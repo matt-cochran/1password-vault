@@ -912,7 +912,7 @@ mod observe {
             .args
             .iter()
             .take_while(|w| **w != "--")
-            .map(|w| w.split_once('=').map_or(*w, |(name, _)| name).to_string())
+            .map(|w| call_word(w))
             .collect();
         Some(CallId {
             system,
@@ -920,6 +920,19 @@ mod observe {
             words,
         })
     }
+
+    /// One argument as the call's identity shows it: a `NAME=value` argument by its name
+    /// only (a value is never shown), except a flag whose value is a setting opv chose and
+    /// that the call cannot be repeated without (`--request-timeout=60s`).
+    fn call_word(w: &str) -> String {
+        match w.split_once('=') {
+            Some((name, _)) if !KEEPS_VALUE.contains(&name) => name.to_string(),
+            _ => w.to_string(),
+        }
+    }
+
+    /// The flags whose `=value` is opv's own setting, kept in a call's identity.
+    const KEEPS_VALUE: &[&str] = &["--request-timeout"];
 
     /// Shell tokens that override `program`'s own sign-in (design §5).
     fn shell_tokens(program: &str) -> &'static [&'static str] {
@@ -1024,8 +1037,13 @@ pub fn record_streamed(program: &str, args: &[&str], exit: crate::cause::ExitCla
 
 /// Keep what the runner saw of `call`'s attempt `res` (call `id`) when it failed.
 fn observe_attempt(id: Option<u64>, call: &Call, res: &io::Result<(Attempt, Stderr)>) {
+    observe_attempt_n(id, call, res, 1);
+}
+
+/// [`observe_attempt`] for a read's `n`-th attempt.
+fn observe_attempt_n(id: Option<u64>, call: &Call, res: &io::Result<(Attempt, Stderr)>, n: u32) {
     if let Some(seen) = observe::failed(call, res) {
-        failure::observe(id, seen);
+        failure::observe(id, seen.on_attempt(n));
     }
 }
 
@@ -1048,7 +1066,7 @@ fn read_on(e: &dyn Engine, call: &Call, refused: &[i32]) -> io::Result<Outcome> 
             return Err(budget_spent(call));
         }
         let res = attempt_on(e, call, limit);
-        observe_attempt(id, call, &res);
+        observe_attempt_n(id, call, &res, n);
         let (attempt, stderr) = res?;
         let failed = match attempt {
             Attempt::Exited(o) if o.status == 0 => {
@@ -1697,6 +1715,22 @@ fn backoff_scale() -> f64 {
     1.0
 }
 
+/// The time limit of one attempt. Builds with the `fake` feature (tests only; release builds
+/// never enable it) read `OPV_TEST_CALL_LIMIT` (seconds) and stop a call at the lower of it
+/// and `limit`, so the end-to-end matrix sees a hanging tool end as opv's own timeout, the
+/// runner fact a real hang produces, without waiting out the real limits.
+fn test_call_limit(limit: Duration) -> Duration {
+    #[cfg(feature = "fake")]
+    if let Some(s) = std::env::var("OPV_TEST_CALL_LIMIT")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|s| s.is_finite() && *s > 0.0)
+    {
+        return limit.min(Duration::from_secs_f64(s));
+    }
+    limit
+}
+
 impl Engine for ProcessRunner {
     fn now(&self) -> Instant {
         Instant::now()
@@ -1720,7 +1754,7 @@ impl Engine for ProcessRunner {
         self.verbose
     }
     fn attempt(&self, call: &Call, limit: Duration) -> io::Result<(Attempt, Stderr)> {
-        self.spawn_attempt(call, limit)
+        self.spawn_attempt(call, test_call_limit(limit))
     }
     fn wrote(&self, program: &str) {
         if target_write(program) {

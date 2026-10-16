@@ -200,6 +200,7 @@ pub fn run(
         &opts.source,
         (&replace, &rotate, &skip),
         opts.apply,
+        &apply_command(env_name, opts),
         r,
     )?;
     print(out, env_name, opts, &plan)
@@ -220,6 +221,7 @@ fn plan_skipping(
     source: &Source,
     (replace, rotate, skip): KeySets<'_>,
     apply: bool,
+    by: &Cmd,
     r: &dyn CommandRunner,
 ) -> Result<AdoptPlan, Error> {
     let mut plan = plan_and_write(fleet, env_name, source, replace, rotate, false, r)?;
@@ -237,7 +239,7 @@ fn plan_skipping(
     if apply {
         super::tidy::require_person(r, "opv adopt --apply")?;
         if !plan.writes.is_empty() {
-            write(fleet, fleet.environment(env_name)?, source, &plan, r)?;
+            write(fleet, fleet.environment(env_name)?, by, &plan, r)?;
         }
     }
     Ok(plan)
@@ -263,28 +265,23 @@ pub fn plan_and_write(
     let read = super::tidy::read(fleet, env_name, r)?;
     let plan = crate::domain::adopt::plan(fleet, env_name, &read.fields, &found, replace, rotate);
     if apply && !plan.writes.is_empty() {
-        write(fleet, env, source, &plan, r)?;
+        write(fleet, env, &plan_command(&env.name, source), &plan, r)?;
     }
     Ok(plan)
 }
 
 /// Write `plan.writes` in one item edit per boundary item (FR-57), each value into its
 /// key's boundary, keeping a replaced value in `opv · kept`, then read each item back and
-/// verify every written field holds what was written.
+/// verify every written field holds what was written. `by` is the command that wrote,
+/// named by a read-back failure as the one to run again.
 fn write(
     fleet: &Fleet,
     env: &crate::domain::Environment,
-    source: &Source,
+    by: &Cmd,
     plan: &AdoptPlan,
     r: &dyn CommandRunner,
 ) -> Result<(), Error> {
-    write_values(
-        fleet,
-        env,
-        &plan.writes,
-        &plan_command(&env.name, source),
-        r,
-    )
+    write_values(fleet, env, &plan.writes, by, r)
 }
 
 /// The adoption plan's own read, `adopt <env> --from <source>` (without `--apply`): after
@@ -406,8 +403,7 @@ fn write_item(
 }
 
 /// The plan's next step (design §10.1): `opv ready <env>` once applied or when nothing is
-/// to write, else this same review with `--apply`, keeping every `--replace`, `--rotate`
-/// and `--skip` it was made with, so the apply writes no more than was reviewed (05.04).
+/// to write, else the writing command, so the apply writes no more than was reviewed (05.04).
 fn next_step(env_name: &str, opts: &Opts, writes: usize) -> Cmd {
     if opts.apply || writes == 0 {
         return Cmd {
@@ -415,6 +411,12 @@ fn next_step(env_name: &str, opts: &Opts, writes: usize) -> Cmd {
             args: vec![env_name.to_string()],
         };
     }
+    apply_command(env_name, opts)
+}
+
+/// The writing command (05.04): this same review with `--apply`, keeping every
+/// `--replace`, `--rotate` and `--skip` it was made with.
+fn apply_command(env_name: &str, opts: &Opts) -> Cmd {
     let from = match &opts.source {
         Source::Dotenv(p) => p.display().to_string(),
         Source::Target(name) => format!("target:{name}"),

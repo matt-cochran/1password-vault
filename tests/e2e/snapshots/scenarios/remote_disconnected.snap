@@ -7,4 +7,4 @@
 Connection to builder.example.test closed by remote host.
 opv: the connection to builder.example.test (remote profile builder) ended while the app ran; the app was stopped and its folder removed
 Do: check the connection to builder.example.test
-Next: opv run prod --product web --role serve --remote builder --preview
+Next: opv run prod --product web --role serve --remote builder --confirm prod

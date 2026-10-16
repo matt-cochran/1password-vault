@@ -2707,7 +2707,7 @@ mod tests {
         assert_eq!(e.exit_code(), 6);
         assert!(
             e.to_string().contains(
-                "allumata/OPENAI_API_KEY (does not meet its rule: import-hash-after-odd-quotes"
+                "allumata/OPENAI_API_KEY (does not meet its rule import-hash-after-odd-quotes"
             ),
             "{e}"
         );
@@ -3279,7 +3279,7 @@ mod tests {
         assert_eq!(e.code_str(), "keys_blocking", "{e}");
         assert!(
             e.to_string()
-                .contains("allumata/SMTP_PASS (does not meet its rule: refuse_in"),
+                .contains("allumata/SMTP_PASS (does not meet its rule refuse_in"),
             "{e}"
         );
         assert_no_values(&e.to_string());

@@ -1,20 +1,20 @@
 # vault_locate__op_vault_get_ve2eshareddev00000000000001__timeout: opv vault locate vE2ESHAREDDEV00000000000001 | fault timeout on op vault get vE2ESHAREDDEV00000000000001
 
-## text exit: 7
+## text exit: 9
 ## text stdout
-AE2EDEVACCOUNT000000000001 (e2e-dev, e2e.1password.com): not found
-AE2EOPSACCOUNT000000000002 (e2e-ops, e2e.1password.com): not found
 
 ## text stderr
-opv: the 1Password account to use is not added to op on this machine
-Do: add the account you use at op's prompt
-Next: opv login --add
+opv: 1Password did not answer after 1 attempt: it timed out
+  checked: op vault get vE2ESHAREDDEV00000000000001 --account AE2EDEVACCOUNT000000000001 --format json (timed out)
+Do: approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network
+Next: opv vault locate vE2ESHAREDDEV00000000000001
 
-## json exit: 7
+## json exit: 9
 ## json stdout
-{"schema_version":2,"ok":false,"exit_code":7,"vault_id":"vE2ESHAREDDEV00000000000001","accounts":[{"account_id":"AE2EDEVACCOUNT000000000001","shorthand":"e2e-dev","sign_in":"e2e.1password.com","result":"not_found"},{"account_id":"AE2EOPSACCOUNT000000000002","shorthand":"e2e-ops","sign_in":"e2e.1password.com","result":"not_found"}],"complete":true,"next":"opv login --add","do":"add the account you use at op's prompt","error":{"code":"account_not_registered","category":"auth","message":"the 1Password account to use is not added to op on this machine","subject":{"in_app":false,"account":{"by":"unnamed"},"selected_by":{"from":"op_default"}},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":true,"do":"add the account you use at op's prompt","next":"opv login --add","next_kind":"handoff"}}
+{"schema_version":2,"ok":false,"exit_code":9,"next":"opv vault locate vE2ESHAREDDEV00000000000001 --json","do":"approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network","error":{"code":"provider_unavailable","category":"unknown","message":"1Password did not answer after 1 attempt: it timed out","subject":{"attempts":1,"system":"one_password","why":{"why":"timeout"}},"evidence":{"checked":"op vault get vE2ESHAREDDEV00000000000001 --account AE2EDEVACCOUNT000000000001 --format json","account":null,"upstream":null},"retry":"safe","human_required":false,"do":"approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network","next":"opv vault locate vE2ESHAREDDEV00000000000001 --json","next_kind":"rerun"}}
 
 ## json stderr
-opv: the 1Password account to use is not added to op on this machine
-Do: add the account you use at op's prompt
-Next: opv login --add
+opv: 1Password did not answer after 1 attempt: it timed out
+  checked: op vault get vE2ESHAREDDEV00000000000001 --account AE2EDEVACCOUNT000000000001 --format json (timed out)
+Do: approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network
+Next: opv vault locate vE2ESHAREDDEV00000000000001 --json

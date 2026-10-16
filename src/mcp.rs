@@ -1124,7 +1124,8 @@ fn deployment_plan_from_fleet<R: CommandRunner>(
         r,
         &mut *bytes,
         true,
-    );
+    )
+    .map_err(|e| e.in_env(&scope.env));
     receipt_answer(&call, r, &bytes, result, |doc| plan_receipt(doc, &scope))
 }
 

@@ -5,7 +5,7 @@
 ok    config: valid (1 environment, 2 products); source: <SCENARIO>/project/secrets.toml
 ok    op: version 2.40.0
 ok    op auth: signed in (USER)
-FAIL  item: 1Password account AE2EDEVACCOUNT000000000001 (chosen by op's default account) is not added to op on this machine
+FAIL  item: 1Password account AE2EDEVACCOUNT000000000001 (chosen by the .opv file <SCENARIO>/project/.opv) is not added to op on this machine
   do: add account AE2EDEVACCOUNT000000000001 at op's prompt
   fix: opv login --add
 skip  target: environment dev has no target (run-only)
@@ -16,7 +16,7 @@ ok    agent skill: not installed (optional: opv skill install)
 
 ## text stderr
 using <SCENARIO>/project/secrets.toml
-opv: 1Password account AE2EDEVACCOUNT000000000001 (chosen by op's default account) is not added to op on this machine
+opv: 1Password account AE2EDEVACCOUNT000000000001 (chosen by the .opv file <SCENARIO>/project/.opv) is not added to op on this machine
 --- 1Password CLI replied, exit 1 ---
 | [ERROR] 2026/10/16 00:04:42 no account found for filter AE2EDEVACCOUNT000000000001
 --- (scrubbed) ---
@@ -25,11 +25,11 @@ Next: opv login --add
 
 ## json exit: 7
 ## json stdout
-{"schema_version":2,"ok":false,"exit_code":7,"config_source":"<SCENARIO>/project/secrets.toml","checks":[{"name":"config","target":null,"status":"ok","detail":"valid (1 environment, 2 products); source: <SCENARIO>/project/secrets.toml","next":null,"do":null},{"name":"op","target":null,"status":"ok","detail":"version 2.40.0","next":null,"do":null},{"name":"op auth","target":null,"status":"ok","detail":"signed in (USER)","next":null,"do":null},{"name":"item","target":null,"status":"fail","detail":"1Password account AE2EDEVACCOUNT000000000001 (chosen by op's default account) is not added to op on this machine","next":"opv login --add","do":"add account AE2EDEVACCOUNT000000000001 at op's prompt"},{"name":"target","target":null,"status":"skip","detail":"environment dev has no target (run-only)","next":null,"do":null},{"name":"op local run","target":null,"status":"ok","detail":"native op; opv run can start local commands","next":null,"do":null},{"name":"opv","target":null,"status":"ok","detail":"not found on PATH","next":null,"do":null},{"name":"agent skill","target":null,"status":"ok","detail":"not installed (optional: opv skill install)","next":null,"do":null},{"name":"core dumps","host":true}],"next":"opv login --add","do":"add account AE2EDEVACCOUNT000000000001 at op's prompt","error":{"code":"account_not_registered","category":"auth","message":"1Password account AE2EDEVACCOUNT000000000001 (chosen by op's default account) is not added to op on this machine","subject":{"in_app":false,"account":{"by":"id","value":"AE2EDEVACCOUNT000000000001"},"selected_by":{"from":"op_default"}},"evidence":{"checked":null,"account":null,"upstream":{"source":"one_password","tool":"1Password CLI","version":null,"exit":{"kind":"code","code":1},"said":["[ERROR] 2026/10/16 00:04:42 no account found for filter AE2EDEVACCOUNT000000000001"],"truncated":false,"removed_advice":false,"untrusted":true,"omitted":0}},"retry":"after_fix","human_required":true,"do":"add account AE2EDEVACCOUNT000000000001 at op's prompt","next":"opv login --add","next_kind":"handoff"}}
+{"schema_version":2,"ok":false,"exit_code":7,"config_source":"<SCENARIO>/project/secrets.toml","checks":[{"name":"config","target":null,"status":"ok","detail":"valid (1 environment, 2 products); source: <SCENARIO>/project/secrets.toml","next":null,"do":null},{"name":"op","target":null,"status":"ok","detail":"version 2.40.0","next":null,"do":null},{"name":"op auth","target":null,"status":"ok","detail":"signed in (USER)","next":null,"do":null},{"name":"item","target":null,"status":"fail","detail":"1Password account AE2EDEVACCOUNT000000000001 (chosen by the .opv file <SCENARIO>/project/.opv) is not added to op on this machine","next":"opv login --add","do":"add account AE2EDEVACCOUNT000000000001 at op's prompt"},{"name":"target","target":null,"status":"skip","detail":"environment dev has no target (run-only)","next":null,"do":null},{"name":"op local run","target":null,"status":"ok","detail":"native op; opv run can start local commands","next":null,"do":null},{"name":"opv","target":null,"status":"ok","detail":"not found on PATH","next":null,"do":null},{"name":"agent skill","target":null,"status":"ok","detail":"not installed (optional: opv skill install)","next":null,"do":null},{"name":"core dumps","host":true}],"next":"opv login --add","do":"add account AE2EDEVACCOUNT000000000001 at op's prompt","error":{"code":"account_not_registered","category":"auth","message":"1Password account AE2EDEVACCOUNT000000000001 (chosen by the .opv file <SCENARIO>/project/.opv) is not added to op on this machine","subject":{"in_app":false,"account":{"by":"id","value":"AE2EDEVACCOUNT000000000001"},"selected_by":{"from":"dot_opv","path":"<SCENARIO>/project/.opv"}},"evidence":{"checked":null,"account":null,"upstream":{"source":"one_password","tool":"1Password CLI","version":null,"exit":{"kind":"code","code":1},"said":["[ERROR] 2026/10/16 00:04:42 no account found for filter AE2EDEVACCOUNT000000000001"],"truncated":false,"removed_advice":false,"untrusted":true,"omitted":0}},"retry":"after_fix","human_required":true,"do":"add account AE2EDEVACCOUNT000000000001 at op's prompt","next":"opv login --add","next_kind":"handoff"}}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml
-opv: 1Password account AE2EDEVACCOUNT000000000001 (chosen by op's default account) is not added to op on this machine
+opv: 1Password account AE2EDEVACCOUNT000000000001 (chosen by the .opv file <SCENARIO>/project/.opv) is not added to op on this machine
 --- 1Password CLI replied, exit 1 ---
 | [ERROR] 2026/10/16 00:04:42 no account found for filter AE2EDEVACCOUNT000000000001
 --- (scrubbed) ---

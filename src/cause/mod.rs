@@ -44,6 +44,10 @@ pub struct Observed {
     exit: ExitClass,
     /// Who was acting when the call failed (person, deploy credentials, a shell token).
     principal: Principal,
+    /// How many times the runner made the call: a read is retried (B: the count a cause
+    /// names is the one the retry notices showed, never a guess).
+    #[serde(skip)]
+    attempts: u32,
     #[serde(skip)]
     _sealed: (),
 }
@@ -56,7 +60,16 @@ impl Observed {
             call,
             exit,
             principal,
+            attempts: 1,
             _sealed: (),
+        }
+    }
+    /// For the runner only: the same observation, made on the call's `n`-th attempt.
+    #[doc(hidden)]
+    pub(crate) fn on_attempt(self, n: u32) -> Self {
+        Self {
+            attempts: n.max(1),
+            ..self
         }
     }
     /// For the runner only, like [`Observed::from_failed_call`]: a call it made that
@@ -68,6 +81,7 @@ impl Observed {
             call,
             exit,
             principal,
+            attempts: 1,
             _sealed: (),
         }
     }
@@ -79,6 +93,10 @@ impl Observed {
     }
     pub fn principal(&self) -> &Principal {
         &self.principal
+    }
+    /// How many times the runner made the call (1 unless a read was retried).
+    pub fn attempts(&self) -> u32 {
+        self.attempts
     }
 }
 

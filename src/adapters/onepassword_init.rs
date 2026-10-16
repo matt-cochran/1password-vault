@@ -103,7 +103,11 @@ pub fn vault_users(
 ) -> Result<Option<serde_json::Value>, Error> {
     let args = ["vault", "user", "list", vault_id, "--format", "json"];
     match list(r, &args, host, Some(vault_id)) {
-        Ok(out) => Ok(serde_json::from_slice(&out.stdout).ok()),
+        // A list op answered with but opv cannot read is op's unexpected output (A1), never
+        // a list this person may not see.
+        Ok(out) => serde_json::from_slice(&out.stdout)
+            .map(Some)
+            .map_err(|e| super::onepassword::unreadable_reply(&args, &e)),
         // Signed in, the listing is refused or not understood: this person may not manage
         // the vault. A session, account or credential problem is still reported.
         Err(e)

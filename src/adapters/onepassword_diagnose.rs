@@ -42,6 +42,11 @@ pub struct Facts {
     /// `op vault get` on the call's vault succeeded, so a `vault user list` refusal is the
     /// missing Manage grant.
     pub vault_readable: bool,
+    /// The account the checkout's `.opv` selects, with that file's path.
+    pub pointer: Option<(String, std::path::PathBuf)>,
+    /// The 1Password app holds the accounts op sees (macOS, Windows, op.exe from WSL): an
+    /// account is added there, never with `opv login --add` (audit 04.07).
+    pub in_app: bool,
 }
 
 /// The outcome of looking for a vault in the machine's other accounts ([`search_vault`]).
@@ -71,7 +76,9 @@ pub fn search_vault(r: &dyn CommandRunner, vault: &VaultId, selected: &AccountId
         match manifest::holds_vault(r, &a.account_uuid, vault.as_str()) {
             manifest::Holds::Found => return VaultSearch::FoundIn(AccountId::new(&a.account_uuid)),
             manifest::Holds::NotFound => {}
-            manifest::Holds::Unknown => unasked.push(AccountId::new(&a.account_uuid)),
+            manifest::Holds::Unknown | manifest::Holds::Unanswered => {
+                unasked.push(AccountId::new(&a.account_uuid))
+            }
         }
     }
     VaultSearch::Nowhere { unasked }
@@ -138,8 +145,13 @@ impl Facts {
             .filter(|var| std::env::var_os(var).is_some_and(|v| !v.is_empty()))
             .map(VarName::new)
             .collect();
+        let here = std::env::current_dir().unwrap_or_default();
+        let pointer = crate::config_store::pointer_account(&here)
+            .zip(crate::config_store::walk_up(&here, ".opv"));
         Self {
             env_overrides,
+            pointer,
+            in_app: crate::app::account::app_holds_accounts_here(),
             ..Self::default()
         }
     }
@@ -263,7 +275,7 @@ fn unknown_outcome(seen: Observed, ctx: &DiagnoseContext) -> Cause {
     Cause::Unavailable {
         system: System::OnePassword,
         why: seen.exit().unanswered().unwrap_or(Unanswered::Timeout),
-        attempts: 1,
+        attempts: seen.attempts(),
         seen,
     }
 }
@@ -282,24 +294,39 @@ fn account_not_on_machine(
         .or_else(|| ctx.account.as_ref().map(|a| a.to_string()))
         .or_else(|| after(stderr, "no account found for filter "))
         .unwrap_or_default();
+    // Where the account came from: opv passes the selected account to op as `--account`,
+    // so the flag alone does not say who chose it (L9 follow-up).
+    let selected_by = match &facts.pointer {
+        Some((id, path)) if id.eq_ignore_ascii_case(&given) => {
+            AccountSource::DotOpv { path: path.clone() }
+        }
+        _ if facts.overridden_by(OP_ACCOUNT)
+            && std::env::var(OP_ACCOUNT).is_ok_and(|v| v.eq_ignore_ascii_case(&given)) =>
+        {
+            AccountSource::EnvVar {
+                var: VarName::new(OP_ACCOUNT),
+            }
+        }
+        _ => match (&ctx.env, &ctx.account) {
+            (Some(env), Some(a)) if a.as_str().eq_ignore_ascii_case(&given) => {
+                AccountSource::Environment { env: env.clone() }
+            }
+            _ if flag.is_some() => AccountSource::Flag,
+            _ if facts.overridden_by(OP_ACCOUNT) => AccountSource::EnvVar {
+                var: VarName::new(OP_ACCOUNT),
+            },
+            _ => AccountSource::OpDefault,
+        },
+    };
     let account = if given.contains('@') {
         AccountRef::Email(given)
     } else {
         AccountRef::Id(AccountId::new(given))
     };
-    let selected_by = if flag.is_some() {
-        AccountSource::Flag
-    } else if facts.overridden_by(OP_ACCOUNT) {
-        AccountSource::EnvVar {
-            var: VarName::new(OP_ACCOUNT),
-        }
-    } else {
-        AccountSource::OpDefault
-    };
     Cause::AccountNotOnMachine {
         account,
         selected_by,
-        in_app: false,
+        in_app: facts.in_app,
     }
 }
 

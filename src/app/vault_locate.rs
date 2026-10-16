@@ -42,16 +42,18 @@ fn row(a: &Account, result: &'static str) -> Row {
 
 /// Ask each account in turn whether it holds `vault` (the shared read-only probe,
 /// [`manifest::holds_vault`]).
-pub fn rows(r: &dyn CommandRunner, accounts: &[Account], vault: &str) -> Vec<Row> {
+/// A check that never answered stops the inventory with the runner's cause (design §5): an
+/// account that could not be asked for that reason is not one to sign in to.
+pub fn rows(r: &dyn CommandRunner, accounts: &[Account], vault: &str) -> Result<Vec<Row>, Error> {
     accounts
         .iter()
         .map(|a| {
-            let result = match manifest::holds_vault(r, &a.account_uuid, vault) {
+            let result = match manifest::holds_vault_or_why(r, &a.account_uuid, vault)? {
                 Holds::Found => "found",
                 Holds::NotFound => "not_found",
-                Holds::Unknown => "unknown",
+                Holds::Unknown | Holds::Unanswered => "unknown",
             };
-            row(a, result)
+            Ok(row(a, result))
         })
         .collect()
 }
@@ -86,7 +88,7 @@ pub fn run(
         }
         Discovery::Unavailable => return Err(super::account::account_list_failed()),
     };
-    let rows = rows(r, &accounts, vault);
+    let rows = rows(r, &accounts, vault)?;
     let found: Vec<&Row> = rows.iter().filter(|r| r.result == "found").collect();
     let unknown: Vec<&Row> = rows.iter().filter(|r| r.result == "unknown").collect();
     if json {

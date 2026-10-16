@@ -1175,3 +1175,13 @@ fn an_account_id_is_named_as_an_id() {
         AccountRef::Id(AccountId::new("TTDZ56BHZFH6VFAWGXNBFD3EWU"))
     );
 }
+
+/// Snapshot review A: with op not installed there is no list to report; the command fails
+/// with the missing dependency (exit 3), never a list with a finding and exit 0.
+#[test]
+fn account_list_without_op_is_a_missing_dependency() {
+    let r = crate::runner::fake::FakeRunner::default();
+    r.push_io_error(std::io::ErrorKind::NotFound);
+    let code = list(&r, None, true, &mut Vec::new()).map_err(|e| e.code_str());
+    assert_eq!(code, Err("dependency_missing"));
+}

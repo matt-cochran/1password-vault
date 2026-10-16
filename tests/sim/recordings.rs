@@ -9,6 +9,9 @@ use std::path::PathBuf;
 pub const NO_RECORDING: i32 = 86;
 /// Exit code for a command the simulator does not model.
 pub const UNSUPPORTED: i32 = 87;
+/// Exit code for a `malformed_output` fault on a call that fails without it: there is no
+/// output to damage, so the fault cannot be told apart from the call's own failure.
+pub const NO_OUTPUT: i32 = 88;
 
 /// One process reply: what the simulated tool prints and its exit code.
 #[derive(Debug, Clone, Default)]

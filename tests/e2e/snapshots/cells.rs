@@ -8,7 +8,6 @@ cells! {
     access__op_vault_user_list_ve2eshareddev00000000000001__other_account_session => "access", "op", "vault user list vE2ESHAREDDEV00000000000001", "other_account_session";
     access__op_vault_user_list_ve2eshareddev00000000000001__signed_out => "access", "op", "vault user list vE2ESHAREDDEV00000000000001", "signed_out";
     access__op_vault_user_list_ve2eshareddev00000000000001__timeout => "access", "op", "vault user list vE2ESHAREDDEV00000000000001", "timeout";
-    access__op_vault_user_list_ve2eshareddev00000000000001__tool_missing => "access", "op", "vault user list vE2ESHAREDDEV00000000000001", "tool_missing";
     access__op_vault_user_list_ve2esharedprod0000000000001__account_not_on_machine => "access", "op", "vault user list vE2ESHAREDPROD0000000000001", "account_not_on_machine";
     access__op_vault_user_list_ve2esharedprod0000000000001__applied_but_reply_lost => "access", "op", "vault user list vE2ESHAREDPROD0000000000001", "applied_but_reply_lost";
     access__op_vault_user_list_ve2esharedprod0000000000001__credential_rejected => "access", "op", "vault user list vE2ESHAREDPROD0000000000001", "credential_rejected";
@@ -17,7 +16,6 @@ cells! {
     access__op_vault_user_list_ve2esharedprod0000000000001__other_account_session => "access", "op", "vault user list vE2ESHAREDPROD0000000000001", "other_account_session";
     access__op_vault_user_list_ve2esharedprod0000000000001__signed_out => "access", "op", "vault user list vE2ESHAREDPROD0000000000001", "signed_out";
     access__op_vault_user_list_ve2esharedprod0000000000001__timeout => "access", "op", "vault user list vE2ESHAREDPROD0000000000001", "timeout";
-    access__op_vault_user_list_ve2esharedprod0000000000001__tool_missing => "access", "op", "vault user list vE2ESHAREDPROD0000000000001", "tool_missing";
     access__op_vault_user_list_ve2estatefly00000000000001__account_not_on_machine => "access", "op", "vault user list vE2ESTATEFLY00000000000001", "account_not_on_machine";
     access__op_vault_user_list_ve2estatefly00000000000001__applied_but_reply_lost => "access", "op", "vault user list vE2ESTATEFLY00000000000001", "applied_but_reply_lost";
     access__op_vault_user_list_ve2estatefly00000000000001__credential_rejected => "access", "op", "vault user list vE2ESTATEFLY00000000000001", "credential_rejected";
@@ -26,7 +24,6 @@ cells! {
     access__op_vault_user_list_ve2estatefly00000000000001__other_account_session => "access", "op", "vault user list vE2ESTATEFLY00000000000001", "other_account_session";
     access__op_vault_user_list_ve2estatefly00000000000001__signed_out => "access", "op", "vault user list vE2ESTATEFLY00000000000001", "signed_out";
     access__op_vault_user_list_ve2estatefly00000000000001__timeout => "access", "op", "vault user list vE2ESTATEFLY00000000000001", "timeout";
-    access__op_vault_user_list_ve2estatefly00000000000001__tool_missing => "access", "op", "vault user list vE2ESTATEFLY00000000000001", "tool_missing";
     access__op_vault_user_list_ve2estategh000000000000001__account_not_on_machine => "access", "op", "vault user list vE2ESTATEGH000000000000001", "account_not_on_machine";
     access__op_vault_user_list_ve2estategh000000000000001__applied_but_reply_lost => "access", "op", "vault user list vE2ESTATEGH000000000000001", "applied_but_reply_lost";
     access__op_vault_user_list_ve2estategh000000000000001__credential_rejected => "access", "op", "vault user list vE2ESTATEGH000000000000001", "credential_rejected";
@@ -35,7 +32,6 @@ cells! {
     access__op_vault_user_list_ve2estategh000000000000001__other_account_session => "access", "op", "vault user list vE2ESTATEGH000000000000001", "other_account_session";
     access__op_vault_user_list_ve2estategh000000000000001__signed_out => "access", "op", "vault user list vE2ESTATEGH000000000000001", "signed_out";
     access__op_vault_user_list_ve2estategh000000000000001__timeout => "access", "op", "vault user list vE2ESTATEGH000000000000001", "timeout";
-    access__op_vault_user_list_ve2estategh000000000000001__tool_missing => "access", "op", "vault user list vE2ESTATEGH000000000000001", "tool_missing";
     access__op_vault_user_list_ve2estatek8s00000000000001__account_not_on_machine => "access", "op", "vault user list vE2ESTATEK8S00000000000001", "account_not_on_machine";
     access__op_vault_user_list_ve2estatek8s00000000000001__applied_but_reply_lost => "access", "op", "vault user list vE2ESTATEK8S00000000000001", "applied_but_reply_lost";
     access__op_vault_user_list_ve2estatek8s00000000000001__credential_rejected => "access", "op", "vault user list vE2ESTATEK8S00000000000001", "credential_rejected";
@@ -44,7 +40,6 @@ cells! {
     access__op_vault_user_list_ve2estatek8s00000000000001__other_account_session => "access", "op", "vault user list vE2ESTATEK8S00000000000001", "other_account_session";
     access__op_vault_user_list_ve2estatek8s00000000000001__signed_out => "access", "op", "vault user list vE2ESTATEK8S00000000000001", "signed_out";
     access__op_vault_user_list_ve2estatek8s00000000000001__timeout => "access", "op", "vault user list vE2ESTATEK8S00000000000001", "timeout";
-    access__op_vault_user_list_ve2estatek8s00000000000001__tool_missing => "access", "op", "vault user list vE2ESTATEK8S00000000000001", "tool_missing";
     access__op_vault_user_list_ve2ewebdev0000000000000001__account_not_on_machine => "access", "op", "vault user list vE2EWEBDEV0000000000000001", "account_not_on_machine";
     access__op_vault_user_list_ve2ewebdev0000000000000001__applied_but_reply_lost => "access", "op", "vault user list vE2EWEBDEV0000000000000001", "applied_but_reply_lost";
     access__op_vault_user_list_ve2ewebdev0000000000000001__credential_rejected => "access", "op", "vault user list vE2EWEBDEV0000000000000001", "credential_rejected";
@@ -53,7 +48,6 @@ cells! {
     access__op_vault_user_list_ve2ewebdev0000000000000001__other_account_session => "access", "op", "vault user list vE2EWEBDEV0000000000000001", "other_account_session";
     access__op_vault_user_list_ve2ewebdev0000000000000001__signed_out => "access", "op", "vault user list vE2EWEBDEV0000000000000001", "signed_out";
     access__op_vault_user_list_ve2ewebdev0000000000000001__timeout => "access", "op", "vault user list vE2EWEBDEV0000000000000001", "timeout";
-    access__op_vault_user_list_ve2ewebdev0000000000000001__tool_missing => "access", "op", "vault user list vE2EWEBDEV0000000000000001", "tool_missing";
     access__op_vault_user_list_ve2ewebprod000000000000001__account_not_on_machine => "access", "op", "vault user list vE2EWEBPROD000000000000001", "account_not_on_machine";
     access__op_vault_user_list_ve2ewebprod000000000000001__applied_but_reply_lost => "access", "op", "vault user list vE2EWEBPROD000000000000001", "applied_but_reply_lost";
     access__op_vault_user_list_ve2ewebprod000000000000001__credential_rejected => "access", "op", "vault user list vE2EWEBPROD000000000000001", "credential_rejected";
@@ -62,7 +56,6 @@ cells! {
     access__op_vault_user_list_ve2ewebprod000000000000001__other_account_session => "access", "op", "vault user list vE2EWEBPROD000000000000001", "other_account_session";
     access__op_vault_user_list_ve2ewebprod000000000000001__signed_out => "access", "op", "vault user list vE2EWEBPROD000000000000001", "signed_out";
     access__op_vault_user_list_ve2ewebprod000000000000001__timeout => "access", "op", "vault user list vE2EWEBPROD000000000000001", "timeout";
-    access__op_vault_user_list_ve2ewebprod000000000000001__tool_missing => "access", "op", "vault user list vE2EWEBPROD000000000000001", "tool_missing";
     access__op_whoami__account_not_on_machine => "access", "op", "whoami", "account_not_on_machine";
     access__op_whoami__applied_but_reply_lost => "access", "op", "whoami", "applied_but_reply_lost";
     access__op_whoami__credential_rejected => "access", "op", "whoami", "credential_rejected";
@@ -83,7 +76,6 @@ cells! {
     account_list__op_whoami__other_account_session => "account_list", "op", "whoami", "other_account_session";
     account_list__op_whoami__signed_out => "account_list", "op", "whoami", "signed_out";
     account_list__op_whoami__timeout => "account_list", "op", "whoami", "timeout";
-    account_list__op_whoami__tool_missing => "account_list", "op", "whoami", "tool_missing";
     bootstrap_dry_run__op_vault_get_ve2eshareddev00000000000001__account_not_on_machine => "bootstrap_dry_run", "op", "vault get vE2ESHAREDDEV00000000000001", "account_not_on_machine";
     bootstrap_dry_run__op_vault_get_ve2eshareddev00000000000001__applied_but_reply_lost => "bootstrap_dry_run", "op", "vault get vE2ESHAREDDEV00000000000001", "applied_but_reply_lost";
     bootstrap_dry_run__op_vault_get_ve2eshareddev00000000000001__credential_rejected => "bootstrap_dry_run", "op", "vault get vE2ESHAREDDEV00000000000001", "credential_rejected";
@@ -101,7 +93,6 @@ cells! {
     bootstrap_dry_run__op_vault_get_ve2esharedprod0000000000001__other_account_session => "bootstrap_dry_run", "op", "vault get vE2ESHAREDPROD0000000000001", "other_account_session";
     bootstrap_dry_run__op_vault_get_ve2esharedprod0000000000001__signed_out => "bootstrap_dry_run", "op", "vault get vE2ESHAREDPROD0000000000001", "signed_out";
     bootstrap_dry_run__op_vault_get_ve2esharedprod0000000000001__timeout => "bootstrap_dry_run", "op", "vault get vE2ESHAREDPROD0000000000001", "timeout";
-    bootstrap_dry_run__op_vault_get_ve2esharedprod0000000000001__tool_missing => "bootstrap_dry_run", "op", "vault get vE2ESHAREDPROD0000000000001", "tool_missing";
     bootstrap_dry_run__op_vault_get_ve2estatefly00000000000001__account_not_on_machine => "bootstrap_dry_run", "op", "vault get vE2ESTATEFLY00000000000001", "account_not_on_machine";
     bootstrap_dry_run__op_vault_get_ve2estatefly00000000000001__applied_but_reply_lost => "bootstrap_dry_run", "op", "vault get vE2ESTATEFLY00000000000001", "applied_but_reply_lost";
     bootstrap_dry_run__op_vault_get_ve2estatefly00000000000001__credential_rejected => "bootstrap_dry_run", "op", "vault get vE2ESTATEFLY00000000000001", "credential_rejected";
@@ -110,7 +101,6 @@ cells! {
     bootstrap_dry_run__op_vault_get_ve2estatefly00000000000001__other_account_session => "bootstrap_dry_run", "op", "vault get vE2ESTATEFLY00000000000001", "other_account_session";
     bootstrap_dry_run__op_vault_get_ve2estatefly00000000000001__signed_out => "bootstrap_dry_run", "op", "vault get vE2ESTATEFLY00000000000001", "signed_out";
     bootstrap_dry_run__op_vault_get_ve2estatefly00000000000001__timeout => "bootstrap_dry_run", "op", "vault get vE2ESTATEFLY00000000000001", "timeout";
-    bootstrap_dry_run__op_vault_get_ve2estatefly00000000000001__tool_missing => "bootstrap_dry_run", "op", "vault get vE2ESTATEFLY00000000000001", "tool_missing";
     bootstrap_dry_run__op_vault_get_ve2estategh000000000000001__account_not_on_machine => "bootstrap_dry_run", "op", "vault get vE2ESTATEGH000000000000001", "account_not_on_machine";
     bootstrap_dry_run__op_vault_get_ve2estategh000000000000001__applied_but_reply_lost => "bootstrap_dry_run", "op", "vault get vE2ESTATEGH000000000000001", "applied_but_reply_lost";
     bootstrap_dry_run__op_vault_get_ve2estategh000000000000001__credential_rejected => "bootstrap_dry_run", "op", "vault get vE2ESTATEGH000000000000001", "credential_rejected";
@@ -119,7 +109,6 @@ cells! {
     bootstrap_dry_run__op_vault_get_ve2estategh000000000000001__other_account_session => "bootstrap_dry_run", "op", "vault get vE2ESTATEGH000000000000001", "other_account_session";
     bootstrap_dry_run__op_vault_get_ve2estategh000000000000001__signed_out => "bootstrap_dry_run", "op", "vault get vE2ESTATEGH000000000000001", "signed_out";
     bootstrap_dry_run__op_vault_get_ve2estategh000000000000001__timeout => "bootstrap_dry_run", "op", "vault get vE2ESTATEGH000000000000001", "timeout";
-    bootstrap_dry_run__op_vault_get_ve2estategh000000000000001__tool_missing => "bootstrap_dry_run", "op", "vault get vE2ESTATEGH000000000000001", "tool_missing";
     bootstrap_dry_run__op_vault_get_ve2estatek8s00000000000001__account_not_on_machine => "bootstrap_dry_run", "op", "vault get vE2ESTATEK8S00000000000001", "account_not_on_machine";
     bootstrap_dry_run__op_vault_get_ve2estatek8s00000000000001__applied_but_reply_lost => "bootstrap_dry_run", "op", "vault get vE2ESTATEK8S00000000000001", "applied_but_reply_lost";
     bootstrap_dry_run__op_vault_get_ve2estatek8s00000000000001__credential_rejected => "bootstrap_dry_run", "op", "vault get vE2ESTATEK8S00000000000001", "credential_rejected";
@@ -128,7 +117,6 @@ cells! {
     bootstrap_dry_run__op_vault_get_ve2estatek8s00000000000001__other_account_session => "bootstrap_dry_run", "op", "vault get vE2ESTATEK8S00000000000001", "other_account_session";
     bootstrap_dry_run__op_vault_get_ve2estatek8s00000000000001__signed_out => "bootstrap_dry_run", "op", "vault get vE2ESTATEK8S00000000000001", "signed_out";
     bootstrap_dry_run__op_vault_get_ve2estatek8s00000000000001__timeout => "bootstrap_dry_run", "op", "vault get vE2ESTATEK8S00000000000001", "timeout";
-    bootstrap_dry_run__op_vault_get_ve2estatek8s00000000000001__tool_missing => "bootstrap_dry_run", "op", "vault get vE2ESTATEK8S00000000000001", "tool_missing";
     bootstrap_dry_run__op_vault_get_ve2ewebdev0000000000000001__account_not_on_machine => "bootstrap_dry_run", "op", "vault get vE2EWEBDEV0000000000000001", "account_not_on_machine";
     bootstrap_dry_run__op_vault_get_ve2ewebdev0000000000000001__applied_but_reply_lost => "bootstrap_dry_run", "op", "vault get vE2EWEBDEV0000000000000001", "applied_but_reply_lost";
     bootstrap_dry_run__op_vault_get_ve2ewebdev0000000000000001__credential_rejected => "bootstrap_dry_run", "op", "vault get vE2EWEBDEV0000000000000001", "credential_rejected";
@@ -137,7 +125,6 @@ cells! {
     bootstrap_dry_run__op_vault_get_ve2ewebdev0000000000000001__other_account_session => "bootstrap_dry_run", "op", "vault get vE2EWEBDEV0000000000000001", "other_account_session";
     bootstrap_dry_run__op_vault_get_ve2ewebdev0000000000000001__signed_out => "bootstrap_dry_run", "op", "vault get vE2EWEBDEV0000000000000001", "signed_out";
     bootstrap_dry_run__op_vault_get_ve2ewebdev0000000000000001__timeout => "bootstrap_dry_run", "op", "vault get vE2EWEBDEV0000000000000001", "timeout";
-    bootstrap_dry_run__op_vault_get_ve2ewebdev0000000000000001__tool_missing => "bootstrap_dry_run", "op", "vault get vE2EWEBDEV0000000000000001", "tool_missing";
     bootstrap_dry_run__op_vault_get_ve2ewebprod000000000000001__account_not_on_machine => "bootstrap_dry_run", "op", "vault get vE2EWEBPROD000000000000001", "account_not_on_machine";
     bootstrap_dry_run__op_vault_get_ve2ewebprod000000000000001__applied_but_reply_lost => "bootstrap_dry_run", "op", "vault get vE2EWEBPROD000000000000001", "applied_but_reply_lost";
     bootstrap_dry_run__op_vault_get_ve2ewebprod000000000000001__credential_rejected => "bootstrap_dry_run", "op", "vault get vE2EWEBPROD000000000000001", "credential_rejected";
@@ -146,7 +133,6 @@ cells! {
     bootstrap_dry_run__op_vault_get_ve2ewebprod000000000000001__other_account_session => "bootstrap_dry_run", "op", "vault get vE2EWEBPROD000000000000001", "other_account_session";
     bootstrap_dry_run__op_vault_get_ve2ewebprod000000000000001__signed_out => "bootstrap_dry_run", "op", "vault get vE2EWEBPROD000000000000001", "signed_out";
     bootstrap_dry_run__op_vault_get_ve2ewebprod000000000000001__timeout => "bootstrap_dry_run", "op", "vault get vE2EWEBPROD000000000000001", "timeout";
-    bootstrap_dry_run__op_vault_get_ve2ewebprod000000000000001__tool_missing => "bootstrap_dry_run", "op", "vault get vE2EWEBPROD000000000000001", "tool_missing";
     check_dev__op_item_get_ie2epersonal00000000000001__account_not_on_machine => "check_dev", "op", "item get iE2EPERSONAL00000000000001", "account_not_on_machine";
     check_dev__op_item_get_ie2epersonal00000000000001__applied_but_reply_lost => "check_dev", "op", "item get iE2EPERSONAL00000000000001", "applied_but_reply_lost";
     check_dev__op_item_get_ie2epersonal00000000000001__credential_rejected => "check_dev", "op", "item get iE2EPERSONAL00000000000001", "credential_rejected";
@@ -155,7 +141,6 @@ cells! {
     check_dev__op_item_get_ie2epersonal00000000000001__other_account_session => "check_dev", "op", "item get iE2EPERSONAL00000000000001", "other_account_session";
     check_dev__op_item_get_ie2epersonal00000000000001__signed_out => "check_dev", "op", "item get iE2EPERSONAL00000000000001", "signed_out";
     check_dev__op_item_get_ie2epersonal00000000000001__timeout => "check_dev", "op", "item get iE2EPERSONAL00000000000001", "timeout";
-    check_dev__op_item_get_ie2epersonal00000000000001__tool_missing => "check_dev", "op", "item get iE2EPERSONAL00000000000001", "tool_missing";
     check_dev__op_item_get_ie2eshareddev00000000000001__account_not_on_machine => "check_dev", "op", "item get iE2ESHAREDDEV00000000000001", "account_not_on_machine";
     check_dev__op_item_get_ie2eshareddev00000000000001__applied_but_reply_lost => "check_dev", "op", "item get iE2ESHAREDDEV00000000000001", "applied_but_reply_lost";
     check_dev__op_item_get_ie2eshareddev00000000000001__credential_rejected => "check_dev", "op", "item get iE2ESHAREDDEV00000000000001", "credential_rejected";
@@ -173,7 +158,6 @@ cells! {
     check_dev__op_item_get_ie2ewebdev0000000000000001__other_account_session => "check_dev", "op", "item get iE2EWEBDEV0000000000000001", "other_account_session";
     check_dev__op_item_get_ie2ewebdev0000000000000001__signed_out => "check_dev", "op", "item get iE2EWEBDEV0000000000000001", "signed_out";
     check_dev__op_item_get_ie2ewebdev0000000000000001__timeout => "check_dev", "op", "item get iE2EWEBDEV0000000000000001", "timeout";
-    check_dev__op_item_get_ie2ewebdev0000000000000001__tool_missing => "check_dev", "op", "item get iE2EWEBDEV0000000000000001", "tool_missing";
     check_dev__op_item_list__account_not_on_machine => "check_dev", "op", "item list", "account_not_on_machine";
     check_dev__op_item_list__applied_but_reply_lost => "check_dev", "op", "item list", "applied_but_reply_lost";
     check_dev__op_item_list__credential_rejected => "check_dev", "op", "item list", "credential_rejected";
@@ -181,7 +165,6 @@ cells! {
     check_dev__op_item_list__other_account_session => "check_dev", "op", "item list", "other_account_session";
     check_dev__op_item_list__signed_out => "check_dev", "op", "item list", "signed_out";
     check_dev__op_item_list__timeout => "check_dev", "op", "item list", "timeout";
-    check_dev__op_item_list__tool_missing => "check_dev", "op", "item list", "tool_missing";
     check_dev__op_vault_list__account_not_on_machine => "check_dev", "op", "vault list", "account_not_on_machine";
     check_dev__op_vault_list__applied_but_reply_lost => "check_dev", "op", "vault list", "applied_but_reply_lost";
     check_dev__op_vault_list__credential_rejected => "check_dev", "op", "vault list", "credential_rejected";
@@ -190,7 +173,6 @@ cells! {
     check_dev__op_vault_list__other_account_session => "check_dev", "op", "vault list", "other_account_session";
     check_dev__op_vault_list__signed_out => "check_dev", "op", "vault list", "signed_out";
     check_dev__op_vault_list__timeout => "check_dev", "op", "vault list", "timeout";
-    check_dev__op_vault_list__tool_missing => "check_dev", "op", "vault list", "tool_missing";
     check_prod__op_item_get_ie2esharedprod0000000000001__account_not_on_machine => "check_prod", "op", "item get iE2ESHAREDPROD0000000000001", "account_not_on_machine";
     check_prod__op_item_get_ie2esharedprod0000000000001__applied_but_reply_lost => "check_prod", "op", "item get iE2ESHAREDPROD0000000000001", "applied_but_reply_lost";
     check_prod__op_item_get_ie2esharedprod0000000000001__credential_rejected => "check_prod", "op", "item get iE2ESHAREDPROD0000000000001", "credential_rejected";
@@ -208,7 +190,6 @@ cells! {
     check_prod__op_item_get_ie2ewebprod000000000000001__other_account_session => "check_prod", "op", "item get iE2EWEBPROD000000000000001", "other_account_session";
     check_prod__op_item_get_ie2ewebprod000000000000001__signed_out => "check_prod", "op", "item get iE2EWEBPROD000000000000001", "signed_out";
     check_prod__op_item_get_ie2ewebprod000000000000001__timeout => "check_prod", "op", "item get iE2EWEBPROD000000000000001", "timeout";
-    check_prod__op_item_get_ie2ewebprod000000000000001__tool_missing => "check_prod", "op", "item get iE2EWEBPROD000000000000001", "tool_missing";
     doctor_dev__op_item_get_ie2eshareddev00000000000001__account_not_on_machine => "doctor_dev", "op", "item get iE2ESHAREDDEV00000000000001", "account_not_on_machine";
     doctor_dev__op_item_get_ie2eshareddev00000000000001__applied_but_reply_lost => "doctor_dev", "op", "item get iE2ESHAREDDEV00000000000001", "applied_but_reply_lost";
     doctor_dev__op_item_get_ie2eshareddev00000000000001__credential_rejected => "doctor_dev", "op", "item get iE2ESHAREDDEV00000000000001", "credential_rejected";
@@ -217,7 +198,6 @@ cells! {
     doctor_dev__op_item_get_ie2eshareddev00000000000001__other_account_session => "doctor_dev", "op", "item get iE2ESHAREDDEV00000000000001", "other_account_session";
     doctor_dev__op_item_get_ie2eshareddev00000000000001__signed_out => "doctor_dev", "op", "item get iE2ESHAREDDEV00000000000001", "signed_out";
     doctor_dev__op_item_get_ie2eshareddev00000000000001__timeout => "doctor_dev", "op", "item get iE2ESHAREDDEV00000000000001", "timeout";
-    doctor_dev__op_item_get_ie2eshareddev00000000000001__tool_missing => "doctor_dev", "op", "item get iE2ESHAREDDEV00000000000001", "tool_missing";
     doctor_dev__op_item_get_ie2ewebdev0000000000000001__account_not_on_machine => "doctor_dev", "op", "item get iE2EWEBDEV0000000000000001", "account_not_on_machine";
     doctor_dev__op_item_get_ie2ewebdev0000000000000001__applied_but_reply_lost => "doctor_dev", "op", "item get iE2EWEBDEV0000000000000001", "applied_but_reply_lost";
     doctor_dev__op_item_get_ie2ewebdev0000000000000001__credential_rejected => "doctor_dev", "op", "item get iE2EWEBDEV0000000000000001", "credential_rejected";
@@ -226,7 +206,6 @@ cells! {
     doctor_dev__op_item_get_ie2ewebdev0000000000000001__other_account_session => "doctor_dev", "op", "item get iE2EWEBDEV0000000000000001", "other_account_session";
     doctor_dev__op_item_get_ie2ewebdev0000000000000001__signed_out => "doctor_dev", "op", "item get iE2EWEBDEV0000000000000001", "signed_out";
     doctor_dev__op_item_get_ie2ewebdev0000000000000001__timeout => "doctor_dev", "op", "item get iE2EWEBDEV0000000000000001", "timeout";
-    doctor_dev__op_item_get_ie2ewebdev0000000000000001__tool_missing => "doctor_dev", "op", "item get iE2EWEBDEV0000000000000001", "tool_missing";
     doctor_dev__op_whoami__account_not_on_machine => "doctor_dev", "op", "whoami", "account_not_on_machine";
     doctor_dev__op_whoami__applied_but_reply_lost => "doctor_dev", "op", "whoami", "applied_but_reply_lost";
     doctor_dev__op_whoami__credential_rejected => "doctor_dev", "op", "whoami", "credential_rejected";
@@ -253,7 +232,6 @@ cells! {
     plan_prod__gh_variable_list__malformed_output => "plan_prod", "gh", "variable list", "malformed_output";
     plan_prod__gh_variable_list__signed_out => "plan_prod", "gh", "variable list", "signed_out";
     plan_prod__gh_variable_list__timeout => "plan_prod", "gh", "variable list", "timeout";
-    plan_prod__gh_variable_list__tool_missing => "plan_prod", "gh", "variable list", "tool_missing";
     plan_prod__kubectl_get_secret__applied_but_reply_lost => "plan_prod", "kubectl", "get secret", "applied_but_reply_lost";
     plan_prod__kubectl_get_secret__forbidden => "plan_prod", "kubectl", "get secret", "forbidden";
     plan_prod__kubectl_get_secret__malformed_output => "plan_prod", "kubectl", "get secret", "malformed_output";
@@ -278,12 +256,10 @@ cells! {
     plan_prod__op_item_get_ie2ewebprod000000000000001__other_account_session => "plan_prod", "op", "item get iE2EWEBPROD000000000000001", "other_account_session";
     plan_prod__op_item_get_ie2ewebprod000000000000001__signed_out => "plan_prod", "op", "item get iE2EWEBPROD000000000000001", "signed_out";
     plan_prod__op_item_get_ie2ewebprod000000000000001__timeout => "plan_prod", "op", "item get iE2EWEBPROD000000000000001", "timeout";
-    plan_prod__op_item_get_ie2ewebprod000000000000001__tool_missing => "plan_prod", "op", "item get iE2EWEBPROD000000000000001", "tool_missing";
     ready_dev__op_account_list__applied_but_reply_lost => "ready_dev", "op", "account list", "applied_but_reply_lost";
     ready_dev__op_account_list__credential_rejected => "ready_dev", "op", "account list", "credential_rejected";
     ready_dev__op_account_list__malformed_output => "ready_dev", "op", "account list", "malformed_output";
     ready_dev__op_account_list__timeout => "ready_dev", "op", "account list", "timeout";
-    ready_dev__op_account_list__tool_missing => "ready_dev", "op", "account list", "tool_missing";
     ready_dev__op_item_get_ie2epersonal00000000000001__account_not_on_machine => "ready_dev", "op", "item get iE2EPERSONAL00000000000001", "account_not_on_machine";
     ready_dev__op_item_get_ie2epersonal00000000000001__applied_but_reply_lost => "ready_dev", "op", "item get iE2EPERSONAL00000000000001", "applied_but_reply_lost";
     ready_dev__op_item_get_ie2epersonal00000000000001__credential_rejected => "ready_dev", "op", "item get iE2EPERSONAL00000000000001", "credential_rejected";
@@ -292,7 +268,6 @@ cells! {
     ready_dev__op_item_get_ie2epersonal00000000000001__other_account_session => "ready_dev", "op", "item get iE2EPERSONAL00000000000001", "other_account_session";
     ready_dev__op_item_get_ie2epersonal00000000000001__signed_out => "ready_dev", "op", "item get iE2EPERSONAL00000000000001", "signed_out";
     ready_dev__op_item_get_ie2epersonal00000000000001__timeout => "ready_dev", "op", "item get iE2EPERSONAL00000000000001", "timeout";
-    ready_dev__op_item_get_ie2epersonal00000000000001__tool_missing => "ready_dev", "op", "item get iE2EPERSONAL00000000000001", "tool_missing";
     ready_dev__op_item_get_ie2eshareddev00000000000001__account_not_on_machine => "ready_dev", "op", "item get iE2ESHAREDDEV00000000000001", "account_not_on_machine";
     ready_dev__op_item_get_ie2eshareddev00000000000001__applied_but_reply_lost => "ready_dev", "op", "item get iE2ESHAREDDEV00000000000001", "applied_but_reply_lost";
     ready_dev__op_item_get_ie2eshareddev00000000000001__credential_rejected => "ready_dev", "op", "item get iE2ESHAREDDEV00000000000001", "credential_rejected";
@@ -301,7 +276,6 @@ cells! {
     ready_dev__op_item_get_ie2eshareddev00000000000001__other_account_session => "ready_dev", "op", "item get iE2ESHAREDDEV00000000000001", "other_account_session";
     ready_dev__op_item_get_ie2eshareddev00000000000001__signed_out => "ready_dev", "op", "item get iE2ESHAREDDEV00000000000001", "signed_out";
     ready_dev__op_item_get_ie2eshareddev00000000000001__timeout => "ready_dev", "op", "item get iE2ESHAREDDEV00000000000001", "timeout";
-    ready_dev__op_item_get_ie2eshareddev00000000000001__tool_missing => "ready_dev", "op", "item get iE2ESHAREDDEV00000000000001", "tool_missing";
     ready_dev__op_item_get_ie2ewebdev0000000000000001__account_not_on_machine => "ready_dev", "op", "item get iE2EWEBDEV0000000000000001", "account_not_on_machine";
     ready_dev__op_item_get_ie2ewebdev0000000000000001__applied_but_reply_lost => "ready_dev", "op", "item get iE2EWEBDEV0000000000000001", "applied_but_reply_lost";
     ready_dev__op_item_get_ie2ewebdev0000000000000001__credential_rejected => "ready_dev", "op", "item get iE2EWEBDEV0000000000000001", "credential_rejected";
@@ -310,7 +284,6 @@ cells! {
     ready_dev__op_item_get_ie2ewebdev0000000000000001__other_account_session => "ready_dev", "op", "item get iE2EWEBDEV0000000000000001", "other_account_session";
     ready_dev__op_item_get_ie2ewebdev0000000000000001__signed_out => "ready_dev", "op", "item get iE2EWEBDEV0000000000000001", "signed_out";
     ready_dev__op_item_get_ie2ewebdev0000000000000001__timeout => "ready_dev", "op", "item get iE2EWEBDEV0000000000000001", "timeout";
-    ready_dev__op_item_get_ie2ewebdev0000000000000001__tool_missing => "ready_dev", "op", "item get iE2EWEBDEV0000000000000001", "tool_missing";
     ready_dev__op_item_list__account_not_on_machine => "ready_dev", "op", "item list", "account_not_on_machine";
     ready_dev__op_item_list__applied_but_reply_lost => "ready_dev", "op", "item list", "applied_but_reply_lost";
     ready_dev__op_item_list__credential_rejected => "ready_dev", "op", "item list", "credential_rejected";
@@ -318,7 +291,6 @@ cells! {
     ready_dev__op_item_list__other_account_session => "ready_dev", "op", "item list", "other_account_session";
     ready_dev__op_item_list__signed_out => "ready_dev", "op", "item list", "signed_out";
     ready_dev__op_item_list__timeout => "ready_dev", "op", "item list", "timeout";
-    ready_dev__op_item_list__tool_missing => "ready_dev", "op", "item list", "tool_missing";
     ready_dev__op_vault_list__account_not_on_machine => "ready_dev", "op", "vault list", "account_not_on_machine";
     ready_dev__op_vault_list__applied_but_reply_lost => "ready_dev", "op", "vault list", "applied_but_reply_lost";
     ready_dev__op_vault_list__credential_rejected => "ready_dev", "op", "vault list", "credential_rejected";
@@ -327,7 +299,6 @@ cells! {
     ready_dev__op_vault_list__other_account_session => "ready_dev", "op", "vault list", "other_account_session";
     ready_dev__op_vault_list__signed_out => "ready_dev", "op", "vault list", "signed_out";
     ready_dev__op_vault_list__timeout => "ready_dev", "op", "vault list", "timeout";
-    ready_dev__op_vault_list__tool_missing => "ready_dev", "op", "vault list", "tool_missing";
     ready_dev__op_whoami__account_not_on_machine => "ready_dev", "op", "whoami", "account_not_on_machine";
     ready_dev__op_whoami__applied_but_reply_lost => "ready_dev", "op", "whoami", "applied_but_reply_lost";
     ready_dev__op_whoami__credential_rejected => "ready_dev", "op", "whoami", "credential_rejected";
@@ -362,14 +333,11 @@ cells! {
     status_prod__gh_variable_list__malformed_output => "status_prod", "gh", "variable list", "malformed_output";
     status_prod__gh_variable_list__signed_out => "status_prod", "gh", "variable list", "signed_out";
     status_prod__gh_variable_list__timeout => "status_prod", "gh", "variable list", "timeout";
-    status_prod__gh_variable_list__tool_missing => "status_prod", "gh", "variable list", "tool_missing";
     status_prod__kubectl_get_deployment_e2e_app__applied_but_reply_lost => "status_prod", "kubectl", "get deployment e2e-app", "applied_but_reply_lost";
     status_prod__kubectl_get_deployment_e2e_app__forbidden => "status_prod", "kubectl", "get deployment e2e-app", "forbidden";
-    status_prod__kubectl_get_deployment_e2e_app__malformed_output => "status_prod", "kubectl", "get deployment e2e-app", "malformed_output";
     status_prod__kubectl_get_deployment_e2e_app__not_found => "status_prod", "kubectl", "get deployment e2e-app", "not_found";
     status_prod__kubectl_get_deployment_e2e_app__signed_out => "status_prod", "kubectl", "get deployment e2e-app", "signed_out";
     status_prod__kubectl_get_deployment_e2e_app__timeout => "status_prod", "kubectl", "get deployment e2e-app", "timeout";
-    status_prod__kubectl_get_deployment_e2e_app__tool_missing => "status_prod", "kubectl", "get deployment e2e-app", "tool_missing";
     status_prod__kubectl_get_deployment_e2e_app__unreachable => "status_prod", "kubectl", "get deployment e2e-app", "unreachable";
     status_prod__kubectl_get_secret__applied_but_reply_lost => "status_prod", "kubectl", "get secret", "applied_but_reply_lost";
     status_prod__kubectl_get_secret__forbidden => "status_prod", "kubectl", "get secret", "forbidden";
@@ -395,7 +363,6 @@ cells! {
     status_prod__op_item_get_ie2ewebprod000000000000001__other_account_session => "status_prod", "op", "item get iE2EWEBPROD000000000000001", "other_account_session";
     status_prod__op_item_get_ie2ewebprod000000000000001__signed_out => "status_prod", "op", "item get iE2EWEBPROD000000000000001", "signed_out";
     status_prod__op_item_get_ie2ewebprod000000000000001__timeout => "status_prod", "op", "item get iE2EWEBPROD000000000000001", "timeout";
-    status_prod__op_item_get_ie2ewebprod000000000000001__tool_missing => "status_prod", "op", "item get iE2EWEBPROD000000000000001", "tool_missing";
     sync_prod_unconfirmed__flyctl_secrets_list__applied_but_reply_lost => "sync_prod_unconfirmed", "flyctl", "secrets list", "applied_but_reply_lost";
     sync_prod_unconfirmed__flyctl_secrets_list__credential_rejected => "sync_prod_unconfirmed", "flyctl", "secrets list", "credential_rejected";
     sync_prod_unconfirmed__flyctl_secrets_list__malformed_output => "sync_prod_unconfirmed", "flyctl", "secrets list", "malformed_output";
@@ -414,7 +381,6 @@ cells! {
     sync_prod_unconfirmed__gh_variable_list__malformed_output => "sync_prod_unconfirmed", "gh", "variable list", "malformed_output";
     sync_prod_unconfirmed__gh_variable_list__signed_out => "sync_prod_unconfirmed", "gh", "variable list", "signed_out";
     sync_prod_unconfirmed__gh_variable_list__timeout => "sync_prod_unconfirmed", "gh", "variable list", "timeout";
-    sync_prod_unconfirmed__gh_variable_list__tool_missing => "sync_prod_unconfirmed", "gh", "variable list", "tool_missing";
     sync_prod_unconfirmed__kubectl_auth_can_i_delete_secrets__applied_but_reply_lost => "sync_prod_unconfirmed", "kubectl", "auth can-i delete secrets", "applied_but_reply_lost";
     sync_prod_unconfirmed__kubectl_auth_can_i_delete_secrets__malformed_output => "sync_prod_unconfirmed", "kubectl", "auth can-i delete secrets", "malformed_output";
     sync_prod_unconfirmed__kubectl_auth_can_i_delete_secrets__signed_out => "sync_prod_unconfirmed", "kubectl", "auth can-i delete secrets", "signed_out";
@@ -425,20 +391,17 @@ cells! {
     sync_prod_unconfirmed__kubectl_auth_can_i_list_pods__malformed_output => "sync_prod_unconfirmed", "kubectl", "auth can-i list pods", "malformed_output";
     sync_prod_unconfirmed__kubectl_auth_can_i_list_pods__signed_out => "sync_prod_unconfirmed", "kubectl", "auth can-i list pods", "signed_out";
     sync_prod_unconfirmed__kubectl_auth_can_i_list_pods__timeout => "sync_prod_unconfirmed", "kubectl", "auth can-i list pods", "timeout";
-    sync_prod_unconfirmed__kubectl_auth_can_i_list_pods__tool_missing => "sync_prod_unconfirmed", "kubectl", "auth can-i list pods", "tool_missing";
     sync_prod_unconfirmed__kubectl_auth_can_i_list_pods__unreachable => "sync_prod_unconfirmed", "kubectl", "auth can-i list pods", "unreachable";
     sync_prod_unconfirmed__kubectl_auth_can_i_list_replicasets__applied_but_reply_lost => "sync_prod_unconfirmed", "kubectl", "auth can-i list replicasets", "applied_but_reply_lost";
     sync_prod_unconfirmed__kubectl_auth_can_i_list_replicasets__malformed_output => "sync_prod_unconfirmed", "kubectl", "auth can-i list replicasets", "malformed_output";
     sync_prod_unconfirmed__kubectl_auth_can_i_list_replicasets__signed_out => "sync_prod_unconfirmed", "kubectl", "auth can-i list replicasets", "signed_out";
     sync_prod_unconfirmed__kubectl_auth_can_i_list_replicasets__timeout => "sync_prod_unconfirmed", "kubectl", "auth can-i list replicasets", "timeout";
-    sync_prod_unconfirmed__kubectl_auth_can_i_list_replicasets__tool_missing => "sync_prod_unconfirmed", "kubectl", "auth can-i list replicasets", "tool_missing";
     sync_prod_unconfirmed__kubectl_auth_can_i_list_replicasets__unreachable => "sync_prod_unconfirmed", "kubectl", "auth can-i list replicasets", "unreachable";
     sync_prod_unconfirmed__kubectl_get_secret__applied_but_reply_lost => "sync_prod_unconfirmed", "kubectl", "get secret", "applied_but_reply_lost";
     sync_prod_unconfirmed__kubectl_get_secret__forbidden => "sync_prod_unconfirmed", "kubectl", "get secret", "forbidden";
     sync_prod_unconfirmed__kubectl_get_secret__malformed_output => "sync_prod_unconfirmed", "kubectl", "get secret", "malformed_output";
     sync_prod_unconfirmed__kubectl_get_secret__signed_out => "sync_prod_unconfirmed", "kubectl", "get secret", "signed_out";
     sync_prod_unconfirmed__kubectl_get_secret__timeout => "sync_prod_unconfirmed", "kubectl", "get secret", "timeout";
-    sync_prod_unconfirmed__kubectl_get_secret__tool_missing => "sync_prod_unconfirmed", "kubectl", "get secret", "tool_missing";
     sync_prod_unconfirmed__kubectl_get_secret__unreachable => "sync_prod_unconfirmed", "kubectl", "get secret", "unreachable";
     sync_prod_unconfirmed__op_item_get_ie2esharedprod0000000000001__account_not_on_machine => "sync_prod_unconfirmed", "op", "item get iE2ESHAREDPROD0000000000001", "account_not_on_machine";
     sync_prod_unconfirmed__op_item_get_ie2esharedprod0000000000001__applied_but_reply_lost => "sync_prod_unconfirmed", "op", "item get iE2ESHAREDPROD0000000000001", "applied_but_reply_lost";
@@ -457,7 +420,6 @@ cells! {
     sync_prod_unconfirmed__op_item_get_ie2ewebprod000000000000001__other_account_session => "sync_prod_unconfirmed", "op", "item get iE2EWEBPROD000000000000001", "other_account_session";
     sync_prod_unconfirmed__op_item_get_ie2ewebprod000000000000001__signed_out => "sync_prod_unconfirmed", "op", "item get iE2EWEBPROD000000000000001", "signed_out";
     sync_prod_unconfirmed__op_item_get_ie2ewebprod000000000000001__timeout => "sync_prod_unconfirmed", "op", "item get iE2EWEBPROD000000000000001", "timeout";
-    sync_prod_unconfirmed__op_item_get_ie2ewebprod000000000000001__tool_missing => "sync_prod_unconfirmed", "op", "item get iE2EWEBPROD000000000000001", "tool_missing";
     vault_locate__op_account_list__applied_but_reply_lost => "vault_locate", "op", "account list", "applied_but_reply_lost";
     vault_locate__op_account_list__credential_rejected => "vault_locate", "op", "account list", "credential_rejected";
     vault_locate__op_account_list__malformed_output => "vault_locate", "op", "account list", "malformed_output";
@@ -466,10 +428,8 @@ cells! {
     vault_locate__op_vault_get_ve2eshareddev00000000000001__account_not_on_machine => "vault_locate", "op", "vault get vE2ESHAREDDEV00000000000001", "account_not_on_machine";
     vault_locate__op_vault_get_ve2eshareddev00000000000001__applied_but_reply_lost => "vault_locate", "op", "vault get vE2ESHAREDDEV00000000000001", "applied_but_reply_lost";
     vault_locate__op_vault_get_ve2eshareddev00000000000001__credential_rejected => "vault_locate", "op", "vault get vE2ESHAREDDEV00000000000001", "credential_rejected";
-    vault_locate__op_vault_get_ve2eshareddev00000000000001__malformed_output => "vault_locate", "op", "vault get vE2ESHAREDDEV00000000000001", "malformed_output";
     vault_locate__op_vault_get_ve2eshareddev00000000000001__not_found => "vault_locate", "op", "vault get vE2ESHAREDDEV00000000000001", "not_found";
     vault_locate__op_vault_get_ve2eshareddev00000000000001__other_account_session => "vault_locate", "op", "vault get vE2ESHAREDDEV00000000000001", "other_account_session";
     vault_locate__op_vault_get_ve2eshareddev00000000000001__signed_out => "vault_locate", "op", "vault get vE2ESHAREDDEV00000000000001", "signed_out";
     vault_locate__op_vault_get_ve2eshareddev00000000000001__timeout => "vault_locate", "op", "vault get vE2ESHAREDDEV00000000000001", "timeout";
-    vault_locate__op_vault_get_ve2eshareddev00000000000001__tool_missing => "vault_locate", "op", "vault get vE2ESHAREDDEV00000000000001", "tool_missing";
 }

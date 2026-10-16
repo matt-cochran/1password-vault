@@ -2089,7 +2089,7 @@ fn a4_keys_blocking_names_the_rules_reason() {
         })],
     };
     assert!(
-        c.message().contains("prefix, expected prefix sk-"),
+        c.message().contains("rule prefix: expected prefix sk-"),
         "{}",
         c.message()
     );
@@ -3462,6 +3462,145 @@ fn i6_account_required_is_a_persons_pick() {
     let (action, _) =
         Cause::AccountRequired { accounts: vec![] }.step_in(&inv(), &person_at_terminal());
     assert_eq!(action, Some(Action::PickBetween));
+}
+
+/// E (snapshot review): a refused right in a target's namespace names that namespace, and
+/// the kube context it is in only as the context.
+#[test]
+fn a_missing_right_in_a_namespace_names_the_namespace_and_its_context() {
+    let c = Cause::MissingRight {
+        system: System::Kubernetes,
+        resource: ResourceRef {
+            kind: ResourceKind::Namespace,
+            name: ResourceName::new("e2e-prod"),
+            scope: Some("context e2e-cluster".into()),
+        },
+        right: Right::Verb {
+            verb: "list".into(),
+            resource: "secrets".into(),
+        },
+        grant: GrantModel::K8sRbac {
+            verb: "list".into(),
+            resource: "secrets".into(),
+            namespace: Some("e2e-prod".into()),
+        },
+        env: None,
+        target: None,
+        seen: fly_seen(),
+    };
+    assert_eq!(
+        c.message(),
+        "you may not list secrets in namespace e2e-prod (context e2e-cluster, Kubernetes)"
+    );
+}
+
+/// F (snapshot review): a failed rule names the rule and why the value fails it apart.
+#[test]
+fn an_empty_value_names_its_rule_and_that_it_is_empty() {
+    let s = value_state(&ValueState::RuleFailed {
+        rule: "nonempty",
+        reason: Some("empty".into()),
+    });
+    assert_eq!(s, "does not meet its rule nonempty: it is empty");
+}
+
+/// F (snapshot review): one allowed choice is named alone, never "one of prod".
+#[test]
+fn one_allowed_choice_is_named_alone() {
+    assert_eq!(one_of(&["prod".to_string()]), "prod");
+}
+
+#[test]
+fn several_allowed_choices_are_one_of_them() {
+    assert_eq!(
+        one_of(&["dev".to_string(), "prod".to_string()]),
+        "one of dev, prod"
+    );
+}
+
+/// C (snapshot review): an unrecognised failure with no reply to show never points at one.
+#[test]
+fn an_unrecognised_failure_without_a_reply_says_the_tool_wrote_none() {
+    let c = Cause::Unrecognized {
+        system: System::OnePassword,
+        established: vec![],
+        env: None,
+        target: None,
+        seen: seen(Principal::Person { account: None }),
+    };
+    let doc = document(&c, None, &inv(), false);
+    assert_eq!(
+        doc["do"],
+        "op wrote no reply (exit 1), so opv cannot tell why it failed; check op on its own"
+    );
+}
+
+/// D (snapshot review): a disconnected remote hands back the run with every flag, its
+/// confirmation included, as the person's own step (X1, X4).
+#[test]
+fn a_remote_disconnect_hands_back_the_run_with_its_confirmation() {
+    let c = Cause::RemoteDisconnected {
+        profile: ProfileName::new("prof-box"),
+        host: "box.example".into(),
+        during: RemotePhase::Running,
+    };
+    let inv = Invocation {
+        command: vec!["run".into()],
+        args: vec![
+            "prod".into(),
+            "--product".into(),
+            "web".into(),
+            "--remote".into(),
+            "builder".into(),
+            "--confirm".into(),
+            "prod".into(),
+        ],
+        has_child: false,
+        ..inv()
+    };
+    assert_eq!(
+        next_in(&c, &inv),
+        "opv run prod --product web --remote builder --confirm prod"
+    );
+}
+
+/// D (snapshot review): a generated configuration is fixed in its generator, so no opv
+/// command is Next (retry never), never `opv config edit` on the same file.
+#[test]
+fn a_generated_configuration_names_no_opv_command_as_next() {
+    let c = Cause::ConfigNotEditable {
+        source: file_source(),
+        reason: NotEditable::Generated { generator: None },
+    };
+    let inv = Invocation {
+        command: vec!["env".into()],
+        args: vec!["add".into(), "staging".into()],
+        ..inv()
+    };
+    assert_eq!(c.step(&inv).1, Next::None(NoNext::NothingToRun));
+}
+
+/// D (snapshot review): an invalid proposal (retry never) names no command, never the
+/// command's help.
+#[test]
+fn an_invalid_proposal_names_no_command_as_next() {
+    let c = Cause::ConfigProposalInvalid {
+        source: file_source(),
+        field: DottedPath(vec!["products".into(), "web".into()]),
+        rule: FieldRule::Missing,
+    };
+    assert_eq!(c.step(&inv()).1, Next::None(NoNext::NothingToRun));
+}
+
+/// D (snapshot review): an unreadable input names its kind once ("the .env file").
+#[test]
+fn an_unreadable_input_says_the_once() {
+    let c = Cause::InputUnreadable {
+        path: PathBuf::from("missing.env"),
+        kind: InputKind::Dotenv,
+        io: IoKind::NotFound,
+    };
+    assert!(!c.message().contains("the the"));
 }
 
 /// L1: a built plan step keeps the global `--timeout` flag with its value.

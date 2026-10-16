@@ -1,20 +1,20 @@
 # bootstrap_dry_run__op_vault_get_ve2estatek8s00000000000001__timeout: opv bootstrap --dry-run | fault timeout on op vault get vE2ESTATEK8S00000000000001
 
-## text exit: 4
+## text exit: 9
 ## text stdout
 
 ## text stderr
-opv: op failed at 1Password in a way opv does not recognise (opv checked: op exited 124)
-  checked: op vault get vE2ESTATEK8S00000000000001 --format json (exit 124)
-Do: read the reply of op shown above; opv does not recognise it
-Next: opv doctor --env prod
+opv: 1Password did not answer after 1 attempt: it timed out
+  checked: op vault get vE2ESTATEK8S00000000000001 --format json (timed out)
+Do: approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network
+Next: opv bootstrap --dry-run
 
-## json exit: 4
+## json exit: 9
 ## json stdout
-{"schema_version":2,"ok":false,"exit_code":4,"next":"opv doctor --env prod","do":"read the reply of op shown above; opv does not recognise it","error":{"code":"unrecognized_failure","category":"source","message":"op failed at 1Password in a way opv does not recognise (opv checked: op exited 124)","subject":{"target":null,"system":"one_password","established":["op exited 124"],"env":"prod"},"evidence":{"checked":"op vault get vE2ESTATEK8S00000000000001 --format json","account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"read the reply of op shown above; opv does not recognise it","next":"opv doctor --env prod","next_kind":"run"}}
+{"schema_version":2,"ok":false,"exit_code":9,"next":"opv bootstrap --dry-run --json","do":"approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network","error":{"code":"provider_unavailable","category":"unknown","message":"1Password did not answer after 1 attempt: it timed out","subject":{"attempts":1,"system":"one_password","why":{"why":"timeout"}},"evidence":{"checked":"op vault get vE2ESTATEK8S00000000000001 --format json","account":null,"upstream":null},"retry":"safe","human_required":false,"do":"approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network","next":"opv bootstrap --dry-run --json","next_kind":"rerun"}}
 
 ## json stderr
-opv: op failed at 1Password in a way opv does not recognise (opv checked: op exited 124)
-  checked: op vault get vE2ESTATEK8S00000000000001 --format json (exit 124)
-Do: read the reply of op shown above; opv does not recognise it
-Next: opv doctor --env prod
+opv: 1Password did not answer after 1 attempt: it timed out
+  checked: op vault get vE2ESTATEK8S00000000000001 --format json (timed out)
+Do: approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network
+Next: opv bootstrap --dry-run --json

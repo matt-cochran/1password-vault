@@ -264,6 +264,14 @@ fn vault_visible(
         PROBE_TIMEOUT,
     ) {
         Ok(out) => out,
+        // Design §5: op that never started is the dependency's cause, before anything else.
+        Err(e) if !crate::adapters::probe::started(&e) => {
+            return Err(crate::adapters::probe::probe_failure(
+                &crate::host::OP_CLI,
+                &e,
+                &Host::detect,
+            ));
+        }
         Err(_) => return Ok(Seen::Unanswered(crate::runner::take_observed())),
     };
     if out.status == 0 {
@@ -367,8 +375,10 @@ pub(crate) fn plan_checked(
     let visible = |account: Option<&str>, env: &str, v: &str| -> Result<Option<bool>, Error> {
         match vault_visible(r, account, scope, project_dir, env, v)? {
             Seen::Visible => Ok(Some(true)),
-            // A recorded ID is taken as it is when op cannot be asked (the offline trial).
-            Seen::Unanswered(_) if !strict => Ok(None),
+            // A recorded ID is taken as it is when op is not asked at all (the offline trial
+            // makes no call). A call op was asked and did not answer is reported (design §5,
+            // X26): never "ok" on a guess.
+            Seen::Unanswered(None) if !strict => Ok(None),
             Seen::Unanswered(seen) => Err(match seen {
                 Some(seen) => op_diagnose::diagnose(seen, "", &DiagnoseContext::default()).into(),
                 None => Cause::Bug {
