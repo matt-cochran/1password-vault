@@ -431,13 +431,12 @@ pub(crate) fn token_needs(repos: &[String], environment: Option<&str>) -> Vec<St
 /// The failed gh call the error at hand came from, classified by the GitHub strategy
 /// ([`super::diagnose`], design §5) from what the runner observed and gh's raw stderr, with
 /// gh's scrubbed reply as the evidence. A rejected token is told which rights its
-/// replacement needs (`needs`). `None` when the runner observed no failed call (a reply that
-/// was lost before an exit status).
+/// replacement needs (`needs`). `None` when the runner observed no failed call (stdout over
+/// the output cap, which is an answer, not a failure).
 pub(crate) fn diagnosed(ctx: &DiagnoseContext, needs: Vec<String>) -> Option<Error> {
-    let seen = crate::runner::take_observed()?;
-    let exit = seen.exit();
-    let mut cause =
-        crate::runner::with_failure_stderr(|stderr| super::diagnose::diagnose(seen, stderr, ctx));
+    let failed = crate::runner::take_failure()?;
+    let exit = failed.seen.exit();
+    let mut cause = super::diagnose::diagnose(failed.seen.clone(), failed.stderr(), ctx);
     if let Cause::CredentialRejected {
         problem: CredentialProblem::Rejected { needs: n },
         ..
@@ -446,7 +445,7 @@ pub(crate) fn diagnosed(ctx: &DiagnoseContext, needs: Vec<String>) -> Option<Err
     {
         *n = needs;
     }
-    Some(match crate::runner::take_failure_excerpt() {
+    Some(match failed.excerpt {
         Some(x) => Error::with_evidence(
             cause,
             Upstream {

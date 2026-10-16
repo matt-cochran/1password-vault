@@ -113,3 +113,91 @@ fn the_persons_command_exiting_non_zero_is_not_observed() {
     let _ = r.run_inherited("sh", &["-c", "exit 3"], &[]);
     assert!(take_observed().is_none());
 }
+
+// --- B1: one way to hand a diagnosis the failed call; A1: unusable answers ----------------
+
+#[test]
+fn take_failure_hands_the_diagnosis_the_raw_stderr_b1() {
+    let r = FakeRunner::default();
+    r.push_with_stderr(Output::failure(1), "gh: Bad credentials (HTTP 401)");
+    let _ = r.write(&Call::new("gh", &["secret", "set", "API_KEY"]));
+    assert_eq!(
+        take_failure().map(|f| f.stderr().to_string()),
+        Some("gh: Bad credentials (HTTP 401)".to_string())
+    );
+}
+
+#[test]
+fn a_killed_call_keeps_its_stderr_for_the_diagnosis_b1() {
+    let r = FakeRunner::default();
+    r.push_unknown_with_stderr("killed", "partial reply");
+    let _ = r.write(&Call::new("flyctl", &["secrets", "deploy"]));
+    assert_eq!(
+        take_failure().map(|f| f.stderr().to_string()),
+        Some("partial reply".to_string())
+    );
+}
+
+#[test]
+fn a_lost_reply_is_an_observed_failure_b1() {
+    let r = FakeRunner::default();
+    r.push_unknown("lost");
+    let _ = r.write(&Call::new("flyctl", &["secrets", "deploy"]));
+    assert!(take_failure().is_some());
+}
+
+#[test]
+fn a_streamed_child_is_handed_over_with_its_stderr_b1() {
+    record_streamed(
+        "ssh",
+        &["-p", "22", "host"],
+        ExitClass::Code { code: 255 },
+        b"Permission denied (publickey).",
+    );
+    assert_eq!(
+        take_failure().map(|f| f.stderr().to_string()),
+        Some("Permission denied (publickey).".to_string())
+    );
+}
+
+fn item_get() -> Call<'static> {
+    Call::new("op", &["item", "get", "deploy"])
+}
+
+#[test]
+fn a_call_that_answered_is_observed_as_an_unusable_reply_a1() {
+    let r = FakeRunner::new([Output::success("{not json")]);
+    let _ = r.read(&item_get(), &[]);
+    assert_eq!(
+        take_unusable_reply(&item_get()).map(|o| o.exit()),
+        Some(ExitClass::Code { code: 0 })
+    );
+}
+
+/// The runner's own observation, not one made up from the call: output over the cap keeps
+/// how the child really ended.
+#[test]
+fn an_answer_over_the_cap_keeps_how_the_child_ended_a1() {
+    let r = FakeRunner::default();
+    r.push_io_error(io::ErrorKind::OutOfMemory);
+    let _ = r.read(&item_get(), &[]);
+    assert_eq!(
+        take_unusable_reply(&item_get()).map(|o| o.exit()),
+        Some(ExitClass::Signal { signal: 9 })
+    );
+}
+
+#[test]
+fn a_later_failed_call_drops_the_unusable_reply_a1() {
+    let r = FakeRunner::new([Output::success(""), Output::failure(1)]);
+    let _ = r.read(&item_get(), &[]);
+    let _ = r.write(&Call::new("op", &["item", "edit", "deploy"]));
+    assert!(take_unusable_reply(&item_get()).is_none());
+}
+
+#[test]
+fn a_failed_call_is_not_an_unusable_reply_a1() {
+    let r = FakeRunner::new([Output::failure(1)]);
+    let _ = r.write(&Call::new("op", &["item", "edit", "deploy"]));
+    assert!(take_unusable_reply(&item_get()).is_none());
+}

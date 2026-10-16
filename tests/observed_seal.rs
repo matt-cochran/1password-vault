@@ -1,5 +1,6 @@
-//! Design §5 "Sealing": `Observed::from_failed_call` is called in production code only by
-//! the runner, for a call it actually made and that failed. Test modules are excluded: a
+//! Design §5 "Sealing": `Observed::from_failed_call` and `Observed::from_unusable_reply` are
+//! called in production code only by the runner, for a call it actually made that failed or
+//! answered with a reply opv cannot use (A1). Test modules are excluded: a
 //! `*_tests.rs` file, a `tests.rs` file, and everything from a file's `#[cfg(test)]` on.
 
 use std::path::{Path, PathBuf};
@@ -25,12 +26,16 @@ fn production(text: &str) -> &str {
     text.split("#[cfg(test)]").next().unwrap_or(text)
 }
 
+/// The sealed constructors of `Observed`.
+const SEALED: [&str; 2] = ["from_failed_call(", "from_unusable_reply("];
+
 fn calls_from_failed_call(text: &str) -> bool {
     production(text).lines().any(|line| {
         let code = line.trim_start();
         !code.starts_with("//")
-            && !code.contains("fn from_failed_call(")
-            && code.contains("from_failed_call(")
+            && SEALED
+                .iter()
+                .any(|c| !code.contains(&format!("fn {c}")) && code.contains(c))
     })
 }
 

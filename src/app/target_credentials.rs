@@ -262,10 +262,10 @@ pub(crate) fn after_mint(
     let then = match (e.cause(), ctx) {
         (Some((c, _)), _) => c.clone(),
         (None, None) => return Err(e),
-        (None, Some(ctx)) => match crate::runner::take_observed() {
-            Some(seen) => crate::runner::with_failure_stderr(|stderr| {
-                crate::adapters::onepassword_diagnose::diagnose(seen, stderr, ctx)
-            }),
+        (None, Some(ctx)) => match crate::runner::take_failure() {
+            Some(f) => {
+                crate::adapters::onepassword_diagnose::diagnose(f.seen.clone(), f.stderr(), ctx)
+            }
             None => return Err(e),
         },
     };

@@ -395,11 +395,11 @@ impl Failed {
         &self.seen
     }
 
-    /// The failed `call`'s observation and reply. A call the runner kept no observation of
-    /// (a lost reply, or stdout over the output cap) is observed as the call itself.
+    /// The failed `call`'s observation and reply. A call that answered with a reply opv
+    /// cannot use (stdout over the output cap) is the runner's observation of that answer.
     pub(crate) fn of(call: &Call) -> Failed {
         Self::take().unwrap_or_else(|| Failed {
-            seen: crate::runner::observe_unreadable_reply(call)
+            seen: crate::runner::take_unusable_reply(call)
                 .expect("op is an external system the runner observes"),
             stderr: String::new(),
             upstream: None,
@@ -1265,7 +1265,7 @@ pub(crate) fn read_op(
 /// quote input (values).
 pub(crate) fn unreadable_reply(args: &[&str], e: &serde_json::Error) -> Error {
     let call = Call::new(OP, args);
-    match crate::runner::observe_unreadable_reply(&call) {
+    match crate::runner::take_unusable_reply(&call) {
         Some(seen) => Cause::UnexpectedOutput {
             system: System::OnePassword,
             at: Some(Location {
