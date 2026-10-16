@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-15
+
+### Added
+
+- `opv run <env> --product <p> [--role <r>] --remote <profile>`: remote development delivery without plaintext environment files (#139). A reviewed profile, `[products.<p>.remotes.<name>]`, pins the SSH host and its public host key, the user and port, the environments and roles that may go there, the remote `opv` path, the working directory and the command; every field is validated at load. The run's selection is resolved by `op run` and sent by `opv remote-send` over `ssh -F none` with strict pinned host-key checking, batch mode and no forwarding or multiplexing, to `opv remote-receive`, as one framed payload on stdin that is validated whole before anything is written or started. File keys go to a RAM-only 0700 directory on the remote host (refused, never written to disk, without one); the remote app's environment is declared-only and never holds an `OP_*` variable. A disconnect, 45 seconds without a heartbeat, or a signal stops the app's process group and removes the directory. It needs a person's terminal; no MCP tool runs it. Design, trust model and limits: `docs/design/remote-delivery.md` (FR-63).
+- `opv run --preview --remote <profile>` and `opv_delivery_preview` with `remote` preview a remote run: `transport`, the profile's pinned connection and command, and `remote_profiles` (identifiers only).
+- A `MountedSecretStore`-shaped fixture consumer reads the serving role's #136 mapping through `opv local-delivery` byte for byte, finds no migration material and refuses a traversing name (`tests/mounted_consumer.rs`).
+- Error codes `permission_denied` (signed in, but missing a right; human required, the grant in `Do:`) and `owner_setup_required` (a GitHub environment its owner must create; the command in `Do:`).
+- `opv_deployment_plan` takes optional `targets`, `product` and `rotate`, so a scoped `opv_sync` can be previewed and approved with the same scope.
+
+### Fixed
+
+Wrong causes and looping next steps, found by a sweep of the CLI and MCP after #157:
+
+- `opv access` checks the 1Password session first and reports `op_not_signed_in` instead of every vault being outside the account; each environment's vaults are checked in its own account, one vault outside it is reported on its own, and the finding names the account (#157).
+- `opv login` no longer fails with "signed in, but vault access failed … setup vault" and `Next: opv login` when `op whoami` succeeds; it runs its command (#157). A failed `op account list` no longer starts the add-account flow.
+- `opv bootstrap` (including `--dry-run`), `opv structure plan` and the MCP structure tools report a missing session as `op_not_signed_in`, not `ids_not_in_account` with a `--rebind` step; `opv_structure_apply` checks the person before it uses the single-use approval.
+- `opv ready` reports a target's real cause (sign-in, missing CLI, provider outage) instead of `grants_missing`, checks a state vault that can be read but not managed with `op vault get`, and reads each environment in its own account (as `doctor` now does).
+- "…, then run opv again" no longer renders as `Next: opv`, and a target error without a step says to fix the cause before re-running.
+- Fly failures under deploy credentials are diagnosed as the token, not "not logged in to Fly"; Kubernetes tells a 401 (sign-in), a 403 (`permission_denied`) and an outage apart, and no longer reports a forbidden API list as "ESO not installed"; Azure and Kubernetes missing rights are `permission_denied`, not `auth_required`; the Key Vault access wait tells a missing vault, no answer and a refusal apart.
+- `opv delivery verify` and receipts never use an "unknown" account (a failed `op whoami` is its own error), and `--product` with an undeclared product fails instead of passing with nothing checked.
+- `opv sync --receipt` checks the path before anything is staged, and a target error after staging says what was already staged.
+- `opv run` reports a failed personal-item lookup by its cause, not "not set up yet".
+- Manifest errors keep the step `op`'s session diagnosis gave (`opv login --add`, the CI token step) instead of `opv login`; a service account or CI is told a person runs the write in their own terminal; advisory account findings carry no login step.
+- `opv target credentials` steps follow the target's state (recorded, cannot mint, needs a provider sign-in); existing targets point at `opv config edit`, and a misspelt target lists the targets.
+- Exit codes match their error codes (`inventory_incomplete`, `account_not_registered`, `policy_refused`, `tidy_conflict`, deploy-credential failures), and repeated refusals no longer say to re-run.
+- MCP errors carry `human_required` and the error's own runnable `opv` step, with a hint per code; MCP-only codes now use the CLI's (`unknown_env`, `usage`, `terminal_required`, `invalid_name`); `opv_access` returns its `checked` and `unclassified` counts and has a budget longer than the 1Password app's approval prompt; `opv_ready` findings keep their target; `docs/mcp.md` no longer says sync is unavailable through MCP.
+
 ## [0.9.0] - 2026-10-15
 
 0.8.1 was not released on its own; its changes are part of 0.9.0.
@@ -368,7 +396,8 @@ Local development without a deployment target. Two deprecated forms are removed,
 - `secretctl` renamed to `opv` ([#4](https://github.com/matt-cochran/1password-vault/pull/4)).
 - Gitflow guard, CI on `dev`/`staging`/`main`, and Dependabot targeting `dev` ([#5](https://github.com/matt-cochran/1password-vault/pull/5)).
 
-[Unreleased]: https://github.com/matt-cochran/1password-vault/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/matt-cochran/1password-vault/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/matt-cochran/1password-vault/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/matt-cochran/1password-vault/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/matt-cochran/1password-vault/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/matt-cochran/1password-vault/compare/v0.6.1...v0.7.0
