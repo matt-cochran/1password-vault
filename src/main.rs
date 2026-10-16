@@ -3576,7 +3576,9 @@ fn run_other(
             json,
             target,
             ..
-        } => status::run_targeted(&loaded?, &env, &target, product.as_deref(), r, out, json),
+        } => status::run_targeted(&loaded?, &env, &target, product.as_deref(), r, out, json)
+            // An adapter's cause names the environment the command ran for (L10 follow-up).
+            .map_err(|e| e.in_env(&env)),
         Cmd::Plan(a) => sync::plan_rotating(
             &loaded?,
             &a.env,
@@ -3586,7 +3588,8 @@ fn run_other(
             r,
             out,
             a.json,
-        ),
+        )
+        .map_err(|e| e.in_env(&a.env)),
         Cmd::Approve {
             plan_id,
             sync: Some(env),
@@ -3651,7 +3654,7 @@ fn run_other(
         }
         Cmd::Sync(a) => {
             let env = a.env.clone();
-            sync::run(&loaded?, &env, r, out, &a.into())
+            sync::run(&loaded?, &env, r, out, &a.into()).map_err(|e| e.in_env(&env))
         }
         Cmd::Config(ConfigCmd::Export { env: Some(env), .. }) => {
             config_export::run(&loaded?, &env, r, out)

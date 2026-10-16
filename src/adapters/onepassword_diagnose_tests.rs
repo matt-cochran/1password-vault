@@ -681,3 +681,47 @@ fn probe_with_an_unrecorded_reply_is_undetermined() {
     r.push_with_stderr(Output::failure(1), "");
     assert_eq!(session_for(&r, &account_b()), SessionCheck::Undetermined);
 }
+
+/// Case 02 for an account the checkout's `.opv` chose (opv passes it as `--account`).
+fn case_02_with(facts: &Facts) -> Cause {
+    diagnosed(
+        "02-account-not-on-machine",
+        "whoami --account ZZZZZZZZZZZZZZZZZZZZZZZZZZ",
+        person(),
+        &DiagnoseContext::default(),
+        facts,
+    )
+}
+
+/// L9 follow-up: an account the checkout's `.opv` selected is said to be chosen there, not
+/// by op's default or a flag the person never typed.
+#[test]
+fn an_unknown_account_from_dot_opv_names_dot_opv() {
+    let facts = Facts {
+        pointer: Some((
+            "ZZZZZZZZZZZZZZZZZZZZZZZZZZ".into(),
+            std::path::PathBuf::from("/work/.opv"),
+        )),
+        ..Facts::default()
+    };
+    assert!(matches!(
+        case_02_with(&facts),
+        Cause::AccountNotOnMachine {
+            selected_by: AccountSource::DotOpv { .. },
+            ..
+        }
+    ));
+}
+
+/// L9 follow-up: where the 1Password app holds op's accounts, the account is added there.
+#[test]
+fn an_unknown_account_where_the_app_holds_accounts_is_in_the_app() {
+    let facts = Facts {
+        in_app: true,
+        ..Facts::default()
+    };
+    assert!(matches!(
+        case_02_with(&facts),
+        Cause::AccountNotOnMachine { in_app: true, .. }
+    ));
+}
