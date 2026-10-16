@@ -168,17 +168,12 @@ pub const NOT_FOUND: &str = "no secrets.toml found in ";
 /// No `secrets.toml` in `start` or a parent (P3): the first-run router, offering both
 /// starting paths and the explicit `--config`.
 pub fn not_found(start: &Path) -> Error {
-    Error::Config(
-        format!(
-            "{NOT_FOUND}{} or any parent directory.\n  \
-             Project ships opv.setup.toml?   opv setup\n  \
-             Configured elsewhere?           opv --config <path> <command>",
-            start.display()
-        )
-        .into(),
-    )
-    .with_code(crate::error::Code::ConfigNotFound)
-    .with_next("opv init dev")
+    // C16: the catalog's cause; no environment is guessed (`opv init dev` was one).
+    crate::cause::Cause::ConfigNotFound {
+        searched_from: start.to_path_buf(),
+        env: None,
+    }
+    .into()
 }
 
 /// Parse and validate configuration text. A removed form (FR-60) fails before anything else
@@ -3056,7 +3051,8 @@ environments = ["prod"]
                 kind: Declared::Product,
                 name: "wbe".into(),
                 declared: vec!["web".into()],
-                closest: None
+                // 09.13: a swapped pair of letters is one edit.
+                closest: Some("web".into())
             }
         );
     }

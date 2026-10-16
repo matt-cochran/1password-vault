@@ -333,10 +333,8 @@ pub fn discover(r: &dyn CommandRunner) -> Discovery {
             ),
             Err(_) => Discovery::Unavailable,
         },
-        Ok(_) => {
-            let _ = crate::runner::take_failure_excerpt();
-            Discovery::Unavailable
-        }
+        // The failure stays with the runner for the caller's diagnosis (E1).
+        Ok(_) => Discovery::Unavailable,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Discovery::OpMissing,
         Err(_) => Discovery::Unavailable,
     }
@@ -346,6 +344,10 @@ pub fn discover(r: &dyn CommandRunner) -> Discovery {
 /// exit status only (its output names the person and is dropped unread). It never prompts
 /// and never asks the desktop app. `None` when the probe cannot run.
 pub fn signed_in(r: &dyn CommandRunner, account_uuid: &str) -> Option<bool> {
+    // H3 (#160): an empty account names none; never `op whoami --account ""`.
+    if account_uuid.trim().is_empty() {
+        return None;
+    }
     match r.probe(
         &Call::new(
             OP,

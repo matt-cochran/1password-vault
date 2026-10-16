@@ -61,12 +61,12 @@ pub struct ConfigReport {
 /// `secrets.toml`, else a `.opv` pointer (a configuration in 1Password, not read here).
 /// The provider sections its targets use, when it could be read.
 pub fn local_config(config: Option<&Path>, start: &Path) -> (ConfigReport, Option<Vec<String>>) {
-    use crate::config_store::{DOT_FILE, walk_up};
+    use crate::config_store::{find_dot_opv, walk_up};
     let path = config
         .map(Path::to_path_buf)
         .or_else(|| walk_up(start, "secrets.toml"));
     let Some(path) = path else {
-        let source = if walk_up(start, DOT_FILE).is_some() {
+        let source = if find_dot_opv(start).is_some() {
             "manifest"
         } else {
             "none"

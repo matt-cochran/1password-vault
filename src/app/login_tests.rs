@@ -274,7 +274,7 @@ fn the_added_account_is_recorded_for_the_project() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join(".git")).unwrap();
     let mut b = Fake::signed_in(0);
-    crate::host::with_test_host(wsl(), || {
+    let uuid = crate::host::with_test_host(wsl(), || {
         choose_account(
             &lists(&[ONE, BOTH]),
             Some("me@labs.example"),
@@ -284,11 +284,47 @@ fn the_added_account_is_recorded_for_the_project() {
             &mut Ui::default(),
         )
         .unwrap()
-    });
+    })
+    .unwrap();
+    // H2: recorded once the sign-in succeeded.
+    let record = Some((dir.path(), uuid.as_str()));
+    run_recording(
+        None,
+        Some(&uuid),
+        None,
+        &[],
+        record,
+        &mut b,
+        &mut Ui::default(),
+    )
+    .unwrap();
     assert_eq!(
         crate::config_store::pointer_account(dir.path()).as_deref(),
         Some("ALABS000000000000000000001")
     );
+}
+
+#[test]
+fn a_failed_sign_in_leaves_the_projects_dot_opv_unchanged() {
+    // H2 (#160): `opv login --account B` whose sign-in fails never rewrites `.opv`.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    crate::config_store::record_account(dir.path(), A).unwrap();
+    let mut b = Fake::with_sessions([a_live(), a_live()]);
+    let record = Some((dir.path(), B));
+    let _ = run_recording(None, Some(B), None, &[], record, &mut b, &mut Ui::default());
+    assert_eq!(
+        crate::config_store::pointer_account(dir.path()).as_deref(),
+        Some(A)
+    );
+}
+
+#[test]
+fn an_empty_account_is_never_checked_with_op() {
+    // H3 (#160): never `op whoami --account ""`.
+    let mut b = Fake::signed_in(0);
+    run_or(None, Some(""), None, &[], &mut b, &mut Ui::default()).unwrap();
+    assert!(b.checked.borrow().is_empty());
 }
 
 /// Several accounts and none chosen: a menu, with "add another" where op keeps its own.
@@ -584,9 +620,11 @@ fn a_failing_account_list_adds_no_account() {
 }
 
 #[test]
-fn a_failing_account_list_steps_to_doctor() {
+fn a_failing_account_list_is_diagnosed_from_ops_reply() {
+    // E1: the failed list is the op diagnosis's cause (with its own Do and Next), no
+    // longer a free-text error that steps to `opv doctor`.
     let e = login_with_a_failing_account_list(&mut Fake::signed_in(0));
-    assert_eq!(e.next_step(), Some("opv doctor"));
+    assert!(e.cause().is_some(), "{e}");
 }
 
 // --- #160: the session is checked for the account asked for, by ID ------------------------
@@ -886,4 +924,11 @@ fn no_accounts_on_macos_is_an_account_to_add_in_the_app() {
         .unwrap_err()
     });
     assert_eq!(e.code(), crate::error::Code::AccountNotRegistered);
+}
+
+#[test]
+fn a_scratch_folder_under_the_temp_folder_is_never_a_project() {
+    // G4: a stray `/tmp/.opv` above the scratch folder never makes it a project.
+    let dir = tempfile::tempdir().unwrap();
+    assert!(!in_project(dir.path()));
 }

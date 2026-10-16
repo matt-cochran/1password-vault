@@ -682,13 +682,13 @@ fn tidy(
         }
         // I4: every field opv wrote or kept (so every original label and value, in place or
         // in `opv · kept`) is in the item read back.
-        let lost = onepassword_tidy::lost(fresh.raw(), &template, after.raw())?;
-        if lost > 0 {
-            let fields = lost_fields(fresh.raw(), &template, after.raw())?;
+        let fields = onepassword_tidy::lost(fresh.raw(), &template, after.raw())?;
+        if !fields.is_empty() {
             drop(template);
             r.note(&format!(
-                "1Password ({env_name}) was tidied, but {lost} field(s) opv wrote or kept are \
-                 not in the item read back; restore them from the item's history in 1Password."
+                "1Password ({env_name}) was tidied, but {} field(s) opv wrote or kept are \
+                 not in the item read back; restore them from the item's history in 1Password.",
+                fields.len()
             ));
             let cause = crate::cause::Cause::ReadBackMissing {
                 vault: crate::cause::VaultId::new(&b.vault_id),
@@ -800,52 +800,6 @@ fn finish(
         version: None,
         identity: None,
     }
-}
-
-/// The labels (`section/label`) of the fields [`onepassword_tidy::lost`] counts: each field
-/// opv wrote (`intended`) or found (`original`) that the item read back (`after`) lacks.
-/// Names only, never a value; values are compared in constant time as there.
-fn lost_fields(
-    original: &[u8],
-    intended: &[u8],
-    after: &[u8],
-) -> Result<Vec<crate::cause::FieldName>, Error> {
-    use subtle::ConstantTimeEq;
-    let (original, _) = onepassword_tidy::parse(original)?;
-    let (intended, _) = onepassword_tidy::parse(intended)?;
-    let (after, _) = onepassword_tidy::parse(after)?;
-    let same = |a: &SecretValue, b: &SecretValue| -> bool {
-        a.expose().as_bytes().ct_eq(b.expose().as_bytes()).into()
-    };
-    let name = |f: &convention::Found| {
-        crate::cause::FieldName::new(match f.section_label() {
-            Some(s) if !s.is_empty() => format!("{s}/{}", f.label),
-            _ => f.label.clone(),
-        })
-    };
-    let mut used = vec![false; after.fields.len()];
-    let mut out = Vec::new();
-    for f in &intended.fields {
-        let hit = after.fields.iter().enumerate().position(|(i, g)| {
-            !used[i]
-                && g.section_label() == f.section_label()
-                && g.label == f.label
-                && same(&g.value, &f.value)
-        });
-        match hit {
-            Some(i) => used[i] = true,
-            None => out.push(name(f)),
-        }
-    }
-    for f in &original.fields {
-        let in_place = after.fields.iter().any(|g| g.id == f.id);
-        let value_kept =
-            f.value.expose().is_empty() || after.fields.iter().any(|g| same(&g.value, &f.value));
-        if !(in_place && value_kept) && !out.contains(&name(f)) {
-            out.push(name(f));
-        }
-    }
-    Ok(out)
 }
 
 #[cfg(test)]

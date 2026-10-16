@@ -131,7 +131,13 @@ fn sync_of_a_shared_key_prints_no_value() {
 #[test]
 fn status_reports_a_missing_source_once() {
     let (res, _) = status(&fleet_shared(), complete_item());
-    assert!(matches!(res, Err(Error::Findings(1, _))), "{res:?}");
+    assert!(
+        res.as_ref()
+            .err()
+            .and_then(crate::app::testutil::findings_of)
+            == Some(1),
+        "{res:?}"
+    );
 }
 
 #[test]

@@ -85,8 +85,9 @@ pub fn capable() -> bool {
 }
 
 /// `opv ui`: the full-screen view, or (without a capable terminal) the same information as
-/// lines, from `opv ready`.
-pub fn run(source: Exe, out: &mut dyn Write) -> Result<(), Error> {
+/// lines, from `opv ready`. Returns the exit code (`ready`'s when the text form ran), so the
+/// caller exits and every guard and drop runs (D7).
+pub fn run(source: Exe, out: &mut dyn Write) -> Result<i32, Error> {
     if !capable() {
         let why = if std::env::var_os("OPV_UI_TEXT").is_some() {
             "OPV_UI_TEXT is set"
@@ -102,13 +103,10 @@ pub fn run(source: Exe, out: &mut dyn Write) -> Result<(), Error> {
             .command(&["ready"])
             .status()
             .map_err(|e| start_failed(e.kind()))?;
-        if status.success() {
-            return Ok(());
-        }
         // ready printed its own error and steps; they stay the last word, with its exit
-        // code (07.05).
+        // code (07.05), returned to main instead of exiting here (D7).
         out.flush().map_err(crate::app::write_err)?;
-        std::process::exit(exit_code(status));
+        return Ok(exit_code(status));
     }
     eprintln!("opv ui: reading the configuration and readiness…");
     let mut app = App::new(Snapshot::gather(&source));
@@ -195,7 +193,7 @@ pub fn run(source: Exe, out: &mut dyn Write) -> Result<(), Error> {
         }
     })();
     leave(&mut term)?;
-    result
+    result.map(|()| 0)
 }
 
 type Term = Terminal<CrosstermBackend<io::Stdout>>;

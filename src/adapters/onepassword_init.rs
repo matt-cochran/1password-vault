@@ -316,7 +316,15 @@ fn lookup(mut all: Vec<Named>, title: &str, what: &str, scope: &str) -> Result<L
 /// refused create (the account may not allow it) names the manual step.
 pub fn create_vault(r: &dyn CommandRunner, title: &str) -> Result<Named, Error> {
     let args = ["vault", "create", title, "--format", "json"];
-    created(r, &args, None, CreateKind::Vault, title, None)
+    created(
+        r,
+        &args,
+        None,
+        CreateKind::Vault,
+        title,
+        None,
+        Refind::ByTitle,
+    )
 }
 
 /// Create an empty Secure Note `title` in `vault_id` for a person running `init` (FR-43):
@@ -348,6 +356,7 @@ pub fn create_item_tagged(
         CreateKind::Item,
         title,
         Some(vault_id),
+        Refind::ByTitle,
     )
 }
 
@@ -375,13 +384,15 @@ struct ItemTemplate<'a> {
 /// `(label, value)` (FR-40), tagged with `tags` (names, never values). The template is
 /// serialized directly into a zeroizing buffer and sent on `op item create`'s stdin only
 /// (SR-3/SR-8); the value never reaches argv or an error. A person running `opv target
-/// credentials --create` gets the new item's ID.
+/// credentials --create` gets the new item's ID. `refind` is how a person finds the item
+/// again when the create's outcome is unknown: never a re-run, which would mint again (X5).
 pub fn create_item_with_secret_fields(
     r: &dyn CommandRunner,
     vault_id: &str,
     title: &str,
     tags: &[String],
     fields: &[(&str, &SecretValue)],
+    refind: Refind,
 ) -> Result<Named, Error> {
     let args = [
         "item", "create", "-", "--vault", vault_id, "--title", title, "--format", "json",
@@ -411,14 +422,16 @@ pub fn create_item_with_secret_fields(
         CreateKind::ItemWithSecrets,
         title,
         Some(vault_id),
+        refind,
     )
 }
 
 /// One non-idempotent create (X5): through [`CommandRunner::create`], never retried. A
 /// refusal is diagnosed like any failed call (nothing was made); an unknown outcome, or a
 /// create whose reply carries no ID, may have made the object (04.04): a vault or a plain
-/// item is found again by its title on the next run, so re-running is safe; an item holding
-/// secrets is checked first, never re-created.
+/// item is found again by its title on the next run ([`Refind::ByTitle`]), so re-running is
+/// safe; an item holding secrets is found by the caller's `refind` and checked first, never
+/// re-created (C21).
 fn created(
     r: &dyn CommandRunner,
     args: &[&str],
@@ -426,6 +439,7 @@ fn created(
     kind: CreateKind,
     title: &str,
     vault: Option<&str>,
+    refind: Refind,
 ) -> Result<Named, Error> {
     #[derive(Deserialize)]
     struct Row {
@@ -433,7 +447,7 @@ fn created(
         id: String,
     }
     let call = Call::new(OP, args).with_stdin(stdin);
-    let unknown = |seen| unknown_create(kind, title, vault, seen);
+    let unknown = |seen| unknown_create(kind, title, refind.clone(), seen);
     match r.create(&call, kind) {
         Ok(CreateOutcome::Done(o)) => match serde_json::from_slice::<Row>(&o.stdout) {
             Ok(row) if config::is_id(&row.id) => Ok(Named {
@@ -452,17 +466,12 @@ fn created(
                     name: ResourceName::new(title),
                     scope: vault.map(str::to_string),
                 }),
-                create: Some((kind, title.to_string(), Refind::ByTitle)),
+                create: Some((kind, title.to_string(), refind.clone())),
                 ..DiagnoseContext::default()
             };
-            let e = failed_read(r, &Host::detect, &ctx, &call, vault);
-            if kind.secret_bearing() {
-                // The caller adds the step that matters most here: the secret was minted
-                // elsewhere and must be revoked there. Until that caller reports a cause of
-                // its own, the diagnosis travels as its text.
-                return Err(Error::Source(e.to_string().into()));
-            }
-            Err(e)
+            // A refusal is a cause of its own: a caller that minted the secret wraps it in
+            // what was already made (C21).
+            Err(failed_read(r, &Host::detect, &ctx, &call, vault))
         }
         Ok(CreateOutcome::OutcomeUnknown(seen)) => Err(unknown(Failed::with_reply(seen))),
         Err(e) => Err(op_spawn_error(&e, &Host::detect)),
@@ -470,30 +479,13 @@ fn created(
 }
 
 /// A create that may or may not have made `title` (X5, design §4.6).
-fn unknown_create(kind: CreateKind, title: &str, vault: Option<&str>, failed: Failed) -> Error {
-    if kind.secret_bearing() {
-        // No opv command lists a vault's items, so the check is op's own listing, and the
-        // orphan's secret was never recorded anywhere: a person checks before anything is
-        // minted or created again.
-        return Error::Unknown(
-            format!(
-                "opv cannot tell whether 1Password created the item {title:?}{}",
-                vault.map(|v| format!(" in vault {v}")).unwrap_or_default()
-            )
-            .into(),
-        )
-        .with_code(crate::error::Code::OutcomeUnknown)
-        .with_do(format!(
-            "check with op item list --vault {} whether {title:?} exists before creating it again",
-            vault.unwrap_or("<vault>")
-        ));
-    }
+fn unknown_create(kind: CreateKind, title: &str, refind: Refind, failed: Failed) -> Error {
     let seen = failed.seen().clone();
     failed.report(Cause::CreateOutcomeUnknown {
         system: System::OnePassword,
         kind,
         name: title.to_string(),
-        refind: Refind::ByTitle,
+        refind,
         seen,
     })
 }

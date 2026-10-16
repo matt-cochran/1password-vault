@@ -18,8 +18,7 @@ use base64::Engine as _;
 
 use super::write_err;
 use crate::cause::{
-    Cause, EnvName, GenerateRefusal, Guard, IoKind, KeyName, NameKind, ProductName, Unusable,
-    UsageProblem,
+    Cause, EnvName, GenerateRefusal, Guard, IoKind, KeyName, NameKind, ProductName, UsageProblem,
 };
 use crate::domain::{KeySpec, SecretValue, key_label};
 use crate::error::Error;
@@ -80,19 +79,23 @@ pub fn recipe(product: &str, key: &str, env: &str, spec: &KeySpec) -> Result<Rec
     }
 }
 
+/// The operating system's random source failed (F2): opv's own local I/O, never a tool.
+fn random_source_failed() -> Error {
+    Cause::LocalIo {
+        op: crate::cause::LocalOp::RandomSource,
+        path: std::path::PathBuf::new(),
+        io: IoKind::Other,
+    }
+    .into()
+}
+
 /// A fresh value for `recipe` from the operating system's CSPRNG.
 pub fn make(recipe: Recipe) -> Result<SecretValue, Error> {
     let n = match recipe {
         Recipe::Base64(n) | Recipe::Hex(n) => n,
     };
     let mut bytes = zeroize::Zeroizing::new(vec![0u8; n]);
-    getrandom::fill(&mut bytes).map_err(|_| -> Error {
-        Cause::ToolUnusable {
-            tool: "the operating system's random source".into(),
-            why: Unusable::SpawnFailed { io: IoKind::Other },
-        }
-        .into()
-    })?;
+    getrandom::fill(&mut bytes).map_err(|_| -> Error { random_source_failed() })?;
     let text = match recipe {
         Recipe::Base64(_) => base64::engine::general_purpose::STANDARD.encode(&*bytes),
         Recipe::Hex(_) => hex::encode(&*bytes),

@@ -290,6 +290,34 @@ impl Backend for Runtime {
             env: &env,
             limit: None,
         };
+        // G1 (X5): setup's `item create` is a non-idempotent create: one that never
+        // answered may have made the item, which a re-run finds again by its title.
+        if let ["item", "create", rest @ ..] = args {
+            let title = rest
+                .iter()
+                .position(|a| *a == "--title")
+                .and_then(|i| rest.get(i + 1))
+                .copied()
+                .unwrap_or_default();
+            return match self
+                .runner
+                .create(&call, crate::cause::CreateKind::ItemWithSecrets)
+                .map_err(dependency)?
+            {
+                crate::runner::CreateOutcome::Done(o)
+                | crate::runner::CreateOutcome::Refused(o) => Ok(o),
+                crate::runner::CreateOutcome::OutcomeUnknown(seen) => {
+                    Err(Cause::CreateOutcomeUnknown {
+                        system: crate::cause::System::OnePassword,
+                        kind: crate::cause::CreateKind::ItemWithSecrets,
+                        name: title.to_string(),
+                        refind: crate::cause::Refind::ByTitle,
+                        seen,
+                    }
+                    .into())
+                }
+            };
+        }
         // Reads retry within the run budget (NR-3); a save is never retried (NR-2).
         let outcome = if op_writes(args) {
             self.runner.write(&call)
@@ -523,51 +551,86 @@ fn terminal_lost() -> Error {
 
 impl Interaction for Console {
     fn show(&mut self, message: &str) -> Result<(), Error> {
-        println!("{message}");
-        Ok(())
+        show_on(&mut io::stdout(), message)
     }
     fn confirm(&mut self, question: &str) -> Result<bool, Error> {
-        print!("{question} [y/N] ");
-        io::stdout().flush().map_err(|_| terminal_lost())?;
-        let mut answer = String::new();
-        if io::stdin()
-            .read_line(&mut answer)
-            .map_err(|_| terminal_lost())?
-            == 0
-        {
-            return Err(declined());
-        }
-        Ok(matches!(
-            answer.trim().to_ascii_lowercase().as_str(),
-            "y" | "yes"
-        ))
+        confirm_on(&mut io::stdout(), question)
     }
     fn secret(&mut self, title: &str) -> Result<SecretValue, Error> {
-        // Masked, not hidden (0.9.0): the person sees that a paste landed, never its length.
-        super::masked::prompt(title)?.ok_or_else(declined)
+        secret_prompt(title)
     }
     fn choose(&mut self, question: &str, choices: &[String]) -> Result<String, Error> {
-        println!("{question}");
-        for (index, choice) in choices.iter().enumerate() {
-            println!("  {}. {choice}", index + 1);
+        choose_on(&mut io::stdout(), question, choices)
+    }
+}
+
+/// The console of `opv login` (C17, #159): its progress and prompts go to stderr, so
+/// stdout carries only the child's output (`opv login -- opv … --json` is one document).
+pub struct LoginConsole;
+
+impl Interaction for LoginConsole {
+    fn show(&mut self, message: &str) -> Result<(), Error> {
+        show_on(&mut io::stderr(), message)
+    }
+    fn confirm(&mut self, question: &str) -> Result<bool, Error> {
+        confirm_on(&mut io::stderr(), question)
+    }
+    fn secret(&mut self, title: &str) -> Result<SecretValue, Error> {
+        secret_prompt(title)
+    }
+    fn choose(&mut self, question: &str, choices: &[String]) -> Result<String, Error> {
+        choose_on(&mut io::stderr(), question, choices)
+    }
+}
+
+fn show_on(out: &mut dyn Write, message: &str) -> Result<(), Error> {
+    writeln!(out, "{message}").map_err(|_| terminal_lost())
+}
+
+fn secret_prompt(title: &str) -> Result<SecretValue, Error> {
+    // Masked, not hidden (0.9.0): the person sees that a paste landed, never its length.
+    super::masked::prompt(title)?.ok_or_else(declined)
+}
+
+fn confirm_on(out: &mut dyn Write, question: &str) -> Result<bool, Error> {
+    write!(out, "{question} [y/N] ").map_err(|_| terminal_lost())?;
+    out.flush().map_err(|_| terminal_lost())?;
+    let mut answer = String::new();
+    if io::stdin()
+        .read_line(&mut answer)
+        .map_err(|_| terminal_lost())?
+        == 0
+    {
+        return Err(declined());
+    }
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
+fn choose_on(out: &mut dyn Write, question: &str, choices: &[String]) -> Result<String, Error> {
+    let lost = |_: io::Error| terminal_lost();
+    writeln!(out, "{question}").map_err(lost)?;
+    for (index, choice) in choices.iter().enumerate() {
+        writeln!(out, "  {}. {choice}", index + 1).map_err(lost)?;
+    }
+    loop {
+        write!(out, "Enter a number (or press Enter to stop): ").map_err(lost)?;
+        out.flush().map_err(lost)?;
+        let mut answer = String::new();
+        let size = io::stdin()
+            .read_line(&mut answer)
+            .map_err(|_| terminal_lost())?;
+        if size == 0 || answer.trim().is_empty() {
+            return Err(declined());
         }
-        loop {
-            print!("Enter a number (or press Enter to stop): ");
-            io::stdout().flush().map_err(|_| terminal_lost())?;
-            let mut answer = String::new();
-            let size = io::stdin()
-                .read_line(&mut answer)
-                .map_err(|_| terminal_lost())?;
-            if size == 0 || answer.trim().is_empty() {
-                return Err(declined());
-            }
-            if let Ok(number) = answer.trim().parse::<usize>()
-                && let Some(choice) = number.checked_sub(1).and_then(|n| choices.get(n))
-            {
-                return Ok(choice.clone());
-            }
-            println!("Choose one of the numbered choices above.");
+        if let Ok(number) = answer.trim().parse::<usize>()
+            && let Some(choice) = number.checked_sub(1).and_then(|n| choices.get(n))
+        {
+            return Ok(choice.clone());
         }
+        writeln!(out, "Choose one of the numbered choices above.").map_err(lost)?;
     }
 }
 

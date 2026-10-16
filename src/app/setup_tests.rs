@@ -358,10 +358,8 @@ fn duplicate_vault_is_refused_without_guessing_or_writing() {
     ]);
     let mut ui = Ui::new(vec![], &[]);
     let error = run(&path, None, None, None, &mut backend, &mut ui).unwrap_err();
-    assert!(
-        error.to_string().contains("rename the duplicate"),
-        "{error}"
-    );
+    // F4: a duplicate title is the catalog's ItemUnusable (its Do renames the duplicate).
+    assert_eq!(error.code_str(), "item_unusable");
     assert_eq!(backend.calls.borrow().len(), 2);
 }
 
@@ -369,26 +367,14 @@ fn duplicate_vault_is_refused_without_guessing_or_writing() {
 fn shared_keys_have_unique_ids_and_keep_product_sections() {
     let recipe = Recipe::parse("title='Products'\nenvironment='dev'\nvault='Development'\nitem='api'\n[[fields]]\nkey='API_KEY'\nproduct='one'\ntitle='One login'\ndescription='For one.'\nsource='Dashboard.'\n[[fields]]\nkey='API_KEY'\nproduct='two'\ntitle='Two login'\ndescription='For two.'\nsource='Dashboard.'\n").unwrap();
     let mut doc = json!({"category":"SECURE_NOTE","fields":[],"sections":[]});
-    let indices = field_indices(
-        &mut doc,
-        &recipe.fields,
-        &recipe,
-        Path::new("opv.setup.toml"),
-    )
-    .unwrap();
+    let indices = field_indices(&mut doc, &recipe.fields, &recipe).unwrap();
     assert_ne!(
         doc["fields"][indices[0]]["id"],
         doc["fields"][indices[1]]["id"]
     );
     assert_eq!(doc["fields"][indices[1]]["section"]["label"], "two");
     assert_eq!(
-        field_indices(
-            &mut doc,
-            &recipe.fields,
-            &recipe,
-            Path::new("opv.setup.toml")
-        )
-        .unwrap(),
+        field_indices(&mut doc, &recipe.fields, &recipe).unwrap(),
         indices
     );
 }
@@ -1036,4 +1022,12 @@ fn an_open_dotenv_file_is_file_too_open() {
     fs::write(&path, "A=1\n").unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
     assert_eq!(read_legacy(&path).unwrap_err().code_str(), "file_too_open");
+}
+
+#[test]
+fn a_dotenv_file_that_cannot_be_read_is_input_unreadable() {
+    // F4: a missing file is an unreadable input, not one whose content is invalid.
+    let dir = tempfile::tempdir().unwrap();
+    let e = read_legacy(&dir.path().join("missing.env")).unwrap_err();
+    assert_eq!(e.code_str(), "input_unreadable");
 }

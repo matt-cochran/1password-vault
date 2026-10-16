@@ -223,3 +223,9 @@ fn a_failure_after_an_approved_sync_steps_to_the_plan_of_its_scope() {
         "opv plan prod --target east --rotate api/JWT_KEY"
     );
 }
+
+#[test]
+fn a_malformed_plan_id_is_a_usage_error_before_any_terminal() {
+    // 09.27: checked before the terminal gate, so it is exit 2, never terminal_required.
+    assert_eq!(check_structural_id("nonsense").unwrap_err().exit_code(), 2);
+}

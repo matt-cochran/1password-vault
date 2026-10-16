@@ -99,11 +99,32 @@ pub fn run_or(
     backend: &mut dyn Backend,
     ui: &mut dyn Interaction,
 ) -> Result<i32, Error> {
+    run_recording(fleet, fallback, env, command, None, backend, ui)
+}
+
+/// [`run_or`] that records `record`'s account in the project's `.opv` (at or above the
+/// folder it names) only once the sign-in succeeded (H2, #160): a failed sign-in leaves
+/// `.opv` as it was.
+pub fn run_recording(
+    fleet: Option<&Fleet>,
+    fallback: Option<&str>,
+    env: Option<&str>,
+    command: &[String],
+    record: Option<(&std::path::Path, &str)>,
+    backend: &mut dyn Backend,
+    ui: &mut dyn Interaction,
+) -> Result<i32, Error> {
     // The account chosen for this login (`opv login --account`, the menu) when the
-    // configuration names none.
-    let account = account_or(fleet, fallback, env, ui)?.or_else(|| backend.current_account());
+    // configuration names none. An empty account is no account (H3): op is never asked
+    // about `--account ""`.
+    let account = account_or(fleet, fallback, env, ui)?
+        .or_else(|| backend.current_account())
+        .filter(|a| !a.trim().is_empty());
     backend.use_account(account.as_deref());
     prepare(account.as_deref(), backend, ui)?;
+    if let Some((start, uuid)) = record {
+        record_chosen(start, uuid, backend, ui)?;
+    }
     if command.is_empty() {
         let label = account.as_deref().map(|a| backend.account_label(a));
         let scope = match (env, &label) {
@@ -345,20 +366,36 @@ pub fn choose_account_with(
     backend.use_account(Some(&uuid));
     // #153: a one-off login outside a project (no repository, no `.opv` above `start`)
     // records nothing: it never creates project configuration.
-    if !record || !in_project(start) {
+    if !records(start, record) {
         ui.show(&format!(
             "Signing in to 1Password account {} for this login only; .opv is unchanged.",
             backend.account_label(&uuid)
         ))?;
-        return Ok(Some(uuid));
     }
-    let path = crate::config_store::record_account(start, &uuid)?;
+    // Otherwise the account is recorded after its sign-in succeeds ([`run_recording`]).
+    Ok(Some(uuid))
+}
+
+/// Whether a login from `start` records its chosen account in `.opv`: asked to (`record`,
+/// not `--no-record`) and inside a project.
+pub fn records(start: &std::path::Path, record: bool) -> bool {
+    record && in_project(start)
+}
+
+/// Record `uuid` as the project's account in `.opv` (at or above `start`), after its
+/// sign-in succeeded (H2).
+pub fn record_chosen(
+    start: &std::path::Path,
+    uuid: &str,
+    backend: &dyn Backend,
+    ui: &mut dyn Interaction,
+) -> Result<(), Error> {
+    let path = crate::config_store::record_account(start, uuid)?;
     ui.show(&format!(
         "This project uses 1Password account {}; recorded in {} (commit it).",
-        backend.account_label(&uuid),
+        backend.account_label(uuid),
         path.display()
-    ))?;
-    Ok(Some(uuid))
+    ))
 }
 
 /// Whether `start` is inside a project: a git repository, or a folder with a `.opv` at or
@@ -366,6 +403,9 @@ pub fn choose_account_with(
 fn in_project(start: &std::path::Path) -> bool {
     start
         .ancestors()
+        // G4: test builds never look at or above the system temp folder, so a stray
+        // `/tmp/.opv` never decides a test (always true outside tests).
+        .take_while(|d| crate::config_store::hermetic(d))
         .any(|d| d.join(".git").exists() || d.join(".opv").symlink_metadata().is_ok())
 }
 

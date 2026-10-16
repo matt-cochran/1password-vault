@@ -197,6 +197,27 @@ fn no_account() -> Error {
     }
 }
 
+/// C2 (09.mcp): a structural `PlanChanged` whose old id was never approved on this machine
+/// (`approved` says) names no plan opv knows: `PlanUnknown`, never "changed since it was
+/// approved". Any other error is returned as it is.
+pub fn unknown_unless_approved(e: Error, approved: &dyn Fn(&str) -> bool) -> Error {
+    match e.cause() {
+        Some((
+            Cause::PlanChanged {
+                old,
+                scope: PlanScope::Structural,
+                ..
+            },
+            _,
+        )) if !approved(old.as_str()) => Cause::PlanUnknown {
+            plan: old.as_str().to_string(),
+            scope: Some(PlanScope::Structural),
+        }
+        .into(),
+        _ => e,
+    }
+}
+
 /// The structural plan `old` is now `new` (the configuration, the account or what exists in
 /// 1Password changed): nothing was approved, applied or used, and the step is the read of
 /// the new plan, which a person then approves (05.15).

@@ -434,13 +434,17 @@ pub fn unprovable(raw: &[u8]) -> Option<&'static str> {
     })
 }
 
-/// How many fields of the tidy are missing from the item read back after the write (I4,
-/// I5): each field of `intended` (the template written: every original field, moved,
+/// The fields of the tidy missing from the item read back after the write (I4, I5), by
+/// label (`section/label`, names only, G2): each field of `intended` (the template written: every original field, moved,
 /// relabelled or kept, plus the new ones) must be in `after` with the same section label,
 /// label and value; each field of `original` must still be there by id with its value, or
 /// its original value must be kept in another field. Values are compared in constant time
 /// and never printed.
-pub fn lost(original: &[u8], intended: &[u8], after: &[u8]) -> Result<usize, Error> {
+pub fn lost(
+    original: &[u8],
+    intended: &[u8],
+    after: &[u8],
+) -> Result<Vec<crate::cause::FieldName>, Error> {
     use subtle::ConstantTimeEq;
     let (original, _) = parse(original)?;
     let (intended, _) = parse(intended)?;
@@ -448,8 +452,14 @@ pub fn lost(original: &[u8], intended: &[u8], after: &[u8]) -> Result<usize, Err
     let same = |a: &SecretValue, b: &SecretValue| -> bool {
         a.expose().as_bytes().ct_eq(b.expose().as_bytes()).into()
     };
+    let name = |f: &Found| {
+        crate::cause::FieldName::new(match f.section_label() {
+            Some(s) if !s.is_empty() => format!("{s}/{}", f.label),
+            _ => f.label.clone(),
+        })
+    };
     let mut used = vec![false; after.fields.len()];
-    let mut missing = 0;
+    let mut missing = Vec::new();
     for f in &intended.fields {
         let hit = after.fields.iter().enumerate().position(|(i, g)| {
             !used[i]
@@ -459,15 +469,15 @@ pub fn lost(original: &[u8], intended: &[u8], after: &[u8]) -> Result<usize, Err
         });
         match hit {
             Some(i) => used[i] = true,
-            None => missing += 1,
+            None => missing.push(name(f)),
         }
     }
     for f in &original.fields {
         let in_place = after.fields.iter().any(|g| g.id == f.id);
         let value_kept =
             f.value.expose().is_empty() || after.fields.iter().any(|g| same(&g.value, &f.value));
-        if !(in_place && value_kept) {
-            missing += 1;
+        if !(in_place && value_kept) && !missing.contains(&name(f)) {
+            missing.push(name(f));
         }
     }
     Ok(missing)
@@ -507,6 +517,18 @@ mod tests {
         let l =
             layout_of(json!({"fields": [{"id": "a", "type": "DATE", "label": "D", "value": 17}]}));
         assert_eq!(l.fields[0].value.expose(), "17");
+    }
+
+    #[test]
+    fn a_field_missing_after_the_write_is_named_by_its_label() {
+        // G2 (F4d): the read-back names the lost field, never only a count.
+        let item = serde_json::to_vec(&json!({"fields": [
+            {"id": "k", "type": "CONCEALED", "label": "API_KEY", "value": "x",
+             "section": {"id": "web", "label": "web"}},
+        ]}))
+        .unwrap();
+        let lost = lost(&item, &item, br#"{"fields": []}"#).unwrap();
+        assert_eq!(lost, [crate::cause::FieldName::new("web/API_KEY")]);
     }
 
     #[test]

@@ -1692,6 +1692,10 @@ fn structure_apply(project: &std::path::Path, plan_id: &str, verbose: bool) -> V
             plan_id,
             &mut |p| crate::approval::consume(&p.plan_id, &scope.project, &scope.account, now()),
         )
+        // C2 (09.mcp): an id never approved here is unknown, not changed since approval.
+        .map_err(|e| {
+            crate::app::structure::unknown_unless_approved(e, &crate::approval::ever_approved)
+        })
     });
     match applied {
         Ok(a) => applied_projection(&a),

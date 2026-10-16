@@ -713,6 +713,24 @@ fn write_json(
 
 /// A configuration error in text opv generated: say so, and that nothing was written.
 fn would_write(e: Error, command: &str) -> Error {
+    // F2: an invalid field in the proposed text is `ConfigProposalInvalid` (nothing written).
+    if let Some((
+        crate::cause::Cause::ConfigInvalid {
+            source,
+            field,
+            rule,
+            ..
+        },
+        _,
+    )) = e.cause()
+    {
+        return crate::cause::Cause::ConfigProposalInvalid {
+            source: source.clone(),
+            field: field.clone(),
+            rule: rule.clone(),
+        }
+        .into();
+    }
     match e {
         e @ Error::Config(_) => e.map_text(|m| {
             format!("{m} (in the configuration {command} would write; nothing written)")

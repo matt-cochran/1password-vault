@@ -215,7 +215,6 @@ fn planned(plan: &Value) -> BTreeSet<String> {
 }
 
 #[test]
-#[ignore = "#150: the plan leaves out the GitHub variable gh/E2E__WEB__LOG_LEVEL (row action null), which the confirmed sync then sets"]
 fn issue_150_sync_without_confirm_writes_nothing_and_the_confirmed_write_is_the_plan() {
     let s = Scenario::new(|_| {});
     let before = s.world_now();

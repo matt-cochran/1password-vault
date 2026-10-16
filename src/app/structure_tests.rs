@@ -782,3 +782,13 @@ fn a_checkout_without_a_file_never_steps_to_bootstrap() {
     let e = scope(dir.path(), &FakeOp::default()).unwrap_err();
     assert!(!e.step("", "").next.contains("bootstrap"));
 }
+
+#[test]
+fn a_changed_plan_never_approved_here_is_plan_unknown() {
+    // C2 (09.mcp): never "changed since it was approved" for an id never approved.
+    let e = unknown_unless_approved(
+        changed("sp-0000000000000000", "sp-1111111111111111"),
+        &|_| false,
+    );
+    assert_eq!(e.code_str(), "plan_unknown");
+}

@@ -1745,6 +1745,12 @@ fn main() -> ExitCode {
         inv: opv::cause::Invocation::from_cli(&std::env::args().collect::<Vec<_>>()),
         verbose: cli.verbose,
         utf8: locale_is_utf8(),
+        // D2 (A8): the error is coloured only where stderr is a terminal that takes it.
+        colour: colour::enabled(
+            cli.color,
+            io::IsTerminal::is_terminal(&io::stderr()),
+            std::env::var_os("NO_COLOR"),
+        ),
     };
     let target_options = target_fields(&matches);
     let rerun = rerun_command(&cli.cmd);
@@ -1860,6 +1866,8 @@ struct Render {
     inv: opv::cause::Invocation,
     verbose: bool,
     utf8: bool,
+    /// Whether stderr takes colour (`--color`, a terminal, `NO_COLOR`), A8.
+    colour: bool,
 }
 
 impl Render {
@@ -1878,7 +1886,7 @@ impl Render {
                 &self.inv,
                 self.verbose,
                 self.utf8,
-                false,
+                self.colour,
             ),
             None => opv::error::report_with(e, step, excerpt),
         }
@@ -1981,6 +1989,16 @@ fn usage_error(e: clap::Error) -> ExitCode {
             args.iter().any(|a| a == "--json"),
         );
     }
+    // 09.03, 09.83: a misspelt subcommand clap suggests, or a subcommand's flag given
+    // before it: the corrected command, when it parses.
+    if let Some(command) = corrected_command(&e, &args) {
+        return usage_cause(
+            opv::cause::Cause::Usage {
+                problem: opv::cause::UsageProblem::UseInstead { command },
+            },
+            args.iter().any(|a| a == "--json"),
+        );
+    }
     // FR-60: a removed form names its replacement exactly.
     let removed = removed_init_target(&args);
     let help = match &removed {
@@ -2031,6 +2049,72 @@ fn usage_error(e: clap::Error) -> ExitCode {
         let _ = writeln!(opv::output::stdout(), "{doc}");
     }
     ExitCode::from(exit_byte(e.exit_code()))
+}
+
+/// The command `args` meant, when clap's error names a fix that parses (09.03, 09.83): the
+/// subcommand clap suggests for a misspelt one (`stauts` → `status`), or a flag of the
+/// subcommand typed before it (`--json check prod` → `check prod --json`). `None` when no
+/// single correction parses.
+fn corrected_command(e: &clap::Error, args: &[String]) -> Option<opv::cause::Cmd> {
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
+    let one = |kind| match e.get(kind) {
+        Some(ContextValue::String(s)) => Some(s.clone()),
+        Some(ContextValue::Strings(v)) if v.len() == 1 => v.first().cloned(),
+        _ => None,
+    };
+    let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    let fixed: Vec<String> = match e.kind() {
+        ErrorKind::InvalidSubcommand => {
+            let typo = one(ContextKind::InvalidSubcommand)?;
+            let suggested = match e.get(ContextKind::SuggestedSubcommand) {
+                Some(ContextValue::String(s)) => s.clone(),
+                Some(ContextValue::Strings(v)) => {
+                    opv::app::suggest::closest(&typo, v.iter().map(String::as_str))?.to_string()
+                }
+                _ => return None,
+            };
+            let at = args[..end].iter().position(|a| *a == typo)?;
+            let mut fixed = args.to_vec();
+            fixed[at] = suggested;
+            fixed
+        }
+        ErrorKind::UnknownArgument => {
+            let flag = one(ContextKind::InvalidArg)?;
+            let flag = flag.split('=').next().unwrap_or_default().to_string();
+            let root = cli_command();
+            let first_sub = args[..end]
+                .iter()
+                .position(|a| root.find_subcommand(a).is_some())?;
+            let at = args[..first_sub]
+                .iter()
+                .position(|a| a.split('=').next() == Some(flag.as_str()))?;
+            let mut fixed = args.to_vec();
+            let moved = fixed.remove(at);
+            let end = fixed.iter().position(|a| a == "--").unwrap_or(fixed.len());
+            fixed.insert(end, moved);
+            fixed
+        }
+        _ => return None,
+    };
+    let argv = std::iter::once("opv".to_string()).chain(fixed.iter().cloned());
+    cli_command().try_get_matches_from(argv).ok()?;
+    // The subcommand words, then everything else, as the catalog's typed command.
+    let root = cli_command();
+    let mut cmd = &root;
+    let (mut command, mut rest) = (Vec::new(), Vec::new());
+    for a in fixed {
+        match cmd.find_subcommand(&a) {
+            Some(sub) if rest.iter().all(|r: &String| r.starts_with('-')) => {
+                command.push(a);
+                cmd = sub;
+            }
+            _ => rest.push(a),
+        }
+    }
+    Some(opv::cause::Cmd {
+        command,
+        args: rest,
+    })
 }
 
 /// A usage error opv diagnoses itself before the command runs: the cause through the one
@@ -2591,7 +2675,7 @@ fn run(
             *add,
             &here,
             &mut runtime,
-            &mut setup_runtime::Console,
+            &mut setup_runtime::LoginConsole,
             !*no_record,
         )?;
         // #153: this login only, in the chosen account, whatever the project records.
@@ -2602,7 +2686,7 @@ fn run(
                 None,
                 command,
                 &mut runtime,
-                &mut setup_runtime::Console,
+                &mut setup_runtime::LoginConsole,
             );
         }
         // #142: before 1Password's prompt, say what in this machine's setup can make a
@@ -2621,19 +2705,37 @@ fn run(
         {
             let _ = writeln!(io::stderr(), "note ({}): {}", f.code, f.message);
         }
-        let fleet = match find_config(cli.config.as_ref(), config_source).transpose()? {
-            Some(f) => Some(f),
-            None => manifest_for_login(&cli, config_source),
+        // C18 (#159): the child's own `--config`/`--file` names the configuration (and so
+        // the account) when login was given none; it is never looked up from the git remote.
+        let child_config = cli
+            .config
+            .is_none()
+            .then(|| login_child_config(command))
+            .flatten();
+        let fleet = match child_config {
+            Some(path) => config::load(&path).ok(),
+            None => match find_config(cli.config.as_ref(), config_source).transpose()? {
+                Some(f) => Some(f),
+                None => manifest_for_login(&cli, config_source),
+            },
         };
-        let start = std::env::current_dir().unwrap_or_default();
-        let fallback = config_store::pointer_account(&start);
-        return login::run_or(
+        // H2 (#160): the chosen account is the one signed in to, and `.opv` records it only
+        // after that sign-in succeeded.
+        let fallback = chosen
+            .clone()
+            .or_else(|| config_store::pointer_account(&here));
+        let record = chosen
+            .as_deref()
+            .filter(|_| login::records(&here, true))
+            .map(|uuid| (here.as_path(), uuid));
+        return login::run_recording(
             fleet.as_ref(),
             fallback.as_deref(),
             env.as_deref(),
             command,
+            record,
             &mut runtime,
-            &mut setup_runtime::Console,
+            &mut setup_runtime::LoginConsole,
         );
     }
     if let Cmd::Setup {
@@ -2708,7 +2810,7 @@ fn run(
                 exe,
                 config: cli.config.clone(),
             };
-            return opv::ui::run::run(source, out).map(|()| 0);
+            return opv::ui::run::run(source, out);
         }
         Cmd::Bootstrap {
             file,
@@ -2795,6 +2897,8 @@ fn run(
             sync: None,
             ..
         } => {
+            // 09.27: the input is checked before the terminal is asked for.
+            opv::app::approve::check_structural_id(plan_id)?;
             opv::app::setup_runtime::Console::require_terminal("approve", &typed_command())?;
             let here = std::env::current_dir().unwrap_or_default();
             let scope = opv::app::structure::scope(&here, &r)?;
@@ -2919,6 +3023,18 @@ fn run(
         .map(|()| 0);
     }
     let manifest = matches!(found, Ok(config_store::Found::Manifest(_)));
+    // D2 (A10): steps a manifest project refuses (file-only commands) are never rendered.
+    if let Ok(config_store::Found::Manifest(m)) = &found {
+        opv::cause::situation::note_config_source(opv::cause::ConfigSource::Manifest {
+            title: m.title.clone(),
+            vault: opv::cause::VaultId::new(&m.vault_id),
+            project: m
+                .title
+                .strip_prefix("opv · ")
+                .unwrap_or(&m.title)
+                .to_string(),
+        });
+    }
     // The project's account (its manifest's, or the one recorded in .opv): `doctor`
     // without --env checks the sign-in of that account, never op's default (FR-40).
     let run_account = match &found {
@@ -2927,11 +3043,17 @@ fn run(
     }
     .or(config_store::selected_account_id(
         &r,
-        &std::env::current_dir().unwrap_or_default(),
+        &account_start(match &found {
+            Ok(config_store::Found::File { store, .. }) => Some(store.path.as_path()),
+            _ => None,
+        }),
     )?);
     r.use_account(run_account.clone());
     let loaded = found.and_then(|f| f.load(&r));
     let mut cmd = cli.cmd;
+    // 09.03b: no configuration at all starts the environment the command named.
+    let env_named = cmd.env().map(|(e, _)| e.to_string());
+    let loaded = loaded.map_err(|e| init_for(e, env_named.as_deref()));
     // A file that does not load: re-check it with a read-only command (H10). A manifest
     // has no file to fix in place: `opv config edit` opens it (FR-44).
     let loaded = match loaded {
@@ -3011,7 +3133,8 @@ fn run(
                 .into());
             }
             // #139: values leave this machine only when a person runs it in their terminal;
-            // no MCP tool or flag runs a remote delivery.
+            // no MCP tool or flag runs a remote delivery. 09.42: the profile is checked first.
+            run_cmd::check_remote(&fleet, env, product.as_deref(), role.as_deref(), profile)?;
             opv::app::setup_runtime::Console::require_terminal("run --remote", &typed_command())?;
             let mut retry = confirm_retry(env, product.as_deref(), role.as_deref());
             retry.push_str(&format!(" --remote {}", shell_word(profile)));
@@ -4163,18 +4286,77 @@ impl opv::app::approve::Review for TerminalReview {
     }
 }
 
+/// 09.03b: a missing configuration for a command that names environment `env` steps to
+/// `opv init <env>`, never another environment.
+fn init_for(e: Error, env: Option<&str>) -> Error {
+    let Some(env) = env else {
+        return e;
+    };
+    if e.code() != opv::error::Code::ConfigNotFound {
+        return e;
+    }
+    match e.cause() {
+        Some((
+            opv::cause::Cause::ConfigNotFound {
+                searched_from,
+                env: None,
+            },
+            _,
+        )) => opv::cause::Cause::ConfigNotFound {
+            searched_from: searched_from.clone(),
+            env: Some(opv::cause::EnvName::new(env)),
+        }
+        .into(),
+        Some(_) => e,
+        None => e.with_next(format!("opv init {}", shell_word(env))),
+    }
+}
+
+/// Where the `.opv` pointer of this run is looked up (C9, 09.08): the configuration file's
+/// own folder, so `--config other/secrets.toml` uses that project's account; else the
+/// working folder.
+fn account_start(config: Option<&std::path::Path>) -> PathBuf {
+    config
+        .and_then(std::path::Path::parent)
+        .filter(|d| !d.as_os_str().is_empty())
+        .and_then(|d| std::fs::canonicalize(d).ok())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+}
+
+/// The words of the opv command `opv login` runs, before any `--` of its own; `None` when
+/// the child is not opv.
+fn login_child_opv_words(command: &[String]) -> Option<&[String]> {
+    let (program, args) = command.split_first()?;
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    if name != "opv" && name != "opv.exe" {
+        return None;
+    }
+    let end = args.iter().position(|w| w == "--").unwrap_or(args.len());
+    Some(&args[..end])
+}
+
 /// #159: whether the command `opv login` runs is opv asking for one JSON document (`--json`
 /// among its own words, before any `--` of its own).
 fn login_child_json(command: &[String]) -> bool {
-    let Some((program, args)) = command.split_first() else {
-        return false;
-    };
-    let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
-    (name == "opv" || name == "opv.exe")
-        && args
-            .iter()
-            .take_while(|w| w.as_str() != "--")
-            .any(|w| w == "--json")
+    login_child_opv_words(command).is_some_and(|args| args.iter().any(|w| w == "--json"))
+}
+
+/// C18 (#159): the configuration file the opv command `opv login` runs names with
+/// `--config` or `--file` (either `--flag PATH` or `--flag=PATH`), so login signs in to
+/// that file's account instead of looking up a manifest from the git remote.
+fn login_child_config(command: &[String]) -> Option<PathBuf> {
+    let args = login_child_opv_words(command)?;
+    args.iter().enumerate().find_map(|(i, w)| {
+        for flag in ["--config", "--file"] {
+            if w == flag {
+                return args.get(i + 1).map(PathBuf::from);
+            }
+            if let Some(v) = w.strip_prefix(flag).and_then(|r| r.strip_prefix('=')) {
+                return Some(PathBuf::from(v));
+            }
+        }
+        None
+    })
 }
 
 #[cfg(test)]
@@ -4190,6 +4372,76 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Err(io::ErrorKind::BrokenPipe.into())
         }
+    }
+
+    fn corrected(line: &str) -> Option<String> {
+        let args = words(line);
+        let argv = std::iter::once("opv".to_string()).chain(args.iter().cloned());
+        let e = cli_command().try_get_matches_from(argv).unwrap_err();
+        corrected_command(&e, &args).map(|c| opv::cause::render::cmd_text(&c))
+    }
+
+    #[test]
+    fn a_misspelt_subcommand_is_corrected_to_the_one_clap_suggests() {
+        // 09.83.
+        assert_eq!(corrected("stauts prod").as_deref(), Some("opv status prod"));
+    }
+
+    #[test]
+    fn a_subcommand_flag_before_the_subcommand_moves_after_it() {
+        // 09.03.
+        assert_eq!(
+            corrected("--json check prod").as_deref(),
+            Some("opv check prod --json")
+        );
+    }
+
+    #[test]
+    fn a_missing_configuration_steps_to_init_of_the_named_environment() {
+        // 09.03b.
+        let e = init_for(
+            opv::config::not_found(std::path::Path::new("/nowhere")),
+            Some("prod"),
+        );
+        assert!(e.to_string().contains("environment prod"), "{e}");
+    }
+
+    #[test]
+    fn the_account_pointer_is_looked_up_beside_the_given_configuration() {
+        // C9 (09.08): `--config other/secrets.toml` reads `other`'s `.opv`.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("secrets.toml");
+        assert_eq!(
+            account_start(Some(&file)),
+            std::fs::canonicalize(dir.path()).unwrap()
+        );
+    }
+
+    #[test]
+    fn login_reads_the_childs_file_flag_for_its_configuration() {
+        // C18 (#159): the child's `--file` names the configuration, not the git remote.
+        let child = words("opv bootstrap --file fleet.toml --dry-run");
+        assert_eq!(
+            login_child_config(&child),
+            Some(PathBuf::from("fleet.toml"))
+        );
+    }
+
+    #[test]
+    fn login_reads_the_childs_config_flag_with_an_equals_sign() {
+        // C18 (#159).
+        let child = words("opv --config=a/secrets.toml check dev");
+        assert_eq!(
+            login_child_config(&child),
+            Some(PathBuf::from("a/secrets.toml"))
+        );
+    }
+
+    #[test]
+    fn login_ignores_a_file_flag_after_the_childs_own_double_dash() {
+        // C18: words after the child's `--` belong to its own child.
+        let child = words("opv run dev -- tool --file x");
+        assert_eq!(login_child_config(&child), None);
     }
 
     #[test]
@@ -4677,6 +4929,7 @@ mod tests {
             inv: opv::cause::Invocation::from_cli(&words("opv status prod")),
             verbose,
             utf8,
+            colour: false,
         }
     }
 

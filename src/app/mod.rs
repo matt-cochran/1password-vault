@@ -82,7 +82,7 @@ mod staged_tests;
 pub mod status;
 pub mod structure;
 pub mod structure_cmd;
-pub(crate) mod suggest;
+pub mod suggest;
 pub mod sync;
 pub mod target_cmd;
 pub mod target_credentials;
@@ -454,6 +454,9 @@ pub(crate) struct JsonPart<'a> {
     /// `--rotate` entries the part was planned with (`plan` only); sets `rotate` on the
     /// matching rows. `None` for `status`.
     pub rotate: Option<&'a BTreeSet<(String, String)>>,
+    /// The config channel's writes (FR-46, `plan` only): a variable the sync sets or
+    /// prunes is that row's action, so the plan shows every write the sync makes (#150).
+    pub vars: Option<&'a variables::VarPlan>,
 }
 
 /// FR-21: one names-only JSON document for `status --json` and `plan --json`. Every row
@@ -593,8 +596,22 @@ fn json_rows(
     link: Option<&str>,
 ) -> Vec<JsonRow> {
     let plan = part.plan;
-    let staged: HashSet<&str> = plan.stage.iter().map(|(n, _)| n.as_str()).collect();
-    let pruned: HashSet<&str> = plan.prune.iter().map(String::as_str).collect();
+    let (var_set, var_prune): (&[String], &[String]) = match part.vars {
+        Some(v) => (&v.set, &v.prune),
+        None => (&[], &[]),
+    };
+    let staged: HashSet<&str> = plan
+        .stage
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .chain(var_set.iter().map(String::as_str))
+        .collect();
+    let pruned: HashSet<&str> = plan
+        .prune
+        .iter()
+        .chain(var_prune)
+        .map(String::as_str)
+        .collect();
     let held_keys: HashSet<(&str, &str)> = plan
         .held_immutable
         .iter()
@@ -1167,6 +1184,21 @@ pub(crate) fn rows_item_url(
 /// The `Findings` error of `status`, `plan` and `check`: the fix is a person's (`Do:`, A3)
 /// and `Next:` opens the first blocking key in 1Password (H1).
 pub(crate) fn findings_error(n: usize, rows: &[Row], env_name: &str) -> Error {
+    // C4 (09.11, 09.18, 09.22): the blocking keys are the catalog's `ValuesNeeded` (exit 8),
+    // whose step opens the first of them with the invocation's `--config` kept; only
+    // findings without a blocking key keep the count.
+    let blocking: Vec<crate::cause::ValueRow> = rows
+        .iter()
+        .filter(|r| is_blocking(r))
+        .map(value_row)
+        .collect();
+    if !blocking.is_empty() {
+        return crate::cause::Cause::ValuesNeeded {
+            env: crate::cause::EnvName::new(env_name),
+            rows: blocking,
+        }
+        .into();
+    }
     // Found live: 1Password shows an empty field only in edit mode, so "fix the keys" sent
     // the person looking for a field that seemed not to exist.
     let empty = rows.iter().any(|r| {
@@ -1181,6 +1213,26 @@ pub(crate) fn findings_error(n: usize, rows: &[Row], env_name: &str) -> Error {
         "fix the keys above in 1Password"
     };
     Error::findings(n, open_next(rows, env_name)).with_do(action)
+}
+
+/// One blocking row as the catalog names it: product, key and what is wrong, never a value.
+pub(crate) fn value_row(row: &Row) -> crate::cause::ValueRow {
+    use crate::cause::{KeyName, ProductName, ValueRow, ValueState};
+    let state = match &row.state {
+        KeyState::RuleFailed(rule, _) if *rule == variables::CONCEALED_RULE => {
+            ValueState::ConcealedConfig
+        }
+        KeyState::RuleFailed(rule, _) => ValueState::RuleFailed { rule },
+        KeyState::WrongKind if row.kind == Kind::Secret => ValueState::StoredAsText,
+        KeyState::WrongKind => ValueState::ConcealedConfig,
+        _ => ValueState::Missing,
+    };
+    ValueRow {
+        product: ProductName::new(&row.product),
+        key: KeyName::new(&row.key),
+        target: None,
+        state,
+    }
 }
 
 /// The next step for findings (H1): open the first blocking key's field in 1Password.
@@ -2022,6 +2074,23 @@ pub(crate) mod testutil {
     use crate::domain::Fleet;
     use crate::runner::Output;
     use crate::runner::fake::FakeRunner;
+
+    /// How many findings `e` reports: the blocking keys of a `ValuesNeeded` (C4), or the
+    /// count of a legacy `Findings`; `None` for any other error.
+    pub fn findings_of(e: &crate::error::Error) -> Option<usize> {
+        match e {
+            crate::error::Error::Findings(n, _) => Some(*n),
+            _ => match e.cause() {
+                Some((crate::cause::Cause::ValuesNeeded { rows, .. }, _)) => Some(rows.len()),
+                _ => None,
+            },
+        }
+    }
+
+    /// The Next of `e`, rendered for `opv` with no flags (C4: catalog errors too).
+    pub fn next_of_error(e: &crate::error::Error) -> String {
+        e.step("opv", "opv").next
+    }
 
     pub const MARKER: &str = "FIXTUREVALUE";
     pub const OPENAI: &str = "sk-proj-FIXTUREVALUE";

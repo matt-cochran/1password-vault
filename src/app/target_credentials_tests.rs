@@ -345,7 +345,7 @@ fn a_failed_store_names_the_minted_credential() {
     w.op.vaults.borrow_mut().retain(|(id, _)| id != "vstate");
     let (_d, path) = file(&fleet_text(None));
     let (res, _, _) = create(&w, &fleet(None), &path, true);
-    assert!(res.unwrap_err().text().contains(CREDENTIAL));
+    assert!(message(&res.unwrap_err()).contains(CREDENTIAL));
 }
 
 #[test]
@@ -354,7 +354,23 @@ fn a_failed_store_gives_the_providers_revoke_hint() {
     w.op.vaults.borrow_mut().retain(|(id, _)| id != "vstate");
     let (_d, path) = file(&fleet_text(None));
     let (res, _, _) = create(&w, &fleet(None), &path, true);
-    assert!(res.unwrap_err().text().contains("flyctl tokens"));
+    // C21: the revoke is the cause's Do (SecretNotStored), never free text.
+    assert_eq!(res.unwrap_err().code_str(), "secret_not_stored");
+}
+
+#[test]
+fn a_failed_store_never_leads_to_the_mint_again() {
+    // C21 (X5): a token that was minted but not stored steps to a read, never a re-run of
+    // `--create`, which would mint a second token.
+    let w = World::new();
+    w.op.vaults.borrow_mut().retain(|(id, _)| id != "vstate");
+    let (_d, path) = file(&fleet_text(None));
+    let (res, _, _) = create(&w, &fleet(None), &path, true);
+    let next = res
+        .unwrap_err()
+        .step("opv target credentials staging --target web --create", "")
+        .next;
+    assert!(!next.contains("--create"), "{next}");
 }
 
 #[test]
@@ -523,7 +539,9 @@ fn a_failed_store_fills_in_the_app_to_list_tokens() {
     w.op.vaults.borrow_mut().retain(|(id, _)| id != "vstate");
     let (_d, path) = file(&fleet_text(None));
     let (res, _, _) = create(&w, &fleet(None), &path, true);
-    assert!(message(&res.unwrap_err()).contains("flyctl tokens list --app shop-staging"));
+    // C21: Fly's own listing is the step that finds the token (Provider::mint_refind).
+    let next = res.unwrap_err().step("", "").next;
+    assert_eq!(next, "flyctl tokens list --app shop-staging");
 }
 
 #[test]

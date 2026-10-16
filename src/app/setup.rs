@@ -4,10 +4,9 @@ use crate::adapters::onepassword::{Failed, WipeOnDrop, serialize_exact};
 use crate::adapters::onepassword_diagnose::Facts;
 pub use crate::adapters::onepassword_diagnose::SessionCheck;
 use crate::cause::{
-    AccountId, Cause, Closest, ConfigSource, CreateKind, DiagnoseContext, EnvName, FieldName,
-    FieldRule, GivenBy, InputKind, IoKind, ItemId, NoTerminal, NotEditable, ProductName, Refind,
-    ResourceKind, ResourceName, ResourceRef, StoreObject, System, Unusable, ValueRow, ValueState,
-    VaultId,
+    AccountId, Cause, Closest, ConfigSource, CreateKind, DiagnoseContext, EnvName, FieldRule,
+    GivenBy, InputKind, IoKind, ItemId, NoTerminal, NotEditable, ProductName, Refind, ResourceKind,
+    ResourceName, ResourceRef, StoreObject, System, Unusable, ValueRow, ValueState, VaultId,
 };
 use crate::config;
 use crate::domain::{Kind, SecretValue};
@@ -159,33 +158,22 @@ fn list(output: &Output, args: &[&str]) -> Result<Vec<Name>, Error> {
     serde_json::from_slice(&output.stdout).map_err(|_| unreadable_reply(args))
 }
 
-/// The recipe field (`vault`, `item`) whose title more than one object has: the person
-/// renames the duplicate or names another title in the recipe.
-fn duplicate_title(recipe_path: &Path, field: &str) -> Error {
-    Cause::InputInvalid {
-        path: recipe_path.to_path_buf(),
-        kind: InputKind::SetupRecipe,
-        at: None,
-        field: field.to_string(),
-        rule: FieldRule::Type {
-            expected: "a title only one object in 1Password has (rename the duplicate in \
-                       1Password, or name another title here)",
-        },
+/// The title (of a vault or an item) more than one object has (F4): the person renames
+/// the duplicate or names another title in the recipe.
+fn duplicate_title(title: &str) -> Error {
+    Cause::ItemUnusable {
+        vault: None,
+        title: title.to_string(),
+        problem: crate::cause::ItemProblem::DuplicateTitle,
     }
     .into()
 }
 
-fn match_name(
-    rows: Vec<Name>,
-    name: &str,
-    field: &str,
-    recipe_path: &Path,
-    args: &[&str],
-) -> Result<Option<String>, Error> {
+fn match_name(rows: Vec<Name>, name: &str, args: &[&str]) -> Result<Option<String>, Error> {
     let mut matches = rows.into_iter().filter(|r| r.name == name);
     let first = matches.next();
     if matches.next().is_some() {
-        return Err(duplicate_title(recipe_path, field));
+        return Err(duplicate_title(name));
     }
     if let Some(row) = first {
         if !config::is_id(&row.id) {
@@ -269,6 +257,8 @@ fn sign_in(
     backend: &mut dyn Backend,
     ui: &mut dyn Interaction,
 ) -> Result<Output, Error> {
+    // H3 (#160): an empty account is none; op is never asked about `--account ""`.
+    let account = account.filter(|a| !a.trim().is_empty());
     backend.native()?;
     ui.show(&format!("1Password CLI: ready ({})", version(backend)?))?;
     match account {
@@ -419,18 +409,12 @@ fn field_indices(
     doc: &mut Value,
     definitions: &[Field],
     recipe: &Recipe,
-    recipe_path: &Path,
 ) -> Result<Vec<usize>, Error> {
     if doc.get("category").and_then(Value::as_str) != Some("SECURE_NOTE") {
-        return Err(Cause::InputInvalid {
-            path: recipe_path.to_path_buf(),
-            kind: InputKind::SetupRecipe,
-            at: None,
-            field: "item".into(),
-            rule: FieldRule::Type {
-                expected: "the title of a Secure Note item (the item with this title is \
-                           another category, and setup leaves it unchanged)",
-            },
+        return Err(Cause::ItemUnusable {
+            vault: Some(crate::cause::VaultId::new(&recipe.vault)),
+            title: recipe.item.clone(),
+            problem: crate::cause::ItemProblem::WrongCategory,
         }
         .into());
     }
@@ -559,6 +543,17 @@ fn expanded(path: &Path, recipe_path: &Path) -> Result<PathBuf, Error> {
     }
 }
 
+/// The input file `path` could not be read (F4): `InputUnreadable`, naming the file and
+/// the I/O failure, never its contents.
+fn input_unreadable(path: &Path, kind: InputKind, io: std::io::ErrorKind) -> Error {
+    Cause::InputUnreadable {
+        path: path.to_path_buf(),
+        kind,
+        io: IoKind::from(io),
+    }
+    .into()
+}
+
 /// The input file `path` (a dotenv file, a setup recipe) cannot be used as it is, named
 /// with what it must be (05.09, 05.21). Never its contents.
 fn input_unusable(path: &Path, kind: InputKind, expected: &'static str) -> Error {
@@ -572,21 +567,12 @@ fn input_unusable(path: &Path, kind: InputKind, expected: &'static str) -> Error
     .into()
 }
 
-/// What an input file must be, when reading it failed with `io`.
-fn readable(io: std::io::ErrorKind) -> &'static str {
-    match IoKind::from(io) {
-        IoKind::NotFound => "present at this path (check the path for a typo)",
-        IoKind::PermissionDenied => "readable by you",
-        IoKind::IsADirectory | IoKind::Other => "a readable regular file",
-    }
-}
-
 /// The literal assignments of the dotenv file `path` (`init --from`, `adopt --from` and
 /// setup's import): private, regular, under 1 MiB, UTF-8. Every refusal names the file
 /// (05.09); nothing is imported from a file refused.
 pub(crate) fn read_legacy(path: &Path) -> Result<BTreeMap<String, SecretValue>, Error> {
     let info = fs::symlink_metadata(path)
-        .map_err(|e| input_unusable(path, InputKind::Dotenv, readable(e.kind())))?;
+        .map_err(|e| input_unreadable(path, InputKind::Dotenv, e.kind()))?;
     if !info.file_type().is_file() || info.len() > 1024 * 1024 {
         return Err(input_unusable(
             path,
@@ -738,7 +724,7 @@ pub fn run(
     ui: &mut dyn Interaction,
 ) -> Result<i32, Error> {
     let text = fs::read_to_string(recipe_path)
-        .map_err(|e| input_unusable(recipe_path, InputKind::SetupRecipe, readable(e.kind())))?;
+        .map_err(|e| input_unreadable(recipe_path, InputKind::SetupRecipe, e.kind()))?;
     // C8: the recipe's errors name the recipe file itself.
     let recipe = Recipe::parse_at(recipe_path, &text)?;
     let products: Vec<_> = recipe
@@ -794,31 +780,26 @@ pub fn run(
     }
     ui.show(&format!("\n{}\nWe will save your existing settings in 1Password and prepare local commands.\nNo infrastructure will be applied or deployed.\n", recipe.title))?;
     let vaults = prepare(account, backend, ui)?;
-    let vault = match_name(
-        list(&vaults, &VAULT_LIST)?,
-        &recipe.vault,
-        "vault",
-        recipe_path,
-        &VAULT_LIST,
-    )?
-    .ok_or_else(|| -> Error {
-        // #157: the account it was looked for in is named.
-        Cause::InputInvalid {
-            path: recipe_path.to_path_buf(),
-            kind: InputKind::SetupRecipe,
-            at: None,
-            field: format!(
-                "vault {:?} (looked for in {})",
-                recipe.vault,
-                account_name(backend, account)
-            ),
-            rule: FieldRule::Type {
-                expected: "the title of a vault in that account (create it in the 1Password \
+    let vault = match_name(list(&vaults, &VAULT_LIST)?, &recipe.vault, &VAULT_LIST)?.ok_or_else(
+        || -> Error {
+            // #157: the account it was looked for in is named.
+            Cause::InputInvalid {
+                path: recipe_path.to_path_buf(),
+                kind: InputKind::SetupRecipe,
+                at: None,
+                field: format!(
+                    "vault {:?} (looked for in {})",
+                    recipe.vault,
+                    account_name(backend, account)
+                ),
+                rule: FieldRule::Type {
+                    expected: "the title of a vault in that account (create it in the 1Password \
                            app, or sign in to the account that holds it)",
-            },
-        }
-        .into()
-    })?;
+                },
+            }
+            .into()
+        },
+    )?;
     ui.show(&format!("Signed in. Using vault {}.", recipe.vault))?;
     let list_items = ["item", "list", "--vault", &vault, "--format", "json"];
     let items = successful(
@@ -828,13 +809,7 @@ pub fn run(
         &op_context(account, Some(vault_ref(&vault, account)), false),
         &Facts::from_process_env(),
     )?;
-    let mut item_id = match_name(
-        list(&items, &list_items)?,
-        &recipe.item,
-        "item",
-        recipe_path,
-        &list_items,
-    )?;
+    let mut item_id = match_name(list(&items, &list_items)?, &recipe.item, &list_items)?;
     let raw = if let Some(id) = &item_id {
         read_fresh(backend, id, &vault, account)?
     } else {
@@ -852,7 +827,6 @@ pub fn run(
     };
     let (mut doc, mut indices) = laid_out(
         &recipe,
-        recipe_path,
         &vault,
         item_id.as_deref(),
         &raw.stdout,
@@ -938,7 +912,6 @@ pub fn run(
                 ui.show("\nThe item changed in 1Password while setup was open, so nothing was saved. Setup read it again: what 1Password holds now is kept, and your entries fill only the settings that are still empty.")?;
                 (doc, indices) = laid_out(
                     &recipe,
-                    recipe_path,
                     &vault,
                     item_id.as_deref(),
                     &base.stdout,
@@ -1159,7 +1132,6 @@ fn finish(
 /// added. Returns the document and each active field's index in it.
 fn laid_out(
     recipe: &Recipe,
-    recipe_path: &Path,
     vault: &str,
     item_id: Option<&str>,
     raw: &[u8],
@@ -1175,7 +1147,7 @@ fn laid_out(
             .map_err(|_| unreadable_reply(&ITEM_GET))?,
     );
     drop(tidied);
-    let indices = field_indices(&mut doc.0, active, recipe, recipe_path)?;
+    let indices = field_indices(&mut doc.0, active, recipe)?;
     Ok((doc, indices))
 }
 
@@ -1273,13 +1245,13 @@ fn verify_saved(
         // Another edit landed together with setup's; setup did not retry.
         return Err(Cause::ConcurrentEdit { object: object() }.into());
     }
-    let lost = crate::adapters::onepassword_tidy::lost(base, payload, &after.stdout)?;
-    if lost > 0 {
+    let fields = crate::adapters::onepassword_tidy::lost(base, payload, &after.stdout)?;
+    if !fields.is_empty() {
         return Err(Cause::ReadBackMissing {
             vault: VaultId::new(vault),
             item: ItemId::new(id),
-            // The tidy's read-back counts the lost fields; it does not name them yet.
-            fields: vec![FieldName::new(super::plural(lost, "field", "fields"))],
+            // G2 (F4d): the fields by label, never a count.
+            fields,
             by: crate::cause::Cmd {
                 command: vec!["setup".into()],
                 args: Vec::new(),

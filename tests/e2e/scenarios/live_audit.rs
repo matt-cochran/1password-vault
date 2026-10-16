@@ -362,7 +362,6 @@ fn live_09_01_check_with_no_configuration_is_config_not_found() {
 }
 
 #[test]
-#[ignore = "09.03b: config_not_found steps to `opv init dev`, not the environment the command named (`opv init prod`)"]
 fn live_09_03b_check_prod_with_no_configuration_steps_to_init_prod() {
     let out = Scenario::new()
         .without_config()
@@ -385,7 +384,6 @@ fn live_09_02_status_signed_out_with_no_configuration_fails_on_the_configuration
 }
 
 #[test]
-#[ignore = "09.03: a --json placed before the subcommand steps to `opv check --help`, not the corrected `opv check prod --json` clap already names"]
 fn live_09_03_a_misplaced_json_flag_steps_to_the_corrected_command() {
     let out = Scenario::new().opv(&["--json", "check", "prod"]);
     assert_eq!(
@@ -477,7 +475,6 @@ fn live_09_26_structural_approve_without_a_terminal_keeps_config() {
 }
 
 #[test]
-#[ignore = "09.27: approve checks the terminal before the plan id, so a malformed id is refused as terminal_required (exit 6), not as a usage error"]
 fn live_09_27_approve_of_a_malformed_plan_id_is_a_usage_error_before_the_terminal_gate() {
     let out = Scenario::new().opv(&["approve", "nonsense"]);
     assert_eq!(out.exit(), Some(2), "{}", out.shown());
@@ -499,7 +496,6 @@ fn live_09_30_approve_with_deploy_target_prune_without_a_terminal_keeps_every_fl
 }
 
 #[test]
-#[ignore = "09.42: run checks the terminal before the remote profile, so an undeclared profile is refused as terminal_required (exit 6), not unknown_profile"]
 fn live_09_42_run_with_an_undeclared_remote_profile_is_refused_before_the_terminal_gate() {
     let out = Scenario::new().opv(&["run", "prod", "--product", "web", "--remote", "nosuch"]);
     assert_eq!(out.exit(), Some(2), "{}", out.shown());
@@ -532,7 +528,6 @@ fn live_09_94_login_add_without_a_terminal_exits_6() {
 // --- steps keep --config (11, 14, 18, 22, 33, 34, 95) -----------------------------------------
 
 #[test]
-#[ignore = "09.11: the values-needed step `opv open web/LOG_LEVEL --env prod` drops --config"]
 fn live_09_11_check_with_an_invalid_value_keeps_config_in_its_next() {
     let s = Scenario::new().edit_config(prod_log_level_invalid);
     let out = s.opv_config(&["check", "prod", "--json"]);
@@ -559,7 +554,6 @@ fn live_09_14_a_product_typo_substitutes_the_product_and_keeps_config() {
 }
 
 #[test]
-#[ignore = "09.18: the values-needed step `opv open web/API_KEY --env prod` drops --config"]
 fn live_09_18_status_with_a_missing_value_keeps_config_in_its_next() {
     let s = Scenario::new().edit_world(blank(WEB_PROD_ITEM, "API_KEY"));
     let out = s.opv_config(&["status", "prod", "--target", "fly", "--json"]);
@@ -571,7 +565,6 @@ fn live_09_18_status_with_a_missing_value_keeps_config_in_its_next() {
 }
 
 #[test]
-#[ignore = "09.22: the values-needed step `opv open web/API_KEY --env prod` drops --config"]
 fn live_09_22_plan_with_a_missing_value_keeps_config_in_its_next() {
     let s = Scenario::new().edit_world(blank(WEB_PROD_ITEM, "API_KEY"));
     let out = s.opv_config(&["plan", "prod", "--json"]);
@@ -703,7 +696,6 @@ fn live_09_36_sync_json_prints_no_value() {
 // --- name typos (13, 51, 52, 57, 83–87) --------------------------------------------------------
 
 #[test]
-#[ignore = "09.13: a transposed environment name (prdo) gets no closest match, so the step is a listing instead of `opv check prod`"]
 fn live_09_13_a_transposed_environment_steps_to_the_same_command_with_it_corrected() {
     let out = Scenario::new().opv(&["check", "prdo"]);
     assert_eq!(
@@ -753,7 +745,6 @@ fn live_09_57_an_access_target_typo_keeps_the_environment() {
 }
 
 #[test]
-#[ignore = "09.83: a misspelt subcommand steps to `opv --help`, not the `opv status prod` clap already suggests"]
 fn live_09_83_a_subcommand_typo_steps_to_the_corrected_command() {
     let out = Scenario::new().opv(&["stauts", "prod"]);
     assert_eq!(
@@ -1084,7 +1075,6 @@ fn live_09_73_check_with_an_unknown_selected_account_is_account_not_registered()
 }
 
 #[test]
-#[ignore = "09.74: malformed op item JSON is still the legacy source_error with a same-command Next, not unexpected_output"]
 fn live_09_74_malformed_item_json_is_unexpected_output() {
     let out = Scenario::new()
         .faults(&fault("op", "item get", "malformed_output"))
@@ -1256,7 +1246,6 @@ fn live_09_mcp_structure_plan_prints_no_value() {
 }
 
 #[test]
-#[ignore = "09.mcp: opv_structure_apply of a plan id never prepared is still stale_plan (\"the plan changed\"), not plan_unknown"]
 fn live_09_mcp_structure_apply_of_a_plan_never_prepared_is_plan_unknown() {
     let doc = Scenario::new().account(DEV_ACCOUNT).mcp(
         "opv_structure_apply",

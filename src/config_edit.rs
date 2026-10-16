@@ -353,8 +353,14 @@ pub(crate) fn write_atomic(
         .file_name()
         .map_or_else(|| "secrets.toml".into(), |n| n.to_string_lossy());
     let tmp: PathBuf = dir.join(format!(".{name}.opv.{}.tmp", std::process::id()));
-    let fail = |what: &str, p: &Path, e: io::Error| {
-        Error::Config(format!("cannot {what} {}: {e}", p.display()).into())
+    // A3: opv's own write failed: `LocalIo`, naming the path (never the content).
+    let fail = |_what: &str, p: &Path, e: io::Error| -> Error {
+        crate::cause::Cause::LocalIo {
+            op: crate::cause::LocalOp::Write,
+            path: p.to_path_buf(),
+            io: crate::cause::IoKind::from(e.kind()),
+        }
+        .into()
     };
     let res = (|| {
         let mut f = fs::OpenOptions::new()
@@ -381,6 +387,14 @@ pub(crate) fn write_atomic(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_write_into_a_missing_folder_is_opvs_own_local_io() {
+        // A3: opv's own write failure is `LocalIo`, never a configuration error.
+        let dir = tempfile::tempdir().unwrap();
+        let e = write_atomic(&dir.path().join("no/such/secrets.toml"), "", || Ok(())).unwrap_err();
+        assert_eq!(e.code_str(), "local_io_failed");
+    }
 
     const FILE: &str = "# top comment\n[environments.prod]  # the live one\nvault_id = \"v\"\nitem_id = \"i\"\n\n# api keys\n[products.api.keys.A]\nkind = \"secret\"\nenvironments = [\"prod\"]  # only prod\n";
 

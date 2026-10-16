@@ -281,8 +281,14 @@ pub fn preview_for(
     Ok(())
 }
 
+/// The preview could not be written to stdout (A3): `LocalIo{Stdout}`.
 fn write_err(e: io::Error) -> Error {
-    Error::Dependency(format!("cannot write the preview ({e})").into())
+    crate::cause::Cause::LocalIo {
+        op: crate::cause::LocalOp::Stdout,
+        path: std::path::PathBuf::new(),
+        io: crate::cause::IoKind::from(e.kind()),
+    }
+    .into()
 }
 
 /// The text form: one line per delivered key plus the summary lines, names and identifiers

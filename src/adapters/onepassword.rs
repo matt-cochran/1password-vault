@@ -53,9 +53,9 @@ use super::onepassword_diagnose::Facts;
 use super::onepassword_diagnose_items::diagnose_item_call;
 use crate::cause::{
     AccountId, AccountRef, AccountSource, Cause, CredentialProblem, CredentialRef, DiagnoseContext,
-    DottedPath, EnvName, GrantModel, IoKind, ItemId, Location, NamedBy, NotFoundState, Observed,
-    ResourceKind, ResourceName, ResourceRef, Right, SessionState, System, Unanswered, Unusable,
-    Upstream, VarName, VaultId,
+    DottedPath, EnvName, ExitClass, GrantModel, IoKind, ItemId, Location, NamedBy, NotFoundState,
+    Observed, ResourceKind, ResourceName, ResourceRef, Right, SessionState, System, Unanswered,
+    Unusable, Upstream, VarName, VaultId,
 };
 use crate::domain::model::{Boundary, Environment, Kind, key_label};
 use crate::domain::plan::ItemField;
@@ -684,8 +684,13 @@ pub(crate) fn failed_read_from(
 
 /// NR-26: 1Password grants access per vault, so a read of the item `ctx` names that keeps
 /// failing in a vault this identity opens is an item that is not there (moved, archived or
-/// deleted). `None` when the call was not a read of an item.
+/// deleted). `None` when the call was not a read of an item, or when it did not end with
+/// op's own failure exit (1): a read that hung, was killed or could not start says nothing
+/// about the item (E2, X13).
 fn missing_item(ctx: &DiagnoseContext, seen: &Observed) -> Option<Cause> {
+    if seen.exit() != (ExitClass::Code { code: 1 }) {
+        return None;
+    }
     let item = ctx
         .resource
         .as_ref()
@@ -865,6 +870,10 @@ fn read_whole_as(
         args.push(NO_CACHE);
     }
     let raw = read_diagnosed(r, env, b, &args, &Host::detect)?;
+    // 09.74: a reply that is not JSON is this call's `UnexpectedOutput`, reported while the
+    // runner still holds the call's observation (the tolerant reader parses it later).
+    serde_json::from_slice::<serde::de::IgnoredAny>(&raw)
+        .map_err(|e| unreadable_reply(&args, &e))?;
     Ok(Item {
         fields: Vec::new(),
         version: item_version(&raw),
@@ -909,7 +918,8 @@ fn read_sections_on(
         "json",
     ];
     let stdout = read_diagnosed(r, env, b, &args, host)?;
-    let fields = parse_fields(&stdout, sections)?;
+    // 09.74: JSON op answered with that opv cannot read is `UnexpectedOutput` of this call.
+    let fields = parse_fields(&stdout, sections, &|e| unreadable_reply(&args, e))?;
     Ok(Item {
         fields,
         version: item_version(&stdout),
@@ -1351,8 +1361,12 @@ impl<'de> Deserialize<'de> for Concealed {
     }
 }
 
-fn parse_fields(json: &[u8], only: Option<&BTreeSet<String>>) -> Result<Vec<ItemField>, Error> {
-    let raw: RawItem = serde_json::from_slice(json).map_err(|e| json_error(&e))?;
+fn parse_fields(
+    json: &[u8],
+    only: Option<&BTreeSet<String>>,
+    unreadable: &dyn Fn(&serde_json::Error) -> Error,
+) -> Result<Vec<ItemField>, Error> {
+    let raw: RawItem = serde_json::from_slice(json).map_err(|e| unreadable(&e))?;
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
     for f in raw.fields {
@@ -2114,6 +2128,19 @@ mod tests {
         assert_eq!(e.code_str(), "account_not_registered");
     }
 
+    /// E2 (X13): a read that keeps ending with an exit other than op's own failure (124
+    /// from a hung op, 127 from a missing one) is never reported as a missing item.
+    #[test]
+    fn a_read_that_keeps_hanging_is_not_a_missing_item() {
+        let r = FakeRunner::new(
+            std::iter::once(Output::failure(124))
+                .chain([Output::success(WHOAMI_SA), vault_ok()])
+                .chain(failed_read(124)),
+        );
+        let e = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err();
+        assert_ne!(e.code_str(), "item_not_found");
+    }
+
     /// In WSL with the Windows `op.exe`, a signed-out session is the locked app.
     #[test]
     fn wsl_windows_op_signed_out_names_the_app() {
@@ -2326,7 +2353,7 @@ mod tests {
         ] {
             let e = read_err(bytes);
             let s = format!("{e} {e:?}");
-            assert!(matches!(e, Error::Source(_)), "{s}");
+            assert_eq!(e.code_str(), "unexpected_output", "{s}");
             assert!(
                 !s.contains("987654321123") && !s.contains("sk-FIXTURE"),
                 "{s}"

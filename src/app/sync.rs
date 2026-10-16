@@ -2268,6 +2268,7 @@ pub fn plan_rotating(
                 plan: &p.plan,
                 pinned: None,
                 rotate: Some(&p.rotate),
+                vars: Some(&p.var_plan),
             })
             .collect();
         write_json(
@@ -3407,7 +3408,7 @@ mod tests {
         let mut out = Vec::new();
         let e = plan(&fleet_smtp(), "staging", &r, &mut out).unwrap_err();
         let out = text_of(&out);
-        assert!(matches!(e, Error::Findings(1, _)), "{e}");
+        assert!(crate::app::testutil::findings_of(&e) == Some(1), "{e}");
         assert!(
             out.lines()
                 .any(|l| l.contains("SMTP_PASS") && l.contains("failed refuse_in (")),
@@ -3450,7 +3451,7 @@ mod tests {
         ]);
         let (res, out) = plan_out(&r);
         let e = res.unwrap_err();
-        assert!(matches!(e, Error::Findings(1, _)), "{e}");
+        assert!(crate::app::testutil::findings_of(&e) == Some(1), "{e}");
         assert_eq!(e.exit_code(), 8);
         assert!(
             out.lines().any(|l| l.contains("OPENAI_API_KEY")
@@ -3574,7 +3575,7 @@ mod tests {
         ]);
         let (res, out) = plan_out(&r);
         let e = res.unwrap_err();
-        assert!(matches!(e, Error::Findings(1, _)), "{e}");
+        assert!(crate::app::testutil::findings_of(&e) == Some(1), "{e}");
         assert!(out.contains("failed not_prefix ("), "{out}");
         assert_no_values(&out);
         assert_no_values(&e.to_string());
