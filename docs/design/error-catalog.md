@@ -338,12 +338,12 @@ Next: opv vault locate atqr2ek…
            "evidence": {"checked": "op vault get atqr2ek…", "account": "6AINMAIK…",
                         "upstream": {"source": "op", "tool": "1Password CLI", "version": "2.31.0", "exit": 1,
                                      "said": ["[ERROR] \"atqr2ek…\" isn't a vault in this account."], "removed_advice": true}},
-           "retry": "after_fix", "human_required": true,
+           "retry": "after_fix", "human_required": false,
            "do": "find the account that holds it, or fix vault_id for environment staging in secrets.toml",
            "next": "opv vault locate atqr2ek…", "next_kind": "run"}}
 ```
 
-MCP returns exactly this `error` object (plus `ok: false`), with no separate hint table. `next_kind` (`rerun`, `run`, `check`, `handoff`, `vendor`, `none`) tells an agent whether it may run the step itself (`run`, `check`, `rerun`) or must hand it to the person (`handoff`, or any step when `human_required` is true).
+MCP returns exactly this `error` object (plus `ok: false`), with no separate hint table. (`human_required` is false here: an agent can run `opv vault locate` itself; §6.3.) `next_kind` (`rerun`, `run`, `check`, `handoff`, `vendor`, `none`) tells an agent whether it may run the step itself (`run`, `check`, `rerun`) or must hand it to the person (`handoff`, or any step when `human_required` is true).
 
 ### 7.3 The upstream reply block
 
