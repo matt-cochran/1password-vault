@@ -586,6 +586,7 @@ Still open, with the review's position and the owner's earlier decision (§12.4)
 ### 12.4 Owner decisions
 
 - **`.opv` discovery stops at the repository root.** It never reads a `.opv` above the git top level; outside a repository, it reads only the current directory.
+- **Azure diagnosis is deferred for 0.10.0 (2026-10-16).** There are no new Azure recordings. The Azure strategy classifies only what the 2026-10-08 spike recorded and the runner-level facts (timeouts, spawn failures, principal). Every other Azure failure is `Unrecognized`, with Azure's full scrubbed reply. Azure phrases are added when a sandbox recording exists.
 - **The agent skill is refreshed only on install:** by `install.sh`, the npm postinstall, and `opv skill install`. No other command writes `$HOME`; `opv doctor` and `opv skill status` report an outdated copy.
 
 ### 12.5 Open questions for review
