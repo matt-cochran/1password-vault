@@ -491,10 +491,14 @@ fn listing_in_a_missing_environment_names_it() {
 }
 
 #[test]
-fn listing_in_a_missing_environment_offers_the_create_command() {
+fn listing_in_a_missing_environment_never_runs_the_create_command_as_next() {
     let e = listing_in_missing_environment().unwrap_err();
-    assert_eq!(
-        e.next_step(),
-        Some("gh api -X PUT repos/example-org/example-repo/environments/nope")
-    );
+    assert_eq!(e.next_step(), None);
+}
+
+#[test]
+fn a_refused_read_while_signed_in_names_the_rights_to_check() {
+    let r = FakeRunner::new([Output::success("")]);
+    let e = read_failure(&r, "gh api", "org/r", 1);
+    assert!(e.text().contains("Secrets and Variables write"), "{e:?}");
 }

@@ -28,11 +28,18 @@ impl DeployLogin for GithubLogin {
         mut values: BTreeMap<String, SecretValue>,
         _r: &dyn CommandRunner,
     ) -> Result<(), Error> {
-        self.token = Some(
-            values
-                .remove("GH_TOKEN")
-                .ok_or_else(|| Error::Source("deploy credentials: GH_TOKEN is missing".into()))?,
-        );
+        self.token = Some(values.remove("GH_TOKEN").ok_or_else(|| {
+            Error::Auth(
+                "deploy credentials: the deploy_credentials item has no GH_TOKEN field; \
+                 nothing was changed"
+                    .into(),
+            )
+            .with_code(crate::error::Code::DeployCredentialsFailed)
+            .with_do(
+                "add a GH_TOKEN field holding a fine-grained GitHub token to the \
+                 environment's deploy_credentials item in 1Password",
+            )
+        })?);
         Ok(())
     }
 
@@ -83,5 +90,14 @@ mod tests {
     fn sign_in_refuses_a_missing_token() {
         let mut l = GithubLogin::default();
         assert!(l.sign_in(BTreeMap::new(), &FakeRunner::default()).is_err());
+    }
+
+    #[test]
+    fn a_deploy_item_without_a_token_is_deploy_credentials_failed() {
+        let mut l = GithubLogin::default();
+        let e = l
+            .sign_in(BTreeMap::new(), &FakeRunner::default())
+            .unwrap_err();
+        assert_eq!(e.code(), crate::error::Code::DeployCredentialsFailed);
     }
 }
