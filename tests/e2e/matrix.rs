@@ -969,6 +969,12 @@ fn the_committed_cells_are_the_discovered_candidates() {
     );
 }
 
+/// Every path is migrated, so no rule may be excused again: `KNOWN_LEGACY.txt` stays empty.
+#[test]
+fn no_rule_is_excused_as_known_legacy() {
+    assert!(known_legacy().is_empty(), "{:?}", known_legacy());
+}
+
 fn generate(cands: Vec<Cell>, untargetable: Vec<String>) {
     let mut results = in_parallel(cands, outcome);
     results.sort_by(|a, b| a.0.cmp(&b.0));
