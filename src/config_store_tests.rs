@@ -26,6 +26,11 @@ fn req(dir: &Path) -> Request {
     }
 }
 
+/// The catalog cause of `e` (every migrated discovery failure is one).
+fn cause_of(e: &Error) -> &Cause {
+    e.cause().expect("a catalog cause").0
+}
+
 fn title_of(found: Result<Found, Error>) -> String {
     match found {
         Ok(Found::Manifest(m)) => m.title,
@@ -230,7 +235,7 @@ fn dot_opv_with_an_unknown_key_is_a_config_error() {
     std::fs::write(dir.path().join(DOT_FILE), "projct = \"myapp\"\n").unwrap();
     assert!(matches!(
         locate(&req(dir.path()), &FakeOp::default()),
-        Err(Error::Config(_))
+        Err(e) if e.code_str() == "config_invalid"
     ));
 }
 
@@ -258,16 +263,82 @@ fn git_remote_discovery_is_one_listing() {
 }
 
 #[test]
-fn several_repo_matches_are_listed_with_opv_project_next() {
+fn several_repo_matches_list_every_candidate() {
     let op = FakeOp::with_remote("https://github.com/acme/myapp.git");
     put(&op, "myapp-dev", "api", &repo_tags(&[]));
     put(&op, "shared", "web", &repo_tags(&[]));
     let dir = tempfile::tempdir().unwrap();
     let e = locate(&req(dir.path()), &op).unwrap_err();
     assert!(
-        e.text().contains("opv · api")
-            && e.text().contains("opv · web")
-            && e.next_step().unwrap().starts_with("OPV_PROJECT="),
+        matches!(cause_of(&e), Cause::ManifestAmbiguous { candidates, .. } if candidates.len() == 2),
+        "{e:?}"
+    );
+}
+
+/// 03.09: the path tags do not decide; nothing is archived and no first match is guessed.
+#[test]
+fn several_repo_matches_are_not_a_person_only_pick() {
+    let op = FakeOp::with_remote("https://github.com/acme/myapp.git");
+    put(&op, "myapp-dev", "api", &repo_tags(&[]));
+    put(&op, "shared", "web", &repo_tags(&[]));
+    let dir = tempfile::tempdir().unwrap();
+    let e = locate(&req(dir.path()), &op).unwrap_err();
+    assert!(
+        matches!(
+            cause_of(&e),
+            Cause::ManifestAmbiguous {
+                person_picks: false,
+                ..
+            }
+        ),
+        "{e:?}"
+    );
+}
+
+/// 03.09 (X2): the step never names the first match as the project.
+#[test]
+fn several_repo_matches_guess_no_project() {
+    let op = FakeOp::with_remote("https://github.com/acme/myapp.git");
+    put(&op, "myapp-dev", "api", &repo_tags(&[]));
+    put(&op, "shared", "web", &repo_tags(&[]));
+    let dir = tempfile::tempdir().unwrap();
+    let e = locate(&req(dir.path()), &op).unwrap_err();
+    let inv = crate::cause::Invocation::from_cli(&["opv".into(), "status".into()]);
+    assert_eq!(
+        cause_of(&e).step(&inv).1,
+        crate::cause::Next::Check(crate::cause::Cmd {
+            command: vec!["projects".into()],
+            args: vec![],
+        })
+    );
+}
+
+/// 03.10: a project name no manifest has is `manifest_not_found`, never a `config import`
+/// that needs a file this checkout does not have.
+#[test]
+fn an_unknown_project_is_manifest_not_found() {
+    let op = FakeOp::default();
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = req(dir.path());
+    r.project = Some("nosuch".into());
+    let e = locate(&r, &op).unwrap_err();
+    assert!(
+        matches!(cause_of(&e), Cause::ManifestNotFound { project, .. } if project == "nosuch"),
+        "{e:?}"
+    );
+}
+
+/// 03.20: the first-run router says which account it searched for the repository.
+#[test]
+fn the_first_run_router_names_the_account_searched() {
+    let e = not_found(
+        Path::new("/w"),
+        Some(REPO),
+        Some("ALABS000000000000000000001"),
+    );
+    assert!(
+        e.text()
+            .contains("in account ALABS000000000000000000001 is tagged for github.com/acme/myapp"),
         "{e:?}"
     );
 }
@@ -358,8 +429,12 @@ fn root_with_path_manifests_lists_candidates() {
     put(&op, "myapp-dev", "api", &repo_tags(&["apps/api"]));
     put(&op, "myapp-dev", "web", &repo_tags(&["apps/web"]));
     let e = locate(&req(dir.path()), &op).unwrap_err();
+    let listed = match cause_of(&e) {
+        Cause::ManifestAmbiguous { candidates, .. } => candidates.join("; "),
+        _ => String::new(),
+    };
     assert!(
-        e.text().contains("paths apps/api") && e.text().contains("paths apps/web"),
+        listed.contains("paths apps/api") && listed.contains("paths apps/web"),
         "{e:?}"
     );
 }
@@ -422,7 +497,7 @@ fn create_refuses_a_second_manifest_for_the_same_repo() {
     let op = FakeOp::default();
     put(&op, "myapp-dev", "myapp", &repo_tags(&[]));
     let e = create_manifest(&op, "shared", "renamed", Some(REPO), &[], TOML, None).unwrap_err();
-    assert_eq!(e.next_step(), Some("opv config edit"));
+    assert_eq!(e.code_str(), "manifest_exists");
 }
 
 #[test]
@@ -546,13 +621,13 @@ fn every_read_a_manifest_write_checks_against_bypasses_the_cache() {
 }
 
 #[test]
-fn an_edit_landing_with_a_manifest_write_is_config_changed() {
+fn an_edit_landing_with_a_manifest_write_is_a_concurrent_edit() {
     let op = FakeOp::default();
     let (_, found) = myapp(&op);
     let base = found.store().read_for_write(&op).unwrap();
     op.racing_edit.set(Some(1));
     let e = save(found.store(), &op, &base, &edited()).unwrap_err();
-    assert_eq!(e.code(), crate::error::Code::ConfigChanged);
+    assert_eq!(e.code_str(), "concurrent_edit");
 }
 
 #[test]
@@ -673,7 +748,16 @@ fn a_single_path_scoped_manifest_is_not_used_from_a_sibling_directory() {
     put(&op, "myapp-dev", "api", &repo_tags(&["apps/api"]));
     let start = dir.path().join("apps/web");
     let e = locate(&req(&start), &op).unwrap_err();
-    assert_eq!(e.next_step(), Some("OPV_PROJECT=api opv <command>"));
+    assert!(
+        matches!(
+            cause_of(&e),
+            Cause::ManifestAmbiguous {
+                person_picks: false,
+                ..
+            }
+        ),
+        "{e:?}"
+    );
 }
 
 #[test]
@@ -836,6 +920,78 @@ fn recording_the_account_refuses_a_pointer_that_does_not_parse() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join(DOT_FILE), "not = [toml\n").unwrap();
     assert!(record_account(dir.path(), "ALABS000000000000000000001").is_err());
+}
+
+// --- §12.4: `.opv` discovery stops at the repository root (09.08) ---
+
+#[test]
+fn a_pointer_above_the_repository_root_is_never_read() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(DOT_FILE),
+        "account = \"ASTRAY00000000000000000001\"\n",
+    )
+    .unwrap();
+    let inner = dir.path().join("repo/src");
+    std::fs::create_dir_all(&inner).unwrap();
+    std::fs::create_dir(dir.path().join("repo/.git")).unwrap();
+    assert_eq!(pointer_account(&inner), None);
+}
+
+#[test]
+fn a_pointer_at_the_repository_root_is_read_from_a_subdirectory() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::create_dir(repo.join(".git")).unwrap();
+    std::fs::write(
+        repo.join(DOT_FILE),
+        "account = \"ALABS000000000000000000001\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pointer_account(&repo.join("src")).as_deref(),
+        Some("ALABS000000000000000000001")
+    );
+}
+
+#[test]
+fn outside_a_repository_a_parents_pointer_is_never_read() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(DOT_FILE),
+        "account = \"ASTRAY00000000000000000001\"\n",
+    )
+    .unwrap();
+    let child = dir.path().join("scratch");
+    std::fs::create_dir(&child).unwrap();
+    assert_eq!(pointer_account(&child), None);
+}
+
+#[test]
+fn outside_a_repository_the_current_directorys_pointer_is_read() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(DOT_FILE),
+        "account = \"ALABS000000000000000000001\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pointer_account(dir.path()).as_deref(),
+        Some("ALABS000000000000000000001")
+    );
+}
+
+/// The simulator's report: a project's own `.opv` above a test's repository leaked into it.
+#[test]
+fn a_pointer_above_the_repository_root_selects_no_manifest() {
+    let op = FakeOp::default();
+    put(&op, "myapp-dev", "outer", &manifest_tags(None, &[]));
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(DOT_FILE), "project = \"outer\"\n").unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    assert_ne!(title_of(locate(&req(&repo), &op)), "opv · outer");
 }
 
 #[test]

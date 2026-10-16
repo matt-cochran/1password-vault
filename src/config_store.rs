@@ -21,6 +21,10 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::adapters::onepassword_manifest::{self as manifest, MANIFEST_TAG, Row};
+use crate::cause::{
+    AccountId, Cause, ConfigSource, DottedPath, FieldRule, GivenBy, Location, PatternId,
+    StoreObject, UsageProblem, VarName, VaultId,
+};
 use crate::config;
 use crate::domain::Fleet;
 use crate::error::Error;
@@ -81,6 +85,20 @@ pub trait ConfigStore {
     ) -> Result<Replaced, Error>;
     /// How errors in its text name it (`<path>:<line>: …` or `manifest "opv · app": …`).
     fn source(&self) -> config::Source<'_>;
+    /// Where it is, as the error catalog names it (X16: messages are source-aware).
+    fn cause_source(&self) -> ConfigSource {
+        match self.source() {
+            config::Source::File(path) => ConfigSource::File {
+                path: path.to_path_buf(),
+                given_by: GivenBy::Discovered,
+            },
+            config::Source::Manifest(title) => ConfigSource::Manifest {
+                title: title.to_string(),
+                vault: VaultId::new(""),
+                project: title.strip_prefix("opv · ").unwrap_or(title).to_string(),
+            },
+        }
+    }
     /// Validate `text` as this configuration, with errors naming it (H10, FR-44).
     fn parse(&self, text: &str) -> Result<Fleet, Error> {
         config::parse_at(text, self.source())
@@ -98,15 +116,44 @@ pub fn save(
 ) -> Result<(), Error> {
     match store.replace(r, base, text)? {
         Replaced::Saved => Ok(()),
-        Replaced::Changed(_) => Err(Error::Config(
-            format!(
-                "{} changed while opv was editing it; nothing written: run the command again",
-                store.describe()
-            )
-            .into(),
-        )
-        .with_code(crate::error::Code::ConfigChanged)),
+        Replaced::Changed(_) => Err(Cause::ChangedBeforeWrite {
+            object: store_object(&store.cause_source()),
+        }
+        .into()),
     }
+}
+
+/// The object a configuration edit can conflict on.
+pub fn store_object(source: &ConfigSource) -> StoreObject {
+    match source {
+        ConfigSource::File { path, .. } => StoreObject::File { path: path.clone() },
+        ConfigSource::Manifest { title, vault, .. } => StoreObject::Manifest {
+            title: title.clone(),
+            vault: vault.clone(),
+        },
+    }
+}
+
+/// A file that could not be read, as the catalog's `ConfigUnreadable`.
+pub(crate) fn unreadable(path: &Path, e: &std::io::Error, given_by: GivenBy) -> Error {
+    Cause::ConfigUnreadable {
+        path: path.to_path_buf(),
+        io: e.kind().into(),
+        given_by,
+    }
+    .into()
+}
+
+/// The 1-based line and column of the start of `at` in `text`.
+pub(crate) fn location(text: &str, at: Option<std::ops::Range<usize>>) -> Option<Location> {
+    let at = at?.start.min(text.len());
+    let before = text.get(..at)?;
+    let line = before.matches('\n').count() + 1;
+    let col = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+    Some(Location {
+        line: u32::try_from(line).ok()?,
+        col: u32::try_from(col).ok()?,
+    })
 }
 
 /// `secrets.toml` (or any `--config` path).
@@ -121,9 +168,8 @@ impl ConfigStore for FileStore {
     }
 
     fn read(&self, _: &dyn CommandRunner) -> Result<Snapshot, Error> {
-        let text = fs::read_to_string(&self.path).map_err(|e| {
-            Error::Config(format!("cannot read {}: {e}", self.path.display()).into())
-        })?;
+        let text = fs::read_to_string(&self.path)
+            .map_err(|e| unreadable(&self.path, &e, GivenBy::Discovered))?;
         Ok(Snapshot {
             text,
             version: None,
@@ -228,17 +274,12 @@ impl ManifestStore {
         if version == expected && now == text {
             return Ok(());
         }
-        Err(Error::Config(
-            format!(
-                "{}: another edit landed while opv wrote it (version {version}, expected \
-                 {expected}); opv did not retry. Check the manifest's history in 1Password and \
-                 keep the right version",
-                self.describe()
-            )
-            .into(),
-        )
-        .with_code(crate::error::Code::ConfigChanged)
-        .with_next("opv config export --toml"))
+        // Another edit landed with opv's (a version other than `expected`); opv did not
+        // retry. The catalog asks a person to check the manifest's history.
+        Err(Cause::ConcurrentEdit {
+            object: store_object(&self.cause_source()),
+        }
+        .into())
     }
 }
 
@@ -310,6 +351,18 @@ impl ConfigStore for ManifestStore {
         config::Source::Manifest(&self.title)
     }
 
+    fn cause_source(&self) -> ConfigSource {
+        ConfigSource::Manifest {
+            title: self.title.clone(),
+            vault: VaultId::new(self.vault_id.clone()),
+            project: self
+                .title
+                .strip_prefix("opv · ")
+                .unwrap_or(&self.title)
+                .to_string(),
+        }
+    }
+
     fn parse(&self, text: &str) -> Result<Fleet, Error> {
         let mut fleet = config::parse_at(text, self.source())?;
         fleet.origin = crate::domain::Origin::Manifest;
@@ -372,7 +425,7 @@ impl Found {
     /// environment that names none of its own (I2), so the environments' item reads go to
     /// the account the manifest lives in.
     pub fn load(&self, r: &dyn CommandRunner) -> Result<Fleet, Error> {
-        let snap = self.store().read(r)?;
+        let snap = self.store().read(r).map_err(|e| self.given_by(e))?;
         let mut fleet = parse_from(self, &snap.text)?;
         // The account the configuration came from (a manifest's), or for a file the
         // account recorded in the nearest `.opv` (FR-40): environments naming none use it.
@@ -393,6 +446,51 @@ impl Found {
             }
         }
         Ok(fleet)
+    }
+}
+
+impl Found {
+    /// How the file was named (`--config`, `OPV_CONFIG` or discovery), as the catalog says it.
+    fn given(&self) -> GivenBy {
+        match self {
+            Found::File {
+                given: Some(Given::Flag),
+                ..
+            } => GivenBy::Flag {
+                flag: "--config".into(),
+            },
+            Found::File {
+                given: Some(Given::Env),
+                ..
+            } => GivenBy::EnvVar {
+                var: VarName::new("OPV_CONFIG"),
+            },
+            _ => GivenBy::Discovered,
+        }
+    }
+
+    /// `e` naming the flag or variable that gave an unreadable file (03.12).
+    fn given_by(&self, e: Error) -> Error {
+        match e.cause() {
+            Some((Cause::ConfigUnreadable { path, io, .. }, None)) => Cause::ConfigUnreadable {
+                path: path.clone(),
+                io: *io,
+                given_by: self.given(),
+            }
+            .into(),
+            _ => e,
+        }
+    }
+
+    /// Where the configuration is, as the catalog names it.
+    pub fn cause_source(&self) -> ConfigSource {
+        match self.store().cause_source() {
+            ConfigSource::File { path, .. } => ConfigSource::File {
+                path,
+                given_by: self.given(),
+            },
+            m => m,
+        }
     }
 }
 
@@ -451,26 +549,34 @@ pub struct DotOpv {
 
 /// Parse a `.opv` file's text.
 pub fn parse_dot_opv(text: &str, path: &Path) -> Result<DotOpv, Error> {
+    let invalid = |at: Option<Location>, field: &str, rule: FieldRule| -> Error {
+        Cause::ConfigInvalid {
+            source: ConfigSource::File {
+                path: path.to_path_buf(),
+                given_by: GivenBy::Discovered,
+            },
+            at,
+            field: DottedPath(vec![field.to_string()]),
+            rule,
+        }
+        .into()
+    };
     let d: DotOpv = toml::from_str(text).map_err(|e| {
-        Error::Config(
-            format!(
-                "invalid {}: {}; expected project = \"<name>\" and/or account = \
-                 \"<account>\"",
-                path.display(),
-                crate::config::toml_error_inline(text, e.span(), e.message())
-            )
-            .into(),
-        )
+        // The pointer holds `project = "<name>"` and/or `account = "<account>"` only.
+        let at = location(text, e.span());
+        if e.message().starts_with("unknown field") {
+            invalid(at, "the pointer", FieldRule::Unknown { suggestion: None })
+        } else {
+            invalid(at, "the pointer", FieldRule::Syntax)
+        }
     })?;
     if let Some(project) = &d.project
         && !is_project_name(project)
     {
-        return Err(Error::Config(
-            format!(
-                "invalid {}: project {project:?} must match ^[A-Za-z0-9][A-Za-z0-9._-]*$",
-                path.display()
-            )
-            .into(),
+        return Err(invalid(
+            None,
+            "project",
+            FieldRule::Pattern { id: PatternId::Id },
         ));
     }
     // M5: the account reaches `op` as `--account <account>`: a sign-in address, email or
@@ -478,13 +584,12 @@ pub fn parse_dot_opv(text: &str, path: &Path) -> Result<DotOpv, Error> {
     if let Some(a) = &d.account
         && !config::is_account(a)
     {
-        return Err(Error::Config(
-            format!(
-                "invalid {}: account {a:?} must be a sign-in address, email or account ID \
-                 (letters, digits, . - _ @ +, starting with a letter or digit)",
-                path.display()
-            )
-            .into(),
+        return Err(invalid(
+            None,
+            "account",
+            FieldRule::Pattern {
+                id: PatternId::Account,
+            },
         ));
     }
     Ok(d)
@@ -493,7 +598,7 @@ pub fn parse_dot_opv(text: &str, path: &Path) -> Result<DotOpv, Error> {
 /// The account named by the nearest `.opv` pointer, if any (read without any `op` call,
 /// for `opv login` before a manifest can be read).
 pub fn pointer_account(start: &Path) -> Option<String> {
-    let path = walk_up(start, DOT_FILE)?;
+    let path = find_dot_opv(start)?;
     let text = fs::read_to_string(&path).ok()?;
     parse_dot_opv(&text, &path).ok()?.account
 }
@@ -507,10 +612,7 @@ pub fn pointer_account(start: &Path) -> Option<String> {
 /// existing `.opv` that does not parse is refused rather than replaced, and nothing above
 /// the repository root is touched.
 pub fn record_account(start: &Path, account: &str) -> Result<PathBuf, Error> {
-    let root = start
-        .ancestors()
-        .find(|d| d.join(".git").exists())
-        .unwrap_or(start);
+    let root = repo_root(start).unwrap_or(start);
     let path = start
         .ancestors()
         .scan(false, |past_root, d| {
@@ -563,6 +665,32 @@ fn write_no_follow(path: &Path, text: &str) -> std::io::Result<()> {
     opts.open(path)?.write_all(text.as_bytes())
 }
 
+/// The repository root holding `start`: the nearest ancestor (or `start` itself) with a
+/// `.git` directory or file (a worktree or submodule), the directory `git rev-parse
+/// --show-toplevel` names, found without running git. `None` outside a repository.
+pub fn repo_root(start: &Path) -> Option<&Path> {
+    start.ancestors().find(|d| d.join(".git").exists())
+}
+
+/// The `.opv` pointer for `start` (design §12.4, owner decision): the nearest one from
+/// `start` up to and including the repository root, never above it; outside a repository,
+/// only `start` itself. A `.opv` left in a parent such as `/tmp` or `$HOME` never selects
+/// a checkout's account or project (09.08).
+pub fn find_dot_opv(start: &Path) -> Option<PathBuf> {
+    let root = repo_root(start).unwrap_or(start);
+    let mut past_root = false;
+    start
+        .ancestors()
+        .take_while(|d| {
+            let keep = !past_root;
+            past_root = past_root || *d == root;
+            keep
+        })
+        .take_while(|d| hermetic(d))
+        .map(|d| d.join(DOT_FILE))
+        .find(|p| p.is_file())
+}
+
 /// The nearest file named `name` in `start` or a parent.
 pub fn walk_up(start: &Path, name: &str) -> Option<PathBuf> {
     start
@@ -608,9 +736,9 @@ pub fn locate(req: &Request, r: &dyn CommandRunner) -> Result<Found, Error> {
             given: None,
         });
     }
-    if let Some(path) = walk_up(&req.start, DOT_FILE) {
-        let text = fs::read_to_string(&path)
-            .map_err(|e| Error::Config(format!("cannot read {}: {e}", path.display()).into()))?;
+    if let Some(path) = find_dot_opv(&req.start) {
+        let text =
+            fs::read_to_string(&path).map_err(|e| unreadable(&path, &e, GivenBy::Discovered))?;
         let dot = parse_dot_opv(&text, &path)?;
         // One order everywhere (0.9.0): OP_ACCOUNT (which `opv login --account` sets for its
         // command) before the checkout's .opv.
@@ -620,7 +748,7 @@ pub fn locate(req: &Request, r: &dyn CommandRunner) -> Result<Found, Error> {
         }
         return match git_repo(r) {
             Some(repo) => by_repo(r, &repo, &req.start, account.as_deref()),
-            None => Err(not_found(&req.start, None)),
+            None => Err(not_found(&req.start, None, None)),
         };
     }
     match git_repo(r) {
@@ -628,7 +756,7 @@ pub fn locate(req: &Request, r: &dyn CommandRunner) -> Result<Found, Error> {
             let account = pick_account(r, req.account.clone())?;
             by_repo(r, &repo, &req.start, account.as_deref())
         }
-        None => Err(not_found(&req.start, None)),
+        None => Err(not_found(&req.start, None, None)),
     }
 }
 
@@ -705,9 +833,20 @@ fn by_project(
     matched: Matched,
 ) -> Result<Found, Error> {
     if !is_project_name(project) {
-        return Err(Error::Config(
-            format!("project {project:?} must match ^[A-Za-z0-9][A-Za-z0-9._-]*$").into(),
-        ));
+        return Err(match &matched {
+            Matched::DotFile(path) => Cause::ConfigInvalid {
+                source: ConfigSource::File {
+                    path: path.clone(),
+                    given_by: GivenBy::Discovered,
+                },
+                at: None,
+                field: DottedPath(vec!["project".into()]),
+                rule: FieldRule::Pattern { id: PatternId::Id },
+            },
+            Matched::ProjectEnv => project_usage("OPV_PROJECT"),
+            Matched::Repo(_) | Matched::Given => project_usage("--project"),
+        }
+        .into());
     }
     let rows = manifest::list(r, account.as_deref(), &Host::detect)?;
     let title = manifest_title(project);
@@ -716,24 +855,30 @@ fn by_project(
         [one] => Ok(Found::Manifest(ManifestStore::from_row(
             one, account, matched,
         ))),
-        [] => Err(Error::Config(
-            format!("no 1Password manifest titled {title:?} (tag {MANIFEST_TAG}) is visible")
-                .into(),
-        )
-        .with_code(crate::error::Code::ManifestNotFound)
-        .with_next(format!(
-            "opv config import --vault <vault> --project {project}"
-        ))),
-        many => Err(Error::Config(
-            format!(
-                "{} manifests are titled {title:?}: {}; keep one (archive the others in \
-                 1Password)",
-                many.len(),
-                listing(many)
-            )
-            .into(),
-        )
-        .with_code(crate::error::Code::ManifestAmbiguous)),
+        // 03.10: the likely causes are a misspelt name or another account; `opv projects`
+        // lists what this account can see. Never `config import` (it needs a file).
+        [] => Err(Cause::ManifestNotFound {
+            project: project.to_string(),
+            account: account.map(AccountId::new),
+        }
+        .into()),
+        // Several manifests share the title: a person keeps one and archives the others.
+        many => Err(Cause::ManifestAmbiguous {
+            candidates: many.iter().map(|r| listing(&[*r])).collect(),
+            person_picks: true,
+        }
+        .into()),
+    }
+}
+
+/// A project name given by `flag` (or variable) that is not one.
+fn project_usage(flag: &str) -> Cause {
+    Cause::Usage {
+        problem: UsageProblem::ValueFormat {
+            flag: flag.to_string(),
+            format: "a project name: letters, digits, ., _ and -, starting with a letter or \
+                     digit, at most 64 characters",
+        },
     }
 }
 
@@ -759,7 +904,7 @@ fn by_repo(
         )))
     };
     if hits.is_empty() {
-        return Err(not_found(start, Some(repo)));
+        return Err(not_found(start, Some(repo), account.as_deref()));
     }
     let rel = git_toplevel(r).and_then(|top| relative(start, &top));
     let rel = rel.as_deref().unwrap_or("");
@@ -769,23 +914,9 @@ fn by_repo(
         if path_score(&row_paths(one), rel).is_some() {
             return found(one);
         }
-        return Err(Error::Config(
-            format!(
-                "the only manifest matching {repo} does not cover {}: {}",
-                if rel.is_empty() {
-                    "the repository root"
-                } else {
-                    rel
-                },
-                listing_with_paths(&hits)
-            )
-            .into(),
-        )
-        .with_code(crate::error::Code::ManifestNotFound)
-        .with_next(format!(
-            "OPV_PROJECT={} opv <command>",
-            project_of(one).unwrap_or("<project>")
-        )));
+        // 03.09: nothing to archive; the person points this directory at a project. Never
+        // a guessed `OPV_PROJECT=<first match>` (X2).
+        return Err(path_undecided(&hits));
     }
     let scored: Vec<(usize, &Row)> = hits
         .iter()
@@ -799,25 +930,18 @@ fn by_repo(
         .collect();
     match top.as_slice() {
         [one] => found(one),
-        _ => Err(Error::Config(
-            format!(
-                "{} manifests match {repo}{}: {}",
-                hits.len(),
-                if rel.is_empty() {
-                    String::new()
-                } else {
-                    format!(" and none covers {rel} alone")
-                },
-                listing_with_paths(&hits)
-            )
-            .into(),
-        )
-        .with_code(crate::error::Code::ManifestAmbiguous)
-        .with_next(format!(
-            "OPV_PROJECT={} opv <command>",
-            project_of(hits[0]).unwrap_or("<project>")
-        ))),
+        _ => Err(path_undecided(&hits)),
     }
+}
+
+/// The repository's manifests, whose path tags do not decide this directory (03.09): no
+/// person-only pick between duplicates, and never a guessed first match (X2).
+fn path_undecided(hits: &[&Row]) -> Error {
+    Cause::ManifestAmbiguous {
+        candidates: hits.iter().map(|r| listing_with_paths(&[*r])).collect(),
+        person_picks: false,
+    }
+    .into()
 }
 
 /// The score of a manifest with `paths` for the directory `rel` (relative to the repo
@@ -945,10 +1069,14 @@ pub fn project_of(r: &Row) -> Option<&str> {
 
 /// No configuration anywhere: the first-run router. Starts with [`config::NOT_FOUND`] so
 /// `doctor` keys its first-run step on it.
-pub fn not_found(start: &Path, repo: Option<&str>) -> Error {
-    let manifest = match repo {
-        Some(repo) => format!("no 1Password manifest is tagged for {repo}"),
-        None => "no git remote to match a 1Password manifest".to_string(),
+pub fn not_found(start: &Path, repo: Option<&str>, account: Option<&str>) -> Error {
+    // 03.20: only the selected account was searched; say so.
+    let manifest = match (repo, account) {
+        (Some(repo), Some(a)) => {
+            format!("no 1Password manifest in account {a} is tagged for {repo}")
+        }
+        (Some(repo), None) => format!("no 1Password manifest is tagged for {repo}"),
+        (None, _) => "no git remote to match a 1Password manifest".to_string(),
     };
     Error::Config(
         format!(
@@ -956,6 +1084,7 @@ pub fn not_found(start: &Path, repo: Option<&str>) -> Error {
              New project?                    opv init dev\n  \
              Have a secrets.toml elsewhere?  opv config import --file <path> --vault <vault>\n  \
              Manifest for another project?   OPV_PROJECT=<name> opv <command>\n  \
+             Manifest in another account?    opv projects\n  \
              Configured elsewhere?           opv --config <path> <command>\n  \
              Project ships opv.setup.toml?   opv setup",
             config::NOT_FOUND,
@@ -1072,10 +1201,7 @@ pub fn default_project(
     if is_project_name(&name) {
         Ok(name)
     } else {
-        Err(Error::Config(
-            format!("project name {name:?} must match ^[A-Za-z0-9][A-Za-z0-9._-]*$").into(),
-        )
-        .with_next("pass --project <name>"))
+        Err(project_usage("--project").into())
     }
 }
 
@@ -1112,17 +1238,11 @@ pub fn create_manifest(
         tag.as_ref().is_some_and(|t| row.tags.contains(t)) && p == wanted
     };
     if let Some(row) = rows.iter().find(|r| r.title == title || same_scope(r)) {
-        return Err(Error::Config(
-            format!(
-                "a manifest for this project already exists: {:?} in vault {} ({})",
-                row.title,
-                vault_label(row),
-                row.id
-            )
-            .into(),
-        )
-        .with_code(crate::error::Code::ManifestExists)
-        .with_next("opv config edit"));
+        return Err(Cause::ManifestExists {
+            title: listing(&[row]),
+            local_file: None,
+        }
+        .into());
     }
     let item = manifest::template(&title, project, &manifest_tags(repo, paths), text);
     let row = manifest::create(r, vault, &item, account, &Host::detect)?;
