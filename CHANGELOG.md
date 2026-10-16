@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Wrong causes and looping next steps, found by a sweep of the CLI and MCP after #157:
 
 - `opv access` checks the 1Password session first and reports `op_not_signed_in` instead of every vault being outside the account; each environment's vaults are checked in its own account, one vault outside it is reported on its own, and the finding names the account (#157).
-- `opv login` no longer fails with "signed in, but vault access failed … setup vault" and `Next: opv login` when `op whoami` succeeds; it runs its command (#157). A failed `op account list` no longer starts the add-account flow.
+- `opv login` no longer says "signed in, but vault access failed … setup vault" with a `Next: opv login` loop when `op vault list` fails under a live session. It says the session may belong to another account on the same sign-in address, runs nothing, and points at `opv account list` (#157; checking that the session belongs to the requested account is #160). A failed `op account list` no longer starts the add-account flow.
 - `opv bootstrap` (including `--dry-run`), `opv structure plan` and the MCP structure tools report a missing session as `op_not_signed_in`, not `ids_not_in_account` with a `--rebind` step; `opv_structure_apply` checks the person before it uses the single-use approval.
 - `opv ready` reports a target's real cause (sign-in, missing CLI, provider outage) instead of `grants_missing`, checks a state vault that can be read but not managed with `op vault get`, and reads each environment in its own account (as `doctor` now does).
 - "…, then run opv again" no longer renders as `Next: opv`, and a target error without a step says to fix the cause before re-running.

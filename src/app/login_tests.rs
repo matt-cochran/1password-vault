@@ -492,7 +492,7 @@ fn login_add_in_wsl_with_windows_op_directs_to_the_windows_app() {
     assert_eq!(e.code(), crate::error::Code::AccountNotRegistered);
 }
 
-/// #157: signed in (`op whoami` succeeds) while `op vault list` fails.
+/// #160: `op whoami` succeeds (perhaps for another account) while `op vault list` fails.
 fn signed_in_vault_list_failing() -> Fake {
     let f = Fake::signed_in(0);
     *f.replies.borrow_mut() = [
@@ -505,33 +505,32 @@ fn signed_in_vault_list_failing() -> Fake {
 }
 
 #[test]
-fn login_runs_its_command_when_signed_in_but_the_vault_list_fails() {
+fn login_runs_no_command_when_the_vault_list_fails_under_a_live_session() {
     let f = fleet(None, None);
     let mut b = signed_in_vault_list_failing();
-    run(
+    let _ = run(
         Some(&f),
         Some("dev"),
         &cmd(&["opv", "access", "dev"]),
         &mut b,
         &mut Ui::default(),
-    )
-    .unwrap();
-    assert_eq!(b.children.borrow().len(), 1);
+    );
+    assert!(b.children.borrow().is_empty());
 }
 
 #[test]
-fn login_signed_in_with_a_failing_vault_list_starts_no_second_sign_in() {
+fn a_failed_vault_list_under_a_live_session_never_steps_to_login() {
     let f = fleet(None, None);
     let mut b = signed_in_vault_list_failing();
-    run(
+    let e = run(
         Some(&f),
         Some("dev"),
         &cmd(&["opv", "access", "dev"]),
         &mut b,
         &mut Ui::default(),
     )
-    .unwrap();
-    assert!(b.sign_ins.is_empty());
+    .unwrap_err();
+    assert_eq!(e.next_step(), Some("opv account list"));
 }
 
 /// #157: account_not_registered exits 7 (auth), as its code says.

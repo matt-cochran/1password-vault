@@ -40,9 +40,9 @@ use std::sync::Arc;
 #[cfg(unix)]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 #[cfg(unix)]
 use std::time::Instant;
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
