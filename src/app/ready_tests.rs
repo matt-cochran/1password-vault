@@ -331,7 +331,10 @@ fn row_finding_verify_names_the_product() {
         )],
     )];
     let r = receipt(&inputs(&report, envs), "0.6.0");
-    assert_eq!(r.findings[0].verify, "opv status staging --product api");
+    assert_eq!(
+        r.findings[0].verify,
+        "opv status staging --target staging-target --product api"
+    );
 }
 
 #[test]
@@ -541,7 +544,7 @@ fn text_first_line_reports_blocking_and_finding_counts() {
         )],
     )];
     let r = receipt(&inputs(&report, envs), "0.6.0");
-    assert!(text(&r).starts_with("ready: 1 blocking · 1 findings · receipt rcpt-"));
+    assert!(text(&r).starts_with("ready: 1 blocking · 1 finding · receipt rcpt-"));
 }
 
 #[test]
@@ -1163,16 +1166,86 @@ fn a_target_stopped_by_a_missing_cli_is_the_agents_to_fix() {
     );
 }
 
+/// 07.07: doctor cannot see a timeout, so the step re-reads that target instead.
 #[test]
-fn a_target_error_without_a_step_points_at_doctor_for_that_target() {
+fn a_target_error_without_a_step_rereads_that_target() {
     let report = account_report();
     let error = Error::Unknown("timed out".into());
     let envs = vec![env_err("staging", Some("Fly"), error)];
     let r = receipt(&inputs(&report, envs), "0.9.0");
     assert_eq!(
         r.findings[0].prerequisite,
+        "opv status staging --target staging-target"
+    );
+}
+
+/// A cause doctor checks (a missing CLI without a step) still goes to doctor for that target.
+#[test]
+fn a_target_error_doctor_checks_points_at_doctor_for_that_target() {
+    let report = account_report();
+    let error = Error::Dependency("flyctl is not installed".into());
+    let envs = vec![env_err("staging", Some("Fly"), error)];
+    let r = receipt(&inputs(&report, envs), "0.9.0");
+    assert_eq!(
+        r.findings[0].prerequisite,
         "opv doctor --env staging --target staging-target"
     );
+}
+
+/// The GitHub "environment missing" error: a `Do:` for the owner and no step of its own.
+fn owner_setup_receipt() -> Receipt {
+    let report = account_report();
+    let error = crate::adapters::github::missing_environment_error("o/r", "staging");
+    let envs = vec![env_err("staging", Some("GitHub"), error)];
+    receipt(&inputs(&report, envs), "0.10.0")
+}
+
+/// 07.07 (S1): the owner's action is the prerequisite, never `opv doctor` (which cannot
+/// see it: a loop).
+#[test]
+fn an_owner_setup_finding_never_points_at_doctor() {
+    assert!(
+        !owner_setup_receipt().findings[0]
+            .prerequisite
+            .starts_with("opv doctor")
+    );
+}
+
+/// 07.07 (S1): the error's `Do:` is kept, as the prerequisite.
+#[test]
+fn an_owner_setup_finding_keeps_the_errors_do() {
+    assert!(
+        owner_setup_receipt().findings[0]
+            .prerequisite
+            .contains("repos/o/r/environments/staging")
+    );
+}
+
+/// 07.07: the owner's step is the owner's.
+#[test]
+fn an_owner_setup_finding_is_the_owners() {
+    assert_eq!(owner_setup_receipt().findings[0].actor, "owner");
+}
+
+/// 07.07: a finding whose error has both a Do and a Next shows the Do in `--json`.
+#[test]
+fn a_finding_keeps_the_errors_do_beside_its_next() {
+    let report = account_report();
+    let error = Error::Config("x".into())
+        .with_do("ask the owner")
+        .with_next("opv status staging");
+    let envs = vec![env_err("staging", Some("Fly"), error)];
+    let r = receipt(&inputs(&report, envs), "0.10.0");
+    assert_eq!(r.findings[0].act.as_deref(), Some("ask the owner"));
+}
+
+/// 07.30: a run scoped to one environment claims only that environment.
+#[test]
+fn a_clean_single_environment_receipt_names_it() {
+    let report = account_report();
+    let envs = vec![env("staging", Some("Fly"), Vec::new())];
+    let r = receipt(&inputs(&report, envs), "0.10.0");
+    assert!(text(&r).contains("every declared key in staging is saved and staging was read"));
 }
 
 /// #157: a person who can read the state vault but not manage it needs no grant.

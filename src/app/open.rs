@@ -300,9 +300,9 @@ mod tests {
         );
     }
 
-    /// M6: with several environments, the step is the same `open --print` with `--env`.
+    /// M6, X2: with several environments, a person picks one; opv never picks for them.
     #[test]
-    fn open_print_without_env_suggests_open_print_with_env() {
+    fn open_print_without_env_needs_a_choice() {
         let r = FakeRunner::new([]);
         let e = run(
             &fleet(),
@@ -313,12 +313,7 @@ mod tests {
             &mut Vec::new(),
         )
         .unwrap_err();
-        assert!(
-            e.next_step().is_some_and(|n| n
-                .starts_with("opv open allumata/INTEGRATION_ENC_KEY --env ")
-                && n.ends_with(" --print")),
-            "{:?}",
-            e.next_step()
-        );
+        // A person picks the environment (R23): never the first one named for them (X2).
+        assert_eq!(e.code_str(), "choice_required");
     }
 }

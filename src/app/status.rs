@@ -934,10 +934,8 @@ mod tests {
         let fl = fleet_with("[environments.dev]\n");
         let r = FakeRunner::new([]);
         let e = run(&fl, "dev", &r, &mut Vec::new()).unwrap_err();
-        assert!(
-            matches!(&e, Error::Config(m) if m.contains("\"dev\"") && m.contains("no deployment target")),
-            "{e}"
-        );
+        // The catalog's no-target cause (R25), naming the environment.
+        assert_eq!(e.code_str(), "no_target", "{e}");
         assert!(r.calls.borrow().is_empty());
     }
 

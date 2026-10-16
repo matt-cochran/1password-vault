@@ -473,14 +473,14 @@ fn sync_summaries_name_each_target() {
 }
 
 #[test]
-fn an_unknown_target_is_a_usage_error() {
+fn an_unknown_target_is_an_unknown_target() {
     let w = world();
     let opts = SyncOpts {
         targets: targets(&["north"]),
         ..SyncOpts::default()
     };
     let err = sync_with(&w, &both(&w), opts).0.unwrap_err();
-    assert_eq!(err.code(), Code::Usage);
+    assert_eq!(err.code_str(), "unknown_target");
 }
 
 #[test]
@@ -497,7 +497,7 @@ fn an_unknown_target_error_lists_the_environments_targets() {
         false,
     )
     .unwrap_err();
-    assert!(err.to_string().contains("(targets: east, west)"), "{err}");
+    assert!(err.to_string().contains("(declared: east, west)"), "{err}");
 }
 
 #[test]
