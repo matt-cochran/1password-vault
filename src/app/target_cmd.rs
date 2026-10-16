@@ -110,7 +110,8 @@ fn add_inner(
             "environment {}: target {} already exists; opv target add only adds new targets: \
              change it in {place} by hand (opv config edit)",
             args.env, args.name
-        )));
+        ))
+        .with_next("opv config edit"));
     }
     let (provider, values) = provider_and_values(args)?;
     let section = provider.init_section(&values).ok_or_else(|| {
