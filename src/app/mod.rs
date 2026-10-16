@@ -60,6 +60,7 @@ pub(crate) mod preflight;
 mod product_flag_tests;
 pub mod ready;
 pub mod remote_delivery;
+pub mod remote_diagnose;
 pub mod repair;
 pub mod run;
 pub mod setup;
