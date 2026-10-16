@@ -238,7 +238,7 @@ impl Action {
 pub enum FieldRule {
     Syntax,
     Pattern {
-        id: &'static str,
+        id: PatternId,
     },
     Reserved {
         set: Vec<String>,
@@ -355,6 +355,8 @@ pub enum Cause {
         target: TargetName,
         vault: VaultId,
         shared_with: Vec<TargetName>,
+        source: ConfigSource,
+        at: Option<Location>,
     },
     ConfigNotEditable {
         source: ConfigSource,
@@ -448,6 +450,8 @@ pub enum Cause {
         resource: ResourceRef,
         right: Right,
         grant: GrantModel,
+        env: Option<EnvName>,
+        target: Option<TargetName>,
         seen: Observed,
     },
     OwnerSetupRequired {
@@ -457,6 +461,7 @@ pub enum Cause {
     NotFound {
         system: System,
         resource: ResourceRef,
+        named_by: NamedBy,
         state: NotFoundState,
         seen: Observed,
     },
@@ -466,6 +471,8 @@ pub enum Cause {
         system: System,
         subject: ResourceRef,
         why: Refusal,
+        env: Option<EnvName>,
+        target: Option<TargetName>,
         seen: Observed,
     },
     Guard {
@@ -498,6 +505,8 @@ pub enum Cause {
     Partial {
         done: Vec<String>,
         approval_used: Option<PlanId>,
+        /// What the used approval covered: Next reads what remains in that same scope.
+        approval_scope: Option<PlanScope>,
         then: Box<Cause>,
     },
     Interrupted {
@@ -520,6 +529,13 @@ pub enum Cause {
     // §4.7 external tools
     ToolMissing {
         tool: String,
+        /// The platform and shell the install line is for.
+        #[serde(serialize_with = "platform_word")]
+        platform: crate::host::Platform,
+        #[serde(serialize_with = "shell_kind")]
+        shell: crate::host::Shell,
+        /// Under CI the install line is the CI job's.
+        ci: bool,
     },
     ToolUnusable {
         tool: String,
@@ -533,6 +549,8 @@ pub enum Cause {
     Unrecognized {
         system: System,
         established: Vec<String>,
+        env: Option<EnvName>,
+        target: Option<TargetName>,
         seen: Observed,
     },
 
@@ -567,23 +585,31 @@ pub enum Cause {
     // §4.9 approvals and plans
     ApprovalMissing {
         plan: PlanId,
+        scope: PlanScope,
     },
     ApprovalUsed {
         plan: PlanId,
+        scope: PlanScope,
         partial: bool,
     },
     PlanChanged {
         old: PlanId,
         new: PlanId,
+        scope: PlanScope,
     },
     PlanUnknown {
         plan: String,
+        /// The scope the plan id was given for, when the invocation says.
+        scope: Option<PlanScope>,
     },
 
     // §4.10 platform, delivery, internal
     RamDirUnavailable {
         remote: Option<ProfileName>,
         why: RamDir,
+        /// The run whose preview checks the folder again, when known.
+        env: Option<EnvName>,
+        product: Option<ProductName>,
     },
     PrivateDirFailed {
         dir: PathBuf,
@@ -594,6 +620,8 @@ pub enum Cause {
         user: String,
         host: String,
         port: u16,
+        /// The file holding the host key pinned in the profile, as opv's own check uses it.
+        known_hosts: PathBuf,
     },
     /// The connection ended or stalled after the payload was sent: ssh itself exits 255
     /// mid-session (recorded: "closed by remote host", "server not responding"), so a 255
@@ -622,6 +650,29 @@ pub enum Cause {
     Bug {
         site: &'static str,
     },
+}
+
+/// `ToolMissing.platform` in the document (`host::Platform` has no serde form of its own).
+fn platform_word<S: serde::Serializer>(p: &crate::host::Platform, s: S) -> Result<S::Ok, S::Error> {
+    use crate::host::Platform;
+    s.serialize_str(match p {
+        Platform::Linux => "linux",
+        Platform::Wsl => "wsl",
+        Platform::MacOs => "macos",
+        Platform::Windows => "windows",
+        Platform::Other => "other",
+    })
+}
+
+/// `ToolMissing.shell` in the document.
+fn shell_kind<S: serde::Serializer>(sh: &crate::host::Shell, s: S) -> Result<S::Ok, S::Error> {
+    use crate::host::Shell;
+    s.serialize_str(match sh {
+        Shell::Posix => "posix",
+        Shell::Fish => "fish",
+        Shell::PowerShell => "powershell",
+        Shell::Other => "other",
+    })
 }
 
 /// Supporting enums of the catalog.
@@ -721,7 +772,9 @@ pub enum Refusal {
 #[serde(tag = "guard", rename_all = "snake_case")]
 pub enum Guard {
     ValueTooLarge {
+        product: ProductName,
         key: KeyName,
+        env: EnvName,
         limit: u64,
     },
     NotManagedByOpv {
@@ -737,7 +790,9 @@ pub enum Guard {
         key: KeyName,
     },
     GenerateRefused {
+        product: ProductName,
         key: KeyName,
+        env: EnvName,
         why: &'static str,
     },
     RemoteProfileRefuses {
