@@ -127,7 +127,7 @@ pub fn plan(
         return Err(no_account("structure"));
     }
     let (environments, stale) =
-        bootstrap::plan_checked(r, text, project, &BTreeSet::new(), true, Some(account))?;
+        bootstrap::plan_checked(r, text, project, &BTreeSet::new(), true, Some(account), None)?;
     // A recorded ID outside the account: the cataloged `ids_not_in_account` op's reply was
     // diagnosed as, with that reply as its evidence.
     if let Some(e) = stale {

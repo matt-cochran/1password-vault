@@ -240,6 +240,7 @@ fn vault_visible(
     r: &dyn CommandRunner,
     account: Option<&str>,
     scope: Option<&str>,
+    project_dir: Option<&Path>,
     env: &str,
     vault_id: &str,
 ) -> Result<Seen, Error> {
@@ -250,10 +251,11 @@ fn vault_visible(
         .or(scope)
         .filter(|_| Host::detect().op_credential.is_none())
         .map(str::to_string);
+    // The project's own `.opv` (beside its configuration file), never the process's
+    // working directory: `--file` may name a project elsewhere.
     let selected = account.clone().or_else(|| {
-        std::env::current_dir()
-            .ok()
-            .and_then(|d| crate::config_store::selected_account(&d))
+        project_dir
+            .and_then(crate::config_store::selected_account)
             .filter(|a| crate::config::is_id(a))
     });
     let r = super::signin::EnvRunner::with_account(r, account);
@@ -341,14 +343,15 @@ pub(crate) fn plan_with(
     rebind: &BTreeSet<String>,
     strict: bool,
 ) -> Result<Vec<EnvPlan>, Error> {
-    plan_checked(r, text, project, rebind, strict, None).map(|(plans, _)| plans)
+    plan_checked(r, text, project, rebind, strict, None, None).map(|(plans, _)| plans)
 }
 
 /// [`plan_with`], plus the cataloged `ids_not_in_account` of the first recorded vault op
 /// said is not in the account, with op's reply as its evidence (#159); `None` when there is
 /// none, or when the runner observed no call (the caller then refuses: an observed call is
 /// the only way to name it). `scope` is the account the caller chose for the structure
-/// (G3): a recorded vault is looked for there, not in op's default.
+/// (G3): a recorded vault is looked for there, not in op's default. `project_dir` holds the
+/// configuration file, whose `.opv` names the selected account when neither does.
 pub(crate) fn plan_checked(
     r: &dyn CommandRunner,
     text: &str,
@@ -356,13 +359,14 @@ pub(crate) fn plan_checked(
     rebind: &BTreeSet<String>,
     strict: bool,
     scope: Option<&str>,
+    project_dir: Option<&Path>,
 ) -> Result<(Vec<EnvPlan>, Option<Error>), Error> {
     // #157: a vault `op vault get` cannot open is outside the account only when someone is
     // signed in, so the session is checked (once) before the first such answer is believed.
     let session_checked = std::cell::Cell::new(false);
     let stale = std::cell::RefCell::new(None);
     let visible = |account: Option<&str>, env: &str, v: &str| -> Result<Option<bool>, Error> {
-        match vault_visible(r, account, scope, env, v)? {
+        match vault_visible(r, account, scope, project_dir, env, v)? {
             Seen::Visible => Ok(Some(true)),
             // A recorded ID is taken as it is when op cannot be asked (the offline trial).
             Seen::Unanswered(_) if !strict => Ok(None),
@@ -801,7 +805,11 @@ pub fn run(
             given_by: GivenBy::Discovered,
         })
     })?;
-    let (plans, stale) = plan_checked(r, &text, project, &opts.rebind, false, None)?;
+    let dir = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let (plans, stale) = plan_checked(r, &text, project, &opts.rebind, false, None, Some(dir))?;
     if let Some(env) = &opts.ci_reader
         && !plans.iter().any(|p| &p.environment == env)
     {
