@@ -231,3 +231,50 @@ fn without_a_ram_directory_the_refusal_is_ram_dir_unavailable() {
     );
     assert_eq!(code, Some(6));
 }
+
+/// The step's stderr for a refusal, with the person's run passed as `opv run` passes it.
+fn refusal_stderr(env: &[(&str, &str)]) -> String {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_opv"));
+    cmd.arg("local-delivery")
+        .args(MOUNT_ARGS)
+        .args(["--", "true"])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env(
+            "OPV_RUN_OUTER",
+            r#"{"env":"dev","product":"web","profile":null,"command":["run"],"args":["dev","--product","web"],"has_child":true}"#,
+        );
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    String::from_utf8_lossy(&cmd.output().unwrap().stderr).into_owned()
+}
+
+const NO_RAM_DIR: &[(&str, &str)] = &[
+    ("GITHUB_APP_PRIVATE_KEY", MARKER),
+    ("XDG_RUNTIME_DIR", "/tmp"),
+];
+
+/// 07.09: an internal step's refusal never sends the person to `opv doctor`.
+#[test]
+fn a_refusal_of_the_step_never_names_doctor() {
+    let err = refusal_stderr(NO_RAM_DIR);
+    assert!(!err.contains("opv doctor"), "{err}");
+}
+
+/// 07.09: an internal step's refusal never names the hidden step itself.
+#[test]
+fn a_refusal_of_the_step_never_names_the_step() {
+    let err = refusal_stderr(NO_RAM_DIR);
+    assert!(!err.contains("local-delivery"), "{err}");
+}
+
+/// 07.09, 07.17: the refusal steps to the person's run's preview.
+#[test]
+fn a_refusal_of_the_step_steps_to_the_runs_preview() {
+    let err = refusal_stderr(NO_RAM_DIR);
+    assert!(
+        err.contains("Next: opv run dev --product web --preview"),
+        "{err}"
+    );
+}

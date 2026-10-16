@@ -1044,7 +1044,7 @@ fn preview_failure(
         .unwrap_or_default();
     let unknown_profile = remote.is_some_and(|r| prod.is_some_and(|p| !p.remotes.contains_key(r)));
     let (hint, list) = match code {
-        "usage" if unknown_profile => (
+        "usage" | "unknown_profile" if unknown_profile => (
             "The product declares no remote profile by that name: name one of remote_profiles. A person adds a reviewed profile under [products.<p>.remotes.<name>]; no tool can.".to_string(),
             Some(("remote_profiles", profiles)),
         ),
@@ -1057,7 +1057,7 @@ fn preview_failure(
             "Several products (or none) have keys desired in this environment: name one with product; products lists them.".to_string(),
             Some(("products", products)),
         ),
-        "usage" => (
+        "usage" | "choice_required" | "unknown_role" => (
             "This product's keys declare process roles: name one of roles with role (a role no key declares is refused).".to_string(),
             Some((
                 "roles",
