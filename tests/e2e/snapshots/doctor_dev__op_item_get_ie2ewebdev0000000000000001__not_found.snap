@@ -1,0 +1,32 @@
+# doctor_dev__op_item_get_ie2ewebdev0000000000000001__not_found: opv doctor --env dev | fault not_found on op item get iE2EWEBDEV0000000000000001
+
+## text exit: 4
+## text stdout
+ok    config: valid (1 environment, 2 products); source: <SCENARIO>/project/secrets.toml
+ok    op: version 2.40.0
+ok    op auth: signed in (USER)
+FAIL  item: source error: op item get failed (exit 1): signed in to 1Password as USER; item iE2EWEBDEV0000000000000001 not found in vault vE2EWEBDEV0000000000000001 (moved, archived or deleted?)
+  fix: check item_id in the configuration, then `op item get iE2EWEBDEV0000000000000001 --vault vE2EWEBDEV0000000000000001 --account AE2EDEVACCOUNT000000000001`
+skip  flyctl: no environment has a fly section
+skip  fly auth: no environment has a fly section
+ok    op local run: native op; opv run can start local commands
+ok    opv: not found on PATH
+ok    agent skill: not installed (optional: opv skill install)
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: source error: item check failed (see the FAIL line above)
+  op said: [ERROR] 2026/10/16 00:05:18 "iE2EWEBDEV0000000000000001" isn't an item in the "vE2EWEBDEV0000000000000001" vault. Specify the item with its UUID, name, or domain
+Do: check item_id in the configuration
+Next: op item get iE2EWEBDEV0000000000000001 --vault vE2EWEBDEV0000000000000001 --account AE2EDEVACCOUNT000000000001
+
+## json exit: 4
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":4,"config_source":"<SCENARIO>/project/secrets.toml","checks":[{"name":"config","target":null,"status":"ok","detail":"valid (1 environment, 2 products); source: <SCENARIO>/project/secrets.toml","next":null,"do":null},{"name":"op","target":null,"status":"ok","detail":"version 2.40.0","next":null,"do":null},{"name":"op auth","target":null,"status":"ok","detail":"signed in (USER)","next":null,"do":null},{"name":"item","target":null,"status":"fail","detail":"source error: op item get failed (exit 1): signed in to 1Password as USER; item iE2EWEBDEV0000000000000001 not found in vault vE2EWEBDEV0000000000000001 (moved, archived or deleted?)","next":"op item get iE2EWEBDEV0000000000000001 --vault vE2EWEBDEV0000000000000001 --account AE2EDEVACCOUNT000000000001","do":"check item_id in the configuration"},{"name":"flyctl","target":null,"status":"skip","detail":"no environment has a fly section","next":null,"do":null},{"name":"fly auth","target":null,"status":"skip","detail":"no environment has a fly section","next":null,"do":null},{"name":"op local run","target":null,"status":"ok","detail":"native op; opv run can start local commands","next":null,"do":null},{"name":"opv","target":null,"status":"ok","detail":"not found on PATH","next":null,"do":null},{"name":"agent skill","target":null,"status":"ok","detail":"not installed (optional: opv skill install)","next":null,"do":null}],"next":"op item get iE2EWEBDEV0000000000000001 --vault vE2EWEBDEV0000000000000001 --account AE2EDEVACCOUNT000000000001","do":"check item_id in the configuration","error":{"code":"item_not_found","category":"source","message":"item check failed (see the FAIL line above)","detail":[],"retry":"after_fix","human_required":false,"do":"check item_id in the configuration","next":"op item get iE2EWEBDEV0000000000000001 --vault vE2EWEBDEV0000000000000001 --account AE2EDEVACCOUNT000000000001"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: source error: item check failed (see the FAIL line above)
+  op said: [ERROR] 2026/10/16 00:05:18 "iE2EWEBDEV0000000000000001" isn't an item in the "vE2EWEBDEV0000000000000001" vault. Specify the item with its UUID, name, or domain
+Do: check item_id in the configuration
+Next: op item get iE2EWEBDEV0000000000000001 --vault vE2EWEBDEV0000000000000001 --account AE2EDEVACCOUNT000000000001

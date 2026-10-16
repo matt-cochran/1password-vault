@@ -1,0 +1,18 @@
+# status_prod__kubectl_config_get_contexts_e2e_cluster__timeout: opv status prod | fault timeout on kubectl config get-contexts e2e-cluster
+
+## text exit: 2
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: configuration error: kubectl context "e2e-cluster" is not in your kubeconfig (kubectl get deployment e2e-app failed); nothing was changed
+Next: kubectl config get-contexts
+
+## json exit: 2
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":2,"next":"kubectl config get-contexts","do":null,"error":{"code":"config_invalid","category":"config","message":"kubectl context \"e2e-cluster\" is not in your kubeconfig (kubectl get deployment e2e-app failed); nothing was changed","detail":[],"retry":"after_fix","human_required":false,"do":null,"next":"kubectl config get-contexts"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: configuration error: kubectl context "e2e-cluster" is not in your kubeconfig (kubectl get deployment e2e-app failed); nothing was changed
+Next: kubectl config get-contexts

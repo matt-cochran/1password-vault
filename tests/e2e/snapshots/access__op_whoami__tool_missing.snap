@@ -1,0 +1,28 @@
+# access__op_whoami__tool_missing: opv access | fault tool_missing on op whoami
+
+## text exit: 7
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: authentication error: not signed in to 1Password (opv access; op whoami failed)
+  sign in: opv login
+  (a 1Password CLI session expires after 30 minutes idle)
+  if you are signed in, check network access to 1Password
+  then run opv again
+Do: sign in: opv login
+Next: opv access
+
+## json exit: 7
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":7,"next":"opv access --json","do":"sign in: opv login","error":{"code":"op_not_signed_in","category":"auth","message":"not signed in to 1Password (opv access; op whoami failed)","detail":["sign in: opv login","(a 1Password CLI session expires after 30 minutes idle)","if you are signed in, check network access to 1Password","then run opv again"],"retry":"after_fix","human_required":true,"do":"sign in: opv login","next":"opv access --json"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: authentication error: not signed in to 1Password (opv access; op whoami failed)
+  sign in: opv login
+  (a 1Password CLI session expires after 30 minutes idle)
+  if you are signed in, check network access to 1Password
+  then run opv again
+Do: sign in: opv login
+Next: opv access --json

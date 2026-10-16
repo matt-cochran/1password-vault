@@ -1,0 +1,26 @@
+# ready_dev__op_item_get_ie2eshareddev00000000000001__account_not_on_machine: opv ready dev | fault account_not_on_machine on op item get iE2ESHAREDDEV00000000000001
+
+## text exit: 0
+## text stdout
+ready: 1 blocking · 2 findings · receipt rcpt-<id>
+PRODUCT  Local development
+Needs attention:
+  [owner] shared_sign_in_address AE2EDEVACCOUNT000000000001 → opv account list
+  [agent] item_not_found dev → check item_id in the configuration, then `op item get iE2ESHAREDDEV00000000000001 --vault vE2ESHAREDDEV00000000000001 --account AE2EDEVACCOUNT000000000001`
+Next (agent): check item_id in the configuration, then `op item get iE2ESHAREDDEV00000000000001 --vault vE2ESHAREDDEV00000000000001 --account AE2EDEVACCOUNT000000000001`
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+op item get failed; signed in with access to vault vE2ESHAREDDEV00000000000001, so retrying
+retrying op item get (2/3) in <delay>
+retrying op item get (3/3) in <delay>
+
+## json exit: 0
+## json stdout
+{"schema_version":1,"ok":true,"receipt_id":"rcpt-<id>","opv_version":"0.10.0","config":{"source":"<SCENARIO>/project/secrets.toml"},"account":{"account_id":"AE2EDEVACCOUNT000000000001","by":"pointer"},"matrix":[],"targets":[],"findings":[{"code":"shared_sign_in_address","scope":{"account":"AE2EDEVACCOUNT000000000001"},"blocking":false,"actor":"owner","effect":"none","prerequisite":"opv account list","verify":"opv account list --json"},{"code":"item_not_found","scope":{"environment":"dev"},"blocking":true,"actor":"agent","effect":"none","prerequisite":"check item_id in the configuration, then `op item get iE2ESHAREDDEV00000000000001 --vault vE2ESHAREDDEV00000000000001 --account AE2EDEVACCOUNT000000000001`","verify":"opv ready --json"}],"next":{"actor":"agent","command":"check item_id in the configuration, then `op item get iE2ESHAREDDEV00000000000001 --vault vE2ESHAREDDEV00000000000001 --account AE2EDEVACCOUNT000000000001`"},"do":null}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+op item get failed; signed in with access to vault vE2ESHAREDDEV00000000000001, so retrying
+retrying op item get (2/3) in <delay>
+retrying op item get (3/3) in <delay>

@@ -1,0 +1,17 @@
+# account_list__op_account_list__applied_but_reply_lost: opv account list | fault applied_but_reply_lost on op account list
+
+## text exit: 0
+## text stdout
+SELECTED  ACCOUNT  ADDRESS  SOURCE  SIGNED IN
+no account selected for this project
+Only accounts added to this 1Password CLI are listed; an account that is only in the 1Password app appears after opv login --add. (op in WSL does not see the Windows app's accounts)
+discovery_unavailable: op account list failed or printed something opv does not understand
+Next: opv doctor
+
+## text stderr
+
+## json exit: 0
+## json stdout
+{"schema_version":1,"ok":true,"discovery":"unavailable","platform":"wsl","cli_accounts_only":true,"selected":null,"accounts":[],"findings":[{"code":"discovery_unavailable","human_required":false,"message":"op account list failed or printed something opv does not understand","next":"opv doctor"}],"next":"opv doctor","do":null}
+
+## json stderr

@@ -1,0 +1,16 @@
+# vault_locate__op_account_list__applied_but_reply_lost: opv vault locate vE2ESHAREDDEV00000000000001 | fault applied_but_reply_lost on op account list
+
+## text exit: 4
+## text stdout
+
+## text stderr
+opv: source error: op account list failed, so opv cannot tell which accounts to ask
+Next: opv doctor
+
+## json exit: 4
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":4,"next":"opv doctor","do":null,"error":{"code":"source_error","category":"source","message":"op account list failed, so opv cannot tell which accounts to ask","detail":[],"retry":"after_fix","human_required":false,"do":null,"next":"opv doctor"}}
+
+## json stderr
+opv: source error: op account list failed, so opv cannot tell which accounts to ask
+Next: opv doctor

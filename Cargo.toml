@@ -85,3 +85,9 @@ path = "tests/sim/opv_sim.rs"
 required-features = ["fake"]
 test = false
 doctest = false
+
+# The fault matrix over the real binary (design §13.3): tests/e2e/matrix.rs.
+[[test]]
+name = "e2e_matrix"
+path = "tests/e2e/matrix.rs"
+required-features = ["fake"]

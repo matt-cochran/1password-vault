@@ -1,0 +1,35 @@
+# check_dev__op_vault_list__timeout: opv check dev | fault timeout on op vault list
+
+## text exit: 8
+## text stdout
+web/PERSONAL_LLM_KEY: missing
+  guidance: your own key, billed to you
+shared/DATABASE_URL: saved
+web/API_KEY: saved
+web/DATABASE_URL: saved (shared from shared/DATABASE_URL)
+web/LOG_LEVEL: saved
+web/MIGRATION_TOKEN: saved
+web/SESSION_SECRET: saved
+web/TLS_CERTIFICATE: saved
+web/TLS_PRIVATE_KEY: saved
+no deployment target checked
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+retrying op vault list (2/3) in <delay>
+retrying op vault list (3/3) in <delay>
+opv: 1 finding
+Do: fix the keys above in 1Password (click Edit on the item: it hides empty fields until then)
+Next: opv open web/PERSONAL_LLM_KEY --env dev
+
+## json exit: 8
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":8,"environment":"dev","product":null,"target_checked":false,"rows":[{"target":null,"product":"shared","key":"DATABASE_URL","kind":"secret","state":"saved","rule":null,"reason":null,"target_name":null,"target_state":null,"action":null},{"target":null,"product":"web","key":"API_KEY","kind":"secret","state":"saved","rule":null,"reason":null,"target_name":null,"target_state":null,"action":null},{"target":null,"product":"web","key":"DATABASE_URL","kind":"secret","state":"saved","rule":null,"reason":null,"target_name":null,"target_state":null,"action":null,"shared_from":"shared/DATABASE_URL"},{"target":null,"product":"web","key":"LOG_LEVEL","kind":"config","state":"saved","rule":null,"reason":null,"target_name":null,"target_state":null,"action":null},{"target":null,"product":"web","key":"MIGRATION_TOKEN","kind":"secret","state":"saved","rule":null,"reason":null,"target_name":null,"target_state":null,"action":null},{"target":null,"product":"web","key":"PERSONAL_LLM_KEY","kind":"secret","state":"missing","rule":null,"reason":null,"target_name":null,"target_state":null,"action":null,"open_url":"https://start.1password.com/open/i?a=AE2EDEVACCOUNT000000000001&v=vE2EWEBDEV0000000000000001&i=iE2EWEBDEV0000000000000001&h=e2e.1password.com"},{"target":null,"product":"web","key":"SESSION_SECRET","kind":"secret","state":"saved","rule":null,"reason":null,"target_name":null,"target_state":null,"action":null},{"target":null,"product":"web","key":"TLS_CERTIFICATE","kind":"secret","state":"saved","rule":null,"reason":null,"target_name":null,"target_state":null,"action":null},{"target":null,"product":"web","key":"TLS_PRIVATE_KEY","kind":"secret","state":"saved","rule":null,"reason":null,"target_name":null,"target_state":null,"action":null}],"findings":1,"totals":{"rows":9,"findings":1},"next":"opv open web/PERSONAL_LLM_KEY --env dev","do":"fix the keys above in 1Password (click Edit on the item: it hides empty fields until then)","error":{"code":"findings","category":"findings","message":"1 finding","detail":[],"retry":"after_fix","human_required":true,"do":"fix the keys above in 1Password (click Edit on the item: it hides empty fields until then)","next":"opv open web/PERSONAL_LLM_KEY --env dev"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+retrying op vault list (2/3) in <delay>
+retrying op vault list (3/3) in <delay>
+opv: 1 finding
+Do: fix the keys above in 1Password (click Edit on the item: it hides empty fields until then)
+Next: opv open web/PERSONAL_LLM_KEY --env dev

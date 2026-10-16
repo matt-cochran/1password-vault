@@ -1,0 +1,24 @@
+# status_prod__op_item_get_ie2ewebprod000000000000001__signed_out: opv status prod | fault signed_out on op item get iE2EWEBPROD000000000000001
+
+## text exit: 4
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+op item get failed; signed in with access to vault vE2EWEBPROD000000000000001, so retrying
+opv: source error: op item get failed (exit 1): signed in to 1Password as USER; item iE2EWEBPROD000000000000001 not found in vault vE2EWEBPROD000000000000001 (moved, archived or deleted?)
+  op said: [ERROR] 2026/10/16 00:04:44 error initializing client: You are not currently signed in
+Do: check item_id in the configuration
+Next: op item get iE2EWEBPROD000000000000001 --vault vE2EWEBPROD000000000000001 --account AE2EDEVACCOUNT000000000001
+
+## json exit: 4
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":4,"next":"op item get iE2EWEBPROD000000000000001 --vault vE2EWEBPROD000000000000001 --account AE2EDEVACCOUNT000000000001","do":"check item_id in the configuration","error":{"code":"item_not_found","category":"source","message":"op item get failed (exit 1): signed in to 1Password as USER; item iE2EWEBPROD000000000000001 not found in vault vE2EWEBPROD000000000000001 (moved, archived or deleted?)","detail":[],"retry":"after_fix","human_required":false,"do":"check item_id in the configuration","next":"op item get iE2EWEBPROD000000000000001 --vault vE2EWEBPROD000000000000001 --account AE2EDEVACCOUNT000000000001"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+op item get failed; signed in with access to vault vE2EWEBPROD000000000000001, so retrying
+opv: source error: op item get failed (exit 1): signed in to 1Password as USER; item iE2EWEBPROD000000000000001 not found in vault vE2EWEBPROD000000000000001 (moved, archived or deleted?)
+  op said: [ERROR] 2026/10/16 00:04:44 error initializing client: You are not currently signed in
+Do: check item_id in the configuration
+Next: op item get iE2EWEBPROD000000000000001 --vault vE2EWEBPROD000000000000001 --account AE2EDEVACCOUNT000000000001

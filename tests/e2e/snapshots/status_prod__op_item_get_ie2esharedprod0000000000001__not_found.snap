@@ -1,0 +1,22 @@
+# status_prod__op_item_get_ie2esharedprod0000000000001__not_found: opv status prod | fault not_found on op item get iE2ESHAREDPROD0000000000001
+
+## text exit: 4
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: source error: op item get failed (exit 1): signed in to 1Password as USER; item iE2ESHAREDPROD0000000000001 not found in vault vE2ESHAREDPROD0000000000001 (moved, archived or deleted?)
+  op said: [ERROR] 2026/10/16 00:05:18 "iE2ESHAREDPROD0000000000001" isn't an item in the "vE2ESHAREDPROD0000000000001" vault. Specify the item with its UUID, name, or domain
+Do: check item_id in the configuration
+Next: op item get iE2ESHAREDPROD0000000000001 --vault vE2ESHAREDPROD0000000000001 --account AE2EDEVACCOUNT000000000001
+
+## json exit: 4
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":4,"next":"op item get iE2ESHAREDPROD0000000000001 --vault vE2ESHAREDPROD0000000000001 --account AE2EDEVACCOUNT000000000001","do":"check item_id in the configuration","error":{"code":"item_not_found","category":"source","message":"op item get failed (exit 1): signed in to 1Password as USER; item iE2ESHAREDPROD0000000000001 not found in vault vE2ESHAREDPROD0000000000001 (moved, archived or deleted?)","detail":[],"retry":"after_fix","human_required":false,"do":"check item_id in the configuration","next":"op item get iE2ESHAREDPROD0000000000001 --vault vE2ESHAREDPROD0000000000001 --account AE2EDEVACCOUNT000000000001"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: source error: op item get failed (exit 1): signed in to 1Password as USER; item iE2ESHAREDPROD0000000000001 not found in vault vE2ESHAREDPROD0000000000001 (moved, archived or deleted?)
+  op said: [ERROR] 2026/10/16 00:05:18 "iE2ESHAREDPROD0000000000001" isn't an item in the "vE2ESHAREDPROD0000000000001" vault. Specify the item with its UUID, name, or domain
+Do: check item_id in the configuration
+Next: op item get iE2ESHAREDPROD0000000000001 --vault vE2ESHAREDPROD0000000000001 --account AE2EDEVACCOUNT000000000001

@@ -1,0 +1,18 @@
+# plan_prod__op_item_get_ie2ewebprod000000000000001__malformed_output: opv plan prod | fault malformed_output on op item get iE2EWEBPROD000000000000001
+
+## text exit: 4
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: source error: op returned malformed item JSON (Eof error at line 1, column 446)
+Next: opv plan prod
+
+## json exit: 4
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":4,"next":"opv plan prod --json","do":null,"error":{"code":"source_error","category":"source","message":"op returned malformed item JSON (Eof error at line 1, column 446)","detail":[],"retry":"after_fix","human_required":false,"do":null,"next":"opv plan prod --json"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: source error: op returned malformed item JSON (Eof error at line 1, column 446)
+Next: opv plan prod --json

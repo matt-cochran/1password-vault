@@ -1,0 +1,18 @@
+# check_dev__op_item_get_ie2ewebdev0000000000000001__malformed_output: opv check dev | fault malformed_output on op item get iE2EWEBDEV0000000000000001
+
+## text exit: 4
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: source error: op returned malformed item JSON (Eof error at line 1, column 605)
+Next: opv check dev
+
+## json exit: 4
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":4,"next":"opv check dev --json","do":null,"error":{"code":"source_error","category":"source","message":"op returned malformed item JSON (Eof error at line 1, column 605)","detail":[],"retry":"after_fix","human_required":false,"do":null,"next":"opv check dev --json"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: source error: op returned malformed item JSON (Eof error at line 1, column 605)
+Next: opv check dev --json

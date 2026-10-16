@@ -1,0 +1,22 @@
+# sync_prod_unconfirmed__kubectl_auth_can_i_list_replicasets__tool_missing: opv sync prod | fault tool_missing on kubectl auth can-i list replicasets
+
+## text exit: 5
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+retrying kubectl (2/3) in <delay>
+retrying kubectl (3/3) in <delay>
+opv: target error: kubectl auth can-i list replicasets failed (exit 127) for deployment e2e-app in namespace e2e-prod (context e2e-cluster); nothing was changed by this step
+Next: kubectl --context e2e-cluster --namespace e2e-prod auth can-i list replicasets
+
+## json exit: 5
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":5,"next":"kubectl --context e2e-cluster --namespace e2e-prod auth can-i list replicasets","do":null,"error":{"code":"target_error","category":"target","message":"kubectl auth can-i list replicasets failed (exit 127) for deployment e2e-app in namespace e2e-prod (context e2e-cluster); nothing was changed by this step","detail":[],"retry":"after_fix","human_required":false,"do":null,"next":"kubectl --context e2e-cluster --namespace e2e-prod auth can-i list replicasets"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+retrying kubectl (2/3) in <delay>
+retrying kubectl (3/3) in <delay>
+opv: target error: kubectl auth can-i list replicasets failed (exit 127) for deployment e2e-app in namespace e2e-prod (context e2e-cluster); nothing was changed by this step
+Next: kubectl --context e2e-cluster --namespace e2e-prod auth can-i list replicasets

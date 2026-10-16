@@ -1,0 +1,20 @@
+# sync_prod_unconfirmed__kubectl_auth_can_i_list_pods__malformed_output: opv sync prod | fault malformed_output on kubectl auth can-i list pods
+
+## text exit: 6
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: policy denied: environment prod is guarded (confirm_env = true): sync needs --confirm prod; nothing was changed
+Do: confirm with the user that prod is the environment to change
+Next: opv sync prod --confirm prod
+
+## json exit: 6
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":6,"next":"opv sync prod --json --confirm prod","do":"confirm with the user that prod is the environment to change","error":{"code":"confirm_required","category":"policy","message":"environment prod is guarded (confirm_env = true): sync needs --confirm prod; nothing was changed","detail":[],"retry":"never","human_required":true,"do":"confirm with the user that prod is the environment to change","next":"opv sync prod --json --confirm prod"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: policy denied: environment prod is guarded (confirm_env = true): sync needs --confirm prod; nothing was changed
+Do: confirm with the user that prod is the environment to change
+Next: opv sync prod --json --confirm prod
