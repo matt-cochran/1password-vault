@@ -4,4 +4,6 @@
 
 mod scenarios {
     pub mod issue_159;
+    pub mod issues;
+    pub mod live_audit;
 }
