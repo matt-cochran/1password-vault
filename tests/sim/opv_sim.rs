@@ -200,10 +200,11 @@ fn simulate(program: &str, args: &[String]) -> i32 {
         }
         Some(kind) => {
             // A fault that says an object is missing removes it, so later reads agree.
-            if program == "gh" && gh::fault_effect(kind, &mut world, args) {
-                if let Err(e) = world.save() {
-                    return fail(&e);
-                }
+            if program == "gh"
+                && gh::fault_effect(kind, &mut world, args)
+                && let Err(e) = world.save()
+            {
+                return fail(&e);
             }
             fault_reply(program, kind, &world, args)
         }
