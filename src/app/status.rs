@@ -20,8 +20,9 @@ use super::{
     print_extras, print_legend, print_rows, product_names, read_and_plan, resolve_targets,
     rows_item_url, scope_plan, target_runners, target_word, write_err, write_json,
 };
+use crate::cause::{Cause, Cmd, EnvName, KeyName, ProductName, ValueRow, ValueState};
 use crate::domain::provenance::latest;
-use crate::domain::{Binding, Fleet, KeyState, Row, StoreEntry, SyncPlan};
+use crate::domain::{Binding, Fleet, KeyState, Kind, Row, StoreEntry, SyncPlan};
 use crate::error::Error;
 use crate::ports::{PinnedRuntime, PinnedStore, Ports};
 use crate::provider::TargetConfig;
@@ -165,15 +166,21 @@ pub fn run_targeted(
             print_legend(out, &words, label, p.live)?;
         }
     }
-    // Extras and concealed config are about the 1Password item, the same for every target.
+    // Extras are about the 1Password item, the same for every target.
     print_extras(out, &parts[0].plan)?;
-    print_concealed_config(out, &parts[0].plan)?;
+    print_concealed_config(out, &parts)?;
+    let several = fleet
+        .environments
+        .get(env_name)
+        .is_some_and(|e| e.targets.len() > 1);
     for p in &parts {
         let mut out = Prefixed::new(out, format!("{}: ", placement(env_name, &p.name)));
         if let Some(pinned) = &p.pinned {
+            let deploy = deploy_step(env_name, several.then_some(p.name.as_str()));
             pinned.print(
                 &mut out,
                 env_name,
+                &deploy,
                 &KeyNames::new(fleet, env_name, &p.name)?,
             )?;
         }
@@ -263,10 +270,16 @@ fn status_part<'f>(
     })
 }
 
-/// M4 (owner ruling): one warning per config key whose 1Password field is concealed. The
-/// key is accepted and delivered, as a plain environment value; its value is never shown.
-fn print_concealed_config(out: &mut dyn Write, plan: &SyncPlan) -> Result<(), Error> {
-    for (product, key) in &plan.concealed_config {
+/// M4 (owner ruling): one warning per config key whose 1Password field is concealed and
+/// that some target delivers as a plain environment value; its value is never shown. A
+/// target that refuses it (`variables::plan`, a `concealed-config` finding) drops it from
+/// its plan's list, so "is delivered" is a typed fact of a part's plan (01.01).
+fn print_concealed_config(out: &mut dyn Write, parts: &[StatusPart<'_>]) -> Result<(), Error> {
+    let delivered: BTreeSet<&(String, String)> = parts
+        .iter()
+        .flat_map(|p| &p.plan.concealed_config)
+        .collect();
+    for (product, key) in delivered {
         writeln!(
             out,
             "warning: {} is concealed in 1Password but declared config; it is delivered as a \
@@ -276,6 +289,19 @@ fn print_concealed_config(out: &mut dyn Write, plan: &SyncPlan) -> Result<(), Er
         .map_err(write_err)?;
     }
     Ok(())
+}
+
+/// `opv sync <env> --deploy`, the write that applies pending bindings, with `--target` when
+/// the environment has several (01.23). Typed (design §10.1); opv never adds `--confirm`.
+fn deploy_step(env_name: &str, target: Option<&str>) -> Cmd {
+    let mut args = vec![env_name.to_string(), "--deploy".to_string()];
+    if let Some(t) = target {
+        args.extend(["--target".to_string(), t.to_string()]);
+    }
+    Cmd {
+        command: vec!["sync".to_string()],
+        args,
+    }
 }
 
 /// `opv status <env> --target <t>[ --product p]`.
@@ -319,8 +345,12 @@ pub fn overview(
             },
             environments: &o.envs,
         };
-        let text = serde_json::to_string(&doc)
-            .map_err(|e| Error::Dependency(format!("cannot serialize JSON ({e})").into()))?;
+        // 01.26: an internal invariant, never a missing dependency.
+        let text = serde_json::to_string(&doc).map_err(|_| {
+            Error::from(Cause::Bug {
+                site: "status overview document serializes",
+            })
+        })?;
         writeln!(out, "{text}").map_err(write_err)?;
     } else {
         for line in &o.lines {
@@ -338,13 +368,15 @@ pub struct Overview {
     product: Option<String>,
     first_err: Option<(String, Error)>,
     findings: usize,
-    first_finding: Option<String>,
+    /// The first environment with findings and its blocking rows: the failure names them,
+    /// so its step opens a key that has a finding (01.08), never a guessed product.
+    first_finding: Option<(String, Vec<Row>)>,
 }
 
 impl Overview {
-    /// The first error, else `Findings` when any environment has findings, each with a
-    /// runnable next step for `fleet`.
-    pub fn result(self, fleet: &Fleet) -> Result<(), Error> {
+    /// The first error, else `ValuesNeeded` for the first environment with findings (its
+    /// blocking keys, so the step opens one of them). `_fleet` is kept for the callers.
+    pub fn result(self, _fleet: &Fleet) -> Result<(), Error> {
         let product = self.product.as_deref();
         let scoped = |cmd: String| match product {
             Some(p) => format!("{cmd} --product {p}"),
@@ -354,21 +386,11 @@ impl Overview {
             return Err(e.or_next(|| scoped(format!("opv status {name}"))));
         }
         match self.first_finding {
-            Some(name) => {
-                let deployed = fleet
-                    .environments
-                    .get(&name)
-                    .is_some_and(|e| !e.targets.is_empty());
-                let cmd = match deployed {
-                    true => format!("opv status {name}"),
-                    false => match product {
-                        Some(_) => format!("opv check {name}"),
-                        None => format!("opv check {name} --product {}", first_product(fleet)),
-                    },
-                };
-                Err(Error::findings(self.findings, scoped(cmd))
-                    .with_do("fix the keys in 1Password"))
+            Some((name, rows)) => Err(Cause::ValuesNeeded {
+                env: EnvName::new(name),
+                rows: rows.iter().map(value_row).collect(),
             }
+            .into()),
             None => Ok(()),
         }
     }
@@ -423,7 +445,10 @@ pub fn overview_of(fleet: &Fleet, product: Option<&str>, r: &dyn CommandRunner) 
                 let n = rows.iter().filter(|r| is_blocking(r)).count();
                 if n > 0 {
                     o.findings += n;
-                    o.first_finding.get_or_insert_with(|| name.clone());
+                    o.first_finding.get_or_insert_with(|| {
+                        let blocking = rows.iter().filter(|r| is_blocking(r)).cloned();
+                        (name.clone(), blocking.collect())
+                    });
                 }
                 o.envs.push(OverviewEnv {
                     name: name.clone(),
@@ -469,13 +494,23 @@ pub fn overview_of(fleet: &Fleet, product: Option<&str>, r: &dyn CommandRunner) 
     o
 }
 
-/// The first declared product, for a runnable `opv check <env> --product <p>` step.
-fn first_product(fleet: &Fleet) -> &str {
-    fleet
-        .products
-        .keys()
-        .next()
-        .map_or("<name>", String::as_str)
+/// A blocking row as the catalog's [`ValueRow`]: its key and why it needs a value.
+fn value_row(row: &Row) -> ValueRow {
+    let state = match &row.state {
+        KeyState::RuleFailed(rule, _) if *rule == super::variables::CONCEALED_RULE => {
+            ValueState::ConcealedConfig
+        }
+        KeyState::RuleFailed(rule, _) => ValueState::RuleFailed { rule },
+        KeyState::WrongKind if row.kind == Kind::Secret => ValueState::StoredAsText,
+        KeyState::WrongKind => ValueState::ConcealedConfig,
+        _ => ValueState::Missing,
+    };
+    ValueRow {
+        product: ProductName::new(&row.product),
+        key: KeyName::new(&row.key),
+        target: None,
+        state,
+    }
 }
 
 /// `dev: run-only · 4 keys · 3 saved · 1 skipped · 1 finding` (H11).
@@ -629,11 +664,19 @@ struct PinnedStatus {
 }
 
 impl PinnedStatus {
-    fn print(&self, out: &mut dyn Write, env_name: &str, names: &KeyNames) -> Result<(), Error> {
+    /// `deploy` is the write that applies the pending bindings ([`deploy_step`]).
+    fn print(
+        &self,
+        out: &mut dyn Write,
+        env_name: &str,
+        deploy: &Cmd,
+        names: &KeyNames,
+    ) -> Result<(), Error> {
         let mut line = |text: String| writeln!(out, "{text}").map_err(write_err);
         if !self.pending.is_empty() {
             line(format!(
-                "pending deploy (opv sync {env_name} --deploy): {}",
+                "pending deploy ({}): {}",
+                crate::cause::render::cmd_text(deploy),
                 names.join(&self.pending)
             ))?;
         }

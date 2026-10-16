@@ -45,16 +45,34 @@
     "environments": 3,
     "findings": 1
   },
-  "next": "opv status staging",
-  "do": "fix the keys in 1Password",
+  "next": "opv open allumata/STRIPE_SECRET_KEY --env staging",
+  "do": "fill in allumata/STRIPE_SECRET_KEY in 1Password for environment staging",
   "error": {
     "code": "findings",
     "category": "findings",
-    "message": "1 finding",
-    "detail": [],
+    "message": "environment staging needs 1 value: allumata/STRIPE_SECRET_KEY (missing)",
+    "subject": {
+      "rows": [
+        {
+          "product": "allumata",
+          "key": "STRIPE_SECRET_KEY",
+          "target": null,
+          "state": {
+            "state": "missing"
+          }
+        }
+      ],
+      "env": "staging"
+    },
+    "evidence": {
+      "checked": null,
+      "account": null,
+      "upstream": null
+    },
     "retry": "after_fix",
     "human_required": true,
-    "do": "fix the keys in 1Password",
-    "next": "opv status staging"
+    "do": "fill in allumata/STRIPE_SECRET_KEY in 1Password for environment staging",
+    "next": "opv open allumata/STRIPE_SECRET_KEY --env staging",
+    "next_kind": "run"
   }
 }

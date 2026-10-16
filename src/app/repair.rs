@@ -23,17 +23,11 @@ pub fn run(
     fleet.environment(env_name)?;
     super::tidy::require_person(r, &format!("opv tidy {env_name}"))?;
     let read = super::tidy::read(fleet, env_name, r)?;
-    if let Some(code) = read.tidy_error {
-        // Exit 4 like the code's own table entry: the item, not the outcome, is in question.
-        return Err(Error::Source(
-            format!(
-                "could not tidy 1Password ({env_name}); the item was read as it is and left \
-                 as opv found it or as one verified edit left it"
-            )
-            .into(),
-        )
-        .with_code(code)
-        .with_next(format!("opv doctor --env {env_name}")));
+    // 01.02: the tidy's own failure, naming the item: changed before the write (nothing
+    // written, re-run), another edit landed with it (check the item's history), or fields
+    // missing on read-back (restore them). Never "verified" when it was not.
+    if let Some(e) = read.tidy_failure {
+        return Err(e);
     }
     if json {
         let doc = serde_json::json!({

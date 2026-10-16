@@ -1716,3 +1716,56 @@ fn a_write_in_ci_needs_a_persons_terminal() {
         "{e:?}"
     );
 }
+
+// ---- 01.02: `opv tidy` fails with the tidy's own typed cause --------------------------------
+
+/// The catalog cause of the failed tidy `op` reads.
+fn tidy_cause(op: &FakeOp) -> crate::cause::Cause {
+    let e = tidied(op).tidy_failure.expect("a tidy failure");
+    e.cause().expect("a catalog cause").0.clone()
+}
+
+#[test]
+fn an_item_edited_twice_is_changed_before_write() {
+    let op = FakeOp::person(messy_item());
+    op.editors.borrow_mut().push((2, someone_edits_session));
+    op.editors.borrow_mut().push((3, someone_edits_session));
+    assert!(matches!(
+        tidy_cause(&op),
+        crate::cause::Cause::ChangedBeforeWrite { .. }
+    ));
+}
+
+#[test]
+fn an_edit_landing_with_the_tidy_is_a_concurrent_edit() {
+    let op = FakeOp::person(messy_item());
+    op.racing.set(Some(someone_edits_session));
+    assert!(matches!(
+        tidy_cause(&op),
+        crate::cause::Cause::ConcurrentEdit { .. }
+    ));
+}
+
+#[test]
+fn a_field_the_write_dropped_is_named_on_read_back() {
+    let op = FakeOp::person(messy_item());
+    op.edit.set(Edit::Lossy);
+    assert!(matches!(
+        tidy_cause(&op),
+        crate::cause::Cause::ReadBackMissing { fields, .. } if !fields.is_empty()
+    ));
+}
+
+#[test]
+fn a_field_the_write_dropped_steps_to_opv_tidy() {
+    let op = FakeOp::person(messy_item());
+    op.edit.set(Edit::Lossy);
+    let inv = crate::cause::Invocation::from_cli(&["opv".to_string(), "tidy".to_string()]);
+    assert_eq!(
+        tidy_cause(&op).step(&inv).1,
+        crate::cause::Next::Run(crate::cause::Cmd {
+            command: vec!["tidy".into(), "dev".into()],
+            args: vec![],
+        })
+    );
+}
