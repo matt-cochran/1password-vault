@@ -1586,18 +1586,19 @@ fn structure_plan(project: &std::path::Path, verbose: bool) -> Value {
         verbose,
     );
     let r = read_only(Duration::from_secs(60));
-    let planned = crate::app::structure::scope(project, &r).and_then(|scope| {
-        r.inner.use_account(Some(scope.account.clone()));
-        let text = std::fs::read_to_string(&scope.path).map_err(|e| -> Error {
-            Cause::ConfigUnreadable {
-                path: scope.path.clone(),
-                io: e.kind().into(),
-                given_by: crate::cause::GivenBy::Discovered,
-            }
-            .into()
-        })?;
-        crate::app::structure::plan(&r, &text, &scope.project, &scope.account)
-    });
+    let planned =
+        crate::app::structure::scope_as(project, &r, "structure plan").and_then(|scope| {
+            r.inner.use_account(Some(scope.account.clone()));
+            let text = std::fs::read_to_string(&scope.path).map_err(|e| -> Error {
+                Cause::ConfigUnreadable {
+                    path: scope.path.clone(),
+                    io: e.kind().into(),
+                    given_by: crate::cause::GivenBy::Discovered,
+                }
+                .into()
+            })?;
+            crate::app::structure::plan(&r, &text, &scope.project, &scope.account)
+        });
     if r.refused.load(Ordering::Relaxed) {
         return call.refused(write_refused());
     }
@@ -1626,28 +1627,34 @@ fn structure_apply(project: &std::path::Path, plan_id: &str, verbose: bool) -> V
         vec![plan_id.to_string()],
         verbose,
     );
-    if let Some(var) = credential_in_environment(std::env::vars()) {
-        return call.refused(own_session("structure apply", var));
-    }
-    if let Some(refused) = ci_refusal() {
-        return call.refused(refused);
-    }
     let r = ProcessRunner::new(Budget::starting_now(Duration::from_secs(300)), false);
-    let applied = crate::app::structure::scope(project, &r).and_then(|scope| {
-        r.use_account(Some(scope.account.clone()));
-        crate::app::structure::apply(
-            &r,
-            &scope.path,
-            &scope.project,
-            &scope.account,
-            plan_id,
-            &mut |p| crate::approval::consume(&p.plan_id, &scope.project, &scope.account, now()),
-        )
-        // C2 (09.mcp): an id never approved here is unknown, not changed since approval.
-        .map_err(|e| {
-            crate::app::structure::unknown_unless_approved(e, &crate::approval::ever_approved)
-        })
-    });
+    let applied =
+        crate::app::structure::scope_as(project, &r, "structure apply").and_then(|scope| {
+            r.use_account(Some(scope.account.clone()));
+            crate::app::structure::apply(
+                &r,
+                &scope.path,
+                &scope.project,
+                &scope.account,
+                plan_id,
+                // L8: the CLI's order. A plan id that names no plan is refused first; a
+                // credential in the server's environment or CI then refuses the write before
+                // the single-use approval is spent, where the CLI checks for a person.
+                &mut |p| {
+                    if let Some(var) = credential_in_environment(std::env::vars()) {
+                        return Err(own_session("structure apply", var).into());
+                    }
+                    if let Some(refused) = ci_refusal() {
+                        return Err(refused.into());
+                    }
+                    crate::approval::consume(&p.plan_id, &scope.project, &scope.account, now())
+                },
+            )
+            // C2 (09.mcp): an id never approved here is unknown, not changed since approval.
+            .map_err(|e| {
+                crate::app::structure::unknown_unless_approved(e, &crate::approval::ever_approved)
+            })
+        });
     match applied {
         Ok(a) => applied_projection(&a),
         Err(e) => call.failed(&e),
