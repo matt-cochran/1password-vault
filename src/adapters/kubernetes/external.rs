@@ -24,14 +24,13 @@
 //! | ready | `get externalsecrets.external-secrets.io <n> --ignore-not-found -o json` | read |
 //! | list | `get externalsecrets.external-secrets.io -l <selector> -o json` | read |
 //! | delete | `delete externalsecrets.external-secrets.io <names…> --ignore-not-found` | write |
-//! | events | `get events --field-selector involvedObject.kind=ExternalSecret,involvedObject.name=<n> -o json` (diagnosis only) | read |
 //! | preflight | `get --raw /apis/external-secrets.io/v1`, `get clustersecretstores.external-secrets.io <s> --ignore-not-found -o json`, `auth can-i create externalsecrets.external-secrets.io` | reads |
 //!
 //! Every failure to sync is `Ready=False/SecretSyncedError` with the same message (E3), so
-//! opv diagnoses it itself: does the version exist in the store, is the ClusterSecretStore
-//! Ready and does it name the store, and what the operator's newest warning event says of
-//! the store's credential (a store's Ready status is cached and can outlive its credential).
-//! The event text is classified, never printed.
+//! opv diagnoses it itself: does the version exist in the store (if not, re-running pins a
+//! fresh one); otherwise the ClusterSecretStore or its identity is at fault (missing, not
+//! Ready, naming another vault, or a credential expired or denied behind a cached Ready
+//! status), which a cluster admin fixes. The operator's own text is never printed (SR-1).
 
 use std::cell::OnceCell;
 use std::collections::BTreeSet;
@@ -40,9 +39,10 @@ use serde_json::{Value, json};
 
 use super::store::referenced_names;
 use super::{Effect, KubeTarget, Kubectl, LABEL_KEY, LABEL_MANAGED, VALUE_KEY, store_name};
+use crate::cause::{Cause, ResourceKind, ResourceName, ResourceRef, System};
 use crate::domain::SecretValue;
 use crate::domain::plan::StoreEntry;
-use crate::error::{Code, Error};
+use crate::error::Error;
 use crate::ports::{PinnedStore, Store};
 use crate::provider::{Check, PreflightMode, Verdict};
 use crate::runner::Outcome;
@@ -116,7 +116,6 @@ pub(crate) fn list(k: &Kubectl<'_>, selector: &str) -> Result<Vec<Listed>, Error
         what,
         &["get", RESOURCE, "-l", selector, "-o", "json"],
         None,
-        &format!("auth can-i list {RESOURCE}"),
     )?;
     let doc = super::parse_json(&out, what)?;
     Ok(doc
@@ -192,10 +191,11 @@ pub(crate) fn apply(k: &Kubectl<'_>, name: &str, body: &[u8]) -> Result<(), Erro
             if echoed.rsplit('/').next() == Some(name) {
                 Ok(())
             } else {
-                Err(Error::Target(
+                Err(Error::Unknown(
                     format!(
-                        "{what} did not confirm the ExternalSecret it wrote; nothing else was \
-                     changed\n  next: check with `{}`, then re-run the same command",
+                        "{what} did not confirm the ExternalSecret it wrote; it may or may not \
+                         exist and nothing else was changed\n  next: check with `{}`, then \
+                         re-run the same command",
                         k.command(&format!("get {RESOURCE} {name} -o name"))
                     )
                     .into(),
@@ -203,15 +203,13 @@ pub(crate) fn apply(k: &Kubectl<'_>, name: &str, body: &[u8]) -> Result<(), Erro
             }
         }
         // The read-back explains the failure, so the apply's excerpt stays (NR-31).
-        other => match crate::runner::diagnosing(|| get(k, name)) {
-            Ok(Some(_)) => Ok(()),
-            _ => Err(k.fail(
-                Effect::Write,
-                &what,
-                other,
-                &format!("auth can-i create {RESOURCE}"),
-            )),
-        },
+        _ => {
+            let failed = k.failed(Effect::Write);
+            match crate::runner::diagnosing(|| get(k, name)) {
+                Ok(Some(_)) => Ok(()),
+                _ => Err(k.explain(failed, Effect::Write, k.target.namespace_ref())),
+            }
+        }
     }
 }
 
@@ -223,7 +221,6 @@ pub(crate) fn get(k: &Kubectl<'_>, name: &str) -> Result<Option<Value>, Error> {
         &what,
         &["get", RESOURCE, name, "--ignore-not-found", "-o", "json"],
         None,
-        &format!("describe {RESOURCE} {name}"),
     )?;
     if super::text(&out, &what)?.trim().is_empty() {
         return Ok(None);
@@ -317,7 +314,6 @@ pub(crate) fn store_state(
             "json",
         ],
         None,
-        &format!("auth can-i get {STORE_RESOURCE}"),
     )?;
     if super::text(&out, &what)?.trim().is_empty() {
         return Ok(StoreState::Missing);
@@ -334,12 +330,40 @@ pub(crate) fn store_state(
                 names_store: seen.iter().any(|s| s.to_ascii_lowercase().contains(&want)),
             }
         }
-        Some((s, reason, message)) => {
-            StoreState::NotReady(format!("Ready={s}, reason {reason}: {message}"))
-        }
+        // The condition's message is operator-written text: never echoed (06.52). Its
+        // reason is a CamelCase code, kept only when it is one.
+        Some((s, reason, _)) => StoreState::NotReady(match reason_code(&reason) {
+            Some(r) => format!("Ready={}, reason {r}", reason_code(&s).unwrap_or("?")),
+            None => format!("Ready={}", reason_code(&s).unwrap_or("?")),
+        }),
         None => StoreState::NotReady("it reports no Ready condition yet".into()),
     })
 }
+
+/// `s` when it is a condition code (`True`, `InvalidProviderConfig`): letters only, at most
+/// 64 characters; `None` for anything else, which is never shown.
+fn reason_code(s: &str) -> Option<&str> {
+    (!s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphabetic())).then_some(s)
+}
+
+/// The ClusterSecretStore `name` (or the operator itself) as the object a cluster admin
+/// sets up: opv cannot fix it, so the step is a person's (06.15, 06.25, 06.52).
+fn owner_setup(name: &str) -> Error {
+    Cause::OwnerSetupRequired {
+        system: System::Kubernetes,
+        object: ResourceRef {
+            kind: ResourceKind::ExternalStore,
+            name: ResourceName::new(name),
+            scope: None,
+        },
+    }
+    .into()
+}
+
+/// The operator object: not installed, or too old to serve the API opv writes.
+const OPERATOR: &str = "External Secrets Operator";
+/// The operator object when it is installed but does not serve [`API`].
+const OPERATOR_V1: &str = "External Secrets Operator serving external-secrets.io/v1";
 
 fn collect(v: &Value, out: &mut BTreeSet<String>) {
     match v {
@@ -352,67 +376,10 @@ fn collect(v: &Value, out: &mut BTreeSet<String>) {
     }
 }
 
-/// What the operator's newest warning event for an ExternalSecret says of the store's
-/// credential.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Credential {
-    /// Microsoft Entra AADSTS7000222: the client secret has expired.
-    Expired,
-    /// HTTP 401 or `invalid_client`: the identity cannot sign in.
-    Rejected,
-    /// HTTP 403: the identity signs in but may not read the secret.
-    Denied,
-    /// No event, an event about something else, or events that cannot be read.
-    Unknown,
-}
-
-/// The newest `Warning` event's message, classified (E3). Best effort and read-only:
-/// events that cannot be read (RBAC, expired) are [`Credential::Unknown`].
-pub(crate) fn credential(k: &Kubectl<'_>, es: &str) -> Credential {
-    let what = format!("kubectl get events for ExternalSecret {es}");
-    let selector = format!("involvedObject.kind=ExternalSecret,involvedObject.name={es}");
-    let args = ["get", "events", "--field-selector", &selector, "-o", "json"];
-    match k.call(Effect::Read, &what, &args, None, &[]) {
-        Ok(Outcome::Done(out)) => super::parse_json(&out, &what)
-            .map(|doc| classify_events(&doc))
-            .unwrap_or(Credential::Unknown),
-        _ => Credential::Unknown,
-    }
-}
-
-/// [`credential`] over an event list. RFC 3339 times in one zone sort as text.
-pub(crate) fn classify_events(doc: &Value) -> Credential {
-    let when = |e: &&Value| {
-        ["lastTimestamp", "eventTime", "firstTimestamp"]
-            .iter()
-            .find_map(|k| e.get(*k).and_then(Value::as_str))
-            .unwrap_or("")
-            .to_string()
-    };
-    let newest = doc
-        .get("items")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|e| e.get("type").and_then(Value::as_str) == Some("Warning"))
-        .max_by_key(when);
-    let message = newest
-        .and_then(|e| e.get("message"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if message.contains("AADSTS7000222") {
-        Credential::Expired
-    } else if message.contains("StatusCode=401") || message.contains("invalid_client") {
-        Credential::Rejected
-    } else if message.contains("StatusCode=403") || message.contains("Forbidden") {
-        Credential::Denied
-    } else {
-        Credential::Unknown
-    }
-}
-
 /// The ExternalSecret could not read version `version` of `env_name`: opv's own diagnosis
-/// (E3) naming the cause and the next step. Read-only.
+/// (E3). Read-only. A store that is missing, not Ready, names another vault, or whose
+/// identity the operator reports as expired, rejected or denied is fixed by a cluster
+/// admin, never by opv (06.15); the operator's own text is classified, never echoed (06.52).
 pub(crate) fn diagnose_failed(
     k: &Kubectl<'_>,
     bridge: &Bridge<'_>,
@@ -421,85 +388,28 @@ pub(crate) fn diagnose_failed(
     version: &str,
 ) -> Error {
     let t = k.target;
-    let css = &bridge.cluster_store;
-    let head = format!(
-        "ExternalSecret {es} could not read version {version} of {env_name} from {} \
-         (SecretSyncedError); deployment {} was not changed",
-        bridge.describe, t.deployment
-    );
-    let describe = k.command(&format!("describe {RESOURCE} {es}"));
     match bridge.store.has_version(env_name, version) {
         Ok(Some(false)) => {
             return Error::Target(
                 format!(
-                    "{head}\n  cause: {} has no version {version} of {env_name} (deleted or purged \
-                 after opv wrote it); re-running writes and pins a fresh version\n  next: \
-                 re-run the same command",
-                    bridge.describe
+                    "ExternalSecret {es} could not read version {version} of {env_name} from \
+                     {}, which no longer has it (deleted or purged after opv wrote it); \
+                     deployment {} was not changed; re-running writes and pins a fresh \
+                     version\n  next: re-run the same command",
+                    bridge.describe, t.deployment
                 )
                 .into(),
             );
         }
-        Err(e) => {
-            return Error::Target(
-                format!(
-                    "{head}\n  cause not found: could not check the version in {} ({e})\n  next: \
-                 `{describe}`",
-                    bridge.describe
-                )
-                .into(),
-            );
-        }
+        // The version could not be checked: that failure is the cause opv can name.
+        Err(e) => return e,
         Ok(_) => {}
     }
-    let css_cmd = k.command(&format!("describe {STORE_RESOURCE} {css}"));
-    match store_state(k, css, &bridge.locator) {
-        Ok(StoreState::Missing) => Error::Target(format!(
-            "{head}\n  cause: ClusterSecretStore {css} does not exist\n  next: create it (see \
-             docs/agent-setup.md), or set secret_store in the store's [stores.<name>] table to \
-             the one that reads {}",
-            bridge.describe
-        ).into()),
-        Ok(StoreState::NotReady(why)) => Error::Target(format!(
-            "{head}\n  cause: ClusterSecretStore {css} is not Ready ({why})\n  next: `{css_cmd}`; \
-             fix its credentials, then run the same command again"
-        ).into()),
-        Ok(StoreState::Ready { names_store: false }) => Error::Target(format!(
-            "{head}\n  cause: ClusterSecretStore {css} is Ready but its settings never name {} \
-             (a vault URL for another vault?)\n  next: `{css_cmd}`; point it at {}, or set \
-             secret_store to the ClusterSecretStore that does",
-            bridge.locator, bridge.describe
-        ).into()),
-        Ok(StoreState::Ready { names_store: true }) => match credential(k, es) {
-            Credential::Expired => Error::Target(format!(
-                "{head}\n  cause: the credential of ClusterSecretStore {css} has expired (the \
-                 operator reports Microsoft Entra AADSTS7000222; the store's Ready status is \
-                 cached from before)\n  next: `{css_cmd}` names the credential Secret \
-                 (authSecretRef); renew it, then run the same command again"
-            ).into()),
-            Credential::Rejected => Error::Target(format!(
-                "{head}\n  cause: the identity of ClusterSecretStore {css} cannot sign in (the \
-                 operator reports HTTP 401: an expired, rotated or wrong credential)\n  next: \
-                 `{css_cmd}` names the credential Secret (authSecretRef); renew it, then run the \
-                 same command again"
-            ).into()),
-            Credential::Denied => Error::Target(format!(
-                "{head}\n  cause: the identity of ClusterSecretStore {css} signs in but may not \
-                 read this secret (the operator reports HTTP 403; for Key Vault: no \"Key Vault \
-                 Secrets User\" role on the vault, or a vault firewall)\n  next: grant the \
-                 store's identity read access, then run the same command again"
-            ).into()),
-            Credential::Unknown => Error::Target(format!(
-                "{head}\n  cause: the version exists and ClusterSecretStore {css} is Ready, so its \
-                 identity most likely cannot read this secret (for Key Vault: no \"Key Vault \
-                 Secrets User\" role on the vault, or a vault firewall)\n  next: `{describe}`, \
-                 then grant the store's identity read access and run the same command again"
-            ).into()),
-        },
-        Err(e) => Error::Target(format!(
-            "{head}\n  cause not found: could not read ClusterSecretStore {css} ({e})\n  next: \
-             `{describe}`"
-        ).into()),
+    match store_state(k, &bridge.cluster_store, &bridge.locator) {
+        // Every state of the store and of its credential is a cluster admin's to fix; the
+        // operator's events only told opv that the store is at fault.
+        Ok(_) => owner_setup(&bridge.cluster_store),
+        Err(e) => e,
     }
 }
 
@@ -524,49 +434,25 @@ pub(crate) fn operator_served(k: &Kubectl<'_>) -> Result<(), Error> {
                 Err(not_served(false))
             }
         }
-        Outcome::Refused(out) => {
-            // Asked before the probes below: the refusal's own words decide.
-            let not_found = crate::runner::last_failure_not_found();
+        Outcome::Refused(_) => {
+            // Taken before the probes below: the refusal's own words decide.
+            let failed = k.failed(Effect::Read);
+            let missing = matches!(
+                &failed,
+                Ok(f) if matches!(f.cause, Cause::OwnerSetupRequired { .. })
+            );
             let group = ["get", "--raw", "/apis/external-secrets.io"];
             let probe = || k.call(Effect::Read, what, &group, None, &[1]);
             match crate::runner::diagnosing(probe)? {
                 Outcome::Done(_) => Err(not_served(true)),
-                _ => match k.diagnose(
-                    Effect::Read,
-                    what,
-                    &crate::runner::status_text(out.status),
-                    "api-resources --api-group=external-secrets.io",
-                ) {
-                    // Context and cluster are fine and the API server said the API is not
-                    // there (404), or its discovery list has no such group: the operator is
-                    // not installed.
-                    Error::Target(_) if not_found || group_absent(k) => Err(not_served(false)),
-                    // Any other refusal (403 first among them) proves nothing about the
-                    // operator: this identity may not read API discovery.
-                    Error::Target(_) => Err(Error::Target(
-                        format!(
-                            "{what} was refused ({}) and not as missing, so the External \
-                             Secrets Operator may well be installed; nothing was changed",
-                            crate::runner::status_text(out.status)
-                        )
-                        .into(),
-                    )
-                    .with_code(Code::PermissionDenied)
-                    .with_do(format!(
-                        "ask a cluster admin to let this identity read API discovery \
-                         (the system:discovery role), or check the cause with `{}`",
-                        k.command("get --raw /apis/external-secrets.io/v1")
-                    ))),
-                    other => Err(other),
-                },
+                // The API server said the API is not there, or its discovery list has no
+                // such group: the operator is not installed. Any other refusal (403 first
+                // among them) proves nothing about the operator.
+                _ if missing || group_absent(k) => Err(not_served(false)),
+                _ => Err(k.explain(failed, Effect::Read, k.target.namespace_ref())),
             }
         }
-        other => Err(k.fail(
-            Effect::Read,
-            what,
-            other,
-            "api-resources --api-group=external-secrets.io",
-        )),
+        _ => Err(k.fail(Effect::Read)),
     }
 }
 
@@ -593,27 +479,15 @@ fn group_absent(k: &Kubectl<'_>) -> bool {
         })
 }
 
+/// The operator is not installed (`old`: installed, but it does not serve [`API`]): a
+/// cluster admin installs or upgrades it (06.25).
 fn not_served(old: bool) -> Error {
-    if old {
-        Error::Dependency(
-            "the External Secrets Operator in this cluster does not serve external-secrets.io/v1, \
-             which opv writes; nothing was changed\n  next: upgrade it (opv is tested with 2.11): \
-             helm upgrade external-secrets external-secrets/external-secrets -n external-secrets"
-                .into(),
-        )
-    } else {
-        Error::Dependency(
-            "the External Secrets Operator is not installed in this cluster (no \
-             external-secrets.io/v1 API); nothing was changed\n  next: helm install \
-             external-secrets external-secrets/external-secrets -n external-secrets \
-             --create-namespace (see docs/agent-setup.md)"
-                .into(),
-        )
-    }
+    owner_setup(if old { OPERATOR_V1 } else { OPERATOR })
 }
 
-/// `auth can-i <verb> externalsecrets.external-secrets.io`: `Ok(true)` when allowed.
-pub(crate) fn can_i(k: &Kubectl<'_>, verb: &str) -> Result<bool, Error> {
+/// `auth can-i <verb> externalsecrets.external-secrets.io`: `Ok(None)` when allowed, else
+/// the kubectl strategy's typed refusal (a missing right, naming the grant).
+pub(crate) fn can_i(k: &Kubectl<'_>, verb: &str) -> Result<Option<Error>, Error> {
     let what = format!("kubectl auth can-i {verb} {RESOURCE}");
     match k.call(
         Effect::Read,
@@ -622,28 +496,12 @@ pub(crate) fn can_i(k: &Kubectl<'_>, verb: &str) -> Result<bool, Error> {
         None,
         &[1],
     )? {
-        Outcome::Done(_) => Ok(true),
-        Outcome::Refused(o) if o.status == 1 && super::runtime::answered_no(&o.stdout) => Ok(false),
-        other => Err(k.fail(
-            Effect::Read,
-            &what,
-            other,
-            &format!("auth can-i {verb} {RESOURCE}"),
-        )),
+        Outcome::Done(_) => Ok(None),
+        Outcome::Refused(o) if o.status == 1 && super::runtime::answered_no(&o.stdout) => {
+            Ok(Some(k.fail(Effect::Read)))
+        }
+        _ => Err(k.fail(Effect::Read)),
     }
-}
-
-/// The `create role` / `create rolebinding` pair granting `verbs` on ExternalSecrets.
-fn grant(k: &Kubectl<'_>, verbs: &str) -> String {
-    format!(
-        "`{}` and `{}`",
-        k.command(&format!(
-            "create role opv-external-secrets --verb={verbs} --resource={RESOURCE}"
-        )),
-        k.command(
-            "create rolebinding opv-external-secrets --role=opv-external-secrets --user=<you>"
-        )
-    )
 }
 
 /// The External Secrets checks before a command touches the target (NR-23): the operator
@@ -661,7 +519,7 @@ pub(crate) fn preflight(
     let mut checks = Vec::new();
     let name = format!("cluster secret store {cluster_store}");
     let refuse_or_warn = |checks: &mut Vec<Check>, msg: String| match mode {
-        PreflightMode::Mutate => Err(Error::Target(msg.into())),
+        PreflightMode::Mutate => Err(owner_setup(cluster_store)),
         PreflightMode::Read => {
             checks.push(Check {
                 name: name.clone().into(),
@@ -672,23 +530,10 @@ pub(crate) fn preflight(
     };
     let css_cmd = k.command(&format!("describe {STORE_RESOURCE} {cluster_store}"));
     match store_state(k, cluster_store, locator)? {
-        StoreState::Missing => {
-            return Err(Error::Target(
-                format!(
-                    "ClusterSecretStore {cluster_store} does not exist, so no ExternalSecret can \
-                 read {describe}; nothing was changed\n  next: create it (see \
-                 docs/agent-setup.md), or set secret_store in the store's [stores.<name>] \
-                 table to the ClusterSecretStore that reads {describe}"
-                )
-                .into(),
-            ));
-        }
+        StoreState::Missing => return Err(owner_setup(cluster_store)),
         StoreState::NotReady(why) => refuse_or_warn(
             &mut checks,
-            format!(
-                "ClusterSecretStore {cluster_store} is not Ready ({why}); nothing was \
-                 changed\n  next: `{css_cmd}`; fix it, then run the same command again"
-            ),
+            format!("ClusterSecretStore {cluster_store} is not Ready ({why}) (`{css_cmd}`)"),
         )?,
         StoreState::Ready { names_store: false } => checks.push(Check {
             name: name.clone().into(),
@@ -699,32 +544,12 @@ pub(crate) fn preflight(
         }),
         StoreState::Ready { names_store: true } => {}
     }
-    if !can_i(k, "create")? {
-        let msg = format!(
-            "your kubectl identity cannot create ExternalSecrets in namespace {}; nothing was \
-             changed\n  next: ask an admin to grant it: {}",
-            k.target.namespace,
-            grant(k, "get,list,create,delete")
-        );
+    if let Some(refused) = can_i(k, "create")? {
         match mode {
-            PreflightMode::Mutate => {
-                return Err(Error::Target(
-                    format!(
-                        "your kubectl identity cannot create ExternalSecrets in namespace {}; \
-                         nothing was changed",
-                        k.target.namespace
-                    )
-                    .into(),
-                )
-                .with_code(Code::PermissionDenied)
-                .with_do(format!(
-                    "ask a namespace admin to grant it: {}",
-                    grant(k, "get,list,create,delete")
-                )));
-            }
+            PreflightMode::Mutate => return Err(refused),
             PreflightMode::Read => checks.push(Check {
                 name: "external secrets access".into(),
-                outcome: Ok(Verdict::Warn(msg)),
+                outcome: Ok(Verdict::Warn(refused.to_string())),
             }),
         }
     }
@@ -764,16 +589,7 @@ pub(crate) fn doctor(
     }
     let css_cmd = k.command(&format!("describe {STORE_RESOURCE} {cluster_store}"));
     let css = store_state(k, cluster_store, locator).and_then(|s| match s {
-        StoreState::Missing => Err(Error::Target(
-            format!(
-                "{cluster_store} does not exist\n  next: create it (see docs/agent-setup.md), or \
-             set secret_store in the store's [stores.<name>] table"
-            )
-            .into(),
-        )),
-        StoreState::NotReady(why) => Err(Error::Target(
-            format!("{cluster_store} is not Ready ({why})\n  next: `{css_cmd}`").into(),
-        )),
+        StoreState::Missing | StoreState::NotReady(_) => Err(owner_setup(cluster_store)),
         StoreState::Ready { names_store: false } => Ok(Verdict::Warn(format!(
             "{cluster_store} is Ready, but its settings never name {locator}; check that it \
              reads {describe} (`{css_cmd}`)"
@@ -786,8 +602,8 @@ pub(crate) fn doctor(
     let mut failed = None;
     for verb in ["get", "list", "create", "delete"] {
         match can_i(k, verb) {
-            Ok(true) => {}
-            Ok(false) => missing.push(verb),
+            Ok(None) => {}
+            Ok(Some(_)) => missing.push(verb),
             Err(e) => {
                 failed = Some(e);
                 break;
@@ -801,10 +617,9 @@ pub(crate) fn doctor(
             k.target.namespace
         )),
         (None, false) => Verdict::Warn(format!(
-            "your kubectl identity cannot {} ExternalSecrets in namespace {}\n  next: {}",
+            "your kubectl identity cannot {} ExternalSecrets in namespace {}",
             missing.join(", "),
-            k.target.namespace,
-            grant(k, &missing.join(","))
+            k.target.namespace
         )),
     };
     vec![
@@ -871,15 +686,15 @@ impl<'a> ExternalStore<'a> {
         args.push("--ignore-not-found");
         match self.k.call(Effect::Write, what, &args, None, &[])? {
             Outcome::Done(_) => Ok(()),
-            other => match crate::runner::diagnosing(|| list(&self.k, selector)) {
-                Ok(left) if !left.iter().any(|l| names.contains(&l.name.as_str())) => Ok(()),
-                _ => Err(self.k.fail(
-                    Effect::Write,
-                    what,
-                    other,
-                    &format!("auth can-i delete {RESOURCE}"),
-                )),
-            },
+            _ => {
+                let failed = self.k.failed(Effect::Write);
+                match crate::runner::diagnosing(|| list(&self.k, selector)) {
+                    Ok(left) if !left.iter().any(|l| names.contains(&l.name.as_str())) => Ok(()),
+                    _ => Err(self
+                        .k
+                        .explain(failed, Effect::Write, self.k.target.namespace_ref())),
+                }
+            }
         }
     }
 
@@ -943,7 +758,9 @@ impl PinnedStore for ExternalStore<'_> {
         stamp: &crate::domain::Stamp,
     ) -> Result<String, Error> {
         if let Some((rule, reason)) = super::store::refusal(name, value) {
-            return Err(Error::Policy(format!("{name}: {rule}: {reason}").into()));
+            return Err(Error::Policy(
+                format!("{name}: {rule}: {reason}; nothing was sent to the cluster").into(),
+            ));
         }
         self.inner.write_one(name, value, stamp)
     }
@@ -1157,7 +974,7 @@ mod tests {
     fn missing_version_is_named_as_the_cause() {
         assert!(
             diagnosis(Some(false), vec![])
-                .contains("has no version 46687ce78b76487cb0c1da470360b638 of DB_URL")
+                .contains("version 46687ce78b76487cb0c1da470360b638 of DB_URL from Key Vault kv-opv-fixture, which no longer has it")
         );
     }
 
@@ -1168,114 +985,116 @@ mod tests {
         assert_eq!(e.step(rerun, "opv sync --help").next, rerun);
     }
 
-    #[test]
-    fn store_not_ready_is_named_with_its_message() {
-        let out = store_with(|v| {
+    /// The object a cluster admin is asked to set up, when the error is that.
+    fn owner_object(e: &Error) -> Option<String> {
+        match e.cause() {
+            Some((Cause::OwnerSetupRequired { object, .. }, _)) => {
+                Some(object.name.as_str().to_string())
+            }
+            _ => None,
+        }
+    }
+
+    fn not_ready_store() -> Output {
+        store_with(|v| {
             v["status"]["conditions"][0]["status"] = json!("False");
             v["status"]["conditions"][0]["message"] = json!("unable to authenticate");
-        });
-        assert!(
-            diagnosis(Some(true), vec![out])
-                .contains("is not Ready (Ready=False, reason Valid: unable to authenticate)")
+        })
+    }
+
+    #[test]
+    fn store_not_ready_is_the_cluster_admins_to_fix() {
+        let e = diagnosis_error(Some(true), vec![not_ready_store()]);
+        assert_eq!(owner_object(&e).as_deref(), Some("prod-vault"));
+    }
+
+    /// 06.52: the store's Ready message is operator-written text, never echoed.
+    #[test]
+    fn store_not_ready_message_is_never_shown() {
+        assert!(!diagnosis(Some(true), vec![not_ready_store()]).contains("unable to authenticate"));
+    }
+
+    #[test]
+    fn store_not_ready_state_keeps_only_status_and_reason() {
+        let r = FakeRunner::new([not_ready_store()]);
+        let t = super::super::testutil::target();
+        assert_eq!(
+            store_state(&Kubectl::new(&r, &t), "prod-vault", "kv-opv-fixture").unwrap(),
+            StoreState::NotReady("Ready=False, reason Valid".into())
         );
     }
 
     #[test]
-    fn store_for_another_vault_is_named() {
+    fn store_for_another_vault_is_the_cluster_admins_to_fix() {
         let out = store_with(|v| {
             v["spec"]["provider"]["azurekv"]["vaultUrl"] =
                 json!("https://kv-other.vault.azure.net/");
         });
-        assert!(
-            diagnosis(Some(true), vec![out]).contains("its settings never name kv-opv-fixture")
-        );
+        let e = diagnosis_error(Some(true), vec![out]);
+        assert_eq!(owner_object(&e).as_deref(), Some("prod-vault"));
     }
 
     #[test]
-    fn missing_store_is_named() {
-        assert!(
-            diagnosis(Some(true), vec![Output::success(Vec::new())])
-                .contains("ClusterSecretStore prod-vault does not exist")
-        );
+    fn missing_store_is_the_cluster_admins_to_fix() {
+        let e = diagnosis_error(Some(true), vec![Output::success(Vec::new())]);
+        assert_eq!(owner_object(&e).as_deref(), Some("prod-vault"));
     }
 
+    /// 06.15: found live, an expired client secret behind a store still cached as Ready;
+    /// only a cluster admin can renew it, so a person acts first.
     #[test]
-    fn recorded_ready_store_that_names_the_vault_points_at_the_identity() {
-        let events = Output::success(r#"{"items":[]}"#);
-        assert!(
-            diagnosis(Some(true), vec![store_with(|_| {}), events])
-                .contains("its identity most likely cannot read")
-        );
-    }
-
-    const EVENTS_EXPIRED: &str = include_str!(
-        "../../../tests/fixtures/external-secrets/events-store-credential-expired.json"
-    );
-
-    /// The recorded event list with its warning's message rewritten by `f`.
-    fn events_with(f: impl FnOnce(&str) -> String) -> Output {
-        let mut v: Value = serde_json::from_str(EVENTS_EXPIRED).unwrap();
-        let m = v["items"][1]["message"].as_str().unwrap().to_string();
-        v["items"][1]["message"] = json!(f(&m));
-        Output::success(v.to_string().into_bytes())
-    }
-
-    /// Found live: an expired client secret behind a store still cached as Ready.
-    #[test]
-    fn recorded_expired_store_credential_is_named_as_the_cause() {
-        let events = Output::success(EVENTS_EXPIRED);
-        assert!(
-            diagnosis(Some(true), vec![store_with(|_| {}), events])
-                .contains("the credential of ClusterSecretStore prod-vault has expired")
-        );
-    }
-
-    #[test]
-    fn rejected_store_credential_is_named_as_the_cause() {
-        let events = events_with(|m| m.replace("AADSTS7000222", "AADSTS7000215"));
-        assert!(
-            diagnosis(Some(true), vec![store_with(|_| {}), events])
-                .contains("the identity of ClusterSecretStore prod-vault cannot sign in")
-        );
-    }
-
-    #[test]
-    fn forbidden_read_is_named_as_the_cause() {
-        let events = events_with(|_| "StatusCode=403 -- Forbidden".into());
-        assert!(
-            diagnosis(Some(true), vec![store_with(|_| {}), events])
-                .contains("signs in but may not read this secret")
-        );
-    }
-
-    #[test]
-    fn unreadable_events_keep_the_identity_diagnosis() {
-        let mut outputs = vec![store_with(|_| {})];
-        outputs.extend(crate::runner::fake::failed_read(1));
-        assert!(diagnosis(Some(true), outputs).contains("its identity most likely cannot read"));
-    }
-
-    #[test]
-    fn an_older_warning_does_not_decide_the_cause() {
-        let mut v: Value = serde_json::from_str(EVENTS_EXPIRED).unwrap();
-        v["items"][0]["type"] = json!("Warning");
-        v["items"][0]["message"] = json!("StatusCode=403");
-        v["items"][1]["lastTimestamp"] = json!("2026-10-12T04:44:40Z");
-        assert_eq!(classify_events(&v), Credential::Expired);
-    }
-
-    #[test]
-    fn the_event_message_is_never_printed() {
-        let events = Output::success(EVENTS_EXPIRED);
-        assert!(!diagnosis(Some(true), vec![store_with(|_| {}), events]).contains("Trace ID"));
+    fn ready_store_that_cannot_read_needs_a_person() {
+        assert!(diagnosis_error(Some(true), vec![store_with(|_| {})]).human_required());
     }
 
     #[test]
     fn store_that_cannot_tell_versions_still_gets_the_cluster_store_checked() {
-        let events = Output::success(r#"{"items":[]}"#);
+        let e = diagnosis_error(None, vec![store_with(|_| {})]);
+        assert_eq!(owner_object(&e).as_deref(), Some("prod-vault"));
+    }
+
+    /// 06.25: an operator that is not installed is a cluster admin's to install, never a
+    /// dependency opv names a repository-local document for.
+    #[test]
+    fn operator_not_installed_is_the_cluster_admins_to_install() {
+        let r = FakeRunner::default();
+        r.push_with_stderr(
+            Output::failure(1),
+            "Error from server (NotFound): the server could not find the requested resource\n",
+        );
+        r.push_with_stderr(
+            Output::failure(1),
+            "Error from server (NotFound): the server could not find the requested resource\n",
+        );
+        let t = super::super::testutil::target();
+        let e = operator_served(&Kubectl::new(&r, &t)).unwrap_err();
+        assert_eq!(owner_object(&e).as_deref(), Some(OPERATOR));
+    }
+
+    #[test]
+    fn a_no_to_creating_external_secrets_is_permission_denied() {
+        let r = FakeRunner::new([Output {
+            status: 1,
+            stdout: b"no\n".to_vec().into(),
+        }]);
+        let t = super::super::testutil::target();
+        let refused = can_i(&Kubectl::new(&r, &t), "create").unwrap();
+        assert_eq!(refused.map(|e| e.code_str()), Some("permission_denied"));
+    }
+
+    #[test]
+    fn operator_not_installed_needs_a_person() {
+        let r = FakeRunner::default();
+        r.push_with_stderr(
+            Output::failure(1),
+            "Error from server (NotFound): the server could not find the requested resource\n",
+        );
+        r.push_with_stderr(Output::failure(1), "");
+        let t = super::super::testutil::target();
         assert!(
-            diagnosis(None, vec![store_with(|_| {}), events])
-                .contains("its identity most likely cannot read")
+            operator_served(&Kubectl::new(&r, &t))
+                .unwrap_err()
+                .human_required()
         );
     }
 }

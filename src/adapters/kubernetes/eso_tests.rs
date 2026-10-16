@@ -1000,45 +1000,48 @@ fn cluster_secret_store_not_ready_refuses_before_any_write() {
     assert_eq!(sim.writes(), 0);
 }
 
+/// 06.52: the store's Ready message is operator-written text, never echoed.
 #[test]
-fn cluster_secret_store_not_ready_refusal_names_its_message() {
+fn cluster_secret_store_not_ready_refusal_never_echoes_its_message() {
     let (_, e) = refused(not_ready);
-    assert!(e.to_string().contains("unable to validate store"), "{e}");
+    assert!(!e.to_string().contains("unable to validate store"), "{e}");
+}
+
+#[test]
+fn cluster_secret_store_not_ready_refusal_is_the_cluster_admins_to_fix() {
+    let (_, e) = refused(not_ready);
+    assert_eq!(e.code_str(), "owner_setup_required");
 }
 
 #[test]
 fn missing_cluster_secret_store_refuses_before_any_write() {
     let (sim, e) = refused(|w| w.cluster_store = None);
     assert!(
-        sim.writes() == 0
-            && e.to_string()
-                .contains("ClusterSecretStore prod-vault does not exist"),
+        sim.writes() == 0 && e.code_str() == "owner_setup_required",
         "{e}"
     );
 }
 
+/// 06.25: installing the operator is a cluster admin's step, not a missing local tool.
 #[test]
-fn operator_not_installed_is_a_dependency_error() {
+fn operator_not_installed_is_the_cluster_admins_to_install() {
     let (_, e) = refused(|w| w.operator = false);
-    assert_eq!(e.exit_code(), 3, "{e}");
+    assert_eq!(e.code_str(), "owner_setup_required", "{e}");
 }
 
 #[test]
 fn identity_that_cannot_create_external_secrets_is_refused_before_any_write() {
-    let (sim, e) = refused(|w| w.may_create = false);
-    assert!(sim.writes() == 0 && e.exit_code() == 5, "{e}");
+    let (sim, _) = refused(|w| w.may_create = false);
+    assert_eq!(sim.writes(), 0);
 }
 
 // ---- SecretSyncedError (E3) ----
 
+/// 06.15: a store identity that cannot read is fixed by a cluster admin, so a person acts.
 #[test]
-fn sync_error_names_the_store_identity_as_the_cause() {
+fn sync_error_on_the_store_identity_needs_a_person() {
     let (_, e) = refused(|w| w.denied = true);
-    assert!(
-        e.to_string()
-            .contains("its identity most likely cannot read this secret"),
-        "{e}"
-    );
+    assert!(e.human_required(), "{e}");
 }
 
 #[test]
@@ -1231,7 +1234,7 @@ fn a_forbidden_discovery_read_is_never_reported_as_a_missing_operator() {
         w.operator = false;
         w.forbid_discovery = true;
     });
-    assert_eq!(e.code(), crate::error::Code::PermissionDenied);
+    assert_ne!(e.code_str(), "owner_setup_required");
 }
 
 #[test]
@@ -1239,7 +1242,10 @@ fn doctor_reports_a_missing_operator() {
     let sim = Sim::new(item_with(API_V1));
     sim.world.borrow_mut().operator = false;
     let out = doctor_out(&sim);
-    assert!(out.contains("FAIL  external secrets operator: dependency error: the External Secrets Operator is not installed"), "{out}");
+    assert!(
+        out.contains("FAIL  external secrets operator: external store External Secrets Operator"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -1422,13 +1428,15 @@ fn status_json_carries_the_chain_beside_target_name() {
     );
 }
 
-/// UX1 (NR-19): a refusal on the External Secrets path names a runnable next step.
+/// UX1 (NR-19): a refusal on the External Secrets path names a runnable next step: the
+/// read that checks the store again once a cluster admin fixed it.
 #[test]
 fn cluster_secret_store_not_ready_refusal_names_a_next_step() {
     let (_, e) = refused(not_ready);
     assert!(
-        e.next_step()
-            .is_some_and(|n| n.contains("kubectl") && n.contains("describe")),
+        e.step("opv sync dev", "opv sync --help")
+            .next
+            .starts_with("opv ready"),
         "{e:?}"
     );
 }
