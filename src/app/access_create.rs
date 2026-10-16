@@ -32,7 +32,7 @@ use super::write_err;
 use crate::adapters::onepassword_diagnose::diagnose;
 use crate::cause::render::cmd_text;
 use crate::cause::{
-    AccountId, Cause, Cmd, CreateKind, DiagnoseContext, EnvName, Guard, Refind, TargetName,
+    AccountId, Cause, Cmd, CreateKind, DiagnoseContext, EnvName, Guard, Refind, System, TargetName,
     Unusable, Upstream, UsageProblem,
 };
 use crate::domain::SecretValue;
@@ -293,21 +293,18 @@ pub fn run(
     // From here on, any output that might echo it is scrubbed (SR-1).
     crate::scrub::register_secret(token.expose());
     if token.expose().is_empty() {
-        // 07.13: the account exists and its token is lost; name it, and check before any
-        // re-create (the runner observed no failure, so this is not a diagnosed cause).
-        return Err(Error::Source(
-            format!(
-                "1Password created service account {:?} but printed no token, so its token \
-                 was never stored",
-                id.service_account
-            )
-            .into(),
-        )
-        .with_do(format!(
-            "remove service account {:?} in 1Password (Developer > Service accounts)",
-            id.service_account
-        ))
-        .with_next(cmd_text(&check)));
+        // 07.13, C20: the account exists and its token is lost (1Password shows it once):
+        // it is revoked, never made again (X5). op has no listing of service accounts, so
+        // there is no vendor refind.
+        return Err(Cause::SecretNotStored {
+            system: System::OnePassword,
+            kind: CreateKind::ServiceAccount,
+            name: id.service_account.clone(),
+            env: EnvName::new(env),
+            target: TargetName::new(target.unwrap_or_default()),
+            refind: None,
+        }
+        .into());
     }
     let stored = ci_secrets::store(r, &gh.repo, gh.environment.as_deref(), &gh.secret, &token);
     drop(token);

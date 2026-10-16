@@ -151,7 +151,7 @@ fn read(
         Ok(Outcome::Done(o)) => Ok(o.stdout.to_vec()),
         Ok(Outcome::Refused(_)) => Err(diagnosis(r, host, account, &call, item)),
         Ok(Outcome::Unknown { .. }) => Err(unanswered(&call)),
-        Err(e) => Err(op_spawn_error(&e, host)),
+        Err(e) => Err(op_spawn_error(r, &e, host)),
     }
 }
 
@@ -198,8 +198,19 @@ pub struct Account {
 /// sign-in address (matched ignoring case). `op` itself takes no email, and a sign-in
 /// address is shared by every account on `my.1password.com`, so opv resolves `who` to the
 /// account ID once and uses that (found live). None, or several, is a configuration error
-/// that lists the accounts.
+/// that lists the accounts. `who` came from `--account`; [`resolve_from`] names another
+/// source.
 pub fn resolve(accounts: &[Account], who: &str) -> Result<String, Error> {
+    resolve_from(accounts, who, AccountSource::Flag)
+}
+
+/// [`resolve`] for an account value that `selected_by` chose (`OP_ACCOUNT`, a `.opv`, an
+/// argument): an account op does not know names that source, never `--account` (C20).
+pub fn resolve_from(
+    accounts: &[Account],
+    who: &str,
+    selected_by: AccountSource,
+) -> Result<String, Error> {
     let w = who.trim().to_ascii_lowercase();
     let host = |u: &str| {
         u.trim_start_matches("https://")
@@ -217,7 +228,7 @@ pub fn resolve(accounts: &[Account], who: &str) -> Result<String, Error> {
         .collect();
     match hits.as_slice() {
         [one] => Ok(one.account_uuid.clone()),
-        [] => Err(not_known(who)),
+        [] => Err(not_known(who, selected_by)),
         // An address or email several accounts share: a person picks one by its account
         // ID (04.09); opv never takes the first.
         many => Err(Cause::AccountAmbiguous {
@@ -236,7 +247,7 @@ pub fn resolve(accounts: &[Account], who: &str) -> Result<String, Error> {
 /// share the Windows app's: found live), so it is added at op's prompt (`opv login --add`,
 /// with `--account` only for an email); with the Windows `op.exe` or on macOS and Windows,
 /// in the 1Password app. The cause renders the step for the platform.
-fn not_known(who: &str) -> Error {
+fn not_known(who: &str, selected_by: AccountSource) -> Error {
     let account = if who.contains('@') {
         AccountRef::Email(who.to_string())
     } else if crate::config::is_id(who) {
@@ -247,7 +258,7 @@ fn not_known(who: &str) -> Error {
     let host = Host::detect();
     Cause::AccountNotOnMachine {
         account,
-        selected_by: AccountSource::Flag,
+        selected_by,
         in_app: host.op_is_windows_exe()
             || matches!(
                 host.platform,
@@ -257,42 +268,16 @@ fn not_known(who: &str) -> Error {
     .into()
 }
 
-/// One line per account: email, sign-in address and account ID (the person's own accounts,
-/// shown so they can choose).
-fn listing(accounts: &[Account]) -> String {
-    if accounts.is_empty() {
-        return "  (none: add one in the 1Password app)".into();
-    }
-    accounts
-        .iter()
-        .map(|a| {
-            format!(
-                "  {}  {}  {}",
-                if a.email.is_empty() { "-" } else { &a.email },
-                a.url.trim_start_matches("https://").trim_end_matches('/'),
-                a.account_uuid
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// Several accounts on this machine and none chosen for the project: opv never guesses and
 /// never searches them all (each search asks the 1Password app about that account, and
-/// none of them was granted to this project). The person picks one.
+/// none of them was granted to this project). The person picks one by its account ID, and
+/// the step lists them (`opv account list`), never a guessed candidate (X2).
 pub fn choose_error(accounts: &[Account]) -> Error {
-    Error::Config(
-        format!(
-            "{} 1Password accounts are on this machine and this project names none; opv uses \
-             only the account you choose, never op's default:\n{}",
-            accounts.len(),
-            listing(accounts)
-        )
-        .into(),
-    )
-    .with_code(crate::error::Code::AccountRequired)
-    .with_do("pick the project's account: run opv login --account <email or account ID> in your own terminal")
-    .with_next("opv account list")
+    Cause::ChoiceRequired {
+        flag: "--account".to_string(),
+        candidates: accounts.iter().map(|a| a.account_uuid.clone()).collect(),
+    }
+    .into()
 }
 
 /// The accounts op knows (`op account list`, a free probe); empty when it fails. Callers
@@ -384,11 +369,12 @@ pub fn get(
     let args = argv(&base, account);
     let out = read(r, &args, account, host, Some((item_id, vault_id)))?;
     let raw: Value = serde_json::from_slice(&out).map_err(|e| unreadable_reply(&args, &e))?;
-    parse(raw, item_id)
+    parse(raw, item_id, vault_id)
 }
 
-/// The manifest fields of an item JSON document.
-fn parse(raw: Value, item_id: &str) -> Result<Manifest, Error> {
+/// The manifest fields of an item JSON document. An item tagged as a manifest without a
+/// notes field holding text is not a Secure Note opv can use: it is left unchanged.
+fn parse(raw: Value, item_id: &str, vault_id: &str) -> Result<Manifest, Error> {
     let fields = raw["fields"].as_array().cloned().unwrap_or_default();
     let notes = fields
         .iter()
@@ -396,14 +382,11 @@ fn parse(raw: Value, item_id: &str) -> Result<Manifest, Error> {
         .and_then(|f| f["value"].as_str())
         .map(config_text)
         .ok_or_else(|| {
-            Error::Source(
-                format!(
-                    "item {item_id} is tagged {MANIFEST_TAG} but has no notes field holding the \
-                     configuration\n  next: opv config import --vault <vault> (or fix the item \
-                     in 1Password)"
-                )
-                .into(),
-            )
+            Error::from(Cause::ItemUnusable {
+                vault: Some(crate::cause::VaultId::new(vault_id)),
+                title: raw["title"].as_str().unwrap_or(item_id).to_string(),
+                problem: crate::cause::ItemProblem::WrongCategory,
+            })
         })?;
     let project = fields
         .iter()
@@ -537,7 +520,7 @@ pub fn create(
             Err(failed_read(r, host, &ctx, &call, None))
         }
         Ok(CreateOutcome::OutcomeUnknown(seen)) => Err(unknown(Failed::with_reply(seen))),
-        Err(e) => Err(op_spawn_error(&e, host)),
+        Err(e) => Err(op_spawn_error(r, &e, host)),
     }
 }
 
@@ -560,10 +543,15 @@ pub fn edit(
     account: Option<&str>,
     host: &dyn Fn() -> Host,
 ) -> Result<Written, Error> {
+    // `base` is the manifest as `get` read it, whose parse found its notes field: an item
+    // without one here is opv's own error.
+    let not_read = || {
+        Error::from(Cause::Bug {
+            site: "onepassword_manifest: an edit base without the notes get found",
+        })
+    };
     let mut item = base.clone();
-    let fields = item["fields"]
-        .as_array_mut()
-        .ok_or_else(|| Error::Source(format!("item {item_id} has no fields").into()))?;
+    let fields = item["fields"].as_array_mut().ok_or_else(not_read)?;
     let project = fields
         .iter()
         .find(|f| f["label"] == "project")
@@ -573,7 +561,7 @@ pub fn edit(
     let notes = fields
         .iter_mut()
         .find(|f| f["purpose"] == "NOTES" || f["id"] == "notesPlain")
-        .ok_or_else(|| Error::Source(format!("item {item_id} has no notes field").into()))?;
+        .ok_or_else(not_read)?;
     let previous = notes["value"].as_str().map(str::to_string);
     notes["value"] = Value::String(note_with(text, previous.as_deref(), &project));
     let body = serde_json::to_vec(&item).map_err(|_| Cause::Bug {
@@ -591,7 +579,7 @@ pub fn edit(
         Ok(Outcome::Done(o)) => Ok(match serde_json::from_slice::<Value>(&o.stdout) {
             Ok(v) => Written {
                 version: v["version"].as_u64(),
-                text: parse(v, item_id).ok().map(|m| m.text),
+                text: parse(v, item_id, vault_id).ok().map(|m| m.text),
             },
             Err(_) => Written::default(),
         }),
@@ -605,7 +593,7 @@ pub fn edit(
             ctx.resource.clone().expect("the edit names its item"),
             &call,
         )),
-        Err(e) => Err(op_spawn_error(&e, host)),
+        Err(e) => Err(op_spawn_error(r, &e, host)),
     }
 }
 
@@ -695,7 +683,7 @@ mod tests {
     #[test]
     fn template_holds_the_text_project_and_convention() {
         let t = template("opv · app", "app", &[MANIFEST_TAG.into()], "x = 1\n");
-        let m = parse(t, "i").unwrap();
+        let m = parse(t, "i", "v").unwrap();
         assert_eq!(
             (m.text.as_str(), m.project.as_deref()),
             ("x = 1\n", Some("app"))

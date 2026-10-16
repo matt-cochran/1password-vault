@@ -583,7 +583,7 @@ impl Server {
                 Err(e) => return call.failed(&e),
             };
             // Writes go to the project's own 1Password account, never op's default.
-            match crate::app::structure::binding(project, &r) {
+            match crate::app::structure::binding_as(project, &r, "generate") {
                 Ok((_, account)) => r.use_account(Some(account)),
                 Err(e) => return call.failed(&e),
             }
@@ -617,7 +617,7 @@ impl Server {
                 Ok(fleet) => fleet,
                 Err(e) => return call.failed(&e),
             };
-            let (name, account) = match crate::app::structure::binding(project, &r) {
+            let (name, account) = match crate::app::structure::binding_as(project, &r, "sync") {
                 Ok(b) => b,
                 Err(e) => return call.failed(&e),
             };

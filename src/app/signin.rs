@@ -169,7 +169,7 @@ impl<'a> EnvRunner<'a> {
         reference: &ItemRef,
         fields: &[CredentialField],
     ) -> Result<Self, Error> {
-        self.sign_in_with(login, reference, fields, None, None)?;
+        self.sign_in_with(login, reference, fields, None)?;
         Ok(self)
     }
 
@@ -181,11 +181,12 @@ impl<'a> EnvRunner<'a> {
         mut login: Box<dyn DeployLogin>,
         reference: &ItemRef,
         fields: &[CredentialField],
-        env_name: Option<&str>,
         principal: Option<crate::cause::Principal>,
     ) -> Result<(), Error> {
-        let values = onepassword::read_deploy_credentials(&*self, reference, fields, env_name)
-            .map_err(|e| deploy_failed(e, reference))?;
+        // The item belongs to this deploy identity (env and target), named by its refusal.
+        let values =
+            onepassword::read_deploy_credentials(&*self, reference, fields, principal.as_ref())
+                .map_err(|e| deploy_failed(e, reference))?;
         let signed = match principal {
             Some(p) => crate::runner::under_deploy(p, || login.sign_in(values, &*self)),
             None => login.sign_in(values, &*self),
@@ -233,13 +234,7 @@ impl<'a> EnvRunner<'a> {
             env: crate::cause::EnvName::new(env_name),
             target: crate::cause::TargetName::new(target_name.clone()),
         };
-        self.sign_in_with(
-            login,
-            reference,
-            fields,
-            Some(env_name),
-            Some(principal.clone()),
-        )?;
+        self.sign_in_with(login, reference, fields, Some(principal.clone()))?;
         self.deploy = Some(principal);
         Ok(())
     }

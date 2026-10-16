@@ -6,7 +6,7 @@ use std::path::Path;
 
 /// Legacy constructions in production code when the Catalog arm landed. Lower it when a
 /// change converts call sites to causes; never raise it.
-const LEGACY_CEILING: usize = 129;
+const LEGACY_CEILING: usize = 94;
 
 const CONSTRUCTORS: [&str; 8] = [
     "Error::Config(",

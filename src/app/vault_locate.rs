@@ -12,8 +12,8 @@ use serde_json::json;
 
 use super::write_err;
 use crate::adapters::onepassword_manifest::{self as manifest, Account, Discovery};
-use crate::cause::{AccountId, Cause, UsageProblem};
-use crate::error::{Code, Error};
+use crate::cause::{AccountId, AccountRef, AccountSource, Cause, UsageProblem};
+use crate::error::Error;
 use crate::runner::{Call, CommandRunner, PROBE_TIMEOUT};
 
 /// What one account says about the vault.
@@ -148,25 +148,15 @@ pub fn run(
         }
         .into());
     }
-    // Audit 04.07: an account is added at op's prompt only where op keeps its own accounts.
-    let (add, next) = if super::account::app_holds_accounts_here() {
-        ("add that account in the 1Password app", "opv login")
-    } else {
-        ("add that account to op here", "opv login --add")
-    };
-    Err(Error::Source(
-        format!(
-            "vault {vault} is in none of the {} accounts this 1Password CLI knows; it may \
-             have been deleted, or be in an account not added here",
-            rows.len()
-        )
-        .into(),
-    )
-    .with_code(Code::VaultNoAccess)
-    .with_do(format!(
-        "check the vault ID in the configuration; if another account holds it, {add}"
-    ))
-    .with_next(next))
+    // Every account op knows answered that it does not hold the vault: the account that
+    // does is not added here. It is added at op's prompt only where op keeps its own
+    // accounts (04.07), and the step never loops back to `opv vault locate`.
+    Err(Cause::AccountNotOnMachine {
+        account: AccountRef::Unnamed,
+        selected_by: AccountSource::OpDefault,
+        in_app: super::account::app_holds_accounts_here(),
+    }
+    .into())
 }
 
 /// `opv vault locate` under a service account or Connect (audit 04.13): one `op vault get`

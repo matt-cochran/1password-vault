@@ -11,7 +11,8 @@
 use std::io::{self, Read, Write};
 
 use crate::cause::{
-    AccountId, AccountRef, Cause, ExitClass, NoTerminal, SessionState, System, Upstream,
+    AccountId, AccountRef, Cause, DiagnoseContext, ExitClass, NoTerminal, SessionState, System,
+    Upstream,
 };
 use crate::error::{Code, Error};
 
@@ -244,41 +245,17 @@ impl Failure {
     }
 
     /// The error for `what` (`signing in`, `adding the account`) to `account` (as the person
-    /// named it, or `None`) during `opv <command>`; one recovery step, naming the account
-    /// whenever it is known.
+    /// named it, or `None`) during `opv <command>`, when op's own lines were not kept: the
+    /// same as [`Failure::error_said`] with none.
     pub fn error(self, what: &str, account: Option<&str>, command: &str) -> Error {
-        if let Some(cause) = self.cause(account) {
-            return cause.into();
-        }
-        let who = account.map_or(String::new(), |a| format!(" to {a}"));
-        let again = match account {
-            Some(a) => format!("opv login --account {a}"),
-            None => "opv login".to_string(),
-        };
-        let (text, step, next) = match self {
-            Failure::ProviderUnavailable => (
-                format!("1Password could not be reached while {what}{who}"),
-                "check the network or https://status.1password.com; nothing was changed",
-                again,
-            ),
-            _ => (
-                format!("{what}{who} did not complete; 1Password gave no reason opv recognises"),
-                "check the CLI with opv doctor",
-                "opv doctor".to_string(),
-            ),
-        };
-        // Audit 04.27: say plainly that no session token left this process.
-        let text = format!("{text} (during opv {command}). No session token was shown or saved.");
-        let e = match self {
-            Failure::ProviderUnavailable => Error::Unknown(text.into()),
-            _ => Error::Auth(text.into()),
-        };
-        e.with_code(self.code()).with_do(step).with_next(next)
+        self.error_said(what, account, command, &[], None)
     }
 
-    /// [`Failure::error`] with op's own error lines (`messages`, from [`Filter`]) and exit
-    /// `status` as the scrubbed evidence of a cataloged cause (#142: opv's words alone can
-    /// hide the cause). A failure without a cause keeps its legacy text.
+    /// The error for this failure with op's own error lines (`messages`, from [`Filter`])
+    /// and exit `status` (128 + n for signal n) as the scrubbed evidence (#142: opv's words
+    /// alone can hide the cause). A failure the classifier cannot name (1Password not
+    /// reached, a reason opv does not recognise) is recorded as the streamed `op` call it
+    /// was and diagnosed from op's own reply, like every failed `op` call (C9, 04.02).
     pub fn error_said(
         self,
         what: &str,
@@ -287,6 +264,7 @@ impl Failure {
         messages: &[String],
         status: Option<i32>,
     ) -> Error {
+        let _ = command;
         let said: Vec<String> = messages
             .iter()
             .filter(|m| !m.trim().is_empty())
@@ -308,9 +286,65 @@ impl Failure {
                     untrusted: true,
                 },
             ),
-            _ => self.error(what, account, command),
+            Some(cause) => cause.into(),
+            None => diagnosed(what, account, messages, status),
         }
     }
+}
+
+/// The prompted `op` call (`op signin`, `op account add`) that ended as `status` after
+/// printing `messages`, recorded with the runner (it ran on the terminal, outside it) and
+/// diagnosed by the 1Password strategy from op's own reply, with that reply as evidence.
+fn diagnosed(what: &str, account: Option<&str>, messages: &[String], status: Option<i32>) -> Error {
+    let args: &[&str] = if what.contains("account") {
+        &["account", "add"]
+    } else {
+        &["signin"]
+    };
+    let exit = match status {
+        Some(code) if code > 128 => ExitClass::Signal { signal: code - 128 },
+        Some(code) => ExitClass::Code { code },
+        None => ExitClass::Signal { signal: 0 },
+    };
+    crate::runner::record_streamed(
+        crate::adapters::onepassword::OP,
+        args,
+        exit,
+        messages.join("\n").as_bytes(),
+    );
+    let Some(failure) = crate::runner::take_failure() else {
+        return Cause::Bug {
+            site: "signin_filter: a recorded op prompt left no failure",
+        }
+        .into();
+    };
+    let ctx = DiagnoseContext {
+        account: account
+            .filter(|a| crate::config::is_id(a))
+            .map(AccountId::new),
+        ..DiagnoseContext::default()
+    };
+    let cause = crate::adapters::onepassword_diagnose::diagnose(
+        failure.seen.clone(),
+        failure.stderr(),
+        &ctx,
+    );
+    let said = failure.excerpt.map(|x| x.lines).unwrap_or_default();
+    if said.is_empty() {
+        return cause.into();
+    }
+    Error::with_evidence(
+        cause,
+        Upstream {
+            source: System::OnePassword,
+            tool: "1Password CLI".into(),
+            version: None,
+            exit,
+            said,
+            removed_advice: false,
+            untrusted: true,
+        },
+    )
 }
 
 #[cfg(test)]
