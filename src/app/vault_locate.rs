@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use super::write_err;
-use crate::adapters::onepassword_manifest::{self as manifest, Account, Discovery};
+use crate::adapters::onepassword_manifest::{self as manifest, Account, Discovery, Holds};
 use crate::cause::{AccountId, AccountRef, AccountSource, Cause, UsageProblem};
 use crate::error::Error;
 use crate::runner::{Call, CommandRunner, PROBE_TIMEOUT};
@@ -40,63 +40,20 @@ fn row(a: &Account, result: &'static str) -> Row {
     }
 }
 
-/// Ask each account in turn whether it holds `vault`.
+/// Ask each account in turn whether it holds `vault` (the shared read-only probe,
+/// [`manifest::holds_vault`]).
 pub fn rows(r: &dyn CommandRunner, accounts: &[Account], vault: &str) -> Vec<Row> {
     accounts
         .iter()
         .map(|a| {
-            let args = [
-                "vault",
-                "get",
-                vault,
-                "--account",
-                a.account_uuid.as_str(),
-                "--format",
-                "json",
-            ];
-            let call = Call::new("op", &args);
-            match r.probe(&call, PROBE_TIMEOUT) {
-                Ok(o) if o.status == 0 => row(a, "found"),
-                Ok(_) => match probe_said(vault, &a.account_uuid) {
-                    Some(true) => row(a, "not_found"),
-                    Some(false) => row(a, "unknown"),
-                    // A reply opv does not recognise: not there when this account is
-                    // signed in, else not asked.
-                    None => match manifest::signed_in(r, &a.account_uuid) {
-                        Some(true) => row(a, "not_found"),
-                        _ => row(a, "unknown"),
-                    },
-                },
-                Err(_) => row(a, "unknown"),
-            }
+            let result = match manifest::holds_vault(r, &a.account_uuid, vault) {
+                Holds::Found => "found",
+                Holds::NotFound => "not_found",
+                Holds::Unknown => "unknown",
+            };
+            row(a, result)
         })
         .collect()
-}
-
-/// What the failed `op vault get` of `vault` in `account` said, through the 1Password
-/// diagnosis (design §5): `Some(true)` the vault is not in that account, `Some(false)` the
-/// account could not be asked (a sign-in, a timeout, op unusable), `None` a reply the
-/// diagnosis does not recognise.
-fn probe_said(vault: &str, account: &str) -> Option<bool> {
-    let failure = crate::runner::take_failure()?;
-    let ctx = crate::cause::DiagnoseContext {
-        resource: Some(crate::cause::ResourceRef {
-            kind: crate::cause::ResourceKind::Vault,
-            name: crate::cause::ResourceName::new(vault),
-            scope: Some(account.to_string()),
-        }),
-        account: Some(AccountId::new(account)),
-        ..crate::cause::DiagnoseContext::default()
-    };
-    match crate::adapters::onepassword_diagnose::diagnose(
-        failure.seen.clone(),
-        failure.stderr(),
-        &ctx,
-    ) {
-        Cause::NotFound { .. } | Cause::InOtherAccount { .. } => Some(true),
-        Cause::Unrecognized { .. } => None,
-        _ => Some(false),
-    }
 }
 
 /// `opv vault locate <vault>`.

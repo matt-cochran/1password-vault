@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
 use super::write_err;
-use crate::adapters::onepassword_diagnose::Facts;
+use crate::adapters::onepassword_diagnose::{Facts, locate_owner};
 use crate::adapters::onepassword_diagnose_items::diagnose_item_call;
 use crate::adapters::onepassword_init;
 use crate::cause::render::next_text;
@@ -422,7 +422,8 @@ fn diagnose_vault(r: &dyn CommandRunner, need: &Needs<'_>, vault: &str) -> Optio
     };
     let (seen, said) = get.or(list)?;
     let exit = seen.exit();
-    let cause = diagnose_item_call(seen, &said.join("\n"), &ctx, &facts);
+    // #153a: a vault in another account names that account.
+    let cause = locate_owner(r, diagnose_item_call(seen, &said.join("\n"), &ctx, &facts));
     let elsewhere =
         !found && matches!(cause, Cause::InOtherAccount { .. } | Cause::NotFound { .. });
     let upstream = (!said.is_empty()).then(|| op_reply(exit, said));

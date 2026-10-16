@@ -773,7 +773,7 @@ A failure after the command produced its document (findings, exit 8) keeps that 
 | `account_not_registered` | 7 | after_fix | yes | the 1Password account is not added to this 1Password CLI; a person adds it (opv login --add, or in the app) |
 | `credential_rejected` | 7 | after_fix | yes | a credential (a token, a sign-in) was not accepted |
 | `deploy_credentials_failed` | 7 | after_fix | yes | the environment's deploy credentials in 1Password were rejected or are incomplete; nothing was changed |
-| `ids_not_in_account` | 7 | after_fix | no | an environment's recorded vault is not in the selected 1Password account; a person selects the owning account or rebinds the environment |
+| `ids_not_in_account` | 7 | after_fix | yes | an environment's recorded vault is not in the selected 1Password account; a person selects the owning account or rebinds the environment |
 | `op_not_signed_in` | 7 | after_fix | yes | not signed in to 1Password |
 | `own_session_required` | 7 | never | yes | the command writes 1Password, which only a person signed in with their own session may do (not a service account, Connect or deploy credentials) |
 | `target_not_signed_in` | 7 | after_fix | yes | not signed in to the target CLI |

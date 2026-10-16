@@ -124,7 +124,7 @@ fn diagnosis(
     };
     let cause = failed.diagnosed(&ctx, &Facts::from_process_env());
     if !matches!(cause, Cause::Unrecognized { .. }) {
-        return failed.report(cause);
+        return failed.report(super::onepassword_diagnose::locate_owner(r, cause));
     }
     let cause = if signed {
         established(cause, format!("account {id} is signed in"))
@@ -358,6 +358,75 @@ pub fn signed_in(r: &dyn CommandRunner, account_uuid: &str) -> Option<bool> {
             Some(o.status == 0)
         }
         Err(_) => None,
+    }
+}
+
+/// What one account says about a vault (#153): `op vault get <vault> --account <account>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Holds {
+    /// The vault opens in this account.
+    Found,
+    /// The account is signed in and the vault is not in it.
+    NotFound,
+    /// The account could not be asked: not signed in, or the check did not finish.
+    Unknown,
+}
+
+/// Whether account `account_uuid` holds `vault` (#153, #153a): one `op vault get <vault>
+/// --account <account>`, exit status only (its output names the vault and is dropped
+/// unread). A failed check is read through the 1Password diagnosis, and a reply it does not
+/// recognise asks whether the account is signed in at all, so "not here" is never claimed
+/// for an account that could not be asked. Read-only: it never prompts or signs in. Shared
+/// by `opv vault locate` and the diagnosis of a vault in another account.
+pub fn holds_vault(r: &dyn CommandRunner, account_uuid: &str, vault: &str) -> Holds {
+    let args = [
+        "vault",
+        "get",
+        vault,
+        "--account",
+        account_uuid,
+        "--format",
+        "json",
+    ];
+    match r.probe(&Call::new(OP, &args), crate::runner::PROBE_TIMEOUT) {
+        Ok(o) if o.status == 0 => Holds::Found,
+        Ok(_) => match probe_said(vault, account_uuid) {
+            Some(true) => Holds::NotFound,
+            Some(false) => Holds::Unknown,
+            // A reply opv does not recognise: not there when this account is signed in,
+            // else not asked.
+            None => match signed_in(r, account_uuid) {
+                Some(true) => Holds::NotFound,
+                _ => Holds::Unknown,
+            },
+        },
+        Err(_) => Holds::Unknown,
+    }
+}
+
+/// What the failed `op vault get` of `vault` in `account` said, through the 1Password
+/// diagnosis (design §5): `Some(true)` the vault is not in that account, `Some(false)` the
+/// account could not be asked (a sign-in, a timeout, op unusable), `None` a reply the
+/// diagnosis does not recognise, or no reply of its own (a probe made while diagnosing
+/// another failure records none, and that failure's reply is never taken here).
+fn probe_said(vault: &str, account: &str) -> Option<bool> {
+    if crate::runner::in_diagnosis() {
+        return None;
+    }
+    let failure = crate::runner::take_failure()?;
+    let ctx = DiagnoseContext {
+        resource: Some(ResourceRef {
+            kind: ResourceKind::Vault,
+            name: ResourceName::new(vault),
+            scope: Some(account.to_string()),
+        }),
+        account: Some(AccountId::new(account)),
+        ..DiagnoseContext::default()
+    };
+    match super::onepassword_diagnose::diagnose(failure.seen.clone(), failure.stderr(), &ctx) {
+        Cause::NotFound { .. } | Cause::InOtherAccount { .. } => Some(true),
+        Cause::Unrecognized { .. } => None,
+        _ => Some(false),
     }
 }
 

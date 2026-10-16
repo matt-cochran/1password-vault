@@ -48,7 +48,7 @@ use serde::de::{self, Deserializer, Visitor};
 use serde_json::{Value, json};
 use zeroize::{Zeroize, Zeroizing};
 
-use super::onepassword_diagnose::Facts;
+use super::onepassword_diagnose::{Facts, locate_owner};
 use super::onepassword_diagnose_items::diagnose_item_call;
 use crate::cause::{
     AccountId, AccountRef, AccountSource, Cause, CredentialProblem, CredentialRef, DiagnoseContext,
@@ -576,8 +576,8 @@ pub(crate) fn established(mut cause: Cause, fact: impl Into<String>) -> Cause {
 
 /// A signed-in call about `vault` failed and `op vault get <vault>` was refused (04.06,
 /// 04.25): with an account selected, the vault is not in it (deleted, not shared, or in
-/// another account; `opv vault locate` finds which); in op's default account, the missing
-/// grant is Read. No further probe is made.
+/// another account, which the caller looks up: [`locate_owner`]); in op's default account,
+/// the missing grant is Read.
 fn vault_unreachable(ctx: &DiagnoseContext, seen: &Observed, vault: &str) -> Cause {
     match ctx.account.clone() {
         Some(selected) => Cause::InOtherAccount {
@@ -589,6 +589,7 @@ fn vault_unreachable(ctx: &DiagnoseContext, seen: &Observed, vault: &str) -> Cau
                 .map(|r| ItemId::new(r.name.as_str())),
             selected,
             owning: None,
+            unasked: Vec::new(),
             env: ctx.env.clone(),
             seen: seen.clone(),
         },
@@ -668,6 +669,7 @@ pub(crate) fn failed_read_from(
 ) -> Error {
     let cause = failed.diagnosed(ctx, &Facts::from_process_env());
     if !matches!(cause, Cause::Unrecognized { .. }) {
+        let cause = locate_owner(r, cause);
         return failed.report(cause);
     }
     match crate::runner::diagnosing(|| unsettled(r, host, ctx, vault, &failed.seen, cause)) {
@@ -676,7 +678,7 @@ pub(crate) fn failed_read_from(
             let missing = missing_item(ctx, &failed.seen);
             failed.report(missing.unwrap_or(cause))
         }
-        Ok((cause, false)) => failed.report(cause),
+        Ok((cause, false)) => failed.report(locate_owner(r, cause)),
         Err(e) => e,
     }
 }
@@ -1039,14 +1041,14 @@ fn read_or_diagnose(
     let failed = Failed::of(&call);
     let cause = failed.diagnosed(ctx, &Facts::from_process_env());
     if !matches!(cause, Cause::Unrecognized { .. }) {
-        return Err(failed.report(cause));
+        return Err(failed.report(locate_owner(r, cause)));
     }
     // The probes explain the failed read; its reply stays with the error (NR-31). The
     // retry below is a new call and owns its own reply.
     let (cause, retry) =
         crate::runner::diagnosing(|| unsettled(r, host, ctx, Some(vault), &failed.seen, cause))?;
     if !retry {
-        return Err(failed.report(cause));
+        return Err(failed.report(locate_owner(r, cause)));
     }
     r.note(&format!(
         "{} failed; signed in with access to vault {vault}, so retrying",
@@ -1910,6 +1912,17 @@ mod tests {
         ])
     }
 
+    /// [`vault_refused`], then `op account list` fails, so the other accounts cannot be
+    /// searched for the vault (#153a).
+    fn vault_refused_accounts_unlisted() -> FakeRunner {
+        FakeRunner::new([
+            Output::failure(1),
+            Output::success(WHOAMI_SA),
+            Output::failure(1),
+            Output::failure(1),
+        ])
+    }
+
     fn env_in_account() -> Environment {
         Environment {
             account: Some("AENV00000000000000000000AA".into()),
@@ -1921,16 +1934,26 @@ mod tests {
     /// vault get`: the vault is not in that account (or not shared), never "grant access".
     #[test]
     fn op_vault_without_access_is_in_another_account() {
-        let e =
-            read_item_with(&vault_refused(), &env_in_account(), &test_at(), &linux()).unwrap_err();
+        let e = read_item_with(
+            &vault_refused_accounts_unlisted(),
+            &env_in_account(),
+            &test_at(),
+            &linux(),
+        )
+        .unwrap_err();
         assert_eq!(e.code_str(), "ids_not_in_account");
     }
 
     /// 04.06: its step is the command that finds the vault's account, never a raw probe.
     #[test]
     fn op_vault_without_access_steps_to_vault_locate() {
-        let e =
-            read_item_with(&vault_refused(), &env_in_account(), &test_at(), &linux()).unwrap_err();
+        let e = read_item_with(
+            &vault_refused_accounts_unlisted(),
+            &env_in_account(),
+            &test_at(),
+            &linux(),
+        )
+        .unwrap_err();
         assert_eq!(e.next_text().unwrap_or_default(), "opv vault locate vstg");
     }
 

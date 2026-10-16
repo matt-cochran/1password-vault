@@ -376,6 +376,21 @@ fn a_boundary_outside_the_account_stops_with_ops_not_found() {
     assert_eq!(e.code_str(), "resource_not_found");
 }
 
+/// The account comes from the `.opv` beside the configuration file, never from the
+/// process's working directory: a vault outside it is in another account.
+#[test]
+fn a_boundary_outside_the_projects_dot_opv_account_is_ids_not_in_account() {
+    let (dir, path, op) =
+        workspace_with(&FLEET.replace("vdev0000000000000000000001", OTHER_ACCOUNT));
+    std::fs::write(
+        dir.path().join(".opv"),
+        "account = \"AE2EDEVACCOUNT000000000001\"\n",
+    )
+    .unwrap();
+    let e = run_probed(&path, &Probed::new(op)).unwrap_err();
+    assert_eq!(e.code_str(), "ids_not_in_account");
+}
+
 #[test]
 fn ids_from_another_account_stop_before_anything_is_created() {
     let (_dir, path, op) =
