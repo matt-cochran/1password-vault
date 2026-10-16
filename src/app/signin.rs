@@ -21,7 +21,7 @@ use crate::domain::{Fleet, ItemRef};
 use crate::error::Error;
 use crate::host::Host;
 use crate::provider::{CredentialField, DeployLogin};
-use crate::runner::{Call, CommandRunner, Outcome, Output};
+use crate::runner::{Call, CommandRunner, CreateOutcome, Outcome, Output};
 
 /// The run's runner, for one environment: its 1Password account on `op` calls and, once
 /// signed in, its deploy identity on the target CLI's calls.
@@ -251,6 +251,13 @@ impl CommandRunner for EnvRunner<'_> {
         let env = self.merged(call.program, call.env);
         self.as_principal(call.program, || {
             self.inner.write(&Call { env: &env, ..*call })
+        })
+    }
+
+    fn create(&self, call: &Call, kind: crate::cause::CreateKind) -> io::Result<CreateOutcome> {
+        let env = self.merged(call.program, call.env);
+        self.as_principal(call.program, || {
+            self.inner.create(&Call { env: &env, ..*call }, kind)
         })
     }
 

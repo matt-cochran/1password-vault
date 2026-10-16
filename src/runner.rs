@@ -186,6 +186,16 @@ pub trait CommandRunner {
     /// [`Outcome::Unknown`]. `Err` only when the program could not be started (nothing ran).
     fn write(&self, call: &Call) -> io::Result<Outcome>;
 
+    /// Non-idempotent create (X5, design §5 "Creates are their own runner effect"): one
+    /// write attempt, never retried. Exit 0 is [`CreateOutcome::Done`]; a non-zero exit was
+    /// a definite refusal ([`CreateOutcome::Refused`], nothing was made). A timeout, a kill,
+    /// a lost reply, a signal or a spent budget is [`CreateOutcome::OutcomeUnknown`], never
+    /// an error a call site could word as "did not create". `Err` only when the program
+    /// could not be started (nothing ran).
+    fn create(&self, call: &Call, _kind: crate::cause::CreateKind) -> io::Result<CreateOutcome> {
+        runner_create::from_write(self.write(call), call)
+    }
+
     /// True once this run started a write to a target, which a later read that fails or
     /// never answers must not call "nothing was changed" (NR-2, NR-28). The 1Password tidy
     /// (FR-43) rewrites an item's layout, never a target, so `op` writes do not count. A
@@ -2187,6 +2197,14 @@ pub mod fake {
             super::write_on(self, call)
         }
 
+        fn create(
+            &self,
+            call: &super::Call,
+            _kind: crate::cause::CreateKind,
+        ) -> io::Result<super::CreateOutcome> {
+            super::runner_create::from_write(super::write_on(self, call), call)
+        }
+
         /// A queued `TimedOut` comes back as that error, like a real probe timeout. A
         /// non-zero exit keeps its stderr for the failure excerpt, like the real probe.
         ///
@@ -2268,6 +2286,11 @@ pub mod fake {
         }
     }
 }
+
+#[path = "runner_create.rs"]
+mod runner_create;
+
+pub use runner_create::CreateOutcome;
 
 #[cfg(test)]
 #[path = "runner_observed_tests.rs"]
