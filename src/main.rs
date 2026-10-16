@@ -1710,6 +1710,8 @@ enum ConfigSource {
 }
 
 fn main() -> ExitCode {
+    // §9.2: harden before anything else, for every command, before parsing arguments.
+    opv::hardening::harden();
     // clap prints usage errors itself (exit 2, shared with configuration errors); opv adds
     // the `Next:` line (NR-19).
     let matches = match cli_command().try_get_matches() {
