@@ -419,6 +419,12 @@ pub const TIDIES_1PASSWORD: [&str; 12] = [
     "init",
 ];
 
+/// Commands that also create 1Password vaults or items with no flag asking for it, beside
+/// their own `effect` (02.16): `init` creates the boundary vault and item when they are
+/// missing, and `target add` creates the target's state vault. `opv schema` marks them
+/// `also_writes_1password`.
+pub const ALSO_WRITES_1PASSWORD: [&str; 2] = ["init", "target add"];
+
 /// What a flag adds to its command's effect: (command, long flag, effect). Every one of
 /// these needs the user's yes for the run.
 pub const FLAG_EFFECTS: [(&str, &str, &str); 11] = [
@@ -459,7 +465,7 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
             "json": "with --json (and always for schema and config export <env>) stdout is one JSON document; human text goes to stderr",
             "ok": "true on success; false on failure, with exit_code and error",
             "next": "a command that runs as typed, or null; on failure always set",
-            "do": "an action only a person can take (fill a value in 1Password, sign in), or null; shown before next",
+            "do": "what to do before `next`, or null; shown before next. Only a person can do it when human_required is true (fill a value in 1Password, approve, sign in)",
             "retry": "safe: re-run the same command now; after_fix: re-run it once `do` is done; never: run `next` instead",
             "human_required": "true when an agent must hand `do` and `next` to the user instead of acting",
             "text": "every failure ends with an optional `Do: <action>` line and exactly one `Next: <command>` line, the last line on stderr",
@@ -564,6 +570,7 @@ fn leaf_commands(cmd: &clap::Command, prefix: String, out: &mut Vec<Value>) {
         "handles_values": effect.map(|e| e.handles_values),
         "ask_user_first": effect.map(|e| e.ask_user_first),
         "tidies_1password": effect.map(|_| TIDIES_1PASSWORD.contains(&path.as_str())),
+        "also_writes_1password": effect.map(|_| ALSO_WRITES_1PASSWORD.contains(&path.as_str())),
     }));
 }
 
@@ -610,7 +617,10 @@ fn exit_codes() -> Value {
         "7": {"meaning": "authentication (1Password or the target)", "retry": "after_fix"},
         "8": {"meaning": "findings: status, plan or check found blocking keys", "retry": "after_fix"},
         "9": {"meaning": "outcome unknown, or a provider did not answer; nothing is known to be broken", "retry": "safe"},
+        "70": {"meaning": "internal error: an opv bug (report it)", "retry": "never"},
+        "129": {"meaning": "interrupted (SIGHUP)", "retry": "safe"},
         "130": {"meaning": "interrupted (SIGINT)", "retry": "safe"},
+        "131": {"meaning": "interrupted (SIGQUIT)", "retry": "safe"},
         "143": {"meaning": "interrupted (SIGTERM)", "retry": "safe"},
         "run": "opv run exits with the child's own code",
     })

@@ -203,7 +203,8 @@ pub fn run(
     for t in &tools {
         let state = match (t.status, &t.version, t.reason) {
             ("installed", Some(v), _) => v.clone(),
-            ("missing", _, _) => "missing".into(),
+            // 05.40: what to do about it, not only the state.
+            ("missing", _, _) => "missing (opv doctor shows how to install it)".into(),
             (_, _, reason) => format!("unknown ({})", reason.unwrap_or("probe failed")),
         };
         let used = if t.providers.is_empty() {
@@ -213,7 +214,9 @@ pub fn run(
         };
         let configured = match t.configured {
             Some(true) => "; configured",
-            Some(false) => "; not configured",
+            // 05.40: "not configured" read as "not set up"; it means this project's
+            // configuration has no target that needs the tool.
+            Some(false) => "; not used by this configuration",
             None => "",
         };
         writeln!(
