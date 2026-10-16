@@ -507,7 +507,75 @@ fn ci_reader_steps_first_to_creating_it_without_showing_its_token() {
         ..Opts::default()
     };
     let out = run_with(&path, &op, &opts).unwrap();
-    assert!(out.contains("  opv access prod --create --github <owner/repo>"));
+    // The command now also names --project and --config (05.27), between env and --create.
+    assert!(out.contains(" --create --github <owner/repo>"));
+}
+
+/// 05.27: `opv access` would otherwise name the service account after the repository.
+#[test]
+fn ci_reader_access_command_names_the_project_bootstrap_used() {
+    let (_dir, path, op) = workspace_with(TWO);
+    let opts = Opts {
+        ci_reader: Some("prod".into()),
+        ..Opts::default()
+    };
+    let out = run_with(&path, &op, &opts).unwrap();
+    assert!(out.contains("  opv access prod --project myapp --config "));
+}
+
+/// X1: the closing step reads the same file bootstrap completed.
+#[test]
+fn bootstrap_ends_with_ready_on_the_same_file() {
+    let (_dir, path, op) = workspace();
+    let out = run_with(&path, &op, &Opts::default()).unwrap();
+    assert!(out.ends_with(&format!("Next: opv ready --config {}\n", path.display())));
+}
+
+/// 05.05: a create whose reply never came may have made the vault; it is never "did not
+/// create".
+#[test]
+fn an_unanswered_create_is_create_outcome_unknown() {
+    let r = crate::runner::fake::FakeRunner::default();
+    r.push_unknown("timeout");
+    let e = create(&r, &["vault", "create", "x"], None, CreateKind::Vault, "x").unwrap_err();
+    assert_eq!(e.code_str(), "create_outcome_unknown");
+}
+
+/// 05.06: bootstrap finds the vault by its title, so the step is the same command with
+/// every flag (--project, --file) kept, never a bare `opv bootstrap`.
+#[test]
+fn an_unanswered_create_steps_to_the_same_command() {
+    let r = crate::runner::fake::FakeRunner::default();
+    r.push_unknown("timeout");
+    let e = create(&r, &["vault", "create", "x"], None, CreateKind::Vault, "x").unwrap_err();
+    let (cause, _) = e.cause().unwrap();
+    assert_eq!(
+        cause.step(&crate::cause::Invocation::default()).1,
+        crate::cause::Next::Rerun
+    );
+}
+
+/// #159: op's reply decides; "not currently signed in" is a sign-in, never a vault
+/// outside the account.
+#[test]
+fn a_vault_get_op_answers_signed_out_is_op_not_signed_in() {
+    let r = crate::runner::fake::FakeRunner::default();
+    r.push_with_stderr(
+        crate::runner::Output::failure(1),
+        "[ERROR] 2026/10/16 00:04:44 You are not currently signed in. Please run `op signin --help` for instructions\n",
+    );
+    let e = plan(&r, FLEET, "myapp", &none()).unwrap_err();
+    assert_eq!(e.code_str(), "op_not_signed_in");
+}
+
+/// 05.06: the personal-vault refusal steps to the same command once the field is set.
+#[test]
+fn a_missing_personal_vault_names_no_bare_bootstrap() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("secrets.toml");
+    std::fs::write(&path, TEAM).unwrap();
+    let e = run_with(&path, &FakeOp::default(), &Opts::default()).unwrap_err();
+    assert_eq!(e.next_step(), None);
 }
 
 #[test]

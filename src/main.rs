@@ -2267,6 +2267,10 @@ impl Cmd {
                 json: true,
                 ..
             } => return Some(true),
+            // #159: `opv login … -- opv … --json` that fails before its child runs (the
+            // sign-in or the vault list) still answers with that command's one JSON document,
+            // so error.code is readable. On success the child writes its own; login adds none.
+            Cmd::Login { command, .. } => login_child_json(command),
             _ => false,
         };
         json.then_some(false)
@@ -3945,6 +3949,20 @@ impl opv::app::approve::Review for TerminalReview {
         })?;
         Ok(answer.trim().to_string())
     }
+}
+
+/// #159: whether the command `opv login` runs is opv asking for one JSON document (`--json`
+/// among its own words, before any `--` of its own).
+fn login_child_json(command: &[String]) -> bool {
+    let Some((program, args)) = command.split_first() else {
+        return false;
+    };
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    (name == "opv" || name == "opv.exe")
+        && args
+            .iter()
+            .take_while(|w| w.as_str() != "--")
+            .any(|w| w == "--json")
 }
 
 #[cfg(test)]
