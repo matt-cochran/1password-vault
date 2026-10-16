@@ -1425,19 +1425,15 @@ fn with_account<'a>(program: &str, args: &[&'a str], env: &[(&'a str, &'a str)])
 
 /// Observe an inherited call (`op run -- <cmd>`, FR-4) that failed to start or exited
 /// non-zero, like a captured one. Its child command after `--` is never named.
+/// An inherited call (`op run` and the person's command under it) is observed only when it
+/// could not be started: its exit code and signals are the person's own command's, never a
+/// 1Password failure.
 fn observe_inherited(call: &Call, env: &[(&str, &str)], status: &io::Result<ExitStatus>) {
     let id = failure::begin();
-    let res = match status {
-        Err(e) => Err(io::Error::from(e.kind())),
-        Ok(st) => Ok((
-            match killed_by_signal(*st) {
-                Some(sig) => Attempt::Killed(sig),
-                None => Attempt::Exited(Output::failure(exit_code(*st))),
-            },
-            Stderr::default(),
-        )),
-    };
-    observe_attempt(id, &Call { env, ..*call }, &res);
+    if let Err(e) = status {
+        let res: io::Result<(Attempt, Stderr)> = Err(io::Error::from(e.kind()));
+        observe_attempt(id, &Call { env, ..*call }, &res);
+    }
 }
 
 /// Pseudo-random jitter without a dependency: a randomly keyed hash of the current instant.

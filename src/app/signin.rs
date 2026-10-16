@@ -29,6 +29,9 @@ pub struct EnvRunner<'a> {
     inner: &'a dyn CommandRunner,
     account: Option<String>,
     login: Option<Box<dyn DeployLogin>>,
+    /// The deploy credentials in effect (design §5): calls that use them are observed under
+    /// this principal, not the person or a shell token.
+    deploy: Option<crate::cause::Principal>,
 }
 
 impl<'a> EnvRunner<'a> {
@@ -39,6 +42,7 @@ impl<'a> EnvRunner<'a> {
             inner,
             account,
             login: None,
+            deploy: None,
         }
     }
 }
@@ -128,6 +132,7 @@ impl<'a> EnvRunner<'a> {
             inner,
             account,
             login: None,
+            deploy: None,
         }
     }
 
@@ -178,11 +183,13 @@ impl<'a> EnvRunner<'a> {
             return Ok(());
         };
         let t = match target {
-            Some(name) => env.targets.get(name),
-            None if env.targets.len() == 1 => env.targets.values().next(),
+            Some(name) => env.targets.get_key_value(name),
+            None if env.targets.len() == 1 => env.targets.iter().next(),
             None => None,
         };
-        let Some((t, reference)) = t.and_then(|t| Some((t, t.deploy_credentials.as_ref()?))) else {
+        let Some((target_name, t, reference)) =
+            t.and_then(|(n, t)| Some((n, t, t.deploy_credentials.as_ref()?)))
+        else {
             return Ok(());
         };
         // A Key Vault behind a Kubernetes runtime signs `az` in (FR-39, FR-40).
@@ -191,7 +198,23 @@ impl<'a> EnvRunner<'a> {
             .deploy_credential_fields()
             .map_err(|why| Error::Config(format!("environment {env_name}: {why}").into()))?;
         let login = provider.deploy_login()?;
-        self.sign_in_with(login, reference, fields, Some(env_name))
+        self.sign_in_with(login, reference, fields, Some(env_name))?;
+        self.deploy = Some(crate::cause::Principal::DeployCredentials {
+            item: crate::cause::ItemId::new(reference.item.clone()),
+            env: crate::cause::EnvName::new(env_name),
+            target: crate::cause::TargetName::new(target_name.clone()),
+        });
+        Ok(())
+    }
+
+    /// Run `f` under the deploy principal when `program` uses the deploy credentials.
+    fn as_principal<T>(&self, program: &str, f: impl FnOnce() -> T) -> T {
+        match (&self.deploy, &self.login) {
+            (Some(p), Some(login)) if !login.env(program).is_empty() => {
+                crate::runner::under_deploy(p.clone(), f)
+            }
+            _ => f(),
+        }
     }
 
     /// The extra child environment for `program`.
@@ -219,17 +242,23 @@ impl<'a> EnvRunner<'a> {
 impl CommandRunner for EnvRunner<'_> {
     fn read(&self, call: &Call, refused: &[i32]) -> io::Result<Outcome> {
         let env = self.merged(call.program, call.env);
-        self.inner.read(&Call { env: &env, ..*call }, refused)
+        self.as_principal(call.program, || {
+            self.inner.read(&Call { env: &env, ..*call }, refused)
+        })
     }
 
     fn write(&self, call: &Call) -> io::Result<Outcome> {
         let env = self.merged(call.program, call.env);
-        self.inner.write(&Call { env: &env, ..*call })
+        self.as_principal(call.program, || {
+            self.inner.write(&Call { env: &env, ..*call })
+        })
     }
 
     fn probe(&self, call: &Call, limit: Duration) -> io::Result<Output> {
         let env = self.merged(call.program, call.env);
-        self.inner.probe(&Call { env: &env, ..*call }, limit)
+        self.as_principal(call.program, || {
+            self.inner.probe(&Call { env: &env, ..*call }, limit)
+        })
     }
 
     fn pause(&self, d: Duration, note: &str) {
@@ -242,7 +271,7 @@ impl CommandRunner for EnvRunner<'_> {
 
     fn run_inherited(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> io::Result<i32> {
         let env = self.merged(program, env);
-        self.inner.run_inherited(program, args, &env)
+        self.as_principal(program, || self.inner.run_inherited(program, args, &env))
     }
 
     fn remaining(&self) -> Option<Duration> {

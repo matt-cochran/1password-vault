@@ -104,3 +104,12 @@ fn name_value_word_keeps_only_its_name() {
         ])
     );
 }
+
+/// `op run`'s exit is the person's own command's: a non-zero exit is not a 1Password failure.
+#[cfg(unix)]
+#[test]
+fn the_persons_command_exiting_non_zero_is_not_observed() {
+    let r = ProcessRunner::new(Budget::starting_now(Duration::from_secs(30)), false);
+    let _ = r.run_inherited("sh", &["-c", "exit 3"], &[]);
+    assert!(take_observed().is_none());
+}
