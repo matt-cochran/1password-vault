@@ -1,4 +1,4 @@
-use super::missing_environment_error;
+use super::gh::missing_environment_error;
 use crate::cause::{Cause, Invocation};
 
 fn cause() -> Cause {
