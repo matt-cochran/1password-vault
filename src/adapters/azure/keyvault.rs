@@ -33,7 +33,10 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::cause::{Cause, DiagnoseContext, Guard, ResourceKind};
+use crate::cause::{
+    Cause, DiagnoseContext, DottedPath, Guard, NamedBy, NotFoundState, Refusal, ResourceKind,
+    ResourceName, ResourceRef, System,
+};
 use crate::domain::plan::StoreEntry;
 use crate::domain::{SecretValue, Stamp};
 use crate::error::Error;
@@ -42,6 +45,7 @@ use crate::runner::{CommandRunner, Outcome, Wait};
 
 use super::AzureTarget;
 use super::az::{self, Effect, invoke, read_output, write_output};
+use super::preflight::{missing_in_reply, unreadable_json, unusable};
 
 /// Largest value Key Vault accepts, in bytes (FR-30).
 pub const VALUE_LIMIT: usize = 25 * 1024;
@@ -200,17 +204,7 @@ impl KeyVault<'_> {
                 &[],
             )?,
         )?;
-        // serde_json messages can quote input fragments, so report only the position.
-        serde_json::from_slice(&out.stdout).map_err(|e| {
-            Error::Target(
-                format!(
-                    "az {OP} returned unexpected JSON (line {}, column {})",
-                    e.line(),
-                    e.column()
-                )
-                .into(),
-            )
-        })
+        unreadable_json(&out.stdout, OP)
     }
 
     /// The managed env name stored as `e` when opv owns it: its Key Vault spelling matches
@@ -259,17 +253,9 @@ impl KeyVault<'_> {
             Outcome::Refused(out) if out.status == 3 => return Ok(None),
             other => read_output(self.runner, self.ctx(), other)?,
         };
-        let entry: ShowEntry = serde_json::from_slice(&out.stdout).map_err(|e| {
-            Error::Target(
-                format!(
-                    "az {OP} returned unexpected JSON (line {}, column {})",
-                    e.line(),
-                    e.column()
-                )
-                .into(),
-            )
-        })?;
-        let version = version_from_id(&entry.id).ok_or_else(|| no_version_error(name))?;
+        let entry: ShowEntry = unreadable_json(&out.stdout, OP)?;
+        let version =
+            version_from_id(&entry.id).ok_or_else(|| missing_in_reply(OP, "version id"))?;
         Ok(Some((SecretValue::new(entry.value), version)))
     }
 
@@ -336,7 +322,7 @@ impl KeyVault<'_> {
                     self.recover(name)?;
                     outcome = set()?;
                 }
-                Some(_) => return Err(soft_deleted_error(name, self.vault, self.subscription)),
+                Some(_) => return Err(self.soft_deleted(name)),
                 None => {
                     if !crate::runner::diagnosing(|| az::signed_in(self.runner))? {
                         let up = az::take_failure().and_then(|(_, up)| up);
@@ -352,7 +338,7 @@ impl KeyVault<'_> {
                 let version = std::str::from_utf8(&out.stdout)
                     .ok()
                     .and_then(version_from_id)
-                    .ok_or_else(|| no_version_error(name))?;
+                    .ok_or_else(|| self.unconfirmed(OP, name))?;
                 self.confirm_version(name, &version)?;
                 Ok(version)
             }
@@ -448,13 +434,8 @@ impl KeyVault<'_> {
                 }
             }
             if wait.over(self.runner, CONFIRM_POLL) {
-                return Err(Error::Unknown(
-                    format!(
-                        "Key Vault accepted version {version} of {name} but does not show it yet; \
-                     nothing else was changed; re-run to confirm"
-                    )
-                    .into(),
-                ));
+                // Accepted, but not shown yet: whether the version stuck is not known.
+                return Err(self.unconfirmed(OP, name));
             }
             wait.pause(self.runner, CONFIRM_POLL, "");
         }
@@ -613,13 +594,15 @@ impl KeyVault<'_> {
                 }
             }
             if wait.over(self.runner, CONFIRM_POLL) {
-                return Err(Error::Unknown(
-                    format!(
-                        "Key Vault is still recovering {name}; nothing else was changed; re-run \
-                         in a minute"
-                    )
-                    .into(),
-                ));
+                // Key Vault's own recovery of the secret is still running.
+                return Err(unusable(OP, |seen| Cause::TargetRefused {
+                    system: System::Azure,
+                    subject: self.secret_ref(name),
+                    why: Refusal::InProgress,
+                    env: Some(crate::cause::EnvName::new(self.env)),
+                    target: None,
+                    seen,
+                }));
             }
             wait.pause(self.runner, CONFIRM_POLL, "");
         }
@@ -672,6 +655,43 @@ impl KeyVault<'_> {
 }
 
 impl KeyVault<'_> {
+    /// Secret `name` (its Key Vault spelling) of this vault, as the subject of a cause.
+    fn secret_ref(&self, name: &str) -> ResourceRef {
+        ResourceRef {
+            kind: ResourceKind::KeyVaultSecret,
+            name: ResourceName::new(name),
+            scope: Some(self.vault.to_string()),
+        }
+    }
+
+    /// A write of `name` that Key Vault accepted without confirming the version it made
+    /// (NR-30): whether it stuck is not known, and re-running is safe (NR-2).
+    fn unconfirmed(&self, what: &str, name: &str) -> Error {
+        unusable(what, |seen| Cause::WriteOutcomeUnknown {
+            system: System::Azure,
+            subject: self.secret_ref(name),
+            seen,
+        })
+    }
+
+    /// The failed `set` of `name`, soft-deleted and not by opv's prune: opv leaves it alone
+    /// and names the recover command (FR-32), `az`'s reply as evidence.
+    fn soft_deleted(&self, name: &str) -> Error {
+        let Some((seen, up)) = az::take_failure() else {
+            return az::unobserved(self.runner);
+        };
+        let deleted = Cause::NotFound {
+            system: System::Azure,
+            resource: self.secret_ref(name),
+            named_by: NamedBy::ConfigField {
+                path: DottedPath(vec!["azure".into(), "key_vault".into()]),
+            },
+            state: NotFoundState::SoftDeleted,
+            seen,
+        };
+        az::report(deleted, up)
+    }
+
     /// Tag the current version [`PRUNED_TAG`]`=<env>` just before opv deletes it, keeping
     /// its other tags (`--tags` replaces them): the proof, kept by the soft-deleted secret,
     /// that opv itself deleted it and may recover it (FR-32). A write, never retried; if it
@@ -721,34 +741,8 @@ fn version_from_id(id: &str) -> Option<String> {
     ok.then(|| v.to_owned())
 }
 
-/// Key Vault answered without a usable version, so nothing can be pinned (NR-6).
-fn no_version_error(name: &str) -> Error {
-    Error::Target(
-        format!("Key Vault returned no version for {name}; nothing was bound; re-run").into(),
-    )
-}
-
 /// Tag opv sets on a secret just before its prune deletes it (FR-32).
 const PRUNED_TAG: &str = "opv-pruned";
-
-/// The soft-deleted refusal for a secret opv did not delete itself: it names the exact
-/// recover command, which is also its `Next:` (re-running sync first would fail again).
-/// opv recovers only what its own prune deleted (FR-32).
-/// The command carries `--subscription` (06.29): the person's default subscription may not be
-/// the configured one (NR-7).
-fn soft_deleted_error(name: &str, vault: &str, subscription: &str) -> Error {
-    let recover = format!(
-        "az keyvault secret recover --vault-name {vault} --name {name} --subscription {subscription}"
-    );
-    Error::Target(
-        format!(
-            "{name} is soft-deleted in Key Vault {vault}, and not by opv's prune, so opv leaves \
-             it alone; recover it, then re-run: {recover}"
-        )
-        .into(),
-    )
-    .with_next(recover)
-}
 
 #[cfg(test)]
 mod tests {
@@ -909,13 +903,22 @@ mod tests {
         assert!(!r.argv_contains("show-deleted"));
     }
 
+    /// 06.38: a reply opv cannot read is an unexpected output, whose step is to update az.
     #[test]
-    fn read_with_garbled_id_is_target_error() {
+    fn list_with_unreadable_json_is_unexpected_output() {
+        let r = FakeRunner::new([Output::success("{not json")]);
+        let templates = names(&[]);
+        let err = vault(&r, "prod", &templates).list().unwrap_err();
+        assert_eq!(err.code_str(), "unexpected_output");
+    }
+
+    #[test]
+    fn read_with_garbled_id_is_unexpected_output() {
         let body = SHOW_FIXTURE.replace(VERSION, "not-a-version");
         let r = FakeRunner::new([Output::success(body)]);
         let templates = names(&[]);
         let err = vault(&r, "prod", &templates).read(NAME).unwrap_err();
-        assert!(matches!(err, Error::Target(m) if m.contains("returned no version")));
+        assert_eq!(err.code_str(), "unexpected_output");
     }
 
     #[test]
@@ -1003,28 +1006,23 @@ mod tests {
         let err = kv
             .write_one("MY-SECRET", &SecretValue::new(MARKER.into()), &stamp())
             .unwrap_err();
-        assert!(matches!(err, Error::Target(msg) if msg.contains(
-            "az keyvault secret recover --vault-name kv-opv-fixture --name MY-SECRET --subscription"
-        )));
+        assert!(
+            crate::error::report(&err, "-", None).contains(
+                "az keyvault secret recover --vault-name kv-opv-fixture --name MY-SECRET"
+            )
+        );
     }
 
-    /// Found live: the step after a soft-deleted name is the recovery, not a re-run; it
-    /// names the configured subscription (06.29, NR-7).
+    /// Found live: a soft-deleted name is a resource opv will not touch, never a re-run.
     #[test]
-    fn soft_deleted_name_next_is_the_recover_command() {
+    fn soft_deleted_name_is_not_found_and_not_rerun() {
         let r = FakeRunner::new([Output::failure(1), Output::success("")]);
         let templates = names(&[]);
         let kv = vault(&r, "prod", &templates);
         let err = kv
             .write_one("MY-SECRET", &SecretValue::new(MARKER.into()), &stamp())
             .unwrap_err();
-        assert_eq!(
-            err.next_step(),
-            Some(
-                "az keyvault secret recover --vault-name kv-opv-fixture --name MY-SECRET \
-                 --subscription 00000000-0000-0000-0000-000000000000"
-            )
-        );
+        assert_eq!(err.code_str(), "resource_not_found");
     }
 
     #[test]
@@ -1231,23 +1229,23 @@ mod tests {
     }
 
     #[test]
-    fn write_with_empty_id_is_target_error() {
+    fn write_with_empty_id_is_unknown_outcome() {
         let r = FakeRunner::new([Output::success("")]);
         let templates = names(&[]);
         let err = vault(&r, "prod", &templates)
             .write_one(NAME, &secret(), &stamp())
             .unwrap_err();
-        assert!(matches!(err, Error::Target(m) if m.contains("returned no version for")));
+        assert_eq!(err.code_str(), "outcome_unknown");
     }
 
     #[test]
-    fn write_with_garbled_id_is_target_error() {
+    fn write_with_garbled_id_is_unknown_outcome() {
         let r = FakeRunner::new([Output::success(id("XYZ"))]);
         let templates = names(&[]);
         let err = vault(&r, "prod", &templates)
             .write_one(NAME, &secret(), &stamp())
             .unwrap_err();
-        assert!(matches!(err, Error::Target(m) if m.contains("nothing was bound")));
+        assert_eq!(err.exit_code(), 9);
     }
 
     const STALE: &str = "11111111111111111111111111111111";
@@ -1288,9 +1286,7 @@ mod tests {
         let err = vault(&r, "prod", &templates)
             .write_one(NAME, &secret(), &stamp())
             .unwrap_err();
-        assert!(matches!(err, Error::Unknown(m) if m.contains(
-            "accepted version 46687ce78b76487cb0c1da470360b638 of FLEET--API--DB-URL but does not show it yet"
-        )));
+        assert_eq!(err.code_str(), "outcome_unknown");
     }
 
     /// `set` fails, `show-deleted` says no, `az account show` says signed in.

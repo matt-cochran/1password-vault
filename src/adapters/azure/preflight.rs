@@ -26,14 +26,14 @@ use super::az::{self, AZ_CLI, Effect};
 use super::containerapp::{self, ContainerApp, POLL_EVERY, PROGRESS_EVERY, WAIT_MAX};
 use crate::adapters::probe::{parse_version, spawn_tool};
 use crate::cause::{
-    Cause, DiagnoseContext, DottedPath, GrantModel, NamedBy, NotFoundState, ResourceKind,
-    ResourceName, ResourceRef, Right, System, Unusable,
+    Cause, DiagnoseContext, DottedPath, GrantModel, Location, NamedBy, NotFoundState, Observed,
+    OutputProblem, Refusal, ResourceKind, ResourceName, ResourceRef, Right, System, Unusable,
 };
 use crate::error::Error;
 use crate::host::Host;
 use crate::ports::PinnedRuntime;
 use crate::provider::{Check, Preflight, PreflightMode, Verdict};
-use crate::runner::{CommandRunner, Outcome, Output, Wait};
+use crate::runner::{Call, CommandRunner, Outcome, Output, Wait};
 
 /// Oldest Azure CLI opv is tested with: `doctor` warns below it.
 pub const AZ_TESTED_MIN: (u64, u64, u64) = (2, 60, 0);
@@ -47,6 +47,18 @@ pub const DOCTOR_CHECKS: &[&str] = &[
     "container app",
     "app identity access",
 ];
+
+/// The target's Container App, as the subject of a cause.
+pub(crate) fn app_ref(t: &AzureTarget) -> ResourceRef {
+    ResourceRef {
+        kind: ResourceKind::ContainerApp,
+        name: ResourceName::new(&t.container_app),
+        scope: Some(format!(
+            "resource group {} (subscription {})",
+            t.resource_group, t.subscription
+        )),
+    }
+}
 
 /// The preflight of an Azure target (NR-23, NR-25). Keeps the vault URI for `open`. A
 /// Container App whose last update failed is a warning: its previous revision keeps
@@ -96,21 +108,13 @@ pub fn vault_uri_of(t: &AzureTarget, r: &dyn CommandRunner) -> Result<String, Er
 /// labels, nothing after the host but one optional `/`. Returned without the trailing `/`.
 /// The value is never echoed: a hostile one names only what is wrong with it.
 pub fn vault_uri(show: &Value, vault: &str) -> Result<String, Error> {
-    let bad =
-        |why: &str| {
-            Error::Target(format!(
-            "az keyvault show returned a vaultUri for Key Vault {vault} that opv cannot use \
-             ({why}); nothing was changed\n  next: check it with `az keyvault show -n {vault} \
-             --query properties.vaultUri`, then run opv again"
-        ).into())
-        };
+    // A vaultUri opv cannot use is a reply it cannot use (A1); its value is never echoed.
+    let bad = || unusable(VAULT_SHOW, |seen| unparseable(None, seen));
     let raw = show
         .pointer("/properties/vaultUri")
         .and_then(Value::as_str)
-        .ok_or_else(|| bad("missing"))?;
-    let rest = raw
-        .strip_prefix("https://")
-        .ok_or_else(|| bad("not https"))?;
+        .ok_or_else(|| missing_in_reply(VAULT_SHOW, "properties.vaultUri"))?;
+    let rest = raw.strip_prefix("https://").ok_or_else(bad)?;
     let host = rest.strip_suffix('/').unwrap_or(rest);
     let labels: Vec<&str> = host.split('.').collect();
     let plain = host.len() <= 253
@@ -121,10 +125,10 @@ pub fn vault_uri(show: &Value, vault: &str) -> Result<String, Error> {
                 && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
         });
     if !plain {
-        return Err(bad("not a plain host name"));
+        return Err(bad());
     }
     if labels.len() < 3 || !labels[0].eq_ignore_ascii_case(vault) {
-        return Err(bad("its host does not name the vault"));
+        return Err(bad());
     }
     Ok(format!("https://{host}"))
 }
@@ -201,18 +205,61 @@ fn vault_ctx(v: &Vault) -> DiagnoseContext {
 }
 
 fn parse(out: &Output, op: &str) -> Result<Value, Error> {
-    // serde_json messages can quote input fragments, so report only the position.
-    serde_json::from_slice(&out.stdout).map_err(|e| {
-        Error::Target(
-            format!(
-                "az {op} returned JSON opv cannot read (line {}, column {}); nothing was \
-             changed\n  next: update the Azure CLI (`az upgrade`), then run opv again",
-                e.line(),
-                e.column()
-            )
-            .into(),
-        )
+    unreadable_json(&out.stdout, op)
+}
+
+/// The `keyvault show` reply the vault URI comes from.
+const VAULT_SHOW: &str = "keyvault show";
+
+/// `stdout` of `az <what>` as JSON, or the reply opv cannot read (A1): only the position
+/// is kept, since serde_json's message can quote the input.
+pub(crate) fn unreadable_json<T: serde::de::DeserializeOwned>(
+    stdout: &[u8],
+    what: &str,
+) -> Result<T, Error> {
+    serde_json::from_slice(stdout).map_err(|e| {
+        let at = Location {
+            line: u32::try_from(e.line()).unwrap_or(u32::MAX),
+            col: u32::try_from(e.column()).unwrap_or(u32::MAX),
+        };
+        unusable(what, |seen| unparseable(Some(at), seen))
     })
+}
+
+/// `az` answered, but opv cannot read its reply.
+fn unparseable(at: Option<Location>, seen: Observed) -> Cause {
+    Cause::UnexpectedOutput {
+        system: System::Azure,
+        at,
+        problem: OutputProblem::Unparseable,
+        seen,
+    }
+}
+
+/// `az <what>` answered without `field`, which opv needs from its reply.
+pub(crate) fn missing_in_reply(what: &str, field: &'static str) -> Error {
+    unusable(what, |seen| Cause::UnexpectedOutput {
+        system: System::Azure,
+        at: None,
+        problem: OutputProblem::Empty { what: field },
+        seen,
+    })
+}
+
+/// The cause of the latest `az <what>` call (`what`: its leading words, such as
+/// `containerapp show`), built on the runner's own observation of it (design §4.6, A1):
+/// the call that answered with a reply opv cannot use, or, when it failed, its failure.
+pub(crate) fn unusable(what: &str, cause: impl FnOnce(Observed) -> Cause) -> Error {
+    let words: Vec<&str> = what.split_whitespace().collect();
+    let seen = crate::runner::take_unusable_reply(&Call::new(az::PROGRAM, &words))
+        .or_else(crate::runner::take_observed);
+    match seen {
+        Some(seen) => cause(seen).into(),
+        None => Cause::Bug {
+            site: "azure: an az reply the runner did not observe",
+        }
+        .into(),
+    }
 }
 
 /// The signed-in account can see the subscription (NR-7). One probe when it can; a
@@ -359,11 +406,7 @@ fn app(t: &AzureTarget, r: &dyn CommandRunner) -> Result<Value, Error> {
         t.subscription.as_str(),
     );
     let base = ["containerapp", "show", "-g", rg, "-n", a, "-o", "json"];
-    let resource = ResourceRef {
-        kind: ResourceKind::ContainerApp,
-        name: ResourceName::new(a),
-        scope: Some(format!("resource group {rg} (subscription {s})")),
-    };
+    let resource = app_ref(t);
     let app = match read(s, r, OP, &base, &[3])? {
         Outcome::Done(out) => parse(&out, OP)?,
         // Exit 3 is az's "no such resource" (Q3).
@@ -412,19 +455,16 @@ fn settled_app(t: &AzureTarget, r: &dyn CommandRunner) -> Result<Value, Error> {
         }
         let waited = wait.elapsed(r);
         if wait.over(r, POLL_EVERY) {
-            return Err(Error::Target(
-                format!(
-                    "container app {a} is still being updated by someone else (provisioningState \
-                 InProgress) after {secs} s; nothing was changed\n  next: wait for that update \
-                 to finish (`az containerapp show -g {rg} -n {a} --subscription {s} --query \
-                 properties.provisioningState`), then run opv again",
-                    a = t.container_app,
-                    rg = t.resource_group,
-                    s = t.subscription,
-                    secs = waited.as_secs()
-                )
-                .into(),
-            ));
+            // Someone else's update is still running, as opv's own `containerapp show`
+            // says; nothing was changed (NR-25).
+            return Err(unusable("containerapp show", |seen| Cause::TargetRefused {
+                system: System::Azure,
+                subject: app_ref(t),
+                why: Refusal::InProgress,
+                env: None,
+                target: None,
+                seen,
+            }));
         }
         let note = if reported.is_none_or(|at| waited.saturating_sub(at) >= PROGRESS_EVERY) {
             reported = Some(waited);
@@ -885,7 +925,10 @@ mod tests {
         let mut app = app_show();
         app["properties"]["configuration"]["activeRevisionsMode"] = json!("Multiple");
         let (_, res) = preflight_on(healthy_with(&app));
-        assert!(matches!(res, Err(Error::Config(m)) if m.mentions("revision set-mode")));
+        assert_eq!(
+            res.err().map(|e| e.code_str()),
+            Some("owner_setup_required")
+        );
     }
 
     #[test]
@@ -954,13 +997,13 @@ mod tests {
     }
 
     #[test]
-    fn app_update_that_never_finishes_is_a_target_error_after_the_wait() {
+    fn app_update_that_never_finishes_is_refused_as_in_progress_after_the_wait() {
         let polls =
             (0..=WAIT_MAX.as_secs() / POLL_EVERY.as_secs()).map(|_| out(&app_in("InProgress")));
         let mut responses = vec![ok(), out(&vault_show()), ok()];
         responses.extend(polls);
         let (_, res) = preflight_on(responses);
-        assert!(matches!(res, Err(Error::Target(m)) if m.contains("still being updated")));
+        assert!(err_text(res).contains("another change is still in progress"));
     }
 
     /// R11: a failed last update is not a broken app; opv proceeds and says so.
@@ -1005,21 +1048,24 @@ mod tests {
     #[test]
     fn plain_http_vault_uri_is_refused() {
         assert!(
-            matches!(uri_of("http://kv-opv-fixture.vault.azure.net/"), Err(Error::Target(m)) if m.contains("not https"))
+            uri_of("http://kv-opv-fixture.vault.azure.net/").map_err(|e| e.code_str())
+                == Err("unexpected_output")
         );
     }
 
     #[test]
     fn vault_uri_with_a_path_is_refused() {
         assert!(
-            matches!(uri_of("https://kv-opv-fixture.vault.azure.net/x/"), Err(Error::Target(m)) if m.contains("not a plain host name"))
+            uri_of("https://kv-opv-fixture.vault.azure.net/x/").map_err(|e| e.code_str())
+                == Err("unexpected_output")
         );
     }
 
     #[test]
     fn vault_uri_of_another_vault_is_refused() {
         assert!(
-            matches!(uri_of("https://other.vault.azure.net/"), Err(Error::Target(m)) if m.contains("does not name the vault"))
+            uri_of("https://other.vault.azure.net/").map_err(|e| e.code_str())
+                == Err("unexpected_output")
         );
     }
 
@@ -1028,7 +1074,7 @@ mod tests {
         let mut v = vault_show();
         v["properties"].as_object_mut().unwrap().remove("vaultUri");
         assert!(
-            matches!(vault_uri(&v, "kv-opv-fixture"), Err(Error::Target(m)) if m.contains("missing"))
+            vault_uri(&v, "kv-opv-fixture").map_err(|e| e.code_str()) == Err("unexpected_output")
         );
     }
 
