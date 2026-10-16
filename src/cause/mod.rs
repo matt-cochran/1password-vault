@@ -1151,3 +1151,28 @@ impl From<RetryClass> for Retry {
 #[cfg(test)]
 #[path = "contract_tests.rs"]
 mod tests;
+
+// --- diagnosis (design §5) ----------------------------------------------------------------
+
+/// What the call site knows about a failed call, for the system's diagnosis strategy. Every
+/// strategy (`src/adapters/<system>/diagnose.rs`, `src/app/remote_diagnose.rs`) exposes
+/// `pub fn diagnose(seen: Observed, stderr: &str, ctx: &DiagnoseContext) -> Cause`. `stderr`
+/// is the call's raw stderr (phrases match before scrubbing; it never leaves the
+/// strategy except through the scrubbed evidence box). A strategy that cannot tell returns
+/// `Cause::Unrecognized` with what it did establish.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiagnoseContext {
+    pub env: Option<EnvName>,
+    pub target: Option<TargetName>,
+    /// The resource the call was about, when the call site knows it.
+    pub resource: Option<ResourceRef>,
+    /// Where the resource's name came from, for `NotFound`'s Do.
+    pub named_by: Option<NamedBy>,
+    /// The call was a non-idempotent create of this kind (an unknown outcome is then
+    /// `CreateOutcomeUnknown`, never a plain failure).
+    pub create: Option<(CreateKind, String, Refind)>,
+    /// The call was a write (an unknown outcome is `WriteOutcomeUnknown`).
+    pub write: bool,
+    /// The account the call was made in (1Password).
+    pub account: Option<AccountId>,
+}
