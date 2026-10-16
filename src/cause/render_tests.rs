@@ -3492,6 +3492,7 @@ fn l1_a_built_step_keeps_an_inline_timeout_flag() {
     };
     let inv = cli(&["opv", "sync", "prod", "--timeout=60"]);
     assert_eq!(next_in(&c, &inv), "opv plan prod --timeout=60");
+}
 
 /// L5: a malformed `.env` holds secret values only a person may open, so fixing it
 /// is a person's step before the same command runs again.
@@ -3520,6 +3521,7 @@ fn l5_invalid_setup_recipe_needs_no_person() {
         rule: FieldRule::Syntax,
     };
     assert!(!c.human_required(&inv()));
+}
 
 // ---- L10: an overview fills the environment a cause never knew -----------------------
 

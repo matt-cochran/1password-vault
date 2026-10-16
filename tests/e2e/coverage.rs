@@ -392,7 +392,8 @@ impl Scenario {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| root.clone());
         let s = s.replace(&real, "<SCENARIO>").replace(&root, "<SCENARIO>");
-        let s = re(r#""platform":"(linux|wsl|macos|windows)""#).replace_all(&s, r#""platform":"<platform>""#);
+        let s = re(r#""platform":"(linux|wsl|macos|windows)""#)
+            .replace_all(&s, r#""platform":"<platform>""#);
         let s = re(r"\bin \d+(\.\d+)? ?(ms|s)\b").replace_all(&s, "in <delay>");
         let s = re(r"rcpt-[0-9a-f]+").replace_all(&s, "rcpt-<id>");
         s.replace(" (op in WSL does not see the Windows app's accounts)", "")
