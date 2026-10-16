@@ -3510,4 +3510,64 @@ fn l5_invalid_setup_recipe_needs_no_person() {
         rule: FieldRule::Syntax,
     };
     assert!(!c.human_required(&inv()));
+
+// ---- L10: an overview fills the environment a cause never knew -----------------------
+
+fn unrecognized_without_env() -> Cause {
+    Cause::Unrecognized {
+        system: System::Fly,
+        established: Vec::new(),
+        env: None,
+        target: None,
+        seen: person(),
+    }
+}
+
+/// L10: a cause that never knew its environment takes the one the overview knows.
+#[test]
+fn l10_in_env_fills_an_unset_environment() {
+    let c = unrecognized_without_env().in_env("prod");
+    let env = match c {
+        Cause::Unrecognized { env, .. } => env,
+        other => panic!("not Unrecognized: {other:?}"),
+    };
+    assert_eq!(env, Some(EnvName::new("prod")));
+}
+
+/// L10: an environment the cause already carries is never replaced.
+#[test]
+fn l10_in_env_keeps_an_environment_already_set() {
+    let c = Cause::Unrecognized {
+        system: System::Fly,
+        established: Vec::new(),
+        env: Some(EnvName::new("staging")),
+        target: None,
+        seen: person(),
+    }
+    .in_env("prod");
+    let env = match c {
+        Cause::Unrecognized { env, .. } => env,
+        other => panic!("not Unrecognized: {other:?}"),
+    };
+    assert_eq!(env, Some(EnvName::new("staging")));
+}
+
+/// L10: the environment reaches a cause wrapped in `Partial`'s `then`.
+#[test]
+fn l10_in_env_reaches_a_partial_then() {
+    let c = Cause::Partial {
+        done: Vec::new(),
+        approval_used: None,
+        approval_scope: None,
+        then: Box::new(unrecognized_without_env()),
+    }
+    .in_env("prod");
+    let env = match c {
+        Cause::Partial { then, .. } => match *then {
+            Cause::Unrecognized { env, .. } => env,
+            other => panic!("not Unrecognized: {other:?}"),
+        },
+        other => panic!("not Partial: {other:?}"),
+    };
+    assert_eq!(env, Some(EnvName::new("prod")));
 }
