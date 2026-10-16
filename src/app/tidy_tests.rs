@@ -1575,6 +1575,16 @@ fn opv_tidy_json_never_carries_a_value() {
     assert!(!repair(&op, true).1.contains(MARKER));
 }
 
+/// The exit matches the code's own table entry (4), not outcome-unknown (9).
+#[test]
+fn opv_tidy_with_a_conflict_exits_as_a_source_error() {
+    let op = FakeOp::person(messy_item());
+    op.editors.borrow_mut().push((2, someone_edits_session));
+    op.editors.borrow_mut().push((3, someone_edits_session));
+    let (res, _) = repair(&op, false);
+    assert_eq!(res.unwrap_err().exit_code(), 4);
+}
+
 #[test]
 fn opv_tidy_on_a_tidy_item_writes_nothing() {
     let op = FakeOp::person(tidy_item());

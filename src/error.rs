@@ -306,7 +306,9 @@ impl Error {
                 .filter(|l| !l.is_empty())
                 .map_or_else(|| rerun.to_string(), |l| format!("{l}, then {rerun}")),
             _ if self.code().retry() == Retry::Never => help.to_string(),
-            Error::Config(_) => format!("fix the cause above, then {rerun}"),
+            // A refusal by the target repeats until its cause is fixed: never the bare
+            // command again.
+            Error::Config(_) | Error::Target(_) => format!("fix the cause above, then {rerun}"),
             _ => rerun.to_string(),
         }
     }
@@ -483,6 +485,8 @@ codes! {
     ItemChanged => "item_changed", 4, AfterFix, true, "opv setup: the 1Password item changed while setup was saving it: again after setup re-read it (nothing was written; run opv setup again), or another edit landed with setup's or a field setup wrote is missing (a person checks the item's history)";
     InventoryIncomplete => "inventory_incomplete", 4, AfterFix, true, "one or more 1Password accounts could not be listed, so the project inventory is incomplete; a project missing from it is not evidence that it does not exist";
     TargetError => "target_error", 5, AfterFix, false, "the target (Fly, Azure, Kubernetes) refused or failed";
+    PermissionDenied => "permission_denied", 5, AfterFix, true, "signed in to the target, but this identity lacks a role or right there (or a network rule keeps it out); a person with access grants it";
+    OwnerSetupRequired => "owner_setup_required", 5, AfterFix, true, "the target lacks something only its owner sets up (a GitHub environment and its protection rules); a person creates it";
     TargetUnhealthy => "target_unhealthy", 5, AfterFix, false, "the new revision did not become healthy; the previous one keeps serving";
     UpdateRefused => "update_refused", 5, AfterFix, false, "the target refused the update and applied nothing; the previous revision keeps serving; re-running repeats the refusal";
     PolicyRefused => "policy_refused", 6, AfterFix, false, "opv refused the operation";
@@ -491,7 +495,7 @@ codes! {
     ConfirmRequired => "confirm_required", 6, Never, true, "the environment sets confirm_env; pass --confirm <env>";
     ConfirmMismatch => "confirm_mismatch", 6, Never, false, "--confirm names another environment";
     StalePlan => "stale_plan", 6, Never, false, "sync --expect-plan: the plan changed since it was reviewed (the item, the target or the configuration); nothing was changed; review the new plan";
-    RamDirUnavailable => "ram_dir_unavailable", 6, AfterFix, false, "deploy credentials for Azure need a private RAM-backed directory (XDG_RUNTIME_DIR on Linux, %LOCALAPPDATA%\\Temp on Windows) and none is usable; nothing was read or changed";
+    RamDirUnavailable => "ram_dir_unavailable", 6, AfterFix, false, "Azure deploy credentials, or a file opv run delivers locally, need a private RAM-backed directory (XDG_RUNTIME_DIR on Linux, %LOCALAPPDATA%\\Temp on Windows) and none is usable; nothing was read or changed";
     TerminalRequired => "terminal_required", 6, Never, true, "the command needs the user's own interactive terminal";
     AuthRequired => "auth_required", 7, AfterFix, true, "not signed in to 1Password or the target CLI";
     OpNotSignedIn => "op_not_signed_in", 7, AfterFix, true, "not signed in to 1Password";
@@ -506,8 +510,8 @@ codes! {
     OutcomeUnknown => "outcome_unknown", 9, Safe, false, "a change may or may not have been applied; re-running is safe";
     ProviderUnavailable => "provider_unavailable", 9, Safe, false, "a provider did not answer after its retries; nothing was changed";
     Interrupted => "interrupted", 130, Safe, false, "interrupted by SIGINT (130) or SIGTERM (143); re-running is safe";
-    TidyConflict => "tidy_conflict", 4, Safe, false, "the 1Password item changed while opv was tidying it: twice before the write (nothing was written), or another edit landed with opv's (check the item's history; opv never retries); never a failure: reported in a document's tidy_error while the command reads the item as it is";
-    TidyUnverified => "tidy_unverified", 4, AfterFix, true, "opv tidied the 1Password item but the item read back lacks a field opv wrote or kept; a person restores it from the item's history; never a failure: reported in a document's tidy_error";
+    TidyConflict => "tidy_conflict", 4, Safe, false, "the 1Password item changed while opv was tidying it: twice before the write (nothing was written), or another edit landed with opv's (check the item's history; opv never retries); a read reports it in its document's tidy_error and goes on with the item as it is, and opv tidy fails with it";
+    TidyUnverified => "tidy_unverified", 4, AfterFix, true, "opv tidied the 1Password item but the item read back lacks a field opv wrote or kept; a person restores it from the item's history; a read reports it in its document's tidy_error and goes on, and opv tidy fails with it";
 }
 
 /// The end of a failure (A3): an optional human-only action (`Do:`) and one command that
@@ -592,6 +596,13 @@ pub fn split_step(raw: &str, rerun: &str) -> Step {
             next: step,
         };
     }
+    // "run opv again" is the command that was run, never a bare `opv`.
+    if is_rerun_phrase(&step) {
+        return Step {
+            action: None,
+            next: rerun.to_string(),
+        };
+    }
     // `run <command> again; <why>`: the command, without the explanation.
     let lead = step.split("; ").next().unwrap_or_default();
     let lead = lead.strip_prefix("run ").unwrap_or(lead);
@@ -610,6 +621,12 @@ pub fn split_step(raw: &str, rerun: &str) -> Step {
         .or_else(|| step.rsplit_once(" then "));
     if let Some((head, tail)) = split {
         let tail = tail.trim().trim_end_matches('.');
+        if is_rerun_phrase(tail) {
+            return Step {
+                action: Some(head.to_string()),
+                next: rerun.to_string(),
+            };
+        }
         let tail = tail.strip_prefix("run ").unwrap_or(tail);
         let tail = tail.strip_suffix(" again").unwrap_or(tail);
         let tail = tail.trim_matches('`');
@@ -1133,5 +1150,45 @@ mod tests {
         let e = Error::Source("item not found\n  vault: vprd".into());
         let v = envelope(&e, &e.step("opv status prod", "h"));
         assert_eq!(v["error"]["detail"], serde_json::json!(["vault: vprd"]));
+    }
+
+    #[test]
+    fn then_run_opv_again_is_the_command_that_was_run() {
+        assert_eq!(
+            split_step("sign in with az login, then run opv again", "opv sync prod").next,
+            "opv sync prod"
+        );
+    }
+
+    #[test]
+    fn run_opv_again_alone_is_the_command_that_was_run() {
+        assert_eq!(
+            split_step("run opv again", "opv sync prod").next,
+            "opv sync prod"
+        );
+    }
+
+    #[test]
+    fn a_target_error_without_a_step_asks_to_fix_the_cause_first() {
+        let e = Error::Target("az keyvault secret set failed for kv".into());
+        assert_eq!(
+            e.step("opv sync prod", "opv sync --help").action.as_deref(),
+            Some("fix the cause above")
+        );
+    }
+
+    #[test]
+    fn ram_dir_unavailable_covers_local_delivery_too() {
+        assert!(Code::RamDirUnavailable.meaning().contains("opv run"));
+    }
+
+    #[test]
+    fn a_missing_right_needs_a_human() {
+        assert!(Code::PermissionDenied.human_required());
+    }
+
+    #[test]
+    fn owner_setup_needs_a_human() {
+        assert!(Code::OwnerSetupRequired.human_required());
     }
 }
