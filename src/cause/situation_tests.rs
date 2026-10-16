@@ -67,6 +67,11 @@ refusal_rows! {
         { let mut s = base(); s.ci = true; s },
         cmd(&["login", "dev"]),
         Some(RefusedBecause::Ci);
+    // A10: a vendor sign-in is a browser flow a CI job cannot finish.
+    a10_ci_refuses_a_vendor_sign_in:
+        { let mut s = base(); s.ci = true; s },
+        cmd(&["flyctl", "auth", "login"]),
+        Some(RefusedBecause::Ci);
     ci_refuses_approve:
         { let mut s = base(); s.ci = true; s },
         cmd(&["approve"]),

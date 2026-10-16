@@ -804,7 +804,7 @@ environments = ["prod", "dev"]
         let e = require_confirmation(&guarded(), "prod", None, "retry").unwrap_err();
         let inv = crate::cause::Invocation::from_cli(&cmd(&["opv", "run", "prod"]));
         let text = match e.cause() {
-            Some((c, _)) => crate::cause::render::render_text(c, None, &inv, false, false),
+            Some((c, _)) => crate::cause::render::render_text(c, None, &inv, false, false, false),
             None => String::new(),
         };
         assert!(

@@ -48,7 +48,7 @@ fn persons_run() -> Outer {
 
 fn rendered(e: &Error, inv: &crate::cause::Invocation) -> String {
     match e.cause() {
-        Some((c, _)) => crate::cause::render::render_text(c, None, inv, false, false),
+        Some((c, _)) => crate::cause::render::render_text(c, None, inv, false, false, false),
         None => e.to_string(),
     }
 }

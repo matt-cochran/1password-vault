@@ -1272,6 +1272,7 @@ pub(crate) fn unreadable_reply(args: &[&str], e: &serde_json::Error) -> Error {
                 line: u32::try_from(e.line()).unwrap_or(u32::MAX),
                 col: u32::try_from(e.column()).unwrap_or(u32::MAX),
             }),
+            problem: crate::cause::OutputProblem::Unparseable,
             seen,
         }
         .into(),

@@ -789,7 +789,14 @@ pub fn report(e: &Error, rerun: &str, excerpt: Option<&crate::scrub::Excerpt>) -
 /// [`report`] with the step already worked out.
 pub fn report_with(e: &Error, step: &Step, excerpt: Option<&crate::scrub::Excerpt>) -> String {
     if let Error::Catalog(c, up) = e {
-        return crate::cause::render::render_text(c, up.as_deref(), &invocation(), false, false);
+        return crate::cause::render::render_text(
+            c,
+            up.as_deref(),
+            &invocation(),
+            false,
+            false,
+            false,
+        );
     }
     let msg = format!("opv: {e}");
     let (head, rest) = match msg.split_once('\n') {
@@ -1348,8 +1355,14 @@ mod tests {
 
     #[test]
     fn a_catalog_error_reports_the_catalog_text() {
-        let want =
-            crate::cause::render::render_text(&own_session(), None, &invocation(), false, false);
+        let want = crate::cause::render::render_text(
+            &own_session(),
+            None,
+            &invocation(),
+            false,
+            false,
+            false,
+        );
         assert_eq!(
             report(&Error::from(own_session()), "opv approve", None),
             want

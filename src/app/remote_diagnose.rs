@@ -213,6 +213,7 @@ fn classify_code(
                 host: conn.host.to_string(),
                 port: conn.port,
                 known_hosts: conn.known_hosts.to_path_buf(),
+                identity_file: conn.identity_file.map(Path::to_path_buf),
             };
         }
     }

@@ -6,6 +6,7 @@
 //! evidence box ([`super::evidence`]), never a message or a step (§9.3).
 
 use super::evidence;
+use super::situation::{RefusedBecause, Situation};
 use super::*;
 use crate::error::shell_word;
 
@@ -16,6 +17,10 @@ const PERSON_ONLY_FLAGS: [&str; 4] = [
     "--expect-plan",
     "--prune-immutable",
 ];
+
+/// ANSI dim and reset, for the upstream box when the terminal takes colour (A8).
+const DIM: &str = "\x1b[2m";
+const RESET: &str = "\x1b[0m";
 
 /// The issue tracker a `Bug` points at.
 const ISSUES_URL: &str = "https://github.com/matt-cochran/1password-vault/issues";
@@ -38,12 +43,24 @@ fn vendor(program: &str, args: &[&str]) -> Next {
 
 /// The command line of a [`Cmd`]: its argv ([`Cmd::to_argv`]), each word quoted with
 /// `shell_word`.
+///
+/// A trailing `--` marks where the person's own child command goes (`opv run … --
+/// <command>`): it renders as `-- <command>`, never as a child's words (design §6.1).
 pub fn cmd_text(c: &Cmd) -> String {
-    c.to_argv()
+    let argv = c.to_argv();
+    let (words, child) = match argv.split_last() {
+        Some((last, rest)) if last == "--" => (rest, true),
+        _ => (argv.as_slice(), false),
+    };
+    let mut s = words
         .iter()
         .map(|w| shell_word(w))
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" ");
+    if child {
+        s.push_str(" -- <command>");
+    }
+    s
 }
 
 fn vendor_text(v: &VendorCmd) -> String {
@@ -288,6 +305,12 @@ fn with_flag(mut c: Cmd, flag: &str) -> Cmd {
 }
 
 fn help_of(inv: &Invocation) -> Next {
+    // R26 (A19): a usage error of sync or plan steps to the plan of its environment.
+    if matches!(inv.command.as_slice(), [c] if c == "sync" || c == "plan")
+        && let Some(env) = inv_env(inv)
+    {
+        return Next::Check(cmd(&["plan"], &[env]));
+    }
     let mut c = Cmd {
         command: inv.command.clone(),
         args: vec!["--help".into()],
@@ -297,6 +320,182 @@ fn help_of(inv: &Invocation) -> Next {
         c.args.clear();
     }
     Next::Check(c)
+}
+
+/// A vendor command as a [`Cmd`], so [`Situation::refuses`] can check it.
+fn vendor_as_cmd(v: &VendorCmd) -> Cmd {
+    Cmd {
+        command: vec![v.program.clone()],
+        args: v.args.clone(),
+    }
+}
+
+/// The sign-in advice when the situation refuses an interactive sign-in (A10): under CI
+/// the job's own credential, under a shell token the token itself.
+fn sign_in_advice(system: System, why: RefusedBecause) -> String {
+    match why {
+        RefusedBecause::ShellToken => format!(
+            "the token set in this shell is used for {} instead of a sign-in: replace it with a valid one, or unset it to sign in as yourself",
+            system.label()
+        ),
+        RefusedBecause::ServiceAccount => "the service account or Connect credential in this shell decides the 1Password account: check that it is valid".to_string(),
+        _ => match system {
+            System::OnePassword => "give this CI job a 1Password service account token in OP_SERVICE_ACCOUNT_TOKEN (opv ci workflow prints a job that reads it)".to_string(),
+            System::Fly => "set FLY_API_TOKEN in this CI job from the target's deploy credentials (opv ci workflow prints that step)".to_string(),
+            System::GitHub => "set GH_TOKEN in this CI job from the target's deploy credentials (opv ci workflow prints that step)".to_string(),
+            System::Azure => "sign this CI job in with the target's deploy credentials, a service principal (opv ci workflow prints that step)".to_string(),
+            System::Kubernetes => "give this CI job a kubeconfig whose context carries its own credentials".to_string(),
+            System::Ssh | System::RemoteOpv => "give this CI job the remote profile's ssh key".to_string(),
+        },
+    }
+}
+
+/// The read that shows whether the run can sign in: `opv doctor`, scoped to the
+/// invocation's environment when it names one.
+fn signed_in_check(inv: &Invocation) -> Next {
+    match inv_env(inv) {
+        Some(env) => Next::Run(cmd(&["doctor"], &["--env", env])),
+        None => Next::Run(cmd(&["doctor"], &[])),
+    }
+}
+
+/// Whether the situation refuses `next`, with the command as shown. A handoff is a
+/// person's own step, and a re-run is the person's own command, already run without a
+/// terminal: the lack of one here refuses neither.
+fn refusal(next: &Next, inv: &Invocation, sit: &Situation) -> Option<(RefusedBecause, String)> {
+    let (checked, shown, persons_own) = match next {
+        Next::Rerun => {
+            if !matches!(inv.origin, Origin::Cli) {
+                return None;
+            }
+            let mut c = inv_cmd(inv);
+            if inv.has_child {
+                c.args.push("--".into());
+            }
+            (c, rerun_text(inv), true)
+        }
+        Next::Run(c) | Next::Check(c) => (c.clone(), cmd_text(c), false),
+        Next::Handoff(c) => (c.clone(), cmd_text(c), true),
+        Next::Vendor(v) => (vendor_as_cmd(v), vendor_text(v), false),
+        Next::None(_) => return None,
+    };
+    match sit.refuses(&checked) {
+        Some(RefusedBecause::NoTerminal) if persons_own => None,
+        Some(why) => Some((why, shown)),
+        None => None,
+    }
+}
+
+/// Whether `a` is one of the flags only a person may pass, in either form.
+fn person_only_flag(a: &str) -> Option<bool> {
+    PERSON_ONLY_FLAGS.iter().find_map(|f| {
+        if a == *f {
+            Some(true)
+        } else if a.starts_with(&format!("{f}=")) {
+            Some(false)
+        } else {
+            None
+        }
+    })
+}
+
+/// `c` without any flag only a person may pass (and its value).
+fn without_consent(mut c: Cmd) -> Cmd {
+    let mut args = Vec::with_capacity(c.args.len());
+    let mut words = c.args.drain(..);
+    while let Some(a) = words.next() {
+        match person_only_flag(&a) {
+            Some(true) => {
+                words.next();
+            }
+            Some(false) => {}
+            None => args.push(a),
+        }
+    }
+    drop(words);
+    c.args = args;
+    c
+}
+
+/// A re-run of an invocation that carried a person's consent (A9, X4): never the consent
+/// again. Its read when it writes (`sync` → `plan`), else the command without it.
+fn rerun_without_consent(inv: &Invocation) -> Next {
+    let stripped = without_consent(inv_cmd(inv));
+    match read_form(stripped.clone()) {
+        Some(c) if c != stripped => Next::Check(c),
+        _ => Next::Run(stripped),
+    }
+}
+
+/// `next` with the invocation's global `--config <path>` when it is a command opv built
+/// that lacks it (A20, X1). It goes before a `--`, never into a child command.
+fn with_global_config(next: Next, inv: &Invocation) -> Next {
+    if !matches!(inv.origin, Origin::Cli) {
+        return next;
+    }
+    let mut given = Vec::new();
+    let mut words = inv.args.iter();
+    while let Some(a) = words.next() {
+        if a == "--config" {
+            if let Some(v) = words.next() {
+                given = vec![a.clone(), v.clone()];
+            }
+        } else if a.starts_with("--config=") {
+            given = vec![a.clone()];
+        }
+    }
+    if given.is_empty() {
+        return next;
+    }
+    let add = |mut c: Cmd| {
+        let end = c
+            .args
+            .iter()
+            .position(|a| a == "--")
+            .unwrap_or(c.args.len());
+        let has = c.args[..end]
+            .iter()
+            .any(|a| a == "--config" || a.starts_with("--config="));
+        if !has && !c.command.is_empty() {
+            c.args.splice(end..end, given.iter().cloned());
+        }
+        c
+    };
+    match next {
+        Next::Run(c) => Next::Run(add(c)),
+        Next::Check(c) => Next::Check(add(c)),
+        Next::Handoff(c) => Next::Handoff(add(c)),
+        other => other,
+    }
+}
+
+/// `c` with the child placeholder (`-- <command>`) when the invocation had a child
+/// command (A11): its words are never stored, only that it was there.
+fn with_child(mut c: Cmd, inv: &Invocation) -> Cmd {
+    if inv.has_child && !c.args.iter().any(|a| a == "--") {
+        c.args.push("--".into());
+    }
+    c
+}
+
+/// The listing that shows what a choice flag may take (A11).
+fn flag_listing(flag: &str, inv: &Invocation) -> Next {
+    match flag {
+        "--target" => Next::Check(cmd(&["target", "list"], &[])),
+        "--account" => Next::Check(cmd(&["account", "list"], &[])),
+        "--env" | "--product" | "--role" | "--remote" | "--key" => {
+            Next::Check(cmd(&["config", "describe"], &[]))
+        }
+        _ => match inv_env(inv) {
+            Some(env) => Next::Check(cmd(&["status"], &[env])),
+            None => Next::Check(cmd(&["config", "describe"], &[])),
+        },
+    }
+}
+
+/// The subscription of an Azure resource, from its scope (`subscription <id>`).
+fn subscription_of(r: &ResourceRef) -> Option<&str> {
+    r.scope.as_deref()?.strip_prefix("subscription ")
 }
 
 fn doctor_for(principal: Option<&Principal>, credential: Option<&CredentialRef>) -> Next {
@@ -398,6 +597,7 @@ fn account_ref(a: &AccountRef) -> String {
         AccountRef::Email(e) => e.clone(),
         AccountRef::Shorthand(s) => s.clone(),
         AccountRef::Unnamed => "you use".to_string(),
+        AccountRef::Any => "any account".to_string(),
     }
 }
 
@@ -453,6 +653,8 @@ fn resource_kind(k: ResourceKind) -> &'static str {
         ResourceKind::Repository => "repository",
         ResourceKind::GitHubEnvironment => "GitHub environment",
         ResourceKind::ExternalStore => "external store",
+        ResourceKind::KeyVaultSecret => "Key Vault secret",
+        ResourceKind::Subscription => "subscription",
     }
 }
 
@@ -548,6 +750,7 @@ fn store_object(o: &StoreObject) -> String {
             format!("the 1Password manifest {title} (vault {vault})")
         }
         StoreObject::Item { vault, item } => format!("item {item} in vault {vault}"),
+        StoreObject::Resource { resource } => resource_words(resource),
     }
 }
 
@@ -656,9 +859,11 @@ fn vendor_sign_in(system: System) -> Option<VendorCmd> {
 }
 
 fn session_words(system: System, account: &Option<AccountId>, state: &SessionState) -> String {
-    let acct = match account {
-        Some(a) => format!(" account {a}"),
-        None => String::new(),
+    // Kubernetes signs in per kube context; its "account" is the context (A16).
+    let acct = match (account, system) {
+        (Some(a), System::Kubernetes) => format!(" context {a}"),
+        (Some(a), _) => format!(" account {a}"),
+        (None, _) => String::new(),
     };
     let sys = system.label();
     match state {
@@ -703,6 +908,41 @@ fn value_state(s: &ValueState) -> String {
         ValueState::ConcealedConfig => "a setting stored concealed".into(),
         ValueState::FieldNotCreated => "its field does not exist yet".into(),
     }
+}
+
+/// The rows of a values finding, each `product/key[ for target t] (state)`.
+fn value_rows(rows: &[ValueRow]) -> String {
+    rows.iter()
+        .map(|r| {
+            let on = match &r.target {
+                Some(t) => format!(" for target {t}"),
+                None => String::new(),
+            };
+            format!("{}/{}{on} ({})", r.product, r.key, value_state(&r.state))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn local_op(op: LocalOp) -> &'static str {
+    match op {
+        LocalOp::Read => "read",
+        LocalOp::Write => "write",
+        LocalOp::CreateDir => "create the folder",
+        LocalOp::CurrentDir => "find the current folder",
+        LocalOp::CurrentExe => "find its own program file",
+        LocalOp::HomeDir => "find your home folder",
+        LocalOp::Stdout => "write to standard output",
+    }
+}
+
+/// A condition's reason code as shown: a CamelCase word only (names only, X19); anything
+/// else is upstream free text and is never echoed.
+fn reason_code(reason: &str) -> &str {
+    let word = !reason.is_empty()
+        && reason.len() <= 64
+        && reason.chars().all(|c| c.is_ascii_alphanumeric());
+    if word { reason } else { "unrecognised" }
 }
 
 fn value_fix(s: &ValueState) -> &'static str {
@@ -769,6 +1009,9 @@ struct Plan {
     action: Option<Action>,
     do_text: Option<String>,
     next: Next,
+    /// The step the variant chose was refused in this situation and moved into the Do
+    /// for a person (design §6.4): `human_required` is then true.
+    refused: bool,
 }
 
 fn plan(action: Option<(Action, String)>, next: Next) -> Plan {
@@ -780,6 +1023,7 @@ fn plan(action: Option<(Action, String)>, next: Next) -> Plan {
         action,
         do_text,
         next,
+        refused: false,
     }
 }
 
@@ -881,11 +1125,11 @@ impl Cause {
                 candidates,
                 person_picks: _,
             } => format!(
-                "{} match this project: {}",
+                "{} this project: {}",
                 plural(
                     candidates.len(),
-                    "1Password manifest",
-                    "1Password manifests"
+                    "1Password manifest matches",
+                    "1Password manifests match"
                 ),
                 list(candidates)
             ),
@@ -920,6 +1164,10 @@ impl Cause {
                     )
                 }
             }
+            KeyNotDeclared { key, env, product } => match product {
+                Some(p) => format!("key {p}/{key} is not declared for environment {env}"),
+                None => format!("key {key} is not declared for environment {env}"),
+            },
             Ambiguous {
                 kind,
                 given,
@@ -939,6 +1187,9 @@ impl Cause {
                 Scope::NoTargetDelivers { target } => {
                     format!("target {target} of environment {env} delivers no product")
                 }
+                Scope::NoSecretDelivered { target } => format!(
+                    "target {target} of environment {env} delivers no secret, so there is no delivery to verify"
+                ),
                 Scope::NoTargets { products } => format!(
                     "environment {env} has no target for products {}",
                     list_of(products)
@@ -955,6 +1206,11 @@ impl Cause {
                 UsageProblem::ValueFormat { flag, format } => {
                     format!("{flag} expects {format}")
                 }
+                UsageProblem::EntryFormat {
+                    flag,
+                    entry,
+                    format,
+                } => format!("{flag} {entry} is not valid: {flag} expects {format}"),
                 UsageProblem::NeedsFlag { flag, needs } => format!("{flag} needs {needs}"),
                 UsageProblem::UseInstead { command } => {
                     format!("this is done with {} instead", cmd_text(command))
@@ -982,6 +1238,7 @@ impl Cause {
                     AccountRef::Unnamed => {
                         format!("the 1Password account to use is not added {place}")
                     }
+                    AccountRef::Any => format!("no 1Password account is added {place}"),
                     _ => format!(
                         "1Password account {} (chosen by {}) is not added {place}",
                         account_ref(account),
@@ -1046,6 +1303,27 @@ impl Cause {
                     }
                 }
             }
+            MissingRight {
+                system: System::Kubernetes,
+                resource,
+                right:
+                    Right::Verb {
+                        verb,
+                        resource: kind,
+                    },
+                seen,
+                ..
+            } => match &resource.scope {
+                // A16: the verb and kind name the right; the namespace is where.
+                Some(ns) => format!(
+                    "{} may not {verb} {kind} in namespace {ns} (Kubernetes)",
+                    principal_words(seen.principal())
+                ),
+                None => format!(
+                    "{} may not {verb} {kind} (Kubernetes)",
+                    principal_words(seen.principal())
+                ),
+            },
             MissingRight {
                 system,
                 resource,
@@ -1118,6 +1396,13 @@ impl Cause {
                         ),
                     },
                     Refusal::NoRevision => format!("{sys} made no new revision of {what}"),
+                    Refusal::NotRunning => format!("{what} at {sys} is not running"),
+                    Refusal::InProgress => format!(
+                        "{sys} refused the update to {what}: another change is still in progress"
+                    ),
+                    Refusal::ChangedOutsideOpv => format!(
+                        "{what} at {sys} was changed outside opv since opv last wrote it, so opv did not overwrite it"
+                    ),
                 }
             }
             Guard { guard } => match guard {
@@ -1211,7 +1496,10 @@ impl Cause {
                 approval_scope: _,
                 then,
             } => {
-                let mut s = format!("{}; already written: {}", then.message(), list(done));
+                let mut s = then.message();
+                if !done.is_empty() {
+                    s.push_str(&format!("; already written: {}", list(done)));
+                }
                 if let Some(p) = approval_used {
                     s.push_str(&format!("; approval {p} is used up"));
                 }
@@ -1262,12 +1550,25 @@ impl Cause {
                     format!("{tool} is the Windows build, used from WSL")
                 }
             },
-            UnexpectedOutput { system, at, seen } => format!(
-                "opv could not read the reply of {} from {}{}",
-                exit_program(seen),
-                system.label(),
-                at_words(at)
-            ),
+            UnexpectedOutput {
+                system,
+                at,
+                problem,
+                seen,
+            } => match problem {
+                OutputProblem::Unparseable => format!(
+                    "opv could not read the reply of {} from {}{}",
+                    exit_program(seen),
+                    system.label(),
+                    at_words(at)
+                ),
+                OutputProblem::Empty { what } => format!(
+                    "{} answered from {} with an empty {what}{}",
+                    exit_program(seen),
+                    system.label(),
+                    at_words(at)
+                ),
+            },
             Unrecognized {
                 system,
                 established,
@@ -1304,23 +1605,16 @@ impl Cause {
             ConfirmMismatch { given, env } => {
                 format!("the confirmation {given} does not match environment {env}")
             }
-            ValuesNeeded { env, rows } => {
-                let named = rows
-                    .iter()
-                    .map(|r| {
-                        let on = match &r.target {
-                            Some(t) => format!(" for target {t}"),
-                            None => String::new(),
-                        };
-                        format!("{}/{}{on} ({})", r.product, r.key, value_state(&r.state))
-                    })
-                    .collect::<Vec<_>>();
-                format!(
-                    "environment {env} needs {}: {}",
-                    plural(rows.len(), "value", "values"),
-                    named.join(", ")
-                )
-            }
+            KeysBlocking { env, rows } => format!(
+                "opv wrote nothing to environment {env}: it needs {}: {}",
+                plural(rows.len(), "value", "values"),
+                value_rows(rows)
+            ),
+            ValuesNeeded { env, rows } => format!(
+                "environment {env} needs {}: {}",
+                plural(rows.len(), "value", "values"),
+                value_rows(rows)
+            ),
             LocalFileTooOpen { path, mode, want } => format!(
                 "{} has mode {mode:04o}; opv needs {want:04o} or stricter",
                 path.display()
@@ -1378,7 +1672,7 @@ impl Cause {
                 user,
                 host,
                 port,
-                known_hosts: _,
+                ..
             } => format!("cannot reach {user}@{host} port {port} (remote profile {profile})"),
             RemoteDisconnected {
                 profile,
@@ -1424,36 +1718,196 @@ impl Cause {
                 "opv cannot confirm that product {product} is delivered to target {target} in environment {env}: {}",
                 unverified_words(state)
             ),
+            LocalIo { op, path, io } => {
+                if path.as_os_str().is_empty() {
+                    format!("opv could not {}: {}", local_op(*op), io_words(*io))
+                } else {
+                    format!(
+                        "opv could not {} {}: {}",
+                        local_op(*op),
+                        path.display(),
+                        io_words(*io)
+                    )
+                }
+            }
+            StoreNotReady { store, reason } => format!(
+                "{} is not ready (reason: {})",
+                resource_words(store),
+                reason_code(reason)
+            ),
+            HandoffPipeContested { system } => format!(
+                "another process connected to opv's private pipe for {}'s CLI and was refused; nothing was sent to it",
+                system.label()
+            ),
             Bug { site } => format!("opv hit an internal error ({site})"),
         }
     }
 
-    /// The Do and Next (design §4, §6.2).
+    /// The Do and Next (design §4, §6.2) in this run's situation.
     pub fn step(&self, inv: &Invocation) -> (Option<Action>, Next) {
-        let p = self.plan(inv);
+        self.step_in(inv, &Situation::current())
+    }
+
+    /// The Do and Next in `sit` (design §6.4).
+    pub fn step_in(&self, inv: &Invocation, sit: &Situation) -> (Option<Action>, Next) {
+        let p = self.plan_in(inv, sit);
         (p.action, p.next)
     }
 
     /// The Do in words, filled from the subject; `None` when there is no Do.
     pub fn do_text(&self, inv: &Invocation) -> Option<String> {
-        self.plan(inv).do_text
+        self.do_text_in(inv, &Situation::current())
+    }
+
+    /// The Do in words in `sit`.
+    pub fn do_text_in(&self, inv: &Invocation, sit: &Situation) -> Option<String> {
+        self.plan_in(inv, sit).do_text
     }
 
     /// True exactly when the step needs a person (design §6.3).
     pub fn human_required(&self, inv: &Invocation) -> bool {
-        let (action, next) = self.step(inv);
-        matches!(next, Next::Handoff(_))
-            || action.is_some_and(|a| a.person_only())
+        self.human_required_in(inv, &Situation::current())
+    }
+
+    /// `human_required` in `sit`: a step the situation refused is a person's.
+    pub fn human_required_in(&self, inv: &Invocation, sit: &Situation) -> bool {
+        let p = self.plan_in(inv, sit);
+        matches!(p.next, Next::Handoff(_))
+            || p.refused
+            || p.action.is_some_and(|a| a.person_only())
             || matches!(
                 self,
                 Cause::NeedsTerminal { .. }
                     | Cause::NeedsOwnSession { .. }
                     | Cause::NeedsConfirm { .. }
                     | Cause::ApprovalMissing { .. }
+                    | Cause::CredentialRejected { .. }
             )
     }
 
+    /// The plan in this run's situation.
     fn plan(&self, inv: &Invocation) -> Plan {
+        self.plan_in(inv, &Situation::current())
+    }
+
+    /// The variant's plan, then the rules every step obeys whatever the variant chose:
+    /// a re-run never repeats a person's consent (X4, A9), a built command keeps the
+    /// global `--config` (X1, A20), and no step the situation refuses is rendered as the
+    /// Next (X8, A10).
+    fn plan_in(&self, inv: &Invocation, sit: &Situation) -> Plan {
+        let mut p = self.plan_raw(inv);
+        if matches!(p.next, Next::Rerun)
+            && matches!(inv.origin, Origin::Cli)
+            && carries_person_only_flag(&inv_cmd(inv))
+        {
+            p.next = rerun_without_consent(inv);
+        }
+        p.next = with_global_config(p.next, inv);
+        if let Cause::NotSignedIn { system, .. } = self
+            && let Some(v) = vendor_sign_in(*system)
+            && let Some(why) = sit.refuses(&vendor_as_cmd(&v))
+        {
+            p.do_text = Some(sign_in_advice(*system, why));
+            p.refused = true;
+            if matches!(p.next, Next::Rerun) {
+                p.next = signed_in_check(inv);
+            }
+        }
+        if let Some((why, shown)) = refusal(&p.next, inv, sit) {
+            p = self.refused(p, why, &shown, inv, sit);
+        }
+        p
+    }
+
+    /// `p` with its refused Next moved into the Do, and Next falling back to a read.
+    fn refused(
+        &self,
+        mut p: Plan,
+        why: RefusedBecause,
+        shown: &str,
+        inv: &Invocation,
+        sit: &Situation,
+    ) -> Plan {
+        let sign_in = matches!(
+            self,
+            Cause::NotSignedIn { .. } | Cause::InventoryIncomplete { .. }
+        );
+        let words = match why {
+            _ if sign_in
+                && matches!(
+                    why,
+                    RefusedBecause::Ci
+                        | RefusedBecause::ServiceAccount
+                        | RefusedBecause::ShellToken
+                ) =>
+            {
+                let system = match self {
+                    Cause::NotSignedIn { system, .. } => *system,
+                    _ => System::OnePassword,
+                };
+                p.do_text = None;
+                Some(sign_in_advice(system, why))
+            }
+            RefusedBecause::Ci => Some(format!("outside CI, in your own terminal: {shown}")),
+            RefusedBecause::NoTerminal => Some(format!("in your own terminal: {shown}")),
+            RefusedBecause::ServiceAccount => Some(format!(
+                "in your own session, without the service account or Connect credential: {shown}"
+            )),
+            RefusedBecause::ShellToken => Some(sign_in_advice(System::OnePassword, why)),
+            RefusedBecause::ManifestProject => Some(format!(
+                "this project's configuration is a 1Password manifest, so {shown} does not apply"
+            )),
+            RefusedBecause::Platform => Some(format!(
+                "add the account in the 1Password app and turn on its CLI integration (not {shown})"
+            )),
+            RefusedBecause::RemoteChild => Some(format!(
+                "a remote profile runs its own command: {shown} works only without --remote"
+            )),
+            RefusedBecause::HiddenCommand => None,
+        };
+        if let Some(w) = words {
+            p.do_text = Some(match p.do_text.take() {
+                Some(d) => format!("{d}; {w}"),
+                None => w,
+            });
+        }
+        p.refused |= !matches!(
+            why,
+            RefusedBecause::HiddenCommand | RefusedBecause::ManifestProject
+        );
+        p.next = self.fallback(why, shown, inv, sit);
+        p
+    }
+
+    /// The read a refused step falls back to (design §6.4).
+    fn fallback(
+        &self,
+        why: RefusedBecause,
+        shown: &str,
+        inv: &Invocation,
+        sit: &Situation,
+    ) -> Next {
+        let candidate = match (why, self) {
+            (RefusedBecause::ManifestProject, _) if shown.starts_with("opv bootstrap") => {
+                Some(Next::Check(cmd(&["structure", "plan"], &[])))
+            }
+            (_, Cause::NotSignedIn { .. } | Cause::CredentialRejected { .. }) => {
+                Some(signed_in_check(inv))
+            }
+            _ => {
+                let stripped = without_consent(inv_cmd(inv));
+                read_form(stripped.clone())
+                    .filter(|c| *c != inv_cmd(inv))
+                    .map(Next::Check)
+            }
+        };
+        match candidate {
+            Some(n) if refusal(&n, inv, sit).is_none() => with_global_config(n, inv),
+            _ => Next::None(NoNext::NothingToRun),
+        }
+    }
+
+    fn plan_raw(&self, inv: &Invocation) -> Plan {
         use Cause::*;
         match self {
             ConfigNotFound {
@@ -1475,11 +1929,7 @@ impl Cause {
                 )),
                 Next::Run(cmd(&["config", "edit"], &[])),
             ),
-            ConfigUnreadable {
-                path,
-                io: _,
-                given_by,
-            } => plan(
+            ConfigUnreadable { path, io, given_by } => plan(
                 inspect(match given_by {
                     GivenBy::Flag { flag } => format!("check the path given with {flag}"),
                     GivenBy::EnvVar { var } => format!("check the path in {var}"),
@@ -1487,7 +1937,10 @@ impl Cause {
                         format!("check that you can read {}", path.display())
                     }
                 }),
-                Next::Rerun,
+                match io {
+                    IoKind::NotFound => Next::Run(cmd(&["doctor"], &[])),
+                    _ => Next::Rerun,
+                },
             ),
             ConfigInvalid {
                 source,
@@ -1580,9 +2033,10 @@ impl Cause {
                 }),
                 Next::Run(cmd(&["config", "edit"], &[])),
             ),
+            // A14: the person picks the direction, but no step is person-only.
             CopiesDiffer { file, manifest } => plan(
                 Some((
-                    Action::PickBetween,
+                    Action::Inspect,
                     format!(
                         "decide which is right: update {} (opv config export --toml > {}) or the manifest {manifest} (opv config edit)",
                         file.display(),
@@ -1591,7 +2045,15 @@ impl Cause {
                 )),
                 Next::None(NoNext::PersonPicksDirection),
             ),
-            ManifestNotFound { .. } => plan(None, Next::Check(cmd(&["projects"], &[]))),
+            ManifestNotFound { project, account } => plan(
+                inspect(match account {
+                    Some(a) => format!(
+                        "check that project {project} is the one you mean, and that account {a} holds its manifest"
+                    ),
+                    None => format!("check that project {project} is the one you mean"),
+                }),
+                Next::Check(cmd(&["projects"], &[])),
+            ),
             ManifestAmbiguous {
                 candidates,
                 person_picks,
@@ -1604,7 +2066,16 @@ impl Cause {
                 }),
                 Next::Check(cmd(&["projects"], &[])),
             ),
-            ManifestExists { .. } => plan(None, Next::Run(cmd(&["config", "edit"], &[]))),
+            ManifestExists { local_file, .. } => plan(
+                None,
+                match local_file {
+                    Some(f) => Next::Check(Cmd {
+                        command: vec!["config".into(), "check".into()],
+                        args: vec!["--file".into(), f.display().to_string()],
+                    }),
+                    None => Next::Run(cmd(&["config", "edit"], &[])),
+                },
+            ),
             InventoryIncomplete { unlisted } => match unlisted.first() {
                 Some(first) => {
                     let mut args = vec![
@@ -1648,6 +2119,12 @@ impl Cause {
                     None => name_listing(*kind, inv),
                 },
             ),
+            KeyNotDeclared { key, env, .. } => plan(
+                inspect(format!(
+                    "declare {key} for environment {env} (opv add), or use a key it declares"
+                )),
+                Next::Check(cmd(&["config", "describe"], &[])),
+            ),
             Ambiguous {
                 kind,
                 given: _,
@@ -1661,14 +2138,15 @@ impl Cause {
                     let mut c = inv_cmd(inv);
                     c.args.push(flag.clone());
                     c.args.push(only.clone());
-                    plan(None, run_or_handoff(c))
+                    plan(None, run_or_handoff(with_child(c, inv)))
                 }
+                // A11: the listing of what may be picked, never `none`.
                 _ => plan(
                     Some((
                         Action::PickBetween,
                         format!("pick one of {} and pass it with {flag}", list(candidates)),
                     )),
-                    Next::None(NoNext::NothingToRun),
+                    flag_listing(flag, inv),
                 ),
             },
             NothingInScope { env, what } => match what {
@@ -1684,6 +2162,9 @@ impl Cause {
                     )),
                     Next::Check(cmd(&["status"], &[env.as_str()])),
                 ),
+                Scope::NoSecretDelivered { .. } => {
+                    plan(None, Next::Check(cmd(&["status"], &[env.as_str()])))
+                }
                 Scope::NoTargets { products } => plan(
                     inspect(format!(
                         "declare a target in environment {env} for {}",
@@ -1707,6 +2188,7 @@ impl Cause {
                     | UsageProblem::MisplacedBeforeDashDash { .. }
                     | UsageProblem::ConflictsWith { .. }
                     | UsageProblem::ValueFormat { .. }
+                    | UsageProblem::EntryFormat { .. }
                     | UsageProblem::NeedsFlag { .. } => help_of(inv),
                 },
             ),
@@ -1724,6 +2206,20 @@ impl Cause {
                     (
                         Action::UnlockApp,
                         "unlock the 1Password app and approve its prompt".to_string(),
+                    )
+                } else if *system == System::Kubernetes {
+                    // A16: a kubeconfig credential refresh, per context.
+                    (
+                        Action::SignIn {
+                            system: *system,
+                            account: account.clone(),
+                        },
+                        match account {
+                            Some(c) => format!(
+                                "refresh the credentials of kube context {c} with the sign-in of its auth provider"
+                            ),
+                            None => "refresh the credentials of the current kube context with the sign-in of its auth provider".to_string(),
+                        },
                     )
                 } else {
                     let acct = match account {
@@ -1775,6 +2271,7 @@ impl Cause {
             } => {
                 let who = match account {
                     AccountRef::Unnamed => "the account you use".to_string(),
+                    AccountRef::Any => "a 1Password account (any one you use)".to_string(),
                     a => format!("account {}", account_ref(a)),
                 };
                 let text = if *in_app {
@@ -1789,9 +2286,10 @@ impl Cause {
                         AccountRef::Email(e) => {
                             Next::Handoff(cmd(&["login"], &["--add", "--account", e]))
                         }
-                        AccountRef::Id(_) | AccountRef::Shorthand(_) | AccountRef::Unnamed => {
-                            Next::Handoff(cmd(&["login"], &["--add"]))
-                        }
+                        AccountRef::Id(_)
+                        | AccountRef::Shorthand(_)
+                        | AccountRef::Unnamed
+                        | AccountRef::Any => Next::Handoff(cmd(&["login"], &["--add"])),
                     }
                 };
                 plan(
@@ -1936,7 +2434,9 @@ impl Cause {
                     | ResourceKind::Namespace
                     | ResourceKind::Deployment
                     | ResourceKind::KubeContext
-                    | ResourceKind::Repository => format!(
+                    | ResourceKind::Repository
+                    | ResourceKind::KeyVaultSecret
+                    | ResourceKind::Subscription => format!(
                         "ask an owner at {} to set up {}",
                         system.label(),
                         resource_words(object)
@@ -1972,11 +2472,23 @@ impl Cause {
                     },
                     NotFoundState::SoftDeleted => match (system, resource.kind) {
                         (System::Azure, ResourceKind::KeyVault) => {
-                            format!(
+                            let mut line = format!(
                                 "recover it: az keyvault recover --name {}",
                                 shell_word(name)
-                            )
+                            );
+                            if let Some(sub) = subscription_of(resource) {
+                                line.push_str(&format!(" --subscription {}", shell_word(sub)));
+                            }
+                            line
                         }
+                        (System::Azure, ResourceKind::KeyVaultSecret) => match &resource.scope {
+                            Some(vault) => format!(
+                                "recover it: az keyvault secret recover --vault-name {} --name {}",
+                                shell_word(vault),
+                                shell_word(name)
+                            ),
+                            None => format!("recover {what} at {}", system.label()),
+                        },
                         _ => format!("recover {what} at {}", system.label()),
                     },
                     NotFoundState::LocalContextMissing => {
@@ -1984,14 +2496,45 @@ impl Cause {
                     }
                 };
                 let next = match (system, state) {
-                    (System::Azure, NotFoundState::SoftDeleted) => {
-                        vendor("az", &["keyvault", "list-deleted"])
+                    (System::Azure, NotFoundState::SoftDeleted) => match resource.kind {
+                        ResourceKind::KeyVaultSecret => match &resource.scope {
+                            Some(vault) => vendor(
+                                "az",
+                                &["keyvault", "secret", "list-deleted", "--vault-name", vault],
+                            ),
+                            None => vendor("az", &["keyvault", "list"]),
+                        },
+                        _ => match subscription_of(resource) {
+                            Some(sub) => {
+                                vendor("az", &["keyvault", "list-deleted", "--subscription", sub])
+                            }
+                            None => vendor("az", &["keyvault", "list-deleted"]),
+                        },
+                    },
+                    // A16: the context listing only for a missing context.
+                    (System::Kubernetes, NotFoundState::LocalContextMissing) => {
+                        vendor("kubectl", &["config", "get-contexts"])
                     }
-                    (System::Kubernetes, _) => vendor("kubectl", &["config", "get-contexts"]),
+                    (System::Kubernetes, _) => match (resource.kind, &resource.scope) {
+                        (ResourceKind::KubeContext, _) => {
+                            vendor("kubectl", &["config", "get-contexts"])
+                        }
+                        (ResourceKind::ExternalStore, _) => {
+                            vendor("kubectl", &["get", "clustersecretstores"])
+                        }
+                        (ResourceKind::Deployment, Some(ns)) => {
+                            vendor("kubectl", &["get", "deployments", "--namespace", ns])
+                        }
+                        _ => vendor("kubectl", &["get", "namespaces"]),
+                    },
                     (System::Fly, _) => vendor("flyctl", &["apps", "list"]),
                     (System::Azure, _) => match resource.kind {
                         ResourceKind::ContainerApp => vendor("az", &["containerapp", "list"]),
-                        _ => vendor("az", &["keyvault", "list"]),
+                        ResourceKind::Subscription => vendor("az", &["account", "list"]),
+                        _ => match subscription_of(resource) {
+                            Some(sub) => vendor("az", &["keyvault", "list", "--subscription", sub]),
+                            None => vendor("az", &["keyvault", "list"]),
+                        },
                     },
                     (System::GitHub, _) => vendor("gh", &["repo", "list"]),
                     (System::OnePassword, _) => match (resource.kind, &resource.scope) {
@@ -2024,6 +2567,13 @@ impl Cause {
                         "check why revision {new_revision} of {what} fails its health checks in its logs"
                     ),
                     Refusal::NoRevision => format!("check the deployment history of {what}"),
+                    Refusal::NotRunning => format!("check the logs of {what} for why it stopped"),
+                    Refusal::InProgress => {
+                        format!("wait for the change in progress on {what} to finish")
+                    }
+                    Refusal::ChangedOutsideOpv => format!(
+                        "check who changed {what} and whether opv's values should replace theirs"
+                    ),
                 };
                 plan(
                     inspect(text),
@@ -2149,13 +2699,24 @@ impl Cause {
                 }
             },
             WriteOutcomeUnknown { .. } => plan(None, Next::Rerun),
-            Unavailable { system, .. } => plan(
-                inspect(format!(
-                    "check the status page of {} or the network",
-                    system.label()
-                )),
-                Next::Rerun,
-            ),
+            Unavailable { system, seen, .. } => {
+                // A17: the status page link; A21: a person's op may be waiting on the app.
+                let page = match crate::host::tool(exit_program(seen)) {
+                    Some(t) if !t.status_page.is_empty() => format!(
+                        "check {}'s status page ({}) or the network",
+                        system.label(),
+                        t.status_page
+                    ),
+                    _ => format!("check the status page of {} or the network", system.label()),
+                };
+                let text = match (system, seen.principal()) {
+                    (System::OnePassword, Principal::Person { .. }) => format!(
+                        "approve the 1Password app's prompt if it shows one; otherwise {page}"
+                    ),
+                    _ => page,
+                };
+                plan(inspect(text), Next::Rerun)
+            }
             BudgetSpent {
                 budget_seconds,
                 writes_started: _,
@@ -2188,11 +2749,18 @@ impl Cause {
                 approval_scope,
                 then,
             } => {
-                let inner = then.plan(inv);
-                let written = format!("already written: {}", list(done));
-                let action = match (inner.action, inner.do_text) {
-                    (Some(a), Some(t)) => Some((a, format!("{t} ({written})"))),
-                    _ => inspect(format!("review what remains ({written})")),
+                let inner = then.plan_raw(inv);
+                // A15: an empty `done` names nothing as written.
+                let action = match (inner.action, inner.do_text, done.is_empty()) {
+                    (Some(a), Some(t), true) => Some((a, t)),
+                    (Some(a), Some(t), false) => {
+                        Some((a, format!("{t} (already written: {})", list(done))))
+                    }
+                    (_, _, true) => inspect("review what remains"),
+                    (_, _, false) => inspect(format!(
+                        "review what remains (already written: {})",
+                        list(done)
+                    )),
                 };
                 let next = match approval_scope {
                     Some(scope) => scope_read(scope),
@@ -2204,7 +2772,7 @@ impl Cause {
             ChangedBeforeWrite { .. } => plan(None, Next::Rerun),
             ConcurrentEdit { object } => {
                 let next = match object {
-                    StoreObject::Item { .. } => match inv_env(inv) {
+                    StoreObject::Item { .. } | StoreObject::Resource { .. } => match inv_env(inv) {
                         Some(env) => Next::Check(cmd(&["status"], &[env])),
                         None => Next::Check(cmd(&["status"], &[])),
                     },
@@ -2290,13 +2858,27 @@ impl Cause {
                 )
             }
             Unrecognized {
-                env, target, seen, ..
+                system,
+                env,
+                target,
+                seen,
+                ..
             } => plan(
                 inspect(format!(
                     "read the reply of {} shown above; opv does not recognise it",
                     exit_program(seen)
                 )),
-                doctor_scoped(env, target, Some(seen.principal())),
+                match system {
+                    // A12: opv doctor does not check ssh; the full reply does.
+                    System::Ssh => {
+                        let c = with_flag(without_consent(inv_cmd(inv)), "--verbose");
+                        match read_form(c.clone()) {
+                            Some(r) if r != c => Next::Check(with_flag(r, "--verbose")),
+                            _ => Next::Run(c),
+                        }
+                    }
+                    _ => doctor_scoped(env, target, Some(seen.principal())),
+                },
             ),
             NeedsTerminal { why: _ } => plan(
                 inspect("run it in your own terminal"),
@@ -2306,6 +2888,7 @@ impl Cause {
                 let mut c = inv_cmd(inv);
                 c.args.push("--confirm".into());
                 c.args.push(env.to_string());
+                let c = with_child(c, inv);
                 plan(
                     Some((
                         Action::Confirm { env: env.clone() },
@@ -2316,11 +2899,15 @@ impl Cause {
                     Next::Handoff(c),
                 )
             }
+            // A18 (01.12): only the person knows which environment they meant.
             ConfirmMismatch { given: _, env } => plan(
-                inspect("check which environment you meant"),
+                Some((
+                    Action::Confirm { env: env.clone() },
+                    "check which environment you meant".to_string(),
+                )),
                 Next::Check(cmd(&["plan"], &[env.as_str()])),
             ),
-            ValuesNeeded { env, rows } => match rows.first() {
+            ValuesNeeded { env, rows } | KeysBlocking { env, rows } => match rows.first() {
                 Some(first) => {
                     let name = format!("{}/{}", first.product, first.key);
                     plan(
@@ -2464,29 +3051,32 @@ impl Cause {
                 host,
                 port,
                 known_hosts,
+                identity_file,
             } => {
-                let port = port.to_string();
-                let dest = format!("{user}@{host}");
-                let pinned = format!("UserKnownHostsFile={}", known_hosts.display());
+                let mut args: Vec<String> = ["-F", "none", "-o", "StrictHostKeyChecking=yes", "-o"]
+                    .iter()
+                    .map(|a| a.to_string())
+                    .collect();
+                args.push(format!("UserKnownHostsFile={}", known_hosts.display()));
+                // A12: the profile's identity file, as opv's own connection uses it.
+                if let Some(key) = identity_file {
+                    args.push("-i".into());
+                    args.push(key.display().to_string());
+                    args.push("-o".into());
+                    args.push("IdentitiesOnly=yes".into());
+                }
+                args.push("-p".into());
+                args.push(port.to_string());
+                args.push(format!("{user}@{host}"));
+                args.push("true".into());
                 plan(
                     inspect(format!(
                         "check the connection to {host}, and that it presents the host key pinned in remote profile {profile}"
                     )),
-                    vendor(
-                        "ssh",
-                        &[
-                            "-F",
-                            "none",
-                            "-o",
-                            "StrictHostKeyChecking=yes",
-                            "-o",
-                            &pinned,
-                            "-p",
-                            &port,
-                            &dest,
-                            "true",
-                        ],
-                    ),
+                    Next::Vendor(VendorCmd {
+                        program: "ssh".into(),
+                        args,
+                    }),
                 )
             }
             RemoteDisconnected {
@@ -2527,19 +3117,66 @@ impl Cause {
                 product: _,
                 state,
             } => match state {
-                Unverified::NotRecorded
-                | Unverified::Superseded { .. }
-                | Unverified::ChangedOnTarget
-                | Unverified::ChangedInOnePassword => plan(
+                // 01.06: a delivery never made is a scoped plan away.
+                Unverified::NotRecorded => plan(
+                    None,
+                    Next::Check(cmd(&["plan"], &[env.as_str(), "--target", target.as_str()])),
+                ),
+                Unverified::Superseded { receipt } => plan(
+                    inspect(format!(
+                        "verify the later delivery instead: its receipt is {}",
+                        receipt.display()
+                    )),
+                    Next::Check(cmd(&["plan"], &[env.as_str(), "--target", target.as_str()])),
+                ),
+                Unverified::ChangedOnTarget | Unverified::ChangedInOnePassword => plan(
                     None,
                     Next::Check(cmd(&["plan"], &[env.as_str(), "--target", target.as_str()])),
                 ),
                 Unverified::OtherAccount { account } => plan(
                     inspect(format!("check that account {account} is the one you mean")),
-                    Next::Check(cmd(&["account", "list"], &[])),
+                    Next::Handoff(cmd(&["login"], &["--account", account.as_str()])),
                 ),
                 Unverified::Unverifiable => plan(None, Next::None(NoNext::NothingToRun)),
             },
+            LocalIo { op, path, io: _ } => plan(
+                inspect(match op {
+                    LocalOp::Stdout => {
+                        "check where standard output goes (a closed pipe, a full disk)".to_string()
+                    }
+                    LocalOp::CurrentDir => "check that the current folder still exists".to_string(),
+                    LocalOp::HomeDir => "check that HOME is set".to_string(),
+                    LocalOp::CurrentExe => {
+                        "check that opv's own program file is still in place".to_string()
+                    }
+                    LocalOp::Read | LocalOp::Write | LocalOp::CreateDir => {
+                        format!("check free space and permissions of {}", path.display())
+                    }
+                }),
+                Next::Rerun,
+            ),
+            StoreNotReady { store, reason } => plan(
+                Some((
+                    Action::OwnerSetup {
+                        object: store.clone(),
+                    },
+                    format!(
+                        "ask a cluster admin to make {} ready (its reason: {})",
+                        resource_words(store),
+                        reason_code(reason)
+                    ),
+                )),
+                vendor(
+                    "kubectl",
+                    &["get", "clustersecretstore", store.name.as_str()],
+                ),
+            ),
+            HandoffPipeContested { .. } => plan(
+                inspect(
+                    "check the processes running as you, and treat this machine as untrusted until you know which one connected",
+                ),
+                Next::Rerun,
+            ),
             Bug { site: _ } => plan(
                 inspect(format!("report this as an opv bug: {ISSUES_URL}")),
                 Next::Check(cmd(&["version"], &[])),
@@ -2608,12 +3245,17 @@ pub fn category(exit_code: i32) -> &'static str {
 
 /// The terminal text (§7.1): `opv: <message>`, the `checked:` line, the upstream box,
 /// `Do: …`, and `Next: …` last. Ends with a newline.
+///
+/// `colour` (A8, §7.1) is the terminal's colour support, which the caller decides (stderr
+/// is a terminal, `NO_COLOR` unset, `--color`): with it the upstream box is dimmed. Colour
+/// only reinforces; the words are the same without it.
 pub fn render_text(
     cause: &Cause,
     upstream: Option<&Upstream>,
     inv: &Invocation,
     verbose: bool,
     utf8: bool,
+    colour: bool,
 ) -> String {
     let mut s = format!("opv: {}\n", cause.message());
     if let Some(seen) = cause.observed() {
@@ -2622,7 +3264,14 @@ pub fn render_text(
         s.push('\n');
     }
     if let Some(up) = upstream {
-        s.push_str(&evidence::upstream_box(up, verbose, utf8));
+        let boxed = evidence::upstream_box(up, verbose, utf8);
+        if colour {
+            for line in boxed.lines() {
+                s.push_str(&format!("{DIM}{line}{RESET}\n"));
+            }
+        } else {
+            s.push_str(&boxed);
+        }
     }
     let p = cause.plan(inv);
     if let Some(d) = p.do_text {

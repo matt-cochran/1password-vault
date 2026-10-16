@@ -302,8 +302,9 @@ fn undeclared_rotate_next_plans_the_closest_key() {
     );
 }
 
+/// A19 (R26): a usage error of sync steps to the plan of its environment, not `--help`.
 #[test]
-fn prune_immutable_without_prune_next_is_the_help() {
+fn prune_immutable_without_prune_next_is_the_plan() {
     let o = SyncOpts {
         prune_immutable: vec!["allumata/INTEGRATION_ENC_KEY".into()],
         ..SyncOpts::default()
@@ -314,7 +315,7 @@ fn prune_immutable_without_prune_next_is_the_help() {
             &res.unwrap_err(),
             "opv sync prod --prune-immutable allumata/INTEGRATION_ENC_KEY"
         ),
-        Some("opv sync --help".into())
+        Some("opv plan prod".into())
     );
 }
 
@@ -1123,7 +1124,7 @@ fn expect_plan_with_prune_immutable_next_is_not_the_sync() {
                  --expect-plan 00000000";
     assert_eq!(
         catalog_next(&res.unwrap_err(), typed),
-        Some("opv sync --help".into())
+        Some("opv plan prod".into())
     );
 }
 

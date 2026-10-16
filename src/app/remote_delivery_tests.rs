@@ -420,6 +420,7 @@ fn refusal_text(env: &str, role: &str) -> String {
             ]),
             false,
             false,
+            false,
         ),
         None => String::new(),
     }

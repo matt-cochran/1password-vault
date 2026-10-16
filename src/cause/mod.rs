@@ -413,6 +413,13 @@ pub enum Cause {
         candidates: Vec<String>,
         closest: Option<Closest>,
     },
+    /// A key that is not declared for one environment (R21): "key X is not declared for
+    /// environment E".
+    KeyNotDeclared {
+        key: KeyName,
+        env: EnvName,
+        product: Option<ProductName>,
+    },
     Ambiguous {
         kind: NameKind,
         given: String,
@@ -565,9 +572,12 @@ pub enum Cause {
         tool: String,
         why: Unusable,
     },
+    /// A call that answered, but with output opv cannot use (A1): unparseable, or empty
+    /// where a value was due (a minted token).
     UnexpectedOutput {
         system: System,
         at: Option<Location>,
+        problem: OutputProblem,
         seen: Observed,
     },
     Unrecognized {
@@ -590,6 +600,12 @@ pub enum Cause {
         env: EnvName,
     },
     ValuesNeeded {
+        env: EnvName,
+        rows: Vec<ValueRow>,
+    },
+    /// A write refused because values are missing or fail their rule (exit 6,
+    /// `keys_blocking`); `ValuesNeeded` is the finding of a read (exit 8).
+    KeysBlocking {
         env: EnvName,
         rows: Vec<ValueRow>,
     },
@@ -646,6 +662,8 @@ pub enum Cause {
         port: u16,
         /// The file holding the host key pinned in the profile, as opv's own check uses it.
         known_hosts: PathBuf,
+        /// The profile's identity file, which the pinned check uses too.
+        identity_file: Option<PathBuf>,
     },
     /// The connection ended or stalled after the payload was sent: ssh itself exits 255
     /// mid-session (recorded: "closed by remote host", "server not responding"), so a 255
@@ -670,6 +688,24 @@ pub enum Cause {
         target: TargetName,
         product: ProductName,
         state: Unverified,
+    },
+    /// opv's own local input or output failed (writing a file, finding the working folder,
+    /// its own executable or the home folder, writing to stdout).
+    LocalIo {
+        op: LocalOp,
+        path: PathBuf,
+        io: IoKind,
+    },
+    /// An external store (a ClusterSecretStore) is not ready; `reason` is the condition's
+    /// reason code (a CamelCase word), never its message.
+    StoreNotReady {
+        store: ResourceRef,
+        reason: String,
+    },
+    /// Another process connected to opv's private hand-off pipe for a vendor CLI: opv
+    /// refused it and sent nothing.
+    HandoffPipeContested {
+        system: System,
     },
     Bug {
         site: &'static str,
@@ -732,8 +768,16 @@ pub enum NotEditable {
 #[serde(tag = "what", rename_all = "snake_case")]
 pub enum Scope {
     NoProductHasKeys,
-    NoTargetDelivers { target: TargetName },
-    NoTargets { products: Vec<ProductName> },
+    NoTargetDelivers {
+        target: TargetName,
+    },
+    /// The target delivers no secret, so there is no delivery to verify.
+    NoSecretDelivered {
+        target: TargetName,
+    },
+    NoTargets {
+        products: Vec<ProductName>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -752,6 +796,12 @@ pub enum UsageProblem {
     },
     ValueFormat {
         flag: String,
+        format: &'static str,
+    },
+    /// One entry of a repeatable option is malformed (`--rotate`, `--prune-immutable`).
+    EntryFormat {
+        flag: String,
+        entry: String,
         format: &'static str,
     },
     NeedsFlag {
@@ -789,6 +839,35 @@ pub enum Refusal {
         serving: Option<String>,
     },
     NoRevision,
+    /// The app is not running (a dead app).
+    NotRunning,
+    /// Another change is still in progress at the provider.
+    InProgress,
+    /// The object was changed outside opv since opv last wrote it.
+    ChangedOutsideOpv,
+}
+
+/// What was wrong with a call's output (`UnexpectedOutput`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "problem", rename_all = "snake_case")]
+pub enum OutputProblem {
+    /// It could not be parsed (JSON, a version line).
+    Unparseable,
+    /// It was empty where a value was due (`what`: "deploy token").
+    Empty { what: &'static str },
+}
+
+/// Which of opv's own local operations failed (`LocalIo`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalOp {
+    Read,
+    Write,
+    CreateDir,
+    CurrentDir,
+    CurrentExe,
+    HomeDir,
+    Stdout,
 }
 
 /// opv's own refusals that are not person-only steps (§4.5).
@@ -934,6 +1013,7 @@ impl Cause {
                 NameKind::RemoteProfile => "unknown_profile",
                 NameKind::Mode | NameKind::HelpTopic => "usage",
             },
+            KeyNotDeclared { .. } => "undeclared_key",
             Ambiguous { .. } => "ambiguous_name",
             ChoiceRequired { .. } => "choice_required",
             NothingInScope { what, .. } => match what {
@@ -982,6 +1062,7 @@ impl Cause {
             ChangedBeforeWrite { object } => match object {
                 StoreObject::File { .. } | StoreObject::Manifest { .. } => "config_changed",
                 StoreObject::Item { .. } => "item_changed",
+                StoreObject::Resource { .. } => "target_changed",
             },
             ConcurrentEdit { .. } => "concurrent_edit",
             ReadBackMissing { .. } => "tidy_unverified",
@@ -993,6 +1074,7 @@ impl Cause {
             NeedsConfirm { .. } => "confirm_required",
             ConfirmMismatch { .. } => "confirm_mismatch",
             ValuesNeeded { .. } => "findings",
+            KeysBlocking { .. } => "keys_blocking",
             LocalFileTooOpen { .. } => "file_too_open",
             InputInvalid { .. } => "input_invalid",
             ApprovalMissing { .. } => "approval_required",
@@ -1006,6 +1088,9 @@ impl Cause {
             RemoteVersionMismatch { .. } => "remote_version_mismatch",
             ChildStartFailed { .. } => "child_start_failed",
             DeliveryUnverified { .. } => "delivery_unverified",
+            LocalIo { .. } => "local_io_failed",
+            StoreNotReady { .. } => "owner_setup_required",
+            HandoffPipeContested { .. } => "handoff_refused",
             Bug { .. } => "internal_error",
         }
     }
@@ -1027,6 +1112,7 @@ impl Cause {
             | ManifestAmbiguous { .. }
             | ManifestExists { .. }
             | NotDeclared { .. }
+            | KeyNotDeclared { .. }
             | Ambiguous { .. }
             | ChoiceRequired { .. }
             | NothingInScope { .. }
@@ -1043,6 +1129,9 @@ impl Cause {
             }
             | ConcurrentEdit { .. }
             | ReadBackMissing { .. } => 4,
+            ChangedBeforeWrite {
+                object: StoreObject::Resource { .. },
+            } => 5,
             ChangedBeforeWrite { .. } => 2,
             MissingRight { system, .. }
             | NotFound { system, .. }
@@ -1055,6 +1144,7 @@ impl Cause {
                 }
             }
             OwnerSetupRequired { .. }
+            | StoreNotReady { .. }
             | TargetRefused { .. }
             | RemoteUnreachable { .. }
             | RemoteDisconnected { .. } => 5,
@@ -1071,7 +1161,10 @@ impl Cause {
             | PlanChanged { .. }
             | PlanUnknown { .. }
             | RamDirUnavailable { .. }
-            | PrivateDirFailed { .. } => 6,
+            | PrivateDirFailed { .. }
+            | LocalIo { .. }
+            | KeysBlocking { .. }
+            | HandoffPipeContested { .. } => 6,
             NotSignedIn { .. }
             | AccountNotOnMachine { .. }
             | AccountAmbiguous { .. }
@@ -1108,6 +1201,7 @@ impl Cause {
                 RetryClass::CheckFirst
             }
             NotDeclared { .. }
+            | KeyNotDeclared { .. }
             | Ambiguous { .. }
             | ChoiceRequired { .. }
             | NothingInScope { .. }
