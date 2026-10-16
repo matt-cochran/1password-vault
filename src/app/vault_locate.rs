@@ -57,17 +57,46 @@ pub fn rows(r: &dyn CommandRunner, accounts: &[Account], vault: &str) -> Vec<Row
             let call = Call::new("op", &args);
             match r.probe(&call, PROBE_TIMEOUT) {
                 Ok(o) if o.status == 0 => row(a, "found"),
-                Ok(_) => {
-                    let _ = crate::runner::take_failure_excerpt();
-                    match manifest::signed_in(r, &a.account_uuid) {
+                Ok(_) => match probe_said(vault, &a.account_uuid) {
+                    Some(true) => row(a, "not_found"),
+                    Some(false) => row(a, "unknown"),
+                    // A reply opv does not recognise: not there when this account is
+                    // signed in, else not asked.
+                    None => match manifest::signed_in(r, &a.account_uuid) {
                         Some(true) => row(a, "not_found"),
                         _ => row(a, "unknown"),
-                    }
-                }
+                    },
+                },
                 Err(_) => row(a, "unknown"),
             }
         })
         .collect()
+}
+
+/// What the failed `op vault get` of `vault` in `account` said, through the 1Password
+/// diagnosis (design §5): `Some(true)` the vault is not in that account, `Some(false)` the
+/// account could not be asked (a sign-in, a timeout, op unusable), `None` a reply the
+/// diagnosis does not recognise.
+fn probe_said(vault: &str, account: &str) -> Option<bool> {
+    let failure = crate::runner::take_failure()?;
+    let ctx = crate::cause::DiagnoseContext {
+        resource: Some(crate::cause::ResourceRef {
+            kind: crate::cause::ResourceKind::Vault,
+            name: crate::cause::ResourceName::new(vault),
+            scope: Some(account.to_string()),
+        }),
+        account: Some(AccountId::new(account)),
+        ..crate::cause::DiagnoseContext::default()
+    };
+    match crate::adapters::onepassword_diagnose::diagnose(
+        failure.seen.clone(),
+        failure.stderr(),
+        &ctx,
+    ) {
+        Cause::NotFound { .. } | Cause::InOtherAccount { .. } => Some(true),
+        Cause::Unrecognized { .. } => None,
+        _ => Some(false),
+    }
 }
 
 /// `opv vault locate <vault>`.

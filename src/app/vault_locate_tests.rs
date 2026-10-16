@@ -141,14 +141,14 @@ fn a_vault_the_credential_cannot_read_never_steps_to_login() {
 }
 
 #[test]
-fn a_vault_in_no_account_is_vault_no_access() {
+fn a_vault_in_no_account_is_account_not_registered() {
     let (res, _) = locate(vec![
         Output::failure(1),
         Output::success("{}"),
         Output::failure(1),
         Output::success("{}"),
     ]);
-    assert_eq!(res.unwrap_err().code().as_str(), "vault_no_access");
+    assert_eq!(res.unwrap_err().code().as_str(), "account_not_registered");
 }
 
 #[test]

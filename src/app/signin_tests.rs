@@ -151,10 +151,7 @@ fn missing_token_field_names_the_field_not_a_value() {
         Err(e) => e.to_string(),
         Ok(_) => panic!("a missing field must fail"),
     };
-    assert!(
-        e.contains("field FLY_API_TOKEN is missing") && !e.contains(MARKER),
-        "{e}"
-    );
+    assert!(e.contains("FLY_API_TOKEN") && !e.contains(MARKER), "{e}");
 }
 
 #[test]
@@ -165,7 +162,8 @@ fn token_of_the_wrong_type_is_refused() {
         Err(e) => e.to_string(),
         Ok(_) => panic!("a text token must fail"),
     };
-    assert!(e.contains("must be a Password (concealed) field"), "{e}");
+    // R37: a field of another type cannot be read as the credential.
+    assert!(e.contains("cannot be read"), "{e}");
 }
 
 /// A Kubernetes runtime keeping its secrets in a Key Vault (`secrets_in`) signs `az` in

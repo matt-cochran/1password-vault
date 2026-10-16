@@ -270,14 +270,43 @@ fn not_known(who: &str, selected_by: AccountSource) -> Error {
 
 /// Several accounts on this machine and none chosen for the project: opv never guesses and
 /// never searches them all (each search asks the 1Password app about that account, and
-/// none of them was granted to this project). The person picks one by its account ID, and
-/// the step lists them (`opv account list`), never a guessed candidate (X2).
+/// none of them was granted to this project). The person picks one.
+///
+/// Still Legacy: its public code `account_required` (docs/usage.md, and `doctor`'s skip of
+/// the sign-in check) has no catalog cause yet; `ChoiceRequired` would rename it.
 pub fn choose_error(accounts: &[Account]) -> Error {
-    Cause::ChoiceRequired {
-        flag: "--account".to_string(),
-        candidates: accounts.iter().map(|a| a.account_uuid.clone()).collect(),
+    Error::Config(
+        format!(
+            "{} 1Password accounts are on this machine and this project names none; opv uses \
+             only the account you choose, never op's default:\n{}",
+            accounts.len(),
+            listing(accounts)
+        )
+        .into(),
+    )
+    .with_code(crate::error::Code::AccountRequired)
+    .with_do("pick the project's account: run opv login --account <email or account ID> in your own terminal")
+    .with_next("opv account list")
+}
+
+/// One line per account: email, sign-in address and account ID (the person's own accounts,
+/// shown so they can choose).
+fn listing(accounts: &[Account]) -> String {
+    if accounts.is_empty() {
+        return "  (none: add one in the 1Password app)".into();
     }
-    .into()
+    accounts
+        .iter()
+        .map(|a| {
+            format!(
+                "  {}  {}  {}",
+                if a.email.is_empty() { "-" } else { &a.email },
+                a.url.trim_start_matches("https://").trim_end_matches('/'),
+                a.account_uuid
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The accounts op knows (`op account list`, a free probe); empty when it fails. Callers
