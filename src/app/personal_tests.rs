@@ -305,3 +305,15 @@ personal = true
     .unwrap();
     assert_eq!(item_title(&f.environments["dev"], "myapp"), "My Keys");
 }
+
+/// The `git` probe, then `op vault list` failing while nobody is signed in (`op whoami` and
+/// `op account list` fail too): the run's cause is the sign-in, not a missing item.
+#[test]
+fn a_signed_out_run_is_not_told_its_personal_item_is_missing() {
+    let mut replies = vec![Output::failure(2)];
+    replies.extend((0..12).map(|_| Output::failure(1)));
+    let r = FakeRunner::new(replies);
+    let e = crate::app::run::run(&personal_fleet(), "dev", "api", &["env".to_string()], &r)
+        .unwrap_err();
+    assert_ne!(e.code(), crate::error::Code::ItemNotFound);
+}

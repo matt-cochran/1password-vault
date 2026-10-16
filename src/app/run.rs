@@ -239,8 +239,8 @@ fn launch(
         match personal::locate(runner, fleet, env_name, &project) {
             Ok(Some(e)) => Some(e),
             // A sign-in, network or op failure is its own cause, not a missing item.
-            Err(e) => return Err(e),
-            Ok(None) => {
+            Err(e) if e.code() != crate::error::Code::ItemNotFound => return Err(e),
+            Ok(None) | Err(_) => {
                 let labels: Vec<String> = selected
                     .iter()
                     .filter(|(_, spec)| personal::is_personal(fleet, spec))
