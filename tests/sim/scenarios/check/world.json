@@ -5,7 +5,7 @@
       {
         "id": "ASIMACCOUNT000000000000001",
         "shorthand": "sim",
-        "url": "sim.1password.com",
+        "url": "https://sim.1password.com",
         "email": "person@example.com",
         "user": "USIMUSER000000000000000001",
         "user_type": "HUMAN",
