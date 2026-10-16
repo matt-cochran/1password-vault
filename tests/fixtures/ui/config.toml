@@ -1,0 +1,48 @@
+# The configuration behind the `opv ui` fixtures, in the 0.7+ shape: a run-only
+# environment and one with a named GitHub target. `opv config export --json` of this file
+# is what the UI reads (the test fixture converts it the way export does).
+
+[environments.local]
+title = "Local development"
+order = 1
+boundaries.core = { vault_id = "vsmoke", item_id = "ismoke" }
+
+[environments.ci]
+title = "CI (GitHub)"
+order = 2
+boundaries.core = { vault_id = "vsmoke", item_id = "ismoke" }
+
+[environments.ci.targets.app]
+github.repo = "example-org/example-repo"
+products = ["api"]
+state_vault_id = "vstate"
+
+[products.api]
+boundary = "core"
+
+[products.api.keys.API_TOKEN]
+kind = "secret"
+environments = ["local", "ci"]
+
+[products.api.keys.APP_NAME]
+kind = "config"
+environments = ["local", "ci"]
+
+[products.api.keys.DEPLOY_TOKEN]
+kind = "secret"
+from = "shared/DEPLOY_TOKEN"
+environments = ["local", "ci"]
+
+[products.api.keys.OPENAI_API_KEY]
+kind = "secret"
+personal = true
+environments = ["local"]
+guidance = "your own OpenAI key (billed to you)"
+
+[products.shared]
+source_only = true
+boundary = "core"
+
+[products.shared.keys.DEPLOY_TOKEN]
+kind = "secret"
+environments = ["local", "ci"]

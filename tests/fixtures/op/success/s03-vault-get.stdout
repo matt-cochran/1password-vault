@@ -1,0 +1,11 @@
+{
+  "id": "<ID_3>",
+  "name": "<NAME_3>",
+  "content_version": 2,
+  "created_at": "<TIME_5>",
+  "updated_at": "<TIME_6>",
+  "items": 1,
+  "description": "<DESCRIPTION_1>",
+  "attribute_version": 1,
+  "type": "USER_CREATED"
+}

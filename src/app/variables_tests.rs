@@ -140,6 +140,13 @@ fn a_concealed_config_field_fails_its_rule() {
     );
 }
 
+/// 01.01: a key this target refuses is not "delivered as a plain environment value".
+#[test]
+fn a_refused_concealed_config_field_is_not_listed_as_delivered() {
+    let (p, _) = planned(Some(signup("open", true)), &FakeVars::with(&[]));
+    assert!(p.concealed_config.is_empty());
+}
+
 #[test]
 fn a_concealed_config_field_is_never_set() {
     let (_, v) = planned(Some(signup("open", true)), &FakeVars::with(&[]));

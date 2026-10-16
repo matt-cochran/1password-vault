@@ -12,6 +12,7 @@
 mod az;
 pub mod config;
 pub mod containerapp;
+pub mod diagnose;
 pub mod handoff;
 pub mod keyvault;
 pub mod login;

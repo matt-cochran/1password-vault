@@ -117,11 +117,17 @@ impl CommandRunner for World {
     fn probe(&self, call: &Call, limit: Duration) -> io::Result<Output> {
         self.record(call);
         if call.program == "flyctl" && call.args == ["auth", "whoami"] {
-            return Ok(if self.fly_signed_in {
-                Output::success("me@example.com\n")
-            } else {
-                Output::failure(1)
-            });
+            if self.fly_signed_in {
+                return Ok(Output::success("me@example.com\n"));
+            }
+            // flyctl's recorded signed-out reply, through the runner so the failure is
+            // observed and diagnosed (design §5).
+            let fake = crate::runner::fake::FakeRunner::default();
+            fake.push_with_stderr(
+                Output::failure(1),
+                include_str!("../../tests/fixtures/fly/failures/01-signed-out-whoami.stderr"),
+            );
+            return fake.probe(call, limit);
         }
         self.op.probe(call, limit)
     }
@@ -259,7 +265,7 @@ fn a_target_that_already_records_deploy_credentials_is_refused() {
     let deploy = Some("op://vstate/already0000000000000000001");
     let (_d, path) = file(&fleet_text(deploy));
     let (res, _, _) = create(&w, &fleet(deploy), &path, true);
-    assert_eq!(res.unwrap_err().code(), Code::PolicyRefused);
+    assert_eq!(res.unwrap_err().code_str(), "already_declared");
 }
 
 #[test]
@@ -285,7 +291,7 @@ fn a_provider_that_cannot_mint_is_refused() {
     let w = World::new();
     let (_d, path) = file(&fleet_text(None));
     let (res, _, _) = create(&w, &github_fleet(), &path, true);
-    assert_eq!(res.unwrap_err().code(), Code::PolicyRefused);
+    assert_eq!(res.unwrap_err().code_str(), "usage");
 }
 
 #[test]
@@ -318,7 +324,7 @@ fn a_missing_provider_sign_in_is_reported_as_auth_required() {
     w.fly_signed_in = false;
     let (_d, path) = file(&fleet_text(None));
     let (res, _, _) = create(&w, &fleet(None), &path, true);
-    assert_eq!(res.unwrap_err().code(), Code::AuthRequired);
+    assert_eq!(res.unwrap_err().code_str(), "target_not_signed_in");
 }
 
 #[test]
@@ -338,7 +344,7 @@ fn a_failed_store_names_the_minted_credential() {
     w.op.vaults.borrow_mut().retain(|(id, _)| id != "vstate");
     let (_d, path) = file(&fleet_text(None));
     let (res, _, _) = create(&w, &fleet(None), &path, true);
-    assert!(res.unwrap_err().text().contains(CREDENTIAL));
+    assert!(message(&res.unwrap_err()).contains(CREDENTIAL));
 }
 
 #[test]
@@ -347,7 +353,20 @@ fn a_failed_store_gives_the_providers_revoke_hint() {
     w.op.vaults.borrow_mut().retain(|(id, _)| id != "vstate");
     let (_d, path) = file(&fleet_text(None));
     let (res, _, _) = create(&w, &fleet(None), &path, true);
-    assert!(res.unwrap_err().text().contains("flyctl tokens"));
+    // C21: the revoke is the cause's Do (SecretNotStored), never free text.
+    assert_eq!(res.unwrap_err().code_str(), "secret_not_stored");
+}
+
+#[test]
+fn a_failed_store_never_leads_to_the_mint_again() {
+    // C21 (X5): a token that was minted but not stored steps to a read, never a re-run of
+    // `--create`, which would mint a second token.
+    let w = World::new();
+    w.op.vaults.borrow_mut().retain(|(id, _)| id != "vstate");
+    let (_d, path) = file(&fleet_text(None));
+    let (res, _, _) = create(&w, &fleet(None), &path, true);
+    let next = res.unwrap_err().next_text().unwrap_or_default();
+    assert!(!next.contains("--create"), "{next}");
 }
 
 #[test]
@@ -384,4 +403,156 @@ fn show_names_the_next_command() {
             .unwrap()
             .contains("Next: opv target credentials staging --target web --create")
     );
+}
+
+fn shown(fleet: &Fleet, w: &World) -> String {
+    let mut out = Vec::new();
+    show(fleet, "staging", "web", w, &mut out).unwrap();
+    String::from_utf8(out).unwrap()
+}
+
+#[test]
+fn show_never_suggests_create_when_credentials_are_recorded() {
+    let w = World::new();
+    assert!(!shown(&fleet(Some(RECORDED_REFERENCE)), &w).contains("--create"));
+}
+
+#[test]
+fn show_names_the_provider_sign_in_before_create() {
+    let mut w = World::new();
+    w.fly_signed_in = false;
+    assert!(shown(&fleet(None), &w).contains("Do: sign in to Fly: flyctl auth login"));
+}
+
+#[test]
+fn show_never_suggests_create_where_the_provider_cannot_mint() {
+    let w = World::new();
+    let mut out = Vec::new();
+    show(&github_fleet(), "staging", "web", &w, &mut out).unwrap();
+    assert!(
+        String::from_utf8(out)
+            .unwrap()
+            .contains("Next: opv config edit")
+    );
+}
+
+#[test]
+fn a_recorded_credential_refusal_points_to_config_edit() {
+    let w = World::new();
+    let deploy = Some(RECORDED_REFERENCE);
+    let (_d, path) = file(&fleet_text(deploy));
+    let (res, _, _) = create(&w, &fleet(deploy), &path, true);
+    assert_eq!(
+        res.unwrap_err().next_text().unwrap_or_default(),
+        "opv config edit"
+    );
+}
+
+// ── Regressions of the audit findings (06-targets.md) ──────────────────────────
+
+/// A catalog error's message, or a legacy error's text.
+fn message(e: &Error) -> String {
+    match e.cause() {
+        Some((c, _)) => c.message(),
+        None => e.text().to_string(),
+    }
+}
+
+#[test]
+fn show_names_the_preflight_cause_not_a_sign_in() {
+    // 06.06: the summary line repeats the cause the preflight found.
+    let mut w = World::new();
+    w.fly_signed_in = false;
+    assert!(shown(&fleet(None), &w).contains("Fly can mint one once this is fixed: "));
+}
+
+#[test]
+fn show_leads_to_create_once_the_preflight_cause_is_fixed() {
+    // The step follows the target's state: after signing in, the --create runs.
+    let mut w = World::new();
+    w.fly_signed_in = false;
+    assert!(
+        shown(&fleet(None), &w)
+            .contains("Next: opv target credentials staging --target web --create")
+    );
+}
+
+#[test]
+fn a_preflight_failure_keeps_its_do_unchanged() {
+    // 06.07: nothing is appended to the line that becomes Do.
+    let mut w = World::new();
+    w.fly_signed_in = false;
+    let (_d, path) = file(&fleet_text(None));
+    let (res, _, _) = create(&w, &fleet(None), &path, true);
+    let action = res.unwrap_err().do_text();
+    assert!(!action.unwrap_or_default().contains("nothing was created"));
+}
+
+#[test]
+fn a_generated_configuration_is_refused_before_a_token_is_minted() {
+    // 06.08: a configuration that cannot take the reference is refused before the mint.
+    let w = World::new();
+    let (_d, path) = file(&format!("# generated by make\n{}", fleet_text(None)));
+    let _ = create(&w, &fleet(None), &path, true);
+    assert!(!w.ran("flyctl", &["tokens"]));
+}
+
+/// opv could not edit the target's section of the configuration at `path`.
+fn not_editable(path: &std::path::Path) -> Error {
+    crate::cause::Cause::ConfigNotEditable {
+        source: crate::cause::ConfigSource::File {
+            path: path.to_path_buf(),
+            given_by: crate::cause::GivenBy::Discovered,
+        },
+        reason: crate::cause::NotEditable::UnsupportedLayout {
+            section: "environments.staging.targets.web".into(),
+        },
+    }
+    .into()
+}
+
+#[test]
+fn a_reference_that_cannot_be_recorded_names_the_stored_item() {
+    // 06.08: the failure says what exists, so nothing is minted twice.
+    let (_d, path) = file(&fleet_text(None));
+    let done = vec!["1Password item i1 in vault vstate, to record as op://vstate/i1".into()];
+    let e = after_mint(not_editable(&path), done);
+    assert!(message(&e).contains("op://vstate/i1"));
+}
+
+#[test]
+fn a_reference_that_cannot_be_recorded_never_leads_to_the_mint_again() {
+    // 06.08, X5: Next is a read, never the --create.
+    let (_d, path) = file(&fleet_text(None));
+    let e = after_mint(not_editable(&path), vec!["Fly deploy token t".into()]);
+    assert!(!e.next_text().unwrap_or_default().contains("--create"));
+}
+
+#[test]
+fn a_failed_store_fills_in_the_app_to_list_tokens() {
+    // 06.09: the revoke hint names the app, never `<app>`.
+    let w = World::new();
+    w.op.vaults.borrow_mut().retain(|(id, _)| id != "vstate");
+    let (_d, path) = file(&fleet_text(None));
+    let (res, _, _) = create(&w, &fleet(None), &path, true);
+    // C21: Fly's own listing is the step that finds the token (Provider::mint_refind).
+    let next = res.unwrap_err().next_text().unwrap_or_default();
+    assert_eq!(next, "flyctl tokens list --app shop-staging");
+}
+
+#[test]
+fn declining_is_the_declined_cause() {
+    // 06.45: a decline is its own cause, never "fix the cause above".
+    let w = World::new();
+    let (_d, path) = file(&fleet_text(None));
+    let (res, _, _) = create(&w, &fleet(None), &path, false);
+    assert_eq!(res.unwrap_err().code_str(), "declined");
+}
+
+#[test]
+fn a_misspelt_target_is_an_unknown_target() {
+    let w = World::new();
+    let mut out = Vec::new();
+    let e = show(&fleet(None), "staging", "wbe", &w, &mut out).unwrap_err();
+    assert_eq!(e.code_str(), "unknown_target");
 }

@@ -10,7 +10,11 @@
 
 use std::io::{self, Read, Write};
 
-use crate::error::{Code, Error};
+use crate::cause::{
+    AccountId, AccountRef, Cause, DiagnoseContext, ExitClass, NoTerminal, SessionState, System,
+    Upstream,
+};
+use crate::error::Error;
 
 /// op's error prefix: `[ERROR] YYYY/MM/DD HH:MM:SS <message>`.
 const ERROR_TAG: &[u8] = b"[ERROR] ";
@@ -148,9 +152,20 @@ pub fn classify(messages: &[String], status: Option<i32>) -> Failure {
         "no accounts found matching",
         "no account found for",
         "account not found",
+        // macOS or Windows with the app integration off: op sees no account (audit 04.15).
+        "no accounts configured",
     ]) {
         Failure::AccountNotRegistered
-    } else if has(&["desktop app", "1password app", "app integration", "locked"]) {
+    } else if has(&[
+        "desktop app",
+        "1password app",
+        "app integration",
+        "locked",
+        // The app's approval prompt left unanswered, before any network reading (04.18).
+        "authorization timeout",
+        "authorization prompt",
+        "approval",
+    ]) {
         Failure::DesktopAppUnavailable
     } else if has(&["(401)", "unauthorized", "invalid credentials", "incorrect"]) {
         Failure::CredentialRejected
@@ -177,84 +192,147 @@ pub fn classify(messages: &[String], status: Option<i32>) -> Failure {
 }
 
 impl Failure {
-    /// The stable error code (FR-50).
-    pub fn code(self) -> Code {
-        match self {
-            Failure::AccountNotRegistered => Code::AccountNotRegistered,
-            Failure::NotSignedIn => Code::OpNotSignedIn,
-            Failure::DesktopAppUnavailable => Code::DesktopAppUnavailable,
-            Failure::CredentialRejected => Code::CredentialRejected,
-            Failure::Cancelled => Code::SignInCancelled,
-            Failure::ProviderUnavailable => Code::ProviderUnavailable,
-            Failure::NoTerminal => Code::TerminalRequired,
-            Failure::Unexpected => Code::OpUnexpected,
-        }
+    /// The cataloged cause of this failure for `account` (as the person named it, or
+    /// `None`). `None` for a failure the catalog cannot name without the failed call's
+    /// observation (`op signin` runs on the terminal, outside the runner): 1Password not
+    /// reached, and a reason opv does not recognise.
+    pub fn cause(self, account: Option<&str>) -> Option<Cause> {
+        let signed_out = |state| Cause::NotSignedIn {
+            system: System::OnePassword,
+            account: account.map(AccountId::new),
+            state,
+        };
+        Some(match self {
+            // Audit 04.02: only an email follows `opv login --add --account`; an account ID
+            // is added at op's prompt (or in the app where the app holds the accounts).
+            Failure::AccountNotRegistered => Cause::AccountNotOnMachine {
+                account: account.map_or(AccountRef::Unnamed, super::account::account_ref),
+                selected_by: account.map_or(
+                    crate::cause::AccountSource::OpDefault,
+                    super::account::source_of,
+                ),
+                in_app: super::account::app_holds_accounts_here(),
+            },
+            Failure::DesktopAppUnavailable => signed_out(SessionState::AppLocked),
+            // A rejected password, a cancelled prompt or no session: not signed in, and
+            // signing in again is the step; op's own words are the evidence.
+            Failure::NotSignedIn | Failure::CredentialRejected | Failure::Cancelled => {
+                signed_out(SessionState::SignedOut)
+            }
+            Failure::NoTerminal => Cause::NeedsTerminal {
+                why: if crate::host::Host::detect().ci {
+                    NoTerminal::Ci
+                } else {
+                    NoTerminal::NoTty
+                },
+            },
+            Failure::ProviderUnavailable | Failure::Unexpected => return None,
+        })
     }
 
     /// The error for `what` (`signing in`, `adding the account`) to `account` (as the person
-    /// named it, or `None`) during `opv <command>`; one recovery step, naming the account
-    /// whenever it is known.
+    /// named it, or `None`) during `opv <command>`, when op's own lines were not kept: the
+    /// same as [`Failure::error_said`] with none.
     pub fn error(self, what: &str, account: Option<&str>, command: &str) -> Error {
-        let who = account.map_or(String::new(), |a| format!(" to {a}"));
-        let again = match account {
-            Some(a) => format!("opv login --account {a}"),
-            None => "opv login".to_string(),
-        };
-        let (text, step, next) = match self {
-            Failure::AccountNotRegistered => (
-                format!(
-                    "1Password could not find the account{who}: it is not added to this 1Password CLI"
-                ),
-                "add it here; you type the sign-in address, Secret Key and password only at 1Password's prompt",
-                match account {
-                    Some(a) => format!("opv login --add --account {a}"),
-                    None => "opv login --add".to_string(),
+        self.error_said(what, account, command, &[], None)
+    }
+
+    /// The error for this failure with op's own error lines (`messages`, from [`Filter`])
+    /// and exit `status` (128 + n for signal n) as the scrubbed evidence (#142: opv's words
+    /// alone can hide the cause). A failure the classifier cannot name (1Password not
+    /// reached, a reason opv does not recognise) is recorded as the streamed `op` call it
+    /// was and diagnosed from op's own reply, like every failed `op` call (C9, 04.02).
+    pub fn error_said(
+        self,
+        what: &str,
+        account: Option<&str>,
+        command: &str,
+        messages: &[String],
+        status: Option<i32>,
+    ) -> Error {
+        let _ = command;
+        let said: Vec<String> = messages
+            .iter()
+            .filter(|m| !m.trim().is_empty())
+            .map(|m| crate::scrub::scrub(m.lines().next().unwrap_or_default()))
+            .collect();
+        match self.cause(account) {
+            Some(cause) if !said.is_empty() => Error::with_evidence(
+                cause,
+                Upstream {
+                    source: System::OnePassword,
+                    tool: "1Password CLI".into(),
+                    version: None,
+                    exit: match status {
+                        Some(code) => ExitClass::Code { code },
+                        None => ExitClass::Signal { signal: 0 },
+                    },
+                    said,
+                    removed_advice: false,
+                    truncated: false,
+                    untrusted: true,
                 },
             ),
-            Failure::NotSignedIn => (
-                format!("1Password did not start a session{who}"),
-                "sign in again at 1Password's prompt",
-                again,
-            ),
-            Failure::DesktopAppUnavailable => (
-                format!("the 1Password app did not answer while {what}{who}"),
-                "unlock the 1Password app and turn on Settings > Developer > Integrate with 1Password CLI, then try again",
-                again,
-            ),
-            Failure::CredentialRejected => (
-                format!("1Password did not accept what was typed while {what}{who}"),
-                "type the password (and Secret Key when asked) again at 1Password's prompt",
-                again,
-            ),
-            Failure::Cancelled => (
-                format!("{what}{who} was cancelled"),
-                "start again when ready",
-                again,
-            ),
-            Failure::ProviderUnavailable => (
-                format!("1Password could not be reached while {what}{who}"),
-                "check the network or https://status.1password.com, then try again; nothing was changed",
-                again,
-            ),
-            Failure::NoTerminal => (
-                format!("1Password needs your own terminal for its prompt while {what}{who}"),
-                "run this in your own interactive terminal",
-                again,
-            ),
-            Failure::Unexpected => (
-                format!("{what}{who} did not complete; 1Password gave no reason opv recognises"),
-                "check the CLI with opv doctor, then try again",
-                "opv doctor".to_string(),
-            ),
-        };
-        let text = format!("{text} (during opv {command}). Nothing was printed from the session.");
-        let e = match self {
-            Failure::ProviderUnavailable => Error::Unknown(text.into()),
-            Failure::NoTerminal => Error::Policy(text.into()),
-            _ => Error::Auth(text.into()),
-        };
-        e.with_code(self.code()).with_do(step).with_next(next)
+            Some(cause) => cause.into(),
+            None => diagnosed(what, account, messages, status),
+        }
     }
+}
+
+/// The prompted `op` call (`op signin`, `op account add`) that ended as `status` after
+/// printing `messages`, recorded with the runner (it ran on the terminal, outside it) and
+/// diagnosed by the 1Password strategy from op's own reply, with that reply as evidence.
+fn diagnosed(what: &str, account: Option<&str>, messages: &[String], status: Option<i32>) -> Error {
+    let args: &[&str] = if what.contains("account") {
+        &["account", "add"]
+    } else {
+        &["signin"]
+    };
+    let exit = match status {
+        Some(code) if code > 128 => ExitClass::Signal { signal: code - 128 },
+        Some(code) => ExitClass::Code { code },
+        None => ExitClass::Signal { signal: 0 },
+    };
+    crate::runner::record_streamed(
+        crate::adapters::onepassword::OP,
+        args,
+        exit,
+        messages.join("\n").as_bytes(),
+    );
+    let Some(failure) = crate::runner::take_failure() else {
+        return Cause::Bug {
+            site: "signin_filter: a recorded op prompt left no failure",
+        }
+        .into();
+    };
+    let ctx = DiagnoseContext {
+        account: account
+            .filter(|a| crate::config::is_id(a))
+            .map(AccountId::new),
+        ..DiagnoseContext::default()
+    };
+    let cause = crate::adapters::onepassword_diagnose::diagnose(
+        failure.seen.clone(),
+        failure.stderr(),
+        &ctx,
+    );
+    let (said, truncated) = crate::scrub::Excerpt::parts(failure.excerpt);
+    if said.is_empty() {
+        return cause.into();
+    }
+    Error::with_evidence(
+        cause,
+        Upstream {
+            source: System::OnePassword,
+            tool: "1Password CLI".into(),
+            version: None,
+            exit,
+            said,
+            removed_advice: false,
+            truncated,
+            untrusted: true,
+        },
+    )
 }
 
 #[cfg(test)]

@@ -9,7 +9,11 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::error::{Code, Error};
+use crate::cause::{
+    Cause, EnvName, IoKind, KeyName, PlanId, PlanScope, ProductKey, ProductName, TargetName,
+    UsageProblem,
+};
+use crate::error::Error;
 
 /// How long a recorded approval stays usable: fifteen minutes from `now`.
 pub const TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
@@ -43,10 +47,13 @@ pub fn dir() -> Result<PathBuf, Error> {
     if let Some(state) = std::env::var_os("XDG_STATE_HOME") {
         return Ok(PathBuf::from(state).join("opv").join("approvals"));
     }
-    let home = std::env::var_os("HOME").ok_or_else(|| {
-        Error::Config(
-            "cannot locate the approvals directory: neither XDG_STATE_HOME nor HOME is set".into(),
-        )
+    // Neither XDG_STATE_HOME nor HOME: there is no private folder to keep approvals in.
+    let home = std::env::var_os("HOME").ok_or_else(|| -> Error {
+        Cause::PrivateDirFailed {
+            dir: PathBuf::from("$HOME/.local/state/opv/approvals"),
+            io: IoKind::NotFound,
+        }
+        .into()
     })?;
     Ok(PathBuf::from(home)
         .join(".local")
@@ -133,20 +140,25 @@ pub fn consume_scoped_in(
     }
     match opts.open(&lock) {
         Ok(_) => {}
+        // Used (or being used): it never applies again, and the read of what remains is the
+        // next step, never the approval (X4).
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(refusal(plan_id, "already used or being used"));
+            return Err(Cause::ApprovalUsed {
+                plan: PlanId::new(plan_id),
+                scope: plan_scope(scope),
+                partial: false,
+            }
+            .into());
         }
-        Err(e) => return Err(refusal(plan_id, format_args!("cannot claim record: {e}"))),
+        Err(e) => return Err(dir_refusal(dir, &e)),
     }
     let outcome = match std::fs::symlink_metadata(&source) {
         Ok(m) if m.file_type().is_file() => {
             read_claimed(&source, plan_id, scope, project, account, now)
         }
-        Ok(_) => Err(refusal(plan_id, "malformed record")),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Err(refusal(plan_id, "no approval recorded"))
-        }
-        Err(e) => Err(refusal(plan_id, format_args!("cannot read record: {e}"))),
+        Ok(_) => Err(refusal(plan_id, scope)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(refusal(plan_id, scope)),
+        Err(e) => Err(dir_refusal(dir, &e)),
     };
     // The record is spent whatever the verdict; the claim file stays, so the same id can
     // never be claimed again until a new approval replaces it.
@@ -186,34 +198,96 @@ pub fn consume(plan_id: &str, project: &str, account: &str, now: u64) -> Result<
     consume_in(&dir()?, plan_id, project, account, now)
 }
 
-/// A plan id is `sp-` followed by exactly sixteen lowercase hex digits.
+/// A plan id is `sp-` and sixteen lowercase hex digits (structural), or eight lowercase hex
+/// digits (sync).
 fn validate_plan_id(plan_id: &str) -> Result<(), Error> {
-    let sync_id = plan_id.len() == crate::domain::provenance::PLAN_ID_LEN
-        && plan_id
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-    if crate::app::structure::is_plan_id(plan_id) || sync_id {
+    if crate::app::structure::is_plan_id(plan_id) || is_sync_id(plan_id) {
         Ok(())
     } else {
-        Err(Error::Config(
-            format!("not a plan id: {plan_id} (want sp- followed by 16 lowercase hex digits)")
-                .into(),
-        )
-        .with_code(Code::Usage))
+        Err(Cause::Usage {
+            problem: UsageProblem::ValueFormat {
+                flag: "the plan id".into(),
+                format: PLAN_ID_FORMAT,
+            },
+        }
+        .into())
     }
 }
 
-/// A consume refusal: `approval_required`, with the command a person runs to approve.
-fn refusal(plan_id: &str, why: impl std::fmt::Display) -> Error {
-    Error::Policy(format!("no usable approval for plan {plan_id}: {why}").into())
-        .with_code(Code::ApprovalRequired)
-        .with_next(format!("opv approve {plan_id}"))
+/// Both plan id forms, in words (05.36).
+pub const PLAN_ID_FORMAT: &str = "sp- and 16 hex digits (structural) or 8 hex digits (sync)";
+
+/// True for a sync plan id: eight lowercase hex digits.
+pub fn is_sync_id(plan_id: &str) -> bool {
+    plan_id.len() == crate::domain::provenance::PLAN_ID_LEN
+        && plan_id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// A record or directory refusal: `policy_refused`.
-fn dir_refusal(path: &Path, why: impl std::fmt::Display) -> Error {
-    Error::Policy(format!("cannot use approvals directory {}: {why}", path.display()).into())
-        .with_code(Code::PolicyRefused)
+/// The typed scope of an approval's scope key: empty is a structural plan, else the sync
+/// key [`crate::app::approve::SyncScope::key`] writes, so a refusal's step carries every
+/// scope flag the approval was made with (X1).
+pub fn plan_scope(key: &str) -> PlanScope {
+    let mut words = key.split(' ').filter(|w| !w.is_empty());
+    if words.next() != Some("sync") {
+        return PlanScope::Structural;
+    }
+    let mut scope = PlanScope::Sync {
+        env: EnvName::new(words.next().unwrap_or_default()),
+        targets: Vec::new(),
+        product: None,
+        deploy: false,
+        prune: false,
+        rotate: Vec::new(),
+    };
+    let PlanScope::Sync {
+        targets,
+        product,
+        deploy,
+        prune,
+        rotate,
+        ..
+    } = &mut scope
+    else {
+        unreachable!("built as a sync scope above")
+    };
+    for w in words {
+        match w.split_once('=') {
+            Some(("targets", "*")) | Some(("product", "*")) => {}
+            Some(("targets", list)) => targets.extend(list.split(',').map(TargetName::new)),
+            Some(("product", p)) => *product = Some(ProductName::new(p)),
+            Some(("rotate", list)) => rotate.extend(list.split(',').filter_map(|k| {
+                k.split_once('/').map(|(p, k)| ProductKey {
+                    product: ProductName::new(p),
+                    key: KeyName::new(k),
+                })
+            })),
+            _ if w == "deploy" => *deploy = true,
+            _ if w == "prune" => *prune = true,
+            _ => {}
+        }
+    }
+    scope
+}
+
+/// A consume refusal: the plan is not approved (no usable record), so a person approves it,
+/// with every scope flag (`approval_required`).
+fn refusal(plan_id: &str, scope: &str) -> Error {
+    Cause::ApprovalMissing {
+        plan: PlanId::new(plan_id),
+        scope: plan_scope(scope),
+    }
+    .into()
+}
+
+/// The approvals directory cannot be used.
+fn dir_refusal(path: &Path, e: &std::io::Error) -> Error {
+    Cause::PrivateDirFailed {
+        dir: path.to_path_buf(),
+        io: e.kind().into(),
+    }
+    .into()
 }
 
 /// Create `dir` (and parents) if it does not exist; otherwise refuse a symlink, a
@@ -224,10 +298,10 @@ fn ensure_dir(dir: &Path) -> Result<(), Error> {
         Ok(meta) => check_dir(dir, &meta),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             create_private_dir(dir)?;
-            let meta = std::fs::symlink_metadata(dir).map_err(|e| dir_refusal(dir, e))?;
+            let meta = std::fs::symlink_metadata(dir).map_err(|e| dir_refusal(dir, &e))?;
             check_dir(dir, &meta)
         }
-        Err(e) => Err(dir_refusal(dir, e)),
+        Err(e) => Err(dir_refusal(dir, &e)),
     }
 }
 
@@ -239,28 +313,42 @@ fn create_private_dir(dir: &Path) -> Result<(), Error> {
         use std::os::unix::fs::DirBuilderExt as _;
         builder.mode(0o700);
     }
-    builder.create(dir).map_err(|e| dir_refusal(dir, e))?;
+    builder.create(dir).map_err(|e| dir_refusal(dir, &e))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| dir_refusal(dir, e))?;
+            .map_err(|e| dir_refusal(dir, &e))?;
     }
     Ok(())
 }
 
 fn check_dir(dir: &Path, meta: &std::fs::Metadata) -> Result<(), Error> {
     if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
-        return Err(dir_refusal(dir, "it is a symlink or not a directory"));
+        return Err(Cause::PrivateDirFailed {
+            dir: dir.to_path_buf(),
+            io: IoKind::Other,
+        }
+        .into());
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
         if meta.uid() != rustix::process::geteuid().as_raw() {
-            return Err(dir_refusal(dir, "it is not owned by the current user"));
+            return Err(Cause::PrivateDirFailed {
+                dir: dir.to_path_buf(),
+                io: IoKind::PermissionDenied,
+            }
+            .into());
         }
         if meta.mode() & 0o077 != 0 {
-            return Err(dir_refusal(dir, "it is accessible by group or others"));
+            // 05.36: the fix is the mode, and the step says it (chmod 700).
+            return Err(Cause::LocalFileTooOpen {
+                path: dir.to_path_buf(),
+                mode: meta.mode() & 0o777,
+                want: 0o700,
+            }
+            .into());
         }
     }
     Ok(())
@@ -268,9 +356,24 @@ fn check_dir(dir: &Path, meta: &std::fs::Metadata) -> Result<(), Error> {
 
 /// Write `approval` to a `0600` temp file in `dir`, then rename it into place over any
 /// earlier record. `O_NOFOLLOW | O_CREAT | O_EXCL` on unix.
+/// Whether `plan_id` was ever approved here: an approval is recorded for it, or one was
+/// claimed (used). Names only; nothing is read or changed (C2: an id never approved is
+/// `PlanUnknown`, not a plan that changed since its approval).
+pub fn ever_approved(plan_id: &str) -> bool {
+    validate_plan_id(plan_id).is_ok()
+        && dir().is_ok_and(|d| {
+            d.join(format!("{plan_id}.json")).exists()
+                || d.join(format!("{plan_id}.claim")).exists()
+        })
+}
+
 fn write_record(dir: &Path, approval: &Approval) -> Result<(), Error> {
-    let text = serde_json::to_string(approval)
-        .map_err(|e| dir_refusal(dir, format_args!("cannot encode the record: {e}")))?;
+    let text = serde_json::to_string(approval).map_err(|_| -> Error {
+        Cause::Bug {
+            site: "approval: a fixed record failed to encode",
+        }
+        .into()
+    })?;
     let tmp = dir.join(format!(
         ".{}.{}.{}.tmp",
         approval.plan_id,
@@ -292,18 +395,12 @@ fn write_record(dir: &Path, approval: &Approval) -> Result<(), Error> {
     });
     if let Err(e) = written {
         let _ = std::fs::remove_file(&tmp);
-        return Err(dir_refusal(
-            dir,
-            format_args!("cannot write the record: {e}"),
-        ));
+        return Err(dir_refusal(dir, &e));
     }
     let dest = dir.join(format!("{}.json", approval.plan_id));
     if let Err(e) = replace(&tmp, &dest) {
         let _ = std::fs::remove_file(&tmp);
-        return Err(dir_refusal(
-            dir,
-            format_args!("cannot place the record: {e}"),
-        ));
+        return Err(dir_refusal(dir, &e));
     }
     Ok(())
 }
@@ -337,24 +434,25 @@ fn read_claimed(
     account: &str,
     now: u64,
 ) -> Result<(), Error> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| refusal(plan_id, format_args!("cannot read record: {e}")))?;
-    let approval: Approval =
-        serde_json::from_slice(&bytes).map_err(|_| refusal(plan_id, "malformed record"))?;
+    // Unreadable, malformed, another plan or scope, expired, another project or account:
+    // this plan is not approved here, and a person approves it again.
+    let refused = || refusal(plan_id, scope);
+    let bytes = std::fs::read(path).map_err(|_| refused())?;
+    let approval: Approval = serde_json::from_slice(&bytes).map_err(|_| refused())?;
     if approval.plan_id != plan_id {
-        return Err(refusal(plan_id, "record names another plan"));
+        return Err(refused());
     }
     if approval.scope != scope {
-        return Err(refusal(plan_id, "approved for another scope"));
+        return Err(refused());
     }
     if approval.expires_at <= now {
-        return Err(refusal(plan_id, "expired"));
+        return Err(refused());
     }
     if approval.project != project {
-        return Err(refusal(plan_id, "recorded for another project"));
+        return Err(refused());
     }
     if approval.account != account {
-        return Err(refusal(plan_id, "recorded for another account"));
+        return Err(refused());
     }
     Ok(())
 }

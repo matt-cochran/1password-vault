@@ -17,12 +17,15 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 
-use toml_edit::{DocumentMut, Item, Table, Value};
+use toml_edit::{DocumentMut, Item, Table};
 
 use super::write_err;
 use crate::adapters::onepassword_init::{self as init_op, Lookup};
 use crate::adapters::registry;
 use crate::app::{bootstrap, personal, tidy};
+use crate::cause::{
+    Cause, Cmd, ConfigSource, DottedPath, FieldRule, NameKind, NotEditable, UsageProblem,
+};
 use crate::config;
 use crate::config_store::{self, ConfigStore};
 use crate::domain::{Fleet, naming};
@@ -65,21 +68,60 @@ pub struct ListArgs {
     pub json: bool,
 }
 
-fn cfg(msg: String) -> Error {
-    Error::Config(msg.into())
+/// An opv command as a typed step (design §10.1).
+fn opv(command: &[&str], args: &[&str]) -> Cmd {
+    Cmd {
+        command: command.iter().map(|w| w.to_string()).collect(),
+        args: args.iter().map(|w| w.to_string()).collect(),
+    }
 }
 
-/// `opv target add` (FR-56): a refusal names its own next step unless it has one.
+/// A command-line refusal: its Next is `opv target add --help` (flag errors only, 06.27).
+fn usage(problem: UsageProblem) -> Error {
+    Cause::Usage { problem }.into()
+}
+
+/// A target opv cannot write for this provider: the person adds it with `opv config edit`
+/// (06.27: never `--help`, which cannot change the configuration).
+fn by_hand() -> Error {
+    usage(UsageProblem::UseInstead {
+        command: opv(&["config", "edit"], &[]),
+    })
+}
+
+/// A section of the configuration written in a shape opv does not edit (R15, 06.27): Do
+/// edit it by hand, Next `opv config edit`.
+fn not_editable(source: &ConfigSource, section: String) -> Error {
+    Cause::ConfigNotEditable {
+        source: source.clone(),
+        reason: NotEditable::UnsupportedLayout { section },
+    }
+    .into()
+}
+
+/// `env`/`name` already declares a target: it is changed with `opv config edit`.
+fn exists(env: &str, name: &str) -> Error {
+    Cause::AlreadyDeclared {
+        kind: NameKind::Target,
+        name: format!("{name} in environment {env}"),
+    }
+    .into()
+}
+
+/// An internal invariant that does not hold (a fragment opv built itself).
+fn bug(site: &'static str) -> Error {
+    Cause::Bug { site }.into()
+}
+
+/// `opv target add` (FR-56). Every refusal is a catalog cause with its own step: flag
+/// errors lead to `--help`, configuration-shape refusals to `opv config edit` (06.27).
 pub fn add(
     args: &AddArgs,
     store: &dyn ConfigStore,
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    add_inner(args, store, r, out).map_err(|e| match e {
-        e @ Error::Config(_) => e.or_next(|| "opv target add --help".into()),
-        other => other,
-    })
+    add_inner(args, store, r, out)
 }
 
 fn add_inner(
@@ -92,47 +134,30 @@ fn add_inner(
     let base = store.read_for_write(r)?;
     let original = &base.text;
     let place = store.describe();
-    let fleet = store.parse(original).map_err(|e| match e {
-        e @ Error::Config(_) => e
-            .map_text(|m| super::on_first_line(&m, " (fix it first; nothing written)"))
-            .or_next(|| "opv config edit".into()),
-        other => other,
-    })?;
+    let source = store.cause_source();
+    let fleet = store.parse(original)?;
     let environment = fleet.environment(&args.env)?;
     if !config::is_target_name(&args.name) {
-        return Err(cfg(format!(
-            "target name {:?} must match ^[a-z][a-z0-9-]*$",
-            args.name
-        )));
+        return Err(usage(UsageProblem::ValueFormat {
+            flag: format!("the target name {:?}", args.name),
+            format: "a name matching ^[a-z][a-z0-9-]*$",
+        }));
     }
     if environment.targets.contains_key(&args.name) {
-        return Err(cfg(format!(
-            "environment {}: target {} already exists; opv target add only adds new targets: \
-             change it in {place} by hand (opv config edit)",
-            args.env, args.name
-        )));
+        return Err(exists(&args.env, &args.name));
     }
     let (provider, values) = provider_and_values(args)?;
-    let section = provider.init_section(&values).ok_or_else(|| {
-        cfg(format!(
-            "opv target add cannot write a {} target yet; add [environments.{}.targets.{}] by \
-             hand",
-            provider.label(),
-            args.env,
-            args.name
-        ))
-    })?;
+    let section = provider.init_section(&values).ok_or_else(by_hand)?;
     let products = checked_products(&fleet, &args.products)?;
 
-    let dir = std::env::current_dir()
-        .map_err(|e| Error::Config(format!("cannot read the current directory: {e}").into()))?;
+    let dir = std::env::current_dir().unwrap_or_default();
     let project = match &args.project {
         Some(p) => {
             if !config_store::is_project_name(p) {
-                return Err(cfg(format!(
-                    "--project {p:?} must match ^[A-Za-z0-9][A-Za-z0-9._-]*$ (at most 64 \
-                     characters)"
-                )));
+                return Err(usage(UsageProblem::ValueFormat {
+                    flag: "--project".into(),
+                    format: "a name matching ^[A-Za-z0-9][A-Za-z0-9._-]*$ (at most 64 characters)",
+                }));
             }
             p.clone()
         }
@@ -153,18 +178,14 @@ fn add_inner(
             Some(state_vault_id),
             items,
         );
-        let text = insert_target(original, &args.env, &args.name, &body, &comment)?;
+        let text = insert_target_in(original, &source, &args.env, &args.name, &body, &comment)?;
         // The same validation as a hand-written file: provider fields, products, deploy
         // credentials and the state vault, before anything is written or created.
-        store.parse(&text).map_err(|e| match e {
-            e @ Error::Config(_) => e.map_text(|m| {
-                format!("{m} (in the configuration opv target add would write; nothing written)")
-            }),
-            other => other,
-        })?;
+        store.parse(&text)?;
         Ok(text)
     };
-    let next = format!("opv access {} --target {}", args.env, args.name);
+    let next =
+        crate::cause::render::cmd_text(&opv(&["access"], &[&args.env, "--target", &args.name]));
 
     if args.dry_run {
         // Read-only: report whether the state vault would be created or reused.
@@ -173,6 +194,11 @@ fn add_inner(
             Lookup::Missing(_) => (title.clone(), true),
         };
         build(&state_vault_id, &[])?;
+        // #150: the write needs a login session of the person's own.
+        r.note(&super::login::dry_run_session_note(
+            crate::config_store::selected_account(&dir).as_deref(),
+            &super::login::this_command(),
+        ));
         if args.json {
             return write_json(out, &args.env, &args.name, &state_vault_id, created, &next);
         }
@@ -217,35 +243,29 @@ pub(crate) fn provider_and_values(
 ) -> Result<(&'static dyn Provider, BTreeMap<&'static str, String>), Error> {
     let provider = match &args.provider {
         Some(named) => registry::find(named).ok_or_else(|| {
-            cfg(format!(
-                "--provider {named:?} is not a provider; known: {}",
-                registry::sections().join(", ")
-            ))
+            usage(UsageProblem::ValueFormat {
+                flag: format!("--provider {named}"),
+                format: "a provider opv knows (opv target add --help lists them)",
+            })
         })?,
         None => inferred_provider(args)?,
     };
     if provider.init_fields().is_empty() {
-        return Err(cfg(format!(
-            "opv target add cannot write a {} target yet; add [environments.{}.targets.{}] by \
-             hand",
-            provider.label(),
-            args.env,
-            args.name
-        )));
+        return Err(by_hand());
     }
     let mut values = BTreeMap::new();
     for (flag, value) in &args.fields {
         let (owner, field) = find_field(flag).ok_or_else(|| {
-            cfg(format!(
-                "unknown target option --{flag} (opv target add --help lists every option)"
-            ))
+            usage(UsageProblem::UnknownFlag {
+                flag: format!("--{flag}"),
+                closest: None,
+            })
         })?;
         if owner.section() != provider.section() {
-            return Err(cfg(format!(
-                "--{flag} is an option of --provider {}, not {}",
-                owner.section(),
-                provider.section()
-            )));
+            return Err(usage(UsageProblem::ConflictsWith {
+                a: format!("--{flag}"),
+                b: format!("--provider {}", provider.section()),
+            }));
         }
         values.insert(field.field, value.clone());
     }
@@ -256,11 +276,10 @@ pub(crate) fn provider_and_values(
         .map(|f| format!("--{}", init_flag(provider, f)))
         .collect();
     if !missing.is_empty() {
-        return Err(cfg(format!(
-            "--provider {} needs {}",
-            provider.section(),
-            missing.join(", ")
-        )));
+        return Err(usage(UsageProblem::NeedsFlag {
+            flag: format!("--provider {}", provider.section()),
+            needs: missing.join(", "),
+        }));
     }
     Ok((provider, values))
 }
@@ -268,30 +287,28 @@ pub(crate) fn provider_and_values(
 /// The one provider whose options `args` gives, when `--provider` is omitted: none or
 /// several are refused, naming what to pass.
 fn inferred_provider(args: &AddArgs) -> Result<&'static dyn Provider, Error> {
-    let mut owners: Vec<&'static dyn Provider> = Vec::new();
+    // Each provider whose option was given, with the first such flag.
+    let mut owners: Vec<(&'static dyn Provider, &str)> = Vec::new();
     for flag in args.fields.keys() {
         if let Some((p, _)) = find_field(flag)
-            && !owners.iter().any(|o| o.section() == p.section())
+            && !owners.iter().any(|(o, _)| o.section() == p.section())
         {
-            owners.push(p);
+            owners.push((p, flag));
         }
     }
     match owners.as_slice() {
-        [one] => Ok(*one),
-        [] => Err(cfg(format!(
-            "opv target add needs the target's provider options (opv target add --help lists \
-             them) or --provider <{}>",
-            registry::sections().join("|")
-        ))),
-        _ => Err(cfg(format!(
-            "the options given belong to {} providers ({}); a target has one provider",
-            owners.len(),
-            owners
-                .iter()
-                .map(|p| p.section())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))),
+        [(one, _)] => Ok(*one),
+        [] => Err(usage(UsageProblem::NeedsFlag {
+            flag: "opv target add".into(),
+            needs: format!(
+                "the target's provider options or --provider <{}>",
+                registry::sections().join("|")
+            ),
+        })),
+        [(_, a), (_, b), ..] => Err(usage(UsageProblem::ConflictsWith {
+            a: format!("--{a}"),
+            b: format!("--{b}"),
+        })),
     }
 }
 
@@ -317,17 +334,18 @@ pub(crate) fn checked_products(fleet: &Fleet, given: &[String]) -> Result<Vec<St
         }
         match fleet.products.get(p) {
             None => {
-                let declared: Vec<&str> = fleet.products.keys().map(String::as_str).collect();
-                return Err(cfg(format!(
-                    "--products names {p:?}, which is not a declared product (declared: {})",
-                    declared.join(", ")
-                )));
+                return Err(super::not_declared(
+                    NameKind::Product,
+                    p,
+                    fleet.products.keys().map(String::as_str),
+                ));
             }
             Some(prod) if prod.source_only => {
-                return Err(cfg(format!(
-                    "--products names {p:?}, which is source-only and never delivered; list the \
-                     products whose keys point at it with from instead"
-                )));
+                return Err(usage(UsageProblem::ValueFormat {
+                    flag: format!("--products {p}"),
+                    format: "delivered products (a source-only product is never delivered; name \
+                             the products whose keys point at it with from)",
+                }));
             }
             Some(_) => products.push(p.clone()),
         }
@@ -380,8 +398,8 @@ pub(crate) fn target_table(
 
 /// `original` with the target inserted, keeping every existing comment and line. `body` is
 /// the TOML fragment [`target_table`] built; `comment` is the one-line note above the new
-/// table. An unknown environment or a `targets` written in a shape opv does not edit is
-/// refused with the reason.
+/// table. Its refusals name the configuration as `secrets.toml`; [`insert_target_in`] names
+/// the source it came from.
 pub(crate) fn insert_target(
     original: &str,
     env: &str,
@@ -389,12 +407,35 @@ pub(crate) fn insert_target(
     body: &str,
     comment: &str,
 ) -> Result<String, Error> {
+    let source = crate::domain::model::ReadFrom::default().0;
+    insert_target_in(original, &source, env, name, body, comment)
+}
+
+/// [`insert_target`] for the configuration `source`. An unknown environment or a `targets`
+/// written in a shape opv does not edit is refused with the reason (R15, 06.27); a parse
+/// error never shows the offending line (06.53).
+pub(crate) fn insert_target_in(
+    original: &str,
+    source: &ConfigSource,
+    env: &str,
+    name: &str,
+    body: &str,
+    comment: &str,
+) -> Result<String, Error> {
     let mut doc: DocumentMut = original
         .parse()
-        .map_err(|e: toml_edit::TomlError| cfg(format!("invalid secrets.toml: {e}")))?;
+        .map_err(|e: toml_edit::TomlError| -> Error {
+            Cause::ConfigInvalid {
+                source: source.clone(),
+                at: config_store::location(original, e.span()),
+                field: DottedPath(vec!["the TOML".into()]),
+                rule: FieldRule::Syntax,
+            }
+            .into()
+        })?;
     let frag: DocumentMut = body
         .parse()
-        .map_err(|e: toml_edit::TomlError| cfg(format!("invalid target section: {e}")))?;
+        .map_err(|_| bug("target_cmd::insert_target fragment"))?;
     let Some(mut table) = frag
         .get("environments")
         .and_then(|e| e.get(env))
@@ -403,7 +444,7 @@ pub(crate) fn insert_target(
         .and_then(Item::as_table)
         .cloned()
     else {
-        return Err(cfg(format!("invalid target section for {name}")));
+        return Err(bug("target_cmd::insert_target fragment table"));
     };
     clear_positions(&mut table);
     table.set_implicit(false);
@@ -411,67 +452,37 @@ pub(crate) fn insert_target(
     let envs = doc
         .get_mut("environments")
         .and_then(Item::as_table_like_mut)
-        .ok_or_else(|| {
-            cfg(
-                "cannot add under environments: the file writes it in a shape opv does not edit"
-                    .into(),
-            )
-        })?;
-    let Some(env_item) = envs.get_mut(env) else {
-        return Err(cfg(format!(
-            "no environment {env} in the configuration; add it with opv init {env} --add-env \
-             first"
-        )));
-    };
-    let env_tbl = env_item
-        .as_table_like_mut()
-        .ok_or_else(|| cfg(format!("environment {env} is not a table")))?;
-    enum Where {
-        Missing,
-        Table,
-        Inline,
-        Other,
+        .ok_or_else(|| not_editable(source, "environments".into()))?;
+    if envs.get(env).is_none() {
+        let declared: Vec<String> = envs.iter().map(|(k, _)| k.to_string()).collect();
+        return Err(super::not_declared(
+            NameKind::Environment,
+            env,
+            declared.iter().map(String::as_str),
+        ));
     }
-    let where_ = match env_tbl.get("targets") {
-        None => Where::Missing,
-        Some(Item::Table(t)) => {
-            if t.contains_key(name) {
-                return Err(cfg(format!(
-                    "environment {env}: target {name} already exists"
-                )));
-            }
-            Where::Table
-        }
-        Some(Item::Value(Value::InlineTable(_))) => Where::Inline,
-        Some(_) => Where::Other,
-    };
-    match where_ {
-        Where::Missing => {
+    let env_tbl = envs
+        .get_mut(env)
+        .and_then(Item::as_table_like_mut)
+        .ok_or_else(|| not_editable(source, format!("environments.{env}")))?;
+    let targets_section = format!("environments.{env}.targets");
+    match env_tbl.get("targets") {
+        None => {
             let mut t = Table::new();
             t.set_implicit(true);
             env_tbl.insert("targets", Item::Table(t));
         }
-        Where::Inline => {
-            return Err(cfg(format!(
-                "environment {env}: targets is written as an inline table; write each target as \
-                 [environments.{env}.targets.<name>] by hand (opv config edit)"
-            )));
-        }
-        Where::Other => {
-            return Err(cfg(format!(
-                "environment {env}: targets is not a table; opv does not edit this shape"
-            )));
-        }
-        Where::Table => {}
+        Some(Item::Table(t)) if t.contains_key(name) => return Err(exists(env, name)),
+        Some(Item::Table(_)) => {}
+        // An inline table or any other value: written by hand (06.27).
+        Some(_) => return Err(not_editable(source, targets_section)),
     }
     let targets = env_tbl
         .get_mut("targets")
         .and_then(Item::as_table_like_mut)
-        .ok_or_else(|| cfg(format!("environment {env}: targets is not a table")))?;
+        .ok_or_else(|| not_editable(source, targets_section.clone()))?;
     if targets.contains_key(name) {
-        return Err(cfg(format!(
-            "environment {env}: target {name} already exists"
-        )));
+        return Err(exists(env, name));
     }
     targets.insert(name, Item::Table(table));
     Ok(doc.to_string())
@@ -610,7 +621,18 @@ pub fn list(fleet: &Fleet, args: &ListArgs, out: &mut dyn Write) -> Result<(), E
         }
     }
     if !any {
-        writeln!(out, "no deploy targets declared").map_err(write_err)?;
+        // Which scope is empty, and the command that adds a target to it (06.44).
+        let scope = match &args.env {
+            Some(e) => format!("environment {e} has no deploy targets"),
+            None => "no environment declares a deploy target".to_string(),
+        };
+        writeln!(out, "{scope}").map_err(write_err)?;
+        writeln!(
+            out,
+            "Next: {}",
+            crate::cause::render::cmd_text(&opv(&["target", "add"], &["--help"]))
+        )
+        .map_err(write_err)?;
     }
     Ok(())
 }

@@ -120,7 +120,6 @@ fn the_schema_is_current_for_named_targets_and_boundaries() {
         "boundary_missing",
         "state_vault_missing",
         "state_vault_wider_than_values",
-        "duplicate_scope",
     ] {
         assert!(slugs.contains(&slug), "error_codes is missing {slug}");
     }

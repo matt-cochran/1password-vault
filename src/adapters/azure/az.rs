@@ -1,8 +1,11 @@
 //! Shared `az` (Azure CLI) plumbing for the Azure adapters (FR-10, FR-26, FR-29, SR-3).
 //!
-//! The Azure CLI exits non-zero for every failure and the runner discards child stderr
-//! (SR-1), so sign-in is told apart from a target failure by a separate, read-only
-//! `az account show -o none` probe ([`diagnose`]). Values never appear in argv or env:
+//! A failed `az` call is reported from what opv itself established, never from `az`'s
+//! wording (owner decision 2026-10-16, design `docs/design/error-catalog.md` §12.4): the
+//! runner's observation of the call goes to the Azure strategy ([`super::diagnose`]), which
+//! classifies only runner-level facts, and `az`'s scrubbed reply is shown as evidence. The
+//! one probe added here is `az account show -o none` (exit status only): when it fails for
+//! the person's own sign-in, the cause is that sign-in. Values never appear in argv or env:
 //! a value goes to `az` through the platform's hand-off (SR-3): `/dev/stdin`, or on native
 //! Windows a user-only named pipe ([`super::handoff`]).
 //!
@@ -13,9 +16,13 @@
 use std::io;
 
 use super::handoff;
+use crate::cause::{
+    Cause, DiagnoseContext, EnvName, ExitClass, Observed, Principal, ResourceKind, ResourceName,
+    ResourceRef, SessionState, System, Unusable, Upstream,
+};
 use crate::error::Error;
 use crate::host::{Host, Tool};
-use crate::runner::{Call, CommandRunner, Outcome, Output, PROBE_TIMEOUT, unknown_text};
+use crate::runner::{Call, CommandRunner, Outcome, Output, PROBE_TIMEOUT};
 
 /// The Azure CLI binary.
 pub const PROGRAM: &str = "az";
@@ -36,6 +43,8 @@ pub const AZ_CLI: Tool = Tool {
         ("AZURE_CORE_COLLECT_TELEMETRY", "no"),
         ("AZURE_CORE_OUTPUT", "json"),
     ],
+    // Only the runner's retry decision reads these (a missing object is not retried); no
+    // Azure cause is chosen from them, since no recording backs them (§12.4).
     not_found: &[
         "SecretNotFound",
         "ResourceNotFound",
@@ -48,6 +57,12 @@ pub const AZ_CLI: Tool = Tool {
 
 /// Global flag that keeps `az` quiet apart from errors (R7).
 pub const ONLY_SHOW_ERRORS: &str = "--only-show-errors";
+
+/// The name the evidence box gives `az`'s reply (§7.3).
+const TOOL_NAME: &str = "Azure CLI";
+
+/// `az account show -o none`: exit status only.
+const SIGNED_IN: [&str; 5] = ["account", "show", "-o", "none", ONLY_SHOW_ERRORS];
 
 /// Whether a call changes the target (NR-2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,11 +86,12 @@ pub(crate) fn invoke(
 
 /// [`invoke`] with extra child environment (`AZURE_CONFIG_DIR` of a deploy sign-in). A
 /// value in `stdin` reaches `az` through the platform's hand-off: callers write
-/// `/dev/stdin` where `az` takes the value's path ([`handoff::deliver`]).
+/// `/dev/stdin` where `az` takes the value's path ([`handoff::deliver`]). `_op` names the
+/// call for readers; the runner names it in every report from its argv.
 pub(crate) fn invoke_env(
     r: &dyn CommandRunner,
     effect: Effect,
-    op: &str,
+    _op: &str,
     args: &[&str],
     stdin: Option<&[u8]>,
     refused: &[i32],
@@ -107,68 +123,167 @@ pub(crate) fn invoke_env(
             Effect::Write => r.write(&call),
         }
     })?;
-    res.map_err(|e| match e.kind() {
-        io::ErrorKind::NotFound => Error::Dependency(
-            format!(
-                "{PROGRAM} not found on PATH\n  {}",
-                Host::detect().install_hint(AZ_CLI)
-            )
-            .into(),
-        ),
+    res.map_err(|e| start_failed(r, &e))
+}
+
+/// `az` could not be started: missing, not runnable, or the run budget is spent.
+fn start_failed(r: &dyn CommandRunner, e: &io::Error) -> Error {
+    match e.kind() {
+        io::ErrorKind::NotFound => tool_missing(),
         // A spent run budget: the call never started.
-        io::ErrorKind::TimedOut => AZ_CLI
-            .budget_spent(r, &e)
-            .map_text(|m| format!("az {op}: {m}")),
-        kind => Error::Target(
-            format!(
-                "az {op} could not start {PROGRAM} ({kind}); nothing was changed\n  next: check \
-             that `{PROGRAM} version` runs, then run opv again"
-            )
-            .into(),
-        ),
-    })
+        io::ErrorKind::TimedOut => AZ_CLI.budget_spent(r, e),
+        kind => Cause::ToolUnusable {
+            tool: PROGRAM.to_string(),
+            why: Unusable::SpawnFailed { io: kind.into() },
+        }
+        .into(),
+    }
+}
+
+/// `az` is not on PATH (FR-10): the install line for this platform.
+pub(crate) fn tool_missing() -> Error {
+    let host = Host::detect();
+    Cause::ToolMissing {
+        tool: PROGRAM.to_string(),
+        platform: host.platform,
+        shell: host.shell,
+        ci: host.ci,
+    }
+    .into()
 }
 
 /// A read's output, or the diagnosed error for a non-zero exit / unknown outcome.
 pub(crate) fn read_output(
     r: &dyn CommandRunner,
-    op: &str,
-    target: &str,
+    ctx: DiagnoseContext,
     outcome: Outcome,
 ) -> Result<Output, Error> {
     match outcome {
         Outcome::Done(out) => Ok(out),
-        Outcome::Refused(_) => Err(diagnose(r, op, target)),
-        Outcome::Unknown { .. } => Err(AZ_CLI.unanswered(r, &format!("az {op}"))),
+        Outcome::Refused(_) | Outcome::Unknown { .. } => Err(failed(r, ctx)),
     }
 }
 
 /// A write's output, or the diagnosed error. A write that never finished (timeout, kill,
-/// lost) is [`Error::Unknown`]: it may or may not have been applied (NR-2).
+/// lost) is `WriteOutcomeUnknown`: it may or may not have been applied (NR-2).
 pub(crate) fn write_output(
     r: &dyn CommandRunner,
-    op: &str,
-    target: &str,
+    ctx: DiagnoseContext,
     outcome: Outcome,
 ) -> Result<Output, Error> {
     match outcome {
         Outcome::Done(out) => Ok(out),
-        Outcome::Refused(_)
-        | Outcome::Unknown {
-            status: Some(_), ..
-        } => Err(diagnose(r, op, target)),
-        Outcome::Unknown { reason, .. } => Err(Error::Unknown(format!(
-            "az {op}: {}; the change may or may not have been applied\n  next: re-run the same command",
-            unknown_text(PROGRAM, reason)
-        ).into())),
+        Outcome::Refused(_) | Outcome::Unknown { .. } => Err(failed(r, writing(ctx))),
+    }
+}
+
+/// What a call is about, for its diagnosis: an Azure resource in `scope`, for opv
+/// environment `env` when known.
+pub(crate) fn about(
+    kind: ResourceKind,
+    name: &str,
+    scope: String,
+    env: Option<&str>,
+) -> DiagnoseContext {
+    DiagnoseContext {
+        env: env.filter(|e| !e.is_empty()).map(EnvName::new),
+        resource: Some(ResourceRef {
+            kind,
+            name: ResourceName::new(name),
+            scope: Some(scope),
+        }),
+        ..DiagnoseContext::default()
+    }
+}
+
+/// `ctx` for a write: an unknown outcome is then `WriteOutcomeUnknown`.
+pub(crate) fn writing(mut ctx: DiagnoseContext) -> DiagnoseContext {
+    ctx.write = true;
+    ctx
+}
+
+/// What the runner kept of the `az` call that just failed: its observation and `az`'s
+/// scrubbed reply as evidence. `None` when the runner observed no failed call.
+pub(crate) fn take_failure() -> Option<(Observed, Option<Upstream>)> {
+    let excerpt = crate::runner::take_failure_excerpt();
+    let seen = crate::runner::take_observed()?;
+    let up = excerpt.map(|x| Upstream {
+        source: System::Azure,
+        tool: TOOL_NAME.to_string(),
+        version: None,
+        exit: seen.exit(),
+        said: x.lines,
+        removed_advice: false,
+        truncated: x.truncated,
+        untrusted: true,
+    });
+    Some((seen, up))
+}
+
+/// `cause`, with `az`'s reply as its evidence when there is one.
+pub(crate) fn report(cause: Cause, up: Option<Upstream>) -> Error {
+    match up {
+        Some(up) => Error::with_evidence(cause, up),
+        None => cause.into(),
+    }
+}
+
+/// The error for the `az` call that just failed (FR-26): the person's own sign-in when
+/// `az account show` fails, else what the Azure strategy makes of the runner's facts.
+pub(crate) fn failed(r: &dyn CommandRunner, ctx: DiagnoseContext) -> Error {
+    match take_failure() {
+        Some((seen, up)) => diagnosed(r, seen, up, &ctx),
+        None => unobserved(r),
+    }
+}
+
+/// [`failed`] for a failure already taken with [`take_failure`].
+pub(crate) fn diagnosed(
+    r: &dyn CommandRunner,
+    seen: Observed,
+    up: Option<Upstream>,
+    ctx: &DiagnoseContext,
+) -> Error {
+    // Only the person's own sign-in is probed: under deploy credentials, `az login` in the
+    // person's profile changes nothing (X22). A call that never answered says nothing
+    // about the sign-in either.
+    let own = matches!(seen.principal(), Principal::Person { .. });
+    if own
+        && matches!(seen.exit(), ExitClass::Code { .. })
+        && crate::runner::diagnosing(|| probe_status(r, &SIGNED_IN)).is_ok_and(|ok| !ok)
+    {
+        return report(signed_out(), up);
+    }
+    classified(seen, up, ctx)
+}
+
+/// What the Azure strategy makes of a failure taken with [`take_failure`], with no probe.
+pub(crate) fn classified(seen: Observed, up: Option<Upstream>, ctx: &DiagnoseContext) -> Error {
+    let stderr = up.as_ref().map(|u| u.said.join("\n")).unwrap_or_default();
+    report(super::diagnose::diagnose(seen, &stderr, ctx), up)
+}
+
+/// A failure the runner did not observe. The runners opv ships observe every failed call;
+/// a runner that does not (a test world that loses calls) gets the pre-catalog answer for
+/// a call that never answered: outcome unknown, safe to re-run (NR-2, NR-28).
+pub(crate) fn unobserved(r: &dyn CommandRunner) -> Error {
+    AZ_CLI.unanswered(r, PROGRAM)
+}
+
+/// The person is not signed in to Azure (`az account show` failed).
+pub(crate) fn signed_out() -> Cause {
+    Cause::NotSignedIn {
+        system: System::Azure,
+        account: None,
+        state: SessionState::SignedOut,
     }
 }
 
 /// Whether `az account show` succeeds: `Ok(true)` signed in, `Ok(false)` signed out. A
-/// missing `az` is [`Error::Dependency`]; a probe that errors or times out says nothing
-/// about the sign-in, so it is an [`Error::Target`] that asks for a manual check.
+/// missing `az` is `ToolMissing`; a probe that never answered is diagnosed from the
+/// runner's observation of it, never called a sign-out.
 pub(crate) fn signed_in(r: &dyn CommandRunner) -> Result<bool, Error> {
-    probe(r, &["account", "show", "-o", "none", ONLY_SHOW_ERRORS])
+    probe(r, &SIGNED_IN)
 }
 
 /// Whether the signed-in account can see `subscription` (NR-7): `az account show
@@ -190,139 +305,19 @@ pub(crate) fn sees_subscription(r: &dyn CommandRunner, subscription: &str) -> Re
 
 /// A read-only `az` probe decided by exit status alone: `Ok(true)` for exit 0.
 fn probe(r: &dyn CommandRunner, args: &[&str]) -> Result<bool, Error> {
-    match r.probe(&Call::new(PROGRAM, args), PROBE_TIMEOUT) {
-        Ok(o) => Ok(o.status == 0),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Error::Dependency(
-            format!(
-                "{PROGRAM} not found on PATH\n  {}",
-                Host::detect().install_hint(AZ_CLI)
-            )
-            .into(),
-        )),
-        // `az` did not answer in time (or was cut off): Azure or the network is not
-        // responding, which re-running can get past (NR-28); after a write, NR-2.
-        Err(e) if !r.writes_started() => Err(Error::Unknown(
-            format!(
-                "could not check the Azure sign-in: az account show did not answer ({e}); \
-                 nothing was changed. Check {}, then re-run",
-                AZ_CLI.status_page
-            )
-            .into(),
-        )
-        .with_code(crate::error::Code::ProviderUnavailable)),
-        Err(e) => Err(Error::Unknown(
-            format!(
-                "could not check the Azure sign-in: az account show did not answer ({e}), after \
-                 this run had started changing the target; those changes may or may not be \
-                 complete. Check {}, then re-run the same command",
-                AZ_CLI.status_page
-            )
-            .into(),
-        )),
-    }
+    probe_status(r, args).map_err(|e| match e.kind() {
+        io::ErrorKind::NotFound => tool_missing(),
+        // `az` did not answer in time (or was cut off): the runner observed how (NR-28).
+        _ => failed(r, DiagnoseContext::default()),
+    })
 }
 
-/// The error for an `az` call that exited non-zero (FR-26). `az account show -o none`
-/// decides by exit status only (its stdout is dropped unread, SR-1): non-zero means not
-/// signed in ([`Error::Auth`] naming `az login`); zero means signed in but the operation
-/// failed ([`Error::Target`] naming `az <op> for <target>`). A missing `az` is
-/// [`Error::Dependency`] with the platform install hint (FR-10); a probe that could not
-/// run says so instead of claiming a sign-out.
-pub fn diagnose(r: &dyn CommandRunner, op: &str, target: &str) -> Error {
-    // The probe explains the failed call; its excerpt stays with the error (NR-31).
-    match crate::runner::diagnosing(|| signed_in(r)) {
-        Ok(true) => Error::Target(format!("az {op} failed for {target}").into()),
-        Ok(false) => not_logged_in(None),
-        // The call itself answered (non-zero); only the sign-in check did not.
-        Err(Error::Unknown(_)) => Error::Target(
-            format!(
-                "az {op} failed for {target}, and could not check the Azure sign-in (az account \
-                 show did not answer)\n  next: run az account show"
-            )
-            .into(),
-        ),
-        Err(e) => e,
-    }
-}
-
-/// The sign-in error every Azure adapter returns (FR-26); `failed` names the call that
-/// failed first, when there is one.
-pub(crate) fn not_logged_in(failed: Option<&str>) -> Error {
-    let why = match failed {
-        Some(f) => format!("{f}; az account show failed"),
-        None => "az account show failed".into(),
-    };
-    Error::Auth(
-        format!(
-            "not logged in to Azure ({why})\n  next: run `az login` (in CI: sign in with \
-         azure/login first), then run opv again"
-        )
-        .into(),
-    )
+/// The probe's exit status as a yes or no, or the error that kept it from answering.
+fn probe_status(r: &dyn CommandRunner, args: &[&str]) -> io::Result<bool> {
+    r.probe(&Call::new(PROGRAM, args), PROBE_TIMEOUT)
+        .map(|o| o.status == 0)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::runner::fake::FakeRunner;
-
-    /// NR-31: a refused `az` call keeps its own stderr through the sign-in diagnosis.
-    #[test]
-    fn failed_call_leaves_an_az_said_excerpt() {
-        let r = FakeRunner::default();
-        r.push_with_stderr(
-            Output::failure(1),
-            "ERROR: (Forbidden) The user does not have secrets set permission on kv-prod\n",
-        );
-        r.push_with_stderr(Output::success(""), "");
-        let outcome = invoke(
-            &r,
-            Effect::Write,
-            "keyvault secret set",
-            &["keyvault"],
-            None,
-            &[],
-        );
-        let _ = write_output(&r, "keyvault secret set", "kv-prod", outcome.unwrap());
-        assert_eq!(
-            crate::runner::take_failure_excerpt().map(|x| x.render()),
-            Some("  az said: ERROR: (Forbidden) The user does not have secrets set permission on kv-prod\n".into())
-        );
-    }
-
-    /// NR-19 + NR-31: what opv prints for a failed `az` call is the error line, then the
-    /// scrubbed `az said:` excerpt, then exactly one `Next:` line, in that order.
-    #[test]
-    fn failed_az_call_reports_error_then_excerpt_then_next() {
-        let r = FakeRunner::default();
-        r.push_with_stderr(
-            Output::failure(1),
-            "ERROR: (Forbidden) The user does not have secrets set permission on kv-prod\n",
-        );
-        r.push_with_stderr(Output::success(""), "");
-        let outcome = invoke(
-            &r,
-            Effect::Write,
-            "keyvault secret set",
-            &["keyvault"],
-            None,
-            &[],
-        );
-        let e = write_output(&r, "keyvault secret set", "kv-prod", outcome.unwrap()).unwrap_err();
-        let excerpt = crate::runner::take_failure_excerpt();
-        assert_eq!(
-            crate::error::report(&e, "opv sync prod", excerpt.as_ref()),
-            "opv: target error: az keyvault secret set failed for kv-prod\n  \
-             az said: ERROR: (Forbidden) The user does not have secrets set permission on kv-prod\n\
-             Next: opv sync prod\n"
-        );
-    }
-
-    #[test]
-    fn probe_that_cannot_run_does_not_claim_signed_out() {
-        let r = FakeRunner::default();
-        r.push_unknown("timeout");
-        let err = diagnose(&r, "keyvault secret show", "kv");
-        assert!(matches!(err, Error::Target(m) if m.contains("could not check the Azure sign-in")));
-    }
-}
+#[path = "az_tests.rs"]
+mod tests;

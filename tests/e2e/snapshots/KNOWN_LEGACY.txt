@@ -1,0 +1,2 @@
+# Rules a not-yet-migrated path breaks: `<cell> <rule>`. This list only shrinks
+# (empty since every path is migrated); remove an entry once its rule holds.

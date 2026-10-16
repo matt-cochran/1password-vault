@@ -1,0 +1,17 @@
+[
+  {
+    "id": "<ID_8>",
+    "title": "<TITLE_1>",
+    "tags": ["<TAG_1>"],
+    "version": 1,
+    "vault": {
+      "id": "<ID_3>",
+      "name": "<NAME_3>"
+    },
+    "category": "SECURE_NOTE",
+    "last_edited_by": "<USER_2>",
+    "created_at": "<TIME_6>",
+    "updated_at": "<TIME_6>",
+    "additional_information": "<INFO_1>"
+  }
+]

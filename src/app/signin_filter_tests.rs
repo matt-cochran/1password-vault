@@ -107,25 +107,120 @@ fn an_unrecognised_failure_is_never_a_wrong_password() {
     );
 }
 
+fn cause_of(e: &Error) -> crate::cause::Cause {
+    e.cause().expect("a catalog cause").0.clone()
+}
+
+/// The catalog renders the add step from the account's kind: an email may follow
+/// `opv login --add --account`.
 #[test]
-fn an_unregistered_accounts_next_step_adds_that_account() {
+fn an_unregistered_email_is_named_as_an_email() {
     let e = Failure::AccountNotRegistered.error("signing in", Some("owner@example.com"), "login");
-    assert_eq!(
-        e.next_step(),
-        Some("opv login --add --account owner@example.com")
+    assert!(
+        matches!(
+            cause_of(&e),
+            crate::cause::Cause::AccountNotOnMachine {
+                account: AccountRef::Email(ref m),
+                ..
+            } if m == "owner@example.com"
+        ),
+        "{e:?}"
+    );
+}
+
+/// Audit 04.02: an account ID is never handed to `op account add --email`: it is named as
+/// an ID, whose add step is `opv login --add` without `--account`.
+#[test]
+fn an_unregistered_account_id_is_named_as_an_id() {
+    let e = Failure::AccountNotRegistered.error(
+        "signing in",
+        Some("TTDZ56BHZFH6VFAWGXNBFD3EWU"),
+        "login",
+    );
+    assert!(
+        matches!(
+            cause_of(&e),
+            crate::cause::Cause::AccountNotOnMachine {
+                account: AccountRef::Id(_),
+                ..
+            }
+        ),
+        "{e:?}"
     );
 }
 
 #[test]
-fn a_known_account_is_named_in_the_retry_step() {
+fn a_known_account_is_named_in_the_sign_in_cause() {
     let e = Failure::NotSignedIn.error("signing in", Some("ABCDEF"), "setup");
-    assert_eq!(e.next_step(), Some("opv login --account ABCDEF"));
+    assert!(
+        matches!(
+            cause_of(&e),
+            crate::cause::Cause::NotSignedIn { account: Some(ref a), .. } if a.as_str() == "ABCDEF"
+        ),
+        "{e:?}"
+    );
 }
 
+/// C9, 04.02: a failure the classifier cannot name goes through the 1Password diagnosis of
+/// the prompted call, never opv's own guess.
 #[test]
-fn the_message_names_the_running_command() {
-    let e = Failure::NotSignedIn.error("signing in", None, "status");
-    assert!(e.mentions("during opv status"), "{e}");
+fn an_unrecognised_failure_is_diagnosed_from_ops_reply() {
+    let e = Failure::Unexpected.error_said("signing in", None, "status", &[], Some(1));
+    assert_eq!(e.code_str(), "unrecognized_failure");
+}
+
+/// #142: op's own line is the evidence of a diagnosed prompt failure.
+#[test]
+fn an_unrecognised_failure_shows_ops_own_line() {
+    let e = Failure::Unexpected.error_said(
+        "signing in",
+        None,
+        "status",
+        &["something op said".to_string()],
+        Some(1),
+    );
+    let shown = crate::error::report(&e);
+    assert!(shown.contains("something op said"), "{shown}");
+}
+
+/// Audit 04.15: op with the app integration off reports no accounts configured.
+#[test]
+fn no_accounts_configured_is_not_registered() {
+    assert_eq!(
+        classify(
+            &["No accounts configured for use with 1Password CLI.".into()],
+            Some(1)
+        ),
+        Failure::AccountNotRegistered
+    );
+}
+
+/// Audit 04.18: an unanswered app approval is the app, not the network.
+#[test]
+fn an_authorization_timeout_is_the_app_not_the_network() {
+    assert_eq!(
+        classify(&["authorization timeout".into()], Some(1)),
+        Failure::DesktopAppUnavailable
+    );
+}
+
+/// #142: op's own words stay with a cataloged sign-in failure, as its evidence.
+#[test]
+fn op_said_is_kept_as_the_evidence() {
+    let e = Failure::NotSignedIn.error_said(
+        "signing in",
+        Some("ABCDEF"),
+        "login",
+        &["no active session found for account ABCDEF".into()],
+        Some(1),
+    );
+    let said = e.cause().and_then(|(_, up)| up).map(|u| u.said.clone());
+    assert_eq!(
+        said,
+        Some(vec![
+            "no active session found for account ABCDEF".to_string()
+        ])
+    );
 }
 
 #[test]

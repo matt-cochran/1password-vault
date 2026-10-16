@@ -449,3 +449,58 @@ fn distinct_service_account_names_yield_no_pending_revoke() {
     let found = findings(&[visible("prod", true, two)]);
     assert!(!codes(&found).contains(&"pending_revoke"));
 }
+
+// --- 07.10, 07.35, 07.36: findings name the vault, the environment and who acts ---
+
+fn twins() -> Vec<Reader> {
+    vec![
+        Reader {
+            name: "shop-prod-ci".into(),
+            read_only: true,
+        },
+        Reader {
+            name: "shop-prod-ci".into(),
+            read_only: true,
+        },
+    ]
+}
+
+#[test]
+fn pending_revoke_names_the_vault_apart_from_the_environment() {
+    let found = findings(&[visible("prod", true, twins())]);
+    assert!(
+        found[0].message.contains("vault v1 (environment prod)"),
+        "{}",
+        found[0].message
+    );
+}
+
+#[test]
+fn a_writing_service_account_is_not_assumed_to_be_the_ci_reader() {
+    let writers = vec![Reader {
+        name: "sync-bot".into(),
+        read_only: false,
+    }];
+    let found = findings(&[visible("prod", true, writers)]);
+    let message = &found
+        .iter()
+        .find(|f| f.code == "ci_reader_can_write")
+        .unwrap()
+        .message;
+    assert!(
+        message.contains("If sync-bot is this project's CI reader, recreate it read-only"),
+        "{message}"
+    );
+}
+
+#[test]
+fn access_not_visible_says_who_can_run_the_check() {
+    let found = findings(&[invisible("prod")]);
+    assert!(
+        found[0]
+            .message
+            .contains("ask a manager of the vault to run opv access prod"),
+        "{}",
+        found[0].message
+    );
+}

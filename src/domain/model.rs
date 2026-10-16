@@ -146,6 +146,47 @@ pub struct Product {
     /// key as a variable in the inherited environment.
     #[serde(default)]
     pub local: Option<Local>,
+    /// Reviewed remote execution profiles (#139): `opv run --remote <name>` delivers this
+    /// product's selected keys to the pinned host over SSH and runs the pinned command
+    /// there. Empty: the product has no remote delivery.
+    #[serde(default)]
+    pub remotes: BTreeMap<String, Remote>,
+}
+
+/// `[products.<p>.remotes.<name>]`: one reviewed remote execution profile (#139). Every
+/// field is pinned in the configuration; nothing about the host, the transport or the
+/// command can be chosen at run time, from the command line or from MCP.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Remote {
+    /// The SSH host name or address.
+    pub host: String,
+    /// The SSH port. Default 22.
+    #[serde(default = "default_ssh_port")]
+    pub port: u16,
+    /// The remote account the app runs as.
+    pub user: String,
+    /// The host's public key, pinned (`<type> <base64>`, as in `known_hosts`). The
+    /// connection fails unless the host presents exactly this key.
+    pub host_key: String,
+    /// The environments whose values may go to this host. At least one.
+    pub environments: Vec<String>,
+    /// The process roles that may run there; `None`: every role the product declares.
+    #[serde(default)]
+    pub roles: Option<Vec<String>>,
+    /// The absolute path of the opv binary on the remote host.
+    pub opv: String,
+    /// The absolute working directory on the remote host.
+    pub workdir: String,
+    /// The pinned command and its arguments.
+    pub command: Vec<String>,
+    /// A local SSH private key file to authenticate with; `None`: the SSH agent.
+    #[serde(default)]
+    pub identity_file: Option<String>,
+}
+
+fn default_ssh_port() -> u16 {
+    22
 }
 
 /// `[products.<p>.local]`: local delivery under `opv run` (#136, #137).
@@ -320,11 +361,42 @@ pub fn key_label(product: &str, key: &str) -> String {
     format!("{product}/{key}")
 }
 
-/// The configuration error text for `product`'s boundary `boundary` not being recorded in
-/// `env` (FR-57). The caller attaches the `boundary_missing` code and the next step
-/// `opv bootstrap`, which creates and records it.
-pub fn boundary_missing(env: &str, product: &str, boundary: &str) -> String {
-    format!("product {product} in {env} needs boundary {boundary}")
+/// `product`'s boundary not being recorded in `env` (FR-57, audit 03.02): the catalog cause,
+/// whose Next is source-aware (`opv bootstrap` for a file, the structure plan for a
+/// manifest).
+pub fn boundary_missing(
+    env: &str,
+    product: &str,
+    source: crate::cause::ConfigSource,
+) -> crate::cause::Cause {
+    crate::cause::Cause::BoundaryMissing {
+        env: crate::cause::EnvName::new(env),
+        product: crate::cause::ProductName::new(product),
+        source,
+    }
+}
+
+/// Where a [`Fleet`] was read from, for the causes it reports (X16). Wording only: two fleets
+/// read from different places compare equal when they say the same.
+#[derive(Debug, Clone)]
+pub struct ReadFrom(pub crate::cause::ConfigSource);
+
+impl PartialEq for ReadFrom {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for ReadFrom {}
+
+impl Default for ReadFrom {
+    /// A text parsed without a source: named as `secrets.toml`, the file it stands for.
+    fn default() -> Self {
+        Self(crate::cause::ConfigSource::File {
+            path: "secrets.toml".into(),
+            given_by: crate::cause::GivenBy::Discovered,
+        })
+    }
 }
 
 /// A validated configuration. Build it with `config::load` or `config::parse`. There is one
@@ -335,6 +407,8 @@ pub struct Fleet {
     pub products: BTreeMap<String, Product>,
     /// Where the configuration was read from, for wording only (FR-44).
     pub origin: Origin,
+    /// The configuration's source, for the causes a later lookup reports (X16).
+    pub read_from: ReadFrom,
 }
 
 /// Where a configuration was read from (FR-44). Wording only: the plan id and every other
@@ -361,36 +435,19 @@ impl Origin {
 impl Fleet {
     /// Look up an environment by a (possibly user-supplied) name.
     ///
-    /// An unknown name suggests the closest defined one, and the `Next:` step is a read-only
-    /// command for it (`status`, or `doctor --env` for an environment without a target), or
-    /// the `status` overview when nothing is close (H10).
+    /// An unknown name is [`crate::cause::Cause::NotDeclared`]: it lists the declared ones,
+    /// and its step substitutes only a unique close match (X2, audit 03.02).
     pub fn environment(&self, env: &str) -> Result<&Environment, Error> {
         self.environments.get(env).ok_or_else(|| {
             let known: Vec<&str> = self.environments.keys().map(String::as_str).collect();
             let close = crate::app::suggest::close(env, known.iter().copied());
-            let (hint, next) = match close.first() {
-                Some(c) => (
-                    format!("; did you mean {c}?"),
-                    match self
-                        .environments
-                        .get(*c)
-                        .is_some_and(|e| !e.targets.is_empty())
-                    {
-                        true => format!("opv status {c}"),
-                        false => format!("opv doctor --env {c}"),
-                    },
-                ),
-                None => (String::new(), "opv status".to_string()),
-            };
-            Error::Config(
-                format!(
-                    "undefined environment {env:?} (defined: {}){hint}",
-                    known.join(", ")
-                )
-                .into(),
-            )
-            .with_next(next)
-            .with_code(crate::error::Code::UnknownEnv)
+            crate::cause::Cause::NotDeclared {
+                kind: crate::cause::NameKind::Environment,
+                given: env.to_string(),
+                candidates: known.iter().map(|k| k.to_string()).collect(),
+                closest: crate::cause::Closest::unique(&close),
+            }
+            .into()
         })
     }
 
@@ -459,11 +516,10 @@ impl Fleet {
     /// desired in the environment, so only an undesired product reaches it).
     pub fn boundary(&self, env: &str, product: &str) -> Result<&Boundary, Error> {
         let name = self.boundary_of(product);
-        self.environment(env)?.boundaries.get(name).ok_or_else(|| {
-            Error::Config(boundary_missing(env, product, name).into())
-                .with_code(crate::error::Code::BoundaryMissing)
-                .with_next("opv bootstrap")
-        })
+        self.environment(env)?
+            .boundaries
+            .get(name)
+            .ok_or_else(|| boundary_missing(env, product, self.read_from.0.clone()).into())
     }
 
     /// Target name (runtime env var name) for `product`/`key` on target `target` of `env`.

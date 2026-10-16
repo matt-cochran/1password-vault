@@ -101,7 +101,7 @@ fn exit_code_help_names_every_target_cli() {
 #[test]
 fn config_export_no_longer_requires_json_flag() {
     let (_, _, err) = opv_with(&[], &["--config", CFG, "config", "export", "qa"]);
-    assert!(err.contains("undefined environment \"qa\""), "{err}");
+    assert!(err.contains("environment qa is not declared"), "{err}");
 }
 
 // --- completions (P13) ---
@@ -136,7 +136,7 @@ fn completions_for_an_unknown_shell_exit_2() {
 #[test]
 fn opv_config_selects_the_configuration() {
     let (_, _, err) = opv_with(&[("OPV_CONFIG", CFG)], &["status", "qa"]);
-    assert!(err.contains("undefined environment \"qa\""), "{err}");
+    assert!(err.contains("environment qa is not declared"), "{err}");
 }
 
 #[test]
@@ -154,7 +154,7 @@ fn config_flag_overrides_opv_config() {
         &[("OPV_CONFIG", "does-not-exist.toml")],
         &["--config", CFG, "status", "qa"],
     );
-    assert!(err.contains("undefined environment \"qa\""), "{err}");
+    assert!(err.contains("environment qa is not declared"), "{err}");
 }
 
 #[test]
@@ -176,7 +176,7 @@ fn init_refuses_opv_config() {
         .unwrap();
     let err = String::from_utf8(out.stderr).unwrap();
     assert!(
-        err.contains("OPV_CONFIG is set; unset it for init"),
+        err.contains("opv init and OPV_CONFIG cannot be used together"),
         "{err}"
     );
 }
@@ -362,7 +362,7 @@ fn config_error_next_after_sync_is_plan() {
     let p = path.to_str().unwrap();
     let (_, _, err) = opv_with(&[], &["--config", p, "sync", "prod", "--deploy"]);
     // The path is quoted exactly as the product quotes it for this platform's shell.
-    let want = format!("Next: opv --config {} plan prod", opv::error::shell_word(p));
+    let want = format!("Next: opv plan --config {} prod", opv::error::shell_word(p));
     assert_eq!(err.lines().last(), Some(want.as_str()), "{err}");
 }
 

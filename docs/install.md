@@ -12,7 +12,7 @@ curl -fsSL https://raw.githubusercontent.com/matt-cochran/1password-vault/main/i
 
 The opv agent skill for AI coding assistants (`opv skill install --user --target all`, for Claude Code and Codex) is registered for this user by default, and again when the script finds opv already installed. Opt out with `--no-skill` (`... | sh -s -- --no-skill`), or leave the skill alone in automation by setting `CI` or `OPV_NO_SKILL=1`; `--skill` is still accepted and is the default now. `opv skill status` shows installed copies and `opv doctor` warns when one is older than the binary. A copy you edited is kept unless you pass `opv skill install --force`.
 
-An upgrade through any channel (cargo, Homebrew, a manual binary, `install.sh` or npm) refreshes existing unedited user copies of the skill on the next `opv` run, so a copy you never edited stays in step with the binary.
+Only the installers (`install.sh`, the npm postinstall) and `opv skill install` write the skill. No other opv command writes your home directory, so an upgrade through cargo, Homebrew or a manual binary leaves the old copy in place: `opv doctor` and `opv skill status` report an outdated copy, and `opv skill status` names the `opv skill install` command that updates it.
 
 
 `install.sh` installs or updates `opv` into `~/.local/bin` without `sudo` and without
@@ -23,7 +23,7 @@ WSL and macOS under Rosetta), verifies the download against the release's
 platform, a missing checksum tool or a checksum mismatch fails closed.
 
 ```sh
-sh install.sh --version v0.9.0   # install exactly this release (default: latest)
+sh install.sh --version v0.10.0  # install exactly this release (default: latest)
 sh install.sh --dir /usr/local/bin
 sh install.sh --check            # report what would happen, change nothing
 ```
@@ -142,7 +142,7 @@ opv version --json   # the same, as one document
 | `flyctl` | tested with 0.4.112 and later 0.4.x patches | Fly targets |
 | Azure CLI `az` | 2.60 or newer | Azure targets |
 | `kubectl` | a version that matches your cluster (opv checks only that it runs) | Kubernetes targets |
-| GitHub CLI `gh` | tested with 2.102.0 | GitHub Actions targets |
+| GitHub CLI `gh` | 2.43.0 or newer (tested with 2.102.0) | GitHub Actions targets |
 
 `opv doctor` warns (exit code unchanged) when a version differs. When a tool is installed but its folder is not on `PATH` (common for `~/.local/bin`, `~/.fly/bin`, `/opt/homebrew/bin`, or the WinGet links folder on Windows), opv says where it is and how to add it to `PATH` instead of suggesting an install.
 

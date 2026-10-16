@@ -1,8 +1,13 @@
 //! `opv access` (FR-52, FR-59): who needs which vault, per boundary and per target, end to
 //! end on the stateful fake `op`. People are counted, never named.
 
+use std::io;
+use std::time::Duration;
+
 use super::*;
 use crate::adapters::fake_op::FakeOp;
+use crate::runner::fake::FakeRunner;
+use crate::runner::{Call, Outcome, Output};
 use serde_json::{Value, json};
 
 const VSHARED: &str = "vshared";
@@ -128,16 +133,64 @@ fn members_only() -> FakeOp {
     op
 }
 
-fn run_json(op: &FakeOp, env: Option<&str>, target: Option<&str>) -> Value {
+fn run_json(op: &dyn CommandRunner, env: Option<&str>, target: Option<&str>) -> Value {
     let mut out = Vec::new();
     run(&fleet(), env, target, Some("shop"), op, true, &mut out).unwrap();
     serde_json::from_slice(&out).unwrap()
 }
 
-fn run_text(op: &FakeOp, env: Option<&str>, target: Option<&str>) -> String {
+fn run_text(op: &dyn CommandRunner, env: Option<&str>, target: Option<&str>) -> String {
     let mut out = Vec::new();
     run(&fleet(), env, target, Some("shop"), op, false, &mut out).unwrap();
     String::from_utf8(out).unwrap()
+}
+
+/// op 2.40.0's recorded reply to `op vault get <vault>` for a vault the account does not
+/// hold (tests/fixtures/op/failures, case 14).
+const NOT_A_VAULT_HERE: &str =
+    include_str!("../../tests/fixtures/op/failures/14-vault-in-other-account.stderr");
+
+/// The fake `op`, whose failed `op vault get` probes go through the observing fake runner
+/// with op's recorded reply, as the real runner observes them (#157).
+struct Probed {
+    op: FakeOp,
+    get: FakeRunner,
+}
+
+impl Probed {
+    fn new(op: FakeOp) -> Self {
+        Probed {
+            op,
+            get: FakeRunner::default(),
+        }
+    }
+}
+
+impl CommandRunner for Probed {
+    fn read(&self, call: &Call, refused: &[i32]) -> io::Result<Outcome> {
+        self.op.read(call, refused)
+    }
+    fn write(&self, call: &Call) -> io::Result<Outcome> {
+        self.op.write(call)
+    }
+    fn probe(&self, call: &Call, limit: Duration) -> io::Result<Output> {
+        let answer = self.op.probe(call, limit)?;
+        match call.args {
+            ["vault", "get", vault, ..] if call.program == "op" && answer.status != 0 => {
+                self.get.push_with_stderr(
+                    Output::failure(1),
+                    &NOT_A_VAULT_HERE.replace("<VAULT_B>", vault),
+                );
+                self.get.probe(call, limit)
+            }
+            _ => Ok(answer),
+        }
+    }
+    fn pause(&self, _: Duration, _: &str) {}
+    fn note(&self, _: &str) {}
+    fn run_inherited(&self, _: &str, _: &[&str], _: &[(&str, &str)]) -> io::Result<i32> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
 }
 
 /// The `(vault, permission)` of every check for one principal, in report order.
@@ -351,7 +404,9 @@ fn an_unreadable_vault_keeps_its_finding() {
 
 #[test]
 fn a_finding_names_the_vault_it_is_about() {
-    assert!(run_text(&unreadable(), Some("prod"), None).contains("the vwebstate vault"));
+    assert!(
+        run_text(&unreadable(), Some("prod"), None).contains("vault vwebstate (environment prod)")
+    );
 }
 
 // --- readers and privacy ------------------------------------------------------------
@@ -449,7 +504,7 @@ fn the_json_document_carries_the_commands() {
 
 /// Every grant missing, and the `web` boundary vault unreadable: in the account (`op vault
 /// get` finds it) when `in_account`, else not.
-fn web_vault_unreadable(in_account: bool) -> FakeOp {
+fn web_vault_unreadable(in_account: bool) -> Probed {
     let op = members_only();
     op.vault_users.borrow_mut().remove(VWEB);
     if in_account {
@@ -457,10 +512,10 @@ fn web_vault_unreadable(in_account: bool) -> FakeOp {
             .borrow_mut()
             .push((VWEB.into(), "shop-web-prod".into()));
     }
-    op
+    Probed::new(op)
 }
 
-fn web_check_state(op: &FakeOp) -> Value {
+fn web_check_state(op: &dyn CommandRunner) -> Value {
     let doc = run_json(op, Some("prod"), Some("web"));
     doc["environments"][0]["report"]["checks"]
         .as_array()
@@ -513,4 +568,167 @@ fn an_identity_whose_vaults_all_exist_still_gets_its_owner_command() {
             .unwrap()
             .is_empty()
     );
+}
+
+/// #157: nobody signed in.
+fn signed_out() -> FakeOp {
+    let op = visible();
+    op.signed_in.set(false);
+    op
+}
+
+#[test]
+fn access_without_a_session_is_op_not_signed_in() {
+    let mut out = Vec::new();
+    let e = run(
+        &fleet(),
+        None,
+        None,
+        Some("shop"),
+        &signed_out(),
+        true,
+        &mut out,
+    )
+    .unwrap_err();
+    assert_eq!(e.code_str(), "op_not_signed_in");
+}
+
+#[test]
+fn access_without_a_session_classifies_no_vault() {
+    let mut out = Vec::new();
+    let _ = run(
+        &fleet(),
+        None,
+        None,
+        Some("shop"),
+        &signed_out(),
+        true,
+        &mut out,
+    );
+    assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+}
+
+#[test]
+fn one_vault_outside_the_account_leaves_the_others_classified() {
+    assert_eq!(
+        state_of(
+            &run_json(&web_vault_unreadable(false), Some("prod"), Some("web")),
+            VSHARED
+        ),
+        "missing"
+    );
+}
+
+#[test]
+fn a_missing_vault_finding_never_says_setup_vault() {
+    let text = run_text(&web_vault_unreadable(false), Some("prod"), Some("web"));
+    assert!(!text.contains("setup vault"), "{text}");
+}
+
+/// The configuration with `prod` in account `ACCTPROD` (#157).
+fn fleet_in_account() -> crate::domain::Fleet {
+    let mut fleet = fleet();
+    fleet
+        .environments
+        .get_mut("prod")
+        .expect("prod is declared")
+        .account = Some("ACCTPROD".into());
+    fleet
+}
+
+fn findings_in_account(op: &dyn CommandRunner) -> Value {
+    let mut out = Vec::new();
+    run(
+        &fleet_in_account(),
+        Some("prod"),
+        Some("web"),
+        Some("shop"),
+        op,
+        true,
+        &mut out,
+    )
+    .unwrap();
+    let doc: Value = serde_json::from_slice(&out).unwrap();
+    doc["environments"][0]["findings"].clone()
+}
+
+#[test]
+fn a_missing_vault_finding_names_the_account_it_checked() {
+    let found = findings_in_account(&web_vault_unreadable(false));
+    assert!(
+        found[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not in 1Password account ACCTPROD"),
+        "{found}"
+    );
+}
+
+/// #153a: op lists the machine's accounts and none holds the vault, so `vault locate` would
+/// only repeat the search: the step is the selected account's vault list.
+#[test]
+fn a_vault_no_account_on_the_machine_holds_steps_to_the_selected_accounts_vaults() {
+    let found = findings_in_account(&web_vault_unreadable(false));
+    assert_eq!(found[0]["next"], "op vault list --account ACCTPROD");
+}
+
+#[test]
+fn a_vault_in_another_account_keeps_the_documented_finding_code() {
+    let found = findings_in_account(&web_vault_unreadable(false));
+    assert_eq!(found[0]["code"], "vault_not_in_account");
+}
+
+#[test]
+fn a_vault_get_failure_the_runner_did_not_observe_is_never_guessed_elsewhere() {
+    let op = members_only();
+    op.vault_users.borrow_mut().remove(VWEB);
+    assert_eq!(web_check_state(&op), "not_visible");
+}
+
+// --- 07.10, 07.34: findings name the environment and label their step ---
+
+/// Two service accounts named like the web deploy identity read the shared vault, as after
+/// `opv access --create` made a replacement.
+fn replaced_reader() -> FakeOp {
+    let op = visible();
+    op.vault_users.borrow_mut().insert(
+        VSHARED.into(),
+        json!([
+            account("shop-prod-web-deploy", &["allow_viewing"]),
+            account("shop-prod-web-deploy", &["allow_viewing"]),
+            account("shop-prod-ci", &["allow_viewing"]),
+        ]),
+    );
+    op
+}
+
+#[test]
+fn pending_revoke_steps_to_the_environment_not_the_vault() {
+    let text = run_text(&replaced_reader(), Some("prod"), None);
+    assert!(
+        text.contains("    next: opv delivery verify prod\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn pending_revoke_names_the_vault_and_its_environment() {
+    let text = run_text(&replaced_reader(), Some("prod"), None);
+    assert!(text.contains("vault vshared (environment prod)"), "{text}");
+}
+
+#[test]
+fn an_undeclared_target_is_unknown_target() {
+    let mut out = Vec::new();
+    let e = run(
+        &fleet(),
+        Some("prod"),
+        Some("nope"),
+        Some("shop"),
+        &visible(),
+        true,
+        &mut out,
+    )
+    .unwrap_err();
+    assert_eq!(e.cause().map(|(c, _)| c.code()), Some("unknown_target"));
 }

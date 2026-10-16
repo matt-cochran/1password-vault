@@ -64,10 +64,15 @@ with tempfile.TemporaryDirectory() as directory:
             props = set(tool.get('inputSchema', {}).get('properties', {}) or {})
             assert not props & {'value', 'secret', 'password', 'token', 'approved'}, tool
         apply_tool = next(t for t in tools if t['name'] == 'opv_structure_apply')
-        assert set(apply_tool['inputSchema']['properties']) == {'plan_id'}, apply_tool
+        assert set(apply_tool['inputSchema']['properties']) == {'plan_id', 'verbose'}, apply_tool
         sync_tool = next(t for t in tools if t['name'] == 'opv_sync')
         assert set(sync_tool['inputSchema']['properties']) == {
-            'environment', 'plan_id', 'targets', 'product', 'deploy', 'prune', 'rotate'}, sync_tool
+            'environment', 'plan_id', 'targets', 'product', 'deploy', 'prune', 'rotate',
+            'verbose'}, sync_tool
+        # The deployment plan takes the scope opv_sync approves, so a scoped sync is not stale.
+        plan_tool = next(t for t in tools if t['name'] == 'opv_deployment_plan')
+        assert set(plan_tool['inputSchema']['properties']) == {
+            'environment', 'targets', 'product', 'rotate', 'verbose'}, plan_tool
         reply = send('tools/call', {'name': 'opv_configuration', 'arguments': {}}, 3)
         text = reply['result']['content'][0]['text']
         config = json.loads(text)
@@ -96,6 +101,14 @@ with tempfile.TemporaryDirectory() as directory:
             'plan_id': 'sp-0000000000000000'}}, 7)
         result = json.loads(unapproved['result']['content'][0]['text'])
         assert result['ok'] is False, result
+        # A failure is the --json document's error object: cause, steps and who acts.
+        error = result['error']
+        assert {'code', 'category', 'message', 'subject', 'evidence', 'retry',
+                'human_required', 'do', 'next', 'next_kind'} <= set(error), error
+        assert isinstance(error['human_required'], bool), error
+        # Every tool takes the CLI's verbose flag.
+        assert all('verbose' in (tool.get('inputSchema', {}).get('properties') or {})
+                   for tool in tools), tools
         # A value cannot be declared: there is no field for it.
         with_value = send('tools/call', {'name': 'opv_declare_key', 'arguments': {
             'product': 'api', 'key': 'NEW_KEY', 'kind': 'secret', 'value': 'SECRET_MARKER'}}, 8)

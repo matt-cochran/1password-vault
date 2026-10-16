@@ -17,8 +17,8 @@ pub fn select(
     // lives in `super::pick_product`. `doctor` (required = false) keeps the whole
     // environment when the choice is ambiguous instead of failing.
     let chosen = match product {
-        Some(p) => Some(super::pick_product(fleet, env, Some(p), "check")?),
-        None => match super::pick_product(fleet, env, None, "check") {
+        Some(p) => Some(super::pick_product(fleet, env, Some(p))?),
+        None => match super::pick_product(fleet, env, None) {
             Ok(p) => Some(p),
             Err(_) if !required => None,
             Err(e) => return Err(e),
@@ -61,7 +61,7 @@ pub fn check(
         // Planned without a target: check never reaches one.
         let mut plan = super::plan_item(&selected, env, None, fields, None, &none, &none)?.0;
         plan.tidy = read.changes;
-        plan.tidy_error = read.tidy_error.map(crate::error::Code::as_str);
+        plan.tidy_error = read.tidy_error;
         plan
     } else {
         read_and_plan_products(&selected, fleet, env, runner)?
@@ -140,7 +140,7 @@ pub fn check(
         writeln!(out, "{line}").map_err(write_err)?;
     }
     if findings > 0 {
-        Err(super::findings_error(findings, &plan.rows, env))
+        Err(super::findings_error(&plan.rows, env))
     } else {
         Ok(())
     }
@@ -168,7 +168,13 @@ mod tests {
         let r = FakeRunner::new([item(&[])]);
         let mut out = Vec::new();
         let result = check(&f, "dev", Some("allumata"), &r, &mut out, true);
-        assert!(matches!(result, Err(Error::Findings(1, _))));
+        assert!(
+            result
+                .as_ref()
+                .err()
+                .and_then(crate::app::testutil::findings_of)
+                == Some(1)
+        );
         assert_no_values(&text_of(&out));
     }
 
@@ -180,7 +186,7 @@ mod tests {
         );
         let r = FakeRunner::new([item(&[])]);
         let e = check(&f, "dev", Some("allumata"), &r, &mut Vec::new(), true).unwrap_err();
-        assert!(e.action().is_some_and(|a| a.contains("click Edit")));
+        assert!(e.do_text().is_some_and(|a| a.contains("click Edit")));
     }
 
     #[test]

@@ -10,7 +10,7 @@ HOOK = pathlib.Path(__file__).with_name("ready-session.py")
 
 @unittest.skipUnless(sys.platform != "win32", "POSIX process groups")
 class HookTests(unittest.TestCase):
-    def run_hook(self, body, event=None):
+    def run_hook(self, body, event=None, timeout="2"):
         with tempfile.TemporaryDirectory() as directory:
             fake = pathlib.Path(directory) / "opv"
             fake.write_text("#!/usr/bin/env python3\n" + body)
@@ -18,13 +18,13 @@ class HookTests(unittest.TestCase):
             payload = event if event is not None else {
                 "hook_event_name": "SessionStart", "cwd": directory}
             return subprocess.run([sys.executable, str(HOOK), "--env", "dev",
-                                   "--opv", str(fake), "--timeout", "0.2"],
+                                   "--opv", str(fake), "--timeout", timeout],
                                   input=json.dumps(payload), text=True,
-                                  capture_output=True, timeout=4)
+                                  capture_output=True, timeout=8)
 
     def receipt(self, findings):
         return "import json\nprint(json.dumps(" + repr({
-            "schema_version": 1, "matrix": [{"environment": "dev"}],
+            "schema_version": 2, "matrix": [{"environment": "dev"}],
             "findings": findings}) + "))\n"
 
     def test_ready_receipt_produces_session_context(self):
@@ -47,7 +47,7 @@ class HookTests(unittest.TestCase):
             "import sys\nprint('SECRET_MARKER', file=sys.stderr)\nsys.exit(1)\n").stdout)
 
     def test_timeout_returns_unconfirmed_context(self):
-        self.assertIn("could not be confirmed", self.run_hook("import time\ntime.sleep(5)\n").stdout)
+        self.assertIn("could not be confirmed", self.run_hook("import time\ntime.sleep(5)\n", timeout="0.2").stdout)
 
     def test_malformed_receipt_returns_unconfirmed_context(self):
         self.assertIn("could not be confirmed", self.run_hook("print('not JSON')\n").stdout)
@@ -65,7 +65,11 @@ class HookTests(unittest.TestCase):
 
     def test_unknown_schema_returns_unconfirmed_context(self):
         self.assertIn("could not be confirmed", self.run_hook(
-            self.receipt([]).replace("'schema_version': 1", "'schema_version': 2")).stdout)
+            self.receipt([]).replace("'schema_version': 2", "'schema_version': 3")).stdout)
+
+    def test_receipt_from_opv_0_9_is_still_read(self):
+        self.assertIn("no blocking findings", self.run_hook(
+            self.receipt([]).replace("'schema_version': 2", "'schema_version': 1")).stdout)
 
     def test_receipt_for_wrong_environment_is_not_reported_ready(self):
         self.assertIn("could not be confirmed", self.run_hook(

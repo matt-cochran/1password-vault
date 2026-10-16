@@ -1,17 +1,31 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "ok": false,
   "exit_code": 2,
-  "next": "opv status",
+  "next": "opv config describe",
   "do": null,
   "error": {
     "code": "unknown_env",
     "category": "config",
-    "message": "undefined environment \"qa\" (defined: prod, staging)",
-    "detail": [],
+    "message": "environment qa is not declared (declared: prod, staging)",
+    "subject": {
+      "closest": null,
+      "kind": "environment",
+      "given": "qa",
+      "candidates": [
+        "prod",
+        "staging"
+      ]
+    },
+    "evidence": {
+      "checked": null,
+      "account": null,
+      "upstream": null
+    },
     "retry": "never",
     "human_required": false,
     "do": null,
-    "next": "opv status"
+    "next": "opv config describe",
+    "next_kind": "check"
   }
 }

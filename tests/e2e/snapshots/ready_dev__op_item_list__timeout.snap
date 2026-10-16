@@ -1,0 +1,24 @@
+# ready_dev__op_item_list__timeout: opv ready dev | fault timeout on op item list
+
+## text exit: 0
+## text stdout
+ready: 1 blocking · 2 findings · receipt rcpt-<id>
+PRODUCT  Local development
+Needs attention:
+  [owner] shared_sign_in_address AE2EDEVACCOUNT000000000001 → opv account list
+  [agent] provider_unavailable dev → approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network
+Next (agent): approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+retrying op item list (2/3) in <delay>
+retrying op item list (3/3) in <delay>
+
+## json exit: 0
+## json stdout
+{"schema_version":2,"ok":true,"receipt_id":"rcpt-<id>","opv_version":"0.10.0","config":{"source":"<SCENARIO>/project/secrets.toml"},"account":{"account_id":"AE2EDEVACCOUNT000000000001","by":"pointer"},"matrix":[],"targets":[],"findings":[{"code":"shared_sign_in_address","scope":{"account":"AE2EDEVACCOUNT000000000001"},"blocking":false,"actor":"owner","effect":"none","prerequisite":"opv account list","verify":"opv account list --json"},{"code":"provider_unavailable","scope":{"environment":"dev"},"blocking":true,"actor":"agent","effect":"none","prerequisite":"approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network","verify":"opv ready --json"}],"next":{"actor":"agent","command":"approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network"},"do":null}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+retrying op item list (2/3) in <delay>
+retrying op item list (3/3) in <delay>

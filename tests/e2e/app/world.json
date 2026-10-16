@@ -1,0 +1,471 @@
+{
+  "op": {
+    "default_account": "AE2EDEVACCOUNT000000000001",
+    "accounts": [
+      {
+        "id": "AE2EDEVACCOUNT000000000001",
+        "shorthand": "e2e-dev",
+        "url": "https://e2e.1password.com",
+        "email": "dev@example.com",
+        "user": "UE2EDEVUSER000000000000001",
+        "user_type": "HUMAN",
+        "signed_in": true
+      },
+      {
+        "id": "AE2EOPSACCOUNT000000000002",
+        "shorthand": "e2e-ops",
+        "url": "https://e2e.1password.com",
+        "email": "ops@example.test",
+        "user": "UE2EOPSUSER000000000000002",
+        "user_type": "HUMAN",
+        "signed_in": true
+      }
+    ],
+    "service_account_tokens": [
+      "ops_e2e_marker_service_account_token"
+    ],
+    "vaults": [
+      {
+        "id": "vE2ESHAREDDEV00000000000001",
+        "name": "e2e-app · shared · dev values",
+        "account": "AE2EDEVACCOUNT000000000001"
+      },
+      {
+        "id": "vE2EWEBDEV0000000000000001",
+        "name": "e2e-app · web · dev values",
+        "account": "AE2EDEVACCOUNT000000000001"
+      },
+      {
+        "id": "vE2ESHAREDPROD0000000000001",
+        "name": "e2e-app · shared · prod values",
+        "account": "AE2EDEVACCOUNT000000000001"
+      },
+      {
+        "id": "vE2EWEBPROD000000000000001",
+        "name": "e2e-app · web · prod values",
+        "account": "AE2EDEVACCOUNT000000000001"
+      },
+      {
+        "id": "vE2ESTATEFLY00000000000001",
+        "name": "e2e-app · fly · state",
+        "account": "AE2EDEVACCOUNT000000000001"
+      },
+      {
+        "id": "vE2ESTATEK8S00000000000001",
+        "name": "e2e-app · k8s · state",
+        "account": "AE2EDEVACCOUNT000000000001"
+      },
+      {
+        "id": "vE2ESTATEGH000000000000001",
+        "name": "e2e-app · gh · state",
+        "account": "AE2EDEVACCOUNT000000000001"
+      },
+      {
+        "id": "vE2EMANIFEST00000000000001",
+        "name": "e2e-manifest",
+        "account": "AE2EDEVACCOUNT000000000001"
+      },
+      {
+        "id": "vE2EPRIVATE000000000000001",
+        "name": "e2e-dev-private",
+        "account": "AE2EDEVACCOUNT000000000001"
+      },
+      {
+        "id": "vE2EOPSVAULT00000000000001",
+        "name": "e2e-ops-secrets",
+        "account": "AE2EOPSACCOUNT000000000002"
+      }
+    ],
+    "items": [
+      {
+        "id": "iE2ESHAREDDEV00000000000001",
+        "title": "e2e-app · shared · dev values",
+        "version": 1,
+        "vault": {
+          "id": "vE2ESHAREDDEV00000000000001",
+          "name": "e2e-app · shared · dev values"
+        },
+        "category": "SECURE_NOTE",
+        "sections": [
+          {
+            "id": "shared",
+            "label": "shared"
+          }
+        ],
+        "fields": [
+          {
+            "id": "notesPlain",
+            "type": "STRING",
+            "purpose": "NOTES",
+            "label": "notesPlain"
+          },
+          {
+            "id": "shared_database_url",
+            "section": {
+              "id": "shared",
+              "label": "shared"
+            },
+            "type": "CONCEALED",
+            "label": "DATABASE_URL",
+            "value": "test-marker-e2e-dev-shared-database-url"
+          },
+          {
+            "id": "shared_feature_flags",
+            "section": {
+              "id": "shared",
+              "label": "shared"
+            },
+            "type": "STRING",
+            "label": "FEATURE_FLAGS",
+            "value": "on"
+          }
+        ]
+      },
+      {
+        "id": "iE2EWEBDEV0000000000000001",
+        "title": "e2e-app · web · dev values",
+        "version": 1,
+        "vault": {
+          "id": "vE2EWEBDEV0000000000000001",
+          "name": "e2e-app · web · dev values"
+        },
+        "category": "SECURE_NOTE",
+        "sections": [
+          {
+            "id": "web",
+            "label": "web"
+          }
+        ],
+        "fields": [
+          {
+            "id": "notesPlain",
+            "type": "STRING",
+            "purpose": "NOTES",
+            "label": "notesPlain"
+          },
+          {
+            "id": "web_api_key",
+            "section": {
+              "id": "web",
+              "label": "web"
+            },
+            "type": "CONCEALED",
+            "label": "API_KEY",
+            "value": "test-marker-e2e-dev-web-api-key"
+          },
+          {
+            "id": "web_log_level",
+            "section": {
+              "id": "web",
+              "label": "web"
+            },
+            "type": "STRING",
+            "label": "LOG_LEVEL",
+            "value": "debug"
+          },
+          {
+            "id": "web_session_secret",
+            "section": {
+              "id": "web",
+              "label": "web"
+            },
+            "type": "CONCEALED",
+            "label": "SESSION_SECRET",
+            "value": "test-marker-e2e-dev-web-session-secret"
+          },
+          {
+            "id": "web_migration_token",
+            "section": {
+              "id": "web",
+              "label": "web"
+            },
+            "type": "CONCEALED",
+            "label": "MIGRATION_TOKEN",
+            "value": "test-marker-e2e-dev-web-migration-token"
+          },
+          {
+            "id": "web_tls_certificate",
+            "section": {
+              "id": "web",
+              "label": "web"
+            },
+            "type": "CONCEALED",
+            "label": "TLS_CERTIFICATE",
+            "value": "test-marker-e2e-dev-web-tls-certificate"
+          },
+          {
+            "id": "web_tls_private_key",
+            "section": {
+              "id": "web",
+              "label": "web"
+            },
+            "type": "CONCEALED",
+            "label": "TLS_PRIVATE_KEY",
+            "value": "test-marker-e2e-dev-web-tls-private-key"
+          }
+        ]
+      },
+      {
+        "id": "iE2ESHAREDPROD0000000000001",
+        "title": "e2e-app · shared · prod values",
+        "version": 1,
+        "vault": {
+          "id": "vE2ESHAREDPROD0000000000001",
+          "name": "e2e-app · shared · prod values"
+        },
+        "category": "SECURE_NOTE",
+        "sections": [
+          {
+            "id": "shared",
+            "label": "shared"
+          }
+        ],
+        "fields": [
+          {
+            "id": "notesPlain",
+            "type": "STRING",
+            "purpose": "NOTES",
+            "label": "notesPlain"
+          },
+          {
+            "id": "shared_database_url",
+            "section": {
+              "id": "shared",
+              "label": "shared"
+            },
+            "type": "CONCEALED",
+            "label": "DATABASE_URL",
+            "value": "test-marker-e2e-prod-shared-database-url"
+          },
+          {
+            "id": "shared_feature_flags",
+            "section": {
+              "id": "shared",
+              "label": "shared"
+            },
+            "type": "STRING",
+            "label": "FEATURE_FLAGS",
+            "value": "off"
+          }
+        ]
+      },
+      {
+        "id": "iE2EWEBPROD000000000000001",
+        "title": "e2e-app · web · prod values",
+        "version": 1,
+        "vault": {
+          "id": "vE2EWEBPROD000000000000001",
+          "name": "e2e-app · web · prod values"
+        },
+        "category": "SECURE_NOTE",
+        "sections": [
+          {
+            "id": "web",
+            "label": "web"
+          }
+        ],
+        "fields": [
+          {
+            "id": "notesPlain",
+            "type": "STRING",
+            "purpose": "NOTES",
+            "label": "notesPlain"
+          },
+          {
+            "id": "web_api_key",
+            "section": {
+              "id": "web",
+              "label": "web"
+            },
+            "type": "CONCEALED",
+            "label": "API_KEY",
+            "value": "test-marker-e2e-prod-web-api-key"
+          },
+          {
+            "id": "web_log_level",
+            "section": {
+              "id": "web",
+              "label": "web"
+            },
+            "type": "STRING",
+            "label": "LOG_LEVEL",
+            "value": "warn"
+          },
+          {
+            "id": "web_session_secret",
+            "section": {
+              "id": "web",
+              "label": "web"
+            },
+            "type": "CONCEALED",
+            "label": "SESSION_SECRET",
+            "value": "test-marker-e2e-prod-web-session-secret"
+          },
+          {
+            "id": "web_migration_token",
+            "section": {
+              "id": "web",
+              "label": "web"
+            },
+            "type": "CONCEALED",
+            "label": "MIGRATION_TOKEN",
+            "value": "test-marker-e2e-prod-web-migration-token"
+          }
+        ]
+      },
+      {
+        "id": "iE2EPERSONAL00000000000001",
+        "title": "e2e-app · dev (personal)",
+        "version": 1,
+        "vault": {
+          "id": "vE2EPRIVATE000000000000001",
+          "name": "e2e-dev-private"
+        },
+        "category": "SECURE_NOTE",
+        "sections": [
+          {
+            "id": "web",
+            "label": "web"
+          }
+        ],
+        "fields": [
+          {
+            "id": "notesPlain",
+            "type": "STRING",
+            "purpose": "NOTES",
+            "label": "notesPlain"
+          },
+          {
+            "id": "web_personal_llm_key",
+            "section": {
+              "id": "web",
+              "label": "web"
+            },
+            "type": "CONCEALED",
+            "label": "PERSONAL_LLM_KEY",
+            "value": "test-marker-e2e-personal-llm-key"
+          }
+        ]
+      },
+      {
+        "id": "iE2EMANIFEST00000000000001",
+        "title": "opv · e2e-app",
+        "version": 1,
+        "vault": {
+          "id": "vE2EMANIFEST00000000000001",
+          "name": "e2e-manifest"
+        },
+        "category": "SECURE_NOTE",
+        "tags": [
+          "opv-manifest",
+          "opv-repo:example.test|e2e-org|e2e-app"
+        ],
+        "sections": [],
+        "fields": [
+          {
+            "id": "notesPlain",
+            "type": "STRING",
+            "purpose": "NOTES",
+            "label": "notesPlain",
+            "value": "# opv managed configuration\n\nopv reads this note to know which keys the project **e2e-app** needs and where each environment keeps them. **No secret values are stored here.**\n\n- Values: in each environment's own item (its `vault_id` and `item_id` below). Open one with `opv open KEY --env ENV`.\n- Change keys with `opv add KEY` or `opv config edit`. Hand edits are fine inside the code block while it stays valid TOML; opv reads only the code block.\n- About opv: https://github.com/matt-cochran/1password-vault\n\n```toml\n# The end-to-end test application (design §13.2). It holds IDs, names and rules only,\n# never a value: every field in tests/e2e/app/world.json carries a marker.\n#\n# File route:     opv --config tests/e2e/app/secrets.toml config describe --json\n# Manifest route: OPV_PROJECT=e2e-app opv config describe --json\n#                 (the item \"opv · e2e-app\" lives in world.json and its notes hold this\n#                  same TOML; tests/e2e/app/manifest/ keeps the committed copy)\n\n# Local development: no targets here, so the personal key is allowed. The team values\n# live in the two boundary items recorded below.\n[environments.dev]\ntitle = \"Local development\"\norder = 1\nboundaries.shared = { vault_id = \"vE2ESHAREDDEV00000000000001\", item_id = \"iE2ESHAREDDEV00000000000001\" }\nboundaries.web    = { vault_id = \"vE2EWEBDEV0000000000000001\", item_id = \"iE2EWEBDEV0000000000000001\" }\npersonal_vault = \"e2e-dev-private\"\npersonal_item  = \"e2e-app · dev (personal)\"\n\n# Production: locked behind confirm_env, one target per provider, and a reviewed remote\n# execution profile for the builder host.\n[environments.prod]\ntitle = \"Production\"\norder = 2\nconfirm_env = true\nboundaries.shared = { vault_id = \"vE2ESHAREDPROD0000000000001\", item_id = \"iE2ESHAREDPROD0000000000001\" }\nboundaries.web    = { vault_id = \"vE2EWEBPROD000000000000001\", item_id = \"iE2EWEBPROD000000000000001\" }\n\n# The Fly target: one secret per rendered name.\n[environments.prod.targets.fly]\nfly.app = \"e2e-app-prod\"\nfly.secret_name = \"E2E__{PRODUCT}__{KEY}\"\nstate_vault_id = \"vE2ESTATEFLY00000000000001\"\n\n# The Kubernetes target: the Deployment reads names from the e2e-prod namespace.\n[environments.prod.targets.k8s]\nkubernetes.context = \"e2e-cluster\"\nkubernetes.namespace = \"e2e-prod\"\nkubernetes.deployment = \"e2e-app\"\nkubernetes.env_name = \"E2E__{PRODUCT}__{KEY}\"\nstate_vault_id = \"vE2ESTATEK8S00000000000001\"\n\n# The GitHub target: repository secrets and variables, plus the production environment.\n[environments.prod.targets.gh]\ngithub.repo = \"e2e-org/e2e-app\"\ngithub.environment = \"production\"\ngithub.secret_name = \"E2E__{PRODUCT}__{KEY}\"\nstate_vault_id = \"vE2ESTATEGH000000000000001\"\n\n# A source-only home for a value more than one product reads. It is never delivered.\n[products.shared]\nsource_only = true\nboundary = \"shared\"\n\n[products.shared.keys.DATABASE_URL]\nkind = \"secret\"\nenvironments = [\"dev\", \"prod\"]\nguidance = \"the one connection string the fleet reads\"\n\n[products.shared.keys.FEATURE_FLAGS]\nkind = \"config\"\nenvironments = [\"dev\", \"prod\"]\nrules = { enum = [\"on\", \"off\"] }\n\n# The web product: its own keys, one shared key, two role-scoped keys, two file keys and\n# one personal key.\n[products.web]\nboundary = \"web\"\n\n[products.web.keys.DATABASE_URL]\nkind = \"secret\"\nfrom = \"shared/DATABASE_URL\"\nenvironments = [\"dev\", \"prod\"]\n\n[products.web.keys.API_KEY]\nkind = \"secret\"\nenvironments = [\"dev\", \"prod\"]\nguidance = \"the service's own API key\"\n\n[products.web.keys.LOG_LEVEL]\nkind = \"config\"\nenvironments = [\"dev\", \"prod\"]\nrules = { enum = [\"debug\", \"info\", \"warn\"] }\n\n# The serving process gets this; the migrating process does not.\n[products.web.keys.SESSION_SECRET]\nkind = \"secret\"\nenvironments = [\"dev\", \"prod\"]\nroles = [\"serve\"]\n\n# The migrating process gets this; the serving process does not.\n[products.web.keys.MIGRATION_TOKEN]\nkind = \"secret\"\nenvironments = [\"dev\", \"prod\"]\nroles = [\"migrate\"]\n\n# File keys: under `opv run`, their values are written into WEB_SECRETS_DIR at these\n# relative paths instead of the environment.\n[products.web.keys.TLS_CERTIFICATE]\nkind = \"secret\"\nenvironments = [\"dev\"]\nfile = \"tls/certificate\"\n\n[products.web.keys.TLS_PRIVATE_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\nfile = \"tls/private-key\"\n\n# Each developer keeps their own LLM key in their own item.\n[products.web.keys.PERSONAL_LLM_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\npersonal = true\nguidance = \"your own key, billed to you\"\n\n[products.web.local]\nenvironment = \"declared_only\"\nsecrets_dir_env = \"WEB_SECRETS_DIR\"\n\n# The reviewed remote profile: a pinned host, roles and command.\n[products.web.remotes.builder]\nhost = \"builder.example.test\"\nuser = \"deploy\"\nhost_key = \"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIe2eMarkerHostKeyNotARealKey000000\"\nenvironments = [\"prod\"]\nroles = [\"serve\", \"migrate\"]\nopv = \"/usr/local/bin/opv\"\nworkdir = \"/srv/e2e-app\"\ncommand = [\"/usr/local/bin/opv\", \"run\", \"--env\", \"prod\", \"--product\", \"web\"]\n```\n"
+          },
+          {
+            "id": "project",
+            "type": "STRING",
+            "label": "project",
+            "value": "e2e-app"
+          },
+          {
+            "id": "convention",
+            "type": "STRING",
+            "label": "convention",
+            "value": "1"
+          }
+        ]
+      }
+    ]
+  },
+  "fly": {
+    "signed_in": true,
+    "tokens": [
+      "FlyV1 fm2_e2e_marker_fly_token"
+    ],
+    "apps": {
+      "e2e-app-prod": {
+        "secrets": [
+          {
+            "name": "E2E__WEB__API_KEY",
+            "digest": "0000000000000e01",
+            "status": "Deployed"
+          },
+          {
+            "name": "E2E__WEB__DATABASE_URL",
+            "digest": "0000000000000e02",
+            "status": "Deployed"
+          },
+          {
+            "name": "E2E__WEB__LOG_LEVEL",
+            "digest": "0000000000000e03",
+            "status": "Deployed"
+          },
+          {
+            "name": "E2E__WEB__SESSION_SECRET",
+            "digest": "0000000000000e04",
+            "status": "Deployed"
+          },
+          {
+            "name": "E2E__WEB__MIGRATION_TOKEN",
+            "digest": "0000000000000e05",
+            "status": "Deployed"
+          }
+        ]
+      }
+    }
+  },
+  "kubernetes": {
+    "current_context": "e2e-cluster",
+    "contexts": {
+      "e2e-cluster": {
+        "user": "system:serviceaccount:e2e-prod:opv",
+        "external_secrets": false,
+        "namespaces": {
+          "e2e-prod": {
+            "secrets": [],
+            "deployments": [],
+            "replicasets": [],
+            "pods": []
+          }
+        }
+      }
+    }
+  },
+  "github": {
+    "signed_in": true,
+    "tokens": [
+      "ghp_e2e_marker_github_token"
+    ],
+    "repos": {
+      "e2e-org/e2e-app": {
+        "secrets": {},
+        "variables": {},
+        "environments": {
+          "production": {
+            "secrets": {},
+            "variables": {}
+          }
+        }
+      }
+    }
+  },
+  "hosts": {
+    "builder.example.test": {
+      "env": {
+        "XDG_RUNTIME_DIR": "/tmp/e2e-builder-runtime"
+      },
+      "commands": {
+        "/usr/local/bin/opv": "/usr/local/bin/opv"
+      },
+      "state": "ok"
+    }
+  }
+}

@@ -22,8 +22,8 @@ use serde_json::{Value, json};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::onepassword::{
-    DEFAULT_SECTION_ID, OP, WipeOnDrop, default_section, failed_op_error_as, json_error,
-    op_spawn_error, serialize_exact,
+    DEFAULT_SECTION_ID, OP, WipeOnDrop, default_section, failed_write, json_error, op_spawn_error,
+    serialize_exact, unfinished_write,
 };
 use crate::domain::convention::{
     Found, KEPT_SECTION, Layout, MARKER_SECTION, Op, Section, TidyPlan,
@@ -32,7 +32,7 @@ use crate::domain::model::{Boundary, Environment};
 use crate::domain::secret::SecretValue;
 use crate::error::Error;
 use crate::host::Host;
-use crate::runner::{Call, CommandRunner, Outcome, status_text, unknown_text};
+use crate::runner::{Call, CommandRunner, Outcome};
 
 /// The item's edit stamp: `version` and `updated_at`. Two reads with the same stamp saw
 /// the same item; a different stamp means someone edited it in between.
@@ -152,8 +152,30 @@ pub fn parse(json: &[u8]) -> Result<(Layout, Stamp), Error> {
     Ok((layout, Stamp(raw.version, raw.updated_at)))
 }
 
-fn source(what: &str) -> Error {
-    Error::Source(format!("op item JSON: {what}; nothing written").into())
+/// Item JSON that [`check`] accepted when it was read, but that is not an item now: opv's
+/// own error, never 1Password's (C20). Nothing is written.
+fn source(_what: &str) -> Error {
+    crate::cause::Cause::Bug {
+        site: "onepassword_tidy: item JSON checked when read is not an item",
+    }
+    .into()
+}
+
+/// Whether `json` is an item opv's readers accept (C20): a JSON object whose `sections`
+/// and `fields`, when present, are lists of objects of the expected shape. Checked on every
+/// item reply while the runner still holds the call, so a reply of another shape is that
+/// call's `UnexpectedOutput`, and the later parse ([`parse`], [`apply`]) cannot fail. The
+/// values read are dropped (zeroized) at once.
+pub fn check(json: &[u8]) -> Result<(), serde_json::Error> {
+    serde_json::from_slice::<RawItem>(json)?;
+    // A JSON array also deserializes into a struct (by position): only an object is an item.
+    match json.iter().find(|b| !b.is_ascii_whitespace()) {
+        Some(b'{') => Ok(()),
+        _ => Err(<serde_json::Error as de::Error>::invalid_type(
+            de::Unexpected::Seq,
+            &"an item object",
+        )),
+    }
 }
 
 /// `base`, or `base_2`, `base_3`, ... until it is not in `taken`; then taken.
@@ -365,37 +387,27 @@ pub fn write(
         "json",
     ];
     let call = Call::new(OP, &args).with_stdin(Some(template));
-    let status = match r.write(&call).map_err(|e| op_spawn_error(&e, host))? {
+    match r.write(&call).map_err(|e| op_spawn_error(r, &e, host))? {
         // The edited item comes back on stdout (with values): registered with the stderr
         // scrubber (NR-31) and handed back in its zeroizing buffer.
         Outcome::Done(o) => {
             crate::scrub::register_item_values(&o.stdout);
-            return Ok(o.stdout);
+            // An echo that is not an item opv can read is treated as no echo: the caller
+            // reads the item back (fresh), and that read is checked like any other (C20).
+            if check(&o.stdout).is_err() {
+                return Ok(Zeroizing::new(Vec::new()));
+            }
+            Ok(o.stdout)
         }
-        Outcome::Refused(o) => o.status,
-        Outcome::Unknown {
-            status: Some(s), ..
-        } => s,
-        Outcome::Unknown { reason, .. } => {
-            return Err(Error::Unknown(
-                format!(
-                    "{}: {}; the item is either unchanged or fully tidied (one edit)",
-                    call.step(),
-                    unknown_text(OP, reason)
-                )
-                .into(),
-            ));
-        }
-    };
-    Err(failed_op_error_as(
-        r,
-        env,
-        b,
-        host,
-        &format!("op item edit failed ({})", status_text(status)),
-        "grant this identity write access to the vault",
-        true,
-    ))
+        // A refusal right after a read of the same item is the missing Write grant unless
+        // the session explains it (04.01), never "not available".
+        Outcome::Refused(_)
+        | Outcome::Unknown {
+            status: Some(_), ..
+        } => Err(failed_write(r, env, b, host, &call)),
+        // One atomic edit: the item is either unchanged or fully tidied.
+        Outcome::Unknown { .. } => Err(unfinished_write(env, b, &call)),
+    }
 }
 
 /// Field types a whole-item edit is known to keep exactly: plain string values (the
@@ -449,13 +461,17 @@ pub fn unprovable(raw: &[u8]) -> Option<&'static str> {
     })
 }
 
-/// How many fields of the tidy are missing from the item read back after the write (I4,
-/// I5): each field of `intended` (the template written: every original field, moved,
+/// The fields of the tidy missing from the item read back after the write (I4, I5), by
+/// label (`section/label`, names only, G2): each field of `intended` (the template written: every original field, moved,
 /// relabelled or kept, plus the new ones) must be in `after` with the same section label,
 /// label and value; each field of `original` must still be there by id with its value, or
 /// its original value must be kept in another field. Values are compared in constant time
 /// and never printed.
-pub fn lost(original: &[u8], intended: &[u8], after: &[u8]) -> Result<usize, Error> {
+pub fn lost(
+    original: &[u8],
+    intended: &[u8],
+    after: &[u8],
+) -> Result<Vec<crate::cause::FieldName>, Error> {
     use subtle::ConstantTimeEq;
     let (original, _) = parse(original)?;
     let (intended, _) = parse(intended)?;
@@ -463,8 +479,14 @@ pub fn lost(original: &[u8], intended: &[u8], after: &[u8]) -> Result<usize, Err
     let same = |a: &SecretValue, b: &SecretValue| -> bool {
         a.expose().as_bytes().ct_eq(b.expose().as_bytes()).into()
     };
+    let name = |f: &Found| {
+        crate::cause::FieldName::new(match f.section_label() {
+            Some(s) if !s.is_empty() => format!("{s}/{}", f.label),
+            _ => f.label.clone(),
+        })
+    };
     let mut used = vec![false; after.fields.len()];
-    let mut missing = 0;
+    let mut missing = Vec::new();
     for f in &intended.fields {
         let hit = after.fields.iter().enumerate().position(|(i, g)| {
             !used[i]
@@ -474,15 +496,15 @@ pub fn lost(original: &[u8], intended: &[u8], after: &[u8]) -> Result<usize, Err
         });
         match hit {
             Some(i) => used[i] = true,
-            None => missing += 1,
+            None => missing.push(name(f)),
         }
     }
     for f in &original.fields {
         let in_place = after.fields.iter().any(|g| g.id == f.id);
         let value_kept =
             f.value.expose().is_empty() || after.fields.iter().any(|g| same(&g.value, &f.value));
-        if !(in_place && value_kept) {
-            missing += 1;
+        if !(in_place && value_kept) && !missing.contains(&name(f)) {
+            missing.push(name(f));
         }
     }
     Ok(missing)
@@ -522,6 +544,18 @@ mod tests {
         let l =
             layout_of(json!({"fields": [{"id": "a", "type": "DATE", "label": "D", "value": 17}]}));
         assert_eq!(l.fields[0].value.expose(), "17");
+    }
+
+    #[test]
+    fn a_field_missing_after_the_write_is_named_by_its_label() {
+        // G2 (F4d): the read-back names the lost field, never only a count.
+        let item = serde_json::to_vec(&json!({"fields": [
+            {"id": "k", "type": "CONCEALED", "label": "API_KEY", "value": "x",
+             "section": {"id": "web", "label": "web"}},
+        ]}))
+        .unwrap();
+        let lost = lost(&item, &item, br#"{"fields": []}"#).unwrap();
+        assert_eq!(lost, [crate::cause::FieldName::new("web/API_KEY")]);
     }
 
     #[test]
@@ -585,5 +619,54 @@ mod tests {
         };
         let out: Value = serde_json::from_slice(&apply(raw, &plan).unwrap()).unwrap();
         assert_eq!(out["sections"], json!([{"id": "api", "label": "api"}]));
+    }
+
+    fn tidy_target() -> (Environment, Boundary) {
+        let env = Environment {
+            name: "prod".into(),
+            ..Environment::default()
+        };
+        let b = Boundary {
+            vault_id: "vprd".into(),
+            item_id: "iprd".into(),
+        };
+        (env, b)
+    }
+
+    /// 04.01: a tidy edit refused right after the item was read is the missing Write grant
+    /// (vault_no_access), never "not available to this identity".
+    #[test]
+    fn a_refused_tidy_write_is_the_missing_write_grant() {
+        use crate::runner::Output;
+        let r = crate::runner::fake::FakeRunner::new([
+            Output::failure(1),
+            Output::success(r#"{"user_type":"HUMAN"}"#),
+        ]);
+        let (env, b) = tidy_target();
+        let e = write(&r, &env, &b, b"{}").unwrap_err();
+        assert_eq!(e.code_str(), "vault_no_access");
+    }
+
+    /// 04.01: the grant names the right that is missing: write access.
+    #[test]
+    fn a_refused_tidy_write_asks_for_write_access() {
+        use crate::runner::Output;
+        let r = crate::runner::fake::FakeRunner::new([
+            Output::failure(1),
+            Output::success(r#"{"user_type":"HUMAN"}"#),
+        ]);
+        let (env, b) = tidy_target();
+        let e = write(&r, &env, &b, b"{}").unwrap_err();
+        assert!(e.to_string().contains("may not write item iprd"), "{e}");
+    }
+
+    /// NR-2: a tidy edit that timed out is an unknown outcome, safe to re-run.
+    #[test]
+    fn an_unfinished_tidy_write_is_outcome_unknown() {
+        let r = crate::runner::fake::FakeRunner::default();
+        r.push_unknown("timeout");
+        let (env, b) = tidy_target();
+        let e = write(&r, &env, &b, b"{}").unwrap_err();
+        assert_eq!(e.code_str(), "outcome_unknown");
     }
 }

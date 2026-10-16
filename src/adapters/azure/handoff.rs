@@ -22,6 +22,7 @@
 
 use std::io;
 
+use crate::cause::{Cause, During, OutputProblem, System};
 use crate::error::Error;
 use crate::runner::Outcome;
 
@@ -37,14 +38,25 @@ pub trait Handoff: Sync {
     fn offer(&self, data: &[u8]) -> Result<Box<dyn Offer>, Error>;
 }
 
+/// How serving one value ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Served {
+    /// The call read every byte (or the bytes went on its stdin).
+    Read,
+    /// The call never read the value: it went nowhere.
+    Unread,
+    /// Another process connected to the private pipe and was refused, unread.
+    Contested,
+}
+
 /// One value being served.
 pub trait Offer {
     /// The path `az` reads the value from.
     fn path(&self) -> &str;
     /// True when the bytes go on the child's stdin.
     fn on_stdin(&self) -> bool;
-    /// After the call: stop serving. `Err` when `az` never read the value.
-    fn finish(self: Box<Self>) -> Result<(), Error>;
+    /// After the call: stop serving, and say how it ended.
+    fn finish(self: Box<Self>) -> Served;
 }
 
 /// `/dev/stdin` and the child's stdin (every platform but Windows).
@@ -59,8 +71,8 @@ impl Offer for StdinOffer {
     fn on_stdin(&self) -> bool {
         true
     }
-    fn finish(self: Box<Self>) -> Result<(), Error> {
-        Ok(())
+    fn finish(self: Box<Self>) -> Served {
+        Served::Read
     }
 }
 
@@ -109,9 +121,29 @@ pub fn deliver(
         })
         .collect();
     let res = run(&rewritten, offer.on_stdin().then_some(data));
-    let served = offer.finish();
-    match (&res, served) {
-        (Ok(Outcome::Done(_)), Err(e)) => Err(e),
+    match (&res, offer.finish()) {
+        // Another process reached for the value: refused unread, but the machine is not
+        // to be trusted, whatever the call did.
+        (_, Served::Contested) => Err(Cause::HandoffPipeContested {
+            system: System::Azure,
+        }
+        .into()),
+        // `az` answered without reading the value: a reply opv cannot use (A1), from the
+        // runner's own observation of the call.
+        (Ok(Outcome::Done(_)), Served::Unread) => {
+            Err(super::preflight::unusable(&args.join(" "), |seen| {
+                Cause::UnexpectedOutput {
+                    system: System::Azure,
+                    at: None,
+                    problem: OutputProblem::Empty {
+                        what: "read of the value from opv's pipe",
+                    },
+                    // What az did without the value is not known, so no write is claimed.
+                    during: During::Read,
+                    seen,
+                }
+            }))
+        }
         _ => Ok(res),
     }
 }
@@ -135,7 +167,7 @@ pub(crate) mod pipe {
     };
     use zeroize::Zeroizing;
 
-    use super::{MAX_CONNECTIONS, Offer};
+    use super::{MAX_CONNECTIONS, Offer, Served};
     use crate::adapters::azure::winsec::{UserOnly, wide};
     use crate::error::Error;
 
@@ -218,15 +250,15 @@ pub(crate) mod pipe {
         thread: Option<std::thread::JoinHandle<()>>,
     }
 
+    /// The user-only pipe could not be made (`what`: its security or the pipe itself): the
+    /// catalog's private-folder failure, with the OS error's kind, never its number.
     fn pipe_error(what: &str) -> Error {
-        Error::Dependency(
-            format!(
-                "cannot create the private pipe that hands the value to az ({what}, error {}); \
-             nothing was changed",
-                unsafe { GetLastError() }
-            )
-            .into(),
-        )
+        let _ = what;
+        crate::cause::Cause::PrivateDirFailed {
+            dir: std::path::PathBuf::from(r"\\.\pipe"),
+            io: std::io::Error::last_os_error().kind().into(),
+        }
+        .into()
     }
 
     /// One server instance of `path`, user-only.
@@ -347,24 +379,15 @@ pub(crate) mod pipe {
         fn on_stdin(&self) -> bool {
             false
         }
-        fn finish(mut self: Box<Self>) -> Result<(), Error> {
+        fn finish(mut self: Box<Self>) -> Served {
             self.stop();
             if self.refused.load(Ordering::SeqCst) > 0 {
-                return Err(Error::Target(
-                    "another process connected to opv's private pipe for az and was refused; \
-                     nothing was sent to it, but treat this machine as untrusted\n  next: \
-                     check the processes running as you, then run opv again"
-                        .into(),
-                ));
+                return Served::Contested;
             }
             if self.served() == 0 {
-                return Err(Error::Target(
-                    "az exited without reading the value from opv's private pipe; nothing was \
-                     sent\n  next: check that az version runs, then run opv again"
-                        .into(),
-                ));
+                return Served::Unread;
             }
-            Ok(())
+            Served::Read
         }
     }
 
@@ -431,7 +454,7 @@ pub(crate) mod pipe {
         #[test]
         fn finish_without_a_reader_is_an_error() {
             let server = Box::new(Server::start(b"x", this_process).unwrap());
-            assert!(server.finish().is_err());
+            assert_eq!(server.finish(), Served::Unread);
         }
 
         /// M1: a client that is not the az process opv started reads nothing.
@@ -448,7 +471,7 @@ pub(crate) mod pipe {
         fn an_unknown_client_fails_the_call() {
             let server = Server::start(b"FIXTUREVALUE", |_| false).unwrap();
             let _ = std::fs::File::open(server.path()).map(|mut f| f.read_to_end(&mut Vec::new()));
-            assert!(Box::new(server).finish().is_err());
+            assert_eq!(Box::new(server).finish(), Served::Contested);
         }
 
         #[test]
@@ -485,11 +508,11 @@ mod tests {
         fn on_stdin(&self) -> bool {
             false
         }
-        fn finish(self: Box<Self>) -> Result<(), Error> {
+        fn finish(self: Box<Self>) -> Served {
             if self.read {
-                Ok(())
+                Served::Read
             } else {
-                Err(Error::Target("never read".into()))
+                Served::Unread
             }
         }
     }

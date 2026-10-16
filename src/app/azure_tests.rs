@@ -759,9 +759,12 @@ fn failed_revision_names_doctor_access_check() {
     let sim = api_changed();
     sim.world.borrow_mut().fail_revisions = true;
     let (res, _) = sync_on(&sim, &fleet_a(), &deploy());
+    // The catalog's TargetRefused (unhealthy revision) steps to the scoped doctor check.
     assert!(
-        matches!(&res, Err(Error::Target(m)) if m.mentions("opv doctor --env prod")
-            && m.contains("previous revision keeps serving")),
+        res.as_ref().is_err_and(|e| e
+            .next_text()
+            .unwrap_or_default()
+            .starts_with("opv doctor --env prod")),
         "{res:?}"
     );
 }
@@ -875,7 +878,9 @@ fn refused_sync_names_the_missing_key() {
     );
     let (res, _) = sync_on(&sim, &fleet_a(), &deploy());
     assert!(
-        matches!(&res, Err(Error::Policy(m)) if m.starts_with("sync refused, nothing staged: app/DB_URL (missing)")),
+        res.as_ref()
+            .is_err_and(|e| e.code_str() == "keys_blocking"
+                && e.to_string().contains("app/DB_URL (missing)")),
         "{res:?}"
     );
 }
@@ -1065,7 +1070,11 @@ fn no_change_deploy_reports_a_failed_latest_revision() {
     sim.world.borrow_mut().fail_revisions = true;
     let _ = sync_on(&sim, &fleet_a(), &deploy());
     let (res, _) = sync_on(&sim, &fleet_a(), &deploy());
-    assert!(matches!(res, Err(Error::Target(_))), "{res:?}");
+    assert!(
+        res.as_ref()
+            .is_err_and(|e| e.code_str() == "target_unhealthy"),
+        "{res:?}"
+    );
 }
 
 /// Shortens the health wait for targets opened on this thread; no test waits 300 s.
@@ -1080,11 +1089,10 @@ fn timed_out_revision_names_revision_and_keeps_previous_serving() {
     let sim = api_changed();
     sim.world.borrow_mut().stall_revisions = true;
     let (res, _) = sync_on(&sim, &fleet_a(), &deploy());
-    let new_rev = format!("{APP}--{:07}", sim.world.borrow().serial);
+    // Still rolling out when the wait ended: the message names that revision (J2).
     assert!(
-        matches!(&res, Err(Error::Target(m)) if m.contains(&new_rev)
-            && m.contains("previous revision keeps serving")
-            && m.contains("not healthy yet")),
+        res.as_ref().is_err_and(|e| e.code_str() == "update_refused"
+            && e.to_string().contains("opv-fixture-app--0000007")),
         "{res:?}"
     );
 }
@@ -1095,11 +1103,10 @@ fn no_change_deploy_with_failed_latest_revision_says_opv_changed_nothing() {
     sim.world.borrow_mut().fail_revisions = true;
     let _ = sync_on(&sim, &fleet_a(), &deploy());
     let (res, _) = sync_on(&sim, &fleet_a(), &deploy());
+    // The refusal names the latest revision as it already was (this run applied nothing).
+    let rev = format!("{APP}--{:07}", sim.world.borrow().serial);
     assert!(
-        matches!(&res, Err(Error::Target(m)) if m.starts_with("nothing to change; the latest revision")
-            && m.contains("(with these settings) is unhealthy")
-            && m.contains("opv changed nothing")
-            && m.action().is_some_and(|n| n.starts_with("az containerapp revision show"))),
+        res.as_ref().is_err_and(|e| e.to_string().contains(&rev)),
         "{res:?}"
     );
 }
@@ -1236,14 +1243,16 @@ fn sync_with_a_stale_plan_id_writes_nothing() {
 }
 
 #[test]
-fn stale_plan_refusal_names_the_new_id_and_the_exact_command() {
+/// R71: the new id is named for review; the step is the plan read, never a sync carrying
+/// the new id (X4).
+fn stale_plan_refusal_names_the_new_id() {
     let sim = api_changed();
     let id = plan_id(&sim, &fleet_a());
     let (res, _) = sync_on(&sim, &fleet_a(), &expecting("00000000"));
     assert!(
         res.unwrap_err()
             .to_string()
-            .contains(&format!("opv sync prod --deploy --expect-plan {id}")),
+            .contains(&format!("00000000 is now {id}")),
     );
 }
 

@@ -10,6 +10,7 @@ use serde::Deserialize;
 use super::containerapp::ContainerApp;
 use super::keyvault::KeyVault;
 use super::preflight;
+use crate::cause::{Cause, ConfigCheck, DottedPath, FieldRule};
 use crate::config::{check_ident, is_id};
 use crate::error::Error;
 use crate::host::Host;
@@ -173,11 +174,35 @@ static INIT_FIELDS: [InitField; 8] = [
     },
 ];
 
-fn cfg(msg: String) -> Error {
-    Error::Config(msg.into())
+/// `azure.<field>` breaks `rule` (FR-28). The section does not carry its place in the
+/// file, so the field is named within the section.
+fn invalid(field: &str, rule: FieldRule) -> Error {
+    Cause::ConfigInvalid {
+        source: crate::domain::model::ReadFrom::default().0,
+        at: None,
+        field: DottedPath(vec!["azure".into(), field.into()]),
+        rule,
+    }
+    .into()
 }
 
 impl Provider for AzureProvider {
+    fn value_shapes(&self) -> &'static [(&'static str, &'static str)] {
+        &[
+            (
+                "must be a subscription id",
+                "a subscription id like 00000000-0000-0000-0000-000000000000",
+            ),
+            (
+                "must be a Key Vault name",
+                "a Key Vault name: 3 to 24 letters, digits and -, starting with a letter",
+            ),
+            (
+                "must be a ClusterSecretStore name",
+                "a ClusterSecretStore name: lower-case letters, digits, - and .",
+            ),
+        ]
+    }
     fn section(&self) -> &'static str {
         "azure"
     }
@@ -195,9 +220,12 @@ impl Provider for AzureProvider {
         let a: RawAzure = section.deserialize()?;
         let template = a.env_name.clone();
         if !template.contains("{KEY}") {
-            return Err(cfg(format!(
-                "environment {env}: azure.env_name {template:?} must contain {{KEY}}"
-            )));
+            return Err(invalid(
+                "env_name",
+                FieldRule::Type {
+                    expected: "a template that contains {KEY}",
+                },
+            ));
         }
         Ok(Box::new(azure_target(env, a, template)?))
     }
@@ -280,10 +308,16 @@ fn azure_target(name: &str, a: RawAzure, template: String) -> Result<AzureTarget
     let config = match a.config.as_deref() {
         None | Some("env") => ConfigRoute::Env,
         Some("store") => ConfigRoute::Store,
-        Some(v) => {
-            return Err(cfg(format!(
-                "environment {name}: azure.config must be \"env\" or \"store\", got {v:?}"
-            )));
+        Some(_) => {
+            return Err(invalid(
+                "config",
+                FieldRule::Check {
+                    check: ConfigCheck::NotOneOf {
+                        allowed: vec!["env".into(), "store".into()],
+                        closest: None,
+                    },
+                },
+            ));
         }
     };
     Ok(AzureTarget {
@@ -352,6 +386,19 @@ thread_local! {
 }
 
 impl TargetConfig for AzureTarget {
+    fn runtime_subject(
+        &self,
+    ) -> Option<(
+        crate::cause::System,
+        &'static str,
+        crate::cause::ResourceRef,
+    )> {
+        Some((
+            crate::cause::System::Azure,
+            super::az::PROGRAM,
+            super::preflight::app_ref(self),
+        ))
+    }
     fn target_locator(&self) -> String {
         format!(
             "subscription {} key vault {} container app {}/{}",
@@ -411,7 +458,7 @@ impl TargetConfig for AzureTarget {
         // Directories a killed run left behind are removed at the start of every Azure run
         // (I2, SR-4), not only by the next deploy sign-in.
         super::login::sweep_stale();
-        let app = ContainerApp::new(r, self, managed.clone());
+        let app = ContainerApp::new(r, self, managed.clone()).for_env(env);
         // Tests shorten the health wait; production has no such switch.
         #[cfg(test)]
         let app = match TEST_WAIT.with(std::cell::Cell::get) {
@@ -538,8 +585,8 @@ environments = ["prod"]
         let bad = azure_env_with("identity = \"system\"", "identity = 5");
         assert_eq!(
             parse(&bad).unwrap_err().to_string(),
-            "configuration error: invalid secrets.toml: TOML parse error at line 11, column 12\n\
-             invalid type: integer, expected a string"
+            "secrets.toml at line 11, column 12: environments.prod.targets.app.azure.identity \
+             must be a string in quotes"
         );
     }
 
@@ -555,7 +602,7 @@ environments = ["prod"]
             "",
         ));
         assert!(
-            e.contains("TOML parse error at line") && e.contains("missing field `subscription`"),
+            e.contains("azure.subscription is required but missing"),
             "{e}"
         );
     }
@@ -720,7 +767,10 @@ kind = "secret"
 environments = ["prod"]
 "#;
         let e = azure_err(&azure_doc(AZURE_ENV, keys));
-        assert!(e.contains("both map to Key Vault name"), "{e}");
+        assert!(
+            e.contains("renders Key Vault name ") && e.contains(" for both "),
+            "{e}"
+        );
     }
 
     #[test]
@@ -729,7 +779,10 @@ environments = ["prod"]
         let keys =
             format!("[products.api.keys.{long}]\nkind = \"secret\"\nenvironments = [\"prod\"]\n");
         let e = azure_err(&azure_doc(AZURE_ENV, &keys));
-        assert!(e.contains("api/KKKK") && e.contains("{1,127}"), "{e}");
+        assert!(
+            e.contains("api/KKKK") && e.contains("over the 127 allowed"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -783,7 +836,7 @@ environments = ["prod"]
             "env_name = \"FLEET__{PRODUCT}__{KEY}\"\n",
             "",
         ));
-        assert!(e.contains("missing field `env_name`"), "{e}");
+        assert!(e.contains("azure.env_name is required but missing"), "{e}");
     }
 
     #[test]
@@ -792,10 +845,7 @@ environments = ["prod"]
             "identity = \"system\"",
             "identity = \"system\"\nconfig = \"plain\"",
         ));
-        assert!(
-            e.contains("azure.config must be \"env\" or \"store\", got \"plain\""),
-            "{e}"
-        );
+        assert!(e.contains("azure.config must be one of env, store"), "{e}");
     }
 
     #[test]
@@ -804,6 +854,6 @@ environments = ["prod"]
             .replace("environments.prod", "environments.stage")
             .replace("ca-myapp", "ca-other");
         let e = azure_err(&azure_doc(&format!("{AZURE_ENV}{second}"), KEYS));
-        assert!(e.contains("both use Key Vault"), "{e}");
+        assert!(e.contains("manages the same names on Azure "), "{e}");
     }
 }

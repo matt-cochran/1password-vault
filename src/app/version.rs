@@ -61,12 +61,12 @@ pub struct ConfigReport {
 /// `secrets.toml`, else a `.opv` pointer (a configuration in 1Password, not read here).
 /// The provider sections its targets use, when it could be read.
 pub fn local_config(config: Option<&Path>, start: &Path) -> (ConfigReport, Option<Vec<String>>) {
-    use crate::config_store::{DOT_FILE, walk_up};
+    use crate::config_store::{find_dot_opv, walk_up};
     let path = config
         .map(Path::to_path_buf)
         .or_else(|| walk_up(start, "secrets.toml"));
     let Some(path) = path else {
-        let source = if walk_up(start, DOT_FILE).is_some() {
+        let source = if find_dot_opv(start).is_some() {
             "manifest"
         } else {
             "none"
@@ -203,7 +203,8 @@ pub fn run(
     for t in &tools {
         let state = match (t.status, &t.version, t.reason) {
             ("installed", Some(v), _) => v.clone(),
-            ("missing", _, _) => "missing".into(),
+            // 05.40: what to do about it, not only the state.
+            ("missing", _, _) => "missing (opv doctor shows how to install it)".into(),
             (_, _, reason) => format!("unknown ({})", reason.unwrap_or("probe failed")),
         };
         let used = if t.providers.is_empty() {
@@ -213,7 +214,9 @@ pub fn run(
         };
         let configured = match t.configured {
             Some(true) => "; configured",
-            Some(false) => "; not configured",
+            // 05.40: "not configured" read as "not set up"; it means this project's
+            // configuration has no target that needs the tool.
+            Some(false) => "; not used by this configuration",
             None => "",
         };
         writeln!(

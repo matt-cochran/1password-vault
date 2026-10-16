@@ -224,9 +224,11 @@ mod tests {
     const OK: &str = r#"azure_key_vault = "kv-myapp-prod"
 subscription = "00000000-0000-0000-0000-000000000000""#;
 
+    /// The text of the store section's `ConfigInvalid` (C15: provider sections report the
+    /// typed cause).
     fn err(store: &str) -> String {
         match parse_config(&toml(store)) {
-            Err(Error::Config(m)) => m.to_string(),
+            Err(e) if e.code_str() == "config_invalid" => e.to_string(),
             other => panic!("expected a config error, got {other:?}"),
         }
     }
@@ -234,7 +236,8 @@ subscription = "00000000-0000-0000-0000-000000000000""#;
     #[test]
     fn store_without_subscription_is_refused() {
         assert!(
-            err(r#"azure_key_vault = "kv-myapp-prod""#).contains("missing field `subscription`")
+            err(r#"azure_key_vault = "kv-myapp-prod""#)
+                .contains("subscription is required but missing")
         );
     }
 
@@ -251,7 +254,7 @@ subscription = "00000000-0000-0000-0000-000000000000""#;
 
     #[test]
     fn store_with_an_unknown_field_is_refused() {
-        assert!(err(&format!("{OK}\nresource_group = \"rg\"")).contains("unknown field"));
+        assert!(err(&format!("{OK}\nresource_group = \"rg\"")).contains("is not a known setting"));
     }
 
     #[test]

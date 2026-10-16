@@ -57,8 +57,8 @@ fn sync_on_a_local_environment_explains_there_is_nothing_to_sync() {
     assert!(a.status.contains("local only"), "{}", a.status);
 }
 
-fn plan_doc(id: Option<&str>, findings: u64) -> serde_json::Value {
-    serde_json::json!({"stage": ["API_TOKEN"], "prune": [], "totals": {"findings": findings}, "plan_id": id})
+fn plan_doc(id: Option<&str>, findings: u64) -> crate::ui::docs::RowsDoc {
+    serde_json::from_value(serde_json::json!({"rows": [], "stage": ["API_TOKEN"], "prune": [], "totals": {"findings": findings}, "plan_id": id})).unwrap()
 }
 
 #[test]
@@ -127,12 +127,13 @@ fn enter_on_a_key_row_opens_its_detail() {
 
 // #94: the adoption review ---------------------------------------------------------------
 
-fn adopt_doc() -> serde_json::Value {
-    serde_json::json!({"rows": [
+fn adopt_doc() -> crate::ui::docs::AdoptDoc {
+    serde_json::from_value(serde_json::json!({"rows": [
         {"found": ["API_TOKEN"], "product": "api", "key": "API_TOKEN", "action": "import"},
         {"found": ["APP_NAME"], "product": "api", "key": "APP_NAME", "action": "differs"},
         {"found": ["STRAY"], "product": null, "key": null, "action": "not_declared"}
-    ]})
+    ]}))
+    .unwrap()
 }
 
 fn reviewing() -> App {

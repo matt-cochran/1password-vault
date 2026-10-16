@@ -1,0 +1,51 @@
+{
+  "op": {
+    "default_account": "ASIMACCOUNT000000000000001",
+    "accounts": [
+      {
+        "id": "ASIMACCOUNT000000000000001",
+        "shorthand": "sim",
+        "url": "https://sim.1password.com",
+        "email": "person@example.com",
+        "user": "USIMUSER000000000000000001",
+        "user_type": "HUMAN",
+        "signed_in": true
+      }
+    ],
+    "vaults": [
+      {
+        "id": "vsimdev00000000000000000001",
+        "name": "sim-dev",
+        "account": "ASIMACCOUNT000000000000001"
+      }
+    ],
+    "items": [
+      {
+        "id": "isimdev00000000000000000001",
+        "title": "sim-dev",
+        "version": 1,
+        "vault": { "id": "vsimdev00000000000000000001", "name": "sim-dev" },
+        "category": "SECURE_NOTE",
+        "sections": [{ "id": "app", "label": "app" }],
+        "fields": [
+          { "id": "notesPlain", "type": "STRING", "purpose": "NOTES", "label": "notesPlain" },
+          {
+            "id": "app_api_key",
+            "section": { "id": "app", "label": "app" },
+            "type": "CONCEALED",
+            "label": "API_KEY",
+            "value": "test-marker-sim-api-key"
+          }
+        ]
+      }
+    ]
+  },
+  "fly": {
+    "signed_in": true,
+    "apps": {
+      "sim-app": {
+        "secrets": [{ "name": "API_KEY", "digest": "0000000000000000", "status": "Deployed" }]
+      }
+    }
+  }
+}

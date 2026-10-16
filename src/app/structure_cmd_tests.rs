@@ -106,7 +106,11 @@ fn structure_plan_text_points_at_the_approve_command() {
 // structure apply --------------------------------------------------------------------------
 
 fn refuse(name: &str) -> Result<(), Error> {
-    Err(Error::Policy(format!("no approval for {name}").into()).with_code(Code::ApprovalRequired))
+    Err(crate::cause::Cause::ApprovalMissing {
+        plan: crate::cause::PlanId::new(name),
+        scope: crate::cause::PlanScope::Structural,
+    }
+    .into())
 }
 
 #[test]
@@ -118,11 +122,12 @@ fn structure_apply_without_approval_is_refused() {
         &scope_of(&path),
         &id,
         &mut |_| refuse(&id),
+        &|_| true,
         false,
         &mut Vec::new(),
     )
     .unwrap_err();
-    assert_eq!(e.code(), Code::ApprovalRequired);
+    assert_eq!(e.code_str(), "approval_required");
 }
 
 #[test]
@@ -134,6 +139,7 @@ fn a_refused_apply_creates_no_vault() {
         &scope_of(&path),
         &id,
         &mut |_| refuse(&id),
+        &|_| true,
         false,
         &mut Vec::new(),
     );
@@ -150,15 +156,38 @@ fn a_stale_plan_is_refused() {
         &scope_of(&path),
         &id,
         &mut |_| Ok(()),
+        &|_| true,
         false,
         &mut Vec::new(),
     )
     .unwrap_err();
-    assert_eq!(e.code(), Code::StalePlan);
+    assert_eq!(e.code_str(), "stale_plan");
 }
 
+/// C2: an id never approved on this machine (the injected approval folder holds none) that
+/// matches no plan is `PlanUnknown`, never a plan that changed since its approval.
 #[test]
-fn a_stale_plan_names_the_new_plan_id_in_its_next_step() {
+fn an_unapproved_unknown_plan_id_is_plan_unknown() {
+    let (_d, path, op) = workspace();
+    let id = plan_id_of(&path, &op);
+    std::fs::write(&path, format!("{CONFIG}\n# changed\n")).unwrap();
+    let approvals = tempfile::tempdir().unwrap();
+    let e = apply_authorized(
+        &op,
+        &scope_of(&path),
+        &id,
+        &mut |_| Ok(()),
+        &|plan| approvals.path().join(format!("{plan}.json")).exists(),
+        false,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(e.code_str(), "plan_unknown");
+}
+
+/// The new plan id is in the message; the step reads the new plan (05.15).
+#[test]
+fn a_stale_plan_names_the_new_plan_id() {
     let (_d, path, op) = workspace();
     let id = plan_id_of(&path, &op);
     std::fs::write(&path, format!("{CONFIG}\n# changed\n")).unwrap();
@@ -168,11 +197,31 @@ fn a_stale_plan_names_the_new_plan_id_in_its_next_step() {
         &scope_of(&path),
         &id,
         &mut |_| Ok(()),
+        &|_| true,
         false,
         &mut Vec::new(),
     )
     .unwrap_err();
-    assert!(e.next_step().unwrap_or_default().contains(&new));
+    assert!(e.to_string().contains(&new));
+}
+
+/// 05.15: the step after a changed plan is its read, never an approval an agent runs.
+#[test]
+fn a_stale_plan_steps_to_the_new_structural_plan() {
+    let (_d, path, op) = workspace();
+    let id = plan_id_of(&path, &op);
+    std::fs::write(&path, format!("{CONFIG}\n# changed\n")).unwrap();
+    let e = apply_authorized(
+        &op,
+        &scope_of(&path),
+        &id,
+        &mut |_| Ok(()),
+        &|_| true,
+        false,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(e.next_text().unwrap_or_default(), "opv structure plan");
 }
 
 // config describe --------------------------------------------------------------------------
@@ -213,4 +262,66 @@ fn config_describe_text_names_the_environment_and_key() {
     config_describe(&fleet, false, &mut buf).unwrap();
     let text = String::from_utf8(buf).unwrap();
     assert!(text.contains("environment dev") && text.contains("key web/SESSION_KEY secret"));
+}
+
+// 0.10.0 error catalog (05.12, 05.13, 05.37) -----------------------------------------------
+
+fn applied_text(path: &Path, op: &FakeOp) -> String {
+    let id = plan_id_of(path, op);
+    let mut buf = Vec::new();
+    apply_authorized(
+        op,
+        &scope_of(path),
+        &id,
+        &mut |_| Ok(()),
+        &|_| true,
+        false,
+        &mut buf,
+    )
+    .unwrap();
+    String::from_utf8(buf).unwrap()
+}
+
+/// 05.13: a complete structure has nothing to approve.
+#[test]
+fn a_complete_structure_plan_steps_to_ready() {
+    let (_d, path, op) = workspace();
+    applied_text(&path, &op);
+    let mut buf = Vec::new();
+    plan_scoped(&op, &scope_of(&path), false, &mut buf).unwrap();
+    assert!(
+        String::from_utf8(buf)
+            .unwrap()
+            .ends_with("Next: opv ready\n")
+    );
+}
+
+/// 05.12: the text form of apply ends with a step.
+#[test]
+fn structure_apply_text_ends_with_ready() {
+    let (_d, path, op) = workspace();
+    assert!(applied_text(&path, &op).ends_with("Next: opv ready\n"));
+}
+
+/// 05.12: a generated configuration's IDs reach the person in the text form too.
+#[test]
+fn a_generated_configuration_apply_text_lists_the_generator_ids() {
+    let (_d, path, op) = workspace();
+    std::fs::write(&path, format!("# generated by infra\n{CONFIG}")).unwrap();
+    assert!(applied_text(&path, &op).contains("record these IDs in its generator's input"));
+}
+
+/// 05.37: the environment being added is named in the step, never a placeholder.
+#[test]
+fn env_add_without_a_file_steps_to_init_of_that_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = env_add(
+        &FakeOp::default(),
+        dir.path(),
+        "staging",
+        false,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(e.next_text().unwrap_or_default(), "opv init staging");
 }

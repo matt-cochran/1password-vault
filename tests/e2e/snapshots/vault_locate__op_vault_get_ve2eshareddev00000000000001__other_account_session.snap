@@ -1,0 +1,20 @@
+# vault_locate__op_vault_get_ve2eshareddev00000000000001__other_account_session: opv vault locate vE2ESHAREDDEV00000000000001 | fault other_account_session on op vault get vE2ESHAREDDEV00000000000001
+
+## text exit: 4
+## text stdout
+AE2EDEVACCOUNT000000000001 (e2e-dev, e2e.1password.com): unknown
+AE2EOPSACCOUNT000000000002 (e2e-ops, e2e.1password.com): unknown
+
+## text stderr
+opv: the account inventory is incomplete: accounts AE2EDEVACCOUNT000000000001, AE2EOPSACCOUNT000000000002 could not be listed
+Do: sign in to account AE2EDEVACCOUNT000000000001, AE2EOPSACCOUNT000000000002
+Next: opv login --account AE2EDEVACCOUNT000000000001 --no-record -- opv vault locate vE2ESHAREDDEV00000000000001
+
+## json exit: 4
+## json stdout
+{"schema_version":2,"ok":false,"exit_code":4,"vault_id":"vE2ESHAREDDEV00000000000001","accounts":[{"account_id":"AE2EDEVACCOUNT000000000001","shorthand":"e2e-dev","sign_in":"e2e.1password.com","result":"unknown"},{"account_id":"AE2EOPSACCOUNT000000000002","shorthand":"e2e-ops","sign_in":"e2e.1password.com","result":"unknown"}],"complete":false,"next":"opv login --account AE2EDEVACCOUNT000000000001 --no-record -- opv vault locate vE2ESHAREDDEV00000000000001 --json","do":"sign in to account AE2EDEVACCOUNT000000000001, AE2EOPSACCOUNT000000000002","error":{"code":"inventory_incomplete","category":"source","message":"the account inventory is incomplete: accounts AE2EDEVACCOUNT000000000001, AE2EOPSACCOUNT000000000002 could not be listed","subject":{"unlisted":["AE2EDEVACCOUNT000000000001","AE2EOPSACCOUNT000000000002"]},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":true,"do":"sign in to account AE2EDEVACCOUNT000000000001, AE2EOPSACCOUNT000000000002","next":"opv login --account AE2EDEVACCOUNT000000000001 --no-record -- opv vault locate vE2ESHAREDDEV00000000000001 --json","next_kind":"handoff"}}
+
+## json stderr
+opv: the account inventory is incomplete: accounts AE2EDEVACCOUNT000000000001, AE2EOPSACCOUNT000000000002 could not be listed
+Do: sign in to account AE2EDEVACCOUNT000000000001, AE2EOPSACCOUNT000000000002
+Next: opv login --account AE2EDEVACCOUNT000000000001 --no-record -- opv vault locate vE2ESHAREDDEV00000000000001 --json

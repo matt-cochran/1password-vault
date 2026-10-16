@@ -25,11 +25,16 @@ use super::AzureTarget;
 use super::az::{self, AZ_CLI, Effect};
 use super::containerapp::{self, ContainerApp, POLL_EVERY, PROGRESS_EVERY, WAIT_MAX};
 use crate::adapters::probe::{parse_version, spawn_tool};
+use crate::cause::{
+    Cause, DiagnoseContext, DottedPath, During, GrantModel, Location, NamedBy, NotFoundState,
+    Observed, OutputProblem, Refusal, ResourceKind, ResourceName, ResourceRef, Right, System,
+    Unusable,
+};
 use crate::error::Error;
 use crate::host::Host;
 use crate::ports::PinnedRuntime;
 use crate::provider::{Check, Preflight, PreflightMode, Verdict};
-use crate::runner::{CommandRunner, Outcome, Output, Wait};
+use crate::runner::{Call, CommandRunner, Outcome, Output, Wait};
 
 /// Oldest Azure CLI opv is tested with: `doctor` warns below it.
 pub const AZ_TESTED_MIN: (u64, u64, u64) = (2, 60, 0);
@@ -43,6 +48,18 @@ pub const DOCTOR_CHECKS: &[&str] = &[
     "container app",
     "app identity access",
 ];
+
+/// The target's Container App, as the subject of a cause.
+pub(crate) fn app_ref(t: &AzureTarget) -> ResourceRef {
+    ResourceRef {
+        kind: ResourceKind::ContainerApp,
+        name: ResourceName::new(&t.container_app),
+        scope: Some(format!(
+            "resource group {} (subscription {})",
+            t.resource_group, t.subscription
+        )),
+    }
+}
 
 /// The preflight of an Azure target (NR-23, NR-25). Keeps the vault URI for `open`. A
 /// Container App whose last update failed is a warning: its previous revision keeps
@@ -92,21 +109,13 @@ pub fn vault_uri_of(t: &AzureTarget, r: &dyn CommandRunner) -> Result<String, Er
 /// labels, nothing after the host but one optional `/`. Returned without the trailing `/`.
 /// The value is never echoed: a hostile one names only what is wrong with it.
 pub fn vault_uri(show: &Value, vault: &str) -> Result<String, Error> {
-    let bad =
-        |why: &str| {
-            Error::Target(format!(
-            "az keyvault show returned a vaultUri for Key Vault {vault} that opv cannot use \
-             ({why}); nothing was changed\n  next: check it with `az keyvault show -n {vault} \
-             --query properties.vaultUri`, then run opv again"
-        ).into())
-        };
+    // A vaultUri opv cannot use is a reply it cannot use (A1); its value is never echoed.
+    let bad = || invalid_in_reply(VAULT_SHOW, "properties.vaultUri");
     let raw = show
         .pointer("/properties/vaultUri")
         .and_then(Value::as_str)
-        .ok_or_else(|| bad("missing"))?;
-    let rest = raw
-        .strip_prefix("https://")
-        .ok_or_else(|| bad("not https"))?;
+        .ok_or_else(|| missing_in_reply(VAULT_SHOW, "properties.vaultUri"))?;
+    let rest = raw.strip_prefix("https://").ok_or_else(bad)?;
     let host = rest.strip_suffix('/').unwrap_or(rest);
     let labels: Vec<&str> = host.split('.').collect();
     let plain = host.len() <= 253
@@ -117,10 +126,10 @@ pub fn vault_uri(show: &Value, vault: &str) -> Result<String, Error> {
                 && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
         });
     if !plain {
-        return Err(bad("not a plain host name"));
+        return Err(bad());
     }
     if labels.len() < 3 || !labels[0].eq_ignore_ascii_case(vault) {
-        return Err(bad("its host does not name the vault"));
+        return Err(bad());
     }
     Ok(format!("https://{host}"))
 }
@@ -170,24 +179,115 @@ fn read(
     )
 }
 
-/// A read that never finished after its retries: Azure did not answer (NR-28).
-fn unfinished(r: &dyn CommandRunner, op: &str) -> Error {
-    AZ_CLI.unanswered(r, &format!("az {op}"))
+/// A Key Vault, as the subject of a cause.
+fn vault_ref(v: &Vault) -> ResourceRef {
+    ResourceRef {
+        kind: ResourceKind::KeyVault,
+        name: ResourceName::new(&v.name),
+        scope: Some(format!("subscription {}", v.subscription)),
+    }
+}
+
+/// A configuration field (`azure.key_vault`, `stores.prod-vault.azure_key_vault`) as the
+/// place a resource's name came from.
+fn named_by(field: &str) -> NamedBy {
+    NamedBy::ConfigField {
+        path: DottedPath(field.split('.').map(String::from).collect()),
+    }
+}
+
+/// A call about vault `v`, for its diagnosis.
+fn vault_ctx(v: &Vault) -> DiagnoseContext {
+    DiagnoseContext {
+        resource: Some(vault_ref(v)),
+        named_by: Some(named_by(&v.vault_field)),
+        ..DiagnoseContext::default()
+    }
 }
 
 fn parse(out: &Output, op: &str) -> Result<Value, Error> {
-    // serde_json messages can quote input fragments, so report only the position.
-    serde_json::from_slice(&out.stdout).map_err(|e| {
-        Error::Target(
-            format!(
-                "az {op} returned JSON opv cannot read (line {}, column {}); nothing was \
-             changed\n  next: update the Azure CLI (`az upgrade`), then run opv again",
-                e.line(),
-                e.column()
-            )
-            .into(),
-        )
+    unreadable_json(&out.stdout, op)
+}
+
+/// The `keyvault show` reply the vault URI comes from.
+const VAULT_SHOW: &str = "keyvault show";
+
+/// `stdout` of `az <what>` as JSON, or the reply opv cannot read (A1): only the position
+/// is kept, since serde_json's message can quote the input.
+pub(crate) fn unreadable_json<T: serde::de::DeserializeOwned>(
+    stdout: &[u8],
+    what: &str,
+) -> Result<T, Error> {
+    reply_json(stdout, what, During::Read)
+}
+
+/// `stdout` of `az <what>` as JSON, `during` the call it answered: a read, or a write az
+/// applied, whose unreadable reply says the change is made.
+pub(crate) fn reply_json<T: serde::de::DeserializeOwned>(
+    stdout: &[u8],
+    what: &str,
+    during: During,
+) -> Result<T, Error> {
+    serde_json::from_slice(stdout).map_err(|e| {
+        let at = Location {
+            line: u32::try_from(e.line()).unwrap_or(u32::MAX),
+            col: u32::try_from(e.column()).unwrap_or(u32::MAX),
+        };
+        unusable(what, |seen| {
+            unusable_reply(Some(at), OutputProblem::Unparseable, during, seen)
+        })
     })
+}
+
+/// `az` answered with a reply opv cannot use.
+fn unusable_reply(
+    at: Option<Location>,
+    problem: OutputProblem,
+    during: During,
+    seen: Observed,
+) -> Cause {
+    Cause::UnexpectedOutput {
+        system: System::Azure,
+        at,
+        problem,
+        during,
+        seen,
+    }
+}
+
+/// `az <what>` (a read) answered without `field`, which opv needs from its reply.
+pub(crate) fn missing_in_reply(what: &str, field: &'static str) -> Error {
+    bad_reply(what, OutputProblem::Empty { what: field }, During::Read)
+}
+
+/// `az <what>` (a read) answered with `field` in a form opv cannot use.
+pub(crate) fn invalid_in_reply(what: &str, field: &'static str) -> Error {
+    bad_reply(
+        what,
+        OutputProblem::InvalidValue { what: field },
+        During::Read,
+    )
+}
+
+/// `az <what>` answered `during` a call with a reply that has `problem`.
+pub(crate) fn bad_reply(what: &str, problem: OutputProblem, during: During) -> Error {
+    unusable(what, |seen| unusable_reply(None, problem, during, seen))
+}
+
+/// The cause of the latest `az <what>` call (`what`: its leading words, such as
+/// `containerapp show`), built on the runner's own observation of it (design §4.6, A1):
+/// the call that answered with a reply opv cannot use, or, when it failed, its failure.
+pub(crate) fn unusable(what: &str, cause: impl FnOnce(Observed) -> Cause) -> Error {
+    let words: Vec<&str> = what.split_whitespace().collect();
+    let seen = crate::runner::take_unusable_reply(&Call::new(az::PROGRAM, &words))
+        .or_else(crate::runner::take_observed);
+    match seen {
+        Some(seen) => cause(seen).into(),
+        None => Cause::Bug {
+            site: "azure: an az reply the runner did not observe",
+        }
+        .into(),
+    }
 }
 
 /// The signed-in account can see the subscription (NR-7). One probe when it can; a
@@ -196,20 +296,18 @@ fn subscription(v: &Vault, r: &dyn CommandRunner) -> Result<(), Error> {
     if az::sees_subscription(r, &v.subscription)? {
         return Ok(());
     }
-    if !az::signed_in(r)? {
-        return Err(az::not_logged_in(None));
+    // The failed probe's observation and reply, kept through the sign-in check.
+    let taken = az::take_failure();
+    if !crate::runner::diagnosing(|| az::signed_in(r))? {
+        return Err(az::report(az::signed_out(), taken.and_then(|(_, up)| up)));
     }
-    Err(Error::Auth(
-        format!(
-            "signed in to Azure, but this account cannot see subscription {s} ({f}); \
-         nothing was changed\n  next: `az account list -o table` lists the subscriptions it \
-         can see; sign in with an account that can see {s} (`az login`), or correct \
-         {f}",
-            s = v.subscription,
-            f = v.subscription_field
-        )
-        .into(),
-    ))
+    // Signed in, but this subscription is not visible: az's reply says why (a wrong
+    // subscription id or no role on it); opv shows it rather than guess (§12.4).
+    let ctx = DiagnoseContext::default();
+    Err(match taken {
+        Some((seen, up)) => az::classified(seen, up, &ctx),
+        None => az::unobserved(r),
+    })
 }
 
 /// `keyvault show`: the vault exists in the subscription (NR-25). On failure a read-only
@@ -226,31 +324,30 @@ fn vault(v: &Vault, r: &dyn CommandRunner) -> Result<Value, Error> {
         &[3],
     )? {
         Outcome::Done(out) => parse(&out, OP),
-        Outcome::Unknown { .. } => Err(unfinished(r, OP)),
-        Outcome::Refused(_) => {
+        // Exit 3 is az's "no such resource" (Q3, Q4): `show-deleted` tells a soft-deleted
+        // vault from a missing one.
+        Outcome::Refused(out) if out.status == 3 => {
+            let Some((seen, up)) = az::take_failure() else {
+                return Err(az::unobserved(r));
+            };
             const DELETED: &str = "keyvault show-deleted";
             let probe = ["keyvault", "show-deleted", "-n", kv, "-o", "none"];
-            match read(s, r, DELETED, &probe, &[1, 3])? {
-                Outcome::Done(_) => Err(Error::Target(
-                    format!(
-                        "Key Vault {kv} is deleted but still recoverable (soft-deleted); nothing \
-                     was changed\n  next: recover it with `az keyvault recover -n {kv} \
-                     --subscription {s}`, then run opv again"
-                    )
-                    .into(),
-                )),
-                Outcome::Unknown { .. } => Err(unfinished(r, DELETED)),
-                Outcome::Refused(_) => Err(Error::Target(
-                    format!(
-                        "Key Vault {kv} was not found in subscription {s}, or this account cannot \
-                     read it; nothing was changed\n  next: check {} and {} with `az keyvault \
-                     show -n {kv} --subscription {s}`",
-                        v.vault_field, v.subscription_field
-                    )
-                    .into(),
-                )),
-            }
+            let state = match crate::runner::diagnosing(|| read(s, r, DELETED, &probe, &[1, 3]))? {
+                Outcome::Done(_) => NotFoundState::SoftDeleted,
+                Outcome::Refused(_) => NotFoundState::Missing,
+                // The probe never answered: the vault's state is unknown.
+                Outcome::Unknown { .. } => return Err(az::classified(seen, up, &vault_ctx(v))),
+            };
+            let missing = Cause::NotFound {
+                system: System::Azure,
+                resource: vault_ref(v),
+                named_by: named_by(&v.vault_field),
+                state,
+                seen,
+            };
+            Err(az::report(missing, up))
         }
+        Outcome::Refused(_) | Outcome::Unknown { .. } => Err(az::failed(r, vault_ctx(v))),
     }
 }
 
@@ -270,27 +367,49 @@ fn vault_answers(v: &Vault, r: &dyn CommandRunner, vault: &Value) -> Result<(), 
     ];
     match read(s, r, OP, &base, &[])? {
         Outcome::Done(_) => Ok(()),
-        Outcome::Unknown { .. } => Err(unfinished(r, OP)),
-        Outcome::Refused(_) if network_restricted(vault) => Err(Error::Target(
-            format!(
-                "Key Vault {kv} refused this request: it accepts connections only from allowed \
-             networks (firewall or private endpoint), and this machine is not on one; nothing \
-             was changed\n  next: run opv from a network the vault allows, or ask an owner to \
-             allow this address: `az keyvault network-rule add -n {kv} --ip-address <your \
-             address> --subscription {s}`"
-            )
-            .into(),
-        )),
-        Outcome::Refused(_) => Err(Error::Auth(
-            format!(
-                "Key Vault {kv} refused to list its secrets to this account (Azure RBAC or access \
-             policy); nothing was changed\n  next: ask an owner to grant it: `az role \
-             assignment create --role \"Key Vault Secrets Officer\" --assignee <you> --scope \
-             {id}`; a new grant can take a few minutes to apply, then run opv again",
-                id = vault["id"].as_str().unwrap_or("<vault id>")
-            )
-            .into(),
-        )),
+        Outcome::Unknown { .. } => Err(az::failed(r, vault_ctx(v))),
+        // The vault exists and the same sign-in just read it (`keyvault show`), so its data
+        // plane refusing is a network rule or a missing grant; the vault's own settings
+        // say which grant model applies (06.16, 06.17), and the right is asked of whoever
+        // made the call (06.19).
+        Outcome::Refused(_) => {
+            let Some((seen, up)) = az::take_failure() else {
+                return Err(az::unobserved(r));
+            };
+            let missing = Cause::MissingRight {
+                system: System::Azure,
+                resource: vault_ref(v),
+                right: Right::List,
+                grant: grant_model(vault),
+                env: None,
+                target: None,
+                seen,
+            };
+            Err(az::report(missing, up))
+        }
+    }
+}
+
+/// How access to a vault is granted: its network rules when it keeps unknown networks out,
+/// else an access policy when it does not use Azure RBAC (`enableRbacAuthorization`
+/// false), else the Key Vault Secrets Officer role on the vault.
+fn grant_model(vault: &Value) -> GrantModel {
+    if network_restricted(vault) {
+        return GrantModel::NetworkRule;
+    }
+    let rbac = vault
+        .pointer("/properties/enableRbacAuthorization")
+        .and_then(Value::as_bool);
+    if rbac == Some(false) {
+        return GrantModel::AccessPolicy {
+            permissions: ["get", "list", "set", "delete", "recover"]
+                .map(String::from)
+                .to_vec(),
+        };
+    }
+    GrantModel::Rbac {
+        role: "Key Vault Secrets Officer".into(),
+        scope: vault["id"].as_str().unwrap_or_default().to_string(),
     }
 }
 
@@ -315,20 +434,33 @@ fn app(t: &AzureTarget, r: &dyn CommandRunner) -> Result<Value, Error> {
         t.subscription.as_str(),
     );
     let base = ["containerapp", "show", "-g", rg, "-n", a, "-o", "json"];
-    let app =
-        match read(s, r, OP, &base, &[3])? {
-            Outcome::Done(out) => parse(&out, OP)?,
-            Outcome::Unknown { .. } => return Err(unfinished(r, OP)),
-            Outcome::Refused(_) => {
-                return Err(Error::Target(format!(
-                "container app {a} was not found in resource group {rg} (subscription {s}), \
-                 or this account cannot read it; nothing was changed\n  next: check \
-                 azure.container_app and azure.resource_group with `az containerapp show -g \
-                 {rg} -n {a} --subscription {s}`"
-            ).into()));
-            }
-        };
-    containerapp::single_revision_mode(t, &app)?;
+    let resource = app_ref(t);
+    let app = match read(s, r, OP, &base, &[3])? {
+        Outcome::Done(out) => parse(&out, OP)?,
+        // Exit 3 is az's "no such resource" (Q3).
+        Outcome::Refused(out) if out.status == 3 => {
+            let Some((seen, up)) = az::take_failure() else {
+                return Err(az::unobserved(r));
+            };
+            let missing = Cause::NotFound {
+                system: System::Azure,
+                resource,
+                named_by: named_by("azure.container_app"),
+                state: NotFoundState::Missing,
+                seen,
+            };
+            return Err(az::report(missing, up));
+        }
+        Outcome::Refused(_) | Outcome::Unknown { .. } => {
+            let ctx = DiagnoseContext {
+                resource: Some(resource),
+                named_by: Some(named_by("azure.container_app")),
+                ..DiagnoseContext::default()
+            };
+            return Err(az::failed(r, ctx));
+        }
+    };
+    containerapp::single_revision_mode(t, &app, None)?;
     Ok(app)
 }
 
@@ -351,19 +483,16 @@ fn settled_app(t: &AzureTarget, r: &dyn CommandRunner) -> Result<Value, Error> {
         }
         let waited = wait.elapsed(r);
         if wait.over(r, POLL_EVERY) {
-            return Err(Error::Target(
-                format!(
-                    "container app {a} is still being updated by someone else (provisioningState \
-                 InProgress) after {secs} s; nothing was changed\n  next: wait for that update \
-                 to finish (`az containerapp show -g {rg} -n {a} --subscription {s} --query \
-                 properties.provisioningState`), then run opv again",
-                    a = t.container_app,
-                    rg = t.resource_group,
-                    s = t.subscription,
-                    secs = waited.as_secs()
-                )
-                .into(),
-            ));
+            // Someone else's update is still running, as opv's own `containerapp show`
+            // says; nothing was changed (NR-25).
+            return Err(unusable("containerapp show", |seen| Cause::TargetRefused {
+                system: System::Azure,
+                subject: app_ref(t),
+                why: Refusal::InProgress { revision: None },
+                env: None,
+                target: None,
+                seen,
+            }));
         }
         let note = if reported.is_none_or(|at| waited.saturating_sub(at) >= PROGRESS_EVERY) {
             reported = Some(waited);
@@ -508,9 +637,11 @@ fn not_checked(name: &'static str, why: &str) -> Check {
 fn az_version(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Verdict, Error> {
     let o = spawn_tool(r, AZ_CLI, host, &["version", "-o", "json"])?;
     if o.status != 0 {
-        return Err(Error::Dependency(
-            format!("{} version failed (exit {})", az::PROGRAM, o.status).into(),
-        ));
+        return Err(Cause::ToolUnusable {
+            tool: az::PROGRAM.to_string(),
+            why: Unusable::VersionUnreadable,
+        }
+        .into());
     }
     let (a, b, c) = AZ_TESTED_MIN;
     let version = serde_json::from_slice::<Value>(&o.stdout)
@@ -532,7 +663,7 @@ fn az_version(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Verdict,
 fn az_login(r: &dyn CommandRunner) -> Result<Verdict, Error> {
     match az::signed_in(r)? {
         true => Ok(Verdict::Ok("signed in".into())),
-        false => Err(az::not_logged_in(None)),
+        false => Err(az::signed_out().into()),
     }
 }
 
@@ -575,6 +706,7 @@ fn access(t: &AzureTarget, r: &dyn CommandRunner, uri: String) -> Verdict {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cause::Invocation;
     use crate::runner::fake::FakeRunner;
     use serde_json::json;
 
@@ -635,7 +767,7 @@ mod tests {
 
     /// The error as reported: its message and its `Next:` line.
     fn err_text(res: Result<Preflight, Error>) -> String {
-        crate::error::report(&res.unwrap_err(), "-", None)
+        crate::error::report(&res.unwrap_err())
     }
 
     #[test]
@@ -710,29 +842,19 @@ mod tests {
     #[test]
     fn preflight_signed_out_names_az_login() {
         let (_, res) = preflight_on(vec![Output::failure(1), Output::failure(1)]);
-        assert!(matches!(res, Err(Error::Auth(m)) if m.mentions("az login")));
-    }
-
-    #[test]
-    fn preflight_on_an_invisible_subscription_names_it_and_the_next_step() {
-        let (_, res) = preflight_on(vec![Output::failure(1), ok()]);
-        assert!(matches!(res, Err(Error::Auth(m)) if m.contains(
-            "cannot see subscription 00000000-0000-0000-0000-000000000000 (azure.subscription)"
-        ) && m.mentions("az account list -o table")));
+        assert!(err_text(res).contains("az login"));
     }
 
     #[test]
     fn soft_deleted_vault_names_the_recover_command() {
         let (_, res) = preflight_on(vec![ok(), Output::failure(3), ok()]);
-        assert!(err_text(res).contains(
-            "az keyvault recover -n kv-opv-fixture --subscription 00000000-0000-0000-0000-000000000000"
-        ));
+        assert!(err_text(res).contains("az keyvault recover --name kv-opv-fixture"));
     }
 
     #[test]
     fn missing_vault_names_the_fields_to_check() {
         let (_, res) = preflight_on(vec![ok(), Output::failure(3), Output::failure(3)]);
-        assert!(err_text(res).contains("check azure.key_vault and azure.subscription"));
+        assert!(err_text(res).contains("check azure.key_vault, which names Key Vault"));
     }
 
     fn firewalled() -> Value {
@@ -742,24 +864,80 @@ mod tests {
         v
     }
 
-    #[test]
-    fn firewalled_vault_names_network_access() {
-        let mut responses = vec![ok(), out(&firewalled())];
+    /// The Do of a catalog error, as rendered.
+    fn do_of(res: Result<Preflight, Error>) -> String {
+        res.err()
+            .and_then(|e| {
+                e.cause()
+                    .and_then(|(c, _)| c.do_text(&Invocation::default()))
+            })
+            .unwrap_or_default()
+    }
+
+    /// The vault is found, then its data plane refuses every attempt.
+    fn refused_by(vault: &Value) -> Vec<Output> {
+        let mut responses = vec![ok(), out(vault)];
         responses.extend(crate::runner::fake::failed_read(1));
-        let (_, res) = preflight_on(responses);
-        assert!(
-            matches!(res, Err(Error::Target(m)) if m.contains("allowed networks (firewall or private endpoint)"))
-        );
+        responses
+    }
+
+    /// 06.17: a firewall refusal is a missing right (a network rule), not a target error.
+    #[test]
+    fn firewalled_vault_refusal_is_permission_denied() {
+        let (_, res) = preflight_on(refused_by(&firewalled()));
+        assert_eq!(res.err().map(|e| e.code_str()), Some("permission_denied"));
+    }
+
+    #[test]
+    fn firewalled_vault_asks_for_the_network_rule() {
+        let (_, res) = preflight_on(refused_by(&firewalled()));
+        assert!(do_of(res).contains("network rules of Key Vault"));
     }
 
     #[test]
     fn vault_refusing_this_account_names_the_role_grant() {
-        let mut responses = vec![ok(), out(&vault_show())];
-        responses.extend(crate::runner::fake::failed_read(1));
-        let (_, res) = preflight_on(responses);
-        assert!(matches!(res, Err(Error::Auth(m)) if m.mentions(
-            "az role assignment create --role \"Key Vault Secrets Officer\""
+        let (_, res) = preflight_on(refused_by(&vault_show()));
+        assert!(do_of(res).contains("the role Key Vault Secrets Officer"));
+    }
+
+    /// 06.16: an access-policy vault gets an access policy, not a role assignment.
+    #[test]
+    fn access_policy_vault_refusal_asks_for_an_access_policy() {
+        let (_, res) = preflight_on(refused_by(&fixture(
+            "constructed/keyvault-show-access-policy.json",
         )));
+        assert!(do_of(res).contains("add an access policy on Key Vault"));
+    }
+
+    /// 06.19: under deploy credentials the grant is asked for them, not for "you".
+    #[test]
+    fn vault_refusal_under_deploy_credentials_addresses_them() {
+        let r = FakeRunner::new(refused_by(&vault_show()));
+        let deploy = crate::cause::Principal::DeployCredentials {
+            vault: crate::cause::VaultId::new("vlt-deploy"),
+            item: crate::cause::ItemId::new("azure-deploy"),
+            env: crate::cause::EnvName::new("prod"),
+            target: crate::cause::TargetName::new("web"),
+        };
+        let res = crate::runner::under_deploy(deploy, || run(&target(), &r, PreflightMode::Mutate));
+        assert!(do_of(res).contains("to deploy credentials azure-deploy"));
+    }
+
+    #[test]
+    fn vault_refusing_this_account_is_permission_denied() {
+        let (_, res) = preflight_on(refused_by(&vault_show()));
+        assert_eq!(res.err().map(|e| e.code_str()), Some("permission_denied"));
+    }
+
+    /// Signed in, but the subscription is not visible: az's reply says why (a wrong id or
+    /// no role); opv shows it rather than guess from az's wording (§12.4).
+    #[test]
+    fn an_invisible_subscription_shows_azs_reply_unrecognized() {
+        let (_, res) = preflight_on(vec![Output::failure(1), ok()]);
+        assert_eq!(
+            res.err().map(|e| e.code_str()),
+            Some("unrecognized_failure")
+        );
     }
 
     #[test]
@@ -775,17 +953,30 @@ mod tests {
         let mut app = app_show();
         app["properties"]["configuration"]["activeRevisionsMode"] = json!("Multiple");
         let (_, res) = preflight_on(healthy_with(&app));
-        assert!(matches!(res, Err(Error::Config(m)) if m.mentions("revision set-mode")));
+        assert_eq!(
+            res.err().map(|e| e.code_str()),
+            Some("owner_setup_required")
+        );
+    }
+
+    /// I5: the Do of a multiple-revision app is the owner's set-mode command, scoped to the
+    /// app's subscription.
+    #[test]
+    fn multiple_revision_mode_do_names_the_set_mode_command() {
+        let mut app = app_show();
+        app["properties"]["configuration"]["activeRevisionsMode"] = json!("Multiple");
+        let (_, res) = preflight_on(healthy_with(&app));
+        assert!(
+            do_of(res).contains(&format!(
+                "az containerapp revision set-mode --mode single --resource-group opv-fixture-rg --name opv-fixture-app --subscription {SUB}"
+            ))
+        );
     }
 
     #[test]
-    fn missing_app_names_the_show_command() {
+    fn missing_app_names_the_field_to_check() {
         let (_, res) = preflight_on(vec![ok(), out(&vault_show()), ok(), Output::failure(3)]);
-        assert!(
-            err_text(res).contains(
-                "az containerapp show -g opv-fixture-rg -n opv-fixture-app --subscription"
-            )
-        );
+        assert!(err_text(res).contains("check azure.container_app, which names container app"));
     }
 
     #[test]
@@ -848,13 +1039,13 @@ mod tests {
     }
 
     #[test]
-    fn app_update_that_never_finishes_is_a_target_error_after_the_wait() {
+    fn app_update_that_never_finishes_is_refused_as_in_progress_after_the_wait() {
         let polls =
             (0..=WAIT_MAX.as_secs() / POLL_EVERY.as_secs()).map(|_| out(&app_in("InProgress")));
         let mut responses = vec![ok(), out(&vault_show()), ok()];
         responses.extend(polls);
         let (_, res) = preflight_on(responses);
-        assert!(matches!(res, Err(Error::Target(m)) if m.contains("still being updated")));
+        assert!(err_text(res).contains("another change is still in progress"));
     }
 
     /// R11: a failed last update is not a broken app; opv proceeds and says so.
@@ -899,21 +1090,24 @@ mod tests {
     #[test]
     fn plain_http_vault_uri_is_refused() {
         assert!(
-            matches!(uri_of("http://kv-opv-fixture.vault.azure.net/"), Err(Error::Target(m)) if m.contains("not https"))
+            uri_of("http://kv-opv-fixture.vault.azure.net/").map_err(|e| e.code_str())
+                == Err("unexpected_output")
         );
     }
 
     #[test]
     fn vault_uri_with_a_path_is_refused() {
         assert!(
-            matches!(uri_of("https://kv-opv-fixture.vault.azure.net/x/"), Err(Error::Target(m)) if m.contains("not a plain host name"))
+            uri_of("https://kv-opv-fixture.vault.azure.net/x/").map_err(|e| e.code_str())
+                == Err("unexpected_output")
         );
     }
 
     #[test]
     fn vault_uri_of_another_vault_is_refused() {
         assert!(
-            matches!(uri_of("https://other.vault.azure.net/"), Err(Error::Target(m)) if m.contains("does not name the vault"))
+            uri_of("https://other.vault.azure.net/").map_err(|e| e.code_str())
+                == Err("unexpected_output")
         );
     }
 
@@ -922,7 +1116,7 @@ mod tests {
         let mut v = vault_show();
         v["properties"].as_object_mut().unwrap().remove("vaultUri");
         assert!(
-            matches!(vault_uri(&v, "kv-opv-fixture"), Err(Error::Target(m)) if m.contains("missing"))
+            vault_uri(&v, "kv-opv-fixture").map_err(|e| e.code_str()) == Err("unexpected_output")
         );
     }
 
@@ -940,7 +1134,7 @@ mod tests {
             .map(|c| {
                 (
                     c.name.to_string(),
-                    c.outcome.map_err(|e| crate::error::report(&e, "-", None)),
+                    c.outcome.map_err(|e| crate::error::report(&e)),
                 )
             })
             .collect()
@@ -998,7 +1192,8 @@ mod tests {
         r.push_io_error(std::io::ErrorKind::NotFound);
         let host = Host::detect();
         let checks = doctor(&target(), &r, &|| host);
-        assert!(matches!(&checks[0].outcome, Err(Error::Dependency(m)) if m.contains("install")));
+        // R56: the catalog's ToolMissing, whose Do is the install line.
+        assert!(matches!(&checks[0].outcome, Err(e) if e.code_str() == "dependency_missing"));
     }
 
     #[test]

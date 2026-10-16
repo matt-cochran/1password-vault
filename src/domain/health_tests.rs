@@ -430,6 +430,32 @@ fn a_live_key_in_development_is_found() {
     );
 }
 
+/// 01.25: production is told by name only, so the message says so instead of asserting it.
+#[test]
+fn a_live_key_message_says_production_is_told_by_name() {
+    let found = run(&[("dev", false, vec![secret("STRIPE_KEY", &v("sk_live_"))])]);
+    assert!(
+        found[0].message.contains("dev is not named as production"),
+        "{}",
+        found[0].message
+    );
+}
+
+/// 01.25: the local-address check names every address it matches, not only localhost.
+#[test]
+fn a_local_address_message_names_the_addresses_it_matches() {
+    let found = run(&[(
+        "staging",
+        true,
+        vec![field("PUBLIC_URL", Kind::Config, "http://0.0.0.0:3000")],
+    )]);
+    assert!(
+        found[0].message.contains("local-only address"),
+        "{}",
+        found[0].message
+    );
+}
+
 #[test]
 fn a_live_key_in_production_is_fine() {
     assert!(codes(&[("prod", true, vec![secret("STRIPE_KEY", &v("sk_live_"))])]).is_empty());

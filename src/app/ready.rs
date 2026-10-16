@@ -10,7 +10,7 @@
 
 use std::io::Write;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::app::account::Report;
@@ -71,20 +71,20 @@ pub struct Inputs<'a> {
 }
 
 /// `config` of the receipt: where the configuration was read from.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigRef {
     pub source: Option<String>,
 }
 
 /// `account` of the receipt: the selected account (FR-49), or `null` when none is.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountRef {
     pub account_id: String,
     pub by: String,
 }
 
 /// One environment × product cell of the matrix.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MatrixEntry {
     pub environment: String,
     /// The environment's display name (FR-55).
@@ -104,7 +104,7 @@ pub struct MatrixEntry {
 
 /// What a finding is about: any of the account, environment, target, product or key, each
 /// omitted when absent (FR-51).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Scope {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
@@ -140,7 +140,7 @@ pub struct TargetReport {
 
 /// One thing a person or agent must act on, with one runnable prerequisite and one verify
 /// command (FR-51).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Finding {
     pub code: String,
     pub scope: Scope,
@@ -153,11 +153,15 @@ pub struct Finding {
     /// #92). Names only, never a value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// The error's own Do, for a finding made from an error (JSON `do`, text `Do:`): what a
+    /// person does first, never dropped (07.07).
+    #[serde(rename = "do", skip_serializing_if = "Option::is_none")]
+    pub act: Option<String>,
 }
 
 /// The first step: the actor and the command of the first blocking finding, else of the
 /// first finding.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Next {
     pub actor: String,
     pub command: String,
@@ -359,7 +363,7 @@ fn is_finding_state(state: &KeyState) -> bool {
 fn target_missing(t: &TargetInput) -> Option<String> {
     t.grants_missing
         .clone()
-        .or_else(|| t.rows.as_ref().err().map(|e| e.text().to_string()))
+        .or_else(|| t.rows.as_ref().err().map(|e| e.to_string()))
 }
 
 /// The FR-56 `grants_missing` finding for one target: what an owner must grant, and the
@@ -378,6 +382,66 @@ fn grants_missing(env: &str, target: &str, reason: &str) -> Finding {
         prerequisite: format!("opv access {env} --target {target}"),
         verify: format!("opv access {env} --target {target} --json"),
         message: Some(reason.to_string()),
+        act: None,
+    }
+}
+
+/// True for the codes that mean a vault or item could not be opened: a grant to give.
+fn is_no_access(e: &Error) -> bool {
+    matches!(e.code_str(), "vault_no_access" | "item_not_found")
+}
+
+/// Whether the cause's own Next is `opv ready` (typed: its re-run under `ready`, or a built
+/// `ready` command), which is the finding's verify rather than a step toward it.
+fn next_is_ready(e: &Error) -> bool {
+    use crate::cause::Next;
+    let Some((cause, _)) = e.cause() else {
+        return false;
+    };
+    let inv = crate::error::invocation();
+    match cause.step(&inv).1 {
+        Next::Rerun => inv.command == ["ready"],
+        Next::Run(c) | Next::Check(c) => c.command == ["ready"],
+        _ => false,
+    }
+}
+
+/// What `opv ready` re-runs to verify a finding.
+const VERIFY: &str = "opv ready --json";
+
+/// The finding for an error that stopped reading an environment (or one target of it): the
+/// error's own code, actor, effect, Do and next step (#157), all from its cause (design
+/// §6.1: no step override). The prerequisite is the cause's Next; a cause whose Next is no
+/// command, or is `ready` itself again, has its Do as the prerequisite, so an owner's step
+/// is never dropped (07.07).
+fn error_finding(env: &str, target: Option<&str>, e: &Error) -> Finding {
+    let code = e.code_str();
+    let effect = match code {
+        "op_not_signed_in" | "auth_required" | "account_not_registered" | "selected_signed_out" => {
+            "signs_in"
+        }
+        _ => "none",
+    };
+    let (act, next) = super::own_step(e);
+    // The cause's own Next, unless it is `ready` itself (this finding's verify): then its
+    // Do is what to do first.
+    let next = next.filter(|_| !next_is_ready(e));
+    let prerequisite = next.clone().or_else(|| act.clone()).unwrap_or_default();
+    Finding {
+        code: code.into(),
+        scope: Scope {
+            environment: Some(env.to_string()),
+            target: target.map(str::to_string),
+            ..Scope::default()
+        },
+        blocking: true,
+        actor: if e.human_required() { "owner" } else { "agent" }.into(),
+        effect: effect.into(),
+        // The Do is shown on its own line only when it is not the prerequisite already.
+        act: act.filter(|a| *a != prerequisite),
+        prerequisite,
+        verify: VERIFY.into(),
+        message: None,
     }
 }
 
@@ -414,10 +478,14 @@ fn row_findings(
             _ => continue,
         };
         let label = key_label(&r.product, &r.key);
-        let (product, verify) = (
-            Some(r.product.clone()),
-            format!("opv status {} --product {}", env.name, r.product),
-        );
+        let verify = match target {
+            Some(t) => format!(
+                "opv status {} --target {t} --product {}",
+                env.name, r.product
+            ),
+            None => format!("opv status {} --product {}", env.name, r.product),
+        };
+        let product = Some(r.product.clone());
         out.push(Finding {
             code: code.into(),
             scope: Scope {
@@ -433,6 +501,7 @@ fn row_findings(
             prerequisite: format!("opv open {label} --env {}", env.name),
             verify,
             message: None,
+            act: None,
         });
     }
 }
@@ -471,6 +540,7 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
             prerequisite: f.next.clone().unwrap_or_else(|| "opv account list".into()),
             verify: "opv account list --json".into(),
             message: None,
+            act: None,
         });
     }
     for env in &inputs.envs {
@@ -481,9 +551,7 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
                 };
                 // FR-55: an environment meant for others (its audience) and an access
                 // error is not a problem to fix.
-                let no_access = t.rows.as_ref().err().is_some_and(|e| {
-                    matches!(e.code().as_str(), "vault_no_access" | "item_not_found")
-                });
+                let no_access = t.rows.as_ref().err().is_some_and(is_no_access);
                 if let (Some(audience), true) = (&env.audience, no_access) {
                     out.push(Finding {
                         code: "not_for_you".into(),
@@ -501,18 +569,26 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
                         ),
                         verify: "opv ready --json".into(),
                         message: None,
+                        act: None,
                     });
                     continue;
                 }
-                out.push(grants_missing(&env.name, &t.name, &reason));
+                // #157: only a vault or item that cannot be opened is a grant to give; any
+                // other cause (signed out, a missing CLI, a timeout, the provider's own
+                // preflight) is reported as itself, with its own step.
+                match &t.rows {
+                    Err(e) if t.grants_missing.is_none() && !no_access => {
+                        out.push(error_finding(&env.name, Some(&t.name), e));
+                    }
+                    _ => out.push(grants_missing(&env.name, &t.name, &reason)),
+                }
             }
             continue;
         }
         let Err(e) = &env.rows else { continue };
-        let code = e.code();
         // FR-55: an environment meant for others (its audience) that this person cannot
         // open is not a problem to fix.
-        let no_access = matches!(code.as_str(), "vault_no_access" | "item_not_found");
+        let no_access = is_no_access(e);
         if let (Some(audience), true) = (&env.audience, no_access) {
             out.push(Finding {
                 code: "not_for_you".into(),
@@ -529,37 +605,11 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
                 ),
                 verify: "opv ready --json".into(),
                 message: None,
+                act: None,
             });
             continue;
         }
-        let effect = match code.as_str() {
-            "op_not_signed_in"
-            | "auth_required"
-            | "account_not_registered"
-            | "selected_signed_out" => "signs_in",
-            _ => "none",
-        };
-        out.push(Finding {
-            code: code.as_str().into(),
-            scope: Scope {
-                environment: Some(env.name.clone()),
-                ..Scope::default()
-            },
-            blocking: true,
-            actor: if code.human_required() {
-                "owner"
-            } else {
-                "agent"
-            }
-            .into(),
-            effect: effect.into(),
-            prerequisite: e
-                .next_step()
-                .map(str::to_string)
-                .unwrap_or_else(|| format!("opv status {}", env.name)),
-            verify: "opv ready --json".into(),
-            message: None,
-        });
+        out.push(error_finding(&env.name, None, e));
     }
     for env in &inputs.envs {
         if let Some(targets) = &env.target {
@@ -597,6 +647,7 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
             prerequisite: format!("opv open {label} --env {env}"),
             verify: "opv ready --json".into(),
             message: Some(h.message.clone()),
+            act: None,
         });
     }
     out
@@ -608,8 +659,8 @@ pub fn render_text(r: &Receipt, out: &mut dyn Write) -> Result<(), Error> {
     let blocking = r.findings.iter().filter(|f| f.blocking).count();
     writeln!(
         out,
-        "ready: {blocking} blocking · {} findings · receipt {}",
-        r.findings.len(),
+        "ready: {blocking} blocking · {} · receipt {}",
+        super::plural(r.findings.len(), "finding", "findings"),
         r.receipt_id
     )
     .map_err(super::write_err)?;
@@ -666,11 +717,12 @@ pub fn render_text(r: &Receipt, out: &mut dyn Write) -> Result<(), Error> {
     }
 
     if r.findings.is_empty() {
-        writeln!(
-            out,
-            "Nothing needs attention: every declared key is saved and every environment was read."
-        )
-        .map_err(super::write_err)?;
+        // Claim only what was read: one environment, or every one (07.30, X26).
+        let claim = match envs.as_slice() {
+            [(name, _)] => format!("every declared key in {name} is saved and {name} was read"),
+            _ => "every declared key is saved and every environment was read".to_string(),
+        };
+        writeln!(out, "Nothing needs attention: {claim}.").map_err(super::write_err)?;
     } else {
         writeln!(out, "Needs attention:").map_err(super::write_err)?;
     }
@@ -686,6 +738,9 @@ pub fn render_text(r: &Receipt, out: &mut dyn Write) -> Result<(), Error> {
         .map_err(super::write_err)?;
         if let Some(m) = &f.message {
             writeln!(out, "      {m}").map_err(super::write_err)?;
+        }
+        if let Some(a) = &f.act {
+            writeln!(out, "      Do: {a}").map_err(super::write_err)?;
         }
     }
     if let Some(n) = &r.next {
@@ -765,10 +820,34 @@ mod tests;
 
 /// One `op vault user list` for `vault_id` (FR-56): `None` when this person can see the
 /// vault, else the `grants_missing` reason naming it. The vault ID is never a value.
+///
+/// Listing a vault's users needs managing it (#157): a person who can read the vault but not
+/// manage it gets no list, so one `op vault get` (exit status only; its output names the
+/// vault and is dropped unread, SR-1) decides; only when that fails too is a grant missing.
 fn state_vault_grants(r: &dyn crate::runner::CommandRunner, vault_id: &str) -> Option<String> {
     match crate::adapters::onepassword_init::vault_users(r, vault_id, &crate::host::Host::detect) {
         Ok(Some(_)) => None,
-        Ok(None) => Some(format!("state vault {vault_id} cannot be opened")),
+        Ok(None) => {
+            let _ = crate::runner::take_failure_excerpt();
+            let opened = r
+                .probe(
+                    &crate::runner::Call::new(
+                        "op",
+                        &["vault", "get", vault_id, "--format", "json"],
+                    ),
+                    crate::runner::PROBE_TIMEOUT,
+                )
+                .map(|o| o.status == 0);
+            match opened {
+                // A probe that could not run cannot tell: nothing is claimed missing.
+                Ok(true) | Err(_) => None,
+                Ok(false) => {
+                    // Its stderr must not attach to what is reported (NR-31).
+                    let _ = crate::runner::take_failure_excerpt();
+                    Some(format!("state vault {vault_id} cannot be opened"))
+                }
+            }
+        }
         Err(e) => Some(format!("state vault {vault_id}: {e}")),
     }
 }
@@ -787,7 +866,15 @@ pub fn run(
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     if let Some(e) = only {
-        fleet.environment(e)?;
+        super::environment(fleet, e)?;
+    }
+    // #157: nobody signed in is one finding of its own, never every target's missing grant.
+    // L9: an account op does not know is not a failure here: the account report below names
+    // it (`selected_account_absent`) with its step, `opv login --add`.
+    match crate::adapters::onepassword::require_session(r, &crate::host::Host::detect, "opv ready")
+    {
+        Err(e) if e.code_str() == "account_not_registered" => {}
+        other => other?,
     }
     let account = super::account::gather(r, None);
     // FR-55: the environments' own order, then their keys; never a fixed list.
@@ -832,6 +919,9 @@ pub fn run(
         // One visibility check per state vault the targets need (FR-56), not per target.
         let mut vault_checks: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
+        // The state vault is checked with the environment's own account (FR-40), as
+        // `status` reads its rows.
+        let env_runner = super::signin::open(fleet, name, r, super::signin::Reach::Store)?;
         for (tname, t) in &env.targets {
             let keep = if reading { Some(&mut fields) } else { None };
             let rows = super::status::env_rows_keeping(
@@ -849,7 +939,7 @@ pub fn run(
             let grants_missing = if readable {
                 vault_checks
                     .entry(t.state_vault_id.clone())
-                    .or_insert_with(|| state_vault_grants(r, &t.state_vault_id))
+                    .or_insert_with(|| state_vault_grants(&env_runner, &t.state_vault_id))
                     .clone()
             } else {
                 None
@@ -908,12 +998,16 @@ pub fn run(
         },
         env!("CARGO_PKG_VERSION"),
     );
-    let mut v = serde_json::to_value(&doc)
-        .map_err(|_| Error::Config("cannot serialize the readiness receipt".into()))?;
+    // The receipt is plain data: failing to serialize it is opv's own bug.
+    let bug = |_| {
+        Error::from(crate::cause::Cause::Bug {
+            site: "ready receipt serialization",
+        })
+    };
+    let mut v = serde_json::to_value(&doc).map_err(bug)?;
     v["schema_version"] = serde_json::json!(crate::json::SCHEMA_VERSION);
     if let Some(path) = save {
-        let text = serde_json::to_string_pretty(&v)
-            .map_err(|_| Error::Config("cannot serialize the readiness receipt".into()))?;
+        let text = serde_json::to_string_pretty(&v).map_err(bug)?;
         super::init::write_atomic(path, &format!("{text}\n"), true)?;
     }
     if json {

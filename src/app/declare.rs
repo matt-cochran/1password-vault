@@ -15,9 +15,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use crate::cause::{Cause, Cmd, ConfigSource, GivenBy, NameKind, NotEditable, UsageProblem};
 use crate::config_store::{ConfigStore, FileStore, Replaced, Snapshot};
 use crate::domain::Fleet;
-use crate::error::{Code, Error};
+use crate::error::Error;
 use crate::runner::CommandRunner;
 
 /// Guidance is shown to people and other assistants: one short line of plain text.
@@ -50,28 +51,57 @@ impl ConfigStore for Declaring {
     }
 }
 
+fn read(path: &Path) -> Result<String, Error> {
+    std::fs::read_to_string(path)
+        .map_err(|e| crate::config_store::unreadable(path, &e, GivenBy::Discovered))
+}
+
 fn store(path: &Path) -> Result<Declaring, Error> {
-    let text = std::fs::read_to_string(path).map_err(|e| {
-        Error::Config(format!("Cannot read {} ({}).", path.display(), e.kind()).into())
-    })?;
+    let text = read(path)?;
     if super::bootstrap::is_generated(&text) {
-        return Err(Error::Policy(
-            format!(
-                "{} is generated; opv does not edit it: declare this in its generator's input",
-                path.display()
-            )
-            .into(),
-        )
-        .with_code(Code::PolicyRefused));
+        return Err(Cause::ConfigNotEditable {
+            source: ConfigSource::File {
+                path: PathBuf::from(path),
+                given_by: GivenBy::Discovered,
+            },
+            reason: NotEditable::Generated { generator: None },
+        }
+        .into());
     }
     Ok(Declaring(FileStore {
         path: PathBuf::from(path),
     }))
 }
 
-fn cfg(m: String) -> Error {
-    Error::Config(m.into()).with_code(Code::ConfigInvalid)
+/// An argument of the declaration has the wrong form.
+fn format_error(flag: &str, format: &'static str) -> Error {
+    Cause::Usage {
+        problem: UsageProblem::ValueFormat {
+            flag: flag.into(),
+            format,
+        },
+    }
+    .into()
 }
+
+/// What a person declares with `opv target add <env> <name>` in their own terminal.
+fn target_add(env: &str, name: &str) -> Error {
+    Cause::Usage {
+        problem: UsageProblem::UseInstead {
+            command: Cmd {
+                command: vec!["target".into(), "add".into()],
+                args: vec![env.into(), name.into()],
+            },
+        },
+    }
+    .into()
+}
+
+/// The form of a declared name, in words.
+const NAME_FORMAT: &str = "a lowercase letter, then lowercase letters, digits or dashes";
+
+/// The guidance limit in words; it states [`GUIDANCE_MAX`].
+const GUIDANCE_FORMAT: &str = "one line of at most 300 characters";
 
 /// A key declaration: names, kind, rules and guidance; never a value.
 #[derive(Debug, Clone, Default)]
@@ -94,14 +124,24 @@ pub fn key(r: &dyn CommandRunner, path: &Path, k: &Key) -> Result<bool, Error> {
     if let Some(g) = &k.guidance
         && (g.chars().count() > GUIDANCE_MAX || g.chars().any(char::is_control))
     {
-        return Err(cfg(format!(
-            "guidance must be one line of at most {GUIDANCE_MAX} characters"
-        )));
+        return Err(format_error("guidance", GUIDANCE_FORMAT));
     }
     if !["secret", "config"].contains(&k.kind.as_str()) {
-        return Err(cfg(format!("kind {:?} must be secret or config", k.kind)));
+        return Err(format_error("kind", "secret or config"));
     }
     let store = store(path)?;
+    // 05.19: an environment the file does not declare is named, with the declared ones;
+    // `opv init --add-env` is never the step (it needs an existing item).
+    let declared = environments(path)?;
+    if let Some(env) = k.environments.iter().find(|e| !declared.contains(*e)) {
+        return Err(Cause::NotDeclared {
+            kind: NameKind::Environment,
+            given: env.clone(),
+            candidates: declared.into_iter().collect(),
+            closest: None,
+        }
+        .into());
+    }
     let before = std::fs::read_to_string(path).unwrap_or_default();
     let args = super::add::AddArgs {
         name: format!("{}/{}", k.product, k.key),
@@ -121,9 +161,7 @@ pub fn key(r: &dyn CommandRunner, path: &Path, k: &Key) -> Result<bool, Error> {
 /// plan): true when the file changed.
 pub fn environment(r: &dyn CommandRunner, path: &Path, name: &str) -> Result<bool, Error> {
     if !crate::config::is_target_name(name) {
-        return Err(cfg(format!(
-            "environment name {name:?} must match ^[a-z][a-z0-9-]*$"
-        )));
+        return Err(format_error("the environment name", NAME_FORMAT));
     }
     let store = store(path)?;
     let base = store.read(r)?;
@@ -165,18 +203,11 @@ pub struct Target {
 pub fn target(r: &dyn CommandRunner, path: &Path, t: &Target) -> Result<bool, Error> {
     use super::target_cmd;
     if !crate::config::is_target_name(&t.name) {
-        return Err(cfg(format!(
-            "target name {:?} must match ^[a-z][a-z0-9-]*$",
-            t.name
-        )));
+        return Err(format_error("the target name", NAME_FORMAT));
     }
+    // Deploy credentials are not declared here: a person adds them with opv target add.
     if t.fields.keys().any(|k| k.contains("credential")) {
-        return Err(Error::Policy(
-            "deploy credentials are not declared here; a person adds them with opv target add \
-             --deploy-credentials in their own terminal"
-                .into(),
-        )
-        .with_code(Code::PolicyRefused));
+        return Err(target_add(&t.environment, &t.name));
     }
     let store = store(path)?;
     let base = store.read(r)?;
@@ -194,12 +225,9 @@ pub fn target(r: &dyn CommandRunner, path: &Path, t: &Target) -> Result<bool, Er
         ..Default::default()
     };
     let (provider, values) = target_cmd::provider_and_values(&args)?;
-    let section = provider.init_section(&values).ok_or_else(|| {
-        cfg(format!(
-            "a {} target cannot be declared here yet; a person adds it with opv target add",
-            provider.label()
-        ))
-    })?;
+    let section = provider
+        .init_section(&values)
+        .ok_or_else(|| target_add(&t.environment, &t.name))?;
     let products = target_cmd::checked_products(&fleet, &t.products)?;
     let body = target_cmd::target_table(
         &t.environment,
@@ -235,17 +263,27 @@ pub fn set_target_deploy_credentials(
     let store = store(path)?;
     let base = store.read(r)?;
     let mut doc = super::bootstrap::parse_doc(&base.text)?;
+    let declared: Vec<String> = doc
+        .get("environments")
+        .and_then(|e| e.get(env))
+        .and_then(|e| e.get("targets"))
+        .and_then(toml_edit::Item::as_table_like)
+        .map(|t| t.iter().map(|(k, _)| k.to_string()).collect())
+        .unwrap_or_default();
     let table = doc
         .get_mut("environments")
         .and_then(|e| e.get_mut(env))
         .and_then(|e| e.get_mut("targets"))
         .and_then(|t| t.get_mut(target))
         .and_then(toml_edit::Item::as_table_like_mut)
-        .ok_or_else(|| {
-            cfg(format!(
-                "environment {env} has no target {target:?} opv can edit; add this line by \
-                 hand: deploy_credentials = {reference:?}"
-            ))
+        .ok_or_else(|| -> Error {
+            Cause::NotDeclared {
+                kind: NameKind::Target,
+                given: target.to_string(),
+                candidates: declared,
+                closest: None,
+            }
+            .into()
         })?;
     table.insert("deploy_credentials", toml_edit::value(reference));
     let text = doc.to_string();
@@ -256,9 +294,7 @@ pub fn set_target_deploy_credentials(
 
 /// The environment names declared in the file at `path` (for checks before a declaration).
 pub fn environments(path: &Path) -> Result<BTreeSet<String>, Error> {
-    let text = std::fs::read_to_string(path).map_err(|e| {
-        Error::Config(format!("Cannot read {} ({}).", path.display(), e.kind()).into())
-    })?;
+    let text = read(path)?;
     let doc = super::bootstrap::parse_doc(&text)?;
     Ok(doc
         .get("environments")

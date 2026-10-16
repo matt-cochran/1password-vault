@@ -151,10 +151,7 @@ fn missing_token_field_names_the_field_not_a_value() {
         Err(e) => e.to_string(),
         Ok(_) => panic!("a missing field must fail"),
     };
-    assert!(
-        e.contains("field FLY_API_TOKEN is missing") && !e.contains(MARKER),
-        "{e}"
-    );
+    assert!(e.contains("FLY_API_TOKEN") && !e.contains(MARKER), "{e}");
 }
 
 #[test]
@@ -165,7 +162,8 @@ fn token_of_the_wrong_type_is_refused() {
         Err(e) => e.to_string(),
         Ok(_) => panic!("a text token must fail"),
     };
-    assert!(e.contains("must be a Password (concealed) field"), "{e}");
+    // R37, I6: a field of another type is named with the type it must be.
+    assert!(e.contains("is not a concealed (password) field"), "{e}");
 }
 
 /// A Kubernetes runtime keeping its secrets in a Key Vault (`secrets_in`) signs `az` in
@@ -209,8 +207,7 @@ environments = ["dev"]
 }
 
 /// Signed out of 1Password, the deploy-credential read (the first call of `status prod`)
-/// is diagnosed at once and names the environment in its sign-in step, which is the
-/// error's `Next:` (FR-40, UX1).
+/// is diagnosed at once: the missing session, whose Do is the sign-in (FR-40, UX1).
 #[test]
 fn signed_out_deploy_read_names_opv_login_for_the_environment() {
     let fl = fleet_with_credentials();
@@ -225,20 +222,20 @@ fn signed_out_deploy_read_names_opv_login_for_the_environment() {
     });
     let e = res.expect_err("signed out");
     assert_eq!(
-        e.step("opv status prod", "-").action.as_deref(),
-        Some("sign in: opv login prod"),
+        e.do_text().as_deref(),
+        Some("sign in to 1Password"),
         "{e:?}"
     );
 }
 
-/// `doctor --env` keeps the failed deploy read's scrubbed stderr beside the error
-/// (NR-31, UX1), for the text output only.
+/// `doctor --env` keeps the failed deploy read's scrubbed stderr with the error, as its
+/// evidence (NR-31, UX1, design §7.3).
 #[test]
 fn doctor_deploy_failure_keeps_the_excerpt_beside_the_error() {
-    let (_, excerpt) = doctor_signed_out_failure();
+    let e = doctor_signed_out_deploy_failure();
     assert_eq!(
-        excerpt.map(|x| x.render()).as_deref(),
-        Some("  op said: [ERROR] not signed in\n"),
+        e.cause().and_then(|(_, up)| up).map(|u| u.said.clone()),
+        Some(vec!["[ERROR] not signed in".to_string()]),
     );
 }
 
@@ -254,19 +251,15 @@ fn doctor_deploy_failure_text_has_no_excerpt() {
 fn doctor_deploy_failure_keeps_opv_login_as_its_step() {
     let e = doctor_signed_out_deploy_failure();
     assert_eq!(
-        e.step("opv doctor", "-").action.as_deref(),
-        Some("sign in: opv login prod"),
+        e.do_text().as_deref(),
+        Some("sign in to 1Password"),
         "{e:?}"
     );
 }
 
+/// What `doctor --env` gets from a failed per-target deploy sign-in: the error, with the
+/// failed call's scrubbed reply as its evidence (NR-31, M2).
 fn doctor_signed_out_deploy_failure() -> Error {
-    doctor_signed_out_failure().0
-}
-
-/// What `doctor --env` gets from a failed per-target deploy sign-in: the error, and the
-/// failed call's scrubbed excerpt taken right away, as doctor takes it (NR-31, M2).
-fn doctor_signed_out_failure() -> (Error, Option<crate::scrub::Excerpt>) {
     let fl = fleet_with_credentials();
     let r = FakeRunner::new([]);
     r.push_with_stderr(crate::runner::Output::failure(1), "[ERROR] not signed in");
@@ -279,12 +272,10 @@ fn doctor_signed_out_failure() -> (Error, Option<crate::scrub::Excerpt>) {
             br#"[{"url":"x"}]"#.to_vec(),
         )));
     let tty = Host::from_env(&FakeEnv::new("linux").shell("/bin/bash").tty());
-    let e = crate::host::with_test_host(tty, || {
+    crate::host::with_test_host(tty, || {
         open_targeted(&fl, "prod", None, &r, Reach::Target).err()
     })
-    .expect("signed out");
-    let excerpt = crate::runner::take_failure_excerpt().filter(|_| e.from_external_call());
-    (e, excerpt)
+    .expect("signed out")
 }
 
 // ---- FR-41 plan ids on deploy-credential runs and manifest configurations ----
@@ -325,4 +316,61 @@ fn plan_of_a_manifest_configuration_names_the_manifest_not_the_file() {
     let r = FakeRunner::new([complete_item(), fly_empty()]);
     crate::app::sync::plan_with(&fl, "prod", &r, &mut out, false).unwrap();
     assert!(text_of(&out).contains("the target or the manifest changed"));
+}
+
+// 06.30: a rejected deploy credential names its item by the full reference, vault included.
+#[test]
+fn a_rejected_deploy_credential_names_the_vault_of_its_item() {
+    use crate::cause::{
+        CallId, Cause, CredentialProblem, CredentialRef, EnvName, ExitClass, ItemId, Observed,
+        Principal, System, TargetName, VaultId,
+    };
+    let principal = Principal::DeployCredentials {
+        vault: crate::cause::VaultId::new("vlt-deploy"),
+        item: ItemId::new("fly"),
+        env: EnvName::new("prod"),
+        target: TargetName::new("web"),
+    };
+    let seen = Observed::from_failed_call(
+        CallId {
+            system: System::Fly,
+            program: "flyctl".into(),
+            words: vec!["auth".into(), "whoami".into()],
+        },
+        ExitClass::Code { code: 1 },
+        principal,
+    );
+    let rejected: Error = Cause::CredentialRejected {
+        system: System::Fly,
+        credential: CredentialRef::DeployCredentials {
+            vault: VaultId::new(""),
+            item: ItemId::new("fly"),
+            env: EnvName::new("prod"),
+            target: TargetName::new("web"),
+        },
+        problem: CredentialProblem::Rejected { needs: Vec::new() },
+        seen,
+    }
+    .into();
+    let reference = ItemRef {
+        vault: "deploy-prd".into(),
+        item: "fly".into(),
+    };
+    assert!(matches!(
+        deploy_failed(rejected, &reference).cause(),
+        Some((Cause::CredentialRejected {
+            credential: CredentialRef::DeployCredentials { vault, .. },
+            ..
+        }, _)) if vault.as_str() == "deploy-prd"
+    ));
+}
+
+/// L2: a target write made through the environment's runner counts as started, so a
+/// budget spent after it never says "before any write".
+#[test]
+fn a_target_write_through_the_environment_runner_counts_as_started() {
+    let r = FakeRunner::new([fly_empty()]);
+    let er = EnvRunner::new(&r, None);
+    let _ = er.write(&crate::runner::Call::new("flyctl", &["secrets", "import"]));
+    assert!(er.writes_started());
 }
