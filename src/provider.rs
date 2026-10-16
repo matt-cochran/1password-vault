@@ -477,3 +477,15 @@ impl Verdict {
         }
     }
 }
+
+/// The catalog's external system behind `provider`, by its configuration section (for a
+/// cause about the provider itself, such as `Guard::ProviderHidesValues`).
+pub fn system_of(provider: &dyn Provider) -> crate::cause::System {
+    use crate::cause::System;
+    match provider.section() {
+        "fly" => System::Fly,
+        "azure" => System::Azure,
+        "kubernetes" => System::Kubernetes,
+        _ => System::GitHub,
+    }
+}

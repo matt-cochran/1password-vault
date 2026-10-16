@@ -53,6 +53,21 @@ fn add_to(file: &str, a: AddArgs) -> Added {
     }
 }
 
+/// The CLI invocation `opv <words>`, for rendering a cause's step.
+fn cli(words: &[&str]) -> crate::cause::Invocation {
+    let argv: Vec<String> = std::iter::once("opv")
+        .chain(words.iter().copied())
+        .map(str::to_string)
+        .collect();
+    crate::cause::Invocation::from_cli(&argv)
+}
+
+/// The Next an error renders against `inv`, as a command line.
+fn next_of(e: &Error, inv: &crate::cause::Invocation) -> Option<String> {
+    let (cause, _) = e.cause().expect("a catalog cause");
+    crate::cause::render::next_text(&cause.step(inv).1, inv)
+}
+
 fn new_key(name: &str) -> AddArgs {
     AddArgs {
         name: name.into(),
@@ -221,15 +236,23 @@ fn a_new_key_without_kind_is_refused() {
     assert!(a.err().contains("--kind"), "{}", a.err());
 }
 
-/// M6: an undeclared environment is added with init --add-env first.
+/// 05.19: an undeclared environment is the catalog's NotDeclared (audit 03.02), never the
+/// `opv init <env> --add-env` that needs an existing item.
 #[test]
-fn an_unknown_environment_says_to_add_it_with_add_env() {
+fn an_unknown_environment_is_not_declared() {
     let mut args = new_key("api/STRIPE_KEY");
     args.envs = vec!["qa".into()];
     let a = add_to(COMMENTED, args);
-    // An undeclared environment is the catalog's NotDeclared (audit 03.02); its add-env
-    // step is the add lane's to type.
     assert_eq!(a.res.unwrap_err().code_str(), "unknown_env");
+}
+
+#[test]
+fn an_unknown_environment_never_names_init_add_env() {
+    let mut args = new_key("api/STRIPE_KEY");
+    args.envs = vec!["qa".into()];
+    let a = add_to(COMMENTED, args);
+    let inv = cli(&["add", "api/STRIPE_KEY", "--kind", "secret", "--env", "qa"]);
+    assert!(!next_of(a.res.as_ref().unwrap_err(), &inv).is_some_and(|n| n.contains("init")));
 }
 
 #[test]
@@ -240,16 +263,40 @@ fn an_unknown_environment_is_refused() {
     assert!(a.res.is_err());
 }
 
+/// 05.20: a bare KEY no product declares needs its product (a usage error).
 #[test]
-fn a_key_without_product_is_refused_naming_the_product_form() {
+fn a_new_key_without_product_is_a_usage_error() {
     let a = add_to(COMMENTED, new_key("STRIPE_KEY"));
-    assert!(a.err().contains("opv add api/STRIPE_KEY"), "{}", a.err());
+    assert_eq!(a.res.unwrap_err().code_str(), "usage");
+}
+
+/// 05.20: a bare KEY that exactly one product declares names that product's key, as the
+/// help promises.
+#[test]
+fn a_bare_key_one_product_declares_is_that_products_key() {
+    let mut args = new_key("DATABASE_URL");
+    args.kind = None;
+    let a = add_to(COMMENTED, args);
+    assert!(
+        a.out.contains("api/DATABASE_URL is already declared"),
+        "{}",
+        a.out
+    );
 }
 
 #[test]
-fn a_key_without_product_is_refused_naming_the_declared_products() {
-    let a = add_to(COMMENTED, new_key("STRIPE_KEY"));
-    assert!(a.err().contains("(products: api)"), "{}", a.err());
+fn a_bare_key_several_products_declare_is_ambiguous() {
+    let file = format!(
+        "{COMMENTED}\n[products.web.keys.DATABASE_URL]\nkind = \"secret\"\nenvironments = [\"dev\"]\n"
+    )
+    .replace(
+        "[environments.dev]   # local only\n",
+        "[environments.dev]   # local only\nboundaries.web = { vault_id = \"vdev\", item_id = \"idev\" }\n",
+    );
+    let mut args = new_key("DATABASE_URL");
+    args.kind = None;
+    let a = add_to(&file, args);
+    assert_eq!(a.res.unwrap_err().code_str(), "ambiguous_name");
 }
 
 #[test]
@@ -276,7 +323,8 @@ fn a_declared_key_with_new_rules_is_refused() {
     let mut args = new_key("api/DATABASE_URL");
     args.rules = vec!["prefix=postgres://".into()];
     let a = add_to(COMMENTED, args);
-    assert!(a.err().contains("by hand"), "{}", a.err());
+    // Pinned wording changed with the catalog: a hand edit is AlreadyDeclared's step.
+    assert_eq!(a.res.unwrap_err().code_str(), "already_declared");
 }
 
 #[test]
@@ -302,10 +350,42 @@ fn the_next_step_checks_the_environment_which_adds_the_field() {
 #[test]
 fn a_refusal_points_at_the_add_help() {
     let a = add_to(COMMENTED, new_key("api/bad"));
+    let inv = cli(&["add", "api/bad", "--kind", "secret"]);
     assert_eq!(
-        a.res.as_ref().unwrap_err().next_step(),
+        next_of(a.res.as_ref().unwrap_err(), &inv).as_deref(),
         Some("opv add --help")
     );
+}
+
+/// 05.38: the field is created by a signed-in person's check.
+#[test]
+fn the_then_line_says_the_check_adds_the_field_when_signed_in() {
+    let mut args = new_key("api/STRIPE_KEY");
+    args.envs = vec!["prod".into()];
+    let a = add_to(COMMENTED, args);
+    assert!(
+        a.out
+            .contains("adds the field to the item when you are signed in"),
+        "{}",
+        a.out
+    );
+}
+
+/// C14: a loader refusal of the text add would write points at no line of it.
+#[test]
+fn a_refusal_of_the_proposed_text_names_no_line() {
+    let file = format!(
+        "{COMMENTED}\n[products.my_app.keys.K]\nkind = \"secret\"\nenvironments = [\"prod\"]\n"
+    )
+    .replace(
+        "[environments.prod]\n",
+        "[environments.prod]\nboundaries.my_app = { vault_id = \"vprd\", item_id = \"iprd\" }\n",
+    );
+    let a = add_to(&file, new_key("my-app/K"));
+    assert!(!matches!(
+        a.res.as_ref().unwrap_err().cause(),
+        Some((Cause::ConfigInvalid { at: Some(_), .. }, _))
+    ));
 }
 
 // --- a manifest in 1Password (FR-44): the same edit through ConfigStore ---

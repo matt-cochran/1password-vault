@@ -6,24 +6,60 @@ fn fleet() -> Fleet {
     crate::config::load("tests/fixtures/secrets.toml").unwrap()
 }
 
+/// The CLI invocation `opv <words>`, for rendering a cause's step.
+fn cli(words: &[&str]) -> crate::cause::Invocation {
+    let argv: Vec<String> = std::iter::once("opv")
+        .chain(words.iter().copied())
+        .map(str::to_string)
+        .collect();
+    crate::cause::Invocation::from_cli(&argv)
+}
+
+/// The Next an error renders against `inv`, as a command line.
+fn next_of(e: &Error, inv: &crate::cause::Invocation) -> Option<String> {
+    let (cause, _) = e.cause().expect("a catalog cause");
+    crate::cause::render::next_text(&cause.step(inv).1, inv)
+}
+
+// Pinned wording changed with the catalog (05.39): an undeclared or malformed entry is a
+// typed cause, not free text.
 #[test]
 fn replace_names_must_be_declared() {
     let e = pairs(&fleet(), &["allumata/NOPE".to_string()], "--replace").unwrap_err();
-    assert!(e.mentions("not a declared key"), "{e}");
+    assert_eq!(e.code_str(), "undeclared_key");
 }
 
 #[test]
 fn a_fleet_replace_needs_a_product() {
     let e = pairs(&fleet(), &["OPENAI_API_KEY".to_string()], "--replace").unwrap_err();
-    assert!(e.mentions("write product/KEY"), "{e}");
+    assert_eq!(e.code_str(), "usage");
 }
 
-/// Fly cannot show a secret's value: adopting from it says so before any read.
+/// Fly cannot show a secret's value: adopting from it is the provider-hides-values guard.
 #[test]
-fn a_target_that_hides_values_is_refused_with_the_manual_way() {
+fn a_target_that_hides_values_is_refused_by_its_guard() {
     let r = FakeRunner::default();
     let e = read_source(&fleet(), "staging", &Source::Target("portfolio".into()), &r).unwrap_err();
-    assert_eq!(e.next_step(), Some("opv adopt staging --from <file.env>"));
+    assert!(matches!(
+        e.cause(),
+        Some((
+            Cause::Guard {
+                guard: Guard::ProviderHidesValues {
+                    system: crate::cause::System::Fly
+                }
+            },
+            _
+        ))
+    ));
+}
+
+/// 05.03 (S1): the refusal's Next never sends the person back to the adopt that refused.
+#[test]
+fn a_target_that_hides_values_never_names_the_same_adopt() {
+    let r = FakeRunner::default();
+    let e = read_source(&fleet(), "staging", &Source::Target("portfolio".into()), &r).unwrap_err();
+    let inv = cli(&["adopt", "staging", "--from", "target:portfolio"]);
+    assert!(!next_of(&e, &inv).is_some_and(|n| n.contains("adopt")));
 }
 
 #[test]
@@ -42,14 +78,12 @@ fn the_bare_target_form_is_a_usage_error() {
     assert_eq!(e.code(), crate::error::Code::Usage);
 }
 
-/// The refusal names the environment's targets and the one working form.
+/// With one target, the refusal's command is the named form.
 #[test]
-fn the_bare_target_error_names_the_targets_and_the_named_form() {
+fn the_bare_target_error_names_the_named_form() {
     let e = source_from(&fleet(), "staging", "target").unwrap_err();
-    assert!(
-        e.mentions("target:portfolio") && e.mentions("portfolio"),
-        "{e}"
-    );
+    let inv = cli(&["adopt", "staging", "--from", "target"]);
+    assert!(next_of(&e, &inv).is_some_and(|n| n.contains("--from target:portfolio")));
 }
 
 #[test]
@@ -387,4 +421,43 @@ fn skip_names_must_be_declared() {
     let mut o = opts(&dir, false, &[]);
     o.skip = vec!["api/NOPE".into()];
     assert!(run(&fleet, "dev", &o, &op, &mut Vec::new()).is_err());
+}
+
+// 05.04 (S1): the plan's Next applies exactly what was reviewed --------------------------
+
+fn narrowed() -> Opts {
+    Opts {
+        source: Source::Dotenv(PathBuf::from("my env/.env.staging")),
+        replace: vec!["api/X".into()],
+        rotate: vec!["api/X".into()],
+        skip: vec!["api/LEGACY_TOKEN".into()],
+        apply: false,
+        json: false,
+    }
+}
+
+#[test]
+fn the_plans_next_keeps_skip() {
+    let next = crate::cause::render::cmd_text(&next_step("staging", &narrowed(), 1));
+    assert!(next.contains("--skip api/LEGACY_TOKEN"), "{next}");
+}
+
+#[test]
+fn the_plans_next_keeps_rotate() {
+    let next = crate::cause::render::cmd_text(&next_step("staging", &narrowed(), 1));
+    assert!(next.contains("--rotate api/X"), "{next}");
+}
+
+#[test]
+fn the_plans_next_quotes_a_path_with_a_space() {
+    let next = crate::cause::render::cmd_text(&next_step("staging", &narrowed(), 1));
+    assert!(next.contains("--from 'my env/.env.staging'"), "{next}");
+}
+
+// 05.10 (S2): a read-back failure names the command that wrote ---------------------------
+
+#[test]
+fn a_read_back_failure_of_adopt_names_its_plan() {
+    let by = plan_command("dev", &Source::Target("web".into()));
+    assert_eq!(by.0, "adopt dev --from target:web");
 }

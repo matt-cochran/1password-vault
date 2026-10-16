@@ -60,7 +60,7 @@ fn field(op: &FakeOp, id: &str, label: &str) -> Option<String> {
 fn a_base64_key_is_generated_as_base64() {
     let (fleet, _, _) = world();
     assert_eq!(
-        recipe("api/SESSION_KEY", &spec(&fleet, "SESSION_KEY")).unwrap(),
+        recipe("api", "SESSION_KEY", "dev", &spec(&fleet, "SESSION_KEY")).unwrap(),
         Recipe::Base64(32)
     );
 }
@@ -68,21 +68,21 @@ fn a_base64_key_is_generated_as_base64() {
 #[test]
 fn a_provider_key_with_a_prefix_is_refused() {
     let (fleet, _, _) = world();
-    assert!(recipe("api/STRIPE_KEY", &spec(&fleet, "STRIPE_KEY")).is_err());
+    assert!(recipe("api", "STRIPE_KEY", "dev", &spec(&fleet, "STRIPE_KEY")).is_err());
 }
 
 /// #157: policy_refused exits 6 (policy), as its code says.
 #[test]
 fn a_refused_key_exits_as_its_code_says() {
     let (fleet, _, _) = world();
-    let e = recipe("api/STRIPE_KEY", &spec(&fleet, "STRIPE_KEY")).unwrap_err();
+    let e = recipe("api", "STRIPE_KEY", "dev", &spec(&fleet, "STRIPE_KEY")).unwrap_err();
     assert_eq!(e.exit_code(), e.code().exit_code());
 }
 
 #[test]
 fn a_key_without_a_byte_length_is_refused() {
     let (fleet, _, _) = world();
-    assert!(recipe("api/PLAIN", &spec(&fleet, "PLAIN")).is_err());
+    assert!(recipe("api", "PLAIN", "dev", &spec(&fleet, "PLAIN")).is_err());
 }
 
 #[test]
@@ -179,4 +179,74 @@ fn an_undeclared_key_is_refused() {
     let (fleet, op, _) = world();
     let e = run(&fleet, "dev", &["api/NOPE".into()], &op, &mut Vec::new()).unwrap_err();
     assert_eq!(e.code().as_str(), "undeclared_key");
+}
+
+// 05.11 (S2): each refusal says its own reason ------------------------------------------
+
+fn why_of(e: &Error) -> &'static str {
+    match e.cause() {
+        Some((
+            Cause::Guard {
+                guard: Guard::GenerateRefused { why, .. },
+            },
+            _,
+        )) => why,
+        _ => "",
+    }
+}
+
+/// `api/SESSION_KEY` (base64, 32 bytes) changed by `f`.
+fn session_key_with(f: impl FnOnce(&mut KeySpec)) -> KeySpec {
+    let (fleet, _, _) = world();
+    let mut s = spec(&fleet, "SESSION_KEY");
+    f(&mut s);
+    s
+}
+
+#[test]
+fn a_personal_key_is_refused_as_personal() {
+    let s = session_key_with(|s| s.personal = true);
+    let e = recipe("api", "SESSION_KEY", "dev", &s).unwrap_err();
+    assert!(why_of(&e).contains("personal"), "{e}");
+}
+
+#[test]
+fn a_byte_count_out_of_range_is_refused_naming_the_range() {
+    let s = session_key_with(|s| s.rules.base64_bytes = Some(8));
+    let e = recipe("api", "SESSION_KEY", "dev", &s).unwrap_err();
+    assert!(why_of(&e).contains("16 and 1024"), "{e}");
+}
+
+#[test]
+fn a_refusal_names_the_environment() {
+    let (fleet, _, _) = world();
+    let e = recipe("api", "STRIPE_KEY", "dev", &spec(&fleet, "STRIPE_KEY")).unwrap_err();
+    assert!(matches!(
+        e.cause(),
+        Some((Cause::Guard { guard: Guard::GenerateRefused { env, .. } }, _))
+            if env.as_str() == "dev"
+    ));
+}
+
+#[test]
+fn a_filled_field_is_refused_as_already_holding_a_value() {
+    let (fleet, op, _) = world();
+    let e = run(
+        &fleet,
+        "dev",
+        &["api/WEBHOOK_HEX".into()],
+        &op,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert!(why_of(&e).contains("already holds a value"), "{e}");
+}
+
+// 05.39 (S3): argument errors carry their own codes --------------------------------------
+
+#[test]
+fn a_key_without_its_product_is_a_usage_error() {
+    let (fleet, op, _) = world();
+    let e = run(&fleet, "dev", &["SESSION_KEY".into()], &op, &mut Vec::new()).unwrap_err();
+    assert_eq!(e.code_str(), "usage");
 }
