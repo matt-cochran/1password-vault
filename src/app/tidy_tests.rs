@@ -1224,6 +1224,14 @@ fn an_edit_landing_with_the_tidy_says_to_check_the_history() {
 }
 
 #[test]
+fn an_edit_landing_with_the_tidy_never_says_tidied() {
+    let op = FakeOp::person(messy_item());
+    op.racing.set(Some(someone_edits_session));
+    tidied(&op);
+    assert!(!op.notes().contains("tidied 1Password"), "{}", op.notes());
+}
+
+#[test]
 fn an_edit_landing_with_the_tidy_is_found_by_a_fresh_re_read_without_an_echo() {
     let op = FakeOp::person(messy_item());
     op.echo.set(false);

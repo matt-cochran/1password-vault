@@ -510,7 +510,7 @@ fn read_item_as(
     }
     match tidy(r, fleet, env_name, env, b, &date, stamp, plan) {
         Ok(Some(t)) => {
-            if !t.changes.is_empty() {
+            if !t.changes.is_empty() && t.failure.is_none() {
                 r.note(&format!(
                     "tidied 1Password ({env_name}): {}",
                     convention::summary(&t.changes)
