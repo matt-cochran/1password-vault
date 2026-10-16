@@ -236,12 +236,14 @@ fn doctor_scoped(
 }
 
 /// Flags of `sync` that `plan` takes too, with whether each takes a value.
-const SYNC_FLAGS_PLAN_KEEPS: [(&str, bool); 5] = [
+const SYNC_FLAGS_PLAN_KEEPS: [(&str, bool); 7] = [
     ("--target", true),
     ("--product", true),
     ("--rotate", true),
     ("--json", false),
     ("--config", true),
+    ("--timeout", true),
+    ("--verbose", false),
 ];
 
 /// The read form of a command, so a substituted name never lands in a write (§4.2): `sync`
