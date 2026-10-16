@@ -3482,4 +3482,32 @@ fn l1_a_built_step_keeps_an_inline_timeout_flag() {
     };
     let inv = cli(&["opv", "sync", "prod", "--timeout=60"]);
     assert_eq!(next_in(&c, &inv), "opv plan prod --timeout=60");
+
+/// L5: a malformed `.env` holds secret values only a person may open, so fixing it
+/// is a person's step before the same command runs again.
+#[test]
+fn l5_invalid_dotenv_needs_a_person() {
+    let c = Cause::InputInvalid {
+        path: PathBuf::from("app/.env"),
+        kind: InputKind::Dotenv,
+        at: Some(Location { line: 7, col: 1 }),
+        field: "BAD KEY".into(),
+        rule: FieldRule::Pattern {
+            id: PatternId::KeyName,
+        },
+    };
+    assert!(c.human_required(&inv()));
+}
+
+/// L5: a setup recipe holds no secret value, so an agent may fix it too.
+#[test]
+fn l5_invalid_setup_recipe_needs_no_person() {
+    let c = Cause::InputInvalid {
+        path: PathBuf::from("opv.recipe"),
+        kind: InputKind::SetupRecipe,
+        at: Some(Location { line: 3, col: 1 }),
+        field: "steps".into(),
+        rule: FieldRule::Syntax,
+    };
+    assert!(!c.human_required(&inv()));
 }

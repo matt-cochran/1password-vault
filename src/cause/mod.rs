@@ -245,6 +245,8 @@ pub enum Action {
         source: ConfigSource,
         field: DottedPath,
     },
+    /// Edit an input file that holds secret values; only a person opens it.
+    EditInput { path: PathBuf },
     /// Install or update a tool.
     Install { tool: String },
     /// Free of person-only meaning: check something named by the subject.
@@ -266,6 +268,7 @@ impl Action {
                 | Action::Confirm { .. }
                 | Action::Revoke { .. }
                 | Action::OwnerSetup { .. }
+                | Action::EditInput { .. }
         )
     }
 }
