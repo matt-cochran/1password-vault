@@ -70,14 +70,21 @@ pub fn locate(
     let team = fleet.environment(env_name)?;
     let vault = match private_vault(r, team)? {
         Some(v) => v,
-        None => return Err(not_set_up(env_name)),
+        None => return Err(not_set_up(env_name, &Missing::Vault(vault_titles(team)))),
     };
-    let item =
-        match onepassword_init::find_item(r, &vault.id, &item_title(team, project), &Host::detect)?
-        {
-            Lookup::Found(i) => i,
-            Lookup::Missing(_) => return Err(not_set_up(env_name)),
-        };
+    let title = item_title(team, project);
+    let item = match onepassword_init::find_item(r, &vault.id, &title, &Host::detect)? {
+        Lookup::Found(i) => i,
+        Lookup::Missing(_) => {
+            return Err(not_set_up(
+                env_name,
+                &Missing::Item {
+                    title,
+                    vault: vault.name.clone(),
+                },
+            ));
+        }
+    };
     Ok(Some(Boundary {
         vault_id: vault.id,
         item_id: item.id,
@@ -90,11 +97,7 @@ pub(crate) fn private_vault(
     r: &dyn CommandRunner,
     team: &Environment,
 ) -> Result<Option<onepassword_init::Named>, Error> {
-    let titles: Vec<&str> = match &team.personal_vault {
-        Some(t) => vec![t.as_str()],
-        None => PRIVATE_VAULTS.to_vec(),
-    };
-    for title in titles {
+    for title in vault_titles(team) {
         if let Lookup::Found(v) = onepassword_init::find_vault(r, title, &Host::detect)? {
             return Ok(Some(v));
         }
@@ -102,10 +105,38 @@ pub(crate) fn private_vault(
     Ok(None)
 }
 
-/// FR-55: the person has not created their personal item yet (or the vault is missing).
-/// Code-free and value-free; `bootstrap` creates it.
-fn not_set_up(env_name: &str) -> Error {
-    Error::Source(format!("your personal item for {env_name} is not set up yet").into())
+/// The vault titles a personal item may be in: `personal_vault`, else the person's own
+/// vault by any of its names.
+fn vault_titles(team: &Environment) -> Vec<&str> {
+    match &team.personal_vault {
+        Some(t) => vec![t.as_str()],
+        None => PRIVATE_VAULTS.to_vec(),
+    }
+}
+
+/// What a personal item lookup did not find.
+enum Missing<'a> {
+    /// No vault with any of these titles.
+    Vault(Vec<&'a str>),
+    /// No item with this title in the vault.
+    Item { title: String, vault: String },
+}
+
+/// FR-55: the person has not created their personal item yet (or the vault is missing),
+/// naming the vault or item title opv looked for (audit 04.16). Value-free; `bootstrap`
+/// creates it. The catalog's `NotFound` needs a failed call, and a lookup that listed no
+/// match made none, so this stays a plain error until the catalog has a cause for it.
+fn not_set_up(env_name: &str, missing: &Missing<'_>) -> Error {
+    let what = match missing {
+        Missing::Vault(titles) => {
+            let quoted: Vec<String> = titles.iter().map(|t| format!("{t:?}")).collect();
+            format!("no vault titled {}", quoted.join(" or "))
+        }
+        Missing::Item { title, vault } => {
+            format!("no item titled {title:?} in vault {vault:?}")
+        }
+    };
+    Error::Source(format!("your personal item for {env_name} is not set up yet: {what}").into())
         .with_code(crate::error::Code::ItemNotFound)
         .with_next("opv bootstrap")
 }
@@ -131,12 +162,19 @@ pub fn merged_fields(
         .into_iter()
         .filter(|f| !claimed.contains(&(f.section.clone(), f.label.clone())))
         .collect();
-    let Ok(Some(at)) = locate(r, fleet, env_name, project) else {
-        return Ok(out);
+    // Audit 04.16: a missing personal item leaves the keys missing; any other failure (a
+    // sign-in, 1Password not answering) is its own cause and is reported as such.
+    let at = match locate(r, fleet, env_name, project) {
+        Ok(Some(at)) => at,
+        Ok(None) => return Ok(out),
+        Err(e) if e.code() == crate::error::Code::ItemNotFound => return Ok(out),
+        Err(e) => return Err(e),
     };
     let team = fleet.environment(env_name)?;
-    let Ok(item) = onepassword::read_whole(r, team, &at) else {
-        return Ok(out);
+    let item = match onepassword::read_whole(r, team, &at) {
+        Ok(item) => item,
+        Err(e) if e.code() == crate::error::Code::ItemNotFound => return Ok(out),
+        Err(e) => return Err(e),
     };
     let Ok((layout, _)) = onepassword_tidy::parse(item.raw()) else {
         return Ok(out);

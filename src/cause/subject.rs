@@ -69,9 +69,12 @@ pub enum AccountRef {
     Id(AccountId),
     Email(String),
     Shorthand(String),
+    /// No account was named: the person is adding one, or none is on this machine.
+    Unnamed,
 }
 
-/// Where the account in effect was chosen.
+/// Where the account in effect was chosen (`Argument`: a positional argument, as in
+/// `opv account use <who>`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "from", rename_all = "snake_case")]
 pub enum AccountSource {
@@ -80,6 +83,7 @@ pub enum AccountSource {
     Flag,
     Environment { env: EnvName },
     OpDefault,
+    Argument,
 }
 
 /// An external system opv talks to (each has one diagnosis strategy, §5).

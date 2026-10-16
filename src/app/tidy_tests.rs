@@ -1669,3 +1669,50 @@ fn a_write_with_no_account_on_this_machine_steps_to_login_add() {
     let e = require_person(&r, "opv target add").unwrap_err();
     assert_eq!(e.next_step(), Some("opv login --add"));
 }
+
+// --- error-catalog lane (audit 04.01, 04.19) ---
+
+/// Audit 04.01: the note after a refused tidy carries the message, never a category prefix.
+#[test]
+fn a_refused_write_note_has_no_category_prefix() {
+    let op = FakeOp::person(messy_item());
+    op.edit.set(Edit::Refuse);
+    tidied(&op);
+    assert!(!op.notes().contains("source error:"), "{}", op.notes());
+}
+
+/// Audit 04.19: an `op whoami` without a user type is never reported as a service account,
+/// Connect or CI; it is a session opv could not confirm.
+#[test]
+fn a_whoami_without_a_user_type_is_a_sign_in_not_a_service_account() {
+    let r = crate::runner::fake::FakeRunner::new([
+        crate::runner::Output::success("{}"),
+        crate::runner::Output::success("{}"),
+    ]);
+    let e = require_person(&r, "opv target add").unwrap_err();
+    assert!(
+        matches!(
+            e.cause(),
+            Some((crate::cause::Cause::NotSignedIn { .. }, _))
+        ),
+        "{e:?}"
+    );
+}
+
+/// Audit 04.19: CI is refused as a run without a person at a terminal (catalog
+/// `NeedsTerminal`), never as a service account.
+#[test]
+fn a_write_in_ci_needs_a_persons_terminal() {
+    let r = crate::runner::fake::FakeRunner::default();
+    let e = crate::host::with_test_host(
+        crate::host::Host::from_env(&crate::host::FakeEnv::new("linux").var("CI")),
+        || require_person(&r, "opv target add").unwrap_err(),
+    );
+    assert!(
+        matches!(
+            e.cause(),
+            Some((crate::cause::Cause::NeedsTerminal { .. }, _))
+        ),
+        "{e:?}"
+    );
+}

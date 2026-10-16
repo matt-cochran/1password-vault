@@ -317,3 +317,30 @@ fn a_signed_out_run_is_not_told_its_personal_item_is_missing() {
         .unwrap_err();
     assert_ne!(e.code(), crate::error::Code::ItemNotFound);
 }
+
+// --- audit 04.16: the setup error names what opv looked for; other failures surface ---
+
+#[test]
+fn a_missing_personal_item_is_named_by_its_title() {
+    let op = FakeOp::default();
+    op.vaults
+        .borrow_mut()
+        .push(("vpriv0000000000000000000001".into(), "Private".into()));
+    let e = locate(&op, &personal_fleet(), "dev", "myapp").unwrap_err();
+    assert!(e.text().contains("myapp · dev (personal)"), "{e}");
+}
+
+#[test]
+fn a_missing_personal_vault_is_named_by_the_titles_tried() {
+    let op = FakeOp::default();
+    let e = locate(&op, &personal_fleet(), "dev", "myapp").unwrap_err();
+    assert!(e.text().contains("\"Private\""), "{e}");
+}
+
+#[test]
+fn merged_fields_reports_a_failure_that_is_not_a_missing_item() {
+    let op = FakeOp::default();
+    op.signed_in.set(false);
+    let team = vec![team_field("OPENAI_API_KEY", "sk-team")];
+    assert!(merged_fields(&op, &personal_fleet(), "dev", team, "myapp").is_err());
+}
