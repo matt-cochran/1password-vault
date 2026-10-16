@@ -2264,7 +2264,7 @@ mod tests {
             include_str!("../../tests/fixtures/op/failures/02-account-not-on-machine.stderr"),
         );
         let h = Host::from_env(&FakeEnv::new("linux"));
-        let e = session_error(diagnose(&r, &|| h.clone()).unwrap(), &h, None, None).unwrap();
+        let e = session_error(diagnose(&r, &|| h).unwrap(), &h, None, None).unwrap();
         assert_eq!(e.code_str(), "account_not_registered");
     }
 
