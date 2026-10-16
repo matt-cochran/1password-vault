@@ -577,6 +577,15 @@ mod failure {
         })
     }
 
+    pub(super) fn signed_out() -> bool {
+        LAST.with(|l| {
+            l.borrow().as_ref().is_some_and(|f| {
+                f.call == CALL.with(Cell::get)
+                    && super::says_signed_out(&f.program, &f.stderr.bytes)
+            })
+        })
+    }
+
     pub(super) fn take() -> Option<crate::scrub::Excerpt> {
         let f = LAST.with(|l| l.borrow_mut().take())?;
         if f.call != CALL.with(Cell::get) {
@@ -630,6 +639,13 @@ fn says(
 /// caller reports it at once instead of retrying.
 pub fn last_failure_not_found() -> bool {
     failure::not_found()
+}
+
+/// True when the last failed captured call on this thread (as for
+/// [`last_failure_not_found`]) said no one is signed in to its service (its CLI's
+/// [`crate::host::Tool::signed_out`] phrases), so the diagnosis is a sign-in, not an outage.
+pub fn last_failure_signed_out() -> bool {
+    failure::signed_out()
 }
 
 /// The scrubbed stderr excerpt of the failed call the error at hand came from (a read
@@ -2855,7 +2871,7 @@ mod tests {
         let e = crate::error::Error::Target("app is dead".into());
         assert_eq!(
             crate::error::report(&e, "opv doctor", take_failure_excerpt().as_ref()),
-            "opv: target error: app is dead\nNext: opv doctor\n"
+            "opv: target error: app is dead\nDo: fix the cause above\nNext: opv doctor\n"
         );
     }
 

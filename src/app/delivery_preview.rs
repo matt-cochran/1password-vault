@@ -126,6 +126,21 @@ pub fn build(
     role: Option<&str>,
     runner: &dyn CommandRunner,
 ) -> Result<Value, Error> {
+    build_for(fleet, env_name, product, role, None, runner)
+}
+
+/// [`build`] for a transport (#139): `remote` names a reviewed remote profile, whose pinned
+/// connection and command are added under `remote` (identifiers and the public host key's
+/// type only), after the same checks `opv run --remote` makes before any read. `transport`
+/// is `local` or `remote`; `remote_profiles` lists the product's profile names either way.
+pub fn build_for(
+    fleet: &Fleet,
+    env_name: &str,
+    product: Option<&str>,
+    role: Option<&str>,
+    remote: Option<&str>,
+    runner: &dyn CommandRunner,
+) -> Result<Value, Error> {
     let product_name = match product {
         Some(p) => p.to_string(),
         None => super::pick_product(fleet, env_name, None, "run")?,
@@ -140,6 +155,27 @@ pub fn build(
             .with_next(format!("opv run {env_name} --preview")));
     }
     let selection = select(env_name, env, &product_name, prod, role)?;
+    let remote_doc = match remote {
+        Some(name) => {
+            let r = super::run::remote_profile(fleet, env_name, &product_name, role, name)?;
+            Some(json!({
+                "profile": name,
+                "host": r.host,
+                "port": r.port,
+                "user": r.user,
+                "host_key_type": r.host_key.split(' ').next(),
+                "host_key_pinned": true,
+                "workdir": r.workdir,
+                "command": r.command,
+                "opv": r.opv,
+                "environments": r.environments,
+                "roles": r.roles,
+                "ssh": ssh_present(),
+                "file_delivery": "checked on the remote host: a user-owned $XDG_RUNTIME_DIR on tmpfs, else refused",
+            }))
+        }
+        None => None,
+    };
     let environment_mode = match prod.local.as_ref().map(|l| l.environment) {
         Some(crate::domain::model::LocalEnvironment::DeclaredOnly) => "declared_only",
         _ => "inherit",
@@ -148,6 +184,11 @@ pub fn build(
         .local
         .as_ref()
         .and_then(|l| l.secrets_dir_env.as_deref());
+    let environment_mode = if remote.is_some() {
+        "declared_only"
+    } else {
+        environment_mode
+    };
     let file_delivery = match crate::app::local_delivery::runtime_dir_support() {
         Ok(_) => json!({"supported": true, "reason": Value::Null}),
         Err(reason) => json!({"supported": false, "reason": reason}),
@@ -190,7 +231,18 @@ pub fn build(
             .iter()
             .map(|k| k.as_str())
             .collect::<Vec<_>>(),
+        "transport": if remote.is_some() { "remote" } else { "local" },
+        "remote": remote_doc,
+        "remote_profiles": prod.remotes.keys().collect::<Vec<_>>(),
     }))
+}
+
+/// Whether the OpenSSH client is on PATH (`yes`/`no`), found by looking, never by running.
+fn ssh_present() -> &'static str {
+    let found = std::env::var_os("PATH").is_some_and(|p| {
+        std::env::split_paths(&p).any(|d| d.join("ssh").is_file() || d.join("ssh.exe").is_file())
+    });
+    if found { "yes" } else { "no" }
 }
 
 /// The two prerequisites a person needs for a run: `op` present and signed in. Found with
@@ -211,16 +263,18 @@ fn prerequisites(runner: &dyn CommandRunner) -> Value {
 
 /// `opv run <env> [--product <p>] [--role <r>] --preview [--json]`: build the document and
 /// print it. Reads no value, runs nothing, and returns 0.
+#[allow(clippy::too_many_arguments)]
 pub fn preview_for(
     fleet: &Fleet,
     env_name: &str,
     product: Option<&str>,
     role: Option<&str>,
+    remote: Option<&str>,
     json_out: bool,
     runner: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    let doc = build(fleet, env_name, product, role, runner)?;
+    let doc = build_for(fleet, env_name, product, role, remote, runner)?;
     if json_out {
         let text = serde_json::to_string(&doc)
             .map_err(|e| Error::Config(format!("cannot render the preview ({e})").into()))?;
@@ -283,6 +337,33 @@ fn write_text(doc: &Value, out: &mut dyn Write) -> io::Result<()> {
             "file delivery: unsupported ({})",
             fd["reason"].as_str().unwrap_or("unknown")
         )?;
+    }
+    let r = &doc["remote"];
+    if r.is_object() {
+        writeln!(
+            out,
+            "transport: remote profile {} ({}@{}:{}, pinned {} host key; ssh on PATH: {})",
+            r["profile"].as_str().unwrap_or(""),
+            r["user"].as_str().unwrap_or(""),
+            r["host"].as_str().unwrap_or(""),
+            r["port"],
+            r["host_key_type"].as_str().unwrap_or(""),
+            r["ssh"].as_str().unwrap_or("unknown"),
+        )?;
+        let command: Vec<&str> = r["command"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        writeln!(
+            out,
+            "remote command: {} (in {})",
+            command.join(" "),
+            r["workdir"].as_str().unwrap_or("")
+        )?;
+    } else {
+        writeln!(out, "transport: local")?;
     }
     writeln!(
         out,

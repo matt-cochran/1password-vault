@@ -106,6 +106,7 @@ pub(crate) fn private_vault(
 /// Code-free and value-free; `bootstrap` creates it.
 fn not_set_up(env_name: &str) -> Error {
     Error::Source(format!("your personal item for {env_name} is not set up yet").into())
+        .with_code(crate::error::Code::ItemNotFound)
         .with_next("opv bootstrap")
 }
 

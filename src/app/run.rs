@@ -99,6 +99,115 @@ pub fn run_with_role(
     command: &[String],
     runner: &dyn CommandRunner,
 ) -> Result<i32, Error> {
+    launch(
+        fleet,
+        env_name,
+        product,
+        role,
+        Launch::Local(command),
+        runner,
+    )
+}
+
+/// `opv run <env> --product <p> [--role <r>] --remote <profile>` (#139): the same selection
+/// and references as a local run, delivered by `op run`'s child `opv remote-send` to the
+/// profile's pinned host, where the pinned command runs. The profile, its environments and
+/// its roles are checked before anything is read.
+pub fn run_remote(
+    fleet: &Fleet,
+    env_name: &str,
+    product: Option<&str>,
+    role: Option<&str>,
+    remote: &str,
+    runner: &dyn CommandRunner,
+) -> Result<i32, Error> {
+    let product = match product {
+        Some(p) => p.to_string(),
+        None => super::pick_product(fleet, env_name, None, "run")?,
+    };
+    launch(
+        fleet,
+        env_name,
+        &product,
+        role,
+        Launch::Remote(remote),
+        runner,
+    )
+}
+
+/// Where a run's values go: a local command, or a reviewed remote profile (#139).
+#[derive(Clone, Copy)]
+enum Launch<'a> {
+    Local(&'a [String]),
+    Remote(&'a str),
+}
+
+/// The profile `name` of `product`, if it may receive `env_name`'s values for `role` (#139).
+/// Checked before any 1Password read; every refusal says nothing was read.
+pub fn remote_profile<'a>(
+    fleet: &'a Fleet,
+    env_name: &str,
+    product: &str,
+    role: Option<&str>,
+    name: &str,
+) -> Result<&'a crate::domain::model::Remote, Error> {
+    let prod = fleet
+        .products
+        .get(product)
+        .ok_or_else(|| super::undefined_product(fleet, product, Some(env_name)))?;
+    let Some(r) = prod.remotes.get(name) else {
+        let known: Vec<&str> = prod.remotes.keys().map(String::as_str).collect();
+        let listed = if known.is_empty() {
+            format!(
+                "it declares none; a person adds a reviewed profile under \
+                 [products.{product}.remotes.<name>]"
+            )
+        } else {
+            format!("declared: {}", known.join(", "))
+        };
+        return Err(Error::Config(
+            format!(
+                "product {product} has no remote profile {name:?} ({listed}); nothing was read"
+            )
+            .into(),
+        )
+        .with_code(crate::error::Code::Usage));
+    };
+    if !r.environments.iter().any(|e| e == env_name) {
+        return Err(Error::Policy(
+            format!(
+                "remote profile {name} of {product} may receive {} values only, not {env_name}'s; \
+                 nothing was read",
+                r.environments.join(", ")
+            )
+            .into(),
+        )
+        .with_code(crate::error::Code::PolicyRefused));
+    }
+    if let (Some(allowed), Some(role)) = (&r.roles, role)
+        && !allowed.iter().any(|x| x == role)
+    {
+        return Err(Error::Policy(
+            format!(
+                "remote profile {name} of {product} runs roles {} only, not {role}; nothing was \
+                 read",
+                allowed.join(", ")
+            )
+            .into(),
+        )
+        .with_code(crate::error::Code::PolicyRefused));
+    }
+    Ok(r)
+}
+
+fn launch(
+    fleet: &Fleet,
+    env_name: &str,
+    product: &str,
+    role: Option<&str>,
+    to: Launch<'_>,
+    runner: &dyn CommandRunner,
+) -> Result<i32, Error> {
     let env = fleet.environment(env_name)?;
     let prod = fleet
         .products
@@ -107,12 +216,16 @@ pub fn run_with_role(
     if prod.source_only {
         return Err(source_only_error(fleet, env_name, product));
     }
-    if command.is_empty() {
-        return Err(Error::Config(
-            "no command given (usage: run <env> --product <p> -- <cmd>...)".into(),
-        )
-        .with_next("opv run --help"));
-    }
+    let remote = match to {
+        Launch::Local([]) => {
+            return Err(Error::Config(
+                "no command given (usage: run <env> --product <p> -- <cmd>...)".into(),
+            )
+            .with_next("opv run --help"));
+        }
+        Launch::Local(_) => None,
+        Launch::Remote(name) => Some((name, remote_profile(fleet, env_name, product, role, name)?)),
+    };
 
     let selection = super::delivery_preview::select(env_name, env, product, prod, role)?;
     let selected: Vec<(&String, &KeySpec)> = selection.delivered;
@@ -125,6 +238,8 @@ pub fn run_with_role(
         let project = personal::project_name(runner, &std::env::current_dir().unwrap_or_default());
         match personal::locate(runner, fleet, env_name, &project) {
             Ok(Some(e)) => Some(e),
+            // A sign-in, network or op failure is its own cause, not a missing item.
+            Err(e) if e.code() != crate::error::Code::ItemNotFound => return Err(e),
             Ok(None) | Err(_) => {
                 let labels: Vec<String> = selected
                     .iter()
@@ -208,16 +323,22 @@ pub fn run_with_role(
     // #136, #137: a product with `[products.<p>.local]` runs its app through opv's local
     // delivery step, as `op run`'s child: it keeps only what the product declares and
     // writes `file` keys to a private RAM directory (names and paths only in argv).
-    let delivery = prod
-        .local
-        .as_ref()
-        .map(|l| delivery_args(l, &selected))
-        .transpose()?;
+    let delivery = match (remote, &to) {
+        // #139: the remote step carries the profile and the names; the command is pinned.
+        (Some((name, r)), _) => Some(remote_args(name, r, prod, &selected)?),
+        (None, _) => prod
+            .local
+            .as_ref()
+            .map(|l| delivery_args(l, &selected))
+            .transpose()?,
+    };
     let mut args: Vec<&str> = vec!["run", "--"];
     if let Some(d) = &delivery {
         args.extend(d.iter().map(String::as_str));
     }
-    args.extend(command.iter().map(String::as_str));
+    if let Launch::Local(command) = to {
+        args.extend(command.iter().map(String::as_str));
+    }
 
     // Clear all declared keys, including other products and mode-skipped keys.
     // Keep PATH and authentication context; add only selected references afterward.
@@ -235,6 +356,38 @@ pub fn run_with_role(
             io::ErrorKind::NotFound => onepassword::op_missing(&Host::detect()),
             k => Error::Dependency(format!("cannot run {OP} ({k})").into()),
         })
+}
+
+/// `opv remote-send --plan <json>` (#139): this opv binary and the plan (the profile's
+/// pinned connection, key names, file paths, directory variable, working directory and
+/// command). Names, paths and a public key only, never a value.
+fn remote_args(
+    name: &str,
+    remote: &crate::domain::model::Remote,
+    prod: &crate::domain::Product,
+    selected: &[(&String, &KeySpec)],
+) -> Result<Vec<String>, Error> {
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.to_str().map(str::to_string))
+        .ok_or_else(|| {
+            Error::Dependency("cannot find this opv binary for remote delivery".into())
+        })?;
+    let keys = selected.iter().map(|(k, _)| (*k).clone()).collect();
+    let files = selected
+        .iter()
+        .filter_map(|(k, spec)| spec.file.as_ref().map(|f| ((*k).clone(), f.clone())))
+        .collect();
+    let dir_env = prod.local.as_ref().and_then(|l| l.secrets_dir_env.clone());
+    let plan = super::remote_delivery::Plan::new(name, remote, keys, files, dir_env);
+    let json = serde_json::to_string(&plan)
+        .map_err(|e| Error::Config(format!("cannot render the remote plan ({e})").into()))?;
+    Ok(vec![
+        exe,
+        "remote-send".to_string(),
+        "--plan".to_string(),
+        json,
+    ])
 }
 
 /// The local delivery step's command line before the app's (#136, #137): this opv binary,

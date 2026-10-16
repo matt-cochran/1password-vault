@@ -186,7 +186,9 @@ impl FakeOp {
             };
         }
         match args.as_slice() {
-            ["whoami", ..] if self.signed_in.get() => Output::success(r#"{"user_type":"HUMAN"}"#),
+            ["whoami", ..] if self.signed_in.get() => Output::success(
+                r#"{"user_type":"HUMAN","account_uuid":"AFAKEOP0000000000000000001"}"#,
+            ),
             ["whoami", ..] => Output::failure(1),
             ["account", "list", ..] => Output::success(r#"[{"url":"my.1password.com"}]"#),
             _ if !self.signed_in.get() => Output::failure(1),

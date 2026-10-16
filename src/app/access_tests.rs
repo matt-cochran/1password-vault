@@ -514,3 +514,64 @@ fn an_identity_whose_vaults_all_exist_still_gets_its_owner_command() {
             .is_empty()
     );
 }
+
+/// #157: nobody signed in.
+fn signed_out() -> FakeOp {
+    let op = visible();
+    op.signed_in.set(false);
+    op
+}
+
+#[test]
+fn access_without_a_session_is_op_not_signed_in() {
+    let mut out = Vec::new();
+    let e = run(
+        &fleet(),
+        None,
+        None,
+        Some("shop"),
+        &signed_out(),
+        true,
+        &mut out,
+    )
+    .unwrap_err();
+    assert_eq!(e.code().as_str(), "op_not_signed_in");
+}
+
+#[test]
+fn access_without_a_session_classifies_no_vault() {
+    let mut out = Vec::new();
+    let _ = run(
+        &fleet(),
+        None,
+        None,
+        Some("shop"),
+        &signed_out(),
+        true,
+        &mut out,
+    );
+    assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+}
+
+#[test]
+fn one_vault_outside_the_account_leaves_the_others_classified() {
+    assert_eq!(
+        state_of(
+            &run_json(&web_vault_unreadable(false), Some("prod"), Some("web")),
+            VSHARED
+        ),
+        "missing"
+    );
+}
+
+#[test]
+fn a_missing_vault_finding_never_says_setup_vault() {
+    let text = run_text(&web_vault_unreadable(false), Some("prod"), Some("web"));
+    assert!(!text.contains("setup vault"), "{text}");
+}
+
+#[test]
+fn a_missing_vault_finding_names_the_account_it_checked() {
+    let text = run_text(&web_vault_unreadable(false), Some("prod"), Some("web"));
+    assert!(text.contains("not in 1Password account"), "{text}");
+}

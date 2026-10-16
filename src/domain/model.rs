@@ -146,6 +146,47 @@ pub struct Product {
     /// key as a variable in the inherited environment.
     #[serde(default)]
     pub local: Option<Local>,
+    /// Reviewed remote execution profiles (#139): `opv run --remote <name>` delivers this
+    /// product's selected keys to the pinned host over SSH and runs the pinned command
+    /// there. Empty: the product has no remote delivery.
+    #[serde(default)]
+    pub remotes: BTreeMap<String, Remote>,
+}
+
+/// `[products.<p>.remotes.<name>]`: one reviewed remote execution profile (#139). Every
+/// field is pinned in the configuration; nothing about the host, the transport or the
+/// command can be chosen at run time, from the command line or from MCP.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Remote {
+    /// The SSH host name or address.
+    pub host: String,
+    /// The SSH port. Default 22.
+    #[serde(default = "default_ssh_port")]
+    pub port: u16,
+    /// The remote account the app runs as.
+    pub user: String,
+    /// The host's public key, pinned (`<type> <base64>`, as in `known_hosts`). The
+    /// connection fails unless the host presents exactly this key.
+    pub host_key: String,
+    /// The environments whose values may go to this host. At least one.
+    pub environments: Vec<String>,
+    /// The process roles that may run there; `None`: every role the product declares.
+    #[serde(default)]
+    pub roles: Option<Vec<String>>,
+    /// The absolute path of the opv binary on the remote host.
+    pub opv: String,
+    /// The absolute working directory on the remote host.
+    pub workdir: String,
+    /// The pinned command and its arguments.
+    pub command: Vec<String>,
+    /// A local SSH private key file to authenticate with; `None`: the SSH agent.
+    #[serde(default)]
+    pub identity_file: Option<String>,
+}
+
+fn default_ssh_port() -> u16 {
+    22
 }
 
 /// `[products.<p>.local]`: local delivery under `opv run` (#136, #137).

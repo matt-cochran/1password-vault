@@ -478,7 +478,8 @@ pub struct Applied {
 }
 
 /// Apply exactly the plan `plan_id` to the configuration file `path` of `project` in
-/// `account`: re-plan, refuse a stale id (`stale_plan`), then `authorize` (the approval
+/// `account`: re-plan, refuse a stale id (`stale_plan`), refuse anyone but a person signed in
+/// (before the single-use approval is spent), then `authorize` (the approval
 /// check; nothing is written unless it passes), then create what the plan lists. IDs are
 /// recorded as each phase completes, so a run that stops part-way keeps what it made, and
 /// a re-run (with a new plan and approval) finds it again by title.
@@ -506,8 +507,10 @@ pub fn apply(
         .with_do("review the new plan, and approve it in your own terminal if it is right")
         .with_next(format!("opv approve {}", p.plan_id)));
     }
-    authorize(&p)?;
+    // A person's own session first (#157): the approval is single-use, so a signed-out or
+    // non-interactive run is refused before it is consumed.
     super::tidy::require_person(r, "the structural apply")?;
+    authorize(&p)?;
     let link_account = onepassword::account(r);
     let link = |v: &str, i: &str| onepassword::item_link(link_account.as_ref(), v, i);
     let mut applied = Applied {

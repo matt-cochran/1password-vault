@@ -31,6 +31,10 @@ type Readers = BTreeMap<String, Option<Vec<Reader>>>;
 /// What one environment needs: one entry per target and one CI reader (FR-59).
 struct Needs<'a> {
     name: &'a str,
+    /// The 1Password account the vaults were checked in, named in findings (#157).
+    account: String,
+    /// The environment's configured account, which the checks run in; `None`: the run's.
+    account_id: Option<String>,
     targets: Vec<TargetNeeds<'a>>,
     ci: Vec<CiNeeds<'a>>,
 }
@@ -88,10 +92,17 @@ pub fn run(
         ordered.retain(|(_, env)| env.targets.contains_key(t));
     }
     let needs = plan_needs(fleet, &ordered, target)?;
-    let (observations, readers) = observe(r, &needs)?;
-    let missing = missing_vaults(r, &readers);
+    // #157: each environment's vaults are checked in its own 1Password account, and a
+    // missing session there is the cause, not every vault being outside the account.
+    let mut sessions: BTreeSet<Option<String>> = BTreeSet::new();
     let mut envs = Vec::with_capacity(needs.len());
     for need in &needs {
+        let er = crate::app::signin::EnvRunner::with_account(r, need.account_id.clone());
+        if sessions.insert(need.account_id.clone()) {
+            crate::adapters::onepassword::require_session(&er, &Host::detect, "opv access")?;
+        }
+        let (observations, readers) = observe(&er, std::slice::from_ref(need))?;
+        let missing = missing_vaults(&er, &readers);
         envs.push(build(need, &project, &observations, &readers, &missing));
     }
     report(out, &envs, json)
@@ -155,8 +166,10 @@ pub fn identity(
         .with_next(format!("opv access {env}")));
     };
     let service_account = first.service_account.clone();
-    let (_, readers) = observe(r, &needs)?;
-    let missing = missing_vaults(r, &readers);
+    let er = crate::app::signin::EnvRunner::with_account(r, need.account_id.clone());
+    crate::adapters::onepassword::require_session(&er, &Host::detect, "opv access")?;
+    let (_, readers) = observe(&er, &needs)?;
+    let missing = missing_vaults(&er, &readers);
     let observed: Vec<ObservedVault> = grants
         .iter()
         .map(|g| ObservedVault {
@@ -231,6 +244,8 @@ fn plan_needs<'a>(
         };
         needs.push(Needs {
             name: env_name,
+            account: account_label(env.account.as_deref()),
+            account_id: env.account.clone(),
             targets,
             ci,
         });
@@ -334,10 +349,11 @@ fn build(
             code: crate::domain::access::VAULT_NOT_IN_ACCOUNT,
             environment: need.name.to_string(),
             message: format!(
-                "vault {vault} is not in the selected 1Password account, or you cannot open \
-                 it; no service-account command is printed for an identity that needs it, \
-                 because it could not succeed here. Find the account that holds it, then fix \
-                 the configured vault_id or select that account"
+                "vault {vault} is not in 1Password account {}, or you cannot open it; no \
+                 service-account command is printed for an identity that needs it, because it \
+                 could not succeed here. Find the account that holds it, then fix the \
+                 configured vault_id or select that account",
+                need.account
             ),
             next: Some(format!("opv vault locate {vault}")),
         });
@@ -364,6 +380,18 @@ fn build(
         commands,
         findings: env_findings,
     }
+}
+
+/// The account a check ran in (#157): the environment's, else `OP_ACCOUNT`, else the
+/// checkout's `.opv` pointer, else op's default.
+fn account_label(configured: Option<&str>) -> String {
+    configured
+        .map(str::to_string)
+        .or_else(crate::config_store::account_env)
+        .or_else(|| {
+            crate::config_store::pointer_account(&std::env::current_dir().unwrap_or_default())
+        })
+        .unwrap_or_else(|| "(op's default account)".to_string())
 }
 
 /// One command per principal with at least one missing grant, over all of that principal's

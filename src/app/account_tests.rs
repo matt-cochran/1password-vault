@@ -898,12 +898,51 @@ fn a_session_variable_for_no_known_account_is_stale() {
     assert!(codes(&shared(&["OP_SESSION_gone"])).contains(&"stale_session_variable"));
 }
 
+/// #157: a sign-in fixes neither a foreign session variable nor a shared address, so
+/// advisory findings alone leave the report without a step (it used to be `opv login`).
 #[test]
-fn a_session_finding_comes_before_the_shared_address_note() {
-    assert_eq!(
-        shared(&["OP_SESSION_my"]).next.as_deref(),
-        Some("opv login --account BUSI0000000000000000000002")
-    );
+fn advisory_findings_alone_give_the_report_no_next_step() {
+    assert_eq!(shared(&["OP_SESSION_my"]).next, None);
+}
+
+#[test]
+fn a_stale_session_variable_has_no_login_step() {
+    let r = shared(&["OP_SESSION_gone"]);
+    let f = r
+        .findings
+        .iter()
+        .find(|f| f.code == "stale_session_variable")
+        .unwrap();
+    assert_eq!(f.next, None);
+}
+
+#[test]
+fn a_stale_session_variable_says_to_unset_it() {
+    let r = shared(&["OP_SESSION_gone"]);
+    let f = r
+        .findings
+        .iter()
+        .find(|f| f.code == "stale_session_variable")
+        .unwrap();
+    assert!(f.message.contains("unset OP_SESSION_gone"));
+}
+
+#[test]
+fn the_shared_address_finding_has_no_login_step() {
+    let r = shared(&[]);
+    let f = r
+        .findings
+        .iter()
+        .find(|f| f.code == "shared_sign_in_address")
+        .unwrap();
+    assert_eq!(f.next, None);
+}
+
+/// #157: account_not_registered exits 7 (auth), as its code says.
+#[test]
+fn an_unknown_account_error_exits_as_its_code_says() {
+    let err = use_account(&[owner()], "ghost@example.com", Path::new(".")).unwrap_err();
+    assert_eq!(err.exit_code(), err.code().exit_code());
 }
 
 #[test]

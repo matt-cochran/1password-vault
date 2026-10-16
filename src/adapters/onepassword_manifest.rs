@@ -105,17 +105,29 @@ pub(crate) fn failure(
             let e =
                 session_error(s, &host(), Some(failed), None).expect("every other session fails");
             match e {
-                Error::Auth(_) => e
-                    .map_text(|m| {
+                Error::Auth(_) => login_next(
+                    e.map_text(|m| {
                         format!(
                             "this project's configuration lives in 1Password, which needs a \
                              session: {m}"
                         )
-                    })
-                    .with_next(LOGIN),
+                    }),
+                    &host(),
+                ),
                 other => other,
             }
         }
+    }
+}
+
+/// `e` with [`LOGIN`] as its step only when it names none (`opv login --add` for no
+/// account stays) and a person can sign in here: under CI or a service-account or Connect
+/// credential `opv login` refuses, so it is never offered there (#157).
+fn login_next(e: Error, host: &Host) -> Error {
+    if e.next_step().is_none() && host.signin_command(None).is_some() {
+        e.with_next(LOGIN)
+    } else {
+        e
     }
 }
 
@@ -585,9 +597,10 @@ fn write_failed(
                 )
                 .into(),
             ),
-            Ok(other) => session_error(other, &host(), Some(step), None)
-                .expect("every other session fails")
-                .with_next(LOGIN),
+            Ok(other) => login_next(
+                session_error(other, &host(), Some(step), None).expect("every other session fails"),
+                &host(),
+            ),
         },
         Outcome::Unknown {
             status: Some(s), ..
@@ -609,9 +622,11 @@ fn write_failed(
                     )
                     .into(),
                 ),
-                Ok(other) => session_error(other, &host(), Some(step), None)
-                    .expect("every other session fails")
-                    .with_next(LOGIN),
+                Ok(other) => login_next(
+                    session_error(other, &host(), Some(step), None)
+                        .expect("every other session fails"),
+                    &host(),
+                ),
             }
         }
         _ => Error::Unknown(
@@ -895,6 +910,44 @@ mod tests {
             account("ACCOUNTUUID000000000000BBB"),
         ]);
         assert_eq!(e.next_step(), Some("opv account list"));
+    }
+
+    fn plain_linux() -> Host {
+        Host::from_env(&crate::host::FakeEnv::new("linux").shell("/bin/bash"))
+    }
+
+    /// #157: no account on this machine keeps the step that adds one.
+    #[test]
+    fn a_failure_with_no_account_keeps_login_add() {
+        let r = FakeRunner::new([Output::failure(1), Output::success("[]")]);
+        let e = failure(&r, &plain_linux, "op item list failed", "the manifest");
+        assert_eq!(e.next_step(), Some("opv login --add"));
+    }
+
+    /// #157: under CI `opv login` refuses, so it is never the step.
+    #[test]
+    fn a_failure_under_ci_never_steps_to_login() {
+        let ci = || Host::from_env(&crate::host::FakeEnv::new("linux").var("CI"));
+        let r = FakeRunner::new([Output::failure(1)]);
+        let e = failure(&r, &ci, "op item list failed", "the manifest");
+        assert_ne!(e.next_step(), Some(LOGIN));
+    }
+
+    /// Signed out at a person's terminal, the step is still `opv login`.
+    #[test]
+    fn a_signed_out_failure_steps_to_login() {
+        let r = FakeRunner::new([Output::failure(1), Output::success(ONE_ACCOUNT)]);
+        let e = failure(&r, &plain_linux, "op item list failed", "the manifest");
+        assert_eq!(e.next_step(), Some(LOGIN));
+    }
+
+    /// #157: a write refused with no account on this machine keeps the step that adds one.
+    #[test]
+    fn a_refused_write_with_no_account_keeps_login_add() {
+        let r = FakeRunner::new([Output::failure(1), Output::success("[]")]);
+        let refused = Outcome::Refused(Output::failure(1));
+        let e = write_failed(&r, &plain_linux, "op item edit", refused, "re-run");
+        assert_eq!(e.next_step(), Some("opv login --add"));
     }
 
     fn wsl_windows_op() -> Host {

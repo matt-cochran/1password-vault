@@ -669,12 +669,19 @@ secret_name = "STATIC""#,
     }
 
     #[test]
-    fn missing_environment_error_offers_the_create_command() {
+    fn missing_environment_error_leaves_the_create_command_to_a_person() {
         let e = crate::adapters::github::missing_environment_error("org/r", "staging");
-        assert_eq!(
-            e.next_step(),
-            Some("gh api -X PUT repos/org/r/environments/staging")
+        assert!(
+            e.action()
+                .is_some_and(|a| a.contains("gh api -X PUT repos/org/r/environments/staging")),
+            "{e:?}"
         );
+    }
+
+    #[test]
+    fn missing_environment_error_needs_a_human() {
+        let e = crate::adapters::github::missing_environment_error("org/r", "staging");
+        assert!(e.code().human_required());
     }
 
     #[test]

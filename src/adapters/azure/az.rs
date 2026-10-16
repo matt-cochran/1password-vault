@@ -231,7 +231,15 @@ fn probe(r: &dyn CommandRunner, args: &[&str]) -> Result<bool, Error> {
 pub fn diagnose(r: &dyn CommandRunner, op: &str, target: &str) -> Error {
     // The probe explains the failed call; its excerpt stays with the error (NR-31).
     match crate::runner::diagnosing(|| signed_in(r)) {
-        Ok(true) => Error::Target(format!("az {op} failed for {target}").into()),
+        // Signed in, so the cause is the resource or this identity's rights on it.
+        Ok(true) => Error::Target(
+            format!(
+                "az {op} failed for {target}: signed in to Azure\n  check that {target} exists \
+                 in the configured subscription and that the signed-in identity has a role on it \
+                 that allows {op}"
+            )
+            .into(),
+        ),
         Ok(false) => not_logged_in(None),
         // The call itself answered (non-zero); only the sign-in check did not.
         Err(Error::Unknown(_)) => Error::Target(
@@ -312,8 +320,11 @@ mod tests {
         let excerpt = crate::runner::take_failure_excerpt();
         assert_eq!(
             crate::error::report(&e, "opv sync prod", excerpt.as_ref()),
-            "opv: target error: az keyvault secret set failed for kv-prod\n  \
-             az said: ERROR: (Forbidden) The user does not have secrets set permission on kv-prod\n\
+            "opv: target error: az keyvault secret set failed for kv-prod: signed in to Azure\n  \
+             az said: ERROR: (Forbidden) The user does not have secrets set permission on kv-prod\n  \
+             check that kv-prod exists in the configured subscription and that the signed-in \
+             identity has a role on it that allows keyvault secret set\n\
+             Do: fix the cause above\n\
              Next: opv sync prod\n"
         );
     }
@@ -324,5 +335,14 @@ mod tests {
         r.push_unknown("timeout");
         let err = diagnose(&r, "keyvault secret show", "kv");
         assert!(matches!(err, Error::Target(m) if m.contains("could not check the Azure sign-in")));
+    }
+
+    #[test]
+    fn a_not_logged_in_error_reruns_the_command_never_bare_opv() {
+        let e = not_logged_in(None);
+        assert_eq!(
+            e.step("opv sync prod", "opv sync --help").next,
+            "opv sync prod"
+        );
     }
 }

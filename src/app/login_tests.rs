@@ -491,3 +491,85 @@ fn login_add_in_wsl_with_windows_op_directs_to_the_windows_app() {
     });
     assert_eq!(e.code(), crate::error::Code::AccountNotRegistered);
 }
+
+/// #160: `op whoami` succeeds (perhaps for another account) while `op vault list` fails.
+fn signed_in_vault_list_failing() -> Fake {
+    let f = Fake::signed_in(0);
+    *f.replies.borrow_mut() = [
+        Output::success(b"2.40.0".to_vec()),
+        Output::failure(1),
+        Output::success(br#"{"user_type":"HUMAN"}"#.to_vec()),
+    ]
+    .into();
+    f
+}
+
+#[test]
+fn login_runs_no_command_when_the_vault_list_fails_under_a_live_session() {
+    let f = fleet(None, None);
+    let mut b = signed_in_vault_list_failing();
+    let _ = run(
+        Some(&f),
+        Some("dev"),
+        &cmd(&["opv", "access", "dev"]),
+        &mut b,
+        &mut Ui::default(),
+    );
+    assert!(b.children.borrow().is_empty());
+}
+
+#[test]
+fn a_failed_vault_list_under_a_live_session_never_steps_to_login() {
+    let f = fleet(None, None);
+    let mut b = signed_in_vault_list_failing();
+    let e = run(
+        Some(&f),
+        Some("dev"),
+        &cmd(&["opv", "access", "dev"]),
+        &mut b,
+        &mut Ui::default(),
+    )
+    .unwrap_err();
+    assert_eq!(e.next_step(), Some("opv account list"));
+}
+
+/// #157: account_not_registered exits 7 (auth), as its code says.
+#[test]
+fn an_account_added_in_the_app_is_an_auth_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = crate::host::with_test_host(mac(), || {
+        choose_account(
+            &lists(&[ONE]),
+            None,
+            true,
+            dir.path(),
+            &mut Fake::signed_in(0),
+            &mut Ui::default(),
+        )
+        .unwrap_err()
+    });
+    assert_eq!(e.exit_code(), e.code().exit_code());
+}
+
+/// `opv login` with an `op account list` that fails.
+fn login_with_a_failing_account_list(b: &mut Fake) -> Error {
+    let dir = tempfile::tempdir().unwrap();
+    let r = crate::runner::fake::FakeRunner::new([Output::failure(1)]);
+    crate::host::with_test_host(wsl(), || {
+        choose_account(&r, None, false, dir.path(), b, &mut Ui::default()).unwrap_err()
+    })
+}
+
+/// #157: a failed account list never starts adding an account.
+#[test]
+fn a_failing_account_list_adds_no_account() {
+    let mut b = Fake::signed_in(0);
+    let _ = login_with_a_failing_account_list(&mut b);
+    assert!(b.added.is_empty());
+}
+
+#[test]
+fn a_failing_account_list_steps_to_doctor() {
+    let e = login_with_a_failing_account_list(&mut Fake::signed_in(0));
+    assert_eq!(e.next_step(), Some("opv doctor"));
+}

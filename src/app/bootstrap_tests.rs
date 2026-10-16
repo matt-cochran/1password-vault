@@ -406,6 +406,31 @@ fn a_result_the_loader_refuses_creates_nothing() {
     assert!(!wrote_to_1password(&op));
 }
 
+/// #157: signed out, a recorded vault is not reported as outside the account.
+#[test]
+fn a_signed_out_dry_run_is_op_not_signed_in() {
+    let (_dir, path, op) = workspace();
+    op.signed_in.set(false);
+    let e = run_with(&path, &op, &dry_run()).unwrap_err();
+    assert_eq!(e.code(), crate::error::Code::OpNotSignedIn);
+}
+
+/// #157: an environment's recorded vault is looked for in that environment's account.
+#[test]
+fn a_recorded_vault_is_looked_for_in_the_environments_account() {
+    let text = FLEET.replace(
+        "[environments.dev]\n",
+        "[environments.dev]\naccount = \"work.1password.com\"\n",
+    );
+    let r = crate::runner::fake::FakeRunner::new([crate::runner::Output::success("{}")]);
+    let _ = plan(&r, &text, "myapp", &BTreeSet::new());
+    assert!(
+        r.calls.borrow()[0]
+            .env
+            .contains(&("OP_ACCOUNT".to_string(), "work.1password.com".to_string()))
+    );
+}
+
 #[test]
 fn a_dry_run_writes_nothing_to_1password() {
     let (_dir, path, op) = workspace();

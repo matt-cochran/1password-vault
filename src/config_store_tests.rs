@@ -580,7 +580,7 @@ fn a_manifest_write_under_a_service_account_is_refused() {
     let base = found.store().read(&op).unwrap();
     let env = crate::host::FakeEnv::new("linux").var_val("OP_SERVICE_ACCOUNT_TOKEN", "dummy");
     let e = under(env, || found.store().replace(&op, &base, &edited())).unwrap_err();
-    assert_eq!(e.code(), crate::error::Code::PolicyRefused);
+    assert_eq!(e.code(), crate::error::Code::TerminalRequired);
 }
 
 #[test]
@@ -593,13 +593,14 @@ fn a_manifest_write_in_ci_writes_nothing() {
     assert_eq!(op.count(&["op", "item", "edit"]), 0);
 }
 
+/// #157: under CI `opv login` refuses, so the refusal never names it.
 #[test]
-fn a_refused_manifest_write_names_opv_login() {
+fn a_refused_manifest_write_in_ci_never_names_opv_login() {
     let op = FakeOp::default();
     let (_, found) = myapp(&op);
     let env = crate::host::FakeEnv::new("linux").var("CI");
     let e = under(env, || found.store().read_for_write(&op)).unwrap_err();
-    assert_eq!(e.next_step(), Some("opv login"));
+    assert_ne!(e.next_step(), Some("opv login"));
 }
 
 #[test]

@@ -81,7 +81,7 @@ Each step can be reverted without touching values. No step moves or re-creates a
 
 ## What stays out of scope
 
-- Remote development delivery (#139) needs its own design.
+- Remote development delivery (#139) has its own design: [remote delivery](remote-delivery.md).
 - Kubernetes and Azure mounted delivery (#40–#42) are deferred.
 - Windows and macOS file delivery stays refused, since neither has a user-owned RAM filesystem opv can verify.
 

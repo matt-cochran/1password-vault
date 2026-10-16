@@ -132,7 +132,7 @@ pub fn run(
         return Ok(());
     }
     if let Some(first) = unknown.first() {
-        return Err(Error::Auth(
+        return Err(Error::Source(
             format!(
                 "vault {vault} is not in any signed-in account; {} account(s) could not be \
                  asked because they are not signed in",

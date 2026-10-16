@@ -201,9 +201,19 @@ impl DeployLogin for AzureLogin {
         r: &dyn crate::runner::CommandRunner,
     ) -> Result<(), Error> {
         let get = |k: &str| {
-            values
-                .get(k)
-                .ok_or_else(|| Error::Source(format!("deploy credentials: {k} is missing").into()))
+            values.get(k).ok_or_else(|| {
+                Error::Auth(
+                    format!(
+                        "deploy credentials: the deploy_credentials item has no {k} field; \
+                         nothing was changed"
+                    )
+                    .into(),
+                )
+                .with_code(Code::DeployCredentialsFailed)
+                .with_do(format!(
+                    "add the {k} field to the environment's deploy_credentials item in 1Password"
+                ))
+            })
         };
         let (tenant, client, secret) = (
             get("AZURE_TENANT_ID")?,
@@ -212,14 +222,17 @@ impl DeployLogin for AzureLogin {
         );
         for (label, v) in [("AZURE_TENANT_ID", tenant), ("AZURE_CLIENT_ID", client)] {
             if !is_azure_id(v.expose()) {
-                return Err(Error::Source(
+                return Err(Error::Auth(
                     format!(
                         "deploy credentials: {label} is not a tenant or client ID (a GUID or \
-                     domain); nothing was changed\n  next: correct it in the \
-                     deploy_credentials item"
+                     domain); nothing was changed"
                     )
                     .into(),
-                ));
+                )
+                .with_code(Code::DeployCredentialsFailed)
+                .with_do(format!(
+                    "correct {label} in the environment's deploy_credentials item in 1Password"
+                )));
             }
         }
         let args = [
@@ -270,13 +283,16 @@ impl DeployLogin for AzureLogin {
             Outcome::Unknown {
                 status: Some(s), ..
             } => Err(rejected(format!("exit {s}"))),
-            Outcome::Unknown { reason, .. } => Err(Error::Target(
+            // `az login` never answered: Azure or the network, which re-running can get past.
+            Outcome::Unknown { reason, .. } => Err(Error::Unknown(
                 format!(
-                    "deploy credentials: {}; nothing was changed",
-                    unknown_text("az login", reason)
+                    "deploy credentials: {}; nothing was changed. Check {}, then re-run",
+                    unknown_text("az login", reason),
+                    AZ_CLI.status_page
                 )
                 .into(),
-            )),
+            )
+            .with_code(Code::ProviderUnavailable)),
         }
     }
 

@@ -63,6 +63,19 @@ fn a_signed_out_account_is_unknown_not_absent() {
     assert_eq!(doc["accounts"][0]["result"], "unknown");
 }
 
+/// #157: inventory_incomplete exits 4 (source), as its code says.
+#[test]
+fn an_incomplete_inventory_exits_as_its_code_says() {
+    let (res, _) = locate(vec![
+        Output::failure(1),
+        Output::failure(1),
+        Output::failure(1),
+        Output::success("{}"),
+    ]);
+    let e = res.unwrap_err();
+    assert_eq!(e.exit_code(), e.code().exit_code());
+}
+
 #[test]
 fn an_unasked_account_points_at_a_one_off_login() {
     let (res, _) = locate(vec![

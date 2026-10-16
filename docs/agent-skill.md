@@ -52,13 +52,16 @@ only), then `opv structure plan --json` for the plan and its `plan_id`, ask the 
 `opv approve <plan_id>` in their own terminal, then `opv structure apply <plan_id> --json`.
 That document is exactly what `opv_structure_plan` / `opv_structure_apply` return, and
 `opv structure apply` refuses an unapproved or stale plan just the same. `opv config
-describe --json` reproduces the `opv_configuration` document, `opv ready --json` the
-readiness receipt, `opv access` and `opv plan` their tools.
+describe --json` reproduces the `opv_configuration` document. `opv ready --json`,
+`opv access --json` and `opv plan --json` carry the full documents that `opv_ready`,
+`opv_access` and `opv_deployment_plan` project (names, codes, states and counts only). An
+MCP error carries `human_required` and, when there is one, a runnable `next`: hand it to
+the user when `human_required` is true.
 
 ## Deploys: the user approves, you run exactly that once
 
 Never run `opv sync` on your own. Show the plan (`opv plan <env> --json`, or
-`opv_deployment_plan`), then hand the user its `approve_command`:
+`opv_deployment_plan` with the same targets, product and rotate), then hand the user its `approve_command`:
 `opv approve <plan_id> --sync <env>` (with the same `--target`, `--product`, `--deploy`,
 `--prune` and `--rotate` you will use). They run it in their own terminal. Then run
 `opv sync <env> --approved <plan_id>` with the same flags (MCP: `opv_sync`). It runs that

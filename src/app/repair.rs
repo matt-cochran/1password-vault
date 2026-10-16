@@ -24,7 +24,8 @@ pub fn run(
     super::tidy::require_person(r, &format!("opv tidy {env_name}"))?;
     let read = super::tidy::read(fleet, env_name, r)?;
     if let Some(code) = read.tidy_error {
-        return Err(Error::Unknown(
+        // Exit 4 like the code's own table entry: the item, not the outcome, is in question.
+        return Err(Error::Source(
             format!(
                 "could not tidy 1Password ({env_name}); the item was read as it is and left \
                  as opv found it or as one verified edit left it"

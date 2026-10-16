@@ -144,6 +144,10 @@ pub fn run(
     }
     // A write is never suggested on a guessed product: the step is its plan.
     check_product(fleet, opts.product.as_deref(), "plan", Some(env_name))?;
+    // A receipt file that cannot be written fails now, before anything is staged.
+    if let Some(path) = &opts.receipt {
+        super::delivery::check_receipt_path(path)?;
+    }
     let names = resolve_targets(fleet, env_name, &opts.targets, "sync")?;
     let runners = target_runners(fleet, env_name, &names, r)?;
     let mut opened = Vec::new();
@@ -1914,6 +1918,14 @@ fn after_writes(e: Error, done: &[String]) -> Error {
                 done.join(", ")
             )
         }),
+        // A refusal after staging: what is already staged stays staged (and is not live).
+        e @ Error::Target(_) if !done.is_empty() => e.map_text(|m| {
+            format!(
+                "{m}\n  {} write(s) had completed before it: {}",
+                done.len(),
+                done.join(", ")
+            )
+        }),
         e => e,
     }
 }
@@ -3677,6 +3689,19 @@ mod tests {
             e.next_step(),
             Some("opv explain allumata/OPENAI_API_KEY --env prod"),
             "{e}"
+        );
+    }
+
+    /// NR-10: a target refusal after staging names what was already staged.
+    #[test]
+    fn a_target_error_after_staging_names_what_completed() {
+        let e = after_writes(
+            Error::Target("flyctl secrets deploy failed".into()),
+            &["api/TOKEN".to_string()],
+        );
+        assert!(
+            e.text()
+                .contains("1 write(s) had completed before it: api/TOKEN")
         );
     }
 }

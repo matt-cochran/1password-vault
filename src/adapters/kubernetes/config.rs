@@ -682,6 +682,8 @@ impl KubernetesTarget {
         )?;
         if o.status == 0 {
             Ok(Verdict::Ok(format!("API server for context {ctx} answers")))
+        } else if crate::runner::last_failure_signed_out() {
+            Err(super::unauthorized(ctx, "nothing was changed"))
         } else {
             Err(Error::Unknown(
                 format!(
@@ -691,7 +693,8 @@ impl KubernetesTarget {
                  it, then re-run `opv doctor`"
                 )
                 .into(),
-            ))
+            )
+            .with_code(crate::error::Code::ProviderUnavailable))
         }
     }
 
@@ -712,7 +715,7 @@ impl KubernetesTarget {
                 "has every right sync needs in namespace {}",
                 self.target.namespace
             ))),
-            Ok(found) => Err(Error::Auth(self.access_fix(&found).to_string().into())),
+            Ok(found) => Err(missing_rights_error(self.access_fix(&found).to_string())),
             Err(e) => Ok(Verdict::Warn(format!("rights not checked: {e}"))),
         }
     }
@@ -730,13 +733,10 @@ impl KubernetesTarget {
         if found.is_empty() {
             return Ok(());
         }
-        Err(Error::Auth(
-            format!(
-                "sync refused, nothing was changed: {}",
-                self.access_fix(&found)
-            )
-            .into(),
-        ))
+        Err(missing_rights_error(format!(
+            "sync refused, nothing was changed: {}",
+            self.access_fix(&found)
+        )))
     }
 
     fn access_fix(&self, found: &[AccessFinding]) -> AccessFix<'_> {
@@ -748,6 +748,14 @@ impl KubernetesTarget {
 }
 
 /// The missing rights and the commands that grant exactly them.
+/// Signed in but missing a right sync needs (FR-32): only a namespace admin can grant
+/// it, so a person acts first (the grant commands are in `text`).
+fn missing_rights_error(text: String) -> Error {
+    Error::Target(text.into())
+        .with_code(crate::error::Code::PermissionDenied)
+        .with_do("ask a namespace admin to run the grant commands above")
+}
+
 struct AccessFix<'a> {
     target: &'a KubernetesTarget,
     found: Vec<AccessFinding>,
@@ -1146,6 +1154,20 @@ environments = ["dev"]
     }
 
     #[test]
+    fn doctor_names_an_unauthorized_cluster_as_a_sign_in() {
+        let r = FakeRunner::new([
+            ok("Client Version: v1.31.2\nKustomize Version: v5.4.2\n"),
+            ok("kind-opv\n"),
+        ]);
+        r.push_with_stderr(
+            Output::failure(1),
+            "error: You must be logged in to the server (Unauthorized)\n",
+        );
+        let checks = target().doctor(&r, &host);
+        assert!(matches!(&checks[2].outcome, Err(Error::Auth(_))));
+    }
+
+    #[test]
     fn doctor_check_names_match_the_provider_list() {
         let r = FakeRunner::new(healthy());
         let checks = target().doctor(&r, &host);
@@ -1214,7 +1236,7 @@ environments = ["dev"]
         let r = FakeRunner::new(g);
         assert_eq!(
             doctor_lines(&r)[3],
-            "kubernetes access: FAIL authentication error: your kubectl identity cannot delete \
+            "kubernetes access: FAIL target error: your kubectl identity cannot delete \
              Secrets, so sync \
              --deploy cannot remove superseded versions (sync needs it)\n  fix (as a namespace \
              admin):\n    kubectl --context kind-opv --namespace myapp create role opv-secrets \
@@ -1246,8 +1268,16 @@ environments = ["dev"]
         let r = FakeRunner::new(deploy_rights("list pods"));
         assert!(matches!(
             target().preflight(&r, PreflightMode::Mutate),
-            Err(Error::Auth(_))
+            Err(Error::Target(_))
         ));
+    }
+
+    /// Signed in but missing a right: a person grants it; not a sign-in.
+    #[test]
+    fn sync_preflight_refusal_without_a_right_is_permission_denied() {
+        let r = FakeRunner::new(deploy_rights("list pods"));
+        let e = target().preflight(&r, PreflightMode::Mutate).unwrap_err();
+        assert_eq!(e.code(), crate::error::Code::PermissionDenied);
     }
 
     #[test]

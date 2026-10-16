@@ -381,6 +381,46 @@ fn grants_missing(env: &str, target: &str, reason: &str) -> Finding {
     }
 }
 
+/// True for the codes that mean a vault or item could not be opened: a grant to give.
+fn is_no_access(e: &Error) -> bool {
+    matches!(e.code().as_str(), "vault_no_access" | "item_not_found")
+}
+
+/// The finding for an error that stopped reading an environment (or one target of it): the
+/// error's own code, actor, effect and next step (#157).
+fn error_finding(env: &str, target: Option<&str>, e: &Error) -> Finding {
+    let code = e.code();
+    let effect = match code.as_str() {
+        "op_not_signed_in" | "auth_required" | "account_not_registered" | "selected_signed_out" => {
+            "signs_in"
+        }
+        _ => "none",
+    };
+    let fallback = match target {
+        Some(t) => format!("opv doctor --env {env} --target {t}"),
+        None => format!("opv status {env}"),
+    };
+    Finding {
+        code: code.as_str().into(),
+        scope: Scope {
+            environment: Some(env.to_string()),
+            target: target.map(str::to_string),
+            ..Scope::default()
+        },
+        blocking: true,
+        actor: if code.human_required() {
+            "owner"
+        } else {
+            "agent"
+        }
+        .into(),
+        effect: effect.into(),
+        prerequisite: e.next_step().map(str::to_string).unwrap_or(fallback),
+        verify: "opv ready --json".into(),
+        message: None,
+    }
+}
+
 /// Each row's own finding (FR-51), scoped to its environment and, for a deployed
 /// environment, the target that delivered it.
 fn row_findings(
@@ -481,9 +521,7 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
                 };
                 // FR-55: an environment meant for others (its audience) and an access
                 // error is not a problem to fix.
-                let no_access = t.rows.as_ref().err().is_some_and(|e| {
-                    matches!(e.code().as_str(), "vault_no_access" | "item_not_found")
-                });
+                let no_access = t.rows.as_ref().err().is_some_and(is_no_access);
                 if let (Some(audience), true) = (&env.audience, no_access) {
                     out.push(Finding {
                         code: "not_for_you".into(),
@@ -504,15 +542,22 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
                     });
                     continue;
                 }
-                out.push(grants_missing(&env.name, &t.name, &reason));
+                // #157: only a vault or item that cannot be opened is a grant to give; any
+                // other cause (signed out, a missing CLI, a timeout, the provider's own
+                // preflight) is reported as itself, with its own step.
+                match &t.rows {
+                    Err(e) if t.grants_missing.is_none() && !no_access => {
+                        out.push(error_finding(&env.name, Some(&t.name), e));
+                    }
+                    _ => out.push(grants_missing(&env.name, &t.name, &reason)),
+                }
             }
             continue;
         }
         let Err(e) = &env.rows else { continue };
-        let code = e.code();
         // FR-55: an environment meant for others (its audience) that this person cannot
         // open is not a problem to fix.
-        let no_access = matches!(code.as_str(), "vault_no_access" | "item_not_found");
+        let no_access = is_no_access(e);
         if let (Some(audience), true) = (&env.audience, no_access) {
             out.push(Finding {
                 code: "not_for_you".into(),
@@ -532,34 +577,7 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
             });
             continue;
         }
-        let effect = match code.as_str() {
-            "op_not_signed_in"
-            | "auth_required"
-            | "account_not_registered"
-            | "selected_signed_out" => "signs_in",
-            _ => "none",
-        };
-        out.push(Finding {
-            code: code.as_str().into(),
-            scope: Scope {
-                environment: Some(env.name.clone()),
-                ..Scope::default()
-            },
-            blocking: true,
-            actor: if code.human_required() {
-                "owner"
-            } else {
-                "agent"
-            }
-            .into(),
-            effect: effect.into(),
-            prerequisite: e
-                .next_step()
-                .map(str::to_string)
-                .unwrap_or_else(|| format!("opv status {}", env.name)),
-            verify: "opv ready --json".into(),
-            message: None,
-        });
+        out.push(error_finding(&env.name, None, e));
     }
     for env in &inputs.envs {
         if let Some(targets) = &env.target {
@@ -765,10 +783,34 @@ mod tests;
 
 /// One `op vault user list` for `vault_id` (FR-56): `None` when this person can see the
 /// vault, else the `grants_missing` reason naming it. The vault ID is never a value.
+///
+/// Listing a vault's users needs managing it (#157): a person who can read the vault but not
+/// manage it gets no list, so one `op vault get` (exit status only; its output names the
+/// vault and is dropped unread, SR-1) decides; only when that fails too is a grant missing.
 fn state_vault_grants(r: &dyn crate::runner::CommandRunner, vault_id: &str) -> Option<String> {
     match crate::adapters::onepassword_init::vault_users(r, vault_id, &crate::host::Host::detect) {
         Ok(Some(_)) => None,
-        Ok(None) => Some(format!("state vault {vault_id} cannot be opened")),
+        Ok(None) => {
+            let _ = crate::runner::take_failure_excerpt();
+            let opened = r
+                .probe(
+                    &crate::runner::Call::new(
+                        "op",
+                        &["vault", "get", vault_id, "--format", "json"],
+                    ),
+                    crate::runner::PROBE_TIMEOUT,
+                )
+                .map(|o| o.status == 0);
+            match opened {
+                // A probe that could not run cannot tell: nothing is claimed missing.
+                Ok(true) | Err(_) => None,
+                Ok(false) => {
+                    // Its stderr must not attach to what is reported (NR-31).
+                    let _ = crate::runner::take_failure_excerpt();
+                    Some(format!("state vault {vault_id} cannot be opened"))
+                }
+            }
+        }
         Err(e) => Some(format!("state vault {vault_id}: {e}")),
     }
 }
@@ -789,6 +831,8 @@ pub fn run(
     if let Some(e) = only {
         fleet.environment(e)?;
     }
+    // #157: nobody signed in is one finding of its own, never every target's missing grant.
+    crate::adapters::onepassword::require_session(r, &crate::host::Host::detect, "opv ready")?;
     let account = super::account::gather(r, None);
     // FR-55: the environments' own order, then their keys; never a fixed list.
     let mut ordered: Vec<(&String, &crate::domain::Environment)> = fleet
@@ -832,6 +876,9 @@ pub fn run(
         // One visibility check per state vault the targets need (FR-56), not per target.
         let mut vault_checks: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
+        // The state vault is checked with the environment's own account (FR-40), as
+        // `status` reads its rows.
+        let env_runner = super::signin::open(fleet, name, r, super::signin::Reach::Store)?;
         for (tname, t) in &env.targets {
             let keep = if reading { Some(&mut fields) } else { None };
             let rows = super::status::env_rows_keeping(
@@ -849,7 +896,7 @@ pub fn run(
             let grants_missing = if readable {
                 vault_checks
                     .entry(t.state_vault_id.clone())
-                    .or_insert_with(|| state_vault_grants(r, &t.state_vault_id))
+                    .or_insert_with(|| state_vault_grants(&env_runner, &t.state_vault_id))
                     .clone()
             } else {
                 None

@@ -175,6 +175,34 @@ pub fn diagnose(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Sessio
     )
 }
 
+/// #157: the session a read-only command checks before it classifies any vault, so a
+/// missing session is reported as `op_not_signed_in` (exit 7, `human_required`) rather than
+/// as every vault being outside the account. Like `doctor`, it asks the 1Password app once
+/// ([`wake`]) before reporting "not signed in" outside CI. A session that could not be
+/// checked (`Unknown`) is let through: each vault is then classified on its own.
+pub fn require_session(
+    r: &dyn CommandRunner,
+    host: &dyn Fn() -> Host,
+    failed: &str,
+) -> Result<(), Error> {
+    let mut session = diagnose(r, host)?;
+    if session == Session::NotSignedIn && !host().ci && wake(r) {
+        session = diagnose(r, host)?;
+    }
+    match session {
+        Session::SignedIn(_) | Session::Unknown => Ok(()),
+        s => {
+            let e = session_error(s, &host(), Some(failed), None)
+                .expect("every other session is an error");
+            Err(if s == Session::NotSignedIn {
+                e.with_code(crate::error::Code::OpNotSignedIn)
+            } else {
+                e
+            })
+        }
+    }
+}
+
 /// Limit for [`wake`]: long enough for a person to approve the 1Password app's prompt.
 pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(60);
 

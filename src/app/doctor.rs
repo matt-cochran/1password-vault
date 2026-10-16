@@ -824,10 +824,14 @@ fn target_checks(
         // Read with the environment's account, never the deploy identity, so it is checked
         // even after a failed sign-in.
         if report.passed("op auth") {
-            report.push(
-                STATE_VAULT_CHECK,
-                state_vault(r, env_name, &name, &target.state_vault_id),
-            );
+            // Store reach signs nothing in, so opening it cannot fail.
+            let check =
+                match super::signin::open_on(fleet, env_name, r, super::signin::Reach::Store, host)
+                {
+                    Ok(account) => state_vault(&account, env_name, &name, &target.state_vault_id),
+                    Err(e) => Err(e),
+                };
+            report.push(STATE_VAULT_CHECK, check);
         } else {
             report.skip(
                 STATE_VAULT_CHECK,
@@ -2319,6 +2323,12 @@ mod tests {
         api_signs_in: bool,
         json: bool,
     ) -> (Result<(), Error>, String) {
+        let r = targets_runner(only, api_signs_in);
+        doctor_targets_on(two_targets(api_signs_in), only, json, &r)
+    }
+
+    /// The answers [`doctor_targets`] gives.
+    fn targets_runner(only: &[&str], api_signs_in: bool) -> FakeRunner {
         let r = FakeRunner::new([]);
         let op_answers = good().into_iter().take(2);
         r.responses
@@ -2340,6 +2350,16 @@ mod tests {
             let answers = good().into_iter().skip(2).chain([vault]);
             r.responses.borrow_mut().extend(answers.map(Ok));
         }
+        r
+    }
+
+    /// `doctor --env prod --product allumata [--target …]` on `fleet`, answered by `r`.
+    fn doctor_targets_on(
+        fleet: Fleet,
+        only: &[&str],
+        json: bool,
+        r: &FakeRunner,
+    ) -> (Result<(), Error>, String) {
         let only: Vec<String> = only.iter().map(|t| t.to_string()).collect();
         let request = Request {
             env: Some("prod"),
@@ -2349,14 +2369,30 @@ mod tests {
             ..Request::default()
         };
         let mut out = Vec::new();
-        let res = run_request_on(
-            Ok(two_targets(api_signs_in)),
-            request,
-            &r,
-            &|| linux(),
-            &mut out,
-        );
+        let res = run_request_on(Ok(fleet), request, r, &|| linux(), &mut out);
         (res, text_of(&out))
+    }
+
+    /// #157: a state vault is looked for in the environment's own account.
+    #[test]
+    fn the_state_vault_is_looked_for_in_the_environments_account() {
+        let r = targets_runner(&["portfolio"], false);
+        let mut fleet = two_targets(false);
+        fleet.environments.get_mut("prod").unwrap().account = Some("work.1password.com".into());
+        let _ = doctor_targets_on(fleet, &["portfolio"], false, &r);
+        let calls = r.calls.borrow();
+        let probe = calls
+            .iter()
+            .find(|c| {
+                c.args
+                    .starts_with(&["vault".to_string(), "get".to_string()])
+            })
+            .unwrap();
+        assert!(
+            probe
+                .env
+                .contains(&("OP_ACCOUNT".to_string(), "work.1password.com".to_string()))
+        );
     }
 
     /// The target of each JSON check named `name`, in order.
