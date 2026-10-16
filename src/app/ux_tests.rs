@@ -193,6 +193,8 @@ fn confirm_env_requires_flag() {
     assert_eq!(res.unwrap_err().exit_code(), 6);
 }
 
+/// The step is a handoff built from the command as typed, every flag kept (R61); a unit
+/// test names the invocation the CLI would have parsed.
 #[test]
 fn confirm_env_refusal_names_the_exact_command() {
     let o = SyncOpts {
@@ -201,8 +203,8 @@ fn confirm_env_refusal_names_the_exact_command() {
     };
     let (res, _) = sync_out(&guarded(), &new_secrets(), &o);
     assert_eq!(
-        res.unwrap_err().next_step(),
-        Some("opv sync prod --deploy --prune --confirm prod")
+        catalog_next(&res.unwrap_err(), "opv sync prod --deploy --prune"),
+        Some("opv sync prod --deploy --prune --confirm prod".into())
     );
 }
 
@@ -221,7 +223,7 @@ fn guarded_refusal_names_blocking_keys_and_the_confirm_flag() {
     let (res, _) = sync_out(&guarded(), &r, &deploy());
     assert!(
         matches!(&res, Err(Error::Policy(m))
-            if m.contains("allumata/OPENAI_API_KEY") && m.contains("add --confirm prod")),
+            if m.contains("allumata/OPENAI_API_KEY") && m.contains("needs a person's confirmation")),
         "{res:?}"
     );
 }
@@ -271,27 +273,37 @@ fn missing_product_next_checks_the_first_product() {
     assert_eq!(e.next_step(), Some("opv check prod --product allumata"));
 }
 
+/// R21: the unique close key is substituted, and the write turned into its read.
 #[test]
-fn undeclared_rotate_next_explains_the_closest_key() {
+fn undeclared_rotate_next_plans_the_closest_key() {
     let o = SyncOpts {
         rotate: vec!["allumata/INTEGRATION_ENC".into()],
         ..SyncOpts::default()
     };
     let (res, _) = sync_out(&fleet(), &FakeRunner::new([]), &o);
     assert_eq!(
-        res.unwrap_err().next_step(),
-        Some("opv explain allumata/INTEGRATION_ENC_KEY --env prod")
+        catalog_next(
+            &res.unwrap_err(),
+            "opv sync prod --rotate allumata/INTEGRATION_ENC"
+        ),
+        Some("opv plan prod --rotate allumata/INTEGRATION_ENC_KEY".into())
     );
 }
 
 #[test]
-fn prune_immutable_without_prune_next_is_plan() {
+fn prune_immutable_without_prune_next_is_the_help() {
     let o = SyncOpts {
         prune_immutable: vec!["allumata/INTEGRATION_ENC_KEY".into()],
         ..SyncOpts::default()
     };
     let (res, _) = sync_out(&fleet(), &FakeRunner::new([]), &o);
-    assert_eq!(res.unwrap_err().next_step(), Some("opv plan prod"));
+    assert_eq!(
+        catalog_next(
+            &res.unwrap_err(),
+            "opv sync prod --prune-immutable allumata/INTEGRATION_ENC_KEY"
+        ),
+        Some("opv sync --help".into())
+    );
 }
 
 #[test]
@@ -343,21 +355,37 @@ fn confirm_naming_another_environment_is_refused() {
         ..SyncOpts::default()
     };
     let (res, _) = sync_out(&fleet(), &FakeRunner::new([]), &o);
-    assert!(matches!(res, Err(Error::Policy(m)) if m.contains("--confirm staging does not match")));
+    assert_eq!(res.unwrap_err().code_str(), "confirm_mismatch");
 }
 
+/// 01.12: a mismatched --confirm steps to the read of the environment, never to a sync
+/// confirmed for the person.
 #[test]
-fn guarded_sync_next_step_keeps_the_confirm_flag() {
+fn confirm_mismatch_next_is_the_plan_not_a_confirmed_sync() {
+    let o = SyncOpts {
+        confirm: Some("staging".into()),
+        deploy: true,
+        ..SyncOpts::default()
+    };
+    let (res, _) = sync_out(&fleet(), &FakeRunner::new([]), &o);
+    assert_eq!(
+        catalog_next(
+            &res.unwrap_err(),
+            "opv sync prod --deploy --confirm staging"
+        ),
+        Some("opv plan prod".into())
+    );
+}
+
+/// X4: opv never adds --confirm to a step it generates; the guard asks the person again.
+#[test]
+fn guarded_sync_next_step_never_adds_the_confirm_flag() {
     let o = SyncOpts {
         confirm: Some("prod".into()),
         ..SyncOpts::default()
     };
     let (_, out) = sync_out(&guarded(), &new_secrets(), &o);
-    assert_eq!(
-        last_line(&out),
-        "Next: opv sync prod --deploy --confirm prod",
-        "{out}"
-    );
+    assert_eq!(last_line(&out), "Next: opv sync prod --deploy", "{out}");
 }
 
 #[test]
@@ -471,9 +499,9 @@ fn sync_product_next_step_keeps_the_product() {
 }
 
 #[test]
-fn undefined_product_is_a_config_error_naming_the_choices() {
+fn undefined_product_is_an_error_naming_the_choices() {
     let (res, _) = sync_out(&fleet(), &FakeRunner::new([]), &product("nope"));
-    assert!(matches!(res, Err(Error::Config(m)) if m.contains("choose one of: allumata")));
+    assert!(res.is_err_and(|e| e.to_string().contains("(declared: allumata)")));
 }
 
 // ---- P11: plan names what it would do ---------------------------------------------------
@@ -960,7 +988,13 @@ fn sync_with_a_stale_fly_plan_id_stages_nothing() {
 #[test]
 fn stale_plan_refusal_next_step_is_the_review() {
     let (res, _) = sync_out(&fleet(), &new_secrets(), &expect("00000000"));
-    assert_eq!(res.unwrap_err().next_step(), Some("opv plan prod"));
+    assert_eq!(
+        catalog_next(
+            &res.unwrap_err(),
+            "opv sync prod --deploy --expect-plan 00000000"
+        ),
+        Some("opv plan prod".into())
+    );
 }
 
 /// The item and the Fly listing after a run staged both secrets but never deployed them.
@@ -1020,7 +1054,24 @@ fn expect_plan_with_prune_immutable_is_refused_before_any_call() {
         ..expect("00000000")
     };
     let (res, _) = sync_out(&fleet(), &r, &o);
-    assert!(matches!(res, Err(Error::Config(_))) && r.calls.borrow().is_empty());
+    assert!(res.is_err_and(|e| e.exit_code() == 2) && r.calls.borrow().is_empty());
+}
+
+/// 01.11: the refusal never hands back the destructive sync, let alone a confirmed one.
+#[test]
+fn expect_plan_with_prune_immutable_next_is_not_the_sync() {
+    let o = SyncOpts {
+        prune: true,
+        prune_immutable: vec!["allumata/INTEGRATION_ENC_KEY".into()],
+        ..expect("00000000")
+    };
+    let (res, _) = sync_out(&guarded(), &FakeRunner::new([]), &o);
+    let typed = "opv sync prod --prune --prune-immutable allumata/INTEGRATION_ENC_KEY \
+                 --expect-plan 00000000";
+    assert_eq!(
+        catalog_next(&res.unwrap_err(), typed),
+        Some("opv sync --help".into())
+    );
 }
 
 // ---- I4: an undeclared --product keeps the command and the environment ---------------
@@ -1044,8 +1095,11 @@ fn status_with_an_undeclared_product_suggests_status_of_the_same_env() {
 fn sync_with_an_undeclared_product_suggests_its_plan() {
     let (res, _) = sync_out(&fleet(), &FakeRunner::new([]), &product("allumatta"));
     assert_eq!(
-        res.unwrap_err().next_step(),
-        Some("opv plan prod --product allumata")
+        catalog_next(
+            &res.unwrap_err(),
+            "opv sync prod --deploy --product allumatta"
+        ),
+        Some("opv plan prod --product allumata".into())
     );
 }
 
@@ -1056,4 +1110,13 @@ fn check_with_findings_does_not_count_them_on_stdout() {
     let mut out = Vec::new();
     let _ = super::local::check(&fleet(), "prod", Some("allumata"), &r, &mut out, false);
     assert!(!text_of(&out).contains("finding"), "{}", text_of(&out));
+}
+
+/// The Next a cataloged error renders for the command line `line` (a unit test has no CLI
+/// invocation of its own).
+fn catalog_next(e: &Error, line: &str) -> Option<String> {
+    let (cause, _) = e.cause()?;
+    let argv: Vec<String> = line.split_whitespace().map(str::to_string).collect();
+    let inv = crate::cause::Invocation::from_cli(&argv);
+    crate::cause::render::next_text(&cause.step(&inv).1, &inv)
 }
