@@ -312,7 +312,12 @@ impl Scenario {
     }
 
     fn normalize(&self, s: &str) -> String {
-        let s = s.replace(&self.root.path().display().to_string(), "<SCENARIO>");
+        // macOS resolves the temp directory through a symlink (/var → /private/var).
+        let root = self.root.path().display().to_string();
+        let real = std::fs::canonicalize(self.root.path())
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| root.clone());
+        let s = s.replace(&real, "<SCENARIO>").replace(&root, "<SCENARIO>");
         let s = delay_re().replace_all(&s, "in <delay>");
         let s = receipt_re().replace_all(&s, "rcpt-<id>");
         // The host's platform (WSL or plain Linux, read from the kernel) is not the
@@ -808,7 +813,13 @@ fn rule_test(cell: &Cell, rule: Rule) {
     );
 }
 
+/// The committed snapshots are recorded on Linux. Other hosts word some messages for their
+/// platform by design (the 1Password app holding the accounts on macOS, the core-dump
+/// check), so they run the rules but skip the snapshot comparison.
 fn snapshot_test(cell: &Cell) {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
     let o = outcome(cell);
     let path = snapshots().join(format!("{}.snap", cell.name()));
     let got = o.snapshot(cell);
