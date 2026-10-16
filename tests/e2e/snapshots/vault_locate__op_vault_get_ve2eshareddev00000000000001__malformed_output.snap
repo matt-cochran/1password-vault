@@ -10,6 +10,6 @@ vault vE2ESHAREDDEV00000000000001 is in account AE2EDEVACCOUNT000000000001; sele
 
 ## json exit: 0
 ## json stdout
-{"schema_version":1,"ok":true,"vault_id":"vE2ESHAREDDEV00000000000001","accounts":[{"account_id":"AE2EDEVACCOUNT000000000001","shorthand":"e2e-dev","sign_in":"e2e.1password.com","result":"found"},{"account_id":"AE2EOPSACCOUNT000000000002","shorthand":"e2e-ops","sign_in":"e2e.1password.com","result":"not_found"}],"complete":true,"next":null,"do":null}
+{"schema_version":2,"ok":true,"vault_id":"vE2ESHAREDDEV00000000000001","accounts":[{"account_id":"AE2EDEVACCOUNT000000000001","shorthand":"e2e-dev","sign_in":"e2e.1password.com","result":"found"},{"account_id":"AE2EOPSACCOUNT000000000002","shorthand":"e2e-ops","sign_in":"e2e.1password.com","result":"not_found"}],"complete":true,"next":null,"do":null}
 
 ## json stderr

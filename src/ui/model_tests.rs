@@ -46,7 +46,7 @@ impl Source for Replacing {
 }
 
 /// `opv ready --json` when op is signed out: the failure document, with its steps.
-pub(crate) const READY_FAILED: &str = r#"{"schema_version":1,"ok":false,"exit_code":7,"next":"opv login","do":null,"error":{"code":"op_not_signed_in","category":"auth","message":"1Password CLI is not signed in","retry":"after_fix","human_required":true,"do":null,"next":"opv login"}}"#;
+pub(crate) const READY_FAILED: &str = r#"{"schema_version":2,"ok":false,"exit_code":7,"next":"opv login","do":null,"error":{"code":"op_not_signed_in","category":"auth","message":"1Password CLI is not signed in","retry":"after_fix","human_required":true,"do":null,"next":"opv login"}}"#;
 
 fn snap() -> Snapshot {
     Snapshot::gather(&Fixtures)

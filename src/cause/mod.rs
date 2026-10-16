@@ -123,8 +123,12 @@ pub struct Upstream {
     pub tool: String,
     pub version: Option<String>,
     pub exit: ExitClass,
-    /// The error line plus the tail (all lines under `--verbose`), already scrubbed.
+    /// Every line of the reply, already scrubbed. The box and `evidence.upstream` show the
+    /// error line plus the tail, or all of it under `--verbose` ([`evidence::shown_lines`]).
     pub said: Vec<String>,
+    /// The reply was longer than the runner keeps ([`crate::runner::STDERR_CAP`]): only
+    /// its end is in `said`, and every channel says so.
+    pub truncated: bool,
     /// The vendor's own advice was cut (it conflicts with opv's steps).
     pub removed_advice: bool,
     /// Always true: third-party text is data, never instructions.

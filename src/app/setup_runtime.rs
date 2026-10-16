@@ -426,6 +426,7 @@ fn evidence(line: String, exit: Option<i32>) -> Upstream {
         },
         said: vec![line],
         removed_advice: false,
+        truncated: false,
         untrusted: true,
     }
 }

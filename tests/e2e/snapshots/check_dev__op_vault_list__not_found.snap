@@ -8,21 +8,21 @@ using <SCENARIO>/project/secrets.toml
 opv: vault list was not found at 1Password
   checked: op vault list --format json (exit 1)
 --- 1Password CLI replied, exit 1 ---
-| [ERROR] 2026/10/16 00:05:18 "list" isn't a vault in this account. Specify the vault with its ID or name
+| [ERROR] 2026/10/16 00:05:18 "list" isn't a vault in this account. Specify the vault with its ID or name.
 --- (scrubbed) ---
 Do: check the name given with --vault, which names vault list
 Next: opv vault locate list
 
 ## json exit: 4
 ## json stdout
-{"schema_version":1,"ok":false,"exit_code":4,"next":"opv vault locate list","do":"check the name given with --vault, which names vault list","error":{"code":"resource_not_found","category":"source","message":"vault list was not found at 1Password","subject":{"state":"missing","system":"one_password","resource":{"kind":"vault","name":"list","scope":null},"named_by":{"by":"flag","flag":"--vault"}},"evidence":{"checked":"op vault list --format json","account":null,"upstream":{"source":"one_password","tool":"1Password CLI","version":null,"exit":{"kind":"code","code":1},"said":["[ERROR] 2026/10/16 00:05:18 \"list\" isn't a vault in this account. Specify the vault with its ID or name"],"removed_advice":false,"untrusted":true}},"retry":"after_fix","human_required":false,"do":"check the name given with --vault, which names vault list","next":"opv vault locate list","next_kind":"run"}}
+{"schema_version":2,"ok":false,"exit_code":4,"next":"opv vault locate list","do":"check the name given with --vault, which names vault list","error":{"code":"resource_not_found","category":"source","message":"vault list was not found at 1Password","subject":{"state":"missing","system":"one_password","resource":{"kind":"vault","name":"list","scope":null},"named_by":{"by":"flag","flag":"--vault"}},"evidence":{"checked":"op vault list --format json","account":null,"upstream":{"source":"one_password","tool":"1Password CLI","version":null,"exit":{"kind":"code","code":1},"said":["[ERROR] 2026/10/16 00:05:18 \"list\" isn't a vault in this account. Specify the vault with its ID or name."],"truncated":false,"removed_advice":false,"untrusted":true,"omitted":0}},"retry":"after_fix","human_required":false,"do":"check the name given with --vault, which names vault list","next":"opv vault locate list","next_kind":"run"}}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml
 opv: vault list was not found at 1Password
   checked: op vault list --format json (exit 1)
 --- 1Password CLI replied, exit 1 ---
-| [ERROR] 2026/10/16 00:05:18 "list" isn't a vault in this account. Specify the vault with its ID or name
+| [ERROR] 2026/10/16 00:05:18 "list" isn't a vault in this account. Specify the vault with its ID or name.
 --- (scrubbed) ---
 Do: check the name given with --vault, which names vault list
 Next: opv vault locate list

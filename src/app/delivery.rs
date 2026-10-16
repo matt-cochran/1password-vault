@@ -159,7 +159,7 @@ fn op_failure(ctx: &DiagnoseContext) -> Option<Error> {
     let failed = crate::runner::take_failure()?;
     let exit = failed.seen.exit();
     let cause = onepassword_diagnose::diagnose(failed.seen.clone(), failed.stderr(), ctx);
-    let said = failed.excerpt.map(|e| e.lines).unwrap_or_default();
+    let (said, truncated) = crate::scrub::Excerpt::parts(failed.excerpt);
     if said.is_empty() {
         return Some(cause.into());
     }
@@ -172,6 +172,7 @@ fn op_failure(ctx: &DiagnoseContext) -> Option<Error> {
             exit,
             said,
             removed_advice: false,
+            truncated,
             untrusted: true,
         },
     ))

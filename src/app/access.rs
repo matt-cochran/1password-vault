@@ -378,12 +378,11 @@ fn observe(
     Ok((observations, readers, unreadable))
 }
 
-/// The failed call the runner observed last, with its scrubbed reply; taken once.
-fn failed_call() -> Option<(Observed, Vec<String>)> {
+/// The failed call the runner observed last, with its scrubbed reply and whether that was
+/// truncated; taken once.
+fn failed_call() -> Option<(Observed, (Vec<String>, bool))> {
     let seen = crate::runner::take_observed()?;
-    let said = crate::runner::take_failure_excerpt()
-        .map(|e| e.lines)
-        .unwrap_or_default();
+    let said = crate::scrub::Excerpt::parts(crate::runner::take_failure_excerpt());
     Some((seen, said))
 }
 
@@ -420,13 +419,13 @@ fn diagnose_vault(r: &dyn CommandRunner, need: &Needs<'_>, vault: &str) -> Optio
         vault_readable: found,
         ..Facts::from_process_env()
     };
-    let (seen, said) = get.or(list)?;
+    let (seen, (said, truncated)) = get.or(list)?;
     let exit = seen.exit();
     // #153a: a vault in another account names that account.
     let cause = locate_owner(r, diagnose_item_call(seen, &said.join("\n"), &ctx, &facts));
     let elsewhere =
         !found && matches!(cause, Cause::InOtherAccount { .. } | Cause::NotFound { .. });
-    let upstream = (!said.is_empty()).then(|| op_reply(exit, said));
+    let upstream = (!said.is_empty()).then(|| op_reply(exit, said, truncated));
     Some(VaultCause {
         vault: vault.to_string(),
         elsewhere,
@@ -447,7 +446,7 @@ fn is_session(cause: &Cause) -> bool {
 }
 
 /// op's scrubbed reply, attributed and marked untrusted (design §7.3).
-fn op_reply(exit: ExitClass, said: Vec<String>) -> Upstream {
+fn op_reply(exit: ExitClass, said: Vec<String>, truncated: bool) -> Upstream {
     Upstream {
         source: System::OnePassword,
         tool: "1Password CLI".to_string(),
@@ -455,6 +454,7 @@ fn op_reply(exit: ExitClass, said: Vec<String>) -> Upstream {
         exit,
         said,
         removed_advice: false,
+        truncated,
         untrusted: true,
     }
 }

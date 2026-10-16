@@ -11,7 +11,7 @@ Next: opv doctor --env dev
 
 ## json exit: 4
 ## json stdout
-{"schema_version":1,"ok":false,"exit_code":4,"next":"opv doctor --env dev","do":"read the reply of op shown above; opv does not recognise it","error":{"code":"unrecognized_failure","category":"source","message":"op failed at 1Password in a way opv does not recognise (opv checked: op exited 127)","subject":{"target":null,"system":"one_password","established":["op exited 127"],"env":"dev"},"evidence":{"checked":"op vault get vE2ESHAREDDEV00000000000001 --format json","account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"read the reply of op shown above; opv does not recognise it","next":"opv doctor --env dev","next_kind":"run"}}
+{"schema_version":2,"ok":false,"exit_code":4,"next":"opv doctor --env dev","do":"read the reply of op shown above; opv does not recognise it","error":{"code":"unrecognized_failure","category":"source","message":"op failed at 1Password in a way opv does not recognise (opv checked: op exited 127)","subject":{"target":null,"system":"one_password","established":["op exited 127"],"env":"dev"},"evidence":{"checked":"op vault get vE2ESHAREDDEV00000000000001 --format json","account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"read the reply of op shown above; opv does not recognise it","next":"opv doctor --env dev","next_kind":"run"}}
 
 ## json stderr
 opv: op failed at 1Password in a way opv does not recognise (opv checked: op exited 127)

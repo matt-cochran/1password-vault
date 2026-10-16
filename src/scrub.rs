@@ -43,12 +43,6 @@ pub enum Kind {
 }
 /// Values (and encodings) shorter than this are replaced only as whole tokens.
 pub const MIN_SUBSTRING: usize = 4;
-/// Lines shown after a failed call's error line (NR-31).
-pub const FAILURE_LINES: usize = 5;
-/// Lines shown per call with `--verbose`.
-pub const VERBOSE_LINES: usize = 20;
-/// Longest line shown; the rest is cut and marked with `…`.
-const LINE_CHARS: usize = 240;
 
 /// The values to scrub. `Debug` prints the count only.
 #[derive(Default)]
@@ -585,13 +579,15 @@ pub fn scrub(text: &str) -> String {
     scrub_patterns(&values)
 }
 
-/// The last `max` non-empty lines of a child's `stderr`, scrubbed and safe to print:
-/// registered values masked on the raw text, then escape sequences and control
-/// characters removed, then values and patterns scrubbed again, each line cut at 240
-/// characters.
-/// When the buffer was `truncated` (only its tail was kept), the first, partial line is
-/// dropped so no value cut in half can show.
-pub fn tail_lines(stderr: &[u8], truncated: bool, max: usize) -> Vec<String> {
+/// Every non-empty line of a child's `stderr`, scrubbed and safe to print: registered
+/// values masked on the raw text, then escape sequences and control characters removed,
+/// then values and patterns scrubbed again. No line is cut or left out; what is shown is
+/// the display's choice (design §7.3: the error line plus the tail, all of it with
+/// `--verbose`).
+/// When the buffer was `truncated` (only its last [`crate::runner::STDERR_CAP`] bytes were
+/// kept), the first, partial line is dropped so no value cut in half can show; the caller
+/// says the reply was truncated.
+pub fn reply_lines(stderr: &[u8], truncated: bool) -> Vec<String> {
     let mut bytes = stderr;
     if truncated {
         bytes = match bytes.iter().position(|&b| b == b'\n') {
@@ -609,14 +605,11 @@ pub fn tail_lines(stderr: &[u8], truncated: bool, max: usize) -> Vec<String> {
     let raw = with_registry(|r| r.scrub_values(&text));
     let plain = strip_escapes(&raw);
     let clean = scrub(&plain);
-    let lines: Vec<&str> = clean
+    clean
         .lines()
         .map(str::trim_end)
         .filter(|l| !l.trim().is_empty())
-        .collect();
-    lines[lines.len().saturating_sub(max)..]
-        .iter()
-        .map(|l| cut(l))
+        .map(str::to_string)
         .collect()
 }
 
@@ -650,13 +643,6 @@ pub fn strip_escapes(text: &str) -> Zeroizing<String> {
     )
 }
 
-fn cut(line: &str) -> String {
-    match line.char_indices().nth(LINE_CHARS) {
-        Some((i, _)) => format!("{}…", &line[..i]),
-        None => line.to_string(),
-    }
-}
-
 /// `line` without a CLI's own directions to the person (FR-50): opv's `Do:` and `Next:` say
 /// what to do, so `Please run 'op signin --help' for instructions` and the like are cut,
 /// keeping the reason before them.
@@ -667,12 +653,11 @@ fn without_vendor_directions(line: &str) -> String {
         "Try authenticating with:",
         "To sign in, run",
     ];
-    let cut_at = DIRECTIONS
-        .iter()
-        .filter_map(|d| line.find(d))
-        .min()
-        .unwrap_or(line.len());
-    line[..cut_at].trim_end_matches([' ', '.']).to_string()
+    // A line without a direction passes through unchanged.
+    match DIRECTIONS.iter().filter_map(|d| line.find(d)).min() {
+        Some(cut_at) => line[..cut_at].trim_end_matches([' ', '.']).to_string(),
+        None => line.to_string(),
+    }
 }
 
 /// The scrubbed stderr lines of a failed call, shown under opv's error line (NR-31).
@@ -680,14 +665,17 @@ fn without_vendor_directions(line: &str) -> String {
 pub struct Excerpt {
     /// The program that failed (`op`, `flyctl`, `az`, `kubectl`).
     pub program: String,
-    /// At most [`FAILURE_LINES`] scrubbed lines, oldest first.
+    /// Every scrubbed line of the reply, oldest first; the display picks what to show.
     pub lines: Vec<String>,
+    /// The reply was longer than [`crate::runner::STDERR_CAP`] bytes and only its end was
+    /// kept; every display of it says so.
+    pub truncated: bool,
 }
 
 impl Excerpt {
     /// `None` when the child wrote nothing worth showing.
     pub fn from_stderr(program: &str, stderr: &[u8], truncated: bool) -> Option<Self> {
-        let lines: Vec<String> = tail_lines(stderr, truncated, FAILURE_LINES)
+        let lines: Vec<String> = reply_lines(stderr, truncated)
             .into_iter()
             .map(|l| without_vendor_directions(&l))
             .filter(|l| !l.trim().is_empty())
@@ -695,7 +683,13 @@ impl Excerpt {
         (!lines.is_empty()).then(|| Self {
             program: program.to_string(),
             lines,
+            truncated,
         })
+    }
+
+    /// The lines of `excerpt` and whether it was truncated; none and false without one.
+    pub fn parts(excerpt: Option<Self>) -> (Vec<String>, bool) {
+        excerpt.map_or_else(Default::default, |x| (x.lines, x.truncated))
     }
 
     /// One `  <program> said: <line>` per line.
@@ -731,6 +725,14 @@ mod tests {
                 "You are not currently signed in. Please run `op signin --help` for instructions"
             ),
             "You are not currently signed in"
+        );
+    }
+
+    #[test]
+    fn a_line_without_a_direction_keeps_its_full_stop() {
+        assert_eq!(
+            without_vendor_directions("Host key verification failed."),
+            "Host key verification failed."
         );
     }
 
@@ -968,28 +970,45 @@ mod tests {
     }
 
     #[test]
-    fn tail_keeps_the_last_five_non_empty_lines() {
+    fn reply_keeps_every_non_empty_line() {
         let s = b"1\n2\n\n3\n4\n5\n6\n   \n7\n";
-        assert_eq!(tail_lines(s, false, 5), ["3", "4", "5", "6", "7"]);
+        assert_eq!(reply_lines(s, false), ["1", "2", "3", "4", "5", "6", "7"]);
     }
 
     #[test]
-    fn tail_drops_the_partial_first_line_of_a_truncated_buffer() {
-        assert_eq!(tail_lines(b"rtial\nwhole", true, 5), ["whole"]);
+    fn reply_drops_the_partial_first_line_of_a_truncated_buffer() {
+        assert_eq!(reply_lines(b"rtial\nwhole", true), ["whole"]);
     }
 
     #[test]
-    fn tail_strips_escape_sequences() {
-        assert_eq!(tail_lines(b"\x1b[31mred\x1b[0m\x07", false, 5), ["red"]);
+    fn reply_strips_escape_sequences() {
+        assert_eq!(reply_lines(b"\x1b[31mred\x1b[0m\x07", false), ["red"]);
     }
 
     #[test]
-    fn tail_cuts_long_lines() {
+    fn reply_keeps_long_lines_whole() {
         let long = "x".repeat(500);
-        assert_eq!(
-            tail_lines(long.as_bytes(), false, 5)[0].chars().count(),
-            LINE_CHARS + 1
+        assert_eq!(reply_lines(long.as_bytes(), false)[0].chars().count(), 500);
+    }
+
+    #[test]
+    fn a_registered_value_never_survives_in_any_line_of_a_long_reply() {
+        let mut stderr = String::from("[ERROR] 2026/10/16 10:00:00 request failed\n");
+        for i in 0..400 {
+            stderr.push_str(&format!("detail {i}: field holds VerboseMark-77x{i}\n"));
+        }
+        with_registry(|r| r.register("VerboseMark-77x"));
+        let lines = reply_lines(stderr.as_bytes(), false);
+        assert!(
+            !lines.iter().any(|l| l.contains("VerboseMark")),
+            "{lines:?}"
         );
+    }
+
+    #[test]
+    fn a_truncated_excerpt_says_so() {
+        let e = Excerpt::from_stderr("op", b"rtial\n[ERROR] whole\n", true).unwrap();
+        assert!(e.truncated);
     }
 
     #[test]

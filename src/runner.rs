@@ -437,11 +437,14 @@ fn attempt_on(e: &dyn Engine, call: &Call, limit: Duration) -> io::Result<(Attem
             &outcome,
         ));
         if let Ok((a, stderr)) = &res {
-            for line in crate::scrub::tail_lines(
-                &stderr.bytes,
-                stderr.truncated,
-                crate::scrub::VERBOSE_LINES,
-            ) {
+            // The whole reply, scrubbed (design §7.3); a reply past the cap says so.
+            if stderr.truncated {
+                e.note(&format!(
+                    "    stderr truncated: longer than {} KiB, only its end was kept",
+                    STDERR_CAP / 1024
+                ));
+            }
+            for line in crate::scrub::reply_lines(&stderr.bytes, stderr.truncated) {
                 e.note(&format!("    stderr: {line}"));
             }
             if let Attempt::Exited(o) = a {
@@ -3303,6 +3306,34 @@ mod tests {
     fn verbose_stderr_is_scrubbed() {
         let notes = verbose_notes("", "Authorization: Bearer abc.def\n");
         assert_eq!(notes[1], "    stderr: Authorization: Bearer ********");
+    }
+
+    /// A 60-line reply whose first line is op's error and whose every line names `value`.
+    fn long_reply(value: &str) -> String {
+        let mut s = format!("[ERROR] 2026/10/16 10:00:00 refused {value}\n");
+        for i in 1..60 {
+            s.push_str(&format!("detail {i}: {value}\n"));
+        }
+        s
+    }
+
+    #[test]
+    fn verbose_shows_every_line_of_a_long_reply() {
+        let notes = verbose_notes("", &long_reply("plain"));
+        assert_eq!(
+            notes
+                .iter()
+                .filter(|n| n.starts_with("    stderr: "))
+                .count(),
+            60
+        );
+    }
+
+    #[test]
+    fn verbose_masks_a_value_in_every_line_of_a_long_reply() {
+        crate::scrub::register("vbsLongValue-Q9");
+        let notes = verbose_notes("", &long_reply("vbsLongValue-Q9")).join("\n");
+        assert!(!notes.contains("vbsLongValue"), "{notes}");
     }
 
     /// I1: a value holding CR, BEL or ESC is masked in `--verbose` stderr too.

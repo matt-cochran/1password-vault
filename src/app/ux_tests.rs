@@ -158,7 +158,7 @@ fn json_doc(r: &FakeRunner) -> Value {
 
 #[test]
 fn sync_json_is_one_versioned_document() {
-    assert_eq!(json_doc(&new_secrets())["schema_version"], 1);
+    assert_eq!(json_doc(&new_secrets())["schema_version"], 2);
 }
 
 #[test]

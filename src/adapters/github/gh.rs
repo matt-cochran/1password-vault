@@ -454,6 +454,7 @@ pub(crate) fn diagnosed(ctx: &DiagnoseContext, needs: Vec<String>) -> Option<Err
                 exit,
                 said: x.lines,
                 removed_advice: false,
+                truncated: x.truncated,
                 untrusted: true,
             },
         ),

@@ -269,6 +269,7 @@ impl Failure {
                     },
                     said,
                     removed_advice: false,
+                    truncated: false,
                     untrusted: true,
                 },
             ),
@@ -315,7 +316,7 @@ fn diagnosed(what: &str, account: Option<&str>, messages: &[String], status: Opt
         failure.stderr(),
         &ctx,
     );
-    let said = failure.excerpt.map(|x| x.lines).unwrap_or_default();
+    let (said, truncated) = crate::scrub::Excerpt::parts(failure.excerpt);
     if said.is_empty() {
         return cause.into();
     }
@@ -328,6 +329,7 @@ fn diagnosed(what: &str, account: Option<&str>, messages: &[String], status: Opt
             exit,
             said,
             removed_advice: false,
+            truncated,
             untrusted: true,
         },
     )

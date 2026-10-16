@@ -1344,13 +1344,13 @@ fn fly_plan_json_stdout_is_one_json_document() {
     );
 }
 
-/// FR-21: the document declares `schema_version: 1`.
+/// FR-21: the document declares `schema_version: 2` (the error document changed in 0.10.0).
 #[test]
-fn status_json_schema_version_is_one() {
+fn status_json_schema_version_is_two() {
     let h = Harness::new(&good_item());
     let r = h.run(&["status", "prod", "--json"]);
     let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
-    assert_eq!(doc["schema_version"], json!(1), "{}", r.all());
+    assert_eq!(doc["schema_version"], json!(2), "{}", r.all());
 }
 
 /// FR-21: the document names the environment and carries names-only totals.
@@ -1445,13 +1445,13 @@ fn status_json_row_carries_failing_reason() {
     assert_eq!(row["reason"], json!("expected prefix sk-"), "{}", r.all());
 }
 
-/// FR-22: the JSON document keeps schema_version 1 when `reason` is added.
+/// FR-22: the JSON document keeps schema_version 2 when `reason` is added.
 #[test]
-fn status_json_reason_keeps_schema_version_one() {
+fn status_json_reason_keeps_schema_version_two() {
     let h = Harness::new(&item(good_fields("pk-S7MARKERVALUEbadprefix0014")));
     let r = h.run(&["status", "prod", "--json"]);
     let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
-    assert_eq!(doc["schema_version"], json!(1), "{}", r.all());
+    assert_eq!(doc["schema_version"], json!(2), "{}", r.all());
 }
 
 /// FR-22: text output shows `failed <rule> (<reason>)`.
@@ -2254,18 +2254,53 @@ fn excerpt_masks_an_unsectioned_item_value() {
     );
 }
 
-/// At most five lines, the last ones, each labelled with the program, right after the
-/// error line.
+/// At most five lines of the reply in the box, right after the error line: the tool's first
+/// line plus the tail, with the place of the lines left out marked (design §7.3).
 #[test]
-fn excerpt_shows_the_last_five_lines_labelled_with_the_program() {
+fn excerpt_shows_the_first_line_and_the_tail_and_marks_the_gap() {
     let r = list_failure_with_stderr("l2\nl3\nl4\nl5\nl6\nl7");
     let excerpt: Vec<&str> = r.stderr.lines().filter(|l| is_excerpt_line(l)).collect();
     assert_eq!(
         excerpt,
-        ["| l3", "| l4", "| l5", "| l6", "| l7"],
+        [
+            "| S7CHILDSTDERR l2",
+            "| ... 1 line left out",
+            "| l4",
+            "| l5",
+            "| l6",
+            "| l7"
+        ],
         "{}",
         r.stderr
     );
+}
+
+/// With `--verbose` the box holds every line of the reply.
+#[test]
+fn verbose_excerpt_shows_every_line_of_the_reply() {
+    let mut h = Harness::new(&jsonish_item());
+    h.set("FAKE_FLY_LIST_FAIL_AT", "1")
+        .set("FAKE_STDERR_VALUE", "l2\nl3\nl4\nl5\nl6\nl7");
+    let r = h.run(&["status", "prod", "--verbose"]);
+    let excerpt: Vec<&str> = r.stderr.lines().filter(|l| l.starts_with("| ")).collect();
+    assert_eq!(
+        excerpt,
+        ["| S7CHILDSTDERR l2", "| l3", "| l4", "| l5", "| l6", "| l7"],
+        "{}",
+        r.stderr
+    );
+}
+
+/// With `--verbose`, a long reply naming an item value in every line shows every line and
+/// never the value (design §7.3: everything passes through, scrubbed).
+#[test]
+fn verbose_long_reply_never_shows_an_item_value() {
+    let mut h = Harness::new(&jsonish_item());
+    let reply: Vec<String> = (0..80).map(|i| format!("{JSONISH} detail {i}")).collect();
+    h.set("FAKE_FLY_LIST_FAIL_AT", "1")
+        .set("FAKE_STDERR_VALUE", &reply.join("\n"));
+    let r = h.run(&["status", "prod", "--verbose"]);
+    assert!(!r.all().contains("S7MARKERVALUE"), "{}", r.all());
 }
 
 /// `--verbose` shows each call's stderr, scrubbed (the notes value only the registry

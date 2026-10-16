@@ -214,6 +214,7 @@ pub(crate) fn take_failure() -> Option<(Observed, Option<Upstream>)> {
         exit: seen.exit(),
         said: x.lines,
         removed_advice: false,
+        truncated: x.truncated,
         untrusted: true,
     });
     Some((seen, up))

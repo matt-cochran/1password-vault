@@ -166,7 +166,7 @@ mod documents_round_trip {
         }];
         let rows = crate::domain::history::build(&keys, &[], &Default::default());
         let doc = serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "environment": "prod",
             "targets": [
                 {"name": "api", "target": "fly", "latest": null, "rows": rows},
@@ -238,7 +238,7 @@ mod documents_round_trip {
 
 #[test]
 fn a_failure_document_is_never_data() {
-    let out = br#"{"schema_version":1,"ok":false,"exit_code":7,"rows":[],"totals":{"findings":0},"error":{"code":"op_not_signed_in","message":"not signed in","next":"opv login"}}"#;
+    let out = br#"{"schema_version":2,"ok":false,"exit_code":7,"rows":[],"totals":{"findings":0},"error":{"code":"op_not_signed_in","message":"not signed in","next":"opv login"}}"#;
     assert!(parse::<RowsDoc>(out).is_err());
 }
 

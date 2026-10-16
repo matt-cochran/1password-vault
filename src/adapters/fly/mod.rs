@@ -583,7 +583,7 @@ pub(crate) fn failed_call(ctx: &DiagnoseContext) -> Error {
     };
     let exit = failed.seen.exit();
     let cause = diagnose::diagnose(failed.seen.clone(), failed.stderr(), ctx);
-    let said = failed.excerpt.map(|e| e.lines).unwrap_or_default();
+    let (said, truncated) = crate::scrub::Excerpt::parts(failed.excerpt);
     if said.is_empty() {
         return cause.into();
     }
@@ -596,6 +596,7 @@ pub(crate) fn failed_call(ctx: &DiagnoseContext) -> Error {
             exit,
             said,
             removed_advice: false,
+            truncated,
             untrusted: true,
         },
     )

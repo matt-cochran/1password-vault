@@ -194,6 +194,7 @@ fn with_credential(
                     exit,
                     said: stderr.lines().map(str::to_string).collect(),
                     removed_advice: false,
+                    truncated: false,
                     untrusted: true,
                 },
             ));

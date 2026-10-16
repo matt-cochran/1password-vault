@@ -370,9 +370,7 @@ impl Failed {
 
     /// `seen` (a create's unknown outcome, from the runner) with the call's reply.
     pub(crate) fn with_reply(seen: Observed) -> Failed {
-        let said = crate::runner::take_failure_excerpt()
-            .map(|x| x.lines)
-            .unwrap_or_default();
+        let (said, truncated) = crate::scrub::Excerpt::parts(crate::runner::take_failure_excerpt());
         let upstream = (!said.is_empty()).then(|| Upstream {
             source: System::OnePassword,
             tool: "1Password CLI".to_string(),
@@ -380,6 +378,7 @@ impl Failed {
             exit: seen.exit(),
             said: said.clone(),
             removed_advice: false,
+            truncated,
             untrusted: true,
         });
         Failed {

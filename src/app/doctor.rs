@@ -28,7 +28,7 @@
 //! ready (names and states only, never a value) and the `opv check` command. So doctor is
 //! never all clear when `check` would fail.
 //!
-//! `--json` (P18) prints one document instead of the lines: `{schema_version: 1, checks:
+//! `--json` (P18) prints one document instead of the lines: `{schema_version: 2, checks:
 //! [{name, target, status: ok|warn|fail|skip, detail, next}], next}`; `detail` is the line's first
 //! line, `next` its remediation (or null), the top-level `next` the first failure's.
 //!
@@ -565,7 +565,7 @@ fn print_text(report: &Report, out: &mut dyn Write, err: &mut dyn Write) -> Resu
     Ok(())
 }
 
-/// P18, A3: `{schema_version: 1, config_source, checks: [{name, target, status, detail,
+/// P18, A3: `{schema_version: 2, config_source, checks: [{name, target, status, detail,
 /// next, do}], next, do}`. `config_source` is where the configuration was found (FR-44), or
 /// null; `target` is the target a check is about (FR-56), null for a check that runs once.
 /// `detail` is the first line of the check's text (names, versions and commands only);
@@ -2277,7 +2277,7 @@ mod tests {
         assert_eq!(
             (doc["schema_version"].as_u64(), checks),
             (
-                Some(1),
+                Some(2),
                 [
                     ("config", "ok"),
                     ("op", "ok"),
