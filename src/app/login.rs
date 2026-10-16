@@ -175,21 +175,14 @@ pub fn login_then(account: Option<&str>, command: &[String]) -> String {
 /// `opv login --account <account>`, since a sign-in inside an earlier opv command does not
 /// carry over.
 pub fn write_needs_session(what: &str, account: Option<&str>, command: &[String]) -> Error {
-    // catalog: `Cause::NotSignedIn { system: System::OnePassword, account, state:
-    // SessionState::SignedOut }.into()`, whose Next is this same login handoff.
-    Error::Auth(
-        format!(
-            "{what} writes to 1Password and needs your own 1Password session, which this run \
-             does not have. A sign-in made inside an earlier opv command (such as its \
-             --dry-run) ends with that command and does not carry over; nothing written"
-        )
-        .into(),
-    )
-    .with_code(crate::error::Code::OpNotSignedIn)
-    .with_do(
-        "run the command inside opv login in your own terminal, signing in at 1Password's prompt",
-    )
-    .with_next(login_then(account, command))
+    // The catalog renders the handoff `opv login [--account <id>] -- opv <same command>`.
+    let _ = (what, command);
+    crate::cause::Cause::NotSignedIn {
+        system: crate::cause::System::OnePassword,
+        account: account.map(crate::cause::AccountId::new),
+        state: crate::cause::SessionState::EndedWithEarlierCommand,
+    }
+    .into()
 }
 
 /// #150: what a `--dry-run` of a 1Password write says about the write itself: it needs a

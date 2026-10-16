@@ -669,6 +669,11 @@ fn session_words(system: System, account: &Option<AccountId>, state: &SessionSta
         SessionState::OtherAccount { live } => {
             format!("{sys} is signed in to account {live}, not{acct}")
         }
+        SessionState::EndedWithEarlierCommand => format!(
+            "this 1Password write needs your own session for {sys}{acct}, which this run does \
+             not have: a sign-in made inside an earlier opv command (such as its --dry-run) \
+             ends with that command and does not carry over; nothing was written"
+        ),
     }
 }
 
@@ -1732,10 +1737,17 @@ impl Cause {
                         args.push("--account".to_string());
                         args.push(a.to_string());
                     }
-                    args.push("--".into());
-                    args.push("opv".into());
-                    args.extend(inv.command.iter().cloned());
-                    args.extend(inv.args.iter().cloned());
+                    // `opv login` itself, or an MCP call with no command line to repeat: the
+                    // step is the login alone, never a login inside a login.
+                    if matches!(inv.origin, crate::cause::Origin::Cli)
+                        && !inv.command.is_empty()
+                        && inv.command.first().map(String::as_str) != Some("login")
+                    {
+                        args.push("--".into());
+                        args.push("opv".into());
+                        args.extend(inv.command.iter().cloned());
+                        args.extend(inv.args.iter().cloned());
+                    }
                     Next::Handoff(Cmd {
                         command: vec!["login".into()],
                         args,

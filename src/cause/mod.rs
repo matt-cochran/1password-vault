@@ -294,6 +294,9 @@ pub enum SessionState {
     OtherAccount {
         live: AccountId,
     },
+    /// A 1Password write found no session of the person's own: a sign-in made inside an
+    /// earlier opv command (such as its --dry-run) ended with that command (#150).
+    EndedWithEarlierCommand,
 }
 
 /// Why a provider didn't answer (reads only).

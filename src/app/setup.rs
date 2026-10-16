@@ -226,23 +226,12 @@ pub(crate) fn not_signed_in_to(account: &str, check: &SessionCheck) -> Error {
         }
         _ => SessionState::SignedOut,
     };
-    // catalog: `Cause::NotSignedIn { system: System::OnePassword, account: Some(<account>),
-    // state }.into()` once `From<Cause> for Error` lands (cause-legacy lane); for `opv login`
-    // itself its Next stays `opv login --account <account>`.
-    let cause = Cause::NotSignedIn {
+    Cause::NotSignedIn {
         system: System::OnePassword,
         account: Some(AccountId::new(account)),
         state,
-    };
-    Error::Auth(
-        format!(
-            "{} (checked with op whoami --account {account} after signing in); nothing was run",
-            cause.message()
-        )
-        .into(),
-    )
-    .with_code(crate::error::Code::OpNotSignedIn)
-    .with_next(format!("opv login --account {account}"))
+    }
+    .into()
 }
 
 /// `op whoami --account <account>` shows a live session for that account, but `op vault

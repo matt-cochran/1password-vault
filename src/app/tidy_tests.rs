@@ -1626,7 +1626,8 @@ fn a_write_with_nobody_signed_in_says_an_earlier_sign_in_ended() {
     let op = crate::adapters::fake_op::FakeOp::default();
     op.signed_in.set(false);
     let e = require_person(&op, "opv target add").unwrap_err();
-    assert!(e.text().contains("--dry-run"), "{}", e.text());
+    let message = e.cause().map(|(c, _)| c.message()).unwrap_or_default();
+    assert!(message.contains("--dry-run"), "{message}");
 }
 
 #[test]

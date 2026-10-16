@@ -12,10 +12,16 @@ use crate::cause::{
 
 /// The recorded raw stderr and observed exit class for `case`.
 fn recorded(case: &str) -> (String, ExitClass) {
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/github/failures");
+    let dir = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/github/failures"
+    );
     let stderr = std::fs::read_to_string(format!("{dir}/{case}.stderr")).expect("stderr recording");
     let raw = std::fs::read_to_string(format!("{dir}/{case}.exit")).expect("exit recording");
-    let code = raw.trim().parse::<i32>().expect("recorded exit is a number");
+    let code = raw
+        .trim()
+        .parse::<i32>()
+        .expect("recorded exit is a number");
     (stderr, ExitClass::Code { code })
 }
 

@@ -648,18 +648,36 @@ fn a_failed_check_after_signing_in_is_op_not_signed_in() {
 
 #[test]
 fn a_failed_check_steps_to_login_with_the_account_id() {
+    let e = still_other_account();
+    let (cause, _) = e.cause().expect("a catalog cause");
+    let inv = crate::cause::Invocation::from_cli(&[
+        "opv".to_string(),
+        "login".to_string(),
+        "--account".to_string(),
+        "ALABS000000000000000000001".to_string(),
+    ]);
     assert_eq!(
-        still_other_account().next_step(),
-        Some("opv login --account ALABS000000000000000000001")
+        cause.step(&inv).1,
+        crate::cause::Next::Handoff(crate::cause::Cmd {
+            command: vec!["login".into()],
+            args: vec!["--account".into(), "ALABS000000000000000000001".into()],
+        })
     );
 }
 
 #[test]
 fn a_failed_check_names_the_account_whose_session_is_live() {
-    let text = still_other_account().text().to_string();
+    let e = still_other_account();
+    let (cause, _) = e.cause().expect("a catalog cause");
     assert!(
-        text.contains("signed in to account AFAMILY0000000000000000001, not account ALABS"),
-        "{text}"
+        matches!(
+            cause,
+            crate::cause::Cause::NotSignedIn {
+                state: crate::cause::SessionState::OtherAccount { live },
+                ..
+            } if live.as_str() == "AFAMILY0000000000000000001"
+        ),
+        "{cause:?}"
     );
 }
 
@@ -773,6 +791,17 @@ fn the_signed_in_terminal_shows_the_banner() {
 
 // --- #150: a 1Password write without a person's session ----------------------------------
 
+fn step_for(e: &crate::error::Error, inv: &crate::cause::Invocation) -> crate::cause::Next {
+    e.cause().expect("a catalog cause").0.step(inv).1
+}
+
+fn login_handoff(args: &[&str]) -> crate::cause::Next {
+    crate::cause::Next::Handoff(crate::cause::Cmd {
+        command: vec!["login".into()],
+        args: args.iter().map(|a| a.to_string()).collect(),
+    })
+}
+
 fn target_add() -> Vec<String> {
     cmd(&["target", "add", "staging", "fleet", "--fly-app", "my app"])
 }
@@ -780,12 +809,22 @@ fn target_add() -> Vec<String> {
 #[test]
 fn a_write_without_a_session_steps_to_the_same_command_inside_login() {
     let e = write_needs_session("opv target add", Some(B), &target_add());
+    let mut argv = vec!["opv".to_string()];
+    argv.extend(target_add());
     assert_eq!(
-        e.next_step(),
-        Some(
-            "opv login --account ALABS000000000000000000001 -- opv target add staging fleet \
-             --fly-app 'my app'"
-        )
+        step_for(&e, &crate::cause::Invocation::from_cli(&argv)),
+        login_handoff(&[
+            "--account",
+            "ALABS000000000000000000001",
+            "--",
+            "opv",
+            "target",
+            "add",
+            "staging",
+            "fleet",
+            "--fly-app",
+            "my app"
+        ])
     );
 }
 
@@ -799,7 +838,8 @@ fn a_write_without_a_session_is_op_not_signed_in() {
 #[test]
 fn a_write_without_a_session_says_an_earlier_sign_in_does_not_carry_over() {
     let e = write_needs_session("opv target add", Some(B), &target_add());
-    assert!(e.text().contains("does not carry over"), "{}", e.text());
+    let message = e.cause().expect("a catalog cause").0.message();
+    assert!(message.contains("does not carry over"), "{message}");
 }
 
 #[test]
@@ -817,7 +857,10 @@ fn the_dry_run_says_the_write_needs_a_login_session() {
 fn a_write_with_no_command_line_steps_to_login_with_the_account() {
     let e = write_needs_session("opv target add", Some(B), &[]);
     assert_eq!(
-        e.next_step(),
-        Some("opv login --account ALABS000000000000000000001")
+        step_for(
+            &e,
+            &crate::cause::Invocation::from_mcp("opv_declare_target", Vec::new())
+        ),
+        login_handoff(&["--account", "ALABS000000000000000000001"])
     );
 }
