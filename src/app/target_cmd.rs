@@ -174,6 +174,12 @@ fn add_inner(
             Lookup::Missing(_) => (title.clone(), true),
         };
         build(&state_vault_id, &[])?;
+        // #150: the write needs a login session of the person's own.
+        r.note(&super::login::dry_run_session_note(
+            crate::config_store::selected_account(&std::env::current_dir().unwrap_or_default())
+                .as_deref(),
+            &super::login::this_command(),
+        ));
         if args.json {
             return write_json(out, &args.env, &args.name, &state_vault_id, created, &next);
         }

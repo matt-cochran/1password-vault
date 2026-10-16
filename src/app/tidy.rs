@@ -170,7 +170,9 @@ pub(crate) fn require_person(r: &dyn CommandRunner, what: &str) -> Result<(), Er
                 }
                 _ => {}
             }
-            "op whoami could not confirm a person signed in to 1Password"
+            // #150: a person's session could not be confirmed: the same sign-in as above,
+            // never a policy refusal with a bare `opv login`.
+            return Err(not_signed_in(what));
         }
     };
     Err(Error::Policy(
@@ -183,28 +185,14 @@ pub(crate) fn require_person(r: &dyn CommandRunner, what: &str) -> Result<(), Er
     .with_next(crate::adapters::onepassword_manifest::LOGIN))
 }
 
-/// The sign-in a write needs (#150): `op_not_signed_in`, naming the project's account
-/// (`OP_ACCOUNT`, else `.opv`) so `opv login` cannot pick another account on a shared
-/// sign-in address.
+/// The sign-in a write needs (#150): `op_not_signed_in` (in a person's terminal, opv offers
+/// 1Password's prompt and runs the command again), whose step is this same command inside
+/// `opv login --account <the project's account>` (`OP_ACCOUNT`, else `.opv`), so the login
+/// cannot pick another account on a shared sign-in address.
 fn not_signed_in(what: &str) -> Error {
-    let account = crate::config_store::account_env().or_else(|| {
-        crate::config_store::pointer_account(&std::env::current_dir().unwrap_or_default())
-    });
-    let next = match &account {
-        Some(a) => format!("opv login --account {a}"),
-        None => crate::adapters::onepassword_manifest::LOGIN.to_string(),
-    };
-    Error::Auth(
-        format!(
-            "{what} writes to 1Password and needs your own 1Password session, which this run \
-             does not have (a sign-in inside an earlier opv command, such as --dry-run, ends \
-             with it); nothing written"
-        )
-        .into(),
-    )
-    .with_code(Code::OpNotSignedIn)
-    .with_do("sign in at 1Password's prompt in your own terminal, then run the command again (or run it inside that login: opv login --account <ID> -- opv …)")
-    .with_next(next)
+    let account =
+        crate::config_store::selected_account(&std::env::current_dir().unwrap_or_default());
+    super::login::write_needs_session(what, account.as_deref(), &super::login::this_command())
 }
 
 /// True when the item JSON carries the manifest tag (FR-44).

@@ -30,16 +30,24 @@ pub fn account_or(
     env: Option<&str>,
     ui: &mut dyn Interaction,
 ) -> Result<Option<String>, Error> {
+    let fallback = || fallback.map(str::to_string);
     let Some(fleet) = fleet else {
-        return Ok(fallback.map(str::to_string));
+        return Ok(fallback());
     };
+    // #160: an environment that names no account uses the project's recorded one, never
+    // op's default account.
     if let Some(e) = env {
-        return Ok(fleet.environment(e)?.account.clone());
+        return Ok(fleet.environment(e)?.account.clone().or_else(fallback));
     }
     let accounts: std::collections::BTreeSet<_> =
         fleet.environments.values().map(|e| &e.account).collect();
     if accounts.len() <= 1 {
-        return Ok(accounts.into_iter().next().cloned().flatten());
+        return Ok(accounts
+            .into_iter()
+            .next()
+            .cloned()
+            .flatten()
+            .or_else(fallback));
     }
     let label = |name: &str, account: &Option<String>| {
         format!(
@@ -86,23 +94,117 @@ pub fn run_or(
     backend: &mut dyn Backend,
     ui: &mut dyn Interaction,
 ) -> Result<i32, Error> {
-    let account = account_or(fleet, fallback, env, ui)?;
+    // The account chosen for this login (`opv login --account`, the menu) when the
+    // configuration names none.
+    let account = account_or(fleet, fallback, env, ui)?.or_else(|| backend.current_account());
     backend.use_account(account.as_deref());
     prepare(account.as_deref(), backend, ui)?;
     if command.is_empty() {
-        let account = account.as_deref().map(|a| backend.account_label(a));
-        let scope = match (env, &account) {
+        let label = account.as_deref().map(|a| backend.account_label(a));
+        let scope = match (env, &label) {
             (Some(e), Some(a)) => format!(" for {e} ({a})"),
             (Some(e), None) => format!(" for {e}"),
             (None, Some(a)) => format!(" to {a}"),
             (None, None) => String::new(),
         };
-        ui.show(&format!(
-            "Signed in{scope}. This terminal can run opv check, run, plan and sync. Type exit \
-             to leave."
-        ))?;
+        ui.show(&banner(&scope, account.as_deref()))?;
     }
     backend.child(command)
+}
+
+/// The signed-in terminal's banner. With an account, it says the terminal sets
+/// `OP_ACCOUNT`, which op reads as `--account` on every command, so `op signout --all`
+/// there fails with a flag conflict (recorded case 04) unless `OP_ACCOUNT` is unset for it.
+pub fn banner(scope: &str, account: Option<&str>) -> String {
+    let base = format!(
+        "Signed in{scope}. This terminal can run opv check, run, plan and sync. Type exit to \
+         leave."
+    );
+    match account {
+        Some(a) => format!(
+            "{base}\nIt sets OP_ACCOUNT={a}, which op reads as --account, so op and opv here \
+             use that account. To sign out of every account, run: env -u OP_ACCOUNT op \
+             signout --all"
+        ),
+        None => base,
+    }
+}
+
+/// `opv <command>` as the person typed it (opv's own arguments, which never hold a secret),
+/// for a step that runs it again inside `opv login`.
+/// Empty under the MCP server (`opv mcp serve`), which has no command line to repeat.
+pub fn this_command() -> Vec<String> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "mcp") {
+        return Vec::new();
+    }
+    args
+}
+
+/// The words of `opv <command>`, each quoted for a POSIX shell when it needs it.
+fn shell_words(command: &[String]) -> String {
+    command
+        .iter()
+        .map(|w| {
+            let plain = !w.is_empty()
+                && w.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_./:=@,+%".contains(c));
+            if plain {
+                w.clone()
+            } else {
+                format!("'{}'", w.replace('\'', r"'\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `opv login [--account <account>] -- opv <command>`: the command run again inside a login
+/// to the selected account (#150), the step the catalog's `NotSignedIn` renders.
+pub fn login_then(account: Option<&str>, command: &[String]) -> String {
+    let account = account.map_or(String::new(), |a| format!(" --account {a}"));
+    if command.is_empty() {
+        return format!("opv login{account}");
+    }
+    format!("opv login{account} -- opv {}", shell_words(command))
+}
+
+/// #150: a 1Password write found no session of a person's own. In a person's terminal,
+/// opv offers 1Password's sign-in prompt for this code (`op_not_signed_in`) and runs the
+/// command again, as its `--dry-run` did; elsewhere the step is the same command inside
+/// `opv login --account <account>`, since a sign-in inside an earlier opv command does not
+/// carry over.
+pub fn write_needs_session(what: &str, account: Option<&str>, command: &[String]) -> Error {
+    // catalog: `Cause::NotSignedIn { system: System::OnePassword, account, state:
+    // SessionState::SignedOut }.into()`, whose Next is this same login handoff.
+    Error::Auth(
+        format!(
+            "{what} writes to 1Password and needs your own 1Password session, which this run \
+             does not have. A sign-in made inside an earlier opv command (such as its \
+             --dry-run) ends with that command and does not carry over; nothing written"
+        )
+        .into(),
+    )
+    .with_code(crate::error::Code::OpNotSignedIn)
+    .with_do(
+        "run the command inside opv login in your own terminal, signing in at 1Password's prompt",
+    )
+    .with_next(login_then(account, command))
+}
+
+/// #150: what a `--dry-run` of a 1Password write says about the write itself: it needs a
+/// session of the person's own, which the dry run's sign-in does not leave behind.
+pub fn dry_run_session_note(account: Option<&str>, command: &[String]) -> String {
+    let write: Vec<String> = command
+        .iter()
+        .filter(|w| *w != "--dry-run")
+        .cloned()
+        .collect();
+    format!(
+        "note: the write itself needs your own 1Password login session; a sign-in during this \
+         dry run ends with it. Run it in this terminal (opv asks you to sign in), or: {}",
+        login_then(account, &write)
+    )
 }
 
 /// FR-40, FR-50: the 1Password account this checkout uses, chosen once, in one command.
@@ -238,7 +340,11 @@ pub fn choose_account_with(
             }
         }
     };
-    if !record {
+    // This login signs in to the chosen account whatever is recorded (#160).
+    backend.use_account(Some(&uuid));
+    // #153: a one-off login outside a project (no repository, no `.opv` above `start`)
+    // records nothing: it never creates project configuration.
+    if !record || !in_project(start) {
         ui.show(&format!(
             "Signing in to 1Password account {} for this login only; .opv is unchanged.",
             backend.account_label(&uuid)
@@ -252,6 +358,14 @@ pub fn choose_account_with(
         path.display()
     ))?;
     Ok(Some(uuid))
+}
+
+/// Whether `start` is inside a project: a git repository, or a folder with a `.opv` at or
+/// above it.
+fn in_project(start: &std::path::Path) -> bool {
+    start
+        .ancestors()
+        .any(|d| d.join(".git").exists() || d.join(".opv").symlink_metadata().is_ok())
 }
 
 /// `op account list` failed or printed something opv does not understand (#157): which

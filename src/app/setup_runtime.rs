@@ -71,6 +71,51 @@ impl Runtime {
     }
 }
 
+/// The runtime's runner with its environment (its own session, its account) on every call;
+/// a variable the call sets itself (the probe's emptied `OP_ACCOUNT`) replaces the
+/// runtime's. Only [`Backend::session_for`]'s probes go through it.
+struct WithEnv<'a> {
+    inner: &'a ProcessRunner,
+    env: Vec<(&'a str, &'a str)>,
+}
+
+impl WithEnv<'_> {
+    fn merged<'e>(&'e self, call: &Call<'e>) -> Vec<(&'e str, &'e str)> {
+        let mut env: Vec<_> = self
+            .env
+            .iter()
+            .filter(|(k, _)| !call.env.iter().any(|(c, _)| c == k))
+            .copied()
+            .collect();
+        env.extend(call.env.iter().copied());
+        env
+    }
+}
+
+impl CommandRunner for WithEnv<'_> {
+    fn read(&self, call: &Call, refused: &[i32]) -> io::Result<Outcome> {
+        let env = self.merged(call);
+        self.inner.read(&Call { env: &env, ..*call }, refused)
+    }
+    fn write(&self, call: &Call) -> io::Result<Outcome> {
+        let env = self.merged(call);
+        self.inner.write(&Call { env: &env, ..*call })
+    }
+    fn probe(&self, call: &Call, limit: std::time::Duration) -> io::Result<Output> {
+        let env = self.merged(call);
+        self.inner.probe(&Call { env: &env, ..*call }, limit)
+    }
+    fn pause(&self, d: std::time::Duration, note: &str) {
+        self.inner.pause(d, note)
+    }
+    fn note(&self, line: &str) {
+        self.inner.note(line)
+    }
+    fn run_inherited(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> io::Result<i32> {
+        self.inner.run_inherited(program, args, env)
+    }
+}
+
 /// `op` subcommands that change 1Password. Everything else setup runs only reads.
 fn op_writes(args: &[&str]) -> bool {
     matches!(
@@ -166,6 +211,20 @@ impl Backend for Runtime {
     fn use_account(&mut self, account: Option<&str>) {
         self.account = account.map(str::to_owned);
     }
+    fn current_account(&self) -> Option<String> {
+        self.account.clone()
+    }
+    fn session_for(&self, account: &str) -> super::setup::SessionCheck {
+        // This runtime's own session (an account just added) goes with the probe.
+        let runner = WithEnv {
+            inner: &self.runner,
+            env: self.environment(),
+        };
+        crate::adapters::onepassword_diagnose::session_for(
+            &runner,
+            &crate::cause::AccountId::new(account),
+        )
+    }
     fn account_label(&self, account: &str) -> String {
         use crate::adapters::onepassword_manifest as manifest;
         let listed = self
@@ -238,29 +297,16 @@ impl Backend for Runtime {
         }
     }
     fn sign_in(&mut self, account: Option<&str>, add_account: bool) -> Result<(), Error> {
-        let mut command = Command::new("op");
-        command.args(if add_account {
-            vec!["account", "add"]
-        } else {
-            vec!["signin", "--force"]
-        });
         if let Some(account) = account {
             self.account = Some(account.to_owned());
-            command.env("OP_ACCOUNT", account);
-            if !add_account {
-                command.args(["--account", account]);
-            }
         }
-        // A fresh sign-in starts from no session: an inherited `OP_SESSION` or
-        // `OP_SESSION_<account>` (an expired one from an earlier `eval $(op signin)`, or one
-        // for another account on the same sign-in address) must not decide what op does
-        // (#142). --force asks op for a fresh assignment, which stays in this process.
-        command.env_remove("OP_SESSION").env("OP_DEBUG", "false");
-        for (name, _) in std::env::vars_os() {
-            if name.to_str().is_some_and(|n| n.starts_with("OP_SESSION_")) {
-                command.env_remove(&name);
-            }
-        }
+        // A fresh sign-in starts from no session and no `OP_ACCOUNT` (#142, #153): see
+        // `signin_command`. The new session stays in this process.
+        let mut command = super::setup::signin_command(
+            account,
+            add_account,
+            std::env::vars_os().map(|(name, _)| name),
+        );
         let what = if add_account {
             "adding the account"
         } else {

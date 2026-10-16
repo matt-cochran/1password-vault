@@ -172,7 +172,6 @@ fn failed_authentication_is_repaired_then_vault_access_is_verified() {
     let mut backend = Fake::new(vec![
         ok("2.40.0"),
         Output::failure(1),
-        Output::failure(1),
         ok("[]"),
         ok(r#"[{"id":"vault-id","name":"Development"}]"#),
         ok("[]"),
@@ -192,7 +191,6 @@ fn vaults_unlisted_after_sign_in() -> Error {
     let path = recipe(dir.path());
     let mut backend = Fake::new(vec![
         ok("2.40.0"),
-        Output::failure(1),
         Output::failure(1),
         ok(r#"[{"url":"my.1password.com"}]"#),
         Output::failure(1),
@@ -222,7 +220,11 @@ fn vaults_unlisted_after_sign_in_name_the_account_not_a_vault() {
 fn a_missing_vault_names_the_account_it_was_looked_for_in() {
     let dir = tempfile::tempdir().unwrap();
     let path = recipe(dir.path());
-    let mut backend = Fake::new(vec![ok("2.40.0"), ok(r#"[{"id":"x","name":"Other"}]"#)]);
+    let mut backend = Fake::new(vec![
+        ok("2.40.0"),
+        ok(WHOAMI_A),
+        ok(r#"[{"id":"x","name":"Other"}]"#),
+    ]);
     let mut ui = Ui::new(vec![], &[]);
     let error = run(
         &path,
@@ -319,6 +321,120 @@ fn product_setup_prompts_only_selected_product_but_declares_all_managed_names() 
     let calls = backend.calls.borrow();
     let body: Value = serde_json::from_slice(calls.last().unwrap().1.as_ref().unwrap()).unwrap();
     assert_eq!(body["fields"].as_array().unwrap().len(), 1);
+}
+
+// --- #160: the session is checked for the account asked for, never by a bare whoami -------
+
+/// Recorded case 10: `op whoami --account A --format json` while A is signed in.
+const WHOAMI_A: &str = include_str!("../../tests/fixtures/op/failures/10-whoami-a.stdout");
+/// Account B, asked for (the recordings' `<ACCOUNT_1>`).
+const ACCOUNT_B: &str = "BACCOUNT000000000000000001";
+
+/// Setup for account B, whose `op whoami --account B` fails as in recorded case 11 (only A
+/// holds a session); B is signed in at the prompt.
+fn setup_for_b_with_a_live() -> Fake {
+    let dir = tempfile::tempdir().unwrap();
+    let path = recipe(dir.path());
+    let mut backend = Fake::new(vec![
+        ok("2.40.0"),
+        Output::failure(1),
+        ok(r#"[{"url":"my.1password.com"}]"#),
+        ok(WHOAMI_A.replace("<ACCOUNT_2>", ACCOUNT_B).as_str()),
+        ok(r#"[{"id":"x","name":"Other"}]"#),
+    ]);
+    let _ = run(
+        &path,
+        None,
+        Some(ACCOUNT_B),
+        None,
+        &mut backend,
+        &mut Ui::new(vec![], &[]),
+    );
+    backend
+}
+
+#[test]
+fn setup_checks_the_session_of_the_account_by_id() {
+    let backend = setup_for_b_with_a_live();
+    assert_eq!(
+        backend.calls.borrow()[1].0,
+        ["whoami", "--account", ACCOUNT_B, "--format", "json"]
+    );
+}
+
+#[test]
+fn a_live_session_for_another_account_is_never_taken_for_the_account() {
+    assert_eq!(setup_for_b_with_a_live().logins, [false]);
+}
+
+#[test]
+fn setup_without_an_account_never_runs_a_bare_whoami() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = recipe(dir.path());
+    let mut backend = Fake::new(vec![
+        ok("2.40.0"),
+        Output::failure(1),
+        ok(r#"[{"url":"my.1password.com"}]"#),
+        Output::failure(1),
+    ]);
+    let _ = run(
+        &path,
+        None,
+        None,
+        None,
+        &mut backend,
+        &mut Ui::new(vec![], &[]),
+    );
+    assert!(!backend.calls.borrow().iter().any(|c| c.0[0] == "whoami"));
+}
+
+// --- #153: the child `op signin` for B, with a session for A in opv's environment ---------
+
+/// Recorded case 13: `op signin --account B` with `OP_SESSION_<A>` set and `OP_ACCOUNT`
+/// unset succeeded (op 2.40.0). opv runs it so: the account in `--account` only.
+fn signin_for_b() -> std::process::Command {
+    signin_command(
+        Some(ACCOUNT_B),
+        false,
+        [
+            std::ffi::OsString::from("OP_SESSION_ACCOUNTA0000000000000000001"),
+            std::ffi::OsString::from("PATH"),
+        ],
+    )
+}
+
+fn removed(command: &std::process::Command) -> Vec<String> {
+    command
+        .get_envs()
+        .filter(|(_, v)| v.is_none())
+        .map(|(k, _)| k.to_string_lossy().into_owned())
+        .collect()
+}
+
+#[test]
+fn signing_in_to_b_unsets_op_account_for_op() {
+    assert!(removed(&signin_for_b()).contains(&"OP_ACCOUNT".to_string()));
+}
+
+#[test]
+fn signing_in_to_b_unsets_the_other_accounts_session() {
+    assert!(
+        removed(&signin_for_b()).contains(&"OP_SESSION_ACCOUNTA0000000000000000001".to_string())
+    );
+}
+
+#[test]
+fn signing_in_to_b_keeps_the_rest_of_the_environment() {
+    assert!(!removed(&signin_for_b()).contains(&"PATH".to_string()));
+}
+
+#[test]
+fn signing_in_to_b_names_b_with_the_account_flag() {
+    let args: Vec<_> = signin_for_b()
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(args, ["signin", "--force", "--account", ACCOUNT_B]);
 }
 
 // --- the save after a long interactive window: fresh re-read, re-plan, verified write ---
