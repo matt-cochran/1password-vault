@@ -472,12 +472,4 @@ cells! {
     vault_locate__op_vault_get_ve2eshareddev00000000000001__signed_out => "vault_locate", "op", "vault get vE2ESHAREDDEV00000000000001", "signed_out";
     vault_locate__op_vault_get_ve2eshareddev00000000000001__timeout => "vault_locate", "op", "vault get vE2ESHAREDDEV00000000000001", "timeout";
     vault_locate__op_vault_get_ve2eshareddev00000000000001__tool_missing => "vault_locate", "op", "vault get vE2ESHAREDDEV00000000000001", "tool_missing";
-    vault_locate__op_whoami__account_not_on_machine => "vault_locate", "op", "whoami", "account_not_on_machine";
-    vault_locate__op_whoami__applied_but_reply_lost => "vault_locate", "op", "whoami", "applied_but_reply_lost";
-    vault_locate__op_whoami__credential_rejected => "vault_locate", "op", "whoami", "credential_rejected";
-    vault_locate__op_whoami__malformed_output => "vault_locate", "op", "whoami", "malformed_output";
-    vault_locate__op_whoami__other_account_session => "vault_locate", "op", "whoami", "other_account_session";
-    vault_locate__op_whoami__signed_out => "vault_locate", "op", "whoami", "signed_out";
-    vault_locate__op_whoami__timeout => "vault_locate", "op", "whoami", "timeout";
-    vault_locate__op_whoami__tool_missing => "vault_locate", "op", "whoami", "tool_missing";
 }

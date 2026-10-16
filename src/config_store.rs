@@ -22,8 +22,8 @@ use serde::Deserialize;
 
 use crate::adapters::onepassword_manifest::{self as manifest, MANIFEST_TAG, Row};
 use crate::cause::{
-    AccountId, Cause, ConfigSource, DottedPath, FieldRule, GivenBy, Location, PatternId,
-    StoreObject, UsageProblem, VarName, VaultId,
+    AccountId, AccountSource, Cause, ConfigSource, DottedPath, FieldRule, GivenBy, IoKind, LocalOp,
+    Location, PatternId, StoreObject, UsageProblem, VarName, VaultId,
 };
 use crate::config;
 use crate::domain::Fleet;
@@ -352,8 +352,12 @@ impl ConfigStore for ManifestStore {
         self.confirm(r, now.version, written, text)?;
         Ok(Replaced::Saved)
     }
+    // C12: the manifest by title and vault, so its errors name the vault it lives in.
     fn source(&self) -> config::Source<'_> {
-        config::Source::Manifest(&self.title)
+        config::Source::ManifestIn {
+            title: &self.title,
+            vault: &self.vault_id,
+        }
     }
 
     fn cause_source(&self) -> ConfigSource {
@@ -628,20 +632,25 @@ pub fn record_account(start: &Path, account: &str) -> Result<PathBuf, Error> {
         })
         .find(|p| p.symlink_metadata().is_ok())
         .unwrap_or_else(|| root.join(DOT_FILE));
-    let refuse =
-        |why: String| Error::Config(format!("cannot write {}: {why}", path.display()).into());
+    // opv's own local write (A3): what failed, never the OS error's own text.
+    let refuse = |op: LocalOp, io: IoKind| -> Error {
+        Cause::LocalIo {
+            op,
+            path: path.clone(),
+            io,
+        }
+        .into()
+    };
     let project = match path.symlink_metadata() {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(refuse(e.to_string())),
+        Err(e) => return Err(refuse(LocalOp::Read, e.kind().into())),
+        // A symlink or another kind of file: opv only writes a plain .opv, never through it.
         Ok(m) if !m.file_type().is_file() => {
-            return Err(refuse(
-                "it is a symlink or not a regular file, and opv only writes a plain .opv; \
-                 replace it with a plain file or remove it"
-                    .into(),
-            ));
+            return Err(refuse(LocalOp::Write, IoKind::Other));
         }
         Ok(_) => {
-            let text = fs::read_to_string(&path).map_err(|e| refuse(e.to_string()))?;
+            let text =
+                fs::read_to_string(&path).map_err(|e| refuse(LocalOp::Read, e.kind().into()))?;
             parse_dot_opv(&text, &path)?.project
         }
     };
@@ -652,7 +661,7 @@ pub fn record_account(start: &Path, account: &str) -> Result<PathBuf, Error> {
         text.push_str(&format!("project = \"{p}\"\n"));
     }
     text.push_str(&format!("account = \"{account}\"\n"));
-    write_no_follow(&path, &text).map_err(|e| refuse(e.to_string()))?;
+    write_no_follow(&path, &text).map_err(|e| refuse(LocalOp::Write, e.kind().into()))?;
     Ok(path)
 }
 
@@ -730,7 +739,7 @@ pub fn locate(req: &Request, r: &dyn CommandRunner) -> Result<Found, Error> {
         });
     }
     if let Some(project) = &req.project {
-        let account = pick_account(r, req.account.clone())?;
+        let account = pick_account_at(r, req.account.clone(), &req.start)?;
         return by_project(r, project, account, Matched::ProjectEnv);
     }
     if !req.manifest_only
@@ -747,7 +756,7 @@ pub fn locate(req: &Request, r: &dyn CommandRunner) -> Result<Found, Error> {
         let dot = parse_dot_opv(&text, &path)?;
         // One order everywhere (0.9.0): OP_ACCOUNT (which `opv login --account` sets for its
         // command) before the checkout's .opv.
-        let account = pick_account(r, req.account.clone().or(dot.account))?;
+        let account = pick_account_at(r, req.account.clone().or(dot.account), &req.start)?;
         if let Some(project) = &dot.project {
             return by_project(r, project, account, Matched::DotFile(path));
         }
@@ -758,7 +767,7 @@ pub fn locate(req: &Request, r: &dyn CommandRunner) -> Result<Found, Error> {
     }
     match git_repo(r) {
         Some(repo) => {
-            let account = pick_account(r, req.account.clone())?;
+            let account = pick_account_at(r, req.account.clone(), &req.start)?;
             by_repo(r, &repo, &req.start, account.as_deref())
         }
         None => Err(not_found(&req.start, None, None)),
@@ -795,7 +804,23 @@ pub fn selected_account_id(r: &dyn CommandRunner, start: &Path) -> Result<Option
     if accounts.is_empty() {
         return Ok(Some(given));
     }
-    manifest::resolve(&accounts, &given).map(Some)
+    manifest::resolve_from(&accounts, &given, account_source(&given, start)).map(Some)
+}
+
+/// Where the account value `given` was chosen (C20): `OP_ACCOUNT` when it holds that value,
+/// else the `.opv` pointer for `start` that names it; anything else came from `--account`.
+fn account_source(given: &str, start: &Path) -> AccountSource {
+    if account_env().is_some_and(|a| a == given) {
+        return AccountSource::EnvVar {
+            var: VarName::new("OP_ACCOUNT"),
+        };
+    }
+    match find_dot_opv(start) {
+        Some(path) if pointer_account(start).is_some_and(|a| a == given) => {
+            AccountSource::DotOpv { path }
+        }
+        _ => AccountSource::Flag,
+    }
 }
 
 /// The 1Password account every manifest call of this run uses (NR-7: never op's default
@@ -806,6 +831,15 @@ pub fn selected_account_id(r: &dyn CommandRunner, start: &Path) -> Result<Option
 /// search asked the 1Password app about an account this project was never pointed at).
 /// A service-account or Connect credential decides the account itself: `None`.
 pub fn pick_account(r: &dyn CommandRunner, given: Option<String>) -> Result<Option<String>, Error> {
+    pick_account_at(r, given, &std::env::current_dir().unwrap_or_default())
+}
+
+/// [`pick_account`] for the checkout at `start`, whose `.opv` may be where `given` came from.
+fn pick_account_at(
+    r: &dyn CommandRunner,
+    given: Option<String>,
+    start: &Path,
+) -> Result<Option<String>, Error> {
     // A credential decides the account: no `--account` beside it (0.9.0, as documented).
     if Host::detect().op_credential.is_some() {
         return Ok(None);
@@ -824,7 +858,7 @@ pub fn pick_account(r: &dyn CommandRunner, given: Option<String>) -> Result<Opti
     match (given, accounts.as_slice()) {
         // op knows no account list here (or it failed): leave the choice to op.
         (given, []) => Ok(given),
-        (Some(a), all) => manifest::resolve(all, &a).map(Some),
+        (Some(a), all) => manifest::resolve_from(all, &a, account_source(&a, start)).map(Some),
         (None, [one]) => Ok(Some(one.account_uuid.clone())),
         (None, all) => Err(manifest::choose_error(all)),
     }

@@ -369,11 +369,11 @@ fn rebind_records_a_new_boundary_in_the_selected_account() {
 }
 
 #[test]
-fn a_boundary_from_another_account_stops_with_ids_not_in_account() {
+fn a_boundary_outside_the_account_stops_with_ops_not_found() {
     let (_dir, path, op) =
         workspace_with(&FLEET.replace("vdev0000000000000000000001", OTHER_ACCOUNT));
-    let e = run_with(&path, &op, &Opts::default()).unwrap_err();
-    assert_eq!(e.code(), crate::error::Code::IdsNotInAccount);
+    let e = run_probed(&path, &Probed::new(op)).unwrap_err();
+    assert_eq!(e.code_str(), "resource_not_found");
 }
 
 #[test]
@@ -385,14 +385,14 @@ fn ids_from_another_account_stop_before_anything_is_created() {
 }
 
 #[test]
-fn a_state_vault_from_another_account_stops_with_ids_not_in_account() {
+fn a_state_vault_outside_the_account_stops_with_ops_not_found() {
     let text = FLEET.replace(
         "fly.app = \"myapp-prod\"",
         &format!("fly.app = \"myapp-prod\"\nstate_vault_id = \"{OTHER_ACCOUNT}\""),
     );
     let (_dir, path, op) = workspace_with(&text);
-    let e = run_with(&path, &op, &Opts::default()).unwrap_err();
-    assert_eq!(e.code(), crate::error::Code::IdsNotInAccount);
+    let e = run_probed(&path, &Probed::new(op)).unwrap_err();
+    assert_eq!(e.code_str(), "resource_not_found");
 }
 
 #[test]
@@ -810,4 +810,94 @@ fn a_second_run_creates_no_delivery_item() {
     op.calls.borrow_mut().clear();
     bootstrap(&path, &op);
     assert_eq!(op.count(&["op", "item", "create"]), 0);
+}
+
+// --- 0.10.0 error catalog (C19, G3) -----------------------------------------------------------
+
+/// op 2.40.0's recorded reply to `op vault get <vault>` for a vault the account does not
+/// hold (tests/fixtures/op/failures, case 14).
+const NOT_A_VAULT_HERE: &str =
+    include_str!("../../tests/fixtures/op/failures/14-vault-in-other-account.stderr");
+
+/// The fake `op`, whose failed `op vault get` probes go through the observing fake runner
+/// with op's recorded reply, as the real runner observes them; `no_id` makes every create
+/// answer with a reply that holds no ID.
+struct Probed {
+    op: FakeOp,
+    get: crate::runner::fake::FakeRunner,
+    no_id: bool,
+}
+
+impl Probed {
+    fn new(op: FakeOp) -> Self {
+        Probed {
+            op,
+            get: crate::runner::fake::FakeRunner::default(),
+            no_id: false,
+        }
+    }
+}
+
+impl CommandRunner for Probed {
+    fn read(&self, call: &Call, refused: &[i32]) -> std::io::Result<crate::runner::Outcome> {
+        self.op.read(call, refused)
+    }
+    fn write(&self, call: &Call) -> std::io::Result<crate::runner::Outcome> {
+        self.op.write(call)
+    }
+    fn create(&self, call: &Call, kind: CreateKind) -> std::io::Result<CreateOutcome> {
+        if self.no_id {
+            return Ok(CreateOutcome::Done(crate::runner::Output::success("{}")));
+        }
+        self.op.create(call, kind)
+    }
+    fn probe(
+        &self,
+        call: &Call,
+        limit: std::time::Duration,
+    ) -> std::io::Result<crate::runner::Output> {
+        let answer = self.op.probe(call, limit)?;
+        match call.args {
+            ["vault", "get", vault, ..] if call.program == "op" && answer.status != 0 => {
+                self.get.push_with_stderr(
+                    crate::runner::Output::failure(1),
+                    &NOT_A_VAULT_HERE.replace("<VAULT_B>", vault),
+                );
+                self.get.probe(call, limit)
+            }
+            _ => Ok(answer),
+        }
+    }
+    fn pause(&self, _: std::time::Duration, _: &str) {}
+    fn note(&self, _: &str) {}
+    fn run_inherited(&self, _: &str, _: &[&str], _: &[(&str, &str)]) -> std::io::Result<i32> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+}
+
+fn run_probed(path: &Path, r: &Probed) -> Result<String, Error> {
+    let mut out = Vec::new();
+    run(path, "myapp", &Opts::default(), r, &mut out)?;
+    Ok(String::from_utf8(out).unwrap())
+}
+
+/// C19: a create that answered with no ID may have made the object: its outcome is
+/// unknown and it is found again by title, never created twice (X5).
+#[test]
+fn a_create_whose_reply_has_no_id_is_create_outcome_unknown() {
+    let (_dir, path, op) = workspace();
+    let mut r = Probed::new(op);
+    r.no_id = true;
+    let e = run_probed(&path, &r).unwrap_err();
+    assert_eq!(e.code_str(), "create_outcome_unknown");
+}
+
+/// C19, R34: personal keys with no personal vault name the vaults looked for and the
+/// field that names another, never a bare configuration error.
+#[test]
+fn personal_keys_without_a_personal_vault_are_resource_not_found() {
+    let (_dir, path, op) = workspace_with(CORE);
+    op.vaults.borrow_mut().retain(|(_, name)| name != "Private");
+    let e = run_with(&path, &op, &Opts::default()).unwrap_err();
+    assert_eq!(e.code_str(), "resource_not_found");
 }

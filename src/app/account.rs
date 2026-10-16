@@ -10,7 +10,7 @@ use std::io::Write;
 
 use crate::adapters::onepassword_manifest::{Account, Discovery};
 use crate::cause::{AccountId, AccountRef, AccountSource, Cause, Cmd, Invocation, VarName};
-use crate::error::{Code, Error};
+use crate::error::Error;
 use crate::host::Platform;
 
 /// Whether the 1Password app holds the accounts `op` sees: on macOS and Windows, and for the
@@ -87,14 +87,11 @@ pub(crate) fn account_list_failed() -> Error {
             seen,
         }
         .into(),
-        None => Error::Source(
-            "op account list failed or printed something opv does not understand, so opv \
-             cannot tell which 1Password accounts are on this machine; nothing was chosen or \
-             recorded"
-                .into(),
-        )
-        .with_code(Code::OpUnexpected)
-        .with_next("opv doctor"),
+        // No failure was observed, and every answered op call is: the list was not run.
+        None => crate::cause::Cause::Bug {
+            site: "account: an op account list the runner did not observe",
+        }
+        .into(),
     }
 }
 

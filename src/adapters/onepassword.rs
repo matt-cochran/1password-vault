@@ -1,9 +1,9 @@
 //! 1Password adapter wrapping the official `op` CLI (S3; FR-11, FR-13, FR-14, FR-19).
 //!
-//! - [`read_item`] makes exactly one `op item get <item_id> --vault <vault_id> --format json`
-//!   call per environment, by ID only (FR-13). It returns the fields that live inside a
-//!   section, typed by field type (FR-14: CONCEALED = secret, STRING = config), plus the raw
-//!   item JSON so that [`write_skeleton`] needs no second read.
+//! - [`read_whole`] makes exactly one `op item get <item_id> --vault <vault_id> --format json`
+//!   call per environment, by ID only (FR-13), and keeps the raw item JSON for the tolerant
+//!   reader ([`super::onepassword_tidy`], FR-43). A reply that is not an item opv can read is
+//!   that call's `UnexpectedOutput`, found while the runner still holds the call.
 //! - The item read is diagnosed after its first failed attempt, before any retry (P16):
 //!   it is retried only when the identity is signed in and can open the vault.
 //! - A failed `op` call becomes a catalog cause (design `docs/design/error-catalog.md` §5):
@@ -16,8 +16,7 @@
 //!   parsed from `whoami`, and only the entry count from `account list`; identity is never
 //!   printed or kept. [`account`] parses `account_uuid` and the sign-in host, identifiers
 //!   only, to build 1Password's private item link ([`item_link`], H1).
-//! - [`write_skeleton`] (FR-19, the only write) pipes the full current item, with the missing
-//!   sections and empty fields appended, to `op item edit <item_id> --vault <vault_id>
+//! - An item write pipes the full current item to `op item edit <item_id> --vault <vault_id>
 //!   --format json` on stdin. This is the invocation the D0 spike proved (attempt 1). A
 //!   template replaces the item's fields, so it is always the whole item, never a partial one.
 //!
@@ -34,7 +33,7 @@
 //! - serde_json decodes a string containing escape sequences into an internal scratch
 //!   buffer that is not zeroized. Unescaped strings are borrowed from the input and copied
 //!   once, at exact capacity, into the `SecretValue`.
-//! - `write_skeleton` parses the raw JSON into a `serde_json::Value`, whose `String`s hold
+//! - An item write parses the raw JSON into a `serde_json::Value`, whose `String`s hold
 //!   values. Every string in that tree is zeroized before it is dropped (also on error paths),
 //!   and the template is serialized into a `Zeroizing` buffer pre-sized to the exact length,
 //!   so it never reallocates.
@@ -53,11 +52,11 @@ use super::onepassword_diagnose::Facts;
 use super::onepassword_diagnose_items::diagnose_item_call;
 use crate::cause::{
     AccountId, AccountRef, AccountSource, Cause, CredentialProblem, CredentialRef, DiagnoseContext,
-    DottedPath, EnvName, ExitClass, GrantModel, IoKind, ItemId, Location, NamedBy, NotFoundState,
-    Observed, ResourceKind, ResourceName, ResourceRef, Right, SessionState, System, Unanswered,
-    Unusable, Upstream, VarName, VaultId,
+    DottedPath, EnvName, ExitClass, FieldName, GrantModel, IoKind, ItemId, Location, NamedBy,
+    NotFoundState, Observed, Principal, ResourceKind, ResourceName, ResourceRef, Right,
+    SessionState, System, TargetName, Unanswered, Unusable, Upstream, VarName, VaultId,
 };
-use crate::domain::model::{Boundary, Environment, Kind, key_label};
+use crate::domain::model::{Boundary, Environment, Kind};
 use crate::domain::plan::ItemField;
 use crate::domain::secret::SecretValue;
 use crate::error::Error;
@@ -798,24 +797,6 @@ fn vault_access(r: &dyn CommandRunner, vault_id: &str) -> Option<bool> {
     .map(|o| o.status == 0)
 }
 
-/// Read one boundary item `b` of `env` once, by vault ID and item ID (FR-13, FR-57). See
-/// the module docs. The host is detected only if the read fails.
-pub fn read_item(r: &dyn CommandRunner, env: &Environment, b: &Boundary) -> Result<Item, Error> {
-    read_item_on(r, env, b, &Host::detect)
-}
-
-/// [`read_item`] limited to the fields in `sections`: fields of other sections are skipped
-/// before they are validated, so a malformed field in another product's section cannot fail
-/// a product-scoped check (#52). Still one read (FR-13).
-pub fn read_item_in_sections(
-    r: &dyn CommandRunner,
-    env: &Environment,
-    b: &Boundary,
-    sections: &BTreeSet<String>,
-) -> Result<Item, Error> {
-    read_sections_on(r, env, b, Some(sections), &Host::detect)
-}
-
 /// One boundary item's read (FR-13) with no field parsing: the tolerant reader
 /// ([`super::onepassword_tidy`], FR-43) parses the raw JSON itself. `fields` is empty.
 pub fn read_whole(r: &dyn CommandRunner, env: &Environment, b: &Boundary) -> Result<Item, Error> {
@@ -870,10 +851,10 @@ fn read_whole_as(
         args.push(NO_CACHE);
     }
     let raw = read_diagnosed(r, env, b, &args, &Host::detect)?;
-    // 09.74: a reply that is not JSON is this call's `UnexpectedOutput`, reported while the
-    // runner still holds the call's observation (the tolerant reader parses it later).
-    serde_json::from_slice::<serde::de::IgnoredAny>(&raw)
-        .map_err(|e| unreadable_reply(&args, &e))?;
+    // 09.74, C20: a reply that is not an item opv can read (not JSON, or JSON of another
+    // shape) is this call's `UnexpectedOutput`, reported while the runner still holds the
+    // call's observation; the tolerant reader parses it later.
+    super::onepassword_tidy::check(&raw).map_err(|e| unreadable_reply(&args, &e))?;
     Ok(Item {
         fields: Vec::new(),
         version: item_version(&raw),
@@ -881,72 +862,26 @@ fn read_whole_as(
     })
 }
 
-/// [`read_item`] on a given host (tests). A non-zero exit is diagnosed with
-/// [`diagnose`] (FR-26). No second item read is made (FR-13).
-pub fn read_item_with(
-    r: &dyn CommandRunner,
-    env: &Environment,
-    b: &Boundary,
-    host: &Host,
-) -> Result<Item, Error> {
-    read_item_on(r, env, b, &|| *host)
-}
-
-fn read_item_on(
-    r: &dyn CommandRunner,
-    env: &Environment,
-    b: &Boundary,
-    host: &dyn Fn() -> Host,
-) -> Result<Item, Error> {
-    read_sections_on(r, env, b, None, host)
-}
-
-fn read_sections_on(
-    r: &dyn CommandRunner,
-    env: &Environment,
-    b: &Boundary,
-    sections: Option<&BTreeSet<String>>,
-    host: &dyn Fn() -> Host,
-) -> Result<Item, Error> {
-    let args = [
-        "item",
-        "get",
-        b.item_id.as_str(),
-        "--vault",
-        b.vault_id.as_str(),
-        "--format",
-        "json",
-    ];
-    let stdout = read_diagnosed(r, env, b, &args, host)?;
-    // 09.74: JSON op answered with that opv cannot read is `UnexpectedOutput` of this call.
-    let fields = parse_fields(&stdout, sections, &|e| unreadable_reply(&args, e))?;
-    Ok(Item {
-        fields,
-        version: item_version(&stdout),
-        raw: stdout,
-    })
-}
-
 /// Read a `deploy_credentials` item once (FR-40), by the IDs or names in `reference`, and
 /// return exactly the conventional `fields`, keyed by label, as [`SecretValue`]s. Each must
 /// appear once (in any section), with its kind's field type (concealed = secret, text =
-/// config, FR-14) and a value; every other field is skipped unread. Errors name the
-/// reference and the field, never a value (SR-1). `env` names the environment in the
-/// sign-in step (`opv login <env>`) when 1Password is signed out.
+/// config, FR-14) and a value; every other field is skipped unread. `owner` is the deploy
+/// identity the item belongs to (its environment and target): a refusal names the item by
+/// its full reference and steps to that target's doctor (R37, 06.30), never a value (SR-1).
 pub fn read_deploy_credentials(
     r: &dyn CommandRunner,
     reference: &crate::domain::ItemRef,
     fields: &[crate::provider::CredentialField],
-    env: Option<&str>,
+    owner: Option<&Principal>,
 ) -> Result<std::collections::BTreeMap<String, SecretValue>, Error> {
-    read_deploy_credentials_on(r, reference, fields, env, &Host::detect)
+    read_deploy_credentials_on(r, reference, fields, owner, &Host::detect)
 }
 
 fn read_deploy_credentials_on(
     r: &dyn CommandRunner,
     reference: &crate::domain::ItemRef,
     fields: &[crate::provider::CredentialField],
-    env: Option<&str>,
+    owner: Option<&Principal>,
     host: &dyn Fn() -> Host,
 ) -> Result<std::collections::BTreeMap<String, SecretValue>, Error> {
     let args = [
@@ -958,12 +893,19 @@ fn read_deploy_credentials_on(
         "--format",
         "json",
     ];
+    let (env, target) = match owner {
+        Some(Principal::DeployCredentials { env, target, .. }) => {
+            (Some(env.clone()), Some(target.clone()))
+        }
+        _ => (None, None),
+    };
     // A failure is diagnosed at once, as for the environment's item: a signed-out user is
     // told to sign in without blind retries; signed in with the vault open, the read is
     // retried (with backoff) before it is reported. The configuration may live in a
     // manifest, so the item is named by its configuration field, never by a file (04.24).
     let ctx = DiagnoseContext {
-        env: env.map(EnvName::new),
+        env: env.clone(),
+        target: target.clone(),
         resource: Some(ResourceRef {
             kind: ResourceKind::Item,
             name: ResourceName::new(reference.item.as_str()),
@@ -976,7 +918,32 @@ fn read_deploy_credentials_on(
     };
     let stdout = read_or_diagnose(r, &ctx, &reference.vault, &args, host)?;
     let raw: RawItem = serde_json::from_slice(&stdout).map_err(|e| unreadable_reply(&args, &e))?;
+    // The item answered but cannot be used as these credentials (R37): taken while the
+    // runner still holds the read, so the cause names that call.
+    let refused = |problem: CredentialProblem| -> Error {
+        match crate::runner::take_unusable_reply(&Call::new(OP, &args)) {
+            Some(seen) => Cause::CredentialRejected {
+                system: System::OnePassword,
+                credential: CredentialRef::DeployCredentials {
+                    vault: VaultId::new(reference.vault.as_str()),
+                    item: ItemId::new(reference.item.as_str()),
+                    env: env.clone().unwrap_or_else(|| EnvName::new("")),
+                    target: target.clone().unwrap_or_else(|| TargetName::new("")),
+                },
+                problem,
+                seen,
+            }
+            .into(),
+            None => Cause::Bug {
+                site: "deploy credentials: the item read left no observation",
+            }
+            .into(),
+        }
+    };
     let mut found: std::collections::BTreeMap<String, SecretValue> = Default::default();
+    // A field of another type, or one listed twice, is not a value opv can take as this
+    // credential: the item cannot be read as one.
+    let mut unusable = false;
     for f in raw.fields {
         let Some(want) = fields.iter().find(|w| w.label == f.label) else {
             continue;
@@ -986,55 +953,29 @@ fn read_deploy_credentials_on(
             Kind::Config => "STRING",
         };
         if f.ty != expected {
-            return Err(Error::Source(
-                format!(
-                    "deploy credentials {reference}: field {} must be a {} field; nothing was \
-                 changed\n  next: change its type in 1Password, keeping the value",
-                    want.label,
-                    match want.kind {
-                        Kind::Secret => "Password (concealed)",
-                        Kind::Config => "Text",
-                    }
-                )
-                .into(),
-            ));
+            unusable = true;
+            continue;
         }
-        let value = f.value.map(|c| c.0).filter(|v| !v.expose().is_empty());
-        let Some(value) = value else {
-            return Err(Error::Source(
-                format!(
-                    "deploy credentials {reference}: field {} is empty; nothing was changed\n  \
-                 next: fill it in 1Password",
-                    want.label
-                )
-                .into(),
-            ));
+        // An empty field is a missing one: no value to sign in with.
+        let Some(value) = f.value.map(|c| c.0).filter(|v| !v.expose().is_empty()) else {
+            continue;
         };
         if found.insert(want.label.to_string(), value).is_some() {
-            return Err(Error::Source(
-                format!(
-                    "deploy credentials {reference}: field {} appears more than once; nothing was \
-                 changed\n  next: keep one field with that name in the item",
-                    want.label
-                )
-                .into(),
-            ));
+            unusable = true;
         }
     }
-    if let Some(missing) = fields.iter().find(|w| !found.contains_key(w.label)) {
-        return Err(Error::Source(
-            format!(
-                "deploy credentials {reference}: field {} is missing; nothing was changed\n  \
-             next: add it to the item as a {} field named {}",
-                missing.label,
-                match missing.kind {
-                    Kind::Secret => "Password (concealed)",
-                    Kind::Config => "Text",
-                },
-                missing.label
-            )
-            .into(),
-        ));
+    if unusable {
+        return Err(refused(CredentialProblem::Unreadable));
+    }
+    let missing: Vec<FieldName> = fields
+        .iter()
+        .filter(|w| !found.contains_key(w.label))
+        .map(|w| FieldName::new(w.label))
+        .collect();
+    if !missing.is_empty() {
+        return Err(refused(CredentialProblem::Incomplete {
+            missing_fields: missing,
+        }));
     }
     Ok(found)
 }
@@ -1080,7 +1021,7 @@ fn read_or_diagnose(
     let call = Call::new(OP, args);
     match r
         .read(&call, &ANY_FAILURE)
-        .map_err(|e| op_spawn_error(&e, host))?
+        .map_err(|e| op_spawn_error(r, &e, host))?
     {
         Outcome::Done(o) => {
             // Every item read registers its field values with the stderr scrubber (NR-31).
@@ -1187,7 +1128,7 @@ fn write_skeleton_on(
     // else is an unknown outcome, which is safe to re-run because the skeleton only adds
     // what is still missing.
     let call = Call::new(OP, &args).with_stdin(Some(&template));
-    match r.write(&call).map_err(|e| op_spawn_error(&e, host))? {
+    match r.write(&call).map_err(|e| op_spawn_error(r, &e, host))? {
         Outcome::Done(o) => Ok(item_version(&o.stdout)),
         Outcome::Refused(_)
         | Outcome::Unknown {
@@ -1216,11 +1157,16 @@ pub fn op_missing(host: &Host) -> Error {
 
 /// An `op` that could not be started (04.14): missing (with the install line), not
 /// executable, or the Windows `op.exe` with WSL interop off, in words, never a Rust
-/// `ErrorKind`. A run budget spent before the call started keeps the runner's own words.
-pub(crate) fn op_spawn_error(e: &io::Error, host: &dyn Fn() -> Host) -> Error {
+/// `ErrorKind`. A call the spent run budget never let start is opv's own limit
+/// (`BudgetSpent`, R52), never op's failure.
+pub(crate) fn op_spawn_error(
+    r: &dyn CommandRunner,
+    e: &io::Error,
+    host: &dyn Fn() -> Host,
+) -> Error {
     let why = match e.kind() {
         io::ErrorKind::NotFound => return op_missing(&host()),
-        io::ErrorKind::TimedOut => return Error::Source(format!("op: {e}").into()),
+        io::ErrorKind::TimedOut => return crate::host::OP_CLI.budget_spent(r, e),
         io::ErrorKind::PermissionDenied => Unusable::NotExecutable,
         _ if host().op_is_windows_exe() => Unusable::WslInteropOff,
         _ => Unusable::SpawnFailed { io: IoKind::Other },
@@ -1237,9 +1183,11 @@ pub(crate) fn op_spawn_error(e: &io::Error, host: &dyn Fn() -> Host) -> Error {
 pub(crate) fn unanswered(call: &Call) -> Error {
     let failed = Failed::of(call);
     let seen = failed.seen.clone();
+    // D6: what the runner saw (a timeout, a kill, a lost reply), never "timed out" by default.
+    let why = seen.exit().unanswered().unwrap_or(Unanswered::Lost);
     failed.report(Cause::Unavailable {
         system: System::OnePassword,
-        why: Unanswered::Timeout,
+        why,
         attempts: crate::runner::READ_ATTEMPTS,
         seen,
     })
@@ -1255,7 +1203,10 @@ pub(crate) fn read_op(
     host: &dyn Fn() -> Host,
 ) -> Result<Output, Error> {
     let call = Call::new(OP, args);
-    match r.read(&call, &[]).map_err(|e| op_spawn_error(&e, host))? {
+    match r
+        .read(&call, &[])
+        .map_err(|e| op_spawn_error(r, &e, host))?
+    {
         Outcome::Done(o) => {
             // Every item read in this run registers all its field values with the stderr
             // scrubber (NR-31), the selected sections' or not.
@@ -1272,7 +1223,7 @@ pub(crate) fn read_op(
 /// The reply of `op <args>` (exit 0) is JSON opv cannot read (04.26, design §4.7): an
 /// unexpected output, whose Do is to update op and whose Next is `opv doctor`, never a
 /// re-run against the same op. Only the position is kept: serde_json's own message can
-/// quote input (values).
+/// quote input (values). Taken right after the call, while the runner still holds it.
 pub(crate) fn unreadable_reply(args: &[&str], e: &serde_json::Error) -> Error {
     let call = Call::new(OP, args);
     match crate::runner::take_unusable_reply(&call) {
@@ -1286,22 +1237,21 @@ pub(crate) fn unreadable_reply(args: &[&str], e: &serde_json::Error) -> Error {
             seen,
         }
         .into(),
-        None => json_error(e),
+        None => Cause::Bug {
+            site: "onepassword: an unreadable op reply left no observation",
+        }
+        .into(),
     }
 }
 
-/// Item JSON opv already holds (from an earlier read) that it cannot read. serde_json's
-/// Display can quote input (values), so report only position and category.
-pub(crate) fn json_error(e: &serde_json::Error) -> Error {
-    Error::Source(
-        format!(
-            "opv could not read 1Password's item JSON ({:?} error at line {}, column {})",
-            e.classify(),
-            e.line(),
-            e.column()
-        )
-        .into(),
-    )
+/// Item JSON opv already holds that it cannot read. Every item reply is checked when it is
+/// read ([`read_whole`], [`super::onepassword_tidy::check`]), while the runner still holds
+/// the call, so a later failure is opv's own (C20).
+pub(crate) fn json_error(_: &serde_json::Error) -> Error {
+    Cause::Bug {
+        site: "onepassword: item JSON checked when read no longer parses",
+    }
+    .into()
 }
 
 /// The item's top-level `version` integer, when present. Every other field is skipped
@@ -1323,20 +1273,12 @@ struct RawItem {
 
 #[derive(Deserialize)]
 struct RawField {
-    #[serde(default)]
-    section: Option<RawSection>,
     #[serde(rename = "type", default)]
     ty: String,
     #[serde(default)]
     label: String,
     #[serde(default)]
     value: Option<Concealed>,
-}
-
-#[derive(Deserialize)]
-struct RawSection {
-    #[serde(default)]
-    label: Option<String>,
 }
 
 /// A JSON string deserialized directly into a [`SecretValue`].
@@ -1361,64 +1303,6 @@ impl<'de> Deserialize<'de> for Concealed {
     }
 }
 
-fn parse_fields(
-    json: &[u8],
-    only: Option<&BTreeSet<String>>,
-    unreadable: &dyn Fn(&serde_json::Error) -> Error,
-) -> Result<Vec<ItemField>, Error> {
-    let raw: RawItem = serde_json::from_slice(json).map_err(|e| unreadable(&e))?;
-    let mut seen = BTreeSet::new();
-    let mut out = Vec::new();
-    for f in raw.fields {
-        // Fields outside sections (built-in notesPlain etc.) are not fleet keys (D0 Q1).
-        let Some(section) = f.section else { continue };
-        // Scoped reads skip other sections before validating them.
-        if let Some(only) = only
-            && !section.label.as_ref().is_some_and(|l| only.contains(l))
-        {
-            continue;
-        }
-        let section = match section.label {
-            Some(l) if !l.is_empty() => l,
-            _ => {
-                return Err(Error::Source(
-                    format!("field {} is in a section without a label", f.label).into(),
-                ));
-            }
-        };
-        if f.label.is_empty() {
-            return Err(Error::Source(
-                format!("field without a label in section {section}").into(),
-            ));
-        }
-        let kind = match f.ty.as_str() {
-            "CONCEALED" => Kind::Secret,
-            "STRING" => Kind::Config,
-            _ => {
-                return Err(Error::Source(
-                    format!("unsupported field type on {section}/{}", f.label).into(),
-                ));
-            }
-        };
-        if !seen.insert((section.clone(), f.label.clone())) {
-            return Err(Error::Source(
-                format!("duplicate field {section}/{} in item", f.label).into(),
-            ));
-        }
-        out.push(ItemField {
-            section,
-            label: f.label,
-            kind,
-            concealed: kind == Kind::Secret,
-            // D0: an empty field has no `value` key at all.
-            value: f
-                .value
-                .map_or_else(|| SecretValue::new(String::new()), |c| c.0),
-        });
-    }
-    Ok(out)
-}
-
 /// A JSON tree whose strings are zeroized when it is dropped.
 pub(crate) struct WipeOnDrop(pub(crate) Value);
 
@@ -1438,10 +1322,16 @@ impl Drop for WipeOnDrop {
 
 // Field creation. `missing` never holds a shared key (FR-45, `from = ...`): callers
 // filter them out (see `app::skeleton`), and any self-healing that creates fields must too.
+//
+// `doc` is an item read with [`read_whole`] (its shape checked then, C20), and `missing` the
+// fields the tolerant reader found absent from that same item, each once: a field already
+// there, one listed twice or an item of another shape is opv's own error, and nothing is
+// written (FR-19: skeleton never modifies a field).
 fn add_missing(doc: &mut Value, missing: &[(String, String, Kind)]) -> Result<(), Error> {
+    let bug = |site: &'static str| Error::from(Cause::Bug { site });
     let obj = doc
         .as_object_mut()
-        .ok_or_else(|| Error::Source("op item JSON is not an object".into()))?;
+        .ok_or_else(|| bug("skeleton: an item checked when read is not an object"))?;
 
     let str_at = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_owned);
     let mut sections: Vec<(String, String)> = Vec::new(); // (id, label)
@@ -1471,18 +1361,10 @@ fn add_missing(doc: &mut Value, missing: &[(String, String, Kind)]) -> Result<()
     let mut listed = BTreeSet::new();
     for (s, l, _) in missing {
         if existing.contains(&(s.clone(), l.clone())) {
-            return Err(Error::Source(
-                format!(
-                    "skeleton: {} already exists in the item; not modified",
-                    key_label(s, l)
-                )
-                .into(),
-            ));
+            return Err(bug("skeleton: a field to add is already in the item"));
         }
         if !listed.insert((s.clone(), l.clone())) {
-            return Err(Error::Source(
-                format!("skeleton: {} listed twice", key_label(s, l)).into(),
-            ));
+            return Err(bug("skeleton: a field to add is listed twice"));
         }
     }
 
@@ -1520,9 +1402,7 @@ fn add_missing(doc: &mut Value, missing: &[(String, String, Kind)]) -> Result<()
             .entry(key)
             .or_insert_with(|| Value::Array(Vec::new()))
             .as_array_mut()
-            .ok_or_else(|| {
-                Error::Source(format!("op item JSON: `{key}` is not an array").into())
-            })?;
+            .ok_or_else(|| bug("skeleton: an item checked when read has a list of another type"))?;
         arr.extend(add);
     }
     Ok(())
@@ -1552,7 +1432,12 @@ pub(crate) fn serialize_exact(v: &Value) -> Result<Zeroizing<Vec<u8>>, Error> {
             Ok(())
         }
     }
-    let fail = |_| Error::Source("could not serialize the item template".into());
+    // A `Value` always serializes, and neither writer can fail: an error is opv's own.
+    let fail = |_| {
+        Error::from(Cause::Bug {
+            site: "onepassword: an item template does not serialize",
+        })
+    };
     let mut n = Count(0);
     serde_json::to_writer(&mut n, v).map_err(fail)?;
     let mut buf = Zeroizing::new(Vec::with_capacity(n.0));
@@ -2531,11 +2416,9 @@ mod tests {
             "SIGNUP_POLICY".to_string(),
             Kind::Secret,
         )];
-        let e = write_skeleton(&r, &test_env(), &test_at(), &item, &missing).unwrap_err();
-        assert!(
-            matches!(&e, Error::Source(m) if m.contains("allumata/SIGNUP_POLICY")),
-            "{e:?}"
-        );
+        // The tolerant reader never lists a field that is there: a caller that does is opv's
+        // own bug, and nothing is written.
+        let _ = write_skeleton(&r, &test_env(), &test_at(), &item, &missing);
         assert!(r.calls.borrow().is_empty());
     }
 
@@ -2697,3 +2580,163 @@ mod tests {
         assert_eq!(r.calls.borrow()[0].args, ["whoami", "--format", "json"]);
     }
 }
+
+/// The strict item reader and the skeleton writer, kept for the tests only: production
+/// reads every item tolerantly ([`read_whole`], [`super::onepassword_tidy`], FR-43) and
+/// writes fields through `app::skeleton`, so nothing outside the tests calls these.
+#[cfg(test)]
+mod strict {
+    use super::*;
+
+    /// Read one boundary item `b` of `env` once, by vault ID and item ID (FR-13, FR-57). See
+    /// the module docs. The host is detected only if the read fails.
+    pub fn read_item(
+        r: &dyn CommandRunner,
+        env: &Environment,
+        b: &Boundary,
+    ) -> Result<Item, Error> {
+        read_item_on(r, env, b, &Host::detect)
+    }
+
+    /// [`read_item`] limited to the fields in `sections`: fields of other sections are skipped
+    /// before they are validated, so a malformed field in another product's section cannot fail
+    /// a product-scoped check (#52). Still one read (FR-13).
+    pub fn read_item_in_sections(
+        r: &dyn CommandRunner,
+        env: &Environment,
+        b: &Boundary,
+        sections: &BTreeSet<String>,
+    ) -> Result<Item, Error> {
+        read_sections_on(r, env, b, Some(sections), &Host::detect)
+    }
+
+    /// [`read_item`] on a given host (tests). A non-zero exit is diagnosed with
+    /// [`diagnose`] (FR-26). No second item read is made (FR-13).
+    pub fn read_item_with(
+        r: &dyn CommandRunner,
+        env: &Environment,
+        b: &Boundary,
+        host: &Host,
+    ) -> Result<Item, Error> {
+        read_item_on(r, env, b, &|| *host)
+    }
+
+    pub(super) fn read_item_on(
+        r: &dyn CommandRunner,
+        env: &Environment,
+        b: &Boundary,
+        host: &dyn Fn() -> Host,
+    ) -> Result<Item, Error> {
+        read_sections_on(r, env, b, None, host)
+    }
+
+    fn read_sections_on(
+        r: &dyn CommandRunner,
+        env: &Environment,
+        b: &Boundary,
+        sections: Option<&BTreeSet<String>>,
+        host: &dyn Fn() -> Host,
+    ) -> Result<Item, Error> {
+        let args = [
+            "item",
+            "get",
+            b.item_id.as_str(),
+            "--vault",
+            b.vault_id.as_str(),
+            "--format",
+            "json",
+        ];
+        let stdout = read_diagnosed(r, env, b, &args, host)?;
+        // 09.74: JSON op answered with that opv cannot read is `UnexpectedOutput` of this call.
+        let fields = parse_fields(&stdout, sections, &|e| unreadable_reply(&args, e))?;
+        Ok(Item {
+            fields,
+            version: item_version(&stdout),
+            raw: stdout,
+        })
+    }
+
+    fn parse_fields(
+        json: &[u8],
+        only: Option<&BTreeSet<String>>,
+        unreadable: &dyn Fn(&serde_json::Error) -> Error,
+    ) -> Result<Vec<ItemField>, Error> {
+        #[derive(Deserialize)]
+        struct StrictItem {
+            #[serde(default)]
+            fields: Vec<StrictField>,
+        }
+        #[derive(Deserialize)]
+        struct StrictField {
+            #[serde(default)]
+            section: Option<StrictSection>,
+            #[serde(rename = "type", default)]
+            ty: String,
+            #[serde(default)]
+            label: String,
+            #[serde(default)]
+            value: Option<Concealed>,
+        }
+        #[derive(Deserialize)]
+        struct StrictSection {
+            #[serde(default)]
+            label: Option<String>,
+        }
+        let raw: StrictItem = serde_json::from_slice(json).map_err(|e| unreadable(&e))?;
+        let mut seen = BTreeSet::new();
+        let mut out = Vec::new();
+        for f in raw.fields {
+            // Fields outside sections (built-in notesPlain etc.) are not fleet keys (D0 Q1).
+            let Some(section) = f.section else { continue };
+            // Scoped reads skip other sections before validating them.
+            if let Some(only) = only
+                && !section.label.as_ref().is_some_and(|l| only.contains(l))
+            {
+                continue;
+            }
+            let section = match section.label {
+                Some(l) if !l.is_empty() => l,
+                _ => {
+                    return Err(Error::Source(
+                        format!("field {} is in a section without a label", f.label).into(),
+                    ));
+                }
+            };
+            if f.label.is_empty() {
+                return Err(Error::Source(
+                    format!("field without a label in section {section}").into(),
+                ));
+            }
+            let kind = match f.ty.as_str() {
+                "CONCEALED" => Kind::Secret,
+                "STRING" => Kind::Config,
+                _ => {
+                    return Err(Error::Source(
+                        format!("unsupported field type on {section}/{}", f.label).into(),
+                    ));
+                }
+            };
+            if !seen.insert((section.clone(), f.label.clone())) {
+                return Err(Error::Source(
+                    format!("duplicate field {section}/{} in item", f.label).into(),
+                ));
+            }
+            out.push(ItemField {
+                section,
+                label: f.label,
+                kind,
+                concealed: kind == Kind::Secret,
+                // D0: an empty field has no `value` key at all.
+                value: f
+                    .value
+                    .map_or_else(|| SecretValue::new(String::new()), |c| c.0),
+            });
+        }
+        Ok(out)
+    }
+}
+
+#[cfg(test)]
+use strict::read_item_on;
+#[cfg(test)]
+pub use strict::{read_item, read_item_in_sections, read_item_with};

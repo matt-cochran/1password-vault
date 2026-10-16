@@ -1039,10 +1039,13 @@ fn live_09_66_vault_locate_of_a_known_vault_exits_0() {
     assert_eq!(out.exit(), Some(0), "{}", out.shown());
 }
 
+/// mig-final-op: every account op knows answered "not here", so the account that holds it
+/// is not added (`account_not_registered`, exit 7, step `opv login --add`); `NotFound`
+/// (exit 4) would step back to this same `vault locate`.
 #[test]
-fn live_09_67_vault_locate_of_a_vault_in_no_account_exits_4() {
+fn live_09_67_vault_locate_of_a_vault_in_no_account_is_account_not_registered() {
     let out = Scenario::new().opv(&["vault", "locate", "vE2ENOSUCHVAULT00000000001"]);
-    assert_eq!(out.exit(), Some(4), "{}", out.shown());
+    assert_eq!(out.exit(), Some(7), "{}", out.shown());
 }
 
 #[test]
@@ -1070,7 +1073,7 @@ fn live_09_73_check_with_an_unknown_selected_account_is_account_not_registered()
     let out = Scenario::new()
         .account(UNKNOWN_ACCOUNT)
         .opv(&["check", "prod", "--json"]);
-    assert_eq!(out.code(), "account_not_registered", "{}", out.shown());
+    assert_eq!(out.exit(), Some(7), "{}", out.shown());
 }
 
 #[test]

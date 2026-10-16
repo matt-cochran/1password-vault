@@ -7,20 +7,20 @@
 using <SCENARIO>/project/secrets.toml
 retrying op item get (2/3) in <delay>
 retrying op item get (3/3) in <delay>
-opv: 1Password did not answer after 3 attempts: it timed out
+opv: 1Password did not answer after 3 attempts: it was stopped by signal 9 before it answered
   checked: op item get iE2EWEBPROD000000000000001 --vault vE2EWEBPROD000000000000001 --format json (stopped by signal 9)
 Do: approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network
 Next: opv plan prod
 
 ## json exit: 9
 ## json stdout
-{"schema_version":1,"ok":false,"exit_code":9,"next":"opv plan prod --json","do":"approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network","error":{"code":"provider_unavailable","category":"unknown","message":"1Password did not answer after 3 attempts: it timed out","subject":{"attempts":3,"system":"one_password","why":{"why":"timeout"}},"evidence":{"checked":"op item get iE2EWEBPROD000000000000001 --vault vE2EWEBPROD000000000000001 --format json","account":null,"upstream":null},"retry":"safe","human_required":false,"do":"approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network","next":"opv plan prod --json","next_kind":"rerun"}}
+{"schema_version":1,"ok":false,"exit_code":9,"next":"opv plan prod --json","do":"approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network","error":{"code":"provider_unavailable","category":"unknown","message":"1Password did not answer after 3 attempts: it was stopped by signal 9 before it answered","subject":{"attempts":3,"system":"one_password","why":{"why":"killed","signal":9}},"evidence":{"checked":"op item get iE2EWEBPROD000000000000001 --vault vE2EWEBPROD000000000000001 --format json","account":null,"upstream":null},"retry":"safe","human_required":false,"do":"approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network","next":"opv plan prod --json","next_kind":"rerun"}}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml
 retrying op item get (2/3) in <delay>
 retrying op item get (3/3) in <delay>
-opv: 1Password did not answer after 3 attempts: it timed out
+opv: 1Password did not answer after 3 attempts: it was stopped by signal 9 before it answered
   checked: op item get iE2EWEBPROD000000000000001 --vault vE2EWEBPROD000000000000001 --format json (stopped by signal 9)
 Do: approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network
 Next: opv plan prod --json

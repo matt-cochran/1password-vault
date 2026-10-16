@@ -413,11 +413,17 @@ fn an_empty_token_names_the_created_account() {
     let mut w = World::new();
     w.created = String::new();
     let (res, _, _) = create(&w, Some("fleet"), true);
-    assert!(
-        res.unwrap_err()
-            .text()
-            .contains("shop-staging-fleet-deploy"),
-    );
+    let e = res.unwrap_err();
+    assert!(crate::error::report(&e, "-", None).contains("shop-staging-fleet-deploy"));
+}
+
+/// C20, X5: a created account whose token was never printed is revoked, never made again.
+#[test]
+fn an_empty_token_is_secret_not_stored() {
+    let mut w = World::new();
+    w.created = String::new();
+    let (res, _, _) = create(&w, Some("fleet"), true);
+    assert_eq!(res.unwrap_err().code_str(), "secret_not_stored");
 }
 
 // --- 07.14: the secret name is checked before anything is created ---

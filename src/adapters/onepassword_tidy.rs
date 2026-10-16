@@ -152,8 +152,30 @@ pub fn parse(json: &[u8]) -> Result<(Layout, Stamp), Error> {
     Ok((layout, Stamp(raw.version, raw.updated_at)))
 }
 
-fn source(what: &str) -> Error {
-    Error::Source(format!("op item JSON: {what}; nothing written").into())
+/// Item JSON that [`check`] accepted when it was read, but that is not an item now: opv's
+/// own error, never 1Password's (C20). Nothing is written.
+fn source(_what: &str) -> Error {
+    crate::cause::Cause::Bug {
+        site: "onepassword_tidy: item JSON checked when read is not an item",
+    }
+    .into()
+}
+
+/// Whether `json` is an item opv's readers accept (C20): a JSON object whose `sections`
+/// and `fields`, when present, are lists of objects of the expected shape. Checked on every
+/// item reply while the runner still holds the call, so a reply of another shape is that
+/// call's `UnexpectedOutput`, and the later parse ([`parse`], [`apply`]) cannot fail. The
+/// values read are dropped (zeroized) at once.
+pub fn check(json: &[u8]) -> Result<(), serde_json::Error> {
+    serde_json::from_slice::<RawItem>(json)?;
+    // A JSON array also deserializes into a struct (by position): only an object is an item.
+    match json.iter().find(|b| !b.is_ascii_whitespace()) {
+        Some(b'{') => Ok(()),
+        _ => Err(<serde_json::Error as de::Error>::invalid_type(
+            de::Unexpected::Seq,
+            &"an item object",
+        )),
+    }
 }
 
 /// `base`, or `base_2`, `base_3`, ... until it is not in `taken`; then taken.
@@ -365,11 +387,16 @@ pub fn write(
         "json",
     ];
     let call = Call::new(OP, &args).with_stdin(Some(template));
-    match r.write(&call).map_err(|e| op_spawn_error(&e, host))? {
+    match r.write(&call).map_err(|e| op_spawn_error(r, &e, host))? {
         // The edited item comes back on stdout (with values): registered with the stderr
         // scrubber (NR-31) and handed back in its zeroizing buffer.
         Outcome::Done(o) => {
             crate::scrub::register_item_values(&o.stdout);
+            // An echo that is not an item opv can read is treated as no echo: the caller
+            // reads the item back (fresh), and that read is checked like any other (C20).
+            if check(&o.stdout).is_err() {
+                return Ok(Zeroizing::new(Vec::new()));
+            }
             Ok(o.stdout)
         }
         // A refusal right after a read of the same item is the missing Write grant unless

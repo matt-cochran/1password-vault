@@ -6,6 +6,7 @@ use std::path::Path;
 
 use super::*;
 use crate::adapters::onepassword_manifest::{Account, Discovery};
+use crate::error::Code;
 use crate::host::Platform;
 
 fn acct(id: &str, email: &str, address: &str, shorthand: &str, user: &str) -> Account {

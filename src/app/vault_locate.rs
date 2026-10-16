@@ -12,8 +12,8 @@ use serde_json::json;
 
 use super::write_err;
 use crate::adapters::onepassword_manifest::{self as manifest, Account, Discovery};
-use crate::cause::{AccountId, Cause, UsageProblem};
-use crate::error::{Code, Error};
+use crate::cause::{AccountId, AccountRef, AccountSource, Cause, UsageProblem};
+use crate::error::Error;
 use crate::runner::{Call, CommandRunner, PROBE_TIMEOUT};
 
 /// What one account says about the vault.
@@ -57,17 +57,46 @@ pub fn rows(r: &dyn CommandRunner, accounts: &[Account], vault: &str) -> Vec<Row
             let call = Call::new("op", &args);
             match r.probe(&call, PROBE_TIMEOUT) {
                 Ok(o) if o.status == 0 => row(a, "found"),
-                Ok(_) => {
-                    let _ = crate::runner::take_failure_excerpt();
-                    match manifest::signed_in(r, &a.account_uuid) {
+                Ok(_) => match probe_said(vault, &a.account_uuid) {
+                    Some(true) => row(a, "not_found"),
+                    Some(false) => row(a, "unknown"),
+                    // A reply opv does not recognise: not there when this account is
+                    // signed in, else not asked.
+                    None => match manifest::signed_in(r, &a.account_uuid) {
                         Some(true) => row(a, "not_found"),
                         _ => row(a, "unknown"),
-                    }
-                }
+                    },
+                },
                 Err(_) => row(a, "unknown"),
             }
         })
         .collect()
+}
+
+/// What the failed `op vault get` of `vault` in `account` said, through the 1Password
+/// diagnosis (design §5): `Some(true)` the vault is not in that account, `Some(false)` the
+/// account could not be asked (a sign-in, a timeout, op unusable), `None` a reply the
+/// diagnosis does not recognise.
+fn probe_said(vault: &str, account: &str) -> Option<bool> {
+    let failure = crate::runner::take_failure()?;
+    let ctx = crate::cause::DiagnoseContext {
+        resource: Some(crate::cause::ResourceRef {
+            kind: crate::cause::ResourceKind::Vault,
+            name: crate::cause::ResourceName::new(vault),
+            scope: Some(account.to_string()),
+        }),
+        account: Some(AccountId::new(account)),
+        ..crate::cause::DiagnoseContext::default()
+    };
+    match crate::adapters::onepassword_diagnose::diagnose(
+        failure.seen.clone(),
+        failure.stderr(),
+        &ctx,
+    ) {
+        Cause::NotFound { .. } | Cause::InOtherAccount { .. } => Some(true),
+        Cause::Unrecognized { .. } => None,
+        _ => Some(false),
+    }
 }
 
 /// `opv vault locate <vault>`.
@@ -148,25 +177,15 @@ pub fn run(
         }
         .into());
     }
-    // Audit 04.07: an account is added at op's prompt only where op keeps its own accounts.
-    let (add, next) = if super::account::app_holds_accounts_here() {
-        ("add that account in the 1Password app", "opv login")
-    } else {
-        ("add that account to op here", "opv login --add")
-    };
-    Err(Error::Source(
-        format!(
-            "vault {vault} is in none of the {} accounts this 1Password CLI knows; it may \
-             have been deleted, or be in an account not added here",
-            rows.len()
-        )
-        .into(),
-    )
-    .with_code(Code::VaultNoAccess)
-    .with_do(format!(
-        "check the vault ID in the configuration; if another account holds it, {add}"
-    ))
-    .with_next(next))
+    // Every account op knows answered that it does not hold the vault: the account that
+    // does is not added here. It is added at op's prompt only where op keeps its own
+    // accounts (04.07), and the step never loops back to `opv vault locate`.
+    Err(Cause::AccountNotOnMachine {
+        account: AccountRef::Unnamed,
+        selected_by: AccountSource::OpDefault,
+        in_app: super::account::app_holds_accounts_here(),
+    }
+    .into())
 }
 
 /// `opv vault locate` under a service account or Connect (audit 04.13): one `op vault get`
