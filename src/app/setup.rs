@@ -1,6 +1,7 @@
 //! Owner-guided, resumable local setup. Existing automation commands never prompt.
 use super::setup_recipe::{Field, Recipe};
 use crate::adapters::onepassword::{WipeOnDrop, serialize_exact};
+pub use crate::adapters::onepassword_diagnose::SessionCheck;
 use crate::config;
 use crate::domain::{Kind, SecretValue};
 use crate::error::Error;
@@ -35,6 +36,21 @@ pub trait Backend {
     }
     /// Use `account` for every later call (`opv login`, FR-40).
     fn use_account(&mut self, _account: Option<&str>) {}
+    /// The account this backend's calls use ([`Backend::use_account`] or a sign-in), if any.
+    fn current_account(&self) -> Option<String> {
+        None
+    }
+    /// #160: whether op holds a session for `account` itself, checked by `op whoami
+    /// --account <account>`; a live session for any other account is never this one's. The
+    /// runtime uses [`crate::adapters::onepassword_diagnose::session_for`], which also names
+    /// the account whose session is live.
+    fn session_for(&self, account: &str) -> SessionCheck {
+        match self.probe(&["whoami", "--account", account, "--format", "json"]) {
+            Ok(o) if o.status == 0 => SessionCheck::SignedIn,
+            Ok(_) => SessionCheck::NotSignedIn,
+            Err(_) => SessionCheck::Undetermined,
+        }
+    }
     /// Run `command` signed in (a signed-in shell when empty); its exit code (`opv login`).
     fn child(&self, _command: &[String]) -> Result<i32, Error> {
         Err(Error::Dependency(
@@ -133,8 +149,11 @@ pub fn prepare(
     }
 }
 
-/// Signed in with a vault listing (`Some`), or signed in while `op vault list` failed
-/// (`None`); a sign-in is started only when `op whoami` fails.
+/// Signed in with a vault listing (`Some`), or signed in to `account` while `op vault list`
+/// failed (`None`). With an account, the session is checked for that account by ID (#160):
+/// a live session for any other account, on the same sign-in address or not, is never taken
+/// for it, and op's prompt for `account` follows. Without one, only a vault list that works
+/// shows a session; a bare `op whoami` never does (it answers for op's default account).
 fn sign_in(
     account: Option<&str>,
     backend: &mut dyn Backend,
@@ -142,50 +161,135 @@ fn sign_in(
 ) -> Result<Option<Output>, Error> {
     backend.native()?;
     ui.show(&format!("1Password CLI: ready ({})", version(backend)?))?;
-    let mut vaults = backend.call(&["vault", "list", "--format", "json"], None)?;
+    match account {
+        Some(a) if backend.session_for(a) == SessionCheck::SignedIn => {
+            let vaults = backend.call(&["vault", "list", "--format", "json"], None)?;
+            return Ok((vaults.status == 0).then_some(vaults));
+        }
+        Some(a) => {
+            start_sign_in(Some(a), backend, ui)?;
+            match backend.session_for(a) {
+                // A check that could not tell leaves it to the vault list below.
+                SessionCheck::SignedIn | SessionCheck::Undetermined => {}
+                check => return Err(not_signed_in_to(a, &check)),
+            }
+        }
+        None => {
+            let vaults = backend.call(&["vault", "list", "--format", "json"], None)?;
+            if vaults.status == 0 {
+                return Ok(Some(vaults));
+            }
+            start_sign_in(None, backend, ui)?;
+        }
+    }
+    let vaults = backend.call(&["vault", "list", "--format", "json"], None)?;
     if vaults.status != 0 {
-        let who = backend.probe(&["whoami", "--format", "json"])?;
-        if who.status == 0 {
-            return Ok(None);
-        }
-        ui.show("Sign in to 1Password. Your password goes only to its own prompt.")?;
-        let accounts = backend.call(&["account", "list", "--format", "json"], None)?;
-        let none = accounts.status == 0
-            && serde_json::from_slice::<Vec<serde::de::IgnoredAny>>(&accounts.stdout)
-                .is_ok_and(|a| a.is_empty());
-        if none {
-            ui.show("First, add your 1Password account at its prompts. Find its details in your 1Password Emergency Kit.")?;
-            backend.sign_in(account, true)?;
-        }
-        backend.sign_in(account, false)?;
-        vaults = backend.call(&["vault", "list", "--format", "json"], None)?;
-        if vaults.status != 0 {
-            // #157: no vault is selected yet; name the account that was signed in to.
-            return Err(source_error(&format!(
-                "Signed in, but {} could not list its vaults. Check that the sign-in finished \
-                 and that your connection works, then rerun setup. Existing credentials are \
-                 preserved.",
-                account_name(backend, account)
-            ))
-            .with_next("opv doctor"));
-        }
+        // #157: no vault is selected yet; name the account that was signed in to.
+        return Err(source_error(&format!(
+            "Signed in, but {} could not list its vaults. Check that the sign-in finished \
+             and that your connection works, then rerun setup. Existing credentials are \
+             preserved.",
+            account_name(backend, account)
+        ))
+        .with_next("opv doctor"));
     }
     Ok(Some(vaults))
 }
 
-/// `op whoami` shows a live session, but `op vault list` failed (#157, #160). The session
-/// may belong to another account on the same sign-in address, so this never claims the
-/// requested account is signed in, and never points at another bare `opv login`.
+/// op's own sign-in prompt for `account` (adding the first account first, when op knows
+/// none). The password goes only to op.
+fn start_sign_in(
+    account: Option<&str>,
+    backend: &mut dyn Backend,
+    ui: &mut dyn Interaction,
+) -> Result<(), Error> {
+    ui.show("Sign in to 1Password. Your password goes only to its own prompt.")?;
+    let accounts = backend.call(&["account", "list", "--format", "json"], None)?;
+    let none = accounts.status == 0
+        && serde_json::from_slice::<Vec<serde::de::IgnoredAny>>(&accounts.stdout)
+            .is_ok_and(|a| a.is_empty());
+    if none {
+        ui.show("First, add your 1Password account at its prompts. Find its details in your 1Password Emergency Kit.")?;
+        backend.sign_in(account, true)?;
+    }
+    backend.sign_in(account, false)
+}
+
+/// #160: op still holds no session for `account` after its sign-in, perhaps because the
+/// live session belongs to another account on the same sign-in address. The step signs in
+/// to that account by ID: never a bare `opv login` (op's default account), never a vault.
+pub(crate) fn not_signed_in_to(account: &str, check: &SessionCheck) -> Error {
+    use crate::cause::{AccountId, Cause, SessionState, System};
+    let state = match check {
+        SessionCheck::OtherAccountLive { live } => {
+            SessionState::OtherAccount { live: live.clone() }
+        }
+        _ => SessionState::SignedOut,
+    };
+    // catalog: `Cause::NotSignedIn { system: System::OnePassword, account: Some(<account>),
+    // state }.into()` once `From<Cause> for Error` lands (cause-legacy lane); for `opv login`
+    // itself its Next stays `opv login --account <account>`.
+    let cause = Cause::NotSignedIn {
+        system: System::OnePassword,
+        account: Some(AccountId::new(account)),
+        state,
+    };
+    Error::Auth(
+        format!(
+            "{} (checked with op whoami --account {account} after signing in); nothing was run",
+            cause.message()
+        )
+        .into(),
+    )
+    .with_code(crate::error::Code::OpNotSignedIn)
+    .with_next(format!("opv login --account {account}"))
+}
+
+/// `op whoami --account <account>` shows a live session for that account, but `op vault
+/// list` failed (#157, #160). Never another bare `opv login`.
 fn vault_list_failed(account: Option<&str>) -> Error {
     let wanted = account.map_or_else(
         || "the default 1Password account".to_string(),
         |a| format!("1Password account {a}"),
     );
     source_error(&format!(
-        "op vault list failed for {wanted}, although op has a live session; that session may \
-         belong to another account on the same sign-in address. Nothing was run."
+        "op vault list failed for {wanted}, although op has a live session for it. Nothing \
+         was run."
     ))
     .with_next("opv account list")
+}
+
+/// The child `op signin` (or `op account add`) for `account` (#153, recorded case 13): the
+/// account goes in `--account` only. `OP_ACCOUNT` (op reads it as `--account`, recorded
+/// case 04), `OP_SESSION` and every inherited `OP_SESSION_*` (`inherited`: the names in
+/// opv's environment) are removed, so a session for another account on the same sign-in
+/// address never decides what op does. `--force` asks op for a fresh assignment.
+pub fn signin_command(
+    account: Option<&str>,
+    add_account: bool,
+    inherited: impl IntoIterator<Item = std::ffi::OsString>,
+) -> std::process::Command {
+    let mut command = std::process::Command::new("op");
+    command.args(if add_account {
+        ["account", "add"].as_slice()
+    } else {
+        ["signin", "--force"].as_slice()
+    });
+    if let Some(account) = account
+        && !add_account
+    {
+        command.args(["--account", account]);
+    }
+    command
+        .env_remove("OP_ACCOUNT")
+        .env_remove("OP_SESSION")
+        .env("OP_DEBUG", "false");
+    for name in inherited {
+        if name.to_str().is_some_and(|n| n.starts_with("OP_SESSION_")) {
+            command.env_remove(&name);
+        }
+    }
+    command
 }
 
 /// How setup names the account it uses: by its label when one was chosen, else the
