@@ -152,5 +152,25 @@ fn a_generated_configuration_is_never_edited() {
         &key_decl("billing", "STRIPE_KEY"),
     )
     .unwrap_err();
-    assert_eq!(e.code().as_str(), "policy_refused");
+    assert_eq!(e.code_str(), "config_not_editable");
+}
+
+/// 05.19: a key for an undeclared environment names it; init --add-env is never the step.
+#[test]
+fn a_key_for_an_undeclared_environment_is_unknown_env() {
+    let (_d, path) = file(FRESH);
+    let mut k = key_decl("billing", "STRIPE_KEY");
+    k.environments = vec!["staging".into()];
+    let e = key(&FakeRunner::default(), &path, &k).unwrap_err();
+    assert_eq!(e.code_str(), "unknown_env");
+}
+
+/// 05.19: its step lists the declared environments.
+#[test]
+fn a_key_for_an_undeclared_environment_steps_to_the_configuration() {
+    let (_d, path) = file(FRESH);
+    let mut k = key_decl("billing", "STRIPE_KEY");
+    k.environments = vec!["staging".into()];
+    let e = key(&FakeRunner::default(), &path, &k).unwrap_err();
+    assert_eq!(e.step("", "").next, "opv config describe");
 }

@@ -7,6 +7,8 @@ use std::time::Duration;
 
 use super::*;
 use crate::adapters::fake_op::FakeOp;
+use crate::error::Code;
+use crate::runner::fake::FakeRunner;
 use crate::runner::{Call, Outcome, Output};
 
 const ACCOUNT: &str = "ACCOUNTAAA000000000000AAAA";
@@ -202,17 +204,24 @@ fn each_independent_target_plans_its_own_delivery_item() {
 
 #[test]
 fn a_recorded_vault_outside_the_account_refuses_the_plan() {
-    let (_d, path, op) =
-        workspace_with(&FLEET.replace("vdev0000000000000000000001", "vother000000000000000000001"));
-    let e = plan(&op, &text(&path), "myapp", ACCOUNT).unwrap_err();
-    assert_eq!(e.code().as_str(), "ids_not_in_account");
+    // The environment names its account, as the structural apply's runner selects one.
+    let (_d, path, op) = workspace_with(
+        &FLEET
+            .replace("vdev0000000000000000000001", "vother000000000000000000001")
+            .replace(
+                "[environments.dev]\n",
+                &format!("[environments.dev]\naccount = \"{ACCOUNT}\"\n"),
+            ),
+    );
+    let e = plan(&Probed::new(op), &text(&path), "myapp", ACCOUNT).unwrap_err();
+    assert_eq!(e.code_str(), "ids_not_in_account");
 }
 
 #[test]
 fn a_plan_without_an_account_id_is_refused() {
     let (_d, path, op) = workspace();
     let e = plan(&op, &text(&path), "myapp", "").unwrap_err();
-    assert_eq!(e.code().as_str(), "account_required");
+    assert_eq!(e.code_str(), "op_not_signed_in");
 }
 
 /// A runner whose `op vault get` probes cannot run: visibility is unknown.
@@ -515,7 +524,7 @@ fn a_configuration_changed_during_apply_is_never_overwritten() {
         Ok(())
     };
     let e = apply(&op, &path, "myapp", ACCOUNT, &id, &mut edit_during).unwrap_err();
-    assert_eq!(e.code().as_str(), "config_changed");
+    assert_eq!(e.code_str(), "config_changed");
 }
 
 // End to end (#133 acceptance) -------------------------------------------------------------
@@ -650,5 +659,126 @@ fn end_to_end_the_approval_cannot_be_replayed() {
         201,
     )
     .unwrap_err();
-    assert_eq!(e.code().as_str(), "approval_required");
+    assert_eq!(e.code_str(), "approval_used");
+}
+
+// 0.10.0 error catalog (C2, 05.02, 05.14, 05.15, X4) ----------------------------------------
+
+/// op 2.40.0's recorded reply to `op vault get <vault>` for a vault the account does not
+/// hold (tests/fixtures/op/failures, case 14).
+const NOT_A_VAULT_HERE: &str =
+    include_str!("../../tests/fixtures/op/failures/14-vault-in-other-account.stderr");
+
+/// The fake `op`, whose failed `op vault get` probes go through the observing fake runner
+/// with op's recorded reply, as the real runner observes them.
+struct Probed {
+    op: FakeOp,
+    get: FakeRunner,
+}
+
+impl Probed {
+    fn new(op: FakeOp) -> Self {
+        Probed {
+            op,
+            get: FakeRunner::default(),
+        }
+    }
+}
+
+impl CommandRunner for Probed {
+    fn read(&self, call: &Call, refused: &[i32]) -> io::Result<Outcome> {
+        self.op.read(call, refused)
+    }
+    fn write(&self, call: &Call) -> io::Result<Outcome> {
+        self.op.write(call)
+    }
+    fn probe(&self, call: &Call, limit: Duration) -> io::Result<Output> {
+        let answer = self.op.probe(call, limit)?;
+        match call.args {
+            ["vault", "get", vault, ..] if call.program == "op" && answer.status != 0 => {
+                self.get.push_with_stderr(
+                    Output::failure(1),
+                    &NOT_A_VAULT_HERE.replace("<VAULT_B>", vault),
+                );
+                self.get.probe(call, limit)
+            }
+            _ => Ok(answer),
+        }
+    }
+    fn pause(&self, _: Duration, _: &str) {}
+    fn note(&self, _: &str) {}
+    fn run_inherited(&self, _: &str, _: &[&str], _: &[(&str, &str)]) -> io::Result<i32> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+}
+
+/// C2: an id that is not a structural plan id is unknown, not a changed plan.
+#[test]
+fn a_malformed_plan_id_is_plan_unknown() {
+    let (_d, path, op) = workspace();
+    let e = apply(&op, &path, "myapp", ACCOUNT, "not-a-plan", &mut approve_all).unwrap_err();
+    assert_eq!(e.code_str(), "plan_unknown");
+}
+
+/// 05.15: a changed plan steps to its read, never to an approval an agent cannot give.
+#[test]
+fn a_stale_plan_id_steps_to_the_new_structural_plan() {
+    let (_d, path, op) = workspace();
+    let id = plan_of(&path, &op).plan_id;
+    std::fs::write(&path, text(&path) + "\n# changed after review\n").unwrap();
+    let e = apply(&op, &path, "myapp", ACCOUNT, &id, &mut approve_all).unwrap_err();
+    assert_eq!(e.step("", "").next, "opv structure plan");
+}
+
+/// 05.14, X4: after the approval was used, the step reads the new plan, never this apply
+/// or the bootstrap dry run.
+#[test]
+fn a_configuration_changed_during_apply_steps_to_the_new_plan() {
+    let (_d, path, op) = workspace();
+    let id = plan_of(&path, &op).plan_id;
+    let p2 = path.clone();
+    let mut edit_during = move |_: &Plan| -> Result<(), Error> {
+        std::fs::write(&p2, std::fs::read_to_string(&p2).unwrap() + "# edited\n").unwrap();
+        Ok(())
+    };
+    let e = apply(&op, &path, "myapp", ACCOUNT, &id, &mut edit_during).unwrap_err();
+    assert_eq!(e.step("", "").next, "opv structure plan");
+}
+
+/// 05.14, X20: the failure says the approval is used up.
+#[test]
+fn a_configuration_changed_during_apply_says_the_approval_is_used() {
+    let (_d, path, op) = workspace();
+    let id = plan_of(&path, &op).plan_id;
+    let p2 = path.clone();
+    let mut edit_during = move |_: &Plan| -> Result<(), Error> {
+        std::fs::write(&p2, std::fs::read_to_string(&p2).unwrap() + "# edited\n").unwrap();
+        Ok(())
+    };
+    let e = apply(&op, &path, "myapp", ACCOUNT, &id, &mut edit_during).unwrap_err();
+    assert!(e.to_string().contains(&format!("approval {id} is used up")));
+}
+
+/// X4: a create that fails after the approval was used never steps to the apply again.
+#[test]
+fn a_partial_apply_steps_to_the_new_plan() {
+    let (_d, path, r) = failing_at(3);
+    let e = apply_reviewed(&path, &r).unwrap_err();
+    assert_eq!(e.step("", "").next, "opv structure plan");
+}
+
+/// X20: a partial apply names what it already created.
+#[test]
+fn a_partial_apply_names_what_it_created() {
+    let (_d, path, r) = failing_at(3);
+    let e = apply_reviewed(&path, &r).unwrap_err();
+    assert!(e.to_string().contains("already written: boundary"));
+}
+
+/// 05.02: a checkout without a secrets.toml is never sent to opv bootstrap.
+#[test]
+fn a_checkout_without_a_file_never_steps_to_bootstrap() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = scope(dir.path(), &FakeOp::default()).unwrap_err();
+    assert!(!e.step("", "").next.contains("bootstrap"));
 }
