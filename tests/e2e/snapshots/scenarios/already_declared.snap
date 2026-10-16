@@ -1,0 +1,21 @@
+# already_declared: opv target add prod fly --fly-app x
+
+## text exit: 2
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: target fly in environment prod is already declared
+Next: opv config edit
+
+## json exit: 2
+## json stdout
+{"schema_version":2,"ok":false,"exit_code":2,"next":"opv config edit","do":null,"error":{"code":"already_declared","category":"config","message":"target fly in environment prod is already declared","subject":{"name":"fly in environment prod","kind":"target"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":null,"next":"opv config edit","next_kind":"run"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: target fly in environment prod is already declared
+Next: opv config edit
+
+## mcp opv_declare_target {"environment":"prod","target":"fly","options":{"fly-app":"x"}}
+{"ok":false,"error":{"code":"already_declared","category":"config","message":"target fly in environment prod is already declared","subject":{"name":"fly in environment prod","kind":"target"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":null,"next":"opv config edit","next_kind":"run"}}

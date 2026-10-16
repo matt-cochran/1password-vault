@@ -1,0 +1,20 @@
+# read_back_missing: opv adopt dev --from .env.dev --apply
+
+## text exit: 4
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: after opv adopt dev --from .env.dev, fields web/API_KEY of item iE2EWEBDEV0000000000000001 in vault vE2EWEBDEV0000000000000001 were missing when read back
+Do: restore web/API_KEY from the history of item iE2EWEBDEV0000000000000001 in 1Password
+Next: opv adopt dev --from .env.dev
+
+## json exit: 4
+## json stdout
+{"schema_version":2,"ok":false,"exit_code":4,"next":"opv adopt dev --from .env.dev","do":"restore web/API_KEY from the history of item iE2EWEBDEV0000000000000001 in 1Password","error":{"code":"tidy_unverified","category":"source","message":"after opv adopt dev --from .env.dev, fields web/API_KEY of item iE2EWEBDEV0000000000000001 in vault vE2EWEBDEV0000000000000001 were missing when read back","subject":{"by":{"command":["adopt"],"args":["dev","--from",".env.dev"]},"vault":"vE2EWEBDEV0000000000000001","item":"iE2EWEBDEV0000000000000001","fields":["web/API_KEY"]},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"restore web/API_KEY from the history of item iE2EWEBDEV0000000000000001 in 1Password","next":"opv adopt dev --from .env.dev","next_kind":"run"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: after opv adopt dev --from .env.dev, fields web/API_KEY of item iE2EWEBDEV0000000000000001 in vault vE2EWEBDEV0000000000000001 were missing when read back
+Do: restore web/API_KEY from the history of item iE2EWEBDEV0000000000000001 in 1Password
+Next: opv adopt dev --from .env.dev

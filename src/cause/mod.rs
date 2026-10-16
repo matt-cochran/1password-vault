@@ -511,6 +511,10 @@ pub enum Cause {
         /// The other accounts that could not be asked (not signed in, or the check did not
         /// finish), when none that could be asked holds the vault (#153a).
         unasked: Vec<AccountId>,
+        /// The machine's other accounts were listed and looked through (#153a): with no
+        /// `owning` and nothing `unasked`, no account on this machine holds the vault. False
+        /// when no search was made (op did not list the accounts), so nothing is known.
+        searched: bool,
         env: Option<EnvName>,
         seen: Observed,
     },

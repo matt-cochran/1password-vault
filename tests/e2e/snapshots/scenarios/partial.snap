@@ -1,0 +1,37 @@
+# partial: opv sync prod --confirm prod
+
+## text exit: 5
+## text stdout
+prod/fly: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
+prod/fly: delivery: web not recorded: no delivery item is recorded for web on prod/fly; opv bootstrap creates it
+prod/fly: written: web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/MIGRATION_TOKEN (E2E__WEB__MIGRATION_TOKEN), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET)
+prod/fly: pending deploy (pass --deploy): web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/MIGRATION_TOKEN (E2E__WEB__MIGRATION_TOKEN), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET)
+prod/fly: summary: written 4 · unchanged 0 · held 0 · deployed no · pending 4 · pruned 0 · kept 0 · skipped 0
+prod/gh: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
+prod/gh: delivery: web not recorded: no delivery item is recorded for web on prod/gh; opv bootstrap creates it
+prod/gh: written: web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/MIGRATION_TOKEN (E2E__WEB__MIGRATION_TOKEN), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET), web/LOG_LEVEL (E2E__WEB__LOG_LEVEL)
+prod/gh: summary: written 5 · unchanged 0 · held 0 · deployed no · pending 0 · pruned 0 · kept 0 · skipped 0
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: deployment e2e-app in namespace e2e-prod was not found at Kubernetes; already written: prod/fly, prod/gh
+  checked: kubectl --context e2e-cluster --namespace e2e-prod --request-timeout get deployment e2e-app -o json (exit 1)
+--- kubectl replied, exit 1 ---
+| Error from server (NotFound): deployments.apps "e2e-app" not found
+--- (scrubbed) ---
+Do: check kubernetes.deployment, which names deployment e2e-app in namespace e2e-prod (opv config edit) (already written: prod/fly, prod/gh)
+Next: opv plan prod
+
+## json exit: 5
+## json stdout
+{"schema_version":2,"ok":false,"exit_code":5,"next":"opv plan prod","do":"check kubernetes.deployment, which names deployment e2e-app in namespace e2e-prod (opv config edit) (already written: prod/fly, prod/gh)","error":{"code":"resource_not_found","category":"target","message":"deployment e2e-app in namespace e2e-prod was not found at Kubernetes; already written: prod/fly, prod/gh","subject":{"then":{"state":"missing","system":"kubernetes","resource":{"kind":"deployment","name":"e2e-app","scope":"e2e-prod"},"named_by":{"by":"config_field","path":["kubernetes","deployment"]}},"done":["prod/fly","prod/gh"],"approval_used":null,"approval_scope":{"kind":"sync","env":"prod","targets":[],"product":null,"deploy":false,"prune":false,"rotate":[]}},"evidence":{"checked":"kubectl --context e2e-cluster --namespace e2e-prod --request-timeout get deployment e2e-app -o json","account":null,"upstream":{"source":"kubernetes","tool":"kubectl","version":null,"exit":{"kind":"code","code":1},"said":["Error from server (NotFound): deployments.apps \"e2e-app\" not found"],"truncated":false,"removed_advice":false,"untrusted":true,"omitted":0}},"retry":"check_first","human_required":false,"do":"check kubernetes.deployment, which names deployment e2e-app in namespace e2e-prod (opv config edit) (already written: prod/fly, prod/gh)","next":"opv plan prod","next_kind":"check"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: deployment e2e-app in namespace e2e-prod was not found at Kubernetes; already written: prod/fly, prod/gh
+  checked: kubectl --context e2e-cluster --namespace e2e-prod --request-timeout get deployment e2e-app -o json (exit 1)
+--- kubectl replied, exit 1 ---
+| Error from server (NotFound): deployments.apps "e2e-app" not found
+--- (scrubbed) ---
+Do: check kubernetes.deployment, which names deployment e2e-app in namespace e2e-prod (opv config edit) (already written: prod/fly, prod/gh)
+Next: opv plan prod

@@ -199,20 +199,26 @@ pub struct GenerateScope {
     verbose: bool,
 }
 
-/// One tool call as the catalog renders its failures (design §6.1): the tool, and the CLI
-/// command that does the same work with every checked name filled in. `Rerun` renders as
-/// "call <tool> again"; every other step is a CLI command built from the cause.
+/// One tool call as the catalog renders its failures (design §2.4, §6.1): the CLI command
+/// that does the same work with every checked name filled in, run with `--json`. MCP is the
+/// `--json` document (owner decision): its `error` is the one `opv <command> <args> --json`
+/// prints, steps and re-runs included.
 pub(crate) struct ToolCall {
     inv: Invocation,
     verbose: bool,
 }
 
 impl ToolCall {
-    /// `tool`'s call, rendered as `opv <command> <args>`. `args` hold checked names only.
-    fn new(tool: &str, command: &[&str], args: Vec<String>, verbose: bool) -> Self {
+    /// `tool`'s call, rendered as `opv <command> <args> --json`. `args` hold checked names
+    /// only. The tool's name stays out of the document: the CLI's has none either.
+    fn new(_tool: &str, command: &[&str], mut args: Vec<String>, verbose: bool) -> Self {
+        if verbose {
+            args.push("--verbose".into());
+        }
+        args.push("--json".into());
         Self {
             inv: Invocation {
-                origin: Origin::Mcp { tool: tool.into() },
+                origin: Origin::Cli,
                 command: command.iter().map(|w| w.to_string()).collect(),
                 args,
                 has_child: false,
@@ -953,11 +959,31 @@ fn read_only(budget: Duration) -> ReadOnly<ProcessRunner> {
 /// Inspection's runner budget.
 const INSPECT_BUDGET: Duration = Duration::from_secs(20);
 
-/// The project's configuration, loaded on `r`.
+/// A runner whose `op` calls use the project's account ([`ProcessRunner::use_account`]).
+trait Accounted: CommandRunner + Sized {
+    fn select_account(&self, account: Option<String>);
+}
+
+impl Accounted for ProcessRunner {
+    fn select_account(&self, account: Option<String>) {
+        self.use_account(account);
+    }
+}
+
+impl Accounted for ReadOnly<ProcessRunner> {
+    fn select_account(&self, account: Option<String>) {
+        self.inner.use_account(account);
+    }
+}
+
+/// The project's configuration, loaded on `r`. First, as the CLI does (FR-40, NR-7): the
+/// project's account (`OP_ACCOUNT`, else its `.opv`) resolved to an ID, so an account value
+/// two accounts share is `account_ambiguous` here too, and op's default is never used.
 fn load_fleet(
     project: &std::path::Path,
-    r: &dyn CommandRunner,
+    r: &impl Accounted,
 ) -> Result<crate::domain::Fleet, Error> {
+    r.select_account(config_store::selected_account_id(r, project)?);
     let req = config_store::Request {
         start: project.into(),
         config: None,
@@ -1393,7 +1419,8 @@ fn existing_target(fleet: &crate::domain::Fleet, env: &str, target: &str) -> Opt
         .is_some_and(|e| e.targets.contains_key(target))
         .then(|| Cause::AlreadyDeclared {
             kind: NameKind::Target,
-            name: target.to_string(),
+            // The CLI's words (`opv target add`): MCP answers what `--json` prints.
+            name: format!("{target} in environment {env}"),
         })
 }
 
@@ -2814,8 +2841,9 @@ rules = { prefix = "sk_" }
         );
     }
 
+    /// MCP is the `--json` document: a re-run is the CLI command with `--json`.
     #[test]
-    fn a_rerun_is_calling_the_tool_again() {
+    fn a_rerun_is_the_cli_commands_json_form() {
         let e: crate::error::Error = crate::cause::Cause::Interrupted {
             signal: 2,
             writes_started: false,
@@ -2823,7 +2851,7 @@ rules = { prefix = "sk_" }
         .into();
         assert_eq!(
             tool(&["sync"], &[]).failed(&e)["error"]["next"],
-            "call opv_sync again"
+            "opv sync --json"
         );
     }
 
@@ -3026,7 +3054,7 @@ rules = { prefix = "sk_" }
         ));
         assert_eq!(
             v["error"]["next"],
-            "opv structure apply sp-0123456789abcdef"
+            "opv structure apply sp-0123456789abcdef --json"
         );
     }
 

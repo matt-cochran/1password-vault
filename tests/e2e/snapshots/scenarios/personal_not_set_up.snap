@@ -1,0 +1,11 @@
+# personal_not_set_up: opv run dev --product web --role serve -- true
+
+## text exit: 4
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: item e2e-app · dev (personal) in vE2EPRIVATE000000000000001 was not found at 1Password; your personal item for environment dev holds web/PERSONAL_LLM_KEY
+  checked: op item list --vault vE2EPRIVATE000000000000001 --format json (exit 0)
+Do: check environments.dev.personal_item, which names item e2e-app · dev (personal) in vE2EPRIVATE000000000000001 (opv config edit)
+Next: op item list --vault vE2EPRIVATE000000000000001

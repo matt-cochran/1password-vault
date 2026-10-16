@@ -1508,6 +1508,7 @@ impl Cause {
                 selected,
                 owning,
                 unasked,
+                searched,
                 env,
                 seen: _,
             } => {
@@ -1526,6 +1527,10 @@ impl Cause {
                     None if !unasked.is_empty() => format!(
                         "{what}{of_env} is not in 1Password account {selected} or in any other account opv could ask; {} could not be asked",
                         accounts_words(unasked)
+                    ),
+                    // #153a: every other account was asked and none holds it.
+                    None if *searched => format!(
+                        "{what}{of_env} is not in 1Password account {selected} or in any other account on this machine"
                     ),
                     None => format!("{what}{of_env} is not in 1Password account {selected}"),
                 }
@@ -2782,9 +2787,10 @@ impl Cause {
             InOtherAccount {
                 vault,
                 item: _,
-                selected: _,
+                selected,
                 owning,
                 unasked,
+                searched,
                 env,
                 seen: _,
             } => {
@@ -2828,6 +2834,15 @@ impl Cause {
                                 vault.as_str(),
                             ],
                         )),
+                    ),
+                    // #153a: the search already asked every other account and none holds
+                    // it, so `vault locate` would only repeat it: the vault ID is wrong for
+                    // this environment, and the selected account's listing shows the right one.
+                    (None, None) if *searched => plan(
+                        inspect(format!(
+                            "no 1Password account on this machine holds vault {vault}: {fix} with a vault of account {selected}"
+                        )),
+                        vendor("op", &["vault", "list", "--account", selected.as_str()]),
                     ),
                     (None, None) => plan(
                         inspect(format!("find the account that holds vault {vault}, or {fix}")),

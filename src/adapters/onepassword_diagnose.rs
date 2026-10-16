@@ -89,6 +89,7 @@ pub fn locate_owner(r: &dyn CommandRunner, cause: Cause) -> Cause {
             selected,
             owning: None,
             unasked,
+            searched: false,
             ..
         } if unasked.is_empty() => crate::runner::diagnosing(|| search_vault(r, vault, selected)),
         _ => return cause,
@@ -111,10 +112,10 @@ pub fn placed(cause: Cause, search: &VaultSearch) -> Cause {
     else {
         return cause;
     };
-    let (owning, unasked) = match search {
-        VaultSearch::FoundIn(owner) => (Some(owner.clone()), Vec::new()),
-        VaultSearch::Nowhere { unasked } => (None, unasked.clone()),
-        VaultSearch::NotSearched => (None, Vec::new()),
+    let (owning, unasked, searched) = match search {
+        VaultSearch::FoundIn(owner) => (Some(owner.clone()), Vec::new(), true),
+        VaultSearch::Nowhere { unasked } => (None, unasked.clone(), true),
+        VaultSearch::NotSearched => (None, Vec::new(), false),
     };
     Cause::InOtherAccount {
         vault,
@@ -122,6 +123,7 @@ pub fn placed(cause: Cause, search: &VaultSearch) -> Cause {
         selected,
         owning,
         unasked,
+        searched,
         env,
         seen,
     }
@@ -382,6 +384,7 @@ fn vault_not_here(seen: Observed, stderr: &str, ctx: &DiagnoseContext) -> Cause 
             selected,
             owning: None,
             unasked: Vec::new(),
+            searched: false,
             env: ctx.env.clone(),
             seen,
         },

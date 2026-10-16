@@ -1,0 +1,20 @@
+# input_unreadable: opv adopt dev --from missing.env
+
+## text exit: 2
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: opv could not read the the .env file missing.env: it does not exist
+Do: check that the the .env file missing.env exists and you can read it
+Next: opv adopt --help
+
+## json exit: 2
+## json stdout
+{"schema_version":2,"ok":false,"exit_code":2,"next":"opv adopt --help","do":"check that the the .env file missing.env exists and you can read it","error":{"code":"input_unreadable","category":"config","message":"opv could not read the the .env file missing.env: it does not exist","subject":{"io":"not_found","path":"missing.env","kind":"dotenv"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"check that the the .env file missing.env exists and you can read it","next":"opv adopt --help","next_kind":"check"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: opv could not read the the .env file missing.env: it does not exist
+Do: check that the the .env file missing.env exists and you can read it
+Next: opv adopt --help

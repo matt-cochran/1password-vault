@@ -303,6 +303,7 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                 selected: AccountId::new("ACC-6AIN"),
                 owning: Some(AccountId::new("ACC-OWNS")),
                 unasked: Vec::new(),
+                searched: false,
                 env: Some(EnvName::new("env-stage")),
                 seen: person(),
             },
@@ -926,6 +927,7 @@ fn in_other_account() -> Cause {
         selected: AccountId::new("6AINMAIK"),
         owning: None,
         unasked: Vec::new(),
+        searched: false,
         env: Some(EnvName::new("staging")),
         seen: person(),
     }
@@ -947,6 +949,7 @@ fn in_owned_account() -> Cause {
             selected,
             owning: Some(AccountId::new("OWNS1")),
             unasked: Vec::new(),
+            searched: true,
             env,
             seen,
         },
@@ -970,6 +973,31 @@ fn in_no_askable_account() -> Cause {
             selected,
             owning: None,
             unasked: vec![AccountId::new("UNASK1")],
+            searched: true,
+            env,
+            seen,
+        },
+        other => other,
+    }
+}
+
+/// #153a: the search asked every other account on the machine and none holds the vault.
+fn in_no_account_on_the_machine() -> Cause {
+    match in_other_account() {
+        Cause::InOtherAccount {
+            vault,
+            item,
+            selected,
+            env,
+            seen,
+            ..
+        } => Cause::InOtherAccount {
+            vault,
+            item,
+            selected,
+            owning: None,
+            unasked: Vec::new(),
+            searched: true,
             env,
             seen,
         },
@@ -1477,7 +1505,7 @@ fn the_document_subject_leaves_out_the_observed_call() {
     let d = document(&in_other_account(), None, &inv(), false);
     assert_eq!(
         d["subject"],
-        serde_json::json!({"vault": "atqr2ek", "item": null, "selected": "6AINMAIK", "owning": null, "unasked": [], "env": "staging"})
+        serde_json::json!({"vault": "atqr2ek", "item": null, "selected": "6AINMAIK", "owning": null, "unasked": [], "searched": false, "env": "staging"})
     );
 }
 
@@ -1883,6 +1911,55 @@ fn a_vault_no_askable_account_holds_next_signs_in_for_the_search_only() {
             ]
             .map(String::from)
             .to_vec(),
+        })
+    );
+}
+
+#[test]
+fn a_vault_no_account_on_the_machine_holds_says_so() {
+    assert_eq!(
+        in_no_account_on_the_machine().message(),
+        "vault atqr2ek (environment staging) is not in 1Password account 6AINMAIK or in any other account on this machine"
+    );
+}
+
+#[test]
+fn a_vault_no_account_on_the_machine_holds_says_to_fix_the_vault_id() {
+    assert_eq!(
+        in_no_account_on_the_machine()
+            .do_text(&inv())
+            .unwrap_or_default(),
+        "no 1Password account on this machine holds vault atqr2ek: fix vault_id for environment staging with a vault of account 6AINMAIK"
+    );
+}
+
+#[test]
+fn a_vault_no_account_on_the_machine_holds_next_lists_the_selected_accounts_vaults() {
+    let (_, next) = in_no_account_on_the_machine().step(&inv());
+    assert_eq!(
+        next,
+        Next::Vendor(VendorCmd {
+            program: "op".into(),
+            args: ["vault", "list", "--account", "6AINMAIK"]
+                .map(String::from)
+                .to_vec(),
+        })
+    );
+}
+
+#[test]
+fn a_vault_no_account_on_the_machine_holds_needs_no_person() {
+    assert!(!in_no_account_on_the_machine().human_required(&inv()));
+}
+
+#[test]
+fn a_vault_in_another_account_not_searched_still_steps_to_vault_locate() {
+    let (_, next) = in_other_account().step(&inv());
+    assert_eq!(
+        next,
+        Next::Run(Cmd {
+            command: vec!["vault".into(), "locate".into()],
+            args: vec!["atqr2ek".into()],
         })
     );
 }

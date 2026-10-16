@@ -1,0 +1,23 @@
+# choice_required: opv run dev --preview --product web
+
+## text exit: 2
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: this command needs --role, one of migrate, serve
+Do: pick one of migrate, serve and pass it with --role
+Next: opv config describe
+
+## json exit: 2
+## json stdout
+{"schema_version":2,"ok":false,"exit_code":2,"next":"opv config describe","do":"pick one of migrate, serve and pass it with --role","error":{"code":"choice_required","category":"config","message":"this command needs --role, one of migrate, serve","subject":{"candidates":["migrate","serve"],"flag":"--role"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":true,"do":"pick one of migrate, serve and pass it with --role","next":"opv config describe","next_kind":"check"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: this command needs --role, one of migrate, serve
+Do: pick one of migrate, serve and pass it with --role
+Next: opv config describe
+
+## mcp opv_delivery_preview {"environment":"dev","product":"web"}
+{"ok":false,"error":{"code":"choice_required","category":"config","message":"this command needs --role, one of migrate, serve","subject":{"candidates":["migrate","serve"],"flag":"--role"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":true,"do":"pick one of migrate, serve and pass it with --role","next":"opv config describe","next_kind":"check"}}

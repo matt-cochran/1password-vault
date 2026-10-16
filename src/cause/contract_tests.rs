@@ -22,6 +22,7 @@ fn a_vault_in_another_account_is_ids_not_in_account() {
         selected: AccountId::new("A1"),
         owning: None,
         unasked: Vec::new(),
+        searched: false,
         env: None,
         seen: observed(),
     };
@@ -36,6 +37,7 @@ fn a_vault_in_another_account_exits_as_an_account_problem() {
         selected: AccountId::new("A1"),
         owning: None,
         unasked: Vec::new(),
+        searched: false,
         env: None,
         seen: observed(),
     };
