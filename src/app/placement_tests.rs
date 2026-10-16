@@ -1006,6 +1006,7 @@ fn mcp_sync(w: &World, fleet: &Fleet, dir: &std::path::Path, id: &str) -> Value 
         deploy: false,
         prune: false,
         rotate: Vec::new(),
+        verbose: false,
     };
     crate::mcp::sync_approved(
         fleet,
@@ -1066,6 +1067,7 @@ fn opv_sync_runs_the_approved_rotation() {
         deploy: false,
         prune: false,
         rotate: vec!["api/LOCK".into()],
+        verbose: false,
     };
     let answer = crate::mcp::sync_approved(
         &fleet,
@@ -1115,7 +1117,7 @@ fn opv_sync_without_an_approval_returns_the_approve_command() {
     let fleet = both(&w);
     let id = plan_id(&w, &fleet, &["east"]);
     assert_eq!(
-        mcp_sync(&w, &fleet, dir.path(), &id)["approve_command"],
+        mcp_sync(&w, &fleet, dir.path(), &id)["error"]["next"],
         json!(format!("opv approve {id} --sync prod --target east"))
     );
 }
@@ -1145,6 +1147,7 @@ fn opv_sync_refuses_an_op_credential_in_its_environment() {
         deploy: false,
         prune: false,
         rotate: Vec::new(),
+        verbose: false,
     };
     let answer = crate::mcp::sync_approved(
         &fleet,
@@ -1156,7 +1159,7 @@ fn opv_sync_refuses_an_op_credential_in_its_environment() {
         std::iter::once(("OP_SERVICE_ACCOUNT_TOKEN".to_string(), "x".to_string())),
         &mut |_, _, _, _, _| Ok(()),
     );
-    assert_eq!(answer["code"], "credential_in_environment");
+    assert_eq!(answer["error"]["code"], "own_session_required");
 }
 
 #[cfg(feature = "mcp")]
@@ -1165,7 +1168,7 @@ fn opv_sync_refuses_a_plan_id_that_is_not_one() {
     let (w, dir) = (world(), tempfile::tempdir().unwrap());
     let fleet = both(&w);
     assert_eq!(
-        mcp_sync(&w, &fleet, dir.path(), "../../etc")["code"],
-        "invalid_plan_id"
+        mcp_sync(&w, &fleet, dir.path(), "../../etc")["error"]["code"],
+        "usage"
     );
 }
