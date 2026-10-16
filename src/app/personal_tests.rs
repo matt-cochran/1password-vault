@@ -181,10 +181,14 @@ fn run_stops_before_the_command_when_the_personal_item_is_missing() {
 
 #[test]
 fn run_reports_personals_own_cause_when_the_personal_item_is_missing() {
-    // `run` passes on personal's own cause for the missing item, never one of its own.
+    // `run` passes on personal's own cause for the missing item, naming the keys (J6).
     let (_r, e) = run_without_a_personal_item();
     assert!(
-        matches!(e.cause(), Some((crate::cause::Cause::NotFound { .. }, _))),
+        matches!(
+            e.cause(),
+            Some((crate::cause::Cause::PersonalNotSetUp { then, .. }, _))
+                if matches!(**then, crate::cause::Cause::NotFound { .. })
+        ),
         "{e}"
     );
 }
@@ -291,6 +295,18 @@ fn locate_reports_setup_missing_when_the_item_does_not_exist() {
         .push(("vpriv0000000000000000000001".into(), "Private".into()));
     let e = locate(&op, &personal_fleet(), "dev", "myapp").unwrap_err();
     assert_eq!(e.code_str(), "item_not_found");
+}
+
+/// J6: a run stopped by a personal item that is not set up names the keys it holds.
+#[test]
+fn a_missing_personal_item_names_the_keys_a_run_needs() {
+    let op = FakeOp::default();
+    op.vaults
+        .borrow_mut()
+        .push(("vpriv0000000000000000000001".into(), "Private".into()));
+    let e = locate(&op, &personal_fleet(), "dev", "myapp").unwrap_err();
+    let e = naming_keys(e, "dev", &[("api", "MY_TOKEN")]);
+    assert!(e.to_string().contains("api/MY_TOKEN"), "{e}");
 }
 
 #[test]

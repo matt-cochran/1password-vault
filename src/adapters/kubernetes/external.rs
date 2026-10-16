@@ -392,6 +392,7 @@ pub(crate) fn diagnose_failed(
             return Cause::ChangedBeforeWrite {
                 object: StoreObject::Resource {
                     resource: t.external_ref(es),
+                    changed: Vec::new(),
                 },
             }
             .into();

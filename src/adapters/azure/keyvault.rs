@@ -598,7 +598,7 @@ impl KeyVault<'_> {
                 return Err(unusable(OP, |seen| Cause::TargetRefused {
                     system: System::Azure,
                     subject: self.secret_ref(name),
-                    why: Refusal::InProgress,
+                    why: Refusal::InProgress { revision: None },
                     env: Some(crate::cause::EnvName::new(self.env)),
                     target: None,
                     seen,

@@ -375,9 +375,11 @@ pub enum StoreObject {
         vault: VaultId,
         item: ItemId,
     },
-    /// A target's object (a deployment) that changed before opv's write.
+    /// A target's object (a deployment) that changed before opv's write, and what changed
+    /// in it (JSON paths, never values).
     Resource {
         resource: ResourceRef,
+        changed: Vec<String>,
     },
 }
 

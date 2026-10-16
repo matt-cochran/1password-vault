@@ -409,7 +409,7 @@ impl PinnedStore for KubeSecrets<'_> {
                     let subject = crate::cause::ResourceRef {
                         kind: crate::cause::ResourceKind::Secret,
                         name: crate::cause::ResourceName::new(secret.clone()),
-                        scope: Some(format!("namespace {}", t.namespace)),
+                        scope: Some(t.namespace.clone()),
                     };
                     return Err(super::unusable(&what, |seen| Cause::WriteOutcomeUnknown {
                         system: crate::cause::System::Kubernetes,

@@ -751,6 +751,10 @@ fn resource_kind(k: ResourceKind) -> &'static str {
 
 fn resource_words(r: &ResourceRef) -> String {
     match &r.scope {
+        // J4: a namespaced Kubernetes object's scope is its namespace's bare name.
+        Some(ns) if matches!(r.kind, ResourceKind::Deployment | ResourceKind::Secret) => {
+            format!("{} {} in namespace {ns}", resource_kind(r.kind), r.name)
+        }
         Some(scope) => format!("{} {} in {scope}", resource_kind(r.kind), r.name),
         None => format!("{} {}", resource_kind(r.kind), r.name),
     }
@@ -841,7 +845,9 @@ fn store_object(o: &StoreObject) -> String {
             format!("the 1Password manifest {title} (vault {vault})")
         }
         StoreObject::Item { vault, item } => format!("item {item} in vault {vault}"),
-        StoreObject::Resource { resource } => resource_words(resource),
+        StoreObject::Resource { resource, changed } => {
+            format!("{}{}", resource_words(resource), changed_words(changed))
+        }
     }
 }
 
@@ -1064,6 +1070,13 @@ fn local_op(op: LocalOp) -> &'static str {
         LocalOp::CurrentExe => "find its own program file",
         LocalOp::HomeDir => "find your home folder",
         LocalOp::Stdout => "write to standard output",
+        LocalOp::Stdin => "read standard input",
+        LocalOp::McpHandshake => {
+            "complete the MCP handshake with its client over standard input and output"
+        }
+        LocalOp::McpSession => {
+            "keep the MCP session with its client over standard input and output"
+        }
         LocalOp::RandomSource => "read the operating system's random source",
     }
 }
@@ -1635,8 +1648,11 @@ impl Cause {
                     },
                     Refusal::NoRevision => format!("{sys} made no new revision of {what}"),
                     Refusal::NotRunning => format!("{what} at {sys} is not running"),
-                    Refusal::InProgress => format!(
+                    Refusal::InProgress { revision: None } => format!(
                         "{sys} refused the update to {what}: another change is still in progress"
+                    ),
+                    Refusal::InProgress { revision: Some(r) } => format!(
+                        "revision {r} of {what} at {sys} is still rolling out; opv pruned nothing"
                     ),
                     Refusal::ChangedOutsideOpv { paths, after_apply } => {
                         let changed = changed_words(paths);
@@ -1741,6 +1757,11 @@ impl Cause {
                     )
                 }
             }
+            PersonalNotSetUp { env, keys, then } => format!(
+                "{}; your personal item for environment {env} holds {}",
+                then.message(),
+                list_of(keys)
+            ),
             Partial {
                 done,
                 approval_used,
@@ -1810,6 +1831,9 @@ impl Cause {
                 Unusable::StoredSecretUnencrypted => format!(
                     "{tool} stored the service principal's secret unencrypted on disk; opv removed it and stopped before any change"
                 ),
+                Unusable::FeatureNotBuilt { feature } => {
+                    format!("this build of {tool} has no {feature} feature")
+                }
             },
             UnexpectedOutput {
                 system,
@@ -2298,6 +2322,7 @@ impl Cause {
     fn plan_raw(&self, inv: &Invocation) -> Plan {
         use Cause::*;
         match self {
+            PersonalNotSetUp { then, .. } => then.plan_raw(inv),
             ConfigNotFound {
                 searched_from: _,
                 env,
@@ -3044,9 +3069,12 @@ impl Cause {
                     ),
                     Refusal::NoRevision => format!("check the deployment history of {what}"),
                     Refusal::NotRunning => format!("check the logs of {what} for why it stopped"),
-                    Refusal::InProgress => {
+                    Refusal::InProgress { revision: None } => {
                         format!("wait for the change in progress on {what} to finish")
                     }
+                    Refusal::InProgress {
+                        revision: Some(r),
+                    } => format!("wait for revision {r} of {what} to finish rolling out"),
                     Refusal::ChangedOutsideOpv {
                         after_apply: false,
                         ..
@@ -3351,6 +3379,10 @@ impl Cause {
                         format!(
                             "update {tool} to a build that encrypts its stored credentials (AZURE_CORE_ENCRYPT_TOKEN_CACHE)"
                         ),
+                    ),
+                    Unusable::FeatureNotBuilt { feature } => (
+                        Action::Install { tool: tool.clone() },
+                        format!("install a release build of {tool}, which has the {feature} feature"),
                     ),
                 };
                 plan(Some(action), Next::Run(cmd(&["doctor"], &[])))
@@ -3719,6 +3751,10 @@ impl Cause {
                     LocalOp::Stdout => {
                         "check where standard output goes (a closed pipe, a full disk)".to_string()
                     }
+                    LocalOp::Stdin => "answer at the prompt, or run this in a terminal".to_string(),
+                    LocalOp::McpHandshake | LocalOp::McpSession => {
+                        "check that the assistant's client starts opv mcp serve and speaks MCP over standard input and output".to_string()
+                    }
                     LocalOp::CurrentDir => "check that the current folder still exists".to_string(),
                     LocalOp::HomeDir => "check that HOME is set".to_string(),
                     LocalOp::CurrentExe => {
@@ -3908,7 +3944,7 @@ fn none_words(n: NoNext) -> &'static str {
 fn cause_account(cause: &Cause) -> Option<&AccountId> {
     match cause {
         Cause::InOtherAccount { selected, .. } => Some(selected),
-        Cause::Partial { then, .. } => cause_account(then),
+        Cause::Partial { then, .. } | Cause::PersonalNotSetUp { then, .. } => cause_account(then),
         _ => None,
     }
 }

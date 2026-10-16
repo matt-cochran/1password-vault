@@ -488,7 +488,7 @@ fn settled_app(t: &AzureTarget, r: &dyn CommandRunner) -> Result<Value, Error> {
             return Err(unusable("containerapp show", |seen| Cause::TargetRefused {
                 system: System::Azure,
                 subject: app_ref(t),
-                why: Refusal::InProgress,
+                why: Refusal::InProgress { revision: None },
                 env: None,
                 target: None,
                 seen,

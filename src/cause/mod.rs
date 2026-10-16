@@ -791,6 +791,14 @@ pub enum Cause {
         /// A product that reads it, when one does: the step names it instead.
         reader: Option<ProductName>,
     },
+    /// The person's own item for `env` is not set up (`then`: its vault or item not found),
+    /// so the personal `keys` a run needs have no value (FR-55, J6). Code, exit code, retry
+    /// and steps are `then`'s.
+    PersonalNotSetUp {
+        env: EnvName,
+        keys: Vec<ProductKey>,
+        then: Box<Cause>,
+    },
     /// No 1Password vault or item, or more than one, has exactly this title (a lookup in a
     /// listing that answered, never a failed call).
     TitleLookup {
@@ -1051,8 +1059,11 @@ pub enum Refusal {
     NoRevision,
     /// The app is not running (a dead app).
     NotRunning,
-    /// Another change is still in progress at the provider.
-    InProgress,
+    /// A change is still in progress at the provider: opv's own `revision` still rolling
+    /// out, or (`None`) someone else's change.
+    InProgress {
+        revision: Option<String>,
+    },
     /// Settings opv does not manage changed outside opv: before opv's write (nothing
     /// written), or while opv's write was applied (`after_apply`: opv's change is live).
     /// `paths`: the changed settings, as JSON paths (never their values).
@@ -1103,6 +1114,12 @@ pub enum LocalOp {
     CurrentExe,
     HomeDir,
     Stdout,
+    /// Standard input (a prompt's answer).
+    Stdin,
+    /// The MCP session with its client over standard input and output: the handshake.
+    McpHandshake,
+    /// The MCP session after the handshake.
+    McpSession,
     /// The operating system's random source (F2).
     RandomSource,
 }
@@ -1160,6 +1177,10 @@ pub enum Unusable {
     /// It kept a secret opv gave it unencrypted on disk (az's service principal store on
     /// Windows); opv removed it with its private folder.
     StoredSecretUnencrypted,
+    /// This build of it leaves out a feature the command needs (opv without its MCP server).
+    FeatureNotBuilt {
+        feature: &'static str,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -1324,7 +1345,7 @@ impl Cause {
             WriteOutcomeUnknown { .. } => "outcome_unknown",
             Unavailable { .. } => "provider_unavailable",
             BudgetSpent { .. } => "budget_spent",
-            Partial { then, .. } => then.code(),
+            Partial { then, .. } | PersonalNotSetUp { then, .. } => then.code(),
             Interrupted { .. } => "interrupted",
             ChangedBeforeWrite { object } => match object {
                 StoreObject::File { .. } | StoreObject::Manifest { .. } => "config_changed",
@@ -1457,7 +1478,7 @@ impl Cause {
             | Unavailable { .. }
             | BudgetSpent { .. }
             | SecretNotStored { .. } => 9,
-            Partial { then, .. } => then.exit_code(),
+            Partial { then, .. } | PersonalNotSetUp { then, .. } => then.exit_code(),
             Interrupted { signal, .. } => 128 + signal,
             Bug { .. } => EXIT_INTERNAL,
         }
@@ -1467,6 +1488,7 @@ impl Cause {
     pub fn retry(&self) -> RetryClass {
         use Cause::*;
         match self {
+            PersonalNotSetUp { then, .. } => then.retry(),
             WriteOutcomeUnknown { .. }
             | Unavailable { .. }
             | Interrupted { .. }
@@ -1523,7 +1545,7 @@ impl Cause {
             | Unavailable { seen, .. }
             | UnexpectedOutput { seen, .. }
             | Unrecognized { seen, .. } => Some(seen),
-            Partial { then, .. } => then.observed(),
+            Partial { then, .. } | PersonalNotSetUp { then, .. } => then.observed(),
             _ => None,
         }
     }

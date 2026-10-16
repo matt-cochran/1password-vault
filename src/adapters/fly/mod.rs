@@ -354,7 +354,7 @@ fn deploy_still_running(app: &str) -> Error {
         Cause::TargetRefused {
             system: System::Fly,
             subject: app_ref(app),
-            why: Refusal::InProgress,
+            why: Refusal::InProgress { revision: None },
             env: None,
             target: None,
             seen,
@@ -1495,7 +1495,7 @@ mod tests {
         assert!(matches!(
             preflight(&r, "app").map_err(|e| e.cause().map(|(c, _)| c.clone())),
             Err(Some(Cause::TargetRefused {
-                why: Refusal::InProgress,
+                why: Refusal::InProgress { revision: None },
                 ..
             }))
         ));

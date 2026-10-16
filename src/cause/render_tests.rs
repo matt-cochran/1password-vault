@@ -796,6 +796,23 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             },
             vec!["title-xyz", "vlt-atqr", "cand-xyz", "id-xyz"],
         ),
+        (
+            PersonalNotSetUp {
+                env: EnvName::new("env-dev"),
+                keys: vec![ProductKey {
+                    product: ProductName::new("prod-api"),
+                    key: KeyName::new("MY_TOKEN"),
+                }],
+                then: Box::new(TitleLookup {
+                    kind: ResourceKind::Item,
+                    title: "title-xyz".into(),
+                    vault: Some(VaultId::new("vlt-atqr")),
+                    matches: 0,
+                    candidates: Vec::new(),
+                }),
+            },
+            vec!["env-dev", "prod-api/MY_TOKEN", "title-xyz"],
+        ),
         (Bug { site: "site-xyz" }, vec!["site-xyz"]),
     ]
 }
@@ -878,10 +895,11 @@ fn ordinal(c: &Cause) -> usize {
         AccountRequired { .. } => 70,
         SourceOnly { .. } => 71,
         TitleLookup { .. } => 72,
+        PersonalNotSetUp { .. } => 73,
     }
 }
 
-const VARIANTS: usize = 73;
+const VARIANTS: usize = 74;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
@@ -1828,9 +1846,52 @@ fn a7_a_deployment_changed_before_the_write_is_a_target_change() {
     let c = Cause::ChangedBeforeWrite {
         object: StoreObject::Resource {
             resource: res(ResourceKind::Deployment, "web"),
+            changed: Vec::new(),
         },
     };
     assert_eq!((c.code(), c.exit_code()), ("target_changed", 5));
+}
+
+/// J2: a deployment changed before the write names what changed in it.
+#[test]
+fn a_deployment_changed_before_the_write_names_the_changed_paths() {
+    let c = Cause::ChangedBeforeWrite {
+        object: StoreObject::Resource {
+            resource: res(ResourceKind::Deployment, "web"),
+            changed: vec!["/spec/template/spec/containers/0/image".into()],
+        },
+    };
+    assert!(
+        c.message()
+            .contains("/spec/template/spec/containers/0/image")
+    );
+}
+
+/// J4: a deployment is named with its namespace as a namespace.
+#[test]
+fn a_deployment_names_its_namespace() {
+    let r = ResourceRef {
+        kind: ResourceKind::Deployment,
+        name: ResourceName::new("app"),
+        scope: Some("e2e-prod".into()),
+    };
+    assert_eq!(resource_words(&r), "deployment app in namespace e2e-prod");
+}
+
+/// J2: a rollout still running when opv stopped waiting names its revision.
+#[test]
+fn a_rollout_still_in_progress_names_its_revision() {
+    let c = Cause::TargetRefused {
+        system: System::Kubernetes,
+        subject: res(ResourceKind::Deployment, "web"),
+        why: Refusal::InProgress {
+            revision: Some("rev-42".into()),
+        },
+        env: None,
+        target: None,
+        seen: person(),
+    };
+    assert!(c.message().contains("rev-42"));
 }
 
 /// A7: a Key Vault secret is a resource kind of its own.

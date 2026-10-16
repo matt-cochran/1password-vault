@@ -1459,7 +1459,14 @@ fn run_pinned(
                 },
             ));
         }
-        Health::TimedOut => return Err(runtime_refused(c, Refusal::InProgress)),
+        Health::TimedOut => {
+            return Err(runtime_refused(
+                c,
+                Refusal::InProgress {
+                    revision: Some(revision.0.clone()),
+                },
+            ));
+        }
     }
     if !pending.is_empty() {
         p(

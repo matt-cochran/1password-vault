@@ -384,6 +384,7 @@ fn variants(c: &Cause) -> Vec<Cause> {
             },
             StoreObject::Resource {
                 resource: res(ResourceKind::Deployment, "dep-shop"),
+                changed: vec!["/spec/replicas".into()],
             },
         ]
         .into_iter()
@@ -844,6 +845,20 @@ fn one_of_each() -> Vec<Cause> {
             vault: Some(VaultId::new("vlt-atqr")),
             matches: 0,
             candidates: vec!["cand-xyz (id-xyz)".into()],
+        },
+        PersonalNotSetUp {
+            env: EnvName::new("env-dev"),
+            keys: vec![ProductKey {
+                product: ProductName::new("prod-api"),
+                key: KeyName::new("MY_TOKEN"),
+            }],
+            then: Box::new(TitleLookup {
+                kind: ResourceKind::Item,
+                title: "title-xyz".into(),
+                vault: None,
+                matches: 0,
+                candidates: Vec::new(),
+            }),
         },
         Bug { site: "site-xyz" },
     ]

@@ -3981,10 +3981,10 @@ fn mcp_serve(project: &std::path::Path) -> Result<i32, Error> {
     use rmcp::{ServiceExt, transport::stdio};
     // The MCP transport's own failures are not configuration errors (02.27): the client's
     // standard input broke off (no handshake, or the session ended with an error).
-    let fail = |_what: &str| {
+    let fail = |op: opv::cause::LocalOp| {
         Error::from(opv::cause::Cause::LocalIo {
-            op: opv::cause::LocalOp::Read,
-            path: PathBuf::from("standard input (the MCP client)"),
+            op,
+            path: PathBuf::new(),
             io: opv::cause::IoKind::Other,
         })
     };
@@ -4005,20 +4005,21 @@ fn mcp_serve(project: &std::path::Path) -> Result<i32, Error> {
         let server = opv::mcp::Server::new(project)
             .serve(stdio())
             .await
-            .map_err(|_| fail("the MCP client did not complete the handshake"))?;
+            .map_err(|_| fail(opv::cause::LocalOp::McpHandshake))?;
         server
             .waiting()
             .await
-            .map_err(|_| fail("the MCP session ended with an error"))?;
+            .map_err(|_| fail(opv::cause::LocalOp::McpSession))?;
         Ok::<_, Error>(0)
     })
 }
 
 #[cfg(not(feature = "mcp"))]
 fn mcp_serve(_project: &std::path::Path) -> Result<i32, Error> {
-    // Every release build has the MCP server; a build without it is a packaging bug.
-    Err(opv::cause::Cause::Bug {
-        site: "this opv was built without the MCP server; install a release build",
+    // Every release build has the MCP server; this build leaves it out (J5).
+    Err(opv::cause::Cause::ToolUnusable {
+        tool: "opv".into(),
+        why: opv::cause::Unusable::FeatureNotBuilt { feature: "mcp" },
     }
     .into())
 }
@@ -4138,8 +4139,8 @@ impl opv::app::approve::Review for TerminalReview {
         let mut answer = String::new();
         io::stdin().read_line(&mut answer).map_err(|e| {
             Error::from(opv::cause::Cause::LocalIo {
-                op: opv::cause::LocalOp::Read,
-                path: PathBuf::from("standard input"),
+                op: opv::cause::LocalOp::Stdin,
+                path: PathBuf::new(),
                 io: e.kind().into(),
             })
         })?;

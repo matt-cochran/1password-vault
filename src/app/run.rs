@@ -243,8 +243,16 @@ fn launch(
         match personal::locate(runner, fleet, env_name, &project) {
             Ok(Some(e)) => Some(e),
             // A missing personal vault or item is personal's own cause (its step sets it
-            // up); a sign-in, network or op failure is its own cause too.
-            Err(e) => return Err(e),
+            // up), naming the personal keys this run needs (J6); a sign-in, network or op
+            // failure is its own cause.
+            Err(e) => {
+                let keys: Vec<(&str, &str)> = selected
+                    .iter()
+                    .filter(|(_, spec)| personal::is_personal(fleet, spec))
+                    .map(|(key, _)| (product, key.as_str()))
+                    .collect();
+                return Err(personal::naming_keys(e, env_name, &keys));
+            }
             // `locate` answers `None` only when the environment declares no personal key,
             // and a personal key was just selected for it.
             Ok(None) => {
