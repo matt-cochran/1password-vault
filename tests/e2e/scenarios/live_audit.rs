@@ -1020,14 +1020,17 @@ fn live_09_91_open_a_declared_key_exits_0() {
 
 // --- accounts, vaults and 1Password failures (65–67, 71–74, 76–78, 88) -------------------------
 
+/// #153a: the vault is looked up in the machine's other accounts, so the step selects the
+/// account that holds it instead of sending the person to `opv vault locate`.
 #[test]
-fn live_09_65_a_vault_outside_the_selected_account_steps_to_vault_locate() {
+fn live_09_65_a_vault_outside_the_selected_account_steps_to_the_account_that_holds_it() {
     let out = Scenario::new()
         .account(OPS_ACCOUNT)
         .opv(&["check", "prod", "--json"]);
+    let selects = format!("opv account use {DEV_ACCOUNT}");
     assert_eq!(
         out.next().as_deref(),
-        Some("opv vault locate vE2ESHAREDPROD0000000000001"),
+        Some(selects.as_str()),
         "{}",
         out.shown()
     );

@@ -604,6 +604,14 @@ fn list_of<T: std::fmt::Display>(items: &[T]) -> String {
         .join(", ")
 }
 
+/// `account <id>`, or `accounts <id>, <id>`.
+fn accounts_words(ids: &[AccountId]) -> String {
+    match ids {
+        [one] => format!("account {one}"),
+        _ => format!("accounts {}", list_of(ids)),
+    }
+}
+
 fn plural(n: usize, one: &str, many: &str) -> String {
     if n == 1 {
         format!("1 {one}")
@@ -1460,6 +1468,7 @@ impl Cause {
                 item,
                 selected,
                 owning,
+                unasked,
                 env,
                 seen: _,
             } => {
@@ -1474,6 +1483,10 @@ impl Cause {
                 match owning {
                     Some(o) => format!(
                         "{what}{of_env} is not in 1Password account {selected}; it is in account {o}"
+                    ),
+                    None if !unasked.is_empty() => format!(
+                        "{what}{of_env} is not in 1Password account {selected} or in any other account opv could ask; {} could not be asked",
+                        accounts_words(unasked)
                     ),
                     None => format!("{what}{of_env} is not in 1Password account {selected}"),
                 }
@@ -2672,6 +2685,7 @@ impl Cause {
                 item: _,
                 selected: _,
                 owning,
+                unasked,
                 env,
                 seen: _,
             } => {
@@ -2679,14 +2693,48 @@ impl Cause {
                     Some(e) => format!("fix vault_id for environment {e}"),
                     None => "fix the vault ID in the configuration".to_string(),
                 };
-                let text = match owning {
-                    Some(o) => format!("use account {o} (opv account use {o}), or {fix}"),
-                    None => format!("find the account that holds vault {vault}, or {fix}"),
-                };
-                plan(
-                    inspect(text),
-                    Next::Run(cmd(&["vault", "locate"], &[vault.as_str()])),
-                )
+                match (owning, unasked.first()) {
+                    // #153a: the account that holds it is known; a person picks between
+                    // selecting it and fixing the configuration.
+                    (Some(o), _) => plan(
+                        Some((
+                            Action::PickBetween,
+                            format!("select account {o} (opv account use {o}), or {fix}"),
+                        )),
+                        Next::Run(cmd(&["account", "use"], &[o.as_str()])),
+                    ),
+                    // No account opv could ask holds it: sign in to the first it could not
+                    // ask, for this check only, and look again.
+                    (None, Some(first)) => plan(
+                        Some((
+                            Action::SignIn {
+                                system: System::OnePassword,
+                                account: Some(first.clone()),
+                            },
+                            format!(
+                                "sign in to {} to look for vault {vault} there, or {fix}",
+                                accounts_words(unasked)
+                            ),
+                        )),
+                        Next::Handoff(cmd(
+                            &["login"],
+                            &[
+                                "--account",
+                                first.as_str(),
+                                "--no-record",
+                                "--",
+                                "opv",
+                                "vault",
+                                "locate",
+                                vault.as_str(),
+                            ],
+                        )),
+                    ),
+                    (None, None) => plan(
+                        inspect(format!("find the account that holds vault {vault}, or {fix}")),
+                        Next::Run(cmd(&["vault", "locate"], &[vault.as_str()])),
+                    ),
+                }
             }
             NeedsOwnSession {
                 command: _,

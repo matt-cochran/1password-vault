@@ -298,6 +298,7 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                 item: Some(ItemId::new("itm-1")),
                 selected: AccountId::new("ACC-6AIN"),
                 owning: Some(AccountId::new("ACC-OWNS")),
+                unasked: Vec::new(),
                 env: Some(EnvName::new("env-stage")),
                 seen: person(),
             },
@@ -881,8 +882,55 @@ fn in_other_account() -> Cause {
         item: None,
         selected: AccountId::new("6AINMAIK"),
         owning: None,
+        unasked: Vec::new(),
         env: Some(EnvName::new("staging")),
         seen: person(),
+    }
+}
+
+/// #153a: the vault located in account `OWNS1` by the search of the other accounts.
+fn in_owned_account() -> Cause {
+    match in_other_account() {
+        Cause::InOtherAccount {
+            vault,
+            item,
+            selected,
+            env,
+            seen,
+            ..
+        } => Cause::InOtherAccount {
+            vault,
+            item,
+            selected,
+            owning: Some(AccountId::new("OWNS1")),
+            unasked: Vec::new(),
+            env,
+            seen,
+        },
+        other => other,
+    }
+}
+
+/// #153a: no account the search could ask holds the vault; `UNASK1` could not be asked.
+fn in_no_askable_account() -> Cause {
+    match in_other_account() {
+        Cause::InOtherAccount {
+            vault,
+            item,
+            selected,
+            env,
+            seen,
+            ..
+        } => Cause::InOtherAccount {
+            vault,
+            item,
+            selected,
+            owning: None,
+            unasked: vec![AccountId::new("UNASK1")],
+            env,
+            seen,
+        },
+        other => other,
     }
 }
 
@@ -1268,7 +1316,7 @@ fn the_document_subject_leaves_out_the_observed_call() {
     let d = document(&in_other_account(), None, &inv(), false);
     assert_eq!(
         d["subject"],
-        serde_json::json!({"vault": "atqr2ek", "item": null, "selected": "6AINMAIK", "owning": null, "env": "staging"})
+        serde_json::json!({"vault": "atqr2ek", "item": null, "selected": "6AINMAIK", "owning": null, "unasked": [], "env": "staging"})
     );
 }
 
@@ -1599,6 +1647,83 @@ fn a_command_is_rendered_from_its_argv_with_each_word_quoted() {
 #[test]
 fn a_vault_in_another_account_needs_no_person() {
     assert!(!in_other_account().human_required(&inv()));
+}
+
+#[test]
+fn a_located_vault_names_the_account_that_holds_it() {
+    assert_eq!(
+        in_owned_account().message(),
+        "vault atqr2ek (environment staging) is not in 1Password account 6AINMAIK; it is in account OWNS1"
+    );
+}
+
+#[test]
+fn a_located_vault_says_to_select_its_account_or_fix_the_vault_id() {
+    assert_eq!(
+        in_owned_account().do_text(&inv()).unwrap_or_default(),
+        "select account OWNS1 (opv account use OWNS1), or fix vault_id for environment staging"
+    );
+}
+
+#[test]
+fn a_located_vault_next_selects_its_account() {
+    let (_, next) = in_owned_account().step(&inv());
+    assert_eq!(
+        next,
+        Next::Run(Cmd {
+            command: vec!["account".into(), "use".into()],
+            args: vec!["OWNS1".into()],
+        })
+    );
+}
+
+#[test]
+fn a_located_vault_leaves_the_choice_to_a_person() {
+    assert!(in_owned_account().human_required(&inv()));
+}
+
+#[test]
+fn a_located_vault_keeps_its_code() {
+    assert_eq!(in_owned_account().code(), "ids_not_in_account");
+}
+
+#[test]
+fn a_vault_no_askable_account_holds_names_the_accounts_not_asked() {
+    assert_eq!(
+        in_no_askable_account().message(),
+        "vault atqr2ek (environment staging) is not in 1Password account 6AINMAIK or in any other account opv could ask; account UNASK1 could not be asked"
+    );
+}
+
+#[test]
+fn a_vault_no_askable_account_holds_says_to_sign_in_to_look_there() {
+    assert_eq!(
+        in_no_askable_account().do_text(&inv()).unwrap_or_default(),
+        "sign in to account UNASK1 to look for vault atqr2ek there, or fix vault_id for environment staging"
+    );
+}
+
+#[test]
+fn a_vault_no_askable_account_holds_next_signs_in_for_the_search_only() {
+    let (_, next) = in_no_askable_account().step(&inv());
+    assert_eq!(
+        next,
+        Next::Handoff(Cmd {
+            command: vec!["login".into()],
+            args: [
+                "--account",
+                "UNASK1",
+                "--no-record",
+                "--",
+                "opv",
+                "vault",
+                "locate",
+                "atqr2ek",
+            ]
+            .map(String::from)
+            .to_vec(),
+        })
+    );
 }
 
 // --- FOLLOWUPS section A: one regression test per item, each citing it -------------------

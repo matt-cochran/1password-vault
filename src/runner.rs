@@ -573,10 +573,15 @@ mod failure {
         static ANSWERED: RefCell<Option<(u64, Observed)>> = const { RefCell::new(None) };
     }
 
+    /// True inside [`diagnosing`](super::diagnosing).
+    pub(super) fn active() -> bool {
+        DIAGNOSING.with(Cell::get) > 0
+    }
+
     /// A call starts: its id, after clearing the slot. `None` inside [`diagnosing`]: the
     /// probe is part of the failure being explained and leaves the slot alone.
     pub(super) fn begin() -> Option<u64> {
-        if DIAGNOSING.with(Cell::get) > 0 {
+        if active() {
             return None;
         }
         LAST.with(|l| l.borrow_mut().take());
@@ -820,6 +825,12 @@ pub fn deploy_principal() -> Option<crate::cause::Principal> {
 pub fn diagnosing<T>(f: impl FnOnce() -> T) -> T {
     let _scope = failure::Diagnosis::enter();
     f()
+}
+
+/// True inside [`diagnosing`]: a probe's failure is not recorded, so the held failure (if
+/// any) is still the call being diagnosed, never the probe's own.
+pub fn in_diagnosis() -> bool {
+    failure::active()
 }
 
 /// Names a failed call and the principal it ran under (design §5): the only place an

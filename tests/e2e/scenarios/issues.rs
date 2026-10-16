@@ -241,7 +241,6 @@ fn issue_150_sync_without_confirm_writes_nothing_and_the_confirmed_write_is_the_
 /// (a) A value vault held by the other account is a configuration error that names that
 /// account, not a missing item.
 #[test]
-#[ignore = "#153: ids_not_in_account names only the selected account; subject.owning stays null because nothing looks the vault up in the other accounts"]
 fn issue_153_a_value_vault_in_the_other_account_names_that_account() {
     let s = Scenario::new(|w| set_vault(w, "vE2EWEBDEV0000000000000001", "account", OTHER));
     let error = document(&s.opv(&["check", "dev", "--json"]))["error"].clone();

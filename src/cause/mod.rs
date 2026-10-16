@@ -498,7 +498,12 @@ pub enum Cause {
         vault: VaultId,
         item: Option<ItemId>,
         selected: AccountId,
+        /// The account on this machine that holds the vault, found by the read-only search
+        /// of the other accounts (#153a).
         owning: Option<AccountId>,
+        /// The other accounts that could not be asked (not signed in, or the check did not
+        /// finish), when none that could be asked holds the vault (#153a).
+        unasked: Vec<AccountId>,
         env: Option<EnvName>,
         seen: Observed,
     },
