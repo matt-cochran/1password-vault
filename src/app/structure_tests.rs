@@ -351,6 +351,30 @@ fn a_service_account_cannot_apply() {
     assert!(apply(&r, &path, "myapp", ACCOUNT, &id, &mut approve_all).is_err());
 }
 
+/// #157: the approval is single-use, so a service account's apply never spends it.
+#[test]
+fn a_service_account_apply_leaves_the_approval_unspent() {
+    let (_d, path, op) = workspace();
+    let id = plan_of(&path, &op).plan_id;
+    let r = ServiceAccount(op);
+    let spent = Cell::new(false);
+    let mut authorize = |_: &Plan| -> Result<(), Error> {
+        spent.set(true);
+        Ok(())
+    };
+    let _ = apply(&r, &path, "myapp", ACCOUNT, &id, &mut authorize);
+    assert!(!spent.get());
+}
+
+/// #157: signed out, a recorded vault is not called outside the account.
+#[test]
+fn a_signed_out_plan_is_op_not_signed_in() {
+    let (_d, path, op) = workspace();
+    op.signed_in.set(false);
+    let e = plan(&op, &text(&path), "myapp", ACCOUNT).unwrap_err();
+    assert_eq!(e.code().as_str(), "op_not_signed_in");
+}
+
 /// The fake `op`, signed in as a service account.
 struct ServiceAccount(FakeOp);
 
