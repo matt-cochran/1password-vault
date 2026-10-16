@@ -998,8 +998,9 @@ environments = ["dev"]
     fn key_ending_in_underscore_is_refused_at_its_line() {
         let e = err(&BARE.replace("keys.JWT_KEY]", "keys.JWT_KEY_]"));
         assert!(
-            e.contains("app/JWT_KEY_ renders Kubernetes name \"jwt-key-\"")
-                && e.contains("line 10, column 20"),
+            e.contains(
+                "renders a Kubernetes name for app/JWT_KEY_ that is not starting and ending"
+            ) && e.contains("line 10, column 20"),
             "{e}"
         );
     }
@@ -1008,7 +1009,7 @@ environments = ["dev"]
     fn fleet_key_ending_in_underscore_is_refused_at_its_line() {
         let e = err(&doc(ENV, &KEYS.replace("DB_URL]", "DB_URL_]")));
         assert!(
-            e.contains("api/DB_URL_ renders Kubernetes name \"fleet--api--db-url-\"")
+            e.contains("renders a Kubernetes name for api/DB_URL_ that is not starting and ending")
                 && e.contains("line 13, column 20"),
             "{e}"
         );
@@ -1028,7 +1029,7 @@ environments = ["dev"]
                     [products.a_b.keys.C]\nkind = \"secret\"\nenvironments = [\"dev\"]\n";
         let e = err(&doc(ENV, keys));
         assert!(
-            e.contains("both map to Kubernetes name fleet--a-b--c"),
+            e.contains("renders Kubernetes name fleet--a-b--c for both"),
             "{e}"
         );
     }
@@ -1040,7 +1041,7 @@ environments = ["dev"]
             format!("[products.api.keys.{long}]\nkind = \"secret\"\nenvironments = [\"dev\"]\n");
         let e = err(&doc(ENV, &keys));
         assert!(
-            e.contains("renders Kubernetes name of 72 characters"),
+            e.contains("that is 72 characters long, over the 63 allowed"),
             "{e}"
         );
     }
@@ -1049,7 +1050,7 @@ environments = ["dev"]
     fn rejects_two_environments_sharing_a_deployment_and_template() {
         let second = ENV.replace("environments.dev", "environments.stage");
         let e = err(&doc(&format!("{ENV}{second}"), KEYS));
-        assert!(e.contains("both use Kubernetes deployment \"api\""), "{e}");
+        assert!(e.contains("manages the same names on Kubernetes "), "{e}");
     }
 
     #[test]
@@ -1374,7 +1375,10 @@ env_name = "{{KEY}}"
     #[test]
     fn unknown_store_lists_the_defined_ones() {
         let e = err(&bound("secrets_in = \"staging-vault\"", DB_URL));
-        assert!(e.contains("names no store; defined: prod-vault"), "{e}");
+        assert!(
+            e.contains("names store staging-vault, which is not declared (declared: prod-vault)"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -1403,7 +1407,9 @@ env_name = "{{KEY}}"
     fn secrets_in_on_fly_lists_the_supported_pairs() {
         let e = err(&on("fly", "app = \"my-app\"\nsecret_name = \"{KEY}\""));
         assert!(
-            e.contains("supported secrets_in pairs: azure_key_vault → kubernetes (External Secrets Operator)"),
+            e.contains(
+                "(supported pairs: azure_key_vault → kubernetes (External Secrets Operator))"
+            ),
             "{e}"
         );
     }
@@ -1414,7 +1420,7 @@ env_name = "{{KEY}}"
                     \"kv-a\"\nresource_group = \"rg\"\ncontainer_app = \"ca\"\nidentity = \"system\"\nenv_name = \"{KEY}\"";
         let e = err(&on("azure", body));
         assert!(
-            e.contains("azure cannot keep its secrets in store \"prod-vault\""),
+            e.contains("which a azure target cannot keep its secrets in"),
             "{e}"
         );
     }
@@ -1422,7 +1428,7 @@ env_name = "{{KEY}}"
     #[test]
     fn store_without_a_kind_lists_the_known_kinds() {
         let text = bound("", DB_URL).replace("azure_key_vault = \"kv-myapp-prod\"\n", "");
-        assert!(err(&text).contains("names no store kind; add one of: azure_key_vault"));
+        assert!(err(&text).contains("names no store kind (one of azure_key_vault"));
     }
 
     #[test]
@@ -1430,7 +1436,7 @@ env_name = "{{KEY}}"
         let text = bound("", DB_URL).replace("[stores.prod-vault]", "[stores.Prod_Vault]");
         let e = err(&text);
         assert!(
-            e.contains("line 1") && e.contains("store \"Prod_Vault\""),
+            e.contains("line 1") && e.contains("stores.Prod_Vault must be"),
             "{e}"
         );
     }
@@ -1440,7 +1446,7 @@ env_name = "{{KEY}}"
         let keys = "[products.app.keys.DB_URL_]\nkind = \"secret\"\nenvironments = [\"dev\"]\n";
         let e = err(&bound("secrets_in = \"prod-vault\"", keys));
         assert!(
-            e.contains("must start and end with a letter or digit"),
+            e.contains("not starting and ending with a letter or digit"),
             "{e}"
         );
     }
@@ -1456,7 +1462,7 @@ env_name = "{{KEY}}"
         ) + "[products.app.keys.DB_URL]\nkind = \"secret\"\nenvironments = [\"dev\", \"prod\"]\n";
         let e = err(&crate::config::testing::bounded(&text));
         assert!(
-            e.contains("environments dev (target app) and prod (target app) both keep Key Vault name db-url in Key Vault kv-myapp-prod"),
+            e.contains("keeps Key Vault name db-url for app/DB_URL in Key Vault kv-myapp-prod, where environment dev keeps it for app/DB_URL"),
             "{e}"
         );
     }
@@ -1468,7 +1474,7 @@ env_name = "{{KEY}}"
             format!("[products.app.keys.{long}]\nkind = \"secret\"\nenvironments = [\"dev\"]\n");
         let e = err(&bound("secrets_in = \"prod-vault\"", &keys));
         assert!(
-            e.contains("renders Kubernetes name of 71 characters"),
+            e.contains("that is 71 characters long, over the 63 allowed"),
             "{e}"
         );
     }

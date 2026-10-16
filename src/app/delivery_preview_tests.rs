@@ -132,7 +132,10 @@ fn an_empty_roles_list_is_refused_at_load() {
         "{text}\n[products.allumata.keys.BAD_ROLES]\nkind = \"secret\"\nenvironments = [\"prod\"]\nroles = []\n"
     ))
     .unwrap_err();
-    assert!(e.to_string().contains("roles must name at least one role"));
+    assert!(
+        e.to_string().contains("BAD_ROLES.roles is an empty list"),
+        "{e}"
+    );
 }
 
 #[test]
@@ -142,7 +145,7 @@ fn a_role_name_outside_the_pattern_is_refused_at_load() {
         "{text}\n[products.allumata.keys.BAD_ROLES]\nkind = \"secret\"\nenvironments = [\"prod\"]\nroles = [\"Serve\"]\n"
     ))
     .unwrap_err();
-    assert!(e.to_string().contains("must match"));
+    assert!(e.to_string().contains("BAD_ROLES.roles must be"), "{e}");
 }
 
 // --- process roles: the op run environment and the local delivery step ----------------

@@ -720,7 +720,10 @@ kind = "secret"
 environments = ["prod"]
 "#;
         let e = azure_err(&azure_doc(AZURE_ENV, keys));
-        assert!(e.contains("both map to Key Vault name"), "{e}");
+        assert!(
+            e.contains("renders Key Vault name ") && e.contains(" for both "),
+            "{e}"
+        );
     }
 
     #[test]
@@ -729,7 +732,10 @@ environments = ["prod"]
         let keys =
             format!("[products.api.keys.{long}]\nkind = \"secret\"\nenvironments = [\"prod\"]\n");
         let e = azure_err(&azure_doc(AZURE_ENV, &keys));
-        assert!(e.contains("api/KKKK") && e.contains("{1,127}"), "{e}");
+        assert!(
+            e.contains("api/KKKK") && e.contains("over the 127 allowed"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -804,6 +810,6 @@ environments = ["prod"]
             .replace("environments.prod", "environments.stage")
             .replace("ca-myapp", "ca-other");
         let e = azure_err(&azure_doc(&format!("{AZURE_ENV}{second}"), KEYS));
-        assert!(e.contains("both use Key Vault"), "{e}");
+        assert!(e.contains("manages the same names on Azure "), "{e}");
     }
 }

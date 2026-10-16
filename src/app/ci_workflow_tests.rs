@@ -194,8 +194,9 @@ fn unknown_target_prints_nothing() {
 
 #[test]
 fn unknown_environment_is_a_usage_error() {
+    // Exit 2 either way; the catalog names it unknown_env (audit 03.02).
     let (err, _) = refused("missing", "portfolio");
-    assert_eq!(err.code(), Code::Usage);
+    assert_eq!(err.exit_code(), 2);
 }
 
 #[test]

@@ -1653,7 +1653,7 @@ mod tests {
         let e = crate::config::parse("[profile\nkind = \"fleet\"\n").unwrap_err();
         let r = FakeRunner::new(good());
         let (_, out) = doctor(Err(e), &r);
-        assert_eq!(do_line(&out), CONFIG_STEP, "{out}");
+        assert!(do_line(&out).starts_with("Do: fix the syntax of "), "{out}");
     }
 
     #[test]
@@ -1667,7 +1667,10 @@ mod tests {
         assert!(e.to_string().contains("bogus"), "{e}");
         let r = FakeRunner::new(good());
         let (_, out) = doctor(Err(e), &r);
-        assert_eq!(do_line(&out), CONFIG_STEP, "{out}");
+        assert!(
+            do_line(&out).starts_with("Do: remove products.allumata.keys.OPENAI_API_KEY.bogus"),
+            "{out}"
+        );
     }
 
     #[test]

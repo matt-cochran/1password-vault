@@ -242,14 +242,22 @@ fn confirm_mismatch_refuses_before_any_call() {
 
 #[test]
 fn unknown_environment_next_is_status_of_the_closest() {
+    // The catalog's NotDeclared substitutes the unique close name into the command as
+    // typed, keeping every flag (audit 03.02, X1).
     let e = fleet().environment("prd").unwrap_err();
-    assert_eq!(e.next_step(), Some("opv status prod"));
+    assert!(matches!(
+        e.cause(),
+        Some((crate::cause::Cause::NotDeclared { closest: Some(c), .. }, _)) if c.as_str() == "prod"
+    ));
 }
 
 #[test]
 fn unknown_environment_without_a_close_name_next_is_the_overview() {
     let e = fleet().environment("nothing-like-it").unwrap_err();
-    assert_eq!(e.next_step(), Some("opv status"));
+    assert!(matches!(
+        e.cause(),
+        Some((crate::cause::Cause::NotDeclared { closest: None, .. }, _))
+    ));
 }
 
 #[test]
@@ -367,7 +375,10 @@ fn confirm_env_must_be_a_boolean() {
         "modes.allumata.payments = \"off\"",
         "modes.allumata.payments = \"off\"\nconfirm_env = \"yes\"",
     );
-    assert!(matches!(config::parse(&bad), Err(Error::Config(_))));
+    assert_eq!(
+        config::parse(&bad).unwrap_err().code_str(),
+        "config_invalid"
+    );
 }
 
 // ---- NR-20: prune names before acting -------------------------------------------------

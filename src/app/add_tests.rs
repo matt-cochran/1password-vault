@@ -192,7 +192,12 @@ fn an_invalid_rule_value_is_refused_by_the_loader() {
     let mut args = new_key("api/STRIPE_KEY");
     args.rules = vec!["regex=([a-z".into()];
     let a = add_to(COMMENTED, args);
-    assert!(a.err().contains("nothing written"), "{}", a.err());
+    // The loader's refusal is a catalog cause (audit 03.01); its field is the rule.
+    assert!(
+        a.err().contains(".rules.regex is not valid syntax"),
+        "{}",
+        a.err()
+    );
 }
 
 #[test]
@@ -222,13 +227,9 @@ fn an_unknown_environment_says_to_add_it_with_add_env() {
     let mut args = new_key("api/STRIPE_KEY");
     args.envs = vec!["qa".into()];
     let a = add_to(COMMENTED, args);
-    let action = a.res.unwrap_err().action().map(str::to_string);
-    assert!(
-        action
-            .as_deref()
-            .is_some_and(|d| d.contains("opv init qa") && d.contains("--add-env")),
-        "{action:?}"
-    );
+    // An undeclared environment is the catalog's NotDeclared (audit 03.02); its add-env
+    // step is the add lane's to type.
+    assert_eq!(a.res.unwrap_err().code_str(), "unknown_env");
 }
 
 #[test]
@@ -376,11 +377,11 @@ fn a_broken_manifest_names_the_manifest_and_points_at_config_edit() {
     let broken = COMMENTED.replace("kind = \"secret\"", "kind = \"secre\"");
     let (_, _, res, _) = add_to_manifest(&broken, new_key("api/STRIPE_KEY"));
     let e = res.unwrap_err();
+    // A catalog cause names its source: the manifest, whose Do says opv config edit.
     assert!(
-        e.text().starts_with("manifest \"opv · myapp\": ")
-            && e.next_step() == Some("opv config edit"),
-        "{e} / {:?}",
-        e.next_step()
+        e.to_string()
+            .starts_with("the 1Password manifest opv · myapp of project myapp"),
+        "{e}"
     );
 }
 

@@ -945,7 +945,8 @@ mod tests {
 
     fn rules_line(extra: &str) -> String {
         let f = fleet_with(&format!(
-            "[products.extra.keys.K]\nkind = \"secret\"\nenvironments = [\"prod\"]\nrules = {{ {extra} }}\n"
+            "[products.extra.keys.K]\nkind = \"secret\"\nenvironments = [\"prod\"]\nrules = {{ {extra} }}\n\
+             [environments.prod.modes.extra]\npayments = \"off\"\n"
         ));
         let out = explain(&f, "extra/K", Some("prod")).unwrap();
         out.lines()
@@ -1105,7 +1106,7 @@ mod tests {
     #[test]
     fn undefined_environment_is_config_error() {
         let e = explain(&fleet(), "allumata/OPENAI_API_KEY", Some("qa")).unwrap_err();
-        assert!(matches!(e, Error::Config(ref m) if m.contains("qa")), "{e}");
+        assert_eq!(e.code_str(), "unknown_env", "{e}");
     }
 
     #[test]

@@ -1,17 +1,20 @@
-//! Configuration errors that point at the file (H10, FR-2): `<file>:<line>: <field>:
-//! <problem>` and the exact fix where one can be derived from the message. Names and
-//! positions only, never the offending line (C1, SR-1): a file given by mistake (a `.env`)
-//! may hold values, so no error quotes the text it came from.
+//! Configuration errors that point at the source (H10, FR-2). Names and positions only,
+//! never the offending line (C1, SR-1): a file given by mistake (a `.env`) may hold values,
+//! so no error quotes the text it came from.
 //!
-//! `parse` reports errors against the name `secrets.toml` (it never sees a path), in the
-//! TOML parser's layout or as a bare message that starts with its owner (`environment
-//! prod: …`, `api/KEY: …`). [`relocate`] rewrites either form for the file that was read.
-
-use std::path::Path;
+//! `parse` reports a catalog cause ([`Cause::ConfigInvalid`] and the other §4.1 variants)
+//! whose field and rule come from the validator, against a stand-in source (it never sees a
+//! path). [`relocate_at`] names the real source: the cause's fields are kept as they are,
+//! never re-derived from a message or a line (audit 03.01).
+//!
+//! A provider's section parser still reports free text (`invalid secrets.toml: TOML parse
+//! error at line …`, or a bare `environment prod: …`); that text is rewritten to name the
+//! source, with the fix only where the parser's message names what is allowed.
 
 use toml::de::DeTable;
 
 use crate::app::suggest;
+use crate::cause::{Cause, ConfigSource};
 use crate::error::Error;
 
 /// How [`super::parse`] prefixes an error that carries a position.
@@ -19,33 +22,50 @@ const INVALID: &str = "invalid secrets.toml: ";
 /// How the TOML parser's own layout starts.
 const AT_LINE: &str = "TOML parse error at line ";
 
-/// `e`, when it is a configuration error from parsing `text`, rewritten to name `file`,
-/// the line and the field, with the edit that fixes it as the error's `Do:` step when the
-/// message names what is allowed (A3). Its next step, if any, is kept. Any other error is returned unchanged.
-pub(super) fn relocate(e: Error, text: &str, file: &Path) -> Error {
-    relocate_at(e, text, super::Source::File(file))
+/// `e`, when it is a configuration error from parsing `text`, naming `source`. A catalog
+/// cause gets `source` in place of the stand-in (a manifest has no file, so no line); a
+/// provider's free text is rewritten to `<file>:<line>: <field>: <problem>`. Any other error
+/// is returned unchanged.
+pub(super) fn relocate_at(e: Error, text: &str, source: ConfigSource) -> Error {
+    if let Some((cause, _)) = e.cause() {
+        return with_source(cause.clone(), source).into();
+    }
+    legacy(e, text, &source)
 }
 
-/// [`relocate`] for any [`super::Source`]: a file is named with the line
-/// (`<file>:<line>: <field>`); a manifest has no file, so it is named by its title
-/// (`manifest "opv · app": <field>`, FR-44).
-pub(super) fn relocate_at(e: Error, text: &str, source: super::Source<'_>) -> Error {
+/// `cause` naming `source`; a manifest has no lines, so its location is dropped (FR-44).
+fn with_source(mut cause: Cause, real: ConfigSource) -> Cause {
+    let manifest = matches!(real, ConfigSource::Manifest { .. });
+    match &mut cause {
+        Cause::ConfigInvalid { source, at, .. } | Cause::StateVaultTooWide { source, at, .. } => {
+            *source = real;
+            if manifest {
+                *at = None;
+            }
+        }
+        Cause::BoundaryMissing { source, .. } | Cause::StateVaultMissing { source, .. } => {
+            *source = real;
+        }
+        _ => {}
+    }
+    cause
+}
+
+/// A provider's free-text configuration error, named against `source`.
+fn legacy(e: Error, text: &str, source: &ConfigSource) -> Error {
     let code = e.code();
     let Error::Config(m) = &e else { return e };
     let next = m.next().map(str::to_string);
     let body = m.text().strip_prefix(INVALID).unwrap_or(m.text());
     let (file, numbered) = match source {
-        super::Source::File(f) => (f.display().to_string(), true),
-        super::Source::Manifest(title) => (format!("manifest {title:?}"), false),
+        ConfigSource::File { path, .. } => (path.display().to_string(), true),
+        ConfigSource::Manifest { title, .. } => (format!("manifest {title:?}"), false),
     };
     let rewritten = match placed(body) {
         Some(p) => {
             let field = field_on_line(text, p.line);
             let line = numbered.then_some(p.line);
-            (
-                render(&file, line, &field, &p.msg),
-                fix_for(&p.msg, &field, text),
-            )
+            (render(&file, line, &field, &p.msg), fix_for(&p.msg, &field))
         }
         None => {
             let (field, line) = match owner_path(body) {
@@ -53,10 +73,7 @@ pub(super) fn relocate_at(e: Error, text: &str, source: super::Source<'_>) -> Er
                 None => (String::new(), None),
             };
             let line = line.filter(|_| numbered);
-            (
-                render(&file, line, &field, body),
-                fix_for(body, &field, text),
-            )
+            (render(&file, line, &field, body), fix_for(body, &field))
         }
     };
     let (rewritten, fix) = rewritten;
@@ -69,7 +86,6 @@ pub(super) fn relocate_at(e: Error, text: &str, source: super::Source<'_>) -> Er
         None => out,
     }
 }
-
 /// An error in [`super::toml_error`]'s layout: the 0-based line and the message after it.
 struct Placed {
     line: usize,
@@ -178,7 +194,6 @@ fn normalise(s: &str) -> String {
 /// The table path a bare message names by its owner prefix.
 fn owner_path(msg: &str) -> Option<Vec<String>> {
     let words: Vec<&str> = msg.split_whitespace().collect();
-    let own = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     let unquote = |s: &str| s.trim_matches(|c| c == '"' || c == ':').to_string();
     match words.as_slice() {
         ["environment", env, field, ..] if env.ends_with(':') => {
@@ -193,21 +208,8 @@ fn owner_path(msg: &str) -> Option<Vec<String>> {
             }
             Some(path)
         }
-        ["environments", _, "and", b, ..] => Some(vec!["environments".into(), unquote(b)]),
         ["product", p, ..] => Some(vec!["products".into(), unquote(p)]),
         ["store", s, ..] => Some(vec!["stores".into(), unquote(s)]),
-        ["no", "environments", ..] => Some(own(&["environments"])),
-        [owner, ..] if owner.ends_with(':') => {
-            let owner = owner.trim_end_matches(':');
-            let (p, k) = owner.split_once('/')?;
-            let mut path = own(&["products", p, "keys", k]);
-            if msg.contains("undefined environment") && !msg.contains("refuse_in") {
-                path.push("environments".into());
-            } else if msg.contains(" rule ") || msg.contains("transform") {
-                path.push("rules".into());
-            }
-            Some(path)
-        }
         _ => None,
     }
 }
@@ -239,7 +241,7 @@ fn locate_path(text: &str, path: &[String]) -> (String, Option<usize>) {
 }
 
 /// The edit that fixes `msg` at `field`, when the message names what is allowed.
-fn fix_for(msg: &str, field: &str, text: &str) -> Option<String> {
+fn fix_for(msg: &str, field: &str) -> Option<String> {
     let first = msg.lines().next().unwrap_or(msg);
     if let Some(bad) = quoted_after(first, "unknown field ") {
         let allowed = allowed_after(first);
@@ -270,27 +272,13 @@ fn fix_for(msg: &str, field: &str, text: &str) -> Option<String> {
             },
         );
     }
-    if let Some(missing) = quoted_after(first, "missing field ") {
+    // A table is named only when the line gave one (never `under []`, audit 03.04). A
+    // "must match" or "is empty" message gives no fix: the field it is about is the
+    // parser's to name, and guessing it from the line named the wrong one (audit 03.01).
+    if let Some(missing) = quoted_after(first, "missing field ")
+        && !field.is_empty()
+    {
         return Some(format!("add {missing} = ... under [{field}]"));
-    }
-    if let Some(env) = quoted_after(first, "undefined environment ") {
-        let defined = environments(text);
-        return Some(
-            match suggest::close(&env, defined.iter().map(String::as_str)).first() {
-                Some(good) => format!("change \"{env}\" to \"{good}\""),
-                None => format!(
-                    "declare [environments.{env}] or use one of: {}",
-                    defined.join(", ")
-                ),
-            },
-        );
-    }
-    if let Some((_, pattern)) = first.split_once("must match ") {
-        let pattern = pattern.split_whitespace().next().unwrap_or(pattern);
-        return Some(format!("change {field} so it matches {pattern}"));
-    }
-    if first.ends_with(" is empty") {
-        return Some(format!("set {field} to a non-empty value"));
     }
     None
 }
@@ -334,19 +322,9 @@ fn allowed_after(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// The environment names `text` declares, for an undefined-environment fix.
-fn environments(text: &str) -> Vec<String> {
-    let Ok(t) = text.parse::<toml::Table>() else {
-        return Vec::new();
-    };
-    t.get("environments")
-        .and_then(toml::Value::as_table)
-        .map(|e| e.keys().cloned().collect())
-        .unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
+    use crate::cause::{Cause, ConfigSource, Invocation};
     use crate::error::Error;
 
     /// The fixture with `from` replaced by `to`, loaded from a file; the error's text and
@@ -361,53 +339,76 @@ mod tests {
         (e, path.display().to_string())
     }
 
+    /// The Do of `e`, a catalog cause, as rendered.
+    fn do_of(e: &Error) -> Option<String> {
+        e.cause()
+            .and_then(|(c, _)| c.do_text(&Invocation::default()))
+    }
+
     #[test]
     fn unknown_field_names_file_line_and_field() {
         let (e, file) = load_err(
             "modes.allumata.payments = \"off\"",
             "modes.allumata.payments = \"off\"\nconfrm_env = true",
         );
-        let want = format!("{file}:13: environments.prod.confrm_env: unknown field");
-        assert!(e.text().starts_with(&want), "{e}");
+        let want = format!("{file} at line 13, column 1: environments.prod.confrm_env ");
+        assert!(e.to_string().starts_with(&want), "{e}");
     }
 
     #[test]
     fn unknown_field_fix_names_the_closest_field() {
-        let (e, _) = load_err(
+        let (e, file) = load_err(
             "modes.allumata.payments = \"off\"",
             "modes.allumata.payments = \"off\"\nconfrm_env = true",
         );
-        assert_eq!(e.action(), Some("rename confrm_env to confirm_env"), "{e}");
+        assert_eq!(
+            do_of(&e),
+            Some(format!(
+                "rename environments.prod.confrm_env to confirm_env in {file} at line 13, column 1"
+            ))
+        );
     }
 
     #[test]
     fn unknown_variant_fix_names_the_closest_value() {
         let (e, _) = load_err("kind = \"secret\"", "kind = \"secert\"");
-        assert_eq!(e.action(), Some("set kind = \"secret\""), "{e}");
+        assert!(
+            do_of(&e).is_some_and(|d| d.starts_with("set kind = \"secret\" in ")),
+            "{:?}",
+            do_of(&e)
+        );
     }
 
     #[test]
     fn undefined_environment_is_located_at_the_key() {
         let (e, file) = load_err("environments = [\"prod\"]", "environments = [\"prd\"]");
         let want = format!(
-            "{file}:21: products.allumata.keys.OPENAI_API_KEY.environments: undefined environment"
+            "{file} at line 21, column 1: products.allumata.keys.OPENAI_API_KEY.environments \
+             names environment prd"
         );
-        assert!(e.text().starts_with(&want), "{e}");
+        assert!(e.to_string().starts_with(&want), "{e}");
     }
 
     #[test]
     fn undefined_environment_fix_names_the_closest_environment() {
         let (e, _) = load_err("environments = [\"prod\"]", "environments = [\"prd\"]");
-        assert_eq!(e.action(), Some("change \"prd\" to \"prod\""), "{e}");
+        assert!(
+            do_of(&e).is_some_and(|d| d.starts_with(
+                "change prd to prod in products.allumata.keys.OPENAI_API_KEY.environments"
+            )),
+            "{:?}",
+            do_of(&e)
+        );
     }
 
     #[test]
-    fn missing_field_fix_names_the_table() {
+    fn missing_field_fix_names_the_field() {
         let (e, _) = load_err("kind = \"secret\"\n", "");
-        assert_eq!(
-            e.action(),
-            Some("add kind = ... under [products.allumata.keys.OPENAI_API_KEY]"),
-            "{e}"
+        assert!(
+            do_of(&e)
+                .is_some_and(|d| d.starts_with("add products.allumata.keys.OPENAI_API_KEY.kind")),
+            "{:?}",
+            do_of(&e)
         );
     }
 
@@ -418,8 +419,8 @@ mod tests {
             "[products.allumata.keys.openai]",
         );
         assert!(
-            e.text().starts_with(&format!(
-                "{file}:19: products.allumata.keys.openai: key name"
+            e.to_string().starts_with(&format!(
+                "{file} at line 19, column 25: products.allumata.keys.openai must be"
             )),
             "{e}"
         );
@@ -428,7 +429,28 @@ mod tests {
     #[test]
     fn located_error_never_shows_the_offending_line() {
         let (e, _) = load_err("kind = \"secret\"", "kind = \"secert\"");
-        assert!(!e.text().contains("kind = \"secert\""), "{e}");
+        assert!(!e.to_string().contains("secert"), "{e}");
+    }
+
+    /// 03.01: a manifest's refusal names the manifest, and no file line.
+    #[test]
+    fn a_manifest_refusal_names_the_manifest() {
+        let text = std::fs::read_to_string("tests/fixtures/secrets.toml")
+            .unwrap()
+            .replacen("kind = \"secret\"", "kind = \"secert\"", 1);
+        let e = crate::config::parse_at(
+            &text,
+            crate::config::Source::ManifestIn {
+                title: "opv · app",
+                vault: "vlt",
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            e.cause(),
+            Some((Cause::ConfigInvalid { source: ConfigSource::Manifest { title, .. }, at: None, .. }, _))
+                if title == "opv · app"
+        ));
     }
 
     /// C1 (SR-1): a `.env` given as the configuration, with its value quoted or bare.
@@ -441,22 +463,27 @@ mod tests {
         crate::config::load(&path).unwrap_err()
     }
 
+    /// Everything a refusal shows: its message and its Do.
+    fn shown(e: &Error) -> String {
+        format!("{e} {:?}", do_of(e))
+    }
+
     #[test]
     fn quoted_env_file_error_never_shows_the_value() {
         let e = env_file_error(&format!("OPENAI_API_KEY=\"{MARKER}\"\n"));
-        assert!(!e.text().contains("C1MARKER"), "{e}");
+        assert!(!shown(&e).contains("C1MARKER"), "{}", shown(&e));
     }
 
     #[test]
     fn bare_env_file_error_never_shows_the_value() {
         let e = env_file_error(&format!("OPENAI_API_KEY={MARKER}\n"));
-        assert!(!e.text().contains("C1MARKER"), "{e}");
+        assert!(!shown(&e).contains("C1MARKER"), "{}", shown(&e));
     }
 
     #[test]
     fn env_file_error_still_names_line_and_column() {
         let e = env_file_error(&format!("# comment\nOPENAI_API_KEY={MARKER}\n"));
-        assert!(e.text().contains(":2:"), "{e}");
+        assert!(e.to_string().contains(" at line 2, column "), "{e}");
     }
 
     #[test]
@@ -464,7 +491,7 @@ mod tests {
         let text = format!("OPENAI_API_KEY=\"{MARKER}\"\n");
         let e = crate::config::parse_at(&text, crate::config::Source::Manifest("opv · app"))
             .unwrap_err();
-        assert!(!e.text().contains("C1MARKER"), "{e}");
+        assert!(!shown(&e).contains("C1MARKER"), "{}", shown(&e));
     }
 
     #[test]
@@ -476,7 +503,7 @@ mod tests {
             1,
         );
         let e = crate::config::parse(&bad).unwrap_err();
-        assert!(!e.text().contains("C1MARKER"), "{e}");
+        assert!(!shown(&e).contains("C1MARKER"), "{}", shown(&e));
     }
 
     #[test]

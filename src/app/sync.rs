@@ -3294,9 +3294,9 @@ mod tests {
     fn unknown_env_is_config_error_before_any_call() {
         let r = FakeRunner::new([]);
         let e = run(&f(), "qa", &r, &mut Vec::new(), &opts()).unwrap_err();
-        assert!(matches!(e, Error::Config(_)), "{e}");
+        assert_eq!(e.code_str(), "unknown_env", "{e}");
         let e = plan(&f(), "qa", &r, &mut Vec::new()).unwrap_err();
-        assert!(matches!(e, Error::Config(_)), "{e}");
+        assert_eq!(e.code_str(), "unknown_env", "{e}");
         assert!(r.calls.borrow().is_empty());
     }
 

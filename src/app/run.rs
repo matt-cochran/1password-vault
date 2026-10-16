@@ -582,7 +582,7 @@ mod tests {
         for (e, p, c, needle) in cases {
             let r = FakeRunner::new([]);
             match run(&fleet(), e, p, &c, &r) {
-                Err(Error::Config(m)) => assert!(m.contains(needle), "{m}"),
+                Err(e) if e.exit_code() == 2 => assert!(e.to_string().contains(needle), "{e}"),
                 other => panic!("expected Config, got {other:?}"),
             }
             assert!(r.calls.borrow().is_empty());

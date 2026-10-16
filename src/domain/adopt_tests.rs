@@ -21,6 +21,7 @@ state_vault_id = "sdev"
 
 [environments.prod]
 boundaries.core = { vault_id = "vprod", item_id = "iprod" }
+modes.api.payments = "test"
 [environments.prod.targets.app]
 fly.app = "app-prod"
 fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
