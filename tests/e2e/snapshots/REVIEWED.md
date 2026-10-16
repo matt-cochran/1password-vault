@@ -5,9 +5,11 @@ The owner reads every message opv 0.10.0 can print on failure and signs off belo
 ## What is here
 
 - **59 scenario snapshots** (`scenarios/*.snap`): one situation each, with the text run, the `--json` run and, where the command has an MCP tool, the MCP answer. Together they reach every error cause except six that are listed as unreachable in `tests/e2e/coverage.rs` (`UNREACHABLE`), each with its reason.
-- **472 matrix snapshots** (`<command>__<call>__<fault>.snap`): one recorded fault injected into one call opv makes. Many cells print the same message for a different vault or item. The table below groups them by error code and fault, so you can read one representative per group (118 groups) rather than all 472.
+- **472 matrix snapshots** (`<command>__<call>__<fault>.snap`): one recorded fault injected into one call opv makes. Many cells print the same message for a different vault or item. The table below groups them by error code and fault, so you can read one representative per group (66 groups) rather than all 472.
 - `SKIPPED.md`: the cells not run, each with its reason (mostly: no recording of rate-limited, server-error or forbidden replies from op, flyctl and gh).
 - `COVERAGE.md`: which fault reached which call.
+
+A group with code `no error document` is a fault the command did not report as an error: check that ignoring it is right.
 
 ## How to read one
 
@@ -89,15 +91,6 @@ Each snapshot has the text run (stderr: `opv:` line, `checked:`, the tool's scru
 
 | | Code | Fault | Cells | Read |
 |---|---|---|---|---|
-| [ ] | `(no` | json | error) | `account_not_on_machine` |
-| [ ] | `(no` | json | error) | `applied_but_reply_lost` |
-| [ ] | `(no` | json | error) | `credential_rejected` |
-| [ ] | `(no` | json | error) | `malformed_output` |
-| [ ] | `(no` | json | error) | `other_account_session` |
-| [ ] | `(no` | json | error) | `scenario` |
-| [ ] | `(no` | json | error) | `signed_out` |
-| [ ] | `(no` | json | error) | `timeout` |
-| [ ] | `(no` | json | error) | `tool_missing` |
 | [ ] | `access_not_visible` | malformed_output | 7 | `access__op_vault_user_list_ve2eshareddev00000000000001__malformed_output.snap` |
 | [ ] | `access_not_visible` | not_found | 7 | `access__op_vault_user_list_ve2eshareddev00000000000001__not_found.snap` |
 | [ ] | `access_not_visible` | timeout | 7 | `access__op_vault_user_list_ve2eshareddev00000000000001__timeout.snap` |
@@ -122,6 +115,14 @@ Each snapshot has the text run (stderr: `opv:` line, `checked:`, the tool's scru
 | [ ] | `inventory_incomplete` | other_account_session | 1 | `vault_locate__op_vault_get_ve2eshareddev00000000000001__other_account_session.snap` |
 | [ ] | `inventory_incomplete` | signed_out | 1 | `vault_locate__op_vault_get_ve2eshareddev00000000000001__signed_out.snap` |
 | [ ] | `item_not_found` | not_found | 12 | `check_dev__op_item_get_ie2eshareddev00000000000001__not_found.snap` |
+| [ ] | `no error document` | account_not_on_machine | 1 | `run_preview__op_whoami__account_not_on_machine.snap` |
+| [ ] | `no error document` | applied_but_reply_lost | 9 | `access__op_whoami__applied_but_reply_lost.snap` |
+| [ ] | `no error document` | credential_rejected | 1 | `run_preview__op_whoami__credential_rejected.snap` |
+| [ ] | `no error document` | malformed_output | 11 | `access__op_whoami__malformed_output.snap` |
+| [ ] | `no error document` | other_account_session | 1 | `run_preview__op_whoami__other_account_session.snap` |
+| [ ] | `no error document` | signed_out | 1 | `run_preview__op_whoami__signed_out.snap` |
+| [ ] | `no error document` | timeout | 1 | `run_preview__op_whoami__timeout.snap` |
+| [ ] | `no error document` | tool_missing | 1 | `run_preview__op_whoami__tool_missing.snap` |
 | [ ] | `op_not_signed_in` | account_not_on_machine | 3 | `access__op_whoami__account_not_on_machine.snap` |
 | [ ] | `op_not_signed_in` | credential_rejected | 3 | `access__op_whoami__credential_rejected.snap` |
 | [ ] | `op_not_signed_in` | other_account_session | 32 | `access__op_vault_user_list_ve2eshareddev00000000000001__other_account_session.snap` |
