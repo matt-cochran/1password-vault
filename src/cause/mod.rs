@@ -1285,6 +1285,32 @@ pub enum Unverified {
 pub const EXIT_INTERNAL: i32 = 70;
 
 impl Cause {
+    /// This cause with the environment it belongs to filled in when the adapter that
+    /// classified it did not know it (an overview knows the environment's name). An `env`
+    /// already set is never replaced, and a `Partial`'s `then` is reached. This only
+    /// annotates the subject: code, exit code, retry class and steps stay the cause's.
+    pub fn in_env(mut self, env: &str) -> Cause {
+        use Cause::*;
+        match &mut self {
+            InOtherAccount { env: e, .. }
+            | MissingRight { env: e, .. }
+            | TargetRefused { env: e, .. }
+            | Unrecognized { env: e, .. }
+            | RamDirUnavailable { env: e, .. }
+            | SourceOnly { env: e, .. } => {
+                if e.is_none() {
+                    *e = Some(EnvName::new(env));
+                }
+            }
+            Partial { then, .. } => {
+                let inner = then.as_ref().clone().in_env(env);
+                **then = inner;
+            }
+            _ => {}
+        }
+        self
+    }
+
     /// The stable machine-readable code (public contract, `schema_version` 2).
     pub fn code(&self) -> &'static str {
         use Cause::*;
