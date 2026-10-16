@@ -241,7 +241,8 @@ fn missing_op_exits_3() {
     let (code, out, err) = opv(&["--config", CFG, "plan", "prod"]);
     assert_eq!(code, 3, "{err}");
     assert!(out.is_empty());
-    assert!(err.starts_with("opv: dependency error"), "{err}");
+    // Catalog (design §4.7): the tool is named, with its install line.
+    assert!(err.starts_with("opv: op is not installed"), "{err}");
 }
 
 #[test]
@@ -1159,9 +1160,10 @@ fn json_usage_error_prints_the_envelope() {
 #[test]
 fn json_dependency_failure_names_a_runnable_next() {
     let (_, out, _) = opv(&["--config", CFG, "status", "prod", "--json"]);
+    // Catalog: Next re-runs the invocation with every flag kept (design §6.1).
     assert_eq!(
         json_of(&out)["next"],
-        "opv --config tests/fixtures/secrets.toml status prod --json",
+        "opv status --config tests/fixtures/secrets.toml prod --json",
         "{out}"
     );
 }

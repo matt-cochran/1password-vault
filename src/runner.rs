@@ -744,6 +744,13 @@ pub fn with_failure_stderr<T>(f: impl FnOnce(&str) -> T) -> T {
     failure::with_stderr(f)
 }
 
+/// What the runner saw of `call`, which exited 0 but whose reply the call site could not
+/// read: the call, exit 0 and the principal in effect (design §4.7 `UnexpectedOutput`).
+/// `None` for a program outside the external systems.
+pub fn observe_unreadable_reply(call: &Call) -> Option<crate::cause::Observed> {
+    observe::unreadable(call)
+}
+
 /// Run `f` with `principal` (an environment's deploy credentials, FR-40) in effect: every
 /// call made inside it that fails is observed under it instead of the person or a shell
 /// token. The runner that adds a deploy identity to calls (`EnvRunner`) wraps the calls of
@@ -894,6 +901,16 @@ mod observe {
         Some(Observed::from_failed_call(
             call_id(call)?,
             exit,
+            principal(call),
+        ))
+    }
+
+    /// The observation of `call`, which exited 0 with a reply opv could not read (design
+    /// §4.7 `UnexpectedOutput`, §4.6 `CreateOutcomeUnknown` with an unreadable reply).
+    pub(super) fn unreadable(call: &Call) -> Option<Observed> {
+        Some(Observed::from_failed_call(
+            call_id(call)?,
+            ExitClass::Code { code: 0 },
             principal(call),
         ))
     }

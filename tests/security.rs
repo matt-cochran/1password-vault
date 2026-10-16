@@ -417,17 +417,43 @@ fn assert_no_marker(what: &str, text: &str) {
     }
 }
 
-/// True for a line of a failed call's scrubbed stderr excerpt (NR-31).
+/// `stdout` without a JSON failure document's `error.evidence.upstream` (the failed call's
+/// scrubbed reply, design §7.2); any other stdout as it is.
+fn without_upstream(stdout: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(stdout) {
+        Ok(mut doc) => {
+            if let Some(ev) = doc
+                .get_mut("error")
+                .and_then(|e| e.get_mut("evidence"))
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                ev.remove("upstream");
+            }
+            doc.to_string()
+        }
+        Err(_) => stdout.to_string(),
+    }
+}
+
+/// True for a line of a failed call's scrubbed stderr excerpt (NR-31), or of a catalog
+/// error's evidence box, which holds the same scrubbed reply (design §7.3).
 fn is_excerpt_line(l: &str) -> bool {
     ["  op said: ", "  flyctl said: ", "  az said: ", "| ", "│ "]
         .iter()
         .any(|p| l.starts_with(p))
 }
 
-/// No value anywhere. Child stderr (the canary) only on stderr, and only in the labelled,
-/// scrubbed excerpt of a failed call (NR-31); stdout never carries child output.
+/// No value anywhere. Child stderr (the canary) only in the labelled, scrubbed excerpt of a
+/// failed call (NR-31) or a catalog error's evidence: on stderr its box, in a `--json`
+/// document `error.evidence.upstream`, marked untrusted (design §7.2, §7.3). Stdout never
+/// carries child output anywhere else.
 fn assert_clean_output(cmd: &[&str], r: &Run) {
-    assert_no_marker(&format!("{cmd:?} stdout"), &r.stdout);
+    assert_no_marker(&format!("{cmd:?} stdout"), &without_upstream(&r.stdout));
+    assert!(
+        !r.stdout.contains(MARK),
+        "{cmd:?} stdout contains {MARK}:\n{}",
+        r.stdout
+    );
     assert!(
         !r.stderr.contains(MARK),
         "{cmd:?} stderr contains {MARK}:\n{}",
@@ -653,14 +679,13 @@ fn child_stderr_suppressed() {
             // P16: a retry note may come first (signed in, vault readable).
             r.stderr
                 .lines()
-                .any(|l| l.starts_with("opv: source error: op item get failed (exit 1)")),
+                .any(|l| l.starts_with("opv: item iprd in vprd was not found at 1Password")),
             "{cmd:?}: {}",
             r.stderr
         );
         for want in [
-            "signed in to 1Password as SERVICE_ACCOUNT",
-            "item iprd not found in vault vprd",
-            "op item get iprd --vault vprd",
+            "checked: op item get iprd --vault vprd",
+            "op item list --vault vprd",
         ] {
             assert!(r.stderr.contains(want), "{cmd:?}: {want}: {}", r.stderr);
         }
@@ -682,7 +707,7 @@ fn op_failure_without_credentials_is_auth() {
         let r = h.run(cmd);
         assert_eq!(r.code, 7, "{cmd:?}: {}", r.all());
         assert!(
-            r.all().contains("authentication error"),
+            r.all().contains("not signed in to 1Password"),
             "{cmd:?}: {}",
             r.all()
         );
@@ -893,15 +918,11 @@ fn expired_session_is_auth_with_signin_command() {
         assert_eq!(r.code, 7, "{cmd:?}: {}", r.all());
         assert!(
             r.stderr
-                .starts_with("opv: authentication error: not signed in to 1Password"),
+                .starts_with("opv: you are not signed in to 1Password"),
             "{cmd:?}: {}",
             r.stderr
         );
-        assert!(
-            r.stderr.contains("\n  sign in: opv login prod\n"),
-            "{}",
-            r.stderr
-        );
+        assert!(r.stderr.contains("\nNext: opv login"), "{}", r.stderr);
         assert!(!r.stderr.contains("to see why"), "{}", r.stderr);
         assert!(!r.stderr.contains("expired-dummy-session"), "{}", r.stderr);
         assert_clean_output(cmd, &r);
@@ -917,11 +938,7 @@ fn expired_session_is_auth_with_signin_command() {
     h.reset();
     let r = h.run(&["status", "prod"]);
     assert_eq!(r.code, 7, "{}", r.all());
-    assert!(
-        r.stderr.contains("\n  sign in: opv login prod\n"),
-        "{}",
-        r.stderr
-    );
+    assert!(r.stderr.contains("\nNext: opv login"), "{}", r.stderr);
     assert!(
         !r.stderr.contains("$(") && !r.stderr.contains("eval"),
         "{}",
@@ -929,7 +946,8 @@ fn expired_session_is_auth_with_signin_command() {
     );
 }
 
-/// FR-26: no account on this machine → `opv login --add`, then sign in; exit 7.
+/// FR-26, 04.07: no account on this machine (Linux) → the account to add at op's prompt,
+/// `opv login --add`; exit 7.
 #[test]
 fn no_account_is_auth_with_login_add() {
     let mut h = Harness::new(&good_item());
@@ -942,10 +960,9 @@ fn no_account_is_auth_with_login_add() {
         let r = h.run(cmd);
         assert_eq!(r.code, 7, "{cmd:?}: {}", r.all());
         for want in [
-            "no 1Password account is set up for op on this machine",
-            "\n  add one: opv login --add\n",
-            "\n  then sign in: opv login",
-            "type the Secret Key and password only at op's prompts",
+            "is not added to op on this machine",
+            "at op's prompt",
+            "opv login --add",
         ] {
             assert!(r.all().contains(want), "{cmd:?}: {want}: {}", r.all());
         }
@@ -953,7 +970,7 @@ fn no_account_is_auth_with_login_add() {
     }
 }
 
-/// FR-26 under CI: advise OP_SERVICE_ACCOUNT_TOKEN, print no interactive command, and do
+/// FR-26 under CI: name OP_SERVICE_ACCOUNT_TOKEN, print no interactive command, and do
 /// not run `op account list`.
 #[test]
 fn ci_not_signed_in_advises_service_account_token() {
@@ -964,7 +981,7 @@ fn ci_not_signed_in_advises_service_account_token() {
     let r = h.run(&["sync", "prod"]);
     assert_eq!(r.code, 7, "{}", r.all());
     assert!(
-        r.stderr.contains("set OP_SERVICE_ACCOUNT_TOKEN"),
+        r.stderr.contains("OP_SERVICE_ACCOUNT_TOKEN"),
         "{}",
         r.stderr
     );
@@ -1020,9 +1037,10 @@ fn fly_logged_out_is_auth_with_next_step() {
     }
 }
 
-/// FR-26 / FR-10: with a non-interactive 1Password credential (service account or
-/// Connect) set, a read and whoami that both fail are ambiguous: Source (4) naming the
-/// variable, no interactive command, no `op account list`.
+/// FR-26, 04.11: with a non-interactive 1Password credential (service account or Connect)
+/// set, a read and whoami that both fail are the credential rejected or unreachable
+/// (credential_rejected, exit 7) naming its variables, no interactive command, no `op
+/// account list`.
 #[test]
 fn rejected_credential_keeps_source_category() {
     for (set, var) in [
@@ -1046,13 +1064,8 @@ fn rejected_credential_keeps_source_category() {
             h.set(k, v);
         }
         let r = h.run(&["status", "prod"]);
-        assert_eq!(r.code, 4, "{var}: {}", r.all());
-        assert!(
-            r.stderr
-                .contains(&format!("check the token in {var} and network access")),
-            "{}",
-            r.stderr
-        );
+        assert_eq!(r.code, 7, "{var}: {}", r.all());
+        assert!(r.stderr.contains(var), "{}", r.stderr);
         assert!(
             !r.stderr.contains("op signin") && !r.stderr.contains("opv login"),
             "{}",
@@ -1073,7 +1086,7 @@ fn ci_false_is_not_ci() {
         .set("FAKE_OP_EXIT", "1");
     let r = h.run(&["status", "prod"]);
     assert_eq!(r.code, 7, "{}", r.all());
-    assert!(r.stderr.contains("sign in: opv login prod"), "{}", r.stderr);
+    assert!(r.stderr.contains("\nNext: opv login"), "{}", r.stderr);
 }
 
 /// FR-26 / FR-10: with FLY_API_TOKEN set, a failed flyctl call is a target error (5) naming
@@ -1139,7 +1152,9 @@ fn exit_codes() {
         assert_eq!(r.code, 3, "{cmd:?}: {}", r.all());
         // Legacy "dependency error", or the catalog's ToolMissing (doctor's probe, R56).
         assert!(
-            r.stderr.contains("dependency error") || r.stderr.contains("is not installed"),
+            r.stderr.contains("dependency error")
+                || r.stderr.contains("is not installed")
+                || r.stderr.contains("install op"),
             "{}",
             r.stderr
         );
@@ -1192,7 +1207,11 @@ fn exit_codes() {
         h7.reset();
         let r = h7.run(cmd);
         assert_eq!(r.code, 7, "{cmd:?}: {}", r.all());
-        assert!(r.stderr.contains("authentication error"), "{}", r.stderr);
+        assert!(
+            r.stderr.contains("not signed in to 1Password"),
+            "{}",
+            r.stderr
+        );
     }
 
     // 8: findings (status / plan with a missing key).

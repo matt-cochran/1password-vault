@@ -22,8 +22,8 @@ use serde_json::{Value, json};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::onepassword::{
-    DEFAULT_SECTION_ID, OP, WipeOnDrop, default_section, failed_op_error_as, json_error,
-    op_spawn_error, serialize_exact,
+    DEFAULT_SECTION_ID, OP, WipeOnDrop, default_section, failed_write, json_error, op_spawn_error,
+    serialize_exact, unfinished_write,
 };
 use crate::domain::convention::{
     Found, KEPT_SECTION, Layout, MARKER_SECTION, Op, Section, TidyPlan,
@@ -32,7 +32,7 @@ use crate::domain::model::{Boundary, Environment};
 use crate::domain::secret::SecretValue;
 use crate::error::Error;
 use crate::host::Host;
-use crate::runner::{Call, CommandRunner, Outcome, status_text, unknown_text};
+use crate::runner::{Call, CommandRunner, Outcome};
 
 /// The item's edit stamp: `version` and `updated_at`. Two reads with the same stamp saw
 /// the same item; a different stamp means someone edited it in between.
@@ -365,37 +365,22 @@ pub fn write(
         "json",
     ];
     let call = Call::new(OP, &args).with_stdin(Some(template));
-    let status = match r.write(&call).map_err(|e| op_spawn_error(&e, host))? {
+    match r.write(&call).map_err(|e| op_spawn_error(&e, host))? {
         // The edited item comes back on stdout (with values): registered with the stderr
         // scrubber (NR-31) and handed back in its zeroizing buffer.
         Outcome::Done(o) => {
             crate::scrub::register_item_values(&o.stdout);
-            return Ok(o.stdout);
+            Ok(o.stdout)
         }
-        Outcome::Refused(o) => o.status,
-        Outcome::Unknown {
-            status: Some(s), ..
-        } => s,
-        Outcome::Unknown { reason, .. } => {
-            return Err(Error::Unknown(
-                format!(
-                    "{}: {}; the item is either unchanged or fully tidied (one edit)",
-                    call.step(),
-                    unknown_text(OP, reason)
-                )
-                .into(),
-            ));
-        }
-    };
-    Err(failed_op_error_as(
-        r,
-        env,
-        b,
-        host,
-        &format!("op item edit failed ({})", status_text(status)),
-        "grant this identity write access to the vault",
-        true,
-    ))
+        // A refusal right after a read of the same item is the missing Write grant unless
+        // the session explains it (04.01), never "not available".
+        Outcome::Refused(_)
+        | Outcome::Unknown {
+            status: Some(_), ..
+        } => Err(failed_write(r, env, b, host, &call)),
+        // One atomic edit: the item is either unchanged or fully tidied.
+        Outcome::Unknown { .. } => Err(unfinished_write(env, b, &call)),
+    }
 }
 
 /// Field types a whole-item edit is known to keep exactly: plain string values (the
@@ -585,5 +570,54 @@ mod tests {
         };
         let out: Value = serde_json::from_slice(&apply(raw, &plan).unwrap()).unwrap();
         assert_eq!(out["sections"], json!([{"id": "api", "label": "api"}]));
+    }
+
+    fn tidy_target() -> (Environment, Boundary) {
+        let env = Environment {
+            name: "prod".into(),
+            ..Environment::default()
+        };
+        let b = Boundary {
+            vault_id: "vprd".into(),
+            item_id: "iprd".into(),
+        };
+        (env, b)
+    }
+
+    /// 04.01: a tidy edit refused right after the item was read is the missing Write grant
+    /// (vault_no_access), never "not available to this identity".
+    #[test]
+    fn a_refused_tidy_write_is_the_missing_write_grant() {
+        use crate::runner::Output;
+        let r = crate::runner::fake::FakeRunner::new([
+            Output::failure(1),
+            Output::success(r#"{"user_type":"HUMAN"}"#),
+        ]);
+        let (env, b) = tidy_target();
+        let e = write(&r, &env, &b, b"{}").unwrap_err();
+        assert_eq!(e.code_str(), "vault_no_access");
+    }
+
+    /// 04.01: the grant names the right that is missing: write access.
+    #[test]
+    fn a_refused_tidy_write_asks_for_write_access() {
+        use crate::runner::Output;
+        let r = crate::runner::fake::FakeRunner::new([
+            Output::failure(1),
+            Output::success(r#"{"user_type":"HUMAN"}"#),
+        ]);
+        let (env, b) = tidy_target();
+        let e = write(&r, &env, &b, b"{}").unwrap_err();
+        assert!(e.to_string().contains("may not write item iprd"), "{e}");
+    }
+
+    /// NR-2: a tidy edit that timed out is an unknown outcome, safe to re-run.
+    #[test]
+    fn an_unfinished_tidy_write_is_outcome_unknown() {
+        let r = crate::runner::fake::FakeRunner::default();
+        r.push_unknown("timeout");
+        let (env, b) = tidy_target();
+        let e = write(&r, &env, &b, b"{}").unwrap_err();
+        assert_eq!(e.code_str(), "outcome_unknown");
     }
 }

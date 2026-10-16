@@ -25,10 +25,18 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::onepassword::{NO_CACHE, Session, account_suffix, diagnose, json_error, session_error};
+use super::onepassword::{
+    Failed, NO_CACHE, established, failed_edit, failed_read, failed_read_from, op_spawn_error,
+    unanswered, unfinished_edit, unreadable_reply,
+};
+use super::onepassword_diagnose::Facts;
+use crate::cause::{
+    AccountId, AccountRef, AccountSource, Cause, CreateKind, DiagnoseContext, Refind, ResourceKind,
+    ResourceName, ResourceRef, SessionState, System,
+};
 use crate::error::Error;
-use crate::host::{Host, OP_CLI};
-use crate::runner::{Call, CommandRunner, Outcome, status_text};
+use crate::host::Host;
+use crate::runner::{Call, CommandRunner, CreateOutcome, Outcome};
 
 const OP: &str = "op";
 
@@ -79,91 +87,55 @@ fn argv<'a>(args: &[&'a str], account: Option<&'a str>) -> Vec<&'a str> {
     v
 }
 
-/// The configuration is looked for in 1Password and the call failed: diagnose (FR-26).
-/// Not signed in is `Auth` (exit 7) with `Next: opv login`, saying plainly that the
-/// configuration lives in 1Password.
-pub(crate) fn failure(
-    r: &dyn CommandRunner,
-    host: &dyn Fn() -> Host,
-    failed: &str,
-    what: &str,
-) -> Error {
-    let session = crate::runner::diagnosing(|| diagnose(r, host));
-    match session {
-        Err(e) => e,
-        Ok(Session::SignedIn(t)) => Error::Source(
-            format!(
-                "{failed}: signed in to 1Password as {t}\n  next: check that this identity can \
-                 see {what}"
-            )
-            .into(),
-        ),
-        Ok(Session::Unknown) => Error::Source(
-            format!("{failed}; run `op item list --tags {MANIFEST_TAG}` to see why").into(),
-        ),
-        Ok(s) => {
-            let e =
-                session_error(s, &host(), Some(failed), None).expect("every other session fails");
-            match e {
-                Error::Auth(_) => login_next(
-                    e.map_text(|m| {
-                        format!(
-                            "this project's configuration lives in 1Password, which needs a \
-                             session: {m}"
-                        )
-                    }),
-                    &host(),
-                ),
-                other => other,
-            }
-        }
+/// What a manifest call is about: the account it was made in and the manifest item.
+fn context(account: Option<&str>, item: Option<(&str, &str)>, write: bool) -> DiagnoseContext {
+    DiagnoseContext {
+        account: account.map(AccountId::new),
+        resource: item.map(|(item, vault)| ResourceRef {
+            kind: ResourceKind::Item,
+            name: ResourceName::new(item),
+            scope: Some(vault.to_string()),
+        }),
+        write,
+        ..DiagnoseContext::default()
     }
 }
 
-/// `e` with [`LOGIN`] as its step only when it names none (`opv login --add` for no
-/// account stays) and a person can sign in here: under CI or a service-account or Connect
-/// credential `opv login` refuses, so it is never offered there (#157).
-fn login_next(e: Error, host: &Host) -> Error {
-    if e.next_step().is_none() && host.signin_command(None).is_some() {
-        e.with_next(LOGIN)
-    } else {
-        e
-    }
-}
-
-/// The error for a read of `what` that failed, diagnosed for `account` when one is known
-/// (#135): a `whoami` probe for exactly that account, so a failure for one account is
-/// never reported as another account's signed-in identity. Without an account this is the
-/// shared [`failure`] path, unchanged for its other callers.
+/// A manifest read that failed (FR-26, design §5). With an account known (#135), its session
+/// is probed for exactly that account, so a failure in one account is never reported as
+/// another account's; when that probe cannot run, and without an account, the shared
+/// session diagnosis runs.
 fn diagnosis(
     r: &dyn CommandRunner,
     host: &dyn Fn() -> Host,
     account: Option<&str>,
-    failed: &str,
-    what: &str,
+    call: &Call,
+    item: Option<(&str, &str)>,
 ) -> Error {
-    let Some(id) = account else {
-        return failure(r, host, failed, what);
+    let ctx = context(account, item, false);
+    // Taken before any probe: a probe that fails must not take the call's reply.
+    let failed = Failed::of(call);
+    let signed = match account {
+        Some(id) => crate::runner::diagnosing(|| signed_in(r, id)),
+        None => None,
     };
-    match signed_in(r, id) {
-        Some(false) => Error::Auth(
-            format!(
-                "{failed}: the 1Password account {id} is not signed in; this project's \
-                 configuration lives in 1Password"
-            )
-            .into(),
-        )
-        .with_code(crate::error::Code::OpNotSignedIn)
-        .with_next(format!("opv login --account {id}")),
-        Some(true) => Error::Source(
-            format!(
-                "{failed}: signed in to 1Password account {id}\n  next: check that this \
-                 account can see {what}"
-            )
-            .into(),
-        ),
-        None => failure(r, host, failed, what),
+    let (Some(id), Some(signed)) = (account, signed) else {
+        return failed_read_from(r, host, &ctx, failed, None);
+    };
+    let cause = failed.diagnosed(&ctx, &Facts::from_process_env());
+    if !matches!(cause, Cause::Unrecognized { .. }) {
+        return failed.report(cause);
     }
+    let cause = if signed {
+        established(cause, format!("account {id} is signed in"))
+    } else {
+        Cause::NotSignedIn {
+            system: System::OnePassword,
+            account: Some(AccountId::new(id)),
+            state: SessionState::SignedOut,
+        }
+    };
+    failed.report(cause)
 }
 
 /// One read; a call still failing after its retries is diagnosed.
@@ -172,27 +144,15 @@ fn read(
     args: &[&str],
     account: Option<&str>,
     host: &dyn Fn() -> Host,
-    failed: &str,
-    what: &str,
+    item: Option<(&str, &str)>,
 ) -> Result<Vec<u8>, Error> {
     let call = Call::new(OP, args);
-    let out = match r.read(&call, &[]) {
-        Ok(Outcome::Done(o)) => o,
-        Ok(Outcome::Refused(o)) => {
-            let failed = format!("{failed} failed ({})", status_text(o.status));
-            return Err(diagnosis(r, host, account, &failed, what));
-        }
-        Ok(Outcome::Unknown { .. }) => return Err(OP_CLI.outage(&call.step())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(super::onepassword::op_missing(&host()));
-        }
-        Err(e) => {
-            return Err(Error::Dependency(
-                format!("failed to run op: {}", e.kind()).into(),
-            ));
-        }
-    };
-    Ok(out.stdout.to_vec())
+    match r.read(&call, &[]) {
+        Ok(Outcome::Done(o)) => Ok(o.stdout.to_vec()),
+        Ok(Outcome::Refused(_)) => Err(diagnosis(r, host, account, &call, item)),
+        Ok(Outcome::Unknown { .. }) => Err(unanswered(&call)),
+        Err(e) => Err(op_spawn_error(&e, host)),
+    }
 }
 
 /// Every manifest this identity can see: one `op item list --tags opv-manifest` call.
@@ -205,18 +165,12 @@ pub fn list(
         &["item", "list", "--tags", MANIFEST_TAG, "--format", "json"],
         account,
     );
-    let out = read(
-        r,
-        &args,
-        account,
-        host,
-        &format!("op item list --tags {MANIFEST_TAG}"),
-        "the vault that holds this project's manifest",
-    )?;
+    let out = read(r, &args, account, host, None)?;
     if out.iter().all(u8::is_ascii_whitespace) {
         return Ok(Vec::new());
     }
-    let mut rows: Vec<Row> = serde_json::from_slice(&out).map_err(|e| json_error(&e))?;
+    let mut rows: Vec<Row> =
+        serde_json::from_slice(&out).map_err(|e| unreadable_reply(&args, &e))?;
     // `--tags` also returns nested tags (`opv-manifest/x`): keep exact ones only.
     rows.retain(|r| r.tags.iter().any(|t| t == MANIFEST_TAG));
     rows.sort_by(|a, b| (&a.title, &a.vault.name, &a.id).cmp(&(&b.title, &b.vault.name, &b.id)));
@@ -263,62 +217,44 @@ pub fn resolve(accounts: &[Account], who: &str) -> Result<String, Error> {
         .collect();
     match hits.as_slice() {
         [one] => Ok(one.account_uuid.clone()),
-        [] => Err(not_known(accounts, who)),
-        many => Err(Error::Config(
-            format!(
-                "{} 1Password accounts match {who:?}; name one by its email or account ID:\n{}",
-                many.len(),
-                listing(&many.iter().map(|a| (*a).clone()).collect::<Vec<_>>())
-            )
-            .into(),
-        )
-        .with_code(crate::error::Code::AccountRequired)),
+        [] => Err(not_known(who)),
+        // An address or email several accounts share: a person picks one by its account
+        // ID (04.09); opv never takes the first.
+        many => Err(Cause::AccountAmbiguous {
+            given: who.to_string(),
+            candidates: many
+                .iter()
+                .map(|a| AccountId::new(a.account_uuid.as_str()))
+                .collect(),
+        }
+        .into()),
     }
 }
 
-/// `who` is not an account this `op` knows. On Linux and in WSL with a native `op`, `op`
-/// keeps its own accounts (in WSL it does not share the Windows app's: found live), so the
-/// step is `opv login --add --account` for that email in this terminal. In WSL with the
-/// Windows `op.exe`, the account is added in the Windows 1Password app (the one `op.exe`
-/// reads); elsewhere, in the 1Password app.
-fn not_known(accounts: &[Account], who: &str) -> Error {
-    use crate::host::Platform;
+/// `who` is not an account this `op` knows (04.10): it is added where op keeps its
+/// accounts. On Linux and in WSL with a native `op`, `op` keeps its own (in WSL it does not
+/// share the Windows app's: found live), so it is added at op's prompt (`opv login --add`,
+/// with `--account` only for an email); with the Windows `op.exe` or on macOS and Windows,
+/// in the 1Password app. The cause renders the step for the platform.
+fn not_known(who: &str) -> Error {
+    let account = if who.contains('@') {
+        AccountRef::Email(who.to_string())
+    } else if crate::config::is_id(who) {
+        AccountRef::Id(AccountId::new(who))
+    } else {
+        AccountRef::Shorthand(who.to_string())
+    };
     let host = Host::detect();
-    let e = Error::Config(
-        format!(
-            "no 1Password account on this machine matches {who:?}; the accounts op knows:\n{}",
-            listing(accounts)
-        )
-        .into(),
-    )
-    .with_code(crate::error::Code::AccountRequired);
-    let windows_op = host.op_is_windows_exe();
-    let own_op = matches!(host.platform, Platform::Linux | Platform::Wsl) && !windows_op;
-    if own_op && who.contains('@') && crate::config::is_account(who) {
-        let wsl = if host.platform == Platform::Wsl {
-            " (op in WSL does not see the Windows app's accounts)"
-        } else {
-            ""
-        };
-        return e
-            .with_do(format!(
-                "add the account to op here{wsl}: type its sign-in address, Secret Key and \
-                 password only at op's prompts, then re-run opv login"
-            ))
-            .with_next(format!("opv login --add --account {who}"));
+    Cause::AccountNotOnMachine {
+        account,
+        selected_by: AccountSource::Flag,
+        in_app: host.op_is_windows_exe()
+            || matches!(
+                host.platform,
+                crate::host::Platform::MacOs | crate::host::Platform::Windows
+            ),
     }
-    if windows_op {
-        return e
-            .with_do(
-                "add the account in the Windows 1Password app and turn on Settings > Developer \
-                 > Integrate with 1Password CLI, then re-run",
-            )
-            .with_next(format!("opv login --account {who}"));
-    }
-    e.with_do(
-        "add the account in the 1Password app and turn on Settings > Developer > Integrate \
-         with 1Password CLI, then re-run",
-    )
+    .into()
 }
 
 /// One line per account: email, sign-in address and account ID (the person's own accounts,
@@ -444,18 +380,8 @@ pub fn get(
         base.push(NO_CACHE);
     }
     let args = argv(&base, account);
-    let out = read(
-        r,
-        &args,
-        account,
-        host,
-        &format!(
-            "op item get {item_id} --vault {vault_id}{}",
-            account_suffix(account)
-        ),
-        &format!("vault {vault_id}"),
-    )?;
-    let raw: Value = serde_json::from_slice(&out).map_err(|e| json_error(&e))?;
+    let out = read(r, &args, account, host, Some((item_id, vault_id)))?;
+    let raw: Value = serde_json::from_slice(&out).map_err(|e| unreadable_reply(&args, &e))?;
     parse(raw, item_id)
 }
 
@@ -569,75 +495,10 @@ fn longest_tick_run(text: &str) -> usize {
     text.split(|c| c != '`').map(str::len).max().unwrap_or(0)
 }
 
-/// A write that may or may not have happened, or failed for a known reason.
-fn write_failed(
-    r: &dyn CommandRunner,
-    host: &dyn Fn() -> Host,
-    step: &str,
-    outcome: Outcome,
-    check: &str,
-) -> Error {
-    match outcome {
-        // M7: a refused call is a definite failure (nothing changed): diagnosed like a
-        // non-zero exit, never reported as an unknown outcome.
-        Outcome::Refused(o) => match crate::runner::diagnosing(|| diagnose(r, host)) {
-            Ok(Session::SignedIn(t)) => Error::Source(
-                format!(
-                    "{step} failed ({}): signed in to 1Password as {t}; the manifest was not \
-                     changed\n  next: check that this identity can write to the vault, then \
-                     {check}",
-                    status_text(o.status)
-                )
-                .into(),
-            ),
-            Ok(Session::Unknown) | Err(_) => Error::Source(
-                format!(
-                    "{step} failed ({}); the manifest was not changed: {check}",
-                    status_text(o.status)
-                )
-                .into(),
-            ),
-            Ok(other) => login_next(
-                session_error(other, &host(), Some(step), None).expect("every other session fails"),
-                &host(),
-            ),
-        },
-        Outcome::Unknown {
-            status: Some(s), ..
-        } => {
-            // A non-zero exit: the session decides whether anything could have happened.
-            match crate::runner::diagnosing(|| diagnose(r, host)) {
-                Ok(Session::SignedIn(t)) => Error::Source(
-                    format!(
-                        "{step} failed ({}): signed in to 1Password as {t}\n  next: check that \
-                         this identity can write to the vault, then {check}",
-                        status_text(s)
-                    )
-                    .into(),
-                ),
-                Ok(Session::Unknown) | Err(_) => Error::Unknown(
-                    format!(
-                        "{step} failed ({}); the manifest may or may not have changed: {check}",
-                        status_text(s)
-                    )
-                    .into(),
-                ),
-                Ok(other) => login_next(
-                    session_error(other, &host(), Some(step), None)
-                        .expect("every other session fails"),
-                    &host(),
-                ),
-            }
-        }
-        _ => Error::Unknown(
-            format!("{step} did not finish; the manifest may or may not have changed: {check}")
-                .into(),
-        ),
-    }
-}
-
 /// Create a manifest in `vault` (a vault title or ID, as op accepts). Returns the new
-/// item's row. One write, never retried.
+/// item's row. One create, never retried (X5): an unknown outcome, or a reply opv cannot
+/// read, may have made the manifest (04.12); re-running is safe because the creating
+/// command refuses when a manifest with this title already exists.
 pub fn create(
     r: &dyn CommandRunner,
     vault: &str,
@@ -645,23 +506,36 @@ pub fn create(
     account: Option<&str>,
     host: &dyn Fn() -> Host,
 ) -> Result<Row, Error> {
-    let body = serde_json::to_vec(item)
-        .map_err(|_| Error::Config("cannot serialize the manifest".into()))?;
+    let body = serde_json::to_vec(item).map_err(|_| Cause::Bug {
+        site: "onepassword_manifest: the manifest item does not serialize",
+    })?;
+    let title = item["title"].as_str().unwrap_or_default().to_string();
     let args = argv(
         &["item", "create", "--vault", vault, "--format", "json", "-"],
         account,
     );
     let call = Call::new(OP, &args).with_stdin(Some(&body));
-    let check = format!("check with `op item list --tags {MANIFEST_TAG}` before re-running");
-    match r.write(&call) {
-        Ok(Outcome::Done(o)) => serde_json::from_slice(&o.stdout).map_err(|e| json_error(&e)),
-        Ok(other) => Err(write_failed(r, host, "op item create", other, &check)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Err(super::onepassword::op_missing(&host()))
+    let unknown = |failed: Failed| {
+        let seen = failed.seen().clone();
+        failed.report(Cause::CreateOutcomeUnknown {
+            system: System::OnePassword,
+            kind: CreateKind::Manifest,
+            name: title.clone(),
+            refind: Refind::ByTitle,
+            seen,
+        })
+    };
+    match r.create(&call, CreateKind::Manifest) {
+        Ok(CreateOutcome::Done(o)) => {
+            serde_json::from_slice(&o.stdout).map_err(|_| unknown(Failed::of(&call)))
         }
-        Err(e) => Err(Error::Dependency(
-            format!("failed to run op: {}", e.kind()).into(),
-        )),
+        Ok(CreateOutcome::Refused(_)) => {
+            let mut ctx = context(account, None, false);
+            ctx.create = Some((CreateKind::Manifest, title.clone(), Refind::ByTitle));
+            Err(failed_read(r, host, &ctx, &call, None))
+        }
+        Ok(CreateOutcome::OutcomeUnknown(seen)) => Err(unknown(Failed::with_reply(seen))),
+        Err(e) => Err(op_spawn_error(&e, host)),
     }
 }
 
@@ -700,8 +574,9 @@ pub fn edit(
         .ok_or_else(|| Error::Source(format!("item {item_id} has no notes field").into()))?;
     let previous = notes["value"].as_str().map(str::to_string);
     notes["value"] = Value::String(note_with(text, previous.as_deref(), &project));
-    let body = serde_json::to_vec(&item)
-        .map_err(|_| Error::Config("cannot serialize the manifest".into()))?;
+    let body = serde_json::to_vec(&item).map_err(|_| Cause::Bug {
+        site: "onepassword_manifest: the manifest item does not serialize",
+    })?;
     let args = argv(
         &[
             "item", "edit", item_id, "--vault", vault_id, "--format", "json",
@@ -709,7 +584,7 @@ pub fn edit(
         account,
     );
     let call = Call::new(OP, &args).with_stdin(Some(&body));
-    let check = "check with `opv config export --toml`, then re-run".to_string();
+    let ctx = context(account, Some((item_id, vault_id)), true);
     match r.write(&call) {
         Ok(Outcome::Done(o)) => Ok(match serde_json::from_slice::<Value>(&o.stdout) {
             Ok(v) => Written {
@@ -718,13 +593,17 @@ pub fn edit(
             },
             Err(_) => Written::default(),
         }),
-        Ok(other) => Err(write_failed(r, host, "op item edit", other, &check)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Err(super::onepassword::op_missing(&host()))
-        }
-        Err(e) => Err(Error::Dependency(
-            format!("failed to run op: {}", e.kind()).into(),
+        // A refusal of an edit built from a fresh read is the missing Write grant unless
+        // the session explains it (04.23); nothing changed.
+        Ok(Outcome::Refused(_))
+        | Ok(Outcome::Unknown {
+            status: Some(_), ..
+        }) => Err(failed_edit(r, host, &ctx, &call)),
+        Ok(Outcome::Unknown { .. }) => Err(unfinished_edit(
+            ctx.resource.clone().expect("the edit names its item"),
+            &call,
         )),
+        Err(e) => Err(op_spawn_error(&e, host)),
     }
 }
 
@@ -793,22 +672,14 @@ mod tests {
     fn a_listing_for_a_signed_out_account_names_that_account() {
         let r = signed_out_listing();
         let e = list(&r, Some("ACCOUNTBBB000000000000BBB"), &Host::detect).unwrap_err();
-        assert!(
-            e.text().contains("ACCOUNTBBB000000000000BBB"),
-            "{}",
-            e.text()
-        );
+        assert!(e.to_string().contains("ACCOUNTBBB000000000000BBB"), "{e}");
     }
 
     #[test]
     fn a_listing_for_a_signed_out_account_never_names_a_signed_in_identity() {
         let r = signed_out_listing();
         let e = list(&r, Some("ACCOUNTBBB000000000000BBB"), &Host::detect).unwrap_err();
-        assert!(
-            !e.text().contains("signed in to 1Password as"),
-            "{}",
-            e.text()
-        );
+        assert!(!e.to_string().contains("signed in to 1Password as"), "{e}");
     }
 
     /// A runner whose `op item list` fails every attempt and whose `op whoami --account`
@@ -877,10 +748,9 @@ mod tests {
         }
     }
 
-    /// I6: a failed manifest read hint names the account, so it cannot run against op's
-    /// default account.
+    /// #135: a failed read in an account names that account.
     #[test]
-    fn a_failed_manifest_read_hint_names_the_account() {
+    fn a_failed_manifest_read_names_the_account_in_its_call() {
         let mut responses: Vec<Output> = crate::runner::fake::failed_read(1).collect();
         responses.push(Output::failure(1));
         let r = FakeRunner::new(responses);
@@ -893,12 +763,7 @@ mod tests {
             &Host::detect,
         )
         .unwrap_err();
-        assert!(
-            e.text()
-                .contains("op item get i --vault v --account ACCOUNTUUID000000000000AAA"),
-            "{}",
-            e.text()
-        );
+        assert!(e.to_string().contains("ACCOUNTUUID000000000000AAA"), "{e}");
     }
 
     /// I7: several accounts and no choice: the step is opv's own list command, one
@@ -916,12 +781,19 @@ mod tests {
         Host::from_env(&crate::host::FakeEnv::new("linux").shell("/bin/bash"))
     }
 
-    /// #157: no account on this machine keeps the step that adds one.
+    fn list_call() -> Call<'static> {
+        Call::new(
+            OP,
+            &["item", "list", "--tags", MANIFEST_TAG, "--format", "json"],
+        )
+    }
+
+    /// #157: no account on this machine is the account to add, never a sign-in.
     #[test]
-    fn a_failure_with_no_account_keeps_login_add() {
+    fn a_failure_with_no_account_is_account_not_registered() {
         let r = FakeRunner::new([Output::failure(1), Output::success("[]")]);
-        let e = failure(&r, &plain_linux, "op item list failed", "the manifest");
-        assert_eq!(e.next_step(), Some("opv login --add"));
+        let e = diagnosis(&r, &plain_linux, None, &list_call(), None);
+        assert_eq!(e.code_str(), "account_not_registered");
     }
 
     /// #157: under CI `opv login` refuses, so it is never the step.
@@ -929,25 +801,45 @@ mod tests {
     fn a_failure_under_ci_never_steps_to_login() {
         let ci = || Host::from_env(&crate::host::FakeEnv::new("linux").var("CI"));
         let r = FakeRunner::new([Output::failure(1)]);
-        let e = failure(&r, &ci, "op item list failed", "the manifest");
+        let e = diagnosis(&r, &ci, None, &list_call(), None);
         assert_ne!(e.next_step(), Some(LOGIN));
     }
 
-    /// Signed out at a person's terminal, the step is still `opv login`.
+    /// Signed out at a person's terminal, the cause is the missing session.
     #[test]
-    fn a_signed_out_failure_steps_to_login() {
+    fn a_signed_out_failure_is_op_not_signed_in() {
         let r = FakeRunner::new([Output::failure(1), Output::success(ONE_ACCOUNT)]);
-        let e = failure(&r, &plain_linux, "op item list failed", "the manifest");
-        assert_eq!(e.next_step(), Some(LOGIN));
+        let e = diagnosis(&r, &plain_linux, None, &list_call(), None);
+        assert_eq!(e.code_str(), "op_not_signed_in");
     }
 
-    /// #157: a write refused with no account on this machine keeps the step that adds one.
+    /// #157: a write refused with no account on this machine is the account to add.
     #[test]
-    fn a_refused_write_with_no_account_keeps_login_add() {
+    fn a_refused_write_with_no_account_is_account_not_registered() {
         let r = FakeRunner::new([Output::failure(1), Output::success("[]")]);
-        let refused = Outcome::Refused(Output::failure(1));
-        let e = write_failed(&r, &plain_linux, "op item edit", refused, "re-run");
-        assert_eq!(e.next_step(), Some("opv login --add"));
+        let ctx = context(None, Some(("i", "v")), true);
+        let e = failed_edit(
+            &r,
+            &plain_linux,
+            &ctx,
+            &Call::new(OP, &["item", "edit", "i"]),
+        );
+        assert_eq!(e.code_str(), "account_not_registered");
+    }
+
+    /// 04.23: an edit refused while signed in is the missing Write grant, never "check …
+    /// then check … before re-running".
+    #[test]
+    fn a_refused_write_signed_in_is_vault_no_access() {
+        let r = FakeRunner::new([Output::success(r#"{"user_type":"HUMAN"}"#)]);
+        let ctx = context(None, Some(("i", "v")), true);
+        let e = failed_edit(
+            &r,
+            &plain_linux,
+            &ctx,
+            &Call::new(OP, &["item", "edit", "i"]),
+        );
+        assert_eq!(e.code_str(), "vault_no_access");
     }
 
     fn wsl_windows_op() -> Host {
@@ -958,16 +850,17 @@ mod tests {
         )
     }
 
-    /// In WSL with the Windows `op.exe`, an unknown account is added in the Windows app.
     #[test]
     fn wsl_windows_op_unknown_account_names_the_windows_app() {
         let e = crate::host::with_test_host(wsl_windows_op(), || {
             resolve(&[], "new@labs.example").unwrap_err()
         });
+        let step = e.step("opv", "opv");
         assert!(
-            e.action()
-                .is_some_and(|a| a.contains("Windows 1Password app")),
-            "{e:?}"
+            step.action
+                .as_deref()
+                .is_some_and(|a| a.contains("in the 1Password app")),
+            "{step:?}"
         );
     }
 
@@ -981,5 +874,32 @@ mod tests {
             e.next_step(),
             Some("opv login --add --account new@labs.example")
         );
+    }
+
+    /// 04.12: a manifest create whose reply cannot be read may have made the manifest.
+    #[test]
+    fn a_created_manifest_with_an_unreadable_reply_is_create_outcome_unknown() {
+        let r = FakeRunner::new([Output::success("not json")]);
+        let item = template("myapp · opv", "myapp", &[], "");
+        let e = create(&r, "v", &item, None, &Host::detect).unwrap_err();
+        assert_eq!(e.code_str(), "create_outcome_unknown");
+    }
+
+    /// 04.10: an account op does not know is the account to add, never "account required".
+    #[test]
+    fn an_unknown_account_is_account_not_registered() {
+        let e = resolve(&[], "ACCOUNTUUID000000000000ZZZ").unwrap_err();
+        assert_eq!(e.code_str(), "account_not_registered");
+    }
+
+    /// 04.09: an address several accounts share is ambiguous, never the first one.
+    #[test]
+    fn a_shared_address_is_account_ambiguous() {
+        let mut a = account("ACCOUNTUUID000000000000AAA");
+        let mut b = account("ACCOUNTUUID000000000000BBB");
+        a.url = "https://my.1password.com".into();
+        b.url = "https://my.1password.com".into();
+        let e = resolve(&[a, b], "my.1password.com").unwrap_err();
+        assert_eq!(e.code_str(), "account_ambiguous");
     }
 }

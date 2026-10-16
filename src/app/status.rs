@@ -1000,7 +1000,8 @@ mod tests {
             .push_back(Ok(crate::runner::Output::failure(1)));
         let mut out = Vec::new();
         let e = run(&fleet(), "prod", &r, &mut out).unwrap_err();
-        assert!(matches!(e, Error::Source(_)), "{e}");
+        // Catalog (04.06): the vault does not open in op's default account.
+        assert_eq!(e.code_str(), "vault_no_access", "{e}");
         assert_no_values(&e.to_string());
         // One item read, then the free session and vault checks (NR-26, P16: before any
         // retry; the vault is not readable, so none); no Fly call.

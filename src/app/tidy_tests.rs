@@ -1667,7 +1667,8 @@ fn a_write_with_no_account_on_this_machine_steps_to_login_add() {
         Output::success("[]"),
     ]);
     let e = require_person(&r, "opv target add").unwrap_err();
-    assert_eq!(e.next_step(), Some("opv login --add"));
+    // Catalog error (04.07): the step comes from the cause.
+    assert_eq!(e.step("-", "-").next, "opv login --add");
 }
 
 // --- error-catalog lane (audit 04.01, 04.19) ---

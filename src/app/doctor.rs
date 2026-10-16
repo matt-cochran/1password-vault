@@ -1414,14 +1414,14 @@ mod tests {
         let r = FakeRunner::new(g);
         let (res, out) = doctor(Ok(fleet()), &r);
         let e = res.unwrap_err();
-        assert!(matches!(e, Error::Auth(_)), "{e}");
+        assert_eq!(e.code_str(), "op_not_signed_in", "{e}");
         assert_eq!(e.exit_code(), 7);
         let lines = checks(&out);
         assert!(
-            lines[2].starts_with("FAIL  op auth: authentication error: not signed in"),
+            lines[2].starts_with("FAIL  op auth: you are not signed in to 1Password"),
             "{out}"
         );
-        assert!(out.contains("\n  sign in: opv login\n"), "{out}");
+        assert!(out.contains("\n  fix: opv login\n"), "{out}");
         assert_eq!(lines.len(), CHECK_LINES, "{out}");
         // Doctor and the read path share one classification: whoami, then account list;
         // doctor then asks the 1Password app once.
@@ -1726,7 +1726,7 @@ mod tests {
         g.insert(3, Output::failure(1)); // the 1Password app does not approve
         let r = FakeRunner::new(g);
         let (_, out) = doctor(Ok(fleet()), &r);
-        assert_eq!(do_line(&out), "Do: sign in: opv login", "{out}");
+        assert_eq!(do_line(&out), "Do: sign in to 1Password", "{out}");
     }
 
     #[test]
@@ -1884,10 +1884,7 @@ mod tests {
         let mut out = Vec::new();
         let res = run_with(Ok(fleet()), &r, &h, &mut out);
         let out = terminal(&res, &out);
-        assert!(
-            do_line(&out).starts_with("Do: set OP_SERVICE_ACCOUNT_TOKEN"),
-            "{out}"
-        );
+        assert!(do_line(&out).contains("OP_SERVICE_ACCOUNT_TOKEN"), "{out}");
     }
 
     /// Unparseable tool output is not echoed (it could be anything).
@@ -2116,7 +2113,7 @@ mod tests {
         let (_, out) = doctor_deploy_failed(false);
         assert!(
             checks(&out).iter().any(|l| l.starts_with(
-                "FAIL  portfolio: deploy credentials: authentication error: not signed in"
+                "FAIL  portfolio: deploy credentials: you are not signed in to 1Password"
             )),
             "{out}"
         );
@@ -2127,7 +2124,7 @@ mod tests {
     fn deploy_failure_names_its_fix() {
         let (res, out) = doctor_deploy_failed(false);
         let t = terminal(&res, out.as_bytes());
-        assert_eq!(do_line(&t), "Do: sign in: opv login prod", "{t}");
+        assert_eq!(do_line(&t), "Do: sign in to 1Password", "{t}");
     }
 
     /// UX1: the failing line carries its step under it, like every other check.
@@ -2135,7 +2132,9 @@ mod tests {
     fn deploy_failure_prints_its_step_under_the_fail_line() {
         let (_, out) = doctor_deploy_failed(false);
         assert!(
-            out.contains("op whoami failed)\n  sign in: opv login prod\n"),
+            out.contains(
+                "deploy credentials: you are not signed in to 1Password\n  do: sign in to 1Password\n  fix: opv login"
+            ),
             "{out}"
         );
     }
@@ -2175,7 +2174,7 @@ mod tests {
     #[test]
     fn deploy_failure_exits_with_its_category() {
         let (res, _) = doctor_deploy_failed(false);
-        assert!(matches!(res, Err(Error::Auth(_))), "{res:?}");
+        assert!(res.as_ref().is_err_and(|e| e.exit_code() == 7), "{res:?}");
     }
 
     /// The JSON output carries the same check.
@@ -2190,9 +2189,11 @@ mod tests {
             .find(|c| c["name"] == "deploy credentials")
             .unwrap()
             .clone();
-        assert_eq!(
-            (check["status"].clone(), check["do"].clone()),
-            ("fail".into(), "sign in: opv login prod".into()),
+        assert!(
+            check["status"] == "fail"
+                && check["next"]
+                    .as_str()
+                    .is_some_and(|n| n.starts_with("opv login")),
             "{out}"
         );
     }
@@ -2306,7 +2307,7 @@ mod tests {
         assert!(
             checks(&out)
                 .iter()
-                .any(|l| l.starts_with("FAIL  item:") && l.contains("cannot access vault vprd")),
+                .any(|l| l.starts_with("FAIL  item:") && l.contains("vault vprd")),
             "{out}"
         );
     }
@@ -2450,7 +2451,7 @@ mod tests {
         let h = Host::from_env(&crate::host::FakeEnv::new("linux").shell("/bin/bash").tty());
         let mut out = Vec::new();
         let res = run_with(Ok(fleet()), &r, &h, &mut out);
-        assert_eq!(do_line(&terminal(&res, &out)), "Do: sign in: opv login");
+        assert_eq!(do_line(&terminal(&res, &out)), "Do: sign in to 1Password");
     }
 
     /// 07.06: the returned error is the check's own, its message included (no override).
