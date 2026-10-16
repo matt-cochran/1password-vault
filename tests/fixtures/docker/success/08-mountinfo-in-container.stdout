@@ -1,0 +1,1 @@
+/<RAMDIR-NAME> /run/secrets/probe ro,nosuid,nodev,relatime - tmpfs tmpfs rw,size=2460988k,nr_inodes=615247,mode=700,uid=1000,gid=1000
