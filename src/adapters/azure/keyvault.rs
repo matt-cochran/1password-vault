@@ -21,7 +21,7 @@
 //!
 //! `list` and `read` are reads (the runner retries them); a `show` that exits 3 is a
 //! definite "absent", never retried. `set` and `delete` are writes (never retried
-//! blindly, NR-2). Every non-zero exit is diagnosed through [`az::diagnose`]; a failed
+//! blindly, NR-2). Every non-zero exit is diagnosed through [`az::failed`]; a failed
 //! `set` is first checked with a read-only `show-deleted --query tags` (stderr is discarded):
 //! a soft-deleted name opv's own prune deleted (tagged `opv-pruned=<env>`) is recovered and
 //! written; any other gets the recover command (FR-32). A `set` that fails for a reason that
@@ -33,11 +33,12 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::cause::{Cause, DiagnoseContext, Guard, ResourceKind};
 use crate::domain::plan::StoreEntry;
 use crate::domain::{SecretValue, Stamp};
-use crate::error::{Code, Error};
+use crate::error::Error;
 use crate::ports::{PinnedStore, Store};
-use crate::runner::{CommandRunner, Outcome, Wait, unknown_text};
+use crate::runner::{CommandRunner, Outcome, Wait};
 
 use super::AzureTarget;
 use super::az::{self, Effect, invoke, read_output, write_output};
@@ -144,6 +145,16 @@ impl KeyVault<'_> {
         v
     }
 
+    /// What every call of this vault is about, for its diagnosis.
+    fn ctx(&self) -> DiagnoseContext {
+        az::about(
+            ResourceKind::KeyVault,
+            self.vault,
+            format!("subscription {}", self.subscription),
+            Some(self.env),
+        )
+    }
+
     /// Managed entries: tagged `opv-managed=<env>` and named in the managed template set
     /// (FR-8). Version comes from `show` / the binding, never `list`; nothing is pending.
     fn list_managed(&self) -> Result<Vec<StoreEntry>, Error> {
@@ -179,8 +190,7 @@ impl KeyVault<'_> {
         ];
         let out = read_output(
             self.runner,
-            OP,
-            self.vault,
+            self.ctx(),
             invoke(
                 self.runner,
                 Effect::Read,
@@ -247,7 +257,7 @@ impl KeyVault<'_> {
         )?;
         let out = match outcome {
             Outcome::Refused(out) if out.status == 3 => return Ok(None),
-            other => read_output(self.runner, OP, self.vault, other)?,
+            other => read_output(self.runner, self.ctx(), other)?,
         };
         let entry: ShowEntry = serde_json::from_slice(&out.stdout).map_err(|e| {
             Error::Target(
@@ -326,10 +336,11 @@ impl KeyVault<'_> {
                     self.recover(name)?;
                     outcome = set()?;
                 }
-                Some(_) => return Err(soft_deleted_error(name, self.vault)),
+                Some(_) => return Err(soft_deleted_error(name, self.vault, self.subscription)),
                 None => {
                     if !crate::runner::diagnosing(|| az::signed_in(self.runner))? {
-                        return Err(az::not_logged_in(None));
+                        let up = az::take_failure().and_then(|(_, up)| up);
+                        return Err(az::report(az::signed_out(), up));
                     }
                     self.await_access()?;
                     outcome = set()?;
@@ -345,14 +356,9 @@ impl KeyVault<'_> {
                 self.confirm_version(name, &version)?;
                 Ok(version)
             }
-            Outcome::Unknown {
-                status: Some(_), ..
+            Outcome::Unknown { .. } | Outcome::Refused(_) => {
+                Err(az::failed(self.runner, az::writing(self.ctx())))
             }
-            | Outcome::Refused(_) => Err(az::diagnose(self.runner, OP, self.vault)),
-            Outcome::Unknown { reason, .. } => Err(Error::Unknown(format!(
-                "az {OP}: {}; the change may or may not have been applied\n  next: re-run the same command",
-                unknown_text(az::PROGRAM, reason)
-            ).into())),
         }
     }
 
@@ -380,46 +386,13 @@ impl KeyVault<'_> {
                 None,
                 &[],
             )?;
-            // A vault that is gone never starts answering: said at once (S2).
-            let missing =
-                matches!(outcome, Outcome::Refused(_)) && crate::runner::last_failure_not_found();
-            if missing {
-                return Err(Error::Target(
-                    format!(
-                        "Key Vault {} was not found in the subscription (deleted, or a wrong \
-                         azure.key_vault or azure.subscription); nothing was changed",
-                        self.vault
-                    )
-                    .into(),
-                )
-                .with_do("check azure.key_vault and azure.subscription in secrets.toml"));
+            if matches!(outcome, Outcome::Done(_)) {
+                return Ok(());
             }
-            let answered = match outcome {
-                Outcome::Done(_) => return Ok(()),
-                Outcome::Refused(_) => true,
-                Outcome::Unknown { status, .. } => status.is_some(),
-            };
+            // Still refused, or no answer: what the last poll observed, with az's reply
+            // (no recording tells a missing grant from a missing vault or a firewall).
             if wait.over(self.runner, ACCESS_POLL) {
-                let waited = wait.elapsed(self.runner);
-                if !answered {
-                    // The last poll never answered: Azure or the network, not a grant.
-                    return Err(az::AZ_CLI.outage(OP));
-                }
-                return Err(Error::Target(
-                    format!(
-                        "Key Vault {vault} still refuses this account after {secs} s (Azure RBAC \
-                         or access policy, or a firewall that keeps this machine out); nothing \
-                         was changed",
-                        vault = self.vault,
-                        secs = waited.as_secs()
-                    )
-                    .into(),
-                )
-                .with_code(Code::PermissionDenied)
-                .with_do(
-                    "ask an owner to grant access, or to allow this network: az role assignment \
-                     create --role \"Key Vault Secrets Officer\" --assignee <you> --scope <vault id>",
-                ));
+                return Err(az::failed(self.runner, self.ctx()));
             }
             let waited = wait.elapsed(self.runner) + ACCESS_POLL;
             wait.pause(
@@ -471,7 +444,7 @@ impl KeyVault<'_> {
                 }
                 Outcome::Refused(out) if out.status == 3 => {}
                 other => {
-                    read_output(self.runner, OP, self.vault, other)?;
+                    read_output(self.runner, self.ctx(), other)?;
                 }
             }
             if wait.over(self.runner, CONFIRM_POLL) {
@@ -516,7 +489,7 @@ impl KeyVault<'_> {
             &[3],
         )? {
             Outcome::Refused(out) if out.status == 3 => Ok(false),
-            other => read_output(self.runner, OP, self.vault, other).map(|_| true),
+            other => read_output(self.runner, self.ctx(), other).map(|_| true),
         }
     }
 
@@ -556,14 +529,7 @@ impl KeyVault<'_> {
                     .unwrap_or_default(),
             )),
             Outcome::Refused(_) => Ok(None),
-            Outcome::Unknown { .. } => Err(Error::Unknown(
-                format!(
-                    "could not tell whether {name} is soft-deleted in Key Vault {}; nothing was \
-                 changed; re-run to check again",
-                    self.vault
-                )
-                .into(),
-            )),
+            Outcome::Unknown { .. } => Err(az::failed(self.runner, self.ctx())),
         }
     }
 
@@ -593,8 +559,7 @@ impl KeyVault<'_> {
         ];
         write_output(
             self.runner,
-            OP,
-            self.vault,
+            self.ctx(),
             invoke(
                 self.runner,
                 Effect::Write,
@@ -644,7 +609,7 @@ impl KeyVault<'_> {
                 Outcome::Done(_) => return Ok(()),
                 Outcome::Refused(out) if out.status == 3 => {}
                 other => {
-                    read_output(self.runner, OP, self.vault, other)?;
+                    read_output(self.runner, self.ctx(), other)?;
                 }
             }
             if wait.over(self.runner, CONFIRM_POLL) {
@@ -668,13 +633,13 @@ impl KeyVault<'_> {
             self.managed_name(e)
                 .is_some_and(|m| m.eq_ignore_ascii_case(name))
         }) else {
-            return Err(Error::Policy(
-                format!(
-                    "{name}: not tagged opv-managed={}; refusing to delete",
-                    self.env
-                )
-                .into(),
-            ));
+            // 06.42: the refusal names the vault.
+            return Err(Cause::Guard {
+                guard: Guard::NotManagedByOpv {
+                    name: format!("{name} in Key Vault {}", self.vault),
+                },
+            }
+            .into());
         };
         let name = &AzureTarget::key_vault_name(name);
         self.mark_pruned(name, entry.tags.as_ref())?;
@@ -692,8 +657,7 @@ impl KeyVault<'_> {
         ];
         write_output(
             self.runner,
-            OP,
-            self.vault,
+            self.ctx(),
             invoke(
                 self.runner,
                 Effect::Write,
@@ -735,8 +699,7 @@ impl KeyVault<'_> {
         args.extend(["-o", "none", az::ONLY_SHOW_ERRORS]);
         write_output(
             self.runner,
-            OP,
-            self.vault,
+            self.ctx(),
             invoke(
                 self.runner,
                 Effect::Write,
@@ -771,8 +734,12 @@ const PRUNED_TAG: &str = "opv-pruned";
 /// The soft-deleted refusal for a secret opv did not delete itself: it names the exact
 /// recover command, which is also its `Next:` (re-running sync first would fail again).
 /// opv recovers only what its own prune deleted (FR-32).
-fn soft_deleted_error(name: &str, vault: &str) -> Error {
-    let recover = format!("az keyvault secret recover --vault-name {vault} --name {name}");
+/// The command carries `--subscription` (06.29): the person's default subscription may not be
+/// the configured one (NR-7).
+fn soft_deleted_error(name: &str, vault: &str, subscription: &str) -> Error {
+    let recover = format!(
+        "az keyvault secret recover --vault-name {vault} --name {name} --subscription {subscription}"
+    );
     Error::Target(
         format!(
             "{name} is soft-deleted in Key Vault {vault}, and not by opv's prune, so opv leaves \
@@ -1012,7 +979,20 @@ mod tests {
         let templates = names(&[NAME]);
         let kv = vault(&r, "prod", &templates);
         let err = kv.delete(NAME).unwrap_err();
-        assert!(matches!(err, Error::Policy(msg) if msg.contains("not tagged opv-managed=prod")));
+        assert_eq!(err.code_str(), "policy_refused");
+    }
+
+    /// 06.42: the delete refusal names the vault the entry is in.
+    #[test]
+    fn delete_refusal_names_the_vault() {
+        let r = FakeRunner::new([Output::success(LIST_FIXTURE)]);
+        let templates = names(&[NAME]);
+        let kv = vault(&r, "prod", &templates);
+        let err = kv.delete(NAME).unwrap_err();
+        assert!(
+            err.to_string().contains("in Key Vault kv-opv-fixture"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1024,11 +1004,12 @@ mod tests {
             .write_one("MY-SECRET", &SecretValue::new(MARKER.into()), &stamp())
             .unwrap_err();
         assert!(matches!(err, Error::Target(msg) if msg.contains(
-            "az keyvault secret recover --vault-name kv-opv-fixture --name MY-SECRET"
+            "az keyvault secret recover --vault-name kv-opv-fixture --name MY-SECRET --subscription"
         )));
     }
 
-    /// Found live: the step after a soft-deleted name is the recovery, not a re-run.
+    /// Found live: the step after a soft-deleted name is the recovery, not a re-run; it
+    /// names the configured subscription (06.29, NR-7).
     #[test]
     fn soft_deleted_name_next_is_the_recover_command() {
         let r = FakeRunner::new([Output::failure(1), Output::success("")]);
@@ -1039,7 +1020,10 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err.next_step(),
-            Some("az keyvault secret recover --vault-name kv-opv-fixture --name MY-SECRET")
+            Some(
+                "az keyvault secret recover --vault-name kv-opv-fixture --name MY-SECRET \
+                 --subscription 00000000-0000-0000-0000-000000000000"
+            )
         );
     }
 
@@ -1243,7 +1227,7 @@ mod tests {
         let err = vault(&r, "prod", &templates)
             .write_one(NAME, &secret(), &stamp())
             .unwrap_err();
-        assert!(matches!(err, Error::Unknown(_)));
+        assert_eq!(err.code_str(), "outcome_unknown");
     }
 
     #[test]
@@ -1371,26 +1355,25 @@ mod tests {
         );
     }
 
+    /// After five minutes of refusals opv cannot tell a missing grant from a missing vault
+    /// or a firewall without az's wording, which no recording backs (§12.4): az's reply is
+    /// shown as it is, not blamed on a role.
     #[test]
-    fn write_without_access_after_five_minutes_is_permission_denied() {
+    fn write_without_access_after_five_minutes_shows_azs_reply_unrecognized() {
         let polls = (0..21).flat_map(|_| crate::runner::fake::failed_read(1));
         let r = FakeRunner::new(failed_set().into_iter().chain(polls));
         let templates = names(&[]);
-        let err = vault(&r, "prod", &templates)
-            .write_one(NAME, &secret(), &stamp())
-            .unwrap_err();
-        assert_eq!(err.code(), Code::PermissionDenied);
-    }
-
-    #[test]
-    fn write_to_a_vault_that_is_gone_says_so_without_waiting() {
-        let r = FakeRunner::new(failed_set());
-        r.push_with_stderr(Output::failure(1), "ERROR: (ResourceNotFound) no vault\n");
-        let templates = names(&[]);
-        let err = vault(&r, "prod", &templates)
-            .write_one(NAME, &secret(), &stamp())
-            .unwrap_err();
-        assert!(err.text().contains("was not found"), "{err:?}");
+        // Under deploy credentials, so no probe of the person's own sign-in follows.
+        let deploy = crate::cause::Principal::DeployCredentials {
+            item: crate::cause::ItemId::new("azure-deploy"),
+            env: crate::cause::EnvName::new("prod"),
+            target: crate::cause::TargetName::new("web"),
+        };
+        let err = crate::runner::under_deploy(deploy, || {
+            vault(&r, "prod", &templates).write_one(NAME, &secret(), &stamp())
+        })
+        .unwrap_err();
+        assert_eq!(err.code_str(), "unrecognized_failure");
     }
 
     #[test]
@@ -1401,28 +1384,29 @@ mod tests {
         let err = vault(&r, "prod", &templates)
             .write_one(NAME, &secret(), &stamp())
             .unwrap_err();
-        assert_eq!(err.code(), Code::ProviderUnavailable);
+        assert_eq!(err.code_str(), "provider_unavailable");
     }
 
     #[test]
-    fn failed_set_when_signed_out_is_auth_error_without_waiting() {
+    fn failed_set_when_signed_out_is_not_signed_in_without_waiting() {
         let r = FakeRunner::new([Output::failure(1), Output::failure(1), Output::failure(1)]);
         let templates = names(&[]);
         let err = vault(&r, "prod", &templates)
             .write_one(NAME, &secret(), &stamp())
             .unwrap_err();
-        assert!(matches!(err, Error::Auth(m) if m.mentions("az login")));
+        assert_eq!(err.code_str(), "target_not_signed_in");
     }
 
     #[test]
-    fn show_deleted_probe_that_never_finishes_is_unknown_error() {
+    fn show_deleted_probe_that_never_finishes_reports_the_failed_set() {
         let r = FakeRunner::new([Output::failure(1)]);
         r.push_unknowns("timeout", 3);
+        r.push_with_stderr(Output::success(""), "");
         let templates = names(&[]);
         let err = vault(&r, "prod", &templates)
             .write_one(NAME, &secret(), &stamp())
             .unwrap_err();
-        assert!(matches!(err, Error::Unknown(m) if m.contains("soft-deleted")));
+        assert_eq!(err.code_str(), "unrecognized_failure");
     }
 
     #[test]
@@ -1437,19 +1421,5 @@ mod tests {
             .filter(|c| c.args.iter().any(|a| a == "show-deleted"))
             .count();
         assert_eq!(probes, 1);
-    }
-
-    #[test]
-    fn failed_call_when_signed_out_is_auth_error() {
-        let r = FakeRunner::new([Output::failure(1)]);
-        let err = az::diagnose(&r, "keyvault secret show", VAULT);
-        assert!(matches!(err, Error::Auth(msg) if msg.mentions("az login")));
-    }
-
-    #[test]
-    fn failed_call_when_signed_in_is_target_error() {
-        let r = FakeRunner::new([Output::success("")]);
-        let err = az::diagnose(&r, "keyvault secret show", VAULT);
-        assert!(matches!(err, Error::Target(msg) if msg.contains(VAULT)));
     }
 }

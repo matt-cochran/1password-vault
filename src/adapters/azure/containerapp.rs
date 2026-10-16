@@ -67,14 +67,18 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use super::az::{self, AZ_CLI, Effect};
+use super::az::{self, Effect};
 use super::{AzureTarget, ConfigRoute, preflight};
+use crate::cause::{
+    Cause, DiagnoseContext, EnvName, Principal, Refusal, ResourceKind, ResourceName, ResourceRef,
+    System,
+};
 use crate::domain::{
     AccessFinding, Binding, Health, RawSpec, Revision, RuntimeChange, RuntimeSnapshot,
 };
 use crate::error::Error;
 use crate::ports::PinnedRuntime;
-use crate::runner::{CommandRunner, Outcome, Output, Wait, status_text, unknown_text};
+use crate::runner::{CommandRunner, Outcome, Output, Wait};
 
 /// Delay between two health polls (R8).
 pub const POLL_EVERY: Duration = Duration::from_secs(5);
@@ -171,20 +175,44 @@ impl<'a> ContainerApp<'a> {
         &self.target.resource_group
     }
 
-    fn subject(&self) -> String {
-        format!(
-            "container app {} in resource group {}",
-            self.app(),
-            self.rg()
-        )
-    }
-
     fn show_hint(&self) -> String {
         format!(
             "az containerapp show -g {} -n {} --subscription {}",
             self.rg(),
             self.app(),
             self.target.subscription
+        )
+    }
+
+    /// This app, as the subject of a cause.
+    fn app_ref(&self) -> ResourceRef {
+        ResourceRef {
+            kind: ResourceKind::ContainerApp,
+            name: ResourceName::new(self.app()),
+            scope: Some(format!(
+                "resource group {} (subscription {})",
+                self.rg(),
+                self.target.subscription
+            )),
+        }
+    }
+
+    /// A call about this app, for its diagnosis.
+    fn app_ctx(&self) -> DiagnoseContext {
+        DiagnoseContext {
+            env: self.env.map(EnvName::new),
+            resource: Some(self.app_ref()),
+            ..DiagnoseContext::default()
+        }
+    }
+
+    /// A call about the app's Key Vault, for its diagnosis.
+    fn vault_ctx(&self) -> DiagnoseContext {
+        az::about(
+            ResourceKind::KeyVault,
+            &self.target.key_vault,
+            format!("subscription {}", self.target.subscription),
+            self.env,
         )
     }
 
@@ -196,124 +224,97 @@ impl<'a> ContainerApp<'a> {
         v
     }
 
-    /// One `az` call with typed, value-free errors. Child stderr is never captured (SR-1);
-    /// a non-zero exit is diagnosed with `az account show` ([`Self::diagnose`]).
+    /// One `az` call with typed, value-free errors; a call that did not succeed is
+    /// diagnosed ([`Self::diagnose`]) from what opv observed, `az`'s reply as evidence.
     fn az(
         &self,
         effect: Effect,
         what: &str,
-        subject: &str,
-        hint: &str,
+        ctx: DiagnoseContext,
         base: &[&str],
         stdin: Option<&[u8]>,
     ) -> Result<Output, Error> {
         let owned = self.argv(base);
         let args: Vec<&str> = owned.iter().map(String::as_str).collect();
-        let outcome = az::invoke(self.runner, effect, what, &args, stdin, &[])?;
-        match outcome {
-            Outcome::Done(out) => Ok(out),
-            Outcome::Refused(out) => Err(self.diagnose(effect, what, subject, hint, out.status)),
-            Outcome::Unknown {
-                status: Some(status),
-                ..
-            } => Err(self.diagnose(effect, what, subject, hint, status)),
-            Outcome::Unknown { reason, .. } if effect == Effect::Write => Err(Error::Unknown(
-                format!(
-                    "az {what}: {}; the update may or may not have been applied, and Azure keeps \
-                     the previous revision serving until a new one is ready\n  next: re-run \
-                     the same command",
-                    unknown_text(az::PROGRAM, reason)
-                )
-                .into(),
-            )),
-            Outcome::Unknown { .. } => Err(AZ_CLI.unanswered(self.runner, &format!("az {what}"))),
-        }
-    }
-
-    /// The error for a call that exited `status` (FR-26): `az account show`, exit status
-    /// only, tells "not signed in" (Auth) from "signed in but refused" (Target; Unknown for
-    /// the update, which may have reached Azure).
-    fn diagnose(
-        &self,
-        effect: Effect,
-        what: &str,
-        subject: &str,
-        hint: &str,
-        status: i32,
-    ) -> Error {
-        let failed = format!("az {what} failed ({})", status_text(status));
-        // The probe explains the failed call; its excerpt stays with the error (NR-31).
         match (
-            crate::runner::diagnosing(|| az::signed_in(self.runner)),
+            az::invoke(self.runner, effect, what, &args, stdin, &[])?,
             effect,
         ) {
-            (Ok(false), _) => az::not_logged_in(Some(&failed)),
-            (Ok(true), Effect::Read) => Error::Target(
-                format!(
-                    "{failed}: signed in to Azure, but {subject} could not be read; nothing was \
-                 changed\n  next: check that it exists and that your account can read it: \
-                 `{hint}`"
-                )
-                .into(),
-            ),
-            (Err(_), Effect::Read) => Error::Target(
-                format!("{failed}; nothing was changed\n  next: run `{hint}` to see why").into(),
-            ),
-            (Ok(true), Effect::Write) => match self.refused_update(&failed, subject) {
-                Some(refused) => refused,
-                None => self.unknown_update(&failed, subject, hint),
-            },
-            (Err(_), Effect::Write) => self.unknown_update(&failed, subject, hint),
+            (Outcome::Done(out), _) => Ok(out),
+            (Outcome::Refused(_) | Outcome::Unknown { .. }, Effect::Read) => {
+                Err(az::failed(self.runner, ctx))
+            }
+            (
+                Outcome::Refused(_)
+                | Outcome::Unknown {
+                    status: Some(_), ..
+                },
+                Effect::Write,
+            ) => Err(self.failed_update(ctx)),
+            // The update never answered: it may or may not have been applied (NR-2).
+            (Outcome::Unknown { status: None, .. }, Effect::Write) => Err(self.unknown_update()),
         }
     }
 
-    /// The update failed while signed in: read the app back (inside the diagnosis, so the
-    /// `az said:` excerpt of the update stays, NR-31). When it still names the revision it
-    /// had before and its provisioning `Failed`, Azure refused the update and applied
-    /// nothing (Q14): a definite failure, exit 5, which a re-run would only repeat. `None`
-    /// when the read-back shows anything else or cannot be read (the outcome stays unknown).
-    fn refused_update(&self, failed: &str, subject: &str) -> Option<Error> {
-        let app = crate::runner::diagnosing(|| self.show()).ok()?;
+    /// An update that exited non-zero (FR-26), read back inside the diagnosis so its reply
+    /// stays the evidence (NR-31). The same latest revision and no update in progress means
+    /// Azure applied nothing (06.03, Q14): a definite refusal that re-running would only
+    /// repeat, decided by opv's own read-back, never by `az`'s wording. Signed out of the
+    /// person's own Azure sign-in is that sign-in. Anything else leaves the outcome unknown
+    /// (NR-2), which `sync` reconciles by reading the bindings back.
+    fn failed_update(&self, ctx: DiagnoseContext) -> Error {
+        // Taken first: a read-back that fails must not take the update's observation.
+        let Some((seen, up)) = az::take_failure() else {
+            return self.unknown_update();
+        };
+        if crate::runner::diagnosing(|| self.read_back()) {
+            let refused = Cause::TargetRefused {
+                system: System::Azure,
+                subject: self.app_ref(),
+                why: Refusal::NoRevision,
+                env: ctx.env,
+                target: ctx.target,
+                seen,
+            };
+            return az::report(refused, up);
+        }
+        let own = matches!(seen.principal(), Principal::Person { .. });
+        if own
+            && crate::runner::diagnosing(|| az::signed_in(self.runner))
+                .is_ok_and(|signed_in| !signed_in)
+        {
+            return az::report(az::signed_out(), up);
+        }
+        self.unknown_update()
+    }
+
+    /// The update's outcome is not known (NR-2): exit 9, re-running is safe.
+    fn unknown_update(&self) -> Error {
+        Error::Unknown(
+            format!(
+                "az containerapp update did not confirm the update of container app {} in \
+                 resource group {}; it may or may not have been applied, and Azure keeps the \
+                 previous revision serving until a new one is ready",
+                self.app(),
+                self.rg()
+            )
+            .into(),
+        )
+    }
+
+    /// After a failed update: true when the app still names the revision it had before and
+    /// no update is in progress (Azure applied nothing); false when it shows a new revision,
+    /// an update in progress, or cannot be read.
+    fn read_back(&self) -> bool {
+        let Ok(app) = self.show() else {
+            return false;
+        };
         let latest = app
             .pointer("/properties/latestRevisionName")
             .and_then(Value::as_str)
             .filter(|r| !r.is_empty());
         let before = self.before_update.borrow();
-        if provisioning_state(&app) != "Failed" || latest != before.as_deref() {
-            return None;
-        }
-        let serving = latest.map_or_else(
-            || "it has no revision yet".to_string(),
-            |r| format!("revision {r} keeps serving"),
-        );
-        Some(
-            Error::Target(
-                format!(
-                    "{failed}: Azure refused the update for {subject} and applied nothing \
-                     (provisioningState Failed, no new revision); {serving}"
-                )
-                .into(),
-            )
-            .with_code(crate::error::Code::UpdateRefused)
-            .with_do(format!(
-                "check that the app identity ({}) can read the referenced Key Vault secrets in \
-                 {}; opv doctor checks this",
-                self.target.identity, self.target.key_vault
-            )),
-        )
-    }
-
-    /// The update's outcome is not known (NR-2): exit 9, re-running is safe.
-    fn unknown_update(&self, failed: &str, subject: &str, hint: &str) -> Error {
-        Error::Unknown(
-            format!(
-                "{failed} for {subject}; the update may or may not have been applied, and Azure \
-                 keeps the previous revision serving until a new one is ready\n  next: check \
-                 that the app identity can read the referenced Key Vault secrets (opv doctor \
-                 checks this) and `{hint}`, then re-run the same command"
-            )
-            .into(),
-        )
+        provisioning_state(&app) != "InProgress" && latest == before.as_deref()
     }
 
     fn show(&self) -> Result<Value, Error> {
@@ -321,8 +322,7 @@ impl<'a> ContainerApp<'a> {
         let out = self.az(
             Effect::Read,
             WHAT,
-            &self.subject(),
-            &self.show_hint(),
+            self.app_ctx(),
             &[
                 "containerapp",
                 "show",
@@ -340,16 +340,10 @@ impl<'a> ContainerApp<'a> {
 
     fn revision_show(&self, rev: &str) -> Result<Value, Error> {
         const WHAT: &str = "containerapp revision show";
-        let hint = format!(
-            "az containerapp revision show -g {} -n {} --revision {rev}",
-            self.rg(),
-            self.app()
-        );
         let out = self.az(
             Effect::Read,
             WHAT,
-            &format!("revision {rev} of {}", self.subject()),
-            &hint,
+            self.app_ctx(),
             &[
                 "containerapp",
                 "revision",
@@ -379,7 +373,7 @@ impl<'a> ContainerApp<'a> {
                     .collect()
             })
             .unwrap_or_default();
-        let next = "next: set azure.container in secrets.toml to one of those names";
+        let next = "next: set azure.container to one of those names (opv config edit)";
         match &self.target.container {
             Some(want) => names.iter().position(|n| n == want).ok_or_else(|| {
                 Error::Config(
@@ -642,8 +636,8 @@ impl<'a> ContainerApp<'a> {
             .map(|(_, v)| v);
         let Some(entry) = attached else {
             return Ok(Err(format!(
-                "container app {name} does not have the user-assigned identity {id} that \
-                 secrets.toml names; attach it: `az containerapp identity assign -g {rg} -n \
+                "container app {name} does not have the user-assigned identity {id} that the \
+                 configuration names; attach it: `az containerapp identity assign -g {rg} -n \
                  {name} --user-assigned {id}`"
             )));
         };
@@ -653,8 +647,10 @@ impl<'a> ContainerApp<'a> {
         let out = self.az(
             Effect::Read,
             "identity show",
-            &format!("managed identity {id}"),
-            &format!("az identity show --ids {id}"),
+            DiagnoseContext {
+                env: self.env.map(EnvName::new),
+                ..DiagnoseContext::default()
+            },
             &["identity", "show", "--ids", id, "-o", "json"],
             None,
         )?;
@@ -677,22 +673,18 @@ impl PinnedRuntime for ContainerApp<'_> {
     }
 
     fn apply(&self, change: &RuntimeChange, snapshot: &RuntimeSnapshot) -> Result<Revision, Error> {
-        if let Some(name) = change
+        // The plan is built from the managed names only.
+        if change
             .pin
             .keys()
             .chain(change.set.keys())
             .chain(&change.unbind)
-            .find(|n| !self.managed.contains(*n))
+            .any(|n| !self.managed.contains(n))
         {
-            return Err(Error::Config(
-                format!(
-                    "{name} is not a managed env name of container app {}; nothing was changed\n  \
-                 next: run {} to see the managed names, then run opv again",
-                    self.app(),
-                    self.plan_command()
-                )
-                .into(),
-            ));
+            return Err(Cause::Bug {
+                site: "azure: a container app change names an env name opv does not manage",
+            }
+            .into());
         }
         let fresh = self.show()?;
         single_revision_mode(self.target, &fresh)?;
@@ -714,23 +706,13 @@ impl PinnedRuntime for ContainerApp<'_> {
         let idx = self.container_index(&doc)?;
         self.edit(&mut doc, idx, change)?;
         prune_superseded(&mut doc, &self.serving_refs(&fresh.spec.0)?);
-        let body = Zeroizing::new(serde_json::to_vec(&doc).map_err(|_| {
-            Error::Target(
-                format!(
-                    "could not encode the update for container app {}; nothing was changed\n  \
-                 next: run opv again",
-                    self.app()
-                )
-                .into(),
-            )
-        })?);
+        let body = Zeroizing::new(serde_json::to_vec(&doc).map_err(|_| encode_bug())?);
         *self.before_update.borrow_mut() = fresh.revision.as_ref().map(|r| r.0.clone());
         const WHAT: &str = "containerapp update";
         let out = self.az(
             Effect::Write,
             WHAT,
-            &self.subject(),
-            &self.show_hint(),
+            self.app_ctx(),
             &[
                 "containerapp",
                 "update",
@@ -859,16 +841,7 @@ impl PinnedRuntime for ContainerApp<'_> {
         if secrets.len() == before {
             return Ok(());
         }
-        let body = Zeroizing::new(serde_json::to_vec(&doc).map_err(|_| {
-            Error::Target(
-                format!(
-                    "could not encode the update for container app {}; nothing was pruned\n  \
-                 next: run opv again",
-                    self.app()
-                )
-                .into(),
-            )
-        })?);
+        let body = Zeroizing::new(serde_json::to_vec(&doc).map_err(|_| encode_bug())?);
         *self.before_update.borrow_mut() = app
             .pointer("/properties/latestRevisionName")
             .and_then(Value::as_str)
@@ -876,8 +849,7 @@ impl PinnedRuntime for ContainerApp<'_> {
         self.az(
             Effect::Write,
             "containerapp update",
-            &self.subject(),
-            &self.show_hint(),
+            self.app_ctx(),
             &[
                 "containerapp",
                 "update",
@@ -928,7 +900,6 @@ impl PinnedRuntime for ContainerApp<'_> {
             Err(reason) => return Ok(each(reason)),
         };
         let kv = &self.target.key_vault;
-        let kv_subject = format!("Key Vault {kv}");
         let kv_hint = format!(
             "az keyvault show -n {kv} --subscription {}",
             self.target.subscription
@@ -936,8 +907,7 @@ impl PinnedRuntime for ContainerApp<'_> {
         let out = self.az(
             Effect::Read,
             "keyvault show",
-            &kv_subject,
-            &kv_hint,
+            self.vault_ctx(),
             &["keyvault", "show", "-n", kv, "-o", "json"],
             None,
         )?;
@@ -966,8 +936,7 @@ impl PinnedRuntime for ContainerApp<'_> {
         let out = self.az(
             Effect::Read,
             "role assignment list",
-            &kv_subject,
-            &kv_hint,
+            self.vault_ctx(),
             &[
                 "role",
                 "assignment",
@@ -1053,6 +1022,14 @@ pub fn secret_name(store_name: &str, version: &str) -> String {
         store_name.to_ascii_lowercase()
     )));
     format!("{SECRET_PREFIX}{}", &digest[..16])
+}
+
+/// A JSON value opv built itself could not be encoded: nothing was sent.
+fn encode_bug() -> Error {
+    Cause::Bug {
+        site: "azure: encoding a container app update",
+    }
+    .into()
 }
 
 /// Parses a read's output; nothing has changed when it fails.
@@ -1506,20 +1483,18 @@ mod tests {
     fn bindings_when_signed_out_is_auth_error() {
         let (t, m) = (target(), managed());
         let r = FakeRunner::new(failed_read(1).chain([Output::failure(1)]));
-        assert!(matches!(
-            adapter(&r, &t, &m).bindings(),
-            Err(Error::Auth(_))
-        ));
+        let e = adapter(&r, &t, &m).bindings().unwrap_err();
+        assert_eq!(e.code_str(), "target_not_signed_in");
     }
 
     #[test]
-    fn bindings_when_signed_in_is_target_error() {
+    /// 06.02: signed in per `az account show` is no proof the app is missing or a role is;
+    /// opv shows az's reply instead of guessing.
+    fn bindings_when_signed_in_shows_azs_reply_unrecognized() {
         let (t, m) = (target(), managed());
         let r = FakeRunner::new(failed_read(3).chain([Output::success("")]));
-        assert!(matches!(
-            adapter(&r, &t, &m).bindings(),
-            Err(Error::Target(_))
-        ));
+        let e = adapter(&r, &t, &m).bindings().unwrap_err();
+        assert_eq!(e.code_str(), "unrecognized_failure");
     }
 
     #[test]
@@ -1527,10 +1502,8 @@ mod tests {
         let (t, m) = (target(), managed());
         let r = FakeRunner::default();
         r.push_io_error(io::ErrorKind::NotFound);
-        assert!(matches!(
-            adapter(&r, &t, &m).bindings(),
-            Err(Error::Dependency(_))
-        ));
+        let e = adapter(&r, &t, &m).bindings().unwrap_err();
+        assert_eq!(e.code_str(), "dependency_missing");
     }
 
     // ---- apply ----
@@ -1755,21 +1728,7 @@ mod tests {
         let mut c = no_change();
         c.set.insert("OTHER".into(), NEW_CONFIG.into());
         let (_, res) = apply_on(&show(), &show(), &c);
-        assert!(matches!(res, Err(Error::Config(_))));
-    }
-
-    #[test]
-    fn a_refused_unmanaged_name_names_the_plan_of_its_environment() {
-        let mut c = no_change();
-        c.set.insert("OTHER".into(), NEW_CONFIG.into());
-        let snap = snapshot_of(&show());
-        let (t, m) = (target(), managed());
-        let r = FakeRunner::default();
-        let e = adapter(&r, &t, &m)
-            .for_env("prod")
-            .apply(&c, &snap)
-            .unwrap_err();
-        assert!(e.mentions("opv plan prod "), "{e:?}");
+        assert_eq!(res.err().map(|e| e.code_str()), Some("internal_error"));
     }
 
     #[test]
@@ -1779,19 +1738,18 @@ mod tests {
     }
 
     #[test]
-    fn failed_update_when_signed_out_is_auth_error() {
+    fn failed_update_when_signed_out_is_not_signed_in() {
         let snap = snapshot_of(&show());
         let (t, m) = (target(), managed());
-        let r = FakeRunner::new([
-            out(&show()),
-            out(&serving_revision()),
-            Output::failure(1),
-            Output::failure(1),
-        ]);
-        assert!(matches!(
-            adapter(&r, &t, &m).apply(&repin(), &snap),
-            Err(Error::Auth(_))
-        ));
+        // The update fails, its read-back fails, then `az account show` fails.
+        let r = FakeRunner::new(
+            [out(&show()), out(&serving_revision()), Output::failure(1)]
+                .into_iter()
+                .chain(failed_read(1))
+                .chain([Output::failure(1)]),
+        );
+        let e = adapter(&r, &t, &m).apply(&repin(), &snap).unwrap_err();
+        assert_eq!(e.code_str(), "target_not_signed_in");
     }
 
     /// The app read back after a failed update: `provisioning` and `latest` as given.
@@ -1802,7 +1760,8 @@ mod tests {
         v
     }
 
-    /// An update that exits 1 while signed in, then `back` as the read-back.
+    /// An update that exits 1, then `back` as the read-back, then `az account show` signed
+    /// in (asked only when the read-back does not settle it).
     fn failed_update(r: &FakeRunner, back: &Value) -> Result<Revision, Error> {
         let snap = snapshot_of(&show());
         let (t, m) = (target(), managed());
@@ -1813,8 +1772,8 @@ mod tests {
             Output::failure(1),
             "ERROR: secret reference cannot be resolved",
         );
-        r.responses.borrow_mut().push_back(Ok(Output::success("")));
         r.responses.borrow_mut().push_back(Ok(out(back)));
+        r.responses.borrow_mut().push_back(Ok(Output::success("")));
         adapter(r, &t, &m).apply(&repin(), &snap)
     }
 
@@ -1838,7 +1797,17 @@ mod tests {
     fn refused_update_is_a_target_error() {
         let r = FakeRunner::default();
         let back = read_back("Failed", &latest_of(&show()));
-        assert!(matches!(failed_update(&r, &back), Err(Error::Target(_))));
+        assert_eq!(failed_update(&r, &back).map_err(|e| e.exit_code()), Err(5));
+    }
+
+    /// 06.03: a missing write right leaves the app `Succeeded` on its old revision; opv's
+    /// read-back shows nothing was applied, so it is a refusal, never "outcome unknown".
+    #[test]
+    fn update_refused_while_the_app_stays_succeeded_is_a_refusal() {
+        let r = FakeRunner::default();
+        let back = read_back("Succeeded", &latest_of(&show()));
+        let e = failed_update(&r, &back).unwrap_err();
+        assert_eq!(e.code_str(), "update_refused");
     }
 
     #[test]
@@ -1854,8 +1823,8 @@ mod tests {
     fn refused_update_keeps_the_az_excerpt() {
         let r = FakeRunner::default();
         let back = read_back("Failed", &latest_of(&show()));
-        let _ = failed_update(&r, &back);
-        assert!(crate::runner::take_failure_excerpt().is_some());
+        let e = failed_update(&r, &back).unwrap_err();
+        assert!(e.cause().and_then(|(_, up)| up).is_some());
     }
 
     /// I6: a read that never answers before any write is Azure's outage (exit 9).
@@ -1866,15 +1835,6 @@ mod tests {
         r.push_unknowns("timeout", crate::runner::READ_ATTEMPTS);
         let e = adapter(&r, &t, &m).bindings().unwrap_err();
         assert_eq!(e.code(), crate::error::Code::ProviderUnavailable);
-    }
-
-    #[test]
-    fn unanswered_read_names_the_azure_status_page() {
-        let (t, m) = (target(), managed());
-        let r = FakeRunner::default();
-        r.push_unknowns("timeout", crate::runner::READ_ATTEMPTS);
-        let e = adapter(&r, &t, &m).bindings().unwrap_err();
-        assert!(e.mentions(az::AZ_CLI.status_page), "{e}");
     }
 
     /// I2: after this run's first write an unanswered read is exit 9 and never claims

@@ -15,7 +15,7 @@
 //! `$XDG_RUNTIME_DIR` owned by the user; macOS refuses); (2) directories left by killed runs
 //! (their pid gone) are removed; (3) a fresh directory is created and checked private;
 //! (4) `az login --service-principal -u <client id> -t <tenant> -p @<hand-off>
-//! --only-show-errors -o none` runs once, the secret through the platform's hand-off
+//! --allow-no-subscriptions --only-show-errors -o none` runs once, the secret through the platform's hand-off
 //! (stdin, or a user-only named pipe on Windows; SR-3); (5) every `az` call of the run
 //! carries `AZURE_CONFIG_DIR`; (6) the directory is removed when the run ends, on success,
 //! error and Ctrl-C / SIGTERM (the signal handler), with retries on Windows, where az's
@@ -26,13 +26,13 @@ use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::az::{AZ_CLI, Effect, ONLY_SHOW_ERRORS, PROGRAM, invoke_env};
+use super::az::{self, Effect, ONLY_SHOW_ERRORS, PROGRAM, invoke_env};
+use crate::cause::{Cause, DiagnoseContext, Principal};
 use crate::domain::{Kind, SecretValue};
 use crate::error::{Code, Error};
-use crate::host::Host;
 use crate::provider::{CredentialField, DeployLogin};
 use crate::ramdir::{PrivateDir, owned_dir, ram_backed, sweep};
-use crate::runner::{Outcome, unknown_text};
+use crate::runner::Outcome;
 
 /// The fields an Azure `deploy_credentials` item holds.
 pub const FIELDS: &[CredentialField] = &[
@@ -54,10 +54,12 @@ pub const FIELDS: &[CredentialField] = &[
 pub const DIR_PREFIX: &str = if cfg!(windows) { "opv-az-" } else { "opv-az." };
 
 /// The refusal when this machine has no safe place for az's stored secret (nothing read or
-/// changed).
+/// changed). The way out is a machine that has one (06.49): removing `deploy_credentials`
+/// would change how everyone deploys the environment, for a limit of this machine alone.
 pub const NO_RAM_DIR: &str = "deploy credentials for Azure need a private RAM directory \
      ($XDG_RUNTIME_DIR on tmpfs), which this machine doesn't have; nothing was read or \
-     changed\n  next: sign in with az login and remove deploy_credentials, or use OIDC in CI";
+     changed\n  next: run this from a Linux login session (its XDG_RUNTIME_DIR is on tmpfs) \
+     or in CI";
 
 /// The Azure CLI signed in as the environment's service principal, in a private directory
 /// removed on drop.
@@ -101,24 +103,18 @@ fn start_windows(base: Option<PathBuf>) -> Result<AzureLogin, Error> {
         .ok_or_else(|| {
             Error::Policy(
                 "deploy credentials for Azure need %LOCALAPPDATA%\\Temp for a private az \
-             directory, which was not found; nothing was read or changed\n  next: sign in \
-             with az login and remove deploy_credentials"
+             directory, which was not found; nothing was read or changed\n  next: run this \
+             from a Windows login session that has %LOCALAPPDATA%, or in CI"
                     .into(),
             )
             .with_code(Code::RamDirUnavailable)
         })?;
     sweep(&base, DIR_PREFIX);
     let dir = PrivateDir::create(&base, DIR_PREFIX).map_err(|e| {
-        Error::Policy(
-            format!(
-                "cannot create a private az directory under {} ({:?}); nothing was read or \
-             changed\n  next: sign in with az login and remove deploy_credentials",
-                base.display(),
-                e.kind()
-            )
-            .into(),
-        )
-        .with_code(Code::RamDirUnavailable)
+        Error::from(Cause::PrivateDirFailed {
+            dir: base.clone(),
+            io: e.kind().into(),
+        })
     })?;
     Ok(AzureLogin { dir })
 }
@@ -177,8 +173,7 @@ fn check_store(dir: &Path, windows: bool) -> Result<(), Error> {
         return Err(Error::Policy(
             "az did not store the deploy credentials encrypted (DPAPI) in opv's private \
              directory, so it was removed; nothing was changed\n  next: remove any az \
-             setting that turns off token cache encryption, or sign in with az login and \
-             remove deploy_credentials"
+             setting that turns off token cache encryption (AZURE_CORE_ENCRYPT_TOKEN_CACHE)"
                 .into(),
         ));
     }
@@ -235,6 +230,8 @@ impl DeployLogin for AzureLogin {
                 )));
             }
         }
+        // `--allow-no-subscriptions`: a service principal with no role on any subscription
+        // still signs in, so the subscription preflight names the subscription (06.18).
         let args = [
             "login",
             "--service-principal",
@@ -244,55 +241,35 @@ impl DeployLogin for AzureLogin {
             tenant.expose(),
             "-p",
             "@/dev/stdin",
+            "--allow-no-subscriptions",
             ONLY_SHOW_ERRORS,
             "-o",
             "none",
         ];
         let env = self.az_env();
-        let rejected =
-            |status: String| {
-                Error::Auth(format!(
-                "deploy credentials: az login --service-principal failed ({status}); nothing \
-                 was changed\n  next: check AZURE_TENANT_ID, AZURE_CLIENT_ID and \
-                 AZURE_CLIENT_SECRET in the deploy_credentials item (an expired client \
-                 secret is the usual cause)"
-            ).into())
-            };
-        let outcome = invoke_env(
-            r,
-            Effect::Write,
-            "login",
-            &args,
-            Some(secret.expose().as_bytes()),
-            &[],
-            &env,
-        )
-        .map_err(|e| match e {
-            Error::Dependency(m) if m.contains("not found on PATH") => Error::Dependency(
-                format!(
-                    "{PROGRAM} not found on PATH\n  {}",
-                    Host::detect().install_hint(AZ_CLI)
-                )
-                .into(),
-            ),
-            e => e,
+        // The call is the service principal's, so a failure is never blamed on the
+        // person's own sign-in, nor on the credentials without proof (06.18).
+        let principal = Principal::ServicePrincipal {
+            client_id: client.expose().to_string(),
+        };
+        let outcome = crate::runner::under_deploy(principal, || {
+            invoke_env(
+                r,
+                Effect::Write,
+                "login",
+                &args,
+                Some(secret.expose().as_bytes()),
+                &[],
+                &env,
+            )
         })?;
         match outcome {
             Outcome::Done(_) => check_store(self.dir.path(), cfg!(windows)),
-            Outcome::Refused(o) => Err(rejected(format!("exit {}", o.status))),
-            Outcome::Unknown {
-                status: Some(s), ..
-            } => Err(rejected(format!("exit {s}"))),
-            // `az login` never answered: Azure or the network, which re-running can get past.
-            Outcome::Unknown { reason, .. } => Err(Error::Unknown(
-                format!(
-                    "deploy credentials: {}; nothing was changed. Check {}, then re-run",
-                    unknown_text("az login", reason),
-                    AZ_CLI.status_page
-                )
-                .into(),
-            )
-            .with_code(Code::ProviderUnavailable)),
+            // A sign-in changes no target: an exit is shown with az's reply, and a call that
+            // never answered is Azure or the network (`Unavailable`), safe to re-run.
+            Outcome::Refused(_) | Outcome::Unknown { .. } => {
+                Err(az::failed(r, DiagnoseContext::default()))
+            }
         }
     }
 

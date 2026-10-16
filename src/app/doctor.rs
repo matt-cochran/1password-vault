@@ -1530,7 +1530,7 @@ mod tests {
         );
         let (_, out) = doctor(crate::config::parse(AZURE), &r);
         assert!(
-            out.contains("FAIL  az login: authentication error: not logged in to Azure"),
+            out.contains("FAIL  az login: you are not signed in to Azure"),
             "{out}"
         );
     }
