@@ -432,7 +432,10 @@ fn vault_in_no_account_on_the_machine_has_no_account_unasked() {
 fn vault_not_searched_when_op_lists_no_accounts_is_not_marked_searched() {
     assert!(matches!(
         located(VaultSearch::NotSearched),
-        Cause::InOtherAccount { searched: false, .. }
+        Cause::InOtherAccount {
+            searched: false,
+            ..
+        }
     ));
 }
 
