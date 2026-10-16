@@ -342,7 +342,8 @@ pub fn verbose_line(call: &Call, elapsed: Duration, outcome: &str) -> String {
 enum Attempt {
     Exited(Output),
     TimedOut,
-    Killed,
+    /// Ended by this signal (not opv's own timeout kill).
+    Killed(i32),
     Lost,
     OverCap,
 }
@@ -352,7 +353,7 @@ impl Attempt {
         match self {
             Attempt::Exited(o) => status_text(o.status),
             Attempt::TimedOut => "timeout".into(),
-            Attempt::Killed => "killed".into(),
+            Attempt::Killed(_) => "killed".into(),
             Attempt::Lost => "lost".into(),
             Attempt::OverCap => status_text(OVER_CAP),
         }
@@ -529,6 +530,7 @@ mod failure {
     use std::cell::{Cell, RefCell};
 
     use super::Stderr;
+    use crate::cause::Observed;
 
     struct Failed {
         call: u64,
@@ -540,6 +542,7 @@ mod failure {
         static CALL: Cell<u64> = const { Cell::new(0) };
         static DIAGNOSING: Cell<u32> = const { Cell::new(0) };
         static LAST: RefCell<Option<Failed>> = const { RefCell::new(None) };
+        static OBSERVED: RefCell<Option<(u64, Observed)>> = const { RefCell::new(None) };
     }
 
     /// A call starts: its id, after clearing the slot. `None` inside [`diagnosing`]: the
@@ -549,6 +552,7 @@ mod failure {
             return None;
         }
         LAST.with(|l| l.borrow_mut().take());
+        OBSERVED.with(|o| o.borrow_mut().take());
         Some(CALL.with(|c| {
             c.set(c.get() + 1);
             c.get()
@@ -567,6 +571,19 @@ mod failure {
                 stderr,
             })
         });
+    }
+
+    /// Call `call` failed as `seen`; kept only while it is still the latest call.
+    pub(super) fn observe(call: Option<u64>, seen: Observed) {
+        let Some(call) = call.filter(|id| *id == CALL.with(Cell::get)) else {
+            return;
+        };
+        OBSERVED.with(|o| *o.borrow_mut() = Some((call, seen)));
+    }
+
+    pub(super) fn take_observed() -> Option<Observed> {
+        let (call, seen) = OBSERVED.with(|o| o.borrow_mut().take())?;
+        (call == CALL.with(Cell::get)).then_some(seen)
     }
 
     pub(super) fn not_found() -> bool {
@@ -656,11 +673,165 @@ pub fn take_failure_excerpt() -> Option<crate::scrub::Excerpt> {
     failure::take()
 }
 
+/// What the runner observed about the failed call the error at hand came from (a non-zero
+/// exit, a timeout, a signal or a spawn failure), with its [`CallId`](crate::cause::CallId)
+/// and the principal in effect; taken once, and dropped by any later call exactly like
+/// [`take_failure_excerpt`] (design §5 "Sealing").
+pub fn take_observed() -> Option<crate::cause::Observed> {
+    failure::take_observed()
+}
+
+/// Run `f` with `principal` (an environment's deploy credentials, FR-40) in effect: every
+/// call made inside it that fails is observed under it instead of the person or a shell
+/// token. The runner that adds a deploy identity to calls (`EnvRunner`) wraps the calls of
+/// the programs its sign-in gives an environment to.
+pub fn under_deploy<T>(principal: crate::cause::Principal, f: impl FnOnce() -> T) -> T {
+    observe::under_deploy(principal, f)
+}
+
 /// Run `f`, the read-only diagnosis of the call that just failed (FR-26): its probes keep
 /// that call's excerpt instead of starting a new one (NR-31). Used only on failure paths.
 pub fn diagnosing<T>(f: impl FnOnce() -> T) -> T {
     let _scope = failure::Diagnosis::enter();
     f()
+}
+
+/// Names a failed call and the principal it ran under (design §5): the only place an
+/// [`Observed`](crate::cause::Observed) is built.
+mod observe {
+    use std::cell::RefCell;
+    use std::io;
+
+    use super::{Attempt, Call, Stderr};
+    use crate::cause::{CallId, ExitClass, Observed, Principal, System, VarName};
+
+    thread_local! {
+        static DEPLOY: RefCell<Option<Principal>> = const { RefCell::new(None) };
+    }
+
+    /// Restores the principal in effect before [`under_deploy`] when dropped.
+    struct Restore(Option<Principal>);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let prev = self.0.take();
+            DEPLOY.with(|d| *d.borrow_mut() = prev);
+        }
+    }
+
+    pub(super) fn under_deploy<T>(principal: Principal, f: impl FnOnce() -> T) -> T {
+        let prev = DEPLOY.with(|d| d.borrow_mut().replace(principal));
+        let _restore = Restore(prev);
+        f()
+    }
+
+    /// The external system `program` belongs to, from its file name (`op`, `op.exe`,
+    /// `/usr/bin/flyctl`); `None` for a program outside the external systems.
+    fn system(program: &str) -> Option<System> {
+        let name = std::path::Path::new(program)
+            .file_stem()
+            .and_then(|n| n.to_str())
+            .unwrap_or(program);
+        Some(match name {
+            "op" => System::OnePassword,
+            "flyctl" | "fly" => System::Fly,
+            "az" => System::Azure,
+            "kubectl" => System::Kubernetes,
+            "gh" => System::GitHub,
+            "ssh" => System::Ssh,
+            "opv" => System::RemoteOpv,
+            _ => return None,
+        })
+    }
+
+    /// The call's name (design §5): the program and its words up to `--` (so `op run`'s
+    /// child command is never part of it), each `name=value` word cut to its name. stdin is
+    /// never read. `None` for a program outside the external systems.
+    pub(super) fn call_id(call: &Call) -> Option<CallId> {
+        let system = system(call.program)?;
+        let words = call
+            .args
+            .iter()
+            .take_while(|w| **w != "--")
+            .map(|w| w.split_once('=').map_or(*w, |(name, _)| name).to_string())
+            .collect();
+        Some(CallId {
+            system,
+            program: call.program.to_string(),
+            words,
+        })
+    }
+
+    /// Shell tokens that override `program`'s own sign-in (design §5).
+    fn shell_tokens(program: &str) -> &'static [&'static str] {
+        match system(program) {
+            Some(System::Fly) => &["FLY_API_TOKEN", "FLY_ACCESS_TOKEN"],
+            Some(System::GitHub) => &["GH_TOKEN", "GITHUB_TOKEN"],
+            Some(System::OnePassword) => &["OP_SERVICE_ACCOUNT_TOKEN"],
+            _ => &[],
+        }
+    }
+
+    /// True when `var` is set, non-empty, in the child's environment: the call's own env
+    /// (later entries win), then the program's pinned env, then opv's own. Only presence is
+    /// read; the value is never kept.
+    fn in_child_env(call: &Call, var: &str) -> bool {
+        let own = call
+            .env
+            .iter()
+            .rev()
+            .chain(super::pinned_env(call.program).iter())
+            .find(|(k, _)| *k == var)
+            .map(|(_, v)| !v.is_empty());
+        own.unwrap_or_else(|| std::env::var_os(var).is_some_and(|v| !v.is_empty()))
+    }
+
+    /// Who acted: the deploy credentials of [`under_deploy`], else a shell token present
+    /// for the program, else the person.
+    fn principal(call: &Call) -> Principal {
+        if let Some(p) = DEPLOY.with(|d| d.borrow().clone()) {
+            return p;
+        }
+        shell_tokens(call.program)
+            .iter()
+            .find(|var| in_child_env(call, var))
+            .map_or(Principal::Person { account: None }, |var| {
+                Principal::ShellToken {
+                    var: VarName::new(*var),
+                }
+            })
+    }
+
+    /// How a failed attempt ended; `None` for success and for the outcomes that are not a
+    /// call failure of their own (output over the cap, a lost pipe).
+    fn exit_class(res: &io::Result<(Attempt, Stderr)>) -> Option<ExitClass> {
+        match res {
+            Err(_) => Some(ExitClass::SpawnFailed),
+            Ok((Attempt::Exited(o), _)) if o.status != 0 => {
+                Some(ExitClass::Code { code: o.status })
+            }
+            Ok((Attempt::TimedOut, _)) => Some(ExitClass::TimedOut),
+            Ok((Attempt::Killed(signal), _)) => Some(ExitClass::Signal { signal: *signal }),
+            Ok(_) => None,
+        }
+    }
+
+    /// The observation of `call`'s attempt `res`, when it failed.
+    pub(super) fn failed(call: &Call, res: &io::Result<(Attempt, Stderr)>) -> Option<Observed> {
+        let exit = exit_class(res)?;
+        Some(Observed::from_failed_call(
+            call_id(call)?,
+            exit,
+            principal(call),
+        ))
+    }
+}
+
+/// Keep what the runner saw of `call`'s attempt `res` (call `id`) when it failed.
+fn observe_attempt(id: Option<u64>, call: &Call, res: &io::Result<(Attempt, Stderr)>) {
+    if let Some(seen) = observe::failed(call, res) {
+        failure::observe(id, seen);
+    }
 }
 
 fn left(e: &dyn Engine) -> Duration {
@@ -681,7 +852,9 @@ fn read_on(e: &dyn Engine, call: &Call, refused: &[i32]) -> io::Result<Outcome> 
         if limit.is_zero() {
             return Err(budget_spent(call));
         }
-        let (attempt, stderr) = attempt_on(e, call, limit)?;
+        let res = attempt_on(e, call, limit);
+        observe_attempt(id, call, &res);
+        let (attempt, stderr) = res?;
         let failed = match attempt {
             Attempt::Exited(o) if o.status == 0 => return Ok(Outcome::Done(o)),
             Attempt::Exited(o) if refused.contains(&o.status) => {
@@ -707,8 +880,8 @@ fn read_on(e: &dyn Engine, call: &Call, refused: &[i32]) -> io::Result<Outcome> 
             }
             Attempt::OverCap => return Ok(Outcome::Refused(Output::failure(OVER_CAP))),
             // opv's own interrupt never retries: the run is stopping (NR-12).
-            Attempt::Killed if signals::stopping() => return Ok(Outcome::unknown("killed")),
-            Attempt::Killed => Outcome::unknown("killed"),
+            Attempt::Killed(_) if signals::stopping() => return Ok(Outcome::unknown("killed")),
+            Attempt::Killed(_) => Outcome::unknown("killed"),
             Attempt::TimedOut => Outcome::unknown("timeout"),
             Attempt::Lost => Outcome::unknown("lost"),
         };
@@ -805,7 +978,9 @@ fn write_on(e: &dyn Engine, call: &Call) -> io::Result<Outcome> {
     if limit.is_zero() {
         return Err(budget_spent(call));
     }
-    let (attempt, stderr) = attempt_on(e, call, limit)?;
+    let res = attempt_on(e, call, limit);
+    observe_attempt(id, call, &res);
+    let (attempt, stderr) = res?;
     e.wrote(call.program);
     Ok(match attempt {
         Attempt::Exited(o) if o.status == 0 => Outcome::Done(o),
@@ -818,7 +993,7 @@ fn write_on(e: &dyn Engine, call: &Call) -> io::Result<Outcome> {
         }
         Attempt::OverCap => Outcome::unknown("failed-write"),
         Attempt::TimedOut => Outcome::unknown("timeout"),
-        Attempt::Killed => Outcome::unknown("killed"),
+        Attempt::Killed(_) => Outcome::unknown("killed"),
         Attempt::Lost => Outcome::unknown("lost"),
     })
 }
@@ -839,7 +1014,9 @@ fn probe_on(e: &dyn Engine, call: &Call, limit: Duration) -> io::Result<Output> 
     if limit.is_zero() {
         return Err(timed_out());
     }
-    let (attempt, stderr) = attempt_on(e, call, limit)?;
+    let res = attempt_on(e, call, limit);
+    observe_attempt(id, call, &res);
+    let (attempt, stderr) = res?;
     match attempt {
         Attempt::Exited(o) => {
             if o.status != 0 {
@@ -849,7 +1026,7 @@ fn probe_on(e: &dyn Engine, call: &Call, limit: Duration) -> io::Result<Output> 
         }
         Attempt::OverCap => Ok(Output::failure(OVER_CAP)),
         Attempt::TimedOut => Err(timed_out()),
-        Attempt::Killed => Err(io::ErrorKind::Interrupted.into()),
+        Attempt::Killed(_) => Err(io::ErrorKind::Interrupted.into()),
         Attempt::Lost => Err(io::ErrorKind::BrokenPipe.into()),
     }
 }
@@ -865,16 +1042,17 @@ fn exit_code(status: ExitStatus) -> i32 {
     status.code().unwrap_or(-1)
 }
 
-fn killed_by_signal(status: ExitStatus) -> bool {
+/// The signal that ended the child, if one did.
+fn killed_by_signal(status: ExitStatus) -> Option<i32> {
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
-        status.signal().is_some()
+        status.signal()
     }
     #[cfg(not(unix))]
     {
         let _ = status;
-        false
+        None
     }
 }
 
@@ -884,10 +1062,8 @@ fn killed_by_signal(status: ExitStatus) -> bool {
 fn exited_early(status: ExitStatus, over: bool) -> Option<Attempt> {
     if over {
         Some(Attempt::OverCap)
-    } else if killed_by_signal(status) {
-        Some(Attempt::Killed)
     } else {
-        None
+        killed_by_signal(status).map(Attempt::Killed)
     }
 }
 
@@ -1247,6 +1423,23 @@ fn with_account<'a>(program: &str, args: &[&'a str], env: &[(&'a str, &'a str)])
     out
 }
 
+/// Observe an inherited call (`op run -- <cmd>`, FR-4) that failed to start or exited
+/// non-zero, like a captured one. Its child command after `--` is never named.
+fn observe_inherited(call: &Call, env: &[(&str, &str)], status: &io::Result<ExitStatus>) {
+    let id = failure::begin();
+    let res = match status {
+        Err(e) => Err(io::Error::from(e.kind())),
+        Ok(st) => Ok((
+            match killed_by_signal(*st) {
+                Some(sig) => Attempt::Killed(sig),
+                None => Attempt::Exited(Output::failure(exit_code(*st))),
+            },
+            Stderr::default(),
+        )),
+    };
+    observe_attempt(id, &Call { env, ..*call }, &res);
+}
+
 /// Pseudo-random jitter without a dependency: a randomly keyed hash of the current instant.
 fn random_jitter() -> f64 {
     use std::hash::BuildHasher;
@@ -1397,8 +1590,9 @@ impl CommandRunner for ProcessRunner {
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
-            .status()?;
-        Ok(exit_code(status))
+            .status();
+        observe_inherited(&Call::new(program, args), env, &status);
+        Ok(exit_code(status?))
     }
 
     fn run_inherited(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> io::Result<i32> {
@@ -1412,8 +1606,9 @@ impl CommandRunner for ProcessRunner {
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
-            .status()?;
-        Ok(exit_code(status))
+            .status();
+        observe_inherited(&Call::new(program, args), env, &status);
+        Ok(exit_code(status?))
     }
 }
 
@@ -1421,8 +1616,8 @@ impl CommandRunner for ProcessRunner {
 /// running captured child (SIGQUIT as SIGTERM, so no core dump), which gets
 /// [`SIGNAL_GRACE`] before it is killed; the registered private directories are removed
 /// (SR-4); opv then exits 128 + the signal (130 for SIGINT, 143 for SIGTERM) with
-/// "interrupted during <step>; safe to re-run". Core dumps are disabled for opv and its
-/// children (SR-8). On Windows a console control handler (Ctrl-C, Ctrl-Break, closing the
+/// "interrupted during <step>; safe to re-run". Core dumps are disabled for every command by
+/// [`crate::hardening::harden`], the first statement of `main` (SR-8). On Windows a console control handler (Ctrl-C, Ctrl-Break, closing the
 /// console, log-off, shutdown) does the same: the console delivers the event to the child
 /// too, so opv waits for it, ends it after the grace period, cleans up and exits 130.
 pub mod signals {
@@ -1648,7 +1843,6 @@ pub mod signals {
     /// Install the handler (once, from `main`).
     #[cfg(unix)]
     pub fn install() -> std::io::Result<()> {
-        no_core_dumps();
         let mut signals = signal_hook::iterator::Signals::new(HANDLED)?;
         std::thread::spawn(move || {
             if let Some(sig) = signals.forever().find(|s| !ignored(*s)) {
@@ -1656,23 +1850,6 @@ pub mod signals {
             }
         });
         Ok(())
-    }
-
-    /// No core dump of opv's memory (or of a child's, which inherits the limit) can reach
-    /// the disk (SR-4, SR-8). Best effort.
-    #[cfg(unix)]
-    fn no_core_dumps() {
-        let zero = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        // SAFETY: a plain syscall with a valid, initialised struct.
-        unsafe { libc::setrlimit(libc::RLIMIT_CORE, &zero) };
-        #[cfg(target_os = "linux")]
-        // SAFETY: a plain prctl with integer arguments.
-        unsafe {
-            libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0)
-        };
     }
 
     /// Install the console control handler (once, from `main`): Ctrl-C, Ctrl-Break,
@@ -1947,6 +2124,21 @@ pub mod fake {
         }
     }
 
+    /// The signal a queued `Interrupted` (a kill) stands for: SIGKILL.
+    const FAKE_KILL_SIGNAL: i32 = 9;
+
+    /// The outcome a queued `io` error stands for (see the module docs); any other kind is a
+    /// spawn error.
+    fn attempt_for(kind: io::ErrorKind) -> io::Result<Attempt> {
+        Ok(match kind {
+            io::ErrorKind::TimedOut => Attempt::TimedOut,
+            io::ErrorKind::Interrupted => Attempt::Killed(FAKE_KILL_SIGNAL),
+            io::ErrorKind::ConnectionAborted => Attempt::Lost,
+            io::ErrorKind::OutOfMemory => Attempt::OverCap,
+            _ => return Err(kind.into()),
+        })
+    }
+
     impl Engine for FakeRunner {
         fn now(&self) -> Instant {
             self.start + self.elapsed.get()
@@ -1976,13 +2168,7 @@ pub mod fake {
             let index = self.calls.borrow().len();
             let attempt = match self.record(call.program, call.args, call.stdin, call.env, false) {
                 Ok(o) => Attempt::Exited(o),
-                Err(e) => match e.kind() {
-                    io::ErrorKind::TimedOut => Attempt::TimedOut,
-                    io::ErrorKind::Interrupted => Attempt::Killed,
-                    io::ErrorKind::ConnectionAborted => Attempt::Lost,
-                    io::ErrorKind::OutOfMemory => Attempt::OverCap,
-                    _ => return Err(e),
-                },
+                Err(e) => attempt_for(e.kind())?,
             };
             Ok((attempt, self.stderr_of(index)))
         }
@@ -2023,7 +2209,16 @@ pub mod fake {
             let id = super::failure::begin();
             self.elapsed.set(self.elapsed.get() + self.call_cost.get());
             let index = self.calls.borrow().len();
-            let out = self.record(call.program, call.args, call.stdin, call.env, false)?;
+            let res = self.record(call.program, call.args, call.stdin, call.env, false);
+            let seen = match &res {
+                Ok(o) => Ok((
+                    Attempt::Exited(Output::failure(o.status)),
+                    Stderr::default(),
+                )),
+                Err(e) => attempt_for(e.kind()).map(|a| (a, Stderr::default())),
+            };
+            super::observe_attempt(id, call, &seen);
+            let out = res?;
             let stderr = self.stderr_of(index);
             if out.status != 0 {
                 super::failure::record(id, call.program, stderr);
@@ -2077,6 +2272,10 @@ pub mod fake {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "runner_observed_tests.rs"]
+mod observed_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2393,7 +2592,7 @@ mod tests {
         use std::os::unix::process::ExitStatusExt;
         assert!(matches!(
             exited_early(ExitStatus::from_raw(9), false),
-            Some(Attempt::Killed)
+            Some(Attempt::Killed(9))
         ));
     }
 

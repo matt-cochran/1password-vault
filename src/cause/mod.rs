@@ -49,7 +49,6 @@ pub struct Observed {
 impl Observed {
     /// For the runner only (see the type's documentation).
     #[doc(hidden)]
-    #[allow(dead_code)] // its one caller, the runner, arrives with `runner-observed`
     pub(crate) fn from_failed_call(call: CallId, exit: ExitClass, principal: Principal) -> Self {
         Self {
             call,
