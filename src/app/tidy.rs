@@ -134,7 +134,20 @@ pub(crate) fn require_person(r: &dyn CommandRunner, what: &str) -> Result<(), Er
     let why = match identity(r) {
         Identity::Person => return Ok(()),
         Identity::ReadOnly => {
-            "this run is a service account, Connect or CI, for which 1Password is read-only"
+            // #157: `opv login` refuses here too, so the step is a person's own terminal.
+            return Err(Error::Policy(
+                format!(
+                    "{what} writes to 1Password, which only a person signed in with their own \
+                     session may do; this run is a service account, Connect or CI, for which \
+                     1Password is read-only; nothing written"
+                )
+                .into(),
+            )
+            .with_code(crate::error::Code::TerminalRequired)
+            .with_do(
+                "a person runs this in their own terminal, without OP_SERVICE_ACCOUNT_TOKEN, \
+                 OP_CONNECT_* or CI set",
+            ));
         }
         Identity::DeployCredentials => {
             "this run signed in with deploy credentials, for which 1Password is read-only"
@@ -145,11 +158,17 @@ pub(crate) fn require_person(r: &dyn CommandRunner, what: &str) -> Result<(), Er
             // not a policy refusal: in a person's terminal opv signs them in at op's own
             // prompt and runs the command again, which checks once more that a person is
             // signed in. Elsewhere the step names the project's account.
-            if matches!(
-                onepassword::diagnose(r, &Host::detect),
-                Ok(Session::NotSignedIn)
-            ) {
-                return Err(not_signed_in(what));
+            match onepassword::diagnose(r, &Host::detect) {
+                Ok(Session::NotSignedIn) => return Err(not_signed_in(what)),
+                // #157: no account on this machine is added first (`opv login --add`).
+                Ok(s @ Session::NoAccount) => {
+                    if let Some(e) =
+                        onepassword::session_error(s, &Host::detect(), Some(what), None)
+                    {
+                        return Err(e);
+                    }
+                }
+                _ => {}
             }
             "op whoami could not confirm a person signed in to 1Password"
         }
