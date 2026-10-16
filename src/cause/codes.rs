@@ -358,6 +358,12 @@ fn variants(c: &Cause) -> Vec<Cause> {
         Guard { .. } => vec![Guard {
             guard: super::Guard::Declined,
         }],
+        // L5: a dotenv file is a person's to fix; a setup recipe is not.
+        InputInvalid { .. } => vec![varied(c, |v| {
+            if let InputInvalid { kind, .. } = v {
+                *kind = InputKind::SetupRecipe;
+            }
+        })],
         CreateOutcomeUnknown { .. } => vec![varied(c, |v| {
             if let CreateOutcomeUnknown { refind, .. } = v {
                 *refind = Refind::ByTitle;
