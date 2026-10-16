@@ -385,9 +385,14 @@ impl Scenario {
 
     /// What a snapshot must not depend on: the scenario's path and the host's platform.
     fn normalize(&self, s: &str) -> String {
+        // macOS resolves the temp directory through a symlink (/var → /private/var), so
+        // opv may print either spelling of the scenario's path.
         let root = self.root.path().display().to_string();
-        let s = s.replace(&root, "<SCENARIO>");
-        let s = re(r#""platform":"(linux|wsl)""#).replace_all(&s, r#""platform":"<platform>""#);
+        let real = std::fs::canonicalize(self.root.path())
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| root.clone());
+        let s = s.replace(&real, "<SCENARIO>").replace(&root, "<SCENARIO>");
+        let s = re(r#""platform":"(linux|wsl|macos|windows)""#).replace_all(&s, r#""platform":"<platform>""#);
         let s = re(r"\bin \d+(\.\d+)? ?(ms|s)\b").replace_all(&s, "in <delay>");
         let s = re(r"rcpt-[0-9a-f]+").replace_all(&s, "rcpt-<id>");
         s.replace(" (op in WSL does not see the Windows app's accounts)", "")
