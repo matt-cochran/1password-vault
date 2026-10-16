@@ -147,7 +147,15 @@ pub fn choose_account_with(
     // In WSL with the Windows `op.exe`, accounts live in the Windows app: op's own prompt
     // is not reachable, so adding one is done in the app.
     let own_op = matches!(platform, Platform::Linux | Platform::Wsl) && !host.op_is_windows_exe();
-    let accounts = manifest::accounts(r);
+    // #157: an `op account list` that failed is not an empty list: never start adding an
+    // account because the list could not be read.
+    let accounts = match manifest::discover(r) {
+        manifest::Discovery::Listed(found) => found,
+        manifest::Discovery::OpMissing => {
+            return Err(crate::adapters::onepassword::op_missing(&host));
+        }
+        manifest::Discovery::Unavailable => return Err(discovery_unavailable()),
+    };
     const ADD: &str = "Add another 1Password account";
     let added = |now: &[manifest::Account]| {
         now.iter()
@@ -246,10 +254,22 @@ pub fn choose_account_with(
     Ok(Some(uuid))
 }
 
+/// `op account list` failed or printed something opv does not understand (#157): which
+/// accounts are on this machine is unknown, so nothing is chosen or added.
+fn discovery_unavailable() -> Error {
+    Error::Auth(
+        "op account list failed or printed something opv does not understand, so opv cannot \
+         tell which 1Password accounts are on this machine; nothing was chosen or added"
+            .into(),
+    )
+    .with_code(crate::error::Code::OpUnexpected)
+    .with_next("opv doctor")
+}
+
 /// Where op shares the 1Password app's accounts (macOS, Windows), an account is added in the
 /// app, not here.
 fn add_in_app(who: Option<&str>) -> Error {
-    Error::Config(
+    Error::Auth(
         format!(
             "on this system the 1Password CLI uses the 1Password app's accounts, so {} is added \
              in the app",
