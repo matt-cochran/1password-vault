@@ -101,9 +101,19 @@ pub struct Server {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Environment {
+pub struct DeploymentPlanScope {
     /// A declared environment name, not a path, command, credential, or value.
     environment: String,
+    /// Only these named targets (empty: every target of the environment), as
+    /// `opv plan --target` takes them.
+    #[serde(default)]
+    targets: Vec<String>,
+    /// Only this declared product.
+    #[serde(default)]
+    product: Option<String>,
+    /// `PRODUCT/KEY` immutable keys to plan as replaced even though present (`--rotate`).
+    #[serde(default)]
+    rotate: Vec<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -164,7 +174,12 @@ impl Server {
             f(&project)
         })
         .await
-        .unwrap_or_else(|_| json!({"ok": false, "code": "inspection_unavailable"}))
+        .unwrap_or_else(|_| {
+            failure(
+                "inspection_unavailable",
+                &code_hint("inspection_unavailable", "the same opv command"),
+            )
+        })
         .to_string()
     }
 }
@@ -191,11 +206,12 @@ impl Server {
 
     #[tool(
         name = "opv_deployment_plan",
-        description = "Preview deployment actions without executing them. Secret entry, layout repair, sync, deploy, prune, and rotation require explicit human approval and are not available through this server.",
+        description = "Preview deployment actions without executing them, for the whole environment or only the given targets, product and immutable keys to rotate (`PRODUCT/KEY`): each row's target, product, key and action, the plan_id, and the approve_command (with the same --target, --product and --rotate) a person runs in their own terminal. Sync, deploy, prune and rotation run only through an approved opv_sync (which never prunes an immutable key); secret entry and layout repair stay with the person.",
         annotations(read_only_hint = true, destructive_hint = false)
     )]
-    async fn deployment_plan(&self, Parameters(args): Parameters<Environment>) -> String {
-        self.inspect(Operation::Plan, Some(args.environment)).await
+    async fn deployment_plan(&self, Parameters(args): Parameters<DeploymentPlanScope>) -> String {
+        self.serialized(move |project| deployment_plan(project, &args))
+            .await
     }
 
     #[tool(
@@ -265,7 +281,7 @@ impl Server {
                 .chain(std::iter::once(&args.key))
                 .chain(args.environments.iter());
             if names.into_iter().any(|n| !identifier(n)) {
-                return structure_error("invalid_name", "Use declared names only.");
+                return failure("invalid_name", "Use declared names only.");
             }
             let k = crate::app::declare::Key {
                 product: args.product,
@@ -323,7 +339,7 @@ impl Server {
                     .values()
                     .any(|v| v.len() > 256 || v.chars().any(char::is_control))
             {
-                return structure_error(
+                return failure(
                     "invalid_name",
                     "Use declared names and public provider options only.",
                 );
@@ -394,11 +410,11 @@ impl Server {
             };
             let fleet = match config_store::locate(&req, &r).and_then(|found| found.load(&r)) {
                 Ok(fleet) => fleet,
-                Err(e) => return structure_failure(&e),
+                Err(e) => return structure_failure(&e, SYNC_CLI),
             };
             let (name, account) = match crate::app::structure::binding(project, &r) {
                 Ok(b) => b,
-                Err(e) => return structure_failure(&e),
+                Err(e) => return structure_failure(&e, SYNC_CLI),
             };
             r.use_account(Some(account.clone()));
             sync_approved(
@@ -477,12 +493,12 @@ pub(crate) fn sync_approved(
     consume: &mut crate::app::approve::Scoped<'_>,
 ) -> Value {
     if let Some(var) = credential_in_environment(vars) {
-        return json!({
-            "ok": false,
-            "code": "credential_in_environment",
-            "variable": var,
-            "human_action": "An approved sync runs with the person's own 1Password sign-in. Start the opv MCP server without op session tokens, service-account or Connect credentials in its environment, or let the person run opv sync in their own terminal."
-        });
+        let mut answer = failure(
+            "credential_in_environment",
+            "An approved sync runs with the person's own 1Password sign-in. Start the opv MCP server without op session tokens, service-account or Connect credentials in its environment, or let the person run opv sync in their own terminal.",
+        );
+        answer["variable"] = json!(var);
+        return answer;
     }
     let names = std::iter::once(&args.environment)
         .chain(args.targets.iter())
@@ -497,16 +513,13 @@ pub(crate) fn sync_approved(
         || !rotate_ok
         || args.rotate.len() > 20
     {
-        return structure_error("invalid_name", "Use declared names only.");
+        return failure("invalid_name", "Use declared names only.");
     }
     if !sync_plan_id(&args.plan_id) {
-        return structure_error("invalid_plan_id", "Call opv_deployment_plan for a plan_id.");
+        return failure("invalid_plan_id", "Call opv_deployment_plan for a plan_id.");
     }
     if !fleet.environments.contains_key(&args.environment) {
-        return structure_error(
-            "unknown_environment",
-            "Name a declared environment; opv_configuration lists them.",
-        );
+        return failure("unknown_env", &code_hint("unknown_env", SYNC_CLI));
     }
     crate::scrub::clear_mcp_registry();
     let _redaction_scope = RedactionScope;
@@ -534,6 +547,7 @@ pub(crate) fn sync_approved(
     );
     if let Err(e) = ran {
         let code = e.code().as_str();
+        let fallback = code_hint(code, SYNC_CLI);
         let human_action = match code {
             "stale_plan" => {
                 "The plan changed since it was approved; nothing was written and the approval was not used. Show the person the new plan and ask them to run approve_command in their own terminal."
@@ -542,13 +556,13 @@ pub(crate) fn sync_approved(
                 "No unused approval covers this exact plan and scope. Ask the person to run approve_command in their own terminal, then call opv_sync again."
             }
             "op_not_signed_in" | "auth_required" => {
-                "The person signs in (1Password desktop app integration, or the target's CLI) and retries."
+                "The person signs in (1Password desktop app integration, or the target's CLI) in their own terminal, then call opv_sync again."
             }
-            _ => {
-                "Nothing more is reported here; the person runs the same opv sync in their own terminal for details."
-            }
+            _ => fallback.as_str(),
         };
-        return json!({"ok": false, "code": code, "approve_command": approve_step(e.next_step()), "human_action": human_action});
+        let mut answer = error_failure(&e, human_action);
+        answer["approve_command"] = json!(approve_step(e.next_step()));
+        return answer;
     }
     let doc: Value = serde_json::from_slice(&report).unwrap_or(Value::Null);
     let names = |field: &str| -> Vec<String> {
@@ -581,7 +595,6 @@ pub(crate) fn sync_approved(
 enum Operation {
     Ready,
     Configuration,
-    Plan,
 }
 
 /// The enforcement boundary is beneath application orchestration, not tool hints.
@@ -618,8 +631,126 @@ impl<R: CommandRunner> CommandRunner for ReadOnly<R> {
     // step_summary intentionally retains the no-op default: no CI file writes.
 }
 
-fn inspection_error(code: &str) -> Value {
-    json!({"ok": false, "code": code, "human_action": "Run opv ready in your own terminal. Enter secret values only in 1Password. Review and approve any changes outside MCP."})
+/// The CLI command named in hints for `opv_sync` failures.
+const SYNC_CLI: &str = "opv sync <env> --approved <plan_id>";
+
+/// The hint for a `policy_refused` write: the CI, service-account, deploy-credential and
+/// unknown-identity refusals (`require_person`) all mean a person must run it themselves.
+const PERSON_WRITES: &str = "Writes to 1Password need a person signed in with their own session: the person runs it in their own terminal without CI, service-account, Connect or deploy credentials (signing in with opv login when asked).";
+
+/// True when only a person can take the next step for `code`: the error table's
+/// [`crate::error::Code::human_required`], and for the MCP-only codes, a credential in the
+/// server's environment.
+fn human_required(code: &str) -> bool {
+    code == "credential_in_environment"
+        || crate::error::Code::ALL
+            .iter()
+            .any(|c| c.as_str() == code && c.human_required())
+}
+
+/// A failure answer: `{ok: false, code, human_required, human_action}`. `human_action` is
+/// fixed text chosen by code, never an error message.
+fn failure(code: &str, human_action: &str) -> Value {
+    json!({"ok": false, "code": code, "human_required": human_required(code), "human_action": human_action})
+}
+
+/// `step` when it is one `opv …` command that runs as typed ([`crate::error::is_runnable`]):
+/// built by opv from names, so it carries no value. Anything else is dropped.
+fn runnable_opv(step: Option<&str>) -> Option<&str> {
+    step.filter(|s| {
+        s.starts_with("opv ")
+            && s.len() <= 200
+            && s.bytes().all(|b| b.is_ascii_graphic() || b == b' ')
+            && crate::error::is_runnable(s)
+    })
+}
+
+/// The answer for `e`: its code, whether a person must act, `human_action`, and its `next`
+/// and `do` when each is a runnable `opv` command. Never its message, which can quote
+/// upstream output.
+fn error_failure(e: &crate::error::Error, human_action: &str) -> Value {
+    let mut v = failure(e.code().as_str(), human_action);
+    if let Some(next) = runnable_opv(e.next_step()) {
+        v["next"] = json!(next);
+    }
+    if let Some(action) = runnable_opv(e.action()) {
+        v["do"] = json!(action);
+    }
+    v
+}
+
+/// The fixed hint for `code`, never an error message. `cli` is the CLI command a person
+/// runs in their own terminal for the full explanation.
+fn code_hint(code: &str, cli: &str) -> String {
+    let fixed = match code {
+        "op_not_signed_in"
+        | "auth_required"
+        | "desktop_app_unavailable"
+        | "sign_in_cancelled"
+        | "credential_rejected" => {
+            "The person signs in to 1Password (the desktop app, with its CLI integration on) in their own terminal, with the command in next when there is one, then call this tool again."
+        }
+        "account_not_registered" => {
+            "The person adds the project's 1Password account with opv login --add in their own terminal, then call this tool again."
+        }
+        "account_required" | "account_ambiguous" => {
+            "The person picks the project's 1Password account with opv login --account <email or account ID> in their own terminal, then call this tool again."
+        }
+        "unknown_env" => "Name a declared environment; opv_configuration lists them.",
+        "unknown_product" => "Name a declared product; opv_configuration lists them.",
+        "undeclared_key" => {
+            "Declare the key with opv_declare_key, then create its empty 1Password field with opv_structure_plan and opv_structure_apply."
+        }
+        "no_target" => "The environment has no deploy target; declare one with opv_declare_target.",
+        "config_not_found" => "There is no secrets.toml; a person creates it with opv init.",
+        "invalid_name" => {
+            "Use declared names only (letters, digits, '.', '_', '/' and '-'); opv_configuration lists them."
+        }
+        "usage" => "An argument is missing or not valid; check the tool's input.",
+        "vault_no_access" | "ids_not_in_account" => {
+            "The signed-in 1Password account cannot see a recorded vault: the person signs in to the account that owns it (opv login --account) or is granted access, then call this tool again."
+        }
+        "dependency_missing" => {
+            "op or a target CLI is missing or unusable: the person installs it (opv doctor shows which), then call this tool again."
+        }
+        "findings" | "keys_blocking" => {
+            "Keys are missing or failing a rule: the person fills them in 1Password (opv_ready lists them by name), then call this tool again."
+        }
+        "outcome_unknown" | "provider_unavailable" | "interrupted" | "config_changed" => {
+            "Nothing is known to be broken; call this tool again."
+        }
+        "policy_refused" => {
+            return format!(
+                "opv refused this and changed nothing. {PERSON_WRITES} Otherwise the person runs {cli} in their own terminal to see why."
+            );
+        }
+        "terminal_required" => {
+            return format!(
+                "This needs a change only a person makes (such as a layout repair): they run {cli} in their own terminal and follow it, then call this tool again."
+            );
+        }
+        "invalid_receipt" | "unsupported_receipt" | "inspection_unavailable" => {
+            return format!(
+                "opv could not build its report here; the person runs {cli} in their own terminal for details."
+            );
+        }
+        _ if human_required(code) => {
+            return format!(
+                "A person acts on this: they run {cli} in their own terminal, which explains it; secret values are entered only in 1Password."
+            );
+        }
+        _ => {
+            return format!(
+                "Fix the cause, then call this tool again; the person runs {cli} in their own terminal for details."
+            );
+        }
+    };
+    fixed.to_string()
+}
+
+/// A failure answer for `code` with its [`code_hint`].
+fn inspection_error(code: &str, cli: &str) -> Value {
+    failure(code, &code_hint(code, cli))
 }
 
 struct RedactionScope;
@@ -629,16 +760,22 @@ impl Drop for RedactionScope {
     }
 }
 
-fn inspect(project: &std::path::Path, operation: Operation, env: Option<&str>) -> Value {
-    crate::scrub::clear_mcp_registry();
-    let _redaction_scope = RedactionScope;
-    if env.is_some_and(|e| !identifier(e)) {
-        return inspection_error("invalid_environment");
-    }
-    let r = ReadOnly {
-        inner: ProcessRunner::new(Budget::starting_now(Duration::from_secs(20)), false),
+/// The read-only runner every inspection uses, with a `budget`.
+fn read_only(budget: Duration) -> ReadOnly<ProcessRunner> {
+    ReadOnly {
+        inner: ProcessRunner::new(Budget::starting_now(budget), false),
         refused: AtomicBool::new(false),
-    };
+    }
+}
+
+/// Inspection's runner budget.
+const INSPECT_BUDGET: Duration = Duration::from_secs(20);
+
+/// The project's configuration, loaded on `r`.
+fn load_fleet(
+    project: &std::path::Path,
+    r: &dyn CommandRunner,
+) -> Result<crate::domain::Fleet, crate::error::Error> {
     let req = config_store::Request {
         start: project.into(),
         config: None,
@@ -646,51 +783,147 @@ fn inspect(project: &std::path::Path, operation: Operation, env: Option<&str>) -
         manifest_only: false,
         account: config_store::account_env(),
     };
-    let fleet = match config_store::locate(&req, &r).and_then(|found| found.load(&r)) {
+    config_store::locate(&req, r).and_then(|found| found.load(r))
+}
+
+fn inspect(project: &std::path::Path, operation: Operation, env: Option<&str>) -> Value {
+    let cli = match operation {
+        Operation::Ready => "opv ready",
+        Operation::Configuration => "opv config describe",
+    };
+    crate::scrub::clear_mcp_registry();
+    let _redaction_scope = RedactionScope;
+    if env.is_some_and(|e| !identifier(e)) {
+        return inspection_error("invalid_name", cli);
+    }
+    let r = read_only(INSPECT_BUDGET);
+    let fleet = match load_fleet(project, &r) {
         Ok(fleet) => fleet,
-        Err(e) => return inspection_error(e.code().as_str()),
+        Err(e) => return error_failure(&e, &code_hint(e.code().as_str(), cli)),
     };
     if let Some(env) = env
         && !fleet.environments.contains_key(env)
     {
-        return inspection_error("unknown_environment");
+        return inspection_error("unknown_env", cli);
     }
     if matches!(operation, Operation::Configuration) {
         return configuration_projection(&fleet);
     }
     let mut bytes = zeroize::Zeroizing::new(Vec::new());
-    let result = match operation {
-        Operation::Ready => crate::app::ready::run(&fleet, None, env, &r, true, None, &mut *bytes),
-        Operation::Plan => crate::app::sync::plan_scoped(
-            &fleet,
-            env.expect("plan environment"),
-            None,
-            &r,
-            &mut *bytes,
-            true,
-        ),
-        Operation::Configuration => unreachable!(),
-    };
+    let result = crate::app::ready::run(&fleet, None, env, &r, true, None, &mut *bytes);
+    receipt_answer(&r, &bytes, result, cli, |doc| {
+        project_receipt(doc, Operation::Ready)
+    })
+}
+
+/// The answer for a CLI document in `bytes` that `result` produced on `r`: a refused write
+/// is `terminal_required`, an unreadable document the error (or `invalid_receipt`), else
+/// `project` of it, marked failed with the error's code and step when `result` failed.
+fn receipt_answer<R: CommandRunner>(
+    r: &ReadOnly<R>,
+    bytes: &[u8],
+    result: Result<(), crate::error::Error>,
+    cli: &str,
+    project: impl FnOnce(&Value) -> Value,
+) -> Value {
     if r.refused.load(Ordering::Relaxed) {
-        return inspection_error("human_approval_required");
+        return inspection_error("terminal_required", cli);
     }
-    let mut doc: Value = match serde_json::from_slice(&bytes) {
+    let mut doc: Value = match serde_json::from_slice(bytes) {
         Ok(v) => v,
         Err(_) => {
-            return inspection_error(
-                result
-                    .err()
-                    .map_or("invalid_receipt", |e| e.code().as_str()),
-            );
+            return match result {
+                Err(e) => error_failure(&e, &code_hint(e.code().as_str(), cli)),
+                Ok(()) => inspection_error("invalid_receipt", cli),
+            };
         }
     };
-    let mut response = project_receipt(&doc, operation);
+    let mut response = project(&doc);
     if let Err(error) = result {
+        let code = error.code().as_str();
         response["ok"] = json!(false);
-        response["code"] = json!(error.code().as_str());
+        response["code"] = json!(code);
+        response["human_required"] = json!(human_required(code));
+        if let Some(next) = runnable_opv(error.next_step()) {
+            response["next"] = json!(next);
+        }
     }
     crate::scrub::wipe_json(&mut doc);
     response
+}
+
+/// The CLI command named in hints for `opv_deployment_plan` failures.
+const PLAN_CLI: &str = "opv plan <env>";
+
+/// `opv_deployment_plan`: the plan `opv plan <env> [--target t]… [--product p] [--rotate
+/// P/K]… --json` prints ([`crate::app::sync::plan_rotating`]), projected, with the
+/// `approve_command` for exactly that scope.
+fn deployment_plan(project: &std::path::Path, args: &DeploymentPlanScope) -> Value {
+    crate::scrub::clear_mcp_registry();
+    let _redaction_scope = RedactionScope;
+    if let Some(refused) = plan_scope_refusal(args) {
+        return refused;
+    }
+    let r = read_only(INSPECT_BUDGET);
+    let fleet = match load_fleet(project, &r) {
+        Ok(fleet) => fleet,
+        Err(e) => return error_failure(&e, &code_hint(e.code().as_str(), PLAN_CLI)),
+    };
+    deployment_plan_from_fleet(&fleet, args, &r)
+}
+
+/// `invalid_name` when a name in `args` is not an identifier, a rotate entry is not
+/// `PRODUCT/KEY`, or there are more than 20 targets or rotate entries.
+fn plan_scope_refusal(args: &DeploymentPlanScope) -> Option<Value> {
+    let rotate_ok = args.rotate.iter().all(|r| {
+        r.split_once('/')
+            .is_some_and(|(p, k)| identifier(p) && identifier(k))
+    });
+    let bad = std::iter::once(&args.environment)
+        .chain(args.targets.iter())
+        .chain(args.product.iter())
+        .any(|n| !identifier(n))
+        || !rotate_ok
+        || args.targets.len() > 20
+        || args.rotate.len() > 20;
+    bad.then(|| inspection_error("invalid_name", PLAN_CLI))
+}
+
+/// [`deployment_plan`] on an already-loaded fleet and the read-only runner `r`.
+fn deployment_plan_from_fleet<R: CommandRunner>(
+    fleet: &crate::domain::Fleet,
+    args: &DeploymentPlanScope,
+    r: &ReadOnly<R>,
+) -> Value {
+    if !fleet.environments.contains_key(&args.environment) {
+        return inspection_error("unknown_env", PLAN_CLI);
+    }
+    let scope = plan_sync_scope(args);
+    let mut bytes = zeroize::Zeroizing::new(Vec::new());
+    let result = crate::app::sync::plan_rotating(
+        fleet,
+        &scope.env,
+        &scope.targets,
+        scope.product.as_deref(),
+        &scope.rotate,
+        r,
+        &mut *bytes,
+        true,
+    );
+    receipt_answer(r, &bytes, result, PLAN_CLI, |doc| plan_receipt(doc, &scope))
+}
+
+/// The sync scope a deployment plan's `approve_command` names: its targets, product and
+/// rotate entries; `--deploy` and `--prune` are the person's to add.
+fn plan_sync_scope(args: &DeploymentPlanScope) -> crate::app::approve::SyncScope {
+    crate::app::approve::SyncScope {
+        env: args.environment.clone(),
+        targets: args.targets.clone(),
+        product: args.product.clone(),
+        deploy: false,
+        prune: false,
+        rotate: args.rotate.clone(),
+    }
 }
 
 /// Credentials that would let this process write 1Password without the person's own
@@ -711,9 +944,22 @@ fn credential_in_environment(vars: impl Iterator<Item = (String, String)>) -> Op
         })
 }
 
-fn structure_error(code: &str, human_action: &str) -> Value {
-    json!({"ok": false, "code": code, "human_action": human_action})
+/// The refusal of a 1Password write when this process runs under CI (`CI` or
+/// `GITHUB_ACTIONS`): 1Password is read-only there (`require_person`), so it is refused
+/// before any call, like [`credential_in_environment`].
+fn ci_refusal(what: &str) -> Option<Value> {
+    crate::host::Host::detect().ci.then(|| {
+        let mut answer = failure(
+            "policy_refused",
+            &format!("{what} writes to 1Password, which is read-only under CI. {PERSON_WRITES}"),
+        );
+        answer["variable"] = json!("CI");
+        answer
+    })
 }
+
+/// The CLI command named in hints for `opv_delivery_preview` failures.
+const PREVIEW_CLI: &str = "opv run <env> --preview";
 
 /// `opv_delivery_preview`: validate the names with [`identifier`], load the project's
 /// configuration on a read-only runner, then answer with the shared preview document.
@@ -727,25 +973,12 @@ fn delivery_preview_doc(
         || product.is_some_and(|p| !identifier(p))
         || role.is_some_and(|r| !identifier(r))
     {
-        return structure_error(
-            "invalid_name",
-            "Use declared names only (letters, digits, '.', '_', '/' and '-').",
-        );
+        return inspection_error("invalid_name", PREVIEW_CLI);
     }
-    let r = ReadOnly {
-        inner: ProcessRunner::new(Budget::starting_now(Duration::from_secs(20)), false),
-        refused: AtomicBool::new(false),
-    };
-    let req = config_store::Request {
-        start: project.into(),
-        config: None,
-        project: None,
-        manifest_only: false,
-        account: config_store::account_env(),
-    };
-    let fleet = match config_store::locate(&req, &r).and_then(|found| found.load(&r)) {
+    let r = read_only(INSPECT_BUDGET);
+    let fleet = match load_fleet(project, &r) {
         Ok(fleet) => fleet,
-        Err(e) => return inspection_error(e.code().as_str()),
+        Err(e) => return error_failure(&e, &code_hint(e.code().as_str(), PREVIEW_CLI)),
     };
     delivery_preview_from_fleet(&fleet, environment, product, role, &r)
 }
@@ -760,29 +993,78 @@ fn delivery_preview_from_fleet(
     runner: &dyn CommandRunner,
 ) -> Value {
     if !fleet.environments.contains_key(environment) {
-        return inspection_error("unknown_environment");
+        return inspection_error("unknown_env", PREVIEW_CLI);
     }
     match crate::app::delivery_preview::build(fleet, environment, product, role, runner) {
         Ok(doc) => doc,
-        Err(e) => structure_error(
-            e.code().as_str(),
-            "Name a role the product's keys declare (or fix the configuration), then ask again.",
-        ),
+        Err(e) => preview_failure(fleet, environment, product, &e),
     }
 }
 
-/// The error answer for `e`: its code, and the new plan id when it is `stale_plan`. Never
-/// its text, which can quote upstream output.
-fn structure_failure(e: &crate::error::Error) -> Value {
+/// A preview failure with a hint for its cause: an undeclared product, a product to pick
+/// (with the products to pick from), a role to name (with the roles the product's keys
+/// declare) or a source-only product. Names only.
+fn preview_failure(
+    fleet: &crate::domain::Fleet,
+    environment: &str,
+    product: Option<&str>,
+    e: &crate::error::Error,
+) -> Value {
     let code = e.code().as_str();
-    let mut v = structure_error(
-        code,
-        if e.code().human_required() {
-            "A person acts on this in their own terminal (opv explains it there); secret values are entered only in 1Password."
-        } else {
-            "Fix the cause, then plan again."
-        },
-    );
+    let products: Vec<&str> = fleet
+        .products
+        .iter()
+        .filter(|(n, p)| !p.source_only && identifier(n))
+        .map(|(n, _)| n.as_str())
+        .collect();
+    let picked = crate::app::pick_product(fleet, environment, product, "run").ok();
+    let prod = picked.as_deref().and_then(|p| fleet.products.get(p));
+    let (hint, list) = match code {
+        "unknown_product" => (code_hint(code, PREVIEW_CLI), Some(("products", products))),
+        "usage" if picked.is_none() => (
+            "Several products (or none) have keys desired in this environment: name one with product; products lists them.".to_string(),
+            Some(("products", products)),
+        ),
+        "usage" => (
+            "This product's keys declare process roles: name one of roles with role (a role no key declares is refused).".to_string(),
+            Some((
+                "roles",
+                prod.map(crate::app::delivery_preview::declared_roles)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|r| identifier(r))
+                    .collect(),
+            )),
+        ),
+        "config_invalid" if prod.is_some_and(|p| p.source_only) => (
+            "This product is source-only: it holds shared values for other products' keys and is never run on its own. Name a product that uses it; products lists them.".to_string(),
+            Some(("products", products)),
+        ),
+        _ => (code_hint(code, PREVIEW_CLI), None),
+    };
+    let mut v = error_failure(e, &hint);
+    if let Some((field, names)) = list {
+        v[field] = json!(names);
+    }
+    v
+}
+
+/// The error answer for `e` on a structural or declaration tool: its code, whether a person
+/// must act, a hint by code, its runnable `next`, and the new plan id when it is
+/// `stale_plan`. Never its text, which can quote upstream output. `cli` is the command a
+/// person runs for details.
+fn structure_failure(e: &crate::error::Error, cli: &str) -> Value {
+    let code = e.code().as_str();
+    let hint = match code {
+        "approval_required" => {
+            "No unused approval covers this plan: the person runs opv approve <plan_id> in their own terminal, then call opv_structure_apply again.".to_string()
+        }
+        "policy_refused" => format!(
+            "opv refused this and changed nothing. {PERSON_WRITES} Otherwise fix the cause (the person runs {cli} in their own terminal to see it), then plan again."
+        ),
+        _ => code_hint(code, cli),
+    };
+    let mut v = error_failure(e, &hint);
     if let Some(id) = e
         .next_step()
         .and_then(|n| n.strip_prefix("opv approve "))
@@ -809,69 +1091,75 @@ fn declared(
     project: &std::path::Path,
     f: impl FnOnce(&dyn CommandRunner, &std::path::Path) -> Result<bool, crate::error::Error>,
 ) -> Value {
+    const CLI: &str = "opv add";
     let Some(path) = config_store::walk_up(project, "secrets.toml") else {
-        return structure_error(
+        return failure(
             "config_not_found",
             "Declarations edit secrets.toml; a person creates it with opv init.",
         );
     };
-    let r = ReadOnly {
-        inner: ProcessRunner::new(Budget::starting_now(Duration::from_secs(20)), false),
-        refused: AtomicBool::new(false),
-    };
+    let r = read_only(INSPECT_BUDGET);
     match f(&r, &path) {
-        _ if r.refused.load(Ordering::Relaxed) => inspection_error("human_approval_required"),
+        _ if r.refused.load(Ordering::Relaxed) => inspection_error("terminal_required", CLI),
         Ok(changed) => json!({
             "ok": true,
             "changed": changed,
             "human_action": "Call opv_structure_plan to see what this needs in 1Password; a person approves it with opv approve.",
         }),
-        Err(e) => structure_failure(&e),
+        Err(e) => structure_failure(&e, CLI),
     }
 }
+
+/// The CLI command named in hints for `opv_access` failures.
+const ACCESS_CLI: &str = "opv access <env>";
+
+/// `opv_access`'s runner budget: above the 1Password app's approval wait
+/// ([`crate::adapters::onepassword::APPROVAL_TIMEOUT`]), so the session check that follows
+/// a `wake` waiting on the app's prompt still has time to run.
+const ACCESS_BUDGET: Duration = Duration::from_secs(120);
 
 /// `opv access` as checked identifiers: what each CI or deploy identity needs, its state,
 /// and the owner's `opv access … --create` command for each identity missing a grant.
 fn access_projection(project: &std::path::Path, env: Option<&str>, target: Option<&str>) -> Value {
     if env.is_some_and(|e| !identifier(e)) || target.is_some_and(|t| !identifier(t)) {
-        return inspection_error("invalid_environment");
+        return inspection_error("invalid_name", ACCESS_CLI);
     }
     if target.is_some() && env.is_none() {
-        return structure_error(
-            "environment_required",
-            "Name the environment of the target.",
-        );
+        return failure("usage", "Name the environment of the target.");
     }
     crate::scrub::clear_mcp_registry();
     let _redaction_scope = RedactionScope;
-    let r = ReadOnly {
-        inner: ProcessRunner::new(Budget::starting_now(Duration::from_secs(60)), false),
-        refused: AtomicBool::new(false),
-    };
-    let req = config_store::Request {
-        start: project.into(),
-        config: None,
-        project: None,
-        manifest_only: false,
-        account: config_store::account_env(),
-    };
-    let fleet = match config_store::locate(&req, &r).and_then(|found| found.load(&r)) {
+    let r = read_only(ACCESS_BUDGET);
+    let fleet = match load_fleet(project, &r) {
         Ok(fleet) => fleet,
-        Err(e) => return inspection_error(e.code().as_str()),
+        Err(e) => return access_failure(&e),
     };
     let mut bytes = zeroize::Zeroizing::new(Vec::new());
     let result = crate::app::access::run(&fleet, env, target, None, &r, true, &mut *bytes);
     if r.refused.load(Ordering::Relaxed) {
-        return inspection_error("human_approval_required");
+        return inspection_error("terminal_required", ACCESS_CLI);
     }
     let Ok(doc) = serde_json::from_slice::<Value>(&bytes) else {
-        return structure_failure(
-            &result
-                .err()
-                .unwrap_or_else(|| crate::error::Error::Config("no report".into())),
-        );
+        return match result {
+            Err(e) => access_failure(&e),
+            Ok(()) => inspection_error("invalid_receipt", ACCESS_CLI),
+        };
     };
     access_answer(&doc)
+}
+
+/// An `opv_access` failure: its code, a hint by code (never "plan again": access plans
+/// nothing), and its runnable `next` (such as the `opv login --account …` that signs the
+/// person in to the project's account).
+fn access_failure(e: &crate::error::Error) -> Value {
+    let code = e.code().as_str();
+    let hint = match code {
+        "policy_refused" => format!(
+            "opv refused this check and changed nothing; the person runs {ACCESS_CLI} in their own terminal to see why."
+        ),
+        _ => code_hint(code, ACCESS_CLI),
+    };
+    error_failure(e, &hint)
 }
 
 /// The `opv access --json` document as the MCP answer, field by field (pure).
@@ -949,7 +1237,16 @@ fn access_answer(doc: &Value) -> Value {
                 Some(json!({"code": code, "next": next}))
             })
             .collect();
-        envs.push(json!({"environment": env_name, "identities": identities, "findings": findings}));
+        // What was checked and what could not be classified, as the CLI prints them: an
+        // answer whose every grant is not_visible checked nothing.
+        let count = |field: &str| e["report"][field].as_u64();
+        envs.push(json!({
+            "environment": env_name,
+            "identities": identities,
+            "findings": findings,
+            "checked": count("checked"),
+            "unclassified": count("unclassified"),
+        }));
     }
     json!({
         "ok": true,
@@ -960,12 +1257,10 @@ fn access_answer(doc: &Value) -> Value {
 }
 
 fn structure_plan(project: &std::path::Path) -> Value {
+    const CLI: &str = "opv structure plan";
     crate::scrub::clear_mcp_registry();
     let _redaction_scope = RedactionScope;
-    let r = ReadOnly {
-        inner: ProcessRunner::new(Budget::starting_now(Duration::from_secs(60)), false),
-        refused: AtomicBool::new(false),
-    };
+    let r = read_only(Duration::from_secs(60));
     let planned = crate::app::structure::scope(project, &r).and_then(|scope| {
         r.inner.use_account(Some(scope.account.clone()));
         let text = std::fs::read_to_string(&scope.path).map_err(|e| {
@@ -976,25 +1271,29 @@ fn structure_plan(project: &std::path::Path) -> Value {
         crate::app::structure::plan(&r, &text, &scope.project, &scope.account)
     });
     if r.refused.load(Ordering::Relaxed) {
-        return inspection_error("human_approval_required");
+        return inspection_error("terminal_required", CLI);
     }
     match planned {
         Ok(p) => plan_projection(&p),
-        Err(e) => structure_failure(&e),
+        Err(e) => structure_failure(&e, CLI),
     }
 }
 
 fn structure_apply(project: &std::path::Path, plan_id: &str) -> Value {
+    const CLI: &str = "opv structure apply <plan_id>";
     if !crate::app::structure::is_plan_id(plan_id) {
-        return structure_error("invalid_plan_id", "Call opv_structure_plan for a plan_id.");
+        return failure("invalid_plan_id", "Call opv_structure_plan for a plan_id.");
     }
     if let Some(var) = credential_in_environment(std::env::vars()) {
-        return json!({
-            "ok": false,
-            "code": "credential_in_environment",
-            "variable": var,
-            "human_action": "Structural writes go through the 1Password app, which asks the person to authorize them. Start the opv MCP server without op session tokens, service-account or Connect credentials in its environment, or run opv bootstrap in your own terminal instead."
-        });
+        let mut answer = failure(
+            "credential_in_environment",
+            "Structural writes go through the 1Password app, which asks the person to authorize them. Start the opv MCP server without op session tokens, service-account or Connect credentials in its environment, or run opv bootstrap in your own terminal instead.",
+        );
+        answer["variable"] = json!(var);
+        return answer;
+    }
+    if let Some(refused) = ci_refusal("The structural apply") {
+        return refused;
     }
     crate::scrub::clear_mcp_registry();
     let _redaction_scope = RedactionScope;
@@ -1012,7 +1311,7 @@ fn structure_apply(project: &std::path::Path, plan_id: &str) -> Value {
     });
     match applied {
         Ok(a) => applied_projection(&a),
-        Err(e) => structure_failure(&e),
+        Err(e) => structure_failure(&e, CLI),
     }
 }
 
@@ -1028,27 +1327,27 @@ fn generate(
     vars: impl Iterator<Item = (String, String)>,
 ) -> Value {
     if let Some(var) = credential_in_environment(vars) {
-        return json!({
-            "ok": false,
-            "code": "credential_in_environment",
-            "variable": var,
-            "human_action": "Generating writes through the 1Password app, which asks the person to authorize them. Start the opv MCP server without op session tokens, service-account or Connect credentials in its environment, or run opv generate in your own terminal instead."
-        });
+        let mut answer = failure(
+            "credential_in_environment",
+            "Generating writes through the 1Password app, which asks the person to authorize them. Start the opv MCP server without op session tokens, service-account or Connect credentials in its environment, or run opv generate in your own terminal instead.",
+        );
+        answer["variable"] = json!(var);
+        return answer;
+    }
+    if let Some(refused) = ci_refusal("Generating") {
+        return refused;
     }
     if keys.is_empty() || keys.len() > 20 {
-        return generate_error("invalid_name", generate_action("invalid_name"));
+        return failure("invalid_name", &generate_action("invalid_name"));
     }
     if keys.iter().any(|k| {
         k.split_once('/')
             .is_none_or(|(product, key)| !identifier(product) || !identifier(key))
     }) {
-        return generate_error("invalid_name", generate_action("invalid_name"));
+        return failure("invalid_name", &generate_action("invalid_name"));
     }
     if !fleet.environments.contains_key(env_name) {
-        return generate_error(
-            "unknown_environment",
-            generate_action("unknown_environment"),
-        );
+        return failure("unknown_env", &generate_action("unknown_env"));
     }
     crate::scrub::clear_mcp_registry();
     let _redaction_scope = RedactionScope;
@@ -1080,39 +1379,22 @@ fn generate(
 }
 
 /// The fixed human action for an error code; never a message or a value from upstream.
-fn generate_action(code: &str) -> &'static str {
+fn generate_action(code: &str) -> String {
     match code {
-        "policy_refused" => {
-            "opv generates only self-made secrets with base64_bytes or hex_bytes rules and never replaces a value; a provider-issued key is created by the person at the provider and typed in 1Password."
+        "policy_refused" => format!(
+            "opv refused and wrote nothing. Either a key is not self-made (opv generates only keys with base64_bytes or hex_bytes rules, into empty fields, and never replaces a value; a provider-issued key is created by the person at the provider and typed in 1Password), or this run may not write to 1Password. {PERSON_WRITES}"
+        ),
+        "invalid_name" => {
+            "Name 1 to 20 keys as <product>/<KEY>, using declared names only.".to_string()
         }
-        "undeclared_key" => {
-            "Declare the key with opv_declare_key, then create its empty 1Password field with opv_structure_plan and opv_structure_apply."
-        }
-        "unknown_environment" | "unknown_env" => {
-            "Name a declared environment; opv_configuration lists them."
-        }
-        "account_required" => {
-            "The person picks the project's 1Password account with opv login --account <email or account ID> in their own terminal."
-        }
-        "op_not_signed_in" => {
-            "The person signs in to 1Password (desktop app integration) and retries."
-        }
-        "invalid_name" => "Name 1 to 20 keys as <product>/<KEY>, using declared names only.",
-        _ => {
-            "Fix the cause, then call opv_generate again. A person runs opv generate in their own terminal for details."
-        }
+        _ => code_hint(code, "opv generate <env> <product/KEY>"),
     }
 }
 
-/// A fixed `{ok:false, code, human_action}` answer for `code`.
-fn generate_error(code: &str, human_action: &str) -> Value {
-    json!({"ok": false, "code": code, "human_action": human_action})
-}
-
-/// `e`'s code with its fixed human action; never its text, which can quote upstream output.
+/// `e`'s code with its fixed human action and runnable `next`; never its text, which can
+/// quote upstream output.
 fn generate_failure(e: &crate::error::Error) -> Value {
-    let code = e.code().as_str();
-    generate_error(code, generate_action(code))
+    error_failure(e, &generate_action(e.code().as_str()))
 }
 
 /// The next step an assistant may repeat for a finding: an `opv` command, or a 1Password
@@ -1135,7 +1417,7 @@ fn ready_finding(f: &Value) -> Value {
     if let Some(code) = f["code"].as_str().filter(|c| identifier(c)) {
         finding["code"] = json!(code);
     }
-    for field in ["environment", "product", "key"] {
+    for field in ["environment", "target", "product", "key"] {
         if let Some(v) = f["scope"][field].as_str().filter(|v| identifier(v)) {
             finding[field] = json!(v);
         }
@@ -1184,16 +1466,17 @@ fn ready_target(t: &Value) -> Option<Value> {
 
 /// Construct a new response, never recursively forwarding arbitrary upstream fields.
 fn project_receipt(doc: &Value, operation: Operation) -> Value {
+    const CLI: &str = "opv ready";
     if doc.get("schema_version").and_then(Value::as_u64) != Some(1) {
-        return inspection_error("unsupported_receipt");
+        return inspection_error("unsupported_receipt", CLI);
     }
     match operation {
         Operation::Ready => {
             let Some(findings) = doc.get("findings").and_then(Value::as_array) else {
-                return inspection_error("invalid_receipt");
+                return inspection_error("invalid_receipt", CLI);
             };
             if findings.iter().any(|f| !f["blocking"].is_boolean()) {
-                return inspection_error("invalid_receipt");
+                return inspection_error("invalid_receipt", CLI);
             }
             let projected: Vec<Value> = findings.iter().map(ready_finding).collect();
             let targets: Vec<Value> = doc["targets"]
@@ -1204,52 +1487,54 @@ fn project_receipt(doc: &Value, operation: Operation) -> Value {
                 .collect();
             json!({"ok": true, "blocking_findings": findings.iter().filter(|f| f["blocking"] == true).count(), "other_findings": findings.iter().filter(|f| f["blocking"] == false).count(), "findings": projected, "targets": targets, "human_action": "Use opv ready in your terminal for details; humans authenticate and enter values in 1Password.", "snapshot_only": true})
         }
-        Operation::Plan => {
-            let Some(rows) = doc.get("rows").and_then(Value::as_array) else {
-                return inspection_error("invalid_receipt");
-            };
-            let rows: Vec<_> = rows
-                .iter()
-                .filter_map(|row| {
-                    let product = row["product"].as_str();
-                    let key = row["key"].as_str()?;
-                    if product.is_some_and(|p| !identifier(p)) || !identifier(key) {
-                        return None;
-                    }
-                    // What sync would do with the row: the plan's own words, or none.
-                    let action = match row["action"].as_str() {
-                        Some("would_stage") => "write",
-                        Some("would_prune") => "unset",
-                        Some("held") => "hold",
-                        None => "none",
-                        Some(_) => "review",
-                    };
-                    let target = row["target"].as_str().filter(|t| identifier(t));
-                    Some(
-                        json!({"target": target, "product": product, "key": key, "action": action}),
-                    )
-                })
-                .collect();
-            let plan_id = doc["plan_id"]
-                .as_str()
-                .filter(|s| s.len() <= 64 && s.bytes().all(|b| b.is_ascii_hexdigit()));
-            let names = |field: &str| -> Vec<&str> {
-                doc[field]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .filter(|name| identifier(name))
-                    .collect()
-            };
-            let env = doc["environment"].as_str().filter(|e| identifier(e));
-            let approve = plan_id
-                .zip(env)
-                .map(|(id, env)| format!("opv approve {id} --sync {env}"));
-            json!({"ok": true, "rows": rows, "stage": names("stage"), "prune": names("prune"), "plan_id": plan_id, "approve_command": approve, "human_action": "A person reviews and approves this plan with approve_command in their own terminal (add --deploy or --prune there to allow those); opv_sync with the same plan_id and flags then runs exactly it once. Rotation and pruning immutable keys stay with the person's own opv sync."})
-        }
         Operation::Configuration => unreachable!(),
     }
+}
+
+/// The `opv plan --json` document as the MCP answer, field by field, with the
+/// `approve_command` for exactly `scope` (its targets, product and rotate entries), so the
+/// approval a person records covers the `opv_sync` that names the same scope.
+fn plan_receipt(doc: &Value, scope: &crate::app::approve::SyncScope) -> Value {
+    if doc.get("schema_version").and_then(Value::as_u64) != Some(1) {
+        return inspection_error("unsupported_receipt", PLAN_CLI);
+    }
+    let Some(rows) = doc.get("rows").and_then(Value::as_array) else {
+        return inspection_error("invalid_receipt", PLAN_CLI);
+    };
+    let rows: Vec<_> = rows
+        .iter()
+        .filter_map(|row| {
+            let product = row["product"].as_str();
+            let key = row["key"].as_str()?;
+            if product.is_some_and(|p| !identifier(p)) || !identifier(key) {
+                return None;
+            }
+            // What sync would do with the row: the plan's own words, or none.
+            let action = match row["action"].as_str() {
+                Some("would_stage") => "write",
+                Some("would_prune") => "unset",
+                Some("held") => "hold",
+                None => "none",
+                Some(_) => "review",
+            };
+            let target = row["target"].as_str().filter(|t| identifier(t));
+            Some(json!({"target": target, "product": product, "key": key, "action": action}))
+        })
+        .collect();
+    let plan_id = doc["plan_id"]
+        .as_str()
+        .filter(|s| s.len() <= 64 && s.bytes().all(|b| b.is_ascii_hexdigit()));
+    let names = |field: &str| -> Vec<&str> {
+        doc[field]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|name| identifier(name))
+            .collect()
+    };
+    let approve = plan_id.map(|id| scope.approve_command(id));
+    json!({"ok": true, "rows": rows, "stage": names("stage"), "prune": names("prune"), "plan_id": plan_id, "approve_command": approve, "human_action": "A person reviews and approves this plan with approve_command in their own terminal (adding --deploy or --prune there to allow those); opv_sync with the same plan_id, targets, product, rotate and flags then runs exactly it once. Sync, deploy, prune and rotation happen only through that approved opv_sync, which never prunes an immutable key."})
 }
 
 #[cfg(test)]
@@ -1280,7 +1565,7 @@ mod tests {
     fn plan_drops_values_even_when_the_source_contains_them() {
         let doc = json!({"schema_version": 1, "rows": [{"product": "api", "key": "API_KEY", "action": "stage", "value": "SECRET_MARKER", "reason": "SECRET_MARKER"}], "plan_id": "123abc"});
         assert!(
-            !project_receipt(&doc, Operation::Plan)
+            !plan_receipt(&doc, &plan_scope(&[], None, &[]))
                 .to_string()
                 .contains("SECRET_MARKER")
         );
@@ -1326,7 +1611,11 @@ mod tests {
     #[test]
     fn a_failed_structural_call_never_returns_upstream_text() {
         let e = crate::error::Error::Source("op said OP_SESSION_my=SECRET_MARKER".into());
-        assert!(!structure_failure(&e).to_string().contains("SECRET_MARKER"));
+        assert!(
+            !structure_failure(&e, "opv structure plan")
+                .to_string()
+                .contains("SECRET_MARKER")
+        );
     }
 
     #[test]
@@ -1334,7 +1623,10 @@ mod tests {
         let e = crate::error::Error::Policy("stale".into())
             .with_code(crate::error::Code::StalePlan)
             .with_next("opv approve sp-0123456789abcdef");
-        assert_eq!(structure_failure(&e)["plan_id"], "sp-0123456789abcdef");
+        assert_eq!(
+            structure_failure(&e, "opv structure plan")["plan_id"],
+            "sp-0123456789abcdef"
+        );
     }
 
     fn hostile_applied() -> crate::app::structure::Applied {
@@ -1383,7 +1675,7 @@ mod tests {
                 {"grant": {"principal": {"kind": "deploy", "environment": "staging", "target": "fleet"},
                            "service_account": "shop-staging-fleet-deploy", "vault_id": "vstate", "permission": "read_write"},
                  "state": "missing"}
-            ]},
+            ], "checked": 2, "unclassified": 1},
             "commands": ["op service-account create x --vault v:read_items"],
             "findings": [{"code": "access_not_visible", "message": value_in_message, "next": "op something raw"}]
         }]})
@@ -1751,10 +2043,10 @@ rules = { prefix = "sk_" }
     }
 
     #[test]
-    fn opv_generate_returns_unknown_environment_for_an_undeclared_environment() {
+    fn opv_generate_returns_unknown_env_for_an_undeclared_environment() {
         let (fleet, op, _) = generate_world();
         let answer = generate(&fleet, "prod", &["api/SESSION_KEY".into()], &op, no_vars());
-        assert_eq!(answer["code"], "unknown_environment");
+        assert_eq!(answer["code"], "unknown_env");
     }
 
     #[test]
@@ -1795,5 +2087,279 @@ rules = { prefix = "sk_" }
     fn opv_delivery_preview_refuses_a_non_identifier_name() {
         let answer = delivery_preview_doc(std::path::Path::new("."), "prod!", None, None);
         assert_eq!(answer["code"], "invalid_name");
+    }
+
+    fn not_signed_in(next: &str) -> crate::error::Error {
+        crate::error::Error::Auth("not signed in; op said SECRET_MARKER".into())
+            .with_code(crate::error::Code::OpNotSignedIn)
+            .with_next(next)
+    }
+
+    #[test]
+    fn an_error_answer_says_a_person_must_act_on_a_sign_in() {
+        let v = error_failure(&not_signed_in("opv login --account ABCDEF"), "hint");
+        assert_eq!(v["human_required"], true);
+    }
+
+    #[test]
+    fn an_error_answer_says_no_person_is_needed_for_an_unknown_environment() {
+        assert_eq!(
+            inspection_error("unknown_env", "opv ready")["human_required"],
+            false
+        );
+    }
+
+    #[test]
+    fn an_error_answer_passes_through_a_runnable_opv_next() {
+        let v = error_failure(&not_signed_in("opv login --account ABCDEF"), "hint");
+        assert_eq!(v["next"], "opv login --account ABCDEF");
+    }
+
+    #[test]
+    fn an_error_answer_drops_a_next_that_is_not_an_opv_command() {
+        let v = error_failure(&not_signed_in("op signin --raw SECRET_MARKER"), "hint");
+        assert!(v.get("next").is_none());
+    }
+
+    #[test]
+    fn an_error_answer_drops_a_next_with_a_placeholder() {
+        let v = error_failure(&not_signed_in("opv login --account <ID>"), "hint");
+        assert!(v.get("next").is_none());
+    }
+
+    #[test]
+    fn an_error_answer_passes_through_a_runnable_opv_do() {
+        let e = not_signed_in("opv ready").with_do("opv login --add");
+        assert_eq!(error_failure(&e, "hint")["do"], "opv login --add");
+    }
+
+    #[test]
+    fn an_error_answer_drops_a_do_that_is_prose() {
+        let e = not_signed_in("opv ready").with_do("sign in at the prompt SECRET_MARKER");
+        assert!(error_failure(&e, "hint").get("do").is_none());
+    }
+
+    #[test]
+    fn an_error_answer_never_carries_the_error_message() {
+        let v = error_failure(&not_signed_in("opv login --account ABCDEF"), "hint");
+        assert!(!v.to_string().contains("SECRET_MARKER"));
+    }
+
+    #[test]
+    fn a_sign_in_hint_tells_the_person_to_sign_in() {
+        assert!(code_hint("op_not_signed_in", ACCESS_CLI).contains("signs in to 1Password"));
+    }
+
+    #[test]
+    fn an_unreadable_ready_report_sends_the_person_not_the_agent_to_the_terminal() {
+        assert!(code_hint("invalid_receipt", "opv ready").contains("the person runs opv ready"));
+    }
+
+    #[test]
+    fn a_credential_in_the_environment_needs_a_person() {
+        assert!(human_required("credential_in_environment"));
+    }
+
+    #[test]
+    fn every_mcp_only_error_code_is_documented() {
+        let doc = include_str!("../docs/mcp.md");
+        assert!(
+            [
+                "invalid_name",
+                "invalid_plan_id",
+                "credential_in_environment",
+                "invalid_receipt",
+                "unsupported_receipt",
+                "inspection_unavailable",
+            ]
+            .iter()
+            .all(|c| doc.contains(&format!("`{c}`")))
+        );
+    }
+
+    #[test]
+    fn access_reports_how_many_grants_it_checked() {
+        let v = access_answer(&access_doc("missing", "m"));
+        assert_eq!(v["environments"][0]["checked"], 2);
+    }
+
+    #[test]
+    fn access_reports_how_many_readers_it_could_not_classify() {
+        let v = access_answer(&access_doc("missing", "m"));
+        assert_eq!(v["environments"][0]["unclassified"], 1);
+    }
+
+    #[test]
+    fn an_access_target_that_is_not_a_name_is_invalid_name() {
+        let v = access_projection(std::path::Path::new("."), Some("prod"), Some("no pe"));
+        assert_eq!(v["code"], "invalid_name");
+    }
+
+    #[test]
+    fn an_access_target_without_its_environment_is_a_usage_error() {
+        let v = access_projection(std::path::Path::new("."), None, Some("fleet"));
+        assert_eq!(v["code"], "usage");
+    }
+
+    #[test]
+    fn an_access_refusal_never_says_to_plan_again() {
+        let e = crate::error::Error::Policy("refused".into());
+        assert!(
+            !access_failure(&e)["human_action"]
+                .as_str()
+                .unwrap()
+                .contains("plan again")
+        );
+    }
+
+    #[test]
+    fn access_has_more_budget_than_the_1password_app_approval_wait() {
+        assert!(ACCESS_BUDGET > crate::adapters::onepassword::APPROVAL_TIMEOUT);
+    }
+
+    #[test]
+    fn a_preview_with_an_undeclared_role_lists_the_declared_roles() {
+        let fleet = crate::app::testutil::role_fleet();
+        let r = FakeRunner::new([]);
+        let v = delivery_preview_from_fleet(&fleet, "prod", Some("allumata"), Some("nope"), &r);
+        assert_eq!(v["roles"], json!(["migrate", "serve"]));
+    }
+
+    #[test]
+    fn a_preview_of_an_undeclared_product_never_asks_for_a_role() {
+        let fleet = crate::app::testutil::role_fleet();
+        let r = FakeRunner::new([]);
+        let v = delivery_preview_from_fleet(&fleet, "prod", Some("nope"), None, &r);
+        assert!(!v["human_action"].as_str().unwrap().contains("role"));
+    }
+
+    #[test]
+    fn a_preview_of_an_undeclared_product_lists_the_products() {
+        let fleet = crate::app::testutil::role_fleet();
+        let r = FakeRunner::new([]);
+        let v = delivery_preview_from_fleet(&fleet, "prod", Some("nope"), None, &r);
+        assert_eq!(v["products"], json!(["allumata"]));
+    }
+
+    fn plan_scope(
+        targets: &[&str],
+        product: Option<&str>,
+        rotate: &[&str],
+    ) -> crate::app::approve::SyncScope {
+        plan_sync_scope(&DeploymentPlanScope {
+            environment: "prod".into(),
+            targets: targets.iter().map(|t| t.to_string()).collect(),
+            product: product.map(str::to_string),
+            rotate: rotate.iter().map(|r| r.to_string()).collect(),
+        })
+    }
+
+    #[test]
+    fn a_scoped_deployment_plan_approves_the_same_targets_product_and_rotation() {
+        let doc =
+            json!({"schema_version": 1, "environment": "prod", "rows": [], "plan_id": "0123abcd"});
+        let v = plan_receipt(&doc, &plan_scope(&["fleet"], Some("api"), &["api/KEY"]));
+        assert_eq!(
+            v["approve_command"],
+            "opv approve 0123abcd --sync prod --target fleet --product api --rotate api/KEY"
+        );
+    }
+
+    #[test]
+    fn a_deployment_plan_refuses_a_rotate_entry_that_is_not_product_slash_key() {
+        let args = DeploymentPlanScope {
+            environment: "prod".into(),
+            targets: vec![],
+            product: None,
+            rotate: vec!["KEY".into()],
+        };
+        assert_eq!(plan_scope_refusal(&args).unwrap()["code"], "invalid_name");
+    }
+
+    #[test]
+    fn a_deployment_plan_for_an_undeclared_environment_is_unknown_env() {
+        let fleet = crate::app::testutil::role_fleet();
+        let r = ReadOnly {
+            inner: FakeRunner::new([]),
+            refused: AtomicBool::new(false),
+        };
+        let args = DeploymentPlanScope {
+            environment: "nope".into(),
+            targets: vec![],
+            product: None,
+            rotate: vec![],
+        };
+        assert_eq!(
+            deployment_plan_from_fleet(&fleet, &args, &r)["code"],
+            "unknown_env"
+        );
+    }
+
+    #[test]
+    fn the_deployment_plan_never_says_sync_is_unavailable_through_mcp() {
+        let doc = json!({"schema_version": 1, "rows": [], "plan_id": "0123abcd"});
+        let v = plan_receipt(&doc, &plan_scope(&[], None, &[]));
+        assert!(
+            v["human_action"]
+                .as_str()
+                .unwrap()
+                .contains("only through that approved opv_sync")
+        );
+    }
+
+    #[test]
+    fn a_generate_policy_refusal_names_a_person_running_it_without_ci_credentials() {
+        assert!(generate_action("policy_refused").contains("without CI"));
+    }
+
+    #[test]
+    fn a_structural_policy_refusal_names_a_person_running_it_without_ci_credentials() {
+        let e = crate::error::Error::Policy("refused".into());
+        assert!(
+            structure_failure(&e, "opv structure apply <plan_id>")["human_action"]
+                .as_str()
+                .unwrap()
+                .contains("without CI")
+        );
+    }
+
+    fn under_ci<T>(f: impl FnOnce() -> T) -> T {
+        let env = crate::host::FakeEnv::new("linux")
+            .var_val("CI", "true")
+            .shell("/bin/bash");
+        crate::host::with_test_host(crate::host::Host::from_env(&env), f)
+    }
+
+    #[test]
+    fn opv_generate_under_ci_names_the_ci_variable() {
+        let (fleet, op, _) = generate_world();
+        let answer =
+            under_ci(|| generate(&fleet, "dev", &["api/SESSION_KEY".into()], &op, no_vars()));
+        assert_eq!(answer["variable"], "CI");
+    }
+
+    #[test]
+    fn opv_generate_under_ci_calls_nothing() {
+        let (fleet, op, _) = generate_world();
+        let _ = under_ci(|| generate(&fleet, "dev", &["api/SESSION_KEY".into()], &op, no_vars()));
+        assert!(op.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn the_structural_apply_is_refused_under_ci() {
+        assert!(under_ci(|| ci_refusal("The structural apply")).is_some());
+    }
+
+    #[test]
+    fn a_ready_finding_keeps_its_target() {
+        let doc = ready_doc(
+            json!([{"code": "grants_missing", "blocking": true,
+                    "scope": {"environment": "prod", "target": "fleet"}}]),
+            json!([]),
+        );
+        assert_eq!(
+            project_receipt(&doc, Operation::Ready)["findings"][0]["target"],
+            "fleet"
+        );
     }
 }

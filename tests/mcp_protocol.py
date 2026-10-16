@@ -68,6 +68,10 @@ with tempfile.TemporaryDirectory() as directory:
         sync_tool = next(t for t in tools if t['name'] == 'opv_sync')
         assert set(sync_tool['inputSchema']['properties']) == {
             'environment', 'plan_id', 'targets', 'product', 'deploy', 'prune', 'rotate'}, sync_tool
+        # The deployment plan takes the scope opv_sync approves, so a scoped sync is not stale.
+        plan_tool = next(t for t in tools if t['name'] == 'opv_deployment_plan')
+        assert set(plan_tool['inputSchema']['properties']) == {
+            'environment', 'targets', 'product', 'rotate'}, plan_tool
         reply = send('tools/call', {'name': 'opv_configuration', 'arguments': {}}, 3)
         text = reply['result']['content'][0]['text']
         config = json.loads(text)
@@ -96,6 +100,7 @@ with tempfile.TemporaryDirectory() as directory:
             'plan_id': 'sp-0000000000000000'}}, 7)
         result = json.loads(unapproved['result']['content'][0]['text'])
         assert result['ok'] is False, result
+        assert isinstance(result['human_required'], bool), result
         # A value cannot be declared: there is no field for it.
         with_value = send('tools/call', {'name': 'opv_declare_key', 'arguments': {
             'product': 'api', 'key': 'NEW_KEY', 'kind': 'secret', 'value': 'SECRET_MARKER'}}, 8)
