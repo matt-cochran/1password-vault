@@ -10,7 +10,7 @@
 
 use std::io::Write;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::app::account::Report;
@@ -71,20 +71,20 @@ pub struct Inputs<'a> {
 }
 
 /// `config` of the receipt: where the configuration was read from.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigRef {
     pub source: Option<String>,
 }
 
 /// `account` of the receipt: the selected account (FR-49), or `null` when none is.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountRef {
     pub account_id: String,
     pub by: String,
 }
 
 /// One environment × product cell of the matrix.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MatrixEntry {
     pub environment: String,
     /// The environment's display name (FR-55).
@@ -104,7 +104,7 @@ pub struct MatrixEntry {
 
 /// What a finding is about: any of the account, environment, target, product or key, each
 /// omitted when absent (FR-51).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Scope {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
@@ -140,7 +140,7 @@ pub struct TargetReport {
 
 /// One thing a person or agent must act on, with one runnable prerequisite and one verify
 /// command (FR-51).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Finding {
     pub code: String,
     pub scope: Scope,
@@ -161,7 +161,7 @@ pub struct Finding {
 
 /// The first step: the actor and the command of the first blocking finding, else of the
 /// first finding.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Next {
     pub actor: String,
     pub command: String,

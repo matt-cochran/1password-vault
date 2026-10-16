@@ -123,15 +123,18 @@ pub struct App {
     pub modal: Option<Modal>,
     /// One line for the person: the last command, what `c` copied, a problem.
     pub status: String,
-    /// `opv account list --json`, once loaded.
-    pub accounts: Option<serde_json::Value>,
+    /// `opv account list --json`, once loaded, or why it could not be.
+    pub accounts: Option<Loaded<super::docs::AccountsDoc>>,
     /// The adoption review's rows and decisions (#94).
     pub adopt: Vec<super::adopt_review::ReviewRow>,
-    /// `opv history <env> --json`, once loaded (#95).
-    pub history: Option<serde_json::Value>,
-    /// `opv access --json`, once loaded (#96).
-    pub access: Option<serde_json::Value>,
+    /// `opv history <env> --json`, once loaded (#95), or why it could not be.
+    pub history: Option<Loaded<super::docs::HistoryDoc>>,
+    /// `opv access --json`, once loaded (#96), or why it could not be.
+    pub access: Option<Loaded<super::docs::AccessDoc>>,
 }
+
+/// A document a screen shows, or the error that stopped it, with its steps (07.02).
+pub type Loaded<T> = Result<T, super::docs::Failure>;
 
 impl App {
     pub fn new(snap: Snapshot) -> App {
@@ -281,10 +284,12 @@ impl App {
             }
             Key::Char('s') => {
                 if let Some(env) = self.current_env() {
-                    if self.snap.env(&env).is_some_and(|e| e.target.is_some()) {
+                    if self.snap.env(&env).is_some_and(|e| e.deployed()) {
                         return Effect::Plan { env };
                     }
-                    self.status = format!("{env} is local only: nothing to sync (opv run {env})");
+                    self.status = format!(
+                        "{env} is local only: nothing to sync (opv run {env} -- <command>)"
+                    );
                 }
             }
             Key::Char('i') => {
@@ -334,7 +339,7 @@ impl App {
             }
             Key::Char('h') => {
                 if let Some(env) = self.current_env() {
-                    if self.snap.env(&env).is_some_and(|e| e.target.is_some()) {
+                    if self.snap.env(&env).is_some_and(|e| e.deployed()) {
                         self.history = None;
                         self.open(Screen::History(env.clone()));
                         return Effect::LoadHistory(env);
@@ -373,7 +378,7 @@ impl App {
     }
 
     /// Open the adoption review from `opv adopt <env> --from <from> --json` (#94).
-    pub fn open_adopt(&mut self, env: &str, from: &str, doc: &serde_json::Value) {
+    pub fn open_adopt(&mut self, env: &str, from: &str, doc: &super::docs::AdoptDoc) {
         let snap = &self.snap;
         let immutable = |p: &str, k: &str| {
             snap.products
@@ -458,30 +463,21 @@ impl App {
     }
 
     /// The sync confirmation for `env`, from `opv plan <env> --json`.
-    pub fn confirm_sync(&mut self, env: &str, plan: &serde_json::Value) {
-        let id = plan["plan_id"].as_str().map(str::to_string);
-        let names = |field: &str| -> Vec<String> {
-            plan[field]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
+    pub fn confirm_sync(&mut self, env: &str, plan: &super::docs::RowsDoc) {
+        let id = plan.plan_id.clone();
         let mut lines = Vec::new();
-        let stage = names("stage");
-        lines.push(if stage.is_empty() {
+        lines.push(if plan.stage.is_empty() {
             "writes nothing".to_string()
         } else {
-            format!("writes: {}", stage.join(", "))
+            format!("writes: {}", plan.stage.join(", "))
         });
-        let prune = names("prune");
-        if !prune.is_empty() {
-            lines.push(format!("would prune (not done here): {}", prune.join(", ")));
+        if !plan.prune.is_empty() {
+            lines.push(format!(
+                "would prune (not done here): {}",
+                plan.prune.join(", ")
+            ));
         }
-        let findings = plan["totals"]["findings"].as_u64().unwrap_or(0);
+        let findings = plan.totals.findings;
         if findings > 0 {
             lines.push(format!(
                 "{findings} finding(s) block this sync: fix them first (see the overview)"
@@ -534,14 +530,19 @@ impl App {
                 }
                 super::forms::Outcome::Command(command) => {
                     let what = form.title();
+                    let effect = if command.iter().any(|w| w == "--add-env") {
+                        // `opv init <env> --add-env` also creates the environment's vault and
+                        // item when they are missing (07.25).
+                        "adds the environment to the configuration and creates its 1Password \
+                         vault and item if they are missing (no value), validated first: a \
+                         refused change writes nothing"
+                    } else {
+                        "edits the configuration (no value), validated first: a refused \
+                         change writes nothing"
+                    };
                     self.modal = Some(Modal::Confirm {
                         title: what.into(),
-                        lines: vec![
-                            "edits the configuration (no value), validated first: a refused \
-                             change writes nothing"
-                                .into(),
-                            format!("runs: {}", command_line(&command)),
-                        ],
+                        lines: vec![effect.into(), format!("runs: {}", command_line(&command))],
                         command,
                         guard: None,
                         typed: String::new(),
