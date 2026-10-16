@@ -12,9 +12,20 @@ use serde_json::{Value, json};
 
 use crate::app::agent_view;
 use crate::app::structure::{self, Scope};
+use crate::cause::render::cmd_text;
+use crate::cause::{Cause, Cmd, EnvName, GivenBy};
 use crate::domain::{Fleet, Kind};
-use crate::error::{Code, Error};
+use crate::error::Error;
 use crate::runner::CommandRunner;
+
+/// A `Next:` line naming one opv command, built from its typed parts (design §10.1).
+fn next(out: &mut dyn Write, command: &[&str], args: &[&str]) -> Result<(), Error> {
+    let c = Cmd {
+        command: command.iter().map(|w| w.to_string()).collect(),
+        args: args.iter().map(|a| a.to_string()).collect(),
+    };
+    line(out, &format!("Next: {}", cmd_text(&c)))
+}
 
 fn write_json(out: &mut dyn Write, doc: &Value) -> Result<(), Error> {
     let mut text = doc.to_string();
@@ -44,10 +55,14 @@ pub fn env_add(
     json: bool,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    let path = crate::config_store::walk_up(start, "secrets.toml").ok_or_else(|| {
-        Error::Config("no secrets.toml here or in a parent directory".into())
-            .with_code(Code::ConfigNotFound)
-            .with_next("opv init <env> --file")
+    // 05.37: the environment is known, so the step names it.
+    let path = crate::config_store::walk_up(start, "secrets.toml").ok_or_else(|| -> Error {
+        Cause::ConfigNotFound {
+            searched_from: start.to_path_buf(),
+            env: Some(EnvName::new(environment)),
+            manifest: None,
+        }
+        .into()
     })?;
     let changed = crate::app::declare::environment(r, &path, environment)?;
     if json {
@@ -71,7 +86,7 @@ pub fn env_add(
             &format!("environment {environment} is already declared; nothing changed"),
         )?;
     }
-    line(out, "Next: opv structure plan")
+    next(out, &["structure", "plan"], &[])
 }
 
 /// `opv structure plan`: resolve the project's [`Scope`], plan it, and print. Read-only.
@@ -92,26 +107,30 @@ pub(crate) fn plan_scoped(
     json: bool,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    let text = std::fs::read_to_string(&scope.path).map_err(|e| {
-        Error::Config(format!("Cannot read {} ({}).", scope.path.display(), e.kind()).into())
-    })?;
+    let text = std::fs::read_to_string(&scope.path)
+        .map_err(|e| crate::config_store::unreadable(&scope.path, &e, GivenBy::Discovered))?;
     let p = structure::plan(r, &text, &scope.project, &scope.account)?;
     if json {
         return write_json(out, &agent_view::plan_projection(&p));
     }
     let lines = structure::describe(&p);
+    // 05.13: a complete structure has nothing to approve.
     if lines.is_empty() {
         line(out, "Nothing to create.")?;
-    } else {
-        for l in &lines {
-            line(out, l)?;
-        }
+        return next(out, &["ready"], &[]);
     }
+    for l in &lines {
+        line(out, l)?;
+    }
+    next(out, &["approve"], &[&p.plan_id])?;
     line(
         out,
         &format!(
-            "Next: ask the person to run opv approve {} in their own terminal",
-            p.plan_id
+            "(in your own terminal; then {})",
+            cmd_text(&Cmd {
+                command: vec!["structure".into(), "apply".into()],
+                args: vec![p.plan_id.clone()],
+            })
         ),
     )
 }
@@ -134,18 +153,23 @@ pub fn apply(
         &scope,
         plan_id,
         &mut |p| crate::approval::consume(&p.plan_id, &project, &account, now()),
+        &crate::approval::ever_approved,
         json,
         out,
     )
 }
 
-/// [`apply`] with an injected authorization check (the real one is
-/// [`crate::approval::consume`]; tests use a temp-dir [`crate::approval::consume_in`]).
+/// [`apply`] with an injected authorization check and approval record (the real ones are
+/// [`crate::approval::consume`] and [`crate::approval::ever_approved`] on this machine's
+/// approval folder; tests use a temp dir and never read the real one). A plan id that was
+/// never approved here and no longer matches is `PlanUnknown`, not a plan that changed
+/// since its approval (C2, as over MCP).
 pub(crate) fn apply_authorized(
     r: &dyn CommandRunner,
     scope: &Scope,
     plan_id: &str,
     authorize: &mut dyn FnMut(&structure::Plan) -> Result<(), Error>,
+    approved: &dyn Fn(&str) -> bool,
     json: bool,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
@@ -156,7 +180,8 @@ pub(crate) fn apply_authorized(
         &scope.account,
         plan_id,
         authorize,
-    )?;
+    )
+    .map_err(|e| structure::unknown_unless_approved(e, approved))?;
     if json {
         return write_json(out, &agent_view::applied_projection(&applied));
     }
@@ -182,7 +207,34 @@ pub(crate) fn apply_authorized(
             ),
         )?;
     }
-    Ok(())
+    // 05.12: what the JSON form carries, the text form says too.
+    if applied.config_written {
+        line(
+            out,
+            &format!("recorded the new IDs in {}", scope.path.display()),
+        )?;
+    }
+    if !applied.generator_ids.is_empty() {
+        line(
+            out,
+            &format!(
+                "{} is generated, so opv did not change it; record these IDs in its generator's input:",
+                scope.path.display()
+            ),
+        )?;
+        for id in &applied.generator_ids {
+            line(out, &format!("  {id}"))?;
+        }
+    }
+    for item in &applied.concurrent_edits {
+        line(
+            out,
+            &format!(
+                "another edit landed on the {item} item while fields were added: check its history in 1Password"
+            ),
+        )?;
+    }
+    next(out, &["ready"], &[])
 }
 
 /// `opv config describe`: the same metadata document as the MCP `opv_configuration` tool.

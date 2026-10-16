@@ -1,0 +1,33 @@
+# doctor_dev__op_item_get_ie2ewebdev0000000000000001__malformed_output: opv doctor --env dev | fault malformed_output on op item get iE2EWEBDEV0000000000000001
+
+## text exit: 4
+## text stdout
+ok    config: valid (1 environment, 2 products); source: <SCENARIO>/project/secrets.toml
+ok    op: version 2.40.0
+ok    op auth: signed in (USER)
+FAIL  item: opv could not read the reply of op from 1Password at line 1, column 605
+  do: update op (opv doctor checks its version)
+  fix: opv doctor --env dev --verbose
+skip  target: environment dev has no target (run-only)
+ok    op local run: native op; opv run can start local commands
+ok    opv: not found on PATH
+ok    agent skill: not installed (optional: opv skill install)
+<host core-dump check>
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: opv could not read the reply of op from 1Password at line 1, column 605
+  checked: op item get iE2EWEBDEV0000000000000001 --vault vE2EWEBDEV0000000000000001 --format json (exit 0)
+Do: update op (opv doctor checks its version)
+Next: opv doctor --env dev --verbose
+
+## json exit: 4
+## json stdout
+{"schema_version":2,"ok":false,"exit_code":4,"config_source":"<SCENARIO>/project/secrets.toml","checks":[{"name":"config","target":null,"status":"ok","detail":"valid (1 environment, 2 products); source: <SCENARIO>/project/secrets.toml","next":null,"do":null},{"name":"op","target":null,"status":"ok","detail":"version 2.40.0","next":null,"do":null},{"name":"op auth","target":null,"status":"ok","detail":"signed in (USER)","next":null,"do":null},{"name":"item","target":null,"status":"fail","detail":"opv could not read the reply of op from 1Password at line 1, column 605","next":"opv doctor --env dev --json --verbose","do":"update op (opv doctor checks its version)"},{"name":"target","target":null,"status":"skip","detail":"environment dev has no target (run-only)","next":null,"do":null},{"name":"op local run","target":null,"status":"ok","detail":"native op; opv run can start local commands","next":null,"do":null},{"name":"opv","target":null,"status":"ok","detail":"not found on PATH","next":null,"do":null},{"name":"agent skill","target":null,"status":"ok","detail":"not installed (optional: opv skill install)","next":null,"do":null},{"name":"core dumps","host":true}],"next":"opv doctor --env dev --json --verbose","do":"update op (opv doctor checks its version)","error":{"code":"unexpected_output","category":"source","message":"opv could not read the reply of op from 1Password at line 1, column 605","subject":{"during":"read","system":"one_password","at":{"line":1,"col":605},"problem":{"problem":"unparseable"}},"evidence":{"checked":"op item get iE2EWEBDEV0000000000000001 --vault vE2EWEBDEV0000000000000001 --format json","account":null,"upstream":null},"retry":"never","human_required":false,"do":"update op (opv doctor checks its version)","next":"opv doctor --env dev --json --verbose","next_kind":"run"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: opv could not read the reply of op from 1Password at line 1, column 605
+  checked: op item get iE2EWEBDEV0000000000000001 --vault vE2EWEBDEV0000000000000001 --format json (exit 0)
+Do: update op (opv doctor checks its version)
+Next: opv doctor --env dev --json --verbose

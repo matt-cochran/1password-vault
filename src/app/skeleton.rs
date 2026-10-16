@@ -73,6 +73,42 @@ fn skeleton_item(
     Ok(missing)
 }
 
+/// The refusal for boundary item `b` of `env` that is the project's manifest (M2): nothing
+/// is written; it names the boundary and the item's IDs, and the fix is a values item of
+/// its own (03.19).
+fn manifest_as_boundary(
+    env: &crate::domain::Environment,
+    b: &crate::domain::Boundary,
+    env_name: &str,
+    raw: &[u8],
+) -> Error {
+    #[derive(serde::Deserialize)]
+    struct Titled {
+        #[serde(default)]
+        title: String,
+    }
+    let title = serde_json::from_slice::<Titled>(raw)
+        .map(|t| t.title)
+        .unwrap_or_default();
+    let name = env
+        .boundaries
+        .iter()
+        .find(|(_, x)| x.vault_id == b.vault_id && x.item_id == b.item_id)
+        .map_or_else(String::new, |(n, _)| format!("boundaries.{n} "));
+    crate::cause::Cause::ConfigNotEditable {
+        source: crate::cause::ConfigSource::Manifest {
+            project: title.strip_prefix("opv · ").unwrap_or(&title).to_string(),
+            title,
+            vault: crate::cause::VaultId::new(b.vault_id.clone()),
+        },
+        reason: crate::cause::NotEditable::ManifestItemAsBoundary {
+            env: crate::cause::EnvName::new(env_name),
+            boundary: format!("{name}(item {})", b.item_id),
+        },
+    }
+    .into()
+}
+
 /// A field to add: product, key and kind.
 pub(crate) type Field = (String, String, Kind);
 
@@ -90,14 +126,7 @@ pub(crate) fn missing_fields(
     let item = onepassword::read_whole_fresh(r, env, b)?;
     // M2: the project manifest (FR-44) holds the configuration; it never gets key fields.
     if super::tidy::is_manifest(item.raw()) {
-        return Err(Error::Policy(
-            format!(
-                "environment {env_name} points at the project's manifest item; opv item skeleton \
-                 never adds fields to it; nothing written"
-            )
-            .into(),
-        )
-        .with_next("opv config edit"));
+        return Err(manifest_as_boundary(env, b, env_name, item.raw()));
     }
     let (layout, _) = onepassword_tidy::parse(item.raw())?;
     let found = convention::resolve(&layout, fleet).chosen;
@@ -195,6 +224,19 @@ mod tests {
         let mut out = Vec::new();
         let res = run(&fleet(), "prod", &r, &mut out);
         (res, text_of(&out), r)
+    }
+
+    /// 03.19: the refusal names the boundary that records the manifest item.
+    #[test]
+    fn a_manifest_boundary_refusal_names_the_boundary() {
+        let f = fleet();
+        let env = &f.environments["prod"];
+        let (name, b) = env.boundaries.iter().next().unwrap();
+        let e = manifest_as_boundary(env, b, "prod", r#"{"title":"opv · app"}"#.as_bytes());
+        assert!(
+            e.to_string().contains(&format!("boundaries.{name} ")),
+            "{e}"
+        );
     }
 
     fn edit_template(r: &FakeRunner) -> Value {
@@ -320,7 +362,7 @@ mod tests {
     fn unknown_env_is_config_error_before_any_call() {
         let r = FakeRunner::new([]);
         let e = run(&fleet(), "qa", &r, &mut Vec::new()).unwrap_err();
-        assert!(matches!(e, Error::Config(_)), "{e}");
+        assert_eq!(e.code_str(), "unknown_env", "{e}");
         assert!(r.calls.borrow().is_empty());
     }
 }

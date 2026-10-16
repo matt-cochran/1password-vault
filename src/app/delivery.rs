@@ -27,7 +27,11 @@ use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 use super::write_err;
-use crate::adapters::{onepassword, onepassword_tidy};
+use crate::adapters::{onepassword, onepassword_diagnose, onepassword_tidy};
+use crate::cause::{
+    Cause, DiagnoseContext, EnvName, FieldRule, InputKind, OutputProblem, ProductName,
+    Scope as InScope, System, TargetName, Unverified, Upstream, UsageProblem,
+};
 use crate::domain::delivery::{
     BindingRef, Evidence, Observed, Receipt, SCHEMA, Scope, Source, Verification, decode_evidence,
     encode_evidence, new_revision, select,
@@ -105,30 +109,73 @@ fn products_in_scope(
 /// that cannot be told is an error: never a receipt minted or judged under a guess.
 fn account_id(r: &dyn CommandRunner) -> Result<String, Error> {
     let call = crate::runner::Call::new(onepassword::OP, &["whoami", "--format", "json"]);
-    let unknown = |why: &str| {
-        Error::Source(
-            format!(
-                "could not tell which 1Password account this session reaches (op whoami \
-                 {why}); no delivery receipt was minted or checked"
-            )
+    // An answer that names no account is the runner's own observation of that call (A1).
+    let unusable = |problem: OutputProblem| -> Error {
+        match crate::runner::take_unusable_reply(&call) {
+            Some(seen) => Cause::UnexpectedOutput {
+                system: System::OnePassword,
+                at: None,
+                problem,
+                during: crate::cause::During::Read,
+                seen,
+            }
             .into(),
-        )
-        .with_next("opv doctor")
+            None => Cause::Bug {
+                site: "delivery: an op whoami reply the runner did not observe",
+            }
+            .into(),
+        }
     };
     let out = match r.read(&call, &[]) {
         Ok(crate::runner::Outcome::Done(out)) => out,
-        Ok(crate::runner::Outcome::Refused(o)) => {
-            return Err(unknown(&crate::runner::status_text(o.status)));
+        Ok(crate::runner::Outcome::Refused(_)) | Err(_) => {
+            return Err(op_failure(&DiagnoseContext::default()).unwrap_or_else(|| {
+                Cause::Bug {
+                    site: "delivery: a failed op whoami left no observation",
+                }
+                .into()
+            }));
         }
         Ok(crate::runner::Outcome::Unknown { .. }) => {
             return Err(crate::host::OP_CLI.unanswered(r, "op whoami"));
         }
-        Err(e) => return Err(unknown(&format!("could not run: {}", e.kind()))),
     };
-    serde_json::from_slice::<Value>(&out.stdout)
-        .ok()
-        .and_then(|v| v["account_uuid"].as_str().map(str::to_string))
-        .ok_or_else(|| unknown("named no account"))
+    let Ok(v) = serde_json::from_slice::<Value>(&out.stdout) else {
+        return Err(unusable(OutputProblem::Unparseable));
+    };
+    v["account_uuid"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| {
+            unusable(OutputProblem::Empty {
+                what: "account_uuid",
+            })
+        })
+}
+
+/// The cause of the `op` call that just failed, from 1Password's own diagnosis (design §5),
+/// with 1Password's reply as evidence; `None` when the runner observed no failed call.
+fn op_failure(ctx: &DiagnoseContext) -> Option<Error> {
+    let failed = crate::runner::take_failure()?;
+    let exit = failed.seen.exit();
+    let cause = onepassword_diagnose::diagnose(failed.seen.clone(), failed.stderr(), ctx);
+    let (said, truncated) = crate::scrub::Excerpt::parts(failed.excerpt);
+    if said.is_empty() {
+        return Some(cause.into());
+    }
+    Some(Error::with_evidence(
+        cause,
+        Upstream {
+            source: System::OnePassword,
+            tool: System::OnePassword.label().to_string(),
+            version: None,
+            exit,
+            said,
+            removed_advice: false,
+            truncated,
+            untrusted: true,
+        },
+    ))
 }
 
 /// The scope a receipt is bound to.
@@ -209,8 +256,15 @@ fn read_state(
     };
     let read = onepassword::read_whole_fresh(r, env, &at)?;
     let raw = Zeroizing::new(read.raw().to_vec());
-    let doc: Value = serde_json::from_slice(&raw)
-        .map_err(|_| Error::Source("the delivery item is not valid JSON".into()))?;
+    // An item `op` returned that is not JSON is 1Password's output problem: the item parser
+    // names it (01.10), never a bare "not valid JSON" with no item.
+    let doc: Value =
+        serde_json::from_slice(&raw).map_err(|_| match onepassword_tidy::parse(&raw) {
+            Err(e) => e,
+            Ok(_) => Error::from(Cause::Bug {
+                site: "delivery item parses as an item but not as JSON",
+            }),
+        })?;
     let mut receipt = None;
     let mut key = None;
     let mut evidence = Vec::new();
@@ -261,12 +315,16 @@ pub(crate) fn ledgers(
                 &s.evidence,
             )),
             Ok(None) => {}
-            Err(e) => r.note(&format!(
-                "the delivery evidence of {product} on {} could not be read ({}); its \
-                 names show as unknown",
-                super::placement(env_name, target),
-                e.code().as_str()
-            )),
+            Err(e) => {
+                let why = e.to_string();
+                let why = why.lines().next().unwrap_or_default();
+                r.note(&format!(
+                    "the delivery evidence of {product} on {} (state vault {}) could not be \
+                     read: {why}; its names show as unknown",
+                    super::placement(env_name, target),
+                    t.state_vault_id
+                ))
+            }
         }
     }
     out
@@ -366,6 +424,7 @@ pub fn record(
             .map(|e| (e.name.clone(), e.clone()))
             .collect();
         let mut unread = false;
+        let mut unrecordable: Vec<&str> = Vec::new();
         for b in set
             .iter()
             .filter(|b| !unconfirmed.contains(&b.name.as_str()))
@@ -375,18 +434,28 @@ pub fn record(
                 unread |= !values.contains_key(&b.source.field);
                 continue;
             };
-            evidence.insert(
-                b.name.clone(),
-                Evidence {
-                    name: b.name.clone(),
-                    store_version: version,
-                    fingerprint: hmac_hex(key.as_bytes(), value.expose().as_bytes()),
-                    source: b.source.clone(),
-                },
-            );
+            let line = Evidence {
+                name: b.name.clone(),
+                store_version: version,
+                fingerprint: hmac_hex(key.as_bytes(), value.expose().as_bytes()),
+                source: b.source.clone(),
+            };
+            // A store version the evidence line cannot hold (empty, or with `|`) is never
+            // recorded: the name stays unconfirmed, so no revision vouches for it.
+            if encode_evidence(&line).is_none() {
+                unrecordable.push(b.name.as_str());
+                continue;
+            }
+            evidence.insert(b.name.clone(), line);
         }
         if unread {
             why.push("a source value could not be read from 1Password".into());
+        }
+        if !unrecordable.is_empty() {
+            why.push(format!(
+                "the target lists a version opv cannot record for: {}",
+                unrecordable.join(", ")
+            ));
         }
         let evidence: Vec<Evidence> = evidence.into_values().collect();
         let this_scope = scope(fleet, env_name, target, &product, &account)?;
@@ -451,8 +520,11 @@ fn write_state(
     key: &str,
     evidence: &[Evidence],
 ) -> Result<(), Error> {
-    let mut doc: Value = serde_json::from_slice(&state.raw)
-        .map_err(|_| Error::Source("the delivery item could not be read".into()))?;
+    let mut doc: Value = serde_json::from_slice(&state.raw).map_err(|_| {
+        Error::from(Cause::Bug {
+            site: "delivery item parsed when read, not when rewritten",
+        })
+    })?;
     let mut fields: Vec<Value> = doc["fields"]
         .as_array()
         .into_iter()
@@ -461,8 +533,11 @@ fn write_state(
         .cloned()
         .collect();
     if let Some(receipt) = receipt {
-        let receipt_json = serde_json::to_string(receipt)
-            .map_err(|_| Error::Config("cannot serialize the delivery receipt".into()))?;
+        let receipt_json = serde_json::to_string(receipt).map_err(|_| {
+            Error::from(Cause::Bug {
+                site: "delivery receipt serializes",
+            })
+        })?;
         fields.push(
             json!({"id": "receipt", "label": RECEIPT_FIELD, "type": "STRING", "value": receipt_json}),
         );
@@ -470,17 +545,21 @@ fn write_state(
     fields
         .push(json!({"id": "evidence-key", "label": KEY_FIELD, "type": "CONCEALED", "value": key}));
     for e in evidence {
+        // `record` keeps only evidence that encodes.
         let line = encode_evidence(e).ok_or_else(|| {
-            Error::Source(format!("cannot record evidence for {}", e.name).into())
+            Error::from(Cause::Bug {
+                site: "kept delivery evidence encodes",
+            })
         })?;
         fields.push(json!({"id": e.name, "label": e.name, "type": "CONCEALED", "value": line}));
     }
     doc["fields"] = Value::Array(fields);
     doc.as_object_mut().map(|o| o.remove("sections"));
-    let template = Zeroizing::new(
-        serde_json::to_vec(&doc)
-            .map_err(|_| Error::Config("cannot serialize the delivery item".into()))?,
-    );
+    let template = Zeroizing::new(serde_json::to_vec(&doc).map_err(|_| {
+        Error::from(Cause::Bug {
+            site: "delivery item serializes",
+        })
+    })?);
     onepassword_tidy::write(r, env, &state.at, &template)?;
     Ok(())
 }
@@ -498,6 +577,34 @@ pub struct PlacementCheck {
     /// The receipt this was checked against, when it is not the current delivery.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub receipt_revision: Option<String>,
+    /// Why the placement is not verified, as a typed fact (`None` exactly when `state` is
+    /// `verified`): the failure `opv delivery verify` reports is built from it.
+    #[serde(skip)]
+    pub unverified: Option<Unverified>,
+}
+
+/// Why a placement is not verified (design §4.10), from what the check read: the delivery
+/// item, this session's account and the comparison. Never inferred from text.
+fn unverified_state(
+    state: Option<&StateItem>,
+    account: &str,
+    v: &Verification,
+) -> Option<Unverified> {
+    let any = |states: &[&str]| v.names.iter().any(|n| states.contains(&n.state));
+    match v.state {
+        "verified" => None,
+        "changed" if any(&["missing_on_target", "drifted_on_target"]) => {
+            Some(Unverified::ChangedOnTarget)
+        }
+        "changed" => Some(Unverified::ChangedInOnePassword),
+        "not_delivered" => match state.and_then(|s| s.receipt.as_ref()) {
+            Some(rec) if rec.scope.account_id != account => Some(Unverified::OtherAccount {
+                account: crate::cause::AccountId::new(&rec.scope.account_id),
+            }),
+            _ => Some(Unverified::NotRecorded),
+        },
+        _ => Some(Unverified::Unverifiable),
+    }
 }
 
 /// `opv delivery verify <env> [--product p] [--target t] [--receipt file] [--json]`:
@@ -516,7 +623,7 @@ pub fn verify(
 ) -> Result<(), Error> {
     // A misspelt product would otherwise match nothing and pass (exit 0) having checked
     // nothing.
-    super::check_product(fleet, only, "delivery verify", Some(env_name))?;
+    super::check_product(fleet, only, Some(env_name))?;
     let names = super::resolve_targets(fleet, env_name, targets, "delivery verify")?;
     let from_file: Vec<Receipt> = match receipt_file {
         Some(p) => read_receipt_file(p)?,
@@ -527,42 +634,63 @@ pub fn verify(
         if products_in_scope(fleet, env_name, target, only)?.is_empty() {
             continue;
         }
-        checks.extend(verify_target(fleet, env_name, target, only, &from_file, r)?);
+        checks.extend(verify_target(
+            fleet,
+            env_name,
+            target,
+            only,
+            &from_file,
+            receipt_file,
+            r,
+        )?);
     }
     if checks.is_empty() {
-        let what = match only {
-            Some(p) => format!("product {p}"),
-            None => "any product".to_string(),
+        // 01.18: with `--target`, the one target named; otherwise the environment's.
+        let what = match (names.as_slice(), targets.is_empty()) {
+            ([t], false) => InScope::NoTargetDelivers {
+                target: TargetName::new(t),
+            },
+            _ => InScope::NoTargets {
+                products: match only {
+                    Some(p) => vec![ProductName::new(p)],
+                    None => fleet.products.keys().map(ProductName::new).collect(),
+                },
+            },
         };
-        return Err(Error::Config(
-            format!(
-                "nothing to verify: no target of {env_name} delivers a secret of {what}; \
-                 nothing was checked"
-            )
-            .into(),
-        )
-        .with_next(format!("opv status {}", crate::error::shell_word(env_name))));
+        return Err(Cause::NothingInScope {
+            env: EnvName::new(env_name),
+            what,
+        }
+        .into());
     }
     report(out, env_name, &checks, json)?;
-    if checks.iter().all(|c| c.verification.state == "verified") {
-        Ok(())
-    } else {
-        let n = checks
-            .iter()
-            .filter(|c| c.verification.state != "verified")
-            .count();
-        Err(Error::findings(n, format!("opv sync {env_name}")))
+    // 01.06: an unverified placement is `delivery_unverified` with its own typed state (the
+    // step follows the state), never `findings` with an unscoped `opv sync`. The first one
+    // in report order; the report above lists every placement.
+    match checks
+        .iter()
+        .find_map(|c| c.unverified.clone().map(|state| (c, state)))
+    {
+        None => Ok(()),
+        Some((c, state)) => Err(Cause::DeliveryUnverified {
+            env: EnvName::new(env_name),
+            target: TargetName::new(&c.target),
+            product: ProductName::new(&c.product),
+            state,
+        }
+        .into()),
     }
 }
 
 /// The placements of target `target` (`only`: that product's), signed in with the target's
-/// own deploy identity.
+/// own deploy identity. `from_file` holds the receipts of `receipt_file`.
 fn verify_target(
     fleet: &Fleet,
     env_name: &str,
     target: &str,
     only: Option<&str>,
     from_file: &[Receipt],
+    receipt_file: Option<&Path>,
     r: &dyn CommandRunner,
 ) -> Result<Vec<PlacementCheck>, Error> {
     let signed_in = super::signin::open_targeted(
@@ -619,6 +747,7 @@ fn verify_target(
         let pending = expected
             .iter()
             .any(|b| listed.iter().any(|e| e.name == b.name && e.pending));
+        let unverified = unverified_state(state.as_ref(), &account, &verification);
         let deployed = match &ports {
             crate::ports::Ports::Staged { runtime, .. } if runtime.live() => "n/a",
             _ if pending => "staged",
@@ -627,22 +756,27 @@ fn verify_target(
         // A receipt the caller kept: selected by its full scope, independent of order; it
         // must be this very delivery to count.
         let mut receipt_revision = None;
-        let kept = select(from_file, &this_scope).map_err(|duplicate| {
-            Error::Config(
-                format!(
-                    "duplicate_scope: the receipt file holds {} receipts for {product} on {}; \
-                     keep one",
-                    duplicate.count,
+        let mut unverified = unverified;
+        // 01.09: the file is named and the fix is to keep one receipt in it.
+        let kept = select(from_file, &this_scope).map_err(|_| {
+            Error::from(Cause::InputInvalid {
+                path: receipt_file.unwrap_or(Path::new("")).to_path_buf(),
+                kind: InputKind::Receipt,
+                at: None,
+                field: format!(
+                    "receipt of {product} on {}",
                     super::placement(env_name, target)
-                )
-                .into(),
-            )
-            .with_code(crate::error::Code::DuplicateScope)
+                ),
+                rule: FieldRule::DuplicateKey,
+            })
         })?;
         if let Some(kept) = kept
             && verification.revision.as_deref() != Some(kept.revision.as_str())
         {
             receipt_revision = Some(kept.revision.clone());
+            unverified = Some(Unverified::Superseded {
+                receipt: receipt_file.unwrap_or(Path::new("")).to_path_buf(),
+            });
             verification.state = "superseded";
             verification.reason = Some(format!(
                 "the receipt's revision {} is not the current delivery",
@@ -655,6 +789,7 @@ fn verify_target(
             verification,
             deployed,
             receipt_revision,
+            unverified,
         });
     }
     Ok(checks)
@@ -662,19 +797,49 @@ fn verify_target(
 
 /// The deliveries a receipt file holds (`{"schema", "deliveries": [...]}`).
 fn read_receipt_file(path: &Path) -> Result<Vec<Receipt>, Error> {
-    let text = std::fs::read_to_string(path).map_err(|e| {
-        Error::Config(format!("cannot read {}: {}", path.display(), e.kind()).into())
-    })?;
-    let doc: Value = serde_json::from_str(&text).map_err(|_| {
-        Error::Config(format!("{} is not a delivery receipt", path.display()).into())
+    let invalid = |field: &str, at: Option<crate::cause::Location>, rule: FieldRule| {
+        Error::from(Cause::InputInvalid {
+            path: path.to_path_buf(),
+            kind: InputKind::Receipt,
+            at,
+            field: field.to_string(),
+            rule,
+        })
+    };
+    let text = std::fs::read_to_string(path).map_err(|_| receipt_flag(path, RECEIPT_READABLE))?;
+    let doc: Value = serde_json::from_str(&text).map_err(|e| {
+        let at = crate::cause::Location {
+            line: u32::try_from(e.line()).unwrap_or(u32::MAX),
+            col: u32::try_from(e.column()).unwrap_or(u32::MAX),
+        };
+        invalid("its JSON", Some(at), FieldRule::Syntax)
     })?;
     if doc["schema"] != SCHEMA {
-        return Err(Error::Config(
-            format!("{} is not a {SCHEMA} receipt", path.display()).into(),
+        return Err(invalid(
+            "schema",
+            None,
+            FieldRule::Type { expected: SCHEMA },
         ));
     }
     serde_json::from_value(doc["deliveries"].clone())
-        .map_err(|_| Error::Config(format!("{} has no deliveries", path.display()).into()))
+        .map_err(|_| invalid("deliveries", None, FieldRule::Missing))
+}
+
+/// What `--receipt` takes, by what was wrong with the path given.
+const RECEIPT_READABLE: &str = "a delivery receipt file opv can read";
+const RECEIPT_NOT_A_DIRECTORY: &str = "a file path, not a directory";
+const RECEIPT_IN_EXISTING_DIRECTORY: &str = "a file in an existing directory";
+const RECEIPT_WRITABLE: &str = "a file in a directory opv can write to";
+
+/// `--receipt <path>` given a path that cannot be used as `format` says.
+fn receipt_flag(path: &Path, format: &'static str) -> Error {
+    Cause::Usage {
+        problem: UsageProblem::ValueFormat {
+            flag: format!("--receipt {}", path.display()),
+            format,
+        },
+    }
+    .into()
 }
 
 /// Write the receipts minted by a sync to `path` (`{"schema", "deliveries": [...]}`):
@@ -683,18 +848,15 @@ fn read_receipt_file(path: &Path) -> Result<Vec<Receipt>, Error> {
 /// path is not a directory. Checked before a sync stages anything, so a bad path never
 /// fails a run half way. Leaves nothing behind.
 pub fn check_receipt_path(path: &Path) -> Result<(), Error> {
-    let bad = |why: String| {
-        Error::Config(format!("--receipt {}: {why}; nothing was changed", path.display()).into())
-    };
     if path.is_dir() {
-        return Err(bad("is a directory".into()));
+        return Err(receipt_flag(path, RECEIPT_NOT_A_DIRECTORY));
     }
     let dir = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
     };
     if !dir.is_dir() {
-        return Err(bad(format!("directory {} does not exist", dir.display())));
+        return Err(receipt_flag(path, RECEIPT_IN_EXISTING_DIRECTORY));
     }
     let probe = dir.join(format!(".opv-receipt-check-{}", std::process::id()));
     match std::fs::OpenOptions::new()
@@ -706,19 +868,56 @@ pub fn check_receipt_path(path: &Path) -> Result<(), Error> {
             let _ = std::fs::remove_file(&probe);
             Ok(())
         }
-        Err(e) => Err(bad(format!(
-            "cannot write in {} ({})",
-            dir.display(),
-            e.kind()
-        ))),
+        Err(_) => Err(receipt_flag(path, RECEIPT_WRITABLE)),
     }
 }
 
 pub fn write_receipt_file(path: &Path, minted: &[Receipt]) -> Result<(), Error> {
     let doc = json!({"schema": SCHEMA, "deliveries": minted});
-    let text = serde_json::to_string_pretty(&doc)
-        .map_err(|_| Error::Config("cannot serialize the delivery receipt".into()))?;
+    let text = serde_json::to_string_pretty(&doc).map_err(|_| {
+        Error::from(Cause::Bug {
+            site: "delivery receipt file serializes",
+        })
+    })?;
     super::init::write_atomic(path, &format!("{text}\n"), true)
+}
+
+/// A placement or name state in words, for the text report (01.17); `--json` keeps the
+/// slugs.
+fn state_words(state: &str) -> &str {
+    match state {
+        "verified" => "verified",
+        "not_delivered" => "not delivered",
+        "changed" => "changed since it was delivered",
+        "superseded" => "superseded by a later delivery",
+        "unverifiable" => "cannot be verified",
+        "missing_on_target" => "missing on the target",
+        "drifted_on_target" => "changed on the target",
+        "source_changed" => "changed in 1Password since",
+        other => other,
+    }
+}
+
+/// Whether the delivery is live, in words.
+fn deployed_words(deployed: &str) -> &str {
+    match deployed {
+        "n/a" => "applied at once",
+        "staged" => "staged, not yet deployed",
+        other => other,
+    }
+}
+
+/// The comparison's reason, in words (the domain's reasons name scope fields).
+fn reason_words(reason: &str) -> String {
+    match reason {
+        "no delivery recorded" => "no delivery is recorded".to_string(),
+        "the binding set changed" => "the set of delivered keys changed".to_string(),
+        "recorded for another account_id" => "recorded under another 1Password account".to_string(),
+        other => match other.strip_prefix("recorded for another ") {
+            Some(field) => format!("recorded for another {}", field.replace('_', " ")),
+            None => other.to_string(),
+        },
+    }
 }
 
 fn report(
@@ -743,15 +942,15 @@ fn report(
             "{} {}: {} (revision {rev}; {})",
             super::placement(env_name, &c.target),
             c.product,
-            v.state,
-            c.deployed
+            state_words(v.state),
+            deployed_words(c.deployed)
         )
         .map_err(write_err)?;
         if let Some(reason) = &v.reason {
-            writeln!(out, "  {reason}").map_err(write_err)?;
+            writeln!(out, "  {}", reason_words(reason)).map_err(write_err)?;
         }
         for n in v.names.iter().filter(|n| n.state != "verified") {
-            writeln!(out, "  {:<32} {}", n.name, n.state).map_err(write_err)?;
+            writeln!(out, "  {:<32} {}", n.name, state_words(n.state)).map_err(write_err)?;
         }
     }
     if checks.is_empty() {

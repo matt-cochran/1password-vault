@@ -1,17 +1,22 @@
 //! The view model of `opv ui` (#82): one snapshot built only from opv's own JSON documents
 //! (`config export --json`, `ready --json`, `status`/`check --json`), so the TUI keeps no
 //! state of its own and shows exactly what the CLI would. Names, states, rules and config
-//! values only: a secret's value is never in any of these documents.
+//! values only: a secret's value is never in any of these documents. The documents are read
+//! as types ([`super::docs`]); a command that failed is a [`Problem`] with its error's steps,
+//! never an empty document (07.02).
 
 use std::collections::BTreeMap;
 
-use serde_json::Value;
+pub use super::docs::Source;
+use super::docs::{Failure, ReadyDoc, RowsDoc, fetch, fetch_config};
+use crate::domain::Fleet;
 
-/// Where the JSON documents come from: the opv binary itself, or fixtures in tests.
-pub trait Source {
-    /// The stdout of `opv <args>` (with `--json` in `args`) as JSON, whatever the exit code;
-    /// `Err` with a short reason when it did not print a JSON document.
-    fn json(&self, args: &[&str]) -> Result<Value, String>;
+/// One target of an environment (FR-56): its name and its provider's label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetView {
+    pub name: String,
+    /// `Fly`, `GitHub`, ...
+    pub provider: String,
 }
 
 /// One environment, from the configuration and the receipt (FR-55). Never hard-coded.
@@ -19,10 +24,27 @@ pub trait Source {
 pub struct EnvView {
     pub key: String,
     pub title: String,
-    /// The target's provider label (`Fly`, `GitHub`, ...); `None`: run-only (local).
-    pub target: Option<String>,
+    /// The environment's targets (FR-56), in name order; empty: run-only (local).
+    pub targets: Vec<TargetView>,
     pub audience: Option<String>,
     pub guarded: bool,
+}
+
+impl EnvView {
+    /// True when opv delivers this environment to at least one target.
+    pub fn deployed(&self) -> bool {
+        !self.targets.is_empty()
+    }
+
+    /// Where it delivers, in a few words: `local`, the one target's provider, or
+    /// `<n> targets`.
+    pub fn place(&self) -> String {
+        match self.targets.as_slice() {
+            [] => "local".into(),
+            [one] => one.provider.clone(),
+            many => format!("{} targets", many.len()),
+        }
+    }
 }
 
 /// One declared key.
@@ -73,10 +95,29 @@ pub struct Finding {
 /// One environment × product summary of the receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Summary {
-    pub keys: u64,
-    pub saved: u64,
-    pub findings: u64,
+    pub keys: usize,
+    pub saved: usize,
+    pub findings: usize,
     pub delivered: bool,
+}
+
+/// A document that could not be read: which command, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Problem {
+    /// What was being read, as `readiness (opv ready)` or `opv status prod`.
+    pub what: String,
+    pub failure: Failure,
+}
+
+impl Problem {
+    /// `could not read <what>: <message>`, then the error's own steps.
+    pub fn lines(&self) -> Vec<String> {
+        let mut lines = self.failure.lines().into_iter();
+        let first = lines.next().unwrap_or_default();
+        std::iter::once(format!("could not read {}: {first}", self.what))
+            .chain(lines.map(|l| format!("  {l}")))
+            .collect()
+    }
 }
 
 /// Everything the screens show.
@@ -94,32 +135,39 @@ pub struct Snapshot {
     pub findings: Vec<Finding>,
     /// (actor, command) of the first step.
     pub next: Option<(String, String)>,
-    /// Documents that could not be read, by command, for the status line.
-    pub problems: Vec<String>,
+    /// Documents that could not be read, with the command's error and its steps.
+    pub problems: Vec<Problem>,
 }
 
-fn s(v: &Value) -> Option<String> {
-    v.as_str().map(str::to_string)
+/// How notable a row's target state is when an environment has several targets: its cell
+/// shows the most notable one.
+fn notable(target_state: Option<&str>) -> u8 {
+    match target_state {
+        Some("absent") => 3,
+        Some("would_change") => 2,
+        Some("present") | None => 1,
+        Some(_) => 0,
+    }
 }
 
 impl Snapshot {
     /// Read the configuration, the receipt, then each environment's rows.
     pub fn gather(source: &dyn Source) -> Snapshot {
         let mut snap = Snapshot::default();
-        match source.json(&["config", "export", "--json"]) {
-            Ok(config) => snap.read_config(&config),
-            Err(why) => snap.problems.push(format!("config export: {why}")),
+        match fetch_config(source) {
+            Ok(fleet) => snap.read_config(&fleet),
+            Err(failure) => snap.problem("the configuration", failure),
         }
-        match source.json(&["ready", "--json"]) {
-            Ok(ready) => snap.read_ready(&ready),
-            Err(why) => snap.problems.push(format!("ready: {why}")),
+        match fetch::<ReadyDoc>(source, &["ready", "--json"]) {
+            Ok(ready) => snap.read_ready(ready),
+            Err(failure) => snap.problem("readiness (opv ready)", failure),
         }
         let envs = snap.envs.clone();
         for env in &envs {
-            if env.target.is_some() {
-                match source.json(&["status", &env.key, "--json"]) {
-                    Ok(doc) => snap.read_rows(&env.key, &doc),
-                    Err(why) => snap.problems.push(format!("status {}: {why}", env.key)),
+            if env.deployed() {
+                match fetch::<RowsDoc>(source, &["status", &env.key, "--json"]) {
+                    Ok(doc) => snap.read_rows(&env.key, doc),
+                    Err(failure) => snap.problem(&format!("opv status {}", env.key), failure),
                 }
             } else {
                 for p in snap.products.clone() {
@@ -133,9 +181,12 @@ impl Snapshot {
                         p.name.as_str(),
                         "--json",
                     ];
-                    match source.json(&args) {
-                        Ok(doc) => snap.read_rows(&env.key, &doc),
-                        Err(why) => snap.problems.push(format!("check {}: {why}", env.key)),
+                    match fetch::<RowsDoc>(source, &args) {
+                        Ok(doc) => snap.read_rows(&env.key, doc),
+                        Err(failure) => snap.problem(
+                            &format!("opv check {} --product {}", env.key, p.name),
+                            failure,
+                        ),
                     }
                 }
             }
@@ -143,111 +194,118 @@ impl Snapshot {
         snap
     }
 
-    fn read_config(&mut self, config: &Value) {
-        let mut envs: Vec<(i64, EnvView)> = Vec::new();
-        if let Some(map) = config["environments"].as_object() {
-            for (key, e) in map {
-                let target = crate::adapters::registry::PROVIDERS
+    fn problem(&mut self, what: &str, failure: Failure) {
+        self.problems.push(Problem {
+            what: what.to_string(),
+            failure,
+        });
+    }
+
+    /// The environments, in their order, and the products, from the configuration as opv
+    /// parses it: targets are read where 0.7+ keeps them (07.01).
+    fn read_config(&mut self, fleet: &Fleet) {
+        let mut envs: Vec<(i64, EnvView)> = fleet
+            .environments
+            .iter()
+            .map(|(key, e)| {
+                let targets = e
+                    .targets
                     .iter()
-                    .find(|p| e.get(p.section()).is_some())
-                    .map(|p| p.label().to_string());
-                envs.push((
-                    e["order"].as_i64().unwrap_or(i64::MAX),
+                    .map(|(name, t)| TargetView {
+                        name: name.clone(),
+                        provider: t.config.provider().label().to_string(),
+                    })
+                    .collect();
+                (
+                    e.order.unwrap_or(i64::MAX),
                     EnvView {
                         key: key.clone(),
-                        title: s(&e["title"]).unwrap_or_else(|| key.clone()),
-                        target,
-                        audience: s(&e["audience"]),
-                        guarded: e["confirm_env"].as_bool().unwrap_or(false),
+                        title: e.title.clone().unwrap_or_else(|| key.clone()),
+                        targets,
+                        audience: e.audience.clone(),
+                        guarded: e.confirm_env,
                     },
-                ));
-            }
-        }
+                )
+            })
+            .collect();
         envs.sort_by(|a, b| (a.0, &a.1.key).cmp(&(b.0, &b.1.key)));
         self.envs = envs.into_iter().map(|(_, e)| e).collect();
-        // Simple profile: keys at the top level, one implicit product.
-        let mut products = Vec::new();
-        let keys_of = |keys: &Value| -> Vec<KeyView> {
-            keys.as_object()
-                .map(|m| {
-                    m.iter()
-                        .map(|(name, k)| KeyView {
-                            name: name.clone(),
-                            kind: s(&k["kind"]).unwrap_or_else(|| "secret".into()),
-                            personal: k["personal"].as_bool().unwrap_or(false),
-                            immutable: k["immutable"].as_bool().unwrap_or(false),
-                            from: s(&k["from"]),
-                            guidance: s(&k["guidance"]).unwrap_or_default(),
-                            environments: k["environments"]
-                                .as_array()
-                                .map(|a| a.iter().filter_map(s).collect())
-                                .unwrap_or_default(),
-                        })
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-        if let Some(map) = config["products"].as_object() {
-            for (name, p) in map {
-                products.push(ProductView {
-                    name: name.clone(),
-                    source_only: p["source_only"].as_bool().unwrap_or(false),
-                    keys: keys_of(&p["keys"]),
-                });
-            }
-        }
-        self.products = products;
+        self.products = fleet
+            .products
+            .iter()
+            .map(|(name, p)| ProductView {
+                name: name.clone(),
+                source_only: p.source_only,
+                keys: p
+                    .keys
+                    .iter()
+                    .map(|(key, k)| KeyView {
+                        name: key.clone(),
+                        kind: crate::app::kind_label(k.kind).to_string(),
+                        personal: k.personal,
+                        immutable: k.immutable,
+                        from: k.from.clone(),
+                        guidance: k.guidance.clone(),
+                        environments: k.environments.clone(),
+                    })
+                    .collect(),
+            })
+            .collect();
     }
 
-    fn read_ready(&mut self, ready: &Value) {
-        self.config_source = s(&ready["config"]["source"]);
-        self.account = s(&ready["account"]["account_id"]);
-        self.receipt_id = s(&ready["receipt_id"]);
-        for m in ready["matrix"].as_array().into_iter().flatten() {
-            let (Some(env), Some(product)) = (s(&m["environment"]), s(&m["product"])) else {
-                continue;
-            };
+    fn read_ready(&mut self, ready: ReadyDoc) {
+        self.config_source = ready.config.source;
+        self.account = ready.account.map(|a| a.account_id);
+        self.receipt_id = Some(ready.receipt_id);
+        for m in ready.matrix {
             self.summary.insert(
-                (env, product),
+                (m.environment, m.product),
                 Summary {
-                    keys: m["keys"].as_u64().unwrap_or(0),
-                    saved: m["saved"].as_u64().unwrap_or(0),
-                    findings: m["findings"].as_u64().unwrap_or(0),
-                    delivered: m["delivered"].as_bool().unwrap_or(true),
+                    keys: m.keys,
+                    saved: m.saved,
+                    findings: m.findings,
+                    delivered: m.delivered,
                 },
             );
         }
-        for f in ready["findings"].as_array().into_iter().flatten() {
-            self.findings.push(Finding {
-                code: s(&f["code"]).unwrap_or_default(),
-                environment: s(&f["scope"]["environment"]),
-                product: s(&f["scope"]["product"]),
-                key: s(&f["scope"]["key"]),
-                blocking: f["blocking"].as_bool().unwrap_or(false),
-                actor: s(&f["actor"]).unwrap_or_default(),
-                effect: s(&f["effect"]).unwrap_or_default(),
-                prerequisite: s(&f["prerequisite"]).unwrap_or_default(),
-                message: s(&f["message"]),
-            });
-        }
-        if let (Some(a), Some(c)) = (s(&ready["next"]["actor"]), s(&ready["next"]["command"])) {
-            self.next = Some((a, c));
-        }
+        self.findings = ready
+            .findings
+            .into_iter()
+            .map(|f| Finding {
+                code: f.code,
+                environment: f.scope.environment,
+                product: f.scope.product,
+                key: f.scope.key,
+                blocking: f.blocking,
+                actor: f.actor,
+                effect: f.effect,
+                prerequisite: f.prerequisite,
+                message: f.message,
+            })
+            .collect();
+        self.next = ready.next.map(|n| (n.actor, n.command));
     }
 
-    fn read_rows(&mut self, env: &str, doc: &Value) {
-        for r in doc["rows"].as_array().into_iter().flatten() {
-            let (Some(product), Some(key)) = (s(&r["product"]), s(&r["key"])) else {
+    /// One environment's rows. With several targets a key has one row per target; its cell
+    /// shows the most notable target state.
+    fn read_rows(&mut self, env: &str, doc: RowsDoc) {
+        for r in doc.rows {
+            let Some(product) = r.product else {
                 continue;
             };
-            self.cells.insert(
-                (env.to_string(), product, key),
-                Cell {
-                    state: s(&r["state"]).unwrap_or_default(),
-                    target: s(&r["target"]),
-                    rule: s(&r["rule"]),
-                },
-            );
+            let cell = Cell {
+                state: r.state,
+                target: r.target_state,
+                rule: r.rule,
+            };
+            let at = (env.to_string(), product, r.key);
+            let keep = self
+                .cells
+                .get(&at)
+                .is_some_and(|c| notable(c.target.as_deref()) >= notable(cell.target.as_deref()));
+            if !keep {
+                self.cells.insert(at, cell);
+            }
         }
     }
 

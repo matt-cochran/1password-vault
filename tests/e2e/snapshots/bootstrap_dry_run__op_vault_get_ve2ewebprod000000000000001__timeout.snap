@@ -1,0 +1,20 @@
+# bootstrap_dry_run__op_vault_get_ve2ewebprod000000000000001__timeout: opv bootstrap --dry-run | fault timeout on op vault get vE2EWEBPROD000000000000001
+
+## text exit: 9
+## text stdout
+
+## text stderr
+opv: 1Password did not answer after 1 attempt: it timed out
+  checked: op vault get vE2EWEBPROD000000000000001 --format json (timed out)
+Do: approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network
+Next: opv bootstrap --dry-run
+
+## json exit: 9
+## json stdout
+{"schema_version":2,"ok":false,"exit_code":9,"next":"opv bootstrap --dry-run --json","do":"approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network","error":{"code":"provider_unavailable","category":"unknown","message":"1Password did not answer after 1 attempt: it timed out","subject":{"attempts":1,"system":"one_password","why":{"why":"timeout"}},"evidence":{"checked":"op vault get vE2EWEBPROD000000000000001 --format json","account":null,"upstream":null},"retry":"safe","human_required":false,"do":"approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network","next":"opv bootstrap --dry-run --json","next_kind":"rerun"}}
+
+## json stderr
+opv: 1Password did not answer after 1 attempt: it timed out
+  checked: op vault get vE2EWEBPROD000000000000001 --format json (timed out)
+Do: approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network
+Next: opv bootstrap --dry-run --json

@@ -1,13 +1,12 @@
 //! `opv schema` (A4): a machine-readable description of the installed binary.
 //!
 //! Commands, arguments and flags come from the clap definitions passed in, the exit and
-//! error codes from [`crate::error::Code`], so neither can drift from the code. What clap
+//! error codes from the catalog ([`crate::cause::codes::table`]), so neither can drift from the code. What clap
 //! cannot know (what a command changes, whether it needs a person's terminal, whether to
 //! ask the user first) is the [`EFFECTS`] table; a test fails when a command has no entry.
 
 use serde_json::{Value, json};
 
-use crate::error::Code;
 use crate::json::SCHEMA_VERSION;
 
 /// Every MCP tool mapped to the CLI command that gives the same guarantee, in tool order
@@ -419,6 +418,12 @@ pub const TIDIES_1PASSWORD: [&str; 12] = [
     "init",
 ];
 
+/// Commands that also create 1Password vaults or items with no flag asking for it, beside
+/// their own `effect` (02.16): `init` creates the boundary vault and item when they are
+/// missing, and `target add` creates the target's state vault. `opv schema` marks them
+/// `also_writes_1password`.
+pub const ALSO_WRITES_1PASSWORD: [&str; 2] = ["init", "target add"];
+
 /// What a flag adds to its command's effect: (command, long flag, effect). Every one of
 /// these needs the user's yes for the run.
 pub const FLAG_EFFECTS: [(&str, &str, &str); 11] = [
@@ -459,7 +464,7 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
             "json": "with --json (and always for schema and config export <env>) stdout is one JSON document; human text goes to stderr",
             "ok": "true on success; false on failure, with exit_code and error",
             "next": "a command that runs as typed, or null; on failure always set",
-            "do": "an action only a person can take (fill a value in 1Password, sign in), or null; shown before next",
+            "do": "what to do before `next`, or null; shown before next. Only a person can do it when human_required is true (fill a value in 1Password, approve, sign in)",
             "retry": "safe: re-run the same command now; after_fix: re-run it once `do` is done; never: run `next` instead",
             "human_required": "true when an agent must hand `do` and `next` to the user instead of acting",
             "text": "every failure ends with an optional `Do: <action>` line and exactly one `Next: <command>` line, the last line on stderr",
@@ -468,19 +473,13 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
             "plan_id": "plan --json prints plan_id when the plan is clean; it covers exactly the targets planned (every target of the environment, or those --target names); sync --expect-plan <plan_id> applies exactly that plan to the same targets or fails with stale_plan (exit 6) and changes nothing",
             "targets": "status, plan and sync cover every target of the environment in name order, or only those --target names (repeatable); every row and key reference names its target",
             "run": "run always passes op:// references to op run, so op run masks values in the child's output; a value needing a fix a person's tidy would make is warned about on stderr, never injected",
-            "schema_version": "stays 1 while fields are only added; changes when a field changes meaning",
+            "schema_version": "2 since 0.10.0 (the error document and its codes changed); stays 2 while fields are only added; changes when a field changes meaning",
         },
         "global_flags": global,
         "commands": commands,
         "mcp_tools": MCP_TOOLS.iter().map(|(tool, cli)| json!({"tool": tool, "cli": cli})).collect::<Vec<_>>(),
         "exit_codes": exit_codes(),
-        "error_codes": Code::ALL.iter().map(|c| json!({
-            "code": c.as_str(),
-            "exit_code": c.exit_code(),
-            "retry": c.retry().as_str(),
-            "human_required": c.human_required(),
-            "meaning": c.meaning(),
-        })).collect::<Vec<_>>(),
+        "error_codes": error_codes(),
         "states": {
             "row_state": ["saved", "missing", "failing_rule", "skipped", "source_blocked"],
             "row_kind": ["secret", "config"],
@@ -564,6 +563,7 @@ fn leaf_commands(cmd: &clap::Command, prefix: String, out: &mut Vec<Value>) {
         "handles_values": effect.map(|e| e.handles_values),
         "ask_user_first": effect.map(|e| e.ask_user_first),
         "tidies_1password": effect.map(|_| TIDIES_1PASSWORD.contains(&path.as_str())),
+        "also_writes_1password": effect.map(|_| ALSO_WRITES_1PASSWORD.contains(&path.as_str())),
     }));
 }
 
@@ -610,7 +610,10 @@ fn exit_codes() -> Value {
         "7": {"meaning": "authentication (1Password or the target)", "retry": "after_fix"},
         "8": {"meaning": "findings: status, plan or check found blocking keys", "retry": "after_fix"},
         "9": {"meaning": "outcome unknown, or a provider did not answer; nothing is known to be broken", "retry": "safe"},
+        "70": {"meaning": "internal error: an opv bug (report it)", "retry": "never"},
+        "129": {"meaning": "interrupted (SIGHUP)", "retry": "safe"},
         "130": {"meaning": "interrupted (SIGINT)", "retry": "safe"},
+        "131": {"meaning": "interrupted (SIGQUIT)", "retry": "safe"},
         "143": {"meaning": "interrupted (SIGTERM)", "retry": "safe"},
         "run": "opv run exits with the child's own code",
     })
@@ -725,17 +728,41 @@ fn documents() -> Value {
     })
 }
 
+/// The public error codes, generated from the catalog ([`crate::cause::codes::table`]):
+/// `exit_code`, `retry` and `human_required` are the code's first (its lowest exit code),
+/// and `exit_codes` and `retry_classes` list every one its causes have.
+fn error_codes() -> Vec<serde_json::Value> {
+    crate::cause::codes::table()
+        .iter()
+        .map(|r| {
+            json!({
+                "code": r.code,
+                "exit_code": r.exits[0],
+                "exit_codes": r.exits,
+                "retry": r.retry[0].as_str(),
+                "retry_classes": r.retry.iter().map(|c| c.as_str()).collect::<Vec<_>>(),
+                "human_required": r.human_required.contains(&true),
+                "meaning": r.meaning,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn every_error_code_is_listed_once() {
-        let mut slugs: Vec<&str> = Code::ALL.iter().map(|c| c.as_str()).collect();
-        let n = slugs.len();
-        slugs.sort_unstable();
-        slugs.dedup();
-        assert_eq!(slugs.len(), n);
+    fn every_error_code_is_the_catalogs() {
+        let listed: Vec<String> = error_codes()
+            .iter()
+            .map(|c| c["code"].as_str().unwrap_or_default().to_string())
+            .collect();
+        let catalog: Vec<String> = crate::cause::codes::table()
+            .iter()
+            .map(|r| r.code.to_string())
+            .collect();
+        assert_eq!(listed, catalog);
     }
 
     #[test]

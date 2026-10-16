@@ -78,6 +78,9 @@ pub(crate) fn plan(
         let pair = (row.product.clone(), row.key.clone());
         if concealed.contains(&pair) {
             row.state = KeyState::RuleFailed(CONCEALED_RULE, Reason::Fixed(CONCEALED_REASON));
+            // 01.01: refused here, so not delivered here: `concealed_config` lists only the
+            // concealed config this target delivers as a plain value.
+            plan.concealed_config.retain(|p| *p != pair);
             continue;
         }
         if let Some((rule, why)) = vars.refusal(&name, value) {

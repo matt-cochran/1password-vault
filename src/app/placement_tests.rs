@@ -15,7 +15,6 @@ use super::*;
 use crate::adapters::fake_op::FakeOp;
 use crate::app::sync::{self, SyncOpts};
 use crate::app::testutil::{fly_app_ok, fly_releases, ok};
-use crate::error::Code;
 use crate::runner::{Call, Outcome, Output};
 
 const MARK: &str = "PLACEMENTMARK";
@@ -371,7 +370,7 @@ fn expect_plan_refuses_a_plan_made_for_other_targets() {
         ..SyncOpts::default()
     };
     let err = sync_with(&w, &fleet, opts).0.unwrap_err();
-    assert_eq!(err.code(), Code::StalePlan);
+    assert_eq!(err.code_str(), "stale_plan");
 }
 
 #[test]
@@ -473,14 +472,57 @@ fn sync_summaries_name_each_target() {
 }
 
 #[test]
-fn an_unknown_target_is_a_usage_error() {
+fn an_unknown_target_is_unknown_target() {
     let w = world();
     let opts = SyncOpts {
         targets: targets(&["north"]),
         ..SyncOpts::default()
     };
     let err = sync_with(&w, &both(&w), opts).0.unwrap_err();
-    assert_eq!(err.code(), Code::Usage);
+    assert_eq!(err.code_str(), "unknown_target");
+}
+
+/// 01.04: a misspelt --target steps to the plan of the unique close target, every scope
+/// flag kept and --deploy, --prune and --confirm dropped; never a write to a guessed target.
+#[test]
+fn a_misspelt_target_on_sync_steps_to_the_plan_of_the_close_one() {
+    let w = world();
+    let opts = SyncOpts {
+        targets: targets(&["wes"]),
+        ..SyncOpts::default()
+    };
+    let err = sync_with(&w, &both(&w), opts).0.unwrap_err();
+    let (cause, _) = err.cause().expect("a cataloged cause");
+    let argv: Vec<String> = "opv sync prod --target wes --deploy --prune --confirm prod"
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let inv = crate::cause::Invocation::from_cli(&argv);
+    assert_eq!(
+        crate::cause::render::next_text(&cause.step(&inv).1, &inv),
+        Some("opv plan prod --target west".into())
+    );
+}
+
+/// 01.04, X2: with no close target the step is the listing, never the first target.
+#[test]
+fn an_unknown_target_with_no_close_one_steps_to_the_listing() {
+    let w = world();
+    let opts = SyncOpts {
+        targets: targets(&["north"]),
+        ..SyncOpts::default()
+    };
+    let err = sync_with(&w, &both(&w), opts).0.unwrap_err();
+    let (cause, _) = err.cause().expect("a cataloged cause");
+    let argv: Vec<String> = "opv sync prod --target north --deploy"
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let inv = crate::cause::Invocation::from_cli(&argv);
+    assert_eq!(
+        crate::cause::render::next_text(&cause.step(&inv).1, &inv),
+        Some("opv target list".into())
+    );
 }
 
 #[test]
@@ -497,7 +539,7 @@ fn an_unknown_target_error_lists_the_environments_targets() {
         false,
     )
     .unwrap_err();
-    assert!(err.to_string().contains("(targets: east, west)"), "{err}");
+    assert!(err.to_string().contains("(declared: east, west)"), "{err}");
 }
 
 #[test]
@@ -514,8 +556,7 @@ fn a_failing_later_target_names_the_targets_already_synced() {
     *w.fail_import.borrow_mut() = Some("myapp-west".into());
     let err = sync_with(&w, &both(&w), SyncOpts::default()).0.unwrap_err();
     assert!(
-        err.to_string()
-            .contains("already synced by this run: prod/east"),
+        err.to_string().contains("already written: prod/east"),
         "{err}"
     );
 }
@@ -645,8 +686,8 @@ fn a_sync_without_an_approval_names_the_approve_command() {
     let id = plan_id(&w, &fleet, &["east"]);
     let e = approved_sync(dir.path(), &w, &fleet, &east_scope(), &id).unwrap_err();
     assert_eq!(
-        e.next_step().map(str::to_string),
-        Some(format!("opv approve {id} --sync prod --target east"))
+        e.next_text().unwrap_or_default(),
+        format!("opv approve {id} --sync prod --target east")
     );
 }
 
@@ -673,7 +714,7 @@ fn an_approval_without_deploy_does_not_cover_a_deploying_sync() {
         ..east_scope()
     };
     let e = approved_sync(dir.path(), &w, &fleet, &deploying, &id).unwrap_err();
-    assert_eq!(e.code(), Code::ApprovalRequired);
+    assert_eq!(e.code_str(), "approval_required");
 }
 
 #[test]
@@ -703,7 +744,7 @@ fn a_stale_plan_is_refused_before_the_approval_is_used() {
         .keys
         .insert("OTHER".into(), other);
     let e = approved_sync(dir.path(), &w, &fleet, &east_scope(), &id).unwrap_err();
-    assert_eq!(e.code(), Code::StalePlan);
+    assert_eq!(e.code_str(), "stale_plan");
 }
 
 #[test]
@@ -915,7 +956,7 @@ fn an_approval_without_rotation_does_not_cover_a_rotating_approved_sync() {
         ..east_scope()
     };
     let e = approved_sync(dir.path(), &w, &fleet, &rotating, &id).unwrap_err();
-    assert_eq!(e.code(), Code::ApprovalRequired);
+    assert_eq!(e.code_str(), "approval_required");
 }
 
 #[test]
@@ -1007,6 +1048,7 @@ fn mcp_sync(w: &World, fleet: &Fleet, dir: &std::path::Path, id: &str) -> Value 
         deploy: false,
         prune: false,
         rotate: Vec::new(),
+        verbose: false,
     };
     crate::mcp::sync_approved(
         fleet,
@@ -1067,6 +1109,7 @@ fn opv_sync_runs_the_approved_rotation() {
         deploy: false,
         prune: false,
         rotate: vec!["api/LOCK".into()],
+        verbose: false,
     };
     let answer = crate::mcp::sync_approved(
         &fleet,
@@ -1116,7 +1159,7 @@ fn opv_sync_without_an_approval_returns_the_approve_command() {
     let fleet = both(&w);
     let id = plan_id(&w, &fleet, &["east"]);
     assert_eq!(
-        mcp_sync(&w, &fleet, dir.path(), &id)["approve_command"],
+        mcp_sync(&w, &fleet, dir.path(), &id)["error"]["next"],
         json!(format!("opv approve {id} --sync prod --target east"))
     );
 }
@@ -1146,6 +1189,7 @@ fn opv_sync_refuses_an_op_credential_in_its_environment() {
         deploy: false,
         prune: false,
         rotate: Vec::new(),
+        verbose: false,
     };
     let answer = crate::mcp::sync_approved(
         &fleet,
@@ -1157,7 +1201,7 @@ fn opv_sync_refuses_an_op_credential_in_its_environment() {
         std::iter::once(("OP_SERVICE_ACCOUNT_TOKEN".to_string(), "x".to_string())),
         &mut |_, _, _, _, _| Ok(()),
     );
-    assert_eq!(answer["code"], "credential_in_environment");
+    assert_eq!(answer["error"]["code"], "own_session_required");
 }
 
 #[cfg(feature = "mcp")]
@@ -1166,7 +1210,7 @@ fn opv_sync_refuses_a_plan_id_that_is_not_one() {
     let (w, dir) = (world(), tempfile::tempdir().unwrap());
     let fleet = both(&w);
     assert_eq!(
-        mcp_sync(&w, &fleet, dir.path(), "../../etc")["code"],
-        "invalid_plan_id"
+        mcp_sync(&w, &fleet, dir.path(), "../../etc")["error"]["code"],
+        "usage"
     );
 }

@@ -6,21 +6,21 @@
 
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 
 use serde::Deserialize;
-use serde::de::{self, Deserializer};
 
 use super::external::{self, Bridge, ExternalStore};
 use super::runtime::{DEPLOY_RIGHTS, POLL_EVERY, WAIT_MAX, missing_rights};
 use super::{
-    KUBECTL, KubeDeployment, KubeSecrets, KubeTarget, Kubectl, PROGRAM, valid_label_value,
+    Effect, Failed, KUBECTL, KubeDeployment, KubeSecrets, KubeTarget, Kubectl, PROGRAM,
+    valid_label_value,
 };
 use crate::adapters::probe::{spawn_tool, version_in};
-use crate::domain::AccessFinding;
+use crate::cause::{Cause, FieldRule, Unusable};
+use crate::config::{TEMPLATE_WORDS, section_invalid};
 use crate::error::Error;
 use crate::host::Host;
-use crate::ports::{PinnedRuntime, Ports};
+use crate::ports::Ports;
 use crate::provider::{
     Check, InitField, NameRules, Preflight, PreflightMode, Provider, Section, StoreBinding,
     StoreConfig, StoreNameRules, TargetConfig, Verdict, eq_as, init_lines,
@@ -112,76 +112,58 @@ static BINDINGS: [StoreBinding; 1] = [StoreBinding {
     via: "External Secrets Operator",
 }];
 
-/// The section as written.
+/// The section as written. Its identifiers are checked once it is read
+/// ([`Raw::checked`]), so each refusal is a typed configuration cause (C15).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Raw {
-    #[serde(deserialize_with = "context")]
     context: String,
-    #[serde(deserialize_with = "namespace")]
     namespace: String,
-    #[serde(deserialize_with = "deployment")]
     deployment: String,
-    #[serde(default, deserialize_with = "container")]
+    #[serde(default)]
     container: Option<String>,
     #[serde(default)]
-    env_name: Option<Template>,
+    env_name: Option<String>,
     #[serde(default)]
     config: ConfigRoute,
 }
 
-/// An `env_name`: must contain `{KEY}` (`{PRODUCT}` is optional; two keys rendering one
-/// name are refused at load, FR-30).
-struct Template(String);
+/// A Kubernetes name (DNS-1123 label), in words.
+const LABEL_WORDS: &str = "a Kubernetes name: lower-case letters, digits and -, starting and ending with a letter or digit, at most 63 characters";
+/// A kubeconfig context name, in words.
+const CONTEXT_WORDS: &str = "a kubeconfig context name: letters, digits and _ . : / @ + -, not starting with - (kubectl config get-contexts -o name lists them)";
 
-impl<'de> Deserialize<'de> for Template {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let t = String::deserialize(d)?;
-        if t.contains("{KEY}") {
-            Ok(Self(t))
-        } else {
-            Err(de::Error::custom(format!(
-                "kubernetes.env_name {t:?} must contain {{KEY}}"
-            )))
+impl Raw {
+    /// The section's identifiers checked (FR-37): the context goes into argv (never read as
+    /// a flag, no whitespace or shell metacharacters; cloud context names hold `:`, `/` and
+    /// `@`); namespace, Deployment and container are DNS-1123 labels; `env_name` is
+    /// required and contains `{KEY}` (`{PRODUCT}` is optional; two keys rendering one name
+    /// are refused at load, FR-30). Returns the template.
+    fn checked(&mut self) -> Result<String, Error> {
+        let bad = |field: &str, words: &'static str| {
+            section_invalid(
+                &format!("kubernetes.{field}"),
+                FieldRule::Type { expected: words },
+            )
+        };
+        if !is_context(&self.context) {
+            return Err(bad("context", CONTEXT_WORDS));
         }
-    }
-}
-
-/// A DNS-1123 label field (namespace, Deployment, container names).
-fn label<'de, D: Deserializer<'de>>(field: &str, d: D) -> Result<String, D::Error> {
-    let s = String::deserialize(d)?;
-    if valid_label_value(&s) {
-        Ok(s)
-    } else {
-        Err(de::Error::custom(format!(
-            "kubernetes.{field} {s:?} must be a Kubernetes name: {LABEL_PATTERN}"
-        )))
-    }
-}
-
-fn namespace<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
-    label("namespace", d)
-}
-
-fn deployment<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
-    label("deployment", d)
-}
-
-fn container<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
-    label("container", d).map(Some)
-}
-
-/// The context goes into argv: non-empty, never read as a flag, no whitespace or shell
-/// metacharacters (cloud context names hold `:`, `/` and `@`, so those are allowed).
-fn context<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
-    let s = String::deserialize(d)?;
-    if is_context(&s) {
-        Ok(s)
-    } else {
-        Err(de::Error::custom(format!(
-            "kubernetes.context {s:?} must be a kubeconfig context name: \
-             ^[A-Za-z0-9_.:/@+][A-Za-z0-9_.:/@+-]*$ (see `kubectl config get-contexts -o name`)"
-        )))
+        let labels = [
+            ("namespace", Some(&self.namespace)),
+            ("deployment", Some(&self.deployment)),
+            ("container", self.container.as_ref()),
+        ];
+        for (field, value) in labels {
+            if value.is_some_and(|v| !valid_label_value(v)) {
+                return Err(bad(field, LABEL_WORDS));
+            }
+        }
+        match self.env_name.take() {
+            Some(t) if t.contains("{KEY}") => Ok(t),
+            Some(_) => Err(bad("env_name", TEMPLATE_WORDS)),
+            None => Err(section_invalid("kubernetes.env_name", FieldRule::Missing)),
+        }
     }
 }
 
@@ -226,15 +208,7 @@ impl Provider for KubernetesProvider {
     fn parse(&self, section: &Section<'_>) -> Result<Box<dyn TargetConfig>, Error> {
         let env = section.env();
         let mut raw: Raw = section.deserialize()?;
-        let Some(Template(t)) = raw.env_name.take() else {
-            return Err(Error::Config(
-                format!(
-                    "environment {env}: kubernetes.env_name is required (for example \
-                     \"FLEET__{{PRODUCT}}__{{KEY}}\", or \"{{KEY}}\" for bare names)"
-                )
-                .into(),
-            ));
-        };
+        let t = raw.checked()?;
         Ok(Box::new(raw.target(env, t)))
     }
 
@@ -291,7 +265,10 @@ impl Provider for KubernetesProvider {
         store: &dyn StoreConfig,
     ) -> Result<Box<dyn TargetConfig>, Error> {
         let Some(t) = target.as_any().downcast_ref::<KubernetesTarget>() else {
-            return Err(Error::Config("kubernetes: not a Kubernetes target".into()));
+            return Err(Cause::Bug {
+                site: "kubernetes: bind was given a target of another provider",
+            }
+            .into());
         };
         Ok(Box::new(KubernetesTarget {
             store: Some(store.clone_box()),
@@ -314,17 +291,22 @@ impl KubernetesTarget {
             .replace("{PRODUCT}", &product)
             .replace("{KEY}", key)
     }
-
-    /// `kubectl --context <c> --namespace <ns> <rest>`, for fix lines.
-    fn command(&self, rest: &str) -> String {
-        format!(
-            "{PROGRAM} --context {} --namespace {} {rest}",
-            self.target.context, self.target.namespace
-        )
-    }
 }
 
 impl TargetConfig for KubernetesTarget {
+    fn runtime_subject(
+        &self,
+    ) -> Option<(
+        crate::cause::System,
+        &'static str,
+        crate::cause::ResourceRef,
+    )> {
+        Some((
+            crate::cause::System::Kubernetes,
+            PROGRAM,
+            self.target.deployment_ref(),
+        ))
+    }
     fn target_locator(&self) -> String {
         format!(
             "context {} namespace {} deployment {}",
@@ -629,9 +611,11 @@ impl TargetConfig for KubernetesTarget {
 fn kubectl_version(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Verdict, Error> {
     let o = spawn_tool(r, KUBECTL, host, &["version", "--client"])?;
     if o.status != 0 {
-        return Err(Error::Dependency(
-            format!("{PROGRAM} version --client failed (exit {})", o.status).into(),
-        ));
+        return Err(Cause::ToolUnusable {
+            tool: PROGRAM.into(),
+            why: Unusable::VersionUnreadable,
+        }
+        .into());
     }
     Ok(match version_in(&o.stdout) {
         Some(v) => Verdict::Ok(format!("version {v}")),
@@ -640,7 +624,9 @@ fn kubectl_version(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Ver
 }
 
 impl KubernetesTarget {
-    /// `kubectl config get-contexts <ctx> -o name`: the context is in the kubeconfig.
+    /// `kubectl config get-contexts <ctx> -o name`: the context is in the kubeconfig. A
+    /// failure is the kubectl strategy's: a context missing on this machine asks for its
+    /// credentials here, never for a change to the shared `kubernetes.context` (06.26).
     fn context_check(
         &self,
         r: &dyn CommandRunner,
@@ -656,18 +642,13 @@ impl KubernetesTarget {
         if o.status == 0 {
             Ok(Verdict::Ok(format!("context {ctx} is in your kubeconfig")))
         } else {
-            Err(Error::Config(
-                format!(
-                    "context \"{ctx}\" is not in your kubeconfig (KUBECONFIG or ~/.kube/config); \
-                 nothing was changed\n  next: kubectl config get-contexts -o name lists the \
-                 contexts; set kubernetes.context in secrets.toml to one of them"
-                )
-                .into(),
-            ))
+            Err(self.probe_failure())
         }
     }
 
-    /// `kubectl --context <ctx> version --request-timeout=5s`: the API server answers.
+    /// `kubectl --context <ctx> version --request-timeout=5s`: the API server answers. A
+    /// failure is the kubectl strategy's: a 401 is a sign-in, a refused connection an
+    /// outage (nothing was changed), anything else unrecognised with kubectl's reply.
     fn cluster_check(
         &self,
         r: &dyn CommandRunner,
@@ -682,47 +663,46 @@ impl KubernetesTarget {
         )?;
         if o.status == 0 {
             Ok(Verdict::Ok(format!("API server for context {ctx} answers")))
-        } else if crate::runner::last_failure_signed_out() {
-            Err(super::unauthorized(ctx, "nothing was changed"))
         } else {
-            Err(Error::Unknown(
-                format!(
-                    "provider unavailable: the Kubernetes API server for context \"{ctx}\" did not \
-                 answer (unreachable, or your credentials for it expired); nothing was \
-                 changed\n  next: `kubectl --context {ctx} cluster-info` shows the cause; fix \
-                 it, then re-run `opv doctor`"
-                )
-                .into(),
-            )
-            .with_code(crate::error::Code::ProviderUnavailable))
+            Err(self.probe_failure())
         }
     }
 
-    /// `kubectl auth can-i` for the rights sync needs. Advisory (R6): a missing right is a
-    /// warning naming the exact grant, never a failure.
-    /// Every right sync needs (FR-32): a missing one fails, naming the grant.
+    /// The doctor probe that just failed, as the kubectl strategy classifies it.
+    fn probe_failure(&self) -> Error {
+        match Failed::take(&self.target.env, Effect::Read) {
+            Ok(mut f) => {
+                f.name_subjects(&self.target, self.target.namespace_ref());
+                f.into_error()
+            }
+            Err(e) => e,
+        }
+    }
+
+    /// Every right sync needs (FR-32), asked with `kubectl auth can-i`: a missing one fails
+    /// with the first refusal the kubectl strategy typed (a missing right, naming the
+    /// grant); rights that cannot be checked are a warning. With a named store opv writes
+    /// no Secrets itself; the ExternalSecret rights have their own line (`external secrets
+    /// access`).
     fn access_check(&self, r: &dyn CommandRunner) -> Result<Verdict, Error> {
-        let rt = KubeDeployment::new(r, &self.target, BTreeSet::new());
-        // With a named store opv writes no Secrets itself; the ExternalSecret rights have
-        // their own line (`external secrets access`).
-        let needed =
-            |f: &AccessFinding| self.store.is_none() || !f.store_name.ends_with(" secrets");
-        match rt
-            .check_access(&[])
-            .map(|found| found.into_iter().filter(needed).collect::<Vec<_>>())
-        {
-            Ok(found) if found.is_empty() => Ok(Verdict::Ok(format!(
-                "has every right sync needs in namespace {}",
-                self.target.namespace
-            ))),
-            Ok(found) => Err(missing_rights_error(self.access_fix(&found).to_string())),
+        let external = self.store.is_some();
+        let needed = |_: &str, resource: &str| !external || resource != "secrets";
+        match missing_rights(&Kubectl::new(r, &self.target), false, needed) {
+            Ok(found) => match found.into_iter().next() {
+                None => Ok(Verdict::Ok(format!(
+                    "has every right sync needs in namespace {}",
+                    self.target.namespace
+                ))),
+                Some((_, refused)) => Err(refused),
+            },
             Err(e) => Ok(Verdict::Warn(format!("rights not checked: {e}"))),
         }
     }
 
     /// `sync` (Mutate): the rights only a deploy uses after the new revision is live
     /// ([`DEPLOY_RIGHTS`]), checked before the first write, so a missing one never fails a
-    /// deploy that succeeded (FR-32, NR-1).
+    /// deploy that succeeded (FR-32, NR-1). Only a namespace admin can grant it, so the
+    /// refusal is a person's step (06.13).
     fn deploy_rights(&self, r: &dyn CommandRunner) -> Result<(), Error> {
         let external = self.store.is_some();
         let pick = |verb: &str, resource: &str| {
@@ -730,74 +710,10 @@ impl KubernetesTarget {
                 || (external && verb == "delete" && resource == external::RESOURCE)
         };
         let found = missing_rights(&Kubectl::new(r, &self.target), external, pick)?;
-        if found.is_empty() {
-            return Ok(());
+        match found.into_iter().next() {
+            None => Ok(()),
+            Some((_, refused)) => Err(refused),
         }
-        Err(missing_rights_error(format!(
-            "sync refused, nothing was changed: {}",
-            self.access_fix(&found)
-        )))
-    }
-
-    fn access_fix(&self, found: &[AccessFinding]) -> AccessFix<'_> {
-        AccessFix {
-            target: self,
-            found: found.to_vec(),
-        }
-    }
-}
-
-/// The missing rights and the commands that grant exactly them.
-/// Signed in but missing a right sync needs (FR-32): only a namespace admin can grant
-/// it, so a person acts first (the grant commands are in `text`).
-fn missing_rights_error(text: String) -> Error {
-    Error::Target(text.into())
-        .with_code(crate::error::Code::PermissionDenied)
-        .with_do("ask a namespace admin to run the grant commands above")
-}
-
-struct AccessFix<'a> {
-    target: &'a KubernetesTarget,
-    found: Vec<AccessFinding>,
-}
-
-impl fmt::Display for AccessFix<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let reasons: Vec<&str> = self.found.iter().map(|a| a.reason.as_str()).collect();
-        write!(f, "{} (sync needs it)", reasons.join("; "))?;
-        f.write_str("\n  fix (as a namespace admin):")?;
-        for resource in [
-            "secrets",
-            external::RESOURCE,
-            "deployments",
-            "replicasets",
-            "pods",
-        ] {
-            let verbs: Vec<&str> = self
-                .found
-                .iter()
-                .filter_map(|a| {
-                    let (verb, res) = a.store_name.split_once(' ')?;
-                    (res == resource).then_some(verb)
-                })
-                .collect();
-            if verbs.is_empty() {
-                continue;
-            }
-            let role = format!("opv-{}", resource.split('.').next().unwrap_or(resource));
-            write!(
-                f,
-                "\n    {}\n    {}",
-                self.target.command(&format!(
-                    "create role {role} --verb={} --resource={resource}",
-                    verbs.join(",")
-                )),
-                self.target.command(&format!(
-                    "create rolebinding {role} --role={role} --user=<your user>"
-                ))
-            )?;
-        }
-        Ok(())
     }
 }
 
@@ -897,24 +813,25 @@ environments = ["dev"]
 
     #[test]
     fn invalid_namespace_points_at_its_line() {
+        // C15: a typed ConfigInvalid at the field's key, in words, never the value (C1).
         assert_eq!(
             err(&with("\"myapp\"", "\"My_App\"")),
-            "configuration error: invalid secrets.toml: TOML parse error at line 9, column 13\n\
-             kubernetes.namespace \"My_App\" must be a Kubernetes name: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ (at most 63 \
-             characters)"
+            "secrets.toml at line 9, column 1: environments.dev.targets.app.kubernetes.namespace \
+             must be a Kubernetes name: lower-case letters, digits and -, starting and ending with \
+             a letter or digit, at most 63 characters"
         );
     }
 
     #[test]
     fn invalid_deployment_points_at_its_line() {
         let e = err(&with("\"api\"", "\"api-\""));
-        assert!(e.contains("line 10, column 14"), "{e}");
+        assert!(e.contains("line 10, column 1:"), "{e}");
     }
 
     #[test]
     fn invalid_container_points_at_its_line() {
         let e = err(&with("api\"\n", "api\"\ncontainer = \"-web\"\n"));
-        assert!(e.contains("line 11, column 13"), "{e}");
+        assert!(e.contains("line 11, column 1:"), "{e}");
     }
 
     #[test]
@@ -926,32 +843,35 @@ environments = ["dev"]
     #[test]
     fn context_with_leading_dash_points_at_its_line() {
         let e = err(&with("\"kind-opv\"", "\"--kubeconfig=/x\""));
-        assert!(e.contains("line 8, column 11"), "{e}");
+        assert!(e.contains("line 8, column 1:"), "{e}");
     }
 
     #[test]
     fn context_with_whitespace_is_refused() {
         let e = err(&with("\"kind-opv\"", "\"kind opv\""));
-        assert!(e.contains("kubernetes.context \"kind opv\""), "{e}");
+        assert!(
+            e.contains("kubernetes.context must be a kubeconfig context name"),
+            "{e}"
+        );
     }
 
     #[test]
     fn context_with_shell_metacharacter_is_refused() {
         let e = err(&with("\"kind-opv\"", "\"kind;rm\""));
-        assert!(e.contains("kubernetes.context \"kind;rm\""), "{e}");
+        assert!(!e.contains("kind;rm"), "{e}");
     }
 
     #[test]
     fn empty_context_is_refused() {
         let e = err(&with("\"kind-opv\"", "\"\""));
-        assert!(e.contains("kubernetes.context \"\""), "{e}");
+        assert!(e.contains("kubernetes.context must be"), "{e}");
     }
 
     #[test]
     fn env_name_without_placeholders_points_at_its_line() {
         let e = err(&with("FLEET__{PRODUCT}__{KEY}", "STATIC"));
         assert!(
-            e.contains("line 11, column 12") && e.contains("must contain {KEY}"),
+            e.contains("line 11, column 1:") && e.contains("a template containing {KEY}"),
             "{e}"
         );
     }
@@ -966,7 +886,7 @@ environments = ["dev"]
     fn unknown_config_route_points_at_its_line() {
         let e = err(&with("api\"\n", "api\"\nconfig = \"plain\"\n"));
         assert!(
-            e.contains("line 11, column 10") && e.contains("unknown variant `plain`"),
+            e.contains("line 11, column 10") && e.contains("must be one of env, store"),
             "{e}"
         );
     }
@@ -998,8 +918,9 @@ environments = ["dev"]
     fn key_ending_in_underscore_is_refused_at_its_line() {
         let e = err(&BARE.replace("keys.JWT_KEY]", "keys.JWT_KEY_]"));
         assert!(
-            e.contains("app/JWT_KEY_ renders Kubernetes name \"jwt-key-\"")
-                && e.contains("line 10, column 20"),
+            e.contains(
+                "renders a Kubernetes name for app/JWT_KEY_ that is not starting and ending"
+            ) && e.contains("line 10, column 20"),
             "{e}"
         );
     }
@@ -1008,7 +929,7 @@ environments = ["dev"]
     fn fleet_key_ending_in_underscore_is_refused_at_its_line() {
         let e = err(&doc(ENV, &KEYS.replace("DB_URL]", "DB_URL_]")));
         assert!(
-            e.contains("api/DB_URL_ renders Kubernetes name \"fleet--api--db-url-\"")
+            e.contains("renders a Kubernetes name for api/DB_URL_ that is not starting and ending")
                 && e.contains("line 13, column 20"),
             "{e}"
         );
@@ -1028,7 +949,7 @@ environments = ["dev"]
                     [products.a_b.keys.C]\nkind = \"secret\"\nenvironments = [\"dev\"]\n";
         let e = err(&doc(ENV, keys));
         assert!(
-            e.contains("both map to Kubernetes name fleet--a-b--c"),
+            e.contains("renders Kubernetes name fleet--a-b--c for both"),
             "{e}"
         );
     }
@@ -1040,7 +961,7 @@ environments = ["dev"]
             format!("[products.api.keys.{long}]\nkind = \"secret\"\nenvironments = [\"dev\"]\n");
         let e = err(&doc(ENV, &keys));
         assert!(
-            e.contains("renders Kubernetes name of 72 characters"),
+            e.contains("that is 72 characters long, over the 63 allowed"),
             "{e}"
         );
     }
@@ -1049,7 +970,7 @@ environments = ["dev"]
     fn rejects_two_environments_sharing_a_deployment_and_template() {
         let second = ENV.replace("environments.dev", "environments.stage");
         let e = err(&doc(&format!("{ENV}{second}"), KEYS));
-        assert!(e.contains("both use Kubernetes deployment \"api\""), "{e}");
+        assert!(e.contains("manages the same names on Kubernetes "), "{e}");
     }
 
     #[test]
@@ -1131,10 +1052,7 @@ environments = ["dev"]
             .map(|c| match c.outcome {
                 Ok(Verdict::Ok(d)) => format!("{}: ok {d}", c.name),
                 Ok(Verdict::Warn(d)) => format!("{}: warn {d}", c.name),
-                Err(e) => match e.next_step() {
-                    Some(n) => format!("{}: FAIL {e}\n  fix: {n}", c.name),
-                    None => format!("{}: FAIL {e}", c.name),
-                },
+                Err(e) => format!("{}: FAIL {e}", c.name),
             })
             .collect()
     }
@@ -1164,7 +1082,10 @@ environments = ["dev"]
             "error: You must be logged in to the server (Unauthorized)\n",
         );
         let checks = target().doctor(&r, &host);
-        assert!(matches!(&checks[2].outcome, Err(Error::Auth(_))));
+        assert_eq!(
+            checks[2].outcome.as_ref().map_err(Error::code_str).err(),
+            Some("target_not_signed_in")
+        );
     }
 
     #[test]
@@ -1181,8 +1102,8 @@ environments = ["dev"]
         r.push_io_error(std::io::ErrorKind::NotFound);
         assert_eq!(
             doctor_lines(&r)[0],
-            "kubectl: FAIL dependency error: kubectl not found on PATH\n  install: brew install \
-             kubectl"
+            // R56: the catalog's message; the install line is its Do.
+            "kubectl: FAIL kubectl is not installed, or not on PATH"
         );
     }
 
@@ -1194,23 +1115,63 @@ environments = ["dev"]
         assert_eq!(r.calls.borrow().len(), 1);
     }
 
+    /// The doctor check `i` when kubectl answers the healthy replies up to it, then fails
+    /// it with `stderr` (a recorded reply, `tests/fixtures/kubernetes/failures/`).
+    fn doctor_failure(i: usize, stderr: &str) -> Error {
+        let r = FakeRunner::default();
+        for out in healthy().into_iter().take(i) {
+            r.push_with_stderr(out, "");
+        }
+        r.push_with_stderr(Output::failure(1), stderr);
+        target()
+            .doctor(&r, &host)
+            .swap_remove(i)
+            .outcome
+            .unwrap_err()
+    }
+
+    const CONTEXT_MISSING: &str = "error: context kind-opv not found\n";
+
+    /// 06.26: a context missing on this machine is set up here, not renamed for everyone.
     #[test]
-    fn doctor_fails_a_missing_context_with_the_listing_command() {
-        let mut g = healthy();
-        g[1] = Output::failure(1);
-        let r = FakeRunner::new(g);
-        assert!(doctor_lines(&r)[1].contains("fix: kubectl config get-contexts -o name"));
+    fn doctor_names_a_context_missing_on_this_machine() {
+        assert!(matches!(
+            doctor_failure(1, CONTEXT_MISSING).cause(),
+            Some((
+                Cause::NotFound {
+                    state: crate::cause::NotFoundState::LocalContextMissing,
+                    ..
+                },
+                _
+            ))
+        ));
+    }
+
+    /// 06.26: the Do never edits the shared `kubernetes.context`.
+    #[test]
+    fn doctor_never_asks_to_change_the_shared_context() {
+        let action = doctor_failure(1, CONTEXT_MISSING).do_text();
+        assert!(!action.unwrap_or_default().contains("kubernetes.context"));
     }
 
     #[test]
     fn doctor_reports_an_unreachable_cluster_as_provider_unavailable() {
-        let mut g = healthy();
-        g[2] = Output::failure(1);
-        let r = FakeRunner::new(g);
-        let l = &doctor_lines(&r)[2];
+        let refused = "The connection to the server 127.0.0.1:9 was refused - did you specify \
+                       the right host or port?\n";
+        assert_eq!(
+            doctor_failure(2, refused).code_str(),
+            "provider_unavailable"
+        );
+    }
+
+    /// 06.37: the outage text does not repeat its category.
+    #[test]
+    fn doctor_outage_text_names_no_category() {
+        let refused = "The connection to the server 127.0.0.1:9 was refused\n";
         assert!(
-            l.contains("FAIL outcome unknown: provider unavailable"),
-            "{l}"
+            !doctor_failure(2, refused)
+                .to_string()
+                .contains("provider unavailable:")
         );
     }
 
@@ -1225,23 +1186,19 @@ environments = ["dev"]
         );
     }
 
-    /// I4: every right sync needs is required; a missing one fails with the exact grant.
+    /// I4: every right sync needs is required; a missing one fails as the right refused.
     #[test]
-    fn doctor_fails_a_missing_right_with_the_exact_grant() {
+    fn doctor_fails_a_missing_right_as_permission_denied() {
         let mut g = healthy();
         g[5] = Output {
             status: 1,
             stdout: zeroize::Zeroizing::new(b"no\n".to_vec()),
         };
         let r = FakeRunner::new(g);
+        let checks = target().doctor(&r, &host);
         assert_eq!(
-            doctor_lines(&r)[3],
-            "kubernetes access: FAIL target error: your kubectl identity cannot delete \
-             Secrets, so sync \
-             --deploy cannot remove superseded versions (sync needs it)\n  fix (as a namespace \
-             admin):\n    kubectl --context kind-opv --namespace myapp create role opv-secrets \
-             --verb=delete --resource=secrets\n    kubectl --context kind-opv --namespace myapp \
-             create rolebinding opv-secrets --role=opv-secrets --user=<your user>"
+            checks[3].outcome.as_ref().map_err(Error::code_str).err(),
+            Some("permission_denied")
         );
     }
 
@@ -1262,14 +1219,13 @@ environments = ["dev"]
             .collect()
     }
 
-    /// I4: sync refuses before its first write when a right only the deploy uses is missing.
+    /// I4, 06.13: sync refuses before its first write when a right only the deploy uses is
+    /// missing, and only a namespace admin can grant it.
     #[test]
-    fn sync_preflight_refuses_without_the_right_to_list_pods() {
+    fn sync_preflight_refusal_without_a_right_needs_a_person() {
         let r = FakeRunner::new(deploy_rights("list pods"));
-        assert!(matches!(
-            target().preflight(&r, PreflightMode::Mutate),
-            Err(Error::Target(_))
-        ));
+        let e = target().preflight(&r, PreflightMode::Mutate).unwrap_err();
+        assert!(e.human_required());
     }
 
     /// Signed in but missing a right: a person grants it; not a sign-in.
@@ -1277,17 +1233,19 @@ environments = ["dev"]
     fn sync_preflight_refusal_without_a_right_is_permission_denied() {
         let r = FakeRunner::new(deploy_rights("list pods"));
         let e = target().preflight(&r, PreflightMode::Mutate).unwrap_err();
-        assert_eq!(e.code(), crate::error::Code::PermissionDenied);
+        assert_eq!(e.code_str(), "permission_denied");
     }
 
     #[test]
     fn sync_preflight_refusal_names_the_grant() {
         let r = FakeRunner::new(deploy_rights("delete secrets"));
         let e = target().preflight(&r, PreflightMode::Mutate).unwrap_err();
-        assert!(
-            e.mentions("create role opv-secrets --verb=delete --resource=secrets"),
-            "{e}"
-        );
+        assert!(matches!(
+            e.cause(),
+            Some((Cause::MissingRight { grant: crate::cause::GrantModel::K8sRbac {
+                verb, resource, namespace }, .. }, _))
+                if verb == "delete" && resource == "secrets" && namespace.as_deref() == Some("myapp")
+        ));
     }
 
     #[test]
@@ -1374,7 +1332,10 @@ env_name = "{{KEY}}"
     #[test]
     fn unknown_store_lists_the_defined_ones() {
         let e = err(&bound("secrets_in = \"staging-vault\"", DB_URL));
-        assert!(e.contains("names no store; defined: prod-vault"), "{e}");
+        assert!(
+            e.contains("names store staging-vault, which is not declared (declared: prod-vault)"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -1403,7 +1364,9 @@ env_name = "{{KEY}}"
     fn secrets_in_on_fly_lists_the_supported_pairs() {
         let e = err(&on("fly", "app = \"my-app\"\nsecret_name = \"{KEY}\""));
         assert!(
-            e.contains("supported secrets_in pairs: azure_key_vault → kubernetes (External Secrets Operator)"),
+            e.contains(
+                "(supported pairs: azure_key_vault → kubernetes (External Secrets Operator))"
+            ),
             "{e}"
         );
     }
@@ -1414,7 +1377,7 @@ env_name = "{{KEY}}"
                     \"kv-a\"\nresource_group = \"rg\"\ncontainer_app = \"ca\"\nidentity = \"system\"\nenv_name = \"{KEY}\"";
         let e = err(&on("azure", body));
         assert!(
-            e.contains("azure cannot keep its secrets in store \"prod-vault\""),
+            e.contains("which a azure target cannot keep its secrets in"),
             "{e}"
         );
     }
@@ -1422,7 +1385,7 @@ env_name = "{{KEY}}"
     #[test]
     fn store_without_a_kind_lists_the_known_kinds() {
         let text = bound("", DB_URL).replace("azure_key_vault = \"kv-myapp-prod\"\n", "");
-        assert!(err(&text).contains("names no store kind; add one of: azure_key_vault"));
+        assert!(err(&text).contains("names no store kind (one of azure_key_vault"));
     }
 
     #[test]
@@ -1430,7 +1393,7 @@ env_name = "{{KEY}}"
         let text = bound("", DB_URL).replace("[stores.prod-vault]", "[stores.Prod_Vault]");
         let e = err(&text);
         assert!(
-            e.contains("line 1") && e.contains("store \"Prod_Vault\""),
+            e.contains("line 1") && e.contains("stores.Prod_Vault must be"),
             "{e}"
         );
     }
@@ -1440,7 +1403,7 @@ env_name = "{{KEY}}"
         let keys = "[products.app.keys.DB_URL_]\nkind = \"secret\"\nenvironments = [\"dev\"]\n";
         let e = err(&bound("secrets_in = \"prod-vault\"", keys));
         assert!(
-            e.contains("must start and end with a letter or digit"),
+            e.contains("not starting and ending with a letter or digit"),
             "{e}"
         );
     }
@@ -1456,7 +1419,7 @@ env_name = "{{KEY}}"
         ) + "[products.app.keys.DB_URL]\nkind = \"secret\"\nenvironments = [\"dev\", \"prod\"]\n";
         let e = err(&crate::config::testing::bounded(&text));
         assert!(
-            e.contains("environments dev (target app) and prod (target app) both keep Key Vault name db-url in Key Vault kv-myapp-prod"),
+            e.contains("keeps Key Vault name db-url for app/DB_URL in Key Vault kv-myapp-prod, where environment dev keeps it for app/DB_URL"),
             "{e}"
         );
     }
@@ -1468,7 +1431,7 @@ env_name = "{{KEY}}"
             format!("[products.app.keys.{long}]\nkind = \"secret\"\nenvironments = [\"dev\"]\n");
         let e = err(&bound("secrets_in = \"prod-vault\"", &keys));
         assert!(
-            e.contains("renders Kubernetes name of 71 characters"),
+            e.contains("that is 71 characters long, over the 63 allowed"),
             "{e}"
         );
     }

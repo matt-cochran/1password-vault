@@ -529,21 +529,164 @@ fn duplicate_receipt_error() -> Error {
     .unwrap_err()
 }
 
+/// The catalog cause of `e`.
+fn cause_of(e: &Error) -> crate::cause::Cause {
+    match e.cause() {
+        Some((c, _)) => c.clone(),
+        None => panic!("not a catalog cause: {e}"),
+    }
+}
+
+/// The Next of `e` for `opv delivery verify prod`.
+fn verify_next(e: &Error) -> crate::cause::Next {
+    let argv: Vec<String> = ["opv", "delivery", "verify", "prod"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    cause_of(e)
+        .step(&crate::cause::Invocation::from_cli(&argv))
+        .1
+}
+
+/// 01.09: a duplicate is an invalid receipt input (was `duplicate_scope` text with a slug
+/// in it and `--help` as its step), whose rule is "keep one".
 #[test]
-fn a_duplicate_scope_in_the_receipt_file_is_a_duplicate_scope_error() {
-    assert_eq!(
-        duplicate_receipt_error().code(),
-        crate::error::Code::DuplicateScope
-    );
+fn a_duplicate_scope_in_the_receipt_file_is_a_duplicate_in_the_receipt() {
+    assert!(matches!(
+        cause_of(&duplicate_receipt_error()),
+        crate::cause::Cause::InputInvalid {
+            kind: crate::cause::InputKind::Receipt,
+            rule: crate::cause::FieldRule::DuplicateKey,
+            ..
+        }
+    ));
 }
 
 #[test]
-fn a_duplicate_scope_error_tells_the_caller_to_keep_one() {
-    assert!(
-        duplicate_receipt_error()
-            .text()
-            .starts_with("duplicate_scope: the receipt file holds 2 receipts for ")
+fn a_duplicate_scope_error_names_the_receipt_file() {
+    assert!(matches!(
+        cause_of(&duplicate_receipt_error()),
+        crate::cause::Cause::InputInvalid { path, .. } if path.ends_with("prod.receipt.json")
+    ));
+}
+
+#[test]
+fn a_duplicate_scope_error_reruns_the_same_verify_after_the_edit() {
+    assert_eq!(
+        verify_next(&duplicate_receipt_error()),
+        crate::cause::Next::Rerun
     );
+}
+
+/// 01.06: an unverified placement is `delivery_unverified`, not `findings`.
+#[test]
+fn an_unverified_placement_is_delivery_unverified() {
+    let _person = crate::app::tidy::activate();
+    let (w, fleet) = world();
+    let e = verify(
+        &fleet,
+        "prod",
+        Some("api"),
+        &[],
+        None,
+        &w,
+        false,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(cause_of(&e).code(), "delivery_unverified");
+}
+
+/// 01.06: a delivery never made is "not recorded", stepped to a scoped plan, never an
+/// unscoped `opv sync`.
+#[test]
+fn a_placement_never_delivered_steps_to_the_targets_plan() {
+    let _person = crate::app::tidy::activate();
+    let (w, fleet) = world();
+    let e = verify(
+        &fleet,
+        "prod",
+        Some("api"),
+        &[],
+        None,
+        &w,
+        false,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        verify_next(&e),
+        crate::cause::Next::Check(crate::cause::Cmd {
+            command: vec!["plan".into()],
+            args: vec!["prod".into(), "--target".into(), "app".into()],
+        })
+    );
+}
+
+/// 01.06: a value changed on the target is `ChangedOnTarget`.
+#[test]
+fn an_edit_on_the_target_is_changed_on_target() {
+    let (w, fleet) = delivered();
+    w.app("myapp").insert(
+        "FLEET__API__TOKEN".into(),
+        ("edited-elsewhere".into(), false),
+    );
+    let e = verify(
+        &fleet,
+        "prod",
+        Some("api"),
+        &[],
+        None,
+        &w,
+        false,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        cause_of(&e),
+        crate::cause::Cause::DeliveryUnverified {
+            state: crate::cause::Unverified::ChangedOnTarget,
+            ..
+        }
+    ));
+}
+
+/// 01.17: the text report words states, never a snake_case slug.
+#[test]
+fn the_text_report_words_its_states() {
+    let _person = crate::app::tidy::activate();
+    let (w, fleet) = world();
+    let mut out = Vec::new();
+    let _ = verify(&fleet, "prod", Some("api"), &[], None, &w, false, &mut out);
+    assert!(
+        !String::from_utf8(out).unwrap().contains("not_delivered"),
+        "slug in the text report"
+    );
+}
+
+/// 01.18: with `--target`, nothing in scope names that target.
+#[test]
+fn nothing_to_verify_on_a_named_target_names_it() {
+    // Neither target of `two_targets` delivers web.
+    let (w, fleet) = two_targets();
+    let e = verify(
+        &fleet,
+        "prod",
+        Some("web"),
+        &["a".to_string()],
+        None,
+        &w,
+        false,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        cause_of(&e),
+        crate::cause::Cause::NothingInScope {
+            what: crate::cause::Scope::NoTargetDelivers { target },
+            ..
+        } if target.as_str() == "a"
+    ));
 }
 
 #[test]
@@ -945,7 +1088,7 @@ fn verify_of_a_misspelt_product_is_unknown_product() {
     let (w, fleet) = delivered();
     let mut out = Vec::new();
     let e = verify(&fleet, "prod", Some("apii"), &[], None, &w, false, &mut out).unwrap_err();
-    assert_eq!(e.code(), crate::error::Code::UnknownProduct);
+    assert_eq!(e.code_str(), "unknown_product");
 }
 
 #[test]

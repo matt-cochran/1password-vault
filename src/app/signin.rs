@@ -21,7 +21,7 @@ use crate::domain::{Fleet, ItemRef};
 use crate::error::Error;
 use crate::host::Host;
 use crate::provider::{CredentialField, DeployLogin};
-use crate::runner::{Call, CommandRunner, Outcome, Output};
+use crate::runner::{Call, CommandRunner, CreateOutcome, Outcome, Output};
 
 /// The run's runner, for one environment: its 1Password account on `op` calls and, once
 /// signed in, its deploy identity on the target CLI's calls.
@@ -29,6 +29,9 @@ pub struct EnvRunner<'a> {
     inner: &'a dyn CommandRunner,
     account: Option<String>,
     login: Option<Box<dyn DeployLogin>>,
+    /// The deploy credentials in effect (design §5): calls that use them are observed under
+    /// this principal, not the person or a shell token.
+    deploy: Option<crate::cause::Principal>,
 }
 
 impl<'a> EnvRunner<'a> {
@@ -39,6 +42,7 @@ impl<'a> EnvRunner<'a> {
             inner,
             account,
             login: None,
+            deploy: None,
         }
     }
 }
@@ -114,11 +118,23 @@ fn open_at<'a>(
 /// A deploy sign-in error (FR-40) with its stable code: a credential the target rejected is
 /// `deploy_credentials_failed` (exit 7); a missing CLI or field, a refused private
 /// directory or an unknown outcome keeps its own code and exit.
-fn deploy_failed(e: Error) -> Error {
-    match e {
-        e @ Error::Auth(_) => e.with_code(crate::error::Code::DeployCredentialsFailed),
-        e => e,
+///
+/// A cataloged rejection of the deploy credentials (diagnosed under their principal, X22)
+/// names the item by its full reference: the runner's principal does not carry the vault,
+/// this sign-in does (06.30).
+fn deploy_failed(e: Error, reference: &ItemRef) -> Error {
+    use crate::cause::{Cause, CredentialRef, VaultId};
+    let Error::Catalog(cause, upstream) = e;
+    let mut cause = *cause;
+    if let Cause::CredentialRejected {
+        credential: CredentialRef::DeployCredentials { vault, .. },
+        ..
+    } = &mut cause
+        && vault.as_str().is_empty()
+    {
+        *vault = VaultId::new(reference.vault.clone());
     }
+    Error::Catalog(Box::new(cause), upstream)
 }
 
 impl<'a> EnvRunner<'a> {
@@ -128,6 +144,7 @@ impl<'a> EnvRunner<'a> {
             inner,
             account,
             login: None,
+            deploy: None,
         }
     }
 
@@ -151,16 +168,25 @@ impl<'a> EnvRunner<'a> {
         Ok(self)
     }
 
+    /// `principal`: the deploy credentials of a named target, under which the provider's
+    /// sign-in calls are observed, so a rejection addresses that credential and never the
+    /// person's own vendor login (X22, 06.01).
     fn sign_in_with(
         &mut self,
         mut login: Box<dyn DeployLogin>,
         reference: &ItemRef,
         fields: &[CredentialField],
-        env_name: Option<&str>,
+        principal: Option<crate::cause::Principal>,
     ) -> Result<(), Error> {
-        let values = onepassword::read_deploy_credentials(&*self, reference, fields, env_name)
-            .map_err(deploy_failed)?;
-        login.sign_in(values, &*self).map_err(deploy_failed)?;
+        // The item belongs to this deploy identity (env and target), named by its refusal.
+        let values =
+            onepassword::read_deploy_credentials(&*self, reference, fields, principal.as_ref())
+                .map_err(|e| deploy_failed(e, reference))?;
+        let signed = match principal {
+            Some(p) => crate::runner::under_deploy(p, || login.sign_in(values, &*self)),
+            None => login.sign_in(values, &*self),
+        };
+        signed.map_err(|e| deploy_failed(e, reference))?;
         self.login = Some(login);
         Ok(())
     }
@@ -178,20 +204,44 @@ impl<'a> EnvRunner<'a> {
             return Ok(());
         };
         let t = match target {
-            Some(name) => env.targets.get(name),
-            None if env.targets.len() == 1 => env.targets.values().next(),
+            Some(name) => env.targets.get_key_value(name),
+            None if env.targets.len() == 1 => env.targets.iter().next(),
             None => None,
         };
-        let Some((t, reference)) = t.and_then(|t| Some((t, t.deploy_credentials.as_ref()?))) else {
+        let Some((target_name, t, reference)) =
+            t.and_then(|(n, t)| Some((n, t, t.deploy_credentials.as_ref()?)))
+        else {
             return Ok(());
         };
         // A Key Vault behind a Kubernetes runtime signs `az` in (FR-39, FR-40).
         let provider = crate::provider::deploy_provider(t.config.as_ref());
-        let fields = provider
-            .deploy_credential_fields()
-            .map_err(|why| Error::Config(format!("environment {env_name}: {why}").into()))?;
+        // The configuration accepts deploy_credentials only on a provider that has fields
+        // for them (config.rs), so a refusal here is an opv bug, not the person's file.
+        let fields = provider.deploy_credential_fields().map_err(|_| {
+            Error::from(crate::cause::Cause::Bug {
+                site: "deploy_credentials accepted for a provider without them",
+            })
+        })?;
         let login = provider.deploy_login()?;
-        self.sign_in_with(login, reference, fields, Some(env_name))
+        let principal = crate::cause::Principal::DeployCredentials {
+            vault: crate::cause::VaultId::new(reference.vault.clone()),
+            item: crate::cause::ItemId::new(reference.item.clone()),
+            env: crate::cause::EnvName::new(env_name),
+            target: crate::cause::TargetName::new(target_name.clone()),
+        };
+        self.sign_in_with(login, reference, fields, Some(principal.clone()))?;
+        self.deploy = Some(principal);
+        Ok(())
+    }
+
+    /// Run `f` under the deploy principal when `program` uses the deploy credentials.
+    fn as_principal<T>(&self, program: &str, f: impl FnOnce() -> T) -> T {
+        match (&self.deploy, &self.login) {
+            (Some(p), Some(login)) if !login.env(program).is_empty() => {
+                crate::runner::under_deploy(p.clone(), f)
+            }
+            _ => f(),
+        }
     }
 
     /// The extra child environment for `program`.
@@ -219,17 +269,30 @@ impl<'a> EnvRunner<'a> {
 impl CommandRunner for EnvRunner<'_> {
     fn read(&self, call: &Call, refused: &[i32]) -> io::Result<Outcome> {
         let env = self.merged(call.program, call.env);
-        self.inner.read(&Call { env: &env, ..*call }, refused)
+        self.as_principal(call.program, || {
+            self.inner.read(&Call { env: &env, ..*call }, refused)
+        })
     }
 
     fn write(&self, call: &Call) -> io::Result<Outcome> {
         let env = self.merged(call.program, call.env);
-        self.inner.write(&Call { env: &env, ..*call })
+        self.as_principal(call.program, || {
+            self.inner.write(&Call { env: &env, ..*call })
+        })
+    }
+
+    fn create(&self, call: &Call, kind: crate::cause::CreateKind) -> io::Result<CreateOutcome> {
+        let env = self.merged(call.program, call.env);
+        self.as_principal(call.program, || {
+            self.inner.create(&Call { env: &env, ..*call }, kind)
+        })
     }
 
     fn probe(&self, call: &Call, limit: Duration) -> io::Result<Output> {
         let env = self.merged(call.program, call.env);
-        self.inner.probe(&Call { env: &env, ..*call }, limit)
+        self.as_principal(call.program, || {
+            self.inner.probe(&Call { env: &env, ..*call }, limit)
+        })
     }
 
     fn pause(&self, d: Duration, note: &str) {
@@ -242,7 +305,7 @@ impl CommandRunner for EnvRunner<'_> {
 
     fn run_inherited(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> io::Result<i32> {
         let env = self.merged(program, env);
-        self.inner.run_inherited(program, args, &env)
+        self.as_principal(program, || self.inner.run_inherited(program, args, &env))
     }
 
     fn remaining(&self) -> Option<Duration> {
@@ -251,6 +314,12 @@ impl CommandRunner for EnvRunner<'_> {
 
     fn spawns_processes(&self) -> bool {
         self.inner.spawns_processes()
+    }
+
+    /// A target write through this runner is the inner runner's (L2: a spent budget after
+    /// one never says "before any write").
+    fn writes_started(&self) -> bool {
+        self.inner.writes_started()
     }
 
     fn step_summary(&self, markdown: &str) {

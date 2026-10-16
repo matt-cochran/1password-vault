@@ -1,0 +1,18 @@
+# account_list__op_account_list__tool_missing: opv account list | fault tool_missing on op account list
+
+## text exit: 3
+## text stdout
+
+## text stderr
+opv: op is not installed, or not on PATH
+Do: install op from https://developer.1password.com/docs/cli/get-started/ (apt, dnf or the zip for this Linux distribution)
+Next: opv account list
+
+## json exit: 3
+## json stdout
+{"schema_version":2,"ok":false,"exit_code":3,"next":"opv account list --json","do":"install op from https://developer.1password.com/docs/cli/get-started/ (apt, dnf or the zip for this Linux distribution)","error":{"code":"dependency_missing","category":"dependency","message":"op is not installed, or not on PATH","subject":{"ci":false,"tool":"op","platform":"<platform>","shell":"posix"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"install op from https://developer.1password.com/docs/cli/get-started/ (apt, dnf or the zip for this Linux distribution)","next":"opv account list --json","next_kind":"rerun"}}
+
+## json stderr
+opv: op is not installed, or not on PATH
+Do: install op from https://developer.1password.com/docs/cli/get-started/ (apt, dnf or the zip for this Linux distribution)
+Next: opv account list --json

@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "ok": false,
   "exit_code": 8,
   "environment": "prod",
@@ -62,15 +62,33 @@
     "findings": 1
   },
   "next": "opv open allumata/OPENAI_API_KEY --env prod",
-  "do": "fix the keys above in 1Password (click Edit on the item: it hides empty fields until then)",
+  "do": "fill in allumata/OPENAI_API_KEY in 1Password for environment prod (click Edit on the item: it hides empty fields until then)",
   "error": {
     "code": "findings",
     "category": "findings",
-    "message": "1 finding",
-    "detail": [],
+    "message": "environment prod needs 1 value: allumata/OPENAI_API_KEY (missing)",
+    "subject": {
+      "rows": [
+        {
+          "product": "allumata",
+          "key": "OPENAI_API_KEY",
+          "target": null,
+          "state": {
+            "state": "missing"
+          }
+        }
+      ],
+      "env": "prod"
+    },
+    "evidence": {
+      "checked": null,
+      "account": null,
+      "upstream": null
+    },
     "retry": "after_fix",
     "human_required": true,
-    "do": "fix the keys above in 1Password (click Edit on the item: it hides empty fields until then)",
-    "next": "opv open allumata/OPENAI_API_KEY --env prod"
+    "do": "fill in allumata/OPENAI_API_KEY in 1Password for environment prod (click Edit on the item: it hides empty fields until then)",
+    "next": "opv open allumata/OPENAI_API_KEY --env prod",
+    "next_kind": "run"
   }
 }

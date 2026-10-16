@@ -1,17 +1,17 @@
 //! The `gh` calls of the GitHub target (FR-46). See the table in the module docs of
 //! [`super`] and `docs/design/spike-github-findings.md`.
 //!
-//! # Errors (FR-10, FR-26, SR-1)
+//! # Errors (FR-10, FR-26, SR-1; design `docs/design/error-catalog.md` §5)
 //!
-//! - `gh` missing from PATH: [`Error::Dependency`] with the platform's install line.
-//! - A call that exited non-zero is definite (gh reports the HTTP status): a 404 names the
-//!   repository (and GitHub environment) as missing or not visible; otherwise the read-only
-//!   `gh auth status` tells a sign-in problem ([`Error::Auth`]) from an access problem
-//!   ([`Error::Target`]). A write refused this way also lists what this run already wrote
-//!   (NR-10).
-//! - A write that timed out, was killed or was lost: [`Error::Unknown`] (exit 9, safe to
-//!   re-run).
-//! - A refused name or value: [`Error::Policy`] naming the key and rule, never the value.
+//! - `gh` missing from PATH: [`Cause::ToolMissing`] with the platform's install line.
+//! - Any other failed call is never classified here: what the runner observed (the exit,
+//!   the principal in effect) and gh's raw stderr go to [`super::diagnose`], which names the
+//!   cause; gh's scrubbed reply is the evidence. A rejected token is told the rights its
+//!   replacement needs. A write that fails after others succeeded is `Partial`, naming what
+//!   this run already wrote (NR-10). A listing in a GitHub environment that gh's reply does
+//!   not explain is checked against the repository's environments: a missing one is the
+//!   owner's setup.
+//! - A refused name or value: a `Guard` cause naming the key and rule, never the value.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -19,14 +19,16 @@ use std::io;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-use super::{CREDENTIAL_VARS, GH, PROGRAM, Scope};
+use super::{GH, PROGRAM, Scope};
+use crate::cause::{
+    Cause, CredentialProblem, DiagnoseContext, ResourceKind, ResourceName, ResourceRef, System,
+    Unusable, Upstream,
+};
 use crate::domain::SecretValue;
 use crate::domain::plan::StoreEntry;
 use crate::error::Error;
 use crate::host::Host;
-use crate::runner::{
-    Call, CommandRunner, Outcome, Output, PROBE_TIMEOUT, status_text, unknown_text,
-};
+use crate::runner::{Call, CommandRunner, Outcome, Output, PROBE_TIMEOUT};
 
 /// Fixed rule id for a name GitHub would reject.
 const NAME_RULE: &str = "github-name";
@@ -88,7 +90,8 @@ pub fn list_secrets(r: &dyn CommandRunner, scope: Scope<'_>) -> Result<Vec<Store
         let out = read_out(
             r,
             WHAT,
-            &place(repo, scope.environment),
+            &context(repo, scope.environment, false),
+            token_needs(scope.repos, scope.environment),
             &Call::new(PROGRAM, &argv),
         )
         .map_err(|e| missing_environment(r, scope, repo, e))?;
@@ -114,19 +117,18 @@ pub fn secret_refusal(name: &str, value: &SecretValue) -> Option<(&'static str, 
     None
 }
 
-/// Refuses the whole batch, naming the key and rule (never the value), when one entry has a
-/// [`secret_refusal`].
+/// Refuses the whole batch when one entry has a [`secret_refusal`]. `sync` refuses every
+/// such value as a blocking row of its plan (`KeysBlocking`) before any write, so one that
+/// reaches here is an internal error; nothing was sent to GitHub.
 pub fn validate_secrets(batch: &[(String, &SecretValue)]) -> Result<(), Error> {
-    for (name, value) in batch {
-        if let Some((rule, reason)) = secret_refusal(name, value) {
-            return Err(Error::Policy(
-                format!(
-                    "GitHub secret refused for {name:?}: rule {rule} ({reason}); nothing was \
-                     sent to GitHub"
-                )
-                .into(),
-            ));
+    if batch
+        .iter()
+        .any(|(name, value)| secret_refusal(name, value).is_some())
+    {
+        return Err(Cause::Bug {
+            site: "github: a value the plan passed breaks a GitHub secret rule",
         }
+        .into());
     }
     Ok(())
 }
@@ -149,14 +151,14 @@ pub fn set_secrets(
         for repo in scope.repos {
             let argv = scoped(&["secret", "set", name], repo, scope.environment);
             let call = Call::new(PROGRAM, &argv).with_stdin(Some(value.expose().as_bytes()));
-            match invoke(r, Effect::Write, WHAT, &call)? {
+            match invoke(r, Effect::Write, &call)? {
                 Outcome::Done(_) => written.push((repo.clone(), name.to_string())),
-                other => {
-                    return Err(set_failure(
+                _ => {
+                    return Err(write_failure(
                         r,
                         WHAT,
-                        &place(repo, scope.environment),
-                        &other,
+                        &context(repo, scope.environment, true),
+                        token_needs(scope.repos, scope.environment),
                         &written,
                     ));
                 }
@@ -181,16 +183,16 @@ pub fn delete_secrets(
                 scope.environment,
             );
             let call = Call::new(PROGRAM, &argv);
-            match invoke(r, Effect::Write, WHAT, &call)? {
+            match invoke(r, Effect::Write, &call)? {
                 Outcome::Done(_) => {}
-                other => {
+                _ => {
                     if !crate::runner::last_failure_not_found() {
-                        return Err(delete_failure(
+                        return Err(write_failure(
                             r,
                             WHAT,
-                            name,
-                            &place(repo, scope.environment),
-                            &other,
+                            &context(repo, scope.environment, true),
+                            token_needs(scope.repos, scope.environment),
+                            &[],
                         ));
                     }
                 }
@@ -215,7 +217,8 @@ pub fn list_variables(
         let out = read_out(
             r,
             WHAT,
-            &place(repo, scope.environment),
+            &context(repo, scope.environment, false),
+            token_needs(scope.repos, scope.environment),
             &Call::new(PROGRAM, &argv),
         )
         .map_err(|e| missing_environment(r, scope, repo, e))?;
@@ -256,14 +259,14 @@ pub fn set_variables(
         for repo in scope.repos {
             let argv = scoped(&["variable", "set", name], repo, scope.environment);
             let call = Call::new(PROGRAM, &argv).with_stdin(Some(value.as_bytes()));
-            match invoke(r, Effect::Write, WHAT, &call)? {
+            match invoke(r, Effect::Write, &call)? {
                 Outcome::Done(_) => written.push((repo.clone(), name.to_string())),
-                other => {
-                    return Err(set_failure(
+                _ => {
+                    return Err(write_failure(
                         r,
                         WHAT,
-                        &place(repo, scope.environment),
-                        &other,
+                        &context(repo, scope.environment, true),
+                        token_needs(scope.repos, scope.environment),
                         &written,
                     ));
                 }
@@ -288,16 +291,16 @@ pub fn delete_variables(
                 scope.environment,
             );
             let call = Call::new(PROGRAM, &argv);
-            match invoke(r, Effect::Write, WHAT, &call)? {
+            match invoke(r, Effect::Write, &call)? {
                 Outcome::Done(_) => {}
-                other => {
+                _ => {
                     if !crate::runner::last_failure_not_found() {
-                        return Err(delete_failure(
+                        return Err(write_failure(
                             r,
                             WHAT,
-                            name,
-                            &place(repo, scope.environment),
-                            &other,
+                            &context(repo, scope.environment, true),
+                            token_needs(scope.repos, scope.environment),
+                            &[],
                         ));
                     }
                 }
@@ -308,33 +311,161 @@ pub fn delete_variables(
 }
 
 /// Names of the GitHub environments of `repo` (`gh api repos/<repo>/environments`), for
-/// preflight. A missing repository is `Error::Target` naming it.
+/// preflight. A failure is diagnosed like any other gh read.
 pub fn environments(r: &dyn CommandRunner, repo: &str) -> Result<Vec<String>, Error> {
     const WHAT: &str = "gh api";
     let path = format!("repos/{repo}/environments");
     let args = ["api", path.as_str()];
-    let out = read_out(r, WHAT, repo, &Call::new(PROGRAM, &args))?;
+    let out = read_out(
+        r,
+        WHAT,
+        &context(repo, None, false),
+        token_needs(&[repo.to_string()], None),
+        &Call::new(PROGRAM, &args),
+    )?;
     let envs: Environments = parse_json(&out, WHAT)?;
     Ok(envs.environments.into_iter().map(|e| e.name).collect())
 }
 
-/// A listing that failed in a GitHub environment: when the environment does not exist in
-/// `repo` (gh's 404 says only "Not Found"), the error that names it and the command that
-/// creates it; any other failure unchanged. One read-only call, only on that failure path.
+/// A listing that failed in a GitHub environment for a reason gh's reply does not name:
+/// when the environment is absent from `repo`'s listing (a read, so a fact, not a guess),
+/// the owner's setup; any other failure unchanged. One read-only call, only on that path.
 fn missing_environment(r: &dyn CommandRunner, scope: Scope<'_>, repo: &str, e: Error) -> Error {
-    let (Some(env), Error::Target(_)) = (scope.environment, &e) else {
+    let Some(env) = scope.environment else {
         return e;
     };
+    if !matches!(e.cause(), Some((Cause::Unrecognized { .. }, _))) {
+        return e;
+    }
     match environments(r, repo) {
-        Ok(names) if !names.iter().any(|n| n == env) => super::missing_environment_error(repo, env),
+        Ok(names) if !names.iter().any(|n| n == env) => missing_environment_error(repo, env),
         _ => e,
     }
+}
+
+/// The GitHub environment `environment` is missing from `repo`: only an owner creates it,
+/// since its protection rules are theirs to decide (FR-46).
+pub(crate) fn missing_environment_error(repo: &str, environment: &str) -> Error {
+    Cause::OwnerSetupRequired {
+        system: System::GitHub,
+        object: ResourceRef {
+            kind: ResourceKind::GitHubEnvironment,
+            name: ResourceName::new(environment),
+            scope: Some(repo.to_string()),
+        },
+    }
+    .into()
 }
 
 /// `gh auth status` exit status only (its output names the account and is dropped unread).
 pub fn auth_status(r: &dyn CommandRunner) -> std::io::Result<bool> {
     r.probe(&Call::new(PROGRAM, &["auth", "status"]), PROBE_TIMEOUT)
         .map(|o| o.status == 0)
+}
+
+/// `gh api user --silent`: a read-only probe whose failures gh words in the recorded phrases
+/// (`tests/fixtures/github/failures` 01, 02), for a diagnosis `gh auth status` cannot give.
+pub fn user_probe(r: &dyn CommandRunner) -> std::io::Result<bool> {
+    r.probe(
+        &Call::new(PROGRAM, &["api", "user", "--silent"]),
+        PROBE_TIMEOUT,
+    )
+    .map(|o| o.status == 0)
+}
+
+/// gh is not on PATH: the install line for this platform and shell (§4.7).
+pub fn tool_missing() -> Error {
+    let host = Host::detect();
+    Cause::ToolMissing {
+        tool: PROGRAM.to_string(),
+        platform: host.platform,
+        shell: host.shell,
+        ci: host.ci,
+    }
+    .into()
+}
+
+/// gh is there but could not be started.
+pub fn tool_unusable(kind: io::ErrorKind) -> Error {
+    Cause::ToolUnusable {
+        tool: PROGRAM.to_string(),
+        why: Unusable::SpawnFailed { io: kind.into() },
+    }
+    .into()
+}
+
+/// What a gh call was about, for its diagnosis: the repository, or the GitHub environment in
+/// it, and whether the call changes the target.
+pub(crate) fn context(repo: &str, environment: Option<&str>, write: bool) -> DiagnoseContext {
+    let resource = match environment {
+        Some(env) => ResourceRef {
+            kind: ResourceKind::GitHubEnvironment,
+            name: ResourceName::new(env),
+            scope: Some(repo.to_string()),
+        },
+        None => ResourceRef {
+            kind: ResourceKind::Repository,
+            name: ResourceName::new(repo),
+            scope: None,
+        },
+    };
+    DiagnoseContext {
+        resource: Some(resource),
+        write,
+        ..DiagnoseContext::default()
+    }
+}
+
+/// The rights a replacement token needs on `repos` (06.20): a GitHub environment's values
+/// also need the Environments permission.
+pub(crate) fn token_needs(repos: &[String], environment: Option<&str>) -> Vec<String> {
+    let on = repos.join(", ");
+    let mut needs = vec![format!("Secrets and Variables write on {on}")];
+    if environment.is_some() {
+        needs.push(format!("Environments read and write on {on}"));
+    }
+    needs
+}
+
+/// The failed gh call the error at hand came from, classified by the GitHub strategy
+/// ([`super::diagnose`], design §5) from what the runner observed and gh's raw stderr, with
+/// gh's scrubbed reply as the evidence. A rejected token is told which rights its
+/// replacement needs (`needs`). `None` when the runner observed no failed call (stdout over
+/// the output cap, which is an answer, not a failure).
+pub(crate) fn diagnosed(ctx: &DiagnoseContext, needs: Vec<String>) -> Option<Error> {
+    let failed = crate::runner::take_failure()?;
+    let exit = failed.seen.exit();
+    let mut cause = super::diagnose::diagnose(failed.seen.clone(), failed.stderr(), ctx);
+    if let Cause::CredentialRejected {
+        problem: CredentialProblem::Rejected { needs: n },
+        ..
+    } = &mut cause
+        && n.is_empty()
+    {
+        *n = needs;
+    }
+    Some(match failed.excerpt {
+        Some(x) => Error::with_evidence(
+            cause,
+            Upstream {
+                source: System::GitHub,
+                tool: "GitHub CLI (gh)".to_string(),
+                version: None,
+                exit,
+                said: x.lines,
+                removed_advice: false,
+                truncated: x.truncated,
+                untrusted: true,
+            },
+        ),
+        None => cause.into(),
+    })
+}
+
+/// A failed gh call diagnosed ([`diagnosed`]); when the runner observed nothing, GitHub
+/// did not answer (the runner's own outage wording).
+fn failure(r: &dyn CommandRunner, what: &str, ctx: &DiagnoseContext, needs: Vec<String>) -> Error {
+    diagnosed(ctx, needs).unwrap_or_else(|| GH.unanswered(r, what))
 }
 
 /// Whether a `gh` call changes the target (NR-2): reads are retried by the runner, writes
@@ -346,179 +477,62 @@ enum Effect {
 }
 
 /// Run one `gh` subcommand, mapping a spawn failure to a typed, value-free error: `gh`
-/// missing is [`Error::Dependency`] with the platform's install hint; a spent run budget is
-/// [`GH::budget_spent`]; anything else is [`Error::Target`].
-fn invoke(
-    r: &dyn CommandRunner,
-    effect: Effect,
-    what: &str,
-    call: &Call<'_>,
-) -> Result<Outcome, Error> {
+/// missing is [`Cause::ToolMissing`]; a spent run budget is [`GH::budget_spent`]; anything
+/// else is [`Cause::ToolUnusable`].
+fn invoke(r: &dyn CommandRunner, effect: Effect, call: &Call<'_>) -> Result<Outcome, Error> {
     let outcome = match effect {
         Effect::Read => r.read(call, &[]),
         Effect::Write => r.write(call),
     };
     outcome.map_err(|e| match e.kind() {
-        io::ErrorKind::NotFound => Error::Dependency(
-            format!(
-                "{PROGRAM} not found on PATH\n  {}",
-                Host::detect().install_hint(GH)
-            )
-            .into(),
-        ),
+        io::ErrorKind::NotFound => tool_missing(),
         io::ErrorKind::TimedOut => GH.budget_spent(r, &e),
-        kind => Error::Target(format!("{what} could not start {PROGRAM} ({kind})").into()),
+        kind => tool_unusable(kind),
     })
 }
 
-/// A successful read's stdout, or the typed error for a refused / unanswered one (NR-2,
-/// FR-26).
+/// A successful read's stdout, or the diagnosed failure (NR-2, FR-26).
 fn read_out(
     r: &dyn CommandRunner,
     what: &str,
-    subject: &str,
+    ctx: &DiagnoseContext,
+    needs: Vec<String>,
     call: &Call<'_>,
 ) -> Result<Output, Error> {
-    match invoke(r, Effect::Read, what, call)? {
+    match invoke(r, Effect::Read, call)? {
         Outcome::Done(out) => Ok(out),
-        Outcome::Refused(out) => Err(read_failure(r, what, subject, out.status)),
-        Outcome::Unknown {
-            status: Some(status),
-            ..
-        } => Err(read_failure(r, what, subject, status)),
-        Outcome::Unknown { .. } => Err(GH.unanswered(r, what)),
+        Outcome::Refused(_) | Outcome::Unknown { .. } => Err(failure(r, what, ctx, needs)),
     }
 }
 
-/// A read that exited non-zero: `Error::Target` naming the operation and repository (and
-/// environment), with a `gh auth status` diagnosis (exit status only) giving
-/// [`Error::Auth`] when it says nobody is signed in. A 404 is a definite "no such
-/// repository / environment": named at once, without a probe (S2).
-fn read_failure(r: &dyn CommandRunner, what: &str, subject: &str, status: i32) -> Error {
-    let failed = format!("{what} failed ({})", status_text(status));
-    if crate::runner::last_failure_not_found() {
-        return Error::Target(
-            format!(
-                "{failed} for {subject}: GitHub reports it missing or not visible to this \
-                 sign-in\n  next: check the repository (and GitHub environment) name in \
-                 secrets.toml and that this account can access it"
-            )
-            .into(),
-        );
-    }
-    let host = Host::detect();
-    match crate::runner::diagnosing(|| auth_status(r)) {
-        // Signed in and not a 404: the token or account lacks a right on the repository,
-        // or GitHub refused the request itself (gh said why above).
-        Ok(true) => Error::Target(
-            format!(
-                "{failed} for {subject}: signed in to GitHub\n  check that this sign-in can \
-                 read and write Actions secrets and variables on {subject} (a fine-grained \
-                 token needs Secrets and Variables write; an account needs admin or write \
-                 access)"
-            )
-            .into(),
-        ),
-        Ok(false) => not_signed_in(&host, Some(&failed)),
-        Err(_) => Error::Target(
-            format!("{failed} for {subject}; run `{PROGRAM} auth status` to see why").into(),
-        ),
-    }
-}
-
-/// "not signed in to GitHub" with the next step for `host` (FR-26): sign in with
-/// `gh auth login`, or set GH_TOKEN/GITHUB_TOKEN when one is in the environment. Text
-/// only, never a token.
-fn not_signed_in(host: &Host, failed: Option<&str>) -> Error {
-    let ctx = match failed {
-        Some(f) => format!("{f}; {PROGRAM} auth status failed"),
-        None => format!("{PROGRAM} auth status failed"),
-    };
-    let next = match host.token(CREDENTIAL_VARS) {
-        Some(var) => format!(
-            "the token in {var} was rejected or has expired; replace it with a fine-grained \
-             token with Secrets and Variables write on the listed repositories"
-        ),
-        None => format!("log in: {PROGRAM} auth login"),
-    };
-    Error::Auth(format!("not signed in to GitHub ({ctx})\n  {next}\n  then run opv again").into())
-}
-
-/// Why a write failed, from its [`Outcome`], never a value.
-fn why(outcome: &Outcome) -> String {
-    match outcome {
-        Outcome::Done(_) => "exit 0".to_string(),
-        Outcome::Refused(out) => status_text(out.status),
-        Outcome::Unknown {
-            status: Some(status),
-            ..
-        } => status_text(*status),
-        Outcome::Unknown { reason, .. } => unknown_text(PROGRAM, reason),
-    }
-}
-
-/// A failed `set`, naming the operation, subject and what this run already wrote in each
-/// repository (NR-10). An exit status is definite: diagnosed like a read ([`read_failure`]).
-/// No status (timed out, killed, lost): [`Error::Unknown`] (NR-2, safe to re-run).
-fn set_failure(
+/// A failed write: the diagnosed failure (an unfinished write is `WriteOutcomeUnknown`, safe
+/// to re-run), as `Partial` naming what this run already wrote in each repository (NR-10).
+fn write_failure(
     r: &dyn CommandRunner,
     what: &str,
-    subject: &str,
-    outcome: &Outcome,
+    ctx: &DiagnoseContext,
+    needs: Vec<String>,
     written: &[(String, String)],
 ) -> Error {
+    let e = failure(r, what, ctx, needs);
     let done = already_written(written);
-    match exit_status(outcome) {
-        Some(status) => {
-            read_failure(r, what, subject, status).map_text(|m| format!("{m}\n  {done}"))
-        }
-        None => Error::Unknown(
-            format!(
-                "{what} failed for {subject} ({}); the change may or may not have been \
-                 applied\n  {done}\n  next: re-run the same command",
-                why(outcome)
-            )
-            .into(),
+    match e {
+        Error::Catalog(cause, up) if !done.is_empty() => Error::Catalog(
+            Box::new(Cause::Partial {
+                done,
+                approval_used: None,
+                approval_scope: None,
+                then: cause,
+            }),
+            up,
         ),
+        e => e,
     }
 }
 
-/// The exit status of a finished call; `None` when the outcome is unknown.
-fn exit_status(outcome: &Outcome) -> Option<i32> {
-    match outcome {
-        Outcome::Done(out) | Outcome::Refused(out) => Some(out.status),
-        Outcome::Unknown { status, .. } => *status,
-    }
-}
-
-/// A failed `delete` that was not a 404, naming the name and repository: diagnosed like a
-/// read when it exited, [`Error::Unknown`] (NR-2, safe to re-run) otherwise.
-fn delete_failure(
-    r: &dyn CommandRunner,
-    what: &str,
-    name: &str,
-    subject: &str,
-    outcome: &Outcome,
-) -> Error {
-    match exit_status(outcome) {
-        Some(status) => read_failure(r, &format!("{what} {name}"), subject, status),
-        None => Error::Unknown(
-            format!(
-                "{what} failed for {name:?} in {subject} ({}); the change may or may not have \
-                 been applied\n  next: re-run the same command",
-                why(outcome)
-            )
-            .into(),
-        ),
-    }
-}
-
-/// The NR-10 line: the `(repo, name)` pairs already written, grouped by repository in
-/// first-seen order, or `already written: none`.
-fn already_written(written: &[(String, String)]) -> String {
-    if written.is_empty() {
-        return "already written: none".to_string();
-    }
+/// What this run already wrote (NR-10): one `<repo>: <names>` entry per repository, in
+/// first-seen order; empty when nothing was written.
+fn already_written(written: &[(String, String)]) -> Vec<String> {
     let mut order: Vec<&str> = Vec::new();
     let mut by_repo: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for (repo, name) in written {
@@ -527,14 +541,13 @@ fn already_written(written: &[(String, String)]) -> String {
         }
         by_repo.entry(repo).or_default().push(name);
     }
-    let parts: Vec<String> = order
+    order
         .iter()
         .map(|repo| {
             let names = by_repo.get(*repo).map(|v| v.join(", ")).unwrap_or_default();
             format!("{repo}: {names}")
         })
-        .collect();
-    format!("already written: {}", parts.join("; "))
+        .collect()
 }
 
 /// The repositories' common secret names, sorted, each with the latest `updatedAt`.
@@ -585,14 +598,6 @@ fn scoped<'a>(head: &[&'a str], repo: &'a str, environment: Option<&'a str>) -> 
     argv
 }
 
-/// `owner/name`, or `owner/name (environment staging)`: names only, never a value.
-fn place(repo: &str, environment: Option<&str>) -> String {
-    match environment {
-        Some(env) => format!("{repo} (environment {env})"),
-        None => repo.to_string(),
-    }
-}
-
 /// `^[A-Za-z_][A-Za-z0-9_]*$` and never the reserved `GITHUB_` prefix.
 fn valid_name(name: &str) -> bool {
     let mut bytes = name.bytes();
@@ -601,17 +606,32 @@ fn valid_name(name: &str) -> bool {
         && !name.starts_with("GITHUB_")
 }
 
-/// Parse a read's JSON, naming the line and column on failure (never its contents).
+/// Parse a read's JSON (`what`: the gh command's words); a reply opv cannot read is
+/// `UnexpectedOutput` at its line and column (never its contents), on the runner's own
+/// observation of the call (A1).
 fn parse_json<T: DeserializeOwned>(out: &Output, what: &str) -> Result<T, Error> {
     serde_json::from_slice(&out.stdout).map_err(|e| {
-        Error::Target(
-            format!(
-                "{what} returned unexpected JSON (line {}, column {})",
-                e.line(),
-                e.column()
-            )
+        let words: Vec<&str> = what
+            .split_whitespace()
+            .skip_while(|w| *w == PROGRAM)
+            .collect();
+        match crate::runner::take_unusable_reply(&Call::new(PROGRAM, &words)) {
+            Some(seen) => Cause::UnexpectedOutput {
+                system: System::GitHub,
+                at: Some(crate::cause::Location {
+                    line: u32::try_from(e.line()).unwrap_or(u32::MAX),
+                    col: u32::try_from(e.column()).unwrap_or(u32::MAX),
+                }),
+                problem: crate::cause::OutputProblem::Unparseable,
+                during: crate::cause::During::Read,
+                seen,
+            }
             .into(),
-        )
+            None => Cause::Bug {
+                site: "github: a gh reply the runner did not observe",
+            }
+            .into(),
+        }
     })
 }
 

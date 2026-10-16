@@ -1,23 +1,22 @@
 //! 1Password adapter wrapping the official `op` CLI (S3; FR-11, FR-13, FR-14, FR-19).
 //!
-//! - [`read_item`] makes exactly one `op item get <item_id> --vault <vault_id> --format json`
-//!   call per environment, by ID only (FR-13). It returns the fields that live inside a
-//!   section, typed by field type (FR-14: CONCEALED = secret, STRING = config), plus the raw
-//!   item JSON so that [`write_skeleton`] needs no second read.
+//! - [`read_whole`] makes exactly one `op item get <item_id> --vault <vault_id> --format json`
+//!   call per environment, by ID only (FR-13), and keeps the raw item JSON for the tolerant
+//!   reader ([`super::onepassword_tidy`], FR-43). A reply that is not an item opv can read is
+//!   that call's `UnexpectedOutput`, found while the runner still holds the call.
 //! - The item read is diagnosed after its first failed attempt, before any retry (P16):
 //!   it is retried only when the identity is signed in and can open the vault.
-//! - A failed `op` call is diagnosed with [`diagnose`] (FR-26): `op whoami`, then
-//!   `op account list` when it fails (both free under rate limits; never a second item
-//!   read; own 15 s limit). Not signed in, with no service-account or Connect credential
-//!   set, is `Auth` (exit 7) with the sign-in step for the detected shell
-//!   ([`crate::host`]); a set credential that fails whoami is `Source` (exit 4, ambiguous:
-//!   rejected or unreachable); signed in is `Source` (exit 4) naming the IDs and the
-//!   identity type. The host is detected only on failure. For diagnosis only `user_type` is
+//! - A failed `op` call becomes a catalog cause (design `docs/design/error-catalog.md` §5):
+//!   its reply is matched against the recorded phrases
+//!   ([`super::onepassword_diagnose_items`]); when they cannot tell, the free probes run:
+//!   [`diagnose`] (`op whoami`, then `op account list` when it fails; never a second item
+//!   read; own 15 s limit), then `op vault get`. The runner's observation of the call and
+//!   its scrubbed reply are the error's evidence. The host is detected only on failure.
+//!   For diagnosis only `user_type` is
 //!   parsed from `whoami`, and only the entry count from `account list`; identity is never
 //!   printed or kept. [`account`] parses `account_uuid` and the sign-in host, identifiers
 //!   only, to build 1Password's private item link ([`item_link`], H1).
-//! - [`write_skeleton`] (FR-19, the only write) pipes the full current item, with the missing
-//!   sections and empty fields appended, to `op item edit <item_id> --vault <vault_id>
+//! - An item write pipes the full current item to `op item edit <item_id> --vault <vault_id>
 //!   --format json` on stdin. This is the invocation the D0 spike proved (attempt 1). A
 //!   template replaces the item's fields, so it is always the whole item, never a partial one.
 //!
@@ -34,7 +33,7 @@
 //! - serde_json decodes a string containing escape sequences into an internal scratch
 //!   buffer that is not zeroized. Unescaped strings are borrowed from the input and copied
 //!   once, at exact capacity, into the `SecretValue`.
-//! - `write_skeleton` parses the raw JSON into a `serde_json::Value`, whose `String`s hold
+//! - An item write parses the raw JSON into a `serde_json::Value`, whose `String`s hold
 //!   values. Every string in that tree is zeroized before it is dropped (also on error paths),
 //!   and the template is serialized into a `Zeroizing` buffer pre-sized to the exact length,
 //!   so it never reallocates.
@@ -49,14 +48,20 @@ use serde::de::{self, Deserializer, Visitor};
 use serde_json::{Value, json};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::domain::model::{Boundary, Environment, Kind, key_label};
+use super::onepassword_diagnose::{Facts, locate_owner};
+use super::onepassword_diagnose_items::diagnose_item_call;
+use crate::cause::{
+    AccountId, AccountRef, AccountSource, Cause, CredentialProblem, CredentialRef, DiagnoseContext,
+    DottedPath, EnvName, ExitClass, FieldName, FieldType, GrantModel, IoKind, ItemId, Location,
+    NamedBy, NotFoundState, Observed, Principal, ResourceKind, ResourceName, ResourceRef, Right,
+    SessionState, System, TargetName, Unanswered, Unusable, Upstream, VarName, VaultId,
+};
+use crate::domain::model::{Boundary, Environment, Kind};
 use crate::domain::plan::ItemField;
 use crate::domain::secret::SecretValue;
-use crate::error::{Code, Error};
-use crate::host::{Host, OP_CLI, OpCredential, Platform};
-use crate::runner::{
-    Call, CommandRunner, Outcome, Output, PROBE_TIMEOUT, status_text, unknown_text,
-};
+use crate::error::Error;
+use crate::host::{Host, OpCredential, Platform};
+use crate::runner::{Call, CommandRunner, Outcome, Output, PROBE_TIMEOUT};
 
 pub(crate) const OP: &str = "op";
 
@@ -122,7 +127,7 @@ impl fmt::Display for IdentityType {
 
 /// The 1Password session state, found without reading any item (FR-26, FR-13): `op whoami`
 /// and, when it fails, `op account list` (both free under rate limits, D0).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Session {
     /// `op whoami` succeeded.
     SignedIn(IdentityType),
@@ -134,6 +139,10 @@ pub enum Session {
     CredentialFailed(OpCredential),
     /// `op whoami` failed and `op account list` is empty: no account on this machine.
     NoAccount,
+    /// `op whoami` failed because op has no account matching the one selected (`no account
+    /// found for filter`, recorded case 02): the account is added, never signed in to. The
+    /// cause is the 1Password strategy's own (L9).
+    AccountAbsent(Box<Cause>),
     /// `op whoami` could not run to completion (spawn error or timeout); nothing known.
     Unknown,
 }
@@ -151,7 +160,11 @@ pub fn diagnose(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Sessio
         PROBE_TIMEOUT,
     ) {
         Ok(o) => o,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(op_missing(&host())),
+        // Design §5: the runner's facts first. op that never started is the dependency's
+        // cause; a whoami that did not answer leaves the session unknown, never signed out.
+        Err(e) if !super::probe::started(&e) => {
+            return Err(super::probe::probe_failure(&crate::host::OP_CLI, &e, host));
+        }
         Err(_) => return Ok(Session::Unknown),
     };
     if who.status == 0 {
@@ -163,6 +176,17 @@ pub fn diagnose(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Sessio
     }
     if h.ci {
         return Ok(Session::NotSignedIn);
+    }
+    // L9: an account op does not know is the strategy's to name (case 02), not a sign-in.
+    if let Some(f) = crate::runner::take_failure() {
+        let cause = super::onepassword_diagnose::diagnose(
+            f.seen.clone(),
+            f.stderr(),
+            &crate::cause::DiagnoseContext::default(),
+        );
+        if matches!(cause, Cause::AccountNotOnMachine { .. }) {
+            return Ok(Session::AccountAbsent(Box::new(cause)));
+        }
     }
     Ok(
         match r.probe(
@@ -192,13 +216,8 @@ pub fn require_session(
     match session {
         Session::SignedIn(_) | Session::Unknown => Ok(()),
         s => {
-            let e = session_error(s, &host(), Some(failed), None)
-                .expect("every other session is an error");
-            Err(if s == Session::NotSignedIn {
-                e.with_code(crate::error::Code::OpNotSignedIn)
-            } else {
-                e
-            })
+            Err(session_error(s, &host(), Some(failed), None)
+                .expect("every other session is an error"))
         }
     }
 }
@@ -350,251 +369,454 @@ fn url_part(s: &str) -> String {
         .collect()
 }
 
-/// The remediation for a session that is not usable, or `None` for `SignedIn` / `Unknown`.
-/// `failed` names what failed first, if anything before `op whoami` (e.g. `op item get
-/// failed (exit 1)`). Text only, never a prompt (FR-9); never asks for a secret anywhere
-/// but `op`'s own prompt.
-///
-/// - `NotSignedIn` / `NoAccount` (no non-interactive credential set): [`Error::Auth`]
-///   (exit 7) with the sign-in step for the shell, or "set OP_SERVICE_ACCOUNT_TOKEN" under
-///   CI.
-/// - `CredentialFailed`: [`Error::Source`] (exit 4, the pre-FR-26 category, FR-10): the
-///   token was rejected or 1Password could not be reached; no interactive command.
+// --- failed `op` calls, diagnosed (design `docs/design/error-catalog.md` §5) ----------------
+
+/// What the runner kept of the failed `op` call the error at hand came from: its
+/// observation and its scrubbed reply, taken once, right after the call and before any
+/// diagnosis probe. The reply is the evidence box (§7.3) and the text the recorded phrase
+/// tables ([`super::onepassword_diagnose`]) are matched against.
+pub(crate) struct Failed {
+    seen: Observed,
+    stderr: String,
+    upstream: Option<Upstream>,
+}
+
+impl Failed {
+    /// The failed call's observation and reply, when the runner kept one.
+    fn take() -> Option<Failed> {
+        crate::runner::take_observed().map(Self::with_reply)
+    }
+
+    /// `seen` (a create's unknown outcome, from the runner) with the call's reply.
+    pub(crate) fn with_reply(seen: Observed) -> Failed {
+        let (said, truncated) = crate::scrub::Excerpt::parts(crate::runner::take_failure_excerpt());
+        let upstream = (!said.is_empty()).then(|| Upstream {
+            source: System::OnePassword,
+            tool: "1Password CLI".to_string(),
+            version: None,
+            exit: seen.exit(),
+            said: said.clone(),
+            removed_advice: false,
+            truncated,
+            untrusted: true,
+        });
+        Failed {
+            stderr: said.join("\n"),
+            seen,
+            upstream,
+        }
+    }
+
+    /// The call this failure observed.
+    pub(crate) fn seen(&self) -> &Observed {
+        &self.seen
+    }
+
+    /// The failed `call`'s observation and reply. A call that answered with a reply opv
+    /// cannot use (stdout over the output cap) is the runner's observation of that answer.
+    pub(crate) fn of(call: &Call) -> Failed {
+        Self::take().unwrap_or_else(|| Failed {
+            seen: crate::runner::take_unusable_reply(call)
+                .expect("op is an external system the runner observes"),
+            stderr: String::new(),
+            upstream: None,
+        })
+    }
+
+    /// The cause the `op` strategy finds from the reply alone (design §5).
+    pub(crate) fn diagnosed(&self, ctx: &DiagnoseContext, facts: &Facts) -> Cause {
+        diagnose_item_call(self.seen.clone(), &self.stderr, ctx, facts)
+    }
+
+    /// `cause` as the error, with the call's reply as its evidence.
+    pub(crate) fn report(self, cause: Cause) -> Error {
+        match self.upstream {
+            Some(up) => Error::with_evidence(cause, up),
+            None => cause.into(),
+        }
+    }
+}
+
+/// What a call about item `b` of `env` is about, for the `op` strategy: the environment,
+/// the item (scoped by its vault), the configuration field that names it and the account.
+fn item_context(env: &Environment, b: &Boundary, write: bool) -> DiagnoseContext {
+    let env_name = (!env.name.is_empty()).then(|| EnvName::new(env.name.as_str()));
+    let named_by = env_name.as_ref().map(|e| {
+        let mut path = vec!["environments".to_string(), e.to_string()];
+        match env.boundaries.iter().find(|(_, x)| *x == b) {
+            Some((name, _)) => path.extend(["boundaries".into(), name.clone(), "item_id".into()]),
+            None => path.push("boundaries".into()),
+        }
+        NamedBy::ConfigField {
+            path: DottedPath(path),
+        }
+    });
+    DiagnoseContext {
+        env: env_name,
+        target: None,
+        resource: Some(ResourceRef {
+            kind: ResourceKind::Item,
+            name: ResourceName::new(b.item_id.as_str()),
+            scope: Some(b.vault_id.clone()),
+        }),
+        named_by,
+        create: None,
+        write,
+        account: env.account.as_deref().map(AccountId::new),
+    }
+}
+
+/// The account the call was made in: the call site's, else none (op's default).
+fn account_source(ctx: &DiagnoseContext) -> AccountSource {
+    match (&ctx.account, &ctx.env) {
+        (Some(_), Some(env)) => AccountSource::Environment { env: env.clone() },
+        (Some(_), None) => AccountSource::Flag,
+        (None, _) => AccountSource::OpDefault,
+    }
+}
+
+/// Stands in for the account when op knows none at all (`op account list` is empty).
+const NO_ACCOUNT_YET: &str = "for this project";
+
+/// The 1Password app holds op's accounts here (macOS, Windows, or op.exe from WSL), so an
+/// account is added there, never with `op account add`.
+fn accounts_in_app(host: &Host) -> bool {
+    host.op_is_windows_exe() || matches!(host.platform, Platform::MacOs | Platform::Windows)
+}
+
+/// The cause for a session [`diagnose`] found unusable; `None` for `SignedIn` / `Unknown`.
+/// `seen` is the failed call the session explains (a rejected credential's evidence).
+fn session_cause(
+    session: Session,
+    host: &Host,
+    ctx: &DiagnoseContext,
+    seen: Option<&Observed>,
+) -> Option<Cause> {
+    match session {
+        Session::SignedIn(_) | Session::Unknown => None,
+        // Under CI no person can sign in (X8): the run needs its service-account token,
+        // which is not set (a set one that fails is `CredentialFailed`).
+        Session::NotSignedIn if host.ci && seen.is_some() => Some(Cause::CredentialRejected {
+            system: System::OnePassword,
+            credential: CredentialRef::ServiceAccountToken {
+                var: VarName::new(OpCredential::ServiceAccount.var()),
+            },
+            problem: CredentialProblem::Unreadable,
+            seen: seen.cloned()?,
+        }),
+        // With op.exe, op's sessions are the Windows app's: not signed in means it is
+        // locked (or its CLI integration is off).
+        Session::NotSignedIn => Some(Cause::NotSignedIn {
+            system: System::OnePassword,
+            account: ctx.account.clone(),
+            state: if host.op_is_windows_exe() {
+                SessionState::AppLocked
+            } else {
+                SessionState::SignedOut
+            },
+        }),
+        Session::AccountAbsent(cause) => Some(*cause),
+        Session::NoAccount => Some(Cause::AccountNotOnMachine {
+            account: ctx.account.clone().map_or_else(
+                || AccountRef::Shorthand(NO_ACCOUNT_YET.to_string()),
+                AccountRef::Id,
+            ),
+            selected_by: account_source(ctx),
+            in_app: accounts_in_app(host),
+        }),
+        Session::CredentialFailed(c) => Some(match seen {
+            Some(seen) => credential_rejected(c, seen.clone()),
+            None => Cause::Bug {
+                site: "onepassword: a rejected credential without its failed call",
+            },
+        }),
+    }
+}
+
+/// The service-account or Connect credential in effect was rejected, or 1Password could
+/// not be reached with it (04.11): both Connect variables are named.
+fn credential_rejected(c: OpCredential, seen: Observed) -> Cause {
+    let credential = match c {
+        OpCredential::ServiceAccount => CredentialRef::ServiceAccountToken {
+            var: VarName::new(c.var()),
+        },
+        OpCredential::Connect => CredentialRef::Connect {
+            host_var: VarName::new("OP_CONNECT_HOST"),
+            token_var: VarName::new(c.var()),
+        },
+    };
+    Cause::CredentialRejected {
+        system: System::OnePassword,
+        credential,
+        problem: CredentialProblem::Rejected { needs: Vec::new() },
+        seen,
+    }
+}
+
+/// The remediation for a session that is not usable, or `None` for `SignedIn` / `Unknown`
+/// (FR-26): a catalog cause (design §4.3) whose Do and Next come from the cause, so the
+/// platform decides how an account is added (04.07) and a rejected credential names its
+/// variables (04.11). Text only, never a prompt (FR-9). `failed` and `env` are kept for
+/// the callers that still pass them; the failed call is the evidence's `checked:` line.
 pub fn session_error(
     session: Session,
     host: &Host,
-    failed: Option<&str>,
+    _failed: Option<&str>,
     env: Option<&str>,
 ) -> Option<Error> {
-    let ctx = match failed {
-        Some(f) => format!("{f}; op whoami failed"),
-        None => "op whoami failed".to_string(),
+    let ctx = DiagnoseContext {
+        env: env.map(EnvName::new),
+        ..DiagnoseContext::default()
     };
-    let ci_token = "set OP_SERVICE_ACCOUNT_TOKEN to a service account token that can read \
-                    the vault (as a CI secret, never in the repository)";
-    let network = "if you are signed in, check network access to 1Password";
-    let mut next: Option<&str> = None;
-    let m =
-        match session {
-            Session::SignedIn(_) | Session::Unknown => return None,
-            Session::CredentialFailed(c) => {
-                return Some(Error::Source(format!(
-                "{ctx}\n  1Password rejected the {} token or could not be reached: check the \
-                 token in {} and network access",
-                c.label(),
-                c.var()
-            ).into()));
-            }
-            Session::NotSignedIn => match host.signin_line("sign in", env) {
-                None => format!("not signed in to 1Password ({ctx})\n  next: {ci_token}"),
-                Some(_) if host.op_is_windows_exe() => format!(
-                    "not signed in to 1Password ({ctx})\n  unlock the 1Password app on Windows \
-                     and turn on Settings > Developer > Integrate with 1Password CLI, then \
-                     retry\n  (a 1Password CLI session expires after 30 minutes idle)\n  \
-                     {network}"
-                ),
-                Some(step) => {
-                    // op in WSL cannot use the Windows app, so only other platforms name it.
-                    let app = if host.platform == Platform::Wsl {
-                        ""
-                    } else {
-                        "\n  or use the 1Password app: Settings > Developer > Integrate with \
-                         1Password CLI, then unlock the app and approve its prompt"
-                    };
-                    format!(
-                        "not signed in to 1Password ({ctx})\n  {step}{app}\n  (a 1Password CLI \
-                         session expires after 30 minutes idle)\n  {network}"
-                    )
-                }
-            },
-            Session::NoAccount => match host.signin_line("then sign in", env) {
-                Some(_) if host.op_is_windows_exe() => format!(
-                    "no 1Password account is set up for op on this machine ({ctx} and op \
-                     account list is empty)\n  add the account in the Windows 1Password app \
-                     and turn on Settings > Developer > Integrate with 1Password CLI, then \
-                     retry\n  type the Secret Key and password only at the app's prompts, \
-                     never into chat, tickets or files"
-                ),
-                None => format!("not signed in to 1Password ({ctx})\n  next: {ci_token}"),
-                Some(step) => {
-                    let wsl = if host.platform == Platform::Wsl {
-                        " (op in WSL does not share the Windows app's accounts)"
-                    } else {
-                        ""
-                    };
-                    next = Some("opv login --add");
-                    format!(
-                        "no 1Password account is set up for op on this machine{wsl} ({ctx} \
-                     and op account list is empty)\n  add one: opv login --add\n  {step}\n  \
-                     type the Secret Key and password only at op's prompts, never into chat, \
-                     tickets or files"
-                    )
-                }
-            },
-        };
-    let mut e =
-        Error::Auth(format!("{m}\n  then run opv again").into()).with_code(Code::OpNotSignedIn);
-    if let Some(n) = next {
-        e = e.with_next(n);
+    // A credential (rejected, or missing under CI) is shown with the call it failed (the
+    // whoami probe, or the call that probe explains); the other sessions are opv's own
+    // findings.
+    let failed = (matches!(session, Session::CredentialFailed(_))
+        || (session == Session::NotSignedIn && host.ci))
+        .then(Failed::take)
+        .flatten();
+    let cause = session_cause(session, host, &ctx, failed.as_ref().map(|f| &f.seen))?;
+    Some(match failed {
+        Some(f) => f.report(cause),
+        None => cause.into(),
+    })
+}
+
+/// What opv established when `op whoami` itself did not answer (X13: said, never guessed).
+const WHOAMI_SILENT: &str = "op whoami did not answer, so the session is unconfirmed";
+
+/// `cause` with `fact` added to what opv established, when it is `Unrecognized`.
+pub(crate) fn established(mut cause: Cause, fact: impl Into<String>) -> Cause {
+    if let Cause::Unrecognized { established, .. } = &mut cause {
+        established.push(fact.into());
     }
-    Some(e)
+    cause
 }
 
-/// After a failed `op` call: diagnose the session and return the error to report. Not
-/// signed in → `Auth` (exit 7) with the sign-in step; a non-interactive credential that
-/// fails → `Source` (exit 4); signed in → `Source` (exit 4) naming the vault and item
-/// IDs, the identity type and `grant`; the session could not be determined → `Source`
-/// with a value-free re-run hint (the last resort).
-pub(crate) fn failed_op_error(
-    r: &dyn CommandRunner,
-    env: &Environment,
-    b: &Boundary,
-    host: &dyn Fn() -> Host,
-    failed: &str,
-    grant: &str,
-) -> Error {
-    failed_op_error_as(r, env, b, host, failed, grant, false)
+/// A signed-in call about `vault` failed and `op vault get <vault>` was refused (04.06,
+/// 04.25): with an account selected, the vault is not in it (deleted, not shared, or in
+/// another account, which the caller looks up: [`locate_owner`]); in op's default account,
+/// the missing grant is Read.
+fn vault_unreachable(ctx: &DiagnoseContext, seen: &Observed, vault: &str) -> Cause {
+    match ctx.account.clone() {
+        Some(selected) => Cause::InOtherAccount {
+            vault: VaultId::new(vault),
+            item: ctx
+                .resource
+                .as_ref()
+                .filter(|r| r.kind == ResourceKind::Item)
+                .map(|r| ItemId::new(r.name.as_str())),
+            selected,
+            owning: None,
+            unasked: Vec::new(),
+            searched: false,
+            env: ctx.env.clone(),
+            seen: seen.clone(),
+        },
+        None => Cause::MissingRight {
+            system: System::OnePassword,
+            resource: ResourceRef {
+                kind: ResourceKind::Vault,
+                name: ResourceName::new(vault),
+                scope: None,
+            },
+            right: Right::Read,
+            grant: GrantModel::VaultPermission,
+            env: ctx.env.clone(),
+            target: None,
+            seen: seen.clone(),
+        },
+    }
 }
 
-/// [`failed_op_error`] for a read or (`write`) a write. For a write whose session cannot be
-/// diagnosed, the change may or may not have happened: `Error::Unknown` (exit 9, NR-2).
-pub(crate) fn failed_op_error_as(
+/// A failed call the phrases could not settle (`cause` is `Unrecognized`), checked with the
+/// free probes (FR-26): the session first (`op whoami`, `op account list`); signed in,
+/// whether `vault` opens (`op vault get`). Returns the cause and whether the session is
+/// signed in with the vault readable, so a read may be retried. Never an item read.
+fn unsettled(
     r: &dyn CommandRunner,
-    env: &Environment,
-    b: &Boundary,
     host: &dyn Fn() -> Host,
-    failed: &str,
-    grant: &str,
-    write: bool,
-) -> Error {
-    // The probes explain the failed call; its excerpt stays with the error (NR-31).
-    crate::runner::diagnosing(|| failed_op_session_error(r, env, b, host, failed, grant, write))
-}
-
-fn failed_op_session_error(
-    r: &dyn CommandRunner,
-    env: &Environment,
-    b: &Boundary,
-    host: &dyn Fn() -> Host,
-    failed: &str,
-    grant: &str,
-    write: bool,
-) -> Error {
-    let session = match diagnose(r, host) {
-        Ok(s) => s,
-        Err(e) => return e,
+    ctx: &DiagnoseContext,
+    vault: Option<&str>,
+    seen: &Observed,
+    cause: Cause,
+) -> Result<(Cause, bool), Error> {
+    let session = diagnose(r, host)?;
+    if let Some(c) = session_cause(session.clone(), &host(), ctx, Some(seen)) {
+        return Ok((c, false));
+    }
+    if session == Session::Unknown {
+        return Ok((established(cause, WHOAMI_SILENT), false));
+    }
+    let Some(vault) = vault else {
+        return Ok((established(cause, "you are signed in to 1Password"), false));
     };
-    match session {
-        Session::SignedIn(t) if !write => {
-            item_unavailable(r, b, env.account.as_deref(), failed, t, grant)
-        }
-        Session::SignedIn(t) => Error::Source(not_available(b, failed, t, grant).into()),
-        Session::Unknown if write => Error::Unknown(
-            format!(
-                "{failed}; the item may or may not have been changed{}, then re-run",
-                rerun_hint(b, env.account.as_deref())
-            )
-            .into(),
+    Ok(match vault_access(r, vault) {
+        Some(true) => (
+            established(
+                cause,
+                format!("you are signed in to 1Password and vault {vault} opens"),
+            ),
+            true,
         ),
-        Session::Unknown => {
-            Error::Source(format!("{failed}{}", rerun_hint(b, env.account.as_deref())).into())
+        Some(false) => (vault_unreachable(ctx, seen, vault), false),
+        None => (
+            established(cause, format!("op vault get {vault} did not answer")),
+            false,
+        ),
+    })
+}
+
+/// A failed `op` read reported at once (design §5): the recorded phrases first, then the
+/// session, then (when it names one) whether its vault opens.
+pub(crate) fn failed_read(
+    r: &dyn CommandRunner,
+    host: &dyn Fn() -> Host,
+    ctx: &DiagnoseContext,
+    call: &Call,
+    vault: Option<&str>,
+) -> Error {
+    failed_read_from(r, host, ctx, Failed::of(call), vault)
+}
+
+/// [`failed_read`] for a failure the caller already took.
+pub(crate) fn failed_read_from(
+    r: &dyn CommandRunner,
+    host: &dyn Fn() -> Host,
+    ctx: &DiagnoseContext,
+    failed: Failed,
+    vault: Option<&str>,
+) -> Error {
+    let cause = failed.diagnosed(ctx, &Facts::from_process_env());
+    if !matches!(cause, Cause::Unrecognized { .. }) {
+        let cause = locate_owner(r, cause);
+        return failed.report(cause);
+    }
+    match crate::runner::diagnosing(|| unsettled(r, host, ctx, vault, &failed.seen, cause)) {
+        // The runner already retried the read: in a vault that opens, it is the item.
+        Ok((cause, true)) => {
+            let missing = missing_item(ctx, &failed.seen);
+            failed.report(missing.unwrap_or(cause))
         }
-        s => session_error(s, &host(), Some(failed), Some(env.name.as_str()))
-            .expect("every other session is an error"),
+        Ok((cause, false)) => failed.report(locate_owner(r, cause)),
+        Err(e) => e,
     }
 }
 
-/// A signed-in item read failed (NR-26): one `op vault get <vault_id>` probe (exit status
-/// only; its output names the vault and is dropped unread, SR-1) tells removed vault access
-/// from an item that was moved, archived or deleted. IDs only, never a title (FR-13).
-fn item_unavailable(
+/// NR-26: 1Password grants access per vault, so a read of the item `ctx` names that keeps
+/// failing in a vault this identity opens is an item that is not there (moved, archived or
+/// deleted). `None` when the call was not a read of an item, or when it did not end with
+/// op's own failure exit (1): a read that hung, was killed or could not start says nothing
+/// about the item (E2, X13).
+fn missing_item(ctx: &DiagnoseContext, seen: &Observed) -> Option<Cause> {
+    if seen.exit() != (ExitClass::Code { code: 1 }) {
+        return None;
+    }
+    let item = ctx
+        .resource
+        .as_ref()
+        .filter(|r| r.kind == ResourceKind::Item && ctx.create.is_none() && !ctx.write)?;
+    Some(Cause::NotFound {
+        system: System::OnePassword,
+        resource: item.clone(),
+        named_by: ctx.named_by.clone().unwrap_or(NamedBy::Flag {
+            flag: "--item".to_string(),
+        }),
+        state: NotFoundState::Missing,
+        seen: seen.clone(),
+    })
+}
+
+/// A refused `op item edit` of item `b`, built from a read of that item moments before
+/// (04.01): the read proved the item exists and opens, so a refusal is the missing Write
+/// grant, unless the session explains it (signed out, no account, a rejected credential).
+pub(crate) fn failed_write(
     r: &dyn CommandRunner,
+    env: &Environment,
     b: &Boundary,
-    account: Option<&str>,
-    failed: &str,
-    t: IdentityType,
-    grant: &str,
+    host: &dyn Fn() -> Host,
+    call: &Call,
 ) -> Error {
-    unavailable_for(b, account, failed, t, grant, vault_access(r, b))
+    failed_edit(r, host, &item_context(env, b, true), call)
+}
+
+/// A refused `op item edit` of the item `ctx` names, built from a fresh read of it (04.01,
+/// 04.23): the missing Write grant, unless the session explains the refusal.
+pub(crate) fn failed_edit(
+    r: &dyn CommandRunner,
+    host: &dyn Fn() -> Host,
+    ctx: &DiagnoseContext,
+    call: &Call,
+) -> Error {
+    let failed = Failed::of(call);
+    let facts = Facts {
+        item_readable: true,
+        ..Facts::from_process_env()
+    };
+    let cause = failed.diagnosed(ctx, &facts);
+    if !matches!(
+        cause,
+        Cause::MissingRight { .. } | Cause::Unrecognized { .. }
+    ) {
+        return failed.report(cause);
+    }
+    let checked = crate::runner::diagnosing(|| -> Result<Cause, Error> {
+        let session = diagnose(r, host)?;
+        Ok(
+            match session_cause(session.clone(), &host(), ctx, Some(&failed.seen)) {
+                Some(c) => c,
+                // The session could not be checked, so the refusal is not known to be
+                // definite: the edit may or may not have been applied (NR-2).
+                None if session == Session::Unknown => Cause::WriteOutcomeUnknown {
+                    system: System::OnePassword,
+                    subject: ctx.resource.clone().unwrap_or(ResourceRef {
+                        kind: ResourceKind::Item,
+                        name: ResourceName::new(""),
+                        scope: None,
+                    }),
+                    seen: failed.seen.clone(),
+                },
+                None => cause,
+            },
+        )
+    });
+    match checked {
+        Ok(cause) => failed.report(cause),
+        Err(e) => e,
+    }
+}
+
+/// An `op item edit` of item `b` that did not finish (a timeout, a signal or a lost reply):
+/// it may or may not have been applied, and re-running is safe (one atomic edit, built from
+/// a fresh read).
+pub(crate) fn unfinished_write(env: &Environment, b: &Boundary, call: &Call) -> Error {
+    let subject = item_context(env, b, true)
+        .resource
+        .expect("an item context names its item");
+    unfinished_edit(subject, call)
+}
+
+/// An edit of `subject` that did not finish: its outcome is unknown, re-running is safe.
+pub(crate) fn unfinished_edit(subject: ResourceRef, call: &Call) -> Error {
+    let failed = Failed::of(call);
+    let seen = failed.seen.clone();
+    failed.report(Cause::WriteOutcomeUnknown {
+        system: System::OnePassword,
+        subject,
+        seen,
+    })
 }
 
 /// `op vault get <vault_id>`: `Some(true)` when the vault is readable, `Some(false)` when
 /// this identity cannot access it, `None` when the probe could not run. Exit status only;
 /// its output names the vault and is dropped unread (SR-1).
-fn vault_access(r: &dyn CommandRunner, b: &Boundary) -> Option<bool> {
+fn vault_access(r: &dyn CommandRunner, vault_id: &str) -> Option<bool> {
     r.probe(
-        &Call::new(
-            OP,
-            &["vault", "get", b.vault_id.as_str(), "--format", "json"],
-        ),
+        &Call::new(OP, &["vault", "get", vault_id, "--format", "json"]),
         PROBE_TIMEOUT,
     )
     .ok()
     .map(|o| o.status == 0)
-}
-
-/// The signed-in item-read error for a known vault probe result (NR-26).
-fn unavailable_for(
-    b: &Boundary,
-    account: Option<&str>,
-    failed: &str,
-    t: IdentityType,
-    grant: &str,
-    vault_readable: Option<bool>,
-) -> Error {
-    let (item, vault) = (&b.item_id, &b.vault_id);
-    let code = match vault_readable {
-        Some(true) => Code::ItemNotFound,
-        Some(false) => Code::VaultNoAccess,
-        None => Code::SourceError,
-    };
-    Error::Source(
-        match vault_readable {
-            Some(true) => format!(
-                "{failed}: signed in to 1Password as {t}; item {item} not found in vault {vault} \
-             (moved, archived or deleted?)\n  next: check item_id in the configuration, then \
-             `{OP} item get {item} --vault {vault}{}`",
-                account_suffix(account)
-            ),
-            Some(false) => format!(
-                "{failed}: signed in to 1Password as {t}, but this identity cannot access vault \
-             {vault}\n  next: {grant} (vault {vault}), or check vault_id in the configuration, \
-             then `{OP} vault get {vault}{}`",
-                account_suffix(account)
-            ),
-            None => not_available(b, failed, t, grant),
-        }
-        .into(),
-    )
-    .with_code(code)
-}
-
-/// A signed-in failure whose cause is not known: access or the IDs.
-fn not_available(b: &Boundary, failed: &str, t: IdentityType, grant: &str) -> String {
-    format!(
-        "{failed}: signed in to 1Password as {t}, but item {} in vault {} is not available to \
-         this identity\n  next: {grant} (vault {}), or check vault_id and item_id in the \
-         configuration",
-        b.item_id, b.vault_id, b.vault_id
-    )
-}
-
-/// Read one boundary item `b` of `env` once, by vault ID and item ID (FR-13, FR-57). See
-/// the module docs. The host is detected only if the read fails.
-pub fn read_item(r: &dyn CommandRunner, env: &Environment, b: &Boundary) -> Result<Item, Error> {
-    read_item_on(r, env, b, &Host::detect)
-}
-
-/// [`read_item`] limited to the fields in `sections`: fields of other sections are skipped
-/// before they are validated, so a malformed field in another product's section cannot fail
-/// a product-scoped check (#52). Still one read (FR-13).
-pub fn read_item_in_sections(
-    r: &dyn CommandRunner,
-    env: &Environment,
-    b: &Boundary,
-    sections: &BTreeSet<String>,
-) -> Result<Item, Error> {
-    read_sections_on(r, env, b, Some(sections), &Host::detect)
 }
 
 /// One boundary item's read (FR-13) with no field parsing: the tolerant reader
@@ -651,6 +873,10 @@ fn read_whole_as(
         args.push(NO_CACHE);
     }
     let raw = read_diagnosed(r, env, b, &args, &Host::detect)?;
+    // 09.74, C20: a reply that is not an item opv can read (not JSON, or JSON of another
+    // shape) is this call's `UnexpectedOutput`, reported while the runner still holds the
+    // call's observation; the tolerant reader parses it later.
+    super::onepassword_tidy::check(&raw).map_err(|e| unreadable_reply(&args, &e))?;
     Ok(Item {
         fields: Vec::new(),
         version: item_version(&raw),
@@ -658,71 +884,26 @@ fn read_whole_as(
     })
 }
 
-/// [`read_item`] on a given host (tests). A non-zero exit is diagnosed with
-/// [`diagnose`] (FR-26). No second item read is made (FR-13).
-pub fn read_item_with(
-    r: &dyn CommandRunner,
-    env: &Environment,
-    b: &Boundary,
-    host: &Host,
-) -> Result<Item, Error> {
-    read_item_on(r, env, b, &|| *host)
-}
-
-fn read_item_on(
-    r: &dyn CommandRunner,
-    env: &Environment,
-    b: &Boundary,
-    host: &dyn Fn() -> Host,
-) -> Result<Item, Error> {
-    read_sections_on(r, env, b, None, host)
-}
-
-fn read_sections_on(
-    r: &dyn CommandRunner,
-    env: &Environment,
-    b: &Boundary,
-    sections: Option<&BTreeSet<String>>,
-    host: &dyn Fn() -> Host,
-) -> Result<Item, Error> {
-    let args = [
-        "item",
-        "get",
-        b.item_id.as_str(),
-        "--vault",
-        b.vault_id.as_str(),
-        "--format",
-        "json",
-    ];
-    let stdout = read_diagnosed(r, env, b, &args, host)?;
-    let fields = parse_fields(&stdout, sections)?;
-    Ok(Item {
-        fields,
-        version: item_version(&stdout),
-        raw: stdout,
-    })
-}
-
 /// Read a `deploy_credentials` item once (FR-40), by the IDs or names in `reference`, and
 /// return exactly the conventional `fields`, keyed by label, as [`SecretValue`]s. Each must
 /// appear once (in any section), with its kind's field type (concealed = secret, text =
-/// config, FR-14) and a value; every other field is skipped unread. Errors name the
-/// reference and the field, never a value (SR-1). `env` names the environment in the
-/// sign-in step (`opv login <env>`) when 1Password is signed out.
+/// config, FR-14) and a value; every other field is skipped unread. `owner` is the deploy
+/// identity the item belongs to (its environment and target): a refusal names the item by
+/// its full reference and steps to that target's doctor (R37, 06.30), never a value (SR-1).
 pub fn read_deploy_credentials(
     r: &dyn CommandRunner,
     reference: &crate::domain::ItemRef,
     fields: &[crate::provider::CredentialField],
-    env: Option<&str>,
+    owner: Option<&Principal>,
 ) -> Result<std::collections::BTreeMap<String, SecretValue>, Error> {
-    read_deploy_credentials_on(r, reference, fields, env, &Host::detect)
+    read_deploy_credentials_on(r, reference, fields, owner, &Host::detect)
 }
 
 fn read_deploy_credentials_on(
     r: &dyn CommandRunner,
     reference: &crate::domain::ItemRef,
     fields: &[crate::provider::CredentialField],
-    env: Option<&str>,
+    owner: Option<&Principal>,
     host: &dyn Fn() -> Host,
 ) -> Result<std::collections::BTreeMap<String, SecretValue>, Error> {
     let args = [
@@ -734,114 +915,94 @@ fn read_deploy_credentials_on(
         "--format",
         "json",
     ];
+    let (env, target) = match owner {
+        Some(Principal::DeployCredentials { env, target, .. }) => {
+            (Some(env.clone()), Some(target.clone()))
+        }
+        _ => (None, None),
+    };
     // A failure is diagnosed at once, as for the environment's item: a signed-out user is
-    // told to sign in without blind retries; signed in, the read is retried (with backoff)
-    // before it is reported.
-    let call = Call::new(OP, &args);
-    let first = match r
-        .read(&call, &ANY_FAILURE)
-        .map_err(|e| op_spawn_error(&e, host))?
-    {
-        Outcome::Done(o) => {
-            crate::scrub::register_item_values(&o.stdout);
-            o
-        }
-        Outcome::Refused(o) => o,
-        Outcome::Unknown { .. } => return Err(OP_CLI.outage(&call.step())),
+    // told to sign in without blind retries; signed in with the vault open, the read is
+    // retried (with backoff) before it is reported. The configuration may live in a
+    // manifest, so the item is named by its configuration field, never by a file (04.24).
+    let ctx = DiagnoseContext {
+        env: env.clone(),
+        target: target.clone(),
+        resource: Some(ResourceRef {
+            kind: ResourceKind::Item,
+            name: ResourceName::new(reference.item.as_str()),
+            scope: Some(reference.vault.clone()),
+        }),
+        named_by: Some(NamedBy::ConfigField {
+            path: DottedPath(vec!["deploy_credentials".to_string()]),
+        }),
+        ..DiagnoseContext::default()
     };
-    let Output { stdout, .. } = if first.status == 0 {
-        first
-    } else {
-        let failed = |status: i32| {
-            format!(
-                "cannot read deploy credentials {reference} (op item get failed ({}))",
-                status_text(status)
-            )
-        };
-        // The probes explain the failed read; its excerpt stays with the error (NR-31).
-        match crate::runner::diagnosing(|| diagnose(r, host))? {
-            Session::SignedIn(_) | Session::Unknown => {}
-            s => {
-                return Err(session_error(s, &host(), Some(&failed(first.status)), env)
-                    .expect("every other session is an error"));
+    let stdout = read_or_diagnose(r, &ctx, &reference.vault, &args, host)?;
+    let raw: RawItem = serde_json::from_slice(&stdout).map_err(|e| unreadable_reply(&args, &e))?;
+    // The item answered but cannot be used as these credentials (R37): taken while the
+    // runner still holds the read, so the cause names that call.
+    let refused = |problem: CredentialProblem| -> Error {
+        match crate::runner::take_unusable_reply(&Call::new(OP, &args)) {
+            Some(seen) => Cause::CredentialRejected {
+                system: System::OnePassword,
+                credential: CredentialRef::DeployCredentials {
+                    vault: VaultId::new(reference.vault.as_str()),
+                    item: ItemId::new(reference.item.as_str()),
+                    env: env.clone().unwrap_or_else(|| EnvName::new("")),
+                    target: target.clone().unwrap_or_else(|| TargetName::new("")),
+                },
+                problem,
+                seen,
             }
+            .into(),
+            None => Cause::Bug {
+                site: "deploy credentials: the item read left no observation",
+            }
+            .into(),
         }
-        let again = read_op(r, &args, host)?;
-        if again.status != 0 {
-            return Err(Error::Source(
-                format!(
-                    "{}; nothing was changed\n  next: check deploy_credentials in \
-                     secrets.toml and that this identity can read that item: {OP} item get \
-                     \"{}\" --vault \"{}\"",
-                    failed(again.status),
-                    reference.item,
-                    reference.vault
-                )
-                .into(),
-            ));
-        }
-        again
     };
-    let raw: RawItem = serde_json::from_slice(&stdout).map_err(|e| json_error(&e))?;
     let mut found: std::collections::BTreeMap<String, SecretValue> = Default::default();
+    // A field of another type, or one listed twice, is not a value opv can take as this
+    // credential: the refusal names that field and what is wrong with it.
+    let mut unusable: Option<CredentialProblem> = None;
     for f in raw.fields {
         let Some(want) = fields.iter().find(|w| w.label == f.label) else {
             continue;
         };
-        let expected = match want.kind {
-            Kind::Secret => "CONCEALED",
-            Kind::Config => "STRING",
+        let (expected, words) = match want.kind {
+            Kind::Secret => ("CONCEALED", FieldType::Concealed),
+            Kind::Config => ("STRING", FieldType::Text),
         };
         if f.ty != expected {
-            return Err(Error::Source(
-                format!(
-                    "deploy credentials {reference}: field {} must be a {} field; nothing was \
-                 changed\n  next: change its type in 1Password, keeping the value",
-                    want.label,
-                    match want.kind {
-                        Kind::Secret => "Password (concealed)",
-                        Kind::Config => "Text",
-                    }
-                )
-                .into(),
-            ));
+            unusable.get_or_insert(CredentialProblem::WrongType {
+                field: FieldName::new(want.label),
+                expected: words,
+            });
+            continue;
         }
-        let value = f.value.map(|c| c.0).filter(|v| !v.expose().is_empty());
-        let Some(value) = value else {
-            return Err(Error::Source(
-                format!(
-                    "deploy credentials {reference}: field {} is empty; nothing was changed\n  \
-                 next: fill it in 1Password",
-                    want.label
-                )
-                .into(),
-            ));
+        // An empty field is a missing one: no value to sign in with.
+        let Some(value) = f.value.map(|c| c.0).filter(|v| !v.expose().is_empty()) else {
+            continue;
         };
         if found.insert(want.label.to_string(), value).is_some() {
-            return Err(Error::Source(
-                format!(
-                    "deploy credentials {reference}: field {} appears more than once; nothing was \
-                 changed\n  next: keep one field with that name in the item",
-                    want.label
-                )
-                .into(),
-            ));
+            unusable.get_or_insert(CredentialProblem::DuplicateField {
+                field: FieldName::new(want.label),
+            });
         }
     }
-    if let Some(missing) = fields.iter().find(|w| !found.contains_key(w.label)) {
-        return Err(Error::Source(
-            format!(
-                "deploy credentials {reference}: field {} is missing; nothing was changed\n  \
-             next: add it to the item as a {} field named {}",
-                missing.label,
-                match missing.kind {
-                    Kind::Secret => "Password (concealed)",
-                    Kind::Config => "Text",
-                },
-                missing.label
-            )
-            .into(),
-        ));
+    if let Some(problem) = unusable {
+        return Err(refused(problem));
+    }
+    let missing: Vec<FieldName> = fields
+        .iter()
+        .filter(|w| !found.contains_key(w.label))
+        .map(|w| FieldName::new(w.label))
+        .collect();
+    if !missing.is_empty() {
+        return Err(refused(CredentialProblem::Incomplete {
+            missing_fields: missing,
+        }));
     }
     Ok(found)
 }
@@ -859,14 +1020,6 @@ const ANY_FAILURE: [i32; 255] = {
 };
 
 /// The environment's one item read (FR-13), diagnosed before it is retried (P16).
-///
-/// `op` exits 1 for "not signed in", "no access" and "not found" alike, so a failed first
-/// attempt is followed by the free diagnosis (`op whoami`, then `op vault get <vault_id>`)
-/// instead of the runner's blind retries. Only when that shows a signed-in identity that
-/// can read the vault (the failure may be transient) is the read retried, with the
-/// runner's usual attempts and backoff (NR-3); every other outcome is reported at once.
-/// A timed-out, killed or lost attempt is still retried by the runner itself, and one
-/// that never finished is the outage error (NR-28, exit 9).
 fn read_diagnosed(
     r: &dyn CommandRunner,
     env: &Environment,
@@ -874,83 +1027,70 @@ fn read_diagnosed(
     args: &[&str],
     host: &dyn Fn() -> Host,
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
-    const GRANT: &str = "grant this identity access to the vault";
+    read_or_diagnose(r, &item_context(env, b, false), &b.vault_id, args, host)
+}
+
+/// One item read in `vault`, diagnosed before it is retried (P16).
+///
+/// `op` exits 1 for "not signed in", "no access" and "not found" alike, so a failed first
+/// attempt is diagnosed (design §5): the recorded phrases, then the free probes (`op
+/// whoami`, then `op vault get <vault>`) instead of the runner's blind retries. Only a
+/// signed-in identity that can open the vault (the failure may be transient) gets the
+/// retry, with the runner's usual attempts and backoff (NR-3); every other outcome is
+/// reported at once. A read that never finished is 1Password unavailable (NR-28, exit 9).
+fn read_or_diagnose(
+    r: &dyn CommandRunner,
+    ctx: &DiagnoseContext,
+    vault: &str,
+    args: &[&str],
+    host: &dyn Fn() -> Host,
+) -> Result<Zeroizing<Vec<u8>>, Error> {
     let call = Call::new(OP, args);
-    let failed = |status: i32| format!("op item get failed ({})", status_text(status));
-    let status = match r
+    match r
         .read(&call, &ANY_FAILURE)
-        .map_err(|e| op_spawn_error(&e, host))?
+        .map_err(|e| op_spawn_error(r, &e, host))?
     {
         Outcome::Done(o) => {
             // Every item read registers its field values with the stderr scrubber (NR-31).
             crate::scrub::register_item_values(&o.stdout);
             return Ok(o.stdout);
         }
-        Outcome::Refused(o) => o.status,
-        Outcome::Unknown { .. } => return Err(OP_CLI.outage(&call.step())),
-    };
-    // S2: op said the item (or vault) does not exist: not transient, so never retried.
-    let missing = crate::runner::last_failure_not_found();
-    // The probes explain the failed read; its excerpt stays with the error (NR-31). A
-    // retry below is a new call and owns its own excerpt.
-    let (t, readable) = crate::runner::diagnosing(|| -> Result<_, Error> {
-        let t = match diagnose(r, host)? {
-            Session::SignedIn(t) => t,
-            Session::Unknown => {
-                return Err(Error::Source(
-                    format!(
-                        "{}{}",
-                        failed(status),
-                        rerun_hint(b, env.account.as_deref())
-                    )
-                    .into(),
-                ));
-            }
-            s => {
-                return Err(
-                    session_error(s, &host(), Some(&failed(status)), Some(&env.name))
-                        .expect("every other session is an error"),
-                );
-            }
-        };
-        let readable = vault_access(r, b);
-        if readable != Some(true) {
-            return Err(unavailable_for(
-                b,
-                env.account.as_deref(),
-                &failed(status),
-                t,
-                GRANT,
-                readable,
-            ));
-        }
-        if missing {
-            return Err(unavailable_for(
-                b,
-                env.account.as_deref(),
-                &failed(status),
-                t,
-                GRANT,
-                readable,
-            ));
-        }
-        Ok((t, readable))
-    })?;
+        Outcome::Refused(_) => {}
+        Outcome::Unknown { .. } => return Err(unanswered(&call)),
+    }
+    let failed = Failed::of(&call);
+    let cause = failed.diagnosed(ctx, &Facts::from_process_env());
+    if !matches!(cause, Cause::Unrecognized { .. }) {
+        return Err(failed.report(locate_owner(r, cause)));
+    }
+    // The probes explain the failed read; its reply stays with the error (NR-31). The
+    // retry below is a new call and owns its own reply.
+    let (cause, retry) =
+        crate::runner::diagnosing(|| unsettled(r, host, ctx, Some(vault), &failed.seen, cause))?;
+    if !retry {
+        return Err(failed.report(locate_owner(r, cause)));
+    }
     r.note(&format!(
-        "{} failed; signed in with access to vault {}, so retrying",
-        call.step(),
-        b.vault_id
+        "{} failed; signed in with access to vault {vault}, so retrying",
+        call.step()
     ));
     match read_op(r, args, host)? {
         Output { status: 0, stdout } => Ok(stdout),
-        Output { status, .. } => Err(unavailable_for(
-            b,
-            env.account.as_deref(),
-            &failed(status),
-            t,
-            GRANT,
-            readable,
-        )),
+        Output { .. } => {
+            // NR-26: still failing in a vault that opens, unless its reply says otherwise.
+            let again = Failed::of(&call);
+            let cause = match again.diagnosed(ctx, &Facts::from_process_env()) {
+                cause @ Cause::Unrecognized { .. } => missing_item(ctx, again.seen())
+                    .unwrap_or_else(|| {
+                        established(
+                            cause,
+                            format!("you are signed in to 1Password and vault {vault} opens"),
+                        )
+                    }),
+                other => other,
+            };
+            Err(again.report(cause))
+        }
     }
 }
 
@@ -1010,40 +1150,19 @@ fn write_skeleton_on(
     ];
     // The edited item comes back on stdout (with values); only its version is read (I5),
     // then it is dropped and zeroized.
-    // A write (NR-2): never retried. A non-zero exit keeps the session diagnosis (a
-    // definite read-back for access and sign-in); anything else is an unknown outcome,
-    // which is safe to re-run because the skeleton only adds what is still missing.
+    // A write (NR-2): never retried. A non-zero exit is diagnosed (the item was just read,
+    // so a refusal is the missing Write grant unless the session says otherwise); anything
+    // else is an unknown outcome, which is safe to re-run because the skeleton only adds
+    // what is still missing.
     let call = Call::new(OP, &args).with_stdin(Some(&template));
-    let status = match r.write(&call).map_err(|e| op_spawn_error(&e, host))? {
-        Outcome::Done(o) => return Ok(item_version(&o.stdout)),
-        Outcome::Refused(o) => o.status,
-        Outcome::Unknown {
-            status: Some(s), ..
-        } => s,
-        Outcome::Unknown { reason, .. } => {
-            return Err(Error::Unknown(
-                format!(
-                    "{}: {}; the item may or may not have been changed\n  next: re-run the \
-                 same command (it adds only the fields still missing)",
-                    call.step(),
-                    unknown_text(OP, reason)
-                )
-                .into(),
-            ));
-        }
-    };
-    if status != 0 {
-        return Err(failed_op_error_as(
-            r,
-            env,
-            b,
-            host,
-            &format!("op item edit failed ({})", status_text(status)),
-            "grant this identity write access to the vault",
-            true,
-        ));
+    match r.write(&call).map_err(|e| op_spawn_error(r, &e, host))? {
+        Outcome::Done(o) => Ok(item_version(&o.stdout)),
+        Outcome::Refused(_)
+        | Outcome::Unknown {
+            status: Some(_), ..
+        } => Err(failed_write(r, env, b, host, &call)),
+        Outcome::Unknown { .. } => Err(unfinished_write(env, b, &call)),
     }
-    Ok(None)
 }
 
 /// The ` --account <id>` suffix for an `op` command when the environment knows its
@@ -1052,44 +1171,69 @@ pub(crate) fn account_suffix(account: Option<&str>) -> String {
     account.map_or_else(String::new, |a| format!(" --account {a}"))
 }
 
-/// Last resort (FR-26), used only when the session could not be diagnosed: a value-free
-/// command to re-run by hand (`op`'s stderr is shown only as a scrubbed excerpt). IDs only; without
-/// `--format json` and `--reveal`, `op` conceals secret fields. (`op item edit` cannot be
-/// re-run without its stdin, so the hint reads the item.)
-fn rerun_hint(b: &Boundary, account: Option<&str>) -> String {
-    format!(
-        "; run `{OP} item get {} --vault {}{}` to see why",
-        b.item_id,
-        b.vault_id,
-        account_suffix(account)
-    )
-}
-
-/// `op` is not on PATH: a dependency error with the install hint for this platform.
+/// `op` is not on PATH: the install line for this platform and shell.
 pub fn op_missing(host: &Host) -> Error {
-    Error::Dependency(format!("op CLI not found on PATH\n  {}", host.install_hint(OP_CLI)).into())
+    Cause::ToolMissing {
+        tool: OP.to_string(),
+        platform: host.platform,
+        shell: host.shell,
+        ci: host.ci,
+    }
+    .into()
 }
 
-/// An `op` spawn error: missing binary (with the install hint) or another start failure.
-pub(crate) fn op_spawn_error(e: &io::Error, host: &dyn Fn() -> Host) -> Error {
-    match e.kind() {
-        io::ErrorKind::NotFound => op_missing(&host()),
-        io::ErrorKind::TimedOut => Error::Source(format!("op: {e}").into()),
-        kind => Error::Dependency(format!("failed to run op: {kind}").into()),
+/// An `op` that could not be started (04.14): missing (with the install line), not
+/// executable, or the Windows `op.exe` with WSL interop off, in words, never a Rust
+/// `ErrorKind`. A call the spent run budget never let start is opv's own limit
+/// (`BudgetSpent`, R52), never op's failure.
+pub(crate) fn op_spawn_error(
+    r: &dyn CommandRunner,
+    e: &io::Error,
+    host: &dyn Fn() -> Host,
+) -> Error {
+    let why = match e.kind() {
+        io::ErrorKind::NotFound => return op_missing(&host()),
+        io::ErrorKind::TimedOut => return crate::host::OP_CLI.budget_spent(r, e),
+        io::ErrorKind::PermissionDenied => Unusable::NotExecutable,
+        _ if host().op_is_windows_exe() => Unusable::WslInteropOff,
+        _ => Unusable::SpawnFailed { io: IoKind::Other },
+    };
+    Cause::ToolUnusable {
+        tool: OP.to_string(),
+        why,
     }
+    .into()
+}
+
+/// A read of `call` still unanswered after its retries (NR-28): 1Password unavailable,
+/// nothing changed, safe to re-run.
+pub(crate) fn unanswered(call: &Call) -> Error {
+    let failed = Failed::of(call);
+    let seen = failed.seen.clone();
+    // D6: what the runner saw (a timeout, a kill, a lost reply), never "timed out" by default.
+    let why = seen.exit().unanswered().unwrap_or(Unanswered::Lost);
+    failed.report(Cause::Unavailable {
+        system: System::OnePassword,
+        why,
+        attempts: seen.attempts(),
+        seen,
+    })
 }
 
 /// One `op` read (NR-3: retried by the runner). The returned output may carry a non-zero
 /// status (still failing after the last attempt): callers diagnose it (FR-26). A read that
-/// never finished after its retries is the outage error naming the step and 1Password's
-/// status page (NR-28, exit 9); nothing was changed.
+/// never finished after its retries is 1Password unavailable (NR-28, exit 9); nothing was
+/// changed.
 pub(crate) fn read_op(
     r: &dyn CommandRunner,
     args: &[&str],
     host: &dyn Fn() -> Host,
 ) -> Result<Output, Error> {
     let call = Call::new(OP, args);
-    match r.read(&call, &[]).map_err(|e| op_spawn_error(&e, host))? {
+    match r
+        .read(&call, &[])
+        .map_err(|e| op_spawn_error(r, &e, host))?
+    {
         Outcome::Done(o) => {
             // Every item read in this run registers all its field values with the stderr
             // scrubber (NR-31), the selected sections' or not.
@@ -1099,21 +1243,43 @@ pub(crate) fn read_op(
             Ok(o)
         }
         Outcome::Refused(o) => Ok(o),
-        Outcome::Unknown { .. } => Err(OP_CLI.outage(&call.step())),
+        Outcome::Unknown { .. } => Err(unanswered(&call)),
     }
 }
 
-/// serde_json's Display can quote input (values), so report only position and category.
-pub(crate) fn json_error(e: &serde_json::Error) -> Error {
-    Error::Source(
-        format!(
-            "op returned malformed item JSON ({:?} error at line {}, column {})",
-            e.classify(),
-            e.line(),
-            e.column()
-        )
+/// The reply of `op <args>` (exit 0) is JSON opv cannot read (04.26, design §4.7): an
+/// unexpected output, whose Do is to update op and whose Next is `opv doctor`, never a
+/// re-run against the same op. Only the position is kept: serde_json's own message can
+/// quote input (values). Taken right after the call, while the runner still holds it.
+pub(crate) fn unreadable_reply(args: &[&str], e: &serde_json::Error) -> Error {
+    let call = Call::new(OP, args);
+    match crate::runner::take_unusable_reply(&call) {
+        Some(seen) => Cause::UnexpectedOutput {
+            system: System::OnePassword,
+            at: Some(Location {
+                line: u32::try_from(e.line()).unwrap_or(u32::MAX),
+                col: u32::try_from(e.column()).unwrap_or(u32::MAX),
+            }),
+            problem: crate::cause::OutputProblem::Unparseable,
+            during: crate::cause::During::Read,
+            seen,
+        }
         .into(),
-    )
+        None => Cause::Bug {
+            site: "onepassword: an unreadable op reply left no observation",
+        }
+        .into(),
+    }
+}
+
+/// Item JSON opv already holds that it cannot read. Every item reply is checked when it is
+/// read ([`read_whole`], [`super::onepassword_tidy::check`]), while the runner still holds
+/// the call, so a later failure is opv's own (C20).
+pub(crate) fn json_error(_: &serde_json::Error) -> Error {
+    Cause::Bug {
+        site: "onepassword: item JSON checked when read no longer parses",
+    }
+    .into()
 }
 
 /// The item's top-level `version` integer, when present. Every other field is skipped
@@ -1135,20 +1301,12 @@ struct RawItem {
 
 #[derive(Deserialize)]
 struct RawField {
-    #[serde(default)]
-    section: Option<RawSection>,
     #[serde(rename = "type", default)]
     ty: String,
     #[serde(default)]
     label: String,
     #[serde(default)]
     value: Option<Concealed>,
-}
-
-#[derive(Deserialize)]
-struct RawSection {
-    #[serde(default)]
-    label: Option<String>,
 }
 
 /// A JSON string deserialized directly into a [`SecretValue`].
@@ -1173,60 +1331,6 @@ impl<'de> Deserialize<'de> for Concealed {
     }
 }
 
-fn parse_fields(json: &[u8], only: Option<&BTreeSet<String>>) -> Result<Vec<ItemField>, Error> {
-    let raw: RawItem = serde_json::from_slice(json).map_err(|e| json_error(&e))?;
-    let mut seen = BTreeSet::new();
-    let mut out = Vec::new();
-    for f in raw.fields {
-        // Fields outside sections (built-in notesPlain etc.) are not fleet keys (D0 Q1).
-        let Some(section) = f.section else { continue };
-        // Scoped reads skip other sections before validating them.
-        if let Some(only) = only
-            && !section.label.as_ref().is_some_and(|l| only.contains(l))
-        {
-            continue;
-        }
-        let section = match section.label {
-            Some(l) if !l.is_empty() => l,
-            _ => {
-                return Err(Error::Source(
-                    format!("field {} is in a section without a label", f.label).into(),
-                ));
-            }
-        };
-        if f.label.is_empty() {
-            return Err(Error::Source(
-                format!("field without a label in section {section}").into(),
-            ));
-        }
-        let kind = match f.ty.as_str() {
-            "CONCEALED" => Kind::Secret,
-            "STRING" => Kind::Config,
-            _ => {
-                return Err(Error::Source(
-                    format!("unsupported field type on {section}/{}", f.label).into(),
-                ));
-            }
-        };
-        if !seen.insert((section.clone(), f.label.clone())) {
-            return Err(Error::Source(
-                format!("duplicate field {section}/{} in item", f.label).into(),
-            ));
-        }
-        out.push(ItemField {
-            section,
-            label: f.label,
-            kind,
-            concealed: kind == Kind::Secret,
-            // D0: an empty field has no `value` key at all.
-            value: f
-                .value
-                .map_or_else(|| SecretValue::new(String::new()), |c| c.0),
-        });
-    }
-    Ok(out)
-}
-
 /// A JSON tree whose strings are zeroized when it is dropped.
 pub(crate) struct WipeOnDrop(pub(crate) Value);
 
@@ -1246,10 +1350,16 @@ impl Drop for WipeOnDrop {
 
 // Field creation. `missing` never holds a shared key (FR-45, `from = ...`): callers
 // filter them out (see `app::skeleton`), and any self-healing that creates fields must too.
+//
+// `doc` is an item read with [`read_whole`] (its shape checked then, C20), and `missing` the
+// fields the tolerant reader found absent from that same item, each once: a field already
+// there, one listed twice or an item of another shape is opv's own error, and nothing is
+// written (FR-19: skeleton never modifies a field).
 fn add_missing(doc: &mut Value, missing: &[(String, String, Kind)]) -> Result<(), Error> {
+    let bug = |site: &'static str| Error::from(Cause::Bug { site });
     let obj = doc
         .as_object_mut()
-        .ok_or_else(|| Error::Source("op item JSON is not an object".into()))?;
+        .ok_or_else(|| bug("skeleton: an item checked when read is not an object"))?;
 
     let str_at = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_owned);
     let mut sections: Vec<(String, String)> = Vec::new(); // (id, label)
@@ -1279,18 +1389,10 @@ fn add_missing(doc: &mut Value, missing: &[(String, String, Kind)]) -> Result<()
     let mut listed = BTreeSet::new();
     for (s, l, _) in missing {
         if existing.contains(&(s.clone(), l.clone())) {
-            return Err(Error::Source(
-                format!(
-                    "skeleton: {} already exists in the item; not modified",
-                    key_label(s, l)
-                )
-                .into(),
-            ));
+            return Err(bug("skeleton: a field to add is already in the item"));
         }
         if !listed.insert((s.clone(), l.clone())) {
-            return Err(Error::Source(
-                format!("skeleton: {} listed twice", key_label(s, l)).into(),
-            ));
+            return Err(bug("skeleton: a field to add is listed twice"));
         }
     }
 
@@ -1328,9 +1430,7 @@ fn add_missing(doc: &mut Value, missing: &[(String, String, Kind)]) -> Result<()
             .entry(key)
             .or_insert_with(|| Value::Array(Vec::new()))
             .as_array_mut()
-            .ok_or_else(|| {
-                Error::Source(format!("op item JSON: `{key}` is not an array").into())
-            })?;
+            .ok_or_else(|| bug("skeleton: an item checked when read has a list of another type"))?;
         arr.extend(add);
     }
     Ok(())
@@ -1360,7 +1460,12 @@ pub(crate) fn serialize_exact(v: &Value) -> Result<Zeroizing<Vec<u8>>, Error> {
             Ok(())
         }
     }
-    let fail = |_| Error::Source("could not serialize the item template".into());
+    // A `Value` always serializes, and neither writer can fail: an error is opv's own.
+    let fail = |_| {
+        Error::from(Cause::Bug {
+            site: "onepassword: an item template does not serialize",
+        })
+    };
     let mut n = Count(0);
     serde_json::to_writer(&mut n, v).map_err(fail)?;
     let mut buf = Zeroizing::new(Vec::with_capacity(n.0));
@@ -1623,12 +1728,10 @@ mod tests {
                 "https://VALUE-MARKER",
             )],
         ));
-        match e {
-            Error::Source(m) => {
-                assert_eq!(m, "unsupported field type on allumata/BASE_URL");
-            }
-            other => panic!("{other:?}"),
-        }
+        assert_eq!(
+            e.to_string(),
+            strict_refusal("a field has a type opv does not read").to_string()
+        );
     }
 
     #[test]
@@ -1654,37 +1757,32 @@ mod tests {
                 ),
             ],
         ));
-        match e {
-            Error::Source(m) => {
-                assert_eq!(m, "duplicate field allumata/OPENAI_API_KEY in item");
-            }
-            other => panic!("{other:?}"),
-        }
+        assert_eq!(
+            e.to_string(),
+            strict_refusal("two fields have the same section and label").to_string()
+        );
     }
 
     const WHOAMI_SA: &str = r#"{"url":"https://my.1password.com","email":"ci-OPHINTMARKER@example.com","user_uuid":"UOPHINTMARKER","account_uuid":"AOPHINTMARKER","user_type":"SERVICE_ACCOUNT"}"#;
 
-    /// FR-26: signed in (whoami succeeds) but the read fails → Source (exit 4) naming the
-    /// IDs and the identity type, with the grant instruction; never "to see why".
+    /// NR-26: signed in, the vault opens, and every read of the item fails: the item is
+    /// not there (item_not_found, exit 4), never "to see why".
     #[test]
-    fn non_zero_exit_while_signed_in_is_source_naming_ids_and_identity_type() {
+    fn non_zero_exit_while_signed_in_is_item_not_found() {
         let r = signed_in_vault_ok_item_missing();
         let e = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err();
-        let m = match &e {
-            Error::Source(m) => m.clone(),
-            other => panic!("{other:?}"),
-        };
-        assert_eq!(e.exit_code(), 4);
+        assert_eq!(e.code_str(), "item_not_found");
+    }
+
+    /// SR-1: whoami's identity (email, IDs) never reaches the error.
+    #[test]
+    fn a_signed_in_failure_never_names_the_identity() {
+        let r = signed_in_vault_ok_item_missing();
+        let e = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err();
+        let t = format!("{e} {e:?}");
         assert!(
-            m.starts_with("op item get failed (exit 1): signed in"),
-            "{m}"
-        );
-        assert!(m.contains("SERVICE_ACCOUNT"), "{m}");
-        assert!(m.contains("item istg not found in vault vstg"), "{m}");
-        assert!(!m.contains("to see why"), "{m}");
-        assert!(
-            !m.contains("example.com") && !m.contains("OPHINTMARKER"),
-            "{m}"
+            !t.contains("example.com") && !t.contains("OPHINTMARKER"),
+            "{t}"
         );
     }
 
@@ -1721,7 +1819,8 @@ mod tests {
         );
     }
 
-    /// NR-31: the diagnosis probes after a failed first read keep that read's excerpt.
+    /// NR-31: the diagnosis probes after a failed first read keep that read's reply, which
+    /// is the error's evidence.
     #[test]
     fn diagnosed_first_read_keeps_its_stderr_excerpt() {
         let r = FakeRunner::default();
@@ -1731,9 +1830,9 @@ mod tests {
         );
         r.push_with_stderr(Output::failure(1), "[ERROR] not signed in\n");
         r.push_with_stderr(accounts(1), "");
-        let _ = read_item_with(&r, &test_env(), &test_at(), &linux());
+        let e = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err();
         assert_eq!(
-            crate::runner::take_failure_excerpt().map(|x| x.lines),
+            e.cause().and_then(|(_, up)| up).map(|u| u.said.clone()),
             Some(vec!["[ERROR] item istg isn't in vault vstg".to_string()])
         );
     }
@@ -1775,7 +1874,7 @@ mod tests {
         assert_eq!(item_reads(&r), 1, "{:?}", argvs(&r));
     }
 
-    /// S2: the missing item is still named by IDs, with the command to check it.
+    /// S2: op's recorded "isn't an item" reply is the missing item, named by its IDs.
     #[test]
     fn item_op_says_does_not_exist_is_named() {
         let r = FakeRunner::default();
@@ -1783,12 +1882,10 @@ mod tests {
             Output::failure(1),
             "[ERROR] \"istg\" isn't an item in the \"vstg\" vault.\n",
         );
-        r.push_with_stderr(Output::success(WHOAMI_SA), "");
-        r.push_with_stderr(vault_ok(), "");
         let e = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err();
-        assert!(
-            e.to_string().contains("item istg not found in vault vstg"),
-            "{e}"
+        assert_eq!(
+            e.to_string(),
+            "item istg in vstg was not found at 1Password"
         );
     }
 
@@ -1812,33 +1909,79 @@ mod tests {
         assert_eq!(item_reads(&r), 1, "{:?}", argvs(&r));
     }
 
-    /// NR-26: signed in, the item read fails and the vault is readable: the item was moved,
-    /// archived or deleted, named by IDs with the command to check it.
+    /// NR-26: signed in, the item read fails and the vault is readable: the step checks
+    /// the configuration field that names the item (opv config edit), never a file.
     #[test]
     fn item_missing_from_readable_vault_is_named() {
         let r = signed_in_vault_ok_item_missing();
         let e = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err();
+        let action = e.do_text();
         assert!(
-            e.to_string()
-                .contains("item istg not found in vault vstg (moved, archived or deleted?)"),
-            "{e}"
+            action
+                .as_deref()
+                .is_some_and(|a| a.contains("opv config edit")),
+            "{action:?}"
         );
     }
 
-    /// NR-26: signed in, the item read fails and so does `op vault get`: vault access.
-    #[test]
-    fn op_vault_without_access_is_named() {
-        let r = FakeRunner::new([
+    fn vault_refused() -> FakeRunner {
+        FakeRunner::new([
             Output::failure(1),
             Output::success(WHOAMI_SA),
             Output::failure(1),
-        ]);
-        let e = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err();
-        assert!(
-            e.to_string()
-                .contains("this identity cannot access vault vstg"),
-            "{e}"
-        );
+        ])
+    }
+
+    /// [`vault_refused`], then `op account list` fails, so the other accounts cannot be
+    /// searched for the vault (#153a).
+    fn vault_refused_accounts_unlisted() -> FakeRunner {
+        FakeRunner::new([
+            Output::failure(1),
+            Output::success(WHOAMI_SA),
+            Output::failure(1),
+            Output::failure(1),
+        ])
+    }
+
+    fn env_in_account() -> Environment {
+        Environment {
+            account: Some("AENV00000000000000000000AA".into()),
+            ..test_env()
+        }
+    }
+
+    /// 04.06: signed in to the environment's account, the item read fails and so does `op
+    /// vault get`: the vault is not in that account (or not shared), never "grant access".
+    #[test]
+    fn op_vault_without_access_is_in_another_account() {
+        let e = read_item_with(
+            &vault_refused_accounts_unlisted(),
+            &env_in_account(),
+            &test_at(),
+            &linux(),
+        )
+        .unwrap_err();
+        assert_eq!(e.code_str(), "ids_not_in_account");
+    }
+
+    /// 04.06: its step is the command that finds the vault's account, never a raw probe.
+    #[test]
+    fn op_vault_without_access_steps_to_vault_locate() {
+        let e = read_item_with(
+            &vault_refused_accounts_unlisted(),
+            &env_in_account(),
+            &test_at(),
+            &linux(),
+        )
+        .unwrap_err();
+        assert_eq!(e.next_text().unwrap_or_default(), "opv vault locate vstg");
+    }
+
+    /// In op's default account, a vault that does not open is the missing Read grant.
+    #[test]
+    fn op_vault_without_access_in_the_default_account_is_vault_no_access() {
+        let e = read_item_with(&vault_refused(), &test_env(), &test_at(), &linux()).unwrap_err();
+        assert_eq!(e.code_str(), "vault_no_access");
     }
 
     /// NR-26: the vault probe's output names the vault; it is never echoed (SR-1).
@@ -1849,18 +1992,13 @@ mod tests {
         assert!(!format!("{e} {e:?}").contains("OPHINTMARKER"), "{e}");
     }
 
-    /// FR-26: whoami fails → Auth (exit 7) with the sign-in command, whatever credential
-    /// variables are set (the motivating bug: an expired OP_SESSION_*).
+    /// FR-26: whoami fails → not signed in (exit 7), whatever credential variables are
+    /// set (the motivating bug: an expired OP_SESSION_*).
     #[test]
-    fn non_zero_exit_not_signed_in_is_auth_with_signin_command() {
+    fn non_zero_exit_not_signed_in_is_op_not_signed_in() {
         let r = FakeRunner::new([Output::failure(1), Output::failure(1), accounts(1)]);
         let e = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err();
-        assert_eq!(e.exit_code(), 7, "{e}");
-        let t = e.to_string();
-        assert!(t.contains("not signed in to 1Password"), "{t}");
-        assert!(t.contains("op item get failed (exit 1)"), "{t}");
-        assert!(t.contains("\n  sign in: opv login staging\n"), "{t}");
-        assert!(!t.contains("to see why"), "{t}");
+        assert_eq!(e.code_str(), "op_not_signed_in");
     }
 
     /// FR-13: diagnosis never reads the item itself; the retries after it (P16, NR-3)
@@ -1877,22 +2015,19 @@ mod tests {
         );
     }
 
-    /// The re-run hint survives only as the last resort: when whoami itself cannot run.
+    /// X13: when whoami itself cannot run, the failure is unrecognised and says so.
     #[test]
-    fn rerun_hint_only_when_session_cannot_be_diagnosed() {
+    fn an_undiagnosed_session_is_unrecognized() {
         let r = FakeRunner::new([Output::failure(1)]);
         r.push_unknown("timeout");
         let e = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err();
-        assert!(
-            matches!(&e, Error::Source(m) if m == "op item get failed (exit 1); run `op item get istg --vault vstg` to see why"),
-            "{e:?}"
-        );
+        assert_eq!(e.code_str(), "unrecognized_failure");
     }
 
-    /// I6: a re-run hint for an environment that knows its account names it, so the
-    /// command cannot run against op's default account.
+    /// I6: the failed call is evidence, never a hand-run `op` command without the
+    /// environment's account.
     #[test]
-    fn a_rerun_hint_names_the_environment_account() {
+    fn an_undiagnosed_failure_names_no_raw_op_command() {
         let r = FakeRunner::new([Output::failure(1)]);
         r.push_unknown("timeout");
         let env = Environment {
@@ -1900,16 +2035,12 @@ mod tests {
             ..test_env()
         };
         let e = read_item_with(&r, &env, &test_at(), &linux()).unwrap_err();
-        assert!(
-            e.to_string()
-                .contains("`op item get istg --vault vstg --account AENV00000000000000000000AA`"),
-            "{e}"
-        );
+        assert!(!e.next_text().unwrap_or_default().starts_with("op "), "{e}");
     }
 
-    /// I6: a moved-item hint for an environment that knows its account names it.
+    /// I6: the missing item's step lists the vault's items with op, by vault ID.
     #[test]
-    fn a_missing_item_hint_names_the_environment_account() {
+    fn a_missing_item_steps_to_the_vaults_listing() {
         let r = signed_in_vault_ok_item_missing();
         let env = Environment {
             account: Some("AENV00000000000000000000AA".into()),
@@ -1917,28 +2048,37 @@ mod tests {
         };
         let e = read_item_with(&r, &env, &test_at(), &linux()).unwrap_err();
         assert_eq!(
-            e.next_step(),
-            Some(
-                "check item_id in the configuration, then `op item get istg --vault vstg \
-                 --account AENV00000000000000000000AA`"
-            )
+            e.next_text().unwrap_or_default(),
+            "op item list --vault vstg"
         );
     }
 
-    /// I7: with no account on the machine, the read error's step is opv's own add
-    /// command, one command that runs as typed.
+    /// I7: with no account on the machine, the read error is the account to add.
     #[test]
-    fn a_no_account_read_error_steps_to_opv_login_add() {
+    fn a_no_account_read_error_is_account_not_registered() {
         let r = FakeRunner::new([Output::failure(1), Output::failure(1), accounts(0)]);
         let e = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err();
-        assert_eq!(e.next_step(), Some("opv login --add"));
+        assert_eq!(e.code_str(), "account_not_registered");
     }
 
-    /// In WSL with the Windows `op.exe`, a signed-out session is fixed in the Windows app.
+    /// E2 (X13): a read that keeps ending with an exit other than op's own failure (124
+    /// from a hung op, 127 from a missing one) is never reported as a missing item.
     #[test]
-    fn wsl_windows_op_signed_out_names_the_windows_app() {
+    fn a_read_that_keeps_hanging_is_not_a_missing_item() {
+        let r = FakeRunner::new(
+            std::iter::once(Output::failure(124))
+                .chain([Output::success(WHOAMI_SA), vault_ok()])
+                .chain(failed_read(124)),
+        );
+        let e = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err();
+        assert_ne!(e.code_str(), "item_not_found");
+    }
+
+    /// In WSL with the Windows `op.exe`, a signed-out session is the locked app.
+    #[test]
+    fn wsl_windows_op_signed_out_names_the_app() {
         let e = session_error(Session::NotSignedIn, &wsl_windows_op(), None, Some("dev")).unwrap();
-        assert!(e.to_string().contains("1Password app on Windows"), "{e}");
+        assert!(e.to_string().contains("1Password app is locked"), "{e}");
     }
 
     /// In WSL with the Windows `op.exe`, the fix is never op's own add/sign-in prompt.
@@ -1948,18 +2088,21 @@ mod tests {
         assert!(!e.mentions("opv login --add"), "{e}");
     }
 
-    /// With no account and the Windows `op.exe`, the account is added in the Windows app.
+    /// 04.07: with no account and the Windows `op.exe`, the account is added in the app.
     #[test]
-    fn wsl_windows_op_no_account_names_the_windows_app() {
+    fn wsl_windows_op_no_account_names_the_app() {
         let e = session_error(Session::NoAccount, &wsl_windows_op(), None, Some("dev")).unwrap();
-        assert!(e.to_string().contains("Windows 1Password app"), "{e}");
+        assert!(
+            e.to_string().contains("1Password app on this machine"),
+            "{e}"
+        );
     }
 
     /// With no account and the Windows `op.exe`, opv never steps to its own add command.
     #[test]
     fn wsl_windows_op_no_account_never_offers_opv_login_add() {
         let e = session_error(Session::NoAccount, &wsl_windows_op(), None, Some("dev")).unwrap();
-        assert_ne!(e.next_step(), Some("opv login --add"));
+        assert_ne!(e.next_text().as_deref(), Some("opv login --add"));
     }
 
     /// I6: child stdout (which can carry values, and whoami's identity) never reaches the
@@ -2008,35 +2151,28 @@ mod tests {
     }
 
     /// Found live: a person's read that waits on the 1Password app's approval prompt
-    /// times out like an outage; the message says to approve it.
+    /// times out like an outage. op's diagnosis reports the outage it observed (X13: never
+    /// the likeliest guess); naming the app prompt is op's diagnosis to add (R29).
     #[test]
-    fn read_outage_for_a_person_mentions_the_app_approval() {
+    fn read_outage_for_a_person_is_the_observed_outage() {
         let r = FakeRunner::default();
         r.push_unknowns("timeout", crate::runner::READ_ATTEMPTS);
         let e = crate::host::with_test_host(linux(), || {
             read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err()
         });
-        assert!(
-            e.to_string()
-                .contains("If the 1Password app is asking to approve access, approve it."),
-            "{e}"
-        );
+        assert_eq!(e.code_str(), "provider_unavailable");
     }
 
     #[test]
-    fn read_outage_exits_9_naming_the_status_page() {
+    fn read_outage_exits_9() {
         let r = FakeRunner::default();
         r.push_unknowns("timeout", crate::runner::READ_ATTEMPTS);
         let ci = Host::from_env(&FakeEnv::new("linux").var("CI"));
         let e = crate::host::with_test_host(ci, || {
             read_item_with(&r, &test_env(), &test_at(), &ci).unwrap_err()
         });
-        assert!(
-            matches!(&e, Error::Unknown(m) if m == "1Password did not respond after 3 \
-                attempts (op item get); nothing was changed. Check \
-                https://status.1password.com, then re-run"),
-            "{e:?}"
-        );
+        // R51: op's diagnosis of the unanswered read; its Do names the status page.
+        assert_eq!((e.exit_code(), e.code_str()), (9, "provider_unavailable"));
     }
 
     /// FR-26: a successful read never detects the host; a failed one does.
@@ -2122,15 +2258,35 @@ mod tests {
         }
     }
 
+    /// L9: `op whoami` for an account op does not know (recorded case 02) is that
+    /// account to add, never a sign-in.
     #[test]
-    fn missing_op_binary_is_dependency_error_with_install_hint() {
+    fn whoami_without_the_selected_account_is_an_account_to_add() {
+        let r = FakeRunner::default();
+        r.push_with_stderr(
+            Output::failure(1),
+            include_str!("../../tests/fixtures/op/failures/02-account-not-on-machine.stderr"),
+        );
+        let h = Host::from_env(&FakeEnv::new("linux"));
+        let e = session_error(diagnose(&r, &|| h).unwrap(), &h, None, None).unwrap();
+        assert_eq!(e.code_str(), "account_not_registered");
+    }
+
+    #[test]
+    fn missing_op_binary_is_dependency_missing() {
         let r = FakeRunner::default();
         r.push_io_error(io::ErrorKind::NotFound);
         let e = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err();
-        assert!(
-            matches!(&e, Error::Dependency(m) if m.contains("op CLI not found on PATH\n  install")),
-            "{e:?}"
-        );
+        assert_eq!(e.code_str(), "dependency_missing");
+    }
+
+    /// 04.14: an op that cannot be executed is named in words, never as a Rust ErrorKind.
+    #[test]
+    fn op_permission_denied_is_tool_unusable() {
+        let r = FakeRunner::default();
+        r.push_io_error(io::ErrorKind::PermissionDenied);
+        let e = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err();
+        assert_eq!(e.to_string(), "op is not executable");
     }
 
     #[test]
@@ -2144,7 +2300,7 @@ mod tests {
         ] {
             let e = read_err(bytes);
             let s = format!("{e} {e:?}");
-            assert!(matches!(e, Error::Source(_)), "{s}");
+            assert_eq!(e.code_str(), "unexpected_output", "{s}");
             assert!(
                 !s.contains("987654321123") && !s.contains("sk-FIXTURE"),
                 "{s}"
@@ -2322,11 +2478,9 @@ mod tests {
             "SIGNUP_POLICY".to_string(),
             Kind::Secret,
         )];
-        let e = write_skeleton(&r, &test_env(), &test_at(), &item, &missing).unwrap_err();
-        assert!(
-            matches!(&e, Error::Source(m) if m.contains("allumata/SIGNUP_POLICY")),
-            "{e:?}"
-        );
+        // The tolerant reader never lists a field that is there: a caller that does is opv's
+        // own bug, and nothing is written.
+        let _ = write_skeleton(&r, &test_env(), &test_at(), &item, &missing);
         assert!(r.calls.borrow().is_empty());
     }
 
@@ -2345,30 +2499,25 @@ mod tests {
         );
     }
 
+    /// 04.01: an edit refused right after the item was read is the missing Write grant.
     #[test]
-    fn skeleton_edit_failure_while_signed_in_is_source_asking_for_write_access() {
+    fn skeleton_edit_failure_while_signed_in_is_the_missing_write_grant() {
         let item = read(allumata_item());
         let r = FakeRunner::new([Output::failure(2), Output::success(WHOAMI_SA)]);
         let missing = [("allumata".to_string(), "NEW_KEY".to_string(), Kind::Config)];
         let e = write_skeleton_with(&r, &test_env(), &test_at(), &item, &missing, &linux())
             .unwrap_err();
-        assert!(
-            matches!(&e, Error::Source(m) if m.starts_with("op item edit failed (exit 2): signed in")
-                && m.mentions("grant this identity write access to the vault")
-                && !m.contains("to see why")),
-            "{e:?}"
-        );
+        assert_eq!(e.code_str(), "vault_no_access");
     }
 
     #[test]
-    fn skeleton_edit_failure_not_signed_in_is_auth() {
+    fn skeleton_edit_failure_not_signed_in_is_op_not_signed_in() {
         let item = read(allumata_item());
         let r = FakeRunner::new([Output::failure(2), Output::failure(1), accounts(1)]);
         let missing = [("allumata".to_string(), "NEW_KEY".to_string(), Kind::Config)];
         let e = write_skeleton_with(&r, &test_env(), &test_at(), &item, &missing, &linux())
             .unwrap_err();
-        assert_eq!(e.exit_code(), 7, "{e}");
-        assert!(e.to_string().contains("opv login staging"), "{e}");
+        assert_eq!(e.code_str(), "op_not_signed_in");
     }
 
     /// NR-2: an edit that timed out may or may not have happened: exit 9, safe to re-run.
@@ -2493,3 +2642,160 @@ mod tests {
         assert_eq!(r.calls.borrow()[0].args, ["whoami", "--format", "json"]);
     }
 }
+
+/// The strict item reader and the skeleton writer, kept for the tests only: production
+/// reads every item tolerantly ([`read_whole`], [`super::onepassword_tidy`], FR-43) and
+/// writes fields through `app::skeleton`, so nothing outside the tests calls these.
+#[cfg(test)]
+mod strict {
+    use super::*;
+
+    /// An item the strict reader refuses (tests only): opv's own refusal, naming why.
+    pub fn strict_refusal(site: &'static str) -> Error {
+        Cause::Bug { site }.into()
+    }
+
+    /// Read one boundary item `b` of `env` once, by vault ID and item ID (FR-13, FR-57). See
+    /// the module docs. The host is detected only if the read fails.
+    pub fn read_item(
+        r: &dyn CommandRunner,
+        env: &Environment,
+        b: &Boundary,
+    ) -> Result<Item, Error> {
+        read_item_on(r, env, b, &Host::detect)
+    }
+
+    /// [`read_item`] limited to the fields in `sections`: fields of other sections are skipped
+    /// before they are validated, so a malformed field in another product's section cannot fail
+    /// a product-scoped check (#52). Still one read (FR-13).
+    pub fn read_item_in_sections(
+        r: &dyn CommandRunner,
+        env: &Environment,
+        b: &Boundary,
+        sections: &BTreeSet<String>,
+    ) -> Result<Item, Error> {
+        read_sections_on(r, env, b, Some(sections), &Host::detect)
+    }
+
+    /// [`read_item`] on a given host (tests). A non-zero exit is diagnosed with
+    /// [`diagnose`] (FR-26). No second item read is made (FR-13).
+    pub fn read_item_with(
+        r: &dyn CommandRunner,
+        env: &Environment,
+        b: &Boundary,
+        host: &Host,
+    ) -> Result<Item, Error> {
+        read_item_on(r, env, b, &|| *host)
+    }
+
+    pub(super) fn read_item_on(
+        r: &dyn CommandRunner,
+        env: &Environment,
+        b: &Boundary,
+        host: &dyn Fn() -> Host,
+    ) -> Result<Item, Error> {
+        read_sections_on(r, env, b, None, host)
+    }
+
+    fn read_sections_on(
+        r: &dyn CommandRunner,
+        env: &Environment,
+        b: &Boundary,
+        sections: Option<&BTreeSet<String>>,
+        host: &dyn Fn() -> Host,
+    ) -> Result<Item, Error> {
+        let args = [
+            "item",
+            "get",
+            b.item_id.as_str(),
+            "--vault",
+            b.vault_id.as_str(),
+            "--format",
+            "json",
+        ];
+        let stdout = read_diagnosed(r, env, b, &args, host)?;
+        // 09.74: JSON op answered with that opv cannot read is `UnexpectedOutput` of this call.
+        let fields = parse_fields(&stdout, sections, &|e| unreadable_reply(&args, e))?;
+        Ok(Item {
+            fields,
+            version: item_version(&stdout),
+            raw: stdout,
+        })
+    }
+
+    fn parse_fields(
+        json: &[u8],
+        only: Option<&BTreeSet<String>>,
+        unreadable: &dyn Fn(&serde_json::Error) -> Error,
+    ) -> Result<Vec<ItemField>, Error> {
+        #[derive(Deserialize)]
+        struct StrictItem {
+            #[serde(default)]
+            fields: Vec<StrictField>,
+        }
+        #[derive(Deserialize)]
+        struct StrictField {
+            #[serde(default)]
+            section: Option<StrictSection>,
+            #[serde(rename = "type", default)]
+            ty: String,
+            #[serde(default)]
+            label: String,
+            #[serde(default)]
+            value: Option<Concealed>,
+        }
+        #[derive(Deserialize)]
+        struct StrictSection {
+            #[serde(default)]
+            label: Option<String>,
+        }
+        let raw: StrictItem = serde_json::from_slice(json).map_err(|e| unreadable(&e))?;
+        let mut seen = BTreeSet::new();
+        let mut out = Vec::new();
+        for f in raw.fields {
+            // Fields outside sections (built-in notesPlain etc.) are not fleet keys (D0 Q1).
+            let Some(section) = f.section else { continue };
+            // Scoped reads skip other sections before validating them.
+            if let Some(only) = only
+                && !section.label.as_ref().is_some_and(|l| only.contains(l))
+            {
+                continue;
+            }
+            let section = match section.label {
+                Some(l) if !l.is_empty() => l,
+                _ => {
+                    return Err(strict_refusal("a field is in a section without a label"));
+                }
+            };
+            if f.label.is_empty() {
+                return Err(strict_refusal("a field has no label"));
+            }
+            let kind = match f.ty.as_str() {
+                "CONCEALED" => Kind::Secret,
+                "STRING" => Kind::Config,
+                _ => {
+                    return Err(strict_refusal("a field has a type opv does not read"));
+                }
+            };
+            if !seen.insert((section.clone(), f.label.clone())) {
+                return Err(strict_refusal("two fields have the same section and label"));
+            }
+            out.push(ItemField {
+                section,
+                label: f.label,
+                kind,
+                concealed: kind == Kind::Secret,
+                // D0: an empty field has no `value` key at all.
+                value: f
+                    .value
+                    .map_or_else(|| SecretValue::new(String::new()), |c| c.0),
+            });
+        }
+        Ok(out)
+    }
+}
+
+#[cfg(test)]
+pub use strict::{read_item, read_item_in_sections, read_item_with};
+#[cfg(test)]
+use strict::{read_item_on, strict_refusal};

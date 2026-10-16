@@ -1,0 +1,26 @@
+# check_prod__op_item_get_ie2esharedprod0000000000001__account_not_on_machine: opv check prod | fault account_not_on_machine on op item get iE2ESHAREDPROD0000000000001
+
+## text exit: 7
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: 1Password account AE2EDEVACCOUNT000000000001 (chosen by the .opv file <SCENARIO>/project/.opv) is not added to op on this machine
+--- 1Password CLI replied, exit 1 ---
+| [ERROR] 2026/10/16 00:04:42 no account found for filter AE2EDEVACCOUNT000000000001
+--- (scrubbed) ---
+Do: add account AE2EDEVACCOUNT000000000001 at op's prompt
+Next: opv login --add
+
+## json exit: 7
+## json stdout
+{"schema_version":2,"ok":false,"exit_code":7,"next":"opv login --add","do":"add account AE2EDEVACCOUNT000000000001 at op's prompt","error":{"code":"account_not_registered","category":"auth","message":"1Password account AE2EDEVACCOUNT000000000001 (chosen by the .opv file <SCENARIO>/project/.opv) is not added to op on this machine","subject":{"in_app":false,"account":{"by":"id","value":"AE2EDEVACCOUNT000000000001"},"selected_by":{"from":"dot_opv","path":"<SCENARIO>/project/.opv"}},"evidence":{"checked":null,"account":null,"upstream":{"source":"one_password","tool":"1Password CLI","version":null,"exit":{"kind":"code","code":1},"said":["[ERROR] 2026/10/16 00:04:42 no account found for filter AE2EDEVACCOUNT000000000001"],"truncated":false,"removed_advice":false,"untrusted":true,"omitted":0}},"retry":"after_fix","human_required":true,"do":"add account AE2EDEVACCOUNT000000000001 at op's prompt","next":"opv login --add","next_kind":"handoff"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: 1Password account AE2EDEVACCOUNT000000000001 (chosen by the .opv file <SCENARIO>/project/.opv) is not added to op on this machine
+--- 1Password CLI replied, exit 1 ---
+| [ERROR] 2026/10/16 00:04:42 no account found for filter AE2EDEVACCOUNT000000000001
+--- (scrubbed) ---
+Do: add account AE2EDEVACCOUNT000000000001 at op's prompt
+Next: opv login --add

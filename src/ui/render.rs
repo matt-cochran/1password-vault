@@ -79,10 +79,7 @@ fn sidebar(f: &mut Frame, area: Rect, app: &App) {
             Nav::Env(e) => {
                 let env = app.snap.env(e);
                 let title = env.map_or(e.as_str(), |x| x.title.as_str());
-                let kind = match env.and_then(|x| x.target.as_deref()) {
-                    Some(t) => t.to_string(),
-                    None => "local".into(),
-                };
+                let kind = env.map_or_else(|| "local".to_string(), |x| x.place());
                 ("ENVIRONMENTS", format!("{title} · {kind}"))
             }
             Nav::Product(p) => {
@@ -192,7 +189,8 @@ fn overview(f: &mut Frame, area: Rect, app: &App) {
         parts[0],
     );
     let mut lines: Vec<Line> = Vec::new();
-    if s.findings.is_empty() {
+    // Only when every document was read: a failed `ready` is not "nothing" (07.02).
+    if s.findings.is_empty() && s.problems.is_empty() {
         lines.push(Line::styled(
             "Nothing needs attention: every declared key is saved.",
             OK,
@@ -223,7 +221,9 @@ fn overview(f: &mut Frame, area: Rect, app: &App) {
         ]));
     }
     for p in &s.problems {
-        lines.push(Line::styled(format!("could not read: {p}"), WARN));
+        for (i, l) in p.lines().into_iter().enumerate() {
+            lines.push(Line::styled(l, if i == 0 { WARN } else { DIM }));
+        }
     }
     f.render_widget(
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(

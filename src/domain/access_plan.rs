@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 use crate::domain::access::Reader;
 
 /// A deploy identity or a CI reader that needs vault access (FR-59).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Principal {
     Deploy { environment: String, target: String },
@@ -21,7 +21,9 @@ pub enum Principal {
 }
 
 /// The access a principal needs on one vault (FR-59).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Permission {
     Read,
@@ -29,7 +31,7 @@ pub enum Permission {
 }
 
 /// One vault grant the configuration requires for one principal (FR-59).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Grant {
     pub principal: Principal,
     pub service_account: String,
@@ -59,7 +61,7 @@ pub struct ObservedVault<'a> {
 }
 
 /// How one required grant compares with what was observed (FR-59).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GrantState {
     Present,
@@ -72,21 +74,21 @@ pub enum GrantState {
 }
 
 /// One required grant and its observed state.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GrantCheck {
     pub grant: Grant,
     pub state: GrantState,
 }
 
 /// A reader on an observed, visible vault that no required grant names (FR-59).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Extra {
     pub vault_id: String,
     pub service_account: String,
 }
 
 /// The comparison result: what was checked and what could not be classified (FR-59).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AccessReport {
     pub checks: Vec<GrantCheck>,
     pub extra: Vec<Extra>,

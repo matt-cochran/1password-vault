@@ -7,13 +7,16 @@
 pub mod adapters;
 pub mod app;
 pub mod approval;
+pub mod cause;
 pub mod config;
 pub mod config_edit;
 pub mod config_store;
 pub mod domain;
 pub mod error;
+pub mod hardening;
 pub mod host;
 pub mod json;
+pub mod output;
 pub mod ports;
 pub mod provider;
 pub mod ramdir;

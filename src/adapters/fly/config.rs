@@ -1,15 +1,16 @@
 //! The Fly provider: a target's `fly` section parsing, Fly name rules, doctor checks and
-//! the port wiring (FR-37, §10.3). Every user-visible Fly message is unchanged from 0.4.
+//! the port wiring (FR-37, §10.3). Failed flyctl calls are diagnosed in `diagnose.rs` (§5).
 
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io;
 
 use serde::Deserialize;
 
-use super::{CREDENTIAL_VARS, FLYCTL, Fly, PROGRAM, auth_whoami, not_logged_in};
+use super::{CREDENTIAL_VARS, FLYCTL, Fly, PROGRAM, auth_whoami};
 use crate::adapters::probe::{parse_version, spawn_tool, version_in};
-use crate::config::{check_ident, is_id};
+use crate::cause::FieldRule;
+use crate::cause::{Cause, DiagnoseContext, Unusable};
+use crate::config::{ID_SHAPE, TEMPLATE_WORDS, check_ident, is_id, section_invalid};
 use crate::domain::SecretValue;
 use crate::error::Error;
 use crate::host::Host;
@@ -85,10 +86,12 @@ impl Provider for FlyProvider {
         let env = section.env();
         let f: RawFly = section.deserialize()?;
         check_app(env, &f.app)?;
-        let t = &f.secret_name;
-        if !t.contains("{KEY}") {
-            return Err(Error::Config(
-                format!("environment {env}: fly.secret_name {t:?} must contain {{KEY}}").into(),
+        if !f.secret_name.contains("{KEY}") {
+            return Err(section_invalid(
+                "fly.secret_name",
+                FieldRule::Type {
+                    expected: TEMPLATE_WORDS,
+                },
             ));
         }
         Ok(Box::new(FlyTarget {
@@ -138,6 +141,17 @@ impl Provider for FlyProvider {
         Some(super::login::CLEANUP_HINT)
     }
 
+    /// C21 (A22): `flyctl tokens list --app <app>` shows the token opv minted.
+    fn mint_refind(&self, target: &dyn TargetConfig) -> Option<crate::cause::VendorCmd> {
+        let t = target.as_any().downcast_ref::<FlyTarget>()?;
+        Some(crate::cause::VendorCmd {
+            program: "flyctl".into(),
+            args: ["tokens", "list", "--app", t.app.as_str()]
+                .map(str::to_string)
+                .to_vec(),
+        })
+    }
+
     fn setup_hint(&self) -> String {
         "configure fly.app and fly.secret_name".into()
     }
@@ -174,7 +188,7 @@ static INIT_FIELDS: [InitField; 2] = [
 
 /// The app name goes into argv: non-empty, unpadded, never read as a flag.
 fn check_app(env: &str, app: &str) -> Result<(), Error> {
-    check_ident(env, "fly.app", app, is_id, "^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    check_ident(env, "fly.app", app, is_id, ID_SHAPE)
 }
 
 impl TargetConfig for FlyTarget {
@@ -278,9 +292,12 @@ fn flyctl_tested(v: (u64, u64, u64)) -> bool {
 fn flyctl_version(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Verdict, Error> {
     let o = spawn_tool(r, FLYCTL, host, &["version"])?;
     if o.status != 0 {
-        return Err(Error::Dependency(
-            format!("{PROGRAM} version failed (exit {})", o.status).into(),
-        ));
+        let _ = crate::runner::take_failure_excerpt();
+        return Err(Cause::ToolUnusable {
+            tool: PROGRAM.to_string(),
+            why: Unusable::VersionUnreadable,
+        }
+        .into());
     }
     let (a, b, c) = FLYCTL_TESTED;
     Ok(match version_in(&o.stdout) {
@@ -315,20 +332,11 @@ fn fly_auth(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Verdict, E
                 "{PROGRAM} auth whoami failed with {var} set (an app-scoped deploy token cannot \
                  run it); fly commands will show whether the token can access the app"
             ))),
-            None => Err(not_logged_in(&host(), None)),
+            // The reply says why (design §5): signed out, a rejected session, or Fly not
+            // answering, never assumed (06.11).
+            None => Err(super::failed_call(&DiagnoseContext::default())),
         },
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Error::Dependency(
-            format!(
-                "{PROGRAM} not found on PATH\n  {}",
-                host().install_hint(FLYCTL)
-            )
-            .into(),
-        )),
-        // No answer within the probe's limit: Fly or the network, not the install.
-        Err(e) if e.kind() == io::ErrorKind::TimedOut => Err(super::whoami_unanswered(&e)),
-        Err(e) => Err(Error::Dependency(
-            format!("failed to run {PROGRAM} ({})", e.kind()).into(),
-        )),
+        Err(e) => Err(super::call_error(r, host, &e, &DiagnoseContext::default())),
     }
 }
 

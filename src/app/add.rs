@@ -9,14 +9,17 @@
 //! is left alone. The write is atomic (a file: a temporary file, then a rename; a manifest:
 //! one item edit) and refused when someone changed the configuration since it was read.
 //!
-//! Makes no target call and reads no item: the field itself is added by `opv item skeleton` and
-//! its value typed in 1Password (FR-11, SR-5). Names, kinds and rules only, never a value.
+//! Makes no target call and reads no item: a person's `opv check <env> --product <p>` adds
+//! the empty field and its value is typed in 1Password (FR-11, SR-5). Names, kinds and rules
+//! only, never a value.
 
 use std::io::Write;
 
 use toml_edit::Value;
 
 use super::write_err;
+use crate::cause::render::cmd_text;
+use crate::cause::{Cause, Cmd, NameKind, UsageProblem};
 use crate::config;
 use crate::config_edit::{ConfigDoc, NewKey};
 use crate::config_store::{self, ConfigStore};
@@ -72,25 +75,13 @@ fn write_json(
     writeln!(out, "{doc}").map_err(write_err)
 }
 
-fn cfg(msg: String) -> Error {
-    Error::Config(msg.into())
+fn usage(problem: UsageProblem) -> Error {
+    Cause::Usage { problem }.into()
 }
 
 /// Run `add` against the configuration in `store` (a file or a manifest; `r` reaches a
-/// manifest). A refusal names `opv add --help` as its next step unless it names its own.
+/// manifest). Every refusal is a catalog cause with its own step; nothing is written.
 pub fn run(
-    args: &AddArgs,
-    store: &dyn ConfigStore,
-    r: &dyn CommandRunner,
-    out: &mut dyn Write,
-) -> Result<(), Error> {
-    run_inner(args, store, r, out).map_err(|e| match e {
-        e @ Error::Config(_) => e.or_next(|| "opv add --help".into()),
-        other => other,
-    })
-}
-
-fn run_inner(
     args: &AddArgs,
     store: &dyn ConfigStore,
     r: &dyn CommandRunner,
@@ -100,13 +91,11 @@ fn run_inner(
     let base = store.read_for_write(r)?;
     let original = &base.text;
     let place = store.describe();
-    let fleet = store.parse(original).map_err(|e| match e {
-        e @ Error::Config(_) => e
-            .map_text(|m| super::on_first_line(&m, " (fix it first; nothing written)"))
-            .or_next(|| "opv config edit".into()),
-        other => other,
-    })?;
+    // A configuration that does not load is reported as the loader's own cause (its field,
+    // line and fix); add has written nothing yet (C14).
+    let fleet = store.parse(original)?;
     let (product, key) = split_name(&args.name, &fleet)?;
+    let (product, key) = (product.as_str(), key.as_str());
     let mut doc = ConfigDoc::parse(original)?;
     let envs = environments(&args.envs, &doc, &fleet)?;
     let label = format!("{product}/{key}");
@@ -119,32 +108,26 @@ fn run_inner(
             .and_then(|p| p.keys.get(key))
             .map(|k| kind_word(k.kind))
             .unwrap_or("secret");
-        if let Some(k) = &args.kind
-            && k != declared
-        {
-            return Err(cfg(format!(
-                "{label} is already declared as {declared}; opv add never changes a key's \
-                 kind: edit {place} by hand (opv config edit)"
-            )));
-        }
-        if !args.rules.is_empty()
+        // add only adds environments to a declared key; anything else is a hand edit.
+        let changes_more = args.kind.as_deref().is_some_and(|k| k != declared)
+            || !args.rules.is_empty()
             || args.guidance.is_some()
             || args.immutable
             || args.from.is_some()
             || args.personal
-            || args.allow_same_value
-        {
-            return Err(cfg(format!(
-                "{label} is already declared; opv add only adds environments to it: change \
-                 its rules, guidance, from, personal, allow_same_value or immutable in {place} \
-                 by hand (opv config edit)"
-            )));
+            || args.allow_same_value;
+        if changes_more {
+            return Err(Cause::AlreadyDeclared {
+                kind: NameKind::Key,
+                name: label,
+            }
+            .into());
         }
         let new: Vec<String> = envs.into_iter().filter(|e| !existing.contains(e)).collect();
         if new.is_empty() {
             let first = existing.first().map_or("<env>", String::as_str);
+            let next = cmd_text(&check_cmd(first, product));
             if args.json {
-                let next = check_command(first, product);
                 return write_json(out, product, key, declared, &existing, &place, false, &next);
             }
             writeln!(
@@ -153,7 +136,7 @@ fn run_inner(
                 existing.join(", ")
             )
             .map_err(write_err)?;
-            return writeln!(out, "Next: {}", check_command(first, product)).map_err(write_err);
+            return writeln!(out, "Next: {next}").map_err(write_err);
         }
         for e in &new {
             doc.add_key_env(product, key, e)?;
@@ -166,16 +149,18 @@ fn run_inner(
     } else {
         let kind = match args.kind.as_deref() {
             Some(k @ ("secret" | "config")) => k,
-            Some(other) => {
-                return Err(cfg(format!(
-                    "--kind must be secret or config, got {other:?}"
-                )));
+            Some(_) => {
+                return Err(usage(UsageProblem::ValueFormat {
+                    flag: "--kind".into(),
+                    format: "secret or config",
+                }));
             }
             None => {
-                return Err(cfg(format!(
-                    "{label} is a new key: pass --kind secret (a concealed field) or --kind \
-                     config (a text field)"
-                )));
+                return Err(usage(UsageProblem::NeedsFlag {
+                    flag: format!("the new key {label}"),
+                    needs: "--kind secret (a concealed field) or --kind config (a text field)"
+                        .into(),
+                }));
             }
         };
         let rules = args
@@ -185,7 +170,10 @@ fn run_inner(
             .collect::<Result<Vec<_>, _>>()?;
         for (i, (n, _)) in rules.iter().enumerate() {
             if rules[..i].iter().any(|(m, _)| m == n) {
-                return Err(cfg(format!("--rule {n} is given twice")));
+                return Err(usage(UsageProblem::ConflictsWith {
+                    a: format!("--rule {n}"),
+                    b: format!("a second --rule {n}"),
+                }));
             }
         }
         doc.add_key(
@@ -230,39 +218,62 @@ fn run_inner(
 
     let text = doc.to_string();
     // The same validation as a hand-written file: names on every target (collisions
-    // included, FR-30), rules, environments.
-    store.parse(&text).map_err(|e| match e {
-        e @ Error::Config(_) => e.map_text(|m| {
-            format!("{m} (in the configuration opv add would write; nothing written)")
-        }),
-        other => other,
-    })?;
+    // included, FR-30), rules, environments. Nothing is written when it fails.
+    store.parse(&text).map_err(proposed)?;
     config_store::save(store, r, &base, &text)?;
 
     let first = &envs[0];
-    // A person's check creates the empty field and links to it (found in a run-through:
-    // `item skeleton` was a step `check` already does).
+    let check = cmd_text(&check_cmd(first, product));
     if args.json {
-        let next = check_command(first, product);
-        return write_json(out, product, key, &kind, &envs, &place, true, &next);
+        return write_json(out, product, key, &kind, &envs, &place, true, &check);
     }
+    let open = Cmd {
+        command: vec!["open".into()],
+        args: vec![label.clone(), "--env".into(), first.clone()],
+    };
     let w = |out: &mut dyn Write, s: String| writeln!(out, "{s}").map_err(write_err);
     w(out, line)?;
+    // A person's check creates the empty field and links to it (05.38: the field is made
+    // only when the check runs signed in as a person).
     w(
         out,
         format!(
-            "then: {} adds the field to the item ({}); fill it in with opv open {} --env {}",
-            check_command(first, product),
+            "then: {check} adds the field to the item when you are signed in ({}); fill it \
+             in with {}",
             envs.join(", "),
-            args.name,
-            first
+            cmd_text(&open)
         ),
     )?;
-    w(out, format!("Next: {}", check_command(first, product)))
+    w(out, format!("Next: {check}"))
 }
 
-fn check_command(env: &str, product: &str) -> String {
-    format!("opv check {env} --product {product}")
+/// A loader refusal of the text add would write. Its line number points into text that
+/// was never saved, so it is dropped; the field and the rule stay (C14).
+fn proposed(e: Error) -> Error {
+    let Error::Catalog(cause, upstream) = e;
+    let cause = match *cause {
+        Cause::ConfigInvalid {
+            source,
+            at: _,
+            field,
+            rule,
+        } => Cause::ConfigInvalid {
+            source,
+            at: None,
+            field,
+            rule,
+        },
+        other => other,
+    };
+    Error::Catalog(Box::new(cause), upstream)
+}
+
+/// `opv check <env> --product <p>`, the read that adds the empty field for a person.
+fn check_cmd(env: &str, product: &str) -> Cmd {
+    Cmd {
+        command: vec!["check".into()],
+        args: vec![env.to_string(), "--product".into(), product.to_string()],
+    }
 }
 
 fn kind_word(k: crate::domain::Kind) -> &'static str {
@@ -272,38 +283,49 @@ fn kind_word(k: crate::domain::Kind) -> &'static str {
     }
 }
 
-/// `product/KEY`, both names checked like the loader checks them. A bare `KEY` is refused
-/// naming `opv add <product>/<KEY>` and the declared products.
-fn split_name<'a>(
-    name: &'a str,
-    fleet: &crate::domain::Fleet,
-) -> Result<(&'a str, &'a str), Error> {
+/// `product/KEY`, both names checked like the loader checks them. A bare `KEY` names the
+/// key exactly one product declares (05.20); declared by several, it is ambiguous; declared
+/// by none, it needs its product.
+fn split_name(name: &str, fleet: &crate::domain::Fleet) -> Result<(String, String), Error> {
     let Some((product, key)) = name.split_once('/') else {
-        let known: Vec<&str> = fleet.products.keys().map(String::as_str).collect();
-        let example = known.first().copied().unwrap_or("api");
-        return Err(cfg(format!(
-            "keys are declared per product: opv add {example}/{name} \
-             (products: {})",
-            if known.is_empty() {
-                "none yet".to_string()
-            } else {
-                known.join(", ")
+        let owners: Vec<&str> = fleet
+            .products
+            .iter()
+            .filter(|(_, p)| p.keys.contains_key(name))
+            .map(|(n, _)| n.as_str())
+            .collect();
+        return match owners.as_slice() {
+            [only] => Ok((only.to_string(), name.to_string())),
+            [] => Err(usage(UsageProblem::ValueFormat {
+                flag: format!("the new key {name}"),
+                format: "PRODUCT/KEY: a bare KEY names a key one product already declares",
+            })),
+            _ => Err(Cause::Ambiguous {
+                kind: NameKind::Key,
+                given: name.to_string(),
+                candidates: owners.iter().map(|p| format!("{p}/{name}")).collect(),
             }
-        )));
+            .into()),
+        };
     };
     if !config::is_product_name(product) {
-        return Err(cfg(format!(
-            "product {product:?} must match ^[a-z][a-z0-9_-]*$"
-        )));
+        return Err(usage(UsageProblem::ValueFormat {
+            flag: format!("the product {product:?}"),
+            format: "a name matching ^[a-z][a-z0-9_-]*$",
+        }));
     }
     if !config::is_env_name(key) {
-        return Err(cfg(format!("key {key:?} must match ^[A-Z][A-Z0-9_]*$")));
+        return Err(usage(UsageProblem::ValueFormat {
+            flag: format!("the key {key:?}"),
+            format: "a name matching ^[A-Z][A-Z0-9_]*$",
+        }));
     }
-    Ok((product, key))
+    Ok((product.to_string(), key.to_string()))
 }
 
 /// The environments to declare: the given ones (each defined, duplicates dropped), or every
-/// environment in file order.
+/// environment in file order. An undeclared one is `NotDeclared` (R21): a unique close name
+/// gives the same command with it; an environment is declared before its keys.
 fn environments(
     given: &[String],
     doc: &ConfigDoc,
@@ -314,11 +336,7 @@ fn environments(
     }
     let mut out: Vec<String> = Vec::new();
     for e in given {
-        // An environment is added with init --add-env first, then the key (M6).
-        fleet.environment(e).map_err(|err| {
-            err.with_do(format!("add environment {e} first: opv init {e} --add-env"))
-                .with_next("opv add --help")
-        })?;
+        super::environment(fleet, e)?;
         if !out.contains(e) {
             out.push(e.clone());
         }
@@ -336,7 +354,10 @@ fn rule(spec: &str) -> Result<(String, Value), Error> {
         None => (spec.trim(), None),
     };
     if name.is_empty() {
-        return Err(cfg(format!("--rule {spec:?}: expected name=value")));
+        return Err(usage(UsageProblem::ValueFormat {
+            flag: "--rule".into(),
+            format: "name=value (or the name of a flag rule)",
+        }));
     }
     let candidates: Vec<Value> = match raw {
         None => vec![Value::from(true)],
@@ -355,24 +376,17 @@ fn rule(spec: &str) -> Result<(String, Value), Error> {
             c
         }
     };
-    let mut first = None;
     for mut v in candidates {
         v.decor_mut().clear();
         let probe = format!("{name} = {v}");
-        match toml::from_str::<Rules>(&probe) {
-            Ok(_) => return Ok((name.to_string(), v)),
-            Err(e) => {
-                first.get_or_insert_with(|| {
-                    crate::config::toml_error_inline(&probe, None, e.message())
-                });
-            }
+        if toml::from_str::<Rules>(&probe).is_ok() {
+            return Ok((name.to_string(), v));
         }
     }
-    Err(cfg(format!(
-        "--rule {name}: {}; see {}/configuration.md#rules-reference",
-        first.unwrap_or_default(),
-        crate::DOCS_URL
-    )))
+    Err(usage(UsageProblem::ValueFormat {
+        flag: format!("--rule {name}"),
+        format: "a rule name and value from the rules reference (configuration.md)",
+    }))
 }
 
 #[cfg(test)]

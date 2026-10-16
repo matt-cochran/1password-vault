@@ -7,7 +7,6 @@
 use super::*;
 use crate::app::testutil::text_of;
 use crate::config;
-use crate::error::Code;
 
 /// One environment with a Fly target and one product: enough to print a workflow.
 const FLY_FLEET: &str = "\
@@ -181,9 +180,9 @@ fn no_github_env_omits_the_job_environment() {
 // --- refusals --------------------------------------------------------------------------
 
 #[test]
-fn unknown_target_is_a_usage_error() {
+fn unknown_target_is_an_unknown_target() {
     let (err, _) = refused("prod", "missing");
-    assert_eq!(err.code(), Code::Usage);
+    assert_eq!(err.code_str(), "unknown_target");
 }
 
 #[test]
@@ -194,8 +193,9 @@ fn unknown_target_prints_nothing() {
 
 #[test]
 fn unknown_environment_is_a_usage_error() {
+    // Exit 2 either way; the catalog names it unknown_env (audit 03.02).
     let (err, _) = refused("missing", "portfolio");
-    assert_eq!(err.code(), Code::Usage);
+    assert_eq!(err.exit_code(), 2);
 }
 
 #[test]
@@ -224,4 +224,55 @@ fn an_environment_that_needs_confirmation_is_confirmed_in_the_sync() {
     assert!(
         text_of(&out).contains("run: opv sync prod --target portfolio --confirm prod --receipt")
     );
+}
+
+// --- whether the printed job can sign in to the target (06.24, 06.48) -----------------
+
+/// The printed workflow for `fleet`'s `prod`/`portfolio`.
+fn workflow_of(fleet: &str) -> String {
+    let fleet = config::parse(fleet).unwrap();
+    let mut out = Vec::new();
+    run(&fleet, "prod", "portfolio", None, false, &mut out).unwrap();
+    text_of(&out)
+}
+
+/// `fleet` with the target's deploy credentials recorded.
+fn with_deploy_credentials(fleet: &str) -> String {
+    fleet.replacen(
+        "state_vault_id = \"s1\"\n",
+        "state_vault_id = \"s1\"\ndeploy_credentials = \"op://deploy/portfolio\"\n",
+        1,
+    )
+}
+
+#[test]
+fn identity_header_says_which_token_it_means() {
+    assert!(fly_workflow(None, false).contains(
+        "# secrets.OP_SERVICE_ACCOUNT_TOKEN is created once, by a person in their own \
+         terminal, with:\n"
+    ));
+}
+
+#[test]
+fn a_fly_target_without_deploy_credentials_names_the_mint_command() {
+    assert!(
+        workflow_of(FLY_FLEET)
+            .contains("#   opv target credentials prod --target portfolio --create\n"),
+        "{}",
+        workflow_of(FLY_FLEET)
+    );
+}
+
+#[test]
+fn a_github_target_without_deploy_credentials_names_config_edit() {
+    assert!(
+        workflow_of(GITHUB_FLEET).contains("a person adds them first with:\n#   opv config edit\n"),
+        "{}",
+        workflow_of(GITHUB_FLEET)
+    );
+}
+
+#[test]
+fn a_target_with_deploy_credentials_gets_no_sign_in_note() {
+    assert!(!workflow_of(&with_deploy_credentials(FLY_FLEET)).contains("not recorded yet"));
 }

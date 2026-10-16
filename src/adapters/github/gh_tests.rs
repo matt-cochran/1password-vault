@@ -1,4 +1,5 @@
 use super::*;
+use crate::cause::Cause;
 use crate::runner::Output;
 use crate::runner::fake::FakeRunner;
 
@@ -250,13 +251,21 @@ fn set_variables_with_an_empty_batch_makes_no_call() {
     assert!(r.calls.borrow().is_empty());
 }
 
+/// The whole terminal report of `e`, as a person reads it.
+fn rendered(e: &Error) -> String {
+    crate::error::report(e)
+}
+
 #[test]
 fn set_secrets_failure_names_what_was_already_written() {
     let r = FakeRunner::new([Output::success(""), Output::failure(1), Output::success("")]);
     let repos = two_repos();
     let v = SecretValue::new("second-repo-value".into());
     let err = set_secrets(&r, scope(&repos), &[("API_TOKEN".into(), &v)]).unwrap_err();
-    assert!(err.mentions("API_TOKEN"));
+    assert!(
+        matches!(err.cause(), Some((Cause::Partial { done, .. }, _)) if done.iter().any(|d| d.contains("API_TOKEN"))),
+        "{err:?}"
+    );
 }
 
 const STDERR_BAD_TOKEN: &str = include_str!("../../../tests/fixtures/github/stderr-bad_token.txt");
@@ -269,7 +278,7 @@ fn set_secrets_failure_never_contains_the_value() {
     let repos = two_repos();
     let v = SecretValue::new("SECOND_REPO_VALUE_9f3a".into());
     let err = set_secrets(&r, scope(&repos), &[("API_TOKEN".into(), &v)]).unwrap_err();
-    assert!(!err.to_string().contains("SECOND_REPO_VALUE_9f3a"));
+    assert!(!rendered(&err).contains("SECOND_REPO_VALUE_9f3a"));
 }
 
 #[test]
@@ -277,50 +286,104 @@ fn set_variables_failure_names_what_was_already_written() {
     let r = FakeRunner::new([Output::success(""), Output::failure(1), Output::success("")]);
     let repos = two_repos();
     let err = set_variables(&r, scope(&repos), &[("APP_NAME".into(), "config-value")]).unwrap_err();
-    assert!(err.mentions("APP_NAME"));
+    assert!(
+        matches!(err.cause(), Some((Cause::Partial { done, .. }, _)) if done.iter().any(|d| d.contains("APP_NAME"))),
+        "{err:?}"
+    );
 }
 
-#[test]
-fn set_secrets_with_a_rejected_token_and_a_failed_probe_is_an_auth_error() {
+/// `gh secret set` refused with the spike's rejected-token reply, under deploy credentials.
+fn set_with_rejected_deploy_token(environment: Option<&str>) -> Error {
     let r = FakeRunner::default();
     r.push_with_stderr(Output::failure(1), STDERR_BAD_TOKEN);
-    r.push_with_stderr(Output::failure(1), "");
     let repos = repos();
     let v = SecretValue::new("token-value".into());
-    let err = set_secrets(&r, scope(&repos), &[("API_TOKEN".into(), &v)]).unwrap_err();
-    assert!(matches!(err, Error::Auth(_)));
+    let principal = crate::cause::Principal::DeployCredentials {
+        vault: crate::cause::VaultId::new("vlt-deploy"),
+        item: crate::cause::ItemId::new("gh-deploy"),
+        env: crate::cause::EnvName::new("prod"),
+        target: crate::cause::TargetName::new("ci"),
+    };
+    crate::runner::under_deploy(principal, || {
+        set_secrets(
+            &r,
+            Scope {
+                repos: &repos,
+                environment,
+            },
+            &[("API_TOKEN".into(), &v)],
+        )
+    })
+    .unwrap_err()
 }
 
 #[test]
-fn set_secrets_with_a_missing_environment_is_a_target_error() {
+fn a_rejected_deploy_token_is_deploy_credentials_failed() {
+    assert_eq!(
+        set_with_rejected_deploy_token(None).code_str(),
+        "deploy_credentials_failed"
+    );
+}
+
+#[test]
+fn a_rejected_deploy_token_never_offers_gh_auth_login() {
+    assert!(!rendered(&set_with_rejected_deploy_token(None)).contains("gh auth login"));
+}
+
+#[test]
+fn a_rejected_token_for_a_github_environment_needs_the_environments_permission() {
+    assert!(
+        rendered(&set_with_rejected_deploy_token(Some("staging")))
+            .contains("Environments read and write"),
+        "{}",
+        rendered(&set_with_rejected_deploy_token(Some("staging")))
+    );
+}
+
+#[test]
+fn a_rejected_token_for_repository_values_needs_no_environments_permission() {
+    assert!(!rendered(&set_with_rejected_deploy_token(None)).contains("Environments"));
+}
+
+#[test]
+fn set_secrets_with_an_unrecorded_reply_is_unrecognized() {
     let r = FakeRunner::default();
     r.push_with_stderr(Output::failure(1), STDERR_ENV_MISSING_SET);
-    r.push_with_stderr(Output::success(""), "");
     let repos = repos();
     let v = SecretValue::new("token-value".into());
     let err = set_secrets(&r, scope(&repos), &[("API_TOKEN".into(), &v)]).unwrap_err();
-    assert!(matches!(err, Error::Target(_)));
+    assert_eq!(err.code_str(), "unrecognized_failure");
 }
 
 #[test]
-fn set_secrets_with_a_missing_environment_names_the_repository() {
+fn set_secrets_with_an_unrecorded_reply_shows_ghs_reply() {
     let r = FakeRunner::default();
     r.push_with_stderr(Output::failure(1), STDERR_ENV_MISSING_SET);
-    r.push_with_stderr(Output::success(""), "");
     let repos = repos();
     let v = SecretValue::new("token-value".into());
     let err = set_secrets(&r, scope(&repos), &[("API_TOKEN".into(), &v)]).unwrap_err();
-    assert!(err.mentions("example-org/example-repo"));
+    assert!(rendered(&err).contains("HTTP 404"), "{}", rendered(&err));
 }
 
 #[test]
-fn set_secrets_with_an_unknown_outcome_is_an_unknown_error() {
+fn set_secrets_with_an_unknown_outcome_is_outcome_unknown() {
     let r = FakeRunner::default();
     r.push_unknown("timeout");
     let repos = repos();
     let v = SecretValue::new("token-value".into());
     let err = set_secrets(&r, scope(&repos), &[("API_TOKEN".into(), &v)]).unwrap_err();
-    assert!(matches!(err, Error::Unknown(_)));
+    assert_eq!(err.code_str(), "outcome_unknown");
+}
+
+#[test]
+fn a_missing_gh_is_dependency_missing() {
+    let r = FakeRunner::default();
+    r.push_io_error(std::io::ErrorKind::NotFound);
+    let repos = repos();
+    assert_eq!(
+        list_secrets(&r, scope(&repos)).unwrap_err().code_str(),
+        "dependency_missing"
+    );
 }
 
 // ---------------------------------------------------------------------------- deletes
@@ -410,22 +473,14 @@ fn variable_refusal_accepts_a_variable_at_the_limit() {
 fn validate_secrets_rejects_a_bad_name() {
     let v = SecretValue::new("value".into());
     let batch = vec![("BAD-NAME".to_string(), &v)];
-    assert!(
-        validate_secrets(&batch)
-            .unwrap_err()
-            .mentions("github-name")
-    );
+    assert!(validate_secrets(&batch).unwrap_err().code_str() == "internal_error");
 }
 
 #[test]
 fn validate_secrets_rejects_the_github_prefix() {
     let v = SecretValue::new("value".into());
     let batch = vec![("GITHUB_FOO".to_string(), &v)];
-    assert!(
-        validate_secrets(&batch)
-            .unwrap_err()
-            .mentions("github-name")
-    );
+    assert!(validate_secrets(&batch).unwrap_err().code_str() == "internal_error");
 }
 
 #[test]
@@ -485,20 +540,23 @@ fn listing_in_missing_environment() -> Result<Vec<StoreEntry>, Error> {
 }
 
 #[test]
+fn listing_in_a_missing_environment_is_owner_setup_required() {
+    let e = listing_in_missing_environment().unwrap_err();
+    assert_eq!(e.code_str(), "owner_setup_required");
+}
+
+#[test]
 fn listing_in_a_missing_environment_names_it() {
     let e = listing_in_missing_environment().unwrap_err();
-    assert!(e.mentions("GitHub environment \"nope\" is missing"), "{e}");
+    assert!(
+        rendered(&e).contains("GitHub environment nope in example-org/example-repo"),
+        "{}",
+        rendered(&e)
+    );
 }
 
 #[test]
-fn listing_in_a_missing_environment_never_runs_the_create_command_as_next() {
+fn listing_in_a_missing_environment_leaves_the_setup_to_a_person() {
     let e = listing_in_missing_environment().unwrap_err();
-    assert_eq!(e.next_step(), None);
-}
-
-#[test]
-fn a_refused_read_while_signed_in_names_the_rights_to_check() {
-    let r = FakeRunner::new([Output::success("")]);
-    let e = read_failure(&r, "gh api", "org/r", 1);
-    assert!(e.text().contains("Secrets and Variables write"), "{e:?}");
+    assert!(e.human_required());
 }

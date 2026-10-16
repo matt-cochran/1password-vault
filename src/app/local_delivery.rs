@@ -25,9 +25,13 @@ use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use crate::error::{Code, Error};
+use crate::cause::{
+    Cause, EnvName, Invocation, IoKind, Origin, ProductName, ProfileName, RamDir, UsageProblem,
+};
+use crate::error::Error;
 
 /// The variables a `declared_only` app still gets from the environment it started in, so
 /// tools resolve and print as usual. None of them is a credential. `LC_*` is kept too.
@@ -62,6 +66,103 @@ pub struct Delivery {
     pub command: Vec<String>,
 }
 
+/// The variable `opv run` gives `op run`, which passes it to the local delivery step: the
+/// person's run ([`Outer`]) as JSON. Names and flags only; it never reaches the app.
+pub const OUTER_VAR: &str = "OPV_RUN_OUTER";
+
+/// The person's `opv run` an internal step serves (design §6.1, X25): the environment, the
+/// product, the remote profile and the command line before `--` (opv's own flags and names
+/// only, never the child's words). The step's errors render their steps against it, so
+/// they never name the hidden step itself or `opv doctor`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Outer {
+    pub env: String,
+    pub product: String,
+    pub profile: Option<String>,
+    /// The subcommand path (`["run"]`).
+    pub command: Vec<String>,
+    /// Every flag and argument before `--`, as the person gave them.
+    pub args: Vec<String>,
+    /// The person passed a command after `--` (rendered only as `-- <command>`).
+    pub has_child: bool,
+}
+
+impl Outer {
+    /// The run of `env` and `product` (to `profile`'s host) that `inv` started.
+    pub fn new(env: &str, product: &str, profile: Option<&str>, inv: &Invocation) -> Self {
+        Outer {
+            env: env.to_string(),
+            product: product.to_string(),
+            profile: profile.map(str::to_string),
+            command: inv.command.clone(),
+            args: inv.args.clone(),
+            has_child: inv.has_child,
+        }
+    }
+
+    /// The person's invocation, as the step's errors render it.
+    pub fn invocation(&self) -> Invocation {
+        Invocation {
+            origin: Origin::Cli,
+            command: self.command.clone(),
+            args: self.args.clone(),
+            has_child: self.has_child,
+        }
+    }
+
+    /// Short names and words, no control character: what a step accepts from its parent.
+    pub fn is_valid(&self) -> bool {
+        let word = |w: &str| w.len() <= 256 && !w.chars().any(char::is_control);
+        let name = |w: &str| !w.is_empty() && w.len() <= 128 && word(w);
+        name(&self.env)
+            && name(&self.product)
+            && self.profile.as_deref().is_none_or(name)
+            && self.command.len() <= 4
+            && self.args.len() <= 64
+            && self.command.iter().chain(&self.args).all(|w| word(w))
+    }
+
+    /// The `opv run` this step serves, from [`OUTER_VAR`]; `None` when it is absent or not
+    /// valid (the step was started by hand).
+    pub fn from_env() -> Option<Self> {
+        let text = std::env::var(OUTER_VAR).ok()?;
+        serde_json::from_str::<Outer>(&text)
+            .ok()
+            .filter(Outer::is_valid)
+    }
+
+    /// Make the step's errors render against the person's run (design §6.1, X25).
+    pub fn install(outer: Option<&Outer>) {
+        let inv = match outer {
+            Some(o) => o.invocation(),
+            // Started by hand: the only honest step is the run's own help.
+            None => Invocation {
+                origin: Origin::Cli,
+                command: vec!["run".into()],
+                args: vec!["--help".into()],
+                has_child: false,
+            },
+        };
+        crate::error::set_outer_invocation(inv);
+    }
+
+    /// No folder for file keys on this machine, or on the profile's host (`remote`), for
+    /// the run `outer`: the cause names the run, so its step is that run's preview.
+    pub fn ram_dir_unavailable(outer: Option<&Outer>, remote: bool, why: RamDir) -> Error {
+        Cause::RamDirUnavailable {
+            remote: remote.then(|| {
+                ProfileName::new(outer.and_then(|o| o.profile.clone()).unwrap_or_default())
+            }),
+            why,
+            purpose: crate::cause::RamPurpose::FileDelivery,
+            env: outer.map(|o| EnvName::new(&o.env)),
+            product: outer.map(|o| ProductName::new(&o.product)),
+        }
+        .into()
+    }
+}
+
 pub(crate) fn is_basic(name: &str) -> bool {
     BASICS.contains(&name) || name.starts_with("LC_")
 }
@@ -78,7 +179,7 @@ pub fn child_env(
     let as_file = |n: &str| d.files.iter().any(|(k, _)| k == n);
     let mut out: Vec<(String, String)> = inherited
         .iter()
-        .filter(|(k, _)| !k.starts_with("OP_") && !as_file(k))
+        .filter(|(k, _)| !k.starts_with("OP_") && k != OUTER_VAR && !as_file(k))
         .filter(|(k, _)| !d.declared_only || is_basic(k) || d.keys.iter().any(|x| x == k))
         .cloned()
         .collect();
@@ -92,39 +193,49 @@ pub fn child_env(
 /// The user-owned, RAM-backed `$XDG_RUNTIME_DIR` file delivery needs (#136), or why it is
 /// unavailable here. One check for the run's file step and for `run --preview`'s platform
 /// report: Linux and WSL on tmpfs/ramfs, never a disk fallback.
-pub fn runtime_dir_support() -> Result<std::path::PathBuf, String> {
+pub fn runtime_dir_support() -> Result<std::path::PathBuf, RamDir> {
+    if !cfg!(target_os = "linux") {
+        return Err(RamDir::NoneOnPlatform {
+            os: std::env::consts::OS,
+        });
+    }
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
         .filter(|v| !v.is_empty())
         .map(std::path::PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .ok_or_else(|| {
-            "no absolute $XDG_RUNTIME_DIR (systemd logind sets it on Linux and WSL)".to_string()
-        })?;
+        .ok_or(RamDir::Unset)?;
+    if !runtime.is_absolute() {
+        return Err(RamDir::NotAbsolute);
+    }
     use crate::ramdir::{owned_dir, ram_backed};
     if !owned_dir(&runtime) {
-        return Err(format!(
-            "$XDG_RUNTIME_DIR {} is not a directory owned by this user",
-            runtime.display()
-        ));
+        return Err(RamDir::NotOwned);
     }
     if !ram_backed(&runtime).unwrap_or(false) {
-        return Err(format!(
-            "$XDG_RUNTIME_DIR {} is not on tmpfs or ramfs (RAM-backed)",
-            runtime.display()
-        ));
+        return Err(RamDir::NotTmpfs);
     }
     Ok(runtime)
 }
 
-pub(crate) fn ram_dir_error() -> Error {
-    Error::Policy(
-        "file delivery needs a private RAM-backed directory: a user-owned $XDG_RUNTIME_DIR on \
-         tmpfs (Linux, WSL). It is not available here, and opv never writes these values to \
-         disk instead; nothing was written"
-            .into(),
-    )
-    .with_code(Code::RamDirUnavailable)
-    .with_do("run this on Linux or WSL with a session runtime directory (systemd logind sets XDG_RUNTIME_DIR), or deliver these keys as variables (remove file)")
+/// Why [`runtime_dir_support`] found no folder, in the preview's words.
+pub fn ram_dir_reason(why: &RamDir) -> String {
+    match why {
+        RamDir::Unset => {
+            "$XDG_RUNTIME_DIR is not set (systemd logind sets it on Linux and WSL)".into()
+        }
+        RamDir::NotAbsolute => "$XDG_RUNTIME_DIR is not an absolute path".into(),
+        RamDir::NotOwned => "$XDG_RUNTIME_DIR is not a directory owned by this user".into(),
+        RamDir::NotTmpfs => "$XDG_RUNTIME_DIR is not on tmpfs or ramfs (RAM-backed)".into(),
+        RamDir::NoneOnPlatform { os } => format!("{os} has no RAM-backed runtime directory"),
+    }
+}
+
+/// A failure to make, or write into, the private directory at `dir`.
+pub(crate) fn private_dir_failed(dir: &Path, e: &std::io::Error) -> Error {
+    Cause::PrivateDirFailed {
+        dir: dir.to_path_buf(),
+        io: IoKind::from(e.kind()),
+    }
+    .into()
 }
 
 /// Write `value` to `dir/<rel>`: each directory component created inside `dir` (0700),
@@ -167,38 +278,43 @@ pub(crate) fn write_file(dir: &Path, rel: &str, value: &[u8]) -> std::io::Result
     f.sync_all()
 }
 
-/// Run the app as `d` says; returns its exit code (128 + the signal that ended it).
+/// Run the app as `d` says; returns its exit code (128 + the signal that ended it). Errors
+/// render their steps against the person's `opv run` ([`Outer`]), never this hidden step.
 pub fn run(d: &Delivery) -> Result<i32, Error> {
+    let outer = Outer::from_env();
+    Outer::install(outer.as_ref());
     if d.command.is_empty() {
-        return Err(Error::Config("no command given".into()).with_code(Code::Usage));
+        return Err(Cause::Usage {
+            problem: UsageProblem::NeedsFlag {
+                flag: "run".into(),
+                needs: "a command after --".into(),
+            },
+        }
+        .into());
     }
     let inherited: Zeroizing<Vec<(String, String)>> = Zeroizing::new(std::env::vars().collect());
     let mut dir = None;
     if !d.files.is_empty() {
         use crate::ramdir::{PrivateDir, sweep};
-        let runtime = runtime_dir_support().map_err(|_| ram_dir_error())?;
+        let runtime = runtime_dir_support()
+            .map_err(|why| Outer::ram_dir_unavailable(outer.as_ref(), false, why))?;
         sweep(&runtime, DIR_PREFIX);
-        let private = PrivateDir::create(&runtime, DIR_PREFIX).map_err(|_| ram_dir_error())?;
+        let private = PrivateDir::create(&runtime, DIR_PREFIX)
+            .map_err(|e| private_dir_failed(&runtime, &e))?;
         let values: BTreeMap<&str, &str> = inherited
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
         for (key, rel) in &d.files {
             let Some(value) = values.get(key.as_str()) else {
-                return Err(Error::Source(
-                    format!("{key} was not resolved by op run; nothing was started").into(),
-                ));
+                // `op run` resolves every reference `opv run` gave it, or starts nothing.
+                return Err(Cause::Bug {
+                    site: "local-delivery: a file key op run did not resolve",
+                }
+                .into());
             };
-            write_file(private.path(), rel, value.as_bytes()).map_err(|e| {
-                Error::Policy(
-                    format!(
-                        "cannot write {key}'s file in the private directory ({})",
-                        e.kind()
-                    )
-                    .into(),
-                )
-                .with_code(Code::PolicyRefused)
-            })?;
+            write_file(private.path(), rel, value.as_bytes())
+                .map_err(|e| private_dir_failed(private.path(), &e))?;
         }
         dir = Some(private);
     }
@@ -211,8 +327,14 @@ pub fn run(d: &Delivery) -> Result<i32, Error> {
         .env_clear()
         .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .status()
-        .map_err(|e| {
-            Error::Dependency(format!("cannot start {} ({:?})", d.command[0], e.kind()).into())
+        .map_err(|e| -> Error {
+            Cause::ChildStartFailed {
+                program: d.command[0].clone(),
+                workdir: None,
+                io: IoKind::from(e.kind()),
+                remote: None,
+            }
+            .into()
         });
     drop(env);
     drop(dir); // removes the directory and every file in it

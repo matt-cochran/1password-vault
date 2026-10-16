@@ -35,11 +35,35 @@ fn non_ram_runtime_dir_is_refused_before_anything_is_read() {
         Err(e) => e,
         Ok(_) => panic!("a disk-backed directory must be refused"),
     };
-    let (text, next) = NO_RAM_DIR.split_once("\n  next: ").unwrap();
     assert_eq!(
-        (e.exit_code(), e.text(), e.next_step()),
-        (6, text, Some(next))
+        e.cause().map(|(c, _)| c.clone()),
+        Some(Cause::RamDirUnavailable {
+            remote: None,
+            why: RamDir::NotTmpfs,
+            purpose: RamPurpose::AzureDeployCredentials,
+            env: None,
+            product: None,
+        })
     );
+}
+
+/// A runtime directory given as a relative path is named as such, not as a disk folder.
+#[test]
+fn relative_runtime_dir_is_refused_as_not_absolute() {
+    let e = match start_in(Some("run/user".into()), &ram) {
+        Err(e) => e,
+        Ok(_) => panic!("a relative runtime directory must be refused"),
+    };
+    assert!(matches!(
+        e.cause(),
+        Some((
+            Cause::RamDirUnavailable {
+                why: RamDir::NotAbsolute,
+                ..
+            },
+            _
+        ))
+    ));
 }
 
 #[test]
@@ -80,8 +104,9 @@ fn login_is_a_service_principal_sign_in_reading_the_secret_from_stdin() {
     let args = r.calls.borrow()[0].args.join(" ");
     assert_eq!(
         args,
-        "login --service-principal -u 00000000-0000-0000-0000-00000000000b -t \
-         00000000-0000-0000-0000-00000000000a -p @/dev/stdin --only-show-errors -o none"
+        "login --service-principal --username=00000000-0000-0000-0000-00000000000b \
+         --tenant=00000000-0000-0000-0000-00000000000a -p @/dev/stdin \
+         --allow-no-subscriptions --only-show-errors -o none"
     );
 }
 
@@ -110,13 +135,25 @@ fn every_az_call_gets_the_config_dir_and_no_other_program_does() {
     );
 }
 
+/// 06.18: a failed service-principal sign-in may be rejected credentials, no network or
+/// something else; with no recording of az's wording, opv shows az's reply rather than
+/// blame the credentials.
 #[test]
-fn rejected_credentials_are_an_auth_error_without_the_secret() {
+fn failed_service_principal_sign_in_is_not_blamed_on_the_credentials() {
     let tmp = tempfile::tempdir().unwrap();
     let mut l = login_in(tmp.path());
     let r = FakeRunner::new([Output::failure(1)]);
     let e = l.sign_in(values(), &r).unwrap_err();
-    assert!(e.exit_code() == 7 && !e.to_string().contains(SECRET), "{e}");
+    assert_eq!(e.code_str(), "unrecognized_failure");
+}
+
+#[test]
+fn failed_sign_in_never_shows_the_secret() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut l = login_in(tmp.path());
+    let r = FakeRunner::new([Output::failure(1)]);
+    let e = l.sign_in(values(), &r).unwrap_err();
+    assert!(!format!("{e:?}").contains(SECRET), "{e:?}");
 }
 
 #[test]
@@ -177,7 +214,24 @@ fn dir_of_a_live_run_is_kept() {
 fn plaintext_store_is_refused_on_windows() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("service_principal_entries.json"), "{}").unwrap();
-    assert_eq!(check_store(tmp.path(), true).unwrap_err().exit_code(), 6);
+    assert!(check_store(tmp.path(), true).is_err());
+}
+
+/// I5: a plaintext store is az's unencrypted secret, never a private-folder failure.
+#[test]
+fn plaintext_store_is_named_as_an_unencrypted_secret() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("service_principal_entries.json"), "{}").unwrap();
+    assert!(matches!(
+        check_store(tmp.path(), true).unwrap_err().cause(),
+        Some((
+            Cause::ToolUnusable {
+                why: Unusable::StoredSecretUnencrypted,
+                ..
+            },
+            _
+        ))
+    ));
 }
 
 #[test]
@@ -214,18 +268,33 @@ fn every_az_call_through_the_environment_runner_uses_the_config_dir() {
     assert!(r.calls.borrow().iter().all(|c| c.env.contains(&want)));
 }
 
+/// The item read refuses an item without every declared field before sign-in, so sign-in
+/// given one is opv's own bug (it used to be worded as the person's item).
 #[test]
-fn a_missing_credential_field_is_deploy_credentials_failed() {
+fn a_missing_credential_field_is_an_internal_error() {
     let tmp = tempfile::tempdir().unwrap();
     let mut l = login_in(tmp.path());
     let mut v = values();
     v.remove("AZURE_CLIENT_ID");
     let e = l.sign_in(v, &FakeRunner::default()).unwrap_err();
-    assert_eq!(e.code(), Code::DeployCredentialsFailed);
+    assert_eq!(e.exit_code(), 70);
 }
 
+/// I5: a tenant ID that looks like an option is refused by opv before az runs.
 #[test]
-fn a_malformed_tenant_id_is_deploy_credentials_failed() {
+fn a_tenant_id_that_looks_like_an_option_is_refused_before_az_runs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut l = login_in(tmp.path());
+    let mut v = values();
+    v.insert("AZURE_TENANT_ID".into(), SecretValue::new("--debug".into()));
+    let r = FakeRunner::default();
+    let _ = l.sign_in(v, &r);
+    assert!(r.calls.borrow().is_empty());
+}
+
+/// I5: a malformed tenant ID is opv's own refusal (it was left to az, then unrecognized).
+#[test]
+fn a_malformed_tenant_id_is_input_invalid() {
     let tmp = tempfile::tempdir().unwrap();
     let mut l = login_in(tmp.path());
     let mut v = values();
@@ -234,7 +303,53 @@ fn a_malformed_tenant_id_is_deploy_credentials_failed() {
         SecretValue::new("not an id!".into()),
     );
     let e = l.sign_in(v, &FakeRunner::default()).unwrap_err();
-    assert_eq!(e.code(), Code::DeployCredentialsFailed);
+    assert_eq!(e.code_str(), "input_invalid");
+}
+
+/// I5: a client ID that is not a GUID is refused, naming AZURE_CLIENT_ID.
+#[test]
+fn a_malformed_client_id_names_the_field() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut l = login_in(tmp.path());
+    let mut v = values();
+    v.insert("AZURE_CLIENT_ID".into(), SecretValue::new("my-app".into()));
+    let e = l.sign_in(v, &FakeRunner::default()).unwrap_err();
+    assert!(
+        e.to_string().contains("AZURE_CLIENT_ID must be a GUID"),
+        "{e}"
+    );
+}
+
+/// I5: a tenant given by its domain is accepted.
+#[test]
+fn a_tenant_domain_is_accepted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut l = login_in(tmp.path());
+    let mut v = values();
+    v.insert(
+        "AZURE_TENANT_ID".into(),
+        SecretValue::new("contoso.onmicrosoft.com".into()),
+    );
+    let r = FakeRunner::new([Output::success(Vec::new())]);
+    assert!(l.sign_in(v, &r).is_ok());
+}
+
+/// I5: under deploy credentials, a malformed ID names the item it is in.
+#[test]
+fn a_malformed_id_names_the_deploy_credentials_item() {
+    use crate::cause::{EnvName, ItemId, TargetName, VaultId};
+    let tmp = tempfile::tempdir().unwrap();
+    let mut l = login_in(tmp.path());
+    let mut v = values();
+    v.insert("AZURE_CLIENT_ID".into(), SecretValue::new("my-app".into()));
+    let p = Principal::DeployCredentials {
+        vault: VaultId::new("ops"),
+        item: ItemId::new("azure-prod"),
+        env: EnvName::new("prod"),
+        target: TargetName::new("web"),
+    };
+    let e = crate::runner::under_deploy(p, || l.sign_in(v, &FakeRunner::default())).unwrap_err();
+    assert!(e.to_string().contains("op://ops/azure-prod"), "{e}");
 }
 
 #[test]
@@ -244,5 +359,5 @@ fn an_unanswered_az_login_is_provider_unavailable() {
     let r = FakeRunner::default();
     r.push_unknown("timeout");
     let e = l.sign_in(values(), &r).unwrap_err();
-    assert_eq!(e.code(), Code::ProviderUnavailable);
+    assert_eq!(e.code_str(), "provider_unavailable");
 }

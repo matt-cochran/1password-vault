@@ -13,9 +13,16 @@ use std::io;
 
 use serde::Deserialize;
 
-use super::{CREDENTIAL_VARS, GH, PROGRAM};
-use crate::adapters::probe::{spawn_tool, version_in};
-use crate::config::check_ident;
+use super::{CREDENTIAL_VARS, PROGRAM};
+use crate::adapters::probe::{parse_version, version_in};
+use crate::cause::{Cause, DiagnoseContext, DottedPath, FieldRule};
+use crate::config::{TEMPLATE_WORDS, check_ident, section_invalid};
+
+/// A GitHub repository, in words.
+const REPO_WORDS: &str = "a repository as owner/name: letters, digits and - for the owner; letters, digits, ., _ and - for the name";
+/// A GitHub environment name, in words.
+const ENVIRONMENT_WORDS: &str =
+    "a GitHub environment name: 1 to 255 letters, digits, ., _, - and spaces";
 use crate::error::Error;
 use crate::host::Host;
 use crate::ports::Ports;
@@ -23,7 +30,7 @@ use crate::provider::{
     Check, InitField, NameRules, Preflight, PreflightMode, Provider, Section, TargetConfig,
     Verdict, eq_as, init_lines,
 };
-use crate::runner::CommandRunner;
+use crate::runner::{Call, CommandRunner, PROBE_TIMEOUT};
 
 /// The registered GitHub provider.
 pub static PROVIDER: GithubProvider = GithubProvider;
@@ -120,39 +127,27 @@ impl Provider for GithubProvider {
             (Some(repo), None) => (vec![repo], "github.repo"),
             (None, Some(repos)) => (repos, "github.repos"),
             (Some(_), Some(_)) => {
-                return Err(Error::Config(
-                    format!(
-                        "environment {env}: github.repo and github.repos are mutually \
-                         exclusive; give exactly one"
-                    )
-                    .into(),
+                return Err(section_invalid(
+                    "github.repos",
+                    FieldRule::ConflictsWith {
+                        field: DottedPath(vec!["github".into(), "repo".into()]),
+                    },
                 ));
             }
-            (None, None) => {
-                return Err(Error::Config(
-                    format!(
-                        "environment {env}: github.repo or github.repos is required; give \
-                         exactly one"
-                    )
-                    .into(),
-                ));
-            }
+            (None, None) => return Err(section_invalid("github.repo", FieldRule::Missing)),
         };
         if repos.is_empty() {
-            return Err(Error::Config(
-                format!("environment {env}: github.repos must list at least one repository").into(),
-            ));
+            return Err(section_invalid("github.repos", FieldRule::Empty));
         }
         let mut seen = BTreeSet::new();
         for repo in &repos {
-            check_ident(env, field, repo, is_repo, "^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$")?;
+            check_ident(env, field, repo, is_repo, REPO_WORDS)?;
             if !seen.insert(repo.to_ascii_lowercase()) {
-                return Err(Error::Config(
-                    format!(
-                        "environment {env}: github repos list {repo:?} more than once \
-                         (GitHub repository names are case-insensitive)"
-                    )
-                    .into(),
+                return Err(section_invalid(
+                    field,
+                    FieldRule::Type {
+                        expected: "a list of distinct repositories (GitHub repository names are case-insensitive)",
+                    },
                 ));
             }
         }
@@ -162,17 +157,16 @@ impl Provider for GithubProvider {
                 "github.environment",
                 environment,
                 is_environment,
-                "^[A-Za-z0-9._ -]{1,255}$",
+                ENVIRONMENT_WORDS,
             )?;
         }
         let secret_name_template = raw.secret_name.unwrap_or_else(|| "{KEY}".into());
         if !secret_name_template.contains("{KEY}") {
-            return Err(Error::Config(
-                format!(
-                    "environment {env}: github.secret_name {secret_name_template:?} must \
-                     contain {{KEY}}"
-                )
-                .into(),
+            return Err(section_invalid(
+                "github.secret_name",
+                FieldRule::Type {
+                    expected: TEMPLATE_WORDS,
+                },
             ));
         }
         Ok(Box::new(GithubTarget {
@@ -334,7 +328,7 @@ impl TargetConfig for GithubTarget {
                     for repo in &self.repos {
                         let names = super::gh::environments(r, repo)?;
                         if !names.iter().any(|n| n == environment) {
-                            return Err(super::missing_environment_error(repo, environment));
+                            return Err(super::gh::missing_environment_error(repo, environment));
                         }
                     }
                 }
@@ -342,18 +336,17 @@ impl TargetConfig for GithubTarget {
             }
         }
     }
-    fn doctor(&self, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Vec<Check> {
+    fn doctor(&self, r: &dyn CommandRunner, _host: &dyn Fn() -> Host) -> Vec<Check> {
         vec![
             Check {
                 name: "gh".into(),
-                outcome: gh_version(r, host),
+                outcome: gh_version(r),
             },
             Check {
                 name: "gh auth".into(),
-                outcome: auth_outcome(
-                    super::gh::auth_status(r),
-                    host().token(CREDENTIAL_VARS),
-                    &host().install_hint(GH),
+                outcome: gh_auth(
+                    r,
+                    super::gh::token_needs(&self.repos, self.environment.as_deref()),
                 ),
             },
         ]
@@ -375,54 +368,77 @@ impl TargetConfig for GithubTarget {
     }
 }
 
-/// `gh --version`: present, and which version (only a strict version token is printed).
-fn gh_version(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Verdict, Error> {
-    let o = spawn_tool(r, GH, host, &["--version"])?;
+/// The oldest gh opv can read with: the first release with `gh variable list --json`,
+/// v2.43.0 (31 Jan 2024; cli/cli#8516, "Add option --json for gh variable list" in its
+/// release notes). `gh secret list --json` came earlier, in v2.36.0 (cli/cli#8081).
+/// `doctor` warns below it (06.21, C3: verified, not guessed).
+pub const GH_TESTED_MIN: (u64, u64, u64) = (2, 43, 0);
+
+/// `gh --version`: present, and which version (only a strict version token is printed); a
+/// release older than [`GH_TESTED_MIN`] is a warning.
+fn gh_version(r: &dyn CommandRunner) -> Result<Verdict, Error> {
+    let o = r
+        .probe(&Call::new(PROGRAM, &["--version"]), PROBE_TIMEOUT)
+        .map_err(spawn_failure)?;
     if o.status != 0 {
-        return Err(Error::Dependency(
-            format!("{PROGRAM} --version failed (exit {})", o.status).into(),
-        ));
+        return Err(probe_failure(Vec::new()));
     }
-    Ok(match version_in(&o.stdout) {
-        Some(v) => Verdict::Ok(format!("version {v}")),
-        None => Verdict::Ok("present, version not recognised".into()),
+    let (a, b, c) = GH_TESTED_MIN;
+    let version = version_in(&o.stdout).and_then(|v| parse_version(&v).map(|n| (v, n)));
+    Ok(match version {
+        Some((v, n)) if n >= GH_TESTED_MIN => Verdict::Ok(format!("version {v}")),
+        Some((v, _)) => Verdict::Warn(format!(
+            "version {v}; opv needs gh {a}.{b}.{c} or later (older releases lack \
+             `gh variable list --json`, and their refusals read as missing rights)"
+        )),
+        None => Verdict::Warn(format!(
+            "present, version not recognised; opv needs gh {a}.{b}.{c} or later"
+        )),
     })
 }
 
-/// The `gh auth` verdict from [`super::gh::auth_status`]: signed in, rejected credential
-/// variable, or no session. Extracted so the branches are testable while `gh.rs` is being
-/// implemented in parallel.
-fn auth_outcome(
-    status: io::Result<bool>,
-    token: Option<&str>,
-    install_hint: &str,
-) -> Result<Verdict, Error> {
-    match status {
-        Ok(true) => Ok(Verdict::Ok("signed in".into())),
-        Ok(false) => Err(match token {
-            Some(var) => Error::Auth(
-                format!(
-                    "not signed in to GitHub ({var} is set but was rejected)\n  next: replace \
-                     {var} with a valid fine-grained token, or unset it and run `{PROGRAM} auth \
-                     login`"
-                )
-                .into(),
-            ),
-            None => Error::Auth(
-                format!(
-                    "not signed in to GitHub ({PROGRAM} auth status failed)\n  next: \
-                     {PROGRAM} auth login"
-                )
-                .into(),
-            ),
-        }),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Error::Dependency(
-            format!("{PROGRAM} not found on PATH\n  {install_hint}").into(),
-        )),
-        Err(e) => Err(Error::Dependency(
-            format!("failed to run {PROGRAM} ({})", e.kind()).into(),
-        )),
+/// The `gh auth` check: `gh auth status` (any token type, exit status only). When it fails,
+/// the failure is diagnosed (design §5): under deploy credentials or a shell token the
+/// rejected credential is named, never `gh auth login` (06.01). `gh auth status` words its
+/// refusal in text no recording covers, so an unrecognised one is diagnosed again from the
+/// read-only `gh api user`, whose refusals are recorded.
+fn gh_auth(r: &dyn CommandRunner, needs: Vec<String>) -> Result<Verdict, Error> {
+    match super::gh::auth_status(r) {
+        Ok(true) => return Ok(Verdict::Ok("signed in".into())),
+        Ok(false) => {}
+        Err(e) => return Err(spawn_failure(e)),
     }
+    let first = probe_failure(needs.clone());
+    if !matches!(first.cause(), Some((Cause::Unrecognized { .. }, _))) {
+        return Err(first);
+    }
+    match super::gh::user_probe(r) {
+        Ok(false) => match super::gh::diagnosed(&DiagnoseContext::default(), needs) {
+            Some(e) if !matches!(e.cause(), Some((Cause::Unrecognized { .. }, _))) => Err(e),
+            _ => Err(first),
+        },
+        _ => Err(first),
+    }
+}
+
+/// A gh probe that could not start: gh missing, a probe that ran out of time (diagnosed:
+/// GitHub unavailable), or gh unusable.
+fn spawn_failure(e: io::Error) -> Error {
+    match e.kind() {
+        io::ErrorKind::NotFound => super::gh::tool_missing(),
+        kind => super::gh::diagnosed(&DiagnoseContext::default(), Vec::new())
+            .unwrap_or_else(|| super::gh::tool_unusable(kind)),
+    }
+}
+
+/// A gh probe that exited non-zero, diagnosed (design §5).
+fn probe_failure(needs: Vec<String>) -> Error {
+    super::gh::diagnosed(&DiagnoseContext::default(), needs).unwrap_or_else(|| {
+        Cause::Bug {
+            site: "github doctor: a failed gh probe left no observation",
+        }
+        .into()
+    })
 }
 
 #[cfg(test)]
@@ -447,16 +463,12 @@ mod tests {
             .clone()
     }
 
-    /// The `Error::Config` text of a refused section body.
+    /// The text of a refused section body's `ConfigInvalid` (C15: a typed cause).
     fn config_error(body: &str) -> String {
         match parse_body(body) {
-            Err(Error::Config(m)) => m.to_string(),
-            other => panic!("expected Config error, got {other:?}"),
+            Err(e) if e.code_str() == "config_invalid" => e.to_string(),
+            other => panic!("expected config_invalid, got {other:?}"),
         }
-    }
-
-    fn host() -> Host {
-        Host::from_env(&crate::host::FakeEnv::new("macos"))
     }
 
     // parse ------------------------------------------------------------------------------
@@ -515,15 +527,12 @@ repos = ["org/a"]"#,
     #[test]
     fn parse_refuses_a_missing_repo() {
         let e = config_error(r#"environment = "staging""#);
-        assert!(
-            e.contains("github.repo") && e.contains("github.repos"),
-            "{e}"
-        );
+        assert!(e.contains("github.repo is required"), "{e}");
     }
 
     #[test]
     fn parse_refuses_an_empty_repos_list() {
-        assert!(config_error("repos = []").contains("at least one repository"));
+        assert!(config_error("repos = []").contains("github.repos is empty"));
     }
 
     #[test]
@@ -539,7 +548,7 @@ repos = ["org/a"]"#,
     #[test]
     fn parse_refuses_case_insensitive_duplicate_repos() {
         let e = config_error(r#"repos = ["Org/R", "org/r"]"#);
-        assert!(e.contains("more than once"), "{e}");
+        assert!(e.contains("distinct repositories"), "{e}");
     }
 
     #[test]
@@ -580,7 +589,10 @@ secret_name = "STATIC""#,
 
     #[test]
     fn parse_refuses_an_unknown_field() {
-        assert!(config_error("repo = \"org/r\"\nrepository = \"org/r\"").contains("unknown field"));
+        assert!(
+            config_error("repo = \"org/r\"\nrepository = \"org/r\"")
+                .contains("not a known setting")
+        );
     }
 
     // rendering --------------------------------------------------------------------------
@@ -664,80 +676,134 @@ secret_name = "STATIC""#,
 
     #[test]
     fn missing_environment_error_names_repository_and_environment() {
-        let e = crate::adapters::github::missing_environment_error("org/r", "staging");
-        assert!(e.mentions("org/r") && e.mentions("staging"), "{e}");
+        let e = crate::adapters::github::gh::missing_environment_error("org/r", "staging");
+        assert!(
+            rendered(&e).contains("GitHub environment staging in org/r"),
+            "{}",
+            rendered(&e)
+        );
     }
 
     #[test]
-    fn missing_environment_error_leaves_the_create_command_to_a_person() {
-        let e = crate::adapters::github::missing_environment_error("org/r", "staging");
-        assert!(
-            e.action()
-                .is_some_and(|a| a.contains("gh api -X PUT repos/org/r/environments/staging")),
-            "{e:?}"
-        );
+    fn missing_environment_error_is_owner_setup_required() {
+        let e = crate::adapters::github::gh::missing_environment_error("org/r", "staging");
+        assert_eq!(e.code_str(), "owner_setup_required");
     }
 
     #[test]
     fn missing_environment_error_needs_a_human() {
-        let e = crate::adapters::github::missing_environment_error("org/r", "staging");
-        assert!(e.code().human_required());
-    }
-
-    #[test]
-    fn missing_environment_error_says_opv_never_creates_environments() {
-        let e = crate::adapters::github::missing_environment_error("org/r", "staging");
-        assert!(e.mentions("opv never creates GitHub environments"), "{e}");
+        let e = crate::adapters::github::gh::missing_environment_error("org/r", "staging");
+        assert!(e.human_required());
     }
 
     // doctor -----------------------------------------------------------------------------
 
+    /// The whole terminal report of `e`, as a person reads it.
+    fn rendered(e: &Error) -> String {
+        crate::error::report(e)
+    }
+
+    /// The recorded `Bad credentials` reply (`tests/fixtures/github/failures/02`).
+    const BAD_CREDENTIALS: &str = "gh: Bad credentials (HTTP 401)\n";
+
+    /// The recorded signed-out reply (`tests/fixtures/github/failures/01`).
+    const SIGNED_OUT: &str = "To get started with GitHub CLI, please run:  gh auth login\n\
+                              Alternatively, populate the GH_TOKEN environment variable with a \
+                              GitHub API authentication token.\n";
+
+    fn deploy() -> crate::cause::Principal {
+        crate::cause::Principal::DeployCredentials {
+            vault: crate::cause::VaultId::new("vlt-deploy"),
+            item: crate::cause::ItemId::new("gh-deploy"),
+            env: crate::cause::EnvName::new("prod"),
+            target: crate::cause::TargetName::new("ci"),
+        }
+    }
+
+    /// `gh auth` under the target's deploy credentials, gh answering `stderr` (exit 1).
+    fn auth_under_deploy(stderr: &str) -> Error {
+        let r = FakeRunner::default();
+        r.push_with_stderr(Output::failure(1), stderr);
+        crate::runner::under_deploy(deploy(), || gh_auth(&r, vec!["Secrets write".into()]))
+            .unwrap_err()
+    }
+
     #[test]
     fn gh_version_reports_the_version() {
-        let r = FakeRunner::new([Output::success("gh version 2.40.0 (2024-01-01)\n")]);
+        let r = FakeRunner::new([Output::success("gh version 2.102.0 (2026-09-30)\n")]);
         assert_eq!(
-            gh_version(&r, &host).unwrap(),
-            Verdict::Ok("version 2.40.0".into())
+            gh_version(&r).unwrap(),
+            Verdict::Ok("version 2.102.0".into())
         );
     }
 
     #[test]
-    fn gh_version_names_the_install_command_when_missing() {
-        let r = FakeRunner::default();
-        r.push_io_error(io::ErrorKind::NotFound);
-        let e = gh_version(&r, &host).unwrap_err();
-        assert!(e.mentions("install: brew install gh"), "{e}");
+    fn gh_version_below_the_minimum_is_a_warning() {
+        let r = FakeRunner::new([Output::success("gh version 2.40.0 (2024-01-01)\n")]);
+        assert!(matches!(gh_version(&r).unwrap(), Verdict::Warn(_)));
     }
 
     #[test]
-    fn auth_outcome_accepts_a_signed_in_session() {
+    fn gh_version_with_variable_list_json_is_no_warning() {
+        // C3: 2.43.0 is the first release with `gh variable list --json` (cli/cli#8516).
+        let r = FakeRunner::new([Output::success("gh version 2.43.0 (2024-01-31)\n")]);
         assert_eq!(
-            auth_outcome(Ok(true), None, "").unwrap(),
+            gh_version(&r).unwrap(),
+            Verdict::Ok("version 2.43.0".into())
+        );
+    }
+
+    #[test]
+    fn gh_version_missing_is_dependency_missing() {
+        let r = FakeRunner::default();
+        r.push_io_error(io::ErrorKind::NotFound);
+        assert_eq!(gh_version(&r).unwrap_err().code_str(), "dependency_missing");
+    }
+
+    #[test]
+    fn gh_auth_accepts_a_signed_in_session() {
+        let r = FakeRunner::new([Output::success("")]);
+        assert_eq!(
+            gh_auth(&r, Vec::new()).unwrap(),
             Verdict::Ok("signed in".into())
         );
     }
 
     #[test]
-    fn auth_outcome_names_a_rejected_token_variable() {
-        let e = auth_outcome(Ok(false), Some("GH_TOKEN"), "").unwrap_err();
-        assert!(e.mentions("GH_TOKEN") && e.mentions("rejected"), "{e}");
+    fn gh_auth_rejected_deploy_credentials_are_deploy_credentials_failed() {
+        assert_eq!(
+            auth_under_deploy(BAD_CREDENTIALS).code_str(),
+            "deploy_credentials_failed"
+        );
     }
 
     #[test]
-    fn auth_outcome_offers_gh_auth_login_without_a_token() {
-        let e = auth_outcome(Ok(false), None, "").unwrap_err();
-        assert_eq!(e.next_step(), Some("gh auth login"));
+    fn gh_auth_rejected_deploy_credentials_never_offer_gh_auth_login() {
+        assert!(!rendered(&auth_under_deploy(BAD_CREDENTIALS)).contains("gh auth login"));
     }
 
     #[test]
-    fn auth_outcome_reports_a_missing_gh_with_the_install_hint() {
-        let e = auth_outcome(
-            Err(io::ErrorKind::NotFound.into()),
-            None,
-            "install: brew install gh",
-        )
-        .unwrap_err();
-        assert!(e.mentions("install: brew install gh"), "{e}");
+    fn gh_auth_an_unrecognised_status_is_diagnosed_from_gh_api_user() {
+        let r = FakeRunner::default();
+        r.push_with_stderr(
+            Output::failure(1),
+            "You are not logged into any GitHub hosts.\n",
+        );
+        r.push_with_stderr(Output::failure(4), SIGNED_OUT);
+        assert_eq!(
+            gh_auth(&r, Vec::new()).unwrap_err().code_str(),
+            "target_not_signed_in"
+        );
+    }
+
+    #[test]
+    fn gh_auth_missing_gh_is_dependency_missing() {
+        let r = FakeRunner::default();
+        r.push_io_error(io::ErrorKind::NotFound);
+        assert_eq!(
+            gh_auth(&r, Vec::new()).unwrap_err().code_str(),
+            "dependency_missing"
+        );
     }
 
     #[test]

@@ -242,9 +242,10 @@ fn per_value(env: &EnvValues<'_>, f: &ItemField, spec: &KeySpec, out: &mut Vec<H
             here(),
             f,
             None,
+            // 01.25: the check matches every local-only address, not only localhost.
             format!(
-                "{name} in {} points at this machine (localhost), but {} deploys; set the \
-                 deployed address",
+                "{name} in {} points at a local-only address (localhost, 127.0.0.1, 0.0.0.0, \
+                 [::1] or host.docker.internal), but {} deploys; set the deployed address",
                 env.name, env.name
             ),
         ));
@@ -276,9 +277,11 @@ fn per_value(env: &EnvValues<'_>, f: &ItemField, spec: &KeySpec, out: &mut Vec<H
             here(),
             f,
             None,
+            // 01.25: production is told only by the environment's name or title.
             format!(
-                "{name} in {} is a live key outside production; use a test-mode key there",
-                env.name
+                "{name} in {} is a live key, but {} is not named as production; use a \
+                 test-mode key there, or ignore this if {} is production",
+                env.name, env.name, env.name
             ),
         ));
     }

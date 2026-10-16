@@ -25,8 +25,9 @@ use std::fmt;
 use std::path::PathBuf;
 
 use crate::adapters::registry;
+use crate::cause::Cause;
 use crate::error::Error;
-use crate::runner::{CommandRunner, READ_ATTEMPTS};
+use crate::runner::CommandRunner;
 
 /// Where detection reads its facts. [`ProcessEnv`] is the real one; tests use
 /// [`FakeEnv`].
@@ -248,65 +249,130 @@ pub fn tool(program: &str) -> Option<&'static Tool> {
 impl Tool {
     /// NR-28: a read of this service still unanswered after its last attempt (timed out,
     /// killed or lost every time). A read changes nothing, so re-running is safe: exit 9.
+    /// The cause comes from this system's diagnosis of the call the runner observed (§5).
     pub fn outage(&self, step: &str) -> Error {
-        Error::Unknown(
-            format!(
-                "{} did not respond after {READ_ATTEMPTS} attempts ({step}); nothing was changed. \
-             {}Check {}, then re-run",
-                self.vendor,
-                self.stall_hint(),
-                self.status_page
-            )
-            .into(),
-        )
-        .with_code(crate::error::Code::ProviderUnavailable)
-    }
-
-    /// For `op` run by a person (no token, not CI): an unanswered 1Password app approval
-    /// prompt also looks like no response (found live: each attempt waited out its limit).
-    fn stall_hint(&self) -> &'static str {
-        let h = Host::detect();
-        if self.program == OP_CLI.program && !h.ci && h.op_credential.is_none() {
-            "If the 1Password app is asking to approve access, approve it. "
-        } else {
-            ""
+        match crate::runner::take_observed() {
+            Some(seen) => diagnose_unanswered(seen).into(),
+            None => self.unobserved(step, false),
         }
     }
 
-    /// A read of this service that never answered after its retries (NR-28): before this
-    /// run wrote to a target, the outage ([`Tool::outage`], exit 9 "provider unavailable");
-    /// after, exit 9 "outcome unknown" (NR-2), never "nothing was changed".
+    /// A read of this service that never answered after its retries (NR-28), before or
+    /// after this run wrote to a target: the read itself changed nothing, so it is the
+    /// outage either way ([`Tool::outage`]); re-running repeats only idempotent writes.
     pub fn unanswered(&self, r: &dyn CommandRunner, step: &str) -> Error {
-        if !r.writes_started() {
-            return self.outage(step);
+        match crate::runner::take_observed() {
+            Some(seen) => diagnose_unanswered(seen).into(),
+            None => self.unobserved(step, r.writes_started()),
         }
-        Error::Unknown(
-            format!(
-                "{} did not respond after {READ_ATTEMPTS} attempts ({step}), after this run had \
-                 started changing the target; those changes may or may not be complete. Check \
-                 {}, then re-run the same command",
-                self.vendor, self.status_page
-            )
-            .into(),
-        )
     }
 
-    /// A call of this service the spent run budget never let start (`--timeout`, NR-4),
-    /// `e` saying which: before this run wrote to a target, a target error ("nothing was
-    /// changed"); after, exit 9 (NR-2), since the run stopped half way.
-    pub fn budget_spent(&self, r: &dyn CommandRunner, e: &std::io::Error) -> Error {
-        if !r.writes_started() {
-            return Error::Target(
-                format!("{e}; nothing was changed\n  next: re-run with a larger --timeout").into(),
-            );
-        }
-        Error::Unknown(
-            format!(
-                "{e}, after this run had started changing the target; those changes may or may \
-                 not be complete\n  next: re-run the same command with a larger --timeout"
-            )
+    /// An unanswered call the runner kept no observation of: a [`CommandRunner`] that
+    /// reported the call unanswered without the runner's engine (an in-memory world that
+    /// loses calls). It is recorded as lost ([`lost_call`]) and diagnosed like any other
+    /// unanswered read (NR-28, exit 9).
+    pub(crate) fn unobserved(&self, _step: &str, _writes_started: bool) -> Error {
+        match lost_call(self.program) {
+            Some(failed) => diagnose_unanswered(failed.seen).into(),
+            None => Cause::Bug {
+                site: "runner: an unanswered call left no observation",
+            }
             .into(),
-        )
+        }
+    }
+
+    /// A call of this service the spent run budget never let start (`--timeout`, NR-4,
+    /// R52): opv's own limit, never the target's refusal. Its Next is the same command with
+    /// twice the budget.
+    pub fn budget_spent(&self, r: &dyn CommandRunner, e: &std::io::Error) -> Error {
+        let _ = e;
+        Cause::BudgetSpent {
+            budget_seconds: run_budget_seconds(&crate::error::invocation()),
+            writes_started: r.writes_started(),
+        }
+        .into()
+    }
+
+    /// The one install line of this tool for `platform`, or the CI job's under CI (FR-26):
+    /// the line both [`Host::install_hint`] and the catalog's `ToolMissing` show.
+    pub fn install_line(&self, platform: Platform, ci: bool) -> &'static str {
+        match (ci, platform) {
+            (true, _) => self.ci,
+            (false, Platform::MacOs) => self.macos,
+            (false, Platform::Windows) => self.windows,
+            (false, Platform::Linux | Platform::Wsl | Platform::Other) => self.linux,
+        }
+    }
+}
+
+/// The run budget (`--timeout`) of `inv` in seconds: the flag as given, else the default.
+fn run_budget_seconds(inv: &crate::cause::Invocation) -> u64 {
+    let mut args = inv.args.iter();
+    while let Some(a) = args.next() {
+        let value = match a.strip_prefix("--timeout") {
+            Some("") => args.next().map(String::as_str),
+            Some(rest) => rest.strip_prefix('='),
+            None => None,
+        };
+        if let Some(secs) = value.and_then(|v| v.parse().ok()) {
+            return secs;
+        }
+    }
+    crate::runner::DEFAULT_RUN_TIMEOUT.as_secs()
+}
+
+/// The cause of a call that never answered, from its own system's diagnosis (§5).
+/// The latest call of `program`, which its [`CommandRunner`] reported unanswered (an
+/// `Outcome::Unknown`) without the runner observing it: recorded through the runner as a
+/// lost reply ([`crate::cause::ExitClass::Lost`], no stderr), so its system's diagnosis
+/// sees what the caller saw: no answer. The runners opv ships observe every attempt
+/// themselves (B1); only in-memory doubles reach this.
+pub(crate) fn lost_call(program: &str) -> Option<crate::runner::Failure> {
+    crate::runner::record_streamed(program, &[], crate::cause::ExitClass::Lost, b"");
+    crate::runner::take_failure()
+}
+
+fn diagnose_unanswered(seen: crate::cause::Observed) -> Cause {
+    use crate::adapters::{azure, fly, github, kubernetes, onepassword_diagnose};
+    use crate::cause::{DiagnoseContext, System, Unanswered};
+    let ctx = DiagnoseContext::default();
+    let cause = match seen.call().system {
+        System::OnePassword => onepassword_diagnose::diagnose(seen, "", &ctx),
+        System::Fly => fly::diagnose::diagnose(seen, "", &ctx),
+        System::Azure => azure::diagnose::diagnose(seen, "", &ctx),
+        System::Kubernetes => kubernetes::diagnose::diagnose(seen, "", &ctx),
+        System::GitHub => github::diagnose::diagnose(seen, "", &ctx),
+        system @ (System::Ssh | System::RemoteOpv) => Cause::Unavailable {
+            system,
+            why: seen.exit().unanswered().unwrap_or(Unanswered::Timeout),
+            attempts: seen.attempts(),
+            seen,
+        },
+    };
+    // Only called once every read attempt went unanswered: the count is the one the runner
+    // observed (B), never a constant.
+    match cause {
+        Cause::Unavailable {
+            system, why, seen, ..
+        } => Cause::Unavailable {
+            system,
+            why,
+            attempts: seen.attempts(),
+            seen,
+        },
+        other => other,
+    }
+}
+
+/// The catalog's [`Cause::ToolMissing`] for `tool` on this host (R56): its install line is
+/// [`Tool::install_line`], so the platform lines live in one place.
+pub fn tool_missing(tool: &Tool) -> Cause {
+    let host = Host::detect();
+    Cause::ToolMissing {
+        tool: tool.program.to_string(),
+        platform: host.platform,
+        shell: host.shell,
+        ci: host.ci,
     }
 }
 
@@ -515,33 +581,40 @@ impl Host {
         if !self.ci
             && let Some(found) = installed_off_path(tool.program, self.platform)
         {
-            let dir = found
-                .parent()
-                .map(|d| d.display().to_string())
-                .unwrap_or_default();
-            return match self.platform {
-                Platform::Windows => format!(
-                    "{} is installed at {} but its folder is not on PATH: add {dir} to PATH \
+            return self.off_path_hint(&tool, &found);
+        }
+        tool.install_line(self.platform, self.ci).into()
+    }
+
+    /// `tool` is installed at `found` but its folder is not on PATH: how to add it, in this
+    /// platform's and shell's own words.
+    fn off_path_hint(&self, tool: &Tool, found: &std::path::Path) -> String {
+        let dir = found
+            .parent()
+            .map(|d| d.display().to_string())
+            .unwrap_or_default();
+        match self.platform {
+            Platform::Windows => format!(
+                "{} is installed at {} but its folder is not on PATH: add {dir} to PATH \
                      (Settings > System > About > Advanced system settings > Environment \
                      Variables), then open a new terminal",
-                    tool.program,
-                    found.display()
-                ),
-                _ => format!(
-                    "{} is installed at {} but not on PATH: add it, for example with \
+                tool.program,
+                found.display()
+            ),
+            // fish has no `export PATH=…` (02.29): its own command adds the folder.
+            _ if self.shell == Shell::Fish => format!(
+                "{} is installed at {} but not on PATH: add it with fish_add_path {dir}, \
+                     then open a new terminal",
+                tool.program,
+                found.display()
+            ),
+            _ => format!(
+                "{} is installed at {} but not on PATH: add it, for example with \
                      export PATH=\"{dir}:$PATH\" in your shell profile, then open a new terminal",
-                    tool.program,
-                    found.display()
-                ),
-            };
+                tool.program,
+                found.display()
+            ),
         }
-        let line = match (self.ci, self.platform) {
-            (true, _) => tool.ci,
-            (false, Platform::MacOs) => tool.macos,
-            (false, Platform::Windows) => tool.windows,
-            (false, _) => tool.linux,
-        };
-        line.into()
     }
 }
 
@@ -1031,6 +1104,41 @@ mod tests {
             hints,
             [OP_CLI.macos, OP_CLI.windows, OP_CLI.linux, OP_CLI.ci]
         );
+    }
+
+    /// 02.29: under fish the off-PATH hint is fish's own command, never `export PATH=`.
+    #[test]
+    fn off_path_hint_under_fish_uses_fish_add_path() {
+        let h = host(FakeEnv::new("linux").shell("/usr/bin/fish"));
+        let hint = h.off_path_hint(&OP_CLI, std::path::Path::new("/home/me/.local/bin/op"));
+        assert!(hint.contains("fish_add_path /home/me/.local/bin"), "{hint}");
+    }
+
+    /// The catalog's ToolMissing and the hint read the same per-platform line.
+    #[test]
+    fn install_line_is_the_platform_line() {
+        assert_eq!(OP_CLI.install_line(Platform::MacOs, false), OP_CLI.macos);
+    }
+
+    /// 02.06: a spent run budget is opv's own limit (budget_spent), never a target refusal.
+    #[test]
+    fn a_spent_budget_is_budget_spent() {
+        let r = crate::runner::fake::FakeRunner::default();
+        let e = OP_CLI.budget_spent(&r, &std::io::Error::from(std::io::ErrorKind::TimedOut));
+        assert_eq!(e.code_str(), "budget_spent");
+    }
+
+    /// 02.06: the budget comes from the invocation's `--timeout`, so Next doubles it.
+    #[test]
+    fn the_run_budget_is_the_timeout_flag() {
+        let inv = crate::cause::Invocation::from_cli(&[
+            "opv".into(),
+            "--timeout".into(),
+            "40".into(),
+            "sync".into(),
+            "prod".into(),
+        ]);
+        assert_eq!(super::run_budget_seconds(&inv), 40);
     }
 
     /// The Windows `op.exe` is named only in WSL, where reads go through the Windows app.

@@ -262,16 +262,39 @@ fn an_invalid_target_name_writes_nothing() {
 #[test]
 fn a_duplicate_target_name_is_refused_naming_it() {
     let a = add_to(WITH_TARGET, add_args("dev", "site"));
-    assert!(a.err().contains("already exists"), "{}", a.err());
+    assert!(a.err().contains("is already declared"), "{}", a.err());
 }
 
 #[test]
 fn a_duplicate_target_name_points_to_config_edit() {
     let a = add_to(WITH_TARGET, add_args("dev", "site"));
     assert_eq!(
-        a.res.as_ref().unwrap_err().next_step(),
-        Some("opv config edit")
+        a.res.as_ref().unwrap_err().next_text().unwrap_or_default(),
+        "opv config edit"
     );
+}
+
+// --- regressions of the audit findings (06-targets.md) -------------------------------
+
+/// The fragment `target add` builds for dev/site.
+fn site_body() -> String {
+    target_table("dev", "site", "fly.app = \"x\"\n", &[], None, None, &[])
+}
+
+#[test]
+fn an_inline_targets_table_points_to_config_edit() {
+    // 06.27: a configuration-shape refusal leads to `opv config edit`, never `--help`.
+    let original = "[environments.dev]\ntargets = {}\n";
+    let e = insert_target(original, "dev", "site", &site_body(), "# c").unwrap_err();
+    assert_eq!(e.next_text().unwrap_or_default(), "opv config edit");
+}
+
+#[test]
+fn an_unparsable_configuration_never_shows_its_lines() {
+    // 06.53: the raw toml_edit error would print the offending line.
+    let original = "[environments.dev]\nbad = = \"LINEMARKER\"\n";
+    let e = insert_target(original, "dev", "site", &site_body(), "# c").unwrap_err();
+    assert!(!e.to_string().contains("LINEMARKER"), "{e}");
 }
 
 #[test]
@@ -354,7 +377,7 @@ fn options_of_two_providers_are_refused() {
     let mut args = add_args("dev", "site");
     args.fields.insert("github-repo".into(), "org/site".into());
     let a = add_to(FLEET, args);
-    assert!(a.err().contains("a target has one provider"), "{}", a.err());
+    assert!(a.err().contains("cannot be used together"), "{}", a.err());
 }
 
 #[test]
@@ -369,7 +392,7 @@ fn a_required_provider_option_missing_is_refused_naming_it() {
 #[test]
 fn a_refusal_offers_a_next_step() {
     let a = add_to(FLEET, add_args("qa", "site"));
-    assert!(a.res.as_ref().unwrap_err().next_step().is_some());
+    assert!(a.res.as_ref().unwrap_err().cause().is_some());
 }
 
 // --- the state vault (FR-58): created once, then reused ------------------------------
@@ -558,8 +581,19 @@ fn list_without_targets_says_none() {
     let fleet = config::parse(FLEET).unwrap();
     assert_eq!(
         list_text(&fleet, &ListArgs::default()),
-        "no deploy targets declared\n"
+        "no environment declares a deploy target\nNext: opv target add --help\n"
     );
+}
+
+#[test]
+fn list_of_an_environment_without_targets_names_it() {
+    // 06.44: the empty listing says which environment has none.
+    let fleet = config::parse(FLEET).unwrap();
+    let args = ListArgs {
+        env: Some("prod".into()),
+        json: false,
+    };
+    assert!(list_text(&fleet, &args).contains("environment prod has no deploy targets"));
 }
 
 #[test]

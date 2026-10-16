@@ -54,11 +54,10 @@ pub fn key_detail(f: &mut Frame, area: Rect, app: &App, product: &str, key: &str
                 &k.kind,
                 delivered,
             );
-            let place = e.target.as_deref().unwrap_or("local");
             lines.push(Line::from(vec![
                 Span::raw(format!("{:<24}", e.title)),
                 Span::styled(format!("{word:<18}"), style),
-                Span::styled(place.to_string(), DIM),
+                Span::styled(e.place(), DIM),
             ]));
         }
     }
@@ -156,46 +155,38 @@ pub fn accounts(f: &mut Frame, area: Rect, app: &App) {
     let mut lines = Vec::new();
     match &app.accounts {
         None => lines.push(Line::raw("reading accounts…")),
-        Some(doc) => {
-            for a in doc["accounts"].as_array().into_iter().flatten() {
-                let mark = if a["selected"].as_bool() == Some(true) {
-                    "*"
-                } else {
-                    " "
-                };
-                let signed = match a["signed_in"].as_bool() {
+        Some(Err(failure)) => failed(&mut lines, "could not list the accounts", failure),
+        Some(Ok(doc)) => {
+            for a in &doc.accounts {
+                let mark = if a.selected { "*" } else { " " };
+                let signed = match a.signed_in {
                     Some(true) => "signed in",
                     Some(false) => "signed out",
                     None => "unknown",
                 };
                 lines.push(Line::raw(format!(
                     "{mark} {} ({})  {}  {signed}",
-                    a["email"].as_str().unwrap_or("-"),
-                    a["account_id"].as_str().unwrap_or("-"),
-                    a["address"].as_str().unwrap_or("-"),
+                    a.email, a.account_id, a.address,
                 )));
             }
-            if let Some(m) = doc["error"]["message"].as_str() {
-                lines.push(Line::raw(format!("could not list the accounts: {m}")));
-            } else if doc["accounts"].as_array().is_none_or(Vec::is_empty) {
+            if doc.accounts.is_empty() {
                 lines.push(Line::raw(
                     "No 1Password account is listed: opv signs in with the credential it finds.",
                 ));
             }
-            if doc["cli_accounts_only"].as_bool() == Some(true) {
+            if doc.cli_accounts_only {
                 lines.push(Line::styled(
                     "Only accounts added to this 1Password CLI are listed; add one with opv \
                      login --add (at 1Password's own prompt).",
                     DIM,
                 ));
             }
-            for fnd in doc["findings"].as_array().into_iter().flatten() {
-                lines.push(Line::raw(format!(
-                    "{}: {}  → {}",
-                    fnd["code"].as_str().unwrap_or(""),
-                    fnd["message"].as_str().unwrap_or(""),
-                    fnd["next"].as_str().unwrap_or("")
-                )));
+            for fnd in &doc.findings {
+                let next = fnd
+                    .next
+                    .as_deref()
+                    .map_or(String::new(), |n| format!("  → {n}"));
+                lines.push(Line::raw(format!("{}: {}{next}", fnd.code, fnd.message)));
             }
         }
     }
@@ -271,41 +262,56 @@ pub fn history(f: &mut Frame, area: Rect, app: &App, env: &str) {
     let mut lines = Vec::new();
     match &app.history {
         None => lines.push(Line::raw("reading history…")),
-        Some(doc) => {
-            match doc["latest"].as_object() {
-                Some(l) => lines.push(Line::styled(
-                    format!(
-                        "last write {} by plan {} (opv {})",
-                        l.get("written").and_then(|v| v.as_str()).unwrap_or("-"),
-                        l.get("plan").and_then(|v| v.as_str()).unwrap_or("-"),
-                        l.get("opv_version").and_then(|v| v.as_str()).unwrap_or("-"),
-                    ),
-                    BOLD,
-                )),
-                None => lines.push(Line::raw(
-                    "this target keeps no write stamps; versions are compared with what opv's own syncs recorded",
-                )),
+        Some(Err(failure)) => failed(&mut lines, "could not read the history", failure),
+        Some(Ok(doc)) => {
+            let parts = doc.parts();
+            let several = parts.len() > 1;
+            for part in &parts {
+                if several {
+                    lines.push(Line::styled(format!("target {}", part.name), BOLD));
+                }
+                match &part.latest {
+                    Some(l) => lines.push(Line::styled(
+                        format!(
+                            "last write {} by plan {} (opv {})",
+                            l.written.as_deref().unwrap_or("-"),
+                            l.plan.as_deref().unwrap_or("-"),
+                            l.opv_version.as_deref().unwrap_or("-"),
+                        ),
+                        BOLD,
+                    )),
+                    None => lines.push(Line::raw(
+                        "no opv write stamp found here; versions are compared with what opv's own syncs recorded",
+                    )),
+                }
+                lines.push(Line::raw(""));
+                for r in &part.rows {
+                    let label = app.label(&r.product, &r.key);
+                    let state = match r.state.as_str() {
+                        "stamped" => "written by opv",
+                        "recorded" => "as opv left it",
+                        "changed_outside_opv" => "changed outside opv",
+                        "not_recorded" => "no record of opv writing it",
+                        "absent" => "not on the target",
+                        other => other,
+                    };
+                    lines.push(Line::raw(format!(
+                        "{label:<30} {:<10} {state:<28} {}",
+                        r.version.as_deref().unwrap_or("-"),
+                        r.written.as_deref().unwrap_or(""),
+                    )));
+                }
+                if part.rows.is_empty() {
+                    lines.push(Line::raw("no secret this target delivers is declared"));
+                }
+                if several {
+                    lines.push(Line::raw(""));
+                }
             }
-            lines.push(Line::raw(""));
-            for r in doc["rows"].as_array().into_iter().flatten() {
-                let s = |k: &str| r[k].as_str().unwrap_or("-").to_string();
-                let label = app.label(&s("product"), &s("key"));
-                let state = match r["state"].as_str().unwrap_or("") {
-                    "stamped" => "written by opv",
-                    "recorded" => "as opv left it",
-                    "changed_outside_opv" => "changed outside opv",
-                    "not_recorded" => "no record of opv writing it",
-                    "absent" => "not on the target",
-                    other => other,
-                };
-                let when = r["written"].as_str().unwrap_or("");
-                lines.push(Line::raw(format!(
-                    "{label:<30} {:<10} {state:<28} {when}",
-                    s("version")
-                )));
-            }
-            if doc["rows"].as_array().is_none_or(|a| a.is_empty()) {
-                lines.push(Line::raw("no secret is declared here"));
+            if parts.is_empty() {
+                lines.push(Line::raw(
+                    "no target: opv writes nothing outside 1Password for this environment",
+                ));
             }
         }
     }
@@ -321,70 +327,77 @@ pub fn history(f: &mut Frame, area: Rect, app: &App, env: &str) {
     );
 }
 
-/// Who can read each environment's vault (#96), from `opv access --json`: people counted,
-/// service accounts named with read-only or can-write, then the findings with the owner's
-/// command for a read-only CI reader (shown, never run: 1Password shows its token once).
+/// Who needs which vault and whether they have it (#96, FR-59), from `opv access --json`:
+/// per environment each principal's grants and their state, extra readers, the findings,
+/// and the owner's commands (shown, never run: 1Password shows a new token once). Never
+/// "clean": what was checked and what could not be classified are counted.
 pub fn access(f: &mut Frame, area: Rect, app: &App) {
+    use crate::domain::access_plan::{GrantState, Permission, Principal};
     let mut lines = Vec::new();
     match &app.access {
         None => lines.push(Line::raw("reading who can use each vault…")),
-        Some(doc) => {
-            for e in doc["environments"].as_array().into_iter().flatten() {
-                let name = e["environment"].as_str().unwrap_or("-");
+        Some(Err(failure)) => failed(&mut lines, "could not read the vault access", failure),
+        Some(Ok(doc)) => {
+            for e in &doc.environments {
+                let name = e.environment.as_str();
                 let title = app.snap.env(name).map_or(name, |x| x.title.as_str());
-                let text = if e["visible"].as_bool() == Some(false) {
-                    format!("{title:<24} not visible to you (managing the vault is needed)")
-                } else {
-                    let sas: Vec<String> = e["service_accounts"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .map(|s| {
-                            let how = if s["read_only"].as_bool() == Some(true) {
-                                "read-only"
-                            } else {
-                                "can write"
-                            };
-                            format!("{} ({how})", s["name"].as_str().unwrap_or("-"))
-                        })
-                        .collect();
-                    format!(
-                        "{title:<24} {} people, {} guests; {}",
-                        e["people"].as_u64().unwrap_or(0),
-                        e["guests"].as_u64().unwrap_or(0),
-                        if sas.is_empty() {
-                            "no service account".to_string()
-                        } else {
-                            sas.join(", ")
-                        }
-                    )
-                };
-                lines.push(Line::raw(text));
-            }
-            let found: Vec<&serde_json::Value> =
-                doc["findings"].as_array().into_iter().flatten().collect();
-            if !found.is_empty() {
-                lines.push(Line::raw(""));
-                lines.push(Line::styled("Needs attention", BOLD));
-            }
-            for fnd in found {
-                lines.push(Line::raw(format!(
-                    "! {}: {}",
-                    fnd["code"].as_str().unwrap_or(""),
-                    fnd["message"].as_str().unwrap_or("")
-                )));
-                if let Some(n) = fnd["next"].as_str() {
-                    lines.push(Line::styled(format!("  owner runs: {n}"), DIM));
+                lines.push(Line::styled(title.to_string(), BOLD));
+                for check in &e.report.checks {
+                    let who = match &check.grant.principal {
+                        Principal::Deploy { target, .. } => format!("deploy identity of {target}"),
+                        Principal::CiReader { .. } => "CI reader".to_string(),
+                    };
+                    let needs = match check.grant.permission {
+                        Permission::Read => "read",
+                        Permission::ReadWrite => "read and write",
+                    };
+                    let state = match check.state {
+                        GrantState::Present => "granted",
+                        GrantState::Missing => "missing",
+                        GrantState::ReadOnlyNeeded => "can write, should only read",
+                        GrantState::NotVisible => "not visible to you",
+                        GrantState::NotInAccount => "vault not in this account",
+                    };
+                    lines.push(Line::raw(format!(
+                        "  {who} ({}): {needs} on vault {}: {state}",
+                        check.grant.service_account, check.grant.vault_id
+                    )));
                 }
-            }
-            if doc["findings"]
-                .as_array()
-                .is_some_and(|a| a.iter().any(|f| f["next"].is_string()))
-            {
+                for extra in &e.report.extra {
+                    lines.push(Line::raw(format!(
+                        "  extra reader {} on vault {}",
+                        extra.service_account, extra.vault_id
+                    )));
+                }
+                for fnd in &e.findings {
+                    lines.push(Line::raw(format!("  ! {}: {}", fnd.code, fnd.message)));
+                    if let Some(n) = &fnd.next {
+                        lines.push(Line::styled(format!("    next: {n}"), DIM));
+                    }
+                }
+                for c in &e.commands {
+                    lines.push(Line::styled(format!("  Owner runs: {c}"), DIM));
+                }
+                if !e.commands.is_empty() {
+                    lines.push(Line::styled(
+                        format!(
+                            "  1Password shows a new token once: store it as the CI secret \
+                             OP_SERVICE_ACCOUNT_TOKEN, or run opv access {name} --create \
+                             --github <owner/repo>"
+                        ),
+                        DIM,
+                    ));
+                }
                 lines.push(Line::styled(
-                    "1Password shows the new token once, to you: store it as the CI secret OP_SERVICE_ACCOUNT_TOKEN yourself.",
+                    format!(
+                        "  checked: {}, could not classify: {}",
+                        e.report.checked, e.report.unclassified
+                    ),
                     DIM,
                 ));
+            }
+            if doc.environments.is_empty() {
+                lines.push(Line::raw("no environment needs vault access"));
             }
         }
     }
@@ -394,4 +407,16 @@ pub fn access(f: &mut Frame, area: Rect, app: &App) {
             .block(Block::default().borders(Borders::ALL).title(" CI access ")),
         area,
     );
+}
+
+/// The lines of a document that could not be read: what, the error, and its steps.
+fn failed(lines: &mut Vec<Line<'static>>, what: &str, failure: &super::docs::Failure) {
+    let mut text = failure.lines().into_iter();
+    lines.push(Line::raw(format!(
+        "{what}: {}",
+        text.next().unwrap_or_default()
+    )));
+    for l in text {
+        lines.push(Line::styled(l, DIM));
+    }
 }

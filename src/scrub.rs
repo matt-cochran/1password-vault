@@ -12,6 +12,12 @@
 //! percent-encoded (upper and lower hex). Values shorter than [`MIN_SUBSTRING`] bytes are
 //! replaced only as whole tokens, so a value such as `on` cannot mangle unrelated text.
 //!
+//! Each value is registered with a [`Kind`]. Every kind is value-matched in untrusted text
+//! ([`scrub`], the excerpts). Only [`Kind::Secret`] values of at least [`SECRET_MIN`] bytes
+//! are also matched by the output guard's byte backstop ([`guard_scrub`], used by
+//! [`crate::output::OutputGuard`]), so a setting such as `true` or `production` never masks
+//! opv's own output (design §8).
+//!
 //! The registry keeps values in zeroizing memory; its `Debug` shows a count only.
 
 #[cfg(not(test))]
@@ -23,15 +29,20 @@ use regex::Regex;
 use zeroize::{Zeroize, Zeroizing};
 
 /// What every registered value and every pattern match is replaced with.
-pub const MASK: &str = "__SECRET__";
+pub const MASK: &str = "********";
+/// Secret-kind values (and encodings) shorter than this are not matched by the output
+/// guard's backstop (design §8).
+pub const SECRET_MIN: usize = 8;
+
+/// What a registered value is: a secret is masked everywhere, including by the output
+/// guard; a setting only in untrusted text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Secret,
+    Setting,
+}
 /// Values (and encodings) shorter than this are replaced only as whole tokens.
 pub const MIN_SUBSTRING: usize = 4;
-/// Lines shown after a failed call's error line (NR-31).
-pub const FAILURE_LINES: usize = 5;
-/// Lines shown per call with `--verbose`.
-pub const VERBOSE_LINES: usize = 20;
-/// Longest line shown; the rest is cut and marked with `…`.
-const LINE_CHARS: usize = 240;
 
 /// The values to scrub. `Debug` prints the count only.
 #[derive(Default)]
@@ -41,6 +52,9 @@ pub struct Registry {
     long: Vec<Zeroizing<String>>,
     /// Shorter values, replaced only where they form a whole token.
     short: Vec<Zeroizing<String>>,
+    /// Secret-kind needles of at least [`SECRET_MIN`] bytes, longest first: the output
+    /// guard's backstop.
+    secret: Vec<Zeroizing<String>>,
 }
 
 impl std::fmt::Debug for Registry {
@@ -56,6 +70,7 @@ impl Registry {
         Self {
             long: Vec::new(),
             short: Vec::new(),
+            secret: Vec::new(),
         }
     }
 
@@ -75,28 +90,47 @@ impl Registry {
     /// trimmed, when it is at least [`MIN_SUBSTRING`] bytes (a CLI that re-indents or
     /// prefixes each line defeats the whole-value needle).
     pub fn register(&mut self, value: &str) {
-        self.register_one(value);
+        self.register_kind(value, Kind::Setting);
+    }
+
+    /// Add `value` as [`Kind::Secret`]: also matched by the output guard when it is at
+    /// least [`SECRET_MIN`] bytes.
+    pub fn register_secret(&mut self, value: &str) {
+        self.register_kind(value, Kind::Secret);
+    }
+
+    /// Add `value` and its encodings as `kind` (see [`Registry::register`]).
+    pub fn register_kind(&mut self, value: &str, kind: Kind) {
+        self.register_one(value, kind);
         let stripped = strip_escapes(value);
         if stripped.as_str() != value {
-            self.register_one(&stripped);
+            self.register_one(&stripped, kind);
         }
         if value.contains(['\n', '\r']) {
             for line in value.split(['\n', '\r']) {
                 let line = line.trim();
                 if line.len() >= MIN_SUBSTRING && line != value {
-                    self.register_one(line);
+                    self.register_one(line, kind);
                     let s = strip_escapes(line);
                     if s.len() >= MIN_SUBSTRING && s.as_str() != line {
-                        self.register_one(&s);
+                        self.register_one(&s, kind);
                     }
                 }
             }
         }
     }
 
-    fn register_one(&mut self, value: &str) {
+    fn register_one(&mut self, value: &str, kind: Kind) {
         if value.trim().is_empty() {
             return;
+        }
+        if kind == Kind::Secret && value.len() >= SECRET_MIN {
+            for needle in encodings(value) {
+                if needle.len() >= SECRET_MIN {
+                    push_unique(&mut self.secret, needle);
+                }
+            }
+            self.secret.sort_by_key(|n| std::cmp::Reverse(n.len()));
         }
         if value.len() < MIN_SUBSTRING {
             // A short value and its encodings (its base64 is what a Kubernetes Secret
@@ -125,6 +159,18 @@ impl Registry {
         for n in &self.short {
             if out.contains(n.as_str()) {
                 out = replace_tokens(&out, n);
+            }
+        }
+        out
+    }
+
+    /// `text` with every secret-kind needle of at least [`SECRET_MIN`] bytes replaced by
+    /// [`MASK`] (the output guard's backstop; settings and short values are kept).
+    pub fn scrub_secrets(&self, text: &str) -> Zeroizing<String> {
+        let mut out = Zeroizing::new(text.to_owned());
+        for n in &self.secret {
+            if out.contains(n.as_str()) {
+                out = Zeroizing::new(out.replace(n.as_str(), MASK));
             }
         }
         out
@@ -263,74 +309,104 @@ fn percent(b: &[u8], lower: bool) -> Zeroizing<String> {
     out
 }
 
-/// Secrets opv never handled, replaced by shape. Each entry: pattern and replacement.
-fn patterns() -> &'static [(Regex, &'static str)] {
-    static P: OnceLock<Vec<(Regex, &'static str)>> = OnceLock::new();
+/// Secrets opv never handled, recognised by their shape (tokens, keys, signatures, the
+/// password in a connection string). Each entry: pattern and replacement. The output guard
+/// applies these to every line opv writes.
+fn token_patterns() -> &'static [(Regex, String)] {
+    static P: OnceLock<Vec<(Regex, String)>> = OnceLock::new();
+    P.get_or_init(|| {
+        let r = |p: &str| Regex::new(p).expect("valid scrub pattern");
+        let keep = |groups: &str| format!("{groups}{MASK}");
+        vec![
+            // PEM private keys, and the tail of one whose BEGIN line was cut off.
+            (
+                r(r"(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\z)"),
+                MASK.to_string(),
+            ),
+            (r(r"(?s)\A.*?-----END [A-Z0-9 ]*PRIVATE KEY-----"), MASK.to_string()),
+            // JWTs (also Kubernetes service-account tokens).
+            (r(r"\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*"), MASK.to_string()),
+            // Fly.io macaroon tokens: `FlyV1 fm2_…,fm2_…`, and a bare `fm1_`/`fm2_` one.
+            (r(r"\bFlyV1\s+[A-Za-z0-9_+/=,.-]+"), MASK.to_string()),
+            (r(r"\bfm[12][a-z]?_[A-Za-z0-9_+/=-]{16,}"), MASK.to_string()),
+            // `Bearer <token>` (also a kubeconfig's bearer token on the wire).
+            (r(r"(?i)\b(bearer)(\s+)[A-Za-z0-9._~+/=-]+"), keep("${1}${2}")),
+            // Kubernetes bootstrap tokens (`abcdef.0123456789abcdef`).
+            (r(r"\b[a-z0-9]{6}\.[a-z0-9]{16}\b"), MASK.to_string()),
+            // 1Password session variables and service-account tokens.
+            (
+                r(r#"\b(OP_SESSION_\w*)(\s*=\s*)("[^"]*"|'[^']*'|\S+)"#),
+                keep("${1}${2}"),
+            ),
+            (r(r"\bops_[A-Za-z0-9+/=_-]{16,}"), MASK.to_string()),
+            // Azure SAS signatures, storage account keys, client secrets.
+            (r(r#"(?i)\b(sig|client_secret)=[^&;\s"',]+"#), keep("${1}=")),
+            (
+                r(r#"(?i)\b(AccountKey|SharedAccessSignature)=[^;\s"',]+"#),
+                keep("${1}="),
+            ),
+            // Connection strings with a password: `scheme://user:password@host` and
+            // `…;Password=…;`.
+            (
+                r(r"(?i)\b([a-z][a-z0-9+.-]*://[^\s:/@]*:)[^\s@/]+(@)"),
+                format!("${{1}}{MASK}${{2}}"),
+            ),
+            (r(r#"(?i)\b(password|pwd)=[^;&\s"']+"#), keep("${1}=")),
+            // Well-known API key prefixes (OpenAI, Stripe, GitHub, Slack, AWS).
+            (
+                r(r"\b(?:sk|pk|rk)[-_](?:live|test|proj)[-_][A-Za-z0-9_-]{8,}"),
+                MASK.to_string(),
+            ),
+            (r(r"\bsk-[A-Za-z0-9_-]{20,}"), MASK.to_string()),
+            (r(r"\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}"), MASK.to_string()),
+            (r(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"), MASK.to_string()),
+            (r(r"\bAKIA[0-9A-Z]{16}\b"), MASK.to_string()),
+        ]
+    })
+}
+
+/// `password=…`, `token=…`, `secret=…`, `apikey=…` and their JSON form: applied to
+/// untrusted text only, since opv's own documents name such keys.
+fn assignment_patterns() -> &'static [(Regex, String)] {
+    static P: OnceLock<Vec<(Regex, String)>> = OnceLock::new();
     const KEYS: &str =
         r"[A-Za-z0-9_.-]*(?:password|passwd|token|secret|apikey|api_key|api-key)[A-Za-z0-9_.-]*";
     P.get_or_init(|| {
         let r = |p: &str| Regex::new(p).expect("valid scrub pattern");
         vec![
-            // PEM private keys, and the tail of one whose BEGIN line was cut off.
             (
-                r(r"(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\z)"),
-                MASK,
-            ),
-            (r(r"(?s)\A.*?-----END [A-Z0-9 ]*PRIVATE KEY-----"), MASK),
-            // JWTs.
-            (r(r"\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*"), MASK),
-            // `Bearer <token>`.
-            (r(r"(?i)\b(bearer)(\s+)[A-Za-z0-9._~+/=-]+"), "${1}${2}__SECRET__"),
-            // 1Password session variables and service-account tokens.
-            (
-                r(r#"\b(OP_SESSION_\w*)(\s*=\s*)("[^"]*"|'[^']*'|\S+)"#),
-                "${1}${2}__SECRET__",
-            ),
-            (r(r"\bops_[A-Za-z0-9+/=_-]{16,}"), MASK),
-            // Azure SAS signatures, storage account keys, client secrets.
-            (
-                r(r#"(?i)\b(sig|client_secret)=[^&;\s"',]+"#),
-                "${1}=__SECRET__",
-            ),
-            (
-                r(r#"(?i)\b(AccountKey|SharedAccessSignature)=[^;\s"',]+"#),
-                "${1}=__SECRET__",
-            ),
-            // Well-known API key prefixes (OpenAI, Stripe, GitHub, Slack, AWS).
-            (
-                r(r"\b(?:sk|pk|rk)[-_](?:live|test|proj)[-_][A-Za-z0-9_-]{8,}"),
-                MASK,
-            ),
-            (r(r"\bsk-[A-Za-z0-9_-]{20,}"), MASK),
-            (r(r"\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}"), MASK),
-            (r(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"), MASK),
-            (r(r"\bAKIA[0-9A-Z]{16}\b"), MASK),
-            // `password=…`, `token=…`, `secret=…`, `apikey=…` and their JSON form.
-            (
-                r(&format!(
-                    r#"(?i)("{KEYS}"\s*:\s*)"(?:[^"\\]|\\.)*""#
-                )),
-                "${1}\"__SECRET__\"",
+                r(&format!(r#"(?i)("{KEYS}"\s*:\s*)"(?:[^"\\]|\\.)*""#)),
+                format!("${{1}}\"{MASK}\""),
             ),
             (
                 r(&format!(
                     r#"(?i)\b({KEYS})(\s*=\s*)("[^"]*"|'[^']*'|[^\s&;,"']+)"#
                 )),
-                "${1}${2}__SECRET__",
+                format!("${{1}}${{2}}{MASK}"),
             ),
         ]
     })
 }
 
-/// `text` with every known secret pattern replaced.
-pub fn scrub_patterns(text: &str) -> String {
+fn apply(text: &str, patterns: &[(Regex, String)]) -> Zeroizing<String> {
     let mut out = Zeroizing::new(text.to_owned());
-    for (re, with) in patterns() {
+    for (re, with) in patterns {
         if re.is_match(&out) {
-            out = Zeroizing::new(re.replace_all(&out, *with).into_owned());
+            out = Zeroizing::new(re.replace_all(&out, with.as_str()).into_owned());
         }
     }
-    std::mem::take(&mut *out)
+    out
+}
+
+/// `text` with every known token shape replaced (the output guard's patterns).
+pub fn scrub_tokens(text: &str) -> String {
+    std::mem::take(&mut *apply(text, token_patterns()))
+}
+
+/// `text` with every known secret pattern replaced: token shapes, then assignments.
+pub fn scrub_patterns(text: &str) -> String {
+    let tokens = apply(text, token_patterns());
+    std::mem::take(&mut *apply(&tokens, assignment_patterns()))
 }
 
 /// The run's registry. A process-wide lock, so a value registered on any thread is
@@ -368,11 +444,77 @@ pub(crate) fn reset_test_registry() {
 #[cfg(feature = "mcp")]
 pub(crate) fn clear_mcp_registry() {
     with_registry(|registry| *registry = Registry::new());
+    // The server's own credentials stay secrets for its whole life.
+    register_credential_env();
 }
 
-/// Register one value for scrubbing.
+/// Register one value for scrubbing in untrusted text, as a [`Kind::Setting`].
 pub fn register(value: &str) {
     with_registry(|r| r.register(value));
+}
+
+/// Register one value as [`Kind::Secret`]: masked in untrusted text and, when at least
+/// [`SECRET_MIN`] bytes, by the output guard too.
+pub fn register_secret(value: &str) {
+    with_registry(|r| r.register_secret(value));
+}
+
+/// Register one value as `kind`.
+pub fn register_kind(value: &str, kind: Kind) {
+    with_registry(|r| r.register_kind(value, kind));
+}
+
+/// The credential variables in opv's own environment whose values are secrets for the run
+/// (design §8): `OP_SERVICE_ACCOUNT_TOKEN`, every `OP_SESSION_*`, `OP_CONNECT_TOKEN`, Fly's,
+/// GitHub's and Azure's tokens and client secrets.
+pub const CREDENTIAL_VARS: [&str; 8] = [
+    "OP_SERVICE_ACCOUNT_TOKEN",
+    "OP_CONNECT_TOKEN",
+    "FLY_API_TOKEN",
+    "FLY_ACCESS_TOKEN",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "AZURE_CLIENT_SECRET",
+    "ARM_CLIENT_SECRET",
+];
+
+/// Whether the environment variable `name` holds a credential opv registers at startup.
+pub fn is_credential_var(name: &str) -> bool {
+    CREDENTIAL_VARS.contains(&name) || name.starts_with("OP_SESSION_")
+}
+
+/// Register the value of every credential variable in `vars` as [`Kind::Secret`].
+pub fn register_credentials_from<I, K, V>(vars: I)
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<std::ffi::OsStr>,
+    V: AsRef<std::ffi::OsStr>,
+{
+    for (k, v) in vars {
+        if k.as_ref().to_str().is_some_and(is_credential_var)
+            && let Some(v) = v.as_ref().to_str()
+        {
+            let v = Zeroizing::new(v.to_owned());
+            register_secret(&v);
+        }
+    }
+}
+
+/// Register the credential variables of opv's own environment (called first thing in
+/// `main`).
+pub fn register_credential_env() {
+    register_credentials_from(std::env::vars_os());
+}
+
+/// One chunk of opv's own output as the output guard writes it: secret-kind values masked
+/// on the raw text, escape sequences, control characters (other than tab and newline) and
+/// bidi overrides removed, secret-kind values masked again (a value that held an escape),
+/// then known token shapes masked. Settings and short values are never matched here.
+pub fn guard_scrub(text: &str) -> String {
+    let raw = with_registry(|r| r.scrub_secrets(text));
+    let plain = strip_escapes(&raw);
+    let again = with_registry(|r| r.scrub_secrets(&plain));
+    scrub_tokens(&again)
 }
 
 /// Register every field value of an `op item get --format json` document: each string
@@ -385,9 +527,10 @@ pub fn register_item_values(raw: &[u8]) {
     fn walk(v: &serde_json::Value, reg: &mut Registry) {
         match v {
             serde_json::Value::Object(m) => {
+                let kind = field_kind(m.get("type").and_then(serde_json::Value::as_str));
                 for (k, x) in m {
                     match x {
-                        serde_json::Value::String(s) if k == "value" => reg.register(s),
+                        serde_json::Value::String(s) if k == "value" => reg.register_kind(s, kind),
                         _ => walk(x, reg),
                     }
                 }
@@ -398,6 +541,26 @@ pub fn register_item_values(raw: &[u8]) {
     }
     with_registry(|r| walk(&doc, r));
     wipe_json(&mut doc);
+}
+
+/// The kind of a 1Password field by its `type` (FR-14: `CONCEALED` is a secret, `STRING` is
+/// configuration). Fails closed: an unknown or missing type is a secret.
+fn field_kind(ty: Option<&str>) -> Kind {
+    const PLAIN: [&str; 9] = [
+        "STRING",
+        "URL",
+        "EMAIL",
+        "PHONE",
+        "MENU",
+        "DATE",
+        "MONTH_YEAR",
+        "ADDRESS",
+        "REFERENCE",
+    ];
+    match ty {
+        Some(t) if PLAIN.contains(&t) => Kind::Setting,
+        _ => Kind::Secret,
+    }
 }
 
 /// Zeroize every string (and key) in a parsed JSON document.
@@ -416,13 +579,15 @@ pub fn scrub(text: &str) -> String {
     scrub_patterns(&values)
 }
 
-/// The last `max` non-empty lines of a child's `stderr`, scrubbed and safe to print:
-/// registered values masked on the raw text, then escape sequences and control
-/// characters removed, then values and patterns scrubbed again, each line cut at 240
-/// characters.
-/// When the buffer was `truncated` (only its tail was kept), the first, partial line is
-/// dropped so no value cut in half can show.
-pub fn tail_lines(stderr: &[u8], truncated: bool, max: usize) -> Vec<String> {
+/// Every non-empty line of a child's `stderr`, scrubbed and safe to print: registered
+/// values masked on the raw text, then escape sequences and control characters removed,
+/// then values and patterns scrubbed again. No line is cut or left out; what is shown is
+/// the display's choice (design §7.3: the error line plus the tail, all of it with
+/// `--verbose`).
+/// When the buffer was `truncated` (only its last [`crate::runner::STDERR_CAP`] bytes were
+/// kept), the first, partial line is dropped so no value cut in half can show; the caller
+/// says the reply was truncated.
+pub fn reply_lines(stderr: &[u8], truncated: bool) -> Vec<String> {
     let mut bytes = stderr;
     if truncated {
         bytes = match bytes.iter().position(|&b| b == b'\n') {
@@ -440,37 +605,42 @@ pub fn tail_lines(stderr: &[u8], truncated: bool, max: usize) -> Vec<String> {
     let raw = with_registry(|r| r.scrub_values(&text));
     let plain = strip_escapes(&raw);
     let clean = scrub(&plain);
-    let lines: Vec<&str> = clean
+    clean
         .lines()
         .map(str::trim_end)
         .filter(|l| !l.trim().is_empty())
-        .collect();
-    lines[lines.len().saturating_sub(max)..]
-        .iter()
-        .map(|l| cut(l))
+        .map(str::to_string)
         .collect()
 }
 
-/// Remove ANSI escape sequences and every control character except tab and newline.
-fn strip_escapes(text: &str) -> Zeroizing<String> {
+/// Whether `c` is a bidirectional embedding, override or isolate (U+202A–202E,
+/// U+2066–2069), which can make displayed text read differently from its bytes.
+fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
+/// Remove escape sequences (ANSI CSI; OSC, including OSC 8 links and OSC 52 clipboard
+/// writes; DCS, SOS, PM and APC strings; their 8-bit C1 forms), every other control
+/// character except tab and newline, and bidi overrides (design §9.4).
+pub fn strip_escapes(text: &str) -> Zeroizing<String> {
     static ANSI: OnceLock<Regex> = OnceLock::new();
     let ansi = ANSI.get_or_init(|| {
-        Regex::new(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*\x07|.)").expect("valid")
+        Regex::new(concat!(
+            r"\x1b\[[0-?]*[ -/]*[@-~]",
+            r"|\x1b[\]PX^_][^\x07\x1b\n\u{9c}]*(?:\x07|\x1b\\|\u{9c})?",
+            r"|\u{9b}[0-?]*[ -/]*[@-~]",
+            r"|[\u{90}\u{98}\u{9d}\u{9e}\u{9f}][^\x07\x1b\n\u{9c}]*(?:\x07|\x1b\\|\u{9c})?",
+            r"|\x1b[^\n]",
+        ))
+        .expect("valid")
     });
     let no_ansi = Zeroizing::new(ansi.replace_all(text, "").into_owned());
     Zeroizing::new(
         no_ansi
             .chars()
-            .filter(|c| !c.is_control() || *c == '\t' || *c == '\n')
+            .filter(|c| (!c.is_control() || *c == '\t' || *c == '\n') && !is_bidi_control(*c))
             .collect(),
     )
-}
-
-fn cut(line: &str) -> String {
-    match line.char_indices().nth(LINE_CHARS) {
-        Some((i, _)) => format!("{}…", &line[..i]),
-        None => line.to_string(),
-    }
 }
 
 /// `line` without a CLI's own directions to the person (FR-50): opv's `Do:` and `Next:` say
@@ -483,12 +653,11 @@ fn without_vendor_directions(line: &str) -> String {
         "Try authenticating with:",
         "To sign in, run",
     ];
-    let cut_at = DIRECTIONS
-        .iter()
-        .filter_map(|d| line.find(d))
-        .min()
-        .unwrap_or(line.len());
-    line[..cut_at].trim_end_matches([' ', '.']).to_string()
+    // A line without a direction passes through unchanged.
+    match DIRECTIONS.iter().filter_map(|d| line.find(d)).min() {
+        Some(cut_at) => line[..cut_at].trim_end_matches([' ', '.']).to_string(),
+        None => line.to_string(),
+    }
 }
 
 /// The scrubbed stderr lines of a failed call, shown under opv's error line (NR-31).
@@ -496,14 +665,17 @@ fn without_vendor_directions(line: &str) -> String {
 pub struct Excerpt {
     /// The program that failed (`op`, `flyctl`, `az`, `kubectl`).
     pub program: String,
-    /// At most [`FAILURE_LINES`] scrubbed lines, oldest first.
+    /// Every scrubbed line of the reply, oldest first; the display picks what to show.
     pub lines: Vec<String>,
+    /// The reply was longer than [`crate::runner::STDERR_CAP`] bytes and only its end was
+    /// kept; every display of it says so.
+    pub truncated: bool,
 }
 
 impl Excerpt {
     /// `None` when the child wrote nothing worth showing.
     pub fn from_stderr(program: &str, stderr: &[u8], truncated: bool) -> Option<Self> {
-        let lines: Vec<String> = tail_lines(stderr, truncated, FAILURE_LINES)
+        let lines: Vec<String> = reply_lines(stderr, truncated)
             .into_iter()
             .map(|l| without_vendor_directions(&l))
             .filter(|l| !l.trim().is_empty())
@@ -511,7 +683,13 @@ impl Excerpt {
         (!lines.is_empty()).then(|| Self {
             program: program.to_string(),
             lines,
+            truncated,
         })
+    }
+
+    /// The lines of `excerpt` and whether it was truncated; none and false without one.
+    pub fn parts(excerpt: Option<Self>) -> (Vec<String>, bool) {
+        excerpt.map_or_else(Default::default, |x| (x.lines, x.truncated))
     }
 
     /// One `  <program> said: <line>` per line.
@@ -551,6 +729,14 @@ mod tests {
     }
 
     #[test]
+    fn a_line_without_a_direction_keeps_its_full_stop() {
+        assert_eq!(
+            without_vendor_directions("Host key verification failed."),
+            "Host key verification failed."
+        );
+    }
+
+    #[test]
     fn a_line_that_is_only_a_direction_is_dropped() {
         assert_eq!(
             Excerpt::from_stderr(
@@ -570,14 +756,14 @@ mod tests {
 
     #[test]
     fn raw_value_is_replaced() {
-        assert_eq!(reg().scrub(&format!("x {MARK} y")), "x __SECRET__ y");
+        assert_eq!(reg().scrub(&format!("x {MARK} y")), "x ******** y");
     }
 
     #[test]
     fn json_escaped_value_is_replaced() {
         let mut r = Registry::new();
         r.register("a\"b\\c\nd");
-        assert_eq!(r.scrub(r#"{"v":"a\"b\\c\nd"}"#), r#"{"v":"__SECRET__"}"#);
+        assert_eq!(r.scrub(r#"{"v":"a\"b\\c\nd"}"#), r#"{"v":"********"}"#);
     }
 
     #[test]
@@ -589,23 +775,20 @@ mod tests {
     fn base64_value_is_replaced() {
         use base64::engine::general_purpose::STANDARD;
         let enc = STANDARD.encode(MARK);
-        assert_eq!(reg().scrub(&format!("data={enc};")), "data=__SECRET__;");
+        assert_eq!(reg().scrub(&format!("data={enc};")), "data=********;");
     }
 
     #[test]
     fn base64url_unpadded_value_is_replaced() {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         let enc = URL_SAFE_NO_PAD.encode(MARK);
-        assert_eq!(reg().scrub(&format!("[{enc}]")), "[__SECRET__]");
+        assert_eq!(reg().scrub(&format!("[{enc}]")), "[********]");
     }
 
     #[test]
     fn percent_encoded_value_is_replaced() {
         let enc = percent(MARK.as_bytes(), false);
-        assert_eq!(
-            reg().scrub(&format!("q={}&", enc.as_str())),
-            "q=__SECRET__&"
-        );
+        assert_eq!(reg().scrub(&format!("q={}&", enc.as_str())), "q=********&");
     }
 
     #[test]
@@ -614,7 +797,7 @@ mod tests {
         r.register("p<w>&d");
         assert_eq!(
             r.scrub(r#"{"value":"p\u003cw\u003e\u0026d"}"#),
-            r#"{"value":"__SECRET__"}"#
+            r#"{"value":"********"}"#
         );
     }
 
@@ -624,7 +807,7 @@ mod tests {
         r.register("bell\u{07}ring");
         assert_eq!(
             r.scrub(r#"Invalid value: "bell\aring""#),
-            r#"Invalid value: "__SECRET__""#
+            r#"Invalid value: "********""#
         );
     }
 
@@ -632,7 +815,7 @@ mod tests {
     fn python_repr_value_is_replaced() {
         let mut r = Registry::new();
         r.register("it's \"x\"");
-        assert_eq!(r.scrub(r#"value 'it\'s "x"'"#), "value '__SECRET__'");
+        assert_eq!(r.scrub(r#"value 'it\'s "x"'"#), "value '********'");
     }
 
     /// A Kubernetes Secret manifest carries a short value as its base64.
@@ -642,7 +825,7 @@ mod tests {
         r.register("ab");
         assert_eq!(
             r.scrub(r#""data":{"value":"YWI="}"#),
-            r#""data":{"value":"__SECRET__"}"#
+            r#""data":{"value":"********"}"#
         );
     }
 
@@ -654,7 +837,7 @@ mod tests {
         );
         assert_eq!(
             reg().scrub(&line),
-            "ERROR: (Conflict) https://kv-prod.vault.azure.net/secrets/fleet--api--db-url/0f3c9a2b7d4e4f0a: __SECRET__"
+            "ERROR: (Conflict) https://kv-prod.vault.azure.net/secrets/fleet--api--db-url/0f3c9a2b7d4e4f0a: ********"
         );
     }
 
@@ -662,7 +845,7 @@ mod tests {
     fn short_value_is_not_replaced_inside_words() {
         let mut r = Registry::new();
         r.register("on");
-        assert_eq!(r.scrub("connection on"), "connection __SECRET__");
+        assert_eq!(r.scrub("connection on"), "connection ********");
     }
 
     #[test]
@@ -670,7 +853,7 @@ mod tests {
         let mut r = Registry::new();
         r.register("abcd");
         r.register("xxabcdyy");
-        assert_eq!(r.scrub("1 xxabcdyy 2"), "1 __SECRET__ 2");
+        assert_eq!(r.scrub("1 xxabcdyy 2"), "1 ******** 2");
     }
 
     #[test]
@@ -684,14 +867,14 @@ mod tests {
     #[test]
     fn jwt_is_scrubbed() {
         let t = "token was eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl ok";
-        assert_eq!(scrub_patterns(t), "token was __SECRET__ ok");
+        assert_eq!(scrub_patterns(t), "token was ******** ok");
     }
 
     #[test]
     fn bearer_token_is_scrubbed() {
         assert_eq!(
             scrub_patterns("Authorization: Bearer abc.def-123"),
-            "Authorization: Bearer __SECRET__"
+            "Authorization: Bearer ********"
         );
     }
 
@@ -699,7 +882,7 @@ mod tests {
     fn op_session_assignment_is_scrubbed() {
         assert_eq!(
             scrub_patterns("export OP_SESSION_my=abcDEF123"),
-            "export OP_SESSION_my=__SECRET__"
+            "export OP_SESSION_my=********"
         );
     }
 
@@ -707,7 +890,7 @@ mod tests {
     fn service_account_token_is_scrubbed() {
         assert_eq!(
             scrub_patterns("bad ops_eyJzaWduSW5BZGRyZXNzIjoi"),
-            "bad __SECRET__"
+            "bad ********"
         );
     }
 
@@ -715,7 +898,7 @@ mod tests {
     fn azure_sas_signature_is_scrubbed() {
         assert_eq!(
             scrub_patterns("https://a.blob/c?sv=1&sig=abc%2Bdef&se=2"),
-            "https://a.blob/c?sv=1&sig=__SECRET__&se=2"
+            "https://a.blob/c?sv=1&sig=********&se=2"
         );
     }
 
@@ -723,7 +906,7 @@ mod tests {
     fn azure_account_key_is_scrubbed() {
         assert_eq!(
             scrub_patterns("AccountName=a;AccountKey=abc+def==;EndpointSuffix=x"),
-            "AccountName=a;AccountKey=__SECRET__;EndpointSuffix=x"
+            "AccountName=a;AccountKey=********;EndpointSuffix=x"
         );
     }
 
@@ -731,7 +914,7 @@ mod tests {
     fn azure_shared_access_signature_is_scrubbed() {
         assert_eq!(
             scrub_patterns("SharedAccessSignature=sv=1&sig=abc;Endpoint=x"),
-            "SharedAccessSignature=__SECRET__;Endpoint=x"
+            "SharedAccessSignature=********;Endpoint=x"
         );
     }
 
@@ -739,27 +922,27 @@ mod tests {
     fn azure_client_secret_is_scrubbed() {
         assert_eq!(
             scrub_patterns("grant_type=client_credentials&client_secret=s3cr3t&x=1"),
-            "grant_type=client_credentials&client_secret=__SECRET__&x=1"
+            "grant_type=client_credentials&client_secret=********&x=1"
         );
     }
 
     #[test]
     fn private_key_block_is_scrubbed() {
         let t = "a\n-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----\nb";
-        assert_eq!(scrub_patterns(t), "a\n__SECRET__\nb");
+        assert_eq!(scrub_patterns(t), "a\n********\nb");
     }
 
     #[test]
     fn private_key_tail_without_begin_is_scrubbed() {
         let t = "MIIabc\nMIIdef\n-----END PRIVATE KEY-----\nb";
-        assert_eq!(scrub_patterns(t), "__SECRET__\nb");
+        assert_eq!(scrub_patterns(t), "********\nb");
     }
 
     #[test]
     fn key_value_assignments_are_scrubbed() {
         assert_eq!(
             scrub_patterns("password=hunter2 token=t1 secret='s 1' apikey=k1 db_password = p"),
-            "password=__SECRET__ token=__SECRET__ secret=__SECRET__ apikey=__SECRET__ db_password = __SECRET__"
+            "password=******** token=******** secret=******** apikey=******** db_password = ********"
         );
     }
 
@@ -767,7 +950,7 @@ mod tests {
     fn json_key_value_assignments_are_scrubbed() {
         assert_eq!(
             scrub_patterns(r#"{"clientSecret": "a\"b", "name": "n", "API_KEY":"k"}"#),
-            r#"{"clientSecret": "__SECRET__", "name": "n", "API_KEY":"__SECRET__"}"#
+            r#"{"clientSecret": "********", "name": "n", "API_KEY":"********"}"#
         );
     }
 
@@ -775,7 +958,7 @@ mod tests {
     fn vendor_api_key_is_scrubbed() {
         assert_eq!(
             scrub_patterns("got sk-proj-abcdefghij0123456789xyz"),
-            "got __SECRET__"
+            "got ********"
         );
     }
 
@@ -787,28 +970,45 @@ mod tests {
     }
 
     #[test]
-    fn tail_keeps_the_last_five_non_empty_lines() {
+    fn reply_keeps_every_non_empty_line() {
         let s = b"1\n2\n\n3\n4\n5\n6\n   \n7\n";
-        assert_eq!(tail_lines(s, false, 5), ["3", "4", "5", "6", "7"]);
+        assert_eq!(reply_lines(s, false), ["1", "2", "3", "4", "5", "6", "7"]);
     }
 
     #[test]
-    fn tail_drops_the_partial_first_line_of_a_truncated_buffer() {
-        assert_eq!(tail_lines(b"rtial\nwhole", true, 5), ["whole"]);
+    fn reply_drops_the_partial_first_line_of_a_truncated_buffer() {
+        assert_eq!(reply_lines(b"rtial\nwhole", true), ["whole"]);
     }
 
     #[test]
-    fn tail_strips_escape_sequences() {
-        assert_eq!(tail_lines(b"\x1b[31mred\x1b[0m\x07", false, 5), ["red"]);
+    fn reply_strips_escape_sequences() {
+        assert_eq!(reply_lines(b"\x1b[31mred\x1b[0m\x07", false), ["red"]);
     }
 
     #[test]
-    fn tail_cuts_long_lines() {
+    fn reply_keeps_long_lines_whole() {
         let long = "x".repeat(500);
-        assert_eq!(
-            tail_lines(long.as_bytes(), false, 5)[0].chars().count(),
-            LINE_CHARS + 1
+        assert_eq!(reply_lines(long.as_bytes(), false)[0].chars().count(), 500);
+    }
+
+    #[test]
+    fn a_registered_value_never_survives_in_any_line_of_a_long_reply() {
+        let mut stderr = String::from("[ERROR] 2026/10/16 10:00:00 request failed\n");
+        for i in 0..400 {
+            stderr.push_str(&format!("detail {i}: field holds VerboseMark-77x{i}\n"));
+        }
+        with_registry(|r| r.register("VerboseMark-77x"));
+        let lines = reply_lines(stderr.as_bytes(), false);
+        assert!(
+            !lines.iter().any(|l| l.contains("VerboseMark")),
+            "{lines:?}"
         );
+    }
+
+    #[test]
+    fn a_truncated_excerpt_says_so() {
+        let e = Excerpt::from_stderr("op", b"rtial\n[ERROR] whole\n", true).unwrap();
+        assert!(e.truncated);
     }
 
     #[test]
@@ -825,6 +1025,6 @@ mod tests {
     #[test]
     fn item_values_are_registered_for_scrubbing() {
         register_item_values(br#"{"fields":[{"label":"K","value":"itemValueQ7x"}]}"#);
-        assert_eq!(scrub("e itemValueQ7x"), "e __SECRET__");
+        assert_eq!(scrub("e itemValueQ7x"), "e ********");
     }
 }

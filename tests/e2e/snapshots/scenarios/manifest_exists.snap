@@ -1,0 +1,8 @@
+# manifest_exists: opv config import --vault e2e-manifest --project e2e-app
+
+## text exit: 2
+## text stdout
+
+## text stderr
+opv: a 1Password manifest named "opv · e2e-app" in vault e2e-manifest (iE2EMANIFEST00000000000001) already exists (the local copy is <SCENARIO>/project/secrets.toml)
+Next: opv config check --file <SCENARIO>/project/secrets.toml

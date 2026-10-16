@@ -236,19 +236,75 @@ fn a_flag_that_names_no_listed_account_is_reported_absent() {
     assert_eq!(r.findings[0].code, "selected_account_absent");
 }
 
+/// Audit 04.03 / 09.01: an absent account ID steps to adding it, never to `opv account list`
+/// (the command just run).
 #[test]
-fn an_absent_non_email_value_next_step_lists_the_accounts() {
+fn an_absent_account_id_next_step_adds_an_account_at_ops_prompt() {
     let d = Discovery::Listed(vec![owner()]);
     let r = report(&inputs(
         d,
-        Some("NOSUCHID"),
+        Some("TTDZ56BHZFH6VFAWGXNBFD3EWU"),
         None,
         None,
         None,
         Platform::Linux,
         &none_signed_in,
     ));
-    assert_eq!(r.findings[0].next.as_deref(), Some("opv account list"));
+    assert_eq!(r.findings[0].next.as_deref(), Some("opv login --add"));
+}
+
+/// Audit 09.01: the `.opv` that chose an absent account is named by its path.
+#[test]
+fn the_absent_finding_names_the_opv_file_by_its_path() {
+    let d = Discovery::Listed(vec![owner()]);
+    let path = Path::new("/work/repo/.opv");
+    let r = report(&inputs(
+        d,
+        None,
+        None,
+        Some(("TTDZ56BHZFH6VFAWGXNBFD3EWU", path)),
+        None,
+        Platform::Linux,
+        &none_signed_in,
+    ));
+    assert!(
+        r.findings[0].message.contains("/work/repo/.opv"),
+        "{}",
+        r.findings[0].message
+    );
+}
+
+/// Audit 04.07: where the 1Password app holds the accounts, an absent account is added in
+/// the app; the step is `opv login`, never `opv login --add`.
+#[test]
+fn an_absent_account_on_macos_steps_to_login_after_the_app() {
+    let d = Discovery::Listed(vec![owner()]);
+    let r = report(&inputs(
+        d,
+        Some("TTDZ56BHZFH6VFAWGXNBFD3EWU"),
+        None,
+        None,
+        None,
+        Platform::MacOs,
+        &none_signed_in,
+    ));
+    assert_eq!(r.findings[0].next.as_deref(), Some("opv login"));
+}
+
+/// Audit 04.07: no accounts on macOS are added in the app, not with `opv login --add`.
+#[test]
+fn the_no_accounts_next_step_on_macos_is_login_after_the_app() {
+    let d = Discovery::Listed(Vec::new());
+    let r = report(&inputs(
+        d,
+        None,
+        None,
+        None,
+        None,
+        Platform::MacOs,
+        &none_signed_in,
+    ));
+    assert_eq!(r.findings[0].next.as_deref(), Some("opv login"));
 }
 
 #[test]
@@ -675,76 +731,125 @@ fn checkout() -> tempfile::TempDir {
 
 #[test]
 fn an_email_matching_several_accounts_is_ambiguous() {
-    let err = use_account(&[twin_a(), twin_b()], "shared@example.com", Path::new(".")).unwrap_err();
-    assert_eq!(err.code(), crate::error::Code::AccountAmbiguous);
+    let err = use_account(
+        &[twin_a(), twin_b()],
+        "shared@example.com",
+        Path::new("."),
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(err.code_str(), "account_ambiguous");
 }
 
+/// The Next of a catalog error, rendered against `opv account use <who>`.
+fn next_of(err: &Error, who: &str) -> Option<String> {
+    let inv = crate::cause::Invocation::from_cli(&[
+        "opv".to_string(),
+        "account".to_string(),
+        "use".to_string(),
+        who.to_string(),
+    ]);
+    let (cause, _) = err.cause().expect("a catalog cause");
+    crate::cause::render::next_text(&cause.step(&inv).1, &inv)
+}
+
+fn message_of(err: &Error) -> String {
+    err.cause().expect("a catalog cause").0.message()
+}
+
+/// Audit 04.05: an ambiguous account is never resolved by recording the first candidate;
+/// the step lists the accounts for the person to pick from.
 #[test]
-fn an_ambiguous_error_next_step_uses_the_first_candidate_id() {
-    let err = use_account(&[twin_a(), twin_b()], "shared@example.com", Path::new(".")).unwrap_err();
+fn an_ambiguous_error_steps_to_the_account_listing_never_a_candidate() {
+    let err = use_account(
+        &[twin_a(), twin_b()],
+        "shared@example.com",
+        Path::new("."),
+        false,
+    )
+    .unwrap_err();
     assert_eq!(
-        err.next_step(),
-        Some("opv account use AAAA0000000000000000000001")
+        next_of(&err, "shared@example.com").as_deref(),
+        Some("opv account list")
     );
 }
 
 #[test]
-fn an_ambiguous_error_lists_each_candidate_id_and_address() {
-    let err = use_account(&[twin_a(), twin_b()], "shared@example.com", Path::new(".")).unwrap_err();
-    let msg = err.text();
+fn an_ambiguous_error_lists_each_candidate_id() {
+    let err = use_account(
+        &[twin_a(), twin_b()],
+        "shared@example.com",
+        Path::new("."),
+        false,
+    )
+    .unwrap_err();
+    let msg = message_of(&err);
     assert!(
-        msg.contains("AAAA0000000000000000000001")
-            && msg.contains("a.1password.com")
-            && msg.contains("BBBB0000000000000000000002")
-            && msg.contains("b.1password.com")
+        msg.contains("AAAA0000000000000000000001") && msg.contains("BBBB0000000000000000000002"),
+        "{msg}"
     );
-}
-
-#[test]
-fn an_ambiguous_error_never_names_the_shared_email() {
-    let err = use_account(&[twin_a(), twin_b()], "shared@example.com", Path::new(".")).unwrap_err();
-    assert!(!err.text().contains("shared@example.com"));
 }
 
 #[test]
 fn an_unknown_account_error_names_who() {
-    let err = use_account(&[owner()], "ghost@example.com", Path::new(".")).unwrap_err();
-    assert!(err.text().contains("ghost@example.com"));
+    let err = use_account(&[owner()], "ghost@example.com", Path::new("."), false).unwrap_err();
+    assert!(message_of(&err).contains("ghost@example.com"));
 }
 
 #[test]
 fn an_unknown_email_next_step_adds_that_account() {
-    let err = use_account(&[owner()], "new@example.com", Path::new(".")).unwrap_err();
+    let err = use_account(&[owner()], "new@example.com", Path::new("."), false).unwrap_err();
     assert_eq!(
-        err.next_step(),
+        next_of(&err, "new@example.com").as_deref(),
         Some("opv login --add --account new@example.com")
     );
 }
 
+/// Audit 04.03: an unknown account ID is added at op's prompt; `opv account list` cannot
+/// add it.
 #[test]
-fn an_unknown_non_email_next_step_lists_the_accounts() {
-    let err = use_account(&[owner()], "NOSUCHID", Path::new(".")).unwrap_err();
-    assert_eq!(err.next_step(), Some("opv account list"));
+fn an_unknown_account_id_next_step_adds_an_account() {
+    let err = use_account(
+        &[owner()],
+        "TTDZ56BHZFH6VFAWGXNBFD3EWU",
+        Path::new("."),
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(
+        next_of(&err, "TTDZ56BHZFH6VFAWGXNBFD3EWU").as_deref(),
+        Some("opv login --add")
+    );
+}
+
+/// Audit 04.07: where the app holds the accounts, the step is the app, then `opv login`.
+#[test]
+fn an_unknown_account_where_the_app_holds_accounts_steps_to_login() {
+    let err = use_account(&[owner()], "new@example.com", Path::new("."), true).unwrap_err();
+    assert_eq!(
+        next_of(&err, "new@example.com").as_deref(),
+        Some("opv login")
+    );
 }
 
 #[test]
 fn one_match_returns_the_account_id() {
     let dir = checkout();
-    let outcome = use_account(&[owner(), other()], "owner@example.com", dir.path()).unwrap();
+    let outcome = use_account(&[owner(), other()], "owner@example.com", dir.path(), false).unwrap();
     assert_eq!(outcome.account_id, "AAAA0000000000000000000001");
 }
 
 #[test]
 fn one_match_writes_the_pointer_at_the_repository_root() {
     let dir = checkout();
-    let outcome = use_account(&[owner(), other()], "owner@example.com", dir.path()).unwrap();
+    let outcome = use_account(&[owner(), other()], "owner@example.com", dir.path(), false).unwrap();
     assert_eq!(outcome.path, dir.path().join(".opv"));
 }
 
 #[test]
 fn the_recorded_pointer_names_the_account_id() {
     let dir = checkout();
-    let _ = use_account(&[owner(), other()], "owner@example.com", dir.path()).unwrap();
+    let _ = use_account(&[owner(), other()], "owner@example.com", dir.path(), false).unwrap();
     let text = std::fs::read_to_string(dir.path().join(".opv")).unwrap();
     assert!(text.contains("AAAA0000000000000000000001"));
 }
@@ -752,7 +857,13 @@ fn the_recorded_pointer_names_the_account_id() {
 #[test]
 fn use_account_matches_a_sign_in_address() {
     let dir = checkout();
-    let outcome = use_account(&[owner(), other()], "my-team.1password.com", dir.path()).unwrap();
+    let outcome = use_account(
+        &[owner(), other()],
+        "my-team.1password.com",
+        dir.path(),
+        false,
+    )
+    .unwrap();
     assert_eq!(outcome.account_id, "AAAA0000000000000000000001");
 }
 
@@ -815,8 +926,8 @@ fn a_selection_matching_several_accounts_is_ambiguous_not_absent() {
 #[test]
 fn using_an_unknown_account_says_it_is_not_registered() {
     let dir = tempfile::tempdir().unwrap();
-    let e = use_account(&two_at_one_address(), "nobody@x.example", dir.path()).unwrap_err();
-    assert_eq!(e.code(), Code::AccountNotRegistered);
+    let e = use_account(&two_at_one_address(), "nobody@x.example", dir.path(), false).unwrap_err();
+    assert_eq!(e.code_str(), "account_not_registered");
 }
 
 // --- #142: two accounts on one sign-in address, and session variables in the shell ---
@@ -941,8 +1052,12 @@ fn the_shared_address_finding_has_no_login_step() {
 /// #157: account_not_registered exits 7 (auth), as its code says.
 #[test]
 fn an_unknown_account_error_exits_as_its_code_says() {
-    let err = use_account(&[owner()], "ghost@example.com", Path::new(".")).unwrap_err();
-    assert_eq!(err.exit_code(), err.code().exit_code());
+    let err = use_account(&[owner()], "ghost@example.com", Path::new("."), false).unwrap_err();
+    assert!(
+        crate::cause::codes::table()
+            .iter()
+            .any(|r| r.code == err.code_str() && r.exits.contains(&err.exit_code()))
+    );
 }
 
 #[test]
@@ -963,4 +1078,110 @@ fn accounts_on_different_addresses_are_not_reported_as_shared() {
 #[test]
 fn a_bare_op_session_variable_is_stale() {
     assert!(codes(&shared(&["OP_SESSION"])).contains(&"stale_session_variable"));
+}
+
+// --- error-catalog lane: account findings and routes (audit 04.05, 04.07, 04.08, 04.17) ---
+
+fn shared_address_selected() -> Report {
+    report(&inputs(
+        Discovery::Listed(two_at_one_address()),
+        Some("my.1password.com"),
+        None,
+        None,
+        None,
+        Platform::Linux,
+        &none_signed_in,
+    ))
+}
+
+/// Audit 04.05: an ambiguous selection never steps to `opv account use <first candidate>`.
+#[test]
+fn an_ambiguous_selection_has_no_runnable_step() {
+    assert_eq!(shared_address_selected().findings[0].next, None);
+}
+
+/// Audit 04.05: each candidate is named by its email, so the person can tell them apart.
+#[test]
+fn an_ambiguous_selection_names_each_candidate_by_email() {
+    let message = shared_address_selected().findings[0].message.clone();
+    assert!(
+        message.contains("a@x.example") && message.contains("b@x.example"),
+        "{message}"
+    );
+}
+
+/// Audit 04.17: the Windows `op.exe` in WSL lists the Windows app's accounts.
+#[test]
+fn the_windows_op_in_wsl_is_not_cli_accounts_only() {
+    let r = report_with(
+        &inputs(
+            Discovery::Listed(vec![owner()]),
+            None,
+            None,
+            None,
+            None,
+            Platform::Wsl,
+            &none_signed_in,
+        ),
+        true,
+    );
+    assert!(!r.cli_accounts_only);
+}
+
+/// Audit 04.17: with the Windows `op.exe`, the note names the Windows app as the source.
+#[test]
+fn the_text_says_the_windows_op_lists_the_windows_apps_accounts() {
+    let r = report_with(
+        &inputs(
+            Discovery::Listed(vec![owner()]),
+            None,
+            None,
+            None,
+            None,
+            Platform::Wsl,
+            &none_signed_in,
+        ),
+        true,
+    );
+    assert!(text(&r).contains("Accounts come from the Windows 1Password app"));
+}
+
+/// Audit 04.08: a failed session probe may be an app that has not approved this terminal
+/// yet; the finding says so instead of claiming the person is signed out.
+#[test]
+fn a_signed_out_finding_mentions_the_apps_prompt() {
+    let signed_out = |_id: &str| Some(false);
+    let r = report(&inputs(
+        Discovery::Listed(vec![owner()]),
+        None,
+        None,
+        None,
+        None,
+        Platform::Linux,
+        &signed_out,
+    ));
+    assert!(
+        r.findings[0].message.contains("approve its prompt"),
+        "{}",
+        r.findings[0].message
+    );
+}
+
+/// Audit 04.02: a value without `@` is never an email for `op account add --email`.
+#[test]
+fn an_account_id_is_named_as_an_id() {
+    assert_eq!(
+        account_ref("TTDZ56BHZFH6VFAWGXNBFD3EWU"),
+        AccountRef::Id(AccountId::new("TTDZ56BHZFH6VFAWGXNBFD3EWU"))
+    );
+}
+
+/// Snapshot review A: with op not installed there is no list to report; the command fails
+/// with the missing dependency (exit 3), never a list with a finding and exit 0.
+#[test]
+fn account_list_without_op_is_a_missing_dependency() {
+    let r = crate::runner::fake::FakeRunner::default();
+    r.push_io_error(std::io::ErrorKind::NotFound);
+    let code = list(&r, None, true, &mut Vec::new()).map_err(|e| e.code_str());
+    assert_eq!(code, Err("dependency_missing"));
 }

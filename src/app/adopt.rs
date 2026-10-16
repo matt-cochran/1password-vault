@@ -12,10 +12,11 @@ use std::path::PathBuf;
 
 use super::write_err;
 use crate::adapters::{onepassword, onepassword_tidy};
+use crate::cause::{Cause, Cmd, FieldName, Guard, ItemId, NameKind, UsageProblem, VaultId};
 use crate::domain::adopt::{Action, AdoptPlan};
 use crate::domain::convention::{self, KEPT_SECTION, Op, TidyPlan};
 use crate::domain::{Boundary, Fleet, Kind, SecretValue, key_label};
-use crate::error::{Code, Error};
+use crate::error::Error;
 use crate::ports::Ports;
 use crate::runner::CommandRunner;
 
@@ -45,21 +46,45 @@ pub fn source_from(fleet: &Fleet, env_name: &str, from: &str) -> Result<Source, 
     Ok(Source::Dotenv(PathBuf::from(from)))
 }
 
-/// The usage error for the removed bare `--from target` (FR-60): it names the environment's
-/// targets and the one form that works, `--from target:<name>`.
+/// The usage error for the removed bare `--from target` (FR-60): with one target, the same
+/// command with `--from target:<name>` (every other flag kept); with several, the person
+/// picks one of the `target:<name>` forms (never a guessed first target, X2).
 fn bare_target(fleet: &Fleet, env_name: &str) -> Error {
-    match super::resolve_targets(fleet, env_name, &[], "adopt") {
-        Ok(names) => Error::Config(
-            format!(
-                "--from target needs a target's name; write --from target:<name> \
-                 (targets: {})",
-                names.join(", ")
-            )
-            .into(),
-        )
-        .with_code(Code::Usage)
-        .with_next(format!("opv adopt {env_name} --from target:{}", names[0])),
-        Err(e) => e,
+    let names = match super::resolve_targets(fleet, env_name, &[], "adopt") {
+        Ok(names) => names,
+        Err(e) => return e,
+    };
+    let forms: Vec<String> = names.iter().map(|n| format!("target:{n}")).collect();
+    match forms.as_slice() {
+        [only] => Cause::Usage {
+            problem: UsageProblem::UseInstead {
+                command: with_named_target(env_name, only),
+            },
+        }
+        .into(),
+        _ => Cause::ChoiceRequired {
+            flag: "--from".into(),
+            candidates: forms,
+        }
+        .into(),
+    }
+}
+
+/// The person's own `opv adopt` with its bare `--from target` replaced by `form`, every
+/// other flag kept; the plain `opv adopt <env> --from <form>` when the command line does
+/// not show that word (an MCP call, `--from=target`).
+fn with_named_target(env_name: &str, form: &str) -> Cmd {
+    let inv = crate::error::invocation();
+    let changed = inv.with_arg("target", form);
+    if inv.command == ["adopt"] && changed.args.iter().any(|a| a == form) {
+        return Cmd {
+            command: changed.command,
+            args: changed.args,
+        };
+    }
+    Cmd {
+        command: vec!["adopt".into()],
+        args: vec![env_name.to_string(), "--from".into(), form.to_string()],
     }
 }
 
@@ -77,7 +102,8 @@ pub struct Opts {
     pub json: bool,
 }
 
-/// `product/KEY` entries as `(product, key)` pairs, each declared.
+/// `product/KEY` entries as `(product, key)` pairs, each declared: a malformed entry is a
+/// usage error, an undeclared one `NotDeclared` naming the declared keys (05.39).
 fn pairs(
     fleet: &Fleet,
     entries: &[String],
@@ -86,24 +112,32 @@ fn pairs(
     entries
         .iter()
         .map(|e| {
-            let (p, k) = match e.split_once('/') {
-                Some((p, k)) => (p.to_string(), k.to_string()),
-                None => {
-                    return Err(Error::Config(
-                        format!("{flag} {e:?}: write product/KEY").into(),
-                    ));
+            let Some((p, k)) = e.split_once('/') else {
+                return Err(Cause::Usage {
+                    problem: UsageProblem::ValueFormat {
+                        flag: flag.to_string(),
+                        format: "<product>/<KEY>",
+                    },
                 }
+                .into());
             };
             if fleet
                 .products
-                .get(&p)
-                .is_none_or(|prod| !prod.keys.contains_key(&k))
+                .get(p)
+                .is_none_or(|prod| !prod.keys.contains_key(k))
             {
-                return Err(Error::Config(
-                    format!("{flag} {e:?}: not a declared key").into(),
+                let declared: Vec<String> = fleet
+                    .products
+                    .iter()
+                    .flat_map(|(p, prod)| prod.keys.keys().map(move |k| key_label(p, k)))
+                    .collect();
+                return Err(super::not_declared(
+                    NameKind::Key,
+                    e,
+                    declared.iter().map(String::as_str),
                 ));
             }
-            Ok((p, k))
+            Ok((p.to_string(), k.to_string()))
         })
         .collect()
 }
@@ -120,7 +154,6 @@ fn read_source(
         Source::Dotenv(path) => super::setup::read_legacy(path),
         Source::Target(name) => {
             let (t, ports) = super::open_target(fleet, env_name, name, r)?;
-            let label = t.provider().label();
             match &ports {
                 Ports::Pinned { store, .. } => {
                     let mut found = BTreeMap::new();
@@ -137,20 +170,13 @@ fn read_source(
                         .into_iter()
                         .map(|(n, val)| (n, SecretValue::new(val)))
                         .collect()),
-                    None => Err(Error::Policy(
-                        format!(
-                            "{label} never shows a stored secret's value, so opv cannot adopt \
-                             from it; nothing was read"
-                        )
-                        .into(),
-                    )
-                    .with_code(Code::PolicyRefused)
-                    .with_do(format!(
-                        "put the values in a private dotenv file (chmod 600) from where you \
-                         keep them today, or type them in 1Password; {label} keeps working \
-                         with its current secrets until you sync"
-                    ))
-                    .with_next(format!("opv adopt {env_name} --from <file.env>"))),
+                    // 05.03: the guard's own step, never this same command again.
+                    None => Err(Cause::Guard {
+                        guard: Guard::ProviderHidesValues {
+                            system: crate::provider::system_of(t.provider()),
+                        },
+                    }
+                    .into()),
                 },
             }
         }
@@ -174,6 +200,7 @@ pub fn run(
         &opts.source,
         (&replace, &rotate, &skip),
         opts.apply,
+        &apply_command(env_name, opts),
         r,
     )?;
     print(out, env_name, opts, &plan)
@@ -194,6 +221,7 @@ fn plan_skipping(
     source: &Source,
     (replace, rotate, skip): KeySets<'_>,
     apply: bool,
+    by: &Cmd,
     r: &dyn CommandRunner,
 ) -> Result<AdoptPlan, Error> {
     let mut plan = plan_and_write(fleet, env_name, source, replace, rotate, false, r)?;
@@ -211,7 +239,7 @@ fn plan_skipping(
     if apply {
         super::tidy::require_person(r, "opv adopt --apply")?;
         if !plan.writes.is_empty() {
-            write(fleet, fleet.environment(env_name)?, &plan, r)?;
+            write(fleet, fleet.environment(env_name)?, by, &plan, r)?;
         }
     }
     Ok(plan)
@@ -237,29 +265,46 @@ pub fn plan_and_write(
     let read = super::tidy::read(fleet, env_name, r)?;
     let plan = crate::domain::adopt::plan(fleet, env_name, &read.fields, &found, replace, rotate);
     if apply && !plan.writes.is_empty() {
-        write(fleet, env, &plan, r)?;
+        write(fleet, env, &plan_command(&env.name, source), &plan, r)?;
     }
     Ok(plan)
 }
 
 /// Write `plan.writes` in one item edit per boundary item (FR-57), each value into its
 /// key's boundary, keeping a replaced value in `opv · kept`, then read each item back and
-/// verify every written field holds what was written.
+/// verify every written field holds what was written. `by` is the command that wrote,
+/// named by a read-back failure as the one to run again.
 fn write(
     fleet: &Fleet,
     env: &crate::domain::Environment,
+    by: &Cmd,
     plan: &AdoptPlan,
     r: &dyn CommandRunner,
 ) -> Result<(), Error> {
-    write_values(fleet, env, &plan.writes, r)
+    write_values(fleet, env, &plan.writes, by, r)
+}
+
+/// The adoption plan's own read, `adopt <env> --from <source>` (without `--apply`): after
+/// a write it shows what is in 1Password now and what remains (05.10).
+fn plan_command(env_name: &str, source: &Source) -> Cmd {
+    let from = match source {
+        Source::Dotenv(p) => p.display().to_string(),
+        Source::Target(name) => format!("target:{name}"),
+    };
+    Cmd {
+        command: vec!["adopt".into()],
+        args: vec![env_name.to_string(), "--from".into(), from],
+    }
 }
 
 /// Write `writes` (product, key, value) into their boundary items, one verified edit per
-/// item (shared with `opv generate`, 0.9.0).
+/// item (shared with `opv generate`, 0.9.0). `by` is the command that wrote, named by a
+/// read-back failure as the one to run again.
 pub(crate) fn write_values(
     fleet: &Fleet,
     env: &crate::domain::Environment,
     writes: &[(String, String, SecretValue)],
+    by: &Cmd,
     r: &dyn CommandRunner,
 ) -> Result<(), Error> {
     let mut by_boundary: BTreeMap<&str, Vec<&(String, String, SecretValue)>> = BTreeMap::new();
@@ -272,7 +317,7 @@ pub(crate) fn write_values(
     for (name, writes) in by_boundary {
         let b = fleet.boundary(&env.name, &writes[0].0)?;
         let part = super::tidy::in_boundary(fleet, name);
-        write_item(&part, env, b, &writes, r)?;
+        write_item(&part, env, b, &writes, by, r)?;
     }
     Ok(())
 }
@@ -283,6 +328,7 @@ fn write_item(
     env: &crate::domain::Environment,
     b: &Boundary,
     writes: &[&(String, String, SecretValue)],
+    by: &Cmd,
     r: &dyn CommandRunner,
 ) -> Result<(), Error> {
     let item = onepassword::read_whole_fresh(r, env, b)?;
@@ -333,7 +379,7 @@ fn write_item(
     let after = onepassword::read_whole_fresh(r, env, b)?;
     let (layout, _) = onepassword_tidy::parse(after.raw())?;
     let res = convention::resolve(&layout, fleet);
-    let missing: Vec<String> = writes
+    let missing: Vec<FieldName> = writes
         .iter()
         .copied()
         .filter(|(p, k, v)| {
@@ -341,19 +387,55 @@ fn write_item(
                 .get(&(p.clone(), k.clone()))
                 .is_none_or(|&i| layout.fields[i].value.expose() != v.expose())
         })
-        .map(|(p, k, _)| key_label(p, k))
+        .map(|(p, k, _)| FieldName::new(key_label(p, k)))
         .collect();
     if !missing.is_empty() {
-        return Err(Error::Unknown(
-            format!(
-                "1Password does not show what opv adopt wrote for {}; re-run the same command \
-                 to retry (the plan is recomputed from what is there)",
-                missing.join(", ")
-            )
-            .into(),
-        ));
+        // 05.10: the command that wrote is named, not always `opv adopt`.
+        return Err(Cause::ReadBackMissing {
+            vault: VaultId::new(&b.vault_id),
+            item: ItemId::new(&b.item_id),
+            fields: missing,
+            by: by.clone(),
+        }
+        .into());
     }
     Ok(())
+}
+
+/// The plan's next step (design §10.1): `opv ready <env>` once applied or when nothing is
+/// to write, else the writing command, so the apply writes no more than was reviewed (05.04).
+fn next_step(env_name: &str, opts: &Opts, writes: usize) -> Cmd {
+    if opts.apply || writes == 0 {
+        return Cmd {
+            command: vec!["ready".into()],
+            args: vec![env_name.to_string()],
+        };
+    }
+    apply_command(env_name, opts)
+}
+
+/// The writing command (05.04): this same review with `--apply`, keeping every
+/// `--replace`, `--rotate` and `--skip` it was made with.
+fn apply_command(env_name: &str, opts: &Opts) -> Cmd {
+    let from = match &opts.source {
+        Source::Dotenv(p) => p.display().to_string(),
+        Source::Target(name) => format!("target:{name}"),
+    };
+    let mut args = vec![env_name.to_string(), "--from".into(), from];
+    for (flag, entries) in [
+        ("--replace", &opts.replace),
+        ("--rotate", &opts.rotate),
+        ("--skip", &opts.skip),
+    ] {
+        for e in entries {
+            args.extend([flag.to_string(), e.clone()]);
+        }
+    }
+    args.push("--apply".into());
+    Cmd {
+        command: vec!["adopt".into()],
+        args,
+    }
 }
 
 /// Text: a count line, one line per row (names and the action word), the next step.
@@ -366,20 +448,7 @@ fn print(out: &mut dyn Write, env_name: &str, opts: &Opts, plan: &AdoptPlan) -> 
     let count = |a: fn(&Action) -> bool| plan.rows.iter().filter(|r| a(&r.action)).count();
     let writes = plan.writes.len();
     let decide = count(|a| matches!(a, Action::Differs | Action::Conflict | Action::Ambiguous));
-    let next = if opts.apply || writes == 0 {
-        format!("opv ready {env_name}")
-    } else {
-        let mut c = format!("opv adopt {env_name}");
-        match &opts.source {
-            Source::Dotenv(p) => c.push_str(&format!(" --from {}", p.display())),
-            Source::Target(name) => c.push_str(&format!(" --from target:{name}")),
-        }
-        for e in &opts.replace {
-            c.push_str(&format!(" --replace {e}"));
-        }
-        c.push_str(" --apply");
-        c
-    };
+    let next = crate::cause::render::cmd_text(&next_step(env_name, opts, writes));
     if opts.json {
         let rows: Vec<serde_json::Value> = plan
             .rows

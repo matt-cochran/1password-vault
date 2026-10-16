@@ -17,12 +17,13 @@
 //! (SR-3); outputs that could echo a value are never requested (`-o name` on writes, jsonpath
 //! names and labels on lists, K1/K2).
 //!
-//! A failing call is diagnosed read-only (FR-26, K6): `kubectl config get-contexts <ctx> -o
-//! name` (fails ⇒ the context is missing, [`Error::Config`]), then `kubectl --context <ctx>
-//! version --request-timeout=5s` (fails ⇒ the cluster is unreachable, [`Error::Unknown`],
-//! exit 9, NR-28); otherwise the step itself was refused ([`Error::Target`]).
+//! A failing call is classified by the kubectl strategy ([`diagnose`], design §5) from what
+//! the runner observed and kubectl's reply; only when it cannot tell, `kubectl --context
+//! <ctx> version --request-timeout=5s` (read-only, FR-26, K6) says whether the API server
+//! answers at all.
 
 pub mod config;
+pub mod diagnose;
 pub mod external;
 pub mod runtime;
 pub mod store;
@@ -37,11 +38,14 @@ use std::io;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::cause::{
+    Cause, DiagnoseContext, DottedPath, EnvName, ExitClass, GrantModel, NamedBy, Observed,
+    ResourceKind, ResourceName, ResourceRef, System, Unanswered, Upstream,
+};
 use crate::error::Error;
 use crate::host::{Host, Tool};
 use crate::runner::{
-    Call, CommandRunner, Outcome, Output, PROBE_TIMEOUT, READ_TIMEOUT, WRITE_TIMEOUT, status_text,
-    unknown_text,
+    Call, CommandRunner, Outcome, Output, PROBE_TIMEOUT, READ_TIMEOUT, WRITE_TIMEOUT,
 };
 
 pub use config::{ConfigRoute, KubernetesTarget, PROVIDER};
@@ -109,19 +113,142 @@ pub struct KubeTarget {
     pub env: String,
 }
 
-/// The API server for `ctx` answered 401 (kubectl: "You must be logged in to the
-/// server"): the kubeconfig's credentials for it are missing or expired, which only a new
-/// sign-in fixes. `failed` says what failed and what is known about the change.
-pub(crate) fn unauthorized(ctx: &str, failed: &str) -> Error {
-    Error::Auth(
-        format!(
-            "the Kubernetes API server for context \"{ctx}\" refused your credentials \
-             (Unauthorized: missing or expired); {failed}\n  sign in to the cluster again (your \
-             provider's credentials command, such as az aks get-credentials or gcloud container \
-             clusters get-credentials)"
-        )
-        .into(),
-    )
+impl KubeTarget {
+    /// The Deployment opv binds, as a catalog subject. Its scope is the namespace's name,
+    /// which a step passes to `kubectl --namespace` as it is (never display words).
+    pub(crate) fn deployment_ref(&self) -> ResourceRef {
+        ResourceRef {
+            kind: ResourceKind::Deployment,
+            name: ResourceName::new(self.deployment.clone()),
+            scope: Some(self.namespace.clone()),
+        }
+    }
+
+    /// The ExternalSecret `name` in this target's namespace, as a catalog subject.
+    pub(crate) fn external_ref(&self, name: &str) -> ResourceRef {
+        ResourceRef {
+            kind: ResourceKind::ExternalStore,
+            name: ResourceName::new(name),
+            scope: Some(self.namespace.clone()),
+        }
+    }
+
+    /// The namespace (where opv's Secrets live), as a catalog subject.
+    pub(crate) fn namespace_ref(&self) -> ResourceRef {
+        ResourceRef {
+            kind: ResourceKind::Namespace,
+            name: ResourceName::new(self.namespace.clone()),
+            scope: Some(format!("context {}", self.context)),
+        }
+    }
+}
+
+/// The configuration field (`kubernetes.<field>`) that names a resource.
+fn field(name: &str) -> NamedBy {
+    NamedBy::ConfigField {
+        path: DottedPath(vec!["kubernetes".into(), name.into()]),
+    }
+}
+
+/// A failed kubectl call as the kubectl strategy ([`diagnose::diagnose`]) classified it:
+/// the cause, what the runner observed, and the call's scrubbed reply for the evidence box.
+pub(crate) struct Failed {
+    pub cause: Cause,
+    pub seen: Observed,
+    said: Vec<String>,
+    truncated: bool,
+}
+
+impl Failed {
+    /// Classify the kubectl call that just failed on this thread (made for environment
+    /// `env`). Phrases match the call's reply; it leaves opv only through the scrubbed
+    /// evidence box, never in opv's own words (SR-1).
+    pub(crate) fn take(env: &str, effect: Effect) -> Result<Failed, Error> {
+        // A runner that reported the call unanswered without observing it (an in-memory
+        // double) has it recorded as lost: its outcome is only unknown (NR-2).
+        let Some(failed) =
+            crate::runner::take_failure().or_else(|| crate::host::lost_call(PROGRAM))
+        else {
+            return Err(Cause::Bug {
+                site: "kubernetes: a failed kubectl call left no observation",
+            }
+            .into());
+        };
+        let ctx = DiagnoseContext {
+            env: Some(EnvName::new(env)),
+            write: effect == Effect::Write,
+            ..Default::default()
+        };
+        let cause = diagnose::diagnose(failed.seen.clone(), failed.stderr(), &ctx);
+        let (said, truncated) = crate::scrub::Excerpt::parts(failed.excerpt);
+        Ok(Failed {
+            cause,
+            seen: failed.seen,
+            said,
+            truncated,
+        })
+    }
+
+    /// Name the target's own subjects: a missing namespace or Deployment points at the
+    /// configuration field that names it (`kubernetes.namespace`, `kubernetes.deployment`),
+    /// and a write's unknown outcome is about `about`.
+    pub(crate) fn name_subjects(&mut self, t: &KubeTarget, about: ResourceRef) {
+        match &mut self.cause {
+            Cause::NotFound {
+                resource, named_by, ..
+            } => match resource.kind {
+                ResourceKind::Namespace => {
+                    *named_by = field("namespace");
+                    resource.scope = Some(format!("context {}", t.context));
+                }
+                ResourceKind::Deployment => {
+                    *named_by = field("deployment");
+                    resource.scope = Some(t.namespace.clone());
+                }
+                ResourceKind::KubeContext => *named_by = field("context"),
+                _ => {}
+            },
+            Cause::WriteOutcomeUnknown { subject, .. } => *subject = about,
+            // The refused right is on this target's Deployment or in its namespace; `auth
+            // can-i` answers "no" without naming the namespace it asked about.
+            Cause::MissingRight {
+                resource,
+                grant:
+                    GrantModel::K8sRbac {
+                        resource: kind,
+                        namespace,
+                        ..
+                    },
+                ..
+            } => {
+                namespace.get_or_insert_with(|| t.namespace.clone());
+                *resource = if kind.starts_with("deployments") {
+                    t.deployment_ref()
+                } else {
+                    t.namespace_ref()
+                };
+            }
+            _ => {}
+        }
+    }
+
+    /// The error, with kubectl's reply as untrusted evidence when it wrote one.
+    pub(crate) fn into_error(self) -> Error {
+        if self.said.is_empty() {
+            return self.cause.into();
+        }
+        let up = Upstream {
+            source: System::Kubernetes,
+            tool: PROGRAM.to_string(),
+            version: None,
+            exit: self.seen.exit(),
+            said: self.said,
+            truncated: self.truncated,
+            removed_advice: false,
+            untrusted: true,
+        };
+        Error::with_evidence(self.cause, up)
+    }
 }
 
 /// The store name for an env name: lower case, `_` → `-` (`FLEET__API__DB_URL` →
@@ -133,12 +260,13 @@ pub fn store_name(env_name: &str) -> String {
 /// A fresh version id: [`VERSION_LEN`] base32 characters from the OS RNG. It is never
 /// derived from the value, so a Secret's name is no fingerprint of it (FR-38, SR-1).
 pub fn new_version() -> Result<String, Error> {
-    let mut bits =
-        getrandom::u64().map_err(|e| {
-            Error::Dependency(format!(
-            "the operating system's random number generator failed ({e}); nothing was written"
-        ).into())
-        })?;
+    let mut bits = getrandom::u64().map_err(|_| {
+        Error::from(Cause::LocalIo {
+            op: crate::cause::LocalOp::RandomSource,
+            path: std::path::PathBuf::new(),
+            io: crate::cause::IoKind::Other,
+        })
+    })?;
     let mut id = String::with_capacity(VERSION_LEN);
     for _ in 0..VERSION_LEN {
         id.push(char::from(ID_ALPHABET[(bits & 31) as usize]));
@@ -178,24 +306,66 @@ pub(crate) fn digest_hex(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
 }
 
-/// Parse `out` as JSON; serde messages can quote input, so report the position only.
+/// Parse `out` as JSON (`what`: the kubectl call's words); a reply opv cannot read is
+/// `UnexpectedOutput` at its position (serde messages can quote input, so never them).
 pub(crate) fn parse_json(out: &Output, what: &str) -> Result<Value, Error> {
     serde_json::from_slice(&out.stdout).map_err(|e| {
-        Error::Target(
-            format!(
-                "{what} returned unexpected JSON (line {}, column {})",
-                e.line(),
-                e.column()
-            )
-            .into(),
+        let at = crate::cause::Location {
+            line: u32::try_from(e.line()).unwrap_or(u32::MAX),
+            col: u32::try_from(e.column()).unwrap_or(u32::MAX),
+        };
+        unusable_reply(
+            what,
+            Some(at),
+            crate::cause::OutputProblem::Unparseable,
+            crate::cause::During::Read,
         )
     })
 }
 
 /// stdout as UTF-8 text (jsonpath outputs: names and labels only).
 pub(crate) fn text<'o>(out: &'o Output, what: &str) -> Result<&'o str, Error> {
-    std::str::from_utf8(&out.stdout)
-        .map_err(|_| Error::Target(format!("{what} returned output that is not UTF-8").into()))
+    std::str::from_utf8(&out.stdout).map_err(|_| {
+        unusable_reply(
+            what,
+            None,
+            crate::cause::OutputProblem::Unparseable,
+            crate::cause::During::Read,
+        )
+    })
+}
+
+/// The kubectl call `what` (its words, `kubectl get deployment api`) answered with a reply
+/// opv cannot use (A1): `UnexpectedOutput` on the runner's own observation of that call.
+pub(crate) fn unusable_reply(
+    what: &str,
+    at: Option<crate::cause::Location>,
+    problem: crate::cause::OutputProblem,
+    during: crate::cause::During,
+) -> Error {
+    unusable(what, |seen| Cause::UnexpectedOutput {
+        system: System::Kubernetes,
+        at,
+        problem,
+        during,
+        seen,
+    })
+}
+
+/// `cause` built on the runner's own observation of the kubectl call `what`, which answered
+/// (design §4.6, A1).
+pub(crate) fn unusable(what: &str, cause: impl FnOnce(Observed) -> Cause) -> Error {
+    let words: Vec<&str> = what
+        .split_whitespace()
+        .skip_while(|w| *w == PROGRAM)
+        .collect();
+    match crate::runner::take_unusable_reply(&Call::new(PROGRAM, &words)) {
+        Some(seen) => cause(seen).into(),
+        None => Cause::Bug {
+            site: "kubernetes: a kubectl reply the runner did not observe",
+        }
+        .into(),
+    }
 }
 
 /// Read or write: decides retry (the runner's) and what a failure means (NR-2).
@@ -276,99 +446,76 @@ impl<'a> Kubectl<'a> {
         what: &str,
         args: &[&str],
         stdin: Option<&[u8]>,
-        hint: &str,
     ) -> Result<Output, Error> {
         match self.call(effect, what, args, stdin, &[])? {
             Outcome::Done(out) => Ok(out),
-            other => Err(self.fail(effect, what, other, hint)),
+            _ => Err(self.fail(effect)),
         }
     }
 
-    /// The typed error for a call that did not succeed (NR-2, NR-28, FR-26).
-    pub fn fail(&self, effect: Effect, what: &str, outcome: Outcome, hint: &str) -> Error {
-        let why = match outcome {
-            Outcome::Done(_) => return Error::Target(format!("{what}: unexpected success").into()),
-            Outcome::Refused(out) => status_text(out.status),
-            Outcome::Unknown {
-                status: Some(status),
-                ..
-            } => status_text(status),
-            Outcome::Unknown { reason, .. } => unknown_text(PROGRAM, reason),
-        };
-        self.diagnose(effect, what, &why, hint)
+    /// The typed error for the call that just did not succeed (design §5). A write's
+    /// unknown outcome is about the target's namespace (where its Secrets live).
+    pub fn fail(&self, effect: Effect) -> Error {
+        self.explain(self.failed(effect), effect, self.target.namespace_ref())
     }
 
-    /// Read-only diagnosis of a failed step (K6): missing context ⇒ `Config`; unreachable
-    /// API server ⇒ `Unknown` (exit 9, "provider unavailable", NR-28); otherwise the step
-    /// itself was refused ⇒ `Target` naming the next command. A failed write whose cause
-    /// cannot be told is `Unknown` (it may have been applied).
-    pub fn diagnose(&self, effect: Effect, what: &str, why: &str, hint: &str) -> Error {
-        // The probes explain the failed call; its excerpt stays with the error (NR-31).
-        crate::runner::diagnosing(|| self.diagnose_failure(effect, what, why, hint))
+    /// Take the failed call's observation now, before a read-back that reconciles it
+    /// (NR-2) makes calls of its own; [`Self::explain`] turns it into the error later.
+    pub fn failed(&self, effect: Effect) -> Result<Failed, Error> {
+        Failed::take(&self.target.env, effect)
     }
 
-    fn diagnose_failure(&self, effect: Effect, what: &str, why: &str, hint: &str) -> Error {
-        let t = self.target;
-        let ctx = t.context.as_str();
-        let contexts = ["config", "get-contexts", ctx, "-o", "name"];
-        match self.probe(&contexts) {
-            Err(e) => return e,
-            Ok(Some(o)) if o.status != 0 => {
-                return Error::Config(
-                    format!(
-                        "kubectl context \"{ctx}\" is not in your kubeconfig ({what} failed); \
-                     nothing was changed\n  next: kubectl config get-contexts"
-                    )
-                    .into(),
-                );
+    /// The error for a failure taken by [`Self::failed`]. The probe explains the failed
+    /// call; its reply stays with the error (NR-31).
+    pub fn explain(
+        &self,
+        failed: Result<Failed, Error>,
+        effect: Effect,
+        about: ResourceRef,
+    ) -> Error {
+        match failed {
+            Ok(f) => crate::runner::diagnosing(|| self.diagnose_failure(f, effect, about)),
+            Err(e) => e,
+        }
+    }
+
+    /// The kubectl strategy ([`diagnose::diagnose`]) classifies the failed call from what
+    /// the runner observed and its own reply. Only when it cannot tell does opv ask the API
+    /// server for its version: no answer means the server is unreachable (a read is
+    /// unavailable, a write's outcome unknown).
+    fn diagnose_failure(&self, mut failed: Failed, effect: Effect, about: ResourceRef) -> Error {
+        if matches!(failed.cause, Cause::Unrecognized { .. })
+            && matches!(failed.seen.exit(), ExitClass::Code { .. })
+        {
+            let version = [
+                "--context",
+                self.target.context.as_str(),
+                "version",
+                "--request-timeout=5s",
+            ];
+            match self.probe(&version) {
+                Err(e) => return e,
+                Ok(Some(o)) if o.status != 0 => {
+                    let seen = failed.seen.clone();
+                    failed.cause = match effect {
+                        Effect::Read => Cause::Unavailable {
+                            system: System::Kubernetes,
+                            why: Unanswered::Network,
+                            attempts: seen.attempts(),
+                            seen,
+                        },
+                        Effect::Write => Cause::WriteOutcomeUnknown {
+                            system: System::Kubernetes,
+                            subject: about.clone(),
+                            seen,
+                        },
+                    };
+                }
+                Ok(_) => {}
             }
-            _ => {}
         }
-        let version = ["--context", ctx, "version", "--request-timeout=5s"];
-        let reachable = matches!(self.probe(&version), Ok(Some(o)) if o.status == 0);
-        let preserved = match effect {
-            Effect::Read => "nothing was changed by this step",
-            Effect::Write => "the change may or may not have been applied",
-        };
-        if !reachable && crate::runner::last_failure_signed_out() {
-            return unauthorized(ctx, &format!("{what} failed ({why}); {preserved}"));
-        }
-        if !reachable {
-            return Error::Unknown(
-                format!(
-                    "provider unavailable: the Kubernetes API server for context \"{ctx}\" did \
-                 not answer (unreachable, or your credentials for it expired); {what} failed \
-                 ({why}); {preserved}\n  next: `kubectl --context {ctx} cluster-info` shows \
-                 the cause; fix it, then re-run the same command"
-                )
-                .into(),
-            )
-            .with_code(crate::error::Code::ProviderUnavailable);
-        }
-        // A read that never answered after its retries (NR-28): after this run's first
-        // write the run stopped half way (NR-2); before it, the provider is unavailable.
-        if effect == Effect::Read && !why.starts_with("exit ") {
-            return KUBECTL.unanswered(self.runner, what);
-        }
-        if effect == Effect::Write && !why.starts_with("exit ") {
-            return Error::Unknown(
-                format!("{what}: {why}; {preserved}\n  next: re-run the same command").into(),
-            );
-        }
-        let preserved = match effect {
-            Effect::Read => preserved,
-            Effect::Write => "kubectl refused the change",
-        };
-        Error::Target(
-            format!(
-                "{what} failed ({why}) for deployment {} in namespace {} (context {ctx}); \
-             {preserved}\n  next: {}",
-                t.deployment,
-                t.namespace,
-                self.command(hint)
-            )
-            .into(),
-        )
+        failed.name_subjects(self.target, about);
+        failed.into_error()
     }
 
     /// A diagnosis probe; `Ok(None)` when it could not run for a reason other than a
@@ -400,27 +547,31 @@ impl<'a> Kubectl<'a> {
             &what,
             &["get", "deployment", d, "-o", "json"],
             None,
-            &format!("get deployment {d}"),
         )?;
         parse_json(&out, &what)
     }
 }
 
 /// `kubectl` could not be started: missing ⇒ `Dependency` with the install command.
-fn spawn_error(r: &dyn CommandRunner, what: &str, e: &io::Error) -> Error {
+fn spawn_error(r: &dyn CommandRunner, _what: &str, e: &io::Error) -> Error {
     match e.kind() {
-        io::ErrorKind::NotFound => Error::Dependency(
-            format!(
-                "{PROGRAM} not found on PATH\n  {}",
-                Host::detect().install_hint(KUBECTL)
-            )
-            .into(),
-        ),
+        io::ErrorKind::NotFound => {
+            let host = Host::detect();
+            Cause::ToolMissing {
+                tool: PROGRAM.to_string(),
+                platform: host.platform,
+                shell: host.shell,
+                ci: host.ci,
+            }
+            .into()
+        }
         // A spent run budget: the call never started (NR-2 once a write had).
-        io::ErrorKind::TimedOut => KUBECTL
-            .budget_spent(r, e)
-            .map_text(|m| format!("{what}: {m}")),
-        kind => Error::Target(format!("{what} could not start {PROGRAM} ({kind})").into()),
+        io::ErrorKind::TimedOut => KUBECTL.budget_spent(r, e),
+        kind => Cause::ToolUnusable {
+            tool: PROGRAM.to_string(),
+            why: crate::cause::Unusable::SpawnFailed { io: kind.into() },
+        }
+        .into(),
     }
 }
 
@@ -442,20 +593,26 @@ pub(crate) fn container_index(deployment: &Value, t: &KubeTarget) -> Result<usiz
         None => None,
     };
     found.ok_or_else(|| {
-        let want = match &t.container {
-            Some(c) => format!("has no container \"{c}\""),
-            None => "has more than one container".to_string(),
+        // `kubernetes.container` must name one of the Deployment's containers (R1).
+        let allowed: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+        let rule = match &t.container {
+            Some(c) => crate::cause::FieldRule::Check {
+                check: crate::cause::ConfigCheck::NotOneOf {
+                    closest: match crate::app::suggest::close(c, names.iter().copied()).as_slice() {
+                        [one] => Some(one.to_string()),
+                        _ => None,
+                    },
+                    allowed,
+                },
+            },
+            None => crate::cause::FieldRule::Missing,
         };
-        Error::Config(
-            format!(
-                "deployment {} {want}; its containers: {}\n  next: set `container` in the \
-             kubernetes section of environment {} to one of them",
-                t.deployment,
-                names.join(", "),
-                t.env
-            )
-            .into(),
-        )
+        Error::from(Cause::ConfigInvalid {
+            source: crate::domain::model::ReadFrom::default().0,
+            at: None,
+            field: DottedPath(vec!["kubernetes".into(), "container".into()]),
+            rule,
+        })
     })
 }
 
@@ -559,7 +716,7 @@ mod tests {
 
     use super::testutil::*;
     use super::*;
-    use crate::runner::fake::{FakeRunner, failed_read};
+    use crate::runner::fake::FakeRunner;
 
     fn kubectl_get_deployment(r: &FakeRunner) -> Result<Value, Error> {
         let t = target();
@@ -630,126 +787,179 @@ mod tests {
         );
     }
 
-    /// NR-31: a refused `kubectl` read keeps its own stderr through the diagnosis probes.
-    #[test]
-    fn failed_read_leaves_a_kubectl_said_excerpt() {
+    /// A `get deployment` that fails every attempt with `stderr` (a recorded reply,
+    /// `tests/fixtures/kubernetes/failures/`), then `probes` answer the diagnosis.
+    fn failing_get(stderr: &str, probes: Vec<Output>) -> Error {
         let r = FakeRunner::default();
         for _ in 0..crate::runner::READ_ATTEMPTS {
-            r.push_with_stderr(
-                Output::failure(1),
-                "Error from server (Forbidden): deployments.apps \"api\" is forbidden\n",
-            );
+            r.push_with_stderr(Output::failure(1), stderr);
         }
-        r.push_with_stderr(ok("context/kind-opv\n"), "");
-        r.push_with_stderr(ok("v1.36"), "");
-        let _ = kubectl_get_deployment(&r);
+        for p in probes {
+            r.push_with_stderr(p, "");
+        }
+        kubectl_get_deployment(&r).unwrap_err()
+    }
+
+    const FORBIDDEN_GET: &str = "Error from server (Forbidden): deployments.apps \"api\" is \
+        forbidden: User \"system:serviceaccount:opv-rec:opv-norbac\" cannot get resource \
+        \"deployments\" in API group \"apps\" in the namespace \"opv-spike\"\n";
+    const NOTFOUND_DEPLOYMENT: &str =
+        "Error from server (NotFound): deployments.apps \"api\" not found\n";
+    const NOTFOUND_NAMESPACE: &str =
+        "Error from server (NotFound): namespaces \"opv-spike\" not found\n";
+    const CONTEXT_MISSING: &str = "error: context \"kind-opv\" does not exist\n";
+    const UNAUTHORIZED: &str = "error: You must be logged in to the server (Unauthorized)\n";
+    const REFUSED: &str = "The connection to the server 127.0.0.1:9 was refused - did you \
+        specify the right host or port?\n";
+
+    /// NR-31: a refused `kubectl` read keeps its own reply, as untrusted evidence.
+    #[test]
+    fn failed_read_keeps_kubectl_reply_as_evidence() {
+        let e = failing_get(FORBIDDEN_GET, vec![]);
         assert_eq!(
-            crate::runner::take_failure_excerpt().map(|x| x.render()),
-            Some("  kubectl said: Error from server (Forbidden): deployments.apps \"api\" is forbidden\n".into())
+            e.cause().and_then(|(_, up)| up).map(|u| u.said.clone()),
+            Some(vec![FORBIDDEN_GET.trim_end().to_string()])
         );
     }
 
-    /// NR-19 + NR-31: what opv prints for a failed `kubectl` read is the error line, then
-    /// the scrubbed `kubectl said:` excerpt, then exactly one `Next:` line, in that order.
+    /// 06.13: a refusal on a reachable cluster names the right that is missing.
     #[test]
-    fn failed_kubectl_read_reports_error_then_excerpt_then_next() {
-        let r = FakeRunner::default();
-        for _ in 0..crate::runner::READ_ATTEMPTS {
-            r.push_with_stderr(
-                Output::failure(1),
-                "Error from server (Forbidden): deployments.apps \"api\" is forbidden\n",
-            );
-        }
-        r.push_with_stderr(ok("context/kind-opv\n"), "");
-        r.push_with_stderr(ok("v1.36"), "");
-        let e = kubectl_get_deployment(&r).unwrap_err();
-        let excerpt = crate::runner::take_failure_excerpt();
-        let text = crate::error::report(&e, "opv sync prod", excerpt.as_ref());
-        let first = format!("opv: {}", e.to_string().lines().next().unwrap());
-        let lines: Vec<&str> = text.lines().collect();
+    fn forbidden_read_is_permission_denied() {
         assert_eq!(
-            (
-                lines[0],
-                lines[1],
-                lines.last().copied(),
-                text.matches("\nNext: ").count()
-            ),
-            (
-                first.as_str(),
-                "  kubectl said: Error from server (Forbidden): deployments.apps \"api\" is forbidden",
-                Some(format!("Next: {}", e.step("opv sync prod", "-").next).as_str()),
-                1
-            ),
-            "{text}"
+            failing_get(FORBIDDEN_GET, vec![]).code_str(),
+            "permission_denied"
         );
     }
 
+    /// 06.13: only a namespace admin can grant it, so a person acts first.
     #[test]
-    fn unreachable_cluster_before_writes_exits_9() {
-        let r =
-            FakeRunner::new(failed_read(1).chain([ok("context/kind-opv\n"), Output::failure(1)]));
-        assert_eq!(kubectl_get_deployment(&r).unwrap_err().exit_code(), 9);
+    fn forbidden_read_needs_a_person() {
+        assert!(failing_get(FORBIDDEN_GET, vec![]).human_required());
     }
 
     #[test]
-    fn unreachable_cluster_error_says_provider_unavailable() {
-        let r =
-            FakeRunner::new(failed_read(1).chain([ok("context/kind-opv\n"), Output::failure(1)]));
+    fn forbidden_read_names_the_verb_and_resource_to_grant() {
+        assert!(matches!(
+            failing_get(FORBIDDEN_GET, vec![]).cause(),
+            Some((Cause::MissingRight { grant: GrantModel::K8sRbac { verb, resource, .. }, .. }, _))
+                if verb == "get" && resource == "deployments"
+        ));
+    }
+
+    /// 06.13: a missing Deployment points at the field that names it.
+    #[test]
+    fn missing_deployment_points_at_kubernetes_deployment() {
+        assert!(matches!(
+            failing_get(NOTFOUND_DEPLOYMENT, vec![]).cause(),
+            Some((Cause::NotFound { named_by: NamedBy::ConfigField { path }, .. }, _))
+                if path.to_string() == "kubernetes.deployment"
+        ));
+    }
+
+    /// I4: a missing Deployment's listing step passes the namespace's name to
+    /// `kubectl --namespace`, never display words ("namespace X (context Y)").
+    #[test]
+    fn missing_deployment_lists_the_deployments_of_the_namespace_by_name() {
+        let e = failing_get(NOTFOUND_DEPLOYMENT, vec![]);
+        let next = e
+            .cause()
+            .map(|(c, _)| c.step(&crate::cause::Invocation::default()).1);
         assert!(
-            err_text(&kubectl_get_deployment(&r).unwrap_err()).contains("provider unavailable")
+            matches!(&next, Some(crate::cause::Next::Vendor(v))
+                if v.args.ends_with(&["--namespace".to_string(), target().namespace])),
+            "{next:?}"
         );
     }
 
+    /// 06.13: the server names a missing namespace even for a namespaced read.
     #[test]
-    fn unreachable_cluster_error_is_coded_provider_unavailable() {
-        let r =
-            FakeRunner::new(failed_read(1).chain([ok("context/kind-opv\n"), Output::failure(1)]));
-        assert_eq!(
-            kubectl_get_deployment(&r).unwrap_err().code(),
-            crate::error::Code::ProviderUnavailable
-        );
+    fn missing_namespace_points_at_kubernetes_namespace() {
+        assert!(matches!(
+            failing_get(NOTFOUND_NAMESPACE, vec![]).cause(),
+            Some((Cause::NotFound { named_by: NamedBy::ConfigField { path }, .. }, _))
+                if path.to_string() == "kubernetes.namespace"
+        ));
+    }
+
+    /// 06.26: a context missing here is fetched on this machine, not renamed for everyone.
+    #[test]
+    fn missing_context_is_missing_on_this_machine() {
+        assert!(matches!(
+            failing_get(CONTEXT_MISSING, vec![]).cause(),
+            Some((
+                Cause::NotFound {
+                    state: crate::cause::NotFoundState::LocalContextMissing,
+                    ..
+                },
+                _
+            ))
+        ));
     }
 
     /// A 401 is a sign-in to redo, never an outage that re-running gets past.
     #[test]
-    fn unauthorized_cluster_is_an_auth_error() {
-        let r = FakeRunner::default();
-        r.push_with_stderr(
-            Output::failure(1),
-            "error: You must be logged in to the server (Unauthorized)\n",
+    fn unauthorized_cluster_is_a_sign_in() {
+        assert_eq!(
+            failing_get(UNAUTHORIZED, vec![]).code_str(),
+            "target_not_signed_in"
         );
-        r.push_with_stderr(ok("context/kind-opv\n"), "");
+    }
+
+    #[test]
+    fn refused_connection_exits_9() {
+        assert_eq!(failing_get(REFUSED, vec![]).exit_code(), 9);
+    }
+
+    #[test]
+    fn refused_connection_is_coded_provider_unavailable() {
+        assert_eq!(
+            failing_get(REFUSED, vec![]).code_str(),
+            "provider_unavailable"
+        );
+    }
+
+    /// 06.37: the outage text does not repeat its category.
+    #[test]
+    fn outage_text_names_no_category() {
+        assert!(
+            !failing_get(REFUSED, vec![])
+                .to_string()
+                .contains("provider unavailable:")
+        );
+    }
+
+    /// An unrecognised reply on a server that does not answer its version is an outage.
+    #[test]
+    fn unrecognised_failure_on_an_unreachable_cluster_exits_9() {
+        let e = failing_get("", vec![Output::failure(1)]);
+        assert_eq!(e.exit_code(), 9);
+    }
+
+    /// An unrecognised reply on a reachable cluster is shown, not guessed at.
+    #[test]
+    fn unrecognised_failure_on_a_reachable_cluster_is_unrecognized() {
+        let e = failing_get("Error from server (Teapot): no\n", vec![ok("v1.36")]);
+        assert_eq!(e.code_str(), "unrecognized_failure");
+    }
+
+    /// 06.14: a write whose cluster stopped answering may have landed: outcome unknown,
+    /// never "provider unavailable" (which means nothing was changed).
+    #[test]
+    fn write_on_an_unreachable_cluster_is_outcome_unknown() {
+        let r = FakeRunner::default();
         r.push_with_stderr(Output::failure(1), "");
-        assert!(matches!(kubectl_get_deployment(&r), Err(Error::Auth(_))));
-    }
-
-    #[test]
-    fn missing_context_is_a_config_error() {
-        let r = FakeRunner::new(failed_read(1).chain([Output::failure(1)]));
-        assert!(matches!(
-            kubectl_get_deployment(&r),
-            Err(Error::Config(m)) if m.mentions("kubectl config get-contexts")
-        ));
-    }
-
-    #[test]
-    fn refused_read_on_reachable_cluster_names_the_next_command() {
-        let r = FakeRunner::new(failed_read(1).chain([ok("context/kind-opv\n"), ok("v1.36")]));
-        assert!(matches!(
-            kubectl_get_deployment(&r),
-            Err(Error::Target(m))
-                if m.next() == Some("kubectl --context kind-opv --namespace opv-spike get deployment api")
-        ));
+        r.push_with_stderr(Output::failure(1), "");
+        let t = target();
+        let k = Kubectl::new(&r, &t);
+        let _ = k.call(Effect::Write, "kubectl apply", &["apply"], None, &[]);
+        assert_eq!(k.fail(Effect::Write).code_str(), "outcome_unknown");
     }
 
     #[test]
     fn missing_kubectl_is_a_dependency_error() {
         let r = FakeRunner::default();
         r.push_io_error(io::ErrorKind::NotFound);
-        assert!(matches!(
-            kubectl_get_deployment(&r),
-            Err(Error::Dependency(m)) if m.starts_with("kubectl not found on PATH")
-        ));
+        assert!(kubectl_get_deployment(&r).is_err_and(|e| e.code_str() == "dependency_missing"));
     }
 
     fn kubectl_hint(os: &str) -> String {
@@ -787,9 +997,15 @@ mod tests {
             container: Some("web".into()),
             ..target()
         };
+        // `kubernetes.container` must name one of the Deployment's containers.
         assert!(matches!(
-            container_index(&d, &t),
-            Err(Error::Config(m)) if m.contains("its containers: agnhost")
+            container_index(&d, &t).map_err(|e| e.cause().map(|(c, _)| c.clone())),
+            Err(Some(Cause::ConfigInvalid {
+                rule: crate::cause::FieldRule::Check {
+                    check: crate::cause::ConfigCheck::NotOneOf { allowed, .. }
+                },
+                ..
+            })) if allowed == ["agnhost"]
         ));
     }
 }

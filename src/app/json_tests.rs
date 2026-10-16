@@ -9,16 +9,19 @@ use super::{local, skeleton, status};
 use crate::error::Error;
 use crate::runner::fake::FakeRunner;
 
-/// stdout as `main` prints it for `--json`: the command's body, framed with its result.
-/// `rerun` is the command line; the help command follows from its first word.
+/// stdout as `main` prints it for `--json`: the command's body, framed with its result,
+/// whose steps render against `rerun`, the command line.
 pub(crate) fn framed(body: &[u8], res: &Result<(), Error>, rerun: &str) -> String {
-    let sub = rerun.split_whitespace().nth(1).unwrap_or_default();
-    let help = format!("opv {sub} --help");
-    let out = match res {
-        Ok(()) => crate::json::finish(body, Ok(()), false),
-        Err(e) => crate::json::finish(body, Err((e, &e.step(rerun, &help))), false),
-    };
-    String::from_utf8(out).unwrap()
+    let words: Vec<String> = rerun.split_whitespace().map(str::to_string).collect();
+    let inv = crate::cause::Invocation::from_cli(&words);
+    String::from_utf8(crate::json::finish_with(
+        body,
+        res.as_ref().map(|_| ()),
+        false,
+        &inv,
+        false,
+    ))
+    .unwrap()
 }
 
 /// `framed` with the temporary directory `dir` replaced by `<dir>` and the rest of each such
@@ -214,10 +217,13 @@ fn sync_confirm_required() {
     // H12: the read-only part runs first; the guard refuses right before the first write.
     let r = FakeRunner::new([complete_item(), fly_empty()]);
     let res = sync::run(&f, "prod", &r, &mut out, &opts);
-    golden(
-        "sync_confirm_required",
-        &framed(&out, &res, "opv sync prod --deploy --json"),
-    );
+    // The handoff is rendered from the process's own command line (R61), which a unit test
+    // does not have: the golden keeps the shape and leaves the command out.
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&framed(&out, &res, "opv sync prod --deploy --json")).unwrap();
+    doc["next"] = "<the command as typed> --confirm prod".into();
+    doc["error"]["next"] = "<the command as typed> --confirm prod".into();
+    golden("sync_confirm_required", &doc.to_string());
 }
 
 fn explain_json(key: &str) -> String {

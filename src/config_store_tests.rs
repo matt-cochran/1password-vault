@@ -26,6 +26,11 @@ fn req(dir: &Path) -> Request {
     }
 }
 
+/// The catalog cause of `e` (every migrated discovery failure is one).
+fn cause_of(e: &Error) -> &Cause {
+    e.cause().expect("a catalog cause").0
+}
+
 fn title_of(found: Result<Found, Error>) -> String {
     match found {
         Ok(Found::Manifest(m)) => m.title,
@@ -230,7 +235,7 @@ fn dot_opv_with_an_unknown_key_is_a_config_error() {
     std::fs::write(dir.path().join(DOT_FILE), "projct = \"myapp\"\n").unwrap();
     assert!(matches!(
         locate(&req(dir.path()), &FakeOp::default()),
-        Err(Error::Config(_))
+        Err(e) if e.code_str() == "config_invalid"
     ));
 }
 
@@ -258,16 +263,82 @@ fn git_remote_discovery_is_one_listing() {
 }
 
 #[test]
-fn several_repo_matches_are_listed_with_opv_project_next() {
+fn several_repo_matches_list_every_candidate() {
     let op = FakeOp::with_remote("https://github.com/acme/myapp.git");
     put(&op, "myapp-dev", "api", &repo_tags(&[]));
     put(&op, "shared", "web", &repo_tags(&[]));
     let dir = tempfile::tempdir().unwrap();
     let e = locate(&req(dir.path()), &op).unwrap_err();
     assert!(
-        e.text().contains("opv · api")
-            && e.text().contains("opv · web")
-            && e.next_step().unwrap().starts_with("OPV_PROJECT="),
+        matches!(cause_of(&e), Cause::ManifestAmbiguous { candidates, .. } if candidates.len() == 2),
+        "{e:?}"
+    );
+}
+
+/// 03.09: the path tags do not decide; nothing is archived and no first match is guessed.
+#[test]
+fn several_repo_matches_are_not_a_person_only_pick() {
+    let op = FakeOp::with_remote("https://github.com/acme/myapp.git");
+    put(&op, "myapp-dev", "api", &repo_tags(&[]));
+    put(&op, "shared", "web", &repo_tags(&[]));
+    let dir = tempfile::tempdir().unwrap();
+    let e = locate(&req(dir.path()), &op).unwrap_err();
+    assert!(
+        matches!(
+            cause_of(&e),
+            Cause::ManifestAmbiguous {
+                person_picks: false,
+                ..
+            }
+        ),
+        "{e:?}"
+    );
+}
+
+/// 03.09 (X2): the step never names the first match as the project.
+#[test]
+fn several_repo_matches_guess_no_project() {
+    let op = FakeOp::with_remote("https://github.com/acme/myapp.git");
+    put(&op, "myapp-dev", "api", &repo_tags(&[]));
+    put(&op, "shared", "web", &repo_tags(&[]));
+    let dir = tempfile::tempdir().unwrap();
+    let e = locate(&req(dir.path()), &op).unwrap_err();
+    let inv = crate::cause::Invocation::from_cli(&["opv".into(), "status".into()]);
+    assert_eq!(
+        cause_of(&e).step(&inv).1,
+        crate::cause::Next::Check(crate::cause::Cmd {
+            command: vec!["projects".into()],
+            args: vec![],
+        })
+    );
+}
+
+/// 03.10: a project name no manifest has is `manifest_not_found`, never a `config import`
+/// that needs a file this checkout does not have.
+#[test]
+fn an_unknown_project_is_manifest_not_found() {
+    let op = FakeOp::default();
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = req(dir.path());
+    r.project = Some("nosuch".into());
+    let e = locate(&r, &op).unwrap_err();
+    assert!(
+        matches!(cause_of(&e), Cause::ManifestNotFound { project, .. } if project == "nosuch"),
+        "{e:?}"
+    );
+}
+
+/// 03.20: the first-run router says which account it searched for the repository.
+#[test]
+fn the_first_run_router_names_the_account_searched() {
+    let e = not_found(
+        Path::new("/w"),
+        Some(REPO),
+        Some("ALABS000000000000000000001"),
+    );
+    assert!(
+        e.to_string()
+            .contains("in account ALABS000000000000000000001 is tagged for github.com/acme/myapp"),
         "{e:?}"
     );
 }
@@ -288,14 +359,17 @@ fn no_match_names_init_as_the_next_step() {
     let op = FakeOp::with_remote("https://github.com/acme/myapp.git");
     let dir = tempfile::tempdir().unwrap();
     let e = locate(&req(dir.path()), &op).unwrap_err();
-    assert!(e.next_step().unwrap().starts_with("opv init "), "{e:?}");
+    assert!(
+        e.next_text().as_deref().unwrap().starts_with("opv init "),
+        "{e:?}"
+    );
 }
 
 #[test]
 fn no_config_anywhere_keeps_the_not_found_prefix_for_doctor() {
     let dir = tempfile::tempdir().unwrap();
     let e = locate(&req(dir.path()), &FakeOp::default()).unwrap_err();
-    assert!(e.text().starts_with(config::NOT_FOUND), "{e:?}");
+    assert_eq!(e.code_str(), "config_not_found", "{e:?}");
 }
 
 #[test]
@@ -304,7 +378,11 @@ fn missing_session_gives_next_opv_login() {
     op.signed_in.set(false);
     let dir = tempfile::tempdir().unwrap();
     let e = locate(&req(dir.path()), &op).unwrap_err();
-    assert_eq!(e.next_step(), Some("opv login"), "{e:?}");
+    // Catalog error: the step is the cause's own sign-in handoff.
+    assert!(
+        e.next_text().unwrap_or_default().starts_with("opv login"),
+        "{e:?}"
+    );
 }
 
 #[test]
@@ -315,10 +393,8 @@ fn missing_session_says_the_configuration_lives_in_1password() {
     let mut r = req(dir.path());
     r.project = Some("myapp".into());
     let e = locate(&r, &op).unwrap_err();
-    assert!(
-        e.text().contains("configuration lives in 1Password"),
-        "{e:?}"
-    );
+    // Catalog error (design §4.3): the missing 1Password session, whatever is looked up.
+    assert!(e.code_str() == "op_not_signed_in", "{e:?}");
 }
 
 // --- monorepo paths ---
@@ -358,8 +434,12 @@ fn root_with_path_manifests_lists_candidates() {
     put(&op, "myapp-dev", "api", &repo_tags(&["apps/api"]));
     put(&op, "myapp-dev", "web", &repo_tags(&["apps/web"]));
     let e = locate(&req(dir.path()), &op).unwrap_err();
+    let listed = match cause_of(&e) {
+        Cause::ManifestAmbiguous { candidates, .. } => candidates.join("; "),
+        _ => String::new(),
+    };
     assert!(
-        e.text().contains("paths apps/api") && e.text().contains("paths apps/web"),
+        listed.contains("paths apps/api") && listed.contains("paths apps/web"),
         "{e:?}"
     );
 }
@@ -388,7 +468,7 @@ fn invalid_manifest_names_the_manifest_not_the_file() {
     let mut r = req(dir.path());
     r.project = Some("bad".into());
     let e = locate(&r, &op).unwrap().load(&op).unwrap_err();
-    assert!(e.text().contains("manifest \"opv · bad\""), "{e:?}");
+    assert!(e.to_string().contains("manifest opv · bad"), "{e:?}");
 }
 
 #[test]
@@ -422,7 +502,7 @@ fn create_refuses_a_second_manifest_for_the_same_repo() {
     let op = FakeOp::default();
     put(&op, "myapp-dev", "myapp", &repo_tags(&[]));
     let e = create_manifest(&op, "shared", "renamed", Some(REPO), &[], TOML, None).unwrap_err();
-    assert_eq!(e.next_step(), Some("opv config edit"));
+    assert_eq!(e.code_str(), "manifest_exists");
 }
 
 #[test]
@@ -546,13 +626,13 @@ fn every_read_a_manifest_write_checks_against_bypasses_the_cache() {
 }
 
 #[test]
-fn an_edit_landing_with_a_manifest_write_is_config_changed() {
+fn an_edit_landing_with_a_manifest_write_is_a_concurrent_edit() {
     let op = FakeOp::default();
     let (_, found) = myapp(&op);
     let base = found.store().read_for_write(&op).unwrap();
     op.racing_edit.set(Some(1));
     let e = save(found.store(), &op, &base, &edited()).unwrap_err();
-    assert_eq!(e.code(), crate::error::Code::ConfigChanged);
+    assert_eq!(e.code_str(), "concurrent_edit");
 }
 
 #[test]
@@ -580,7 +660,7 @@ fn a_manifest_write_under_a_service_account_is_refused() {
     let base = found.store().read(&op).unwrap();
     let env = crate::host::FakeEnv::new("linux").var_val("OP_SERVICE_ACCOUNT_TOKEN", "dummy");
     let e = under(env, || found.store().replace(&op, &base, &edited())).unwrap_err();
-    assert_eq!(e.code(), crate::error::Code::TerminalRequired);
+    assert_eq!(e.code_str(), "own_session_required");
 }
 
 #[test]
@@ -600,7 +680,7 @@ fn a_refused_manifest_write_in_ci_never_names_opv_login() {
     let (_, found) = myapp(&op);
     let env = crate::host::FakeEnv::new("linux").var("CI");
     let e = under(env, || found.store().read_for_write(&op)).unwrap_err();
-    assert_ne!(e.next_step(), Some("opv login"));
+    assert_ne!(e.next_text().as_deref(), Some("opv login"));
 }
 
 #[test]
@@ -648,7 +728,7 @@ fn a_refused_manifest_write_is_a_definite_failure() {
         .store()
         .replace(&RefusedWrites(&op), &base, &edited())
         .unwrap_err();
-    assert_ne!(e.code(), crate::error::Code::OutcomeUnknown, "{e:?}");
+    assert_ne!(e.code_str(), "outcome_unknown", "{e:?}");
 }
 
 #[test]
@@ -673,7 +753,16 @@ fn a_single_path_scoped_manifest_is_not_used_from_a_sibling_directory() {
     put(&op, "myapp-dev", "api", &repo_tags(&["apps/api"]));
     let start = dir.path().join("apps/web");
     let e = locate(&req(&start), &op).unwrap_err();
-    assert_eq!(e.next_step(), Some("OPV_PROJECT=api opv <command>"));
+    assert!(
+        matches!(
+            cause_of(&e),
+            Cause::ManifestAmbiguous {
+                person_picks: false,
+                ..
+            }
+        ),
+        "{e:?}"
+    );
 }
 
 #[test]
@@ -748,7 +837,7 @@ fn accounts_runner(json: &str) -> crate::runner::fake::FakeRunner {
 #[test]
 fn several_accounts_and_none_chosen_is_account_required() {
     let e = pick_account(&accounts_runner(TWO_ACCOUNTS), None).unwrap_err();
-    assert_eq!(e.code(), crate::error::Code::AccountRequired);
+    assert_eq!(e.code_str(), "account_required");
 }
 
 /// opv never searches every account: the only call is `op account list`.
@@ -775,7 +864,8 @@ fn a_shared_sign_in_address_is_ambiguous() {
         &accounts_runner(TWO_ACCOUNTS),
         Some("my.1password.com".into()),
     );
-    assert_eq!(e.unwrap_err().code(), crate::error::Code::AccountRequired);
+    // 04.09: several accounts share the address; a person picks one by its ID.
+    assert_eq!(e.unwrap_err().code_str(), "account_ambiguous");
 }
 
 #[test]
@@ -838,6 +928,78 @@ fn recording_the_account_refuses_a_pointer_that_does_not_parse() {
     assert!(record_account(dir.path(), "ALABS000000000000000000001").is_err());
 }
 
+// --- §12.4: `.opv` discovery stops at the repository root (09.08) ---
+
+#[test]
+fn a_pointer_above_the_repository_root_is_never_read() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(DOT_FILE),
+        "account = \"ASTRAY00000000000000000001\"\n",
+    )
+    .unwrap();
+    let inner = dir.path().join("repo/src");
+    std::fs::create_dir_all(&inner).unwrap();
+    std::fs::create_dir(dir.path().join("repo/.git")).unwrap();
+    assert_eq!(pointer_account(&inner), None);
+}
+
+#[test]
+fn a_pointer_at_the_repository_root_is_read_from_a_subdirectory() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::create_dir(repo.join(".git")).unwrap();
+    std::fs::write(
+        repo.join(DOT_FILE),
+        "account = \"ALABS000000000000000000001\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pointer_account(&repo.join("src")).as_deref(),
+        Some("ALABS000000000000000000001")
+    );
+}
+
+#[test]
+fn outside_a_repository_a_parents_pointer_is_never_read() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(DOT_FILE),
+        "account = \"ASTRAY00000000000000000001\"\n",
+    )
+    .unwrap();
+    let child = dir.path().join("scratch");
+    std::fs::create_dir(&child).unwrap();
+    assert_eq!(pointer_account(&child), None);
+}
+
+#[test]
+fn outside_a_repository_the_current_directorys_pointer_is_read() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(DOT_FILE),
+        "account = \"ALABS000000000000000000001\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pointer_account(dir.path()).as_deref(),
+        Some("ALABS000000000000000000001")
+    );
+}
+
+/// The simulator's report: a project's own `.opv` above a test's repository leaked into it.
+#[test]
+fn a_pointer_above_the_repository_root_selects_no_manifest() {
+    let op = FakeOp::default();
+    put(&op, "myapp-dev", "outer", &manifest_tags(None, &[]));
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(DOT_FILE), "project = \"outer\"\n").unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    assert_ne!(title_of(locate(&req(&repo), &op)), "opv · outer");
+}
+
 #[test]
 fn recording_the_account_ignores_a_pointer_above_the_repository() {
     let dir = tempfile::tempdir().unwrap();
@@ -861,8 +1023,8 @@ fn an_unknown_email_in_wsl_next_adds_the_account_to_op() {
         .unwrap_err()
     });
     assert_eq!(
-        e.next_step(),
-        Some("opv login --add --account new@labs.example")
+        e.next_text().unwrap_or_default(),
+        "opv login --add --account new@labs.example"
     );
 }
 
@@ -942,5 +1104,6 @@ fn a_shared_sign_in_address_in_dot_opv_is_refused_as_ambiguous() {
         r#"[{{"url":"https://my.1password.com","email":"a@x.example","account_uuid":"{ACCOUNT_A}"}},{{"url":"https://my.1password.com","email":"b@x.example","account_uuid":"{ACCOUNT_B}"}}]"#
     ))]);
     let e = selected_account_id(&r, dir.path()).unwrap_err();
-    assert_eq!(e.code().as_str(), "account_required");
+    // 04.09: an address several accounts share is ambiguous, never "none chosen".
+    assert_eq!(e.code_str(), "account_ambiguous");
 }

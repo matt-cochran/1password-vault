@@ -158,7 +158,7 @@ fn json_doc(r: &FakeRunner) -> Value {
 
 #[test]
 fn sync_json_is_one_versioned_document() {
-    assert_eq!(json_doc(&new_secrets())["schema_version"], 1);
+    assert_eq!(json_doc(&new_secrets())["schema_version"], 2);
 }
 
 #[test]
@@ -193,6 +193,8 @@ fn confirm_env_requires_flag() {
     assert_eq!(res.unwrap_err().exit_code(), 6);
 }
 
+/// The step is a handoff built from the command as typed, every flag kept (R61); a unit
+/// test names the invocation the CLI would have parsed.
 #[test]
 fn confirm_env_refusal_names_the_exact_command() {
     let o = SyncOpts {
@@ -201,8 +203,8 @@ fn confirm_env_refusal_names_the_exact_command() {
     };
     let (res, _) = sync_out(&guarded(), &new_secrets(), &o);
     assert_eq!(
-        res.unwrap_err().next_step(),
-        Some("opv sync prod --deploy --prune --confirm prod")
+        catalog_next(&res.unwrap_err(), "opv sync prod --deploy --prune"),
+        Some("opv sync prod --deploy --prune --confirm prod".into())
     );
 }
 
@@ -219,10 +221,13 @@ fn confirm_env_refuses_before_any_write() {
 fn guarded_refusal_names_blocking_keys_and_the_confirm_flag() {
     let r = FakeRunner::new([item_without("allumata", "OPENAI_API_KEY"), fly_empty()]);
     let (res, _) = sync_out(&guarded(), &r, &deploy());
+    // The refusal is the catalog's KeysBlocking; the guard is a note of the same run.
+    let notes = r.notes.borrow().join("\n");
     assert!(
-        matches!(&res, Err(Error::Policy(m))
-            if m.contains("allumata/OPENAI_API_KEY") && m.contains("add --confirm prod")),
-        "{res:?}"
+        res.as_ref()
+            .is_err_and(|e| e.to_string().contains("allumata/OPENAI_API_KEY"))
+            && notes.contains("needs a person's confirmation"),
+        "{res:?} {notes}"
     );
 }
 
@@ -242,20 +247,31 @@ fn confirm_mismatch_refuses_before_any_call() {
 
 #[test]
 fn unknown_environment_next_is_status_of_the_closest() {
+    // The catalog's NotDeclared substitutes the unique close name into the command as
+    // typed, keeping every flag (audit 03.02, X1).
     let e = fleet().environment("prd").unwrap_err();
-    assert_eq!(e.next_step(), Some("opv status prod"));
+    assert!(matches!(
+        e.cause(),
+        Some((crate::cause::Cause::NotDeclared { closest: Some(c), .. }, _)) if c.as_str() == "prod"
+    ));
 }
 
 #[test]
 fn unknown_environment_without_a_close_name_next_is_the_overview() {
     let e = fleet().environment("nothing-like-it").unwrap_err();
-    assert_eq!(e.next_step(), Some("opv status"));
+    assert!(matches!(
+        e.cause(),
+        Some((crate::cause::Cause::NotDeclared { closest: None, .. }, _))
+    ));
 }
 
 #[test]
 fn unknown_product_next_checks_the_closest_product() {
     let e = super::local::select(&two_products(), "prod", Some("wb"), true).unwrap_err();
-    assert_eq!(e.next_step(), Some("opv check prod --product web"));
+    assert_eq!(
+        next_for(&e, &["opv", "check", "prod", "--product", "wb"]),
+        Some("opv check prod --product web".into())
+    );
 }
 
 /// A fleet configuration with one product needs no `--product` (found live: `check`
@@ -265,37 +281,49 @@ fn a_single_product_is_selected_without_the_flag() {
     assert!(super::local::select(&fleet(), "prod", None, true).is_ok());
 }
 
+/// X2: several products are a person's choice; opv never names the first for them.
 #[test]
-fn missing_product_next_checks_the_first_product() {
+fn missing_product_is_a_choice() {
     let e = super::local::select(&two_products(), "prod", None, true).unwrap_err();
-    assert_eq!(e.next_step(), Some("opv check prod --product allumata"));
+    assert_eq!(e.code_str(), "choice_required");
 }
 
+/// R21: the unique close key is substituted, and the write turned into its read.
 #[test]
-fn undeclared_rotate_next_explains_the_closest_key() {
+fn undeclared_rotate_next_plans_the_closest_key() {
     let o = SyncOpts {
         rotate: vec!["allumata/INTEGRATION_ENC".into()],
         ..SyncOpts::default()
     };
     let (res, _) = sync_out(&fleet(), &FakeRunner::new([]), &o);
     assert_eq!(
-        res.unwrap_err().next_step(),
-        Some("opv explain allumata/INTEGRATION_ENC_KEY --env prod")
+        catalog_next(
+            &res.unwrap_err(),
+            "opv sync prod --rotate allumata/INTEGRATION_ENC"
+        ),
+        Some("opv plan prod --rotate allumata/INTEGRATION_ENC_KEY".into())
     );
 }
 
+/// A19 (R26): a usage error of sync steps to the plan of its environment, not `--help`.
 #[test]
-fn prune_immutable_without_prune_next_is_plan() {
+fn prune_immutable_without_prune_next_is_the_plan() {
     let o = SyncOpts {
         prune_immutable: vec!["allumata/INTEGRATION_ENC_KEY".into()],
         ..SyncOpts::default()
     };
     let (res, _) = sync_out(&fleet(), &FakeRunner::new([]), &o);
-    assert_eq!(res.unwrap_err().next_step(), Some("opv plan prod"));
+    assert_eq!(
+        catalog_next(
+            &res.unwrap_err(),
+            "opv sync prod --prune-immutable allumata/INTEGRATION_ENC_KEY"
+        ),
+        Some("opv plan prod".into())
+    );
 }
 
 #[test]
-fn explain_of_an_unknown_key_next_carries_the_env() {
+fn explain_of_an_unknown_key_next_substitutes_the_closest_key() {
     let e = crate::app::testutil::explain(
         &fleet(),
         "allumata/OPENAI_KEY",
@@ -305,13 +333,14 @@ fn explain_of_an_unknown_key_next_carries_the_env() {
     )
     .unwrap_err();
     assert_eq!(
-        e.next_step(),
-        Some("opv explain allumata/OPENAI_API_KEY --env prod")
+        next_for(&e, &["opv", "explain", "allumata/OPENAI_KEY"]),
+        Some("opv explain allumata/OPENAI_API_KEY".into())
     );
 }
 
+/// X2: with several environments a person picks one; opv never names the first.
 #[test]
-fn explain_with_several_environments_next_names_one() {
+fn explain_with_several_environments_is_a_choice() {
     let e = crate::app::testutil::explain(
         &fleet(),
         "allumata/SIGNUP_POLICY",
@@ -320,10 +349,7 @@ fn explain_with_several_environments_next_names_one() {
         false,
     )
     .unwrap_err();
-    assert_eq!(
-        e.next_step(),
-        Some("opv explain allumata/SIGNUP_POLICY --env staging")
-    );
+    assert_eq!(e.code_str(), "choice_required");
 }
 
 #[test]
@@ -343,21 +369,37 @@ fn confirm_naming_another_environment_is_refused() {
         ..SyncOpts::default()
     };
     let (res, _) = sync_out(&fleet(), &FakeRunner::new([]), &o);
-    assert!(matches!(res, Err(Error::Policy(m)) if m.contains("--confirm staging does not match")));
+    assert_eq!(res.unwrap_err().code_str(), "confirm_mismatch");
 }
 
+/// 01.12: a mismatched --confirm steps to the read of the environment, never to a sync
+/// confirmed for the person.
 #[test]
-fn guarded_sync_next_step_keeps_the_confirm_flag() {
+fn confirm_mismatch_next_is_the_plan_not_a_confirmed_sync() {
+    let o = SyncOpts {
+        confirm: Some("staging".into()),
+        deploy: true,
+        ..SyncOpts::default()
+    };
+    let (res, _) = sync_out(&fleet(), &FakeRunner::new([]), &o);
+    assert_eq!(
+        catalog_next(
+            &res.unwrap_err(),
+            "opv sync prod --deploy --confirm staging"
+        ),
+        Some("opv plan prod".into())
+    );
+}
+
+/// X4: opv never adds --confirm to a step it generates; the guard asks the person again.
+#[test]
+fn guarded_sync_next_step_never_adds_the_confirm_flag() {
     let o = SyncOpts {
         confirm: Some("prod".into()),
         ..SyncOpts::default()
     };
     let (_, out) = sync_out(&guarded(), &new_secrets(), &o);
-    assert_eq!(
-        last_line(&out),
-        "Next: opv sync prod --deploy --confirm prod",
-        "{out}"
-    );
+    assert_eq!(last_line(&out), "Next: opv sync prod --deploy", "{out}");
 }
 
 #[test]
@@ -367,7 +409,10 @@ fn confirm_env_must_be_a_boolean() {
         "modes.allumata.payments = \"off\"",
         "modes.allumata.payments = \"off\"\nconfirm_env = \"yes\"",
     );
-    assert!(matches!(config::parse(&bad), Err(Error::Config(_))));
+    assert_eq!(
+        config::parse(&bad).unwrap_err().code_str(),
+        "config_invalid"
+    );
 }
 
 // ---- NR-20: prune names before acting -------------------------------------------------
@@ -471,9 +516,9 @@ fn sync_product_next_step_keeps_the_product() {
 }
 
 #[test]
-fn undefined_product_is_a_config_error_naming_the_choices() {
+fn undefined_product_is_an_error_naming_the_choices() {
     let (res, _) = sync_out(&fleet(), &FakeRunner::new([]), &product("nope"));
-    assert!(matches!(res, Err(Error::Config(m)) if m.contains("choose one of: allumata")));
+    assert!(res.is_err_and(|e| e.to_string().contains("(declared: allumata)")));
 }
 
 // ---- P11: plan names what it would do ---------------------------------------------------
@@ -568,8 +613,8 @@ fn plan_findings_next_step_opens_the_first_key() {
     let r = FakeRunner::new([item_without("allumata", "OPENAI_API_KEY"), fly_empty()]);
     let (res, _) = plan_out(&fleet(), &r, None);
     assert_eq!(
-        res.unwrap_err().next_step(),
-        Some("opv open allumata/OPENAI_API_KEY --env prod")
+        crate::app::testutil::next_of_error(&res.unwrap_err()),
+        "opv open allumata/OPENAI_API_KEY --env prod"
     );
 }
 
@@ -609,7 +654,13 @@ fn status_product_ignores_another_products_findings() {
 fn status_product_counts_only_its_findings() {
     let r = FakeRunner::new([complete_item(), fly_empty()]);
     let (res, _) = status_out(&two_products(), &r, Some("web"));
-    assert!(matches!(res, Err(Error::Findings(1, _))), "{res:?}");
+    assert!(
+        res.as_ref()
+            .err()
+            .and_then(crate::app::testutil::findings_of)
+            == Some(1),
+        "{res:?}"
+    );
 }
 
 #[test]
@@ -681,8 +732,45 @@ fn status_without_env_counts_run_only_findings() {
     ]);
     let (res, _) = overview_out(&f, &r);
     assert_eq!(
-        res.unwrap_err().next_step(),
-        Some("opv check dev --product allumata")
+        values_needed_env(&res.unwrap_err()),
+        Some("dev".to_string())
+    );
+}
+
+/// The environment a `ValuesNeeded` failure is about (the overview's findings, 01.08).
+fn values_needed_env(e: &Error) -> Option<String> {
+    match e.cause() {
+        Some((crate::cause::Cause::ValuesNeeded { env, .. }, _)) => Some(env.to_string()),
+        _ => None,
+    }
+}
+
+/// 01.08: the overview's step opens a key that has a finding, never one of the first
+/// declared product (`zz` sorts after `allumata`, whose keys dev does not use).
+#[test]
+fn status_without_env_opens_the_key_with_the_finding() {
+    let f = fleet_with(
+        "[environments.dev]\nboundaries.allumata = { vault_id = \"vdev\", item_id = \"idev\" }\n\
+         [products.zz]\nboundary = \"allumata\"\n\
+         [products.zz.keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
+    );
+    let r = FakeRunner::new([
+        complete_item(),
+        complete_item(),
+        fly_empty(),
+        complete_item(),
+        fly_empty(),
+    ]);
+    let (res, _) = overview_out(&f, &r);
+    let inv = crate::cause::Invocation::from_cli(&["opv".to_string(), "status".to_string()]);
+    let e = res.unwrap_err();
+    let (cause, _) = e.cause().expect("a catalog cause");
+    assert_eq!(
+        cause.step(&inv).1,
+        crate::cause::Next::Run(crate::cause::Cmd {
+            command: vec!["open".into()],
+            args: vec!["zz/DEV_KEY".into(), "--env".into(), "dev".into()],
+        })
     );
 }
 
@@ -721,7 +809,10 @@ fn status_without_env_json_lists_every_environment() {
 fn status_without_env_exits_8_when_any_environment_has_findings() {
     let r = FakeRunner::new([complete_item(), fly_empty(), staging_item(), fly_empty()]);
     let (res, _) = overview_out(&fleet(), &r);
-    assert_eq!(res.unwrap_err().next_step(), Some("opv status staging"));
+    assert_eq!(
+        values_needed_env(&res.unwrap_err()),
+        Some("staging".to_string())
+    );
 }
 
 #[test]
@@ -736,6 +827,22 @@ fn status_without_env_reports_an_unreadable_environment_and_goes_on() {
             .starts_with("staging: not checked ("),
         "{out}"
     );
+}
+
+/// L10: an unreadable target's error names the environment the overview knows, so its
+/// `Next:` can be scoped to it.
+#[test]
+fn status_without_env_names_the_environment_an_unreadable_target_belongs_to() {
+    let r = FakeRunner::new([complete_item(), fly_empty(), staging_item()]);
+    (0..crate::runner::READ_ATTEMPTS)
+        .for_each(|_| r.push_with_stderr(Output::failure(1), "unrecognised reply"));
+    let (res, _) = overview_out(&fleet(), &r);
+    let e = res.unwrap_err();
+    let env = match e.cause() {
+        Some((crate::cause::Cause::Unrecognized { env, .. }, _)) => env.clone(),
+        other => panic!("expected Unrecognized, got {other:?}"),
+    };
+    assert_eq!(env.map(|n| n.to_string()), Some("staging".to_string()));
 }
 
 // ---- P4: provider-neutral wording ---------------------------------------------------
@@ -780,8 +887,8 @@ fn check_findings_next_step_opens_the_first_key() {
         false,
     );
     assert_eq!(
-        res.unwrap_err().next_step(),
-        Some("opv open allumata/OPENAI_API_KEY --env prod")
+        crate::app::testutil::next_of_error(&res.unwrap_err()),
+        "opv open allumata/OPENAI_API_KEY --env prod"
     );
 }
 
@@ -913,7 +1020,7 @@ fn plan_rotate_marks_the_row_on_target_as_rotate() {
 #[test]
 fn plan_rotate_refuses_a_non_immutable_key() {
     let (res, _) = plan_rotate_out(&["allumata/OPENAI_API_KEY"], false);
-    assert!(matches!(res, Err(Error::Config(_))));
+    assert!(res.is_err_and(|e| e.code_str() == "usage"));
 }
 
 #[test]
@@ -940,7 +1047,7 @@ fn sync_with_rotate_and_a_plain_plan_id_is_stale() {
         ..expect(&id)
     };
     let (res, _) = sync_out(&fleet(), &r, &o);
-    assert_eq!(res.unwrap_err().code(), crate::error::Code::StalePlan);
+    assert_eq!(res.unwrap_err().code_str(), "stale_plan");
 }
 
 #[test]
@@ -960,7 +1067,13 @@ fn sync_with_a_stale_fly_plan_id_stages_nothing() {
 #[test]
 fn stale_plan_refusal_next_step_is_the_review() {
     let (res, _) = sync_out(&fleet(), &new_secrets(), &expect("00000000"));
-    assert_eq!(res.unwrap_err().next_step(), Some("opv plan prod"));
+    assert_eq!(
+        catalog_next(
+            &res.unwrap_err(),
+            "opv sync prod --deploy --expect-plan 00000000"
+        ),
+        Some("opv plan prod".into())
+    );
 }
 
 /// The item and the Fly listing after a run staged both secrets but never deployed them.
@@ -1020,7 +1133,24 @@ fn expect_plan_with_prune_immutable_is_refused_before_any_call() {
         ..expect("00000000")
     };
     let (res, _) = sync_out(&fleet(), &r, &o);
-    assert!(matches!(res, Err(Error::Config(_))) && r.calls.borrow().is_empty());
+    assert!(res.is_err_and(|e| e.exit_code() == 2) && r.calls.borrow().is_empty());
+}
+
+/// 01.11: the refusal never hands back the destructive sync, let alone a confirmed one.
+#[test]
+fn expect_plan_with_prune_immutable_next_is_not_the_sync() {
+    let o = SyncOpts {
+        prune: true,
+        prune_immutable: vec!["allumata/INTEGRATION_ENC_KEY".into()],
+        ..expect("00000000")
+    };
+    let (res, _) = sync_out(&guarded(), &FakeRunner::new([]), &o);
+    let typed = "opv sync prod --prune --prune-immutable allumata/INTEGRATION_ENC_KEY \
+                 --expect-plan 00000000";
+    assert_eq!(
+        catalog_next(&res.unwrap_err(), typed),
+        Some("opv plan prod".into())
+    );
 }
 
 // ---- I4: an undeclared --product keeps the command and the environment ---------------
@@ -1037,15 +1167,21 @@ fn status_with_an_undeclared_product_suggests_status_of_the_same_env() {
         false,
     )
     .unwrap_err();
-    assert_eq!(e.next_step(), Some("opv status prod --product allumata"));
+    assert_eq!(
+        next_for(&e, &["opv", "status", "prod", "--product", "allumatta"]),
+        Some("opv status prod --product allumata".into())
+    );
 }
 
 #[test]
 fn sync_with_an_undeclared_product_suggests_its_plan() {
     let (res, _) = sync_out(&fleet(), &FakeRunner::new([]), &product("allumatta"));
     assert_eq!(
-        res.unwrap_err().next_step(),
-        Some("opv plan prod --product allumata")
+        catalog_next(
+            &res.unwrap_err(),
+            "opv sync prod --deploy --product allumatta"
+        ),
+        Some("opv plan prod --product allumata".into())
     );
 }
 
@@ -1056,4 +1192,37 @@ fn check_with_findings_does_not_count_them_on_stdout() {
     let mut out = Vec::new();
     let _ = super::local::check(&fleet(), "prod", Some("allumata"), &r, &mut out, false);
     assert!(!text_of(&out).contains("finding"), "{}", text_of(&out));
+}
+
+/// The Next a cataloged error renders for the command line `line` (a unit test has no CLI
+/// invocation of its own).
+fn catalog_next(e: &Error, line: &str) -> Option<String> {
+    let (cause, _) = e.cause()?;
+    let argv: Vec<String> = line.split_whitespace().map(str::to_string).collect();
+    let inv = crate::cause::Invocation::from_cli(&argv);
+    crate::cause::render::next_text(&cause.step(&inv).1, &inv)
+}
+
+/// The Next a catalog error renders for the command line `argv` (design §6.1: steps are
+/// built from the invocation, so a test names the one it means).
+fn next_for(e: &Error, argv: &[&str]) -> Option<String> {
+    let inv =
+        crate::cause::Invocation::from_cli(&argv.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+    let (cause, _) = e.cause()?;
+    crate::cause::render::next_text(&cause.step(&inv).1, &inv)
+}
+
+/// 07.23 (S2): no product with keys here is not a choice of product: declaring a key is
+/// the step.
+#[test]
+fn no_product_with_keys_is_nothing_in_scope() {
+    let e = super::product_choice("dev", &[]).unwrap_err();
+    assert_eq!(e.code_str(), "nothing_in_scope");
+}
+
+/// 07.33: the no-target error names the step once, as its Do, not again in its text.
+#[test]
+fn no_target_text_does_not_repeat_its_step() {
+    let e = super::no_target(&fleet(), "dev");
+    assert!(!e.to_string().contains("opv target add"), "{e}");
 }

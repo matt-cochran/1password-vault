@@ -172,7 +172,6 @@ fn failed_authentication_is_repaired_then_vault_access_is_verified() {
     let mut backend = Fake::new(vec![
         ok("2.40.0"),
         Output::failure(1),
-        Output::failure(1),
         ok("[]"),
         ok(r#"[{"id":"vault-id","name":"Development"}]"#),
         ok("[]"),
@@ -186,43 +185,114 @@ fn failed_authentication_is_repaired_then_vault_access_is_verified() {
     assert_eq!(backend.logins, vec![true, false]);
 }
 
-/// Setup whose vault list still fails after the sign-in (#157).
+/// [`Backend`] over the runner's fake, which observes every failed call as the real runner
+/// does, so a failure is diagnosed from op's reply (#159).
+struct Observed {
+    r: crate::runner::fake::FakeRunner,
+}
+impl Backend for Observed {
+    fn native(&self) -> Result<(), Error> {
+        Ok(())
+    }
+    fn call(&self, args: &[&str], stdin: Option<&[u8]>) -> Result<Output, Error> {
+        use crate::runner::{Call, CommandRunner, Outcome};
+        match self
+            .r
+            .read(&Call::new("op", args).with_stdin(stdin), &[])
+            .unwrap()
+        {
+            Outcome::Done(o) | Outcome::Refused(o) => Ok(o),
+            Outcome::Unknown { .. } => unreachable!("no unknown outcome is queued"),
+        }
+    }
+    fn sign_in(&mut self, _: Option<&str>, _: bool) -> Result<(), Error> {
+        Ok(())
+    }
+}
+
+/// op's reply to a call made without a session (recorded case 06).
+const SIGNED_OUT: &str = "[ERROR] 2026/10/16 10:00:00 You are not currently signed in. Please run `op signin --help` for instructions";
+
+/// Setup whose vault list still fails after the sign-in (#157), op saying no one is
+/// signed in.
 fn vaults_unlisted_after_sign_in() -> Error {
     let dir = tempfile::tempdir().unwrap();
     let path = recipe(dir.path());
-    let mut backend = Fake::new(vec![
-        ok("2.40.0"),
-        Output::failure(1),
-        Output::failure(1),
-        ok(r#"[{"url":"my.1password.com"}]"#),
-        Output::failure(1),
-    ]);
+    let r = crate::runner::fake::FakeRunner::new([ok("2.40.0")]);
+    r.push_with_stderr(Output::failure(1), SIGNED_OUT);
+    r.responses
+        .borrow_mut()
+        .push_back(Ok(ok(r#"[{"url":"my.1password.com"}]"#)));
+    r.push_with_stderr(Output::failure(1), SIGNED_OUT);
+    let mut backend = Observed { r };
     let mut ui = Ui::new(vec![], &[]);
     run(&path, None, None, None, &mut backend, &mut ui).unwrap_err()
 }
 
+// 05.08, #159: the cause is op's own reply, never one chosen by setup.
 #[test]
-fn vaults_unlisted_after_sign_in_step_to_doctor() {
+fn vaults_unlisted_after_sign_in_are_diagnosed_from_ops_reply() {
     assert_eq!(
-        vaults_unlisted_after_sign_in().next_step(),
-        Some("opv doctor")
+        vaults_unlisted_after_sign_in().code_str(),
+        "op_not_signed_in"
     );
 }
 
+// 05.08: never "rerun setup", which `opv login` shares.
 #[test]
-fn vaults_unlisted_after_sign_in_name_the_account_not_a_vault() {
+fn vaults_unlisted_after_sign_in_never_name_setup() {
     assert!(
-        vaults_unlisted_after_sign_in()
-            .text()
-            .contains("the signed-in 1Password account could not list its vaults")
+        !vaults_unlisted_after_sign_in()
+            .to_string()
+            .contains("setup")
     );
+}
+
+// #159: `op whoami --account <id>` answers, then `op vault list` says no one is signed in:
+// the account's own sign-in, from op's reply (no longer a Legacy source_error).
+#[test]
+fn a_signed_out_vault_list_under_a_live_session_is_op_not_signed_in() {
+    let r = crate::runner::fake::FakeRunner::new([ok("2.40.0"), ok(WHOAMI_A)]);
+    r.push_with_stderr(Output::failure(1), SIGNED_OUT);
+    let mut backend = Observed { r };
+    let e = prepare(
+        Some("ACCOUNT0000000000000000001"),
+        &mut backend,
+        &mut Ui::new(vec![], &[]),
+    )
+    .unwrap_err();
+    assert_eq!(e.code_str(), "op_not_signed_in");
+}
+
+// 05.26: a failing item step is diagnosed from op's reply, naming no generic "this step".
+#[test]
+fn a_failing_item_list_is_diagnosed_from_ops_reply() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = recipe(dir.path());
+    let r = crate::runner::fake::FakeRunner::new(metadata());
+    r.push_with_stderr(Output::failure(1), SIGNED_OUT);
+    let mut backend = Observed { r };
+    let e = run(
+        &path,
+        None,
+        None,
+        None,
+        &mut backend,
+        &mut Ui::new(vec![], &[]),
+    )
+    .unwrap_err();
+    assert_eq!(e.code_str(), "op_not_signed_in");
 }
 
 #[test]
 fn a_missing_vault_names_the_account_it_was_looked_for_in() {
     let dir = tempfile::tempdir().unwrap();
     let path = recipe(dir.path());
-    let mut backend = Fake::new(vec![ok("2.40.0"), ok(r#"[{"id":"x","name":"Other"}]"#)]);
+    let mut backend = Fake::new(vec![
+        ok("2.40.0"),
+        ok(WHOAMI_A),
+        ok(r#"[{"id":"x","name":"Other"}]"#),
+    ]);
     let mut ui = Ui::new(vec![], &[]);
     let error = run(
         &path,
@@ -235,8 +305,9 @@ fn a_missing_vault_names_the_account_it_was_looked_for_in() {
     .unwrap_err();
     assert!(
         error
-            .text()
-            .contains("missing from 1Password account ACCOUNT0000000000000000001")
+            .to_string()
+            .contains("looked for in 1Password account ACCOUNT0000000000000000001"),
+        "{error}"
     );
 }
 
@@ -249,7 +320,11 @@ fn wrong_kind_has_specific_repair_and_preserves_existing_item() {
     let mut backend = Fake::new(replies);
     let mut ui = Ui::new(vec![], &[]);
     let error = run(&path, None, None, None, &mut backend, &mut ui).unwrap_err();
-    assert!(error.to_string().contains("Password / concealed"));
+    assert!(
+        error
+            .to_string()
+            .contains("stored as plain text, not concealed")
+    );
     assert!(!error.to_string().contains("synthetic-private"));
     assert_eq!(backend.calls.borrow().len(), 4);
 }
@@ -283,7 +358,8 @@ fn duplicate_vault_is_refused_without_guessing_or_writing() {
     ]);
     let mut ui = Ui::new(vec![], &[]);
     let error = run(&path, None, None, None, &mut backend, &mut ui).unwrap_err();
-    assert!(error.to_string().contains("Rename the duplicate"));
+    // F4: a duplicate title is the catalog's ItemUnusable (its Do renames the duplicate).
+    assert_eq!(error.code_str(), "item_unusable");
     assert_eq!(backend.calls.borrow().len(), 2);
 }
 
@@ -291,13 +367,16 @@ fn duplicate_vault_is_refused_without_guessing_or_writing() {
 fn shared_keys_have_unique_ids_and_keep_product_sections() {
     let recipe = Recipe::parse("title='Products'\nenvironment='dev'\nvault='Development'\nitem='api'\n[[fields]]\nkey='API_KEY'\nproduct='one'\ntitle='One login'\ndescription='For one.'\nsource='Dashboard.'\n[[fields]]\nkey='API_KEY'\nproduct='two'\ntitle='Two login'\ndescription='For two.'\nsource='Dashboard.'\n").unwrap();
     let mut doc = json!({"category":"SECURE_NOTE","fields":[],"sections":[]});
-    let indices = field_indices(&mut doc, &recipe.fields).unwrap();
+    let indices = field_indices(&mut doc, &recipe.fields, &recipe).unwrap();
     assert_ne!(
         doc["fields"][indices[0]]["id"],
         doc["fields"][indices[1]]["id"]
     );
     assert_eq!(doc["fields"][indices[1]]["section"]["label"], "two");
-    assert_eq!(field_indices(&mut doc, &recipe.fields).unwrap(), indices);
+    assert_eq!(
+        field_indices(&mut doc, &recipe.fields, &recipe).unwrap(),
+        indices
+    );
 }
 
 #[test]
@@ -319,6 +398,120 @@ fn product_setup_prompts_only_selected_product_but_declares_all_managed_names() 
     let calls = backend.calls.borrow();
     let body: Value = serde_json::from_slice(calls.last().unwrap().1.as_ref().unwrap()).unwrap();
     assert_eq!(body["fields"].as_array().unwrap().len(), 1);
+}
+
+// --- #160: the session is checked for the account asked for, never by a bare whoami -------
+
+/// Recorded case 10: `op whoami --account A --format json` while A is signed in.
+const WHOAMI_A: &str = include_str!("../../tests/fixtures/op/failures/10-whoami-a.stdout");
+/// Account B, asked for (the recordings' `<ACCOUNT_1>`).
+const ACCOUNT_B: &str = "BACCOUNT000000000000000001";
+
+/// Setup for account B, whose `op whoami --account B` fails as in recorded case 11 (only A
+/// holds a session); B is signed in at the prompt.
+fn setup_for_b_with_a_live() -> Fake {
+    let dir = tempfile::tempdir().unwrap();
+    let path = recipe(dir.path());
+    let mut backend = Fake::new(vec![
+        ok("2.40.0"),
+        Output::failure(1),
+        ok(r#"[{"url":"my.1password.com"}]"#),
+        ok(WHOAMI_A.replace("<ACCOUNT_2>", ACCOUNT_B).as_str()),
+        ok(r#"[{"id":"x","name":"Other"}]"#),
+    ]);
+    let _ = run(
+        &path,
+        None,
+        Some(ACCOUNT_B),
+        None,
+        &mut backend,
+        &mut Ui::new(vec![], &[]),
+    );
+    backend
+}
+
+#[test]
+fn setup_checks_the_session_of_the_account_by_id() {
+    let backend = setup_for_b_with_a_live();
+    assert_eq!(
+        backend.calls.borrow()[1].0,
+        ["whoami", "--account", ACCOUNT_B, "--format", "json"]
+    );
+}
+
+#[test]
+fn a_live_session_for_another_account_is_never_taken_for_the_account() {
+    assert_eq!(setup_for_b_with_a_live().logins, [false]);
+}
+
+#[test]
+fn setup_without_an_account_never_runs_a_bare_whoami() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = recipe(dir.path());
+    let mut backend = Fake::new(vec![
+        ok("2.40.0"),
+        Output::failure(1),
+        ok(r#"[{"url":"my.1password.com"}]"#),
+        Output::failure(1),
+    ]);
+    let _ = run(
+        &path,
+        None,
+        None,
+        None,
+        &mut backend,
+        &mut Ui::new(vec![], &[]),
+    );
+    assert!(!backend.calls.borrow().iter().any(|c| c.0[0] == "whoami"));
+}
+
+// --- #153: the child `op signin` for B, with a session for A in opv's environment ---------
+
+/// Recorded case 13: `op signin --account B` with `OP_SESSION_<A>` set and `OP_ACCOUNT`
+/// unset succeeded (op 2.40.0). opv runs it so: the account in `--account` only.
+fn signin_for_b() -> std::process::Command {
+    signin_command(
+        Some(ACCOUNT_B),
+        false,
+        [
+            std::ffi::OsString::from("OP_SESSION_ACCOUNTA0000000000000000001"),
+            std::ffi::OsString::from("PATH"),
+        ],
+    )
+}
+
+fn removed(command: &std::process::Command) -> Vec<String> {
+    command
+        .get_envs()
+        .filter(|(_, v)| v.is_none())
+        .map(|(k, _)| k.to_string_lossy().into_owned())
+        .collect()
+}
+
+#[test]
+fn signing_in_to_b_unsets_op_account_for_op() {
+    assert!(removed(&signin_for_b()).contains(&"OP_ACCOUNT".to_string()));
+}
+
+#[test]
+fn signing_in_to_b_unsets_the_other_accounts_session() {
+    assert!(
+        removed(&signin_for_b()).contains(&"OP_SESSION_ACCOUNTA0000000000000000001".to_string())
+    );
+}
+
+#[test]
+fn signing_in_to_b_keeps_the_rest_of_the_environment() {
+    assert!(!removed(&signin_for_b()).contains(&"PATH".to_string()));
+}
+
+#[test]
+fn signing_in_to_b_names_b_with_the_account_flag() {
+    let args: Vec<_> = signin_for_b()
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(args, ["signin", "--force", "--account", ACCOUNT_B]);
 }
 
 // --- the save after a long interactive window: fresh re-read, re-plan, verified write ---
@@ -544,26 +737,44 @@ mod stateful {
         ui.on_confirm.insert(2, hook(&op, &id, "NOTE", "again"));
         let e = setup(&op, &mut ui, false).unwrap_err();
         assert_eq!(
-            (e.code(), op.count(&["op", "item", "edit"])),
-            (crate::error::Code::ItemChanged, 0)
+            (e.code_str(), op.count(&["op", "item", "edit"])),
+            ("item_changed", 0)
         );
     }
 
     #[test]
-    fn an_edit_landing_with_setups_is_item_changed() {
+    fn an_edit_landing_with_setups_is_concurrent_edit() {
         let (op, _) = op_with_item();
         op.racing_edit.set(Some(1));
         let mut ui = racing(vec![true], &["synthetic-typed"]);
         let e = setup(&op, &mut ui, false).unwrap_err();
-        assert_eq!(e.code(), crate::error::Code::ItemChanged);
+        assert_eq!(e.code_str(), "concurrent_edit");
+    }
+
+    // C1: a failure after the save says exactly what the save put in 1Password.
+    #[test]
+    fn an_edit_landing_with_setups_says_what_was_saved() {
+        let (op, _) = op_with_item();
+        op.racing_edit.set(Some(1));
+        let mut ui = racing(vec![true], &["synthetic-typed"]);
+        let _ = setup(&op, &mut ui, false);
+        assert!(
+            ui.ui
+                .messages
+                .iter()
+                .any(|m| m
+                    == "Saved in 1Password: item api in vault myapp-dev, with Provider login."),
+            "{:?}",
+            ui.ui.messages
+        );
     }
 
     #[test]
-    fn a_write_that_lost_a_value_is_item_changed() {
+    fn a_write_that_lost_a_value_is_read_back_missing() {
         let (op, _) = op_with_item();
         let mut ui = racing(vec![true], &["synthetic-typed"]);
         let e = setup(&op, &mut ui, true).unwrap_err();
-        assert_eq!(e.code(), crate::error::Code::ItemChanged);
+        assert_eq!(e.code_str(), "tidy_unverified");
     }
 
     #[test]
@@ -599,4 +810,224 @@ mod stateful {
             "{item}"
         );
     }
+}
+
+// ---- catalog causes and steps (05.09, 05.21, 05.28, 05.29, 05.32, C1, C8) ----
+
+/// [`Ui`] whose value prompt is stopped by the person (Ctrl-D): the declined guard.
+struct Stopping {
+    messages: Vec<String>,
+}
+impl Interaction for Stopping {
+    fn show(&mut self, s: &str) -> Result<(), Error> {
+        self.messages.push(s.into());
+        Ok(())
+    }
+    fn confirm(&mut self, _: &str) -> Result<bool, Error> {
+        Ok(true)
+    }
+    fn secret(&mut self, _: &str) -> Result<SecretValue, Error> {
+        Err(crate::cause::Cause::Guard {
+            guard: crate::cause::Guard::Declined,
+        }
+        .into())
+    }
+}
+
+/// A recipe of two settings, `SAVED_KEY` (filled in 1Password by an earlier setup) and
+/// `NEW_KEY` (empty), and the replies of the item that holds them.
+fn two_settings(dir: &Path) -> (PathBuf, Vec<Output>) {
+    let path = dir.join("opv.setup.toml");
+    fs::write(&path, "title='Two'\nenvironment='dev'\nvault='Development'\nitem='api'\n[[fields]]\nkey='SAVED_KEY'\nproduct='api'\ntitle='Saved login'\ndescription='Saved before.'\nsource='Dashboard.'\n[[fields]]\nkey='NEW_KEY'\nproduct='api'\ntitle='New login'\ndescription='Not yet.'\nsource='Dashboard.'\n").unwrap();
+    let mut replies = metadata();
+    replies.extend([
+        ok(r#"[{"id":"item-id","title":"api"}]"#),
+        ok(r#"{"category":"SECURE_NOTE","sections":[{"id":"api","label":"api"}],"fields":[{"id":"s","section":{"id":"api","label":"api"},"label":"SAVED_KEY","type":"CONCEALED","value":"synthetic-saved"}]}"#),
+    ]);
+    (path, replies)
+}
+
+// C1 (X26): stopping at a prompt says exactly what 1Password holds: the fields an earlier
+// setup saved are named, and nothing from this run.
+#[test]
+fn stopping_at_a_prompt_names_the_fields_saved_before() {
+    let dir = tempfile::tempdir().unwrap();
+    let (path, replies) = two_settings(dir.path());
+    let mut ui = Stopping { messages: vec![] };
+    let _ = run(&path, None, None, None, &mut Fake::new(replies), &mut ui);
+    assert_eq!(
+        ui.messages.last().map(String::as_str),
+        Some(
+            "Stopped before saving: nothing from this run was saved in 1Password. Saved there \
+             by an earlier setup: Saved login."
+        )
+    );
+}
+
+#[test]
+fn stopping_at_a_prompt_is_declined() {
+    let dir = tempfile::tempdir().unwrap();
+    let (path, replies) = two_settings(dir.path());
+    let mut ui = Stopping { messages: vec![] };
+    let e = run(&path, None, None, None, &mut Fake::new(replies), &mut ui).unwrap_err();
+    assert_eq!(e.code_str(), "declined");
+}
+
+// 05.32: a setup the owner stops ends with the setup command to run again.
+#[test]
+fn a_stopped_setup_ends_with_its_own_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = recipe(dir.path());
+    let mut replies = metadata();
+    replies.push(ok("[]"));
+    let mut ui = Ui::new(vec![false], &[""]);
+    run(&path, None, None, None, &mut Fake::new(replies), &mut ui).unwrap();
+    assert_eq!(
+        ui.messages.last().cloned(),
+        Some(format!(
+            "Next: opv setup --recipe {} --product api",
+            crate::error::shell_word(&path.display().to_string())
+        ))
+    );
+}
+
+// 05.32: progress saved with fields still empty (exit 8) ends with the setup command too.
+#[test]
+fn saved_progress_ends_with_its_own_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = recipe(dir.path());
+    let mut replies = metadata();
+    replies.extend([ok("[]"), ok(r#"{"id":"item-id"}"#)]);
+    let mut ui = Ui::new(vec![true], &[""]);
+    run(&path, None, None, None, &mut Fake::new(replies), &mut ui).unwrap();
+    assert!(
+        ui.messages
+            .last()
+            .is_some_and(|m| m.starts_with("Next: opv setup --recipe ")),
+        "{:?}",
+        ui.messages
+    );
+}
+
+/// `opv setup --product apii` on the one-product recipe.
+fn unknown_product() -> Error {
+    let dir = tempfile::tempdir().unwrap();
+    let path = recipe(dir.path());
+    run(
+        &path,
+        None,
+        None,
+        Some("apii"),
+        &mut Fake::new(vec![]),
+        &mut Ui::new(vec![], &[]),
+    )
+    .unwrap_err()
+}
+
+// 05.21: a product the recipe does not declare is a usage error, before any call.
+#[test]
+fn an_unknown_product_is_a_usage_error() {
+    assert_eq!(unknown_product().code_str(), "usage");
+}
+
+// 05.21: the one product is substituted into the same command, never the failing one.
+#[test]
+fn an_unknown_product_steps_to_the_declared_one() {
+    // The cause's own command, not its rendering: whether `opv setup` may be the Next depends
+    // on the terminal the test runs under (A10, `Situation::refuses`).
+    let next = match unknown_product().cause() {
+        Some((
+            Cause::Usage {
+                problem: crate::cause::UsageProblem::UseInstead { command },
+            },
+            _,
+        )) => crate::cause::render::cmd_text(command),
+        _ => String::new(),
+    };
+    assert!(
+        next.starts_with("opv setup --recipe ") && next.ends_with(" --product api"),
+        "{next}"
+    );
+}
+
+// 05.28: an output configuration without a boundary is the cataloged boundary_missing, its
+// step the cause's own (no "; next:" inside the text).
+#[test]
+fn an_output_without_a_boundary_is_boundary_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = recipe(dir.path());
+    fs::write(dir.path().join("secrets.toml"), "[environments.dev]\n").unwrap();
+    let e = run(
+        &path,
+        None,
+        None,
+        None,
+        &mut Fake::new(vec![]),
+        &mut Ui::new(vec![], &[]),
+    )
+    .unwrap_err();
+    assert_eq!(e.code_str(), "boundary_missing");
+}
+
+// 05.29: an op whose version cannot be read is tool_unusable, on every platform.
+#[test]
+fn an_unreadable_op_version_is_tool_unusable() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = recipe(dir.path());
+    let e = run(
+        &path,
+        None,
+        None,
+        None,
+        &mut Fake::new(vec![ok("not a version")]),
+        &mut Ui::new(vec![], &[]),
+    )
+    .unwrap_err();
+    assert_eq!(e.code_str(), "tool_unusable");
+}
+
+// C8: an invalid recipe is named by its own path.
+#[test]
+fn an_invalid_recipe_names_its_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("team.setup.toml");
+    fs::write(&path, "title=''\n").unwrap();
+    let e = run(
+        &path,
+        None,
+        None,
+        None,
+        &mut Fake::new(vec![]),
+        &mut Ui::new(vec![], &[]),
+    )
+    .unwrap_err();
+    assert!(e.to_string().contains("team.setup.toml"), "{e}");
+}
+
+// 05.09: a dotenv file that is not there is named, never "the existing settings file".
+#[test]
+fn a_missing_dotenv_file_is_named() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = read_legacy(&dir.path().join("typo.env")).unwrap_err();
+    assert!(e.to_string().contains("typo.env"), "{e}");
+}
+
+// 05.09: a dotenv file others can read is file_too_open, whose Do is the chmod.
+#[cfg(unix)]
+#[test]
+fn an_open_dotenv_file_is_file_too_open() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.env");
+    fs::write(&path, "A=1\n").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(read_legacy(&path).unwrap_err().code_str(), "file_too_open");
+}
+
+#[test]
+fn a_dotenv_file_that_cannot_be_read_is_input_unreadable() {
+    // F4: a missing file is an unreadable input, not one whose content is invalid.
+    let dir = tempfile::tempdir().unwrap();
+    let e = read_legacy(&dir.path().join("missing.env")).unwrap_err();
+    assert_eq!(e.code_str(), "input_unreadable");
 }

@@ -1,0 +1,16 @@
+case	exit	command
+01-version	0	op --version 
+02-account-not-on-machine	1	env -u OP_ACCOUNT op whoami --account ZZZZZZZZZZZZZZZZZZZZZZZZZZ 
+03-service-account-token-rejected	9	env -u OP_ACCOUNT OP_SERVICE_ACCOUNT_TOKEN=ops_opvrecordinginvalidtoken op whoami 
+04-op-account-overrides-signout-all	1	env OP_ACCOUNT=<ACCOUNT_2> op signout --all 
+05-signed-out-whoami	1	env -u OP_ACCOUNT op whoami --account <ACCOUNT_2> 
+06-signed-out-vault-list	1	env -u OP_ACCOUNT op vault list --account <ACCOUNT_2> --format json 
+07-signed-out-item-get	1	env -u OP_ACCOUNT op item get opv-recording-none --account <ACCOUNT_2> --format json 
+08-vault-not-found	1	op vault get ZZZZZZZZZZZZZZZZZZZZZZZZZZ --account <ACCOUNT_2> --format json 
+09-item-not-found	1	op item get opv-recording-none --vault <VAULT_A> --account <ACCOUNT_2> --format json 
+10-whoami-a	0	op whoami --account <ACCOUNT_2> --format json 
+11-b-whoami-under-a-session	1	op whoami --account <ACCOUNT_1> --format json 
+12-b-vault-list-under-a-session	1	op vault list --account <ACCOUNT_1> --format json 
+13-b-signin-with-a-session-live	interactive	op signin --account <ACCOUNT_1> (with OP_SESSION_<ACCOUNT_2> set)
+14-vault-in-other-account	1	op vault get <VAULT_B> --account <ACCOUNT_2> --format json 
+15-vault-user-list-in-other-account	1	op vault user list <VAULT_B> --account <ACCOUNT_2> --format json 

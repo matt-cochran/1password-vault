@@ -8,9 +8,17 @@ use serde_json::json;
 
 use super::*;
 use crate::adapters::fake_op::FakeOp;
-use crate::runner::Output;
+use crate::cause::render::next_text;
+use crate::cause::{Invocation, RetryClass};
+use crate::runner::fake::FakeRunner;
+use crate::runner::{Outcome, Output};
 
 const TOKEN: &str = "ops_FAKETOKENMARKER0123456789";
+
+/// op 2.40.0's recorded reply to `op vault get <vault>` for a vault the account does not
+/// hold (tests/fixtures/op/failures, case 14).
+const NOT_A_VAULT_HERE: &str =
+    include_str!("../../tests/fixtures/op/failures/14-vault-in-other-account.stderr");
 
 fn fleet() -> crate::domain::Fleet {
     crate::config::parse(
@@ -40,6 +48,13 @@ struct World {
     gh_signed_in: bool,
     gh_env_exists: bool,
     gh_set_fails: bool,
+    /// What `op service-account create` printed (the token, once).
+    created: String,
+    /// The observing runner a failed `op vault get` probe or a scripted create goes
+    /// through, as the real runner observes them.
+    observed: FakeRunner,
+    /// The create's outcome comes from `observed` (queued by the test) instead of success.
+    scripted_create: bool,
     calls: RefCell<Vec<Recorded>>,
 }
 
@@ -59,6 +74,9 @@ impl World {
             gh_signed_in: true,
             gh_env_exists: true,
             gh_set_fails: false,
+            created: format!("{TOKEN}\n"),
+            observed: FakeRunner::default(),
+            scripted_create: false,
             calls: RefCell::new(Vec::new()),
         }
     }
@@ -108,13 +126,34 @@ impl CommandRunner for World {
                 Output::failure(1)
             });
         }
-        self.op.probe(call, limit)
+        let answer = self.op.probe(call, limit)?;
+        match call.args {
+            ["vault", "get", vault, ..] if answer.status != 0 => {
+                self.observed.push_with_stderr(
+                    Output::failure(1),
+                    &NOT_A_VAULT_HERE.replace("<VAULT_B>", vault),
+                );
+                self.observed.probe(call, limit)
+            }
+            _ => Ok(answer),
+        }
+    }
+    fn create(&self, call: &Call, kind: CreateKind) -> io::Result<CreateOutcome> {
+        if self.scripted_create {
+            self.record(call);
+            return self.observed.create(call, kind);
+        }
+        match self.write(call)? {
+            Outcome::Done(o) => Ok(CreateOutcome::Done(o)),
+            Outcome::Refused(o) => Ok(CreateOutcome::Refused(o)),
+            Outcome::Unknown { .. } => unreachable!("only a scripted create is unknown"),
+        }
     }
     fn write(&self, call: &Call) -> io::Result<Outcome> {
         self.record(call);
         match (call.program, call.args) {
             ("op", ["service-account", "create", ..]) => {
-                Ok(Outcome::Done(Output::success(format!("{TOKEN}\n"))))
+                Ok(Outcome::Done(Output::success(self.created.clone())))
             }
             ("gh", ["secret", "set", ..]) if self.gh_set_fails => {
                 Ok(Outcome::Refused(Output::failure(1)))
@@ -267,13 +306,179 @@ fn a_signed_out_gh_creates_nothing() {
     assert!(!w.ran("op", &["service-account"]));
 }
 
-#[test]
-fn a_vault_outside_the_account_creates_nothing() {
+/// The Next a catalog error renders.
+fn next_of(e: &Error) -> Option<String> {
+    let (cause, _) = e.cause()?;
+    let inv = Invocation::default();
+    next_text(&cause.step(&inv).1, &inv)
+}
+
+fn code_of(e: &Error) -> Option<&'static str> {
+    e.cause().map(|(c, _)| c.code())
+}
+
+/// The `web` boundary vault is in no account op can see.
+fn vault_elsewhere() -> World {
     let w = World::new();
     w.op.vault_users.borrow_mut().remove("vweb");
     w.op.vaults.borrow_mut().retain(|(id, _)| id != "vweb");
+    w
+}
+
+#[test]
+fn a_vault_outside_the_account_steps_to_vault_locate() {
+    let (res, _, _) = create(&vault_elsewhere(), Some("fleet"), true);
+    assert_eq!(
+        next_of(&res.unwrap_err()).as_deref(),
+        Some("opv vault locate vweb")
+    );
+}
+
+#[test]
+fn a_vault_outside_the_account_creates_nothing() {
+    let w = vault_elsewhere();
+    let _ = create(&w, Some("fleet"), true);
+    assert!(!w.ran("op", &["service-account"]));
+}
+
+// --- 07.12: an unknown create outcome is checked, never re-run ---
+
+fn unknown_create() -> World {
+    let mut w = World::new();
+    w.scripted_create = true;
+    w.observed.push_unknown("timeout");
+    w
+}
+
+#[test]
+fn an_unknown_create_is_create_outcome_unknown() {
+    let (res, _, _) = create(&unknown_create(), Some("fleet"), true);
+    assert_eq!(code_of(&res.unwrap_err()), Some("create_outcome_unknown"));
+}
+
+#[test]
+fn an_unknown_create_is_checked_first() {
+    let (res, _, _) = create(&unknown_create(), Some("fleet"), true);
+    assert_eq!(
+        res.unwrap_err().cause().map(|(c, _)| c.retry()),
+        Some(RetryClass::CheckFirst)
+    );
+}
+
+#[test]
+fn an_unknown_create_steps_to_the_access_check_not_the_create() {
+    let (res, _, _) = create(&unknown_create(), Some("fleet"), true);
+    assert_eq!(
+        next_of(&res.unwrap_err()).as_deref(),
+        Some("opv access staging --target fleet")
+    );
+}
+
+#[test]
+fn an_unknown_create_needs_a_person_to_revoke_the_orphan() {
+    let (res, _, _) = create(&unknown_create(), Some("fleet"), true);
+    assert!(
+        res.unwrap_err()
+            .cause()
+            .is_some_and(|(c, _)| c.human_required(&Invocation::default()))
+    );
+}
+
+// --- 07.13: a refused create is diagnosed from op's reply ---
+
+/// op's recorded reply without a session (tests/fixtures/op/failures, case 06).
+const SIGNED_OUT: &str =
+    include_str!("../../tests/fixtures/op/failures/06-signed-out-vault-list.stderr");
+
+#[test]
+fn a_refused_create_is_classified_by_ops_reply() {
+    let mut w = World::new();
+    w.scripted_create = true;
+    w.observed.push_with_stderr(Output::failure(1), SIGNED_OUT);
     let (res, _, _) = create(&w, Some("fleet"), true);
-    assert_eq!(res.unwrap_err().next_step(), Some("opv vault locate vweb"));
+    assert_eq!(code_of(&res.unwrap_err()), Some("op_not_signed_in"));
+}
+
+#[test]
+fn a_refused_create_shows_ops_reply_as_evidence() {
+    let mut w = World::new();
+    w.scripted_create = true;
+    w.observed.push_with_stderr(Output::failure(1), SIGNED_OUT);
+    let (res, _, _) = create(&w, Some("fleet"), true);
+    assert!(res.unwrap_err().cause().is_some_and(|(_, up)| up.is_some()));
+}
+
+#[test]
+fn an_empty_token_names_the_created_account() {
+    let mut w = World::new();
+    w.created = String::new();
+    let (res, _, _) = create(&w, Some("fleet"), true);
+    let e = res.unwrap_err();
+    assert!(crate::error::report(&e).contains("shop-staging-fleet-deploy"));
+}
+
+/// C20, X5: a created account whose token was never printed is revoked, never made again.
+#[test]
+fn an_empty_token_is_secret_not_stored() {
+    let mut w = World::new();
+    w.created = String::new();
+    let (res, _, _) = create(&w, Some("fleet"), true);
+    assert_eq!(res.unwrap_err().code_str(), "secret_not_stored");
+}
+
+// --- 07.14: the secret name is checked before anything is created ---
+
+#[test]
+fn a_secret_name_with_a_dash_is_refused() {
+    let mut g = gh(None);
+    g.secret = "OP-TOKEN".into();
+    assert!(check(&g).is_err());
+}
+
+#[test]
+fn a_secret_name_with_a_dash_creates_nothing() {
+    let w = World::new();
+    let mut ui = Answer(true, RefCell::new(Vec::new()));
+    let mut github = gh(Some("staging-deploy"));
+    github.secret = "OP-TOKEN".into();
+    let req = Request {
+        env: "staging",
+        target: Some("fleet"),
+        project: "shop",
+        github,
+    };
+    let _ = run(&fleet(), &req, &w, &mut ui, &mut Vec::new());
+    assert!(!w.ran("op", &["service-account"]));
+}
+
+#[test]
+fn a_secret_name_starting_with_a_digit_is_refused() {
+    let mut g = gh(None);
+    g.secret = "1TOKEN".into();
+    assert!(check(&g).is_err());
+}
+
+// --- 07.16: the success step is a runnable command ---
+
+#[test]
+fn a_deploy_identity_steps_to_its_delivery_evidence() {
+    let (_, out, _) = create(&World::new(), Some("fleet"), true);
+    assert!(
+        out.contains("\nNext: opv delivery verify staging --target fleet\n"),
+        "{out}"
+    );
+}
+
+#[test]
+fn the_ci_reader_steps_to_the_access_check() {
+    let (_, out, _) = create(&World::new(), None, true);
+    assert!(out.ends_with("Next: opv access staging\n"), "{out}");
+}
+
+#[test]
+fn declining_is_the_declined_guard() {
+    let (res, _, _) = create(&World::new(), Some("fleet"), false);
+    assert_eq!(code_of(&res.unwrap_err()), Some("declined"));
 }
 
 #[test]
@@ -298,11 +503,13 @@ fn a_missing_github_environment_is_created_before_the_account() {
 fn a_failed_secret_store_says_to_remove_the_new_account() {
     let mut w = World::new();
     w.gh_set_fails = true;
-    let (res, _, _) = create(&w, Some("fleet"), true);
+    let (_, _, shown) = create(&w, Some("fleet"), true);
     assert!(
-        res.unwrap_err()
-            .text()
-            .contains("remove that account in 1Password")
+        shown.iter().any(|l| l.contains(
+            "Service account \"shop-staging-fleet-deploy\" was created, but its token could not \
+             be stored: remove it in 1Password"
+        )),
+        "{shown:?}"
     );
 }
 
@@ -310,5 +517,5 @@ fn a_failed_secret_store_says_to_remove_the_new_account() {
 fn a_repository_that_is_not_owner_slash_name_is_refused() {
     let mut g = gh(None);
     g.repo = "acme".into();
-    assert_eq!(check(&g).unwrap_err().code().as_str(), "usage");
+    assert_eq!(code_of(&check(&g).unwrap_err()), Some("usage"));
 }

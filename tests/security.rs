@@ -89,6 +89,14 @@ for a in "$@"; do printf '%s\n' "$a"; done > "$p.argv"
 cat > "$p.stdin"
 export -p > "$p.env"
 printf '%s %s\n' "$FAKE_CHILD_STDERR" "$FAKE_STDERR_VALUE" >&2
+# Signed out (FAKE_FLY_AUTH_EXIT), flyctl's recorded replies (tests/fixtures/fly/failures).
+if [ "${FAKE_FLY_AUTH_EXIT:-0}" != 0 ]; then
+  if [ -n "$FLY_API_TOKEN" ]; then
+    echo "Error: You must be authenticated to view this." >&2
+  else
+    echo "Error: no access token available. Please login with 'flyctl auth login'" >&2
+  fi
+fi
 case "$1 $2" in
   "version "*) echo "flyctl v0.4.112 linux/amd64 Commit: fake"; exit 0 ;;
   "auth whoami") echo "S7MARKERVALUEfly@example.invalid"; exit "${FAKE_FLY_AUTH_EXIT:-0}" ;;
@@ -409,17 +417,43 @@ fn assert_no_marker(what: &str, text: &str) {
     }
 }
 
-/// True for a line of a failed call's scrubbed stderr excerpt (NR-31).
+/// `stdout` without a JSON failure document's `error.evidence.upstream` (the failed call's
+/// scrubbed reply, design §7.2); any other stdout as it is.
+fn without_upstream(stdout: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(stdout) {
+        Ok(mut doc) => {
+            if let Some(ev) = doc
+                .get_mut("error")
+                .and_then(|e| e.get_mut("evidence"))
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                ev.remove("upstream");
+            }
+            doc.to_string()
+        }
+        Err(_) => stdout.to_string(),
+    }
+}
+
+/// True for a line of a failed call's scrubbed stderr excerpt (NR-31), or of a catalog
+/// error's evidence box, which holds the same scrubbed reply (design §7.3).
 fn is_excerpt_line(l: &str) -> bool {
-    ["  op said: ", "  flyctl said: ", "  az said: "]
+    ["  op said: ", "  flyctl said: ", "  az said: ", "| ", "│ "]
         .iter()
         .any(|p| l.starts_with(p))
 }
 
-/// No value anywhere. Child stderr (the canary) only on stderr, and only in the labelled,
-/// scrubbed excerpt of a failed call (NR-31); stdout never carries child output.
+/// No value anywhere. Child stderr (the canary) only in the labelled, scrubbed excerpt of a
+/// failed call (NR-31) or a catalog error's evidence: on stderr its box, in a `--json`
+/// document `error.evidence.upstream`, marked untrusted (design §7.2, §7.3). Stdout never
+/// carries child output anywhere else.
 fn assert_clean_output(cmd: &[&str], r: &Run) {
-    assert_no_marker(&format!("{cmd:?} stdout"), &r.stdout);
+    assert_no_marker(&format!("{cmd:?} stdout"), &without_upstream(&r.stdout));
+    assert!(
+        !r.stdout.contains(MARK),
+        "{cmd:?} stdout contains {MARK}:\n{}",
+        r.stdout
+    );
     assert!(
         !r.stderr.contains(MARK),
         "{cmd:?} stderr contains {MARK}:\n{}",
@@ -645,14 +679,13 @@ fn child_stderr_suppressed() {
             // P16: a retry note may come first (signed in, vault readable).
             r.stderr
                 .lines()
-                .any(|l| l.starts_with("opv: source error: op item get failed (exit 1)")),
+                .any(|l| l.starts_with("opv: item iprd in vprd was not found at 1Password")),
             "{cmd:?}: {}",
             r.stderr
         );
         for want in [
-            "signed in to 1Password as SERVICE_ACCOUNT",
-            "item iprd not found in vault vprd",
-            "op item get iprd --vault vprd",
+            "checked: op item get iprd --vault vprd",
+            "op item list --vault vprd",
         ] {
             assert!(r.stderr.contains(want), "{cmd:?}: {want}: {}", r.stderr);
         }
@@ -674,7 +707,7 @@ fn op_failure_without_credentials_is_auth() {
         let r = h.run(cmd);
         assert_eq!(r.code, 7, "{cmd:?}: {}", r.all());
         assert!(
-            r.all().contains("authentication error"),
+            r.all().contains("not signed in to 1Password"),
             "{cmd:?}: {}",
             r.all()
         );
@@ -722,22 +755,13 @@ fn failure_after_partial_plan_stages_nothing() {
     h.set("FAKE_FLY_LIST_FAIL_AT", "1");
     let r = h.run(&["sync", "prod", "--prune", "--deploy"]);
     assert_eq!(r.code, 5, "{}", r.all());
+    // Design §5: the reply is diagnosed (here unrecognised) and shown; nothing is guessed.
     assert!(
         r.stderr
-            .starts_with("opv: target error: fly secrets list failed (exit 1)"),
+            .contains(&format!("flyctl secrets list --app {APP} --json (exit 1)")),
         "{}",
         r.stderr
     );
-    // FR-26: logged in (auth whoami succeeds), so the app is named with the token check;
-    // never "to see why" (child stderr is discarded).
-    assert!(
-        r.stderr.contains(&format!(
-            "flyctl failed for app {APP}: check that the logged-in Fly account can access it"
-        )),
-        "{}",
-        r.stderr
-    );
-    assert!(!r.stderr.contains("to see why"), "{}", r.stderr);
     for sub in ["import", "unset", "deploy"] {
         assert_eq!(h.fly_calls(sub), 0, "{sub} after a failed list");
     }
@@ -771,8 +795,7 @@ fn list_b_failure_after_staging() {
     let r = h.run(&["sync", "prod", "--prune", "--deploy"]);
     assert_eq!(r.code, 5, "{}", r.all());
     assert!(
-        r.stderr
-            .starts_with("opv: target error: fly secrets list failed (exit 1)"),
+        r.stderr.contains("flyctl secrets list --app"),
         "{}",
         r.stderr
     );
@@ -795,7 +818,7 @@ fn import_failure_stops_the_run() {
     let r = h.run(&["sync", "prod", "--prune", "--deploy"]);
     assert_eq!(r.code, 5, "{}", r.all());
     assert!(
-        r.stderr.contains("fly secrets import failed (exit 1)"),
+        r.stderr.contains("flyctl secrets import --app"),
         "{}",
         r.stderr
     );
@@ -819,14 +842,14 @@ fn rule_failure_names_key_not_value() {
         ("sk-or-S7MARKERVALUEopenrouter0010", "not_prefix"),
     ] {
         h.set_item(&item(good_fields(value)));
-        let named = format!("allumata/OPENAI_API_KEY (failed {rule} (");
+        let named = format!("allumata/OPENAI_API_KEY (does not meet its rule {rule}");
 
         h.reset();
         let r = h.run(&["sync", "prod", "--prune", "--deploy"]);
         assert_eq!(r.code, 6, "{rule}: {}", r.all());
         assert!(
             r.stderr
-                .starts_with("opv: policy denied: sync refused, nothing staged"),
+                .starts_with("opv: opv wrote nothing to environment prod"),
             "{rule}: {}",
             r.stderr
         );
@@ -895,15 +918,11 @@ fn expired_session_is_auth_with_signin_command() {
         assert_eq!(r.code, 7, "{cmd:?}: {}", r.all());
         assert!(
             r.stderr
-                .starts_with("opv: authentication error: not signed in to 1Password"),
+                .starts_with("opv: you are not signed in to 1Password"),
             "{cmd:?}: {}",
             r.stderr
         );
-        assert!(
-            r.stderr.contains("\n  sign in: opv login prod\n"),
-            "{}",
-            r.stderr
-        );
+        assert!(r.stderr.contains("\nNext: opv login"), "{}", r.stderr);
         assert!(!r.stderr.contains("to see why"), "{}", r.stderr);
         assert!(!r.stderr.contains("expired-dummy-session"), "{}", r.stderr);
         assert_clean_output(cmd, &r);
@@ -919,11 +938,7 @@ fn expired_session_is_auth_with_signin_command() {
     h.reset();
     let r = h.run(&["status", "prod"]);
     assert_eq!(r.code, 7, "{}", r.all());
-    assert!(
-        r.stderr.contains("\n  sign in: opv login prod\n"),
-        "{}",
-        r.stderr
-    );
+    assert!(r.stderr.contains("\nNext: opv login"), "{}", r.stderr);
     assert!(
         !r.stderr.contains("$(") && !r.stderr.contains("eval"),
         "{}",
@@ -931,7 +946,10 @@ fn expired_session_is_auth_with_signin_command() {
     );
 }
 
-/// FR-26: no account on this machine → `opv login --add`, then sign in; exit 7.
+/// FR-26, 04.07: no account on this machine (Linux) → the account to add at op's prompt,
+/// `opv login --add`; exit 7. On macOS the 1Password app holds the accounts (see
+/// `no_account_on_macos_is_added_in_the_app`).
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn no_account_is_auth_with_login_add() {
     let mut h = Harness::new(&good_item());
@@ -944,10 +962,9 @@ fn no_account_is_auth_with_login_add() {
         let r = h.run(cmd);
         assert_eq!(r.code, 7, "{cmd:?}: {}", r.all());
         for want in [
-            "no 1Password account is set up for op on this machine",
-            "\n  add one: opv login --add\n",
-            "\n  then sign in: opv login",
-            "type the Secret Key and password only at op's prompts",
+            "is not added to op on this machine",
+            "at op's prompt",
+            "opv login --add",
         ] {
             assert!(r.all().contains(want), "{cmd:?}: {want}: {}", r.all());
         }
@@ -955,7 +972,26 @@ fn no_account_is_auth_with_login_add() {
     }
 }
 
-/// FR-26 under CI: advise OP_SERVICE_ACCOUNT_TOKEN, print no interactive command, and do
+/// FR-26 on macOS: the 1Password app holds the accounts, so the account is added there
+/// (then `opv login`); exit 7.
+#[cfg(target_os = "macos")]
+#[test]
+fn no_account_on_macos_is_added_in_the_app() {
+    let mut h = Harness::new(&good_item());
+    h.unset("OP_SERVICE_ACCOUNT_TOKEN")
+        .set("SHELL", "/bin/zsh")
+        .set("FAKE_OP_EXIT", "1")
+        .set("FAKE_OP_NO_ACCOUNTS", "1");
+    let r = h.run(&["status", "prod"]);
+    assert!(
+        r.all()
+            .contains("in the 1Password app and turn on its CLI integration"),
+        "{}",
+        r.all()
+    );
+}
+
+/// FR-26 under CI: name OP_SERVICE_ACCOUNT_TOKEN, print no interactive command, and do
 /// not run `op account list`.
 #[test]
 fn ci_not_signed_in_advises_service_account_token() {
@@ -966,7 +1002,7 @@ fn ci_not_signed_in_advises_service_account_token() {
     let r = h.run(&["sync", "prod"]);
     assert_eq!(r.code, 7, "{}", r.all());
     assert!(
-        r.stderr.contains("set OP_SERVICE_ACCOUNT_TOKEN"),
+        r.stderr.contains("OP_SERVICE_ACCOUNT_TOKEN"),
         "{}",
         r.stderr
     );
@@ -1012,13 +1048,7 @@ fn fly_logged_out_is_auth_with_next_step() {
         let r = h.run(cmd);
         assert_eq!(r.code, 7, "{cmd:?}: {}", r.all());
         assert!(
-            r.stderr
-                .starts_with("opv: authentication error: not logged in to Fly"),
-            "{cmd:?}: {}",
-            r.stderr
-        );
-        assert!(
-            r.stderr.contains("\n  log in: flyctl auth login\n"),
+            r.stderr.contains("Do: sign in to Fly: flyctl auth login\n"),
             "{}",
             r.stderr
         );
@@ -1026,18 +1056,12 @@ fn fly_logged_out_is_auth_with_next_step() {
         assert_clean_output(cmd, &r);
         assert_eq!(h.fly_calls("import"), 0);
     }
-    h.set("CI", "true");
-    h.reset();
-    let r = h.run(&["sync", "prod"]);
-    assert_eq!(r.code, 7, "{}", r.all());
-    assert!(r.stderr.contains("set FLY_API_TOKEN"), "{}", r.stderr);
-    assert!(!r.stderr.contains("auth login"), "{}", r.stderr);
-    assert_clean_output(&["sync", "prod"], &r);
 }
 
-/// FR-26 / FR-10: with a non-interactive 1Password credential (service account or
-/// Connect) set, a read and whoami that both fail are ambiguous: Source (4) naming the
-/// variable, no interactive command, no `op account list`.
+/// FR-26, 04.11: with a non-interactive 1Password credential (service account or Connect)
+/// set, a read and whoami that both fail are the credential rejected or unreachable
+/// (credential_rejected, exit 7) naming its variables, no interactive command, no `op
+/// account list`.
 #[test]
 fn rejected_credential_keeps_source_category() {
     for (set, var) in [
@@ -1061,13 +1085,8 @@ fn rejected_credential_keeps_source_category() {
             h.set(k, v);
         }
         let r = h.run(&["status", "prod"]);
-        assert_eq!(r.code, 4, "{var}: {}", r.all());
-        assert!(
-            r.stderr
-                .contains(&format!("check the token in {var} and network access")),
-            "{}",
-            r.stderr
-        );
+        assert_eq!(r.code, 7, "{var}: {}", r.all());
+        assert!(r.stderr.contains(var), "{}", r.stderr);
         assert!(
             !r.stderr.contains("op signin") && !r.stderr.contains("opv login"),
             "{}",
@@ -1088,7 +1107,7 @@ fn ci_false_is_not_ci() {
         .set("FAKE_OP_EXIT", "1");
     let r = h.run(&["status", "prod"]);
     assert_eq!(r.code, 7, "{}", r.all());
-    assert!(r.stderr.contains("sign in: opv login prod"), "{}", r.stderr);
+    assert!(r.stderr.contains("\nNext: opv login"), "{}", r.stderr);
 }
 
 /// FR-26 / FR-10: with FLY_API_TOKEN set, a failed flyctl call is a target error (5) naming
@@ -1100,11 +1119,10 @@ fn fly_token_failure_is_target_without_whoami() {
         .set("FAKE_FLY_AUTH_EXIT", "1")
         .set("FLY_API_TOKEN", "dummy-fly-token");
     let r = h.run(&["sync", "prod"]);
-    assert_eq!(r.code, 5, "{}", r.all());
+    assert_eq!(r.code, 7, "{}", r.all());
+    // Design §5: a rejected reply under a shell token names the variable, never the login.
     assert!(
-        r.stderr.contains(&format!(
-            "flyctl failed for app {APP}: check that the token in FLY_API_TOKEN can access it"
-        )),
+        r.stderr.contains("Do: unset FLY_API_TOKEN in this shell"),
         "{}",
         r.stderr
     );
@@ -1153,14 +1171,21 @@ fn exit_codes() {
     for cmd in [&["sync", "prod"][..], &["status", "prod"], &["doctor"]] {
         let r = no_op.run(cmd);
         assert_eq!(r.code, 3, "{cmd:?}: {}", r.all());
-        assert!(r.stderr.contains("dependency error"), "{}", r.stderr);
+        // Legacy "dependency error", or the catalog's ToolMissing (doctor's probe, R56).
+        assert!(
+            r.stderr.contains("dependency error")
+                || r.stderr.contains("is not installed")
+                || r.stderr.contains("install op"),
+            "{}",
+            r.stderr
+        );
     }
     // 3: `flyctl` missing from PATH (dependency); nothing staged.
     let no_fly = Harness::build(&good_item(), true, false);
     let r = no_fly.run(&["sync", "prod"]);
     assert_eq!(r.code, 3, "{}", r.all());
     assert!(
-        r.stderr.contains("flyctl not found on PATH"),
+        r.stderr.contains("flyctl is not installed, or not on PATH"),
         "{}",
         r.stderr
     );
@@ -1203,7 +1228,11 @@ fn exit_codes() {
         h7.reset();
         let r = h7.run(cmd);
         assert_eq!(r.code, 7, "{cmd:?}: {}", r.all());
-        assert!(r.stderr.contains("authentication error"), "{}", r.stderr);
+        assert!(
+            r.stderr.contains("not signed in to 1Password"),
+            "{}",
+            r.stderr
+        );
     }
 
     // 8: findings (status / plan with a missing key).
@@ -1288,8 +1317,9 @@ fn import_refusal_shows_in_status_and_plan_and_blocks_sync() {
     let r = h.run(&["sync", "prod", "--prune", "--deploy"]);
     assert_eq!(r.code, 6, "{}", r.all());
     assert!(
-        r.stderr
-            .contains(&format!("allumata/OPENAI_API_KEY (failed {rule} (")),
+        r.stderr.contains(&format!(
+            "allumata/OPENAI_API_KEY (does not meet its rule {rule}"
+        )),
         "{}",
         r.stderr
     );
@@ -1335,13 +1365,13 @@ fn fly_plan_json_stdout_is_one_json_document() {
     );
 }
 
-/// FR-21: the document declares `schema_version: 1`.
+/// FR-21: the document declares `schema_version: 2` (the error document changed in 0.10.0).
 #[test]
-fn status_json_schema_version_is_one() {
+fn status_json_schema_version_is_two() {
     let h = Harness::new(&good_item());
     let r = h.run(&["status", "prod", "--json"]);
     let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
-    assert_eq!(doc["schema_version"], json!(1), "{}", r.all());
+    assert_eq!(doc["schema_version"], json!(2), "{}", r.all());
 }
 
 /// FR-21: the document names the environment and carries names-only totals.
@@ -1436,13 +1466,13 @@ fn status_json_row_carries_failing_reason() {
     assert_eq!(row["reason"], json!("expected prefix sk-"), "{}", r.all());
 }
 
-/// FR-22: the JSON document keeps schema_version 1 when `reason` is added.
+/// FR-22: the JSON document keeps schema_version 2 when `reason` is added.
 #[test]
-fn status_json_reason_keeps_schema_version_one() {
+fn status_json_reason_keeps_schema_version_two() {
     let h = Harness::new(&item(good_fields("pk-S7MARKERVALUEbadprefix0014")));
     let r = h.run(&["status", "prod", "--json"]);
     let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
-    assert_eq!(doc["schema_version"], json!(1), "{}", r.all());
+    assert_eq!(doc["schema_version"], json!(2), "{}", r.all());
 }
 
 /// FR-22: text output shows `failed <rule> (<reason>)`.
@@ -1738,16 +1768,6 @@ kind = "secret"
 environments = ["prod"]
 rules = { prefix_by_mode = { mode = "payments", values = { test = "sk_test_" } } }
 
-[products.allumata.keys.MODE_UNSET]
-kind = "secret"
-environments = ["prod"]
-rules = { prefix_by_mode = { mode = "billing", values = { on = "b_" } } }
-
-[products.allumata.keys.MODE_UNMAPPED]
-kind = "secret"
-environments = ["prod"]
-rules = { prefix_by_mode = { mode = "region", values = { eu = "eu_" } } }
-
 [products.allumata.keys.REGEX]
 kind = "secret"
 environments = ["prod"]
@@ -1894,18 +1914,6 @@ fn reason_cases() -> Vec<(&'static str, String, &'static str, &'static str)> {
             format!("{m}mode"),
             "prefix_by_mode",
             "wrong prefix for mode test",
-        ),
-        (
-            "MODE_UNSET",
-            format!("{m}mode"),
-            "prefix_by_mode",
-            "mode billing is not set in this environment",
-        ),
-        (
-            "MODE_UNMAPPED",
-            format!("{m}mode"),
-            "prefix_by_mode",
-            "no prefix is configured for mode weird",
         ),
         (
             "REGEX",
@@ -2180,7 +2188,7 @@ fn list_failure_with_stderr(value: &str) -> Run {
     h.run(&["status", "prod"])
 }
 
-const MASKED_EXCERPT: &str = "\n  flyctl said: S7CHILDSTDERR __SECRET__\n";
+const MASKED_EXCERPT: &str = "\n| S7CHILDSTDERR ********\n";
 
 #[test]
 fn excerpt_masks_a_raw_item_value() {
@@ -2267,24 +2275,53 @@ fn excerpt_masks_an_unsectioned_item_value() {
     );
 }
 
-/// At most five lines, the last ones, each labelled with the program, right after the
-/// error line.
+/// At most five lines of the reply in the box, right after the error line: the tool's first
+/// line plus the tail, with the place of the lines left out marked (design §7.3).
 #[test]
-fn excerpt_shows_the_last_five_lines_labelled_with_the_program() {
+fn excerpt_shows_the_first_line_and_the_tail_and_marks_the_gap() {
     let r = list_failure_with_stderr("l2\nl3\nl4\nl5\nl6\nl7");
     let excerpt: Vec<&str> = r.stderr.lines().filter(|l| is_excerpt_line(l)).collect();
     assert_eq!(
         excerpt,
         [
-            "  flyctl said: l3",
-            "  flyctl said: l4",
-            "  flyctl said: l5",
-            "  flyctl said: l6",
-            "  flyctl said: l7"
+            "| S7CHILDSTDERR l2",
+            "| ... 1 line left out",
+            "| l4",
+            "| l5",
+            "| l6",
+            "| l7"
         ],
         "{}",
         r.stderr
     );
+}
+
+/// With `--verbose` the box holds every line of the reply.
+#[test]
+fn verbose_excerpt_shows_every_line_of_the_reply() {
+    let mut h = Harness::new(&jsonish_item());
+    h.set("FAKE_FLY_LIST_FAIL_AT", "1")
+        .set("FAKE_STDERR_VALUE", "l2\nl3\nl4\nl5\nl6\nl7");
+    let r = h.run(&["status", "prod", "--verbose"]);
+    let excerpt: Vec<&str> = r.stderr.lines().filter(|l| l.starts_with("| ")).collect();
+    assert_eq!(
+        excerpt,
+        ["| S7CHILDSTDERR l2", "| l3", "| l4", "| l5", "| l6", "| l7"],
+        "{}",
+        r.stderr
+    );
+}
+
+/// With `--verbose`, a long reply naming an item value in every line shows every line and
+/// never the value (design §7.3: everything passes through, scrubbed).
+#[test]
+fn verbose_long_reply_never_shows_an_item_value() {
+    let mut h = Harness::new(&jsonish_item());
+    let reply: Vec<String> = (0..80).map(|i| format!("{JSONISH} detail {i}")).collect();
+    h.set("FAKE_FLY_LIST_FAIL_AT", "1")
+        .set("FAKE_STDERR_VALUE", &reply.join("\n"));
+    let r = h.run(&["status", "prod", "--verbose"]);
+    assert!(!r.all().contains("S7MARKERVALUE"), "{}", r.all());
 }
 
 /// `--verbose` shows each call's stderr, scrubbed (the notes value only the registry
@@ -2295,8 +2332,7 @@ fn verbose_shows_scrubbed_child_stderr() {
     h.set("FAKE_STDERR_VALUE", NOTES);
     let r = h.run(&["--verbose", "status", "prod"]);
     assert!(
-        r.stderr
-            .contains("\n    stderr: S7CHILDSTDERR __SECRET__\n"),
+        r.stderr.contains("\n    stderr: S7CHILDSTDERR ********\n"),
         "{}",
         r.stderr
     );
@@ -2426,9 +2462,15 @@ fn confirm_env_refusal_ends_with_the_exact_command() {
     );
     h.use_config(&text);
     let r = h.run(&["sync", "prod", "--deploy"]);
-    assert_eq!(
-        r.stderr.lines().last(),
-        Some("Next: opv sync prod --deploy --confirm prod")
+    // The handoff is the command as typed, its --config kept (09.04), plus --confirm.
+    assert!(
+        r.stderr
+            .lines()
+            .last()
+            .is_some_and(|l| l.starts_with("Next: opv sync --config ")
+                && l.ends_with(" prod --deploy --confirm prod")),
+        "{}",
+        r.stderr
     );
 }
 

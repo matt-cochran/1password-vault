@@ -4,10 +4,95 @@
 use super::*;
 use crate::adapters::onepassword_manifest::{Account, Discovery};
 use crate::app::account;
+use crate::cause::{
+    CallId, Cause, ExitClass, GrantModel, NamedBy, NotFoundState, Observed, Principal,
+    ResourceKind, ResourceName, ResourceRef, Right, SessionState, System,
+};
 use crate::domain::Kind;
 use crate::domain::rules::Reason;
-use crate::error::Code;
 use crate::host::Platform;
+
+/// A failed `op` call by the person, as the runner observes one.
+fn op_seen() -> Observed {
+    Observed::from_failed_call(
+        CallId {
+            system: System::OnePassword,
+            program: "op".into(),
+            words: vec!["item".into(), "get".into()],
+        },
+        ExitClass::Code { code: 1 },
+        Principal::Person { account: None },
+    )
+}
+
+fn op_resource(kind: ResourceKind, name: &str) -> ResourceRef {
+    ResourceRef {
+        kind,
+        name: ResourceName::new(name),
+        scope: None,
+    }
+}
+
+/// An item 1Password does not show (`item_not_found`).
+fn item_not_found() -> Error {
+    Cause::NotFound {
+        system: System::OnePassword,
+        resource: op_resource(ResourceKind::Item, "deploy-credentials"),
+        named_by: NamedBy::Flag {
+            flag: "--item".into(),
+        },
+        state: NotFoundState::Missing,
+        seen: op_seen(),
+    }
+    .into()
+}
+
+/// A vault the person cannot open (`vault_no_access`).
+fn vault_no_access() -> Error {
+    Cause::MissingRight {
+        system: System::OnePassword,
+        resource: op_resource(ResourceKind::Vault, "vprd"),
+        right: Right::Read,
+        grant: GrantModel::VaultPermission,
+        env: None,
+        target: None,
+        seen: op_seen(),
+    }
+    .into()
+}
+
+/// A failure 1Password's diagnosis does not recognise.
+fn unrecognized() -> Error {
+    Cause::Unrecognized {
+        system: System::OnePassword,
+        established: Vec::new(),
+        env: None,
+        target: None,
+        seen: op_seen(),
+    }
+    .into()
+}
+
+/// Not signed in to 1Password (`op_not_signed_in`).
+fn op_signed_out() -> Error {
+    Cause::NotSignedIn {
+        system: System::OnePassword,
+        account: None,
+        state: SessionState::SignedOut,
+    }
+    .into()
+}
+
+/// flyctl is not installed (`dependency_missing`).
+fn flyctl_missing() -> Error {
+    Cause::ToolMissing {
+        tool: "flyctl".into(),
+        platform: Platform::Linux,
+        shell: crate::host::Shell::Posix,
+        ci: false,
+    }
+    .into()
+}
 
 fn account(id: &str, email: &str, address: &str, shorthand: &str, user: &str) -> Account {
     Account {
@@ -220,7 +305,7 @@ fn matrix_has_no_entry_for_an_errored_environment() {
             Some("Fly"),
             vec![row("api", "A", KeyState::Ready, TargetState::Present)],
         ),
-        env_err("prod", Some("Fly"), Error::Source("unreadable".into())),
+        env_err("prod", Some("Fly"), unrecognized()),
     ];
     let r = receipt(&inputs(&report, envs), "0.6.0");
     assert_eq!(
@@ -331,7 +416,10 @@ fn row_finding_verify_names_the_product() {
         )],
     )];
     let r = receipt(&inputs(&report, envs), "0.6.0");
-    assert_eq!(r.findings[0].verify, "opv status staging --product api");
+    assert_eq!(
+        r.findings[0].verify,
+        "opv status staging --target staging-target --product api"
+    );
 }
 
 #[test]
@@ -394,24 +482,17 @@ fn discovery_unavailable_account_finding_is_not_blocking() {
 #[test]
 fn an_unreadable_targets_rows_name_that_reason_in_grants_missing() {
     let report = account_report();
-    let error = Error::Source("the deploy credentials item is unreadable".into())
-        .with_code(Code::ItemNotFound);
+    let error = item_not_found();
+    let want = error.to_string();
     let envs = vec![env_err("staging", Some("Fly"), error)];
     let r = receipt(&inputs(&report, envs), "0.6.0");
-    assert_eq!(
-        r.findings[0].message.as_deref(),
-        Some("the deploy credentials item is unreadable")
-    );
+    assert_eq!(r.findings[0].message.as_deref(), Some(want.as_str()));
 }
 
 #[test]
 fn a_grants_missing_finding_next_is_access_with_the_target() {
     let report = account_report();
-    let envs = vec![env_err(
-        "staging",
-        Some("Fly"),
-        Error::Source("unreadable".into()).with_code(Code::VaultNoAccess),
-    )];
+    let envs = vec![env_err("staging", Some("Fly"), vault_no_access())];
     let r = receipt(&inputs(&report, envs), "0.6.0");
     assert_eq!(
         r.findings[0].prerequisite,
@@ -422,11 +503,7 @@ fn a_grants_missing_finding_next_is_access_with_the_target() {
 #[test]
 fn a_grants_missing_finding_blocks_with_the_owner() {
     let report = account_report();
-    let envs = vec![env_err(
-        "staging",
-        Some("Fly"),
-        Error::Source("unreadable".into()).with_code(Code::VaultNoAccess),
-    )];
+    let envs = vec![env_err("staging", Some("Fly"), vault_no_access())];
     let r = receipt(&inputs(&report, envs), "0.6.0");
     let f = &r.findings[0];
     assert_eq!(
@@ -443,11 +520,7 @@ fn a_grants_missing_finding_blocks_with_the_owner() {
 #[test]
 fn a_target_that_could_not_be_read_is_reported_grants_missing() {
     let report = account_report();
-    let envs = vec![env_err(
-        "staging",
-        Some("Fly"),
-        Error::Source("unreadable".into()),
-    )];
+    let envs = vec![env_err("staging", Some("Fly"), unrecognized())];
     let r = receipt(&inputs(&report, envs), "0.6.0");
     assert_eq!(r.targets[0].state, "grants_missing");
 }
@@ -541,7 +614,7 @@ fn text_first_line_reports_blocking_and_finding_counts() {
         )],
     )];
     let r = receipt(&inputs(&report, envs), "0.6.0");
-    assert!(text(&r).starts_with("ready: 1 blocking · 1 findings · receipt rcpt-"));
+    assert!(text(&r).starts_with("ready: 1 blocking · 1 finding · receipt rcpt-"));
 }
 
 #[test]
@@ -718,8 +791,7 @@ fn an_environment_for_another_audience_is_not_a_blocking_problem() {
     let account = crate::app::account::credential_report(crate::host::Platform::Linux);
     let mut env = titled("prod", "Production");
     env.audience = Some("devops".into());
-    env.rows = Err(crate::error::Error::Source("no access".into())
-        .with_code(crate::error::Code::VaultNoAccess));
+    env.rows = Err(vault_no_access());
     let r = receipt(
         &Inputs {
             config_source: None,
@@ -1123,9 +1195,7 @@ fn a_shared_sign_in_address_does_not_block_readiness() {
 /// #157: a target stopped by a missing sign-in is reported as that, not as a missing grant.
 fn signed_out_target_receipt() -> Receipt {
     let report = account_report();
-    let error = Error::Auth("not signed in to 1Password".into())
-        .with_code(Code::OpNotSignedIn)
-        .with_next("opv login");
+    let error = op_signed_out();
     let envs = vec![env_err("staging", Some("Fly"), error)];
     receipt(&inputs(&report, envs), "0.9.0")
 }
@@ -1154,7 +1224,7 @@ fn a_target_stopped_by_a_missing_sign_in_signs_in() {
 #[test]
 fn a_target_stopped_by_a_missing_cli_is_the_agents_to_fix() {
     let report = account_report();
-    let error = Error::Dependency("flyctl is not installed".into());
+    let error = flyctl_missing();
     let envs = vec![env_err("staging", Some("Fly"), error)];
     let r = receipt(&inputs(&report, envs), "0.9.0");
     assert_eq!(
@@ -1163,16 +1233,59 @@ fn a_target_stopped_by_a_missing_cli_is_the_agents_to_fix() {
     );
 }
 
-#[test]
-fn a_target_error_without_a_step_points_at_doctor_for_that_target() {
+/// The GitHub "environment missing" error: a `Do:` for the owner and no step of its own.
+fn owner_setup_receipt() -> Receipt {
     let report = account_report();
-    let error = Error::Unknown("timed out".into());
-    let envs = vec![env_err("staging", Some("Fly"), error)];
-    let r = receipt(&inputs(&report, envs), "0.9.0");
-    assert_eq!(
-        r.findings[0].prerequisite,
-        "opv doctor --env staging --target staging-target"
+    let error = crate::adapters::github::gh::missing_environment_error("o/r", "staging");
+    let envs = vec![env_err("staging", Some("GitHub"), error)];
+    receipt(&inputs(&report, envs), "0.10.0")
+}
+
+/// 07.07 (S1): the owner's action is the prerequisite, never `opv doctor` (which cannot
+/// see it: a loop).
+#[test]
+fn an_owner_setup_finding_never_points_at_doctor() {
+    assert!(
+        !owner_setup_receipt().findings[0]
+            .prerequisite
+            .starts_with("opv doctor")
     );
+}
+
+/// 07.07 (S1): the error's `Do:` is kept, as the prerequisite.
+#[test]
+fn an_owner_setup_finding_keeps_the_errors_do() {
+    assert!(
+        owner_setup_receipt().findings[0]
+            .prerequisite
+            .contains("repos/o/r/environments/staging")
+    );
+}
+
+/// 07.07: the owner's step is the owner's.
+#[test]
+fn an_owner_setup_finding_is_the_owners() {
+    assert_eq!(owner_setup_receipt().findings[0].actor, "owner");
+}
+
+/// 07.07: a finding whose error has both a Do and a Next shows the Do in `--json`.
+#[test]
+fn a_finding_keeps_the_errors_do_beside_its_next() {
+    let report = account_report();
+    let error = vault_no_access();
+    let want = error.do_text();
+    let envs = vec![env_err("staging", None, error)];
+    let r = receipt(&inputs(&report, envs), "0.10.0");
+    assert_eq!(r.findings[0].act, want);
+}
+
+/// 07.30: a run scoped to one environment claims only that environment.
+#[test]
+fn a_clean_single_environment_receipt_names_it() {
+    let report = account_report();
+    let envs = vec![env("staging", Some("Fly"), Vec::new())];
+    let r = receipt(&inputs(&report, envs), "0.10.0");
+    assert!(text(&r).contains("every declared key in staging is saved and staging was read"));
 }
 
 /// #157: a person who can read the state vault but not manage it needs no grant.
@@ -1202,7 +1315,7 @@ fn ready_signed_out_is_op_not_signed_in() {
         &mut Vec::new(),
     )
     .unwrap_err();
-    assert_eq!(e.code(), Code::OpNotSignedIn);
+    assert_eq!(e.code_str(), "op_not_signed_in");
 }
 
 /// #157: the state vault is checked in the environment's own account.

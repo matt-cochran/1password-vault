@@ -88,15 +88,19 @@ pub fn prompt(label: &str) -> Result<Option<SecretValue>, Error> {
     }
     #[cfg(not(feature = "ui"))]
     {
-        let value = rpassword::prompt_password(format!("{label} (hidden): ")).map_err(|_| {
-            Error::Dependency(
-                "Cannot read hidden input. Use your own interactive terminal, or fill this \
-                 field privately in 1Password."
-                    .into(),
-            )
-        })?;
+        let value =
+            rpassword::prompt_password(format!("{label} (hidden): ")).map_err(|_| no_terminal())?;
         Ok(Some(SecretValue::new(value)))
     }
+}
+
+/// The prompt could not drive or read the terminal (R60): the value needs a person at their
+/// own interactive terminal (or filled privately in 1Password).
+fn no_terminal() -> Error {
+    crate::cause::Cause::NeedsTerminal {
+        why: crate::cause::NoTerminal::NoTty,
+    }
+    .into()
 }
 
 #[cfg(feature = "ui")]
@@ -111,11 +115,7 @@ mod terminal {
     use crate::error::Error;
 
     fn io_err(_: std::io::Error) -> Error {
-        Error::Dependency(
-            "Cannot read masked input. Use your own interactive terminal, or fill this field \
-             privately in 1Password."
-                .into(),
-        )
+        super::no_terminal()
     }
 
     /// Raw mode and bracketed paste for the prompt's lifetime, restored on every exit.

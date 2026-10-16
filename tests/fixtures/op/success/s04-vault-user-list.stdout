@@ -1,0 +1,10 @@
+[
+  {
+    "id": "<USER_2>",
+    "name": "<NAME_8>",
+    "email": "<EMAIL_2>",
+    "type": "MEMBER",
+    "state": "ACTIVE",
+    "permissions": ["allow_viewing", "allow_editing", "allow_managing"]
+  }
+]
