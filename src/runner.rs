@@ -591,6 +591,20 @@ mod failure {
         OBSERVED.with(|o| *o.borrow_mut() = Some((call, seen)));
     }
 
+    /// Lend the raw stderr of the latest failed call to `f` ("" when there is none), without
+    /// taking it: the scrubbed excerpt stays for the evidence.
+    pub(super) fn with_stderr<T>(f: impl FnOnce(&str) -> T) -> T {
+        let text = LAST.with(|l| {
+            l.borrow()
+                .as_ref()
+                .filter(|x| x.call == CALL.with(Cell::get))
+                .map(|x| {
+                    zeroize::Zeroizing::new(String::from_utf8_lossy(&x.stderr.bytes).into_owned())
+                })
+        });
+        f(text.as_ref().map_or("", |t| t.as_str()))
+    }
+
     pub(super) fn take_observed() -> Option<Observed> {
         let (call, seen) = OBSERVED.with(|o| o.borrow_mut().take())?;
         (call == CALL.with(Cell::get)).then_some(seen)
@@ -689,6 +703,14 @@ pub fn take_failure_excerpt() -> Option<crate::scrub::Excerpt> {
 /// [`take_failure_excerpt`] (design §5 "Sealing").
 pub fn take_observed() -> Option<crate::cause::Observed> {
     failure::take_observed()
+}
+
+/// Lend the raw stderr of the failed call the error at hand came from to a diagnosis
+/// strategy (design §5: phrases match before scrubbing). Not taken: the scrubbed excerpt
+/// ([`take_failure_excerpt`]) is still there for the evidence. The text lives in zeroizing
+/// memory and never outlives `f`.
+pub fn with_failure_stderr<T>(f: impl FnOnce(&str) -> T) -> T {
+    failure::with_stderr(f)
 }
 
 /// Run `f` with `principal` (an environment's deploy credentials, FR-40) in effect: every

@@ -233,3 +233,14 @@ fn an_unrecorded_gh_reply_is_unrecognized() {
         }
     ));
 }
+
+#[test]
+fn spike_q9_secret_list_with_a_rejected_deploy_token_is_deploy_credentials_failed() {
+    let stderr = include_str!("../../../tests/fixtures/github/stderr-bad_token.txt");
+    let cause = diagnose(
+        observed(ExitClass::Code { code: 1 }, deploy_credentials()),
+        stderr,
+        &DiagnoseContext::default(),
+    );
+    assert_eq!(cause.code(), "deploy_credentials_failed");
+}
