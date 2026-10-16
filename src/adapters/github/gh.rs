@@ -117,19 +117,18 @@ pub fn secret_refusal(name: &str, value: &SecretValue) -> Option<(&'static str, 
     None
 }
 
-/// Refuses the whole batch, naming the key and rule (never the value), when one entry has a
-/// [`secret_refusal`].
+/// Refuses the whole batch when one entry has a [`secret_refusal`]. `sync` refuses every
+/// such value as a blocking row of its plan (`KeysBlocking`) before any write, so one that
+/// reaches here is an internal error; nothing was sent to GitHub.
 pub fn validate_secrets(batch: &[(String, &SecretValue)]) -> Result<(), Error> {
-    for (name, value) in batch {
-        if let Some((rule, reason)) = secret_refusal(name, value) {
-            return Err(Error::Policy(
-                format!(
-                    "GitHub secret refused for {name:?}: rule {rule} ({reason}); nothing was \
-                     sent to GitHub"
-                )
-                .into(),
-            ));
+    if batch
+        .iter()
+        .any(|(name, value)| secret_refusal(name, value).is_some())
+    {
+        return Err(Cause::Bug {
+            site: "github: a value the plan passed breaks a GitHub secret rule",
         }
+        .into());
     }
     Ok(())
 }
@@ -606,17 +605,32 @@ fn valid_name(name: &str) -> bool {
         && !name.starts_with("GITHUB_")
 }
 
-/// Parse a read's JSON, naming the line and column on failure (never its contents).
+/// Parse a read's JSON (`what`: the gh command's words); a reply opv cannot read is
+/// `UnexpectedOutput` at its line and column (never its contents), on the runner's own
+/// observation of the call (A1).
 fn parse_json<T: DeserializeOwned>(out: &Output, what: &str) -> Result<T, Error> {
     serde_json::from_slice(&out.stdout).map_err(|e| {
-        Error::Target(
-            format!(
-                "{what} returned unexpected JSON (line {}, column {})",
-                e.line(),
-                e.column()
-            )
+        let words: Vec<&str> = what
+            .split_whitespace()
+            .skip_while(|w| *w == PROGRAM)
+            .collect();
+        match crate::runner::take_unusable_reply(&Call::new(PROGRAM, &words)) {
+            Some(seen) => Cause::UnexpectedOutput {
+                system: System::GitHub,
+                at: Some(crate::cause::Location {
+                    line: u32::try_from(e.line()).unwrap_or(u32::MAX),
+                    col: u32::try_from(e.column()).unwrap_or(u32::MAX),
+                }),
+                problem: crate::cause::OutputProblem::Unparseable,
+                during: crate::cause::During::Read,
+                seen,
+            }
             .into(),
-        )
+            None => Cause::Bug {
+                site: "github: a gh reply the runner did not observe",
+            }
+            .into(),
+        }
     })
 }
 

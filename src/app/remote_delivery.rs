@@ -886,12 +886,16 @@ fn deliver(mut input: Box<dyn Read + Send>) -> Result<i32, Error> {
 
 #[cfg(not(unix))]
 pub fn receive(_input: Box<dyn Read + Send>) -> Result<i32, Error> {
-    Err(Error::Policy(
-        "remote delivery receives on Linux and other Unix hosts only (file keys need Linux); \
-         nothing was written or started"
-            .into(),
-    )
-    .with_code(crate::error::Code::PolicyRefused))
+    // File keys need a RAM-backed folder, which only Linux and other Unix hosts give.
+    Err(crate::cause::Cause::RamDirUnavailable {
+        remote: None,
+        why: crate::cause::RamDir::NoneOnPlatform {
+            os: std::env::consts::OS,
+        },
+        env: None,
+        product: None,
+    }
+    .into())
 }
 
 /// SIGTERM to the app's process group, SIGKILL after [`STOP_GRACE`]; the app's status.

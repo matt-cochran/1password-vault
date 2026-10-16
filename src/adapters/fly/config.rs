@@ -8,8 +8,9 @@ use serde::Deserialize;
 
 use super::{CREDENTIAL_VARS, FLYCTL, Fly, PROGRAM, auth_whoami};
 use crate::adapters::probe::{parse_version, spawn_tool, version_in};
+use crate::cause::FieldRule;
 use crate::cause::{Cause, DiagnoseContext, Unusable};
-use crate::config::{check_ident, is_id};
+use crate::config::{ID_SHAPE, TEMPLATE_WORDS, check_ident, is_id, section_invalid};
 use crate::domain::SecretValue;
 use crate::error::Error;
 use crate::host::Host;
@@ -85,10 +86,12 @@ impl Provider for FlyProvider {
         let env = section.env();
         let f: RawFly = section.deserialize()?;
         check_app(env, &f.app)?;
-        let t = &f.secret_name;
-        if !t.contains("{KEY}") {
-            return Err(Error::Config(
-                format!("environment {env}: fly.secret_name {t:?} must contain {{KEY}}").into(),
+        if !f.secret_name.contains("{KEY}") {
+            return Err(section_invalid(
+                "fly.secret_name",
+                FieldRule::Type {
+                    expected: TEMPLATE_WORDS,
+                },
             ));
         }
         Ok(Box::new(FlyTarget {
@@ -185,7 +188,7 @@ static INIT_FIELDS: [InitField; 2] = [
 
 /// The app name goes into argv: non-empty, unpadded, never read as a flag.
 fn check_app(env: &str, app: &str) -> Result<(), Error> {
-    check_ident(env, "fly.app", app, is_id, "^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    check_ident(env, "fly.app", app, is_id, ID_SHAPE)
 }
 
 impl TargetConfig for FlyTarget {

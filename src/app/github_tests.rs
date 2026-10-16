@@ -726,7 +726,10 @@ fn concealed_config_blocks_sync_and_names_the_rule() {
     let err = sync_on(&sim, &fleet_ci(), &SyncOpts::default())
         .0
         .unwrap_err();
-    assert!(err.mentions("concealed-config"), "{err}");
+    assert!(
+        err.to_string().contains("a setting stored concealed"),
+        "{err}"
+    );
 }
 
 #[test]

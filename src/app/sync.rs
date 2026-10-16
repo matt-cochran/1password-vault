@@ -37,12 +37,12 @@ use super::{
     JsonPart, KeyNames, Prefixed, check_product, ci_summary, compare, findings_error, is_blocking,
     managed_names, open_target, placement, plan_id_of, plan_item, plural, preflight, print_extras,
     print_legend, print_rows, product_names, read_and_plan_versioned, read_item_fields,
-    resolve_targets, row_names, rows_item_url, scope_plan, target_runners, target_word,
-    unmanaged_on_target, write_err, write_json,
+    resolve_targets, rows_item_url, scope_plan, target_runners, target_word, unmanaged_on_target,
+    write_err, write_json,
 };
 use crate::cause::{
     Cause, Closest, Cmd, EnvName, KeyName, NameKind, PlanId, PlanScope, ProductKey, ProductName,
-    TargetName, UsageProblem,
+    Refusal, TargetName, UsageProblem, ValueRow, ValueState,
 };
 use crate::domain::plan::CurrentState::Same;
 use crate::domain::provenance::run_plan_id;
@@ -54,7 +54,7 @@ use crate::domain::{
 use crate::error::{Code, Error, next_line};
 use crate::ports::{PinnedRuntime, PinnedStore, Ports, StagedRuntime, StagedStore};
 use crate::provider::TargetConfig;
-use crate::runner::CommandRunner;
+use crate::runner::{Call, CommandRunner};
 
 /// Flags of `sync`.
 #[derive(Debug, Default, Clone)]
@@ -550,7 +550,6 @@ impl Ctx<'_> {
                 self.r.note(&guarded);
                 e
             }
-            e @ Error::Policy(_) => e.map_text(|t| format!("{t}; {guarded}")),
             e => e,
         }
     }
@@ -1316,12 +1315,13 @@ fn run_pinned(
         runtime.config_in_store(),
     )?;
     if !want.refused.is_empty() {
-        let keys: Vec<&str> = want
-            .refused
-            .iter()
-            .filter_map(|r| r.split(' ').next())
-            .collect();
-        return Err(c.refusal(blocked(&want.refused, &keys, false, env_name)));
+        return Err(c.refusal(
+            Cause::KeysBlocking {
+                env: EnvName::new(env_name),
+                rows: want.refused,
+            }
+            .into(),
+        ));
     }
     c.require_confirm()?;
     print_extras(out, &plan)?;
@@ -1462,72 +1462,24 @@ fn run_pinned(
         env_routed(out)?;
         return Ok(report);
     } else {
-        return Err(Error::Target(
-            format!(
-                "{} reports no revision, so nothing was pruned",
-                runtime.describe()
-            )
-            .into(),
-        )
-        .with_do(format!(
-            "deploy {} once so it has a revision",
-            runtime.describe()
-        ))
-        .with_next(step_text(&c.opts.command(env_name))));
+        // The runtime's own read shows no revision to prune behind.
+        return Err(runtime_refused(c, Refusal::NoRevision));
     };
     let health = runtime.await_healthy(&revision)?;
-    if pending.is_empty() && !matches!(health, Health::Healthy) {
-        // Nothing was applied: say so, so a failure is not read as caused by this run.
-        let state = match &health {
-            Health::TimedOut => "not healthy yet".to_string(),
-            Health::Unhealthy(detail) => format!("unhealthy\n  {detail}"),
-            Health::Healthy => unreachable!(),
-        };
-        return Err(Error::Target(
-            format!(
-                "nothing to change; the latest revision {} (with these settings) is {state}; \
-                 opv changed nothing",
-                revision.0
-            )
-            .into(),
-        )
-        .with_code(Code::TargetUnhealthy)
-        .with_do(format!(
-            "{} shows its state; fix the revision",
-            runtime.inspect_hint(&revision)
-        ))
-        .with_next(format!("opv doctor --env {env_name}")));
-    }
+    // The runtime's own reads judged the revision (a nothing-to-change run applied nothing,
+    // so the refusal is about the revision as it already was); nothing was pruned.
     match health {
         Health::Healthy => {}
-        Health::Unhealthy(detail) => {
-            return Err(Error::Target(
-                format!("{detail}\n  the previous revision keeps serving; nothing pruned").into(),
-            )
-            .with_code(Code::TargetUnhealthy)
-            .with_do(format!(
-                "fix why {} cannot start the new revision (opv doctor checks that it can read \
-                 its secrets)",
-                runtime.describe()
-            ))
-            .with_next(format!("opv doctor --env {env_name}")));
+        Health::Unhealthy(_) => {
+            return Err(runtime_refused(
+                c,
+                Refusal::Unhealthy {
+                    new_revision: revision.0.clone(),
+                    serving: None,
+                },
+            ));
         }
-        Health::TimedOut => {
-            return Err(Error::Target(
-                format!(
-                    "revision {} of {} is not healthy yet; the previous revision keeps \
-                     serving; nothing pruned",
-                    revision.0,
-                    runtime.describe()
-                )
-                .into(),
-            )
-            .with_code(Code::TargetUnhealthy)
-            .with_do(format!(
-                "{} shows its state; wait until it is healthy",
-                runtime.inspect_hint(&revision)
-            )));
-        }
+        Health::TimedOut => return Err(runtime_refused(c, Refusal::InProgress)),
     }
     if !pending.is_empty() {
         p(
@@ -1714,8 +1666,8 @@ pub(crate) struct PinnedWant {
     pub store: BTreeMap<String, StoreWant>,
     /// Env-routed config: env name → value. Config only, never a secret (FR-14).
     pub plain: BTreeMap<String, String>,
-    /// `product/KEY (failed <rule> (<reason>))` for config values the store refuses.
-    pub refused: Vec<String>,
+    /// Config values the store refuses, with the rule and its fixed reason (never the value).
+    pub refused: Vec<ValueRow>,
 }
 
 /// One store-routed name: the store's version before this run, and the value to write when
@@ -1829,10 +1781,15 @@ pub(crate) fn pinned_want(
             }
             let desired = SecretValue::new(value.clone());
             if let Some((rule, why)) = store.refusal(&name, &desired) {
-                want.refused.push(format!(
-                    "{} (failed {rule} ({why}))",
-                    key_label(product, key)
-                ));
+                want.refused.push(ValueRow {
+                    product: ProductName::new(product),
+                    key: KeyName::new(key),
+                    target: None,
+                    state: ValueState::RuleFailed {
+                        rule,
+                        reason: Some(why.to_string()),
+                    },
+                });
                 continue;
             }
             let (current, same) = match store.read(&name)? {
@@ -1969,51 +1926,50 @@ fn none_or(names: &[&str]) -> String {
     }
 }
 
-/// Refuses the whole run, before any write, when a row blocks (FR-15), naming the next
-/// command (NR-17): the first value to fill, opened in 1Password (R63), never a sync.
+/// Refuses the whole run, before any write, when a row blocks (FR-15): `KeysBlocking`
+/// (exit 6), whose step opens the first value to fill in 1Password (R63), never a sync.
+/// "nothing was changed" holds on every target kind, staged or not (01.14).
 fn refuse_blocking(plan: &SyncPlan, env_name: &str) -> Result<(), Error> {
-    let blocking = row_names(&plan.rows, is_blocking);
-    let keys: Vec<String> = plan
+    let rows: Vec<ValueRow> = plan
         .rows
         .iter()
         .filter(|r| is_blocking(r))
-        .map(|r| key_label(&r.product, &r.key))
+        .map(super::value_row)
         .collect();
-    if keys.is_empty() {
+    if rows.is_empty() {
         return Ok(());
     }
-    // 1Password shows an empty field only in edit mode (as for `findings_error`).
-    let empty = plan.rows.iter().any(|r| {
-        matches!(
-            r.state,
-            KeyState::Missing | KeyState::RuleFailed("nonempty", _)
-        )
-    });
-    let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
-    Err(blocked(&blocking, &keys, empty, env_name))
+    Err(Cause::KeysBlocking {
+        env: EnvName::new(env_name),
+        rows,
+    }
+    .into())
 }
 
-/// The refusal of a sync whose values `blocking` need a person (keys_blocking, exit 6;
-/// the catalog's `ValuesNeeded` has no exit-6 form yet). "nothing was changed" holds on
-/// every target kind, staged or not (01.14).
-fn blocked(blocking: &[String], keys: &[&str], empty: bool, env_name: &str) -> Error {
-    let mut open = Cmd {
-        command: vec!["open".into()],
-        args: vec![
-            keys.first().copied().unwrap_or_default().to_string(),
-            "--env".into(),
-            env_name.to_string(),
-        ],
+/// The pinned runtime of `c` (its Deployment, its Container App) refused the run `why`, as
+/// its own latest read showed it (design §4.5): the runner's observation of that read.
+fn runtime_refused(c: &Ctx<'_>, why: Refusal) -> Error {
+    let Some((system, program, subject)) = c.t.runtime_subject() else {
+        return Cause::Bug {
+            site: "sync: a pinned runtime with no catalog subject",
+        }
+        .into();
     };
-    open.args.extend(config_flag());
-    let mut action = format!("fix {} in 1Password", keys.join(", "));
-    if empty {
-        action.push_str(" (click Edit on the item: it hides empty fields until then)");
+    match crate::runner::take_unusable_reply(&Call::new(program, &[])) {
+        Some(seen) => Cause::TargetRefused {
+            system,
+            subject,
+            why,
+            env: Some(EnvName::new(c.env_name)),
+            target: Some(TargetName::new(c.target)),
+            seen,
+        }
+        .into(),
+        None => Cause::Bug {
+            site: "sync: a runtime state the runner did not observe",
+        }
+        .into(),
     }
-    Error::Policy(format!("sync refused, nothing was changed: {}", blocking.join(", ")).into())
-        .with_code(Code::KeysBlocking)
-        .with_do(action)
-        .with_next(step_text(&open))
 }
 
 /// Longest wait for staged names to show a digest (NR-30).
@@ -2590,16 +2546,17 @@ fn key_ref_format(flag: &str) -> Error {
     .into()
 }
 
-/// A `--rotate` / `--prune-immutable` entry that names a declared key the flag cannot take,
-/// named with why; its step explains that key, a read (the catalog's `Usage` has no form
-/// that names the entry yet).
-fn key_ref_refused(flag: &str, entry: &str, why: &str, env_name: &str) -> Error {
-    let mut explain = Cmd {
-        command: vec!["explain".into()],
-        args: vec![entry.to_string(), "--env".into(), env_name.to_string()],
-    };
-    explain.args.extend(config_flag());
-    Error::Config(format!("{flag} {entry:?}: {why}").into()).with_next(step_text(&explain))
+/// A `--rotate` / `--prune-immutable` entry that names a declared key the flag cannot take
+/// (A5): the entry and what the flag expects, in fixed words.
+fn key_ref_refused(flag: &str, entry: &str, expects: &'static str) -> Error {
+    Cause::Usage {
+        problem: UsageProblem::EntryFormat {
+            flag: flag.to_string(),
+            entry: entry.to_string(),
+            format: expects,
+        },
+    }
+    .into()
 }
 
 /// The declared key a `--rotate` / `--prune-immutable` entry names (R21: an undeclared one
@@ -2639,16 +2596,14 @@ fn parse_rotate(
             return Err(key_ref_refused(
                 "--rotate",
                 e,
-                "key is not immutable (other keys are staged on every sync)",
-                env_name,
+                "an immutable key (other keys are staged on every sync)",
             ));
         }
         if !rules::applies(spec, env_name, env, product) {
             return Err(key_ref_refused(
                 "--rotate",
                 e,
-                &format!("key is not desired in environment {env_name:?}"),
-                env_name,
+                "a key desired in this environment",
             ));
         }
         set.insert((product.to_string(), key.to_string()));
@@ -2681,16 +2636,14 @@ fn parse_prune_immutable(
             return Err(key_ref_refused(
                 "--prune-immutable",
                 e,
-                "key is not immutable (other keys are pruned by --prune alone)",
-                env_name,
+                "an immutable key (other keys are pruned by --prune alone)",
             ));
         }
         if rules::applies(spec, env_name, env, product) {
             return Err(key_ref_refused(
                 "--prune-immutable",
                 e,
-                &format!("key is desired in environment {env_name:?}, so it is never pruned"),
-                env_name,
+                "a key no longer desired in this environment (a desired key is never pruned)",
             ));
         }
         set.insert((product.to_string(), key.to_string()));
@@ -2789,7 +2742,7 @@ mod tests {
             fly_with_prunable(),
         );
         let e = run(&f(), "prod", &r, &mut Vec::new(), &all_flags()).unwrap_err();
-        assert!(matches!(e, Error::Policy(_)), "{e}");
+        assert_eq!(e.code_str(), "keys_blocking", "{e}");
         assert!(e.to_string().contains("OPENAI_API_KEY"), "{e}");
         assert_no_values(&e.to_string());
         assert!(
@@ -2808,7 +2761,7 @@ mod tests {
         let r = fake_with(item(&[]), fly_with_prunable());
         let (res, out) = sync_out(&f(), &r, &all_flags());
         let e = res.unwrap_err();
-        assert!(matches!(e, Error::Policy(_)), "{e}");
+        assert_eq!(e.code_str(), "keys_blocking", "{e}");
         for k in ["OPENAI_API_KEY", "INTEGRATION_ENC_KEY", "SIGNUP_POLICY"] {
             assert!(e.to_string().contains(k), "{e}");
         }
@@ -2830,7 +2783,7 @@ mod tests {
         let r = fake_with(item, fly_with_prunable());
         let (res, out) = sync_out(&f(), &r, &all_flags());
         let e = res.unwrap_err();
-        assert!(matches!(e, Error::Policy(_)), "{e}");
+        assert_eq!(e.code_str(), "keys_blocking", "{e}");
         assert_no_values(&e.to_string());
         assert_no_values(&out);
         assert_nothing_mutated(&r);
@@ -2846,11 +2799,12 @@ mod tests {
         );
         let (res, out) = sync_out(&f(), &r, &all_flags());
         let e = res.unwrap_err();
-        assert!(matches!(e, Error::Policy(_)), "{e}");
+        assert_eq!(e.code_str(), "keys_blocking", "{e}");
         assert_eq!(e.exit_code(), 6);
         assert!(
-            e.to_string()
-                .contains("allumata/OPENAI_API_KEY (failed import-hash-after-odd-quotes ("),
+            e.to_string().contains(
+                "allumata/OPENAI_API_KEY (does not meet its rule: import-hash-after-odd-quotes"
+            ),
             "{e}"
         );
         assert_no_values(&e.to_string());
@@ -3212,7 +3166,7 @@ mod tests {
             ..all_flags()
         };
         let e = run(&fl, "prod", &r, &mut Vec::new(), &o).unwrap_err();
-        assert!(matches!(e, Error::Config(_)), "{e}");
+        assert_eq!(e.code_str(), "usage", "{e}");
         assert!(r.calls.borrow().is_empty());
     }
 
@@ -3418,10 +3372,10 @@ mod tests {
 
         let r = FakeRunner::new([item(&fs), fly_empty(), ok(), ok()]);
         let e = run(&fleet_smtp(), "staging", &r, &mut Vec::new(), &opts()).unwrap_err();
-        assert!(matches!(e, Error::Policy(_)), "{e}");
+        assert_eq!(e.code_str(), "keys_blocking", "{e}");
         assert!(
             e.to_string()
-                .contains("allumata/SMTP_PASS (failed refuse_in ("),
+                .contains("allumata/SMTP_PASS (does not meet its rule: refuse_in"),
             "{e}"
         );
         assert_no_values(&e.to_string());
@@ -3754,12 +3708,8 @@ mod tests {
     fn dead_fly_app_refuses_with_a_next_step() {
         let r = after_list_a([fly_app_dead()]);
         let e = sync_err(&r);
-        assert!(
-            e.next_step().is_some_and(
-                |n| n.starts_with(&format!("recreate it with `flyctl apps create {APP}`"))
-            ),
-            "{e:?}"
-        );
+        // flyctl's own status read says the app is not running (TargetRefused).
+        assert_eq!(e.code_str(), "update_refused", "{e:?}");
     }
 
     #[test]
@@ -3874,8 +3824,8 @@ mod tests {
         );
         let e = sync_err(&r);
         assert_eq!(
-            e.next_step(),
-            Some("opv open allumata/OPENAI_API_KEY --env prod"),
+            e.step("", "").next,
+            "opv open allumata/OPENAI_API_KEY --env prod",
             "{e}"
         );
     }

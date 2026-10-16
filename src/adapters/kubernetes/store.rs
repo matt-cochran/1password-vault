@@ -366,10 +366,13 @@ impl PinnedStore for KubeSecrets<'_> {
     /// A lost write is reconciled by reading the new Secret back (NR-2); if that fails too, the
     /// next run writes another id and the unreferenced one is collected after a healthy rollout.
     fn write_one(&self, name: &str, value: &SecretValue, stamp: &Stamp) -> Result<String, Error> {
-        if let Some((rule, reason)) = refusal(name, value) {
-            return Err(Error::Policy(
-                format!("{name}: {rule}: {reason}; nothing was sent to the cluster").into(),
-            ));
+        // `sync` refuses every such value as a blocking row before any write (its pinned
+        // plan asks this store's `refusal`), so one that reaches here is opv's bug.
+        if refusal(name, value).is_some() {
+            return Err(crate::cause::Cause::Bug {
+                site: "kubernetes: a value the plan passed breaks a Secret rule",
+            }
+            .into());
         }
         if let Some((current, version)) = self.read(name)?
             && same(&current, value)

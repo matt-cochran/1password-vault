@@ -221,10 +221,13 @@ fn confirm_env_refuses_before_any_write() {
 fn guarded_refusal_names_blocking_keys_and_the_confirm_flag() {
     let r = FakeRunner::new([item_without("allumata", "OPENAI_API_KEY"), fly_empty()]);
     let (res, _) = sync_out(&guarded(), &r, &deploy());
+    // The refusal is the catalog's KeysBlocking; the guard is a note of the same run.
+    let notes = r.notes.borrow().join("\n");
     assert!(
-        matches!(&res, Err(Error::Policy(m))
-            if m.contains("allumata/OPENAI_API_KEY") && m.contains("needs a person's confirmation")),
-        "{res:?}"
+        res.as_ref()
+            .is_err_and(|e| e.to_string().contains("allumata/OPENAI_API_KEY"))
+            && notes.contains("needs a person's confirmation"),
+        "{res:?} {notes}"
     );
 }
 
@@ -1001,7 +1004,7 @@ fn plan_rotate_marks_the_row_on_target_as_rotate() {
 #[test]
 fn plan_rotate_refuses_a_non_immutable_key() {
     let (res, _) = plan_rotate_out(&["allumata/OPENAI_API_KEY"], false);
-    assert!(matches!(res, Err(Error::Config(_))));
+    assert!(res.is_err_and(|e| e.code_str() == "usage"));
 }
 
 #[test]

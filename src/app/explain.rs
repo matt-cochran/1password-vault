@@ -223,22 +223,13 @@ fn environment<'a>(
         }
     };
     if !t.spec.environments.iter().any(|e| e == name) {
-        let label = key_label(t.product, t.key);
-        let mut err = Error::Config(
-            format!(
-                "{label} is not declared for environment {name:?} (declared for: {})",
-                t.spec.environments.join(", ")
-            )
-            .into(),
-        )
-        .with_code(crate::error::Code::UndeclaredKey);
-        // The one environment that declares it, never the first of several (X2). The
-        // catalog's `NotDeclared` has no scope for "declared, but not for this
-        // environment" yet, so this stays a Legacy error until it does.
-        if let [only] = t.spec.environments.as_slice() {
-            err = err.with_next(format!("opv explain {label} --env {only}"));
+        // R21 (A6): declared, but not for this environment.
+        return Err(Cause::KeyNotDeclared {
+            key: crate::cause::KeyName::new(t.key),
+            env: crate::cause::EnvName::new(name),
+            product: Some(crate::cause::ProductName::new(t.product)),
         }
-        return Err(err);
+        .into());
     }
     Ok(name)
 }
@@ -1060,12 +1051,10 @@ mod tests {
     }
 
     #[test]
-    fn environment_the_key_is_not_declared_for_is_config_error() {
+    fn environment_the_key_is_not_declared_for_is_undeclared_key() {
+        // R21 (A6): "key X is not declared for environment E".
         let e = explain(&fleet(), "allumata/OPENAI_API_KEY", Some("staging")).unwrap_err();
-        assert!(
-            matches!(e, Error::Config(ref m) if m.contains("staging")),
-            "{e}"
-        );
+        assert_eq!(e.code_str(), "undeclared_key", "{e}");
     }
 
     #[test]

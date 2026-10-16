@@ -425,10 +425,13 @@ Examples:
   opv target credentials staging --target web            # show the recorded state";
 
 const TARGET_CREDENTIALS_MORE: &str = "\
-Mints the target's least-privilege deploy credential at its provider and stores it in a
-new 1Password item in the target's state vault, then records deploy_credentials on the
-target. The token is never shown, copied or pasted. One confirmation names the
-credential, its 90-day validity, the target and the item; declining creates nothing.
+Only Fly targets can be minted for: --create mints a Fly deploy token for the target's app
+and stores it in a new 1Password item in the target's state vault, then records
+deploy_credentials on the target. The token is never shown, copied or pasted. One
+confirmation names the credential, its 90-day validity, the target and the item;
+declining creates nothing. For an Azure, Kubernetes or GitHub target, create its deploy
+identity at the provider, store it in 1Password, and record the item with
+`opv target add --deploy-credentials op://<vault>/<item>`.
 Without --create, prints whether deploy_credentials is recorded and whether the provider
 can mint one. A person's own terminal and 1Password session are required.";
 
@@ -1399,7 +1402,8 @@ enum TargetCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Mint a target's least-privilege deploy credential and store it in 1Password.
+    /// Mint a Fly target's least-privilege deploy token and store it in 1Password (only
+    /// Fly targets can be minted for; the others show their recorded state).
     #[command(before_help = TARGET_CREDENTIALS_QUICK, after_help = TARGET_CREDENTIALS_MORE)]
     Credentials {
         /// Environment name from the configuration (for example prod).
@@ -2713,7 +2717,7 @@ fn run(
             .then(|| login_child_config(command))
             .flatten();
         let fleet = match child_config {
-            Some(path) => config::load(&path).ok(),
+            Some(path) => config::load_given(&path, given_by(ConfigSource::Flag)).ok(),
             None => match find_config(cli.config.as_ref(), config_source).transpose()? {
                 Some(f) => Some(f),
                 None => manifest_for_login(&cli, config_source),
@@ -2774,8 +2778,11 @@ fn run(
     // own signals and its exit code is passed through (FR-4). `setup` and `login` are
     // interactive and returned above.
     if !matches!(cli.cmd, Cmd::Run { .. }) {
-        opv::runner::signals::install().map_err(|e| {
-            Error::Dependency(format!("cannot install signal handlers: {e}").into())
+        // The operating system refused a signal handler: nothing opv can step to.
+        opv::runner::signals::install().map_err(|_| {
+            Error::from(opv::cause::Cause::Bug {
+                site: "main: the signal handlers could not be installed",
+            })
         })?;
     }
     if let Cmd::Init { add_env: false, .. } = &cli.cmd {
@@ -3282,40 +3289,67 @@ fn skill_root(
         .unwrap_or_else(opv::app::skill::project_root))
 }
 
-/// `opv skill install --user` with neither HOME nor USERPROFILE set (02.02).
+/// `opv skill install --user` with neither HOME nor USERPROFILE set (02.02): the install
+/// goes into this project instead, named by its absolute path so it runs as typed.
 fn home_missing(here: &std::path::Path, target: SkillTarget, force: bool) -> Error {
-    let mut next = format!(
-        "opv skill install --project {}",
-        shell_word(&here.display().to_string())
-    );
+    let mut args = vec!["--project".to_string(), here.display().to_string()];
     match target {
-        SkillTarget::Claude => next.push_str(" --target claude"),
-        SkillTarget::Codex => next.push_str(" --target codex"),
+        SkillTarget::Claude => args.extend(["--target".into(), "claude".into()]),
+        SkillTarget::Codex => args.extend(["--target".into(), "codex".into()]),
         SkillTarget::All => {}
     }
     if force {
-        next.push_str(" --force");
+        args.push("--force".into());
     }
-    Error::Config("cannot find the home directory (HOME or USERPROFILE)".into())
-        .with_do("set HOME to your home directory, or install into this project")
-        .with_next(next)
+    opv::cause::Cause::Usage {
+        problem: opv::cause::UsageProblem::UseInstead {
+            command: opv::cause::Cmd {
+                command: vec!["skill".into(), "install".into()],
+                args,
+            },
+        },
+    }
+    .into()
 }
 
-/// A failed write to the output stream (the same wording the library uses), for every
-/// write in this file (02.29: one phrase). opv's own local input and output have no
-/// catalog cause yet, so these three stay Legacy, each built in one place.
+/// opv's own local input or output failed (`LocalIo`): the folder, its program file, the
+/// home folder or the output stream. No path is named; the operation says which.
+fn local_io(op: opv::cause::LocalOp, kind: io::ErrorKind) -> Error {
+    opv::cause::Cause::LocalIo {
+        op,
+        path: PathBuf::new(),
+        io: kind.into(),
+    }
+    .into()
+}
+
+/// A failed write to the output stream, for every write in this file (02.29: one cause).
 fn write_err(e: io::Error) -> Error {
-    Error::Dependency(format!("cannot write output ({})", e.kind()).into())
+    local_io(opv::cause::LocalOp::Stdout, e.kind())
 }
 
 /// The current directory cannot be read (deleted under the shell, or no permission).
 fn cwd_err(e: io::Error) -> Error {
-    Error::Config(format!("cannot read the current directory ({})", e.kind()).into())
+    local_io(opv::cause::LocalOp::CurrentDir, e.kind())
 }
 
 /// The path of this opv binary cannot be found.
 fn exe_err(e: io::Error) -> Error {
-    Error::Dependency(format!("cannot find this opv binary ({})", e.kind()).into())
+    local_io(opv::cause::LocalOp::CurrentExe, e.kind())
+}
+
+/// Where a given configuration path came from (C13, 03.12): an unreadable file names the
+/// flag or the variable that gave it.
+fn given_by(config_source: ConfigSource) -> opv::cause::GivenBy {
+    match config_source {
+        ConfigSource::Flag => opv::cause::GivenBy::Flag {
+            flag: "--config".into(),
+        },
+        ConfigSource::Env => opv::cause::GivenBy::EnvVar {
+            var: opv::cause::VarName::new("OPV_CONFIG"),
+        },
+        ConfigSource::Discovered => opv::cause::GivenBy::Discovered,
+    }
 }
 
 /// The configuration: `--config` / `OPV_CONFIG`, else the nearest `secrets.toml` from the
@@ -3329,7 +3363,7 @@ fn find_config(
             if config_source == ConfigSource::Env {
                 let _ = writeln!(io::stderr(), "using {} (from OPV_CONFIG)", path.display());
             }
-            Some(config::load(path))
+            Some(config::load_given(path, given_by(config_source)))
         }
         None => match std::env::current_dir() {
             Err(e) => Some(Err(cwd_err(e))),
@@ -4130,10 +4164,14 @@ fn exit_byte(code: i32) -> u8 {
 #[cfg(feature = "mcp")]
 fn mcp_serve(project: &std::path::Path) -> Result<i32, Error> {
     use rmcp::{ServiceExt, transport::stdio};
-    // The MCP transport's own failures are not configuration errors (02.27): the client
-    // broke the protocol, so the step re-registers the server.
-    let fail = |what: &str| {
-        Error::Dependency(format!("opv mcp serve: {what}").into()).with_next("opv mcp install")
+    // The MCP transport's own failures are not configuration errors (02.27): the client's
+    // standard input broke off (no handshake, or the session ended with an error).
+    let fail = |_what: &str| {
+        Error::from(opv::cause::Cause::LocalIo {
+            op: opv::cause::LocalOp::Read,
+            path: PathBuf::from("standard input (the MCP client)"),
+            io: opv::cause::IoKind::Other,
+        })
     };
     let project = project
         .canonicalize()
@@ -4143,8 +4181,10 @@ fn mcp_serve(project: &std::path::Path) -> Result<i32, Error> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .map_err(|e| {
-            Error::Dependency(format!("cannot start the MCP runtime ({})", e.kind()).into())
+        .map_err(|_| {
+            Error::from(opv::cause::Cause::Bug {
+                site: "main: the MCP runtime could not start",
+            })
         })?;
     rt.block_on(async {
         let server = opv::mcp::Server::new(project)
@@ -4161,9 +4201,11 @@ fn mcp_serve(project: &std::path::Path) -> Result<i32, Error> {
 
 #[cfg(not(feature = "mcp"))]
 fn mcp_serve(_project: &std::path::Path) -> Result<i32, Error> {
-    Err(Error::Dependency(
-        "this opv was built without MCP; install a release build (npm, install.sh or the GitHub release)".into(),
-    ))
+    // Every release build has the MCP server; a build without it is a packaging bug.
+    Err(opv::cause::Cause::Bug {
+        site: "this opv was built without the MCP server; install a release build",
+    }
+    .into())
 }
 
 /// `opv mcp install`: register `<this opv> mcp serve --project <dir>` with the chosen
@@ -4280,7 +4322,11 @@ impl opv::app::approve::Review for TerminalReview {
             .map_err(write_err)?;
         let mut answer = String::new();
         io::stdin().read_line(&mut answer).map_err(|e| {
-            Error::Dependency(format!("cannot read the answer ({})", e.kind()).into())
+            Error::from(opv::cause::Cause::LocalIo {
+                op: opv::cause::LocalOp::Read,
+                path: PathBuf::from("standard input"),
+                io: e.kind().into(),
+            })
         })?;
         Ok(answer.trim().to_string())
     }
@@ -4790,6 +4836,31 @@ mod tests {
         let e = credentials_need_a_file("opv · app");
         let (cause, _) = e.cause().unwrap();
         assert_eq!(cause.retry(), opv::cause::RetryClass::Never);
+    }
+
+    /// C13 (03.12): a configuration path from OPV_CONFIG is named by that variable.
+    #[test]
+    fn a_config_path_from_opv_config_is_given_by_the_variable() {
+        assert_eq!(
+            given_by(ConfigSource::Env),
+            opv::cause::GivenBy::EnvVar {
+                var: opv::cause::VarName::new("OPV_CONFIG")
+            }
+        );
+    }
+
+    /// C22 (06.47): `target credentials` help says only Fly targets can be minted for.
+    #[test]
+    fn target_credentials_help_says_only_fly_mints() {
+        let help = leaf_helps()
+            .into_iter()
+            .find(|(name, _, _)| name == "target credentials")
+            .map(|(_, long, _)| long)
+            .unwrap_or_default();
+        assert!(
+            help.contains("Only Fly targets can be minted for"),
+            "{help}"
+        );
     }
 
     /// 02.02 (S1): with no home directory the step installs into this project by its

@@ -316,8 +316,12 @@ pub fn status_document(copies: &[Copy]) -> Result<String, Error> {
     Ok(doc.to_string())
 }
 
-fn json_error(e: serde_json::Error) -> Error {
-    Error::Dependency(format!("cannot serialize JSON ({e})").into())
+/// opv's own fixed document failed to encode: a bug, never the person's to fix.
+fn json_error(_: serde_json::Error) -> Error {
+    crate::cause::Cause::Bug {
+        site: "skill: a fixed JSON document failed to encode",
+    }
+    .into()
 }
 
 /// opv's own local I/O failed (A3): `LocalIo`, naming the path and the failure kind.

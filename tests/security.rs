@@ -842,14 +842,14 @@ fn rule_failure_names_key_not_value() {
         ("sk-or-S7MARKERVALUEopenrouter0010", "not_prefix"),
     ] {
         h.set_item(&item(good_fields(value)));
-        let named = format!("allumata/OPENAI_API_KEY (failed {rule} (");
+        let named = format!("allumata/OPENAI_API_KEY (does not meet its rule: {rule}");
 
         h.reset();
         let r = h.run(&["sync", "prod", "--prune", "--deploy"]);
         assert_eq!(r.code, 6, "{rule}: {}", r.all());
         assert!(
             r.stderr
-                .starts_with("opv: policy denied: sync refused, nothing was changed"),
+                .starts_with("opv: opv wrote nothing to environment prod"),
             "{rule}: {}",
             r.stderr
         );
@@ -1296,8 +1296,9 @@ fn import_refusal_shows_in_status_and_plan_and_blocks_sync() {
     let r = h.run(&["sync", "prod", "--prune", "--deploy"]);
     assert_eq!(r.code, 6, "{}", r.all());
     assert!(
-        r.stderr
-            .contains(&format!("allumata/OPENAI_API_KEY (failed {rule} (")),
+        r.stderr.contains(&format!(
+            "allumata/OPENAI_API_KEY (does not meet its rule: {rule}"
+        )),
         "{}",
         r.stderr
     );

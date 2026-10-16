@@ -242,22 +242,16 @@ fn launch(
         let project = personal::project_name(runner, &std::env::current_dir().unwrap_or_default());
         match personal::locate(runner, fleet, env_name, &project) {
             Ok(Some(e)) => Some(e),
-            // A sign-in, network or op failure is its own cause, not a missing item.
-            Err(e) if e.code() != crate::error::Code::ItemNotFound => return Err(e),
-            Ok(None) | Err(_) => {
-                let labels: Vec<String> = selected
-                    .iter()
-                    .filter(|(_, spec)| personal::is_personal(fleet, spec))
-                    .map(|(key, _)| crate::domain::key_label(product, key))
-                    .collect();
-                return Err(Error::Config(
-                    format!(
-                        "your personal item for {env_name} is not set up yet; it holds {}",
-                        labels.join(", ")
-                    )
-                    .into(),
-                )
-                .with_next("opv bootstrap"));
+            // A missing personal vault or item is personal's own cause (its step sets it
+            // up); a sign-in, network or op failure is its own cause too.
+            Err(e) => return Err(e),
+            // `locate` answers `None` only when the environment declares no personal key,
+            // and a personal key was just selected for it.
+            Ok(None) => {
+                return Err(Cause::Bug {
+                    site: "run: a selected personal key whose environment declares none",
+                }
+                .into());
             }
         }
     } else {

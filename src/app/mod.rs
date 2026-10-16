@@ -1032,15 +1032,6 @@ ON TARGET: the key on its deployment target (the TARGET column names the target)
 Missing and failed are findings: status, plan and check exit 8 and print an
 open: link to the item in 1Password (opv open <[product/]KEY> --env <env>).";
 
-/// `product/KEY` of every row in `rows` matching `pred`,
-/// for names-only messages.
-pub(crate) fn row_names(rows: &[Row], pred: impl Fn(&Row) -> bool) -> Vec<String> {
-    rows.iter()
-        .filter(|r| pred(r))
-        .map(|r| format!("{} ({})", key_label(&r.product, &r.key), row_state_label(r)))
-        .collect()
-}
-
 pub(crate) fn is_blocking(r: &Row) -> bool {
     matches!(
         r.state,

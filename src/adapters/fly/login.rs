@@ -10,7 +10,7 @@ use crate::cause::{
     Cause, CommandId, CreateKind, DiagnoseContext, Principal, Refind, System, VarName, VendorCmd,
 };
 use crate::domain::{Kind, SecretValue};
-use crate::error::{Code, Error};
+use crate::error::Error;
 use crate::host::Host;
 use crate::provider::{CredentialField, DeployLogin};
 use crate::runner::{Call, CommandRunner, CreateOutcome};
@@ -93,7 +93,6 @@ pub fn mint_deploy_credential(
     let args = [
         "tokens", "create", "deploy", "--app", app, "--name", name, "--expiry", &expiry,
     ];
-    let what = format!("{PROGRAM} tokens create deploy");
     let refind = Refind::Vendor(tokens_list(app));
     let ctx = DiagnoseContext {
         create: Some((CreateKind::DeployToken, name.to_string(), refind.clone())),
@@ -121,9 +120,26 @@ pub fn mint_deploy_credential(
     // From here on, any output that might echo it is scrubbed (SR-1).
     crate::scrub::register_secret(&token);
     if token.is_empty() {
-        return Err(Error::Target(
-            format!("{what} returned no token; no token was stored").into(),
-        ));
+        // flyctl answered with no token: nothing to store (A1, the runner's observation).
+        return Err(
+            match crate::runner::take_unusable_reply(&Call::new(PROGRAM, &args)) {
+                Some(seen) => Cause::UnexpectedOutput {
+                    system: System::Fly,
+                    at: None,
+                    problem: crate::cause::OutputProblem::Empty {
+                        what: "deploy token",
+                    },
+                    // flyctl applied the create (exit 0); only its reply is unusable.
+                    during: crate::cause::During::AppliedWrite,
+                    seen,
+                }
+                .into(),
+                None => Cause::Bug {
+                    site: "fly: a flyctl token reply the runner did not observe",
+                }
+                .into(),
+            },
+        );
     }
     Ok(BTreeMap::from([(
         TOKEN_FIELD.to_string(),
@@ -143,17 +159,12 @@ impl DeployLogin for FlyLogin {
         mut values: BTreeMap<String, SecretValue>,
         _r: &dyn CommandRunner,
     ) -> Result<(), Error> {
+        // The item was read with every field the provider declares (read_deploy_credentials
+        // refuses one without them), so a missing one is opv's bug.
         self.token = Some(values.remove("FLY_API_TOKEN").ok_or_else(|| {
-            Error::Auth(
-                "deploy credentials: the deploy_credentials item has no FLY_API_TOKEN field; \
-                 nothing was changed"
-                    .into(),
-            )
-            .with_code(Code::DeployCredentialsFailed)
-            .with_do(
-                "add a FLY_API_TOKEN field holding a Fly deploy token to the environment's \
-                 deploy_credentials item in 1Password",
-            )
+            Error::from(Cause::Bug {
+                site: "fly: deploy sign-in given values without a declared field",
+            })
         })?);
         Ok(())
     }

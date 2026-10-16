@@ -39,7 +39,7 @@ use serde_json::{Value, json};
 
 use super::store::referenced_names;
 use super::{Effect, KubeTarget, Kubectl, LABEL_KEY, LABEL_MANAGED, VALUE_KEY, store_name};
-use crate::cause::{Cause, ResourceKind, ResourceName, ResourceRef, System};
+use crate::cause::{Cause, ResourceKind, ResourceName, ResourceRef, StoreObject, System};
 use crate::domain::SecretValue;
 use crate::domain::plan::StoreEntry;
 use crate::error::Error;
@@ -191,15 +191,12 @@ pub(crate) fn apply(k: &Kubectl<'_>, name: &str, body: &[u8]) -> Result<(), Erro
             if echoed.rsplit('/').next() == Some(name) {
                 Ok(())
             } else {
-                Err(Error::Unknown(
-                    format!(
-                        "{what} did not confirm the ExternalSecret it wrote; it may or may not \
-                         exist and nothing else was changed\n  next: check with `{}`, then \
-                         re-run the same command",
-                        k.command(&format!("get {RESOURCE} {name} -o name"))
-                    )
-                    .into(),
-                ))
+                // The apply answered without naming what it wrote (A1): its outcome is unknown.
+                Err(super::unusable(&what, |seen| Cause::WriteOutcomeUnknown {
+                    system: System::Kubernetes,
+                    subject: k.target.external_ref(name),
+                    seen,
+                }))
             }
         }
         // The read-back explains the failure, so the apply's excerpt stays (NR-31).
@@ -389,17 +386,15 @@ pub(crate) fn diagnose_failed(
 ) -> Error {
     let t = k.target;
     match bridge.store.has_version(env_name, version) {
+        // The version was deleted or purged after opv wrote it; the Deployment is unchanged,
+        // and re-running writes and pins a fresh version.
         Ok(Some(false)) => {
-            return Error::Target(
-                format!(
-                    "ExternalSecret {es} could not read version {version} of {env_name} from \
-                     {}, which no longer has it (deleted or purged after opv wrote it); \
-                     deployment {} was not changed; re-running writes and pins a fresh \
-                     version\n  next: re-run the same command",
-                    bridge.describe, t.deployment
-                )
-                .into(),
-            );
+            return Cause::ChangedBeforeWrite {
+                object: StoreObject::Resource {
+                    resource: t.external_ref(es),
+                },
+            }
+            .into();
         }
         // The version could not be checked: that failure is the cause opv can name.
         Err(e) => return e,
@@ -757,10 +752,13 @@ impl PinnedStore for ExternalStore<'_> {
         value: &SecretValue,
         stamp: &crate::domain::Stamp,
     ) -> Result<String, Error> {
-        if let Some((rule, reason)) = super::store::refusal(name, value) {
-            return Err(Error::Policy(
-                format!("{name}: {rule}: {reason}; nothing was sent to the cluster").into(),
-            ));
+        // `sync` refuses every such value as a blocking row before any write (its pinned
+        // plan asks this store's `refusal`), so one that reaches here is opv's bug.
+        if super::store::refusal(name, value).is_some() {
+            return Err(Cause::Bug {
+                site: "kubernetes: a value the plan passed breaks a Secret rule",
+            }
+            .into());
         }
         self.inner.write_one(name, value, stamp)
     }
@@ -972,17 +970,21 @@ mod tests {
 
     #[test]
     fn missing_version_is_named_as_the_cause() {
-        assert!(
-            diagnosis(Some(false), vec![])
-                .contains("version 46687ce78b76487cb0c1da470360b638 of DB_URL from Key Vault kv-opv-fixture, which no longer has it")
+        // The version was removed after opv wrote it: the target changed before the write.
+        assert_eq!(
+            diagnosis_error(Some(false), vec![]).code_str(),
+            "target_changed"
         );
     }
 
     #[test]
-    fn missing_version_reruns_the_command_with_all_its_flags() {
-        let rerun = "opv sync dev --deploy --confirm dev --target app --product api";
+    fn missing_version_reruns_the_same_command() {
+        // Re-running writes and pins a fresh version.
         let e = diagnosis_error(Some(false), vec![]);
-        assert_eq!(e.step(rerun, "opv sync --help").next, rerun);
+        let next = e
+            .cause()
+            .map(|(c, _)| c.step(&crate::cause::Invocation::default()).1);
+        assert_eq!(next, Some(crate::cause::Next::Rerun));
     }
 
     /// The object a cluster admin is asked to set up, when the error is that.

@@ -267,42 +267,17 @@ impl Tool {
         }
     }
 
-    /// An unanswered call the runner kept no observation of (a killed attempt or a lost
-    /// pipe), so no system can diagnose it: exit 9 with the wording it had. Remains Legacy
-    /// until the runner observes those attempts too (§5 "Sealing").
-    pub(crate) fn unobserved(&self, step: &str, writes_started: bool) -> Error {
-        if writes_started {
-            return Error::Unknown(
-                format!(
-                    "{} did not respond after {READ_ATTEMPTS} attempts ({step}), after this run \
-                     had started changing the target; those changes may or may not be \
-                     complete. Check {}, then re-run the same command",
-                    self.vendor, self.status_page
-                )
-                .into(),
-            );
-        }
-        Error::Unknown(
-            format!(
-                "{} did not respond after {READ_ATTEMPTS} attempts ({step}); nothing was changed. \
-             {}Check {}, then re-run",
-                self.vendor,
-                self.stall_hint(),
-                self.status_page
-            )
+    /// An unanswered call the runner kept no observation of: a [`CommandRunner`] that
+    /// reported the call unanswered without the runner's engine (an in-memory world that
+    /// loses calls). It is recorded as lost ([`lost_call`]) and diagnosed like any other
+    /// unanswered read (NR-28, exit 9).
+    pub(crate) fn unobserved(&self, _step: &str, _writes_started: bool) -> Error {
+        match lost_call(self.program) {
+            Some(failed) => diagnose_unanswered(failed.seen).into(),
+            None => Cause::Bug {
+                site: "runner: an unanswered call left no observation",
+            }
             .into(),
-        )
-        .with_code(crate::error::Code::ProviderUnavailable)
-    }
-
-    /// For `op` run by a person (no token, not CI): an unanswered 1Password app approval
-    /// prompt also looks like no response (found live: each attempt waited out its limit).
-    fn stall_hint(&self) -> &'static str {
-        let h = Host::detect();
-        if self.program == OP_CLI.program && !h.ci && h.op_credential.is_none() {
-            "If the 1Password app is asking to approve access, approve it. "
-        } else {
-            ""
         }
     }
 
@@ -347,6 +322,16 @@ fn run_budget_seconds(inv: &crate::cause::Invocation) -> u64 {
 }
 
 /// The cause of a call that never answered, from its own system's diagnosis (§5).
+/// The latest call of `program`, which its [`CommandRunner`] reported unanswered (an
+/// `Outcome::Unknown`) without the runner observing it: recorded through the runner as a
+/// lost reply ([`crate::cause::ExitClass::Lost`], no stderr), so its system's diagnosis
+/// sees what the caller saw: no answer. The runners opv ships observe every attempt
+/// themselves (B1); only in-memory doubles reach this.
+pub(crate) fn lost_call(program: &str) -> Option<crate::runner::Failure> {
+    crate::runner::record_streamed(program, &[], crate::cause::ExitClass::Lost, b"");
+    crate::runner::take_failure()
+}
+
 fn diagnose_unanswered(seen: crate::cause::Observed) -> Cause {
     use crate::adapters::{azure, fly, github, kubernetes, onepassword_diagnose};
     use crate::cause::{DiagnoseContext, System, Unanswered};

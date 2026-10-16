@@ -2,4 +2,4 @@ $ op item get iprd --vault vprd --format json
 $ flyctl secrets list --app mcproductlabs-portfolio-production --json
 --- stdout
 --- result
-Err(Policy("sync refused, nothing was changed: allumata/OPENAI_API_KEY (missing)" next "opv open allumata/OPENAI_API_KEY --env prod"))
+Err(Catalog(KeysBlocking { env: EnvName("prod"), rows: [ValueRow { product: ProductName("allumata"), key: KeyName("OPENAI_API_KEY"), target: None, state: Missing }] }, None))
