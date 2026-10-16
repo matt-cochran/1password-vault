@@ -501,7 +501,7 @@ impl<'a> Kubectl<'a> {
                         Effect::Read => Cause::Unavailable {
                             system: System::Kubernetes,
                             why: Unanswered::Network,
-                            attempts: 1,
+                            attempts: seen.attempts(),
                             seen,
                         },
                         Effect::Write => Cause::WriteOutcomeUnknown {

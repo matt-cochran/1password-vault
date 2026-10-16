@@ -1109,9 +1109,21 @@ mod text_cases {
         )
     }
 
+    /// The `opv run dev --product web --role serve -- <command>` that starts `local-delivery`
+    /// hands it in `OPV_RUN_OUTER`, so its errors' steps name that run (X25), as in use.
+    fn run_outer() -> String {
+        json!({
+            "env": "dev", "product": "web", "profile": null, "command": ["run"],
+            "args": ["dev", "--product", "web", "--role", "serve"], "has_child": true
+        })
+        .to_string()
+    }
+
     pub fn child_start_failed() -> Case {
         case(
-            Scenario::new().var("A", "test-marker-e2e-local-delivery"),
+            Scenario::new()
+                .var("A", "test-marker-e2e-local-delivery")
+                .var("OPV_RUN_OUTER", &run_outer()),
             &["local-delivery", "--key", "A", "--", "/nonexistent/cmd"],
         )
     }
@@ -1180,7 +1192,9 @@ mod text_cases {
 
     pub fn ram_dir_unavailable() -> Case {
         case(
-            Scenario::new().var("TLS_CERTIFICATE", "test-marker-e2e-local-delivery"),
+            Scenario::new()
+                .var("TLS_CERTIFICATE", "test-marker-e2e-local-delivery")
+                .var("OPV_RUN_OUTER", &run_outer()),
             &[
                 "local-delivery",
                 "--key",
@@ -1812,12 +1826,13 @@ fn no_candidate_is_both_a_cell_and_skipped() {
     assert!(both.is_empty(), "{both:?}");
 }
 
-/// E4: a skip says which recording is missing (or that the call is not modelled), so the gap
-/// is visible; recordings are never invented (CONTRIBUTING).
+/// E4: a skip says which recording is missing (or that the call is not modelled, or that a
+/// missing tool already fails at an earlier call), so the gap is visible; recordings are
+/// never invented (CONTRIBUTING).
 #[test]
 fn every_skipped_candidate_states_why() {
     let why = re(
-        r"^(no `[a-z_]+` reply recorded for `[a-z]+ [^`]+` under tests/fixtures/[a-z]+/failures \(opv-sim exit 86\)|`[a-z]+ [^`]+` is not modelled by opv-sim \(exit 87\))$",
+        r"^(no `[a-z_]+` reply recorded for `[a-z]+ [^`]+` under tests/fixtures/[a-z]+/failures \(opv-sim exit 86\)|`[a-z]+ [^`]+` is not modelled by opv-sim \(exit 87\)|`[a-z]+ [^`]+` fails without the fault, so it has no output for `malformed_output` to damage \(opv-sim exit 88\)|a missing `[a-z]+` is missing for every call: opv fails at its first one, `[a-z]+ [^`]+`, so this run is the one of `[a-z0-9_]+`)$",
     );
     let vague: Vec<String> = skips()
         .into_iter()

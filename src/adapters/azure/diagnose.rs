@@ -9,7 +9,6 @@
 
 use crate::cause::{Cause, DiagnoseContext, ExitClass, Observed, Principal, System, Unanswered};
 use crate::host::Host;
-use crate::runner::READ_ATTEMPTS;
 
 /// Turn what opv observed about one failed `az` call into a cause.
 pub fn diagnose(seen: Observed, stderr: &str, ctx: &DiagnoseContext) -> Cause {
@@ -58,7 +57,7 @@ fn unknown_outcome(seen: Observed, ctx: &DiagnoseContext) -> Cause {
     Cause::Unavailable {
         system: System::Azure,
         why: seen.exit().unanswered().unwrap_or(Unanswered::Timeout),
-        attempts: READ_ATTEMPTS,
+        attempts: seen.attempts(),
         seen,
     }
 }

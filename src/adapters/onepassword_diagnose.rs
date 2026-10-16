@@ -71,7 +71,9 @@ pub fn search_vault(r: &dyn CommandRunner, vault: &VaultId, selected: &AccountId
         match manifest::holds_vault(r, &a.account_uuid, vault.as_str()) {
             manifest::Holds::Found => return VaultSearch::FoundIn(AccountId::new(&a.account_uuid)),
             manifest::Holds::NotFound => {}
-            manifest::Holds::Unknown => unasked.push(AccountId::new(&a.account_uuid)),
+            manifest::Holds::Unknown | manifest::Holds::Unanswered => {
+                unasked.push(AccountId::new(&a.account_uuid))
+            }
         }
     }
     VaultSearch::Nowhere { unasked }
@@ -263,7 +265,7 @@ fn unknown_outcome(seen: Observed, ctx: &DiagnoseContext) -> Cause {
     Cause::Unavailable {
         system: System::OnePassword,
         why: seen.exit().unanswered().unwrap_or(Unanswered::Timeout),
-        attempts: 1,
+        attempts: seen.attempts(),
         seen,
     }
 }

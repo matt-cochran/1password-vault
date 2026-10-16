@@ -596,6 +596,14 @@ fn list(items: &[String]) -> String {
     items.join(", ")
 }
 
+/// `prod` for one choice, `one of dev, prod` for several.
+pub(crate) fn one_of(items: &[String]) -> String {
+    match items {
+        [one] => one.clone(),
+        many => format!("one of {}", list(many)),
+    }
+}
+
 fn list_of<T: std::fmt::Display>(items: &[T]) -> String {
     items
         .iter()
@@ -1046,8 +1054,13 @@ fn value_state(s: &ValueState) -> String {
     match s {
         ValueState::Missing => "missing".into(),
         ValueState::RuleFailed { rule, reason } => match reason {
-            Some(reason) => format!("does not meet its rule: {rule}, {reason}"),
-            None => format!("does not meet its rule: {rule}"),
+            // The rule's name and why the value fails it, told apart (F: "rule: nonempty,
+            // empty" read as one thing).
+            Some(reason) if reason == crate::domain::rules::REASON_EMPTY => {
+                format!("does not meet its rule {rule}: it is empty")
+            }
+            Some(reason) => format!("does not meet its rule {rule}: {reason}"),
+            None => format!("does not meet its rule {rule}"),
         },
         ValueState::StoredAsText => "stored as plain text, not concealed".into(),
         ValueState::ConcealedConfig => "a setting stored concealed".into(),
@@ -1583,6 +1596,18 @@ impl Cause {
                 seen,
                 ..
             } => match &resource.scope {
+                // The namespace itself is the subject (`namespace_ref`): its scope is the
+                // kube context it is in, never a namespace.
+                Some(context)
+                    if resource.kind == ResourceKind::Namespace
+                        && context.starts_with("context ") =>
+                {
+                    format!(
+                        "{} may not {verb} {kind} in namespace {} ({context}, Kubernetes)",
+                        principal_words(seen.principal()),
+                        resource.name
+                    )
+                }
                 // A16: the verb and kind name the right; the namespace is where.
                 Some(ns) => format!(
                     "{} may not {verb} {kind} in namespace {ns} (Kubernetes)",
@@ -3224,8 +3249,8 @@ impl Cause {
                     profile, allowed, ..
                 } => plan(
                     inspect(format!(
-                        "use one of {} with remote profile {profile}, or change the profile (opv config edit)",
-                        list(allowed)
+                        "use {} with remote profile {profile}, or change the profile (opv config edit)",
+                        one_of(allowed)
                     )),
                     Next::Run(cmd(&["config", "edit"], &[])),
                 ),
@@ -4061,7 +4086,7 @@ pub fn render_text(
         }
     }
     let p = cause.plan(inv);
-    if let Some(d) = p.do_text {
+    if let Some(d) = do_with_reply(cause, upstream.is_some(), p.do_text) {
         s.push_str(&format!("Do: {d}\n"));
     }
     let next = match (&p.next, next_text(&p.next, inv)) {
@@ -4071,6 +4096,20 @@ pub fn render_text(
     };
     s.push_str(&format!("Next: {next}\n"));
     s
+}
+
+/// The Do as printed beside the evidence (C): an unrecognised failure points at the tool's
+/// reply only when the reply box is there; a tool that wrote nothing is told as such.
+pub fn do_with_reply(cause: &Cause, has_reply: bool, do_text: Option<String>) -> Option<String> {
+    match cause {
+        Cause::Unrecognized { seen, .. } if !has_reply => Some(format!(
+            "{} wrote no reply ({}), so opv cannot tell why it failed; check {} on its own",
+            exit_program(seen),
+            evidence::exit_words(seen.exit()),
+            exit_program(seen)
+        )),
+        _ => do_text,
+    }
 }
 
 fn without_seen(v: &mut serde_json::Value) {
@@ -4108,7 +4147,7 @@ pub fn document(
         },
         "retry": cause.retry(),
         "human_required": cause.human_required(inv),
-        "do": p.do_text,
+        "do": do_with_reply(cause, upstream.is_some(), p.do_text),
         "next": next_text(&p.next, inv),
         "next_kind": next_kind(&p.next),
     })

@@ -102,7 +102,8 @@ impl Error {
     /// Its `Do:` in words, rendered from the cause against [`invocation`] (the document's
     /// `do`); `None` when a person has nothing to do first.
     pub fn do_text(&self) -> Option<String> {
-        self.parts().0.do_text(&invocation())
+        let (cause, upstream) = self.parts();
+        crate::cause::render::do_with_reply(cause, upstream.is_some(), cause.do_text(&invocation()))
     }
 
     /// Its `Next:` command line, rendered from the cause against [`invocation`] (the

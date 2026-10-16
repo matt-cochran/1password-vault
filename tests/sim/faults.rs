@@ -143,13 +143,14 @@ pub fn hit(world: &World, faults: &[Fault], program: &str, words: &[String]) -> 
     fired
 }
 
-/// Whether `program` is left out of the PATH directory: a `tool_missing` fault on any of
-/// its calls, every time.
+/// Whether `program` is left out of the PATH directory: a `tool_missing` fault on it,
+/// every time. A tool that is not installed is missing for every call, so a fault naming
+/// one call leaves the tool out too: opv then fails to start it (the runner fact a missing
+/// tool produces), never sees an exit code from it.
 pub fn missing_tool(faults: &[Fault], program: &str) -> bool {
     faults.iter().any(|f| {
         same_program(&f.program, program)
             && f.kind == Kind::ToolMissing
-            && f.call.as_deref().unwrap_or("").trim().is_empty()
             && matches!(&f.occurrence, None | Some(Occurrence::Named(_)))
             && !matches!(&f.occurrence, Some(Occurrence::Named(s)) if s == "first")
     })

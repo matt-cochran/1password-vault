@@ -48,3 +48,23 @@ fn a_tool_that_fails_to_start_is_unusable() {
         }
     ));
 }
+
+// Design §5 (snapshot review A): a probe that started and was stopped by a signal did not
+// answer; it is its system's unavailability, never a tool that failed to start.
+#[test]
+fn a_probe_stopped_by_a_signal_is_unavailable() {
+    assert_eq!(
+        probe_failing_with(io::ErrorKind::Interrupted).code(),
+        "provider_unavailable"
+    );
+}
+
+// Design §5 (snapshot review A): a probe that ran out of time is its system's
+// unavailability.
+#[test]
+fn a_probe_that_timed_out_is_unavailable() {
+    assert_eq!(
+        probe_failing_with(io::ErrorKind::TimedOut).code(),
+        "provider_unavailable"
+    );
+}

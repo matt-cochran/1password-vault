@@ -156,7 +156,11 @@ pub fn diagnose(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Sessio
         PROBE_TIMEOUT,
     ) {
         Ok(o) => o,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(op_missing(&host())),
+        // Design §5: the runner's facts first. op that never started is the dependency's
+        // cause; a whoami that did not answer leaves the session unknown, never signed out.
+        Err(e) if !super::probe::started(&e) => {
+            return Err(super::probe::probe_failure(&crate::host::OP_CLI, &e, host));
+        }
         Err(_) => return Ok(Session::Unknown),
     };
     if who.status == 0 {
@@ -1195,7 +1199,7 @@ pub(crate) fn unanswered(call: &Call) -> Error {
     failed.report(Cause::Unavailable {
         system: System::OnePassword,
         why,
-        attempts: crate::runner::READ_ATTEMPTS,
+        attempts: seen.attempts(),
         seen,
     })
 }

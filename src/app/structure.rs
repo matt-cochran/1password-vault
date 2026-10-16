@@ -268,12 +268,14 @@ impl CommandRunner for Offline {
     fn write(&self, _: &crate::runner::Call) -> std::io::Result<crate::runner::Outcome> {
         Err(std::io::ErrorKind::PermissionDenied.into())
     }
+    /// op is never asked: every probe is unanswered (never "op did not start", which is a
+    /// missing dependency, design §5), so a recorded ID is taken as it is.
     fn probe(
         &self,
         _: &crate::runner::Call,
         _: std::time::Duration,
     ) -> std::io::Result<crate::runner::Output> {
-        Err(std::io::ErrorKind::PermissionDenied.into())
+        Err(std::io::ErrorKind::TimedOut.into())
     }
     fn pause(&self, _: std::time::Duration, _: &str) {}
     fn note(&self, _: &str) {}

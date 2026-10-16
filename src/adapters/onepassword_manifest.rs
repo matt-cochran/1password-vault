@@ -364,11 +364,15 @@ pub fn signed_in(r: &dyn CommandRunner, account_uuid: &str) -> Option<bool> {
 /// What one account says about a vault (#153): `op vault get <vault> --account <account>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Holds {
+    /// The check never answered (op did not start, or did not answer in time): the runner's
+    /// fact, never read as "not signed in" (design §5). [`holds_vault_or_why`] gives its
+    /// cause.
+    Unanswered,
     /// The vault opens in this account.
     Found,
     /// The account is signed in and the vault is not in it.
     NotFound,
-    /// The account could not be asked: not signed in, or the check did not finish.
+    /// The account could not be asked: op answered, and its session was not there.
     Unknown,
 }
 
@@ -379,6 +383,17 @@ pub enum Holds {
 /// for an account that could not be asked. Read-only: it never prompts or signs in. Shared
 /// by `opv vault locate` and the diagnosis of a vault in another account.
 pub fn holds_vault(r: &dyn CommandRunner, account_uuid: &str, vault: &str) -> Holds {
+    holds_vault_or_why(r, account_uuid, vault).unwrap_or(Holds::Unanswered)
+}
+
+/// [`holds_vault`], with the cause of a check that never answered, decided by the runner's
+/// facts alone (design §5): op that did not start is its dependency cause, a check that did
+/// not answer is 1Password's unavailability.
+pub fn holds_vault_or_why(
+    r: &dyn CommandRunner,
+    account_uuid: &str,
+    vault: &str,
+) -> Result<Holds, Error> {
     let args = [
         "vault",
         "get",
@@ -388,20 +403,28 @@ pub fn holds_vault(r: &dyn CommandRunner, account_uuid: &str, vault: &str) -> Ho
         "--format",
         "json",
     ];
-    match r.probe(&Call::new(OP, &args), crate::runner::PROBE_TIMEOUT) {
-        Ok(o) if o.status == 0 => Holds::Found,
-        Ok(_) => match probe_said(vault, account_uuid) {
-            Some(true) => Holds::NotFound,
-            Some(false) => Holds::Unknown,
-            // A reply opv does not recognise: not there when this account is signed in,
-            // else not asked.
-            None => match signed_in(r, account_uuid) {
+    Ok(
+        match r.probe(&Call::new(OP, &args), crate::runner::PROBE_TIMEOUT) {
+            Ok(o) if o.status == 0 => Holds::Found,
+            Ok(_) => match probe_said(vault, account_uuid) {
                 Some(true) => Holds::NotFound,
-                _ => Holds::Unknown,
+                Some(false) => Holds::Unknown,
+                // A reply opv does not recognise: not there when this account is signed in,
+                // else not asked.
+                None => match signed_in(r, account_uuid) {
+                    Some(true) => Holds::NotFound,
+                    _ => Holds::Unknown,
+                },
             },
+            Err(e) => {
+                return Err(super::probe::probe_failure(
+                    &crate::host::OP_CLI,
+                    &e,
+                    &crate::host::Host::detect,
+                ));
+            }
         },
-        Err(_) => Holds::Unknown,
-    }
+    )
 }
 
 /// What the failed `op vault get` of `vault` in `account` said, through the 1Password

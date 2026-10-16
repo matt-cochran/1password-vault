@@ -735,6 +735,13 @@ pub fn list(
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     let doc = gather(r, flag);
+    // Design §5: op that is not installed is the command's failure (exit 3, with its install
+    // line), as for `opv account use`; there is no list to report.
+    if doc.discovery == discovery_str(&Discovery::OpMissing) {
+        return Err(crate::adapters::onepassword::op_missing(
+            &crate::host::Host::detect(),
+        ));
+    }
     if json {
         let mut v = serde_json::to_value(&doc).map_err(|_| {
             Error::from(Cause::Bug {

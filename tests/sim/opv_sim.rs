@@ -65,7 +65,7 @@ fn main() {
 }
 
 /// `opv-sim install <dir>`: link every tool name to this binary, leaving out a tool with a
-/// `tool_missing` fault on all its calls (when `OPV_SIM_WORLD` is set).
+/// `tool_missing` fault (when `OPV_SIM_WORLD` is set).
 fn admin(args: &[String]) -> i32 {
     match args {
         [cmd, dir] if cmd == "install" => {
@@ -167,6 +167,14 @@ fn simulate(program: &str, args: &[String]) -> i32 {
         Some(Kind::MalformedOutput) => {
             // Answered, not applied: only the output is damaged.
             match answer(program, &mut world, args) {
+                Action::Reply(r) if r.code != 0 => {
+                    eprintln!(
+                        "opv-sim: malformed_output on a call that fails without it (exit {}): \
+                         no output to damage",
+                        r.code
+                    );
+                    return recordings::NO_OUTPUT;
+                }
                 Action::Reply(mut r) => {
                     let half = r.stdout.len() / 2;
                     r.stdout.truncate(half);

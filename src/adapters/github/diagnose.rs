@@ -136,7 +136,7 @@ fn unknown_outcome(seen: &Observed, ctx: &DiagnoseContext) -> Cause {
     Cause::Unavailable {
         system: System::GitHub,
         why: seen.exit().unanswered().unwrap_or(Unanswered::Timeout),
-        attempts: 1,
+        attempts: seen.attempts(),
         seen: seen.clone(),
     }
 }

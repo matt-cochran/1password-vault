@@ -126,6 +126,7 @@ fn boolean_flags(program: &str) -> &'static [&'static str] {
 
 const NO_RECORDING: i32 = 86;
 const UNSUPPORTED: i32 = 87;
+const NO_OUTPUT: i32 = 88;
 
 fn snapshots() -> PathBuf {
     Path::new(ROOT).join("tests/e2e/snapshots")
@@ -168,11 +169,16 @@ impl Cell {
             self.program, self.call, self.kind
         );
         if self.kind == "timeout" {
-            f.push_str("seconds = 1\n");
+            // Hangs past opv's own (capped) call limit: opv kills it, as it would a real hang.
+            f.push_str("seconds = 60\n");
         }
         f
     }
 }
+
+/// The per-call limit a `timeout` cell runs opv with (`OPV_TEST_CALL_LIMIT`, `fake` builds
+/// only), so the hang ends as opv's own timeout without waiting out the real limits.
+const CALL_LIMIT_SECS: &str = "2";
 
 fn slug(s: &str) -> String {
     let mut out = String::new();
@@ -191,6 +197,8 @@ fn slug(s: &str) -> String {
 /// simulator that log each call's argv and exit, a scratch `HOME` and a project copy.
 struct Scenario {
     root: tempfile::TempDir,
+    /// Set for a scenario with a `timeout` fault: `OPV_TEST_CALL_LIMIT` for opv.
+    call_limit: bool,
 }
 
 impl Scenario {
@@ -238,7 +246,10 @@ impl Scenario {
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         }
-        Self { root }
+        Self {
+            root,
+            call_limit: faults.contains("kind = \"timeout\""),
+        }
     }
 
     fn path(&self, sub: &str) -> PathBuf {
@@ -258,6 +269,10 @@ impl Scenario {
             .env("HOME", self.path("home"))
             .env("OPV_NO_SKILL", "1")
             .env("OPV_SIM_WORLD", self.path("world"))
+            .envs(
+                self.call_limit
+                    .then_some(("OPV_TEST_CALL_LIMIT", CALL_LIMIT_SECS)),
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -390,6 +405,50 @@ fn recordings_dir(program: &str) -> &'static str {
     }
 }
 
+/// Why a `tool_missing` candidate on a later call of its tool is no cell: a tool that is not
+/// installed is missing for every call (opv-sim leaves it out of `PATH`), so opv fails at the
+/// command's first call of it, and the run is the one of that first call's cell.
+fn tool_missing_elsewhere(cell: &Cell) -> Option<String> {
+    if cell.kind != "tool_missing" {
+        return None;
+    }
+    let first = first_calls()
+        .get(&(cell.command.clone(), cell.program.clone()))?
+        .clone();
+    (first != cell.call).then(|| {
+        let same = Cell {
+            call: first.clone(),
+            ..cell.clone()
+        };
+        format!(
+            "a missing `{}` is missing for every call: opv fails at its first one, `{} {first}`, \
+             so this run is the one of `{}`",
+            cell.program,
+            cell.program,
+            same.name()
+        )
+    })
+}
+
+/// The first call each command makes of each tool, from the committed cells and skips'
+/// discovery order: `(command, program)` → call words.
+fn first_calls() -> &'static BTreeMap<(String, String), String> {
+    static FIRST: OnceLock<BTreeMap<(String, String), String>> = OnceLock::new();
+    FIRST.get_or_init(|| {
+        let mut first = BTreeMap::new();
+        for (command, calls) in discover() {
+            for (program, words) in calls {
+                if !words.is_empty() {
+                    first
+                        .entry((command.to_string(), program))
+                        .or_insert_with(|| words.join(" "));
+                }
+            }
+        }
+        first
+    })
+}
+
 impl Outcome {
     /// Why the candidate is no cell (E4): the reply nobody recorded, or the call the
     /// simulator does not model. Recordings are never invented (CONTRIBUTING).
@@ -401,6 +460,11 @@ impl Outcome {
                 cell.program,
                 cell.call,
                 recordings_dir(&cell.program)
+            ))
+        } else if self.sim_exits.contains(&NO_OUTPUT) {
+            Some(format!(
+                "`{} {}` fails without the fault, so it has no output for `{}` to damage (opv-sim exit 88)",
+                cell.program, cell.call, cell.kind
             ))
         } else if self.sim_exits.contains(&UNSUPPORTED) {
             Some(format!(
@@ -891,7 +955,15 @@ include!("snapshots/cells.rs");
 
 /// The calls each command makes against the unfaulted world, as `(program, words)`, first
 /// seen first.
-fn discover() -> BTreeMap<&'static str, Vec<(String, Vec<String>)>> {
+/// Each command's calls, as `(program, words)`, first seen first.
+type Discovered = BTreeMap<&'static str, Vec<(String, Vec<String>)>>;
+
+fn discover() -> Discovered {
+    static SEEN: OnceLock<Discovered> = OnceLock::new();
+    SEEN.get_or_init(discover_now).clone()
+}
+
+fn discover_now() -> Discovered {
     COMMANDS
         .iter()
         .map(|(slug, args)| {
@@ -999,8 +1071,30 @@ fn no_rule_is_excused_as_known_legacy() {
 }
 
 fn generate(cands: Vec<Cell>, untargetable: Vec<String>) {
-    let mut results = in_parallel(cands, outcome);
+    let (redundant, run): (Vec<Cell>, Vec<Cell>) = cands
+        .into_iter()
+        .partition(|c| tool_missing_elsewhere(c).is_some());
+    let mut results = in_parallel(run, outcome);
     results.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut skip_rows: Vec<(String, String)> = Vec::new();
+    let row = |cell: &Cell, why: &str| {
+        (
+            cell.name(),
+            format!(
+                "| `{}` | opv {} | {} {} | {} | {why} |\n",
+                cell.name(),
+                cell.args().join(" "),
+                cell.program,
+                cell.call,
+                cell.kind
+            ),
+        )
+    };
+    for cell in &redundant {
+        if let Some(why) = tool_missing_elsewhere(cell) {
+            skip_rows.push(row(cell, &why));
+        }
+    }
     let mut cells_rs = String::from(
         "// @generated by `UPDATE_SNAPSHOTS=1 cargo nextest run --features fake --test e2e_matrix \
          the_committed_cells`: the live cells of the fault matrix (tests/e2e/matrix.rs).\n\
@@ -1011,7 +1105,10 @@ fn generate(cands: Vec<Cell>, untargetable: Vec<String>) {
          Generated by `tests/e2e/matrix.rs`. Each row is a command × call × fault the \
          simulator cannot answer yet: nobody has recorded that tool's reply to that call \
          under that fault in `tests/fixtures/<tool>/failures/` (opv-sim exit 86), or the \
-         simulator does not model the call (exit 87). Most rows are `rate_limited`, \
+         simulator does not model the call (exit 87), or the call fails without the fault, so \
+         `malformed_output` has no output to damage (exit 88). A `tool_missing` row on a later call of a \
+         tool is the run of that tool's first call: a tool that is not installed is missing for \
+         every call. Most rows are `rate_limited`, \
          `server_error` and `forbidden` on op, flyctl and gh: those replies need a live \
          account that is throttled, failing or refused, and no such recording exists yet. \
          The replies are never invented (CONTRIBUTING: recordings, never invented output); \
@@ -1028,14 +1125,7 @@ fn generate(cands: Vec<Cell>, untargetable: Vec<String>) {
     let mut live = 0;
     for (cell, o) in &results {
         if let Some(why) = o.skipped(cell) {
-            skipped.push_str(&format!(
-                "| `{}` | opv {} | {} {} | {} | {why} |\n",
-                cell.name(),
-                cell.args().join(" "),
-                cell.program,
-                cell.call,
-                cell.kind
-            ));
+            skip_rows.push(row(cell, &why));
             continue;
         }
         live += 1;
@@ -1062,6 +1152,10 @@ fn generate(cands: Vec<Cell>, untargetable: Vec<String>) {
         }
     }
     cells_rs.push_str("}\n");
+    skip_rows.sort();
+    for (_, r) in &skip_rows {
+        skipped.push_str(r);
+    }
     if !untargetable.is_empty() {
         skipped.push_str("\n## Calls no fault can target\n\n");
         for u in &untargetable {
@@ -1071,7 +1165,7 @@ fn generate(cands: Vec<Cell>, untargetable: Vec<String>) {
     let mut coverage = format!(
         "# Fault matrix: coverage (§13.4)\n\nGenerated by `tests/e2e/matrix.rs`. {live} live \
          cells; {} skipped.\n\n## Error codes reached\n\n| code | cells | catalog |\n|---|---|---|\n",
-        results.len() - live
+        skip_rows.len()
     );
     for (code, n) in &codes {
         let cat = if catalog_codes().contains(code) {

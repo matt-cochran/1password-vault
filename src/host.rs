@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use crate::adapters::registry;
 use crate::cause::Cause;
 use crate::error::Error;
-use crate::runner::{CommandRunner, READ_ATTEMPTS};
+use crate::runner::CommandRunner;
 
 /// Where detection reads its facts. [`ProcessEnv`] is the real one; tests use
 /// [`FakeEnv`].
@@ -345,18 +345,19 @@ fn diagnose_unanswered(seen: crate::cause::Observed) -> Cause {
         system @ (System::Ssh | System::RemoteOpv) => Cause::Unavailable {
             system,
             why: seen.exit().unanswered().unwrap_or(Unanswered::Timeout),
-            attempts: READ_ATTEMPTS,
+            attempts: seen.attempts(),
             seen,
         },
     };
-    // Only called once every read attempt went unanswered: the count is the runner's.
+    // Only called once every read attempt went unanswered: the count is the one the runner
+    // observed (B), never a constant.
     match cause {
         Cause::Unavailable {
             system, why, seen, ..
         } => Cause::Unavailable {
             system,
             why,
-            attempts: READ_ATTEMPTS,
+            attempts: seen.attempts(),
             seen,
         },
         other => other,

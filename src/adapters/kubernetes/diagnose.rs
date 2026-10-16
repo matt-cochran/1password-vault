@@ -97,7 +97,7 @@ fn apply(rule: Rule, seen: Observed, stderr: &str, ctx: &DiagnoseContext) -> Cau
         Rule::Network => Cause::Unavailable {
             system: System::Kubernetes,
             why: Unanswered::Network,
-            attempts: 1,
+            attempts: seen.attempts(),
             seen,
         },
     }
@@ -241,7 +241,7 @@ fn unknown_outcome(seen: Observed, ctx: &DiagnoseContext) -> Cause {
     Cause::Unavailable {
         system: System::Kubernetes,
         why: seen.exit().unanswered().unwrap_or(Unanswered::Timeout),
-        attempts: 1,
+        attempts: seen.attempts(),
         seen,
     }
 }

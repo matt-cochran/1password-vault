@@ -9,10 +9,8 @@ use crate::error::Error;
 use crate::host::{Host, Tool};
 use crate::runner::{Call, CommandRunner, Output, PROBE_TIMEOUT};
 
-/// Run `tool args` as a probe. A tool that cannot start is a catalog cause (04.14): not on
-/// PATH is `ToolMissing` with this host's install line (R56); not executable or failing to
-/// start is `ToolUnusable` (R57), never a Rust `ErrorKind` name; a probe that did not answer
-/// in time is its system's diagnosis of the observed call (R51).
+/// Run `tool args` as a probe. A probe that did not answer is decided by the runner's facts
+/// alone ([`probe_failure`]).
 pub(crate) fn spawn_tool(
     r: &dyn CommandRunner,
     tool: Tool,
@@ -21,11 +19,29 @@ pub(crate) fn spawn_tool(
 ) -> Result<Output, Error> {
     let call = Call::new(tool.program, args);
     r.probe(&call, PROBE_TIMEOUT)
-        .map_err(|e| spawn_failure(&tool, e.kind(), host))
+        .map_err(|e| probe_failure(&tool, &e, host))
 }
 
-/// The cause of a probe of `tool` that failed to run with `kind`.
-fn spawn_failure(tool: &Tool, kind: io::ErrorKind, host: &dyn Fn() -> Host) -> Error {
+/// Whether a probe that returned `e` started: it ran but did not answer (opv's timeout, a
+/// signal, a lost reply), as opposed to a tool that never started (missing, not
+/// executable, failing to spawn).
+pub(crate) fn started(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::TimedOut
+            | io::ErrorKind::Interrupted
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionAborted
+    )
+}
+
+/// The cause of a probe of `tool` that did not answer, from the runner's facts alone (design
+/// §5: runner facts win over any reading of a reply, and every probe helper decides through
+/// here before it infers a state). A tool that never started is `ToolMissing` with this
+/// host's install line when it is not on PATH (R56), else `ToolUnusable` (R57), never a Rust
+/// `ErrorKind` name; one that started and did not answer (timeout, signal, lost reply) is
+/// its system's diagnosis of the observed call, `Unavailable` for a read (R51).
+pub(crate) fn probe_failure(tool: &Tool, e: &io::Error, host: &dyn Fn() -> Host) -> Error {
     let unusable = |why| {
         Cause::ToolUnusable {
             tool: tool.program.to_string(),
@@ -33,7 +49,10 @@ fn spawn_failure(tool: &Tool, kind: io::ErrorKind, host: &dyn Fn() -> Host) -> E
         }
         .into()
     };
-    match kind {
+    if started(e) {
+        return tool.outage(tool.program);
+    }
+    match e.kind() {
         io::ErrorKind::NotFound => {
             let h = host();
             Cause::ToolMissing {
@@ -45,7 +64,6 @@ fn spawn_failure(tool: &Tool, kind: io::ErrorKind, host: &dyn Fn() -> Host) -> E
             .into()
         }
         io::ErrorKind::PermissionDenied => unusable(Unusable::NotExecutable),
-        io::ErrorKind::TimedOut => tool.outage(tool.program),
         kind => unusable(Unusable::SpawnFailed { io: kind.into() }),
     }
 }

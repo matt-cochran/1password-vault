@@ -2097,7 +2097,7 @@ fn a4_keys_blocking_names_the_rules_reason() {
         })],
     };
     assert!(
-        c.message().contains("prefix, expected prefix sk-"),
+        c.message().contains("rule prefix: expected prefix sk-"),
         "{}",
         c.message()
     );
@@ -3480,4 +3480,75 @@ fn i6_account_required_is_a_persons_pick() {
     let (action, _) =
         Cause::AccountRequired { accounts: vec![] }.step_in(&inv(), &person_at_terminal());
     assert_eq!(action, Some(Action::PickBetween));
+}
+
+/// E (snapshot review): a refused right in a target's namespace names that namespace, and
+/// the kube context it is in only as the context.
+#[test]
+fn a_missing_right_in_a_namespace_names_the_namespace_and_its_context() {
+    let c = Cause::MissingRight {
+        system: System::Kubernetes,
+        resource: ResourceRef {
+            kind: ResourceKind::Namespace,
+            name: ResourceName::new("e2e-prod"),
+            scope: Some("context e2e-cluster".into()),
+        },
+        right: Right::Verb {
+            verb: "list".into(),
+            resource: "secrets".into(),
+        },
+        grant: GrantModel::K8sRbac {
+            verb: "list".into(),
+            resource: "secrets".into(),
+            namespace: Some("e2e-prod".into()),
+        },
+        env: None,
+        target: None,
+        seen: fly_seen(),
+    };
+    assert_eq!(
+        c.message(),
+        "you may not list secrets in namespace e2e-prod (context e2e-cluster, Kubernetes)"
+    );
+}
+
+/// F (snapshot review): a failed rule names the rule and why the value fails it apart.
+#[test]
+fn an_empty_value_names_its_rule_and_that_it_is_empty() {
+    let s = value_state(&ValueState::RuleFailed {
+        rule: "nonempty",
+        reason: Some("empty".into()),
+    });
+    assert_eq!(s, "does not meet its rule nonempty: it is empty");
+}
+
+/// F (snapshot review): one allowed choice is named alone, never "one of prod".
+#[test]
+fn one_allowed_choice_is_named_alone() {
+    assert_eq!(one_of(&["prod".to_string()]), "prod");
+}
+
+#[test]
+fn several_allowed_choices_are_one_of_them() {
+    assert_eq!(
+        one_of(&["dev".to_string(), "prod".to_string()]),
+        "one of dev, prod"
+    );
+}
+
+/// C (snapshot review): an unrecognised failure with no reply to show never points at one.
+#[test]
+fn an_unrecognised_failure_without_a_reply_says_the_tool_wrote_none() {
+    let c = Cause::Unrecognized {
+        system: System::OnePassword,
+        established: vec![],
+        env: None,
+        target: None,
+        seen: seen(Principal::Person { account: None }),
+    };
+    let doc = document(&c, None, &inv(), false);
+    assert_eq!(
+        doc["do"],
+        "op wrote no reply (exit 1), so opv cannot tell why it failed; check op on its own"
+    );
 }

@@ -211,3 +211,27 @@ fn a_failed_call_is_not_an_unusable_reply_a1() {
     let _ = r.write(&Call::new("op", &["item", "edit", "deploy"]));
     assert!(take_unusable_reply(&item_get()).is_none());
 }
+
+/// F (snapshot review): the `checked:` line names kubectl's request timeout with its value,
+/// so the printed call can be run again as it is.
+#[test]
+fn request_timeout_word_keeps_its_value() {
+    let call = Call::new(
+        "kubectl",
+        &["--request-timeout=60s", "get", "deployment", "web"],
+    );
+    let words = observe::call_id(&call).map(|c| c.words);
+    assert_eq!(
+        words.and_then(|w| w.first().cloned()),
+        Some("--request-timeout=60s".to_string())
+    );
+}
+
+/// B (snapshot review): a read that failed on every retry is observed on its last attempt,
+/// so a cause names the count the retry notices showed.
+#[test]
+fn read_failing_every_attempt_is_observed_on_its_last_attempt() {
+    let r = FakeRunner::new(fake::failed_read(1));
+    let _ = r.read(&Call::new("flyctl", &["secrets", "list", "-a", "api"]), &[]);
+    assert_eq!(take_observed().map(|o| o.attempts()), Some(READ_ATTEMPTS));
+}

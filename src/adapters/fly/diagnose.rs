@@ -42,7 +42,7 @@ pub fn diagnose(seen: Observed, stderr: &str, ctx: &DiagnoseContext) -> Cause {
         Some(Reading::Network) => Cause::Unavailable {
             system: System::Fly,
             why: Unanswered::Network,
-            attempts: 1,
+            attempts: seen.attempts(),
             seen,
         },
         Some(Reading::TimedOut) => unknown_outcome(&seen, ctx, Unanswered::Timeout),
@@ -130,7 +130,7 @@ fn unknown_outcome(seen: &Observed, ctx: &DiagnoseContext, why: Unanswered) -> C
     Cause::Unavailable {
         system: System::Fly,
         why,
-        attempts: 1,
+        attempts: seen.attempts(),
         seen: seen.clone(),
     }
 }

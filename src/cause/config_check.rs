@@ -337,8 +337,8 @@ impl ConfigCheck {
                 (Some(c), _) => format!("change {name} to {c} in {field}"),
                 (None, true) => format!("declare {} {name}", kind.noun()),
                 (None, false) => format!(
-                    "use one of {} in {field}, or declare {} {name}",
-                    list(declared),
+                    "use {} in {field}, or declare {} {name}",
+                    super::render::one_of(declared),
                     kind.noun()
                 ),
             },
