@@ -127,15 +127,38 @@ pub fn prepare(
     backend: &mut dyn Backend,
     ui: &mut dyn Interaction,
 ) -> Result<Output, Error> {
+    match sign_in(account, backend, ui)? {
+        Some(vaults) => Ok(vaults),
+        None => Err(vault_list_failed(account)),
+    }
+}
+
+/// [`prepare`] for `opv login` (#157): being signed in is all a login needs, so a vault list
+/// that fails while `op whoami` succeeds does not stop it; the command it runs classifies
+/// each vault itself. Before, the failure said "setup vault" and pointed at `opv login`,
+/// a loop for a person who was already signed in.
+pub fn prepare_session(
+    account: Option<&str>,
+    backend: &mut dyn Backend,
+    ui: &mut dyn Interaction,
+) -> Result<(), Error> {
+    sign_in(account, backend, ui).map(|_| ())
+}
+
+/// Signed in with a vault listing (`Some`), or signed in while `op vault list` failed
+/// (`None`); a sign-in is started only when `op whoami` fails.
+fn sign_in(
+    account: Option<&str>,
+    backend: &mut dyn Backend,
+    ui: &mut dyn Interaction,
+) -> Result<Option<Output>, Error> {
     backend.native()?;
     ui.show(&format!("1Password CLI: ready ({})", version(backend)?))?;
     let mut vaults = backend.call(&["vault", "list", "--format", "json"], None)?;
     if vaults.status != 0 {
         let who = backend.probe(&["whoami", "--format", "json"])?;
         if who.status == 0 {
-            return Err(source_error(
-                "You are signed in, but vault access failed. Check your connection and account access to the setup vault, then rerun the command.",
-            ));
+            return Ok(None);
         }
         ui.show("Sign in to 1Password. Your password goes only to its own prompt.")?;
         let accounts = backend.call(&["account", "list", "--format", "json"], None)?;
@@ -149,7 +172,21 @@ pub fn prepare(
         backend.sign_in(account, false)?;
         vaults = successful(backend, &["vault", "list", "--format", "json"], None)?;
     }
-    Ok(vaults)
+    Ok(Some(vaults))
+}
+
+/// Signed in, but `op vault list` failed (#157): name the account, and point at the check
+/// that can tell why, not at another sign-in.
+fn vault_list_failed(account: Option<&str>) -> Error {
+    let account = account.map_or_else(
+        || "the default 1Password account".to_string(),
+        |a| format!("1Password account {a}"),
+    );
+    source_error(&format!(
+        "You are signed in to {account}, but op vault list failed. Check your connection, \
+         then rerun the command."
+    ))
+    .with_next("opv doctor")
 }
 
 fn field_indices(doc: &mut Value, definitions: &[Field]) -> Result<Vec<usize>, Error> {

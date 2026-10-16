@@ -6,7 +6,7 @@
 //! exit code is returned. Like `setup`, an owner command: it needs an interactive terminal
 //! and may ask which environment to sign in for.
 
-use super::setup::{Backend, Interaction, prepare};
+use super::setup::{Backend, Interaction, prepare_session};
 use crate::domain::Fleet;
 use crate::error::Error;
 
@@ -88,7 +88,7 @@ pub fn run_or(
 ) -> Result<i32, Error> {
     let account = account_or(fleet, fallback, env, ui)?;
     backend.use_account(account.as_deref());
-    prepare(account.as_deref(), backend, ui)?;
+    prepare_session(account.as_deref(), backend, ui)?;
     if command.is_empty() {
         let account = account.as_deref().map(|a| backend.account_label(a));
         let scope = match (env, &account) {
