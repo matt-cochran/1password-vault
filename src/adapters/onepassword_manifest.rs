@@ -53,11 +53,17 @@ pub struct Row {
     pub id: String,
     #[serde(default)]
     pub title: String,
-    #[serde(default)]
+    /// op prints `"tags": null` for an item without tags.
+    #[serde(default, deserialize_with = "null_as_empty")]
     pub tags: Vec<String>,
     #[serde(default)]
     pub version: u64,
     pub vault: VaultRef,
+}
+
+/// A JSON `null` read as an empty list.
+fn null_as_empty<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    Ok(Option::<Vec<String>>::deserialize(d)?.unwrap_or_default())
 }
 
 /// The vault an item lives in.
@@ -702,6 +708,15 @@ pub fn edit(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_row_with_null_tags_reads_as_no_tags() {
+        let row: Row = serde_json::from_str(
+            r#"{"id":"i1","title":"t","tags":null,"version":1,"vault":{"id":"v1","name":"n"}}"#,
+        )
+        .unwrap();
+        assert!(row.tags.is_empty());
+    }
+
     use super::*;
     use crate::runner::Output;
     use crate::runner::fake::FakeRunner;
