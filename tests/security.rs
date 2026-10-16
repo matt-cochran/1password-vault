@@ -947,7 +947,9 @@ fn expired_session_is_auth_with_signin_command() {
 }
 
 /// FR-26, 04.07: no account on this machine (Linux) → the account to add at op's prompt,
-/// `opv login --add`; exit 7.
+/// `opv login --add`; exit 7. On macOS the 1Password app holds the accounts (see
+/// `no_account_on_macos_is_added_in_the_app`).
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn no_account_is_auth_with_login_add() {
     let mut h = Harness::new(&good_item());
@@ -968,6 +970,25 @@ fn no_account_is_auth_with_login_add() {
         }
         assert_clean_output(cmd, &r);
     }
+}
+
+/// FR-26 on macOS: the 1Password app holds the accounts, so the account is added there
+/// (then `opv login`); exit 7.
+#[cfg(target_os = "macos")]
+#[test]
+fn no_account_on_macos_is_added_in_the_app() {
+    let mut h = Harness::new(&good_item());
+    h.unset("OP_SERVICE_ACCOUNT_TOKEN")
+        .set("SHELL", "/bin/zsh")
+        .set("FAKE_OP_EXIT", "1")
+        .set("FAKE_OP_NO_ACCOUNTS", "1");
+    let r = h.run(&["status", "prod"]);
+    assert!(
+        r.all()
+            .contains("in the 1Password app and turn on its CLI integration"),
+        "{}",
+        r.all()
+    );
 }
 
 /// FR-26 under CI: name OP_SERVICE_ACCOUNT_TOKEN, print no interactive command, and do
