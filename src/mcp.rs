@@ -1782,7 +1782,9 @@ fn ready_target(t: &Value) -> Option<Value> {
 /// The `opv ready --json` receipt as the MCP answer: a new response, never recursively
 /// forwarding arbitrary upstream fields.
 fn ready_receipt(doc: &Value) -> Option<Value> {
-    if doc.get("schema_version").and_then(Value::as_u64) != Some(1) {
+    if doc.get("schema_version").and_then(Value::as_u64)
+        != Some(u64::from(crate::json::SCHEMA_VERSION))
+    {
         return None;
     }
     let findings = doc.get("findings").and_then(Value::as_array)?;
@@ -1831,7 +1833,9 @@ fn approve_command(plan_id: &str, scope: &crate::app::approve::SyncScope) -> Str
 /// `approve_command` for exactly `scope` (its targets, product and rotate entries), so the
 /// approval a person records covers the `opv_sync` that names the same scope.
 fn plan_receipt(doc: &Value, scope: &crate::app::approve::SyncScope) -> Option<Value> {
-    if doc.get("schema_version").and_then(Value::as_u64) != Some(1) {
+    if doc.get("schema_version").and_then(Value::as_u64)
+        != Some(u64::from(crate::json::SCHEMA_VERSION))
+    {
         return None;
     }
     let rows = doc.get("rows").and_then(Value::as_array)?;
@@ -1890,7 +1894,7 @@ mod tests {
     }
     #[test]
     fn readiness_drops_value_bearing_and_untrusted_fields() {
-        let doc = json!({"schema_version": 1, "findings": [{"blocking": true, "message": "SECRET_MARKER", "prerequisite": "SECRET_MARKER"}], "value": "SECRET_MARKER"});
+        let doc = json!({"schema_version": 2, "findings": [{"blocking": true, "message": "SECRET_MARKER", "prerequisite": "SECRET_MARKER"}], "value": "SECRET_MARKER"});
         assert!(
             !ready_receipt(&doc)
                 .unwrap_or_default()
@@ -1900,7 +1904,7 @@ mod tests {
     }
     #[test]
     fn plan_drops_values_even_when_the_source_contains_them() {
-        let doc = json!({"schema_version": 1, "rows": [{"product": "api", "key": "API_KEY", "action": "stage", "value": "SECRET_MARKER", "reason": "SECRET_MARKER"}], "plan_id": "123abc"});
+        let doc = json!({"schema_version": 2, "rows": [{"product": "api", "key": "API_KEY", "action": "stage", "value": "SECRET_MARKER", "reason": "SECRET_MARKER"}], "plan_id": "123abc"});
         assert!(
             !plan_receipt(&doc, &plan_scope(&[], None, &[]))
                 .unwrap_or_default()
@@ -2038,7 +2042,7 @@ mod tests {
 
     #[test]
     fn successful_receipt_can_still_have_blocking_findings() {
-        let doc = json!({"schema_version": 1, "findings": [{"blocking": true}]});
+        let doc = json!({"schema_version": 2, "findings": [{"blocking": true}]});
         assert_eq!(
             ready_receipt(&doc).unwrap_or_default()["blocking_findings"],
             1
@@ -2046,7 +2050,7 @@ mod tests {
     }
 
     fn ready_doc(findings: Value, targets: Value) -> Value {
-        json!({"schema_version": 1, "findings": findings, "targets": targets})
+        json!({"schema_version": 2, "findings": findings, "targets": targets})
     }
 
     #[test]
@@ -2607,7 +2611,7 @@ rules = { prefix = "sk_" }
     #[test]
     fn a_scoped_deployment_plan_approves_the_same_targets_product_and_rotation() {
         let doc =
-            json!({"schema_version": 1, "environment": "prod", "rows": [], "plan_id": "0123abcd"});
+            json!({"schema_version": 2, "environment": "prod", "rows": [], "plan_id": "0123abcd"});
         let v = plan_receipt(&doc, &plan_scope(&["fleet"], Some("api"), &["api/KEY"])).unwrap();
         assert_eq!(
             v["approve_command"],
@@ -2652,7 +2656,7 @@ rules = { prefix = "sk_" }
 
     #[test]
     fn the_deployment_plan_never_says_sync_is_unavailable_through_mcp() {
-        let doc = json!({"schema_version": 1, "rows": [], "plan_id": "0123abcd"});
+        let doc = json!({"schema_version": 2, "rows": [], "plan_id": "0123abcd"});
         let v = plan_receipt(&doc, &plan_scope(&[], None, &[])).unwrap();
         assert!(
             v["human_action"]
@@ -2768,6 +2772,7 @@ rules = { prefix = "sk_" }
             exit: crate::cause::ExitClass::Code { code: 1 },
             said: (0..lines).map(|i| format!("line {i}")).collect(),
             removed_advice: false,
+            truncated: false,
             untrusted: true,
         }
     }
@@ -3043,7 +3048,7 @@ rules = { prefix = "sk_" }
             inner: FakeRunner::new([]),
             refused: AtomicBool::new(false),
         };
-        let doc = json!({"schema_version": 1, "rows": [], "plan_id": null}).to_string();
+        let doc = json!({"schema_version": 2, "rows": [], "plan_id": null}).to_string();
         let v = receipt_answer(
             &tool(&["plan"], &["prod"]),
             &r,

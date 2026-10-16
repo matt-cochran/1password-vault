@@ -131,53 +131,122 @@ pub fn strip_display(line: &str) -> String {
     out
 }
 
-/// The lines the box shows: stripped, cut at [`LINE_CHARS`] and limited to [`BOX_LINES`]
-/// unless verbose. Also returns how many lines were left out.
-pub fn shown_lines(up: &Upstream, verbose: bool) -> (Vec<String>, usize) {
-    let take = if verbose { up.said.len() } else { BOX_LINES };
-    let lines = up
-        .said
-        .iter()
-        .take(take)
-        .map(|l| {
-            let l = strip_display(l);
-            if verbose || l.chars().count() <= LINE_CHARS {
-                l
-            } else {
-                let cut: String = l.chars().take(LINE_CHARS).collect();
-                format!("{cut}…")
-            }
-        })
-        .collect::<Vec<_>>();
-    let left_out = up.said.len().saturating_sub(lines.len());
-    (lines, left_out)
+/// What the box and `evidence.upstream` show of a reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shown {
+    /// The lines shown, stripped; cut at [`LINE_CHARS`] unless verbose.
+    pub lines: Vec<String>,
+    /// How many of the reply's lines were left out (0 under `--verbose`).
+    pub omitted: usize,
+    /// Where in `lines` the left-out lines were: before `lines[gap]`.
+    pub gap: usize,
+}
+
+/// True when `line` reads as the tool's error line: op's `[ERROR]`, az's `ERROR:`,
+/// kubectl's `error:` and `Error from server`, flyctl's and gh's `Error:`.
+fn is_error_line(line: &str) -> bool {
+    let lower = line.trim_start().to_ascii_lowercase();
+    line.contains("[ERROR]") || lower.starts_with("error") || lower.contains("error:")
+}
+
+/// The lines shown (§7.3). Under `verbose`, all of them, uncut. Otherwise at most
+/// [`BOX_LINES`]: the tool's error line (its first line that reads as one, else its first
+/// line) plus the tail, so a long reply never loses the line that says what went wrong; the
+/// lines left out are counted and their place is marked.
+pub fn shown_lines(up: &Upstream, verbose: bool) -> Shown {
+    let n = up.said.len();
+    let cut = |l: &String| {
+        let l = strip_display(l);
+        if verbose || l.chars().count() <= LINE_CHARS {
+            l
+        } else {
+            let cut: String = l.chars().take(LINE_CHARS).collect();
+            format!("{cut}…")
+        }
+    };
+    if verbose || n <= BOX_LINES {
+        return Shown {
+            lines: up.said.iter().map(cut).collect(),
+            omitted: 0,
+            gap: 0,
+        };
+    }
+    let tail_from = n - (BOX_LINES - 1);
+    let error = up.said.iter().position(|l| is_error_line(l)).unwrap_or(0);
+    if error >= n - BOX_LINES {
+        // The error line is in the last BOX_LINES lines: they are the box.
+        return Shown {
+            lines: up.said[n - BOX_LINES..].iter().map(cut).collect(),
+            omitted: n - BOX_LINES,
+            gap: 0,
+        };
+    }
+    Shown {
+        lines: std::iter::once(&up.said[error])
+            .chain(&up.said[tail_from..])
+            .map(cut)
+            .collect(),
+        omitted: n - BOX_LINES,
+        gap: 1,
+    }
+}
+
+/// `3 more lines`, `1 more line`: `n` lines, with `more` (or nothing) before the noun.
+fn lines_word(n: usize, more: &str) -> String {
+    let noun = if n == 1 { "line" } else { "lines" };
+    format!("{n} {more}{noun}")
+}
+
+/// The note for a reply longer than the runner keeps.
+fn truncated_note() -> String {
+    format!(
+        "longer than {} KiB, only its end was kept",
+        crate::runner::STDERR_CAP / 1024
+    )
 }
 
 /// The attributed box (§7.3); `utf8: false` falls back to ASCII. Ends with a newline.
 pub fn upstream_box(up: &Upstream, verbose: bool, utf8: bool) -> String {
-    let (lines, left_out) = shown_lines(up, verbose);
+    let shown = shown_lines(up, verbose);
     let head = match &up.version {
         Some(v) => format!("{} ({v}) replied, {}", up.tool, exit_words(up.exit)),
         None => format!("{} replied, {}", up.tool, exit_words(up.exit)),
     };
     let mut notes = vec!["scrubbed".to_string()];
+    if up.truncated {
+        notes.push(truncated_note());
+    }
     if up.removed_advice {
         notes.push(format!("{}'s own advice removed", up.tool));
     }
-    if left_out > 0 {
-        notes.push(format!("{left_out} more lines with --verbose"));
+    if shown.omitted > 0 {
+        notes.push(format!(
+            "{} with --verbose",
+            lines_word(shown.omitted, "more ")
+        ));
     }
     let foot = format!("({})", notes.join("; "));
-    let (top, bar, bottom) = if utf8 {
-        (format!("╭─ {head}"), "│ ", format!("╰─ {foot}"))
+    let (top, bar, bottom, ellipsis) = if utf8 {
+        (format!("╭─ {head}"), "│ ", format!("╰─ {foot}"), "…")
     } else {
-        (format!("--- {head} ---"), "| ", format!("--- {foot} ---"))
+        (
+            format!("--- {head} ---"),
+            "| ",
+            format!("--- {foot} ---"),
+            "...",
+        )
     };
     let mut s = top;
     s.push('\n');
-    for l in lines {
+    for (i, l) in shown.lines.iter().enumerate() {
+        if shown.omitted > 0 && i == shown.gap {
+            s.push_str(&format!(
+                "{bar}{ellipsis} {} left out\n",
+                lines_word(shown.omitted, "")
+            ));
+        }
         s.push_str(bar);
-        s.push_str(&l);
+        s.push_str(l);
         s.push('\n');
     }
     s.push_str(&bottom);
@@ -185,12 +254,15 @@ pub fn upstream_box(up: &Upstream, verbose: bool, utf8: bool) -> String {
     s
 }
 
-/// The document's `evidence.upstream`: the same lines the box shows, marked untrusted.
+/// The document's `evidence.upstream`: the same lines the box shows, marked untrusted, with
+/// how many were left out (`omitted`, 0 under `--verbose`) and whether the reply was longer
+/// than opv keeps (`truncated`).
 pub fn upstream_value(up: &Upstream, verbose: bool) -> serde_json::Value {
-    let (lines, _) = shown_lines(up, verbose);
+    let shown = shown_lines(up, verbose);
     let mut v = serde_json::to_value(up).unwrap_or(serde_json::Value::Null);
     if let Some(o) = v.as_object_mut() {
-        o.insert("said".into(), serde_json::json!(lines));
+        o.insert("said".into(), serde_json::json!(shown.lines));
+        o.insert("omitted".into(), serde_json::json!(shown.omitted));
         o.insert("untrusted".into(), serde_json::Value::Bool(true));
     }
     v

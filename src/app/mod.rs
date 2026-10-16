@@ -451,7 +451,7 @@ pub(crate) struct JsonPart<'a> {
 /// FR-21: one names-only JSON document for `status --json` and `plan --json`. Every row
 /// names its product (FR-20 removed).
 ///
-/// `schema_version` is 1; adding a field keeps the version. Rows carry names, states and
+/// `schema_version` is 2 (since 0.10.0); adding a field keeps the version. Rows carry names, states and
 /// counts only (SR-1): no value, value fragment, value length or guidance text. Errors
 /// before this point leave stdout empty, so a caller only gets a document on success.
 ///

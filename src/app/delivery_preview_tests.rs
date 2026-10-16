@@ -224,7 +224,7 @@ fn the_preview_document_is_schema_version_one() {
         &signed_in(),
     )
     .unwrap();
-    assert_eq!(doc["schema_version"], json!(1));
+    assert_eq!(doc["schema_version"], json!(2));
 }
 
 #[test]

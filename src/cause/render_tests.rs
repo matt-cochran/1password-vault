@@ -914,6 +914,7 @@ fn upstream(lines: usize, removed_advice: bool) -> Upstream {
         exit: ExitClass::Code { code: 1 },
         said: (1..=lines).map(|i| format!("[ERROR] line {i}")).collect(),
         removed_advice,
+        truncated: false,
         untrusted: true,
     }
 }
@@ -1291,7 +1292,125 @@ fn the_box_says_when_advice_was_removed() {
 #[test]
 fn the_box_shows_at_most_five_lines() {
     let b = upstream_box(&upstream(9, false), false, true);
-    assert_eq!(b.lines().filter(|l| l.starts_with("│ ")).count(), BOX_LINES);
+    assert_eq!(
+        b.lines().filter(|l| l.starts_with("│ [ERROR]")).count(),
+        BOX_LINES
+    );
+}
+
+/// op's reply as it is when it says more than the box holds: its `[ERROR]` line first, then
+/// `n - 1` lines of detail.
+fn long_reply(n: usize) -> Upstream {
+    let mut up = upstream(1, false);
+    up.said = std::iter::once("[ERROR] 2026/10/16 10:00:00 refused".to_string())
+        .chain((1..n).map(|i| format!("detail {i}")))
+        .collect();
+    up
+}
+
+#[test]
+fn the_box_keeps_the_error_line_of_a_long_reply() {
+    let b = upstream_box(&long_reply(30), false, true);
+    assert_eq!(
+        b.lines().nth(1),
+        Some("│ [ERROR] 2026/10/16 10:00:00 refused")
+    );
+}
+
+#[test]
+fn the_box_ends_a_long_reply_with_its_tail() {
+    let b = upstream_box(&long_reply(30), false, true);
+    assert_eq!(b.lines().rev().nth(1), Some("│ detail 29"));
+}
+
+#[test]
+fn the_box_marks_where_lines_were_left_out() {
+    let b = upstream_box(&long_reply(30), false, true);
+    assert_eq!(b.lines().nth(2), Some("│ … 25 lines left out"));
+}
+
+#[test]
+fn the_box_counts_the_lines_left_out_in_its_footer() {
+    let b = upstream_box(&long_reply(30), false, true);
+    assert_eq!(
+        b.lines().last(),
+        Some("╰─ (scrubbed; 25 more lines with --verbose)")
+    );
+}
+
+#[test]
+fn the_box_shows_the_tail_alone_when_the_error_line_is_in_it() {
+    let mut up = long_reply(30);
+    up.said[0] = "warning: preview".into();
+    up.said[27] = "Error: refused".into();
+    let b = upstream_box(&up, false, true);
+    assert_eq!(b.lines().nth(1), Some("│ … 25 lines left out"));
+}
+
+#[test]
+fn the_box_shows_a_whole_long_reply_when_verbose() {
+    let b = upstream_box(&long_reply(300), true, true);
+    assert_eq!(b.lines().filter(|l| l.starts_with("│ ")).count(), 300);
+}
+
+#[test]
+fn the_box_keeps_long_lines_whole_when_verbose() {
+    let mut up = upstream(1, false);
+    up.said = vec!["x".repeat(1000)];
+    let b = upstream_box(&up, true, true);
+    assert_eq!(b.lines().nth(1).map(|l| l.chars().count()), Some(2 + 1000));
+}
+
+#[test]
+fn the_box_says_a_truncated_reply_was_cut() {
+    let mut up = upstream(1, false);
+    up.truncated = true;
+    let b = upstream_box(&up, true, true);
+    assert_eq!(
+        b.lines().last(),
+        Some("╰─ (scrubbed; longer than 64 KiB, only its end was kept)")
+    );
+}
+
+#[test]
+fn the_document_keeps_the_error_line_of_a_long_reply() {
+    let d = document(&in_other_account(), Some(&long_reply(30)), &inv(), false);
+    assert_eq!(
+        d["evidence"]["upstream"]["said"][0],
+        serde_json::json!("[ERROR] 2026/10/16 10:00:00 refused")
+    );
+}
+
+#[test]
+fn the_document_counts_the_lines_left_out() {
+    let d = document(&in_other_account(), Some(&long_reply(30)), &inv(), false);
+    assert_eq!(d["evidence"]["upstream"]["omitted"], serde_json::json!(25));
+}
+
+#[test]
+fn the_document_carries_a_whole_long_reply_when_verbose() {
+    let d = document(&in_other_account(), Some(&long_reply(300)), &inv(), true);
+    assert_eq!(
+        d["evidence"]["upstream"]["said"].as_array().map(Vec::len),
+        Some(300)
+    );
+}
+
+#[test]
+fn the_document_leaves_nothing_out_when_verbose() {
+    let d = document(&in_other_account(), Some(&long_reply(300)), &inv(), true);
+    assert_eq!(d["evidence"]["upstream"]["omitted"], serde_json::json!(0));
+}
+
+#[test]
+fn the_document_says_a_reply_was_truncated() {
+    let mut up = upstream(1, false);
+    up.truncated = true;
+    let d = document(&in_other_account(), Some(&up), &inv(), true);
+    assert_eq!(
+        d["evidence"]["upstream"]["truncated"],
+        serde_json::json!(true)
+    );
 }
 
 #[test]

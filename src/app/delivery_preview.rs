@@ -24,8 +24,8 @@ use crate::error::Error;
 use crate::host::Host;
 use crate::runner::CommandRunner;
 
-/// The version of the preview document's shape.
-pub const SCHEMA_VERSION: u32 = 1;
+/// The version of the preview document's shape: the `--json` contract's.
+pub const SCHEMA_VERSION: u32 = crate::json::SCHEMA_VERSION;
 
 /// The role names any key of `product` declares, sorted and deduplicated. Product-wide, so
 /// a run that omits `--role` is refused even when only one key is role-scoped.
@@ -102,7 +102,7 @@ pub fn select<'a>(
 }
 
 /// The preview document for `opv run --preview --json` and `opv_delivery_preview`: one JSON
-/// object, `schema_version` 1, built field by field from identifiers. No value is read and
+/// object, `schema_version` 2, built field by field from identifiers. No value is read and
 /// no `op run`/`op read`/`op item get` is made; the only `op` call is the session probe.
 pub fn build(
     fleet: &Fleet,

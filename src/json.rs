@@ -7,7 +7,8 @@
 //! the bare envelope; a failure after it (findings, exit 8) keeps the rows and adds `error`. The
 //! human text still goes to stderr, so a terminal user loses nothing.
 //!
-//! `schema_version` stays 1 while fields are only added; it changes only when a field
+//! `schema_version` is 2 since 0.10.0, when the error document and its codes changed (FR-60, no
+//! aliases). It stays 2 while fields are only added; it changes only when a field
 //! changes meaning. Names only, never a value (SR-1).
 
 use serde_json::{Map, Value};
@@ -15,7 +16,7 @@ use serde_json::{Map, Value};
 use crate::error::Error;
 
 /// The version of every `--json` document's shape.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// The final stdout of a `--json` command: `body` is what the command wrote (one JSON
 /// object, or nothing), `res` its result; a failure's `error` is rendered against the
@@ -106,7 +107,7 @@ mod tests {
 
     #[test]
     fn success_gains_ok_true_after_schema_version() {
-        let out = finish(br#"{"schema_version":1,"rows":[]}"#, Ok(()), false);
+        let out = finish(br#"{"schema_version":2,"rows":[]}"#, Ok(()), false);
         assert_eq!(
             keys(&parse(&out)),
             ["schema_version", "ok", "rows", "next", "do"]
@@ -116,7 +117,7 @@ mod tests {
     #[test]
     fn success_keeps_the_commands_own_next() {
         let out = finish(
-            br#"{"schema_version":1,"next":"opv sync prod"}"#,
+            br#"{"schema_version":2,"next":"opv sync prod"}"#,
             Ok(()),
             false,
         );
@@ -135,7 +136,7 @@ mod tests {
     #[test]
     fn failure_after_a_document_keeps_its_rows() {
         let out = finish(
-            br#"{"schema_version":1,"rows":[1]}"#,
+            br#"{"schema_version":2,"rows":[1]}"#,
             Err(&refused()),
             false,
         );
@@ -145,7 +146,7 @@ mod tests {
     #[test]
     fn failure_next_is_the_errors_step() {
         let e = refused();
-        let out = finish(br#"{"schema_version":1,"next":null}"#, Err(&e), false);
+        let out = finish(br#"{"schema_version":2,"next":null}"#, Err(&e), false);
         let want = crate::error::document(&e, &crate::error::invocation(), false);
         assert_eq!(parse(&out)["next"], want["next"]);
     }

@@ -147,9 +147,7 @@ fn create(
             .into());
         }
     };
-    let said = crate::runner::take_failure_excerpt()
-        .map(|e| e.lines)
-        .unwrap_or_default();
+    let (said, truncated) = crate::scrub::Excerpt::parts(crate::runner::take_failure_excerpt());
     // The runner observes every call that failed; a runner that did not cannot be diagnosed.
     let Some(seen) = seen else {
         return Err(Cause::Bug {
@@ -175,6 +173,7 @@ fn create(
                 exit,
                 said,
                 removed_advice: false,
+                truncated,
                 untrusted: true,
             },
         )

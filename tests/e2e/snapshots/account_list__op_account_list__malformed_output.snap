@@ -12,6 +12,6 @@ Next: opv doctor
 
 ## json exit: 0
 ## json stdout
-{"schema_version":1,"ok":true,"discovery":"unavailable","platform":"<platform>","cli_accounts_only":true,"selected":null,"accounts":[],"findings":[{"code":"discovery_unavailable","human_required":false,"message":"op account list failed or printed something opv does not understand","next":"opv doctor"}],"next":"opv doctor","do":null}
+{"schema_version":2,"ok":true,"discovery":"unavailable","platform":"<platform>","cli_accounts_only":true,"selected":null,"accounts":[],"findings":[{"code":"discovery_unavailable","human_required":false,"message":"op account list failed or printed something opv does not understand","next":"opv doctor"}],"next":"opv doctor","do":null}
 
 ## json stderr

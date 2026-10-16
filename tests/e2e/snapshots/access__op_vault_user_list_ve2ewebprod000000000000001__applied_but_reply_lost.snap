@@ -14,7 +14,7 @@ Next: opv access
 
 ## json exit: 9
 ## json stdout
-{"schema_version":1,"ok":false,"exit_code":9,"next":"opv access --json","do":"approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network","error":{"code":"provider_unavailable","category":"unknown","message":"1Password did not answer after 3 attempts: it was stopped by signal 9 before it answered","subject":{"attempts":3,"system":"one_password","why":{"why":"killed","signal":9}},"evidence":{"checked":"op vault user list vE2EWEBPROD000000000000001 --format json","account":null,"upstream":null},"retry":"safe","human_required":false,"do":"approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network","next":"opv access --json","next_kind":"rerun"}}
+{"schema_version":2,"ok":false,"exit_code":9,"next":"opv access --json","do":"approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network","error":{"code":"provider_unavailable","category":"unknown","message":"1Password did not answer after 3 attempts: it was stopped by signal 9 before it answered","subject":{"attempts":3,"system":"one_password","why":{"why":"killed","signal":9}},"evidence":{"checked":"op vault user list vE2EWEBPROD000000000000001 --format json","account":null,"upstream":null},"retry":"safe","human_required":false,"do":"approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network","next":"opv access --json","next_kind":"rerun"}}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml

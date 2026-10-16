@@ -11,7 +11,7 @@ Next: opv doctor
 
 ## json exit: 4
 ## json stdout
-{"schema_version":1,"ok":false,"exit_code":4,"next":"opv doctor","do":"update op (opv doctor checks its version)","error":{"code":"unexpected_output","category":"source","message":"opv could not read the reply of op from 1Password","subject":{"during":"read","system":"one_password","at":null,"problem":{"problem":"unparseable"}},"evidence":{"checked":"op account list --format json","account":null,"upstream":null},"retry":"never","human_required":false,"do":"update op (opv doctor checks its version)","next":"opv doctor","next_kind":"run"}}
+{"schema_version":2,"ok":false,"exit_code":4,"next":"opv doctor","do":"update op (opv doctor checks its version)","error":{"code":"unexpected_output","category":"source","message":"opv could not read the reply of op from 1Password","subject":{"during":"read","system":"one_password","at":null,"problem":{"problem":"unparseable"}},"evidence":{"checked":"op account list --format json","account":null,"upstream":null},"retry":"never","human_required":false,"do":"update op (opv doctor checks its version)","next":"opv doctor","next_kind":"run"}}
 
 ## json stderr
 opv: opv could not read the reply of op from 1Password

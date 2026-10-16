@@ -156,6 +156,7 @@ pub(crate) struct Failed {
     pub cause: Cause,
     pub seen: Observed,
     said: Vec<String>,
+    truncated: bool,
 }
 
 impl Failed {
@@ -179,11 +180,12 @@ impl Failed {
             ..Default::default()
         };
         let cause = diagnose::diagnose(failed.seen.clone(), failed.stderr(), &ctx);
-        let said = failed.excerpt.map(|x| x.lines).unwrap_or_default();
+        let (said, truncated) = crate::scrub::Excerpt::parts(failed.excerpt);
         Ok(Failed {
             cause,
             seen: failed.seen,
             said,
+            truncated,
         })
     }
 
@@ -241,6 +243,7 @@ impl Failed {
             version: None,
             exit: self.seen.exit(),
             said: self.said,
+            truncated: self.truncated,
             removed_advice: false,
             untrusted: true,
         };

@@ -302,9 +302,7 @@ fn vault_visible(
 /// no call (a fake). The reply is taken once, so it attaches nowhere else (NR-31).
 fn op_failure(diagnose: impl FnOnce(Observed, &str) -> Cause) -> Option<Error> {
     let seen = crate::runner::take_observed()?;
-    let said: Vec<String> = crate::runner::take_failure_excerpt()
-        .map(|x| x.lines)
-        .unwrap_or_default();
+    let (said, truncated) = crate::scrub::Excerpt::parts(crate::runner::take_failure_excerpt());
     let exit = seen.exit();
     let cause = diagnose(seen, &said.join("\n"));
     if said.is_empty() {
@@ -317,6 +315,7 @@ fn op_failure(diagnose: impl FnOnce(Observed, &str) -> Cause) -> Option<Error> {
         exit,
         said,
         removed_advice: false,
+        truncated,
         untrusted: true,
     };
     Some(Error::with_evidence(cause, upstream))

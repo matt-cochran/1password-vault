@@ -4776,6 +4776,7 @@ mod tests {
                 exit: ExitClass::Code { code: 1 },
                 said: (1..=8).map(|i| format!("line {i}")).collect(),
                 removed_advice: false,
+                truncated: false,
                 untrusted: true,
             },
         )
@@ -4801,8 +4802,8 @@ mod tests {
     }
 
     #[test]
-    fn failure_text_without_verbose_keeps_the_reply_short() {
-        assert!(!rendered(false, true).contains("line 8"));
+    fn failure_text_without_verbose_leaves_out_the_middle_of_the_reply() {
+        assert!(!rendered(false, true).contains("line 2"));
     }
 
     #[test]
