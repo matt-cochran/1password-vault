@@ -1371,15 +1371,13 @@ mod tests {
 
     #[test]
     fn fly_not_signed_in_is_auth_and_identity_not_printed() {
-        let mut g = good();
-        g[3] = Output {
+        let r = fly_signed_out(Output {
             status: 1,
             stdout: zeroize::Zeroizing::new(FLY_WHOAMI.as_bytes().to_vec()),
-        };
-        let r = FakeRunner::new(g);
+        });
         let (res, out) = doctor(Ok(fleet()), &r);
         let e = res.unwrap_err();
-        assert!(matches!(e, Error::Auth(_)), "{e}");
+        assert_eq!(e.exit_code(), 7, "{e}");
         assert!(
             out.lines().nth(4).unwrap().starts_with("FAIL  fly auth"),
             "{out}"
@@ -1619,11 +1617,27 @@ mod tests {
 
     #[test]
     fn next_step_names_fly_login_when_fly_is_logged_out() {
-        let mut g = good();
-        g[3] = Output::failure(1);
-        let r = FakeRunner::new(g);
+        let r = fly_signed_out(Output::failure(1));
         let (_, out) = doctor(Ok(fleet()), &r);
-        assert_eq!(do_line(&out), "Do: log in: flyctl auth login", "{out}");
+        assert_eq!(
+            do_line(&out),
+            "Do: sign in to Fly: flyctl auth login",
+            "{out}"
+        );
+    }
+
+    /// The good doctor run with `flyctl auth whoami` (call 3) answering `whoami` and
+    /// flyctl's recorded signed-out reply (design §5: only that reply makes "signed out").
+    fn fly_signed_out(whoami: Output) -> FakeRunner {
+        let mut rest = good().into_iter();
+        let r = FakeRunner::new(rest.by_ref().take(3));
+        r.push_with_stderr(
+            whoami,
+            include_str!("../../tests/fixtures/fly/failures/01-signed-out-whoami.stderr"),
+        );
+        rest.next();
+        r.responses.borrow_mut().extend(rest.map(Ok));
+        r
     }
 
     #[test]

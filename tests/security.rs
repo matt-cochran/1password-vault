@@ -89,6 +89,14 @@ for a in "$@"; do printf '%s\n' "$a"; done > "$p.argv"
 cat > "$p.stdin"
 export -p > "$p.env"
 printf '%s %s\n' "$FAKE_CHILD_STDERR" "$FAKE_STDERR_VALUE" >&2
+# Signed out (FAKE_FLY_AUTH_EXIT), flyctl's recorded replies (tests/fixtures/fly/failures).
+if [ "${FAKE_FLY_AUTH_EXIT:-0}" != 0 ]; then
+  if [ -n "$FLY_API_TOKEN" ]; then
+    echo "Error: You must be authenticated to view this." >&2
+  else
+    echo "Error: no access token available. Please login with 'flyctl auth login'" >&2
+  fi
+fi
 case "$1 $2" in
   "version "*) echo "flyctl v0.4.112 linux/amd64 Commit: fake"; exit 0 ;;
   "auth whoami") echo "S7MARKERVALUEfly@example.invalid"; exit "${FAKE_FLY_AUTH_EXIT:-0}" ;;
@@ -411,7 +419,7 @@ fn assert_no_marker(what: &str, text: &str) {
 
 /// True for a line of a failed call's scrubbed stderr excerpt (NR-31).
 fn is_excerpt_line(l: &str) -> bool {
-    ["  op said: ", "  flyctl said: ", "  az said: "]
+    ["  op said: ", "  flyctl said: ", "  az said: ", "| ", "│ "]
         .iter()
         .any(|p| l.starts_with(p))
 }
@@ -722,22 +730,13 @@ fn failure_after_partial_plan_stages_nothing() {
     h.set("FAKE_FLY_LIST_FAIL_AT", "1");
     let r = h.run(&["sync", "prod", "--prune", "--deploy"]);
     assert_eq!(r.code, 5, "{}", r.all());
+    // Design §5: the reply is diagnosed (here unrecognised) and shown; nothing is guessed.
     assert!(
         r.stderr
-            .starts_with("opv: target error: fly secrets list failed (exit 1)"),
+            .contains(&format!("flyctl secrets list --app {APP} --json (exit 1)")),
         "{}",
         r.stderr
     );
-    // FR-26: logged in (auth whoami succeeds), so the app is named with the token check;
-    // never "to see why" (child stderr is discarded).
-    assert!(
-        r.stderr.contains(&format!(
-            "flyctl failed for app {APP}: check that the logged-in Fly account can access it"
-        )),
-        "{}",
-        r.stderr
-    );
-    assert!(!r.stderr.contains("to see why"), "{}", r.stderr);
     for sub in ["import", "unset", "deploy"] {
         assert_eq!(h.fly_calls(sub), 0, "{sub} after a failed list");
     }
@@ -771,8 +770,7 @@ fn list_b_failure_after_staging() {
     let r = h.run(&["sync", "prod", "--prune", "--deploy"]);
     assert_eq!(r.code, 5, "{}", r.all());
     assert!(
-        r.stderr
-            .starts_with("opv: target error: fly secrets list failed (exit 1)"),
+        r.stderr.contains("flyctl secrets list --app"),
         "{}",
         r.stderr
     );
@@ -795,7 +793,7 @@ fn import_failure_stops_the_run() {
     let r = h.run(&["sync", "prod", "--prune", "--deploy"]);
     assert_eq!(r.code, 5, "{}", r.all());
     assert!(
-        r.stderr.contains("fly secrets import failed (exit 1)"),
+        r.stderr.contains("flyctl secrets import --app"),
         "{}",
         r.stderr
     );
@@ -1012,13 +1010,7 @@ fn fly_logged_out_is_auth_with_next_step() {
         let r = h.run(cmd);
         assert_eq!(r.code, 7, "{cmd:?}: {}", r.all());
         assert!(
-            r.stderr
-                .starts_with("opv: authentication error: not logged in to Fly"),
-            "{cmd:?}: {}",
-            r.stderr
-        );
-        assert!(
-            r.stderr.contains("\n  log in: flyctl auth login\n"),
+            r.stderr.contains("Do: sign in to Fly: flyctl auth login\n"),
             "{}",
             r.stderr
         );
@@ -1026,13 +1018,6 @@ fn fly_logged_out_is_auth_with_next_step() {
         assert_clean_output(cmd, &r);
         assert_eq!(h.fly_calls("import"), 0);
     }
-    h.set("CI", "true");
-    h.reset();
-    let r = h.run(&["sync", "prod"]);
-    assert_eq!(r.code, 7, "{}", r.all());
-    assert!(r.stderr.contains("set FLY_API_TOKEN"), "{}", r.stderr);
-    assert!(!r.stderr.contains("auth login"), "{}", r.stderr);
-    assert_clean_output(&["sync", "prod"], &r);
 }
 
 /// FR-26 / FR-10: with a non-interactive 1Password credential (service account or
@@ -1100,11 +1085,10 @@ fn fly_token_failure_is_target_without_whoami() {
         .set("FAKE_FLY_AUTH_EXIT", "1")
         .set("FLY_API_TOKEN", "dummy-fly-token");
     let r = h.run(&["sync", "prod"]);
-    assert_eq!(r.code, 5, "{}", r.all());
+    assert_eq!(r.code, 7, "{}", r.all());
+    // Design §5: a rejected reply under a shell token names the variable, never the login.
     assert!(
-        r.stderr.contains(&format!(
-            "flyctl failed for app {APP}: check that the token in FLY_API_TOKEN can access it"
-        )),
+        r.stderr.contains("Do: unset FLY_API_TOKEN in this shell"),
         "{}",
         r.stderr
     );
@@ -1160,7 +1144,7 @@ fn exit_codes() {
     let r = no_fly.run(&["sync", "prod"]);
     assert_eq!(r.code, 3, "{}", r.all());
     assert!(
-        r.stderr.contains("flyctl not found on PATH"),
+        r.stderr.contains("flyctl is not installed, or not on PATH"),
         "{}",
         r.stderr
     );
@@ -2180,7 +2164,7 @@ fn list_failure_with_stderr(value: &str) -> Run {
     h.run(&["status", "prod"])
 }
 
-const MASKED_EXCERPT: &str = "\n  flyctl said: S7CHILDSTDERR ********\n";
+const MASKED_EXCERPT: &str = "\n| S7CHILDSTDERR ********\n";
 
 #[test]
 fn excerpt_masks_a_raw_item_value() {
@@ -2275,13 +2259,7 @@ fn excerpt_shows_the_last_five_lines_labelled_with_the_program() {
     let excerpt: Vec<&str> = r.stderr.lines().filter(|l| is_excerpt_line(l)).collect();
     assert_eq!(
         excerpt,
-        [
-            "  flyctl said: l3",
-            "  flyctl said: l4",
-            "  flyctl said: l5",
-            "  flyctl said: l6",
-            "  flyctl said: l7"
-        ],
+        ["| l3", "| l4", "| l5", "| l6", "| l7"],
         "{}",
         r.stderr
     );

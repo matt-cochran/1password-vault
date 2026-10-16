@@ -627,6 +627,22 @@ mod failure {
         })
     }
 
+    /// The raw reply (for phrase matching) and its scrubbed excerpt; taken once.
+    pub(super) fn take_reply() -> Option<super::FailureReply> {
+        let f = LAST.with(|l| l.borrow_mut().take())?;
+        if f.call != CALL.with(Cell::get) {
+            return None;
+        }
+        Some(super::FailureReply {
+            raw: zeroize::Zeroizing::new(String::from_utf8_lossy(&f.stderr.bytes).into_owned()),
+            excerpt: crate::scrub::Excerpt::from_stderr(
+                &f.program,
+                &f.stderr.bytes,
+                f.stderr.truncated,
+            ),
+        })
+    }
+
     pub(super) fn take() -> Option<crate::scrub::Excerpt> {
         let f = LAST.with(|l| l.borrow_mut().take())?;
         if f.call != CALL.with(Cell::get) {
@@ -695,6 +711,21 @@ pub fn last_failure_signed_out() -> bool {
 /// never attaches to an error it did not cause (NR-31).
 pub fn take_failure_excerpt() -> Option<crate::scrub::Excerpt> {
     failure::take()
+}
+
+/// The reply of the failed call the error at hand came from, for a diagnosis strategy
+/// (design §5): `raw` is matched against the recorded phrases before scrubbing (scrubbing
+/// may change a phrase) and never leaves the strategy; `excerpt` is the scrubbed evidence.
+pub struct FailureReply {
+    pub raw: Zeroizing<String>,
+    pub excerpt: Option<crate::scrub::Excerpt>,
+}
+
+/// [`FailureReply`] of the failed call the error at hand came from; taken once, and
+/// dropped by any later call exactly like [`take_failure_excerpt`] (which it replaces for a
+/// diagnosis).
+pub fn take_failure_reply() -> Option<FailureReply> {
+    failure::take_reply()
 }
 
 /// What the runner observed about the failed call the error at hand came from (a non-zero

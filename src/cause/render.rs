@@ -2104,6 +2104,28 @@ impl Cause {
                     };
                     plan(Some(action), Next::Check(check.clone()))
                 }
+                Refind::Vendor(check) => {
+                    let text = vendor_text(check);
+                    let action = if kind.secret_bearing() {
+                        (
+                            Action::Revoke {
+                                kind: *kind,
+                                name: name.clone(),
+                            },
+                            format!(
+                                "if {text} lists {name}, revoke it: its secret was never stored"
+                            ),
+                        )
+                    } else {
+                        (
+                            Action::Inspect,
+                            format!(
+                                "check with {text} whether {name} exists before creating it again"
+                            ),
+                        )
+                    };
+                    plan(Some(action), Next::Vendor(check.clone()))
+                }
             },
             WriteOutcomeUnknown { .. } => plan(None, Next::Rerun),
             Unavailable { system, .. } => plan(
