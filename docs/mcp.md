@@ -9,8 +9,8 @@ structural changes in their own terminal, and entering every secret value in 1Pa
 |---|---|---|---|---|
 | `opv_ready` | `opv ready` | optional declared environment | nothing | findings with their code, blocking flag, actor, effect and next step (an `opv` command or a 1Password item link), each target's state, and counts |
 | `opv_configuration` | `opv config describe` | none | nothing | environment names, confirmation flags, product/key names and kinds, and each target's provider, delivered products and whether its state vault and deploy identity are declared |
-| `opv_access` | `opv access` | optional environment and target | nothing | each CI or deploy identity's service-account name, vaults, permissions and state, findings with their next step, and for each identity missing a grant the person's `opv access … --create` command |
-| `opv_deployment_plan` | `opv plan --json` | declared environment | nothing | each row's target, product, key and action (`write`, `unset`, `hold`, `none`), the `plan_id`, and the `approve_command` a person runs to approve it; no execution |
+| `opv_access` | `opv access` | optional environment and target | nothing | per environment: each CI or deploy identity's service-account name, vaults, permissions and state, findings with their next step, how many grants were `checked` and how many readers were `unclassified`, and for each identity missing a grant the person's `opv access … --create` command |
+| `opv_deployment_plan` | `opv plan --json` | declared environment, optional targets, product and `rotate` (`PRODUCT/KEY` entries) | nothing | each row's target, product, key and action (`write`, `unset`, `hold`, `none`), the `plan_id`, and the `approve_command` (with the same `--target`, `--product` and `--rotate`) a person runs to approve it; no execution |
 | `opv_declare_key` | `opv add` | product, key, kind, environments, rules, guidance, immutable | local `secrets.toml` | `changed` |
 | `opv_declare_environment` | `opv env add` | environment | local `secrets.toml` | `changed` |
 | `opv_declare_target` | `opv target add` | environment, target, provider, public provider options, products | local `secrets.toml` | `changed` |
@@ -20,14 +20,45 @@ structural changes in their own terminal, and entering every secret value in 1Pa
 | `opv_sync` | `opv sync <env> --approved <PLAN_ID>` | environment, `plan_id`, optional targets and product, `deploy`, `prune`, `rotate` (`PRODUCT/KEY` entries) | the deployment target (exactly the approved plan, once; rotates only the immutable keys the person approved) | names written, pruned, pending and held, and whether it deployed; on refusal the `approve_command` to show the person |
 | `opv_delivery_preview` | `opv run --preview --json` | declared environment, optional product and role | nothing | per delivered key its product, key, `source`, `destination` (`env:<NAME>` or `file:<relative path>`) and `roles`; the keys a role withholds (names only); environment mode, secrets directory variable, file-delivery support and the `op`/signed-in prerequisites (`unknown` when undeterminable); never a value |
 
-Every tool has a CLI command with the same guarantee and the same `--json` document
-(the command is also listed by `opv schema` under `mcp_tools`). The CLI apply and sync
+Every tool has a CLI command with the same guarantee (listed by `opv schema` under
+`mcp_tools`). `opv_configuration`, `opv_delivery_preview`, `opv_structure_plan` and
+`opv_structure_apply` return the same document as their command's `--json`. The others
+return a projection of it: `opv_ready` keeps each finding's code, scope names
+(environment, target, product, key), blocking flag, actor, effect and step, each target's
+state, and the counts, never a message or verification text; `opv_access` keeps the
+fields in the table above, never a raw `op` command or message; `opv_deployment_plan`
+names each row's action as `write`, `unset`, `hold` or `none`. The CLI apply and sync
 still require the person's own `opv approve` first.
 
 No tool accepts or returns a secret value, an arbitrary command, a file path, an
 executable, or an approval boolean. Responses are built field by field from checked
-identifiers; raw upstream JSON and diagnostic text are never returned. An error is its
-stable `code` and a fixed `human_action` (and, for `stale_plan`, the new `plan_id`).
+identifiers; raw upstream JSON and diagnostic text are never returned.
+
+An error is `{ok: false, code, human_required, human_action}`: its stable `code`,
+whether only a person can take the next step (`human_required`, as in the CLI's error
+table), and a fixed `human_action` chosen by code, never the error's message. It adds
+`next` (and `do`) when the error names one `opv` command that runs as typed, such as
+`opv login --account <ID>` for `op_not_signed_in`; hand it to the person when
+`human_required` is true. Some codes add a field: `stale_plan` from the structural tools
+the new `plan_id`; `opv_sync`'s refusals the `approve_command` to show the person;
+`credential_in_environment` the `variable` it found (and a CI refusal `variable: "CI"`);
+`opv_delivery_preview` the declared `roles` for a role error, and the `products` to pick
+from for a product error.
+
+Codes come from the CLI's error table (`opv schema`), plus these MCP-only ones:
+
+| Code | Meaning |
+|---|---|
+| `invalid_name` | an argument is not a declared-name identifier (or too many were given) |
+| `invalid_plan_id` | `plan_id` is not a plan id |
+| `credential_in_environment` | the server holds an `op` session, service-account or Connect credential, so it refuses to write; `human_required` |
+| `invalid_receipt` | the CLI's document could not be read |
+| `unsupported_receipt` | the CLI's document has another schema version |
+| `inspection_unavailable` | the tool call stopped before it answered |
+
+A write refused under CI (`CI` or `GITHUB_ACTIONS` set) is `policy_refused`: 1Password is
+read-only there, and a person runs the command in their own terminal instead. An
+inspection that would need a repair (such as layout tidying) is `terminal_required`.
 
 ## Who does what
 
@@ -50,10 +81,12 @@ stable `code` and a fixed `human_action` (and, for `stale_plan`, the new `plan_i
    arguments.
 6. **The assistant checks readiness** with `opv_ready` and reports names and status only.
 
-Not structural, and never through MCP: permission grants (CI reader or deploy
-identities), deploy credentials, credential replacement, shared (`from`) and personal
-keys, removals and changes to an existing target, sync, deploy, prune, rotation and
-release. Each stays a separately approved command in the person's terminal.
+Sync, deploy, prune and rotation happen only through an approved `opv_sync`: the person
+approves the exact plan (`approve_command` from `opv_deployment_plan`) in their own
+terminal, and `opv_sync` runs it once (it never prunes an immutable key). Never through
+MCP: permission grants (CI reader or deploy identities), deploy credentials, credential
+replacement, shared (`from`) and personal keys, removals and changes to an existing
+target, and release. Each stays a separately approved command in the person's terminal.
 
 ## Authorization and its limits
 
@@ -125,10 +158,12 @@ Any other client runs the same command, for example:
 
 ## Read-only inspection
 
-`opv_ready`, `opv_configuration`, `opv_deployment_plan` and `opv_structure_plan` run on a
-runner that refuses every write and inherited execution beneath the application code,
-including layout tidying the CLI planning path would attempt. If an inspection needs such
-a repair, the server returns `human_approval_required`. Tool annotations are descriptive
+`opv_ready`, `opv_configuration`, `opv_access`, `opv_deployment_plan`,
+`opv_delivery_preview` and `opv_structure_plan` (and the `opv_declare_*` tools, which
+edit only the local file) run on a runner that refuses every write and inherited
+execution beneath the application code, including layout tidying the CLI planning path
+would attempt. If an inspection needs such a repair, the server returns
+`terminal_required`: the person runs the command in their own terminal. Tool annotations are descriptive
 hints, not the enforcement mechanism.
 
 ## Without structural MCP (CLI fallback)
@@ -145,8 +180,10 @@ opv internally reads items to find their fields; “never return values” is an
 response boundary, not a claim that no machine reads them. Names are still metadata: do
 not give untrusted clients access to sensitive projects.
 
-Inspection uses a 20-second runner budget (the structural plan 60 seconds, apply 300
-seconds, for the 1Password app's prompts), runs serially, and clears its redaction
+Inspection uses a 20-second runner budget (`opv_access` 120 seconds, more than the
+1Password app's 60-second approval wait; the structural plan 60 seconds; `opv_structure_apply`
+and `opv_generate` 300 seconds, for the 1Password app's prompts; `opv_sync` 900
+seconds), runs serially, and clears its redaction
 registry on completion. Vendor CLIs keep their own authentication and cache behavior. No
 network listener or arbitrary shell execution is exposed.
 
