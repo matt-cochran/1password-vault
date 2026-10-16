@@ -1,0 +1,20 @@
+# config_proposal_invalid: opv init staging --add-env --vault e2e-dev-private --item e2e-app · dev (personal) --product web
+
+## text exit: 2
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: the change opv proposed for <SCENARIO>/project/secrets.toml would be invalid, so nothing was written: environments.staging.boundaries.web is recorded, but no product with a key in staging lives in it
+Do: remove environments.staging.boundaries.web, or declare that product's keys for staging
+Next: opv init --help
+
+## json exit: 2
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":2,"next":"opv init --help","do":"remove environments.staging.boundaries.web, or declare that product's keys for staging","error":{"code":"config_invalid","category":"config","message":"the change opv proposed for <SCENARIO>/project/secrets.toml would be invalid, so nothing was written: environments.staging.boundaries.web is recorded, but no product with a key in staging lives in it","subject":{"rule":{"rule":"check","check":{"check":"boundary_unused","env":"staging"}},"source":{"kind":"file","path":"<SCENARIO>/project/secrets.toml","given_by":{"via":"discovered"}},"field":["environments","staging","boundaries","web"]},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":"remove environments.staging.boundaries.web, or declare that product's keys for staging","next":"opv init --help","next_kind":"check"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: the change opv proposed for <SCENARIO>/project/secrets.toml would be invalid, so nothing was written: environments.staging.boundaries.web is recorded, but no product with a key in staging lives in it
+Do: remove environments.staging.boundaries.web, or declare that product's keys for staging
+Next: opv init --help

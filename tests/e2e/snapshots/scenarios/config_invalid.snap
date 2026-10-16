@@ -1,0 +1,23 @@
+# config_invalid: opv config describe
+
+## text exit: 2
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: <SCENARIO>/project/secrets.toml at line 11, column 18: the TOML is not valid syntax
+Do: fix the syntax of the TOML in <SCENARIO>/project/secrets.toml at line 11, column 18
+Next: opv config describe
+
+## json exit: 2
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":2,"next":"opv config describe --json","do":"fix the syntax of the TOML in <SCENARIO>/project/secrets.toml at line 11, column 18","error":{"code":"config_invalid","category":"config","message":"<SCENARIO>/project/secrets.toml at line 11, column 18: the TOML is not valid syntax","subject":{"rule":{"rule":"syntax"},"source":{"kind":"file","path":"<SCENARIO>/project/secrets.toml","given_by":{"via":"discovered"}},"at":{"line":11,"col":18},"field":["the TOML"]},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"fix the syntax of the TOML in <SCENARIO>/project/secrets.toml at line 11, column 18","next":"opv config describe --json","next_kind":"rerun"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: <SCENARIO>/project/secrets.toml at line 11, column 18: the TOML is not valid syntax
+Do: fix the syntax of the TOML in <SCENARIO>/project/secrets.toml at line 11, column 18
+Next: opv config describe --json
+
+## mcp opv_configuration {}
+{"ok":false,"error":{"code":"config_invalid","category":"config","message":"<SCENARIO>/project/secrets.toml at line 11, column 18: the TOML is not valid syntax","subject":{"rule":{"rule":"syntax"},"source":{"kind":"file","path":"<SCENARIO>/project/secrets.toml","given_by":{"via":"discovered"}},"at":{"line":11,"col":18},"field":["the TOML"]},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"fix the syntax of the TOML in <SCENARIO>/project/secrets.toml at line 11, column 18","next":"opv config describe --json","next_kind":"rerun"}}

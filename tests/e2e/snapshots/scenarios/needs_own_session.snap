@@ -1,0 +1,18 @@
+# needs_own_session: opv bootstrap
+
+## text exit: 7
+## text stdout
+
+## text stderr
+opv: opv bootstrap must be used in your own session, not as the token in OP_SERVICE_ACCOUNT_TOKEN
+Do: run it in your own terminal, signed in as yourself, without OP_SERVICE_ACCOUNT_TOKEN
+Next: opv bootstrap
+
+## json exit: 7
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":7,"next":"opv bootstrap --json","do":"run it in your own terminal, signed in as yourself, without OP_SERVICE_ACCOUNT_TOKEN","error":{"code":"own_session_required","category":"auth","message":"opv bootstrap must be used in your own session, not as the token in OP_SERVICE_ACCOUNT_TOKEN","subject":{"identity":{"kind":"shell_token","var":"OP_SERVICE_ACCOUNT_TOKEN"},"command":"bootstrap"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":true,"do":"run it in your own terminal, signed in as yourself, without OP_SERVICE_ACCOUNT_TOKEN","next":"opv bootstrap --json","next_kind":"handoff"}}
+
+## json stderr
+opv: opv bootstrap must be used in your own session, not as the token in OP_SERVICE_ACCOUNT_TOKEN
+Do: run it in your own terminal, signed in as yourself, without OP_SERVICE_ACCOUNT_TOKEN
+Next: opv bootstrap --json

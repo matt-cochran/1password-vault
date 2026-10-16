@@ -2,6 +2,8 @@
 //! test application in `tests/e2e/app`. One module per scenario under `scenarios/`.
 #![cfg(all(unix, feature = "fake"))]
 
+mod coverage;
+
 mod scenarios {
     pub mod issue_159;
     pub mod issues;

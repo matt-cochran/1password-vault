@@ -272,7 +272,7 @@ pub enum Action { /* typed, rendered from a table: Grant{…}, FillValue{…}, U
 - **`Invocation`** is built once in `main` from the parsed CLI: the subcommand, its arguments and every flag, global flags such as `--config` and `--json` included. `Rerun` renders it exactly. `invocation.with(...)` changes only the named argument; for example `NotDeclared` with a unique closest match substitutes that one word. The rebuilt command keeps every other flag, so dropping `--skip`, `--rotate`, `--target`, `--config` or `--project` can't happen. That rules out the whole X1 class.
 - **The child command is never rendered.** Arguments after `--` (`opv run … -- <command>`, `opv login … -- <command>`) are opaque: `Rerun` of `run` stays the read it is today (`opv check …`), and a `login --` step names `-- <command>`, never the child's words.
 - **`Cmd`** (simplified after review: no builder per subcommand) is one struct: the subcommand path plus arguments. `Cmd::to_argv()` must round-trip through the real clap definition, which a test checks for every step the catalog can render. Global flags carry over from the invocation.
-- **MCP origin.** A tool call has no command line, so its `Invocation` is `Mcp{tool, args}`. Rerun renders as "call <tool> again". A CLI step is rendered as the CLI equivalent, with every known name filled in.
+- **MCP origin.** A tool call has no command line, so it is rendered as the CLI command that does the same work, with every known name filled in and `--json` (owner decision, 2026-10-16: MCP is the `--json` document, so a tool's `error` is byte for byte the CLI's, Rerun included). `Invocation::from_mcp` remains for tests only.
 - **No step override on `Error`.** There is no `with_next`/`with_do`. Doctor, ready and the TUI show an error's own step, never their own (07.06, 07.07).
 - **Internal steps** (`local-delivery`, `remote-send`, `remote-receive`) carry the invocation of the person's `opv run`, passed down to them. Their errors never point at themselves or at `opv doctor` (X25).
 
@@ -650,9 +650,9 @@ For unknown outcomes, the harness also follows the printed `Next:` once, and che
 
 ### 13.4 Coverage gates
 
-- Every `Cause` variant is reached by at least one cell. Variants reachable only through a bug (`Bug`) are exempt and listed.
+- Every `Cause` variant is reached by at least one cell or scenario snapshot (`tests/e2e/coverage.rs`). Variants no end-to-end run can reach (`Bug`, and the few with no recording or simulator support) are exempt and listed there with their reason.
 - Every `CallId` in the code is exercised by at least one fault.
-- Every MCP tool is driven through the same scenarios over JSON-RPC (the `tests/mcp_protocol.py` approach). Its documents are snapshotted next to the CLI's, and a test checks the two are identical apart from the MCP envelope.
+- Every MCP tool is driven through the same scenarios over JSON-RPC (the `tests/mcp_protocol.py` approach). Its documents are snapshotted next to the CLI's, and a test checks the tool's `error` equals the CLI's `--json` `error`.
 
 ### 13.5 Regression scenarios for the reported issues
 

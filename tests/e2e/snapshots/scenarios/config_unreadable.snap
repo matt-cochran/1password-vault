@@ -1,0 +1,18 @@
+# config_unreadable: opv --config {root}/project config describe
+
+## text exit: 2
+## text stdout
+
+## text stderr
+opv: cannot read the configuration file <SCENARIO>/project (given by --config): it is a folder, not a file
+Do: check the path given with --config
+Next: opv config describe --config <SCENARIO>/project
+
+## json exit: 2
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":2,"next":"opv config describe --config <SCENARIO>/project --json","do":"check the path given with --config","error":{"code":"config_unreadable","category":"config","message":"cannot read the configuration file <SCENARIO>/project (given by --config): it is a folder, not a file","subject":{"given_by":{"via":"flag","flag":"--config"},"path":"<SCENARIO>/project","io":"is_a_directory"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"check the path given with --config","next":"opv config describe --config <SCENARIO>/project --json","next_kind":"rerun"}}
+
+## json stderr
+opv: cannot read the configuration file <SCENARIO>/project (given by --config): it is a folder, not a file
+Do: check the path given with --config
+Next: opv config describe --config <SCENARIO>/project --json

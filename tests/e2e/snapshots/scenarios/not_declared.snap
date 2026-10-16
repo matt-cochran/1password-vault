@@ -1,0 +1,21 @@
+# not_declared: opv ready nope
+
+## text exit: 2
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: environment nope is not declared (declared: dev, prod)
+Next: opv config describe
+
+## json exit: 2
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":2,"next":"opv config describe","do":null,"error":{"code":"unknown_env","category":"config","message":"environment nope is not declared (declared: dev, prod)","subject":{"closest":null,"kind":"environment","given":"nope","candidates":["dev","prod"]},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":null,"next":"opv config describe","next_kind":"check"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: environment nope is not declared (declared: dev, prod)
+Next: opv config describe
+
+## mcp opv_ready {"environment":"nope"}
+{"ok":false,"error":{"code":"unknown_env","category":"config","message":"environment nope is not declared (declared: dev, prod)","subject":{"closest":null,"kind":"environment","given":"nope","candidates":["dev","prod"]},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":null,"next":"opv config describe","next_kind":"check"}}

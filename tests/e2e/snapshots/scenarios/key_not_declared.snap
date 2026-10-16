@@ -1,0 +1,20 @@
+# key_not_declared: opv explain web/TLS_CERTIFICATE --env prod
+
+## text exit: 2
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: key web/TLS_CERTIFICATE is not declared for environment prod
+Do: declare TLS_CERTIFICATE for environment prod (opv add), or use a key it declares
+Next: opv config describe
+
+## json exit: 2
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":2,"next":"opv config describe","do":"declare TLS_CERTIFICATE for environment prod (opv add), or use a key it declares","error":{"code":"undeclared_key","category":"config","message":"key web/TLS_CERTIFICATE is not declared for environment prod","subject":{"product":"web","key":"TLS_CERTIFICATE","env":"prod"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":"declare TLS_CERTIFICATE for environment prod (opv add), or use a key it declares","next":"opv config describe","next_kind":"check"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: key web/TLS_CERTIFICATE is not declared for environment prod
+Do: declare TLS_CERTIFICATE for environment prod (opv add), or use a key it declares
+Next: opv config describe

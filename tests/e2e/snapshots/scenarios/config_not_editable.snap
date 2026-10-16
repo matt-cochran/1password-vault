@@ -1,0 +1,21 @@
+# config_not_editable: opv env add staging
+
+## text exit: 2
+## text stdout
+
+## text stderr
+opv: opv does not edit <SCENARIO>/project/secrets.toml: it is generated
+Do: change its generator's input instead, and generate the configuration again
+Next: opv config edit
+
+## json exit: 2
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":2,"next":"opv config edit","do":"change its generator's input instead, and generate the configuration again","error":{"code":"config_not_editable","category":"config","message":"opv does not edit <SCENARIO>/project/secrets.toml: it is generated","subject":{"reason":{"reason":"generated","generator":null},"source":{"kind":"file","path":"<SCENARIO>/project/secrets.toml","given_by":{"via":"discovered"}}},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":"change its generator's input instead, and generate the configuration again","next":"opv config edit","next_kind":"run"}}
+
+## json stderr
+opv: opv does not edit <SCENARIO>/project/secrets.toml: it is generated
+Do: change its generator's input instead, and generate the configuration again
+Next: opv config edit
+
+## mcp opv_declare_environment {"environment":"staging"}
+{"ok":false,"error":{"code":"config_not_editable","category":"config","message":"opv does not edit <SCENARIO>/project/secrets.toml: it is generated","subject":{"reason":{"reason":"generated","generator":null},"source":{"kind":"file","path":"<SCENARIO>/project/secrets.toml","given_by":{"via":"discovered"}}},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":"change its generator's input instead, and generate the configuration again","next":"opv config edit","next_kind":"run"}}

@@ -1,0 +1,18 @@
+# local_io: opv account use AE2EOPSACCOUNT000000000002
+
+## text exit: 6
+## text stdout
+
+## text stderr
+opv: opv could not write <SCENARIO>/project/.opv: it is a symbolic link or another kind of file, and opv writes only a plain file there
+Do: replace <SCENARIO>/project/.opv with a plain file: remove the link (or other file) there, and opv writes a new one
+Next: opv account use AE2EOPSACCOUNT000000000002
+
+## json exit: 6
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":6,"next":"opv account use AE2EOPSACCOUNT000000000002 --json","do":"replace <SCENARIO>/project/.opv with a plain file: remove the link (or other file) there, and opv writes a new one","error":{"code":"local_io_failed","category":"policy","message":"opv could not write <SCENARIO>/project/.opv: it is a symbolic link or another kind of file, and opv writes only a plain file there","subject":{"io":"not_a_plain_file","op":"write","path":"<SCENARIO>/project/.opv"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"replace <SCENARIO>/project/.opv with a plain file: remove the link (or other file) there, and opv writes a new one","next":"opv account use AE2EOPSACCOUNT000000000002 --json","next_kind":"rerun"}}
+
+## json stderr
+opv: opv could not write <SCENARIO>/project/.opv: it is a symbolic link or another kind of file, and opv writes only a plain file there
+Do: replace <SCENARIO>/project/.opv with a plain file: remove the link (or other file) there, and opv writes a new one
+Next: opv account use AE2EOPSACCOUNT000000000002 --json

@@ -1,0 +1,23 @@
+# approval_used: opv sync prod --approved 346d7a62
+
+## text exit: 6
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: approval 346d7a62 is already used
+Do: review what remains after approval 346d7a62 and approve its new plan
+Next: opv plan prod
+
+## json exit: 6
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":6,"next":"opv plan prod","do":"review what remains after approval 346d7a62 and approve its new plan","error":{"code":"approval_used","category":"policy","message":"approval 346d7a62 is already used","subject":{"partial":false,"plan":"346d7a62","scope":{"kind":"sync","env":"prod","targets":[],"product":null,"deploy":false,"prune":false,"rotate":[]}},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":"review what remains after approval 346d7a62 and approve its new plan","next":"opv plan prod","next_kind":"check"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: approval 346d7a62 is already used
+Do: review what remains after approval 346d7a62 and approve its new plan
+Next: opv plan prod
+
+## mcp opv_sync {"environment":"prod","plan_id":"346d7a62"}
+{"ok":false,"error":{"code":"approval_used","category":"policy","message":"approval 346d7a62 is already used","subject":{"partial":false,"plan":"346d7a62","scope":{"kind":"sync","env":"prod","targets":[],"product":null,"deploy":false,"prune":false,"rotate":[]}},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":"review what remains after approval 346d7a62 and approve its new plan","next":"opv plan prod","next_kind":"check"}}

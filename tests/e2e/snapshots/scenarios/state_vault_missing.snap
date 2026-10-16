@@ -1,0 +1,21 @@
+# state_vault_missing: opv config describe
+
+## text exit: 2
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: no state vault is recorded for target fly of environment prod in <SCENARIO>/project/secrets.toml
+Next: opv bootstrap
+
+## json exit: 2
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":2,"next":"opv bootstrap","do":null,"error":{"code":"state_vault_missing","category":"config","message":"no state vault is recorded for target fly of environment prod in <SCENARIO>/project/secrets.toml","subject":{"source":{"kind":"file","path":"<SCENARIO>/project/secrets.toml","given_by":{"via":"discovered"}},"env":"prod","target":"fly"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":null,"next":"opv bootstrap","next_kind":"run"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: no state vault is recorded for target fly of environment prod in <SCENARIO>/project/secrets.toml
+Next: opv bootstrap
+
+## mcp opv_configuration {}
+{"ok":false,"error":{"code":"state_vault_missing","category":"config","message":"no state vault is recorded for target fly of environment prod in <SCENARIO>/project/secrets.toml","subject":{"source":{"kind":"file","path":"<SCENARIO>/project/secrets.toml","given_by":{"via":"discovered"}},"env":"prod","target":"fly"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":null,"next":"opv bootstrap","next_kind":"run"}}

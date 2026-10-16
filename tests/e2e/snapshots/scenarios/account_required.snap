@@ -1,0 +1,21 @@
+# account_required: opv config describe
+
+## text exit: 2
+## text stdout
+
+## text stderr
+opv: 2 1Password accounts are on this machine and this project names none; opv uses only the account you choose, never op's default: dev@example.com (e2e.1password.com, AE2EDEVACCOUNT000000000001); ops@example.test (e2e.1password.com, AE2EOPSACCOUNT000000000002)
+Do: pick the project's account: run opv login --account <email or account ID> in your own terminal
+Next: opv account list
+
+## json exit: 2
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":2,"next":"opv account list","do":"pick the project's account: run opv login --account <email or account ID> in your own terminal","error":{"code":"account_required","category":"config","message":"2 1Password accounts are on this machine and this project names none; opv uses only the account you choose, never op's default: dev@example.com (e2e.1password.com, AE2EDEVACCOUNT000000000001); ops@example.test (e2e.1password.com, AE2EOPSACCOUNT000000000002)","subject":{"accounts":[{"email":"dev@example.com","address":"e2e.1password.com","id":"AE2EDEVACCOUNT000000000001"},{"email":"ops@example.test","address":"e2e.1password.com","id":"AE2EOPSACCOUNT000000000002"}]},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":true,"do":"pick the project's account: run opv login --account <email or account ID> in your own terminal","next":"opv account list","next_kind":"check"}}
+
+## json stderr
+opv: 2 1Password accounts are on this machine and this project names none; opv uses only the account you choose, never op's default: dev@example.com (e2e.1password.com, AE2EDEVACCOUNT000000000001); ops@example.test (e2e.1password.com, AE2EOPSACCOUNT000000000002)
+Do: pick the project's account: run opv login --account <email or account ID> in your own terminal
+Next: opv account list
+
+## mcp opv_configuration {}
+{"ok":false,"error":{"code":"account_required","category":"config","message":"2 1Password accounts are on this machine and this project names none; opv uses only the account you choose, never op's default: dev@example.com (e2e.1password.com, AE2EDEVACCOUNT000000000001); ops@example.test (e2e.1password.com, AE2EOPSACCOUNT000000000002)","subject":{"accounts":[{"email":"dev@example.com","address":"e2e.1password.com","id":"AE2EDEVACCOUNT000000000001"},{"email":"ops@example.test","address":"e2e.1password.com","id":"AE2EOPSACCOUNT000000000002"}]},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":true,"do":"pick the project's account: run opv login --account <email or account ID> in your own terminal","next":"opv account list","next_kind":"check"}}

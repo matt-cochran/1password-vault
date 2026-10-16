@@ -1,0 +1,18 @@
+# manifest_ambiguous: opv config describe
+
+## text exit: 2
+## text stdout
+
+## text stderr
+opv: 2 1Password manifests match this project: "opv · e2e-app" in vault e2e-manifest (iE2EMANIFEST00000000000001), "opv · e2e-app" in vault e2e-manifest (iE2EMANIFEST00000000000002)
+Do: pick the project's manifest among "opv · e2e-app" in vault e2e-manifest (iE2EMANIFEST00000000000001), "opv · e2e-app" in vault e2e-manifest (iE2EMANIFEST00000000000002)
+Next: opv projects
+
+## json exit: 2
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":2,"next":"opv projects","do":"pick the project's manifest among \"opv · e2e-app\" in vault e2e-manifest (iE2EMANIFEST00000000000001), \"opv · e2e-app\" in vault e2e-manifest (iE2EMANIFEST00000000000002)","error":{"code":"manifest_ambiguous","category":"config","message":"2 1Password manifests match this project: \"opv · e2e-app\" in vault e2e-manifest (iE2EMANIFEST00000000000001), \"opv · e2e-app\" in vault e2e-manifest (iE2EMANIFEST00000000000002)","subject":{"person_picks":true,"candidates":["\"opv · e2e-app\" in vault e2e-manifest (iE2EMANIFEST00000000000001)","\"opv · e2e-app\" in vault e2e-manifest (iE2EMANIFEST00000000000002)"]},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":true,"do":"pick the project's manifest among \"opv · e2e-app\" in vault e2e-manifest (iE2EMANIFEST00000000000001), \"opv · e2e-app\" in vault e2e-manifest (iE2EMANIFEST00000000000002)","next":"opv projects","next_kind":"check"}}
+
+## json stderr
+opv: 2 1Password manifests match this project: "opv · e2e-app" in vault e2e-manifest (iE2EMANIFEST00000000000001), "opv · e2e-app" in vault e2e-manifest (iE2EMANIFEST00000000000002)
+Do: pick the project's manifest among "opv · e2e-app" in vault e2e-manifest (iE2EMANIFEST00000000000001), "opv · e2e-app" in vault e2e-manifest (iE2EMANIFEST00000000000002)
+Next: opv projects

@@ -1,0 +1,10 @@
+# remote_unreachable: opv remote-send --plan {"profile":"builder","host":"builder.example.test","port":22,"user":"deploy","host_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIe2eMarkerHostKeyNotARealKey000000","identity_file":null,"opv":"/usr/local/bin/opv","header":{"keys":["API_KEY","DATABASE_URL","LOG_LEVEL","SESSION_SECRET"],"files":[],"dir_env":"WEB_SECRETS_DIR","workdir":"/srv/e2e-app","command":["/usr/local/bin/opv","run","--env","prod","--product","web"],"outer":{"env":"prod","product":"web","profile":"builder","command":["run"],"args":["prod","--product","web","--role","serve","--remote","builder","--confirm","prod"],"has_child":false}}}
+
+## text exit: 5
+## text stdout
+
+## text stderr
+ssh: connect to host builder.example.test port 22: Connection refused
+opv: cannot reach deploy@builder.example.test port 22 (remote profile builder)
+Do: check the connection to builder.example.test, and that it presents the host key pinned in remote profile builder
+Next: ssh -F none -o StrictHostKeyChecking=yes -o UserKnownHostsFile=<SCENARIO>/home/.local/state/opv/known_hosts/builder -p 22 deploy@builder.example.test true
