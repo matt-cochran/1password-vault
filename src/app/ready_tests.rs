@@ -410,7 +410,7 @@ fn a_grants_missing_finding_next_is_access_with_the_target() {
     let envs = vec![env_err(
         "staging",
         Some("Fly"),
-        Error::Source("unreadable".into()),
+        Error::Source("unreadable".into()).with_code(Code::VaultNoAccess),
     )];
     let r = receipt(&inputs(&report, envs), "0.6.0");
     assert_eq!(
@@ -425,7 +425,7 @@ fn a_grants_missing_finding_blocks_with_the_owner() {
     let envs = vec![env_err(
         "staging",
         Some("Fly"),
-        Error::Source("unreadable".into()),
+        Error::Source("unreadable".into()).with_code(Code::VaultNoAccess),
     )];
     let r = receipt(&inputs(&report, envs), "0.6.0");
     let f = &r.findings[0];
@@ -1017,6 +1017,7 @@ fn ready_run_reports_a_target_with_every_vault_visible_as_ready() {
         &crate::app::testutil::fleet(),
         Some("prod"),
         [
+            crate::app::testutil::whoami(),
             Output::success(Vec::new()),
             complete_item(),
             fly_empty(),
@@ -1030,9 +1031,15 @@ fn ready_run_reports_a_target_with_every_vault_visible_as_ready() {
 fn ready_run_reports_a_target_whose_state_vault_cannot_be_opened_as_grants_missing() {
     use crate::app::testutil::{complete_item, fly_empty, whoami};
     use crate::runner::Output;
-    let mut responses = vec![Output::success(Vec::new()), complete_item(), fly_empty()];
+    let mut responses = vec![
+        whoami(),
+        Output::success(Vec::new()),
+        complete_item(),
+        fly_empty(),
+    ];
     responses.extend(crate::runner::fake::failed_read(1));
     responses.push(whoami());
+    responses.push(Output::failure(1));
     let doc = ready_doc(&crate::app::testutil::fleet(), Some("prod"), responses);
     assert_eq!(doc["targets"][0]["state"], "grants_missing");
 }
@@ -1044,7 +1051,7 @@ fn ready_run_lists_every_target_of_an_environment_with_provider_and_locator() {
     let fleet = crate::app::testutil::fleet_with(
         "[environments.prod.targets.secondary]\nfly.app = \"secondary-app\"\nfly.secret_name = \"FLEET__{PRODUCT}__{KEY}\"\nstate_vault_id = \"sprd2\"\n",
     );
-    let mut responses = vec![Output::success(Vec::new())];
+    let mut responses = vec![crate::app::testutil::whoami(), Output::success(Vec::new())];
     for _ in 0..2 {
         responses.push(complete_item());
         responses.push(fly_empty());
@@ -1072,6 +1079,7 @@ fn a_ready_target_does_not_claim_evidence_can_be_written() {
     use crate::runner::Output;
     let fleet = crate::app::testutil::fleet_with("");
     let responses = vec![
+        crate::app::testutil::whoami(),
         Output::success(Vec::new()),
         complete_item(),
         fly_empty(),
@@ -1109,5 +1117,120 @@ fn a_shared_sign_in_address_does_not_block_readiness() {
         !r.findings
             .iter()
             .any(|f| f.code == "shared_sign_in_address" && f.blocking)
+    );
+}
+
+/// #157: a target stopped by a missing sign-in is reported as that, not as a missing grant.
+fn signed_out_target_receipt() -> Receipt {
+    let report = account_report();
+    let error = Error::Auth("not signed in to 1Password".into())
+        .with_code(Code::OpNotSignedIn)
+        .with_next("opv login");
+    let envs = vec![env_err("staging", Some("Fly"), error)];
+    receipt(&inputs(&report, envs), "0.9.0")
+}
+
+#[test]
+fn a_target_stopped_by_a_missing_sign_in_reports_op_not_signed_in() {
+    assert_eq!(
+        signed_out_target_receipt().findings[0].code,
+        "op_not_signed_in"
+    );
+}
+
+#[test]
+fn a_target_stopped_by_a_missing_sign_in_names_the_errors_own_step() {
+    assert_eq!(
+        signed_out_target_receipt().findings[0].prerequisite,
+        "opv login"
+    );
+}
+
+#[test]
+fn a_target_stopped_by_a_missing_sign_in_signs_in() {
+    assert_eq!(signed_out_target_receipt().findings[0].effect, "signs_in");
+}
+
+#[test]
+fn a_target_stopped_by_a_missing_cli_is_the_agents_to_fix() {
+    let report = account_report();
+    let error = Error::Dependency("flyctl is not installed".into());
+    let envs = vec![env_err("staging", Some("Fly"), error)];
+    let r = receipt(&inputs(&report, envs), "0.9.0");
+    assert_eq!(
+        (r.findings[0].code.as_str(), r.findings[0].actor.as_str()),
+        ("dependency_missing", "agent")
+    );
+}
+
+#[test]
+fn a_target_error_without_a_step_points_at_doctor_for_that_target() {
+    let report = account_report();
+    let error = Error::Unknown("timed out".into());
+    let envs = vec![env_err("staging", Some("Fly"), error)];
+    let r = receipt(&inputs(&report, envs), "0.9.0");
+    assert_eq!(
+        r.findings[0].prerequisite,
+        "opv doctor --env staging --target staging-target"
+    );
+}
+
+/// #157: a person who can read the state vault but not manage it needs no grant.
+#[test]
+fn a_state_vault_the_person_can_read_but_not_manage_needs_no_grant() {
+    use crate::adapters::fake_op::FakeOp;
+    let op = FakeOp::default();
+    op.vaults
+        .borrow_mut()
+        .push(("vsprd".into(), "myapp-prod-state".into()));
+    assert!(state_vault_grants(&op, "vsprd").is_none());
+}
+
+/// #157: signed out, `opv ready` stops with `op_not_signed_in`.
+#[test]
+fn ready_signed_out_is_op_not_signed_in() {
+    use crate::adapters::fake_op::FakeOp;
+    let op = FakeOp::default();
+    op.signed_in.set(false);
+    let e = run(
+        &crate::app::testutil::fleet(),
+        None,
+        Some("prod"),
+        &op,
+        true,
+        None,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(e.code(), Code::OpNotSignedIn);
+}
+
+/// #157: the state vault is checked in the environment's own account.
+#[test]
+fn ready_checks_the_state_vault_in_the_environments_account() {
+    use crate::app::testutil::{complete_item, fly_empty, whoami};
+    use crate::runner::Output;
+    let mut fleet = crate::app::testutil::fleet();
+    fleet.environments.get_mut("prod").unwrap().account = Some("work.1password.com".into());
+    let r = crate::runner::fake::FakeRunner::new([
+        whoami(),
+        Output::success(Vec::new()),
+        complete_item(),
+        fly_empty(),
+        Output::success(b"[]".to_vec()),
+    ]);
+    run(&fleet, None, Some("prod"), &r, true, None, &mut Vec::new()).unwrap();
+    let calls = r.calls.borrow();
+    let state = calls
+        .iter()
+        .find(|c| {
+            c.args
+                .starts_with(&["vault".to_string(), "user".to_string()])
+        })
+        .unwrap();
+    assert!(
+        state
+            .env
+            .contains(&("OP_ACCOUNT".to_string(), "work.1password.com".to_string()))
     );
 }
