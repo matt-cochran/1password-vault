@@ -555,17 +555,15 @@ pub(crate) fn app_context(app: &str) -> DiagnoseContext {
 /// what the runner observed and the call's reply, classified by [`diagnose::diagnose`]
 /// (design §5), with the reply shown as evidence. Never a cause chosen here.
 pub(crate) fn failed_call(ctx: &DiagnoseContext) -> Error {
-    let reply = crate::runner::take_failure_reply();
-    let Some(seen) = crate::runner::take_observed() else {
+    let Some(failed) = crate::runner::take_failure() else {
         return Cause::Bug {
             site: "fly: a failed flyctl call left no observation",
         }
         .into();
     };
-    let (raw, excerpt) = reply.map_or((None, None), |r| (Some(r.raw), r.excerpt));
-    let exit = seen.exit();
-    let cause = diagnose::diagnose(seen, raw.as_deref().map_or("", String::as_str), ctx);
-    let said = excerpt.map(|e| e.lines).unwrap_or_default();
+    let exit = failed.seen.exit();
+    let cause = diagnose::diagnose(failed.seen.clone(), failed.stderr(), ctx);
+    let said = failed.excerpt.map(|e| e.lines).unwrap_or_default();
     if said.is_empty() {
         return cause.into();
     }
@@ -1541,13 +1539,14 @@ mod tests {
     }
 
     #[test]
-    fn read_outage_names_the_step_and_status_page() {
+    /// A lost reply is an observed failure now (B1), so it is diagnosed like any unanswered
+    /// read instead of the legacy outage text.
+    fn read_outage_is_provider_unavailable() {
         let r = FakeRunner::default();
         r.push_unknowns("lost", crate::runner::READ_ATTEMPTS);
         assert_eq!(
-            list(&r, "app").unwrap_err().to_string(),
-            "outcome unknown: Fly did not respond after 3 attempts (fly secrets list); nothing \
-             was changed. Check https://status.flyio.net, then re-run"
+            list(&r, "app").unwrap_err().code_str(),
+            "provider_unavailable"
         );
     }
 

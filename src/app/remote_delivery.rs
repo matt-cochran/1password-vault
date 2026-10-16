@@ -516,8 +516,8 @@ fn ssh_outcome(plan: &Plan, args: &[String], code: i32, seen: &Relayed) -> Resul
         return Ok(code);
     }
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
-    crate::runner::observe_streamed("ssh", &words, ExitClass::Code { code });
-    let Some(observed) = crate::runner::take_observed() else {
+    crate::runner::record_streamed("ssh", &words, ExitClass::Code { code }, &seen.tail);
+    let Some(failed) = crate::runner::take_failure() else {
         return Ok(code);
     };
     let known = pinned_check_file(plan);
@@ -536,8 +536,7 @@ fn ssh_outcome(plan: &Plan, args: &[String], code: i32, seen: &Relayed) -> Resul
         env: plan.outer().map(|o| EnvName::new(&o.env)),
         ..DiagnoseContext::default()
     };
-    let stderr = Zeroizing::new(String::from_utf8_lossy(&seen.tail).into_owned());
-    match super::remote_diagnose::diagnose(observed, &stderr, &conn, &ctx) {
+    match super::remote_diagnose::diagnose(failed.seen.clone(), failed.stderr(), &conn, &ctx) {
         Cause::Unrecognized { .. } if seen.delivered => Ok(code),
         cause => Err(cause.into()),
     }

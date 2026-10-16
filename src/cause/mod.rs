@@ -59,6 +59,18 @@ impl Observed {
             _sealed: (),
         }
     }
+    /// For the runner only, like [`Observed::from_failed_call`]: a call it made that
+    /// answered (`exit`, normally exit 0) with a reply the call site cannot use (A1:
+    /// `UnexpectedOutput`, `WriteOutcomeUnknown`, `TargetRefused`, `CreateOutcomeUnknown`).
+    #[doc(hidden)]
+    pub(crate) fn from_unusable_reply(call: CallId, exit: ExitClass, principal: Principal) -> Self {
+        Self {
+            call,
+            exit,
+            principal,
+            _sealed: (),
+        }
+    }
     pub fn call(&self) -> &CallId {
         &self.call
     }

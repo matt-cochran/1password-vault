@@ -158,6 +158,31 @@ fn a_timed_out_item_create_is_create_outcome_unknown_by_title() {
     ));
 }
 
+/// B2 (X5): a service account cannot be found by title, so a timed-out create keeps the
+/// call site's own check instead of being presented as safe to re-run.
+#[test]
+fn a_timed_out_service_account_create_keeps_the_contexts_refind() {
+    let check = Refind::Check(crate::cause::Cmd {
+        command: vec!["access".to_string()],
+        args: vec!["prod".to_string()],
+    });
+    let ctx = DiagnoseContext {
+        create: Some((
+            CreateKind::ServiceAccount,
+            "opv-prod".to_string(),
+            check.clone(),
+        )),
+        ..DiagnoseContext::default()
+    };
+    let seen = observed(
+        "service-account create opv-prod",
+        ExitClass::TimedOut,
+        person(),
+    );
+    let cause = diagnose_item_call(seen, "", &ctx, &Facts::default());
+    assert!(matches!(cause, Cause::CreateOutcomeUnknown { refind, .. } if refind == check));
+}
+
 #[test]
 fn a_write_refused_on_a_readable_item_is_missing_write_right() {
     let ctx = DiagnoseContext {

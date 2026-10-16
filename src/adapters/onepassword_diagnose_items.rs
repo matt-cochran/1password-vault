@@ -24,14 +24,15 @@ pub fn diagnose_item_call(
 ) -> Cause {
     let words = seen.call().words.clone();
 
-    // An unfinished create is diagnosed by what it was doing, never by its text. An item or
-    // vault create is found again by title on the next run, so re-running is safe.
-    if let Some((kind, name)) = unfinished_create(&seen, ctx) {
+    // An unfinished create is diagnosed by what it was doing, never by its text. How it is
+    // found again is the call site's own `Refind` (X5): a service account cannot be found by
+    // title, so its create is never presented as safe to re-run.
+    if let Some((kind, name, refind)) = unfinished_create(&seen, ctx) {
         return Cause::CreateOutcomeUnknown {
             system: System::OnePassword,
             kind,
             name: name.clone(),
-            refind: Refind::ByTitle,
+            refind: refind.clone(),
             seen,
         };
     }
@@ -84,15 +85,18 @@ fn is_definite_failure(seen: &Observed) -> bool {
     matches!(seen.exit(), ExitClass::Code { .. })
 }
 
-/// The kind and name of a create whose outcome op did not deliver (timeout or signal).
+/// The kind, name and refind of a create whose outcome op did not deliver (timeout or
+/// signal).
 fn unfinished_create<'a>(
     seen: &Observed,
     ctx: &'a DiagnoseContext,
-) -> Option<(CreateKind, &'a String)> {
+) -> Option<(CreateKind, &'a String, &'a Refind)> {
     if !matches!(seen.exit(), ExitClass::TimedOut | ExitClass::Signal { .. }) {
         return None;
     }
-    ctx.create.as_ref().map(|(kind, name, _)| (*kind, name))
+    ctx.create
+        .as_ref()
+        .map(|(kind, name, refind)| (*kind, name, refind))
 }
 
 /// The typed missing grant, addressed to the call's environment and target.

@@ -354,8 +354,24 @@ enum Attempt {
     TimedOut,
     /// Ended by this signal (not opv's own timeout kill).
     Killed(i32),
-    Lost,
-    OverCap,
+    /// The call ran but its reply could not be collected (its stdout or stdin pipe failed,
+    /// or opv could not wait for it), ending as this ([`KILLED_BY_OPV`] when opv ended it).
+    Lost(crate::cause::ExitClass),
+    /// stdout went past [`OUTPUT_CAP`]; the child ended as this.
+    OverCap(crate::cause::ExitClass),
+}
+
+/// How a child that opv itself ended (`Child::kill`, SIGKILL on Unix) is observed.
+const KILLED_BY_OPV: crate::cause::ExitClass = crate::cause::ExitClass::Signal { signal: 9 };
+
+/// How an exited child ended, as observed: the signal that ended it, else its exit code.
+fn exit_class_of(status: ExitStatus) -> crate::cause::ExitClass {
+    match killed_by_signal(status) {
+        Some(signal) => crate::cause::ExitClass::Signal { signal },
+        None => crate::cause::ExitClass::Code {
+            code: exit_code(status),
+        },
+    }
 }
 
 impl Attempt {
@@ -364,8 +380,8 @@ impl Attempt {
             Attempt::Exited(o) => status_text(o.status),
             Attempt::TimedOut => "timeout".into(),
             Attempt::Killed(_) => "killed".into(),
-            Attempt::Lost => "lost".into(),
-            Attempt::OverCap => status_text(OVER_CAP),
+            Attempt::Lost(_) => "lost".into(),
+            Attempt::OverCap(_) => status_text(OVER_CAP),
         }
     }
 }
@@ -553,6 +569,7 @@ mod failure {
         static DIAGNOSING: Cell<u32> = const { Cell::new(0) };
         static LAST: RefCell<Option<Failed>> = const { RefCell::new(None) };
         static OBSERVED: RefCell<Option<(u64, Observed)>> = const { RefCell::new(None) };
+        static ANSWERED: RefCell<Option<(u64, Observed)>> = const { RefCell::new(None) };
     }
 
     /// A call starts: its id, after clearing the slot. `None` inside [`diagnosing`]: the
@@ -563,6 +580,7 @@ mod failure {
         }
         LAST.with(|l| l.borrow_mut().take());
         OBSERVED.with(|o| o.borrow_mut().take());
+        ANSWERED.with(|o| o.borrow_mut().take());
         Some(CALL.with(|c| {
             c.set(c.get() + 1);
             c.get()
@@ -591,18 +609,27 @@ mod failure {
         OBSERVED.with(|o| *o.borrow_mut() = Some((call, seen)));
     }
 
-    /// Lend the raw stderr of the latest failed call to `f` ("" when there is none), without
-    /// taking it: the scrubbed excerpt stays for the evidence.
-    pub(super) fn with_stderr<T>(f: impl FnOnce(&str) -> T) -> T {
-        let text = LAST.with(|l| {
-            l.borrow()
+    /// Call `call` answered with exit 0, as `seen`; kept only while it is still the latest
+    /// call, for a caller that finds the reply unusable.
+    pub(super) fn answered(call: Option<u64>, seen: Observed) {
+        let Some(call) = call.filter(|id| *id == CALL.with(Cell::get)) else {
+            return;
+        };
+        ANSWERED.with(|o| *o.borrow_mut() = Some((call, seen)));
+    }
+
+    pub(super) fn take_answered() -> Option<Observed> {
+        let (call, seen) = ANSWERED.with(|o| o.borrow_mut().take())?;
+        (call == CALL.with(Cell::get)).then_some(seen)
+    }
+
+    /// True when the latest call's failure is still held (not yet taken).
+    pub(super) fn failure_held() -> bool {
+        OBSERVED.with(|o| {
+            o.borrow()
                 .as_ref()
-                .filter(|x| x.call == CALL.with(Cell::get))
-                .map(|x| {
-                    zeroize::Zeroizing::new(String::from_utf8_lossy(&x.stderr.bytes).into_owned())
-                })
-        });
-        f(text.as_ref().map_or("", |t| t.as_str()))
+                .is_some_and(|(call, _)| *call == CALL.with(Cell::get))
+        })
     }
 
     pub(super) fn take_observed() -> Option<Observed> {
@@ -627,19 +654,29 @@ mod failure {
         })
     }
 
-    /// The raw reply (for phrase matching) and its scrubbed excerpt; taken once.
-    pub(super) fn take_reply() -> Option<super::FailureReply> {
-        let f = LAST.with(|l| l.borrow_mut().take())?;
-        if f.call != CALL.with(Cell::get) {
-            return None;
-        }
-        Some(super::FailureReply {
-            raw: zeroize::Zeroizing::new(String::from_utf8_lossy(&f.stderr.bytes).into_owned()),
-            excerpt: crate::scrub::Excerpt::from_stderr(
-                &f.program,
-                &f.stderr.bytes,
-                f.stderr.truncated,
-            ),
+    /// The latest failed call: its observation, raw reply and scrubbed excerpt; taken once.
+    pub(super) fn take_failure() -> Option<super::Failure> {
+        let seen = take_observed()?;
+        let f = LAST
+            .with(|l| l.borrow_mut().take())
+            .filter(|f| f.call == CALL.with(Cell::get));
+        Some(match f {
+            Some(f) => super::Failure {
+                seen,
+                stderr: zeroize::Zeroizing::new(
+                    String::from_utf8_lossy(&f.stderr.bytes).into_owned(),
+                ),
+                excerpt: crate::scrub::Excerpt::from_stderr(
+                    &f.program,
+                    &f.stderr.bytes,
+                    f.stderr.truncated,
+                ),
+            },
+            None => super::Failure {
+                seen,
+                stderr: zeroize::Zeroizing::new(String::new()),
+                excerpt: None,
+            },
         })
     }
 
@@ -713,19 +750,29 @@ pub fn take_failure_excerpt() -> Option<crate::scrub::Excerpt> {
     failure::take()
 }
 
-/// The reply of the failed call the error at hand came from, for a diagnosis strategy
-/// (design §5): `raw` is matched against the recorded phrases before scrubbing (scrubbing
-/// may change a phrase) and never leaves the strategy; `excerpt` is the scrubbed evidence.
-pub struct FailureReply {
-    pub raw: Zeroizing<String>,
+/// The failed call the error at hand came from, for its system's diagnosis strategy (design
+/// §5): what the runner observed, the raw stderr and its scrubbed excerpt. The raw stderr
+/// is matched against the recorded phrases before scrubbing (scrubbing may change a phrase)
+/// and never leaves the strategy; it lives in zeroizing memory. The excerpt is the evidence.
+pub struct Failure {
+    pub seen: crate::cause::Observed,
+    stderr: Zeroizing<String>,
     pub excerpt: Option<crate::scrub::Excerpt>,
 }
 
-/// [`FailureReply`] of the failed call the error at hand came from; taken once, and
-/// dropped by any later call exactly like [`take_failure_excerpt`] (which it replaces for a
-/// diagnosis).
-pub fn take_failure_reply() -> Option<FailureReply> {
-    failure::take_reply()
+impl Failure {
+    /// The call's raw stderr ("" when it wrote none), for the diagnosis only.
+    pub fn stderr(&self) -> &str {
+        &self.stderr
+    }
+}
+
+/// The one way a diagnosis gets a failed call (design §5, B1): its [`Failure`] (a non-zero
+/// exit, a timeout, a kill, a lost reply, a spawn failure, or a streamed child recorded with
+/// [`record_streamed`]); taken once, together with its excerpt, and dropped by any later
+/// call exactly like [`take_failure_excerpt`]. `None` when the runner observed no failure.
+pub fn take_failure() -> Option<Failure> {
+    failure::take_failure()
 }
 
 /// What the runner observed about the failed call the error at hand came from (a non-zero
@@ -736,19 +783,21 @@ pub fn take_observed() -> Option<crate::cause::Observed> {
     failure::take_observed()
 }
 
-/// Lend the raw stderr of the failed call the error at hand came from to a diagnosis
-/// strategy (design §5: phrases match before scrubbing). Not taken: the scrubbed excerpt
-/// ([`take_failure_excerpt`]) is still there for the evidence. The text lives in zeroizing
-/// memory and never outlives `f`.
-pub fn with_failure_stderr<T>(f: impl FnOnce(&str) -> T) -> T {
-    failure::with_stderr(f)
-}
-
-/// What the runner saw of `call`, which exited 0 but whose reply the call site could not
-/// read: the call, exit 0 and the principal in effect (design §4.7 `UnexpectedOutput`).
-/// `None` for a program outside the external systems.
-pub fn observe_unreadable_reply(call: &Call) -> Option<crate::cause::Observed> {
-    observe::unreadable(call)
+/// The one way to observe a call that **answered** (exit 0, or stdout past the output cap)
+/// with a reply the call site cannot use (design §4.6/§4.7, A1): JSON it cannot read, an
+/// empty token, an unconfirmed or lost write reply. This is the runner's own observation of
+/// `call` (its real exit class and principal), taken once and only while no later call has
+/// started. A [`CommandRunner`] that answers without the runner's engine (an in-memory
+/// double) leaves none; `call` is then observed as having exited 0. `None` when the latest
+/// call failed (its failure is [`take_failure`]'s) or is outside the external systems.
+pub fn take_unusable_reply(call: &Call) -> Option<crate::cause::Observed> {
+    if let Some(seen) = failure::take_answered() {
+        return Some(seen);
+    }
+    if failure::failure_held() {
+        return None;
+    }
+    observe::answered(call, crate::cause::ExitClass::Code { code: 0 })
 }
 
 /// Run `f` with `principal` (an environment's deploy credentials, FR-40) in effect: every
@@ -872,8 +921,9 @@ mod observe {
             })
     }
 
-    /// How a failed attempt ended; `None` for success and for the outcomes that are not a
-    /// call failure of their own (output over the cap, a lost pipe).
+    /// How a failed attempt ended; `None` for an answer (exit 0, or stdout over the cap),
+    /// which [`answered`] observes instead. A lost reply is a failure: the call ran, its
+    /// outcome is unknown.
     fn exit_class(res: &io::Result<(Attempt, Stderr)>) -> Option<ExitClass> {
         match res {
             Err(_) => Some(ExitClass::SpawnFailed),
@@ -882,6 +932,7 @@ mod observe {
             }
             Ok((Attempt::TimedOut, _)) => Some(ExitClass::TimedOut),
             Ok((Attempt::Killed(signal), _)) => Some(ExitClass::Signal { signal: *signal }),
+            Ok((Attempt::Lost(exit), _)) => Some(*exit),
             Ok(_) => None,
         }
     }
@@ -905,25 +956,30 @@ mod observe {
         ))
     }
 
-    /// The observation of `call`, which exited 0 with a reply opv could not read (design
-    /// §4.7 `UnexpectedOutput`, §4.6 `CreateOutcomeUnknown` with an unreadable reply).
-    pub(super) fn unreadable(call: &Call) -> Option<Observed> {
-        Some(Observed::from_failed_call(
+    /// The observation of `call`, which answered (ending as `exit`) with a reply the call
+    /// site may find unusable (design §4.6, §4.7, A1).
+    pub(super) fn answered(call: &Call, exit: ExitClass) -> Option<Observed> {
+        Some(Observed::from_unusable_reply(
             call_id(call)?,
-            ExitClass::Code { code: 0 },
+            exit,
             principal(call),
         ))
     }
 }
 
 /// Record that a long-lived, streamed child opv started itself (remote delivery's `ssh`,
-/// whose stdin carries the payload and heartbeats) ended as `exit`, so [`take_observed`]
-/// returns it for that system's diagnosis like any captured call (design §5).
-pub fn observe_streamed(program: &str, args: &[&str], exit: crate::cause::ExitClass) {
+/// whose stdin carries the payload and heartbeats) ended as `exit` after writing `stderr`,
+/// so [`take_failure`] hands it to that system's diagnosis like any captured call (design
+/// §5).
+pub fn record_streamed(program: &str, args: &[&str], exit: crate::cause::ExitClass, stderr: &[u8]) {
     let id = failure::begin();
-    if let Some(seen) = observe::ended(&Call::new(program, args), exit) {
+    let call = Call::new(program, args);
+    if let Some(seen) = observe::ended(&call, exit) {
         failure::observe(id, seen);
     }
+    let mut kept = Stderr::default();
+    kept.push(stderr);
+    failure::record(id, program, kept);
 }
 
 /// Keep what the runner saw of `call`'s attempt `res` (call `id`) when it failed.
@@ -955,7 +1011,10 @@ fn read_on(e: &dyn Engine, call: &Call, refused: &[i32]) -> io::Result<Outcome> 
         observe_attempt(id, call, &res);
         let (attempt, stderr) = res?;
         let failed = match attempt {
-            Attempt::Exited(o) if o.status == 0 => return Ok(Outcome::Done(o)),
+            Attempt::Exited(o) if o.status == 0 => {
+                answered(id, call, crate::cause::ExitClass::Code { code: 0 });
+                return Ok(Outcome::Done(o));
+            }
             Attempt::Exited(o) if refused.contains(&o.status) => {
                 failure::record(id, call.program, stderr);
                 return Ok(Outcome::Refused(o));
@@ -977,12 +1036,19 @@ fn read_on(e: &dyn Engine, call: &Call, refused: &[i32]) -> io::Result<Outcome> 
                 failure::record(id, call.program, stderr);
                 Outcome::Refused(o)
             }
-            Attempt::OverCap => return Ok(Outcome::Refused(Output::failure(OVER_CAP))),
+            Attempt::OverCap(exit) => {
+                answered(id, call, exit);
+                return Ok(Outcome::Refused(Output::failure(OVER_CAP)));
+            }
             // opv's own interrupt never retries: the run is stopping (NR-12).
-            Attempt::Killed(_) if signals::stopping() => return Ok(Outcome::unknown("killed")),
-            Attempt::Killed(_) => Outcome::unknown("killed"),
-            Attempt::TimedOut => Outcome::unknown("timeout"),
-            Attempt::Lost => Outcome::unknown("lost"),
+            Attempt::Killed(_) if signals::stopping() => {
+                failure::record(id, call.program, stderr);
+                return Ok(Outcome::unknown("killed"));
+            }
+            unfinished => {
+                failure::record(id, call.program, stderr);
+                unfinished_outcome(&unfinished)
+            }
         };
         if n >= READ_ATTEMPTS {
             return Ok(failed);
@@ -1082,7 +1148,10 @@ fn write_on(e: &dyn Engine, call: &Call) -> io::Result<Outcome> {
     let (attempt, stderr) = res?;
     e.wrote(call.program);
     Ok(match attempt {
-        Attempt::Exited(o) if o.status == 0 => Outcome::Done(o),
+        Attempt::Exited(o) if o.status == 0 => {
+            answered(id, call, crate::cause::ExitClass::Code { code: 0 });
+            Outcome::Done(o)
+        }
         Attempt::Exited(o) => {
             failure::record(id, call.program, stderr);
             Outcome::Unknown {
@@ -1090,11 +1159,32 @@ fn write_on(e: &dyn Engine, call: &Call) -> io::Result<Outcome> {
                 status: Some(o.status),
             }
         }
-        Attempt::OverCap => Outcome::unknown("failed-write"),
+        Attempt::OverCap(exit) => {
+            answered(id, call, exit);
+            Outcome::unknown("failed-write")
+        }
+        unfinished => {
+            failure::record(id, call.program, stderr);
+            unfinished_outcome(&unfinished)
+        }
+    })
+}
+
+/// The unknown outcome of an attempt that did not finish: a timeout, a kill or a lost reply.
+fn unfinished_outcome(attempt: &Attempt) -> Outcome {
+    match attempt {
         Attempt::TimedOut => Outcome::unknown("timeout"),
         Attempt::Killed(_) => Outcome::unknown("killed"),
-        Attempt::Lost => Outcome::unknown("lost"),
-    })
+        _ => Outcome::unknown("lost"),
+    }
+}
+
+/// Keep, for [`take_unusable_reply`], what the runner saw of `call` (call `id`), which just
+/// answered as `exit`: the caller may still find its reply unusable (design §5, A1).
+fn answered(id: Option<u64>, call: &Call, exit: crate::cause::ExitClass) {
+    if let Some(seen) = observe::answered(call, exit) {
+        failure::answered(id, seen);
+    }
 }
 
 fn probe_on(e: &dyn Engine, call: &Call, limit: Duration) -> io::Result<Output> {
@@ -1118,15 +1208,25 @@ fn probe_on(e: &dyn Engine, call: &Call, limit: Duration) -> io::Result<Output> 
     let (attempt, stderr) = res?;
     match attempt {
         Attempt::Exited(o) => {
-            if o.status != 0 {
+            if o.status == 0 {
+                answered(id, call, crate::cause::ExitClass::Code { code: 0 });
+            } else {
                 failure::record(id, call.program, stderr);
             }
             Ok(o)
         }
-        Attempt::OverCap => Ok(Output::failure(OVER_CAP)),
-        Attempt::TimedOut => Err(timed_out()),
-        Attempt::Killed(_) => Err(io::ErrorKind::Interrupted.into()),
-        Attempt::Lost => Err(io::ErrorKind::BrokenPipe.into()),
+        Attempt::OverCap(exit) => {
+            answered(id, call, exit);
+            Ok(Output::failure(OVER_CAP))
+        }
+        unfinished => {
+            failure::record(id, call.program, stderr);
+            Err(match unfinished {
+                Attempt::TimedOut => timed_out(),
+                Attempt::Killed(_) => io::ErrorKind::Interrupted.into(),
+                _ => io::ErrorKind::BrokenPipe.into(),
+            })
+        }
     }
 }
 
@@ -1160,7 +1260,7 @@ fn killed_by_signal(status: ExitStatus) -> Option<i32> {
 /// drops the pipe, and that is the cap's refusal (NR-5), not an unknown kill.
 fn exited_early(status: ExitStatus, over: bool) -> Option<Attempt> {
     if over {
-        Some(Attempt::OverCap)
+        Some(Attempt::OverCap(exit_class_of(status)))
     } else {
         killed_by_signal(status).map(Attempt::Killed)
     }
@@ -1370,12 +1470,12 @@ impl ProcessRunner {
                 Ok(None) => {}
                 Err(_) => {
                     signals::kill(child);
-                    return Ok(Attempt::Lost);
+                    return Ok(Attempt::Lost(KILLED_BY_OPV));
                 }
             }
             if over.load(Ordering::SeqCst) {
                 signals::kill(child);
-                return Ok(Attempt::OverCap);
+                return Ok(Attempt::OverCap(KILLED_BY_OPV));
             }
             if Instant::now() >= deadline {
                 signals::kill(child);
@@ -1392,13 +1492,13 @@ impl ProcessRunner {
         let remaining = || deadline.saturating_duration_since(Instant::now());
         let stdout = match rrx.recv_timeout(remaining()) {
             Ok(Ok(Some(out))) => out,
-            Ok(Ok(None)) => return Ok(Attempt::OverCap),
-            Ok(Err(_)) => return Ok(Attempt::Lost),
+            Ok(Ok(None)) => return Ok(Attempt::OverCap(exit_class_of(status))),
+            Ok(Err(_)) => return Ok(Attempt::Lost(exit_class_of(status))),
             Err(_) => return Ok(Attempt::TimedOut),
         };
         match wrx.recv_timeout(remaining()) {
             Ok(Ok(())) => {}
-            Ok(Err(_)) => return Ok(Attempt::Lost),
+            Ok(Err(_)) => return Ok(Attempt::Lost(exit_class_of(status))),
             Err(_) => return Ok(Attempt::TimedOut),
         }
         Ok(Attempt::Exited(Output {
@@ -2058,7 +2158,7 @@ pub mod fake {
     use std::io;
     use std::time::{Duration, Instant};
 
-    use super::{Attempt, CommandRunner, Engine, Outcome, Output, Stderr};
+    use super::{Attempt, CommandRunner, Engine, KILLED_BY_OPV, Outcome, Output, Stderr};
 
     /// One recorded invocation, including env names and values so tests can assert what
     /// reached env versus argv. `Debug` shows argv but redacts stdin and env values.
@@ -2159,6 +2259,15 @@ pub mod fake {
             self.responses.borrow_mut().push_back(Ok(out));
         }
 
+        /// Queue an unknown outcome (`timeout`, `killed`, `lost`) whose child wrote `stderr`.
+        pub fn push_unknown_with_stderr(&self, reason: &str, stderr: &str) {
+            let index = self.calls.borrow().len() + self.responses.borrow().len();
+            self.stderr
+                .borrow_mut()
+                .insert(index, stderr.as_bytes().to_vec());
+            self.push_unknown(reason);
+        }
+
         /// The stderr queued for call `index`, if any.
         fn stderr_of(&self, index: usize) -> Stderr {
             let mut s = Stderr::default();
@@ -2228,8 +2337,8 @@ pub mod fake {
         Ok(match kind {
             io::ErrorKind::TimedOut => Attempt::TimedOut,
             io::ErrorKind::Interrupted => Attempt::Killed(FAKE_KILL_SIGNAL),
-            io::ErrorKind::ConnectionAborted => Attempt::Lost,
-            io::ErrorKind::OutOfMemory => Attempt::OverCap,
+            io::ErrorKind::ConnectionAborted => Attempt::Lost(KILLED_BY_OPV),
+            io::ErrorKind::OutOfMemory => Attempt::OverCap(KILLED_BY_OPV),
             _ => return Err(kind.into()),
         })
     }
@@ -2690,7 +2799,7 @@ mod tests {
         let sigpipe = ExitStatus::from_raw(13);
         assert!(matches!(
             exited_early(sigpipe, true),
-            Some(Attempt::OverCap)
+            Some(Attempt::OverCap(_))
         ));
     }
 
