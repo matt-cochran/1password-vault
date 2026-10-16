@@ -71,6 +71,8 @@ pub enum AccountRef {
     Shorthand(String),
     /// No account was named: the person is adding one, or none is on this machine.
     Unnamed,
+    /// No 1Password account at all is on this machine: any account will do.
+    Any,
 }
 
 /// Where the account in effect was chosen (`Argument`: a positional argument, as in
@@ -215,6 +217,10 @@ pub enum ResourceKind {
     Repository,
     GitHubEnvironment,
     ExternalStore,
+    /// A secret in a Key Vault (`scope`: the vault's name).
+    KeyVaultSecret,
+    /// An Azure subscription.
+    Subscription,
 }
 
 /// Who acted: the advice addresses this principal (X22).
@@ -321,9 +327,21 @@ pub enum CredentialRef {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StoreObject {
-    File { path: PathBuf },
-    Manifest { title: String, vault: VaultId },
-    Item { vault: VaultId, item: ItemId },
+    File {
+        path: PathBuf,
+    },
+    Manifest {
+        title: String,
+        vault: VaultId,
+    },
+    Item {
+        vault: VaultId,
+        item: ItemId,
+    },
+    /// A target's object (a deployment) that changed before opv's write.
+    Resource {
+        resource: ResourceRef,
+    },
 }
 
 /// What a non-idempotent create makes (X5).

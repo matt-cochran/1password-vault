@@ -113,7 +113,7 @@ fn role_refusal(argv: &[&str]) -> String {
     let e = build(&role_fleet(), "prod", Some("allumata"), None, &signed_in()).unwrap_err();
     let inv = crate::cause::Invocation::from_cli(&words(argv));
     match e.cause() {
-        Some((c, _)) => crate::cause::render::render_text(c, None, &inv, false, false),
+        Some((c, _)) => crate::cause::render::render_text(c, None, &inv, false, false, false),
         None => e.to_string(),
     }
 }

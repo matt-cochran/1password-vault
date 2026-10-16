@@ -513,6 +513,7 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             UnexpectedOutput {
                 system: System::OnePassword,
                 at: Some(Location { line: 4, col: 9 }),
+                problem: OutputProblem::Unparseable,
                 seen: person(),
             },
             vec!["op", "1Password", "line 4"],
@@ -636,6 +637,7 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                 host: "box.example".into(),
                 port: 2222,
                 known_hosts: pinned_hosts(),
+                identity_file: None,
             },
             vec!["prof-box", "deployer", "box.example", "2222"],
         ),
@@ -673,6 +675,47 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                 },
             },
             vec!["env-prod", "tgt-web", "prod-api", "ACC-OTHER"],
+        ),
+        (
+            KeyNotDeclared {
+                key: KeyName::new("KEY_X"),
+                env: EnvName::new("env-prod"),
+                product: Some(ProductName::new("prod-api")),
+            },
+            vec!["KEY_X", "env-prod", "prod-api"],
+        ),
+        (
+            KeysBlocking {
+                env: EnvName::new("env-prod"),
+                rows: vec![ValueRow {
+                    product: ProductName::new("prod-api"),
+                    key: KeyName::new("KEY_X"),
+                    target: None,
+                    state: ValueState::Missing,
+                }],
+            },
+            vec!["env-prod", "prod-api/KEY_X"],
+        ),
+        (
+            LocalIo {
+                op: LocalOp::Write,
+                path: PathBuf::from("/work/secrets.toml"),
+                io: IoKind::PermissionDenied,
+            },
+            vec!["/work/secrets.toml"],
+        ),
+        (
+            StoreNotReady {
+                store: res(ResourceKind::ExternalStore, "store-op"),
+                reason: "InvalidProviderConfig".into(),
+            },
+            vec!["store-op", "InvalidProviderConfig"],
+        ),
+        (
+            HandoffPipeContested {
+                system: System::Azure,
+            },
+            vec!["Azure"],
         ),
         (Bug { site: "site-xyz" }, vec!["site-xyz"]),
     ]
@@ -744,10 +787,15 @@ fn ordinal(c: &Cause) -> usize {
         ChildStartFailed { .. } => 58,
         DeliveryUnverified { .. } => 59,
         Bug { .. } => 60,
+        KeyNotDeclared { .. } => 61,
+        KeysBlocking { .. } => 62,
+        LocalIo { .. } => 63,
+        StoreNotReady { .. } => 64,
+        HandoffPipeContested { .. } => 65,
     }
 }
 
-const VARIANTS: usize = 61;
+const VARIANTS: usize = 66;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
@@ -789,7 +837,7 @@ fn every_variant_renders() {
     let bad: Vec<&str> = causes()
         .iter()
         .filter(|c| {
-            let text = render_text(c, None, &inv(), false, true);
+            let text = render_text(c, None, &inv(), false, true, false);
             !(text.starts_with("opv: ")
                 && text.lines().last().is_some_and(|l| l.starts_with("Next: ")))
         })
@@ -834,7 +882,7 @@ fn no_message_tells_the_reader_to_run_something() {
 
 #[test]
 fn a_vault_in_another_account_names_the_vault_and_the_checked_account() {
-    let text = render_text(&in_other_account(), None, &inv(), false, true);
+    let text = render_text(&in_other_account(), None, &inv(), false, true, false);
     let first = text.lines().next().unwrap_or_default();
     assert_eq!(
         first,
@@ -844,7 +892,7 @@ fn a_vault_in_another_account_names_the_vault_and_the_checked_account() {
 
 #[test]
 fn a_vault_in_another_account_shows_the_checked_account_id() {
-    let text = render_text(&in_other_account(), None, &inv(), false, true);
+    let text = render_text(&in_other_account(), None, &inv(), false, true, false);
     assert!(
         text.contains("  checked: op vault get vlt-atqr in account 6AINMAIK (exit 1)\n"),
         "{text}"
@@ -877,6 +925,7 @@ fn human_required_matches_step() {
                         | Cause::NeedsOwnSession { .. }
                         | Cause::NeedsConfirm { .. }
                         | Cause::ApprovalMissing { .. }
+                        | Cause::CredentialRejected { .. }
                 );
             derived != c.human_required(&inv())
         })
@@ -1063,6 +1112,7 @@ fn next_is_the_last_line_after_do() {
         &inv(),
         false,
         true,
+        false,
     );
     let last_two: Vec<&str> = text.lines().rev().take(2).map(|l| &l[..4]).collect();
     assert_eq!(last_two, vec!["Next", "Do: "]);
@@ -1487,4 +1537,617 @@ fn a_command_is_rendered_from_its_argv_with_each_word_quoted() {
 #[test]
 fn a_vault_in_another_account_needs_no_person() {
     assert!(!in_other_account().human_required(&inv()));
+}
+
+// --- FOLLOWUPS section A: one regression test per item, each citing it -------------------
+
+fn person_at_terminal() -> Situation {
+    Situation {
+        ci: false,
+        terminal: true,
+        identity: Principal::Person { account: None },
+        config_source: file_source(),
+        platform: Platform::Linux,
+        op: super::super::situation::OpFlavour::Native,
+        remote: false,
+        deploy_credentials_or_shell_token: false,
+    }
+}
+
+fn under_ci() -> Situation {
+    Situation {
+        ci: true,
+        terminal: false,
+        ..person_at_terminal()
+    }
+}
+
+fn cli(words: &[&str]) -> Invocation {
+    Invocation::from_cli(&words.iter().map(|w| w.to_string()).collect::<Vec<_>>())
+}
+
+fn fly_seen() -> Observed {
+    Observed::from_failed_call(
+        CallId {
+            system: System::Fly,
+            program: "flyctl".into(),
+            words: vec!["secrets".into(), "list".into()],
+        },
+        ExitClass::TimedOut,
+        Principal::Person { account: None },
+    )
+}
+
+fn not_signed_in(system: System) -> Cause {
+    Cause::NotSignedIn {
+        system,
+        account: None,
+        state: SessionState::SignedOut,
+    }
+}
+
+fn next_in(c: &Cause, inv: &Invocation) -> String {
+    next_text(&c.step_in(inv, &person_at_terminal()).1, inv).unwrap_or_default()
+}
+
+/// A1: an empty minted token is named as such, not as unreadable output.
+#[test]
+fn a1_an_empty_minted_token_is_named() {
+    let c = Cause::UnexpectedOutput {
+        system: System::Fly,
+        at: None,
+        problem: OutputProblem::Empty {
+            what: "deploy token",
+        },
+        seen: fly_seen(),
+    };
+    assert!(
+        c.message().contains("an empty deploy token"),
+        "{}",
+        c.message()
+    );
+}
+
+/// A1: a dead app is a refusal of its own.
+#[test]
+fn a1_a_dead_app_says_it_is_not_running() {
+    let c = Cause::TargetRefused {
+        system: System::Fly,
+        subject: res(ResourceKind::FlyApp, "app-web"),
+        why: Refusal::NotRunning,
+        env: None,
+        target: None,
+        seen: fly_seen(),
+    };
+    assert!(c.message().contains("is not running"), "{}", c.message());
+}
+
+/// A3: opv's own local I/O names the path.
+#[test]
+fn a3_local_io_names_the_path() {
+    let c = Cause::LocalIo {
+        op: LocalOp::Write,
+        path: PathBuf::from("/work/secrets.toml"),
+        io: IoKind::PermissionDenied,
+    };
+    assert_eq!(
+        c.message(),
+        "opv could not write /work/secrets.toml: permission denied"
+    );
+}
+
+/// A4: sync's refusal keeps exit 6 (`keys_blocking`).
+#[test]
+fn a4_keys_blocking_exits_6() {
+    let c = Cause::KeysBlocking {
+        env: EnvName::new("prod"),
+        rows: vec![],
+    };
+    assert_eq!((c.code(), c.exit_code()), ("keys_blocking", 6));
+}
+
+/// A5: a malformed entry of a repeatable option is named.
+#[test]
+fn a5_a_malformed_entry_is_named() {
+    let c = Cause::Usage {
+        problem: UsageProblem::EntryFormat {
+            flag: "--rotate".into(),
+            entry: "apiKEY".into(),
+            format: "product/KEY",
+        },
+    };
+    assert!(c.message().contains("--rotate apiKEY"), "{}", c.message());
+}
+
+/// A6 (R21): an undeclared key names the environment.
+#[test]
+fn a6_an_undeclared_key_names_its_environment() {
+    let c = Cause::KeyNotDeclared {
+        key: KeyName::new("API_KEY"),
+        env: EnvName::new("prod"),
+        product: None,
+    };
+    assert_eq!(
+        c.message(),
+        "key API_KEY is not declared for environment prod"
+    );
+}
+
+/// A7: a store's reason is shown only as a code word, never as free text.
+#[test]
+fn a7_a_store_reason_that_is_not_a_code_is_never_echoed() {
+    let c = Cause::StoreNotReady {
+        store: res(ResourceKind::ExternalStore, "op-store"),
+        reason: "token=abc is wrong".into(),
+    };
+    assert!(!c.message().contains("abc"), "{}", c.message());
+}
+
+/// A7: a deployment that changed before the write is a target object.
+#[test]
+fn a7_a_deployment_changed_before_the_write_is_a_target_change() {
+    let c = Cause::ChangedBeforeWrite {
+        object: StoreObject::Resource {
+            resource: res(ResourceKind::Deployment, "web"),
+        },
+    };
+    assert_eq!((c.code(), c.exit_code()), ("target_changed", 5));
+}
+
+/// A7: a Key Vault secret is a resource kind of its own.
+#[test]
+fn a7_a_key_vault_secret_is_named_as_one() {
+    let r = ResourceRef {
+        kind: ResourceKind::KeyVaultSecret,
+        name: ResourceName::new("DB-URL"),
+        scope: None,
+    };
+    assert_eq!(resource_words(&r), "Key Vault secret DB-URL");
+}
+
+/// A7: the hand-off pipe's refusal is a cause of its own.
+#[test]
+fn a7_a_contested_handoff_pipe_is_refused() {
+    let c = Cause::HandoffPipeContested {
+        system: System::Azure,
+    };
+    assert_eq!(c.code(), "handoff_refused");
+}
+
+/// A8: with colour, the upstream box is dimmed.
+#[test]
+fn a8_colour_dims_the_upstream_box() {
+    let text = render_text(
+        &in_other_account(),
+        Some(&upstream(1, false)),
+        &inv(),
+        false,
+        true,
+        true,
+    );
+    assert!(text.contains("\x1b[2m"), "{text}");
+}
+
+/// A9 (X4): a re-run never repeats a used approval; it is the read.
+#[test]
+fn a9_a_rerun_never_repeats_the_approval() {
+    let c = Cause::WriteOutcomeUnknown {
+        system: System::Fly,
+        subject: res(ResourceKind::FlyApp, "app-web"),
+        seen: fly_seen(),
+    };
+    let inv = cli(&["opv", "sync", "prod", "--approved", "ab12cd34"]);
+    assert_eq!(next_in(&c, &inv), "opv plan prod");
+}
+
+/// A9 (X4): nor a confirmation or an expected plan.
+#[test]
+fn a9_a_rerun_never_repeats_a_confirmation() {
+    let c = Cause::Interrupted {
+        signal: 2,
+        writes_started: false,
+    };
+    let inv = cli(&[
+        "opv",
+        "sync",
+        "prod",
+        "--confirm",
+        "prod",
+        "--expect-plan",
+        "ab12cd34",
+    ]);
+    let next = next_in(&c, &inv);
+    assert!(
+        !next.contains("--confirm") && !next.contains("--expect-plan"),
+        "{next}"
+    );
+}
+
+/// A10: under CI, a Fly sign-in is the job's token, not `flyctl auth login`.
+#[test]
+fn a10_under_ci_fly_sign_in_is_the_token() {
+    let d = not_signed_in(System::Fly)
+        .do_text_in(&inv(), &under_ci())
+        .unwrap_or_default();
+    assert!(
+        d.contains("FLY_API_TOKEN") && !d.contains("flyctl auth login"),
+        "{d}"
+    );
+}
+
+/// A10: under CI, a 1Password sign-in is the service account token, never `opv login`.
+#[test]
+fn a10_under_ci_1password_sign_in_is_the_service_account_token() {
+    let d = not_signed_in(System::OnePassword)
+        .do_text_in(&inv(), &under_ci())
+        .unwrap_or_default();
+    assert!(d.contains("OP_SERVICE_ACCOUNT_TOKEN"), "{d}");
+}
+
+/// A10: under CI, Next is never `opv login`.
+#[test]
+fn a10_under_ci_next_is_never_opv_login() {
+    let c = not_signed_in(System::OnePassword);
+    let next = next_text(&c.step_in(&inv(), &under_ci()).1, &inv()).unwrap_or_default();
+    assert!(!next.contains("login"), "{next}");
+}
+
+/// A10: `Usage`'s help step passes the refusal predicate (a hidden command's own help is
+/// never a step).
+#[test]
+fn a10_a_help_step_is_never_a_hidden_command() {
+    let c = Cause::Usage {
+        problem: UsageProblem::ConflictsWith {
+            a: "--a".into(),
+            b: "--b".into(),
+        },
+    };
+    let inv = Invocation {
+        command: vec!["local-delivery".into()],
+        args: vec![],
+        ..inv()
+    };
+    assert!(!next_in(&c, &inv).contains("local-delivery"));
+}
+
+/// A11 (X11): a choice among several names the listing, never `none`.
+#[test]
+fn a11_a_choice_among_several_lists_them() {
+    let c = Cause::ChoiceRequired {
+        flag: "--target".into(),
+        candidates: vec!["web".into(), "worker".into()],
+    };
+    assert_eq!(next_in(&c, &inv()), "opv target list");
+}
+
+/// A11: the one candidate keeps the child command's placeholder.
+#[test]
+fn a11_the_one_candidate_keeps_the_child_placeholder() {
+    let c = Cause::ChoiceRequired {
+        flag: "--product".into(),
+        candidates: vec!["api".into()],
+    };
+    let inv = cli(&["opv", "run", "prod", "--", "node", "app.js"]);
+    assert!(next_in(&c, &inv).ends_with("-- <command>"));
+}
+
+/// A11: `NeedsConfirm` keeps the child command's placeholder.
+#[test]
+fn a11_needs_confirm_keeps_the_child_placeholder() {
+    let c = Cause::NeedsConfirm {
+        env: EnvName::new("prod"),
+    };
+    let inv = cli(&["opv", "run", "prod", "--", "node", "app.js"]);
+    assert_eq!(
+        next_in(&c, &inv),
+        "opv run prod --confirm prod -- <command>"
+    );
+}
+
+/// A12: an unrecognised ssh failure re-runs with `--verbose`, never `opv doctor`.
+#[test]
+fn a12_an_unrecognised_ssh_failure_reruns_verbose() {
+    let c = Cause::Unrecognized {
+        system: System::Ssh,
+        established: vec![],
+        env: None,
+        target: None,
+        seen: fly_seen(),
+    };
+    let inv = cli(&["opv", "run", "prod", "--remote", "box"]);
+    assert!(next_in(&c, &inv).contains("--verbose"));
+}
+
+/// A12: the pinned ssh check uses the profile's identity file alone.
+#[test]
+fn a12_the_pinned_ssh_check_uses_the_identity_file() {
+    let c = Cause::RemoteUnreachable {
+        profile: ProfileName::new("box"),
+        user: "deployer".into(),
+        host: "box.example".into(),
+        port: 22,
+        known_hosts: pinned_hosts(),
+        identity_file: Some(PathBuf::from("/home/me/.ssh/box")),
+    };
+    assert!(next_in(&c, &inv()).contains("-i /home/me/.ssh/box -o IdentitiesOnly=yes"));
+}
+
+fn unverified(state: Unverified) -> Cause {
+    Cause::DeliveryUnverified {
+        env: EnvName::new("prod"),
+        target: TargetName::new("web"),
+        product: ProductName::new("api"),
+        state,
+    }
+}
+
+/// A13: a superseded delivery has a Do naming the later receipt.
+#[test]
+fn a13_a_superseded_delivery_names_the_later_receipt() {
+    let d = unverified(Unverified::Superseded {
+        receipt: PathBuf::from("/tmp/receipt.json"),
+    })
+    .do_text(&inv())
+    .unwrap_or_default();
+    assert!(d.contains("/tmp/receipt.json"), "{d}");
+}
+
+/// A13: a delivery from another account steps to signing in to it.
+#[test]
+fn a13_another_account_steps_to_signing_in_to_it() {
+    let c = unverified(Unverified::OtherAccount {
+        account: AccountId::new("ACC-B"),
+    });
+    assert_eq!(next_in(&c, &inv()), "opv login --account ACC-B");
+}
+
+/// A13: "this target delivers no secret" is a scope of its own.
+#[test]
+fn a13_a_target_that_delivers_no_secret_says_so() {
+    let c = Cause::NothingInScope {
+        env: EnvName::new("prod"),
+        what: Scope::NoSecretDelivered {
+            target: TargetName::new("web"),
+        },
+    };
+    assert!(
+        c.message().contains("delivers no secret"),
+        "{}",
+        c.message()
+    );
+}
+
+/// A14: an existing manifest with a local copy checks that copy.
+#[test]
+fn a14_an_existing_manifest_checks_the_local_copy() {
+    let c = Cause::ManifestExists {
+        title: "opv shop".into(),
+        local_file: Some(PathBuf::from("secrets.toml")),
+    };
+    assert_eq!(next_in(&c, &inv()), "opv config check --file secrets.toml");
+}
+
+/// A14: a missing manifest has a Do.
+#[test]
+fn a14_a_missing_manifest_has_a_do() {
+    let c = Cause::ManifestNotFound {
+        project: "shop".into(),
+        account: None,
+    };
+    assert!(c.do_text(&inv()).is_some());
+}
+
+/// A14: differing copies need a person's judgement, but no person-only step.
+#[test]
+fn a14_differing_copies_are_not_human_required() {
+    let c = Cause::CopiesDiffer {
+        file: PathBuf::from("secrets.toml"),
+        manifest: "opv shop".into(),
+    };
+    assert!(!c.human_required(&inv()));
+}
+
+/// A14: one ambiguous manifest is singular.
+#[test]
+fn a14_one_manifest_matches_in_the_singular() {
+    let c = Cause::ManifestAmbiguous {
+        candidates: vec!["opv shop".into()],
+        person_picks: false,
+    };
+    assert_eq!(
+        c.message(),
+        "1 1Password manifest matches this project: opv shop"
+    );
+}
+
+/// A14: a configuration file that does not exist steps to `opv doctor`.
+#[test]
+fn a14_a_missing_config_file_steps_to_doctor() {
+    let c = Cause::ConfigUnreadable {
+        path: PathBuf::from("nope.toml"),
+        io: IoKind::NotFound,
+        given_by: GivenBy::Flag {
+            flag: "--config".into(),
+        },
+    };
+    assert_eq!(next_in(&c, &inv()), "opv doctor");
+}
+
+/// A15: a partial failure with nothing written never says "already written: ".
+#[test]
+fn a15_nothing_written_is_never_listed() {
+    let c = Cause::Partial {
+        done: vec![],
+        approval_used: None,
+        approval_scope: None,
+        then: Box::new(Cause::Interrupted {
+            signal: 2,
+            writes_started: true,
+        }),
+    };
+    assert!(!render_text(&c, None, &inv(), false, true, false).contains("already written"));
+}
+
+/// A16: a missing namespace is not answered with the context listing.
+#[test]
+fn a16_a_missing_namespace_does_not_list_contexts() {
+    let c = Cause::NotFound {
+        system: System::Kubernetes,
+        resource: res(ResourceKind::Namespace, "apps"),
+        named_by: NamedBy::Flag {
+            flag: "--namespace".into(),
+        },
+        state: NotFoundState::Missing,
+        seen: fly_seen(),
+    };
+    assert_eq!(next_in(&c, &inv()), "kubectl get namespaces");
+}
+
+/// A16: a Kubernetes sign-in refreshes the context's credentials.
+#[test]
+fn a16_a_kubernetes_sign_in_refreshes_the_context() {
+    let c = Cause::NotSignedIn {
+        system: System::Kubernetes,
+        account: Some(AccountId::new("prod-aks")),
+        state: SessionState::Expired,
+    };
+    let d = c.do_text(&inv()).unwrap_or_default();
+    assert!(d.contains("credentials of kube context prod-aks"), "{d}");
+}
+
+/// A16: a missing Kubernetes right names the verb and kind once.
+#[test]
+fn a16_a_missing_kubernetes_right_reads_once() {
+    let c = Cause::MissingRight {
+        system: System::Kubernetes,
+        resource: ResourceRef {
+            kind: ResourceKind::Namespace,
+            name: ResourceName::new("secrets"),
+            scope: Some("apps".into()),
+        },
+        right: Right::Verb {
+            verb: "get".into(),
+            resource: "secrets".into(),
+        },
+        grant: GrantModel::K8sRbac {
+            verb: "get".into(),
+            resource: "secrets".into(),
+            namespace: Some("apps".into()),
+        },
+        env: None,
+        target: None,
+        seen: fly_seen(),
+    };
+    assert_eq!(
+        c.message(),
+        "you may not get secrets in namespace apps (Kubernetes)"
+    );
+}
+
+/// A17: a soft-deleted Key Vault is recovered in its subscription.
+#[test]
+fn a17_key_vault_recovery_names_the_subscription() {
+    let c = Cause::NotFound {
+        system: System::Azure,
+        resource: ResourceRef {
+            kind: ResourceKind::KeyVault,
+            name: ResourceName::new("kv-shop"),
+            scope: Some("subscription sub-1".into()),
+        },
+        named_by: NamedBy::Flag {
+            flag: "--vault".into(),
+        },
+        state: NotFoundState::SoftDeleted,
+        seen: fly_seen(),
+    };
+    let d = c.do_text(&inv()).unwrap_or_default();
+    assert!(d.contains("--subscription sub-1"), "{d}");
+}
+
+/// A17: an unanswered provider names its status page.
+#[test]
+fn a17_unavailable_names_the_status_page() {
+    let c = Cause::Unavailable {
+        system: System::Fly,
+        why: Unanswered::Timeout,
+        attempts: 3,
+        seen: fly_seen(),
+    };
+    let d = c.do_text(&inv()).unwrap_or_default();
+    assert!(d.contains("https://status.flyio.net"), "{d}");
+}
+
+/// A18 (01.12): only the person knows which environment they meant.
+#[test]
+fn a18_confirm_mismatch_needs_a_person() {
+    let c = Cause::ConfirmMismatch {
+        given: "prd".into(),
+        env: EnvName::new("prod"),
+    };
+    assert!(c.human_required(&inv()));
+}
+
+/// A19 (R26): a usage error of sync steps to the environment's plan, not `--help`.
+#[test]
+fn a19_a_sync_usage_error_steps_to_the_plan() {
+    let c = Cause::Usage {
+        problem: UsageProblem::NeedsFlag {
+            flag: "--prune-immutable".into(),
+            needs: "--prune".into(),
+        },
+    };
+    assert_eq!(next_in(&c, &inv()), "opv plan prod");
+}
+
+/// A20 (X1): a built step keeps the invocation's `--config`.
+#[test]
+fn a20_a_built_step_keeps_the_config_flag() {
+    let c = Cause::BoundaryMissing {
+        env: EnvName::new("prod"),
+        product: ProductName::new("api"),
+        source: file_source(),
+    };
+    let inv = cli(&["opv", "sync", "prod", "--config", "cfg/secrets.toml"]);
+    assert_eq!(next_in(&c, &inv), "opv bootstrap --config cfg/secrets.toml");
+}
+
+/// A21: a rejected credential needs a person to replace it.
+#[test]
+fn a21_a_rejected_credential_needs_a_person() {
+    let c = Cause::CredentialRejected {
+        system: System::Fly,
+        credential: CredentialRef::ShellToken {
+            var: VarName::new("FLY_API_TOKEN"),
+        },
+        problem: CredentialProblem::Rejected { needs: vec![] },
+        seen: fly_seen(),
+    };
+    assert!(c.human_required(&inv()));
+}
+
+/// A21: a person's unanswered op keeps the hint to approve the app's prompt.
+#[test]
+fn a21_unavailable_op_hints_at_the_app_prompt() {
+    let c = Cause::Unavailable {
+        system: System::OnePassword,
+        why: Unanswered::Timeout,
+        attempts: 1,
+        seen: person(),
+    };
+    let d = c.do_text(&inv()).unwrap_or_default();
+    assert!(d.contains("approve the 1Password app's prompt"), "{d}");
+}
+
+/// A21: no account at all on the machine has its own words.
+#[test]
+fn a21_no_account_at_all_has_its_own_words() {
+    let c = Cause::AccountNotOnMachine {
+        account: AccountRef::Any,
+        selected_by: AccountSource::OpDefault,
+        in_app: false,
+    };
+    assert_eq!(
+        c.message(),
+        "no 1Password account is added to op on this machine"
+    );
 }

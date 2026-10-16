@@ -1872,9 +1872,14 @@ impl Render {
         excerpt: Option<&opv::scrub::Excerpt>,
     ) -> String {
         match e.cause() {
-            Some((cause, upstream)) => {
-                opv::cause::render::render_text(cause, upstream, &self.inv, self.verbose, self.utf8)
-            }
+            Some((cause, upstream)) => opv::cause::render::render_text(
+                cause,
+                upstream,
+                &self.inv,
+                self.verbose,
+                self.utf8,
+                false,
+            ),
             None => opv::error::report_with(e, step, excerpt),
         }
     }
@@ -2035,7 +2040,7 @@ fn usage_cause(cause: opv::cause::Cause, json: bool) -> ExitCode {
     let _ = write!(
         opv::output::stderr(),
         "{}",
-        opv::cause::render::render_text(&cause, None, &inv, false, locale_is_utf8())
+        opv::cause::render::render_text(&cause, None, &inv, false, locale_is_utf8(), false)
     );
     if json {
         let error = opv::cause::render::document(&cause, None, &inv, false);

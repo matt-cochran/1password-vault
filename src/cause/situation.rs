@@ -64,6 +64,42 @@ pub struct Situation {
 }
 
 impl Situation {
+    /// The situation of this run, from the detected host ([`crate::host::Host::detect`]):
+    /// CI, a terminal, a non-interactive 1Password credential, the platform, the `op`
+    /// flavour and any provider token, all by name. Deterministic in this crate's unit
+    /// tests (the fixed test host). Where the configuration came from is not known here: a
+    /// file is assumed unless [`note_config_source`] recorded the manifest.
+    pub fn current() -> Self {
+        use crate::host::{Host, OpCredential};
+        let host = Host::detect();
+        let identity = match host.op_credential {
+            Some(c @ (OpCredential::ServiceAccount | OpCredential::Connect)) => {
+                Principal::ServiceAccount {
+                    name: c.var().to_string(),
+                }
+            }
+            None => Principal::Person { account: None },
+        };
+        let tokens = crate::adapters::registry::credential_vars();
+        Situation {
+            ci: host.ci,
+            terminal: host.interactive,
+            identity,
+            config_source: CONFIG_SOURCE.get().cloned().unwrap_or(ConfigSource::File {
+                path: std::path::PathBuf::new(),
+                given_by: super::GivenBy::Discovered,
+            }),
+            platform: host.platform,
+            op: if host.op_is_windows_exe() {
+                OpFlavour::WindowsExe
+            } else {
+                OpFlavour::Native
+            },
+            remote: false,
+            deploy_credentials_or_shell_token: host.token(&tokens).is_some(),
+        }
+    }
+
     /// The one predicate every rendered step is checked against (design §6.4, X8).
     ///
     /// The rows are checked in a fixed order. Hidden internal commands and a remote run
@@ -78,6 +114,10 @@ impl Situation {
         }
         if self.deploy_credentials_or_shell_token && is_vendor_signin(cmd) {
             return Some(RefusedBecause::ShellToken);
+        }
+        // A vendor sign-in is a browser or device flow: a CI job cannot complete it (A10).
+        if self.ci && is_vendor_signin(cmd) {
+            return Some(RefusedBecause::Ci);
         }
         if is_interactive_only(cmd) {
             if self.ci {
@@ -111,6 +151,16 @@ impl Situation {
         matches!(self.platform, Platform::MacOs | Platform::Windows)
             || matches!(self.op, OpFlavour::App | OpFlavour::WindowsExe)
     }
+}
+
+/// Where this run's configuration came from, once it is known (set by configuration
+/// loading; read by [`Situation::current`]).
+static CONFIG_SOURCE: std::sync::OnceLock<ConfigSource> = std::sync::OnceLock::new();
+
+/// Record where this run's configuration came from, so steps the source refuses (a
+/// file-only command on a manifest project) are never rendered. The first call wins.
+pub fn note_config_source(source: ConfigSource) {
+    let _ = CONFIG_SOURCE.set(source);
 }
 
 /// Commands that must never be rendered as a step.
