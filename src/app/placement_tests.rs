@@ -473,14 +473,57 @@ fn sync_summaries_name_each_target() {
 }
 
 #[test]
-fn an_unknown_target_is_a_usage_error() {
+fn an_unknown_target_is_unknown_target() {
     let w = world();
     let opts = SyncOpts {
         targets: targets(&["north"]),
         ..SyncOpts::default()
     };
     let err = sync_with(&w, &both(&w), opts).0.unwrap_err();
-    assert_eq!(err.code(), Code::Usage);
+    assert_eq!(err.code_str(), "unknown_target");
+}
+
+/// 01.04: a misspelt --target steps to the plan of the unique close target, every scope
+/// flag kept and --deploy, --prune and --confirm dropped; never a write to a guessed target.
+#[test]
+fn a_misspelt_target_on_sync_steps_to_the_plan_of_the_close_one() {
+    let w = world();
+    let opts = SyncOpts {
+        targets: targets(&["wes"]),
+        ..SyncOpts::default()
+    };
+    let err = sync_with(&w, &both(&w), opts).0.unwrap_err();
+    let (cause, _) = err.cause().expect("a cataloged cause");
+    let argv: Vec<String> = "opv sync prod --target wes --deploy --prune --confirm prod"
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let inv = crate::cause::Invocation::from_cli(&argv);
+    assert_eq!(
+        crate::cause::render::next_text(&cause.step(&inv).1, &inv),
+        Some("opv plan prod --target west".into())
+    );
+}
+
+/// 01.04, X2: with no close target the step is the listing, never the first target.
+#[test]
+fn an_unknown_target_with_no_close_one_steps_to_the_listing() {
+    let w = world();
+    let opts = SyncOpts {
+        targets: targets(&["north"]),
+        ..SyncOpts::default()
+    };
+    let err = sync_with(&w, &both(&w), opts).0.unwrap_err();
+    let (cause, _) = err.cause().expect("a cataloged cause");
+    let argv: Vec<String> = "opv sync prod --target north --deploy"
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let inv = crate::cause::Invocation::from_cli(&argv);
+    assert_eq!(
+        crate::cause::render::next_text(&cause.step(&inv).1, &inv),
+        Some("opv target list".into())
+    );
 }
 
 #[test]
@@ -497,7 +540,7 @@ fn an_unknown_target_error_lists_the_environments_targets() {
         false,
     )
     .unwrap_err();
-    assert!(err.to_string().contains("(targets: east, west)"), "{err}");
+    assert!(err.to_string().contains("(declared: east, west)"), "{err}");
 }
 
 #[test]

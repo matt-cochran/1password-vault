@@ -875,7 +875,7 @@ fn refused_sync_names_the_missing_key() {
     );
     let (res, _) = sync_on(&sim, &fleet_a(), &deploy());
     assert!(
-        matches!(&res, Err(Error::Policy(m)) if m.starts_with("sync refused, nothing staged: app/DB_URL (missing)")),
+        matches!(&res, Err(Error::Policy(m)) if m.starts_with("sync refused, nothing was changed: app/DB_URL (missing)")),
         "{res:?}"
     );
 }
@@ -1236,14 +1236,16 @@ fn sync_with_a_stale_plan_id_writes_nothing() {
 }
 
 #[test]
-fn stale_plan_refusal_names_the_new_id_and_the_exact_command() {
+/// R71: the new id is named for review; the step is the plan read, never a sync carrying
+/// the new id (X4).
+fn stale_plan_refusal_names_the_new_id() {
     let sim = api_changed();
     let id = plan_id(&sim, &fleet_a());
     let (res, _) = sync_on(&sim, &fleet_a(), &expecting("00000000"));
     assert!(
         res.unwrap_err()
             .to_string()
-            .contains(&format!("opv sync prod --deploy --expect-plan {id}")),
+            .contains(&format!("00000000 is now {id}")),
     );
 }
 

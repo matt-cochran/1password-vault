@@ -40,6 +40,10 @@ use super::{
     resolve_targets, row_names, rows_item_url, scope_plan, target_runners, target_word,
     unmanaged_on_target, write_err, write_json,
 };
+use crate::cause::{
+    Cause, Closest, Cmd, EnvName, KeyName, NameKind, PlanId, PlanScope, ProductKey, ProductName,
+    TargetName, UsageProblem,
+};
 use crate::domain::plan::CurrentState::Same;
 use crate::domain::provenance::run_plan_id;
 use crate::domain::rules;
@@ -83,37 +87,150 @@ pub struct SyncOpts {
 }
 
 impl SyncOpts {
-    /// The `opv sync` command line these options spell, with `--confirm` when `confirm`.
-    fn command(&self, env_name: &str, confirm: bool) -> String {
-        let mut c = format!("opv sync {env_name}");
+    /// The `opv sync` command these options spell (design §10.1: a typed step, never a
+    /// string). opv never adds `--confirm` to a step it generates (X4): confirming an
+    /// environment is the person's. The global `--config` of this process is kept (09.04).
+    fn command(&self, env_name: &str) -> Cmd {
+        let mut args = vec![env_name.to_string()];
         for t in &self.targets {
-            c.push_str(&format!(" --target {t}"));
+            args.extend(["--target".into(), t.clone()]);
         }
         if self.deploy {
-            c.push_str(" --deploy");
+            args.push("--deploy".into());
         }
         if self.prune {
-            c.push_str(" --prune");
+            args.push("--prune".into());
         }
         for k in &self.rotate {
-            c.push_str(&format!(" --rotate {k}"));
+            args.extend(["--rotate".into(), k.clone()]);
         }
         for k in &self.prune_immutable {
-            c.push_str(&format!(" --prune-immutable {k}"));
+            args.extend(["--prune-immutable".into(), k.clone()]);
         }
         if let Some(p) = &self.product {
-            c.push_str(&format!(" --product {p}"));
+            args.extend(["--product".into(), p.clone()]);
         }
         if self.json {
-            c.push_str(" --json");
+            args.push("--json".into());
         }
         if let Some(id) = &self.expect_plan {
-            c.push_str(&format!(" --expect-plan {id}"));
+            args.extend(["--expect-plan".into(), id.clone()]);
         }
-        if confirm {
-            c.push_str(&format!(" --confirm {env_name}"));
+        args.extend(config_flag());
+        Cmd {
+            command: vec!["sync".into()],
+            args,
         }
-        c
+    }
+
+    /// The scope a run of these options covers, for the read that shows what remains after
+    /// a partial failure or a changed plan (R53, R71: `opv plan <env>` with every scope flag
+    /// `plan` takes).
+    fn scope(&self, env_name: &str) -> PlanScope {
+        PlanScope::Sync {
+            env: EnvName::new(env_name),
+            targets: self.targets.iter().map(TargetName::new).collect(),
+            product: self.product.as_ref().map(ProductName::new),
+            deploy: self.deploy,
+            prune: self.prune,
+            rotate: self
+                .rotate
+                .iter()
+                .filter_map(|e| split_key_ref(e))
+                .map(|(p, k)| ProductKey {
+                    product: ProductName::new(p),
+                    key: KeyName::new(k),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// The global `--config <path>` this process was started with, so a step opv builds runs
+/// against the same configuration (09.04). Empty when it was not given.
+fn config_flag() -> Vec<String> {
+    let args = crate::error::invocation().args;
+    let mut words = args.iter();
+    while let Some(w) = words.next() {
+        if w == "--config" {
+            if let Some(p) = words.next() {
+                return vec!["--config".into(), p.clone()];
+            }
+        } else if let Some(p) = w.strip_prefix("--config=") {
+            return vec!["--config".into(), p.to_string()];
+        }
+    }
+    Vec::new()
+}
+
+/// A step opv built, as the command line it prints.
+fn step_text(c: &Cmd) -> String {
+    crate::cause::render::cmd_text(c)
+}
+
+/// `given` is not a declared name of `kind` (R21): the Next substitutes only a unique close
+/// match, and turns a write into its read; never the first candidate (X2, X3).
+fn not_declared(kind: NameKind, given: &str, candidates: &[&str]) -> Error {
+    Cause::NotDeclared {
+        kind,
+        given: given.to_string(),
+        candidates: candidates.iter().map(|c| c.to_string()).collect(),
+        closest: Closest::unique(&super::suggest::close(given, candidates.iter().copied())),
+    }
+    .into()
+}
+
+/// Every `--target` and `--product` name of a plan or sync, checked before any call
+/// (01.04): an unknown one is [`not_declared`], never a step on a guessed name.
+fn check_names(
+    fleet: &Fleet,
+    env_name: &str,
+    targets: &[String],
+    product: Option<&str>,
+) -> Result<(), Error> {
+    if let Some(p) = product
+        && !fleet.products.contains_key(p)
+    {
+        let all: Vec<&str> = fleet.products.keys().map(String::as_str).collect();
+        return Err(not_declared(NameKind::Product, p, &all));
+    }
+    let env = fleet.environment(env_name)?;
+    let all: Vec<&str> = env.targets.keys().map(String::as_str).collect();
+    match targets.iter().find(|t| !env.targets.contains_key(*t)) {
+        Some(t) if !all.is_empty() => Err(not_declared(NameKind::Target, t, &all)),
+        _ => Ok(()),
+    }
+}
+
+/// `e` after this run already wrote `done` (R53, X20): a cataloged cause becomes
+/// [`Cause::Partial`], whose Next is the read of what remains in `scope`, never the write;
+/// a Legacy error gets the same names on a line of its own.
+fn partial(e: Error, done: &[String], scope: PlanScope) -> Error {
+    if done.is_empty() {
+        return e;
+    }
+    match e {
+        Error::Catalog(c, up) => {
+            let (mut written, then) = match *c {
+                Cause::Partial { done, then, .. } => (done, then),
+                other => (Vec::new(), Box::new(other)),
+            };
+            for d in done {
+                if !written.contains(d) {
+                    written.push(d.clone());
+                }
+            }
+            Error::Catalog(
+                Box::new(Cause::Partial {
+                    done: written,
+                    approval_used: None,
+                    approval_scope: Some(scope),
+                    then,
+                }),
+                up,
+            )
+        }
+        e => with_note(e, &format!("already written: {}", done.join(", "))),
     }
 }
 
@@ -128,27 +245,25 @@ pub fn run(
     // for a missing --confirm: it gates the first write, so one run reports blocking keys
     // and the guard together (H12).
     let guard = confirm_env(fleet, env_name, opts)?;
-    let guarded = guard.guarded;
     if opts.expect_plan.is_some() && !opts.prune_immutable.is_empty() {
-        let without = SyncOpts {
-            expect_plan: None,
-            receipt: None,
-            ..opts.clone()
-        };
-        return Err(Error::Config(
-            "--expect-plan applies the plan `opv plan` showed, which never prunes an immutable \
-             key; nothing was changed"
-                .into(),
-        )
-        .with_next(without.command(env_name, guarded)));
+        // `opv plan` never prunes an immutable key, so no plan id covers one (01.11): a
+        // usage error whose step is never the destructive sync, let alone a confirmed one.
+        return Err(Cause::Usage {
+            problem: UsageProblem::ConflictsWith {
+                a: "--expect-plan".into(),
+                b: "--prune-immutable".into(),
+            },
+        }
+        .into());
     }
-    // A write is never suggested on a guessed product: the step is its plan.
+    // An unknown name is never replaced by a guess, and its step is the read (01.04).
+    check_names(fleet, env_name, &opts.targets, opts.product.as_deref())?;
     check_product(fleet, opts.product.as_deref(), "plan", Some(env_name))?;
-    // A receipt file that cannot be written fails now, before anything is staged.
+    // A receipt file that cannot be written fails now, before anything is staged (01.07).
     if let Some(path) = &opts.receipt {
         super::delivery::check_receipt_path(path)?;
     }
-    let names = resolve_targets(fleet, env_name, &opts.targets, "sync")?;
+    let names = resolve_targets(fleet, env_name, &opts.targets, "plan")?;
     let runners = target_runners(fleet, env_name, &names, r)?;
     let mut opened = Vec::new();
     for (name, signed) in names.iter().zip(&runners) {
@@ -196,8 +311,7 @@ pub fn run(
             .zip(&planned)
             .map(|((c, _), p)| (c.target, p.id.as_str())),
     );
-    let item_version = planned.last().and_then(|p| p.item_version);
-    expect_run(fleet, env_name, opts, &plan_id, item_version)?;
+    expect_run(env_name, opts, &plan_id)?;
     // 3. Each target in name order; one failing stops the run before the next is written.
     let mut reports: Vec<Report> = Vec::new();
     for ((c, ports), p) in targets.iter().zip(planned) {
@@ -212,7 +326,7 @@ pub fn run(
         r.step_summary(&report.step_summary(env_name, c.target, opts, &c.names));
         reports.push(report);
     }
-    let next = next_after(&reports, env_name, opts, guarded);
+    let next = next_after(&reports, env_name, opts);
     if opts.json {
         return write_run_json(
             out,
@@ -260,6 +374,11 @@ fn after_targets(e: Error, env_name: &str, targets: &[(Ctx<'_>, Ports<'_>)], don
         .iter()
         .map(|(c, _)| placement(env_name, c.target))
         .collect();
+    if matches!(e, Error::Catalog(..))
+        && let Some((c, _)) = targets.first()
+    {
+        return partial(e, &synced, c.opts.scope(env_name));
+    }
     let mut note = format!("already synced by this run: {}", synced.join(", "));
     if !rest.is_empty() {
         note.push_str(&format!("; not started: {}", rest.join(", ")));
@@ -293,12 +412,7 @@ fn partial(
 /// The command that finishes the run's job (FR-56): [`Report::next`] of all targets
 /// together, so a deploy is asked for where a target has names pending and `--prune`
 /// where one keeps extras.
-fn next_after(
-    reports: &[Report],
-    env_name: &str,
-    opts: &SyncOpts,
-    guarded: bool,
-) -> Option<String> {
+fn next_after(reports: &[Report], env_name: &str, opts: &SyncOpts) -> Option<String> {
     let open: Vec<&Report> = reports
         .iter()
         .filter(|r| !r.deploy_skipped && !(r.pending.is_empty() && r.kept.is_empty()))
@@ -312,7 +426,7 @@ fn next_after(
         kept: open.iter().flat_map(|r| r.kept.iter().cloned()).collect(),
         ..Report::default()
     }
-    .next(env_name, opts, guarded)
+    .next(env_name, opts)
 }
 
 /// The run report as one document (A6, S4, FR-56): every list holds `{target, product,
@@ -397,8 +511,6 @@ fn write_run_json(
 
 /// The `confirm_env` guard of one run (NR-20).
 struct Guard {
-    /// The environment sets `confirm_env = true`.
-    guarded: bool,
     /// Guarded and `--confirm` was not given: refused right before the first write
     /// ([`Ctx::require_confirm`]), after the read-only checks (H12).
     missing: bool,
@@ -411,15 +523,14 @@ struct Guard {
 fn confirm_env(fleet: &Fleet, env_name: &str, opts: &SyncOpts) -> Result<Guard, Error> {
     let env = fleet.environment(env_name)?;
     match opts.confirm.as_deref() {
-        Some(c) if c != env_name => Err(Error::Policy(
-            format!("--confirm {c} does not match environment {env_name}; nothing was changed")
-                .into(),
-        )
-        .with_code(Code::ConfirmMismatch)
-        .with_next(opts.command(env_name, true))),
+        // Either name may be the typo: the step is the read, never a confirmed write (01.12).
+        Some(c) if c != env_name => Err(Cause::ConfirmMismatch {
+            given: c.to_string(),
+            env: EnvName::new(env_name),
+        }
+        .into()),
         // A plan id is bound to its environment, so it is confirmation enough (FR-41).
         confirm => Ok(Guard {
-            guarded: env.confirm_env,
             missing: env.confirm_env && confirm.is_none() && opts.expect_plan.is_none(),
         }),
     }
@@ -450,13 +561,21 @@ impl Ctx<'_> {
     /// A refusal found before the first write; on a guarded environment run without
     /// `--confirm` it also says the flag is needed, so one run reports both (H12).
     fn refusal(&self, e: Error) -> Error {
-        if !self.confirm_missing || !matches!(e, Error::Policy(_)) {
+        if !self.confirm_missing {
             return e;
         }
         let env = self.env_name;
-        e.map_text(|t| {
-            format!("{t}; {env} is also guarded (confirm_env = true): add --confirm {env} when you re-run")
-        })
+        let guarded = format!(
+            "{env} is also guarded (confirm_env = true): syncing it needs a person's confirmation"
+        );
+        match e {
+            e @ Error::Catalog(..) => {
+                self.r.note(&guarded);
+                e
+            }
+            e @ Error::Policy(_) => e.map_text(|t| format!("{t}; {guarded}")),
+            e => e,
+        }
     }
 
     /// The guard itself (NR-20), after every read-only check and before the first write.
@@ -464,19 +583,10 @@ impl Ctx<'_> {
         if !self.confirm_missing {
             return Ok(());
         }
-        let env = self.env_name;
-        Err(Error::Policy(
-            format!(
-                "environment {env} is guarded (confirm_env = true): sync needs --confirm \
-                 {env}; nothing was changed"
-            )
-            .into(),
-        )
-        .with_code(Code::ConfirmRequired)
-        .with_do(format!(
-            "confirm with the user that {env} is the environment to change"
-        ))
-        .with_next(self.opts.command(env, true)))
+        Err(Cause::NeedsConfirm {
+            env: EnvName::new(self.env_name),
+        }
+        .into())
     }
 
     /// `plan` limited to `--product`, when given.
@@ -515,54 +625,23 @@ impl Ctx<'_> {
 }
 
 /// With `--expect-plan`, refuse a run whose plan id `id` differs (exit 6) before any write,
-/// naming the new id and the command that applies it (FR-41). The id covers every target
-/// the run would sync, so a plan made for other targets never matches (FR-56).
-fn expect_run(
-    fleet: &Fleet,
-    env_name: &str,
-    opts: &SyncOpts,
-    id: &str,
-    item_version: Option<u64>,
-) -> Result<(), Error> {
+/// naming the new id (FR-41). The id covers every target the run would sync, so a plan
+/// made for other targets never matches (FR-56).
+fn expect_run(env_name: &str, opts: &SyncOpts, id: &str) -> Result<(), Error> {
     let Some(expected) = opts.expect_plan.as_deref() else {
         return Ok(());
     };
     if expected.eq_ignore_ascii_case(id) {
         return Ok(());
     }
-    let mut review = format!("opv plan {env_name}");
-    for t in &opts.targets {
-        review.push_str(&format!(" --target {t}"));
+    // The new id is shown for review; the Next is the plan read in the same scope, never a
+    // sync pre-filled with the new id (X4).
+    Err(Cause::PlanChanged {
+        old: PlanId::new(expected),
+        new: PlanId::new(id),
+        scope: opts.scope(env_name),
     }
-    let mut rotate = opts.rotate.clone();
-    rotate.sort();
-    for k in &rotate {
-        review.push_str(&format!(" --rotate {k}"));
-    }
-    if let Some(p) = &opts.product {
-        review.push_str(&format!(" --product {p}"));
-    }
-    let apply = SyncOpts {
-        expect_plan: Some(id.to_string()),
-        receipt: None,
-        confirm: None,
-        ..opts.clone()
-    }
-    .command(env_name, false);
-    let item = item_version
-        .map(|v| format!(" (1Password item v{v})"))
-        .unwrap_or_default();
-    Err(Error::Policy(
-        format!(
-            "stale plan: the plan changed since {expected}; it is now {id}{item} (the \
-             1Password item, a target, the targets planned or {} changed); nothing was \
-             changed\n  review it, then apply exactly that plan with: {apply}",
-            fleet.origin.noun()
-        )
-        .into(),
-    )
-    .with_code(Code::StalePlan)
-    .with_next(review))
+    .into())
 }
 
 /// What one `sync` run did (NR-18): target names only, never a value. The same on every
@@ -680,7 +759,7 @@ impl Report {
 impl Report {
     /// The command that finishes the job: a deploy for pending names, `--prune` for kept
     /// ones. `None` when nothing is left, or a deploy would not help (nothing to restart).
-    fn next(&self, env_name: &str, opts: &SyncOpts, guarded: bool) -> Option<String> {
+    fn next(&self, env_name: &str, opts: &SyncOpts) -> Option<String> {
         if self.deploy_skipped || (self.pending.is_empty() && self.kept.is_empty()) {
             return None;
         }
@@ -696,7 +775,7 @@ impl Report {
             receipt: None,
             targets: opts.targets.clone(),
         };
-        Some(o.command(env_name, guarded))
+        Some(step_text(&o.command(env_name)))
     }
 }
 
@@ -727,7 +806,6 @@ struct Planned {
     prepared: Prepared,
     /// The target's plan id (FR-41), one input of the run's.
     id: String,
-    item_version: Option<u64>,
 }
 
 /// What [`prepare`] read and planned, by the target's kind.
@@ -838,7 +916,6 @@ fn prepare_staged(
     refuse_blocking(&plan, env_name).map_err(|e| c.refusal(e))?;
     Ok(Planned {
         id: c.target_id(&plan, &list_a, item_version, ports),
-        item_version,
         prepared: Prepared::Staged {
             plan,
             list_a,
@@ -897,7 +974,7 @@ fn run_staged(
     } else {
         store.write(&batch)?;
         done.push(format!("staged {} secret(s)", batch.len()));
-        confirm(store, &batch, c.r, label, &done)?
+        confirm(store, &batch, c, &done)?
     };
     // #106, FR-58, D11: what this run wrote (confirmed above) or the plan proved identical,
     // recorded as each placement's evidence lines, which are also its version ledger.
@@ -927,7 +1004,7 @@ fn run_staged(
                 .iter()
                 .map(|n| (n.clone(), vp.want[n].as_str()))
                 .collect();
-            v.set(&batch).map_err(|e| after_writes(e, &done))?;
+            v.set(&batch).map_err(|e| after_writes_in(c, e, &done))?;
             done.push(format!("set {} variable(s)", batch.len()));
             report.written.extend(vp.set.iter().cloned());
         }
@@ -946,13 +1023,14 @@ fn run_staged(
         if !plan.prune.is_empty() {
             store
                 .remove(&plan.prune)
-                .map_err(|e| after_writes(e, &done))?;
+                .map_err(|e| after_writes_in(c, e, &done))?;
             done.push(format!("pruned {} name(s)", plan.prune.len()));
         }
         if let Some(v) = vars
             && !var_prune.is_empty()
         {
-            v.remove(var_prune).map_err(|e| after_writes(e, &done))?;
+            v.remove(var_prune)
+                .map_err(|e| after_writes_in(c, e, &done))?;
             done.push(format!("pruned {} variable(s)", var_prune.len()));
         }
         p(out, format!("pruned: {}", names.join(&all_prune)))?;
@@ -1014,10 +1092,23 @@ fn run_staged(
             report.pending = waiting;
         }
         (false, true) => {
-            runtime.deploy().map_err(|e| after_writes(e, &done))?;
-            p(out, format!("deployed: {}", names.join(&waiting)))?;
+            runtime.deploy().map_err(|e| after_writes_in(c, e, &done))?;
+            // A pruned name is listed under `pruned:`, never as deployed (09.24).
+            let deployed: Vec<String> = waiting
+                .iter()
+                .filter(|n| !report.pruned.contains(n))
+                .cloned()
+                .collect();
+            if deployed.is_empty() {
+                p(
+                    out,
+                    "deployed: the removal of the names pruned above".into(),
+                )?;
+            } else {
+                p(out, format!("deployed: {}", names.join(&deployed)))?;
+            }
             report.deployed = Some(DEPLOYED.into());
-            report.deployed_names = waiting;
+            report.deployed_names = deployed;
         }
         (false, false) => {
             p(out, pending_line(names, &waiting))?;
@@ -1055,8 +1146,18 @@ fn record_delivery(
             // The file holds every receipt this run minted so far, on every target, so a
             // later target that fails leaves the earlier targets' receipts in it (FR-58).
             c.receipts.borrow_mut().extend(rec.minted.iter().cloned());
-            if let Some(path) = &opts.receipt {
-                super::delivery::write_receipt_file(path, &c.receipts.borrow())?;
+            // The writes stand whatever happens to the file (01.07): the receipts are also
+            // recorded in 1Password and in the run report, so a file that cannot be saved is
+            // a note naming it, never a failure that hides what this sync wrote.
+            if let Some(path) = &opts.receipt
+                && let Err(e) = super::delivery::write_receipt_file(path, &c.receipts.borrow())
+            {
+                c.r.note(&format!(
+                    "the delivery receipts this sync minted were not saved to {} ({}); this \
+                     sync's writes stand",
+                    path.display(),
+                    error_words(&e)
+                ));
             }
             if !opts.json {
                 for m in &rec.minted {
@@ -1076,12 +1177,22 @@ fn record_delivery(
         }
         Err(e) => c.r.note(&format!(
             "delivery evidence for {} was not recorded ({}); the target holds what this \
-             sync wrote, and opv delivery verify reports it as not delivered",
+             sync wrote, but opv delivery verify cannot vouch for it until a sync records it",
             placement(env_name, c.target),
-            e.code().as_str()
+            error_words(&e)
         )),
     }
     Ok(())
+}
+
+/// The first line of `e` in words (never a code slug, 01.19): the cause's message for a
+/// cataloged error, else its text.
+fn error_words(e: &Error) -> String {
+    let text = match e.cause() {
+        Some((c, _)) => c.message(),
+        None => e.text().to_string(),
+    };
+    text.lines().next().unwrap_or_default().to_string()
 }
 
 /// One line of output.
@@ -1174,7 +1285,6 @@ fn prepare_pinned(c: &Ctx<'_>, ports: &Ports<'_>, out: &mut dyn Write) -> Result
     refuse_blocking(&plan, env_name).map_err(|e| c.refusal(e))?;
     Ok(Planned {
         id: c.target_id(&plan, &listed, item_version, ports),
-        item_version,
         prepared: Prepared::Pinned {
             plan,
             listed,
@@ -1229,15 +1339,12 @@ fn run_pinned(
         runtime.config_in_store(),
     )?;
     if !want.refused.is_empty() {
-        let first = want.refused[0].split(' ').next().unwrap_or_default();
-        return Err(c.refusal(
-            Error::Policy(
-                format!("sync refused, nothing staged: {}", want.refused.join(", ")).into(),
-            )
-            .with_code(Code::KeysBlocking)
-            .with_do("fix the values named above in 1Password")
-            .with_next(format!("opv explain {first} --env {env_name}")),
-        ));
+        let keys: Vec<&str> = want
+            .refused
+            .iter()
+            .filter_map(|r| r.split(' ').next())
+            .collect();
+        return Err(c.refusal(blocked(&want.refused, &keys, false, env_name)));
     }
     c.require_confirm()?;
     print_extras(out, &plan)?;
@@ -1255,7 +1362,7 @@ fn run_pinned(
         if let Some(value) = &w.write {
             let version = store.write_one(name, value, &stamp).map_err(|e| {
                 let done: Vec<&str> = written.keys().map(String::as_str).collect();
-                with_note(e, &already_written(&done))
+                pinned_partial(c, e, &done, &[])
             })?;
             written.insert(name.clone(), version);
         }
@@ -1385,7 +1492,11 @@ fn run_pinned(
             )
             .into(),
         )
-        .with_next(format!("opv status {env_name}")));
+        .with_do(format!(
+            "deploy {} once so it has a revision",
+            runtime.describe()
+        ))
+        .with_next(step_text(&c.opts.command(env_name))));
     };
     let health = runtime.await_healthy(&revision)?;
     if pending.is_empty() && !matches!(health, Health::Healthy) {
@@ -1419,7 +1530,7 @@ fn run_pinned(
             .with_code(Code::TargetUnhealthy)
             .with_do(format!(
                 "fix why {} cannot start the new revision (opv doctor checks that it can read \
-                 its secrets), then run the same command again",
+                 its secrets)",
                 runtime.describe()
             ))
             .with_next(format!("opv doctor --env {env_name}")));
@@ -1480,9 +1591,10 @@ fn run_pinned(
             && let Err(e) = store.collect_superseded(name, version)
         {
             let line = format!(
-                "warning: superseded versions of {} were not removed: {}",
+                "warning: superseded versions of {} were not removed: {}; the next healthy \
+                 deploy removes them",
                 names.join([name]),
-                e.text().replace('\n', "\n  ")
+                error_words(&e).replace('\n', "\n  ")
             );
             if opts.json {
                 c.r.note(&line);
@@ -1494,15 +1606,19 @@ fn run_pinned(
     let mut pruned: Vec<String> = change.unbind.clone();
     if !deletes.is_empty() {
         // Nothing in the runtime may still point at an entry deleted below (FR-32).
-        runtime
-            .release(deletes)
-            .map_err(|e| with_note(e, "nothing pruned"))?;
+        runtime.release(deletes).map_err(|e| match e {
+            e @ Error::Catalog(..) => pinned_partial(c, e, &report_written(&report), &[]),
+            e => with_note(e, "nothing pruned"),
+        })?;
     }
     let mut unbound_kept = Vec::new();
     for name in deletes {
         let gone = store.delete(name).map_err(|e| {
             let done: Vec<&str> = pruned.iter().map(String::as_str).collect();
-            with_note(e, &format!("already pruned: {}", none_or(&done)))
+            match e {
+                e @ Error::Catalog(..) => pinned_partial(c, e, &report_written(&report), &done),
+                e => with_note(e, &format!("already pruned: {}", none_or(&done))),
+            }
         })?;
         if !gone {
             // Kept for rollback by an older revision: unbound, not pruned (FR-32).
@@ -1584,19 +1700,17 @@ fn apply_reconciled(
     env_name: &str,
     out: &mut dyn Write,
 ) -> Result<Revision, Error> {
-    let msg = match runtime.apply(change, snap) {
-        Err(Error::Unknown(msg)) => msg,
-        Err(e) if e.code() == Code::UpdateRefused => {
+    // An outcome-unknown apply (exit 9, cataloged or not) is read back; a refused one
+    // (nothing applied) keeps its own step.
+    let unknown = match runtime.apply(change, snap) {
+        Err(e) if e.exit_code() == 9 => e,
+        Err(e) if e.code_str() == Code::UpdateRefused.as_str() => {
             return Err(e.or_next(|| format!("opv doctor --env {env_name}")));
         }
         other => return other,
     };
-    let still_unknown = |why: &str| {
-        Error::Unknown(
-            msg.clone()
-                .map_text(|m| format!("{m}\n  read back: {why}; nothing pruned")),
-        )
-    };
+    let still_unknown =
+        |why: &str| with_note(unknown, &format!("read back: {why}; nothing pruned"));
     let Ok(now) = crate::runner::diagnosing(|| runtime.bindings()) else {
         return Err(still_unknown("could not read the bindings back"));
     };
@@ -1841,6 +1955,28 @@ fn with_note(err: Error, note: &str) -> Error {
     }
 }
 
+/// A failure on pinned target `c` after this run wrote the store versions `written` and
+/// pruned `pruned` (R53, X20): a cataloged cause becomes [`Cause::Partial`] naming them; a
+/// Legacy error gets the names on a line of its own.
+fn pinned_partial(c: &Ctx<'_>, e: Error, written: &[&str], pruned: &[&str]) -> Error {
+    match e {
+        e @ Error::Catalog(..) => {
+            let done: Vec<String> = written
+                .iter()
+                .map(|n| format!("{n} (a new version)"))
+                .chain(pruned.iter().map(|n| format!("{n} (pruned)")))
+                .collect();
+            partial(e, &done, c.opts.scope(c.env_name))
+        }
+        e => with_note(e, &already_written(written)),
+    }
+}
+
+/// The store names `report` wrote, for [`pinned_partial`].
+fn report_written(report: &Report) -> Vec<&str> {
+    report.written.iter().map(String::as_str).collect()
+}
+
 fn already_written(done: &[&str]) -> String {
     format!(
         "already written (new versions, not live until a deploy binds them): {}",
@@ -1857,24 +1993,50 @@ fn none_or(names: &[&str]) -> String {
 }
 
 /// Refuses the whole run, before any write, when a row blocks (FR-15), naming the next
-/// command (NR-17).
+/// command (NR-17): the first value to fill, opened in 1Password (R63), never a sync.
 fn refuse_blocking(plan: &SyncPlan, env_name: &str) -> Result<(), Error> {
     let blocking = row_names(&plan.rows, is_blocking);
-    if blocking.is_empty() {
-        return Ok(());
-    }
     let keys: Vec<String> = plan
         .rows
         .iter()
         .filter(|r| is_blocking(r))
         .map(|r| key_label(&r.product, &r.key))
         .collect();
-    Err(
-        Error::Policy(format!("sync refused, nothing staged: {}", blocking.join(", ")).into())
-            .with_code(Code::KeysBlocking)
-            .with_do(format!("fix {} in 1Password", keys.join(", ")))
-            .with_next(format!("opv explain {} --env {env_name}", keys[0])),
-    )
+    if keys.is_empty() {
+        return Ok(());
+    }
+    // 1Password shows an empty field only in edit mode (as for `findings_error`).
+    let empty = plan.rows.iter().any(|r| {
+        matches!(
+            r.state,
+            KeyState::Missing | KeyState::RuleFailed("nonempty", _)
+        )
+    });
+    let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+    Err(blocked(&blocking, &keys, empty, env_name))
+}
+
+/// The refusal of a sync whose values `blocking` need a person (keys_blocking, exit 6;
+/// the catalog's `ValuesNeeded` has no exit-6 form yet). "nothing was changed" holds on
+/// every target kind, staged or not (01.14).
+fn blocked(blocking: &[String], keys: &[&str], empty: bool, env_name: &str) -> Error {
+    let mut open = Cmd {
+        command: vec!["open".into()],
+        args: vec![
+            keys.first().copied().unwrap_or_default().to_string(),
+            "--env".into(),
+            env_name.to_string(),
+        ],
+    };
+    open.args.extend(config_flag());
+    let mut action = format!("fix {} in 1Password", keys.join(", "));
+    if empty {
+        action.push_str(" (click Edit on the item: it hides empty fields until then)");
+    }
+    Error::Policy(format!("sync refused, nothing was changed: {}", blocking.join(", ")).into())
+        .with_code(Code::KeysBlocking)
+        .with_do(action)
+        .with_next(step_text(&open))
 }
 
 /// Longest wait for staged names to show a digest (NR-30).
@@ -1887,23 +2049,23 @@ const CONFIRM_LIMIT: Duration = Duration::from_secs(30);
 fn confirm(
     store: &dyn StagedStore,
     batch: &[(String, &SecretValue)],
-    r: &dyn CommandRunner,
-    label: &str,
+    c: &Ctx<'_>,
     done: &[String],
 ) -> Result<Vec<StoreEntry>, Error> {
+    let (r, label) = (c.r, c.t.provider().label());
     let wait = crate::runner::Wait::new(r, CONFIRM_LIMIT);
     let mut delay = Duration::from_secs(1);
     loop {
         let list = store.list().map_err(|e| match e {
-            Error::Unknown(_) => Error::Unknown(
-                format!(
+            e @ Error::Unknown(_) => with_note(
+                e,
+                &format!(
                     "{label} did not respond while confirming the staged secrets ({}); not \
                      confirmed",
                     done.join(", ")
-                )
-                .into(),
+                ),
             ),
-            e => after_writes(e, done),
+            e => after_writes_in(c, e, done),
         })?;
         let unseen = batch
             .iter()
@@ -1927,6 +2089,15 @@ fn confirm(
             ),
         );
         delay *= 2;
+    }
+}
+
+/// [`after_writes`] on target `c`: a cataloged cause becomes [`Cause::Partial`] naming what
+/// had completed, whose Next reads what remains in the run's scope (R53, 01.07).
+fn after_writes_in(c: &Ctx<'_>, e: Error, done: &[String]) -> Error {
+    match e {
+        e @ Error::Catalog(..) => partial(e, done, c.opts.scope(c.env_name)),
+        e => after_writes(e, done),
     }
 }
 
@@ -2037,6 +2208,7 @@ pub fn plan_rotating(
     out: &mut dyn Write,
     json: bool,
 ) -> Result<(), Error> {
+    check_names(fleet, env_name, targets, product)?;
     check_product(fleet, product, "plan", Some(env_name))?;
     let parsed = parse_rotate(fleet, env_name, rotate)?;
     // Needs a target: `Error::Config` naming the environment otherwise, before any call.
@@ -2065,23 +2237,26 @@ pub fn plan_rotating(
     };
     let findings = || findings_error(n, &all, env_name);
     // A clean plan is applied by its id (M13); `--expect-plan` also stands for a guarded
-    // environment's `--confirm`.
+    // environment's `--confirm`. A plan with findings has no sync step at all: its step is
+    // the error's, opening the first value to fill (01.05), and opv never confirms (X4).
     let clean = n == 0;
-    let sync_next = SyncOpts {
-        // A live target has nothing to deploy (FR-46).
-        deploy: parts.iter().any(|p| !p.live),
-        prune: parts
-            .iter()
-            .any(|p| !p.plan.prune.is_empty() || !p.var_plan.prune.is_empty()),
-        product: product.map(str::to_string),
-        expect_plan: clean.then(|| id.clone()),
-        receipt: None,
-        targets: targets.to_vec(),
-        // The canonical (sorted, deduped) rotate set, so the Next command is stable.
-        rotate: parsed.iter().map(|(p, k)| key_label(p, k)).collect(),
-        ..SyncOpts::default()
-    }
-    .command(env_name, !clean && fleet.environment(env_name)?.confirm_env);
+    let sync_next = step_text(
+        &SyncOpts {
+            // A live target has nothing to deploy (FR-46).
+            deploy: parts.iter().any(|p| !p.live),
+            prune: parts
+                .iter()
+                .any(|p| !p.plan.prune.is_empty() || !p.var_plan.prune.is_empty()),
+            product: product.map(str::to_string),
+            expect_plan: clean.then(|| id.clone()),
+            receipt: None,
+            targets: targets.to_vec(),
+            // The canonical (sorted, deduped) rotate set, so the Next command is stable.
+            rotate: parsed.iter().map(|(p, k)| key_label(p, k)).collect(),
+            ..SyncOpts::default()
+        }
+        .command(env_name),
+    );
     let counts: Vec<String> = parts.iter().map(|p| p.count(env_name)).collect();
     for (p, count) in parts.iter().zip(&counts) {
         let heading = match product {
@@ -2116,7 +2291,7 @@ pub fn plan_rotating(
             &super::JsonExtra {
                 plan_id: clean.then_some(id.as_str()),
                 provenance: None,
-                next: Some(&sync_next),
+                next: clean.then_some(sync_next.as_str()),
                 link: link.as_deref(),
             },
         )?;
@@ -2412,43 +2587,53 @@ fn declared_refs(fleet: &Fleet) -> Vec<String> {
         .collect()
 }
 
-/// The declared key closest to a `--rotate` / `--prune-immutable` entry.
-fn closest_ref(fleet: &Fleet, entry: &str) -> Option<String> {
-    let refs = declared_refs(fleet);
-    super::suggest::close(entry, refs.iter().map(String::as_str))
-        .first()
-        .map(|s| s.to_string())
-}
-
-/// "not a declared key", with the closest declared one when there is one.
-fn undeclared(fleet: &Fleet, entry: &str) -> String {
-    match closest_ref(fleet, entry) {
-        Some(c) => format!("not a declared key; did you mean {c}?"),
-        None => "not a declared key".into(),
-    }
-}
-
-/// The `Next:` step for a bad `--rotate` / `--prune-immutable` entry (H10): `explain` for
-/// the entry when it is declared, else for the closest declared key, else the status rows.
-/// Only ever a read-only command; a suggestion is never applied to the flag.
-fn key_next(fleet: &Fleet, env_name: &str, entry: &str) -> String {
-    let declared = declared_refs(fleet);
-    let target = if declared.iter().any(|d| d == entry) {
-        Some(entry.to_string())
-    } else {
-        closest_ref(fleet, entry)
-    };
-    match target {
-        Some(t) => format!("opv explain {t} --env {env_name}"),
-        None => format!("opv status {env_name}"),
-    }
-}
-
-/// The expected shape of a `--rotate` / `--prune-immutable` entry, for errors.
-const EXPECTED: &str = "expected PRODUCT/KEY";
-
 /// The argument placeholder for `--prune-immutable` in hints.
 const KEY_REF_HINT: &str = "PRODUCT/KEY";
+
+/// A `--rotate` / `--prune-immutable` entry that is not `PRODUCT/KEY` (R26).
+fn key_ref_format(flag: &str) -> Error {
+    Cause::Usage {
+        problem: UsageProblem::ValueFormat {
+            flag: flag.to_string(),
+            format: KEY_REF_HINT,
+        },
+    }
+    .into()
+}
+
+/// A `--rotate` / `--prune-immutable` entry that names a declared key the flag cannot take,
+/// named with why; its step explains that key, a read (the catalog's `Usage` has no form
+/// that names the entry yet).
+fn key_ref_refused(flag: &str, entry: &str, why: &str, env_name: &str) -> Error {
+    let mut explain = Cmd {
+        command: vec!["explain".into()],
+        args: vec![entry.to_string(), "--env".into(), env_name.to_string()],
+    };
+    explain.args.extend(config_flag());
+    Error::Config(format!("{flag} {entry:?}: {why}").into()).with_next(step_text(&explain))
+}
+
+/// The declared key a `--rotate` / `--prune-immutable` entry names (R21: an undeclared one
+/// is [`not_declared`], whose step substitutes only a unique close match, in a read).
+fn declared_key<'f>(
+    fleet: &'f Fleet,
+    flag: &str,
+    entry: &str,
+) -> Result<(&'f str, &'f str, &'f crate::domain::KeySpec), Error> {
+    let (product, key) = split_key_ref(entry).ok_or_else(|| key_ref_format(flag))?;
+    match fleet
+        .products
+        .get_key_value(product)
+        .and_then(|(p, spec)| spec.keys.get_key_value(key).map(|(k, s)| (p, k, s)))
+    {
+        Some((p, k, s)) => Ok((p.as_str(), k.as_str(), s)),
+        None => {
+            let refs = declared_refs(fleet);
+            let all: Vec<&str> = refs.iter().map(String::as_str).collect();
+            Err(not_declared(NameKind::Key, entry, &all))
+        }
+    }
+}
 
 /// Validate every `--rotate PRODUCT/KEY` before any call (FR-16): it must name a declared,
 /// immutable key desired in `env_name`. An unmatched entry is never a silent no-op.
@@ -2460,26 +2645,22 @@ fn parse_rotate(
     let env = fleet.environment(env_name)?;
     let mut set = BTreeSet::new();
     for e in entries {
-        let bad = |why: String| {
-            Error::Config(format!("--rotate {e:?}: {why}").into())
-                .with_next(key_next(fleet, env_name, e))
-        };
-        let (product, key) =
-            split_key_ref(e).ok_or_else(|| bad(EXPECTED.into()).with_code(Code::Usage))?;
-        let spec = fleet
-            .products
-            .get(product)
-            .and_then(|p| p.keys.get(key))
-            .ok_or_else(|| bad(undeclared(fleet, e)).with_code(Code::UndeclaredKey))?;
+        let (product, key, spec) = declared_key(fleet, "--rotate", e)?;
         if !spec.immutable {
-            return Err(bad(
-                "key is not immutable (other keys are staged on every sync)".into(),
+            return Err(key_ref_refused(
+                "--rotate",
+                e,
+                "key is not immutable (other keys are staged on every sync)",
+                env_name,
             ));
         }
         if !rules::applies(spec, env_name, env, product) {
-            return Err(bad(format!(
-                "key is not desired in environment {env_name:?}"
-            )));
+            return Err(key_ref_refused(
+                "--rotate",
+                e,
+                &format!("key is not desired in environment {env_name:?}"),
+                env_name,
+            ));
         }
         set.insert((product.to_string(), key.to_string()));
     }
@@ -2496,35 +2677,32 @@ fn parse_prune_immutable(
 ) -> Result<BTreeSet<(String, String)>, Error> {
     let env = fleet.environment(env_name)?;
     if !opts.prune_immutable.is_empty() && !opts.prune {
-        return Err(Error::Config(
-            "--prune-immutable requires --prune (nothing is pruned without it)".into(),
-        )
-        .with_code(Code::Usage)
-        .with_do("add --prune to the sync command once the plan shows what it removes")
-        .with_next(format!("opv plan {env_name}")));
+        return Err(Cause::Usage {
+            problem: UsageProblem::NeedsFlag {
+                flag: "--prune-immutable".into(),
+                needs: "--prune".into(),
+            },
+        }
+        .into());
     }
     let mut set = BTreeSet::new();
     for e in &opts.prune_immutable {
-        let bad = |why: String| {
-            Error::Config(format!("--prune-immutable {e:?}: {why}").into())
-                .with_next(key_next(fleet, env_name, e))
-        };
-        let (product, key) =
-            split_key_ref(e).ok_or_else(|| bad(EXPECTED.into()).with_code(Code::Usage))?;
-        let spec = fleet
-            .products
-            .get(product)
-            .and_then(|p| p.keys.get(key))
-            .ok_or_else(|| bad(undeclared(fleet, e)).with_code(Code::UndeclaredKey))?;
+        let (product, key, spec) = declared_key(fleet, "--prune-immutable", e)?;
         if !spec.immutable {
-            return Err(bad(
-                "key is not immutable (other keys are pruned by --prune alone)".into(),
+            return Err(key_ref_refused(
+                "--prune-immutable",
+                e,
+                "key is not immutable (other keys are pruned by --prune alone)",
+                env_name,
             ));
         }
         if rules::applies(spec, env_name, env, product) {
-            return Err(bad(format!(
-                "key is desired in environment {env_name:?}, so it is never pruned"
-            )));
+            return Err(key_ref_refused(
+                "--prune-immutable",
+                e,
+                &format!("key is desired in environment {env_name:?}, so it is never pruned"),
+                env_name,
+            ));
         }
         set.insert((product.to_string(), key.to_string()));
     }
@@ -2554,7 +2732,7 @@ mod tests {
             ..Report::default()
         };
         assert_eq!(
-            r.next("ci", &SyncOpts::default(), false).as_deref(),
+            r.next("ci", &SyncOpts::default()).as_deref(),
             Some("opv sync ci --prune")
         );
     }
@@ -3022,9 +3200,10 @@ mod tests {
                 rotate: vec!["allumata/INTEGRATION_ENC_KEY".into(), bad.into()],
                 ..all_flags()
             };
+            // Exit 2 (configuration and usage), before any call; malformed entries are a
+            // cataloged usage error (R26), undeclared ones `NotDeclared` (R21).
             let e = run(&fl, "prod", &r, &mut Vec::new(), &o).unwrap_err();
-            assert!(matches!(e, Error::Config(_)), "{bad}: {e}");
-            assert!(e.to_string().contains(bad), "{bad}: {e}");
+            assert_eq!(e.exit_code(), 2, "{bad}: {e}");
             assert!(r.calls.borrow().is_empty(), "{bad}: calls made");
         }
     }
@@ -3210,8 +3389,7 @@ mod tests {
                 ..opts()
             };
             let e = run(&fleet_old_immutable(), "prod", &r, &mut Vec::new(), &o).unwrap_err();
-            assert!(matches!(e, Error::Config(_)), "{bad}: {e}");
-            assert!(e.to_string().contains("--prune-immutable"), "{bad}: {e}");
+            assert_eq!(e.exit_code(), 2, "{bad}: {e}");
             assert!(r.calls.borrow().is_empty(), "{bad}: calls made");
         }
     }
@@ -3703,9 +3881,10 @@ mod tests {
         );
     }
 
-    /// NR-17: a refusal names the next command, in one line.
+    /// NR-17, R63: a refusal names the next command, in one line: the value to fill,
+    /// opened in 1Password (01.14; it was `opv explain`, which only describes the key).
     #[test]
-    fn refusal_names_explain_as_the_next_command() {
+    fn refusal_names_the_value_to_open_as_the_next_command() {
         let r = fake_with(
             item_without("allumata", "OPENAI_API_KEY"),
             fly_with_prunable(),
@@ -3713,9 +3892,83 @@ mod tests {
         let e = sync_err(&r);
         assert_eq!(
             e.next_step(),
-            Some("opv explain allumata/OPENAI_API_KEY --env prod"),
+            Some("opv open allumata/OPENAI_API_KEY --env prod"),
             "{e}"
         );
+    }
+
+    /// 01.05: `plan --json` with findings carries no sync step (its step is the error's,
+    /// which opens the value to fill), and never a pre-confirmed one.
+    #[test]
+    fn plan_json_with_findings_has_no_sync_step() {
+        let mut fl = f();
+        fl.environments.get_mut("prod").unwrap().confirm_env = true;
+        let r = FakeRunner::new([
+            item_without("allumata", "OPENAI_API_KEY"),
+            fly_empty(),
+            ok(),
+        ]);
+        let mut out = Vec::new();
+        let _ = plan_scoped(&fl, "prod", None, &r, &mut out, true);
+        let doc: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert!(doc["next"].is_null(), "{doc}");
+    }
+
+    /// R53, X20 (01.07): a cataloged failure after this run's writes names them, and its
+    /// step reads what remains instead of writing again.
+    #[test]
+    fn a_cataloged_failure_after_writes_is_partial_naming_them() {
+        let e = partial(
+            Cause::Interrupted {
+                signal: 2,
+                writes_started: true,
+            }
+            .into(),
+            &["staged 2 secret(s)".to_string()],
+            all_flags().scope("prod"),
+        );
+        assert!(
+            matches!(e.cause(), Some((Cause::Partial { done, .. }, _))
+                if done == &["staged 2 secret(s)".to_string()]),
+            "{e:?}"
+        );
+    }
+
+    /// R53: the read after a partial failure keeps the run's scope (X1).
+    #[test]
+    fn a_partial_failure_steps_to_the_plan_of_the_same_scope() {
+        let o = SyncOpts {
+            targets: vec!["portfolio".into()],
+            product: Some("allumata".into()),
+            deploy: true,
+            ..SyncOpts::default()
+        };
+        let e = partial(
+            Cause::Interrupted {
+                signal: 2,
+                writes_started: true,
+            }
+            .into(),
+            &["staged 2 secret(s)".to_string()],
+            o.scope("prod"),
+        );
+        let (cause, _) = e.cause().unwrap();
+        let inv = crate::cause::Invocation::from_cli(&["opv".to_string(), "sync".to_string()]);
+        assert_eq!(
+            crate::cause::render::next_text(&cause.step(&inv).1, &inv),
+            Some("opv plan prod --target portfolio --product allumata".into())
+        );
+    }
+
+    /// X4 (01.05, 01.12): a sync step opv builds never carries --confirm, even when the
+    /// person passed it.
+    #[test]
+    fn a_generated_sync_step_never_carries_confirm() {
+        let o = SyncOpts {
+            confirm: Some("prod".into()),
+            ..all_flags()
+        };
+        assert!(!step_text(&o.command("prod")).contains("--confirm"));
     }
 
     /// NR-10: a target refusal after staging names what was already staged.

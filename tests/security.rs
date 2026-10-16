@@ -824,7 +824,7 @@ fn rule_failure_names_key_not_value() {
         assert_eq!(r.code, 6, "{rule}: {}", r.all());
         assert!(
             r.stderr
-                .starts_with("opv: policy denied: sync refused, nothing staged"),
+                .starts_with("opv: policy denied: sync refused, nothing was changed"),
             "{rule}: {}",
             r.stderr
         );
@@ -2403,9 +2403,15 @@ fn confirm_env_refusal_ends_with_the_exact_command() {
     );
     h.use_config(&text);
     let r = h.run(&["sync", "prod", "--deploy"]);
-    assert_eq!(
-        r.stderr.lines().last(),
-        Some("Next: opv sync prod --deploy --confirm prod")
+    // The handoff is the command as typed, its --config kept (09.04), plus --confirm.
+    assert!(
+        r.stderr
+            .lines()
+            .last()
+            .is_some_and(|l| l.starts_with("Next: opv sync --config ")
+                && l.ends_with(" prod --deploy --confirm prod")),
+        "{}",
+        r.stderr
     );
 }
 

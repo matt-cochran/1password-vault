@@ -214,10 +214,13 @@ fn sync_confirm_required() {
     // H12: the read-only part runs first; the guard refuses right before the first write.
     let r = FakeRunner::new([complete_item(), fly_empty()]);
     let res = sync::run(&f, "prod", &r, &mut out, &opts);
-    golden(
-        "sync_confirm_required",
-        &framed(&out, &res, "opv sync prod --deploy --json"),
-    );
+    // The handoff is rendered from the process's own command line (R61), which a unit test
+    // does not have: the golden keeps the shape and leaves the command out.
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&framed(&out, &res, "opv sync prod --deploy --json")).unwrap();
+    doc["next"] = "<the command as typed> --confirm prod".into();
+    doc["error"]["next"] = "<the command as typed> --confirm prod".into();
+    golden("sync_confirm_required", &doc.to_string());
 }
 
 fn explain_json(key: &str) -> String {

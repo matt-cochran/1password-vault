@@ -414,7 +414,7 @@ fn sync_refusal_names_the_product_and_key() {
     let e = sync_of(&r, &Default::default()).0.unwrap_err();
     assert!(
         e.to_string()
-            .ends_with("nothing staged: app/JWT_KEY (missing)"),
+            .ends_with("nothing was changed: app/JWT_KEY (missing)"),
         "{e}"
     );
 }
@@ -507,7 +507,7 @@ fn sync_refusal_names_the_product_and_key_with_rule_and_reason() {
     let e = sync_of(&r, &Default::default()).0.unwrap_err();
     assert!(
         e.to_string().ends_with(
-            "nothing staged: app/DATABASE_URL (failed prefix (expected prefix postgres://))"
+            "nothing was changed: app/DATABASE_URL (failed prefix (expected prefix postgres://))"
         ),
         "{e}"
     );

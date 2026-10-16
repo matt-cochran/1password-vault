@@ -2,16 +2,24 @@
   "schema_version": 1,
   "ok": false,
   "exit_code": 6,
-  "next": "opv sync prod --deploy --json --confirm prod",
-  "do": "confirm with the user that prod is the environment to change",
+  "next": "<the command as typed> --confirm prod",
+  "do": "make sure prod is the environment you mean (agents: ask the user)",
   "error": {
     "code": "confirm_required",
     "category": "policy",
-    "message": "environment prod is guarded (confirm_env = true): sync needs --confirm prod; nothing was changed",
-    "detail": [],
+    "message": "changing environment prod needs a person's confirmation",
+    "subject": {
+      "env": "prod"
+    },
+    "evidence": {
+      "checked": null,
+      "account": null,
+      "upstream": null
+    },
     "retry": "never",
     "human_required": true,
-    "do": "confirm with the user that prod is the environment to change",
-    "next": "opv sync prod --deploy --json --confirm prod"
+    "do": "make sure prod is the environment you mean (agents: ask the user)",
+    "next": "<the command as typed> --confirm prod",
+    "next_kind": "handoff"
   }
 }
