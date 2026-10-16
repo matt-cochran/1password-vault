@@ -25,8 +25,9 @@ use crate::adapters::onepassword_diagnose::{self as op_diagnose, Facts};
 use crate::adapters::onepassword_diagnose_items::diagnose_item_call;
 use crate::adapters::onepassword_init::{self as init_op, Lookup};
 use crate::cause::{
-    AccountId, Cause, Cmd, CreateKind, DiagnoseContext, EnvName, NameKind, Observed, Refind,
-    ResourceKind, ResourceName, ResourceRef, System, Upstream,
+    AccountId, Cause, Cmd, ConfigSource, CreateKind, DiagnoseContext, DottedPath, EnvName,
+    FieldRule, GivenBy, NameKind, NotEditable, Observed, Refind, ResourceKind, ResourceName,
+    ResourceRef, Scope, System, Upstream,
 };
 use crate::domain::{access_plan, naming};
 use crate::error::Error;
@@ -95,10 +96,16 @@ pub struct Opts {
     pub json: bool,
 }
 
+/// The raw document of `text`. TOML that does not parse is the loader's `ConfigInvalid`
+/// (the field and line it stops at, never the parser's own text, which can quote input).
 pub(crate) fn parse_doc(text: &str) -> Result<DocumentMut, Error> {
-    text.parse().map_err(|e: toml_edit::TomlError| {
-        Error::Config(format!("secrets.toml is not valid TOML ({e}).").into())
-            .with_next("opv config edit")
+    text.parse().map_err(|_: toml_edit::TomlError| {
+        crate::config::parse(text).err().unwrap_or_else(|| {
+            Cause::Bug {
+                site: "bootstrap: TOML the loader reads does not parse as a document",
+            }
+            .into()
+        })
     })
 }
 
@@ -163,8 +170,12 @@ fn environment_names(doc: &DocumentMut) -> Result<Vec<String>, Error> {
         .get("environments")
         .and_then(Item::as_table_like)
         .ok_or_else(|| {
-            Error::Config("secrets.toml declares no environment.".into())
-                .with_next("opv init <env>")
+            Error::from(Cause::ConfigInvalid {
+                source: crate::domain::model::ReadFrom::default().0,
+                at: None,
+                field: DottedPath(vec!["environments".into()]),
+                rule: FieldRule::NoEnvironment,
+            })
         })?;
     Ok(envs.iter().map(|(name, _)| name.to_string()).collect())
 }
@@ -223,15 +234,20 @@ enum Seen {
 /// names the vault and is dropped unread). A failed call is diagnosed from what op said
 /// (#159): only "not in this account" is a vault outside the account; any other failure (a
 /// sign-in, an unrecognised reply) is returned as its own cause, naming the call. `account`
-/// is the environment's own 1Password account (FR-40), when it records one.
+/// is the environment's own 1Password account (FR-40), when it records one; `scope` the
+/// account the caller already chose for the whole structure (G3), else the checkout's.
 fn vault_visible(
     r: &dyn CommandRunner,
     account: Option<&str>,
+    scope: Option<&str>,
     env: &str,
     vault_id: &str,
 ) -> Result<Seen, Error> {
-    // A service-account or Connect credential belongs to one account: it decides.
+    // A service-account or Connect credential belongs to one account: it decides. Otherwise
+    // the environment's own account, else the one the structure was scoped to (G3), is
+    // where the probe looks; op's default only when neither is known.
     let account = account
+        .or(scope)
         .filter(|_| Host::detect().op_credential.is_none())
         .map(str::to_string);
     let selected = account.clone().or_else(|| {
@@ -321,25 +337,28 @@ pub(crate) fn plan_with(
     rebind: &BTreeSet<String>,
     strict: bool,
 ) -> Result<Vec<EnvPlan>, Error> {
-    plan_checked(r, text, project, rebind, strict).map(|(plans, _)| plans)
+    plan_checked(r, text, project, rebind, strict, None).map(|(plans, _)| plans)
 }
 
 /// [`plan_with`], plus the cataloged `ids_not_in_account` of the first recorded vault op
 /// said is not in the account, with op's reply as its evidence (#159); `None` when there is
-/// none, or when the runner observed no call ([`first_stale`] then words it).
+/// none, or when the runner observed no call (the caller then refuses: an observed call is
+/// the only way to name it). `scope` is the account the caller chose for the structure
+/// (G3): a recorded vault is looked for there, not in op's default.
 pub(crate) fn plan_checked(
     r: &dyn CommandRunner,
     text: &str,
     project: &str,
     rebind: &BTreeSet<String>,
     strict: bool,
+    scope: Option<&str>,
 ) -> Result<(Vec<EnvPlan>, Option<Error>), Error> {
     // #157: a vault `op vault get` cannot open is outside the account only when someone is
     // signed in, so the session is checked (once) before the first such answer is believed.
     let session_checked = std::cell::Cell::new(false);
     let stale = std::cell::RefCell::new(None);
     let visible = |account: Option<&str>, env: &str, v: &str| -> Result<Option<bool>, Error> {
-        match vault_visible(r, account, env, v)? {
+        match vault_visible(r, account, scope, env, v)? {
             Seen::Visible => Ok(Some(true)),
             // A recorded ID is taken as it is when op cannot be asked (the offline trial).
             Seen::Unanswered(_) if !strict => Ok(None),
@@ -479,13 +498,24 @@ fn create(
         .ok()
         .and_then(|v| v["id"].as_str().map(str::to_string))
         .filter(|id| crate::config::is_id(id));
-    // op said it created the object but gave no usable ID: the next run finds it by title.
-    let id = id.ok_or_else(|| {
-        Error::Unknown(
-            format!("1Password created {title:?} but its reply gave no ID to record").into(),
-        )
-        .with_code(crate::error::Code::OutcomeUnknown)
-    })?;
+    // C19: op said it created the object but gave no usable ID. Whether it exists is not
+    // known from that reply; the next run finds it by title, never a second create (X5).
+    let Some(id) = id else {
+        return Err(match crate::runner::take_unusable_reply(&call) {
+            Some(seen) => Cause::CreateOutcomeUnknown {
+                system: System::OnePassword,
+                kind,
+                name: title.to_string(),
+                refind: Refind::ByTitle,
+                seen,
+            }
+            .into(),
+            None => Cause::Bug {
+                site: "bootstrap: an op create reply the runner did not observe",
+            }
+            .into(),
+        });
+    };
     Ok(init_op::Named {
         id,
         name: title.to_string(),
@@ -761,19 +791,30 @@ pub fn run(
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     let text = std::fs::read_to_string(path).map_err(|e| {
-        Error::Config(format!("Cannot read {} ({}).", path.display(), e.kind()).into())
-            .with_next("opv init <env>")
+        Error::from(Cause::ConfigUnreadable {
+            path: path.to_path_buf(),
+            io: e.kind().into(),
+            given_by: GivenBy::Discovered,
+        })
     })?;
-    let (plans, stale) = plan_checked(r, &text, project, &opts.rebind, false)?;
+    let (plans, stale) = plan_checked(r, &text, project, &opts.rebind, false, None)?;
     if let Some(env) = &opts.ci_reader
         && !plans.iter().any(|p| &p.environment == env)
     {
         let envs: Vec<String> = plans.iter().map(|p| p.environment.clone()).collect();
         return Err(no_such_environment(env, &envs));
     }
-    if let Some(e) = stale.or_else(|| first_stale(&plans)) {
+    // A recorded ID outside the account: the cataloged `ids_not_in_account` op's reply was
+    // diagnosed as, with that reply as its evidence (#159, C19).
+    if let Some(e) = stale {
         print_plan(out, &plans, opts.json, false)?;
         return Err(e);
+    }
+    if has_stale(&plans) {
+        return Err(Cause::Bug {
+            site: "bootstrap: a recorded vault outside the account left no observation",
+        }
+        .into());
     }
     if opts.dry_run {
         return print_plan(out, &plans, opts.json, false);
@@ -835,18 +876,21 @@ pub fn run(
     if !recorded.is_empty() {
         if is_generated(&text) {
             print_plan(out, &plans, opts.json, false)?;
-            let ids: Vec<String> = recorded.iter().map(Recorded::line).collect();
-            return Err(Error::Policy(
-                format!(
-                    "{} is generated, so opv does not rewrite it; record these IDs in its \
-                     generator's input:\n  {}",
-                    path.display(),
-                    ids.join("\n  ")
-                )
-                .into(),
-            )
-            .with_code(crate::error::Code::PolicyRefused)
-            .with_next("opv bootstrap --dry-run"));
+            // What was made in 1Password, with the IDs its generator's input must record;
+            // the file itself is never rewritten (FR-52).
+            return Err(Cause::Partial {
+                done: recorded.iter().map(Recorded::line).collect(),
+                approval_used: None,
+                approval_scope: None,
+                then: Box::new(Cause::ConfigNotEditable {
+                    source: ConfigSource::File {
+                        path: path.to_path_buf(),
+                        given_by: GivenBy::Discovered,
+                    },
+                    reason: NotEditable::Generated { generator: None },
+                }),
+            }
+            .into());
         }
         super::init::write_atomic(path, &new_text, true)?;
     }
@@ -854,7 +898,7 @@ pub fn run(
     for p in &plans {
         super::skeleton::run_as(&fleet, &p.environment, r, &mut std::io::sink(), false)?;
     }
-    let personal_items = personal_items(&fleet, project, &plans, r, path)?;
+    let personal_items = personal_items(&fleet, project, &plans, r)?;
     print_plan(out, &plans, opts.json, true)?;
     if opts.json {
         return Ok(());
@@ -891,7 +935,6 @@ fn personal_items(
     project: &str,
     plans: &[EnvPlan],
     r: &dyn CommandRunner,
-    path: &Path,
 ) -> Result<Vec<String>, Error> {
     let mut lines = Vec::new();
     for p in plans {
@@ -901,23 +944,8 @@ fn personal_items(
         }
         let team = fleet.environment(env_name)?;
         let Some(vault) = super::personal::private_vault(r, team)? else {
-            // The step is this same command once the field is set (05.06: never a bare
-            // `opv bootstrap` that drops --project or --file).
-            return Err(Error::Config(
-                format!(
-                    "Environment {env_name} has personal keys, but no personal vault was found \
-                     (looked for {}).",
-                    team.personal_vault
-                        .clone()
-                        .unwrap_or_else(|| "Private, Employee, Personal".into())
-                )
-                .into(),
-            )
-            .with_do(format!(
-                "set personal_vault in [environments.{env_name}] of {} to the title of a vault \
-                 only you can open",
-                path.display()
-            )));
+            // C19, R34: the vault titles looked for, and the field that names another one.
+            return Err(super::personal::vault_missing(team));
         };
         let title = super::personal::item_title(team, project);
         let item = ensure_item(r, &vault.id, &title, &env_tag(project, env_name), "")?;
@@ -980,14 +1008,14 @@ fn ci_reader_steps(
         boundary_vaults: e.boundaries.values().map(|b| b.vault_id.as_str()).collect(),
     };
     let grants = access_plan::required(project, &[], &[needs]);
+    // No boundary vault: no product has a team key in this environment, so a CI reader
+    // would read nothing.
     let Some(command) = access_plan::create_command(&grants) else {
-        return Err(Error::Config(
-            format!(
-                "Environment {env} has no boundary vault, so its CI reader would read nothing."
-            )
-            .into(),
-        )
-        .with_next("opv ready"));
+        return Err(Cause::NothingInScope {
+            env: EnvName::new(env),
+            what: Scope::NoProductHasKeys,
+        }
+        .into());
     };
     let lines = [
         format!(
@@ -1029,58 +1057,16 @@ fn no_such_environment(env: &str, declared: &[String]) -> Error {
     .into()
 }
 
-/// The first recorded ID the selected account cannot see, as `ids_not_in_account`.
-pub(crate) fn first_stale(plans: &[EnvPlan]) -> Option<Error> {
-    for p in plans {
-        let env = &p.environment;
-        for b in &p.boundaries {
-            if let BoundaryStep::IdsNotInAccount { vault_id } = &b.step {
-                return Some(stale_error(
-                    format!(
-                        "Environment {env}: boundaries.{} names vault {vault_id}",
-                        b.boundary
-                    ),
-                    format!(
-                        "either select the account that holds it (opv account list, then opv \
-                         account use <ID>), or record a new vault and item in this account with \
-                         opv bootstrap --rebind {env} (values are not moved)"
-                    ),
-                ));
-            }
-        }
-        for s in &p.state_vaults {
-            if let StateStep::IdsNotInAccount { vault_id } = &s.step {
-                return Some(stale_error(
-                    format!(
-                        "Environment {env}: target {} names state vault {vault_id}",
-                        s.target
-                    ),
-                    format!(
-                        "either select the account that holds it (opv account list, then opv \
-                         account use <ID>), or remove state_vault_id from \
-                         [environments.{env}.targets.{}] and run opv bootstrap to create one \
-                         in this account",
-                        s.target
-                    ),
-                ));
-            }
-        }
-    }
-    None
-}
-
-/// `ids_not_in_account`: a recorded ID belongs to an account other than the selected one.
-fn stale_error(what: String, todo: String) -> Error {
-    Error::Config(
-        format!(
-            "{what}, which is not in the selected 1Password account; opv never falls back to \
-             another account."
-        )
-        .into(),
-    )
-    .with_code(crate::error::Code::IdsNotInAccount)
-    .with_do(todo)
-    .with_next("opv account list")
+/// True when a recorded ID of `plans` is not in the selected account.
+fn has_stale(plans: &[EnvPlan]) -> bool {
+    plans.iter().any(|p| {
+        p.boundaries
+            .iter()
+            .any(|b| matches!(b.step, BoundaryStep::IdsNotInAccount { .. }))
+            || p.state_vaults
+                .iter()
+                .any(|s| matches!(s.step, StateStep::IdsNotInAccount { .. }))
+    })
 }
 
 fn print_plan(out: &mut dyn Write, plans: &[EnvPlan], json: bool, done: bool) -> Result<(), Error> {

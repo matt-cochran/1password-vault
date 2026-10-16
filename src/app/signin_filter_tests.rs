@@ -161,17 +161,26 @@ fn a_known_account_is_named_in_the_sign_in_cause() {
     );
 }
 
+/// C9, 04.02: a failure the classifier cannot name goes through the 1Password diagnosis of
+/// the prompted call, never opv's own guess.
 #[test]
-fn an_unrecognised_failure_names_the_running_command() {
-    let e = Failure::Unexpected.error("signing in", None, "status");
-    assert!(e.mentions("during opv status"), "{e}");
+fn an_unrecognised_failure_is_diagnosed_from_ops_reply() {
+    let e = Failure::Unexpected.error_said("signing in", None, "status", &[], Some(1));
+    assert_eq!(e.code_str(), "unrecognized_failure");
 }
 
-/// Audit 04.27: the tail says plainly that no session token left the process.
+/// #142: op's own line is the evidence of a diagnosed prompt failure.
 #[test]
-fn an_unrecognised_failure_says_no_session_token_was_shown() {
-    let e = Failure::Unexpected.error("signing in", None, "status");
-    assert!(e.mentions("No session token was shown or saved."), "{e}");
+fn an_unrecognised_failure_shows_ops_own_line() {
+    let e = Failure::Unexpected.error_said(
+        "signing in",
+        None,
+        "status",
+        &["something op said".to_string()],
+        Some(1),
+    );
+    let shown = crate::error::report(&e, "-", None);
+    assert!(shown.contains("something op said"), "{shown}");
 }
 
 /// Audit 04.15: op with the app integration off reports no accounts configured.

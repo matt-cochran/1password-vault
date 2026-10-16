@@ -474,7 +474,7 @@ fn created(
             Err(failed_read(r, &Host::detect, &ctx, &call, vault))
         }
         Ok(CreateOutcome::OutcomeUnknown(seen)) => Err(unknown(Failed::with_reply(seen))),
-        Err(e) => Err(op_spawn_error(&e, &Host::detect)),
+        Err(e) => Err(op_spawn_error(r, &e, &Host::detect)),
     }
 }
 

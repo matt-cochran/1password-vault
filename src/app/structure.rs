@@ -124,9 +124,10 @@ pub fn plan(
     account: &str,
 ) -> Result<Plan, Error> {
     if !crate::config::is_id(account) {
-        return Err(no_account());
+        return Err(no_account("structure"));
     }
-    let (environments, stale) = bootstrap::plan_checked(r, text, project, &BTreeSet::new(), true)?;
+    let (environments, stale) =
+        bootstrap::plan_checked(r, text, project, &BTreeSet::new(), true, Some(account))?;
     // A recorded ID outside the account: the cataloged `ids_not_in_account` op's reply was
     // diagnosed as, with that reply as its evidence.
     if let Some(e) = stale {
@@ -178,11 +179,11 @@ fn has_stale(environments: &[EnvPlan]) -> bool {
 /// No 1Password account ID for the project. Under a service-account or Connect credential
 /// the structure is a person's own (`own_session_required`); otherwise op knows no account
 /// on this machine, and signing in adds one (`op_not_signed_in`). opv never uses op's
-/// default account for a write.
-fn no_account() -> Error {
+/// default account for a write. `command` is the opv command that needed it (G3).
+fn no_account(command: &str) -> Error {
     match crate::host::Host::detect().op_credential {
         Some(c) => Cause::NeedsOwnSession {
-            command: CommandId("structure".into()),
+            command: CommandId(command.into()),
             identity: Principal::ShellToken {
                 var: VarName::new(c.var()),
             },
@@ -444,7 +445,8 @@ pub fn scope(start: &Path, r: &dyn CommandRunner) -> Result<Scope, Error> {
         path.parent().unwrap_or(start),
     )?;
     let given = config_store::account_env().or_else(|| config_store::pointer_account(start));
-    let account = config_store::pick_account(r, given)?.ok_or_else(no_account)?;
+    let account =
+        config_store::pick_account(r, given)?.ok_or_else(|| no_account(&invoked("structure")))?;
     Ok(Scope {
         path,
         project,
@@ -458,13 +460,33 @@ pub fn scope(start: &Path, r: &dyn CommandRunner) -> Result<Scope, Error> {
 /// and the agent's approved sync resolve it the same way, so an approval made in one
 /// always names what the other consumes.
 pub fn binding(start: &Path, r: &dyn CommandRunner) -> Result<(String, String), Error> {
+    // G3: the command the person ran (`approve`, `sync`), never `structure`.
+    binding_as(start, r, &invoked("sync"))
+}
+
+/// The opv command this run is (`approve`, `sync`, `structure plan`), for a refusal that
+/// names it (G3); `default` under the MCP server, whose tools name their own.
+fn invoked(default: &str) -> String {
+    let command = crate::error::invocation().command.join(" ");
+    match command.as_str() {
+        "" | "mcp" => default.to_string(),
+        _ => command,
+    }
+}
+
+/// [`binding`] for the opv command `command` (an MCP tool names its command itself).
+pub fn binding_as(
+    start: &Path,
+    r: &dyn CommandRunner,
+    command: &str,
+) -> Result<(String, String), Error> {
     use crate::config_store;
     let dir = config_store::walk_up(start, "secrets.toml")
         .and_then(|p| p.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| start.to_path_buf());
     let project = config_store::default_project(None, config_store::git_repo(r).as_deref(), &dir)?;
     let given = config_store::account_env().or_else(|| config_store::pointer_account(start));
-    let account = config_store::pick_account(r, given)?.ok_or_else(no_account)?;
+    let account = config_store::pick_account(r, given)?.ok_or_else(|| no_account(command))?;
     Ok((project, account))
 }
 

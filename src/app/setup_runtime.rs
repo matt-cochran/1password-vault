@@ -391,9 +391,11 @@ pub enum PromptFailure {
 impl PromptFailure {
     fn error(self, what: &str, account: Option<&str>, command: &str) -> Error {
         match self {
-            PromptFailure::Op(f, messages, exit) => {
-                with_said(f.error(what, account, command), &messages, exit)
-            }
+            PromptFailure::Op(f, messages, exit) => with_said(
+                f.error_said(what, account, command, &messages, exit),
+                &messages,
+                exit,
+            ),
             PromptFailure::Spawn(e) => e,
         }
     }

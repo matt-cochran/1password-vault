@@ -160,8 +160,7 @@ personal = true
 fn run_without_a_personal_item() -> (FakeRunner, Error) {
     let r = FakeRunner::new([
         Output::failure(2),
-        Output::success(b"[]".to_vec()),
-        Output::success(b"[]".to_vec()),
+        Output::success(br#"[{"id":"vpriv0000000000000000000001","name":"Private"}]"#.to_vec()),
         Output::success(b"[]".to_vec()),
     ]);
     let e = crate::app::run::run(&personal_fleet(), "dev", "api", &["env".to_string()], &r)
@@ -287,7 +286,7 @@ fn locate_reports_setup_missing_when_the_item_does_not_exist() {
         .borrow_mut()
         .push(("vpriv0000000000000000000001".into(), "Private".into()));
     let e = locate(&op, &personal_fleet(), "dev", "myapp").unwrap_err();
-    assert_eq!(e.next_step(), Some("opv bootstrap"));
+    assert_eq!(e.code_str(), "item_not_found");
 }
 
 #[test]
@@ -327,14 +326,25 @@ fn a_missing_personal_item_is_named_by_its_title() {
         .borrow_mut()
         .push(("vpriv0000000000000000000001".into(), "Private".into()));
     let e = locate(&op, &personal_fleet(), "dev", "myapp").unwrap_err();
-    assert!(e.text().contains("myapp · dev (personal)"), "{e}");
+    let shown = crate::error::report(&e, "-", None);
+    assert!(shown.contains("myapp · dev (personal)"), "{shown}");
 }
 
 #[test]
 fn a_missing_personal_vault_is_named_by_the_titles_tried() {
     let op = FakeOp::default();
     let e = locate(&op, &personal_fleet(), "dev", "myapp").unwrap_err();
-    assert!(e.text().contains("\"Private\""), "{e}");
+    let shown = crate::error::report(&e, "-", None);
+    assert!(shown.contains("Private"), "{shown}");
+}
+
+/// C19, R34: a missing personal vault steps to the field that names another one.
+#[test]
+fn a_missing_personal_vault_names_the_personal_vault_field() {
+    let op = FakeOp::default();
+    let e = locate(&op, &personal_fleet(), "dev", "myapp").unwrap_err();
+    let shown = crate::error::report(&e, "-", None);
+    assert!(shown.contains("environments.dev.personal_vault"), "{shown}");
 }
 
 #[test]

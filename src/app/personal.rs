@@ -14,13 +14,16 @@ use std::path::Path;
 use crate::adapters::onepassword;
 use crate::adapters::onepassword_init::{self, Lookup};
 use crate::adapters::onepassword_tidy;
+use crate::cause::{
+    Cause, DottedPath, NamedBy, NotFoundState, ResourceKind, ResourceName, ResourceRef, System,
+};
 use crate::config_store;
 use crate::domain::convention;
 use crate::domain::plan::ItemField;
 use crate::domain::{Boundary, Environment, Fleet, KeySpec};
 use crate::error::Error;
 use crate::host::Host;
-use crate::runner::CommandRunner;
+use crate::runner::{Call, CommandRunner};
 
 /// The vault titles a person's own vault may have, by account type (FR-55).
 const PRIVATE_VAULTS: [&str; 3] = ["Private", "Employee", "Personal"];
@@ -56,7 +59,7 @@ pub fn item_title(env: &Environment, project: &str) -> String {
 /// titled `personal_vault`, or the first of `Private`, `Employee`, `Personal` that exists;
 /// then the item titled [`item_title`] in it. Returned as the vault and item an item read
 /// addresses, so every existing reader works on it.
-/// A missing vault or item is the setup error [`not_set_up`]; the caller turns it into
+/// A missing vault or item is `NotFound` ([`vault_missing`]); the caller turns it into
 /// findings (`check`) or a configuration error naming the keys (`run`).
 pub fn locate(
     r: &dyn CommandRunner,
@@ -70,20 +73,12 @@ pub fn locate(
     let team = fleet.environment(env_name)?;
     let vault = match private_vault(r, team)? {
         Some(v) => v,
-        None => return Err(not_set_up(env_name, &Missing::Vault(vault_titles(team)))),
+        None => return Err(vault_missing(team)),
     };
     let title = item_title(team, project);
     let item = match onepassword_init::find_item(r, &vault.id, &title, &Host::detect)? {
         Lookup::Found(i) => i,
-        Lookup::Missing(_) => {
-            return Err(not_set_up(
-                env_name,
-                &Missing::Item {
-                    title,
-                    vault: vault.name.clone(),
-                },
-            ));
-        }
+        Lookup::Missing(_) => return Err(item_missing(team, &vault.id, &title)),
     };
     Ok(Some(Boundary {
         vault_id: vault.id,
@@ -114,31 +109,83 @@ fn vault_titles(team: &Environment) -> Vec<&str> {
     }
 }
 
-/// What a personal item lookup did not find.
-enum Missing<'a> {
-    /// No vault with any of these titles.
-    Vault(Vec<&'a str>),
-    /// No item with this title in the vault.
-    Item { title: String, vault: String },
+/// FR-55, 04.16, R34: no vault with any title a personal item may be in. The vault titles
+/// opv looked for are named, and so is the field that sets one (`personal_vault`); the
+/// observed call is the last `op vault list` that answered without it.
+pub(crate) fn vault_missing(team: &Environment) -> Error {
+    let call = Call::new(onepassword::OP, &["vault", "list", "--format", "json"]);
+    missing(
+        &call,
+        ResourceRef {
+            kind: ResourceKind::PersonalVault,
+            name: ResourceName::new(vault_titles(team).join(", ")),
+            scope: None,
+        },
+        &team.name,
+        "personal_vault",
+    )
 }
 
-/// FR-55: the person has not created their personal item yet (or the vault is missing),
-/// naming the vault or item title opv looked for (audit 04.16). Value-free; `bootstrap`
-/// creates it. The catalog's `NotFound` needs a failed call, and a lookup that listed no
-/// match made none, so this stays a plain error until the catalog has a cause for it.
-fn not_set_up(env_name: &str, missing: &Missing<'_>) -> Error {
-    let what = match missing {
-        Missing::Vault(titles) => {
-            let quoted: Vec<String> = titles.iter().map(|t| format!("{t:?}")).collect();
-            format!("no vault titled {}", quoted.join(" or "))
+/// FR-55, 04.16: no item titled `title` in the person's vault `vault_id`. Value-free;
+/// `bootstrap` creates it. The observed call is the `op item list` that answered without it.
+fn item_missing(team: &Environment, vault_id: &str, title: &str) -> Error {
+    let args = ["item", "list", "--vault", vault_id, "--format", "json"];
+    let call = Call::new(onepassword::OP, &args);
+    missing(
+        &call,
+        ResourceRef {
+            kind: ResourceKind::Item,
+            name: ResourceName::new(title),
+            scope: Some(vault_id.to_string()),
+        },
+        &team.name,
+        "personal_item",
+    )
+}
+
+/// `resource` is not in the listing `call` answered with (NotFound, taken while the runner
+/// still holds that answered call): named by the environment's `field` (`personal_vault`,
+/// `personal_item`), which sets the title opv looked for.
+fn missing(call: &Call, resource: ResourceRef, env_name: &str, field: &str) -> Error {
+    match crate::runner::take_unusable_reply(call) {
+        Some(seen) => Cause::NotFound {
+            system: System::OnePassword,
+            resource,
+            named_by: NamedBy::ConfigField {
+                path: DottedPath(vec![
+                    "environments".into(),
+                    env_name.to_string(),
+                    field.to_string(),
+                ]),
+            },
+            state: NotFoundState::Missing,
+            seen,
         }
-        Missing::Item { title, vault } => {
-            format!("no item titled {title:?} in vault {vault:?}")
+        .into(),
+        None => Cause::Bug {
+            site: "personal: a listing the runner did not observe",
         }
-    };
-    Error::Source(format!("your personal item for {env_name} is not set up yet: {what}").into())
-        .with_code(crate::error::Code::ItemNotFound)
-        .with_next("opv bootstrap")
+        .into(),
+    }
+}
+
+/// Whether `e` says the personal item or its vault is not there (not set up yet), as
+/// opposed to a sign-in or 1Password not answering.
+fn not_set_up(e: &Error) -> bool {
+    e.code() == crate::error::Code::ItemNotFound
+        || matches!(
+            e.cause(),
+            Some((
+                Cause::NotFound {
+                    resource: ResourceRef {
+                        kind: ResourceKind::PersonalVault,
+                        ..
+                    },
+                    ..
+                },
+                _
+            ))
+        )
 }
 
 /// The team fields with every personal key's field removed and the personal item's fields
@@ -167,7 +214,7 @@ pub fn merged_fields(
     let at = match locate(r, fleet, env_name, project) {
         Ok(Some(at)) => at,
         Ok(None) => return Ok(out),
-        Err(e) if e.code() == crate::error::Code::ItemNotFound => return Ok(out),
+        Err(e) if not_set_up(&e) => return Ok(out),
         Err(e) => return Err(e),
     };
     let team = fleet.environment(env_name)?;
