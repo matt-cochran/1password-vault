@@ -147,12 +147,18 @@ Each snapshot has the text run (stderr: `opv:` line, `checked:`, the tool's scru
 
 ## Findings
 
-Write each message you want changed here (snapshot, what is wrong, what it should say). They are fixed before the tag.
+The review was delegated by the owner to Junior (DeepSeek through `junior handoff`), and the manager verified every finding against its snapshot. It ran in three passes:
 
--
+1. **The full set:** all 61 scenarios and one cell of every matrix group, 125 snapshots, gave 39 findings (17 high). Thirty-four were confirmed and five rejected as not defects. Fixed on `feat/error-catalog`: a probe's runner facts (tool missing, timeout) now come before any inference, the real attempt counts, Next steps that keep `--apply`/`--confirm` and never point at `--help`, the namespace and context in Kubernetes errors, wording, and a simulator fault-mapping bug.
+2. **The 32 snapshots changed or added by those fixes:** 11 findings. Eight were fixed (the vault name taken from `op vault list`, an unexplained placeholder, two Next steps, the GitHub environment 404, two Do lines, a harness cell), one was reworded (R2-4) and two were not defects.
+3. **The snapshots changed by round 2 and by the move to the owner's recorded op replies:** no new defects.
+
+The triage, with every finding and its outcome, is in `.delivery/v0100/review/TRIAGE.md` (not committed: the review record).
+
+Left for later, needing owner recordings: `op vault user list` without Manage, and `op whoami` with only another account signed in.
 
 ## Sign-off
 
-- [ ] I have read every scenario and one cell of every matrix group, and the messages may ship in 0.10.0.
+- [x] The owner accepted Junior's review, verified by the manager, with its findings fixed, as the snapshot sign-off for 0.10.0 (decision of 2026-10-16).
 
-Signed: ____________ Date: ____________
+Signed: Matthew Cochran (by decision, recorded by Claude) Date: 2026-10-16
