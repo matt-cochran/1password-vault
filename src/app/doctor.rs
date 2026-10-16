@@ -45,6 +45,10 @@ use std::io::{self, Write};
 use super::write_err;
 use crate::adapters::probe::{parse_version, spawn_tool, version_in};
 use crate::adapters::{onepassword, registry};
+use crate::cause::{
+    Cause, DiagnoseContext, EnvName, KeyName, ProductName, ResourceKind, ResourceName, ResourceRef,
+    TargetName, Unusable, UsageProblem, ValueRow, ValueState,
+};
 use crate::domain::model::key_label;
 use crate::domain::{Fleet, KeyState};
 use crate::error::Error;
@@ -62,12 +66,6 @@ const CONFIG_CHECK: &str = "config";
 const ITEM_CHECK: &str = "item";
 /// Settings health across environments (#92).
 const SETTINGS_CHECK: &str = "settings";
-
-/// The fixed step for an invalid configuration.
-const CONFIG_FIX: &str = "fix secrets.toml (see the config line above), then run opv doctor";
-
-/// The step when there is no configuration yet (P3); the config line lists the others.
-const FIRST_RUN: &str = "opv init dev";
 
 pub fn run_scoped(
     config: Result<Fleet, Error>,
@@ -144,13 +142,22 @@ fn run_request_on(
         targets,
         settings,
     } = request;
-    let config =
-        match env {
-            Some(e) => config.and_then(|f| super::local::select(&f, e, product, false)),
-            None if product.is_some() => Err(Error::Config("--product requires --env".into())
-                .with_code(crate::error::Code::Usage)),
-            None => config,
-        };
+    let config = match env {
+        // An undeclared environment is the cause's own: the same doctor with a unique close
+        // name, else a listing (07.06, 07.32).
+        Some(e) => config.and_then(|f| {
+            super::environment(&f, e)?;
+            super::local::select(&f, e, product, false)
+        }),
+        None if product.is_some() => Err(Cause::Usage {
+            problem: UsageProblem::NeedsFlag {
+                flag: "--product".into(),
+                needs: "--env".into(),
+            },
+        }
+        .into()),
+        None => config,
+    };
     // Scoped to environments without a target: local runs are all they are for, so a
     // Windows op.exe is a failure there and only a warning elsewhere (#54).
     let local_only = env.is_some()
@@ -245,7 +252,10 @@ struct Row {
     target: Option<String>,
     state: State,
     text: String,
-    /// The failure's own next step (NR-19), printed as `  fix: <step>` under the line.
+    /// The error's own Do (a failure), printed as `  do: <action>` under the line.
+    act: Option<String>,
+    /// The error's own next step (NR-19), or a warning's, printed as `  fix: <step>` under
+    /// the line. Never a step of doctor's own (design §6.1, 07.06).
     fix: Option<String>,
     /// A failed call's scrubbed stderr excerpt (`  az said: …`), printed under the line in
     /// text output only, never in `--json` (M2, NR-31).
@@ -261,23 +271,19 @@ impl Row {
         }
     }
 
-    /// The remediation for this row: the fixed configuration step, the failure's own next
-    /// step, or its first indented line (the install, sign-in, `op account add` or log-in
-    /// command the failure already prints, FR-26). `None` for a row with nothing to do.
-    /// Never tool output or a value (SR-1).
+    /// The remediation for this row: the failure's own next step, or its first indented
+    /// line (the install, sign-in, `op account add` or log-in command the failure already
+    /// prints, FR-26). `None` for a row with nothing to do, and for a failure whose own step
+    /// is a Do only (a person picks). Never tool output or a value (SR-1).
     fn next(&self) -> Option<String> {
-        if self.state == State::Fail && self.name == CONFIG_CHECK {
-            // No file yet is a first run, not a file to fix (P3).
-            if self.text.contains(crate::config::NOT_FOUND) {
-                return Some(FIRST_RUN.into());
-            }
-            return Some(CONFIG_FIX.into());
-        }
         if matches!(self.state, State::Ok | State::Skip) {
             return None;
         }
         if let Some(f) = &self.fix {
             return Some(f.clone());
+        }
+        if self.act.is_some() {
+            return None;
         }
         self.text
             .lines()
@@ -287,9 +293,11 @@ impl Row {
             .filter(|h| !h.is_empty())
     }
 
-    /// The `Next:` step for this row when it is the first failure (NR-19).
-    fn step(&self) -> String {
-        self.next().unwrap_or_else(|| rerun(&self.label()))
+    /// The `Next:` step for this row when it is the first failure of a Legacy error that
+    /// names none of its own (NR-19): `rerun` is doctor with the scope's flags (X1).
+    fn step(&self, rerun: &str) -> String {
+        self.next()
+            .unwrap_or_else(|| format!("fix the {} failure above, then {rerun}", self.label()))
     }
 }
 
@@ -301,6 +309,8 @@ struct Report {
     first: Option<(usize, Error)>,
     /// The target the checks pushed now are about (FR-56); `None` outside a target.
     target: Option<String>,
+    /// `opv doctor` with the scope's flags: what a Legacy step re-runs (X1).
+    rerun: String,
 }
 
 impl Report {
@@ -315,13 +325,17 @@ impl Report {
         }
     }
 
-    /// A failing check whose line text differs from its error (the item check, P6).
+    /// A failing check whose line text differs from its error (the item check, P6). The
+    /// row shows the error's own Do and Next (design §6.1).
     fn fail(&mut self, name: &str, text: String, e: Error) {
-        let fix = e.next_step().map(str::to_string);
+        let (act, fix) = super::own_step(&e, &self.rerun);
         if self.first.is_none() {
             self.first = Some((self.rows.len(), e));
         }
         self.row(name, State::Fail, text, fix);
+        if let Some(row) = self.rows.last_mut() {
+            row.act = act;
+        }
     }
 
     /// A warning with its own next step (the settings check, #92).
@@ -339,6 +353,7 @@ impl Report {
             target: self.target.clone(),
             state,
             text,
+            act: None,
             fix,
             excerpt: None,
         });
@@ -377,7 +392,10 @@ fn run_on_with(
     scope: Scope<'_>,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    let mut report = Report::default();
+    let mut report = Report {
+        rerun: doctor_command(&scope),
+        ..Report::default()
+    };
     let (fleet, config_line) = match config {
         Ok(f) => {
             let mut summary = config_summary(&f);
@@ -421,9 +439,7 @@ fn run_on_with(
     }
     if let Some(env) = scope.env {
         match &fleet {
-            Some(f) if report.passed("op auth") => {
-                item_check(f, env, scope.product, r, &mut report)
-            }
+            Some(f) if report.passed("op auth") => item_check(f, env, r, &mut report),
             Some(_) => report.skip(
                 ITEM_CHECK,
                 "not checked (see the op auth line above)".into(),
@@ -499,33 +515,58 @@ fn run_on_with(
     }
     report.push("opv", opv_on_path(r));
     report.push("agent skill", Ok(agent_skill()));
+    if let Some(check) = core_dumps() {
+        report.push(CORE_DUMPS_CHECK, Ok(check));
+    }
     if scope.json {
-        print_json(&report, &doctor_command(&scope), scope.source, out)?;
+        print_json(&report, scope.source, out)?;
     } else {
         print_text(&report, out, &mut std::io::stderr())?;
     }
-    // The first failure is the result: its FAIL line above has the detail, so the error
-    // names the check only, and its next step is that check's remediation (NR-19). The
+    // The first failure is the result, with its own Do and Next (design §6.1: no step
+    // override, 07.06). Only a Legacy error that names no step of its own gets the row's
+    // remediation (its first indented line, else the re-run with the scope's flags). The
     // `Next:` line is printed once, last, by the error report on stderr.
     match report.first {
         Some((index, e)) => {
             let row = &report.rows[index];
-            let (check, next) = (row.label(), row.step());
-            Err(e
-                .map_text(|_| format!("{check} check failed (see the FAIL line above)"))
-                .with_next(next))
+            Err(match e.cause() {
+                Some(_) => e,
+                None => {
+                    let step = row.step(&report.rerun);
+                    e.or_next(|| step)
+                }
+            })
         }
         None => {
             if !scope.json {
-                writeln!(out, "all clear: nothing pending").map_err(write_err)?;
+                writeln!(out, "{}", closing_line(&report)).map_err(write_err)?;
             }
             Ok(())
         }
     }
 }
 
-/// One line per check, with `  fix: <step>` under a failure whose step is not already
-/// in its text. The closing `Next:` line is `run_on`'s (all clear) or the error report's.
+/// The last line of a run without failures: "all clear" only when no check warned, since
+/// a warning is something to look at (07.21, X26).
+fn closing_line(report: &Report) -> String {
+    match report
+        .rows
+        .iter()
+        .filter(|r| r.state == State::Warn)
+        .count()
+    {
+        0 => "all clear: nothing pending".into(),
+        n => format!(
+            "no failures; {} above",
+            super::plural(n, "warning", "warnings")
+        ),
+    }
+}
+
+/// One line per check, with the error's own `  do: <action>` and `  fix: <step>` under a
+/// failure or a warning whose step is not already in its text (07.21). The closing line is
+/// `run_on`'s (all clear, or the warning count) or the error report's.
 /// The report as text on `out`; a failed call's scrubbed excerpt goes to `err` (stderr)
 /// right after its FAIL line, never to stdout or a JSON document (M2, NR-31).
 fn print_text(report: &Report, out: &mut dyn Write, err: &mut dyn Write) -> Result<(), Error> {
@@ -535,7 +576,13 @@ fn print_text(report: &Report, out: &mut dyn Write, err: &mut dyn Write) -> Resu
             out.flush().map_err(write_err)?;
             let _ = write!(err, "{x}");
         }
-        if let (State::Fail, Some(fix)) = (row.state, &row.fix) {
+        if !matches!(row.state, State::Fail | State::Warn) {
+            continue;
+        }
+        if let Some(act) = &row.act {
+            writeln!(out, "  do: {act}").map_err(write_err)?;
+        }
+        if let Some(fix) = &row.fix {
             writeln!(out, "  fix: {fix}").map_err(write_err)?;
         }
     }
@@ -564,39 +611,55 @@ fn doctor_command(scope: &Scope<'_>) -> String {
 /// a check with something to do has `do` (the action only a person can take, or null)
 /// and `next` (a command that runs as typed), both null otherwise; the top-level pair is
 /// the first failing check's.
-fn print_json(
-    report: &Report,
-    rerun: &str,
-    source: Option<&str>,
-    out: &mut dyn Write,
-) -> Result<(), Error> {
-    let split = |row: &Row| row.next().map(|n| crate::error::split_step(&n, rerun));
+fn print_json(report: &Report, source: Option<&str>, out: &mut dyn Write) -> Result<(), Error> {
+    let rerun = report.rerun.as_str();
+    // The row's own Do and Next; a step lifted from the text is split at ", then".
+    let step = |row: &Row| -> (Option<String>, Option<String>) {
+        match (&row.act, row.next()) {
+            (Some(a), n) => (Some(a.clone()), n),
+            (None, Some(n)) => {
+                let s = crate::error::split_step(&n, rerun);
+                (s.action, Some(s.next))
+            }
+            (None, None) => (None, None),
+        }
+    };
     let checks: Vec<serde_json::Value> = report
         .rows
         .iter()
         .map(|row| {
-            let step = split(row);
+            let (act, next) = step(row);
             serde_json::json!({
                 "name": row.name,
                 "target": row.target,
                 "status": row.state.json(),
                 "detail": row.text.lines().next().unwrap_or(""),
-                "next": step.as_ref().map(|s| s.next.clone()),
-                "do": step.and_then(|s| s.action),
+                "next": next,
+                "do": act,
             })
         })
         .collect();
-    let first = report
-        .rows
-        .iter()
-        .find(|r| r.state == State::Fail)
-        .map(|r| crate::error::split_step(&r.step(), rerun));
+    // The first failure's own step; a Legacy error naming none gets the re-run, as its
+    // error report does.
+    let (act, next) = match &report.first {
+        Some((i, e)) => {
+            let row = &report.rows[*i];
+            match (e.cause(), step(row)) {
+                (None, (a, None)) => {
+                    let s = crate::error::split_step(&row.step(rerun), rerun);
+                    (a.or(s.action), Some(s.next))
+                }
+                (_, pair) => pair,
+            }
+        }
+        None => (None, None),
+    };
     let doc = serde_json::json!({
         "schema_version": crate::json::SCHEMA_VERSION,
         "config_source": source,
         "checks": checks,
-        "next": first.as_ref().map(|s| s.next.clone()),
-        "do": first.and_then(|s| s.action),
+        "next": next,
+        "do": act,
     });
     writeln!(out, "{doc}").map_err(write_err)
 }
@@ -604,13 +667,7 @@ fn print_json(
 /// P6: `doctor --env` reads the environment's item once, by IDs (FR-13), and plans it
 /// against the declared keys exactly as `check` does, so doctor is never all clear when
 /// `check` would fail. Reports names, counts and states only; never a value.
-fn item_check(
-    fleet: &Fleet,
-    env_name: &str,
-    product: Option<&str>,
-    r: &dyn CommandRunner,
-    report: &mut Report,
-) {
+fn item_check(fleet: &Fleet, env_name: &str, r: &dyn CommandRunner, report: &mut Report) {
     if fleet.environment(env_name).is_err() {
         return report.skip(ITEM_CHECK, "not checked (undefined environment)".into());
     }
@@ -648,33 +705,30 @@ fn item_check(
         Ok((plan, _)) => plan,
         Err(e) => return report.push(ITEM_CHECK, Err(e)),
     };
-    let blocking: Vec<String> = plan
-        .rows
-        .iter()
-        .filter_map(|row| {
-            let state = match &row.state {
-                KeyState::Missing => "missing".to_string(),
-                KeyState::WrongKind => "wrong kind".to_string(),
-                KeyState::RuleFailed(rule, _) => format!("failed {rule}"),
-                KeyState::Ready | KeyState::Skipped | KeyState::SourceBlocked => return None,
-            };
-            Some(format!("{} ({state})", key_label(&row.product, &row.key)))
-        })
-        .collect();
+    let mut blocking: Vec<String> = Vec::new();
+    let mut rows: Vec<ValueRow> = Vec::new();
+    for row in &plan.rows {
+        let (word, state) = match &row.state {
+            KeyState::Missing => ("missing".to_string(), ValueState::Missing),
+            KeyState::WrongKind => ("wrong kind".to_string(), ValueState::StoredAsText),
+            KeyState::RuleFailed(rule, _) => {
+                (format!("failed {rule}"), ValueState::RuleFailed { rule })
+            }
+            KeyState::Ready | KeyState::Skipped | KeyState::SourceBlocked => continue,
+        };
+        blocking.push(format!("{} ({word})", key_label(&row.product, &row.key)));
+        rows.push(ValueRow {
+            product: ProductName::new(row.product.as_str()),
+            key: KeyName::new(row.key.as_str()),
+            target: None,
+            state,
+        });
+    }
     if blocking.is_empty() {
         return report.push(ITEM_CHECK, Ok(Check::Ok(readable)));
     }
-    let check = match product {
-        Some(p) => format!("opv check {env_name} --product {p}"),
-        None => {
-            let first = plan
-                .rows
-                .iter()
-                .find(|r| super::is_blocking(r))
-                .map_or("<product>", |r| r.product.as_str());
-            format!("opv check {env_name} --product {first}")
-        }
-    };
+    // The values a person fills in (R63): the Do names the first and how 1Password shows an
+    // empty field; Next opens it, whichever products the rows span (07.27).
     report.fail(
         ITEM_CHECK,
         format!(
@@ -682,10 +736,11 @@ fn item_check(
             super::plural(blocking.len(), "key", "keys"),
             blocking.join(", ")
         ),
-        Error::findings(
-            blocking.len(),
-            format!("fill them in 1Password, then {check}"),
-        ),
+        Cause::ValuesNeeded {
+            env: EnvName::new(env_name),
+            rows,
+        }
+        .into(),
     );
 }
 
@@ -765,26 +820,18 @@ fn target_checks(
         return;
     };
     if env.targets.is_empty() && only.is_empty() {
-        // A run-only environment uses no provider (the item check already ran).
-        let default = registry::DEFAULT;
-        for check in default.doctor_checks() {
-            report.skip(
-                check,
-                format!("no environment has a {} section", default.section()),
-            );
-        }
-        return;
+        // A run-only environment uses no provider (the item check already ran); other
+        // environments' targets are not this run's (07.22).
+        return report.skip(
+            "target",
+            format!("environment {env_name} has no target (run-only)"),
+        );
     }
     let names = match super::resolve_targets(fleet, env_name, only, "doctor") {
         Ok(names) => names,
-        Err(e) => {
-            // The step to retry is doctor's own form (`--env`), not `opv doctor <env>`.
-            let e = match env.targets.keys().next() {
-                Some(first) => e.with_next(format!("opv doctor --env {env_name} --target {first}")),
-                None => e,
-            };
-            return report.push("target", Err(e));
-        }
+        // The error's own step: an undeclared `--target` re-runs this doctor with a unique
+        // close name, else lists the targets (07.06).
+        Err(e) => return report.push("target", Err(e)),
     };
     for name in names {
         let Some(target) = env.targets.get(&name) else {
@@ -859,11 +906,23 @@ fn state_vault(
         PROBE_TIMEOUT,
     ) {
         Ok(o) if o.status == 0 => Ok(Check::Ok(format!("vault {vault_id} visible"))),
-        Ok(_) => Err(Error::Source(
-            format!("vault {vault_id} is not visible to the signed-in account").into(),
-        )
-        .with_code(crate::error::Code::VaultNoAccess)
-        .with_next(format!("opv access {env} --target {target}"))),
+        // The failed call's cause is the 1Password diagnosis's, never chosen here (§5).
+        Ok(_) => {
+            let said = crate::runner::take_failure_excerpt()
+                .map(|x| x.lines.join("\n"))
+                .unwrap_or_default();
+            let ctx = DiagnoseContext {
+                env: Some(EnvName::new(env)),
+                target: Some(TargetName::new(target)),
+                resource: Some(ResourceRef {
+                    kind: ResourceKind::Vault,
+                    name: ResourceName::new(vault_id),
+                    scope: None,
+                }),
+                ..DiagnoseContext::default()
+            };
+            Err(observed_cause(&said, &ctx, "doctor state vault check"))
+        }
         Err(e) => Ok(Check::Warn(format!(
             "vault {vault_id} not checked (op vault get did not finish: {e})"
         ))),
@@ -905,17 +964,25 @@ fn config_summary(f: &Fleet) -> String {
     )
 }
 
-/// The fix-and-re-run step for a failing check without a remediation of its own.
-fn rerun(check: &str) -> String {
-    format!("fix the {check} failure above, then run opv doctor")
+/// The cause of the `op` call that just failed: the 1Password diagnosis of what the runner
+/// observed (design §5). The runner observes every failed call, so `Bug` names a call that
+/// left no observation (`site`), never a guess.
+fn observed_cause(stderr: &str, ctx: &DiagnoseContext, site: &'static str) -> Error {
+    match crate::runner::take_observed() {
+        Some(seen) => crate::adapters::onepassword_diagnose::diagnose(seen, stderr, ctx).into(),
+        None => Cause::Bug { site }.into(),
+    }
 }
 
 fn op_version(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Check, Error> {
     let o = spawn_tool(r, OP_CLI, host, &["--version"])?;
     if o.status != 0 {
-        return Err(Error::Dependency(
-            format!("op --version failed (exit {})", o.status).into(),
-        ));
+        // op is present but does not report a version: reinstalling it is the step (07.28).
+        return Err(Cause::ToolUnusable {
+            tool: OP_CLI.program.to_string(),
+            why: Unusable::VersionUnreadable,
+        }
+        .into());
     }
     let (a, b, c) = OP_TESTED_MIN;
     Ok(match version_in(&o.stdout) {
@@ -962,9 +1029,15 @@ fn op_auth(
     }
     match session {
         Session::SignedIn(t) => Ok(format!("signed in ({t})")),
-        Session::Unknown => Err(Error::Dependency(
-            "op whoami did not run to completion; the 1Password session could not be checked"
-                .into(),
+        // `op whoami` did not finish: what the runner saw decides, never a guessed session
+        // (07.28, X13).
+        Session::Unknown => Err(observed_cause(
+            "",
+            &DiagnoseContext {
+                env: env.map(EnvName::new),
+                ..DiagnoseContext::default()
+            },
+            "doctor op whoami",
         )),
         s => Err(onepassword::session_error(s, &host(), None, env)
             .expect("every other session is an error")),
@@ -986,12 +1059,20 @@ fn local_run(r: &dyn CommandRunner, local_only: bool) -> Result<Check, Error> {
             "native op; opv run can start local commands".into(),
         )),
         Err(e) if e.kind() == io::ErrorKind::Unsupported && local_only => {
-            Err(Error::Dependency(windows_op.into()))
+            Err(Cause::ToolUnusable {
+                tool: OP_CLI.program.to_string(),
+                why: Unusable::WindowsExeFromWsl,
+            }
+            .into())
         }
         Err(e) if e.kind() == io::ErrorKind::Unsupported => Ok(Check::Warn(windows_op)),
-        Err(e) if local_only => Err(Error::Dependency(
-            format!("cannot inspect op on PATH ({})", e.kind()).into(),
-        )),
+        Err(e) if local_only => Err(Cause::ToolUnusable {
+            tool: OP_CLI.program.to_string(),
+            why: Unusable::SpawnFailed {
+                io: e.kind().into(),
+            },
+        }
+        .into()),
         Err(e) => Ok(Check::Warn(format!(
             "cannot inspect op on PATH ({})",
             e.kind()
@@ -1102,10 +1183,50 @@ fn agent_skill() -> Check {
         return Check::Ok(format!("current (opv {version})"));
     }
     let paths: Vec<String> = stale.iter().map(|c| c.path.display().to_string()).collect();
+    // Owner decision (design §12.4): only an install refreshes the skill, so doctor reports
+    // the outdated copy and names the install; it never writes it.
     Check::Warn(format!(
-        "older or edited copy: {}; run: opv skill install",
-        paths.join(", ")
+        "older or edited copy: {} (only an install refreshes it)\n  {}",
+        paths.join(", "),
+        crate::cause::render::cmd_text(&crate::cause::Cmd {
+            command: vec!["skill".into(), "install".into()],
+            args: Vec::new(),
+        })
     ))
+}
+
+/// The check that reports the host's core-dump setting (design §9.2).
+const CORE_DUMPS_CHECK: &str = "core dumps";
+
+/// `fs.suid_dumpable` (design §9.2): opv makes itself non-dumpable, but with this setting at
+/// 1 or 2 the kernel still writes core dumps of non-dumpable processes, which could hold
+/// values opv had in memory. `None` where there is no such setting (not Linux) and in test
+/// builds, so golden output never depends on the machine running the tests.
+#[cfg(all(target_os = "linux", not(test)))]
+fn core_dumps() -> Option<Check> {
+    std::fs::read_to_string("/proc/sys/fs/suid_dumpable")
+        .ok()
+        .map(|raw| suid_dumpable(&raw))
+}
+
+#[cfg(any(not(target_os = "linux"), test))]
+fn core_dumps() -> Option<Check> {
+    None
+}
+
+/// The verdict on the contents of `/proc/sys/fs/suid_dumpable`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn suid_dumpable(raw: &str) -> Check {
+    match raw.trim() {
+        "0" => {
+            Check::Ok("fs.suid_dumpable = 0: opv's memory is never written to a core dump".into())
+        }
+        v => Check::Warn(format!(
+            "fs.suid_dumpable = {v}: this host may write core dumps of non-dumpable processes, \
+             so a crash could leave opv's memory in a dump\n  \
+             as root: sysctl -w fs.suid_dumpable=0 (and set it in /etc/sysctl.d to keep it)"
+        )),
+    }
 }
 
 /// The command that removes one opv copy on this platform.
@@ -1652,7 +1773,9 @@ mod tests {
         assert!(do_line(&out).starts_with("Do: sign in"), "{out}");
     }
 
-    const CONFIG_STEP: &str = "Do: fix secrets.toml (see the config line above)";
+    /// 07.06: a configuration error without a step of its own gets the re-run of this
+    /// doctor, never a fixed "fix secrets.toml" step (a manifest project has no file).
+    const CONFIG_STEP: &str = "Do: fix the config failure above";
 
     #[test]
     fn next_step_for_invalid_config_is_fix_and_rerun() {
@@ -1663,7 +1786,7 @@ mod tests {
 
     /// A real TOML syntax error carries its position; it is never the step.
     #[test]
-    fn next_step_for_toml_syntax_error_is_the_fixed_config_step() {
+    fn next_step_for_toml_syntax_error_is_fix_and_rerun() {
         let e = crate::config::parse("[profile\nkind = \"fleet\"\n").unwrap_err();
         let r = FakeRunner::new(good());
         let (_, out) = doctor(Err(e), &r);
@@ -1671,7 +1794,7 @@ mod tests {
     }
 
     #[test]
-    fn next_step_for_unknown_field_error_is_the_fixed_config_step() {
+    fn next_step_for_unknown_field_error_is_fix_and_rerun() {
         let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
         let e = crate::config::parse(&text.replace(
             "guidance = \"OpenAI platform / API keys\"",
@@ -1684,13 +1807,47 @@ mod tests {
         assert_eq!(do_line(&out), CONFIG_STEP, "{out}");
     }
 
+    /// 07.28: op present but without a version is reinstalled, not "fixed above".
     #[test]
-    fn next_step_for_failing_version_check_is_fix_and_rerun() {
+    fn next_step_for_failing_version_check_is_a_reinstall() {
         let mut g = good();
         g[0] = Output::failure(2);
         let r = FakeRunner::new(g);
         let (_, out) = doctor(Ok(fleet()), &r);
-        assert_eq!(do_line(&out), "Do: fix the op failure above", "{out}");
+        assert_eq!(do_line(&out), "Do: reinstall op", "{out}");
+    }
+
+    /// 07.06 (S1): a configuration error keeps its own step; doctor never replaces it.
+    #[test]
+    fn a_config_error_keeps_its_own_next_step() {
+        let r = FakeRunner::new(good());
+        let own = Error::Config("manifest is invalid".into()).with_next("opv config edit");
+        let (res, _) = doctor(Err(own), &r);
+        assert_eq!(res.unwrap_err().next_step(), Some("opv config edit"));
+    }
+
+    /// 07.06 (S1): the config line shows the error's own step under it, not a fixed one.
+    #[test]
+    fn the_config_line_shows_the_errors_own_step() {
+        let r = FakeRunner::new(good());
+        let own = Error::Config("manifest is invalid".into()).with_next("opv config edit");
+        let (_, out) = doctor(Err(own), &r);
+        assert!(out.contains("\n  fix: opv config edit\n"), "{out}");
+    }
+
+    /// 07.06 (S1): a catalog cause from the configuration is returned as it is, so its
+    /// steps are its own.
+    #[test]
+    fn a_catalog_config_error_is_returned_unchanged() {
+        let r = FakeRunner::new(good());
+        let cause = crate::cause::Cause::NotDeclared {
+            kind: crate::cause::NameKind::Environment,
+            given: "stagng".into(),
+            candidates: vec!["staging".into()],
+            closest: crate::cause::Closest::unique(&["staging"]),
+        };
+        let (res, _) = doctor(Err(cause.clone().into()), &r);
+        assert_eq!(res.unwrap_err().cause().map(|(c, _)| c), Some(&cause));
     }
 
     #[test]
@@ -1769,7 +1926,7 @@ mod tests {
     fn windows_op_fails_a_local_only_scope() {
         let r = FakeRunner::new(good());
         let (res, _) = doctor_local_only(windows_op(&r));
-        assert!(matches!(res, Err(Error::Dependency(_))));
+        assert_eq!(res.unwrap_err().code_str(), "tool_unusable");
     }
 
     #[cfg(not(windows))]
@@ -1778,9 +1935,7 @@ mod tests {
         let r = FakeRunner::new(good());
         let (_, out) = doctor_local_only(windows_op(&r));
         assert!(
-            out.ends_with(
-                "Do: install the Linux 1Password CLI in WSL and sign in: see https://github.com/matt-cochran/1password-vault/blob/main/docs/local-development.md#wsl\nNext: opv doctor\n"
-            ),
+            out.ends_with("Do: install the Linux build of op inside WSL\nNext: opv doctor\n"),
             "{out}"
         );
     }
@@ -2103,7 +2258,7 @@ mod tests {
     #[test]
     fn scoped_doctor_fails_when_a_key_is_missing() {
         let (res, _, _) = doctor_scoped(item_without("allumata", "OPENAI_API_KEY"), false);
-        assert!(matches!(res, Err(Error::Findings(1, _))), "{res:?}");
+        assert_eq!(res.unwrap_err().exit_code(), 8);
     }
 
     #[test]
@@ -2115,12 +2270,12 @@ mod tests {
         );
     }
 
+    /// 07.27: the missing value is opened in 1Password, whichever products are involved.
     #[test]
-    fn scoped_doctor_next_step_is_the_check_command() {
-        let (res, out, _) = doctor_scoped(item_without("allumata", "OPENAI_API_KEY"), false);
-        assert_eq!(
-            res.unwrap_err().next_step(),
-            Some("fill them in 1Password, then opv check prod --product allumata"),
+    fn scoped_doctor_next_step_opens_the_first_missing_value() {
+        let (_, out, _) = doctor_scoped(item_without("allumata", "OPENAI_API_KEY"), false);
+        assert!(
+            out.contains("\n  fix: opv open allumata/OPENAI_API_KEY --env prod\n"),
             "{out}"
         );
     }
@@ -2211,7 +2366,7 @@ mod tests {
         let (_, out, _) = doctor_scoped(item_without("allumata", "OPENAI_API_KEY"), true);
         assert_eq!(
             json_doc(&out)["next"],
-            "opv check prod --product allumata",
+            "opv open allumata/OPENAI_API_KEY --env prod",
             "{out}"
         );
     }
@@ -2219,7 +2374,11 @@ mod tests {
     #[test]
     fn json_do_is_the_first_failing_checks_action() {
         let (_, out, _) = doctor_scoped(item_without("allumata", "OPENAI_API_KEY"), true);
-        assert_eq!(json_doc(&out)["do"], "fill them in 1Password", "{out}");
+        assert_eq!(
+            json_doc(&out)["do"],
+            "fill in allumata/OPENAI_API_KEY in 1Password for environment prod",
+            "{out}"
+        );
     }
 
     #[test]
@@ -2288,12 +2447,12 @@ mod tests {
         assert_eq!(do_line(&terminal(&res, &out)), "Do: sign in: opv login");
     }
 
-    /// #12: the returned error does not repeat a long check message printed above.
+    /// 07.06: the returned error is the check's own, its message included (no override).
     #[test]
-    fn returned_error_does_not_repeat_the_config_message() {
+    fn returned_error_is_the_config_checks_own() {
         let r = FakeRunner::new(good());
         let (res, _) = doctor(Err(Error::Config("invalid secrets.toml: boom".into())), &r);
-        assert!(!res.unwrap_err().to_string().contains("boom"));
+        assert!(res.unwrap_err().to_string().contains("boom"));
     }
 
     /// #13: an older op gets an upgrade step, not an install link.
@@ -2498,24 +2657,93 @@ mod tests {
         );
     }
 
+    /// §5: a failed `op vault get` is diagnosed from what op said, never assumed to be a
+    /// missing grant.
     #[test]
-    fn a_state_vault_the_account_cannot_see_names_opv_access() {
-        let mut report = Report::default();
-        let r = FakeRunner::new([Output::failure(1)]);
-        report.push("state vault", state_vault(&r, "prod", "api", "sapi"));
-        assert_eq!(
-            report.rows[0].fix.as_deref(),
-            Some("opv access prod --target api")
+    fn a_state_vault_probe_failure_is_diagnosed() {
+        let r = FakeRunner::default();
+        r.push_with_stderr(
+            Output::failure(1),
+            "[ERROR] something op does not usually say",
+        );
+        let e = state_vault(&r, "prod", "api", "sapi").unwrap_err();
+        assert_eq!(e.code_str(), "unrecognized_failure");
+    }
+
+    /// X2: an undeclared `--target` is `NotDeclared`, its step its own, never the first
+    /// target.
+    #[test]
+    fn an_unknown_target_is_not_declared() {
+        let (res, _) = doctor_targets(&["nope"], false, false);
+        assert_eq!(res.unwrap_err().code_str(), "unknown_target");
+    }
+
+    /// 07.22: a run-only environment says so, not "no environment has a fly section".
+    #[test]
+    fn a_run_only_environment_says_it_has_no_target() {
+        let mut f = fleet();
+        let mut env = f.environments["staging"].clone();
+        env.targets.clear();
+        f.environments.insert("dev".into(), env);
+        let r = FakeRunner::new(good().into_iter().take(2).chain([item(&complete_fields())]));
+        let mut out = Vec::new();
+        let _ = run_scoped(Ok(f), Some("dev"), Some("allumata"), &r, &mut out);
+        assert!(
+            text_of(&out).contains("skip  target: environment dev has no target (run-only)"),
+            "{}",
+            text_of(&out)
         );
     }
 
+    /// 07.21: a run with warnings and no failure never says "all clear".
     #[test]
-    fn an_unknown_target_names_doctors_own_retry() {
-        let (res, _) = doctor_targets(&["nope"], false, false);
-        assert_eq!(
-            res.unwrap_err().next_step(),
-            Some("opv doctor --env prod --target api")
+    fn warnings_are_counted_instead_of_all_clear() {
+        let mut g = good();
+        g[0] = Output::success(b"2.31.0\n".to_vec());
+        let r = FakeRunner::new(g);
+        let (_, out) = doctor(Ok(fleet()), &r);
+        assert_eq!(next_line(&out), "no failures; 1 warning above", "{out}");
+    }
+
+    /// 07.21: a warning's own step is printed in text, not only in `--json`.
+    #[test]
+    fn a_warnings_step_is_printed() {
+        let mut report = Report::default();
+        report.warn(
+            "settings",
+            "2 settings to review".into(),
+            "opv open a/B --env dev".into(),
         );
+        let mut out = Vec::new();
+        print_text(&report, &mut out, &mut Vec::new()).unwrap();
+        assert!(text_of(&out).contains("  fix: opv open a/B --env dev"));
+    }
+
+    /// Design §9.2: fs.suid_dumpable = 0 is fine.
+    #[test]
+    fn suid_dumpable_zero_is_ok() {
+        assert!(matches!(suid_dumpable("0\n"), Check::Ok(_)));
+    }
+
+    /// Design §9.2: fs.suid_dumpable = 2 lets the kernel dump non-dumpable processes.
+    #[test]
+    fn suid_dumpable_two_warns() {
+        assert!(matches!(suid_dumpable("2\n"), Check::Warn(_)));
+    }
+
+    /// Owner decision (§12.4): an outdated skill copy names the install, which alone
+    /// refreshes it.
+    #[test]
+    fn an_outdated_skill_copy_names_the_install() {
+        let mut report = Report::default();
+        report.push(
+            "agent skill",
+            Ok(Check::Warn(
+                "older or edited copy: x (only an install refreshes it)\n  opv skill install"
+                    .into(),
+            )),
+        );
+        assert_eq!(report.rows[0].next().as_deref(), Some("opv skill install"));
     }
 }
 

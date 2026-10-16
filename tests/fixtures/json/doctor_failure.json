@@ -33,8 +33,8 @@
       "target": null,
       "status": "fail",
       "detail": "vprd/iprd readable (2 fields in section allumata), but 1 key not ready: allumata/OPENAI_API_KEY (missing)",
-      "next": "opv check prod --product allumata",
-      "do": "fill them in 1Password"
+      "next": "opv open allumata/OPENAI_API_KEY --env prod",
+      "do": "fill in allumata/OPENAI_API_KEY in 1Password for environment prod"
     },
     {
       "name": "flyctl",
@@ -77,16 +77,34 @@
       "do": null
     }
   ],
-  "next": "opv check prod --product allumata",
-  "do": "fill them in 1Password",
+  "next": "opv open allumata/OPENAI_API_KEY --env prod",
+  "do": "fill in allumata/OPENAI_API_KEY in 1Password for environment prod",
   "error": {
     "code": "findings",
     "category": "findings",
-    "message": "item check failed (see the FAIL line above)",
-    "detail": [],
+    "message": "environment prod needs 1 value: allumata/OPENAI_API_KEY (missing)",
+    "subject": {
+      "rows": [
+        {
+          "product": "allumata",
+          "key": "OPENAI_API_KEY",
+          "target": null,
+          "state": {
+            "state": "missing"
+          }
+        }
+      ],
+      "env": "prod"
+    },
+    "evidence": {
+      "checked": null,
+      "account": null,
+      "upstream": null
+    },
     "retry": "after_fix",
     "human_required": true,
-    "do": "fill them in 1Password",
-    "next": "opv check prod --product allumata"
+    "do": "fill in allumata/OPENAI_API_KEY in 1Password for environment prod",
+    "next": "opv open allumata/OPENAI_API_KEY --env prod",
+    "next_kind": "run"
   }
 }

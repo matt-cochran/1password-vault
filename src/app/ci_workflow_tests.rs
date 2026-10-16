@@ -181,9 +181,9 @@ fn no_github_env_omits_the_job_environment() {
 // --- refusals --------------------------------------------------------------------------
 
 #[test]
-fn unknown_target_is_a_usage_error() {
+fn unknown_target_is_an_unknown_target() {
     let (err, _) = refused("prod", "missing");
-    assert_eq!(err.code(), Code::Usage);
+    assert_eq!(err.code_str(), "unknown_target");
 }
 
 #[test]

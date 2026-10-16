@@ -99,7 +99,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{self, Write};
 
-use crate::adapters::{onepassword, registry};
+use crate::adapters::onepassword;
 use crate::domain::plan;
 use crate::domain::{
     Environment, Fleet, KeyState, Kind, Row, SecretValue, StoreEntry, SyncPlan, TargetState,
@@ -409,6 +409,31 @@ pub(crate) fn on_first_line(text: &str, note: &str) -> String {
     match text.split_once('\n') {
         Some((first, rest)) => format!("{first}{note}\n{rest}"),
         None => format!("{text}{note}"),
+    }
+}
+
+/// An error's own Do and Next, in words (design §6.1: no step override). A Catalog error's
+/// come from its cause, rendered against the invocation; a Legacy error's from its own
+/// next step (split at ", then" against `rerun`, the command that was run) and `Do:`.
+/// `doctor` and `ready` show these and never a step of their own (07.06, 07.07).
+pub(crate) fn own_step(e: &Error, rerun: &str) -> (Option<String>, Option<String>) {
+    if let Some((c, _)) = e.cause() {
+        let inv = crate::error::invocation();
+        let (_, next) = c.step(&inv);
+        return (
+            c.do_text(&inv),
+            crate::cause::render::next_text(&next, &inv),
+        );
+    }
+    match e.next_step() {
+        Some(n) => {
+            let s = crate::error::split_step(n, rerun);
+            (
+                s.action.or_else(|| e.action().map(str::to_string)),
+                Some(s.next),
+            )
+        }
+        None => (e.action().map(str::to_string), None),
     }
 }
 
@@ -1304,12 +1329,9 @@ pub(crate) fn check_product(
         c
     };
     if !fleet.products.contains_key(p) {
-        let all: Vec<&str> = fleet.products.keys().map(String::as_str).collect();
-        let pick = suggest::close(p, all.iter().copied())
-            .first()
-            .copied()
-            .or(all.first().copied());
-        return Err(undefined_product(fleet, p, env).with_next(command(pick)));
+        // The cause's own step: the same command with a unique close product, else a
+        // listing; never the first product (X2).
+        return Err(undefined_product(fleet, p, env));
     }
     if fleet.products[p].source_only {
         let pick = fleet.referencing_product(p);
@@ -1320,9 +1342,9 @@ pub(crate) fn check_product(
 
 /// D10/FR-34: the product a command acts on in `env`. `given` (a `--product` value, or
 /// the product part of `open`'s target) is validated when present. Without it, exactly one
-/// product that is not source-only and has a key desired in `env` is used; several is a
-/// usage error listing them, with a `Next:` naming the first. `verb` names the command in
-/// the error, e.g. `check`, `run`, `config export`.
+/// product that is not source-only and has a key desired in `env` is used; otherwise
+/// [`product_choice`]'s cause. `verb` names the command a source-only product's error
+/// re-runs, e.g. `check`, `run`, `config export`.
 pub(crate) fn pick_product(
     fleet: &Fleet,
     env: &str,
@@ -1347,113 +1369,95 @@ pub(crate) fn pick_product(
             candidates.push(name.as_str());
         }
     }
-    match candidates.as_slice() {
+    product_choice(env, &candidates)
+}
+
+/// The product of a command that names none (R23, R24): the one candidate, `ChoiceRequired`
+/// listing several (a person picks; never the first, X2), or `NothingInScope` when no
+/// product has keys desired in `env`: choosing a product cannot help then, declaring a key
+/// does (07.23).
+pub(crate) fn product_choice(env: &str, candidates: &[&str]) -> Result<String, Error> {
+    use crate::cause::{Cause, EnvName, Scope};
+    match candidates {
         [only] => Ok((*only).to_string()),
-        [] => Err(product_choice_error(
-            fleet,
-            env,
-            verb,
-            &[],
-            &non_source_only(fleet),
-        )),
-        many => Err(product_choice_error(fleet, env, verb, many, many)),
+        [] => Err(Cause::NothingInScope {
+            env: EnvName::new(env),
+            what: Scope::NoProductHasKeys,
+        }
+        .into()),
+        many => Err(Cause::ChoiceRequired {
+            flag: "--product".into(),
+            candidates: many.iter().map(|p| (*p).to_string()).collect(),
+        }
+        .into()),
     }
 }
 
-/// The one product-choice error: `--product is required`, the products it lists, and a
-/// `Next:` naming the first of them. `candidates` are the products with keys desired here;
-/// when there are none, `all` names the runnable products for context.
-fn product_choice_error(
-    fleet: &Fleet,
-    env: &str,
-    verb: &str,
-    candidates: &[&str],
-    all: &[&str],
+/// `given`, a `kind` name the configuration does not declare (R21): the declared names, and
+/// a unique close one when there is exactly one (`Closest::unique`), which the cause's Next
+/// substitutes into the command as typed; with none, Next is a listing (X2: never a guess).
+pub(crate) fn not_declared<'a>(
+    kind: crate::cause::NameKind,
+    given: &str,
+    declared: impl IntoIterator<Item = &'a str>,
 ) -> Error {
-    let reason = if candidates.is_empty() {
-        format!("no product has keys desired in environment {env}")
-    } else {
-        format!("several products have keys desired in environment {env}")
-    };
-    let listed = if candidates.is_empty() {
-        all
-    } else {
-        candidates
-    };
-    let mut error = Error::Config(
-        format!(
-            "--product is required for opv {verb}: {reason}. Choose one of: {}.",
-            listed.join(", ")
-        )
-        .into(),
-    )
-    .with_code(crate::error::Code::Usage);
-    if let Some(first) = listed.first() {
-        error = error.with_next(check_command(fleet, Some(env), Some(first)));
+    let candidates: Vec<String> = declared.into_iter().map(str::to_string).collect();
+    let close = suggest::close(given, candidates.iter().map(String::as_str));
+    crate::cause::Cause::NotDeclared {
+        kind,
+        given: given.to_string(),
+        closest: crate::cause::Closest::unique(&close),
+        candidates,
     }
-    error
+    .into()
 }
 
-/// The products that can be run or checked on their own: every non-source-only one (FR-47).
-fn non_source_only(fleet: &Fleet) -> Vec<&str> {
-    fleet
-        .products
-        .iter()
-        .filter(|(_, p)| !p.source_only)
-        .map(|(name, _)| name.as_str())
-        .collect()
-}
-
-/// An undeclared `--product`: the declared ones, the closest named, and a `Next:` step that
-/// checks the closest (else the first) product's keys, read-only (H10). `env` is the
-/// environment of the command when known; otherwise the first one declared.
-pub(crate) fn undefined_product(fleet: &Fleet, p: &str, env: Option<&str>) -> Error {
-    let all: Vec<&str> = fleet.products.keys().map(String::as_str).collect();
-    let close = suggest::close(p, all.iter().copied());
-    let hint = close
-        .first()
-        .map(|c| format!("; did you mean {c}?"))
-        .unwrap_or_default();
-    let pick = close
-        .first()
-        .or(all.first())
-        .copied()
-        .unwrap_or("<product>");
-    Error::Config(
-        format!(
-            "undefined product {p:?}; choose one of: {}{hint}",
-            all.join(", ")
+/// The environment `name` of the configuration, or `NotDeclared` (R21). Its Next is the
+/// command as typed with a unique close name substituted, never another command (07.32).
+pub(crate) fn environment<'f>(fleet: &'f Fleet, name: &str) -> Result<&'f Environment, Error> {
+    fleet.environments.get(name).ok_or_else(|| {
+        not_declared(
+            crate::cause::NameKind::Environment,
+            name,
+            fleet.environments.keys().map(String::as_str),
         )
-        .into(),
-    )
-    .with_code(crate::error::Code::UnknownProduct)
-    .with_next(check_command(fleet, env, Some(pick)))
+    })
 }
 
-/// A read-only command that lists every declared key by name: `status` of the first
-/// environment with a target, else `check` of the first environment (and product).
-pub(crate) fn list_keys_command(fleet: &Fleet) -> String {
-    if let Some((name, _)) = fleet
-        .environments
-        .iter()
-        .find(|(_, e)| !e.targets.is_empty())
-    {
-        return format!("opv status {name}");
-    }
-    let first = fleet.products.keys().next().map(String::as_str);
-    check_command(fleet, None, first)
+/// An undeclared `--product` (R21): the declared products, and the same command with a
+/// unique close product as the Next (else a listing). `env` is kept for the callers that
+/// name the command's environment; the step comes from the invocation.
+pub(crate) fn undefined_product(fleet: &Fleet, p: &str, _env: Option<&str>) -> Error {
+    not_declared(
+        crate::cause::NameKind::Product,
+        p,
+        fleet.products.keys().map(String::as_str),
+    )
 }
 
 /// `opv check <env> [--product <p>]`: a read-only look at one product's keys in `env` (the
 /// first environment declared when `env` is unknown), for `Next:` steps.
 pub(crate) fn check_command(fleet: &Fleet, env: Option<&str>, product: Option<&str>) -> String {
+    crate::cause::render::cmd_text(&check_cmd(fleet, env, product))
+}
+
+/// [`check_command`] as a typed command (design §10.1).
+pub(crate) fn check_cmd(
+    fleet: &Fleet,
+    env: Option<&str>,
+    product: Option<&str>,
+) -> crate::cause::Cmd {
     let env = env
         .filter(|e| fleet.environments.contains_key(*e))
         .or_else(|| fleet.environments.keys().next().map(String::as_str))
         .unwrap_or("<env>");
-    match product {
-        Some(p) => format!("opv check {env} --product {p}"),
-        None => format!("opv check {env}"),
+    let mut args = vec![env.to_string()];
+    if let Some(p) = product {
+        args.extend(["--product".to_string(), p.to_string()]);
+    }
+    crate::cause::Cmd {
+        command: vec!["check".into()],
+        args,
     }
 }
 
@@ -1603,13 +1607,13 @@ pub(crate) fn count_line(env_name: &str, target: &str, rows: &[Row], target_labe
 
 /// The targets a run of `verb` covers in `env` (FR-56): every target of the environment,
 /// or only those `--target` names (repeatable), in name order without repeats. An unknown
-/// name is a usage error that lists the environment's targets; an environment without a
+/// name is `NotDeclared` listing the environment's targets; an environment without a
 /// target is [`no_target`]'s error.
 pub(crate) fn resolve_targets(
     fleet: &Fleet,
     env: &str,
     requested: &[String],
-    verb: &str,
+    _verb: &str,
 ) -> Result<Vec<String>, Error> {
     let e = fleet.environment(env)?;
     if e.targets.is_empty() {
@@ -1617,15 +1621,7 @@ pub(crate) fn resolve_targets(
     }
     let names: Vec<&str> = e.targets.keys().map(String::as_str).collect();
     if let Some(unknown) = requested.iter().find(|n| !e.targets.contains_key(*n)) {
-        return Err(Error::Config(
-            format!(
-                "environment {env} has no target {unknown:?} (targets: {})",
-                names.join(", ")
-            )
-            .into(),
-        )
-        .with_code(crate::error::Code::Usage)
-        .with_next(format!("opv {verb} {env} --target {}", names[0])));
+        return Err(unknown_target(e, unknown));
     }
     Ok(names
         .into_iter()
@@ -1693,10 +1689,9 @@ pub(crate) fn placement(env: &str, target: &str) -> String {
     format!("{env}/{target}")
 }
 
-/// The environment and its target `name` (FR-56); `Error::Config` naming the environment
-/// when it is undefined or has no target (status, plan and sync need one), and a usage
-/// error listing the targets when it has none of that name. The hint names what the
-/// default provider needs (FR-37).
+/// The environment and its target `name` (FR-56); `NotDeclared` when the environment is
+/// undefined or has no target of that name, and [`no_target`]'s cause when it has none
+/// (status, plan and sync need one).
 pub(crate) fn target<'f>(
     fleet: &'f Fleet,
     env: &str,
@@ -1708,45 +1703,35 @@ pub(crate) fn target<'f>(
     }
     match e.targets.get(name) {
         Some(t) => Ok((e, t.config.as_ref())),
-        None => {
-            let names: Vec<&str> = e.targets.keys().map(String::as_str).collect();
-            Err(Error::Config(
-                format!(
-                    "environment {env} has no target {name:?} (targets: {})",
-                    names.join(", ")
-                )
-                .into(),
-            )
-            .with_code(crate::error::Code::Usage)
-            .with_next(format!("opv status {env} --target {}", names[0])))
-        }
+        None => Err(unknown_target(e, name)),
     }
 }
 
-/// The error for an environment without a target (run-only, FR-56).
-fn no_target(fleet: &Fleet, env: &str) -> Error {
-    let local =
-        format!("opv check {env} --product <name> and opv run {env} --product <name> -- <command>");
-    let sections: Vec<&str> = registry::PROVIDERS.iter().map(|p| p.section()).collect();
-    Error::Config(
-        format!(
-            "environment {env:?} has no deployment target. For local settings use {local}. To \
-             deploy, add a named target first with opv target add {env} <name> and one \
-             provider's options ({}; opv target add --help).",
-            sections.join(", ")
-        )
-        .into(),
+/// A `--target` the environment does not declare (R21): its targets, and the same command
+/// with a unique close target substituted, else the target listing (X2: never the first).
+fn unknown_target(e: &Environment, name: &str) -> Error {
+    not_declared(
+        crate::cause::NameKind::Target,
+        name,
+        e.targets.keys().map(String::as_str),
     )
-    .with_code(crate::error::Code::NoTarget)
-    .with_do(format!(
-        "to deploy, add a target with opv target add {env} <name> and one provider's options ({})",
-        sections.join(", ")
-    ))
-    .with_next(check_command(
-        fleet,
-        Some(env),
-        fleet.products.keys().next().map(String::as_str),
-    ))
+}
+
+/// The error for an environment without a target (run-only, FR-56; R25): it names the
+/// products that would need one, and the step to add one is the cause's, once (07.33).
+pub(crate) fn no_target(fleet: &Fleet, env: &str) -> Error {
+    crate::cause::Cause::NothingInScope {
+        env: crate::cause::EnvName::new(env),
+        what: crate::cause::Scope::NoTargets {
+            products: fleet
+                .products
+                .iter()
+                .filter(|(_, p)| !p.source_only)
+                .map(|(name, _)| crate::cause::ProductName::new(name.as_str()))
+                .collect(),
+        },
+    }
+    .into()
 }
 
 /// Resolve target `name` of the environment and open its ports, before any call.

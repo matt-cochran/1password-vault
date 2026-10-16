@@ -634,9 +634,11 @@ mod tests {
         ];
         for (e, p, c, needle) in cases {
             let r = FakeRunner::new([]);
+            // A configuration or name error (exit 2; an undeclared product is the catalog's
+            // `NotDeclared`), naming what was wrong.
             match run(&fleet(), e, p, &c, &r) {
-                Err(e) => assert!(e.to_string().contains(needle), "{e}"),
-                other => panic!("expected an error, got {other:?}"),
+                Err(e) if e.exit_code() == 2 => assert!(e.to_string().contains(needle), "{e}"),
+                other => panic!("expected a configuration error, got {other:?}"),
             }
             assert!(r.calls.borrow().is_empty());
         }

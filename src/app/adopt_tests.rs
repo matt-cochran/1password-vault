@@ -59,9 +59,9 @@ fn a_named_target_is_read_from_that_target() {
 }
 
 #[test]
-fn an_unknown_target_name_is_a_usage_error() {
+fn an_unknown_target_name_is_an_unknown_target() {
     let e = source_from(&fleet(), "staging", "target:nope").unwrap_err();
-    assert_eq!(e.code(), crate::error::Code::Usage);
+    assert_eq!(e.code_str(), "unknown_target");
 }
 
 /// A dotenv path (anything not the `target:` form) stays a file source.

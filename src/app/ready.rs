@@ -153,6 +153,10 @@ pub struct Finding {
     /// #92). Names only, never a value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// The error's own Do, for a finding made from an error (JSON `do`, text `Do:`): what a
+    /// person does first, never dropped (07.07).
+    #[serde(rename = "do", skip_serializing_if = "Option::is_none")]
+    pub act: Option<String>,
 }
 
 /// The first step: the actor and the command of the first blocking finding, else of the
@@ -378,6 +382,7 @@ fn grants_missing(env: &str, target: &str, reason: &str) -> Finding {
         prerequisite: format!("opv access {env} --target {target}"),
         verify: format!("opv access {env} --target {target} --json"),
         message: Some(reason.to_string()),
+        act: None,
     }
 }
 
@@ -386,37 +391,59 @@ fn is_no_access(e: &Error) -> bool {
     matches!(e.code().as_str(), "vault_no_access" | "item_not_found")
 }
 
+/// What `opv ready` re-runs to verify a finding.
+const VERIFY: &str = "opv ready --json";
+
+/// The codes whose cause `opv doctor` checks (the CLIs, their sign-ins and grants): only
+/// these may fall back to it, never a cause doctor cannot see (07.07, X7).
+const DOCTOR_SEES: [&str; 3] = ["dependency_missing", "auth_required", "permission_denied"];
+
 /// The finding for an error that stopped reading an environment (or one target of it): the
-/// error's own code, actor, effect and next step (#157).
+/// error's own code, actor, effect, Do and next step (#157). The prerequisite is the
+/// error's own Next; when it has none, or its Next is `ready` itself (the verify), its Do
+/// is the prerequisite, so an owner's step is never dropped (07.07). Only an error with
+/// neither falls back: to doctor for a cause doctor checks, else to the `status` read of
+/// what failed.
 fn error_finding(env: &str, target: Option<&str>, e: &Error) -> Finding {
-    let code = e.code();
-    let effect = match code.as_str() {
+    let code = e.code_str();
+    let effect = match code {
         "op_not_signed_in" | "auth_required" | "account_not_registered" | "selected_signed_out" => {
             "signs_in"
         }
         _ => "none",
     };
-    let fallback = match target {
-        Some(t) => format!("opv doctor --env {env} --target {t}"),
-        None => format!("opv status {env}"),
+    let (act, next) = super::own_step(e, "opv ready");
+    let next = next.filter(|n| !n.starts_with("opv ready"));
+    let prerequisite = match (&next, &act) {
+        (Some(n), _) => n.clone(),
+        (None, Some(a)) => a.clone(),
+        (None, None) => match target {
+            Some(t) if DOCTOR_SEES.contains(&code) => {
+                format!("opv doctor --env {env} --target {t}")
+            }
+            Some(t) => format!("opv status {env} --target {t}"),
+            None => format!("opv status {env}"),
+        },
     };
     Finding {
-        code: code.as_str().into(),
+        code: code.into(),
         scope: Scope {
             environment: Some(env.to_string()),
             target: target.map(str::to_string),
             ..Scope::default()
         },
         blocking: true,
-        actor: if code.human_required() {
+        actor: if e.human_required() || act.is_some() && next.is_none() {
             "owner"
         } else {
             "agent"
         }
         .into(),
         effect: effect.into(),
-        prerequisite: e.next_step().map(str::to_string).unwrap_or(fallback),
-        verify: "opv ready --json".into(),
+        // The Do is shown on its own line only when it is not the prerequisite already.
+        act: act.filter(|a| *a != prerequisite),
+        prerequisite,
+        verify: VERIFY.into(),
         message: None,
     }
 }
@@ -454,10 +481,14 @@ fn row_findings(
             _ => continue,
         };
         let label = key_label(&r.product, &r.key);
-        let (product, verify) = (
-            Some(r.product.clone()),
-            format!("opv status {} --product {}", env.name, r.product),
-        );
+        let verify = match target {
+            Some(t) => format!(
+                "opv status {} --target {t} --product {}",
+                env.name, r.product
+            ),
+            None => format!("opv status {} --product {}", env.name, r.product),
+        };
+        let product = Some(r.product.clone());
         out.push(Finding {
             code: code.into(),
             scope: Scope {
@@ -473,6 +504,7 @@ fn row_findings(
             prerequisite: format!("opv open {label} --env {}", env.name),
             verify,
             message: None,
+            act: None,
         });
     }
 }
@@ -511,6 +543,7 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
             prerequisite: f.next.clone().unwrap_or_else(|| "opv account list".into()),
             verify: "opv account list --json".into(),
             message: None,
+            act: None,
         });
     }
     for env in &inputs.envs {
@@ -539,6 +572,7 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
                         ),
                         verify: "opv ready --json".into(),
                         message: None,
+                        act: None,
                     });
                     continue;
                 }
@@ -574,6 +608,7 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
                 ),
                 verify: "opv ready --json".into(),
                 message: None,
+                act: None,
             });
             continue;
         }
@@ -615,6 +650,7 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
             prerequisite: format!("opv open {label} --env {env}"),
             verify: "opv ready --json".into(),
             message: Some(h.message.clone()),
+            act: None,
         });
     }
     out
@@ -626,8 +662,8 @@ pub fn render_text(r: &Receipt, out: &mut dyn Write) -> Result<(), Error> {
     let blocking = r.findings.iter().filter(|f| f.blocking).count();
     writeln!(
         out,
-        "ready: {blocking} blocking · {} findings · receipt {}",
-        r.findings.len(),
+        "ready: {blocking} blocking · {} · receipt {}",
+        super::plural(r.findings.len(), "finding", "findings"),
         r.receipt_id
     )
     .map_err(super::write_err)?;
@@ -684,11 +720,12 @@ pub fn render_text(r: &Receipt, out: &mut dyn Write) -> Result<(), Error> {
     }
 
     if r.findings.is_empty() {
-        writeln!(
-            out,
-            "Nothing needs attention: every declared key is saved and every environment was read."
-        )
-        .map_err(super::write_err)?;
+        // Claim only what was read: one environment, or every one (07.30, X26).
+        let claim = match envs.as_slice() {
+            [(name, _)] => format!("every declared key in {name} is saved and {name} was read"),
+            _ => "every declared key is saved and every environment was read".to_string(),
+        };
+        writeln!(out, "Nothing needs attention: {claim}.").map_err(super::write_err)?;
     } else {
         writeln!(out, "Needs attention:").map_err(super::write_err)?;
     }
@@ -704,6 +741,9 @@ pub fn render_text(r: &Receipt, out: &mut dyn Write) -> Result<(), Error> {
         .map_err(super::write_err)?;
         if let Some(m) = &f.message {
             writeln!(out, "      {m}").map_err(super::write_err)?;
+        }
+        if let Some(a) = &f.act {
+            writeln!(out, "      Do: {a}").map_err(super::write_err)?;
         }
     }
     if let Some(n) = &r.next {
@@ -829,7 +869,7 @@ pub fn run(
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     if let Some(e) = only {
-        fleet.environment(e)?;
+        super::environment(fleet, e)?;
     }
     // #157: nobody signed in is one finding of its own, never every target's missing grant.
     crate::adapters::onepassword::require_session(r, &crate::host::Host::detect, "opv ready")?;
@@ -955,12 +995,16 @@ pub fn run(
         },
         env!("CARGO_PKG_VERSION"),
     );
-    let mut v = serde_json::to_value(&doc)
-        .map_err(|_| Error::Config("cannot serialize the readiness receipt".into()))?;
+    // The receipt is plain data: failing to serialize it is opv's own bug.
+    let bug = |_| {
+        Error::from(crate::cause::Cause::Bug {
+            site: "ready receipt serialization",
+        })
+    };
+    let mut v = serde_json::to_value(&doc).map_err(bug)?;
     v["schema_version"] = serde_json::json!(crate::json::SCHEMA_VERSION);
     if let Some(path) = save {
-        let text = serde_json::to_string_pretty(&v)
-            .map_err(|_| Error::Config("cannot serialize the readiness receipt".into()))?;
+        let text = serde_json::to_string_pretty(&v).map_err(bug)?;
         super::init::write_atomic(path, &format!("{text}\n"), true)?;
     }
     if json {

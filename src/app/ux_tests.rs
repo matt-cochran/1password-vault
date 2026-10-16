@@ -257,7 +257,10 @@ fn unknown_environment_without_a_close_name_next_is_the_overview() {
 #[test]
 fn unknown_product_next_checks_the_closest_product() {
     let e = super::local::select(&two_products(), "prod", Some("wb"), true).unwrap_err();
-    assert_eq!(e.next_step(), Some("opv check prod --product web"));
+    assert_eq!(
+        next_for(&e, &["opv", "check", "prod", "--product", "wb"]),
+        Some("opv check prod --product web".into())
+    );
 }
 
 /// A fleet configuration with one product needs no `--product` (found live: `check`
@@ -267,10 +270,11 @@ fn a_single_product_is_selected_without_the_flag() {
     assert!(super::local::select(&fleet(), "prod", None, true).is_ok());
 }
 
+/// X2: several products are a person's choice; opv never names the first for them.
 #[test]
-fn missing_product_next_checks_the_first_product() {
+fn missing_product_is_a_choice() {
     let e = super::local::select(&two_products(), "prod", None, true).unwrap_err();
-    assert_eq!(e.next_step(), Some("opv check prod --product allumata"));
+    assert_eq!(e.code_str(), "choice_required");
 }
 
 /// R21: the unique close key is substituted, and the write turned into its read.
@@ -307,7 +311,7 @@ fn prune_immutable_without_prune_next_is_the_help() {
 }
 
 #[test]
-fn explain_of_an_unknown_key_next_carries_the_env() {
+fn explain_of_an_unknown_key_next_substitutes_the_closest_key() {
     let e = crate::app::testutil::explain(
         &fleet(),
         "allumata/OPENAI_KEY",
@@ -317,13 +321,14 @@ fn explain_of_an_unknown_key_next_carries_the_env() {
     )
     .unwrap_err();
     assert_eq!(
-        e.next_step(),
-        Some("opv explain allumata/OPENAI_API_KEY --env prod")
+        next_for(&e, &["opv", "explain", "allumata/OPENAI_KEY"]),
+        Some("opv explain allumata/OPENAI_API_KEY".into())
     );
 }
 
+/// X2: with several environments a person picks one; opv never names the first.
 #[test]
-fn explain_with_several_environments_next_names_one() {
+fn explain_with_several_environments_is_a_choice() {
     let e = crate::app::testutil::explain(
         &fleet(),
         "allumata/SIGNUP_POLICY",
@@ -332,10 +337,7 @@ fn explain_with_several_environments_next_names_one() {
         false,
     )
     .unwrap_err();
-    assert_eq!(
-        e.next_step(),
-        Some("opv explain allumata/SIGNUP_POLICY --env staging")
-    );
+    assert_eq!(e.code_str(), "choice_required");
 }
 
 #[test]
@@ -1128,7 +1130,10 @@ fn status_with_an_undeclared_product_suggests_status_of_the_same_env() {
         false,
     )
     .unwrap_err();
-    assert_eq!(e.next_step(), Some("opv status prod --product allumata"));
+    assert_eq!(
+        next_for(&e, &["opv", "status", "prod", "--product", "allumatta"]),
+        Some("opv status prod --product allumata".into())
+    );
 }
 
 #[test]
@@ -1159,4 +1164,28 @@ fn catalog_next(e: &Error, line: &str) -> Option<String> {
     let argv: Vec<String> = line.split_whitespace().map(str::to_string).collect();
     let inv = crate::cause::Invocation::from_cli(&argv);
     crate::cause::render::next_text(&cause.step(&inv).1, &inv)
+}
+
+/// The Next a catalog error renders for the command line `argv` (design §6.1: steps are
+/// built from the invocation, so a test names the one it means).
+fn next_for(e: &Error, argv: &[&str]) -> Option<String> {
+    let inv =
+        crate::cause::Invocation::from_cli(&argv.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+    let (cause, _) = e.cause()?;
+    crate::cause::render::next_text(&cause.step(&inv).1, &inv)
+}
+
+/// 07.23 (S2): no product with keys here is not a choice of product: declaring a key is
+/// the step.
+#[test]
+fn no_product_with_keys_is_nothing_in_scope() {
+    let e = super::product_choice("dev", &[]).unwrap_err();
+    assert_eq!(e.code_str(), "nothing_in_scope");
+}
+
+/// 07.33: the no-target error names the step once, as its Do, not again in its text.
+#[test]
+fn no_target_text_does_not_repeat_its_step() {
+    let e = super::no_target(&fleet(), "dev");
+    assert!(!e.to_string().contains("opv target add"), "{e}");
 }

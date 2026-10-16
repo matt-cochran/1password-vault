@@ -186,8 +186,9 @@ fn check_with_several_products_lists_them() {
     assert!(e.to_string().contains("alpha, beta"), "{e}");
 }
 
+/// X2: several products are a person's choice; opv never names the first for them.
 #[test]
-fn check_with_several_products_next_names_the_first() {
+fn check_with_several_products_is_a_choice() {
     let e = local::check(
         &two_products(),
         "prod",
@@ -197,7 +198,7 @@ fn check_with_several_products_next_names_the_first() {
         false,
     )
     .unwrap_err();
-    assert_eq!(e.next_step(), Some("opv check prod --product alpha"));
+    assert_eq!(e.code_str(), "choice_required");
 }
 
 // ---- a source-only product never qualifies ---------------------------------------------

@@ -433,9 +433,9 @@ fn a_recorded_credential_refusal_points_to_config_edit() {
 }
 
 #[test]
-fn a_misspelt_target_is_a_usage_error() {
+fn a_misspelt_target_is_an_unknown_target() {
     let w = World::new();
     let mut out = Vec::new();
     let e = show(&fleet(None), "staging", "wbe", &w, &mut out).unwrap_err();
-    assert_eq!(e.code(), Code::Usage);
+    assert_eq!(e.code_str(), "unknown_target");
 }

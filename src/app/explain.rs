@@ -19,15 +19,18 @@
 //! The target form names the target's provider and locator, its products, its deploy
 //! credentials (or `none`), its state vault ID and its deploy service account.
 //!
-//! An undeclared product, key, target or environment is `Error::Config` (exit 2).
+//! An undeclared product, key, target or environment is the catalog's `NotDeclared`, a key
+//! several products declare `Ambiguous`, and a choice only a person makes `ChoiceRequired`
+//! (exit 2); each names its own step.
 
 use std::io::Write;
 
 use super::{kind_label, suggest, write_err};
+use crate::cause::{Cause, Closest, NameKind};
 use crate::domain::access_plan::{ci_account, deploy_account};
 use crate::domain::model::{KeySpec, Kind, OneOrMany, Rules, key_label};
 use crate::domain::{Fleet, rules};
-use crate::error::{Code, Error};
+use crate::error::Error;
 
 /// The key `explain` was asked about, resolved against the configuration.
 ///
@@ -61,7 +64,7 @@ pub fn run_request(
 ) -> Result<(), Error> {
     match asked {
         Asked::Key(key) => {
-            let t = resolve(fleet, key).map_err(|e| runnable_next(fleet, env, e))?;
+            let t = resolve(fleet, key)?;
             let env_name = environment(fleet, &t, env)?;
             explain_in(fleet, &t, env_name, project, out, json)
         }
@@ -79,16 +82,10 @@ pub(crate) fn locate<'a>(
     target: &str,
     env: Option<&'a str>,
 ) -> Result<(String, String, &'a str), Error> {
-    // The same resolution as `explain`; a suggestion names `opv open` instead (M6).
-    let as_open = |e: Error| match e.next_step().and_then(|n| n.strip_prefix("opv explain ")) {
-        Some(rest) => {
-            let next = format!("opv open {rest}");
-            e.with_next(next)
-        }
-        None => e,
-    };
-    let t = resolve(fleet, target).map_err(|e| as_open(runnable_next(fleet, env, e)))?;
-    let env_name = environment(fleet, &t, env).map_err(as_open)?;
+    // The same resolution as `explain`. Each cause's step is built from the command as
+    // typed, so a suggestion names `opv open` with every flag kept (M6, X1).
+    let t = resolve(fleet, target)?;
+    let env_name = environment(fleet, &t, env)?;
     Ok((t.product.to_string(), t.key.to_string(), env_name))
 }
 
@@ -100,17 +97,13 @@ fn resolve<'a>(fleet: &'a Fleet, target: &str) -> Result<Target<'a>, Error> {
         return resolve_bare(fleet, target);
     };
     let Some((product, p)) = fleet.products.get_key_value(product) else {
-        let known: Vec<&str> = fleet.products.keys().map(String::as_str).collect();
-        let close: Vec<String> = suggest::close(product, known.iter().copied())
-            .into_iter()
-            .map(|c| key_label(c, key))
-            .collect();
-        return Err(did_you_mean(
-            format!(
-                "undeclared product {product:?} (declared: {})",
-                known.join(", ")
-            ),
-            &close.iter().map(String::as_str).collect::<Vec<_>>(),
+        // The key under each declared product: a unique close one is substituted for the
+        // label as typed (R21, 07.26).
+        let labels: Vec<String> = fleet.products.keys().map(|c| key_label(c, key)).collect();
+        return Err(super::not_declared(
+            NameKind::Product,
+            target,
+            labels.iter().map(String::as_str),
         ));
     };
     let Some((key, spec)) = p.keys.get_key_value(key) else {
@@ -120,21 +113,22 @@ fn resolve<'a>(fleet: &'a Fleet, target: &str) -> Result<Target<'a>, Error> {
             .filter(|(_, other)| other.keys.contains_key(key))
             .map(|(name, _)| key_label(name, key))
             .collect();
-        let text = format!("undeclared key {key:?} in product {product}");
+        // Declared under another product: those labels, one of them the close match only
+        // when it is the only one (X2). Otherwise the product's own keys.
         if !elsewhere.is_empty() {
-            let e = Error::Config(format!("{text}; declared as {}", elsewhere.join(", ")).into());
-            return Err(match elsewhere.as_slice() {
-                [one] => e.with_next(format!("opv explain {one}")),
-                _ => e,
-            });
+            return Err(Cause::NotDeclared {
+                kind: NameKind::Key,
+                given: target.to_string(),
+                closest: Closest::unique(&elsewhere.iter().map(String::as_str).collect::<Vec<_>>()),
+                candidates: elsewhere,
+            }
+            .into());
         }
-        let close: Vec<String> = suggest::close(key, p.keys.keys().map(String::as_str))
-            .into_iter()
-            .map(|c| key_label(product, c))
-            .collect();
-        return Err(did_you_mean(
-            text,
-            &close.iter().map(String::as_str).collect::<Vec<_>>(),
+        let labels: Vec<String> = p.keys.keys().map(|k| key_label(product, k)).collect();
+        return Err(super::not_declared(
+            NameKind::Key,
+            target,
+            labels.iter().map(String::as_str),
         ));
     };
     Ok(Target { product, key, spec })
@@ -155,6 +149,7 @@ fn resolve_bare<'a>(fleet: &'a Fleet, key: &str) -> Result<Target<'a>, Error> {
     match found.as_slice() {
         [(product, key, spec)] => Ok(Target { product, key, spec }),
         [] => {
+            // A bare name: the full label of a unique close key is substituted for it.
             let all: Vec<String> = fleet
                 .products
                 .iter()
@@ -171,77 +166,22 @@ fn resolve_bare<'a>(fleet: &'a Fleet, key: &str) -> Result<Target<'a>, Error> {
                 .filter(|(_, b)| close.contains(b))
                 .map(|(l, _)| l.as_str())
                 .collect();
-            Err(did_you_mean(
-                format!("undeclared key {key:?} (explain takes <product>/<KEY>)"),
-                &labels,
-            ))
+            Err(Cause::NotDeclared {
+                kind: NameKind::Key,
+                given: key.to_string(),
+                closest: Closest::unique(&labels),
+                candidates: all,
+            }
+            .into())
         }
-        many => {
-            let (p, k, _) = many[0];
-            Err(Error::Config(
-                format!(
-                    "ambiguous key {key:?}: declared as {}; pass one of them",
-                    many.iter()
-                        .map(|(p, k, _)| key_label(p, k))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-                .into(),
-            )
-            .with_next(format!("opv explain {}", key_label(p, k))))
+        // Declared by several products: a person names one in full (R22, 07.26), never
+        // the first.
+        many => Err(Cause::Ambiguous {
+            kind: NameKind::Key,
+            given: key.to_string(),
+            candidates: many.iter().map(|(p, k, _)| key_label(p, k)).collect(),
         }
-    }
-}
-
-/// A configuration error for a name `explain` does not know, with the close declared
-/// names (P8). The closest candidate becomes the `Next:` step (NR-19, H10); with none,
-/// [`runnable_next`] names a command that lists the declared keys.
-fn did_you_mean(text: String, close: &[&str]) -> Error {
-    match close {
-        [] => Error::Config(text.into()),
-        [one] => Error::Config(format!("{text}; did you mean {one}?").into())
-            .with_next(format!("opv explain {one}")),
-        many => Error::Config(format!("{text}; did you mean {}?", many.join(" or ")).into())
-            .with_next(format!("opv explain {}", many[0])),
-    }
-    .with_code(Code::UndeclaredKey)
-}
-
-/// `e` with a `Next:` step that runs as-is (H10): an `opv explain <label>` step gains the
-/// `--env` it needs when several environments are declared, and an error with no step gets
-/// the read-only command that lists the declared keys.
-fn runnable_next(fleet: &Fleet, env: Option<&str>, e: Error) -> Error {
-    let Some(label) = e
-        .next_step()
-        .and_then(|n| n.strip_prefix("opv explain "))
-        .map(str::to_string)
-    else {
-        let list = super::list_keys_command(fleet);
-        return e.or_next(|| list);
-    };
-    if label.contains(' ') {
-        return e;
-    }
-    let cmd = explain_command(fleet, &label, env);
-    e.with_next(cmd)
-}
-
-/// `opv explain <label>`, with `--env`: the one given, else none when only one environment
-/// is declared, else the first environment the key is declared for.
-fn explain_command(fleet: &Fleet, label: &str, env: Option<&str>) -> String {
-    if let Some(e) = env.filter(|e| fleet.environments.contains_key(*e)) {
-        return format!("opv explain {label} --env {e}");
-    }
-    if fleet.environments.len() <= 1 {
-        return format!("opv explain {label}");
-    }
-    let declared = label
-        .split_once('/')
-        .and_then(|(product, key)| fleet.products.get(product)?.keys.get(key))
-        .and_then(|spec| spec.environments.first());
-    match declared.or_else(|| fleet.environments.keys().next()) {
-        Some(e) => format!("opv explain {label} --env {e}"),
-        None => format!("opv explain {label}"),
+        .into()),
     }
 }
 
@@ -254,7 +194,7 @@ fn environment<'a>(
 ) -> Result<&'a str, Error> {
     let name = match env {
         Some(e) => {
-            fleet.environment(e)?;
+            super::environment(fleet, e)?;
             e
         }
         None => {
@@ -270,18 +210,14 @@ fn environment<'a>(
             match (names.next(), names.next()) {
                 (Some(only), None) => only.as_str(),
                 _ if sole.is_some() => sole.unwrap_or_default(),
+                // Several environments declare the key: a person picks one (R23), never the
+                // first.
                 _ => {
-                    let known: Vec<&str> = fleet.environments.keys().map(String::as_str).collect();
-                    let label = key_label(t.product, t.key);
-                    return Err(Error::Config(
-                        format!(
-                            "several environments are declared ({}): pass --env <environment>",
-                            known.join(", ")
-                        )
-                        .into(),
-                    )
-                    .with_code(Code::Usage)
-                    .with_next(explain_command(fleet, &label, None)));
+                    return Err(Cause::ChoiceRequired {
+                        flag: "--env".into(),
+                        candidates: t.spec.environments.clone(),
+                    }
+                    .into());
                 }
             }
         }
@@ -295,9 +231,12 @@ fn environment<'a>(
             )
             .into(),
         )
-        .with_code(Code::UndeclaredKey);
-        if let Some(first) = t.spec.environments.first() {
-            err = err.with_next(format!("opv explain {label} --env {first}"));
+        .with_code(crate::error::Code::UndeclaredKey);
+        // The one environment that declares it, never the first of several (X2). The
+        // catalog's `NotDeclared` has no scope for "declared, but not for this
+        // environment" yet, so this stays a Legacy error until it does.
+        if let [only] = t.spec.environments.as_slice() {
+            err = err.with_next(format!("opv explain {label} --env {only}"));
         }
         return Err(err);
     }
@@ -312,7 +251,7 @@ fn explain_in(
     out: &mut dyn Write,
     json: bool,
 ) -> Result<(), Error> {
-    let env = fleet.environment(env_name)?;
+    let env = super::environment(fleet, env_name)?;
     let (product, key, spec) = (t.product, t.key, t.spec);
     let field = match spec.kind {
         Kind::Secret => "concealed field",
@@ -530,9 +469,9 @@ fn target_environment<'a>(
     env: Option<&'a str>,
 ) -> Result<&'a str, Error> {
     if let Some(e) = env {
-        let environment = fleet.environment(e)?;
+        let environment = super::environment(fleet, e)?;
         if !environment.targets.contains_key(name) {
-            return Err(no_such_target(e, name, environment.targets.keys()));
+            return Err(no_such_target(fleet, e, name, environment.targets.keys()));
         }
         return Ok(e);
     }
@@ -544,42 +483,37 @@ fn target_environment<'a>(
         .collect();
     match found.as_slice() {
         [only] => Ok(only),
-        [] => Err(Error::Config(
-            format!("no target {name:?} is declared in any environment").into(),
-        )
-        .with_code(Code::Usage)
-        .with_next("opv target list")),
-        many => Err(Error::Config(
-            format!(
-                "target {name:?} is declared in several environments ({}): pass --env \
-                 <environment>",
-                many.join(", ")
-            )
-            .into(),
-        )
-        .with_code(Code::Usage)
-        .with_next(format!("opv explain --target {name} --env {}", many[0]))),
+        // Every environment's targets, a unique close one substituted (R21).
+        [] => {
+            let all: std::collections::BTreeSet<&str> = fleet
+                .environments
+                .values()
+                .flat_map(|e| e.targets.keys().map(String::as_str))
+                .collect();
+            Err(super::not_declared(NameKind::Target, name, all))
+        }
+        // A person picks the environment (R23), never the first.
+        many => Err(Cause::ChoiceRequired {
+            flag: "--env".into(),
+            candidates: many.iter().map(|e| (*e).to_string()).collect(),
+        }
+        .into()),
     }
 }
 
-/// The refusal for a target an environment does not declare, naming the ones it does.
+/// The refusal for a target an environment does not declare: a run-only environment has
+/// none to name, so the step is adding one (R25, 07.41); otherwise the declared ones (R21).
 fn no_such_target<'a>(
+    fleet: &Fleet,
     env_name: &str,
     name: &str,
     known: impl Iterator<Item = &'a String>,
 ) -> Error {
     let known: Vec<&str> = known.map(String::as_str).collect();
-    let text = if known.is_empty() {
-        format!("environment {env_name} declares no target; it is run-only")
-    } else {
-        format!(
-            "environment {env_name} declares no target {name:?} (declared: {})",
-            known.join(", ")
-        )
-    };
-    Error::Config(text.into())
-        .with_code(Code::Usage)
-        .with_next(format!("opv target list --env {env_name}"))
+    if known.is_empty() {
+        return super::no_target(fleet, env_name);
+    }
+    super::not_declared(NameKind::Target, name, known)
 }
 
 /// The target form (FR-56): provider, locator, products, deploy credentials, state vault
@@ -592,11 +526,11 @@ fn explain_target_in(
     out: &mut dyn Write,
     json: bool,
 ) -> Result<(), Error> {
-    let env = fleet.environment(env_name)?;
+    let env = super::environment(fleet, env_name)?;
     let t = env
         .targets
         .get(name)
-        .ok_or_else(|| no_such_target(env_name, name, env.targets.keys()))?;
+        .ok_or_else(|| no_such_target(fleet, env_name, name, env.targets.keys()))?;
     let provider = t.config.provider();
     let locator = t.config.target_locator();
     // FR-48: a named list, or every non-source-only product with a key in this environment.
@@ -675,7 +609,7 @@ fn provider_lines(
 /// written anywhere, and a products list may leave the product out.
 fn no_delivery(fleet: &Fleet, name: &str, provider: &str, product: &str) -> String {
     if fleet.products.get(product).is_some_and(|p| p.source_only) {
-        format!("{name} ({provider}) source-only product, delivered through its sharers")
+        format!("{name} ({provider}): source-only product, delivered through its sharers")
     } else {
         format!("{name} ({provider}): its products list leaves {product} out")
     }
@@ -1067,11 +1001,20 @@ mod tests {
         assert!(out.starts_with("api/TOKEN in prod\n"), "{out}");
     }
 
+    /// X2: a person picks the environment; opv never names the first one for them.
     #[test]
     fn env_is_required_for_a_key_declared_in_several_environments() {
         let e = explain(&fleet(), "allumata/INTEGRATION_ENC_KEY", None).unwrap_err();
-        assert!(matches!(e, Error::Config(_)), "{e}");
-        assert_eq!(e.exit_code(), 2);
+        assert_eq!(e.code_str(), "choice_required");
+    }
+
+    /// The Next a catalog error renders for the command line `argv`.
+    fn next_for(e: &Error, argv: &[&str]) -> Option<String> {
+        let inv = crate::cause::Invocation::from_cli(
+            &argv.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+        );
+        let (cause, _) = e.cause()?;
+        crate::cause::render::next_text(&cause.step(&inv).1, &inv)
     }
 
     /// OPENAI_API_KEY is declared for prod only: no question to ask.
@@ -1085,27 +1028,34 @@ mod tests {
     }
 
     #[test]
-    fn undeclared_product_is_config_error() {
+    fn undeclared_product_is_unknown_product() {
         let e = explain(&fleet(), "nope/OPENAI_API_KEY", Some("prod")).unwrap_err();
-        assert!(
-            matches!(e, Error::Config(ref m) if m.contains("nope")),
-            "{e}"
-        );
+        assert_eq!(e.code_str(), "unknown_product");
     }
 
     #[test]
-    fn undeclared_key_is_config_error() {
+    fn undeclared_key_is_undeclared_key() {
         let e = explain(&fleet(), "allumata/NOPE", Some("prod")).unwrap_err();
-        assert!(
-            matches!(e, Error::Config(ref m) if m.contains("NOPE")),
-            "{e}"
-        );
+        assert_eq!(e.code_str(), "undeclared_key");
     }
 
     #[test]
-    fn undefined_environment_is_config_error() {
+    fn undefined_environment_is_unknown_env() {
         let e = explain(&fleet(), "allumata/OPENAI_API_KEY", Some("qa")).unwrap_err();
-        assert!(matches!(e, Error::Config(ref m) if m.contains("qa")), "{e}");
+        assert_eq!(e.code_str(), "unknown_env");
+    }
+
+    /// 07.32: a misspelt `--env` re-runs the same command with the declared one.
+    #[test]
+    fn misspelt_environment_reruns_explain_with_the_declared_one() {
+        let e = explain(&fleet(), "allumata/OPENAI_API_KEY", Some("prd")).unwrap_err();
+        assert_eq!(
+            next_for(
+                &e,
+                &["opv", "explain", "allumata/OPENAI_API_KEY", "--env", "prd"]
+            ),
+            Some("opv explain allumata/OPENAI_API_KEY --env prod".into())
+        );
     }
 
     #[test]
@@ -1137,18 +1087,31 @@ mod tests {
         let e = explain(&two_products(), "OPENAI_API_KEY", Some("prod")).unwrap_err();
         assert!(
             e.to_string()
-                .contains("ambiguous key \"OPENAI_API_KEY\": declared as allumata/OPENAI_API_KEY, web/OPENAI_API_KEY"),
+                .contains("matches more than one: allumata/OPENAI_API_KEY, web/OPENAI_API_KEY"),
             "{e}"
         );
+    }
+
+    /// 07.26: a key several products declare is ambiguous, not invalid configuration.
+    #[test]
+    fn bare_key_in_several_products_is_ambiguous_name() {
+        let e = explain(&two_products(), "OPENAI_API_KEY", Some("prod")).unwrap_err();
+        assert_eq!(e.code_str(), "ambiguous_name");
+    }
+
+    /// 07.26: an undeclared key is `undeclared_key`, not `config_invalid`.
+    #[test]
+    fn undeclared_key_elsewhere_is_undeclared_key() {
+        let e = explain(&two_products(), "web/INTEGRATION_ENC_KEY", Some("prod")).unwrap_err();
+        assert_eq!(e.code_str(), "undeclared_key");
     }
 
     #[test]
     fn bare_unknown_key_suggests_a_close_declared_key() {
         let e = explain(&fleet(), "OPENAI_API_KY", Some("prod")).unwrap_err();
-        assert!(
-            e.to_string()
-                .contains("did you mean allumata/OPENAI_API_KEY?"),
-            "{e}"
+        assert_eq!(
+            next_for(&e, &["opv", "explain", "OPENAI_API_KY", "--env", "prod"]),
+            Some("opv explain allumata/OPENAI_API_KEY --env prod".into())
         );
     }
 
@@ -1156,9 +1119,11 @@ mod tests {
     fn misspelt_key_in_a_product_suggests_the_declared_key() {
         let e = explain(&fleet(), "allumata/OPENAI_API_KY", Some("prod")).unwrap_err();
         assert_eq!(
-            e.next_step(),
-            Some("opv explain allumata/OPENAI_API_KEY --env prod"),
-            "{e}"
+            next_for(
+                &e,
+                &["opv", "explain", "allumata/OPENAI_API_KY", "--env", "prod"]
+            ),
+            Some("opv explain allumata/OPENAI_API_KEY --env prod".into())
         );
     }
 
@@ -1166,10 +1131,29 @@ mod tests {
     fn misspelt_product_suggests_the_declared_product() {
         let e = explain(&fleet(), "alumata/OPENAI_API_KEY", Some("prod")).unwrap_err();
         assert_eq!(
-            e.next_step(),
-            Some("opv explain allumata/OPENAI_API_KEY --env prod"),
-            "{e}"
+            next_for(
+                &e,
+                &["opv", "explain", "alumata/OPENAI_API_KEY", "--env", "prod"]
+            ),
+            Some("opv explain allumata/OPENAI_API_KEY --env prod".into())
         );
+    }
+
+    /// `open` resolves names exactly as `explain` does (M6).
+    #[test]
+    fn open_of_a_misspelt_key_is_undeclared_key() {
+        let e = locate(&fleet(), "allumata/OPENAI_API_KY", Some("prod")).unwrap_err();
+        assert_eq!(e.code_str(), "undeclared_key");
+    }
+
+    /// 07.41: the source-only line has the ':' its sibling has.
+    #[test]
+    fn source_only_delivery_line_has_a_colon() {
+        let mut f = fleet();
+        if let Some(p) = f.products.get_mut("allumata") {
+            p.source_only = true;
+        }
+        assert!(no_delivery(&f, "web", "Fly", "allumata").starts_with("web (Fly): "));
     }
 }
 

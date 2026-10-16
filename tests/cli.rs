@@ -291,7 +291,7 @@ fn env_without_fly_section_exits_2_for_fly_commands() {
         let (code, _, err) = opv(&args);
         assert_eq!(code, 2, "{cmd:?}: {err}");
         assert!(
-            err.contains("environment \"dev\" has no deployment target"),
+            err.contains("environment dev has no target"),
             "{cmd:?}: {err}"
         );
     }
@@ -592,7 +592,10 @@ fn explain_never_prints_reveal() {
 fn explain_undeclared_key_exits_2() {
     let (code, _, err) = opv(&["--config", CFG, "explain", "allumata/NOPE", "--env", "prod"]);
     assert_eq!(code, 2, "{err}");
-    assert!(err.starts_with("opv: configuration error"), "{err}");
+    assert!(
+        err.starts_with("opv: key allumata/NOPE is not declared"),
+        "{err}"
+    );
 }
 
 /// FR-22, FR-20: under the simple profile `explain` takes the bare key.
@@ -1269,7 +1272,7 @@ fn every_text_failure_ends_with_a_runnable_next() {
         &["--config", CFG, "status", "qa"][..],
         &["--config", CFG, "status", "prod"],
         &["--config", CFG, "sync", "prod", "--rotate", "allumata/NOPE"],
-        &["--config", CFG, "explain", "INTEGRATION_ENC_KEY"],
+        &["--config", CFG, "explain", "allumata/NOPE"],
         &["--config", CFG, "status", "prod", "--product", "nope"],
         &["--config", "does-not-exist.toml", "status", "prod"],
     ] {
