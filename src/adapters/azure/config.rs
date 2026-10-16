@@ -187,6 +187,22 @@ fn invalid(field: &str, rule: FieldRule) -> Error {
 }
 
 impl Provider for AzureProvider {
+    fn value_shapes(&self) -> &'static [(&'static str, &'static str)] {
+        &[
+            (
+                "must be a subscription id",
+                "a subscription id like 00000000-0000-0000-0000-000000000000",
+            ),
+            (
+                "must be a Key Vault name",
+                "a Key Vault name: 3 to 24 letters, digits and -, starting with a letter",
+            ),
+            (
+                "must be a ClusterSecretStore name",
+                "a ClusterSecretStore name: lower-case letters, digits, - and .",
+            ),
+        ]
+    }
     fn section(&self) -> &'static str {
         "azure"
     }
@@ -370,6 +386,19 @@ thread_local! {
 }
 
 impl TargetConfig for AzureTarget {
+    fn runtime_subject(
+        &self,
+    ) -> Option<(
+        crate::cause::System,
+        &'static str,
+        crate::cause::ResourceRef,
+    )> {
+        Some((
+            crate::cause::System::Azure,
+            super::az::PROGRAM,
+            super::preflight::app_ref(self),
+        ))
+    }
     fn target_locator(&self) -> String {
         format!(
             "subscription {} key vault {} container app {}/{}",
@@ -556,8 +585,8 @@ environments = ["prod"]
         let bad = azure_env_with("identity = \"system\"", "identity = 5");
         assert_eq!(
             parse(&bad).unwrap_err().to_string(),
-            "configuration error: invalid secrets.toml: TOML parse error at line 11, column 12\n\
-             invalid type: integer, expected a string"
+            "secrets.toml at line 11, column 12: environments.prod.targets.app.azure.identity \
+             must be a string in quotes"
         );
     }
 
@@ -573,7 +602,7 @@ environments = ["prod"]
             "",
         ));
         assert!(
-            e.contains("TOML parse error at line") && e.contains("missing field `subscription`"),
+            e.contains("azure.subscription is required but missing"),
             "{e}"
         );
     }
@@ -807,7 +836,7 @@ environments = ["prod"]
             "env_name = \"FLEET__{PRODUCT}__{KEY}\"\n",
             "",
         ));
-        assert!(e.contains("missing field `env_name`"), "{e}");
+        assert!(e.contains("azure.env_name is required but missing"), "{e}");
     }
 
     #[test]

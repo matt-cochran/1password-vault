@@ -180,9 +180,13 @@ fn run_stops_before_the_command_when_the_personal_item_is_missing() {
 }
 
 #[test]
-fn run_names_the_personal_key_and_bootstrap_when_the_personal_item_is_missing() {
+fn run_reports_personals_own_cause_when_the_personal_item_is_missing() {
+    // `run` passes on personal's own cause for the missing item, never one of its own.
     let (_r, e) = run_without_a_personal_item();
-    assert!(e.mentions("OPENAI_API_KEY") && e.next_step() == Some("opv bootstrap"));
+    assert!(
+        matches!(e.cause(), Some((crate::cause::Cause::NotFound { .. }, _))),
+        "{e}"
+    );
 }
 
 #[test]

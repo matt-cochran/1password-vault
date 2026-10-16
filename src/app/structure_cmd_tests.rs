@@ -119,6 +119,7 @@ fn structure_apply_without_approval_is_refused() {
         &scope_of(&path),
         &id,
         &mut |_| refuse(&id),
+        &|_| true,
         false,
         &mut Vec::new(),
     )
@@ -135,6 +136,7 @@ fn a_refused_apply_creates_no_vault() {
         &scope_of(&path),
         &id,
         &mut |_| refuse(&id),
+        &|_| true,
         false,
         &mut Vec::new(),
     );
@@ -151,11 +153,33 @@ fn a_stale_plan_is_refused() {
         &scope_of(&path),
         &id,
         &mut |_| Ok(()),
+        &|_| true,
         false,
         &mut Vec::new(),
     )
     .unwrap_err();
     assert_eq!(e.code(), Code::StalePlan);
+}
+
+/// C2: an id never approved on this machine (the injected approval folder holds none) that
+/// matches no plan is `PlanUnknown`, never a plan that changed since its approval.
+#[test]
+fn an_unapproved_unknown_plan_id_is_plan_unknown() {
+    let (_d, path, op) = workspace();
+    let id = plan_id_of(&path, &op);
+    std::fs::write(&path, format!("{CONFIG}\n# changed\n")).unwrap();
+    let approvals = tempfile::tempdir().unwrap();
+    let e = apply_authorized(
+        &op,
+        &scope_of(&path),
+        &id,
+        &mut |_| Ok(()),
+        &|plan| approvals.path().join(format!("{plan}.json")).exists(),
+        false,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(e.code_str(), "plan_unknown");
 }
 
 /// The new plan id is in the message; the step reads the new plan (05.15).
@@ -170,6 +194,7 @@ fn a_stale_plan_names_the_new_plan_id() {
         &scope_of(&path),
         &id,
         &mut |_| Ok(()),
+        &|_| true,
         false,
         &mut Vec::new(),
     )
@@ -188,6 +213,7 @@ fn a_stale_plan_steps_to_the_new_structural_plan() {
         &scope_of(&path),
         &id,
         &mut |_| Ok(()),
+        &|_| true,
         false,
         &mut Vec::new(),
     )
@@ -240,7 +266,16 @@ fn config_describe_text_names_the_environment_and_key() {
 fn applied_text(path: &Path, op: &FakeOp) -> String {
     let id = plan_id_of(path, op);
     let mut buf = Vec::new();
-    apply_authorized(op, &scope_of(path), &id, &mut |_| Ok(()), false, &mut buf).unwrap();
+    apply_authorized(
+        op,
+        &scope_of(path),
+        &id,
+        &mut |_| Ok(()),
+        &|_| true,
+        false,
+        &mut buf,
+    )
+    .unwrap();
     String::from_utf8(buf).unwrap()
 }
 

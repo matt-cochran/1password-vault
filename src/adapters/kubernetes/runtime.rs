@@ -29,7 +29,7 @@ use super::{
     Effect, KubeTarget, Kubectl, LABEL_MANAGED, VALUE_KEY, container_env, container_index,
     digest_hex, secret_name, secret_ref, split_secret_name, store_name, text, valid_label_value,
 };
-use crate::cause::{Cause, Guard};
+use crate::cause::{Cause, EnvName, Guard, OutputProblem, Refusal, StoreObject, System};
 use crate::domain::{
     AccessFinding, Binding, Health, RawSpec, Revision, RuntimeChange, RuntimeSnapshot,
 };
@@ -511,31 +511,38 @@ impl<'a> KubeDeployment<'a> {
                 other => other,
             };
             first = false;
-            let last =
-                match state {
-                    None => {
-                        return Err(Error::Target(format!(
-                        "ExternalSecret {es} disappeared after opv applied it; deployment {d} \
-                         was not changed\n  next: re-run the same command"
-                    ).into()));
+            let last = match state {
+                // Someone removed it after opv applied it; the Deployment is unchanged.
+                None => {
+                    return Err(Cause::ConcurrentEdit {
+                        object: StoreObject::Resource {
+                            resource: self.t().external_ref(es),
+                        },
                     }
-                    Some(Sync::Synced) => return Ok(()),
-                    Some(Sync::Failed) => {
-                        return Err(external::diagnose_failed(
-                            &self.k, bridge, es, env_name, version,
-                        ));
-                    }
-                    Some(Sync::Waiting(state)) => state,
-                };
+                    .into());
+                }
+                Some(Sync::Synced) => return Ok(()),
+                Some(Sync::Failed) => {
+                    return Err(external::diagnose_failed(
+                        &self.k, bridge, es, env_name, version,
+                    ));
+                }
+                Some(Sync::Waiting(state)) => state,
+            };
             let waited = wait.elapsed(r);
             if wait.over(r, poll) {
-                return Err(Error::Target(format!(
-                    "ExternalSecret {es} was not Ready within {} s ({last}); deployment {d} was \
-                     not changed\n  next: `{}`, then run the same command again",
-                    waited.as_secs(),
-                    self.k
-                        .command(&format!("describe {} {es}", external::RESOURCE))
-                ).into()));
+                // Still syncing when the wait ended, as kubectl's own read shows it; the
+                // Deployment is unchanged.
+                let _ = (&last, d);
+                let what = format!("kubectl get {} {es}", external::RESOURCE);
+                return Err(super::unusable(&what, |seen| Cause::TargetRefused {
+                    system: System::Kubernetes,
+                    subject: self.t().external_ref(es),
+                    why: Refusal::InProgress,
+                    env: Some(EnvName::new(env_name)),
+                    target: None,
+                    seen,
+                }));
             }
             if waited >= next_note {
                 (self.note)(&format!(
@@ -553,16 +560,14 @@ impl<'a> KubeDeployment<'a> {
     fn generation(&self, out: &[u8], what: &str) -> Result<Revision, Error> {
         let s = std::str::from_utf8(out).unwrap_or("").trim();
         if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) || s.len() > 19 {
-            return Err(Error::Target(
-                format!(
-                    "{what} succeeded but returned no Deployment generation; the change was \
-                 applied and nothing was pruned\n  next: {}",
-                    self.k.command(&format!(
-                        "rollout status deployment/{}",
-                        self.t().deployment
-                    ))
-                )
-                .into(),
+            // The change was applied; its reply named no generation to watch (A1).
+            return Err(super::unusable_reply(
+                what,
+                None,
+                OutputProblem::Empty {
+                    what: "Deployment generation",
+                },
+                crate::cause::During::AppliedWrite,
             ));
         }
         Ok(Revision(s.to_string()))
@@ -803,15 +808,15 @@ impl PinnedRuntime for KubeDeployment<'_> {
                 .unwrap_or_default();
             return self.generation(generation.as_bytes(), &what);
         }
-        // Safe to re-run, so not a target refusal (06.39); the catalog has no Deployment
-        // subject for "changed before the write" yet.
-        Err(Error::Unknown(
-            format!(
-                "deployment {d} changed while opv applied ({}); nothing applied",
-                changed_paths(&snapshot.spec.0, &fresh)
-            )
-            .into(),
-        ))
+        // Safe to re-run, so not a target refusal (06.39): the Deployment changed before
+        // opv's write, which therefore did not apply.
+        let _ = (d, changed_paths(&snapshot.spec.0, &fresh));
+        Err(Cause::ChangedBeforeWrite {
+            object: StoreObject::Resource {
+                resource: self.t().deployment_ref(),
+            },
+        }
+        .into())
     }
 
     /// Polls the rollout of `revision` (a generation): healthy when rolled out as `kubectl
@@ -845,16 +850,10 @@ impl PinnedRuntime for KubeDeployment<'_> {
             }
             let waited = wait.elapsed(r);
             if wait.over(r, self.poll_every) {
-                return Err(Error::Target(
-                    format!(
-                        "deployment {d} did not finish rolling out generation {generation} within \
-                     {} s ({last}); the previous ReplicaSet keeps serving; nothing pruned\n  \
-                     next: {}",
-                        waited.as_secs(),
-                        self.k.command(&format!("rollout status deployment/{d}"))
-                    )
-                    .into(),
-                ));
+                // Still rolling out when the wait ended: the previous ReplicaSet keeps
+                // serving, and the sync flow reports it (as for Azure).
+                let _ = &last;
+                return Ok(Health::TimedOut);
             }
             if waited >= next_note {
                 (self.note)(&format!(
@@ -1206,7 +1205,12 @@ mod tests {
         let moved = deployment_with(|d| d["metadata"]["resourceVersion"] = json!("990"));
         let r = FakeRunner::new([Output::failure(1), json(&moved)]);
         let e = with_rt(&r, |rt| rt.apply(&change(), &snapshot())).unwrap_err();
-        assert_eq!(e.code().retry(), crate::error::Retry::Safe);
+        // The Deployment changed before opv's write, which did not apply: the step is to
+        // run the same command again.
+        let next = e
+            .cause()
+            .map(|(c, _)| c.step(&crate::cause::Invocation::default()).1);
+        assert_eq!(next, Some(crate::cause::Next::Rerun));
     }
 
     /// 06.28: an env name opv does not manage is refused as such, never sent to `opv
@@ -1230,14 +1234,14 @@ mod tests {
 
     /// M5 (FR-31): the concurrent-change error names the paths that changed.
     #[test]
-    fn concurrent_change_names_the_changed_paths() {
+    fn concurrent_change_is_the_deployment_changed_before_the_write() {
         let moved = deployment_with(|d| {
             d["metadata"]["resourceVersion"] = json!("990");
             d["spec"]["replicas"] = json!(7);
         });
         let r = FakeRunner::new([Output::failure(1), json(&moved)]);
         let e = with_rt(&r, |rt| rt.apply(&change(), &snapshot())).unwrap_err();
-        assert!(e.mentions("(/spec/replicas)"), "{e}");
+        assert_eq!(e.code_str(), "target_changed", "{e}");
     }
 
     #[test]
@@ -1397,7 +1401,7 @@ mod tests {
     }
 
     #[test]
-    fn await_healthy_times_out_naming_the_rollout_command() {
+    fn await_healthy_times_out_as_timed_out() {
         let r = FakeRunner::default();
         for _ in 0..5 {
             r.responses.borrow_mut().extend([
@@ -1406,15 +1410,16 @@ mod tests {
                 Ok(pods("")),
             ]);
         }
-        let e = with_rt(&r, |rt| rt.await_healthy(&Revision("6".into()))).unwrap_err();
-        assert!(matches!(e, Error::Target(m) if m.mentions("rollout status deployment/api")));
+        // Still rolling out when the wait ended: the sync flow reports it (as for Azure).
+        let h = with_rt(&r, |rt| rt.await_healthy(&Revision("6".into()))).unwrap();
+        assert_eq!(h, Health::TimedOut);
     }
 
     /// I3: the rollout wait has its own limit and counts the time its reads take, so with
     /// each read taking 60 s its own message (naming the rollout state) comes long before
     /// the run budget runs out.
     #[test]
-    fn slow_reads_end_the_rollout_wait_with_its_own_message() {
+    fn slow_reads_end_the_rollout_wait_before_the_budget() {
         let (t, m) = (target(), managed());
         let r = FakeRunner::default();
         r.call_cost.set(Duration::from_secs(60));
@@ -1425,11 +1430,10 @@ mod tests {
                 Ok(pods("")),
             ]);
         }
-        let e = KubeDeployment::new(&r, &t, m)
+        let h = KubeDeployment::new(&r, &t, m)
             .with_progress(|_| {})
-            .await_healthy(&Revision("6".into()))
-            .unwrap_err();
-        assert!(e.mentions("did not finish rolling out"), "{e}");
+            .await_healthy(&Revision("6".into()));
+        assert!(matches!(h, Ok(Health::TimedOut)), "{h:?}");
     }
 
     #[test]

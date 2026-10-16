@@ -29,8 +29,8 @@ use zeroize::Zeroizing;
 use super::write_err;
 use crate::adapters::{onepassword, onepassword_diagnose, onepassword_tidy};
 use crate::cause::{
-    Cause, DiagnoseContext, EnvName, FieldRule, InputKind, ProductName, Scope as InScope, System,
-    TargetName, Unverified, Upstream, UsageProblem,
+    Cause, DiagnoseContext, EnvName, FieldRule, InputKind, OutputProblem, ProductName,
+    Scope as InScope, System, TargetName, Unverified, Upstream, UsageProblem,
 };
 use crate::domain::delivery::{
     BindingRef, Evidence, Observed, Receipt, SCHEMA, Scope, Source, Verification, decode_evidence,
@@ -109,43 +109,57 @@ fn products_in_scope(
 /// that cannot be told is an error: never a receipt minted or judged under a guess.
 fn account_id(r: &dyn CommandRunner) -> Result<String, Error> {
     let call = crate::runner::Call::new(onepassword::OP, &["whoami", "--format", "json"]);
-    // Legacy until a successful call with unusable output can be observed (an
-    // `UnexpectedOutput` needs the runner's observation, design §5 "Sealing").
-    let unknown = |why: &str| {
-        Error::Source(
-            format!(
-                "could not tell which 1Password account this session reaches (op whoami \
-                 {why}); no delivery receipt was minted or checked"
-            )
+    // An answer that names no account is the runner's own observation of that call (A1).
+    let unusable = |problem: OutputProblem| -> Error {
+        match crate::runner::take_unusable_reply(&call) {
+            Some(seen) => Cause::UnexpectedOutput {
+                system: System::OnePassword,
+                at: None,
+                problem,
+                during: crate::cause::During::Read,
+                seen,
+            }
             .into(),
-        )
+            None => Cause::Bug {
+                site: "delivery: an op whoami reply the runner did not observe",
+            }
+            .into(),
+        }
     };
     let out = match r.read(&call, &[]) {
         Ok(crate::runner::Outcome::Done(out)) => out,
         Ok(crate::runner::Outcome::Refused(_)) | Err(_) => {
-            return Err(
-                op_failure(&DiagnoseContext::default()).unwrap_or_else(|| unknown("failed"))
-            );
+            return Err(op_failure(&DiagnoseContext::default()).unwrap_or_else(|| {
+                Cause::Bug {
+                    site: "delivery: a failed op whoami left no observation",
+                }
+                .into()
+            }));
         }
         Ok(crate::runner::Outcome::Unknown { .. }) => {
             return Err(crate::host::OP_CLI.unanswered(r, "op whoami"));
         }
     };
-    serde_json::from_slice::<Value>(&out.stdout)
-        .ok()
-        .and_then(|v| v["account_uuid"].as_str().map(str::to_string))
-        .ok_or_else(|| unknown("named no account"))
+    let Ok(v) = serde_json::from_slice::<Value>(&out.stdout) else {
+        return Err(unusable(OutputProblem::Unparseable));
+    };
+    v["account_uuid"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| {
+            unusable(OutputProblem::Empty {
+                what: "account_uuid",
+            })
+        })
 }
 
 /// The cause of the `op` call that just failed, from 1Password's own diagnosis (design §5),
 /// with 1Password's reply as evidence; `None` when the runner observed no failed call.
 fn op_failure(ctx: &DiagnoseContext) -> Option<Error> {
-    let seen = crate::runner::take_observed()?;
-    let said = crate::runner::take_failure_excerpt()
-        .map(|e| e.lines)
-        .unwrap_or_default();
-    let exit = seen.exit();
-    let cause = onepassword_diagnose::diagnose(seen, &said.join("\n"), ctx);
+    let failed = crate::runner::take_failure()?;
+    let exit = failed.seen.exit();
+    let cause = onepassword_diagnose::diagnose(failed.seen.clone(), failed.stderr(), ctx);
+    let said = failed.excerpt.map(|e| e.lines).unwrap_or_default();
     if said.is_empty() {
         return Some(cause.into());
     }

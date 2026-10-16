@@ -8,7 +8,6 @@ use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
-use serde::de::{self, Deserializer};
 
 use super::external::{self, Bridge, ExternalStore};
 use super::runtime::{DEPLOY_RIGHTS, POLL_EVERY, WAIT_MAX, missing_rights};
@@ -17,7 +16,8 @@ use super::{
     valid_label_value,
 };
 use crate::adapters::probe::{spawn_tool, version_in};
-use crate::cause::{Cause, Unusable};
+use crate::cause::{Cause, FieldRule, Unusable};
+use crate::config::{TEMPLATE_WORDS, section_invalid};
 use crate::error::Error;
 use crate::host::Host;
 use crate::ports::Ports;
@@ -112,76 +112,58 @@ static BINDINGS: [StoreBinding; 1] = [StoreBinding {
     via: "External Secrets Operator",
 }];
 
-/// The section as written.
+/// The section as written. Its identifiers are checked once it is read
+/// ([`Raw::checked`]), so each refusal is a typed configuration cause (C15).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Raw {
-    #[serde(deserialize_with = "context")]
     context: String,
-    #[serde(deserialize_with = "namespace")]
     namespace: String,
-    #[serde(deserialize_with = "deployment")]
     deployment: String,
-    #[serde(default, deserialize_with = "container")]
+    #[serde(default)]
     container: Option<String>,
     #[serde(default)]
-    env_name: Option<Template>,
+    env_name: Option<String>,
     #[serde(default)]
     config: ConfigRoute,
 }
 
-/// An `env_name`: must contain `{KEY}` (`{PRODUCT}` is optional; two keys rendering one
-/// name are refused at load, FR-30).
-struct Template(String);
+/// A Kubernetes name (DNS-1123 label), in words.
+const LABEL_WORDS: &str = "a Kubernetes name: lower-case letters, digits and -, starting and ending with a letter or digit, at most 63 characters";
+/// A kubeconfig context name, in words.
+const CONTEXT_WORDS: &str = "a kubeconfig context name: letters, digits and _ . : / @ + -, not starting with - (kubectl config get-contexts -o name lists them)";
 
-impl<'de> Deserialize<'de> for Template {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let t = String::deserialize(d)?;
-        if t.contains("{KEY}") {
-            Ok(Self(t))
-        } else {
-            Err(de::Error::custom(format!(
-                "kubernetes.env_name {t:?} must contain {{KEY}}"
-            )))
+impl Raw {
+    /// The section's identifiers checked (FR-37): the context goes into argv (never read as
+    /// a flag, no whitespace or shell metacharacters; cloud context names hold `:`, `/` and
+    /// `@`); namespace, Deployment and container are DNS-1123 labels; `env_name` is
+    /// required and contains `{KEY}` (`{PRODUCT}` is optional; two keys rendering one name
+    /// are refused at load, FR-30). Returns the template.
+    fn checked(&mut self) -> Result<String, Error> {
+        let bad = |field: &str, words: &'static str| {
+            section_invalid(
+                &format!("kubernetes.{field}"),
+                FieldRule::Type { expected: words },
+            )
+        };
+        if !is_context(&self.context) {
+            return Err(bad("context", CONTEXT_WORDS));
         }
-    }
-}
-
-/// A DNS-1123 label field (namespace, Deployment, container names).
-fn label<'de, D: Deserializer<'de>>(field: &str, d: D) -> Result<String, D::Error> {
-    let s = String::deserialize(d)?;
-    if valid_label_value(&s) {
-        Ok(s)
-    } else {
-        Err(de::Error::custom(format!(
-            "kubernetes.{field} {s:?} must be a Kubernetes name: {LABEL_PATTERN}"
-        )))
-    }
-}
-
-fn namespace<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
-    label("namespace", d)
-}
-
-fn deployment<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
-    label("deployment", d)
-}
-
-fn container<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
-    label("container", d).map(Some)
-}
-
-/// The context goes into argv: non-empty, never read as a flag, no whitespace or shell
-/// metacharacters (cloud context names hold `:`, `/` and `@`, so those are allowed).
-fn context<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
-    let s = String::deserialize(d)?;
-    if is_context(&s) {
-        Ok(s)
-    } else {
-        Err(de::Error::custom(format!(
-            "kubernetes.context {s:?} must be a kubeconfig context name: \
-             ^[A-Za-z0-9_.:/@+][A-Za-z0-9_.:/@+-]*$ (see `kubectl config get-contexts -o name`)"
-        )))
+        let labels = [
+            ("namespace", Some(&self.namespace)),
+            ("deployment", Some(&self.deployment)),
+            ("container", self.container.as_ref()),
+        ];
+        for (field, value) in labels {
+            if value.is_some_and(|v| !valid_label_value(v)) {
+                return Err(bad(field, LABEL_WORDS));
+            }
+        }
+        match self.env_name.take() {
+            Some(t) if t.contains("{KEY}") => Ok(t),
+            Some(_) => Err(bad("env_name", TEMPLATE_WORDS)),
+            None => Err(section_invalid("kubernetes.env_name", FieldRule::Missing)),
+        }
     }
 }
 
@@ -226,15 +208,7 @@ impl Provider for KubernetesProvider {
     fn parse(&self, section: &Section<'_>) -> Result<Box<dyn TargetConfig>, Error> {
         let env = section.env();
         let mut raw: Raw = section.deserialize()?;
-        let Some(Template(t)) = raw.env_name.take() else {
-            return Err(Error::Config(
-                format!(
-                    "environment {env}: kubernetes.env_name is required (for example \
-                     \"FLEET__{{PRODUCT}}__{{KEY}}\", or \"{{KEY}}\" for bare names)"
-                )
-                .into(),
-            ));
-        };
+        let t = raw.checked()?;
         Ok(Box::new(raw.target(env, t)))
     }
 
@@ -320,6 +294,19 @@ impl KubernetesTarget {
 }
 
 impl TargetConfig for KubernetesTarget {
+    fn runtime_subject(
+        &self,
+    ) -> Option<(
+        crate::cause::System,
+        &'static str,
+        crate::cause::ResourceRef,
+    )> {
+        Some((
+            crate::cause::System::Kubernetes,
+            PROGRAM,
+            self.target.deployment_ref(),
+        ))
+    }
     fn target_locator(&self) -> String {
         format!(
             "context {} namespace {} deployment {}",
@@ -826,24 +813,25 @@ environments = ["dev"]
 
     #[test]
     fn invalid_namespace_points_at_its_line() {
+        // C15: a typed ConfigInvalid at the field's key, in words, never the value (C1).
         assert_eq!(
             err(&with("\"myapp\"", "\"My_App\"")),
-            "configuration error: invalid secrets.toml: TOML parse error at line 9, column 13\n\
-             kubernetes.namespace \"My_App\" must be a Kubernetes name: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ (at most 63 \
-             characters)"
+            "secrets.toml at line 9, column 1: environments.dev.targets.app.kubernetes.namespace \
+             must be a Kubernetes name: lower-case letters, digits and -, starting and ending with \
+             a letter or digit, at most 63 characters"
         );
     }
 
     #[test]
     fn invalid_deployment_points_at_its_line() {
         let e = err(&with("\"api\"", "\"api-\""));
-        assert!(e.contains("line 10, column 14"), "{e}");
+        assert!(e.contains("line 10, column 1:"), "{e}");
     }
 
     #[test]
     fn invalid_container_points_at_its_line() {
         let e = err(&with("api\"\n", "api\"\ncontainer = \"-web\"\n"));
-        assert!(e.contains("line 11, column 13"), "{e}");
+        assert!(e.contains("line 11, column 1:"), "{e}");
     }
 
     #[test]
@@ -855,32 +843,35 @@ environments = ["dev"]
     #[test]
     fn context_with_leading_dash_points_at_its_line() {
         let e = err(&with("\"kind-opv\"", "\"--kubeconfig=/x\""));
-        assert!(e.contains("line 8, column 11"), "{e}");
+        assert!(e.contains("line 8, column 1:"), "{e}");
     }
 
     #[test]
     fn context_with_whitespace_is_refused() {
         let e = err(&with("\"kind-opv\"", "\"kind opv\""));
-        assert!(e.contains("kubernetes.context \"kind opv\""), "{e}");
+        assert!(
+            e.contains("kubernetes.context must be a kubeconfig context name"),
+            "{e}"
+        );
     }
 
     #[test]
     fn context_with_shell_metacharacter_is_refused() {
         let e = err(&with("\"kind-opv\"", "\"kind;rm\""));
-        assert!(e.contains("kubernetes.context \"kind;rm\""), "{e}");
+        assert!(!e.contains("kind;rm"), "{e}");
     }
 
     #[test]
     fn empty_context_is_refused() {
         let e = err(&with("\"kind-opv\"", "\"\""));
-        assert!(e.contains("kubernetes.context \"\""), "{e}");
+        assert!(e.contains("kubernetes.context must be"), "{e}");
     }
 
     #[test]
     fn env_name_without_placeholders_points_at_its_line() {
         let e = err(&with("FLEET__{PRODUCT}__{KEY}", "STATIC"));
         assert!(
-            e.contains("line 11, column 12") && e.contains("must contain {KEY}"),
+            e.contains("line 11, column 1:") && e.contains("a template containing {KEY}"),
             "{e}"
         );
     }
@@ -895,7 +886,7 @@ environments = ["dev"]
     fn unknown_config_route_points_at_its_line() {
         let e = err(&with("api\"\n", "api\"\nconfig = \"plain\"\n"));
         assert!(
-            e.contains("line 11, column 10") && e.contains("unknown variant `plain`"),
+            e.contains("line 11, column 10") && e.contains("must be one of env, store"),
             "{e}"
         );
     }

@@ -26,6 +26,13 @@ pub trait Provider: Sync {
     fn section(&self) -> &'static str;
     /// User-facing name: "Fly", "Azure", "Kubernetes".
     fn label(&self) -> &'static str;
+    /// The forms this provider's own section checks ask for, as `(marker, words)`: a serde
+    /// message of a section field that contains `marker` (`must be a Key Vault name`) is
+    /// reported as that field needing `words`, never with the message itself, which quotes
+    /// the value (C1, C15).
+    fn value_shapes(&self) -> &'static [(&'static str, &'static str)] {
+        &[]
+    }
     /// The CLIs this provider runs, its own first: the runner takes each one's pinned
     /// environment and not-found phrases from here, and `Next:` lines starting with one
     /// count as runnable. A store another provider declares brings that provider's CLI.
@@ -324,15 +331,8 @@ impl<'a> Section<'a> {
     /// TOML error in the file: line, column and the field (FR-2), never the line itself
     /// (C1, SR-1).
     pub fn deserialize<T: DeserializeOwned>(&self) -> Result<T, Error> {
-        T::deserialize(ValueDeserializer::from(self.value.clone())).map_err(|e| {
-            Error::Config(
-                format!(
-                    "invalid secrets.toml: {}",
-                    crate::config::toml_error(self.text, e.span(), e.message())
-                )
-                .into(),
-            )
-        })
+        T::deserialize(ValueDeserializer::from(self.value.clone()))
+            .map_err(|e| crate::config::toml_invalid(self.text, &e))
     }
 }
 
@@ -386,6 +386,18 @@ pub trait TargetConfig: fmt::Debug + Send + Sync {
     /// `explain` lines for a config key, when this target routes config itself (Azure:
     /// a plain env value or a Key Vault reference). `None`: config is not deployed here.
     fn explain_config(&self, _product: &str, _key: &str) -> Option<Vec<(&'static str, String)>> {
+        None
+    }
+    /// The runtime a pinned target binds (its Deployment, its Container App) as a catalog
+    /// subject, with its system and program, for a refusal its own reads showed (a revision
+    /// that is unhealthy, still rolling out, or missing; design §4.5). `None`: no runtime.
+    fn runtime_subject(
+        &self,
+    ) -> Option<(
+        crate::cause::System,
+        &'static str,
+        crate::cause::ResourceRef,
+    )> {
         None
     }
     /// Equal configuration (every field), for comparing whole configurations.

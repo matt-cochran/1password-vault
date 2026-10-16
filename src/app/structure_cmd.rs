@@ -152,18 +152,23 @@ pub fn apply(
         &scope,
         plan_id,
         &mut |p| crate::approval::consume(&p.plan_id, &project, &account, now()),
+        &crate::approval::ever_approved,
         json,
         out,
     )
 }
 
-/// [`apply`] with an injected authorization check (the real one is
-/// [`crate::approval::consume`]; tests use a temp-dir [`crate::approval::consume_in`]).
+/// [`apply`] with an injected authorization check and approval record (the real ones are
+/// [`crate::approval::consume`] and [`crate::approval::ever_approved`] on this machine's
+/// approval folder; tests use a temp dir and never read the real one). A plan id that was
+/// never approved here and no longer matches is `PlanUnknown`, not a plan that changed
+/// since its approval (C2, as over MCP).
 pub(crate) fn apply_authorized(
     r: &dyn CommandRunner,
     scope: &Scope,
     plan_id: &str,
     authorize: &mut dyn FnMut(&structure::Plan) -> Result<(), Error>,
+    approved: &dyn Fn(&str) -> bool,
     json: bool,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
@@ -174,7 +179,8 @@ pub(crate) fn apply_authorized(
         &scope.account,
         plan_id,
         authorize,
-    )?;
+    )
+    .map_err(|e| structure::unknown_unless_approved(e, approved))?;
     if json {
         return write_json(out, &agent_view::applied_projection(&applied));
     }

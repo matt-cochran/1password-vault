@@ -15,8 +15,14 @@ use serde::Deserialize;
 
 use super::{CREDENTIAL_VARS, PROGRAM};
 use crate::adapters::probe::{parse_version, version_in};
-use crate::cause::{Cause, DiagnoseContext};
-use crate::config::check_ident;
+use crate::cause::{Cause, DiagnoseContext, DottedPath, FieldRule};
+use crate::config::{TEMPLATE_WORDS, check_ident, section_invalid};
+
+/// A GitHub repository, in words.
+const REPO_WORDS: &str = "a repository as owner/name: letters, digits and - for the owner; letters, digits, ., _ and - for the name";
+/// A GitHub environment name, in words.
+const ENVIRONMENT_WORDS: &str =
+    "a GitHub environment name: 1 to 255 letters, digits, ., _, - and spaces";
 use crate::error::Error;
 use crate::host::Host;
 use crate::ports::Ports;
@@ -121,39 +127,27 @@ impl Provider for GithubProvider {
             (Some(repo), None) => (vec![repo], "github.repo"),
             (None, Some(repos)) => (repos, "github.repos"),
             (Some(_), Some(_)) => {
-                return Err(Error::Config(
-                    format!(
-                        "environment {env}: github.repo and github.repos are mutually \
-                         exclusive; give exactly one"
-                    )
-                    .into(),
+                return Err(section_invalid(
+                    "github.repos",
+                    FieldRule::ConflictsWith {
+                        field: DottedPath(vec!["github".into(), "repo".into()]),
+                    },
                 ));
             }
-            (None, None) => {
-                return Err(Error::Config(
-                    format!(
-                        "environment {env}: github.repo or github.repos is required; give \
-                         exactly one"
-                    )
-                    .into(),
-                ));
-            }
+            (None, None) => return Err(section_invalid("github.repo", FieldRule::Missing)),
         };
         if repos.is_empty() {
-            return Err(Error::Config(
-                format!("environment {env}: github.repos must list at least one repository").into(),
-            ));
+            return Err(section_invalid("github.repos", FieldRule::Empty));
         }
         let mut seen = BTreeSet::new();
         for repo in &repos {
-            check_ident(env, field, repo, is_repo, "^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$")?;
+            check_ident(env, field, repo, is_repo, REPO_WORDS)?;
             if !seen.insert(repo.to_ascii_lowercase()) {
-                return Err(Error::Config(
-                    format!(
-                        "environment {env}: github repos list {repo:?} more than once \
-                         (GitHub repository names are case-insensitive)"
-                    )
-                    .into(),
+                return Err(section_invalid(
+                    field,
+                    FieldRule::Type {
+                        expected: "a list of distinct repositories (GitHub repository names are case-insensitive)",
+                    },
                 ));
             }
         }
@@ -163,17 +157,16 @@ impl Provider for GithubProvider {
                 "github.environment",
                 environment,
                 is_environment,
-                "^[A-Za-z0-9._ -]{1,255}$",
+                ENVIRONMENT_WORDS,
             )?;
         }
         let secret_name_template = raw.secret_name.unwrap_or_else(|| "{KEY}".into());
         if !secret_name_template.contains("{KEY}") {
-            return Err(Error::Config(
-                format!(
-                    "environment {env}: github.secret_name {secret_name_template:?} must \
-                     contain {{KEY}}"
-                )
-                .into(),
+            return Err(section_invalid(
+                "github.secret_name",
+                FieldRule::Type {
+                    expected: TEMPLATE_WORDS,
+                },
             ));
         }
         Ok(Box::new(GithubTarget {
@@ -470,11 +463,11 @@ mod tests {
             .clone()
     }
 
-    /// The `Error::Config` text of a refused section body.
+    /// The text of a refused section body's `ConfigInvalid` (C15: a typed cause).
     fn config_error(body: &str) -> String {
         match parse_body(body) {
-            Err(Error::Config(m)) => m.to_string(),
-            other => panic!("expected Config error, got {other:?}"),
+            Err(e) if e.code_str() == "config_invalid" => e.to_string(),
+            other => panic!("expected config_invalid, got {other:?}"),
         }
     }
 
@@ -534,15 +527,12 @@ repos = ["org/a"]"#,
     #[test]
     fn parse_refuses_a_missing_repo() {
         let e = config_error(r#"environment = "staging""#);
-        assert!(
-            e.contains("github.repo") && e.contains("github.repos"),
-            "{e}"
-        );
+        assert!(e.contains("github.repo is required"), "{e}");
     }
 
     #[test]
     fn parse_refuses_an_empty_repos_list() {
-        assert!(config_error("repos = []").contains("at least one repository"));
+        assert!(config_error("repos = []").contains("github.repos is empty"));
     }
 
     #[test]
@@ -558,7 +548,7 @@ repos = ["org/a"]"#,
     #[test]
     fn parse_refuses_case_insensitive_duplicate_repos() {
         let e = config_error(r#"repos = ["Org/R", "org/r"]"#);
-        assert!(e.contains("more than once"), "{e}");
+        assert!(e.contains("distinct repositories"), "{e}");
     }
 
     #[test]
@@ -599,7 +589,10 @@ secret_name = "STATIC""#,
 
     #[test]
     fn parse_refuses_an_unknown_field() {
-        assert!(config_error("repo = \"org/r\"\nrepository = \"org/r\"").contains("unknown field"));
+        assert!(
+            config_error("repo = \"org/r\"\nrepository = \"org/r\"")
+                .contains("not a known setting")
+        );
     }
 
     // rendering --------------------------------------------------------------------------

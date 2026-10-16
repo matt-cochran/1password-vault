@@ -52,8 +52,8 @@ use serde::Deserialize;
 use zeroize::Zeroizing;
 
 use crate::cause::{
-    Cause, DiagnoseContext, DottedPath, ExitClass, NamedBy, ResourceKind, ResourceName,
-    ResourceRef, System, Unusable, Upstream,
+    Cause, DiagnoseContext, DottedPath, ExitClass, Location, NamedBy, Observed, OutputProblem,
+    Refusal, ResourceKind, ResourceName, ResourceRef, System, Unusable, Upstream,
 };
 use crate::domain::SecretValue;
 use crate::domain::plan::StoreEntry;
@@ -61,7 +61,7 @@ use crate::error::Error;
 use crate::host::{Host, Tool};
 use crate::ports::{StagedRuntime, StagedStore, Store};
 use crate::provider::{Check, Preflight, Verdict};
-use crate::runner::{Call, CommandRunner, Outcome, Output, PROBE_TIMEOUT, Wait, unknown_text};
+use crate::runner::{Call, CommandRunner, Outcome, Output, PROBE_TIMEOUT, Wait};
 
 /// The Fly CLI binary.
 pub const PROGRAM: &str = "flyctl";
@@ -262,14 +262,17 @@ pub fn preflight(r: &dyn CommandRunner, app: &str) -> Result<Preflight, Error> {
     let status: AppStatus = read_json(r, "fly status", app, &["status", "--app", app, "--json"])?;
     let state = status.status.unwrap_or_default().to_ascii_lowercase();
     if state == "dead" {
-        return Err(Error::Target(
-            format!(
-                "Fly app {app} is dead (deleted) and cannot hold secrets; nothing was changed\n  \
-             Next: recreate it with `{PROGRAM} apps create {app}`, or correct the app name in \
-             secrets.toml, then re-run"
-            )
-            .into(),
-        ));
+        // flyctl's own status read says the app cannot hold secrets; nothing was changed.
+        return Err(unusable(&["status", "--app", app, "--json"], |seen| {
+            Cause::TargetRefused {
+                system: System::Fly,
+                subject: app_ref(app),
+                why: Refusal::NotRunning,
+                env: None,
+                target: None,
+                seen,
+            }
+        }));
     }
     let machines = status.machines.unwrap_or_default();
     let started = machines
@@ -325,7 +328,7 @@ fn wait_for_running_deploy(r: &dyn CommandRunner, app: &str) -> Result<(), Error
         };
         let waited = wait.elapsed(r);
         if wait.over(r, DEPLOY_POLL) {
-            return Err(deploy_still_running(app, waited, waited < wait.limit()));
+            return Err(deploy_still_running(app));
         }
         let note = if reported.is_none_or(|at| waited.saturating_sub(at) >= DEPLOY_PROGRESS) {
             reported = Some(waited);
@@ -344,24 +347,40 @@ fn wait_for_running_deploy(r: &dyn CommandRunner, app: &str) -> Result<(), Error
     }
 }
 
-/// A Fly deploy still running when the wait stopped (06.32): nothing was changed. A larger
-/// `--timeout` is offered only when the run budget ended the wait (`budget_ended`); when the
-/// wait's own [`DEPLOY_WAIT_MAX`] did, re-running once the deploy finished is the only way.
-fn deploy_still_running(app: &str, waited: Duration, budget_ended: bool) -> Error {
-    let wait = format!("wait until `{PROGRAM} releases --app {app}` shows the deploy finished");
-    let todo = if budget_ended {
-        format!("{wait}, or re-run with a larger --timeout")
-    } else {
-        wait
-    };
-    Error::Target(
-        format!(
-            "a Fly deploy is still running for {app} after {} s; nothing was changed",
-            waited.as_secs()
-        )
+/// A Fly deploy still running when the wait stopped (06.32), as flyctl's own releases read
+/// shows it: nothing was changed, and the step is to wait for it (design §4.5).
+fn deploy_still_running(app: &str) -> Error {
+    unusable(&["releases", "--app", app, "--json"], |seen| {
+        Cause::TargetRefused {
+            system: System::Fly,
+            subject: app_ref(app),
+            why: Refusal::InProgress,
+            env: None,
+            target: None,
+            seen,
+        }
+    })
+}
+
+/// The cause of the latest flyctl call `args`, which answered with a reply opv cannot use,
+/// built on the runner's own observation of it (design §4.6, A1).
+fn unusable(args: &[&str], cause: impl FnOnce(Observed) -> Cause) -> Error {
+    match crate::runner::take_unusable_reply(&Call::new(PROGRAM, args)) {
+        Some(seen) => cause(seen).into(),
+        None => Cause::Bug {
+            site: "fly: a flyctl reply the runner did not observe",
+        }
         .into(),
-    )
-    .with_do(todo)
+    }
+}
+
+/// The Fly app `app`, as a catalog subject.
+fn app_ref(app: &str) -> ResourceRef {
+    ResourceRef {
+        kind: ResourceKind::FlyApp,
+        name: ResourceName::new(app),
+        scope: None,
+    }
 }
 
 fn release_running(r: &Release) -> bool {
@@ -381,14 +400,17 @@ fn read_json<T: serde::de::DeserializeOwned>(
 ) -> Result<T, Error> {
     let out = run(r, Effect::Read, what, app, args, None)?;
     serde_json::from_slice(&out.stdout).map_err(|e| {
-        Error::Target(
-            format!(
-                "{what} returned unexpected JSON (line {}, column {})",
-                e.line(),
-                e.column()
-            )
-            .into(),
-        )
+        let at = Location {
+            line: u32::try_from(e.line()).unwrap_or(u32::MAX),
+            col: u32::try_from(e.column()).unwrap_or(u32::MAX),
+        };
+        unusable(args, |seen| Cause::UnexpectedOutput {
+            system: System::Fly,
+            at: Some(at),
+            problem: OutputProblem::Unparseable,
+            during: crate::cause::During::Read,
+            seen,
+        })
     })
 }
 
@@ -500,16 +522,14 @@ fn valid_name(name: &str) -> bool {
         && bytes.all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
 }
 
-/// A refusal names the key, the rule and its fixed reason, never the value (FR-15, FR-22,
-/// SR-1).
-fn refused(name: &str, rule: &str, op: &str) -> Error {
-    Error::Policy(
-        format!(
-            "fly {op} refused for {name:?}: rule {rule} ({}); nothing was sent to Fly",
-            import_reason(rule)
-        )
-        .into(),
-    )
+/// A batch that breaks an import rule reached the write. `sync` refuses every value with an
+/// [`entry_refusal`] as a blocking row of its plan (`KeysBlocking`) and the loader refuses
+/// two keys rendering one name, so this is an internal error; nothing was sent to Fly.
+fn refused(_name: &str, _rule: &str, _op: &str) -> Error {
+    Cause::Bug {
+        site: "fly: a name or value the plan passed breaks a Fly import rule",
+    }
+    .into()
 }
 
 /// The fixed reason for a Fly import or name rule (FR-22): a constant per rule, never
@@ -662,9 +682,7 @@ fn run(
     }
     .map_err(|e| match e.kind() {
         // A spent run budget; the runner's own message names the program (no child output).
-        io::ErrorKind::TimedOut => FLYCTL
-            .budget_spent(r, &e)
-            .map_text(|m| format!("{what}: {m}")),
+        io::ErrorKind::TimedOut => FLYCTL.budget_spent(r, &e),
         _ => call_error(r, &Host::detect, &e, &ctx),
     })?;
     match outcome {
@@ -678,14 +696,18 @@ fn run(
         Outcome::Unknown { reason, .. } if effect == Effect::Write => {
             match crate::runner::take_observed() {
                 Some(seen) => Err(diagnose::diagnose(seen, "", &ctx).into()),
-                // A lost reply leaves no observation of its own.
-                None => Err(Error::Unknown(
-                    format!(
-                        "{what}: {}; the change may or may not have been applied",
-                        unknown_text(PROGRAM, reason)
-                    )
-                    .into(),
-                )),
+                // A runner that reported it unanswered without observing it (an in-memory
+                // double) has it recorded as lost: its outcome is only unknown (NR-2).
+                None => {
+                    let _ = reason;
+                    match crate::host::lost_call(PROGRAM) {
+                        Some(failed) => Err(diagnose::diagnose(failed.seen, "", &ctx).into()),
+                        None => Err(Cause::Bug {
+                            site: "fly: an unfinished flyctl write left no observation",
+                        }
+                        .into()),
+                    }
+                }
             }
         }
         // A read unanswered after its last attempt: Fly is unreachable (NR-28), or, after
@@ -795,10 +817,8 @@ mod tests {
                 &[("GOOD".into(), &good), ("FLEET__P__BAD_KEY".into(), &bad)],
             )
             .unwrap_err();
-            assert!(matches!(e, Error::Policy(_)), "{rule}: {e:?}");
+            assert_eq!(e.code_str(), "internal_error", "{rule}: {e:?}");
             let t = err_text(&e);
-            assert!(t.contains("FLEET__P__BAD_KEY"), "{t}");
-            assert!(t.contains(rule), "{rule}: {t}");
             assert!(!t.contains(MARK), "value leaked: {t}");
             assert!(!t.contains("GOOD"), "names the wrong key: {t}");
             assert!(r.calls.borrow().is_empty(), "{rule}: staged something");
@@ -821,18 +841,14 @@ mod tests {
         ] {
             let r = FakeRunner::default();
             let e = stage(&r, "app", &[(name.into(), &v)]).unwrap_err();
-            assert!(matches!(e, Error::Policy(_)), "{name}: {e:?}");
-            assert!(err_text(&e).contains("fly-name-invalid"), "{name}");
+            assert_eq!(e.code_str(), "internal_error", "{name}: {e:?}");
             assert!(!err_text(&e).contains(MARK));
             assert!(r.calls.borrow().is_empty());
         }
         let r = FakeRunner::default();
         let e = stage(&r, "app", &[("DUP".into(), &v), ("DUP".into(), &v)]).unwrap_err();
         let t = err_text(&e);
-        assert!(
-            t.contains("DUP") && t.contains("import-duplicate-name"),
-            "{t}"
-        );
+        assert_eq!(e.code_str(), "internal_error", "{t}");
         assert!(!t.contains(MARK));
         assert!(r.calls.borrow().is_empty());
     }
@@ -844,8 +860,8 @@ mod tests {
         let at = sv(&"v".repeat(MAX_IMPORT_LINE - overhead));
         assert!(validate_import(&[(name.into(), &at)]).is_ok());
         let over = sv(&"v".repeat(MAX_IMPORT_LINE - overhead + 1));
-        let e = validate_import(&[(name.into(), &over)]).unwrap_err();
-        assert!(err_text(&e).contains("import-line-too-long"));
+        assert_eq!(entry_refusal(name, &over), Some("import-line-too-long"));
+        assert!(validate_import(&[(name.into(), &over)]).is_err());
         // Multi-byte characters count as bytes, not chars.
         let euro = sv(&"€".repeat((MAX_IMPORT_LINE - overhead) / 3 + 1));
         assert!(validate_import(&[(name.into(), &euro)]).is_err());
@@ -1076,7 +1092,8 @@ mod tests {
         let e = l
             .sign_in(std::collections::BTreeMap::new(), &FakeRunner::default())
             .unwrap_err();
-        assert_eq!(e.code(), crate::error::Code::DeployCredentialsFailed);
+        // The item is read with every declared field, so a missing one is opv's bug.
+        assert_eq!(e.code_str(), "internal_error");
     }
 
     // ---------------------------------------------------------------- list
@@ -1157,7 +1174,7 @@ mod tests {
         ] {
             let r = FakeRunner::new([Output::success(body)]);
             let e = list(&r, "app").unwrap_err();
-            assert!(matches!(e, Error::Target(_)), "{e:?}");
+            assert_eq!(e.code_str(), "unexpected_output", "{e:?}");
             assert!(!err_text(&e).contains(MARK));
         }
     }
@@ -1233,7 +1250,7 @@ mod tests {
     fn unset_refuses_invalid_names_before_any_call() {
         let r = FakeRunner::default();
         let e = unset_staged(&r, "app", &["OK".into(), "--app".into()]).unwrap_err();
-        assert!(err_text(&e).contains("fly-name-invalid"));
+        assert_eq!(e.code_str(), "internal_error", "{e:?}");
         assert!(r.calls.borrow().is_empty());
     }
 
@@ -1476,27 +1493,23 @@ mod tests {
         // Room for two polls, each with one read's limit to spare (NR-4).
         r.budget.set(crate::runner::READ_TIMEOUT + DEPLOY_POLL * 2);
         assert!(matches!(
-            preflight(&r, "app"),
-            Err(Error::Target(m)) if m.contains("still running for app after 10 s; nothing was changed")
+            preflight(&r, "app").map_err(|e| e.cause().map(|(c, _)| c.clone())),
+            Err(Some(Cause::TargetRefused {
+                why: Refusal::InProgress,
+                ..
+            }))
         ));
     }
 
-    /// 06.32: when the wait's own cap ended it, a larger --timeout cannot help.
+    /// 06.32: a deploy still running is the provider's change in progress, never a
+    /// re-run with a larger --timeout (the wait's own cap may have ended it).
     #[test]
-    fn a_deploy_still_running_at_the_wait_cap_never_offers_a_larger_timeout() {
-        let e = deploy_still_running("app", DEPLOY_WAIT_MAX, false);
+    fn a_deploy_still_running_never_offers_a_larger_timeout() {
+        let r = FakeRunner::new([Output::success("[]")]);
+        let _ = r.read(&Call::new(PROGRAM, &["releases"]), &[]);
+        let e = deploy_still_running("app");
         assert!(
             !crate::error::report(&e, "-", None).contains("--timeout"),
-            "{e:?}"
-        );
-    }
-
-    /// 06.32: when the run budget ended the wait, a larger --timeout is the way on.
-    #[test]
-    fn a_deploy_still_running_at_the_end_of_the_budget_offers_a_larger_timeout() {
-        let e = deploy_still_running("app", Duration::from_secs(10), true);
-        assert!(
-            crate::error::report(&e, "-", None).contains("--timeout"),
             "{e:?}"
         );
     }
@@ -1551,19 +1564,18 @@ mod tests {
         );
     }
 
-    /// FR-22: an import refusal names the rule and its fixed reason, never the value.
+    /// FR-22: an import refusal names the rule and its fixed reason, never the value; the
+    /// plan's row carries it (`entry_refusal_reason`), as sync refuses before staging.
     #[test]
-    fn import_refusal_error_names_rule_and_reason() {
+    fn import_refusal_names_rule_and_reason() {
         let v = sv("a\"#ZQXMARK");
-        let e = validate_import(&[("FLEET__P__K".to_string(), &v)]).unwrap_err();
-        let t = e.to_string();
-        assert!(
-            t.contains(
-                "rule import-hash-after-odd-quotes (a # follows an odd number of double quotes)"
-            ),
-            "{t}"
+        assert_eq!(
+            entry_refusal_reason("FLEET__P__K", &v),
+            Some((
+                "import-hash-after-odd-quotes",
+                "a # follows an odd number of double quotes"
+            ))
         );
-        assert!(!t.contains("ZQXMARK"), "{t}");
     }
 
     #[test]

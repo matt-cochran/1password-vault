@@ -192,7 +192,9 @@ pub fn parse(text: &str) -> Result<Fleet, Error> {
 /// A TOML parse or deserialize error as [`Cause::ConfigInvalid`]: the field is the document
 /// path the error's span falls in, and the rule is the parser's own classification of the
 /// error (missing, unknown, one of, type, duplicate, syntax). Never a value (C1, SR-1).
-fn toml_invalid(text: &str, e: &toml::de::Error) -> Error {
+/// Provider sections ([`Section::deserialize`]) report through it too (D1, C15): their
+/// spans are positions in the whole file, and the loader names the real source.
+pub(crate) fn toml_invalid(text: &str, e: &toml::de::Error) -> Error {
     let span = e.span();
     let msg = sanitize_toml_message(e.message());
     let first = msg.lines().next().unwrap_or_default();
@@ -247,6 +249,8 @@ fn toml_invalid(text: &str, e: &toml::de::Error) -> Error {
         FieldRule::Type {
             expected: expected_words(first),
         }
+    } else if let Some(expected) = provider_shape(first) {
+        FieldRule::Type { expected }
     } else {
         FieldRule::Syntax
     };
@@ -260,6 +264,17 @@ fn toml_invalid(text: &str, e: &toml::de::Error) -> Error {
         rule,
     }
     .into()
+}
+
+/// The form a provider's own section check asks for (its serde message says `<field> <value>
+/// must be <form>`), in opv's fixed words: never the message itself, which quotes the value
+/// (C1). `None` for a message no provider check writes.
+fn provider_shape(msg: &str) -> Option<&'static str> {
+    registry::PROVIDERS
+        .iter()
+        .flat_map(|p| p.value_shapes().iter())
+        .find(|(marker, _)| msg.contains(marker))
+        .map(|(_, words)| *words)
 }
 
 /// The name in backticks after `marker`.
@@ -429,6 +444,31 @@ impl<'t> Doc<'t> {
             rule,
         }
         .into()
+    }
+
+    /// A provider section's refusal (C15): a [`Cause::ConfigInvalid`] that names its field
+    /// within the section (`fly.app`, as [`section_invalid`] does) is named under the
+    /// section's place `base` (`environments.prod.targets.web`) and placed at it. Every
+    /// other error is returned unchanged.
+    fn place(&self, e: Error, base: &[&str]) -> Error {
+        let Some((
+            Cause::ConfigInvalid {
+                at: None,
+                field,
+                rule,
+                ..
+            },
+            _,
+        )) = e.cause()
+        else {
+            return e;
+        };
+        if field.0.first().map(String::as_str) == base.first().copied() {
+            return e;
+        }
+        let mut full: Vec<&str> = base.to_vec();
+        full.extend(field.0.iter().map(String::as_str));
+        self.invalid(&full, rule.clone())
     }
 
     /// The value at `path`, with its place in the file.
@@ -756,7 +796,9 @@ fn stores(raw: &BTreeMap<String, toml::Value>, doc: &Doc<'_>) -> Result<Stores, 
         let value = doc
             .value(&path)
             .ok_or_else(|| doc.invalid(&path, FieldRule::Missing))?;
-        let store = provider.parse_store(kind, &Section::new(name, value, doc.text))?;
+        let store = provider
+            .parse_store(kind, &Section::new(name, value, doc.text))
+            .map_err(|e| doc.place(e, &["stores", name]))?;
         out.insert(name.clone(), store);
     }
     Ok(out)
@@ -844,7 +886,9 @@ fn target_of(
         DeValue::Table(t) => t.remove("secrets_in"),
         _ => None,
     };
-    let target = p.parse(&Section::new(env, &rest, doc.text))?;
+    let target = p
+        .parse(&Section::new(env, &rest, doc.text))
+        .map_err(|e| doc.place(e, &base))?;
     let Some(secrets_in) = secrets_in else {
         return Ok(target);
     };
@@ -1333,25 +1377,49 @@ fn check_scopes(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
 }
 
 /// One identifier: non-empty, unpadded, and accepted by `ok` (safe in argv). For the
-/// providers' section parsers, which word `shape` themselves; the loader's own checks use
-/// [`ident`].
+/// providers' section parsers (C15): the refusal is a typed [`Cause::ConfigInvalid`] for
+/// `field` within the section (`fly.app`); the loader places it under the section's path and
+/// names the real source ([`Doc::place`]). `shape` is the allowed form in words; the shared
+/// ID form is [`PatternId::Id`]. `_env` is the environment (the loader's path names it).
 pub(crate) fn check_ident(
-    name: &str,
+    _env: &str,
     field: &str,
     value: &str,
     ok: fn(&str) -> bool,
-    shape: &str,
+    shape: &'static str,
 ) -> Result<(), Error> {
-    let problem = if value.trim().is_empty() {
-        format!("environment {name}: {field} is empty")
+    let rule = if value.trim().is_empty() {
+        FieldRule::Empty
     } else if value.trim() != value {
-        format!("environment {name}: {field} has leading or trailing whitespace")
+        check(ConfigCheck::Whitespace)
     } else if !ok(value) {
-        format!("environment {name}: {field} {value:?} must match {shape}")
+        match shape {
+            ID_SHAPE => FieldRule::Pattern { id: PatternId::Id },
+            words => FieldRule::Type { expected: words },
+        }
     } else {
         return Ok(());
     };
-    Err(Error::Config(problem.into()))
+    Err(section_invalid(field, rule))
+}
+
+/// A provider's env-name template, in words (`fly.secret_name`, `kubernetes.env_name`).
+pub(crate) const TEMPLATE_WORDS: &str =
+    "a template containing {KEY}, such as \"FLEET__{PRODUCT}__{KEY}\" or \"{KEY}\"";
+
+/// The ID form providers check with [`check_ident`] (Azure and Fly names).
+pub(crate) const ID_SHAPE: &str = "^[A-Za-z0-9][A-Za-z0-9._-]*$";
+
+/// [`Cause::ConfigInvalid`] for `field` within a provider section (`github.repo`): the
+/// loader places it under the section's path ([`Doc::place`]) and names the source (C15).
+pub(crate) fn section_invalid(field: &str, rule: FieldRule) -> Error {
+    Cause::ConfigInvalid {
+        source: parsing_source(),
+        at: None,
+        field: DottedPath(field.split('.').map(str::to_string).collect()),
+        rule,
+    }
+    .into()
 }
 
 /// The SSH host key types a pinned `host_key` may name (#139), as `known_hosts` spells them.
@@ -2820,7 +2888,7 @@ environments = ["prod"]
     fn rejects_a_fly_template_without_key() {
         let m = config_err(&mutate("FLEET__{PRODUCT}__{KEY}", "FLEET_STATIC"));
         assert!(
-            m.contains("fly.secret_name \"FLEET_STATIC\" must contain {KEY}"),
+            m.contains("fly.secret_name must be a template containing {KEY}"),
             "{m}"
         );
     }
@@ -2828,7 +2896,7 @@ environments = ["prod"]
     #[test]
     fn fly_secret_name_is_required() {
         let m = config_err(&web("fly.secret_name = \"{KEY}\"\n", ""));
-        assert!(m.contains("missing field `secret_name`"), "{m}");
+        assert!(m.contains("fly.secret_name is required but missing"), "{m}");
     }
 
     #[test]
@@ -2869,7 +2937,7 @@ environments = ["prod"]
     #[test]
     fn rejects_a_fly_app_that_reads_as_a_flag() {
         let m = config_err(&web("\"web-prod\"", "\"-a\""));
-        assert!(m.contains("fly.app \"-a\" must match"), "{m}");
+        assert!(m.contains("fly.app must be letters, digits"), "{m}");
     }
 
     #[test]
@@ -2904,10 +2972,10 @@ environments = ["prod"]
             "fly.secret_name = \"{KEY}\"\n",
             "fly.secret_name = \"{KEY}\"\nfly.region = \"ams\"\n",
         );
-        assert_eq!(
-            config_err(&bad),
-            "invalid secrets.toml: TOML parse error at line 7, column 5\nunknown field `region`, \
-             expected `app` or `secret_name`"
+        assert!(
+            config_err(&bad).contains("fly.region is not a known setting"),
+            "{}",
+            config_err(&bad)
         );
     }
 
