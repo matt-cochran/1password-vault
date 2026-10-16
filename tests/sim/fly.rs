@@ -1,6 +1,17 @@
-//! The simulated `flyctl`. Failure replies come from `tests/fixtures/fly/failures/`
-//! (flyctl v0.4.111); `secrets list --json` has the shape of `tests/fixtures/fly_list.json`,
+//! The simulated `flyctl` (flyctl v0.4.111). Failure replies come from
+//! `tests/fixtures/fly/failures/`, success replies from `tests/fixtures/fly/success/`;
 //! `status` and `releases` default to `tests/fixtures/fly/*-deployed.json`.
+//!
+//! Recorded success replies: `secrets list --json` (success 01-03: flyctl's indented array of
+//! `{name, digest, status}`, `[]` for an app with no secrets; the world's rows are printed in
+//! that layout) and `auth whoami` (success 04: the account's email, `<EMAIL>` unless the world
+//! sets `fly.email`).
+//!
+//! Awaiting a recording: the stdout of `secrets import`, `secrets unset` and `secrets deploy`
+//! (writes, never run against the owner's apps; the simulator prints nothing, and opv does not
+//! read it). A digest the simulator mints for an imported value has the recorded shape (16
+//! lowercase hex characters) but not Fly's value, which is keyed server-side and cannot be
+//! computed (spike D0, Q4).
 //!
 //! ```json
 //! "fly": {
@@ -26,6 +37,7 @@ use crate::world::World;
 
 const BOOLEAN: &[&str] = &["--stage", "--json", "--detach"];
 const DIR: &str = "fly/failures";
+const OK: &str = "fly/success";
 /// The app name recorded in cases 10 (the recording's own made-up name).
 const RECORDED_APP: &str = "opv-recording-nonexistent-app";
 
@@ -80,8 +92,13 @@ pub fn run(world: &mut World, args: &[String]) -> Reply {
     let app = app_of(args);
     let exists = world.doc["fly"]["apps"].get(&app).is_some();
     match ws.as_slice() {
-        // Its stdout names the account and opv drops it unread; nobody recorded it.
-        ["auth", "whoami"] => Reply::silent(),
+        ["auth", "whoami"] => {
+            let email = world.doc["fly"]["email"].as_str().unwrap_or("<EMAIL>");
+            recorded(
+                &format!("{OK}/04-auth-whoami"),
+                &[("<EMAIL>", email.to_string())],
+            )
+        }
         _ if !exists && ws.first() != Some(&"auth") => {
             if ws == ["secrets", "list"] {
                 fault(Kind::NotFound, world, args)
@@ -94,7 +111,7 @@ pub fn run(world: &mut World, args: &[String]) -> Reply {
                 .iter()
                 .map(|s| json!({"name": s["name"], "digest": s["digest"], "status": s["status"]}))
                 .collect();
-            Reply::json(&Value::Array(rows))
+            listed(&rows)
         }
         ["secrets", "import"] => {
             let mut input = Vec::new();
@@ -143,6 +160,20 @@ fn doc(world: &World, app: &str, key: &str, default: &str) -> Reply {
             None => Reply::no_recording(default, "fly"),
         },
     }
+}
+
+/// `secrets list --json` as flyctl prints it: the layout of success 01-03 (four-space
+/// indent, `name`, `digest`, `status` in that order, a final newline; `[]` when empty).
+fn listed(rows: &[Value]) -> Reply {
+    use serde::Serialize;
+    let mut out = Vec::new();
+    let fmt = serde_json::ser::PrettyFormatter::with_indent(b"    ");
+    let mut ser = serde_json::Serializer::with_formatter(&mut out, fmt);
+    if rows.serialize(&mut ser).is_err() {
+        return Reply::no_recording("flyctl secrets list of rows it cannot print", OK);
+    }
+    out.push(b'\n');
+    Reply::ok(out)
 }
 
 /// A digest that changes with the value (flyctl's own is opaque to opv).

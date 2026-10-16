@@ -1,6 +1,10 @@
 //! The simulated `ssh`: the remote side runs here, as `tests/remote_delivery.rs` does, with
 //! the host's environment and its command paths mapped to local ones. Failure replies come
-//! from `tests/fixtures/ssh/failures/` (OpenSSH 9.6p1).
+//! from `tests/fixtures/ssh/failures/` (OpenSSH 9.6p1). A successful session prints nothing
+//! of ssh's own (failures 11); its output is the remote side's. The host-key fingerprint in
+//! the mismatch banner (failures 01, `<FINGERPRINT>`) is the host's `fingerprint`, else the
+//! one recorded from a throwaway sshd in `tests/fixtures/ssh/success/02-keygen-fingerprint`
+//! (the same `SHA256:…` the banner printed for that key). Nothing here is invented.
 //!
 //! ```json
 //! "hosts": {"builder.example.internal": {
@@ -112,8 +116,8 @@ pub fn fault(kind: Kind, world: &World, args: &[String]) -> Action {
                     "<FINGERPRINT>",
                     world.doc["hosts"][&p.host]["fingerprint"]
                         .as_str()
-                        .unwrap_or("SHA256:opvsimopvsimopvsimopvsimopvsimopvsimopvsim0")
-                        .to_string(),
+                        .map(str::to_string)
+                        .unwrap_or_else(recorded_fingerprint),
                 ),
                 ("<PROFILE>", profile),
             ],
@@ -163,6 +167,16 @@ pub fn fault(kind: Kind, world: &World, args: &[String]) -> Action {
         },
         _ => Action::Reply(Reply::no_recording(&format!("{} on ssh", kind.name()), DIR)),
     }
+}
+
+/// The `SHA256:…` field of `ssh-keygen -l -E sha256` on the throwaway host key (success 02).
+fn recorded_fingerprint() -> String {
+    let r = recorded("ssh/success/02-keygen-fingerprint", &[]);
+    String::from_utf8_lossy(&r.stdout)
+        .split_whitespace()
+        .find(|w| w.starts_with("SHA256:"))
+        .unwrap_or_default()
+        .to_string()
 }
 
 pub fn run(world: &World, args: &[String]) -> Action {
