@@ -716,13 +716,19 @@ pub fn walk_up(start: &Path, name: &str) -> Option<PathBuf> {
 
 /// Test builds never look at or above the system temp directory: a `.opv` or
 /// `secrets.toml` a developer left in `/tmp` must not reach a test's scratch directory
-/// (found: a stray `/tmp/.opv` failed login and discovery tests on one machine only).
+/// (found: a stray `/tmp/.opv` failed login and discovery tests on one machine only). Nor
+/// at this checkout, where unit tests run: a developer's own `.opv` there selected a real
+/// account in tests that select none (found: access tests passed only without one).
 #[cfg(test)]
 pub(crate) fn hermetic(dir: &Path) -> bool {
     let tmp = std::env::temp_dir();
     let tmp = tmp.canonicalize().unwrap_or(tmp);
     let here = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-    here != tmp && !tmp.starts_with(&here)
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let checkout = checkout
+        .canonicalize()
+        .unwrap_or_else(|_| checkout.to_path_buf());
+    here != tmp && !tmp.starts_with(&here) && !checkout.starts_with(&here)
 }
 
 #[cfg(not(test))]
