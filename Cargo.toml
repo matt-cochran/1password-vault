@@ -75,3 +75,13 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 tempfile = "3"
+
+# The test-only simulator for `op`, `flyctl`, `kubectl`, `gh` and `ssh` (design §13). It needs
+# the `fake` feature, which release builds never enable, so it never ships. Its root is not
+# `main.rs`, so Cargo does not also take `tests/sim/` for an integration test.
+[[bin]]
+name = "opv-sim"
+path = "tests/sim/opv_sim.rs"
+required-features = ["fake"]
+test = false
+doctest = false
