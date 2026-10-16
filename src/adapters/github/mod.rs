@@ -20,6 +20,7 @@
 //! With several repositories a name is listed only when every repository has it.
 
 pub mod config;
+pub mod diagnose;
 pub mod gh;
 pub mod login;
 
