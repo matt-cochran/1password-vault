@@ -35,11 +35,34 @@ fn non_ram_runtime_dir_is_refused_before_anything_is_read() {
         Err(e) => e,
         Ok(_) => panic!("a disk-backed directory must be refused"),
     };
-    let (text, next) = NO_RAM_DIR.split_once("\n  next: ").unwrap();
     assert_eq!(
-        (e.exit_code(), e.text(), e.next_step()),
-        (6, text, Some(next))
+        e.cause().map(|(c, _)| c.clone()),
+        Some(Cause::RamDirUnavailable {
+            remote: None,
+            why: RamDir::NotTmpfs,
+            env: None,
+            product: None,
+        })
     );
+}
+
+/// A runtime directory given as a relative path is named as such, not as a disk folder.
+#[test]
+fn relative_runtime_dir_is_refused_as_not_absolute() {
+    let e = match start_in(Some("run/user".into()), &ram) {
+        Err(e) => e,
+        Ok(_) => panic!("a relative runtime directory must be refused"),
+    };
+    assert!(matches!(
+        e.cause(),
+        Some((
+            Cause::RamDirUnavailable {
+                why: RamDir::NotAbsolute,
+                ..
+            },
+            _
+        ))
+    ));
 }
 
 #[test]
@@ -80,9 +103,9 @@ fn login_is_a_service_principal_sign_in_reading_the_secret_from_stdin() {
     let args = r.calls.borrow()[0].args.join(" ");
     assert_eq!(
         args,
-        "login --service-principal -u 00000000-0000-0000-0000-00000000000b -t \
-         00000000-0000-0000-0000-00000000000a -p @/dev/stdin --allow-no-subscriptions \
-         --only-show-errors -o none"
+        "login --service-principal --username=00000000-0000-0000-0000-00000000000b \
+         --tenant=00000000-0000-0000-0000-00000000000a -p @/dev/stdin \
+         --allow-no-subscriptions --only-show-errors -o none"
     );
 }
 
@@ -227,18 +250,38 @@ fn every_az_call_through_the_environment_runner_uses_the_config_dir() {
     assert!(r.calls.borrow().iter().all(|c| c.env.contains(&want)));
 }
 
+/// The item read refuses an item without every declared field before sign-in, so sign-in
+/// given one is opv's own bug (it used to be worded as the person's item).
 #[test]
-fn a_missing_credential_field_is_deploy_credentials_failed() {
+fn a_missing_credential_field_is_an_internal_error() {
     let tmp = tempfile::tempdir().unwrap();
     let mut l = login_in(tmp.path());
     let mut v = values();
     v.remove("AZURE_CLIENT_ID");
     let e = l.sign_in(v, &FakeRunner::default()).unwrap_err();
-    assert_eq!(e.code(), Code::DeployCredentialsFailed);
+    assert_eq!(e.exit_code(), 70);
 }
 
+/// 06.18: an ID that starts with `-` reaches az as the value of its option, never as an
+/// option of its own.
 #[test]
-fn a_malformed_tenant_id_is_deploy_credentials_failed() {
+fn a_tenant_id_that_looks_like_an_option_stays_the_tenant_value() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut l = login_in(tmp.path());
+    let mut v = values();
+    v.insert("AZURE_TENANT_ID".into(), SecretValue::new("--debug".into()));
+    let r = FakeRunner::new([Output::success(Vec::new())]);
+    l.sign_in(v, &r).unwrap();
+    assert!(
+        r.calls.borrow()[0]
+            .args
+            .contains(&"--tenant=--debug".to_string())
+    );
+}
+
+/// 06.18: az rejecting a malformed ID is shown with az's reply, not guessed at.
+#[test]
+fn a_malformed_tenant_id_rejected_by_az_is_not_guessed_at() {
     let tmp = tempfile::tempdir().unwrap();
     let mut l = login_in(tmp.path());
     let mut v = values();
@@ -246,8 +289,10 @@ fn a_malformed_tenant_id_is_deploy_credentials_failed() {
         "AZURE_TENANT_ID".into(),
         SecretValue::new("not an id!".into()),
     );
-    let e = l.sign_in(v, &FakeRunner::default()).unwrap_err();
-    assert_eq!(e.code(), Code::DeployCredentialsFailed);
+    let e = l
+        .sign_in(v, &FakeRunner::new([Output::failure(1)]))
+        .unwrap_err();
+    assert_eq!(e.code_str(), "unrecognized_failure");
 }
 
 #[test]
@@ -257,5 +302,5 @@ fn an_unanswered_az_login_is_provider_unavailable() {
     let r = FakeRunner::default();
     r.push_unknown("timeout");
     let e = l.sign_in(values(), &r).unwrap_err();
-    assert_eq!(e.code(), Code::ProviderUnavailable);
+    assert_eq!(e.code(), crate::error::Code::ProviderUnavailable);
 }
