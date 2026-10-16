@@ -127,6 +127,10 @@ pub struct DeliveryPreviewScope {
     /// Only keys that declare this process role (and keys without roles).
     #[serde(default)]
     role: Option<String>,
+    /// A reviewed remote profile name of the product (`[products.<p>.remotes.<name>]`):
+    /// preview `opv run --remote` instead of a local run. Never a host, path or command.
+    #[serde(default)]
+    remote: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -228,7 +232,7 @@ impl Server {
 
     #[tool(
         name = "opv_delivery_preview",
-        description = "Preview which keys a local `opv run` would deliver for one environment, without reading any value: each key's product, name, source, destination (variable name or relative file path) and declared process roles; the key names a role withholds; the environment mode, the secrets-directory variable, whether RAM-backed file delivery is supported here, and whether the op CLI is present and signed in (unknown when it cannot be determined). Changes nothing; the person runs opv run to deliver values.",
+        description = "Preview which keys a local `opv run` would deliver for one environment, without reading any value: each key's product, name, source, destination (variable name or relative file path) and declared process roles; the key names a role withholds; the environment mode, the secrets-directory variable, whether RAM-backed file delivery is supported here, and whether the op CLI is present and signed in (unknown when it cannot be determined). With remote (a profile name the product declares), previews `opv run --remote`: the profile's pinned host, user, port, host-key type, working directory and command, and whether ssh is on PATH; remote_profiles lists the product's profiles. Changes nothing; only the person runs opv run (a remote run needs their own terminal; no tool runs it).",
         annotations(read_only_hint = true, destructive_hint = false)
     )]
     async fn delivery_preview(&self, Parameters(args): Parameters<DeliveryPreviewScope>) -> String {
@@ -238,6 +242,7 @@ impl Server {
                 &args.environment,
                 args.product.as_deref(),
                 args.role.as_deref(),
+                args.remote.as_deref(),
             )
         })
         .await
@@ -968,10 +973,12 @@ fn delivery_preview_doc(
     environment: &str,
     product: Option<&str>,
     role: Option<&str>,
+    remote: Option<&str>,
 ) -> Value {
     if !identifier(environment)
         || product.is_some_and(|p| !identifier(p))
         || role.is_some_and(|r| !identifier(r))
+        || remote.is_some_and(|r| !identifier(r))
     {
         return inspection_error("invalid_name", PREVIEW_CLI);
     }
@@ -980,7 +987,7 @@ fn delivery_preview_doc(
         Ok(fleet) => fleet,
         Err(e) => return error_failure(&e, &code_hint(e.code().as_str(), PREVIEW_CLI)),
     };
-    delivery_preview_from_fleet(&fleet, environment, product, role, &r)
+    delivery_preview_from_fleet(&fleet, environment, product, role, remote, &r)
 }
 
 /// The MCP answer from an already-loaded fleet: the same document the CLI's
@@ -990,14 +997,16 @@ fn delivery_preview_from_fleet(
     environment: &str,
     product: Option<&str>,
     role: Option<&str>,
+    remote: Option<&str>,
     runner: &dyn CommandRunner,
 ) -> Value {
     if !fleet.environments.contains_key(environment) {
         return inspection_error("unknown_env", PREVIEW_CLI);
     }
-    match crate::app::delivery_preview::build(fleet, environment, product, role, runner) {
+    match crate::app::delivery_preview::build_for(fleet, environment, product, role, remote, runner)
+    {
         Ok(doc) => doc,
-        Err(e) => preview_failure(fleet, environment, product, &e),
+        Err(e) => preview_failure(fleet, environment, product, remote, &e),
     }
 }
 
@@ -1008,6 +1017,7 @@ fn preview_failure(
     fleet: &crate::domain::Fleet,
     environment: &str,
     product: Option<&str>,
+    remote: Option<&str>,
     e: &crate::error::Error,
 ) -> Value {
     let code = e.code().as_str();
@@ -1019,7 +1029,25 @@ fn preview_failure(
         .collect();
     let picked = crate::app::pick_product(fleet, environment, product, "run").ok();
     let prod = picked.as_deref().and_then(|p| fleet.products.get(p));
+    let profiles: Vec<&str> = prod
+        .map(|p| {
+            p.remotes
+                .keys()
+                .map(String::as_str)
+                .filter(|n| identifier(n))
+                .collect()
+        })
+        .unwrap_or_default();
+    let unknown_profile = remote.is_some_and(|r| prod.is_some_and(|p| !p.remotes.contains_key(r)));
     let (hint, list) = match code {
+        "usage" if unknown_profile => (
+            "The product declares no remote profile by that name: name one of remote_profiles. A person adds a reviewed profile under [products.<p>.remotes.<name>]; no tool can.".to_string(),
+            Some(("remote_profiles", profiles)),
+        ),
+        "policy_refused" if remote.is_some() => (
+            "This remote profile does not allow this environment or role: preview another environment or role, or a person changes the reviewed profile.".to_string(),
+            None,
+        ),
         "unknown_product" => (code_hint(code, PREVIEW_CLI), Some(("products", products))),
         "usage" if picked.is_none() => (
             "Several products (or none) have keys desired in this environment: name one with product; products lists them.".to_string(),
@@ -2065,13 +2093,49 @@ rules = { prefix = "sk_" }
         assert_eq!(registered, mapped);
     }
 
+    /// #139: the role fleet with one reviewed remote profile for prod's serve role.
+    fn remote_fleet() -> crate::domain::Fleet {
+        crate::app::testutil::fleet_with(&format!(
+            "{}\n[products.allumata.remotes.builder]\nhost = \"builder.example.internal\"\n\
+             user = \"dev\"\nhost_key = \"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestMarkerHostKey\"\n\
+             environments = [\"prod\"]\nopv = \"/usr/local/bin/opv\"\nworkdir = \"/srv/app\"\n\
+             command = [\"app\"]\n",
+            crate::app::testutil::ROLE_KEYS
+        ))
+    }
+
+    fn remote_preview(profile: &str) -> Value {
+        let r = FakeRunner::new([Output::success(b"{\"user_type\":\"USER\"}".to_vec())]);
+        delivery_preview_from_fleet(
+            &remote_fleet(),
+            "prod",
+            Some("allumata"),
+            Some("serve"),
+            Some(profile),
+            &r,
+        )
+    }
+
+    #[test]
+    fn opv_delivery_preview_previews_a_remote_profile() {
+        assert_eq!(remote_preview("builder")["transport"], "remote");
+    }
+
+    #[test]
+    fn opv_delivery_preview_lists_the_profiles_for_an_unknown_one() {
+        assert_eq!(
+            remote_preview("elsewhere")["remote_profiles"],
+            json!(["builder"])
+        );
+    }
+
     #[test]
     fn opv_delivery_preview_returns_the_shared_document() {
         let fleet = crate::app::testutil::role_fleet();
         let sign_in = || Output::success(b"{\"user_type\":\"USER\"}".to_vec());
         let r = FakeRunner::new([sign_in(), sign_in()]);
         let via_tool =
-            delivery_preview_from_fleet(&fleet, "prod", Some("allumata"), Some("serve"), &r);
+            delivery_preview_from_fleet(&fleet, "prod", Some("allumata"), Some("serve"), None, &r);
         let via_builder = crate::app::delivery_preview::build(
             &fleet,
             "prod",
@@ -2085,7 +2149,7 @@ rules = { prefix = "sk_" }
 
     #[test]
     fn opv_delivery_preview_refuses_a_non_identifier_name() {
-        let answer = delivery_preview_doc(std::path::Path::new("."), "prod!", None, None);
+        let answer = delivery_preview_doc(std::path::Path::new("."), "prod!", None, None, None);
         assert_eq!(answer["code"], "invalid_name");
     }
 
@@ -2221,7 +2285,8 @@ rules = { prefix = "sk_" }
     fn a_preview_with_an_undeclared_role_lists_the_declared_roles() {
         let fleet = crate::app::testutil::role_fleet();
         let r = FakeRunner::new([]);
-        let v = delivery_preview_from_fleet(&fleet, "prod", Some("allumata"), Some("nope"), &r);
+        let v =
+            delivery_preview_from_fleet(&fleet, "prod", Some("allumata"), Some("nope"), None, &r);
         assert_eq!(v["roles"], json!(["migrate", "serve"]));
     }
 
@@ -2229,7 +2294,7 @@ rules = { prefix = "sk_" }
     fn a_preview_of_an_undeclared_product_never_asks_for_a_role() {
         let fleet = crate::app::testutil::role_fleet();
         let r = FakeRunner::new([]);
-        let v = delivery_preview_from_fleet(&fleet, "prod", Some("nope"), None, &r);
+        let v = delivery_preview_from_fleet(&fleet, "prod", Some("nope"), None, None, &r);
         assert!(!v["human_action"].as_str().unwrap().contains("role"));
     }
 
@@ -2237,7 +2302,7 @@ rules = { prefix = "sk_" }
     fn a_preview_of_an_undeclared_product_lists_the_products() {
         let fleet = crate::app::testutil::role_fleet();
         let r = FakeRunner::new([]);
-        let v = delivery_preview_from_fleet(&fleet, "prod", Some("nope"), None, &r);
+        let v = delivery_preview_from_fleet(&fleet, "prod", Some("nope"), None, None, &r);
         assert_eq!(v["products"], json!(["allumata"]));
     }
 
