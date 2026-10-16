@@ -17,8 +17,8 @@
 //! unavailable read — never on the text, which may be absent or a fragment.
 
 use crate::cause::{
-    Cause, CredentialProblem, CredentialRef, DiagnoseContext, ExitClass, Observed, Principal,
-    ResourceKind, ResourceName, ResourceRef, SessionState, System, Unanswered, VarName,
+    Cause, CredentialProblem, CredentialRef, DiagnoseContext, Observed, Principal, ResourceKind,
+    ResourceName, ResourceRef, SessionState, System, Unanswered, VarName,
 };
 
 /// The shell variable gh reads first, named when its refusal text cannot be read.
@@ -28,7 +28,7 @@ const GH_TOKEN: &str = "GH_TOKEN";
 pub fn diagnose(seen: Observed, stderr: &str, ctx: &DiagnoseContext) -> Cause {
     // The runner's budget is the only clock gh has. An unfinished call is diagnosed by what
     // it was doing, never by its text (which may be a fragment).
-    if matches!(seen.exit(), ExitClass::TimedOut | ExitClass::Signal { .. }) {
+    if seen.exit().unanswered().is_some() {
         return unknown_outcome(&seen, ctx);
     }
     match reading(stderr) {
@@ -135,7 +135,7 @@ fn unknown_outcome(seen: &Observed, ctx: &DiagnoseContext) -> Cause {
     }
     Cause::Unavailable {
         system: System::GitHub,
-        why: Unanswered::Timeout,
+        why: seen.exit().unanswered().unwrap_or(Unanswered::Timeout),
         attempts: 1,
         seen: seen.clone(),
     }

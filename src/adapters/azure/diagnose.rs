@@ -26,7 +26,9 @@ pub fn diagnose(seen: Observed, stderr: &str, ctx: &DiagnoseContext) -> Cause {
                 ci: host.ci,
             }
         }
-        ExitClass::TimedOut | ExitClass::Signal { .. } => unknown_outcome(seen, ctx),
+        ExitClass::TimedOut | ExitClass::Signal { .. } | ExitClass::Lost => {
+            unknown_outcome(seen, ctx)
+        }
         ExitClass::Code { .. } => unrecognized(seen, ctx),
     }
 }
@@ -55,7 +57,7 @@ fn unknown_outcome(seen: Observed, ctx: &DiagnoseContext) -> Cause {
     }
     Cause::Unavailable {
         system: System::Azure,
-        why: Unanswered::Timeout,
+        why: seen.exit().unanswered().unwrap_or(Unanswered::Timeout),
         attempts: READ_ATTEMPTS,
         seen,
     }
@@ -95,6 +97,7 @@ fn exit_fact(exit: ExitClass) -> String {
         ExitClass::Signal { signal } => format!("killed by signal {signal}"),
         ExitClass::TimedOut => "the call timed out".to_string(),
         ExitClass::SpawnFailed => "az could not be started".to_string(),
+        ExitClass::Lost => "the call's reply was lost".to_string(),
     }
 }
 

@@ -34,7 +34,7 @@
       "status": "fail",
       "detail": "vprd/iprd readable (2 fields in section allumata), but 1 key not ready: allumata/OPENAI_API_KEY (missing)",
       "next": "opv open allumata/OPENAI_API_KEY --env prod",
-      "do": "fill in allumata/OPENAI_API_KEY in 1Password for environment prod"
+      "do": "fill in allumata/OPENAI_API_KEY in 1Password for environment prod (click Edit on the item: it hides empty fields until then)"
     },
     {
       "name": "flyctl",
@@ -78,7 +78,7 @@
     }
   ],
   "next": "opv open allumata/OPENAI_API_KEY --env prod",
-  "do": "fill in allumata/OPENAI_API_KEY in 1Password for environment prod",
+  "do": "fill in allumata/OPENAI_API_KEY in 1Password for environment prod (click Edit on the item: it hides empty fields until then)",
   "error": {
     "code": "findings",
     "category": "findings",
@@ -103,7 +103,7 @@
     },
     "retry": "after_fix",
     "human_required": true,
-    "do": "fill in allumata/OPENAI_API_KEY in 1Password for environment prod",
+    "do": "fill in allumata/OPENAI_API_KEY in 1Password for environment prod (click Edit on the item: it hides empty fields until then)",
     "next": "opv open allumata/OPENAI_API_KEY --env prod",
     "next_kind": "run"
   }

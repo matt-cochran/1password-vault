@@ -359,7 +359,7 @@ fn diagnose_unanswered(seen: crate::cause::Observed) -> Cause {
         System::GitHub => github::diagnose::diagnose(seen, "", &ctx),
         system @ (System::Ssh | System::RemoteOpv) => Cause::Unavailable {
             system,
-            why: Unanswered::Timeout,
+            why: seen.exit().unanswered().unwrap_or(Unanswered::Timeout),
             attempts: READ_ATTEMPTS,
             seen,
         },

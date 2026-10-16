@@ -128,7 +128,9 @@ pub fn diagnose(
     match seen.exit() {
         // An unknown outcome is about the effect, never about the text: a create may have
         // happened, a write may have landed, a read did not happen.
-        ExitClass::TimedOut | ExitClass::Signal { .. } => unknown_outcome(seen, conn, ctx),
+        ExitClass::TimedOut | ExitClass::Signal { .. } | ExitClass::Lost => {
+            unknown_outcome(seen, conn, ctx)
+        }
         ExitClass::Code { code } => classify_code(seen, stderr, conn, ctx, code),
         ExitClass::SpawnFailed => unrecognized(seen, conn, ctx),
     }
@@ -152,10 +154,7 @@ fn unknown_outcome(seen: Observed, conn: &Connection<'_>, ctx: &DiagnoseContext)
             seen,
         };
     }
-    let why = match seen.exit() {
-        ExitClass::TimedOut => Unanswered::Timeout,
-        _ => Unanswered::Network,
-    };
+    let why = seen.exit().unanswered().unwrap_or(Unanswered::Network);
     Cause::Unavailable {
         system: System::Ssh,
         why,
@@ -278,6 +277,7 @@ fn established(seen: &Observed, conn: &Connection<'_>) -> Vec<String> {
     match seen.exit() {
         ExitClass::Code { code } => facts.push(format!("ssh exited {code}")),
         ExitClass::Signal { signal } => facts.push(format!("ssh was killed by signal {signal}")),
+        ExitClass::Lost => facts.push("ssh's reply was lost".to_string()),
         ExitClass::TimedOut => facts.push("ssh timed out".to_string()),
         ExitClass::SpawnFailed => facts.push("ssh could not be started".to_string()),
     }

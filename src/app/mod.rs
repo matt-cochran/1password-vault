@@ -1222,7 +1222,10 @@ pub(crate) fn value_row(row: &Row) -> crate::cause::ValueRow {
         KeyState::RuleFailed(rule, _) if *rule == variables::CONCEALED_RULE => {
             ValueState::ConcealedConfig
         }
-        KeyState::RuleFailed(rule, _) => ValueState::RuleFailed { rule },
+        KeyState::RuleFailed(rule, why) => ValueState::RuleFailed {
+            rule,
+            reason: Some(why.to_string()),
+        },
         KeyState::WrongKind if row.kind == Kind::Secret => ValueState::StoredAsText,
         KeyState::WrongKind => ValueState::ConcealedConfig,
         _ => ValueState::Missing,

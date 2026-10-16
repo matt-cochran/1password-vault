@@ -58,7 +58,7 @@ const PHRASES: &[(&str, Rule)] = &[
 pub fn diagnose(seen: Observed, stderr: &str, ctx: &DiagnoseContext) -> Cause {
     // An unknown outcome is an outcome, not a phrase: a timed-out or interrupted create or
     // write may already have been applied, and a read that never answered is unavailable.
-    if matches!(seen.exit(), ExitClass::TimedOut | ExitClass::Signal { .. }) {
+    if seen.exit().unanswered().is_some() {
         return unknown_outcome(seen, ctx);
     }
     for (phrase, rule) in PHRASES {
@@ -240,7 +240,7 @@ fn unknown_outcome(seen: Observed, ctx: &DiagnoseContext) -> Cause {
     }
     Cause::Unavailable {
         system: System::Kubernetes,
-        why: Unanswered::Timeout,
+        why: seen.exit().unanswered().unwrap_or(Unanswered::Timeout),
         attempts: 1,
         seen,
     }
@@ -261,6 +261,7 @@ fn established(seen: &Observed) -> Vec<String> {
         ExitClass::Signal { signal } => format!("signal {signal}"),
         ExitClass::TimedOut => "a timeout".to_string(),
         ExitClass::SpawnFailed => "kubectl not starting".to_string(),
+        ExitClass::Lost => "its reply lost".to_string(),
     };
     vec![format!("the call ended with {ended}")]
 }
