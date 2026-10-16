@@ -23,8 +23,12 @@ use sha2::{Digest, Sha256};
 
 use super::bootstrap::{self, BoundaryStep, EnvPlan, Recorded, StateStep};
 use crate::adapters::onepassword;
+use crate::cause::{
+    Cause, CommandId, GivenBy, PlanId, PlanScope, Principal, SessionState, StoreObject, System,
+    VarName,
+};
 use crate::domain::{Fleet, naming};
-use crate::error::{Code, Error};
+use crate::error::Error;
 use crate::runner::CommandRunner;
 
 /// The plan id's prefix and length in hex digits after it: `sp-` and 16 (64 bits).
@@ -120,16 +124,19 @@ pub fn plan(
     account: &str,
 ) -> Result<Plan, Error> {
     if !crate::config::is_id(account) {
-        return Err(Error::Config(
-            "the structural plan needs the project's 1Password account ID".into(),
-        )
-        .with_code(Code::AccountRequired)
-        .with_do("pick the project's account: run opv login --account <email or account ID> in your own terminal")
-        .with_next("opv account list"));
+        return Err(no_account());
     }
-    let environments = bootstrap::plan_with(r, text, project, &BTreeSet::new(), true)?;
-    if let Some(e) = bootstrap::first_stale(&environments) {
+    let (environments, stale) = bootstrap::plan_checked(r, text, project, &BTreeSet::new(), true)?;
+    // A recorded ID outside the account: the cataloged `ids_not_in_account` op's reply was
+    // diagnosed as, with that reply as its evidence.
+    if let Some(e) = stale {
         return Err(e);
+    }
+    if has_stale(&environments) {
+        return Err(Cause::Bug {
+            site: "structure: a recorded vault outside the account left no observation",
+        }
+        .into());
     }
     let fleet = trial_fleet(text, &environments)?;
     let delivery_items = delivery_steps(&fleet)?;
@@ -156,6 +163,52 @@ pub fn plan(
 
 /// The configuration as it would load with every planned ID recorded (placeholders for
 /// the ones still to create): the loader judges the result before anything is created.
+/// True when a recorded ID of `environments` is not in the selected account.
+fn has_stale(environments: &[EnvPlan]) -> bool {
+    environments.iter().any(|e| {
+        e.boundaries
+            .iter()
+            .any(|b| matches!(b.step, BoundaryStep::IdsNotInAccount { .. }))
+            || e.state_vaults
+                .iter()
+                .any(|s| matches!(s.step, StateStep::IdsNotInAccount { .. }))
+    })
+}
+
+/// No 1Password account ID for the project. Under a service-account or Connect credential
+/// the structure is a person's own (`own_session_required`); otherwise op knows no account
+/// on this machine, and signing in adds one (`op_not_signed_in`). opv never uses op's
+/// default account for a write.
+fn no_account() -> Error {
+    match crate::host::Host::detect().op_credential {
+        Some(c) => Cause::NeedsOwnSession {
+            command: CommandId("structure".into()),
+            identity: Principal::ShellToken {
+                var: VarName::new(c.var()),
+            },
+        }
+        .into(),
+        None => Cause::NotSignedIn {
+            system: System::OnePassword,
+            account: None,
+            state: SessionState::SignedOut,
+        }
+        .into(),
+    }
+}
+
+/// The structural plan `old` is now `new` (the configuration, the account or what exists in
+/// 1Password changed): nothing was approved, applied or used, and the step is the read of
+/// the new plan, which a person then approves (05.15).
+pub(crate) fn changed(old: &str, new: &str) -> Error {
+    Cause::PlanChanged {
+        old: PlanId::new(old),
+        new: PlanId::new(new),
+        scope: PlanScope::Structural,
+    }
+    .into()
+}
+
 fn trial_fleet(text: &str, environments: &[EnvPlan]) -> Result<Fleet, Error> {
     let mut doc = bootstrap::parse_doc(text)?;
     for id in bootstrap::placeholders(environments) {
@@ -361,28 +414,16 @@ pub struct Scope {
 /// chosen, is `account_required`: opv never uses op's default for a write.
 pub fn scope(start: &Path, r: &dyn CommandRunner) -> Result<Scope, Error> {
     use crate::config_store;
-    let path = config_store::walk_up(start, "secrets.toml").ok_or_else(|| {
-        Error::Config(
-            "no secrets.toml here or in a parent directory; the structural plan works on a \
-             configuration file (a configuration kept in 1Password is structured with \
-             opv bootstrap in the owner's terminal)"
-                .into(),
-        )
-        .with_code(Code::ConfigNotFound)
-        .with_next("opv init <env> --file")
-    })?;
+    let Some(path) = config_store::walk_up(start, "secrets.toml") else {
+        return Err(no_file(start, r));
+    };
     let project = config_store::default_project(
         None,
         config_store::git_repo(r).as_deref(),
         path.parent().unwrap_or(start),
     )?;
     let given = config_store::account_env().or_else(|| config_store::pointer_account(start));
-    let account = config_store::pick_account(r, given)?.ok_or_else(|| {
-        Error::Config("the project has no 1Password account chosen".into())
-            .with_code(Code::AccountRequired)
-            .with_do("pick the project's account: run opv login --account <email or account ID> in your own terminal")
-            .with_next("opv account list")
-    })?;
+    let account = config_store::pick_account(r, given)?.ok_or_else(no_account)?;
     Ok(Scope {
         path,
         project,
@@ -402,13 +443,35 @@ pub fn binding(start: &Path, r: &dyn CommandRunner) -> Result<(String, String), 
         .unwrap_or_else(|| start.to_path_buf());
     let project = config_store::default_project(None, config_store::git_repo(r).as_deref(), &dir)?;
     let given = config_store::account_env().or_else(|| config_store::pointer_account(start));
-    let account = config_store::pick_account(r, given)?.ok_or_else(|| {
-        Error::Config("the project has no 1Password account chosen".into())
-            .with_code(Code::AccountRequired)
-            .with_do("pick the project's account: run opv login --account <email or account ID> in your own terminal")
-            .with_next("opv account list")
-    })?;
+    let account = config_store::pick_account(r, given)?.ok_or_else(no_account)?;
     Ok((project, account))
+}
+
+/// No `secrets.toml` from `start` up (05.02): the structural plan works on a configuration
+/// file only. A project whose configuration is a 1Password manifest is told so, with the
+/// manifest's own route (`opv config edit`), never `opv bootstrap`, which needs a file too;
+/// with no configuration at all, the lookup's own cause says so.
+fn no_file(start: &Path, r: &dyn CommandRunner) -> Error {
+    use crate::config_store::{self, Found, Request};
+    let req = Request {
+        start: start.to_path_buf(),
+        config: None,
+        project: config_store::project_env(),
+        manifest_only: true,
+        account: config_store::account_env(),
+    };
+    match config_store::locate(&req, r) {
+        Ok(Found::Manifest(m)) => Cause::ConfigSourceMismatch {
+            command: CommandId("structure".into()),
+            manifest: m.title,
+        }
+        .into(),
+        Ok(Found::File { .. }) => Cause::Bug {
+            site: "structure: a manifest-only lookup found a file",
+        }
+        .into(),
+        Err(e) => e,
+    }
 }
 
 /// One line per step of `p`, names and titles only, for a person to review.
@@ -491,28 +554,25 @@ pub fn apply(
     plan_id: &str,
     authorize: &mut dyn FnMut(&Plan) -> Result<(), Error>,
 ) -> Result<Applied, Error> {
+    // C2: an id that is not a structural plan id names no plan at all.
+    if !is_plan_id(plan_id) {
+        return Err(Cause::PlanUnknown {
+            plan: plan_id.to_string(),
+            scope: Some(PlanScope::Structural),
+        }
+        .into());
+    }
     let text = read(path)?;
     let p = plan(r, &text, project, account)?;
     if p.plan_id != plan_id {
-        return Err(Error::Policy(
-            format!(
-                "structural plan {plan_id} is stale: the configuration, the 1Password account \
-                 or what is already created changed since it was reviewed (now {}); nothing \
-                 was changed",
-                p.plan_id
-            )
-            .into(),
-        )
-        .with_code(Code::StalePlan)
-        .with_do("review the new plan, and approve it in your own terminal if it is right")
-        .with_next(format!("opv approve {}", p.plan_id)));
+        return Err(changed(plan_id, &p.plan_id));
     }
     // A person's own session first (#157): the approval is single-use, so a signed-out or
     // non-interactive run is refused before it is consumed.
     super::tidy::require_person(r, "the structural apply")?;
     authorize(&p)?;
-    let link_account = onepassword::account(r);
-    let link = |v: &str, i: &str| onepassword::item_link(link_account.as_ref(), v, i);
+    // The approval is used up from here: any failure says what was created and that the
+    // approval is spent, and its step reads what remains (X4, X20), never this apply again.
     let mut applied = Applied {
         plan_id: p.plan_id.clone(),
         created: Vec::new(),
@@ -521,41 +581,110 @@ pub fn apply(
         generator_ids: Vec::new(),
         concurrent_edits: Vec::new(),
     };
-    let mut doc = bootstrap::parse_doc(&text)?;
+    match apply_approved(r, path, project, &text, &p, &mut applied) {
+        Ok(()) => Ok(applied),
+        Err(e) => Err(after_approval(e, &applied)),
+    }
+}
+
+/// What `applied` holds so far, by name and public ID, for a failure's "already written".
+fn done(applied: &Applied) -> Vec<String> {
+    let mut out: Vec<String> = applied
+        .created
+        .iter()
+        .map(|c| match &c.item_id {
+            Some(i) => format!(
+                "{} {} in {} (vault {}, item {i})",
+                c.kind, c.name, c.environment, c.vault_id
+            ),
+            None => format!(
+                "{} {} in {} (vault {})",
+                c.kind, c.name, c.environment, c.vault_id
+            ),
+        })
+        .collect();
+    out.extend(
+        applied
+            .fields_added
+            .iter()
+            .map(|f| format!("empty field {}/{} in {}", f.product, f.key, f.environment)),
+    );
+    out
+}
+
+/// A failure after the approval of `applied.plan_id` was used (X4, X20): a cataloged cause
+/// is kept inside `Partial`, with what was created and the used approval; one not yet
+/// cataloged is reported as the used approval, so no step ever repeats it.
+fn after_approval(e: Error, applied: &Applied) -> Error {
+    let plan = PlanId::new(&applied.plan_id);
+    let mut written = done(applied);
+    match e {
+        Error::Catalog(cause, upstream) => {
+            let cause = match *cause {
+                Cause::Partial { done, then, .. } => {
+                    written.extend(done);
+                    Cause::Partial {
+                        done: written,
+                        approval_used: Some(plan),
+                        approval_scope: Some(PlanScope::Structural),
+                        then,
+                    }
+                }
+                then => Cause::Partial {
+                    done: written,
+                    approval_used: Some(plan),
+                    approval_scope: Some(PlanScope::Structural),
+                    then: Box::new(then),
+                },
+            };
+            Error::Catalog(Box::new(cause), upstream)
+        }
+        _ => Cause::ApprovalUsed {
+            plan,
+            scope: PlanScope::Structural,
+            partial: !written.is_empty(),
+        }
+        .into(),
+    }
+}
+
+/// The writes of an approved plan `p`, recorded into `applied` as they complete.
+fn apply_approved(
+    r: &dyn CommandRunner,
+    path: &Path,
+    project: &str,
+    text: &str,
+    p: &Plan,
+    applied: &mut Applied,
+) -> Result<(), Error> {
+    let link_account = onepassword::account(r);
+    let link = |v: &str, i: &str| onepassword::item_link(link_account.as_ref(), v, i);
+    let mut doc = bootstrap::parse_doc(text)?;
     let mut recorded: Vec<Recorded> = Vec::new();
-    let mut written_text = text.clone();
-    let phase = create_vaults(r, project, &p, &mut recorded, &mut applied, &link);
-    record(
-        path,
-        &p,
-        &mut doc,
-        &recorded,
-        &mut written_text,
-        &mut applied,
-    )?;
+    let mut written_text = text.to_string();
+    let phase = create_vaults(r, project, p, &mut recorded, applied, &link);
+    record(path, p, &mut doc, &recorded, &mut written_text, applied)?;
     phase?;
     let fleet = crate::config::parse(&doc.to_string())?;
     let mut items = Vec::new();
-    let phase = create_delivery_items(r, project, &fleet, &mut items, &mut applied);
+    let phase = create_delivery_items(r, project, &fleet, &mut items, applied);
     for id in &items {
         id.write(&mut doc);
     }
     recorded.extend(items);
-    record(path, &p, &mut doc, &[], &mut written_text, &mut applied)?;
+    record(path, p, &mut doc, &[], &mut written_text, applied)?;
     phase?;
     if p.generated {
         applied.generator_ids = recorded.iter().map(Recorded::line).collect();
     }
     let fleet = crate::config::parse(&doc.to_string())?;
-    add_fields(r, &fleet, &p, &mut applied)?;
-    Ok(applied)
+    add_fields(r, &fleet, p, applied)
 }
 
+/// The configuration file at `path` (05.37: the path is named; no guessed `opv init`).
 fn read(path: &Path) -> Result<String, Error> {
-    std::fs::read_to_string(path).map_err(|e| {
-        Error::Config(format!("Cannot read {} ({}).", path.display(), e.kind()).into())
-            .with_next("opv init <env>")
-    })
+    std::fs::read_to_string(path)
+        .map_err(|e| crate::config_store::unreadable(path, &e, GivenBy::Discovered))
 }
 
 /// Phase 1: every boundary vault and item and every state vault the plan creates (found by
@@ -669,17 +798,15 @@ fn record(
     }
     // Only IDs are added (the plan judged the completed file with placeholders); a part
     // recorded before a failure may not load yet, and is kept so a re-run need not find it.
+    // 05.14: the file is not overwritten; what was created stays in 1Password and the
+    // caller reports it with the used approval, whose step is the new structural plan.
     if read(path)? != *written {
-        return Err(Error::Config(
-            format!(
-                "{} changed while the structural plan was applied; opv did not overwrite it. \
-                 The objects created so far are found again by title on the next run",
-                path.display()
-            )
-            .into(),
-        )
-        .with_code(Code::ConfigChanged)
-        .with_next("opv bootstrap --dry-run"));
+        return Err(Cause::ChangedBeforeWrite {
+            object: StoreObject::File {
+                path: path.to_path_buf(),
+            },
+        }
+        .into());
     }
     super::init::write_atomic(path, &new_text, true)?;
     *written = new_text;

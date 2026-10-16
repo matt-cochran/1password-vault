@@ -40,7 +40,7 @@ fn a_second_consume_of_the_same_approval_is_refused() {
     record_in(&dir, PLAN, "proj", "acct", NOW).unwrap();
     consume_in(&dir, PLAN, "proj", "acct", NOW + 1).unwrap();
     let refused = consume_in(&dir, PLAN, "proj", "acct", NOW + 2).unwrap_err();
-    assert_eq!(refused.code(), Code::ApprovalRequired);
+    assert_eq!(refused.code_str(), "approval_used");
 }
 
 #[test]
@@ -92,7 +92,7 @@ fn a_refusals_next_step_names_the_approve_command() {
     let t = tempdir();
     let dir = approvals(&t);
     let refused = consume_in(&dir, OTHER_PLAN, "proj", "acct", NOW).unwrap_err();
-    assert_eq!(refused.next_step(), Some(OTHER_PLAN_APPROVE));
+    assert_eq!(refused.step("", "").next, OTHER_PLAN_APPROVE);
 }
 
 #[test]
@@ -196,7 +196,7 @@ fn a_symlinked_approvals_directory_is_refused() {
     let link = approvals(&t);
     std::os::unix::fs::symlink(&real, &link).unwrap();
     let refused = record_in(&link, PLAN, "proj", "acct", NOW).unwrap_err();
-    assert_eq!(refused.code(), Code::PolicyRefused);
+    assert_eq!(refused.code_str(), "private_dir_failed");
 }
 
 #[cfg(unix)]
@@ -208,7 +208,7 @@ fn a_group_or_other_accessible_approvals_directory_is_refused() {
     std::fs::create_dir(&dir).unwrap();
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
     let refused = record_in(&dir, PLAN, "proj", "acct", NOW).unwrap_err();
-    assert_eq!(refused.code(), Code::PolicyRefused);
+    assert_eq!(refused.code_str(), "file_too_open");
 }
 
 #[test]
@@ -262,4 +262,68 @@ fn a_structural_approval_never_covers_a_sync() {
     let dir = approvals(&t);
     record_in(&dir, PLAN, "proj", "acct", NOW).unwrap();
     assert!(consume_scoped_in(&dir, PLAN, "sync prod", "proj", "acct", NOW + 1).is_err());
+}
+
+// 0.10.0 error catalog (05.36, X1, X4) -------------------------------------------------------
+
+/// X4: a used approval steps to the read of what remains, never to approving it again.
+#[test]
+fn a_used_approval_steps_to_the_structural_plan() {
+    let t = tempdir();
+    let dir = approvals(&t);
+    record_in(&dir, PLAN, "proj", "acct", NOW).unwrap();
+    consume_in(&dir, PLAN, "proj", "acct", NOW + 1).unwrap();
+    let refused = consume_in(&dir, PLAN, "proj", "acct", NOW + 2).unwrap_err();
+    assert_eq!(refused.step("", "").next, "opv structure plan");
+}
+
+/// X1: a sync approval's refusal carries every scope flag of the approval.
+#[test]
+fn a_sync_refusal_names_the_approve_command_with_its_scope() {
+    let t = tempdir();
+    let dir = approvals(&t);
+    let refused = consume_scoped_in(
+        &dir,
+        "0a1b2c3d",
+        "sync prod targets=east product=* deploy",
+        "proj",
+        "acct",
+        NOW,
+    )
+    .unwrap_err();
+    assert_eq!(
+        refused.step("", "").next,
+        "opv approve 0a1b2c3d --sync prod --deploy --target east"
+    );
+}
+
+/// 05.36: the format names both plan id forms.
+#[test]
+fn a_malformed_plan_id_names_the_sync_form_too() {
+    let t = tempdir();
+    let refused = record_in(&approvals(&t), "not-a-plan", "proj", "acct", NOW).unwrap_err();
+    assert!(refused.to_string().contains("8 hex digits (sync)"));
+}
+
+/// 05.36: a directory open to others is fixed by its mode, and the step says how.
+#[cfg(unix)]
+#[test]
+fn an_open_approvals_directory_steps_to_chmod() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let t = tempdir();
+    let dir = approvals(&t);
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let refused = record_in(&dir, PLAN, "proj", "acct", NOW).unwrap_err();
+    assert!(
+        refused
+            .step("", "")
+            .action
+            .is_some_and(|a| a.starts_with("chmod 700"))
+    );
+}
+
+#[test]
+fn an_empty_scope_key_is_the_structural_scope() {
+    assert_eq!(plan_scope(""), PlanScope::Structural);
 }
