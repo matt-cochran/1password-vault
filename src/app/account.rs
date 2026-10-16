@@ -65,18 +65,27 @@ pub fn source_of(account: &str) -> AccountSource {
 /// diagnosis of the call); otherwise op's reply was not kept (`manifest::discover` drops
 /// it), so nothing opv could diagnose is known and the step is `opv doctor`.
 pub(crate) fn account_list_failed() -> Error {
-    let unfinished = crate::runner::take_observed().filter(|seen| {
-        matches!(
-            seen.exit(),
-            crate::cause::ExitClass::TimedOut | crate::cause::ExitClass::Signal { .. }
-        )
-    });
-    match unfinished {
-        Some(seen) => crate::adapters::onepassword_diagnose::diagnose(
-            seen,
-            "",
+    // E1: every failed list is diagnosed from op's own reply; one that answered with
+    // output opv cannot read is `UnexpectedOutput`.
+    if let Some(f) = crate::runner::take_failure() {
+        return crate::adapters::onepassword_diagnose::diagnose(
+            f.seen.clone(),
+            f.stderr(),
             &crate::cause::DiagnoseContext::default(),
         )
+        .into();
+    }
+    let list = crate::runner::Call::new(
+        crate::adapters::onepassword::OP,
+        &["account", "list", "--format", "json"],
+    );
+    match crate::runner::take_unusable_reply(&list) {
+        Some(seen) => crate::cause::Cause::UnexpectedOutput {
+            system: crate::cause::System::OnePassword,
+            at: None,
+            problem: crate::cause::OutputProblem::Unparseable,
+            seen,
+        }
         .into(),
         None => Error::Source(
             "op account list failed or printed something opv does not understand, so opv \

@@ -6,9 +6,9 @@ ready: 1 blocking · 2 findings · receipt rcpt-<id>
 PRODUCT  Local development
 Needs attention:
   [owner] shared_sign_in_address AE2EDEVACCOUNT000000000001 → opv account list
-  [agent] item_not_found dev → op item list --vault vE2EWEBDEV0000000000000001
-      Do: check environments.dev.boundaries.web.item_id, which names item iE2EWEBDEV0000000000000001 in vE2EWEBDEV0000000000000001 (opv config edit)
-Next (agent): op item list --vault vE2EWEBDEV0000000000000001
+  [agent] unrecognized_failure dev → opv doctor --env dev
+      Do: read the reply of op shown above; opv does not recognise it
+Next (agent): opv doctor --env dev
 
 ## text stderr
 using <SCENARIO>/project/secrets.toml
@@ -18,7 +18,7 @@ retrying op item get (3/3) in <delay>
 
 ## json exit: 0
 ## json stdout
-{"schema_version":1,"ok":true,"receipt_id":"rcpt-<id>","opv_version":"0.10.0","config":{"source":"<SCENARIO>/project/secrets.toml"},"account":{"account_id":"AE2EDEVACCOUNT000000000001","by":"pointer"},"matrix":[],"targets":[],"findings":[{"code":"shared_sign_in_address","scope":{"account":"AE2EDEVACCOUNT000000000001"},"blocking":false,"actor":"owner","effect":"none","prerequisite":"opv account list","verify":"opv account list --json"},{"code":"item_not_found","scope":{"environment":"dev"},"blocking":true,"actor":"agent","effect":"none","prerequisite":"op item list --vault vE2EWEBDEV0000000000000001","verify":"opv ready --json","do":"check environments.dev.boundaries.web.item_id, which names item iE2EWEBDEV0000000000000001 in vE2EWEBDEV0000000000000001 (opv config edit)"}],"next":{"actor":"agent","command":"op item list --vault vE2EWEBDEV0000000000000001"},"do":null}
+{"schema_version":1,"ok":true,"receipt_id":"rcpt-<id>","opv_version":"0.10.0","config":{"source":"<SCENARIO>/project/secrets.toml"},"account":{"account_id":"AE2EDEVACCOUNT000000000001","by":"pointer"},"matrix":[],"targets":[],"findings":[{"code":"shared_sign_in_address","scope":{"account":"AE2EDEVACCOUNT000000000001"},"blocking":false,"actor":"owner","effect":"none","prerequisite":"opv account list","verify":"opv account list --json"},{"code":"unrecognized_failure","scope":{"environment":"dev"},"blocking":true,"actor":"agent","effect":"none","prerequisite":"opv doctor --env dev","verify":"opv ready --json","do":"read the reply of op shown above; opv does not recognise it"}],"next":{"actor":"agent","command":"opv doctor --env dev"},"do":null}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml

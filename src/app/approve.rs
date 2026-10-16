@@ -106,6 +106,16 @@ pub fn run(
 
 /// `plan_id` is not a structural plan id: a sync plan id is approved with `--sync` and the
 /// scope the assistant named (05.24), anything else is the wrong form.
+/// 09.27: a malformed structural plan id is a usage error, checked before anything asks
+/// for a terminal.
+pub fn check_structural_id(plan_id: &str) -> Result<(), Error> {
+    if structure::is_plan_id(plan_id) {
+        Ok(())
+    } else {
+        Err(not_structural(plan_id))
+    }
+}
+
 fn not_structural(plan_id: &str) -> Error {
     let problem = if crate::approval::is_sync_id(plan_id) {
         UsageProblem::NeedsFlag {

@@ -141,3 +141,14 @@ fn an_unused_provider_cli_is_not_configured() {
     let r = answering(Output::success("2.40.0\n"));
     assert_eq!(doc(&r, Some(&path))["tools"][2]["configured"], false);
 }
+
+#[test]
+fn a_dot_opv_above_the_repository_root_is_no_configuration() {
+    // C7 (09.08): `.opv` is found by the repository-root rule, never above the root.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".opv"), "account = \"AX\"\n").unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let (report, _) = super::local_config(None, &repo);
+    assert_eq!(report.source, "none");
+}

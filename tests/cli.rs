@@ -180,7 +180,8 @@ fn missing_discovered_config_offers_init_and_setup() {
     let dir = tempfile::tempdir().unwrap();
     let (_, _, err) = opv_in(dir.path(), &["status", "prod"]);
     assert!(
-        err.contains("Next: opv init dev") && err.contains("opv setup"),
+        // 09.03b: init starts the environment the command named.
+        err.contains("Next: opv init prod") && err.contains("opv setup"),
         "{err}"
     );
 }

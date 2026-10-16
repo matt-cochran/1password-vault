@@ -20,9 +20,9 @@ use super::{
     print_extras, print_legend, print_rows, product_names, read_and_plan, resolve_targets,
     rows_item_url, scope_plan, target_runners, target_word, write_err, write_json,
 };
-use crate::cause::{Cause, Cmd, EnvName, KeyName, ProductName, ValueRow, ValueState};
+use crate::cause::{Cause, Cmd, EnvName};
 use crate::domain::provenance::latest;
-use crate::domain::{Binding, Fleet, KeyState, Kind, Row, StoreEntry, SyncPlan};
+use crate::domain::{Binding, Fleet, KeyState, Row, StoreEntry, SyncPlan};
 use crate::error::Error;
 use crate::ports::{PinnedRuntime, PinnedStore, Ports};
 use crate::provider::TargetConfig;
@@ -130,6 +130,7 @@ pub fn run_targeted(
                 plan: &p.plan,
                 pinned: p.pinned.as_ref().map(|s| &s.rows),
                 rotate: None,
+                vars: None,
             })
             .collect();
         write_json(
@@ -494,24 +495,7 @@ pub fn overview_of(fleet: &Fleet, product: Option<&str>, r: &dyn CommandRunner) 
     o
 }
 
-/// A blocking row as the catalog's [`ValueRow`]: its key and why it needs a value.
-fn value_row(row: &Row) -> ValueRow {
-    let state = match &row.state {
-        KeyState::RuleFailed(rule, _) if *rule == super::variables::CONCEALED_RULE => {
-            ValueState::ConcealedConfig
-        }
-        KeyState::RuleFailed(rule, _) => ValueState::RuleFailed { rule },
-        KeyState::WrongKind if row.kind == Kind::Secret => ValueState::StoredAsText,
-        KeyState::WrongKind => ValueState::ConcealedConfig,
-        _ => ValueState::Missing,
-    };
-    ValueRow {
-        product: ProductName::new(&row.product),
-        key: KeyName::new(&row.key),
-        target: None,
-        state,
-    }
-}
+use super::value_row;
 
 /// `dev: run-only · 4 keys · 3 saved · 1 skipped · 1 finding` (H11).
 fn run_only_line(env_name: &str, rows: &[Row]) -> String {
@@ -828,7 +812,13 @@ mod tests {
     #[test]
     fn status_missing_row_prints_guidance_on_next_line() {
         let (res, out, _) = status_of(item_without("allumata", "OPENAI_API_KEY"), fly_empty());
-        assert!(matches!(res, Err(Error::Findings(1, _))), "{res:?}");
+        assert!(
+            res.as_ref()
+                .err()
+                .and_then(crate::app::testutil::findings_of)
+                == Some(1),
+            "{res:?}"
+        );
         let lines: Vec<&str> = out.lines().collect();
         let i = lines
             .iter()
@@ -844,7 +834,13 @@ mod tests {
             complete_with(secret("allumata", "OPENAI_API_KEY", "sk-or-FIXTUREVALUE")),
             fly_empty(),
         );
-        assert!(matches!(res, Err(Error::Findings(1, _))), "{res:?}");
+        assert!(
+            res.as_ref()
+                .err()
+                .and_then(crate::app::testutil::findings_of)
+                == Some(1),
+            "{res:?}"
+        );
         let lines: Vec<&str> = out.lines().collect();
         let i = lines
             .iter()
@@ -871,7 +867,13 @@ mod tests {
     #[test]
     fn status_missing_section_reports_every_key_missing() {
         let (res, out, _) = status_of(item(&[]), fly_empty());
-        assert!(matches!(res, Err(Error::Findings(3, _))), "{res:?}");
+        assert!(
+            res.as_ref()
+                .err()
+                .and_then(crate::app::testutil::findings_of)
+                == Some(3),
+            "{res:?}"
+        );
         for k in ["OPENAI_API_KEY", "INTEGRATION_ENC_KEY", "SIGNUP_POLICY"] {
             assert!(
                 out.lines().any(|l| l.contains(k) && l.contains("missing")),
@@ -942,7 +944,13 @@ mod tests {
         let mut out = Vec::new();
         let res = run(&fl, "staging", &r, &mut out);
         let out = text_of(&out);
-        assert!(matches!(res, Err(Error::Findings(1, _))), "{res:?}");
+        assert!(
+            res.as_ref()
+                .err()
+                .and_then(crate::app::testutil::findings_of)
+                == Some(1),
+            "{res:?}"
+        );
         assert!(
             out.lines().any(|l| l.starts_with("portfolio  allumata")
                 && l.contains("SMTP_PASS")
@@ -961,7 +969,7 @@ mod tests {
             fly_empty(),
         );
         let e = res.unwrap_err();
-        assert!(matches!(e, Error::Findings(1, _)), "{e}");
+        assert!(crate::app::testutil::findings_of(&e) == Some(1), "{e}");
         assert_eq!(e.exit_code(), 8);
         assert!(
             out.lines().any(|l| l.contains("OPENAI_API_KEY")
@@ -1050,8 +1058,8 @@ mod tests {
     fn status_findings_next_step_opens_the_first_key() {
         let (res, _, _) = status_of(item_without("allumata", "OPENAI_API_KEY"), fly_empty());
         assert_eq!(
-            res.unwrap_err().next_step(),
-            Some("opv open allumata/OPENAI_API_KEY --env prod")
+            crate::app::testutil::next_of_error(&res.unwrap_err()),
+            "opv open allumata/OPENAI_API_KEY --env prod"
         );
     }
 }

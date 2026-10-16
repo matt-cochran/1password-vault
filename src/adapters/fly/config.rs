@@ -138,6 +138,17 @@ impl Provider for FlyProvider {
         Some(super::login::CLEANUP_HINT)
     }
 
+    /// C21 (A22): `flyctl tokens list --app <app>` shows the token opv minted.
+    fn mint_refind(&self, target: &dyn TargetConfig) -> Option<crate::cause::VendorCmd> {
+        let t = target.as_any().downcast_ref::<FlyTarget>()?;
+        Some(crate::cause::VendorCmd {
+            program: "flyctl".into(),
+            args: ["tokens", "list", "--app", t.app.as_str()]
+                .map(str::to_string)
+                .to_vec(),
+        })
+    }
+
     fn setup_hint(&self) -> String {
         "configure fly.app and fly.secret_name".into()
     }

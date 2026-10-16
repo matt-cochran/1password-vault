@@ -320,6 +320,16 @@ fn json_error(e: serde_json::Error) -> Error {
     Error::Dependency(format!("cannot serialize JSON ({e})").into())
 }
 
+/// opv's own local I/O failed (A3): `LocalIo`, naming the path and the failure kind.
 fn write_error(what: &str, p: &Path, e: io::Error) -> Error {
-    Error::Config(format!("cannot {what} {}: {e}", p.display()).into())
+    crate::cause::Cause::LocalIo {
+        op: if what == "create" {
+            crate::cause::LocalOp::CreateDir
+        } else {
+            crate::cause::LocalOp::Write
+        },
+        path: p.to_path_buf(),
+        io: crate::cause::IoKind::from(e.kind()),
+    }
+    .into()
 }

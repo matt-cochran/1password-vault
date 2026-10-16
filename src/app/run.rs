@@ -133,6 +133,22 @@ pub fn run_remote(
     )
 }
 
+/// 09.42: the product and remote profile a `run --remote` names, checked before anything
+/// asks for a terminal (no 1Password call).
+pub fn check_remote(
+    fleet: &Fleet,
+    env_name: &str,
+    product: Option<&str>,
+    role: Option<&str>,
+    remote: &str,
+) -> Result<(), Error> {
+    let product = match product {
+        Some(p) => p.to_string(),
+        None => super::pick_product(fleet, env_name, None, "run")?,
+    };
+    remote_profile(fleet, env_name, &product, role, remote).map(|_| ())
+}
+
 /// Where a run's values go: a local command, or a reviewed remote profile (#139).
 #[derive(Clone, Copy)]
 enum Launch<'a> {

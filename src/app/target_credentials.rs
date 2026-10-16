@@ -31,8 +31,8 @@ use super::tidy::require_person;
 use super::write_err;
 use crate::adapters::onepassword_init as init_op;
 use crate::cause::{
-    Cause, Cmd, ConfigSource, CreateKind, DiagnoseContext, EnvName, GivenBy, Guard, Invocation,
-    NameKind, NotEditable, Origin, Refind, TargetName, UsageProblem, VendorCmd,
+    Cause, Cmd, ConfigSource, GivenBy, Guard, Invocation, NameKind, NotEditable, Origin, Refind,
+    UsageProblem, VendorCmd,
 };
 use crate::domain::{Fleet, SecretValue, Target};
 use crate::error::{Error, Step};
@@ -250,23 +250,12 @@ fn legacy_after_mint(e: Error, credential: &str, hint: Option<String>) -> Error 
 
 /// A failure after the provider token was minted (and perhaps stored): the cause says what
 /// was already made (`done`), and its Next is a read, never the mint again (X5, X20; 06.08,
-/// 06.09). With `ctx`, a failed 1Password call that left no cause is diagnosed from its
-/// reply (design §5). `Err` gives the error back when it has neither a cause nor a diagnosis.
-pub(crate) fn after_mint(
-    e: Error,
-    done: Vec<String>,
-    ctx: Option<&DiagnoseContext>,
-) -> Result<Error, Error> {
-    let then = match (e.cause(), ctx) {
-        (Some((c, _)), _) => c.clone(),
-        (None, None) => return Err(e),
-        (None, Some(ctx)) => match crate::runner::take_failure() {
-            Some(f) => {
-                crate::adapters::onepassword_diagnose::diagnose(f.seen.clone(), f.stderr(), ctx)
-            }
-            None => return Err(e),
-        },
+/// 06.09). `Err` gives the error back when it has no cause.
+pub(crate) fn after_mint(e: Error, done: Vec<String>) -> Result<Error, Error> {
+    let Some((then, _)) = e.cause() else {
+        return Err(e);
     };
+    let then = then.clone();
     Ok(Cause::Partial {
         done,
         approval_used: None,
@@ -286,7 +275,7 @@ pub(crate) fn not_recorded(
     name: &str,
     done: Vec<String>,
 ) -> Error {
-    match after_mint(e, done.clone(), None) {
+    match after_mint(e, done.clone()) {
         Ok(e) => e,
         Err(_) => Cause::Partial {
             done,
@@ -300,6 +289,41 @@ pub(crate) fn not_recorded(
             }),
         }
         .into(),
+    }
+}
+
+/// The failure to store a token that was already minted (C21), never a step that mints
+/// again (X5). A store whose outcome is unknown may hold the token: a `Partial` naming the
+/// minted token around that cause, whose step finds the item. A store that was refused
+/// left the token with nobody: `SecretNotStored`, revoked at the provider and found by its
+/// own listing (A22).
+fn stored_failed(
+    e: Error,
+    minted: &str,
+    credential: &str,
+    env: &str,
+    name: &str,
+    provider: &dyn Provider,
+    target: &Target,
+) -> Error {
+    match e.cause() {
+        Some((Cause::CreateOutcomeUnknown { .. }, _)) => {
+            after_mint(e, vec![minted.to_string()]).unwrap_or_else(|e| e)
+        }
+        Some(_) => Cause::SecretNotStored {
+            system: crate::provider::system_of(provider),
+            kind: crate::cause::CreateKind::DeployToken,
+            name: credential.to_string(),
+            env: crate::cause::EnvName::new(env),
+            target: crate::cause::TargetName::new(name),
+            refind: provider.mint_refind(target.config.as_ref()),
+        }
+        .into(),
+        None => legacy_after_mint(
+            e,
+            credential,
+            cleanup_hint(provider, target.config.as_ref()),
+        ),
     }
 }
 
@@ -370,46 +394,29 @@ pub fn run(
         "{} deploy token {credential} for {locator}",
         provider.label()
     );
+    // The stored item is found again by its tag, never by minting again (C21, X5).
+    let refind = Refind::Vendor(VendorCmd {
+        program: "op".into(),
+        args: [
+            "item",
+            "list",
+            "--vault",
+            target.state_vault_id.as_str(),
+            "--tags",
+            tag.as_str(),
+        ]
+        .map(str::to_string)
+        .to_vec(),
+    });
     let item = init_op::create_item_with_secret_fields(
         r,
         &target.state_vault_id,
         &item_title,
         &tags,
         &field_refs,
+        refind,
     )
-    .map_err(|e| {
-        let ctx = DiagnoseContext {
-            env: Some(EnvName::new(env)),
-            target: Some(TargetName::new(name)),
-            create: Some((
-                CreateKind::Item,
-                item_title.clone(),
-                Refind::Vendor(VendorCmd {
-                    program: "op".into(),
-                    args: [
-                        "item",
-                        "list",
-                        "--vault",
-                        target.state_vault_id.as_str(),
-                        "--tags",
-                        tag.as_str(),
-                    ]
-                    .map(str::to_string)
-                    .to_vec(),
-                }),
-            )),
-            write: true,
-            ..DiagnoseContext::default()
-        };
-        let done = vec![format!("{minted}, whose secret was never stored")];
-        after_mint(e, done, Some(&ctx)).unwrap_or_else(|e| {
-            legacy_after_mint(
-                e,
-                &credential,
-                cleanup_hint(provider, target.config.as_ref()),
-            )
-        })
-    })?;
+    .map_err(|e| stored_failed(e, &minted, &credential, env, name, provider, target))?;
     drop(fields);
     // Only the item's reference is recorded; the token itself stays in 1Password.
     let reference = format!("op://{}/{}", target.state_vault_id, item.id);

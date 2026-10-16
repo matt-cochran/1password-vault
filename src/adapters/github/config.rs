@@ -375,9 +375,11 @@ impl TargetConfig for GithubTarget {
     }
 }
 
-/// The oldest gh opv is known to work with: the earliest release whose manual documents
-/// `gh variable list --json` (2.49.2, May 2024). `doctor` warns below it (06.21).
-pub const GH_TESTED_MIN: (u64, u64, u64) = (2, 49, 2);
+/// The oldest gh opv can read with: the first release with `gh variable list --json`,
+/// v2.43.0 (31 Jan 2024; cli/cli#8516, "Add option --json for gh variable list" in its
+/// release notes). `gh secret list --json` came earlier, in v2.36.0 (cli/cli#8081).
+/// `doctor` warns below it (06.21, C3: verified, not guessed).
+pub const GH_TESTED_MIN: (u64, u64, u64) = (2, 43, 0);
 
 /// `gh --version`: present, and which version (only a strict version token is printed); a
 /// release older than [`GH_TESTED_MIN`] is a warning.
@@ -393,7 +395,7 @@ fn gh_version(r: &dyn CommandRunner) -> Result<Verdict, Error> {
     Ok(match version {
         Some((v, n)) if n >= GH_TESTED_MIN => Verdict::Ok(format!("version {v}")),
         Some((v, _)) => Verdict::Warn(format!(
-            "version {v}; opv needs gh {a}.{b}.{c} or later (older releases may lack \
+            "version {v}; opv needs gh {a}.{b}.{c} or later (older releases lack \
              `gh variable list --json`, and their refusals read as missing rights)"
         )),
         None => Verdict::Warn(format!(
@@ -746,6 +748,16 @@ secret_name = "STATIC""#,
     fn gh_version_below_the_minimum_is_a_warning() {
         let r = FakeRunner::new([Output::success("gh version 2.40.0 (2024-01-01)\n")]);
         assert!(matches!(gh_version(&r).unwrap(), Verdict::Warn(_)));
+    }
+
+    #[test]
+    fn gh_version_with_variable_list_json_is_no_warning() {
+        // C3: 2.43.0 is the first release with `gh variable list --json` (cli/cli#8516).
+        let r = FakeRunner::new([Output::success("gh version 2.43.0 (2024-01-31)\n")]);
+        assert_eq!(
+            gh_version(&r).unwrap(),
+            Verdict::Ok("version 2.43.0".into())
+        );
     }
 
     #[test]

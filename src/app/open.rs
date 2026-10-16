@@ -162,9 +162,14 @@ pub fn run_as(
     } else {
         // The opener's own stderr is not opv's result (NR-31).
         let _ = crate::runner::take_failure_excerpt();
+        // 04.30: name every opener tried, never only the first.
+        let tried = if with == o.program {
+            o.program.to_string()
+        } else {
+            format!("{} and {with}", o.program)
+        };
         line(format!(
-            "{} could not open it: open the link above yourself",
-            o.program
+            "{tried} could not open it: open the link above yourself"
         ))
     }
 }
@@ -249,6 +254,20 @@ mod tests {
     fn open_reports_a_failed_opener() {
         let (out, _) = open_out(XDG, vec![Output::failure(3)]);
         assert!(out.contains("xdg-open could not open it"), "{out}");
+    }
+
+    /// 04.30: when Windows' opener and wslview both fail, both are named.
+    #[test]
+    fn a_failed_wsl_fallback_names_both_openers() {
+        let wsl = Some(Opener {
+            program: "rundll32.exe",
+            args: &["url.dll,FileProtocolHandler"],
+        });
+        let (out, _) = open_out(wsl, vec![Output::failure(1), Output::failure(1)]);
+        assert!(
+            out.contains("rundll32.exe and wslview could not open it"),
+            "{out}"
+        );
     }
 
     /// Found live: wslview missing in WSL; Windows' opener failing falls back to it.

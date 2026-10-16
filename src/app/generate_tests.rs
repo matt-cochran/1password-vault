@@ -250,3 +250,9 @@ fn a_key_without_its_product_is_a_usage_error() {
     let e = run(&fleet, "dev", &["SESSION_KEY".into()], &op, &mut Vec::new()).unwrap_err();
     assert_eq!(e.code_str(), "usage");
 }
+
+#[test]
+fn a_failed_random_source_is_opvs_own_local_io() {
+    // F2: the OS random source is local I/O, never a missing tool.
+    assert_eq!(random_source_failed().code_str(), "local_io_failed");
+}

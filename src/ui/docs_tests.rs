@@ -81,6 +81,7 @@ fn status_document() -> Vec<u8> {
         plan: &plan,
         pinned: None,
         rotate: None,
+        vars: None,
     }];
     let mut out = Vec::new();
     crate::app::write_json(

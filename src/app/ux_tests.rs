@@ -610,8 +610,8 @@ fn plan_findings_next_step_opens_the_first_key() {
     let r = FakeRunner::new([item_without("allumata", "OPENAI_API_KEY"), fly_empty()]);
     let (res, _) = plan_out(&fleet(), &r, None);
     assert_eq!(
-        res.unwrap_err().next_step(),
-        Some("opv open allumata/OPENAI_API_KEY --env prod")
+        crate::app::testutil::next_of_error(&res.unwrap_err()),
+        "opv open allumata/OPENAI_API_KEY --env prod"
     );
 }
 
@@ -651,7 +651,13 @@ fn status_product_ignores_another_products_findings() {
 fn status_product_counts_only_its_findings() {
     let r = FakeRunner::new([complete_item(), fly_empty()]);
     let (res, _) = status_out(&two_products(), &r, Some("web"));
-    assert!(matches!(res, Err(Error::Findings(1, _))), "{res:?}");
+    assert!(
+        res.as_ref()
+            .err()
+            .and_then(crate::app::testutil::findings_of)
+            == Some(1),
+        "{res:?}"
+    );
 }
 
 #[test]
@@ -862,8 +868,8 @@ fn check_findings_next_step_opens_the_first_key() {
         false,
     );
     assert_eq!(
-        res.unwrap_err().next_step(),
-        Some("opv open allumata/OPENAI_API_KEY --env prod")
+        crate::app::testutil::next_of_error(&res.unwrap_err()),
+        "opv open allumata/OPENAI_API_KEY --env prod"
     );
 }
 

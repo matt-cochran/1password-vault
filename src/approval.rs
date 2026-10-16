@@ -356,6 +356,17 @@ fn check_dir(dir: &Path, meta: &std::fs::Metadata) -> Result<(), Error> {
 
 /// Write `approval` to a `0600` temp file in `dir`, then rename it into place over any
 /// earlier record. `O_NOFOLLOW | O_CREAT | O_EXCL` on unix.
+/// Whether `plan_id` was ever approved here: an approval is recorded for it, or one was
+/// claimed (used). Names only; nothing is read or changed (C2: an id never approved is
+/// `PlanUnknown`, not a plan that changed since its approval).
+pub fn ever_approved(plan_id: &str) -> bool {
+    validate_plan_id(plan_id).is_ok()
+        && dir().is_ok_and(|d| {
+            d.join(format!("{plan_id}.json")).exists()
+                || d.join(format!("{plan_id}.claim")).exists()
+        })
+}
+
 fn write_record(dir: &Path, approval: &Approval) -> Result<(), Error> {
     let text = serde_json::to_string(approval).map_err(|_| -> Error {
         Cause::Bug {

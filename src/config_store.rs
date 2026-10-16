@@ -709,7 +709,7 @@ pub fn walk_up(start: &Path, name: &str) -> Option<PathBuf> {
 /// `secrets.toml` a developer left in `/tmp` must not reach a test's scratch directory
 /// (found: a stray `/tmp/.opv` failed login and discovery tests on one machine only).
 #[cfg(test)]
-fn hermetic(dir: &Path) -> bool {
+pub(crate) fn hermetic(dir: &Path) -> bool {
     let tmp = std::env::temp_dir();
     let tmp = tmp.canonicalize().unwrap_or(tmp);
     let here = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
@@ -717,7 +717,7 @@ fn hermetic(dir: &Path) -> bool {
 }
 
 #[cfg(not(test))]
-fn hermetic(_: &Path) -> bool {
+pub(crate) fn hermetic(_: &Path) -> bool {
     true
 }
 

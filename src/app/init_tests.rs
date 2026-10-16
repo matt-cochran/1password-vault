@@ -1332,3 +1332,13 @@ fn the_product_advice_steps_to_init_help() {
         Some("opv init --help")
     );
 }
+
+#[test]
+fn an_invalid_proposed_configuration_says_nothing_was_written() {
+    // F2: text opv generated that fails validation is `ConfigProposalInvalid`.
+    let e = would_write(
+        config::parse("[environments.dev]\nbogus = 1\n").unwrap_err(),
+        "init",
+    );
+    assert!(e.to_string().contains("nothing was written"), "{e}");
+}

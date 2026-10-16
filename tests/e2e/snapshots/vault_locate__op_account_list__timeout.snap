@@ -4,13 +4,17 @@
 ## text stdout
 
 ## text stderr
-opv: source error: op account list failed or printed something opv does not understand, so opv cannot tell which 1Password accounts are on this machine; nothing was chosen or recorded
+opv: op failed at 1Password in a way opv does not recognise (opv checked: op exited 124)
+  checked: op account list --format json (exit 124)
+Do: read the reply of op shown above; opv does not recognise it
 Next: opv doctor
 
 ## json exit: 4
 ## json stdout
-{"schema_version":1,"ok":false,"exit_code":4,"next":"opv doctor","do":null,"error":{"code":"op_unexpected","category":"source","message":"op account list failed or printed something opv does not understand, so opv cannot tell which 1Password accounts are on this machine; nothing was chosen or recorded","detail":[],"retry":"after_fix","human_required":true,"do":null,"next":"opv doctor"}}
+{"schema_version":1,"ok":false,"exit_code":4,"next":"opv doctor","do":"read the reply of op shown above; opv does not recognise it","error":{"code":"unrecognized_failure","category":"source","message":"op failed at 1Password in a way opv does not recognise (opv checked: op exited 124)","subject":{"target":null,"system":"one_password","established":["op exited 124"],"env":null},"evidence":{"checked":"op account list --format json","account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"read the reply of op shown above; opv does not recognise it","next":"opv doctor","next_kind":"run"}}
 
 ## json stderr
-opv: source error: op account list failed or printed something opv does not understand, so opv cannot tell which 1Password accounts are on this machine; nothing was chosen or recorded
+opv: op failed at 1Password in a way opv does not recognise (opv checked: op exited 124)
+  checked: op account list --format json (exit 124)
+Do: read the reply of op shown above; opv does not recognise it
 Next: opv doctor
