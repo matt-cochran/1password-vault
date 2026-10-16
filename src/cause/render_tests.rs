@@ -3722,3 +3722,27 @@ fn l10_in_env_reaches_a_partial_then() {
     };
     assert_eq!(env, Some(EnvName::new("prod")));
 }
+
+/// R2-2 (snapshot review): a local child that did not start re-runs as `-- <command>`, so
+/// the Do says which command goes there.
+#[test]
+fn a_child_that_did_not_start_names_the_command_to_give() {
+    let c = Cause::ChildStartFailed {
+        program: "/nonexistent/cmd".into(),
+        workdir: None,
+        io: IoKind::NotFound,
+        remote: None,
+    };
+    let run = Invocation {
+        command: vec!["run".into()],
+        args: vec!["dev".into(), "--product".into(), "web".into()],
+        has_child: true,
+        ..inv()
+    };
+    assert_eq!(
+        c.do_text(&run).as_deref(),
+        Some(
+            "check that /nonexistent/cmd is on PATH; <command> is /nonexistent/cmd and its arguments"
+        )
+    );
+}

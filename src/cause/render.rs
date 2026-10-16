@@ -3809,6 +3809,11 @@ impl Cause {
                     Some(p) => format!(
                         "check the command and workdir of remote profile {p} (opv config edit)"
                     ),
+                    // The Next re-run shows the child as `<command>` (§6.1), so the Do says
+                    // what goes there: the program that failed to start, with its arguments.
+                    None if inv.has_child && matches!(inv.origin, Origin::Cli) => format!(
+                        "check that {program} is on PATH; <command> is {program} and its arguments"
+                    ),
                     None => format!("check that {program} is on PATH"),
                 }),
                 Next::Rerun,
