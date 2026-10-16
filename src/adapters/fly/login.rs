@@ -124,7 +124,7 @@ pub fn mint_deploy_credential(
     };
     let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
     // From here on, any output that might echo it is scrubbed (SR-1).
-    crate::scrub::register(&token);
+    crate::scrub::register_secret(&token);
     if token.is_empty() {
         return Err(Error::Target(
             format!("{what} returned no token; no token was stored").into(),

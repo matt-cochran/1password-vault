@@ -212,7 +212,7 @@ pub fn run(
     let token = SecretValue::new(String::from_utf8_lossy(&raw).trim().to_string());
     drop(raw);
     // From here on, any output that might echo it is scrubbed (SR-1).
-    crate::scrub::register(token.expose());
+    crate::scrub::register_secret(token.expose());
     if token.expose().is_empty() {
         return Err(Error::Source(
             "1Password created the service account but printed no token; remove it in \

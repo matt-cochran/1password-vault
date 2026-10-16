@@ -10,7 +10,7 @@ Every failure ends the same way on stderr: opv's error line, then (when an exter
 
 ```text
 opv: source error: op item edit failed (exit 1): signed in to 1Password as SERVICE_ACCOUNT, but item iprd in vault vprd is not available to this identity
-  op said: <the last lines op wrote on stderr, secrets masked as __SECRET__>
+  op said: <the last lines op wrote on stderr, secrets masked as ********>
 Do: grant this identity write access to the vault (vault vprd), or check vault_id and item_id in the configuration
 Next: opv item skeleton prod
 ```
@@ -83,7 +83,7 @@ Every flow is built so that stopping it after any call leaves the app working, a
 
 The stderr of every `op`, `flyctl`, `az` and `kubectl` call is held in memory (never on disk) and shown only after scrubbing:
 
-- every value opv read or wrote in the run is replaced with `__SECRET__`, in its raw form and its common encodings (JSON-escaped, quoted, base64, base64url, percent-encoded);
+- every value opv read or wrote in the run is replaced with `********`, in its raw form and its common encodings (JSON-escaped, quoted, base64, base64url, percent-encoded);
 - patterns catch secrets opv never handled: JWTs, `Bearer` tokens, `OP_SESSION_*`, 1Password service-account tokens, Azure SAS signatures, account keys and client secrets, PEM private keys, well-known API key prefixes, and `password=`, `token=`, `secret=`, `apikey=` assignments;
 - control characters are removed and lines are cut at 240 characters.
 
