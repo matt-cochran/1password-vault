@@ -681,8 +681,45 @@ fn status_without_env_counts_run_only_findings() {
     ]);
     let (res, _) = overview_out(&f, &r);
     assert_eq!(
-        res.unwrap_err().next_step(),
-        Some("opv check dev --product allumata")
+        values_needed_env(&res.unwrap_err()),
+        Some("dev".to_string())
+    );
+}
+
+/// The environment a `ValuesNeeded` failure is about (the overview's findings, 01.08).
+fn values_needed_env(e: &Error) -> Option<String> {
+    match e.cause() {
+        Some((crate::cause::Cause::ValuesNeeded { env, .. }, _)) => Some(env.to_string()),
+        _ => None,
+    }
+}
+
+/// 01.08: the overview's step opens a key that has a finding, never one of the first
+/// declared product (`zz` sorts after `allumata`, whose keys dev does not use).
+#[test]
+fn status_without_env_opens_the_key_with_the_finding() {
+    let f = fleet_with(
+        "[environments.dev]\nboundaries.allumata = { vault_id = \"vdev\", item_id = \"idev\" }\n\
+         [products.zz]\nboundary = \"allumata\"\n\
+         [products.zz.keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
+    );
+    let r = FakeRunner::new([
+        complete_item(),
+        complete_item(),
+        fly_empty(),
+        complete_item(),
+        fly_empty(),
+    ]);
+    let (res, _) = overview_out(&f, &r);
+    let inv = crate::cause::Invocation::from_cli(&["opv".to_string(), "status".to_string()]);
+    let e = res.unwrap_err();
+    let (cause, _) = e.cause().expect("a catalog cause");
+    assert_eq!(
+        cause.step(&inv).1,
+        crate::cause::Next::Run(crate::cause::Cmd {
+            command: vec!["open".into()],
+            args: vec!["zz/DEV_KEY".into(), "--env".into(), "dev".into()],
+        })
     );
 }
 
@@ -721,7 +758,10 @@ fn status_without_env_json_lists_every_environment() {
 fn status_without_env_exits_8_when_any_environment_has_findings() {
     let r = FakeRunner::new([complete_item(), fly_empty(), staging_item(), fly_empty()]);
     let (res, _) = overview_out(&fleet(), &r);
-    assert_eq!(res.unwrap_err().next_step(), Some("opv status staging"));
+    assert_eq!(
+        values_needed_env(&res.unwrap_err()),
+        Some("staging".to_string())
+    );
 }
 
 #[test]

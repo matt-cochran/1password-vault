@@ -250,6 +250,9 @@ pub(crate) struct Read {
     /// The error code of a tidy that was attempted and did not complete (`tidy_conflict`
     /// when the item changed twice meanwhile); the command still went on (FR-43).
     pub tidy_error: Option<Code>,
+    /// The failure behind `tidy_error`, naming the item (and the fields a read-back lacked):
+    /// what `opv tidy` reports (01.02).
+    pub tidy_failure: Option<Error>,
     /// The item's `version` integer as last read (after a tidy, the tidied item's): an
     /// input of the plan id (FR-41).
     pub version: Option<u64>,
@@ -371,6 +374,7 @@ fn read_in(
         refs: BTreeMap::new(),
         normalized: BTreeMap::new(),
         tidy_error: None,
+        tidy_failure: None,
         version: None,
         needing_values: Vec::new(),
         identity: None,
@@ -384,6 +388,7 @@ fn merge(read: &mut Read, part: Read) {
     read.refs.extend(part.refs);
     read.normalized.extend(part.normalized);
     read.tidy_error = read.tidy_error.or(part.tidy_error);
+    read.tidy_failure = read.tidy_failure.take().or(part.tidy_failure);
     read.version = read.version.zip(part.version).map(|(a, b)| a + b);
     read.needing_values.extend(part.needing_values);
     read.identity = read.identity.or(part.identity);
@@ -481,7 +486,9 @@ fn read_item_as(
                     &needing_values(&t.layout, fleet, env_name, env),
                 );
             }
-            Ok(done(t.layout, t.changes, t.error, t.version, Some(who)))
+            let mut res = done(t.layout, t.changes, t.error, t.version, Some(who));
+            res.tidy_failure = t.failure;
+            Ok(res)
         }
         Ok(None) => Ok(done(layout, Vec::new(), None, first, Some(who))),
         Err(e) => {
@@ -491,7 +498,9 @@ fn read_item_as(
                 text.lines().next().unwrap_or("")
             ));
             let code = e.code();
-            Ok(done(layout, Vec::new(), Some(code), first, Some(who)))
+            let mut res = done(layout, Vec::new(), Some(code), first, Some(who));
+            res.tidy_failure = Some(e);
+            Ok(res)
         }
     }
 }
@@ -539,6 +548,8 @@ struct Tidied {
     error: Option<Code>,
     /// The item's version as last read.
     version: Option<u64>,
+    /// The typed failure behind `error`.
+    failure: Option<Error>,
 }
 
 /// Check, write, verify (module docs). Every read here bypasses `op`'s cache (C1), and
@@ -560,6 +571,20 @@ fn tidy(
             changes,
             error,
             version,
+            failure: None,
+        }))
+    };
+    let item = || crate::cause::StoreObject::Item {
+        vault: crate::cause::VaultId::new(&b.vault_id),
+        item: crate::cause::ItemId::new(&b.item_id),
+    };
+    let failed = |layout, changes, code, version, cause: crate::cause::Cause| {
+        Ok(Some(Tidied {
+            layout,
+            changes,
+            error: Some(code),
+            version,
+            failure: Some(cause.into()),
         }))
     };
     for attempt in 0..2 {
@@ -571,7 +596,8 @@ fn tidy(
                     "1Password ({env_name}) changed twice while opv was tidying it; nothing \
                      written. Re-run when nobody is editing the item."
                 ));
-                return tidied(seen, Vec::new(), Some(Code::TidyConflict), fresh.version);
+                let cause = crate::cause::Cause::ChangedBeforeWrite { object: item() };
+                return failed(seen, Vec::new(), Code::TidyConflict, fresh.version, cause);
             }
             stamp = seen_stamp;
             plan = convention::plan(&seen, fleet, env_name, date);
@@ -604,29 +630,40 @@ fn tidy(
                     .map_or_else(|| "unknown".into(), |v| v.to_string()),
                 expected.unwrap_or_default()
             ));
-            return tidied(
+            let cause = crate::cause::Cause::ConcurrentEdit { object: item() };
+            return failed(
                 layout,
                 plan.changes,
-                Some(Code::TidyConflict),
+                Code::TidyConflict,
                 after.version,
+                cause,
             );
         }
         // I4: every field opv wrote or kept (so every original label and value, in place or
         // in `opv · kept`) is in the item read back.
         let lost = onepassword_tidy::lost(fresh.raw(), &template, after.raw())?;
-        drop(template);
         if lost > 0 {
+            let fields = lost_fields(fresh.raw(), &template, after.raw())?;
+            drop(template);
             r.note(&format!(
                 "1Password ({env_name}) was tidied, but {lost} field(s) opv wrote or kept are \
                  not in the item read back; restore them from the item's history in 1Password."
             ));
-            return tidied(
+            let cause = crate::cause::Cause::ReadBackMissing {
+                vault: crate::cause::VaultId::new(&b.vault_id),
+                item: crate::cause::ItemId::new(&b.item_id),
+                fields,
+                by: crate::cause::CommandId(format!("tidy {env_name}")),
+            };
+            return failed(
                 layout,
                 plan.changes,
-                Some(Code::TidyUnverified),
+                Code::TidyUnverified,
                 after.version,
+                cause,
             );
         }
+        drop(template);
         if !convention::plan(&layout, fleet, env_name, date).is_empty() {
             r.note(&format!(
                 "1Password ({env_name}) was written but is not fully tidy yet; the next run \
@@ -715,9 +752,56 @@ fn finish(
         refs,
         normalized,
         tidy_error,
+        tidy_failure: None,
         version: None,
         identity: None,
     }
+}
+
+/// The labels (`section/label`) of the fields [`onepassword_tidy::lost`] counts: each field
+/// opv wrote (`intended`) or found (`original`) that the item read back (`after`) lacks.
+/// Names only, never a value; values are compared in constant time as there.
+fn lost_fields(
+    original: &[u8],
+    intended: &[u8],
+    after: &[u8],
+) -> Result<Vec<crate::cause::FieldName>, Error> {
+    use subtle::ConstantTimeEq;
+    let (original, _) = onepassword_tidy::parse(original)?;
+    let (intended, _) = onepassword_tidy::parse(intended)?;
+    let (after, _) = onepassword_tidy::parse(after)?;
+    let same = |a: &SecretValue, b: &SecretValue| -> bool {
+        a.expose().as_bytes().ct_eq(b.expose().as_bytes()).into()
+    };
+    let name = |f: &convention::Found| {
+        crate::cause::FieldName::new(match f.section_label() {
+            Some(s) if !s.is_empty() => format!("{s}/{}", f.label),
+            _ => f.label.clone(),
+        })
+    };
+    let mut used = vec![false; after.fields.len()];
+    let mut out = Vec::new();
+    for f in &intended.fields {
+        let hit = after.fields.iter().enumerate().position(|(i, g)| {
+            !used[i]
+                && g.section_label() == f.section_label()
+                && g.label == f.label
+                && same(&g.value, &f.value)
+        });
+        match hit {
+            Some(i) => used[i] = true,
+            None => out.push(name(f)),
+        }
+    }
+    for f in &original.fields {
+        let in_place = after.fields.iter().any(|g| g.id == f.id);
+        let value_kept =
+            f.value.expose().is_empty() || after.fields.iter().any(|g| same(&g.value, &f.value));
+        if !(in_place && value_kept) && !out.contains(&name(f)) {
+            out.push(name(f));
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

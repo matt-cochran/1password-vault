@@ -12,9 +12,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
 use super::write_err;
-use crate::domain::Kind;
+use crate::cause::Cmd;
 use crate::domain::history::{HistoryRow, KeyRef, build, latest_written};
+use crate::domain::{KeyState, Kind, TargetState};
 use crate::error::Error;
+use crate::ports::Ports;
 use crate::runner::CommandRunner;
 
 /// What each state means, for the text output.
@@ -88,8 +90,9 @@ pub fn run(
         });
         return writeln!(out, "{doc}").map_err(write_err);
     }
+    let several = env.targets.len() > 1;
     for p in &parts {
-        report(out, env_name, &p.name, p.label, p.section, &p.rows, json)?;
+        report(out, env_name, p, several, json)?;
     }
     Ok(())
 }
@@ -99,6 +102,10 @@ struct HistoryPart {
     name: String,
     label: &'static str,
     section: &'static str,
+    /// The target's store keeps opv's write stamp on each value it writes (a pinned store:
+    /// every write carries one, FR-42). A typed capability of the target (01.03), never
+    /// inferred from a listing without stamps.
+    stamps: bool,
     rows: Vec<HistoryRow>,
 }
 
@@ -125,11 +132,14 @@ fn history_part(
         &none,
         &ledgers,
     )?;
-    // Secrets only: config keys travel as variables, which the stores do not version.
+    // Secrets only: config keys travel as variables, which the stores do not version. A key
+    // this target never delivers (another target's product, source-only) or a mode skips is
+    // not "not on the target" (01.22): it is left out.
     let names: Vec<(String, String, String)> = plan
         .rows
         .iter()
         .filter(|row| row.kind == Kind::Secret)
+        .filter(|row| row.target != TargetState::NotDelivered && row.state != KeyState::Skipped)
         .map(|row| {
             let name = target.env_name(&row.product, &row.key);
             (row.product.clone(), row.key.clone(), name)
@@ -152,32 +162,45 @@ fn history_part(
         name: name.to_string(),
         label: target.provider().label(),
         section: target.provider().section(),
+        stamps: matches!(ports, Ports::Pinned { .. }),
         rows,
     })
 }
 
-/// Print the history of `rows` (`opv history`'s output, text or JSON). Names only.
+/// Print the history of one target (`opv history`'s output, text or JSON). Names only.
+/// `several`: the environment has more than one target, so a step names this one.
 fn report(
     out: &mut dyn Write,
     env_name: &str,
-    target_name: &str,
-    label: &str,
-    section: &str,
-    rows: &[HistoryRow],
+    p: &HistoryPart,
+    several: bool,
     json: bool,
 ) -> Result<(), Error> {
     if json {
         let doc = serde_json::json!({
             "schema_version": crate::json::SCHEMA_VERSION,
             "environment": env_name,
-            "name": target_name,
-            "target": section,
-            "latest": latest_doc(rows),
-            "rows": rows,
+            "name": p.name,
+            "target": p.section,
+            "latest": latest_doc(&p.rows),
+            "rows": p.rows,
         });
         return writeln!(out, "{doc}").map_err(write_err);
     }
-    print_text(out, env_name, target_name, label, rows, latest_row(rows))
+    print_text(out, env_name, p, several)
+}
+
+/// The read that shows what a sync would change on this target: `opv plan <env>`, with
+/// `--target` when the environment has several (01.22).
+fn plan_step(env_name: &str, target_name: &str, several: bool) -> Cmd {
+    let mut args = vec![env_name.to_string()];
+    if several {
+        args.extend(["--target".to_string(), target_name.to_string()]);
+    }
+    Cmd {
+        command: vec!["plan".to_string()],
+        args,
+    }
 }
 
 /// The `latest` object of `rows` (FR-42), or `null` when no row carries a stamp.
@@ -200,20 +223,25 @@ fn latest_row(rows: &[HistoryRow]) -> Option<&HistoryRow> {
 fn print_text(
     out: &mut dyn Write,
     env_name: &str,
-    target_name: &str,
-    label: &str,
-    rows: &[HistoryRow],
-    latest: Option<&HistoryRow>,
+    p: &HistoryPart,
+    several: bool,
 ) -> Result<(), Error> {
-    let place = super::placement(env_name, target_name);
-    let head = match latest {
-        Some(r) => format!(
+    let (label, rows) = (p.label, p.rows.as_slice());
+    let place = super::placement(env_name, &p.name);
+    // 01.03: "keeps no write stamps" only for a store that does not stamp; a stamping store
+    // with no stamp yet holds nothing opv wrote.
+    let head = match (latest_row(rows), p.stamps) {
+        (Some(r), _) => format!(
             "{place} ({label}): last write {} by plan {} (opv {})",
             r.written.as_deref().unwrap_or("-"),
             r.plan.as_deref().unwrap_or("-"),
             r.opv_version.as_deref().unwrap_or("-")
         ),
-        None => format!(
+        (None, true) => format!(
+            "{place} ({label}): no value here carries opv's write stamp yet (not written by \
+             opv, or never synced)"
+        ),
+        (None, false) => format!(
             "{place} ({label}): {label} keeps no write stamps; versions are compared with \
              what opv's own syncs recorded"
         ),
@@ -243,7 +271,8 @@ fn print_text(
         writeln!(out, "  no secret is declared for {env_name}").map_err(write_err)?;
     }
     if rows.iter().any(|r| r.state == "changed_outside_opv") {
-        writeln!(out, "Next: opv plan {env_name}").map_err(write_err)?;
+        let step = plan_step(env_name, &p.name, several);
+        writeln!(out, "Next: {}", crate::cause::render::cmd_text(&step)).map_err(write_err)?;
     }
     Ok(())
 }

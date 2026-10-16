@@ -21,15 +21,32 @@ fn row(name: &str, state: &'static str, written: Option<&str>) -> HistoryRow {
     }
 }
 
-fn text(rows: &[HistoryRow]) -> String {
+/// Target `web` of `prod` holding `rows`; `stamps`: its store keeps opv's write stamps.
+fn part(rows: &[HistoryRow], stamps: bool) -> HistoryPart {
+    HistoryPart {
+        name: "web".into(),
+        label: "Key Vault",
+        section: "azure",
+        stamps,
+        rows: rows.to_vec(),
+    }
+}
+
+/// The text report of `rows` on a store that keeps no stamps; `several`: `prod` has more
+/// than one target.
+fn text_with(rows: &[HistoryRow], stamps: bool, several: bool) -> String {
     let mut out = Vec::new();
-    report(&mut out, "prod", "web", "Key Vault", "azure", rows, false).unwrap();
+    report(&mut out, "prod", &part(rows, stamps), several, false).unwrap();
     String::from_utf8(out).unwrap()
+}
+
+fn text(rows: &[HistoryRow]) -> String {
+    text_with(rows, false, false)
 }
 
 fn doc(rows: &[HistoryRow]) -> serde_json::Value {
     let mut out = Vec::new();
-    report(&mut out, "prod", "web", "Key Vault", "azure", rows, true).unwrap();
+    report(&mut out, "prod", &part(rows, false), false, true).unwrap();
     serde_json::from_slice(&out).unwrap()
 }
 
@@ -48,6 +65,32 @@ fn the_head_names_the_latest_write() {
 #[test]
 fn a_store_without_stamps_says_so() {
     assert!(text(&[row("A", "recorded", None)]).contains("keeps no write stamps"));
+}
+
+/// 01.03: a store that stamps every write, with no stamp in it yet, never "keeps no write
+/// stamps".
+#[test]
+fn a_stamping_store_without_a_stamp_is_never_said_to_keep_none() {
+    assert!(
+        !text_with(&[row("A", "recorded", None)], true, false).contains("keeps no write stamps")
+    );
+}
+
+#[test]
+fn a_stamping_store_without_a_stamp_says_nothing_here_was_written_by_opv() {
+    assert!(
+        text_with(&[row("A", "not_recorded", None)], true, false)
+            .contains("no value here carries opv's write stamp yet")
+    );
+}
+
+/// 01.22: with several targets, the plan step names the one this history is about.
+#[test]
+fn a_change_outside_opv_on_one_of_several_targets_plans_that_target() {
+    assert!(
+        text_with(&[row("A", "changed_outside_opv", None)], false, true)
+            .ends_with("Next: opv plan prod --target web\n")
+    );
 }
 
 #[test]
@@ -166,6 +209,51 @@ fn the_json_lists_each_target_by_name() {
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     assert_eq!(names, ["api", "web"]);
+}
+
+/// 01.22: a key whose product the target does not deliver is not listed as missing there.
+#[test]
+fn a_key_the_target_does_not_deliver_is_not_listed() {
+    let fleet = crate::config::parse(SCOPED).unwrap();
+    let r = FakeRunner::new([scoped_item(), fly_empty()]);
+    let mut out = Vec::new();
+    run(&fleet, "multi", Some("web"), &r, false, &mut out).unwrap();
+    assert!(!text_of(&out).contains("worker/TOKEN"));
+}
+
+/// [`TWO_TARGETS`] with a second product only target `api` delivers.
+const SCOPED: &str = r#"
+[environments.multi]
+boundaries.allumata = { vault_id = "v", item_id = "i" }
+
+[environments.multi.targets.api]
+fly.app = "api-app"
+fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+state_vault_id = "s1"
+
+[environments.multi.targets.web]
+fly.app = "web-app"
+fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+state_vault_id = "s2"
+products = ["allumata"]
+
+[products.allumata.keys.OPENAI_API_KEY]
+kind = "secret"
+environments = ["multi"]
+
+[products.worker]
+boundary = "allumata"
+
+[products.worker.keys.TOKEN]
+kind = "secret"
+environments = ["multi"]
+"#;
+
+fn scoped_item() -> Output {
+    item(&[
+        secret("allumata", "OPENAI_API_KEY", "sk-proj-FIXTUREVALUE"),
+        secret("worker", "TOKEN", "tok-FIXTUREVALUE"),
+    ])
 }
 
 #[test]
