@@ -1,14 +1,15 @@
 //! `config export <env> --json` use case (FR-18, spec §7.2).
 //!
-//! Prints `plan.config` (config-kind values only) as JSON. Refuses with `Error::Policy`,
-//! printing nothing, when a config key is missing, fails a rule or is stored as a secret,
+//! Prints `plan.config` (config-kind values only) as JSON. Refuses with
+//! `Cause::ValuesNeeded` (each key and why), printing nothing, when a config key is missing, fails a rule or is stored as a secret,
 //! or when a secret key is stored as text: the kind check is S5's `WrongKind`. One `op`
 //! call; Fly is not contacted.
 
 use std::collections::BTreeSet;
 use std::io::Write;
 
-use super::{is_blocking, read_and_plan, row_names, write_err};
+use super::{is_blocking, read_and_plan, write_err};
+use crate::cause::{Cause, EnvName, KeyName, ProductName, ValueRow, ValueState};
 use crate::domain::{Fleet, KeyState, Kind, Row};
 use crate::error::Error;
 use crate::runner::CommandRunner;
@@ -25,11 +26,30 @@ pub fn run(
     let product = super::pick_product(fleet, env_name, None, "config export")?;
     let none = BTreeSet::new();
     let (plan, _) = read_and_plan(fleet, env_name, None, r, None, &none, &none)?;
-    let refused = row_names(&plan.rows, refuses);
-    if !refused.is_empty() {
-        return Err(Error::Policy(
-            format!("config export refused: {}", refused.join(", ")).into(),
-        ));
+    // 03.06: each key that blocks the export, with why (missing, failing its rule, or kept
+    // in the wrong kind of field); filling a value is a person's step in 1Password.
+    let rows: Vec<ValueRow> = plan
+        .rows
+        .iter()
+        .filter(|r| refuses(r))
+        .map(|r| ValueRow {
+            product: ProductName::new(r.product.clone()),
+            key: KeyName::new(r.key.clone()),
+            target: None,
+            state: match (&r.state, r.kind) {
+                (KeyState::RuleFailed(rule, _), _) => ValueState::RuleFailed { rule },
+                (KeyState::WrongKind, Kind::Secret) => ValueState::StoredAsText,
+                (KeyState::WrongKind, Kind::Config) => ValueState::ConcealedConfig,
+                _ => ValueState::Missing,
+            },
+        })
+        .collect();
+    if !rows.is_empty() {
+        return Err(Cause::ValuesNeeded {
+            env: EnvName::new(env_name),
+            rows,
+        }
+        .into());
     }
     // Config values are not secret (FR-18); `plan.config` never holds a secret-kind value.
     // M4 (owner ruling): config kept concealed in 1Password is accepted, but its value is
@@ -42,8 +62,12 @@ pub fn run(
         }
     }
     let plan_config = &config;
-    let json = serde_json::to_string_pretty(plan_config)
-        .map_err(|_| Error::Config("cannot serialize config export".into()))?;
+    let json = serde_json::to_string_pretty(plan_config).map_err(|_| -> Error {
+        Cause::Bug {
+            site: "config export: serialize",
+        }
+        .into()
+    })?;
     writeln!(out, "{json}").map_err(write_err)
 }
 
@@ -133,11 +157,50 @@ mod tests {
         ] {
             let (res, out, _) = export(item);
             let e = res.unwrap_err();
-            assert!(matches!(e, Error::Policy(_)), "{e}");
+            assert!(
+                matches!(
+                    e.cause(),
+                    Some((crate::cause::Cause::ValuesNeeded { .. }, _))
+                ),
+                "{e}"
+            );
             assert!(e.to_string().contains("SIGNUP_POLICY"), "{e}");
             assert_no_values(&e.to_string());
             assert!(out.is_empty());
         }
+    }
+
+    /// 03.06: the refusal says why each key blocks it, not only its name.
+    #[test]
+    fn a_config_value_failing_its_rule_is_named_with_the_rule() {
+        let (res, _, _) = export(complete_with(text(
+            "allumata",
+            "SIGNUP_POLICY",
+            "FIXTUREVALUE",
+        )));
+        let e = res.unwrap_err();
+        assert!(
+            matches!(
+                e.cause(),
+                Some((crate::cause::Cause::ValuesNeeded { rows, .. }, _))
+                    if matches!(rows[0].state, ValueState::RuleFailed { .. })
+            ),
+            "{e:?}"
+        );
+    }
+
+    /// 03.06: filling a value is a person's step (human_required), never an agent's.
+    #[test]
+    fn a_missing_config_value_is_a_persons_step() {
+        let (res, _, _) = export(item_without("allumata", "SIGNUP_POLICY"));
+        let e = res.unwrap_err();
+        let inv = crate::cause::Invocation::from_cli(&[
+            "opv".into(),
+            "config".into(),
+            "export".into(),
+            "prod".into(),
+        ]);
+        assert!(e.cause().unwrap().0.human_required(&inv), "{e:?}");
     }
 
     /// A missing secret does not concern config export (secrets are `fly sync`'s job).

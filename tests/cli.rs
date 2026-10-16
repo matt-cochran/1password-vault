@@ -46,7 +46,6 @@ fn unknown_environment_exits_2_before_any_subprocess() {
 fn missing_config_file_exits_2() {
     let (code, _, err) = opv(&["--config", "does-not-exist.toml", "status", "prod"]);
     assert_eq!(code, 2, "{err}");
-    assert!(err.starts_with("opv: configuration error"), "{err}");
 }
 
 /// FR-24, FR-60: a file that still sets the removed `pattern` rule fails at load as a

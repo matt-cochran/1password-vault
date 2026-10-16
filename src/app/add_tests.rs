@@ -393,10 +393,7 @@ fn a_manifest_changed_since_it_was_read_is_refused() {
     };
     op.bump(&m.item_id);
     let e = crate::config_store::save(found.store(), &op, &base, COMMENTED).unwrap_err();
-    assert!(
-        e.to_string().contains("changed while opv was editing it"),
-        "{e}"
-    );
+    assert_eq!(e.code_str(), "config_changed", "{e}");
 }
 
 #[test]
@@ -408,10 +405,7 @@ fn a_file_changed_since_it_was_read_is_refused() {
     let base = store.read(&FakeOp::default()).unwrap();
     fs::write(&path, format!("{COMMENTED}\n# someone else\n")).unwrap();
     let e = crate::config_store::save(&store, &FakeOp::default(), &base, COMMENTED).unwrap_err();
-    assert!(
-        e.to_string().contains("changed while opv was editing it"),
-        "{e}"
-    );
+    assert_eq!(e.code_str(), "config_changed", "{e}");
 }
 
 // #97: --from, --personal, --allow-same-value -------------------------------------------

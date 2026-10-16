@@ -12,11 +12,8 @@ use std::path::{Path, PathBuf};
 
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, TableLike, Value};
 
+use crate::cause::{Cause, ConfigSource, DottedPath, FieldRule, GivenBy, NameKind, NotEditable};
 use crate::error::Error;
-
-fn cfg(msg: String) -> Error {
-    Error::Config(msg.into())
-}
 
 /// A new key's table: `kind`, `environments`, then the optional fields.
 #[derive(Debug, Clone, Copy)]
@@ -40,6 +37,9 @@ pub struct NewKey<'a> {
 #[derive(Debug, Clone)]
 pub struct ConfigDoc {
     doc: DocumentMut,
+    /// Where the text came from, for the catalog's source-aware wording (X16, 03.18);
+    /// `secrets.toml` until the caller says otherwise ([`ConfigDoc::parse_in`]).
+    source: Option<ConfigSource>,
 }
 
 /// `products.<product>.keys`.
@@ -49,14 +49,31 @@ fn keys_path(product: &str) -> Vec<&str> {
 
 impl ConfigDoc {
     pub fn parse(text: &str) -> Result<Self, Error> {
-        text.parse::<DocumentMut>()
-            .map(|doc| Self { doc })
-            .map_err(|e| {
-                cfg(format!(
-                    "invalid secrets.toml: {}",
-                    crate::config::toml_error(text, e.span(), e.message())
-                ))
-            })
+        Self::parse_text(text, None)
+    }
+
+    /// [`ConfigDoc::parse`] of the text of `source` (a file or a manifest): its errors name
+    /// that source and its route (`opv config edit` for a manifest), never "secrets.toml".
+    pub fn parse_in(text: &str, source: ConfigSource) -> Result<Self, Error> {
+        Self::parse_text(text, Some(source))
+    }
+
+    fn parse_text(text: &str, source: Option<ConfigSource>) -> Result<Self, Error> {
+        match text.parse::<DocumentMut>() {
+            Ok(doc) => Ok(Self { doc, source }),
+            Err(e) => Err(Cause::ConfigInvalid {
+                source: source.unwrap_or_else(default_source),
+                at: crate::config_store::location(text, e.span()),
+                field: DottedPath(vec!["the TOML".into()]),
+                rule: FieldRule::Syntax,
+            }
+            .into()),
+        }
+    }
+
+    /// Where the text came from.
+    fn source(&self) -> ConfigSource {
+        self.source.clone().unwrap_or_else(default_source)
     }
 
     /// Environment names, in file order.
@@ -137,6 +154,7 @@ impl ConfigDoc {
     /// Keys written as inline tables (`K = { kind = … }`) get one more inline table.
     pub fn add_key(&mut self, product: &str, key: &str, k: &NewKey<'_>) -> Result<(), Error> {
         let path = keys_path(product);
+        let source = self.source();
         let mut t: &mut dyn TableLike = self.doc.as_table_mut();
         for seg in &path {
             if t.get(seg).is_none() {
@@ -147,7 +165,7 @@ impl ConfigDoc {
             t = t
                 .get_mut(seg)
                 .and_then(Item::as_table_like_mut)
-                .ok_or_else(|| layout_error(&path.join(".")))?;
+                .ok_or_else(|| layout_error(source.clone(), &path.join(".")))?;
         }
         let inline = t.iter().any(|(_, v)| v.is_inline_table());
         let mut fields: Vec<(&str, Value)> = vec![
@@ -193,23 +211,31 @@ impl ConfigDoc {
         if self.has_key(product, key) {
             Ok(())
         } else {
-            Err(layout_error(&path.join(".")))
+            Err(layout_error(source, &path.join(".")))
         }
     }
 
     /// Append `env` to the declared key's `environments`, keeping the array's style.
     pub fn add_key_env(&mut self, product: &str, key: &str, env: &str) -> Result<(), Error> {
-        let name = format!("{product}/{key}");
+        let source = self.source();
         let mut path = keys_path(product);
         path.push(key);
         let arr = self
             .table_at_mut(&path)
             .and_then(|t| t.get_mut("environments"))
             .and_then(Item::as_array_mut)
-            .ok_or_else(|| {
-                cfg(format!(
-                    "{name}: environments is not a list; edit secrets.toml by hand"
-                ))
+            .ok_or_else(|| -> Error {
+                let mut field: Vec<String> = path.iter().map(|s| s.to_string()).collect();
+                field.push("environments".into());
+                Cause::ConfigInvalid {
+                    source,
+                    at: None,
+                    field: DottedPath(field),
+                    rule: FieldRule::Type {
+                        expected: "a list of environment names",
+                    },
+                }
+                .into()
             })?;
         arr.push(env);
         Ok(())
@@ -218,27 +244,34 @@ impl ConfigDoc {
     /// Add `[environments.<env>]` from `table_text` (a TOML fragment holding exactly that
     /// table), after the last environment.
     pub fn add_environment(&mut self, env: &str, table_text: &str) -> Result<(), Error> {
-        let frag = table_text.parse::<DocumentMut>().map_err(|e| {
-            cfg(format!(
-                "invalid environment table: {}",
-                crate::config::toml_error_inline(table_text, e.span(), e.message())
-            ))
-        })?;
+        // The fragment is opv's own text: a failure here is opv's bug, never the person's.
+        let bug = || -> Error {
+            Cause::Bug {
+                site: "config_edit::add_environment",
+            }
+            .into()
+        };
+        let frag = table_text.parse::<DocumentMut>().map_err(|_| bug())?;
         let mut table = frag
             .get("environments")
             .and_then(|e| e.get(env))
             .and_then(Item::as_table)
             .cloned()
-            .ok_or_else(|| cfg(format!("invalid environment table for {env}")))?;
+            .ok_or_else(bug)?;
+        let source = self.source();
         clear_positions(&mut table);
         table.decor_mut().set_prefix("\n");
         let envs = self
             .doc
             .get_mut("environments")
             .and_then(Item::as_table_like_mut)
-            .ok_or_else(|| layout_error("environments"))?;
+            .ok_or_else(|| layout_error(source, "environments"))?;
         if envs.get(env).is_some() {
-            return Err(cfg(format!("environment {env} already exists")));
+            return Err(Cause::AlreadyDeclared {
+                kind: NameKind::Environment,
+                name: env.to_string(),
+            }
+            .into());
         }
         envs.insert(env, Item::Table(table));
         Ok(())
@@ -251,11 +284,24 @@ impl std::fmt::Display for ConfigDoc {
     }
 }
 
-fn layout_error(path: &str) -> Error {
-    cfg(format!(
-        "cannot add under {path}: the file writes it in a shape opv does not edit (an inline \
-         table or a value); edit secrets.toml by hand"
-    ))
+/// The source a [`ConfigDoc`] names when its caller gave none.
+fn default_source() -> ConfigSource {
+    ConfigSource::File {
+        path: PathBuf::from(crate::config_store::FILE_NAME),
+        given_by: GivenBy::Discovered,
+    }
+}
+
+/// `section` is written in a shape opv does not edit (an inline table or a value): the
+/// person edits it by hand, through `opv config edit` for a file or a manifest (03.18).
+fn layout_error(source: ConfigSource, section: &str) -> Error {
+    Cause::ConfigNotEditable {
+        source,
+        reason: NotEditable::UnsupportedLayout {
+            section: section.to_string(),
+        },
+    }
+    .into()
 }
 
 /// `["a", "b"]`.
@@ -279,15 +325,17 @@ fn clear_positions(t: &mut Table) {
 /// temporary file in the same directory, then a rename. A symlink is followed, so the file
 /// it points at is replaced. When the file changed since it was read, nothing is written.
 pub fn replace(path: &Path, original: &str, text: &str) -> Result<(), Error> {
-    let real =
-        fs::canonicalize(path).map_err(|e| cfg(format!("cannot read {}: {e}", path.display())))?;
+    let unreadable = |e: io::Error| crate::config_store::unreadable(path, &e, GivenBy::Discovered);
+    let real = fs::canonicalize(path).map_err(unreadable)?;
     write_atomic(&real, text, || match fs::read_to_string(&real) {
         Ok(now) if now == original => Ok(()),
-        Ok(_) => Err(cfg(format!(
-            "{} changed while opv was editing it; nothing written: run the command again",
-            path.display()
-        ))),
-        Err(e) => Err(cfg(format!("cannot read {}: {e}", path.display()))),
+        Ok(_) => Err(Cause::ChangedBeforeWrite {
+            object: crate::cause::StoreObject::File {
+                path: path.to_path_buf(),
+            },
+        }
+        .into()),
+        Err(e) => Err(unreadable(e)),
     })
 }
 
@@ -389,6 +437,51 @@ mod tests {
         assert!(d.to_string().contains(
             "item_id = \"i\"\n\n[environments.dev]\nvault_id = \"vd\"\nitem_id = \"id\"\n\n# api keys\n"
         ));
+    }
+
+    fn manifest_source() -> ConfigSource {
+        ConfigSource::Manifest {
+            title: "opv · app".into(),
+            vault: crate::cause::VaultId::new("v"),
+            project: "app".into(),
+        }
+    }
+
+    /// 03.18: a layout opv does not edit, in a manifest, names the manifest (whose route is
+    /// `opv config edit`), never "edit secrets.toml by hand".
+    #[test]
+    fn a_layout_opv_does_not_edit_names_the_manifest() {
+        let text =
+            "[environments.prod]\nvault_id = \"v\"\nitem_id = \"i\"\n\n[products]\napi = 1\n";
+        let mut d = ConfigDoc::parse_in(text, manifest_source()).unwrap();
+        let envs = ["prod".to_string()];
+        let e = d.add_key("api", "B", &key(&envs)).unwrap_err();
+        assert!(
+            matches!(
+                e.cause(),
+                Some((
+                    Cause::ConfigNotEditable {
+                        source: ConfigSource::Manifest { .. },
+                        ..
+                    },
+                    _
+                ))
+            ),
+            "{e:?}"
+        );
+    }
+
+    /// 03.18: an existing environment is already declared, not a file to edit by hand.
+    #[test]
+    fn adding_an_existing_environment_is_already_declared() {
+        let mut d = ConfigDoc::parse(FILE).unwrap();
+        let e = d
+            .add_environment(
+                "prod",
+                "[environments.prod]\nvault_id = \"v\"\nitem_id = \"i\"\n",
+            )
+            .unwrap_err();
+        assert_eq!(e.code_str(), "already_declared");
     }
 
     #[test]
