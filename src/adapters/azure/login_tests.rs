@@ -81,7 +81,8 @@ fn login_is_a_service_principal_sign_in_reading_the_secret_from_stdin() {
     assert_eq!(
         args,
         "login --service-principal -u 00000000-0000-0000-0000-00000000000b -t \
-         00000000-0000-0000-0000-00000000000a -p @/dev/stdin --only-show-errors -o none"
+         00000000-0000-0000-0000-00000000000a -p @/dev/stdin --allow-no-subscriptions \
+         --only-show-errors -o none"
     );
 }
 
@@ -110,13 +111,25 @@ fn every_az_call_gets_the_config_dir_and_no_other_program_does() {
     );
 }
 
+/// 06.18: a failed service-principal sign-in may be rejected credentials, no network or
+/// something else; with no recording of az's wording, opv shows az's reply rather than
+/// blame the credentials.
 #[test]
-fn rejected_credentials_are_an_auth_error_without_the_secret() {
+fn failed_service_principal_sign_in_is_not_blamed_on_the_credentials() {
     let tmp = tempfile::tempdir().unwrap();
     let mut l = login_in(tmp.path());
     let r = FakeRunner::new([Output::failure(1)]);
     let e = l.sign_in(values(), &r).unwrap_err();
-    assert!(e.exit_code() == 7 && !e.to_string().contains(SECRET), "{e}");
+    assert_eq!(e.code_str(), "unrecognized_failure");
+}
+
+#[test]
+fn failed_sign_in_never_shows_the_secret() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut l = login_in(tmp.path());
+    let r = FakeRunner::new([Output::failure(1)]);
+    let e = l.sign_in(values(), &r).unwrap_err();
+    assert!(!format!("{e:?}").contains(SECRET), "{e:?}");
 }
 
 #[test]

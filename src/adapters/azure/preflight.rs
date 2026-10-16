@@ -25,7 +25,11 @@ use super::AzureTarget;
 use super::az::{self, AZ_CLI, Effect};
 use super::containerapp::{self, ContainerApp, POLL_EVERY, PROGRESS_EVERY, WAIT_MAX};
 use crate::adapters::probe::{parse_version, spawn_tool};
-use crate::error::{Code, Error};
+use crate::cause::{
+    Cause, DiagnoseContext, DottedPath, GrantModel, NamedBy, NotFoundState, ResourceKind,
+    ResourceName, ResourceRef, Right, System, Unusable,
+};
+use crate::error::Error;
 use crate::host::Host;
 use crate::ports::PinnedRuntime;
 use crate::provider::{Check, Preflight, PreflightMode, Verdict};
@@ -170,9 +174,30 @@ fn read(
     )
 }
 
-/// A read that never finished after its retries: Azure did not answer (NR-28).
-fn unfinished(r: &dyn CommandRunner, op: &str) -> Error {
-    AZ_CLI.unanswered(r, &format!("az {op}"))
+/// A Key Vault, as the subject of a cause.
+fn vault_ref(v: &Vault) -> ResourceRef {
+    ResourceRef {
+        kind: ResourceKind::KeyVault,
+        name: ResourceName::new(&v.name),
+        scope: Some(format!("subscription {}", v.subscription)),
+    }
+}
+
+/// A configuration field (`azure.key_vault`, `stores.prod-vault.azure_key_vault`) as the
+/// place a resource's name came from.
+fn named_by(field: &str) -> NamedBy {
+    NamedBy::ConfigField {
+        path: DottedPath(field.split('.').map(String::from).collect()),
+    }
+}
+
+/// A call about vault `v`, for its diagnosis.
+fn vault_ctx(v: &Vault) -> DiagnoseContext {
+    DiagnoseContext {
+        resource: Some(vault_ref(v)),
+        named_by: Some(named_by(&v.vault_field)),
+        ..DiagnoseContext::default()
+    }
 }
 
 fn parse(out: &Output, op: &str) -> Result<Value, Error> {
@@ -196,26 +221,18 @@ fn subscription(v: &Vault, r: &dyn CommandRunner) -> Result<(), Error> {
     if az::sees_subscription(r, &v.subscription)? {
         return Ok(());
     }
-    if !az::signed_in(r)? {
-        return Err(az::not_logged_in(None));
+    // The failed probe's observation and reply, kept through the sign-in check.
+    let taken = az::take_failure();
+    if !crate::runner::diagnosing(|| az::signed_in(r))? {
+        return Err(az::report(az::signed_out(), taken.and_then(|(_, up)| up)));
     }
-    Err(Error::Target(
-        format!(
-            "signed in to Azure, but this account cannot see subscription {s} ({f}); \
-             nothing was changed",
-            s = v.subscription,
-            f = v.subscription_field
-        )
-        .into(),
-    )
-    .with_code(Code::PermissionDenied)
-    .with_do(format!(
-        "sign in with an account that can see subscription {s} (az login), ask an owner to \
-         give this account a role on it, or correct {f}",
-        s = v.subscription,
-        f = v.subscription_field
-    ))
-    .with_next("az account list -o table"))
+    // Signed in, but this subscription is not visible: az's reply says why (a wrong
+    // subscription id or no role on it); opv shows it rather than guess (§12.4).
+    let ctx = DiagnoseContext::default();
+    Err(match taken {
+        Some((seen, up)) => az::classified(seen, up, &ctx),
+        None => az::unobserved(r),
+    })
 }
 
 /// `keyvault show`: the vault exists in the subscription (NR-25). On failure a read-only
@@ -232,31 +249,30 @@ fn vault(v: &Vault, r: &dyn CommandRunner) -> Result<Value, Error> {
         &[3],
     )? {
         Outcome::Done(out) => parse(&out, OP),
-        Outcome::Unknown { .. } => Err(unfinished(r, OP)),
-        Outcome::Refused(_) => {
+        // Exit 3 is az's "no such resource" (Q3, Q4): `show-deleted` tells a soft-deleted
+        // vault from a missing one.
+        Outcome::Refused(out) if out.status == 3 => {
+            let Some((seen, up)) = az::take_failure() else {
+                return Err(az::unobserved(r));
+            };
             const DELETED: &str = "keyvault show-deleted";
             let probe = ["keyvault", "show-deleted", "-n", kv, "-o", "none"];
-            match read(s, r, DELETED, &probe, &[1, 3])? {
-                Outcome::Done(_) => Err(Error::Target(
-                    format!(
-                        "Key Vault {kv} is deleted but still recoverable (soft-deleted); nothing \
-                     was changed\n  next: recover it with `az keyvault recover -n {kv} \
-                     --subscription {s}`, then run opv again"
-                    )
-                    .into(),
-                )),
-                Outcome::Unknown { .. } => Err(unfinished(r, DELETED)),
-                Outcome::Refused(_) => Err(Error::Target(
-                    format!(
-                        "Key Vault {kv} was not found in subscription {s}, or this account cannot \
-                     read it; nothing was changed\n  next: check {} and {} with `az keyvault \
-                     show -n {kv} --subscription {s}`",
-                        v.vault_field, v.subscription_field
-                    )
-                    .into(),
-                )),
-            }
+            let state = match crate::runner::diagnosing(|| read(s, r, DELETED, &probe, &[1, 3]))? {
+                Outcome::Done(_) => NotFoundState::SoftDeleted,
+                Outcome::Refused(_) => NotFoundState::Missing,
+                // The probe never answered: the vault's state is unknown.
+                Outcome::Unknown { .. } => return Err(az::classified(seen, up, &vault_ctx(v))),
+            };
+            let missing = Cause::NotFound {
+                system: System::Azure,
+                resource: vault_ref(v),
+                named_by: named_by(&v.vault_field),
+                state,
+                seen,
+            };
+            Err(az::report(missing, up))
         }
+        Outcome::Refused(_) | Outcome::Unknown { .. } => Err(az::failed(r, vault_ctx(v))),
     }
 }
 
@@ -276,30 +292,49 @@ fn vault_answers(v: &Vault, r: &dyn CommandRunner, vault: &Value) -> Result<(), 
     ];
     match read(s, r, OP, &base, &[])? {
         Outcome::Done(_) => Ok(()),
-        Outcome::Unknown { .. } => Err(unfinished(r, OP)),
-        Outcome::Refused(_) if network_restricted(vault) => Err(Error::Target(
-            format!(
-                "Key Vault {kv} refused this request: it accepts connections only from allowed \
-             networks (firewall or private endpoint), and this machine is not on one; nothing \
-             was changed\n  next: run opv from a network the vault allows, or ask an owner to \
-             allow this address: `az keyvault network-rule add -n {kv} --ip-address <your \
-             address> --subscription {s}`"
-            )
-            .into(),
-        )),
-        Outcome::Refused(_) => Err(Error::Target(
-            format!(
-                "Key Vault {kv} refused to list its secrets to this account (Azure RBAC or access \
-             policy); nothing was changed"
-            )
-            .into(),
-        )
-        .with_code(Code::PermissionDenied)
-        .with_do(format!(
-            "ask an owner to grant it (a new grant can take a few minutes to apply): az role \
-             assignment create --role \"Key Vault Secrets Officer\" --assignee <you> --scope {id}",
-            id = vault["id"].as_str().unwrap_or("<vault id>")
-        ))),
+        Outcome::Unknown { .. } => Err(az::failed(r, vault_ctx(v))),
+        // The vault exists and the same sign-in just read it (`keyvault show`), so its data
+        // plane refusing is a network rule or a missing grant; the vault's own settings
+        // say which grant model applies (06.16, 06.17), and the right is asked of whoever
+        // made the call (06.19).
+        Outcome::Refused(_) => {
+            let Some((seen, up)) = az::take_failure() else {
+                return Err(az::unobserved(r));
+            };
+            let missing = Cause::MissingRight {
+                system: System::Azure,
+                resource: vault_ref(v),
+                right: Right::List,
+                grant: grant_model(vault),
+                env: None,
+                target: None,
+                seen,
+            };
+            Err(az::report(missing, up))
+        }
+    }
+}
+
+/// How access to a vault is granted: its network rules when it keeps unknown networks out,
+/// else an access policy when it does not use Azure RBAC (`enableRbacAuthorization`
+/// false), else the Key Vault Secrets Officer role on the vault.
+fn grant_model(vault: &Value) -> GrantModel {
+    if network_restricted(vault) {
+        return GrantModel::NetworkRule;
+    }
+    let rbac = vault
+        .pointer("/properties/enableRbacAuthorization")
+        .and_then(Value::as_bool);
+    if rbac == Some(false) {
+        return GrantModel::AccessPolicy {
+            permissions: ["get", "list", "set", "delete", "recover"]
+                .map(String::from)
+                .to_vec(),
+        };
+    }
+    GrantModel::Rbac {
+        role: "Key Vault Secrets Officer".into(),
+        scope: vault["id"].as_str().unwrap_or_default().to_string(),
     }
 }
 
@@ -324,19 +359,36 @@ fn app(t: &AzureTarget, r: &dyn CommandRunner) -> Result<Value, Error> {
         t.subscription.as_str(),
     );
     let base = ["containerapp", "show", "-g", rg, "-n", a, "-o", "json"];
-    let app =
-        match read(s, r, OP, &base, &[3])? {
-            Outcome::Done(out) => parse(&out, OP)?,
-            Outcome::Unknown { .. } => return Err(unfinished(r, OP)),
-            Outcome::Refused(_) => {
-                return Err(Error::Target(format!(
-                "container app {a} was not found in resource group {rg} (subscription {s}), \
-                 or this account cannot read it; nothing was changed\n  next: check \
-                 azure.container_app and azure.resource_group with `az containerapp show -g \
-                 {rg} -n {a} --subscription {s}`"
-            ).into()));
-            }
-        };
+    let resource = ResourceRef {
+        kind: ResourceKind::ContainerApp,
+        name: ResourceName::new(a),
+        scope: Some(format!("resource group {rg} (subscription {s})")),
+    };
+    let app = match read(s, r, OP, &base, &[3])? {
+        Outcome::Done(out) => parse(&out, OP)?,
+        // Exit 3 is az's "no such resource" (Q3).
+        Outcome::Refused(out) if out.status == 3 => {
+            let Some((seen, up)) = az::take_failure() else {
+                return Err(az::unobserved(r));
+            };
+            let missing = Cause::NotFound {
+                system: System::Azure,
+                resource,
+                named_by: named_by("azure.container_app"),
+                state: NotFoundState::Missing,
+                seen,
+            };
+            return Err(az::report(missing, up));
+        }
+        Outcome::Refused(_) | Outcome::Unknown { .. } => {
+            let ctx = DiagnoseContext {
+                resource: Some(resource),
+                named_by: Some(named_by("azure.container_app")),
+                ..DiagnoseContext::default()
+            };
+            return Err(az::failed(r, ctx));
+        }
+    };
     containerapp::single_revision_mode(t, &app)?;
     Ok(app)
 }
@@ -517,9 +569,11 @@ fn not_checked(name: &'static str, why: &str) -> Check {
 fn az_version(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Verdict, Error> {
     let o = spawn_tool(r, AZ_CLI, host, &["version", "-o", "json"])?;
     if o.status != 0 {
-        return Err(Error::Dependency(
-            format!("{} version failed (exit {})", az::PROGRAM, o.status).into(),
-        ));
+        return Err(Cause::ToolUnusable {
+            tool: az::PROGRAM.to_string(),
+            why: Unusable::VersionUnreadable,
+        }
+        .into());
     }
     let (a, b, c) = AZ_TESTED_MIN;
     let version = serde_json::from_slice::<Value>(&o.stdout)
@@ -541,7 +595,7 @@ fn az_version(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Verdict,
 fn az_login(r: &dyn CommandRunner) -> Result<Verdict, Error> {
     match az::signed_in(r)? {
         true => Ok(Verdict::Ok("signed in".into())),
-        false => Err(az::not_logged_in(None)),
+        false => Err(az::signed_out().into()),
     }
 }
 
@@ -584,6 +638,7 @@ fn access(t: &AzureTarget, r: &dyn CommandRunner, uri: String) -> Verdict {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cause::Invocation;
     use crate::runner::fake::FakeRunner;
     use serde_json::json;
 
@@ -719,29 +774,19 @@ mod tests {
     #[test]
     fn preflight_signed_out_names_az_login() {
         let (_, res) = preflight_on(vec![Output::failure(1), Output::failure(1)]);
-        assert!(matches!(res, Err(Error::Auth(m)) if m.mentions("az login")));
-    }
-
-    #[test]
-    fn preflight_on_an_invisible_subscription_names_it_and_the_next_step() {
-        let (_, res) = preflight_on(vec![Output::failure(1), ok()]);
-        assert!(matches!(res, Err(Error::Target(m)) if m.contains(
-            "cannot see subscription 00000000-0000-0000-0000-000000000000 (azure.subscription)"
-        ) && m.mentions("az account list -o table")));
+        assert!(err_text(res).contains("az login"));
     }
 
     #[test]
     fn soft_deleted_vault_names_the_recover_command() {
         let (_, res) = preflight_on(vec![ok(), Output::failure(3), ok()]);
-        assert!(err_text(res).contains(
-            "az keyvault recover -n kv-opv-fixture --subscription 00000000-0000-0000-0000-000000000000"
-        ));
+        assert!(err_text(res).contains("az keyvault recover --name kv-opv-fixture"));
     }
 
     #[test]
     fn missing_vault_names_the_fields_to_check() {
         let (_, res) = preflight_on(vec![ok(), Output::failure(3), Output::failure(3)]);
-        assert!(err_text(res).contains("check azure.key_vault and azure.subscription"));
+        assert!(err_text(res).contains("check azure.key_vault, which names Key Vault"));
     }
 
     fn firewalled() -> Value {
@@ -751,38 +796,79 @@ mod tests {
         v
     }
 
-    #[test]
-    fn firewalled_vault_names_network_access() {
-        let mut responses = vec![ok(), out(&firewalled())];
+    /// The Do of a catalog error, as rendered.
+    fn do_of(res: Result<Preflight, Error>) -> String {
+        res.err()
+            .and_then(|e| {
+                e.cause()
+                    .and_then(|(c, _)| c.do_text(&Invocation::default()))
+            })
+            .unwrap_or_default()
+    }
+
+    /// The vault is found, then its data plane refuses every attempt.
+    fn refused_by(vault: &Value) -> Vec<Output> {
+        let mut responses = vec![ok(), out(vault)];
         responses.extend(crate::runner::fake::failed_read(1));
-        let (_, res) = preflight_on(responses);
-        assert!(
-            matches!(res, Err(Error::Target(m)) if m.contains("allowed networks (firewall or private endpoint)"))
-        );
+        responses
+    }
+
+    /// 06.17: a firewall refusal is a missing right (a network rule), not a target error.
+    #[test]
+    fn firewalled_vault_refusal_is_permission_denied() {
+        let (_, res) = preflight_on(refused_by(&firewalled()));
+        assert_eq!(res.err().map(|e| e.code_str()), Some("permission_denied"));
+    }
+
+    #[test]
+    fn firewalled_vault_asks_for_the_network_rule() {
+        let (_, res) = preflight_on(refused_by(&firewalled()));
+        assert!(do_of(res).contains("network rules of Key Vault"));
     }
 
     #[test]
     fn vault_refusing_this_account_names_the_role_grant() {
-        let mut responses = vec![ok(), out(&vault_show())];
-        responses.extend(crate::runner::fake::failed_read(1));
-        let (_, res) = preflight_on(responses);
-        assert!(res.as_ref().err().and_then(Error::action).is_some_and(|a| {
-            a.contains("az role assignment create --role \"Key Vault Secrets Officer\"")
-        }));
+        let (_, res) = preflight_on(refused_by(&vault_show()));
+        assert!(do_of(res).contains("the role Key Vault Secrets Officer"));
+    }
+
+    /// 06.16: an access-policy vault gets an access policy, not a role assignment.
+    #[test]
+    fn access_policy_vault_refusal_asks_for_an_access_policy() {
+        let (_, res) = preflight_on(refused_by(&fixture(
+            "constructed/keyvault-show-access-policy.json",
+        )));
+        assert!(do_of(res).contains("add an access policy on Key Vault"));
+    }
+
+    /// 06.19: under deploy credentials the grant is asked for them, not for "you".
+    #[test]
+    fn vault_refusal_under_deploy_credentials_addresses_them() {
+        let r = FakeRunner::new(refused_by(&vault_show()));
+        let deploy = crate::cause::Principal::DeployCredentials {
+            item: crate::cause::ItemId::new("azure-deploy"),
+            env: crate::cause::EnvName::new("prod"),
+            target: crate::cause::TargetName::new("web"),
+        };
+        let res = crate::runner::under_deploy(deploy, || run(&target(), &r, PreflightMode::Mutate));
+        assert!(do_of(res).contains("to deploy credentials azure-deploy"));
     }
 
     #[test]
     fn vault_refusing_this_account_is_permission_denied() {
-        let mut responses = vec![ok(), out(&vault_show())];
-        responses.extend(crate::runner::fake::failed_read(1));
-        let (_, res) = preflight_on(responses);
-        assert_eq!(res.err().map(|e| e.code()), Some(Code::PermissionDenied));
+        let (_, res) = preflight_on(refused_by(&vault_show()));
+        assert_eq!(res.err().map(|e| e.code_str()), Some("permission_denied"));
     }
 
+    /// Signed in, but the subscription is not visible: az's reply says why (a wrong id or
+    /// no role); opv shows it rather than guess from az's wording (§12.4).
     #[test]
-    fn an_invisible_subscription_is_permission_denied() {
+    fn an_invisible_subscription_shows_azs_reply_unrecognized() {
         let (_, res) = preflight_on(vec![Output::failure(1), ok()]);
-        assert_eq!(res.err().map(|e| e.code()), Some(Code::PermissionDenied));
+        assert_eq!(
+            res.err().map(|e| e.code_str()),
+            Some("unrecognized_failure")
+        );
     }
 
     #[test]
@@ -802,13 +888,9 @@ mod tests {
     }
 
     #[test]
-    fn missing_app_names_the_show_command() {
+    fn missing_app_names_the_field_to_check() {
         let (_, res) = preflight_on(vec![ok(), out(&vault_show()), ok(), Output::failure(3)]);
-        assert!(
-            err_text(res).contains(
-                "az containerapp show -g opv-fixture-rg -n opv-fixture-app --subscription"
-            )
-        );
+        assert!(err_text(res).contains("check azure.container_app, which names container app"));
     }
 
     #[test]
