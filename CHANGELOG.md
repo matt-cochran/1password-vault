@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.10.0] - 2026-10-15
+## [0.10.0] - 2026-10-16
 
 Every failure is now one typed cause from a closed catalog (#157, #159, #160; design: `docs/design/error-catalog.md`). This changes the `--json` error object and removes error codes; see Changed.
 
@@ -59,6 +59,20 @@ Wrong causes and looping next steps, found by a sweep of the CLI and MCP after #
 - `opv target credentials` steps follow the target's state (recorded, cannot mint, needs a provider sign-in); existing targets point at `opv config edit`, and a misspelt target lists the targets.
 - Exit codes match their error codes (`inventory_incomplete`, `account_not_registered`, `policy_refused`, deploy-credential failures), and repeated refusals no longer say to re-run.
 - MCP errors carry `human_required` and the error's own runnable `opv` step; MCP-only codes are gone (see Changed); `opv_access` returns its `checked` and `unclassified` counts and has a budget longer than the 1Password app's approval prompt; `opv_ready` findings keep their target; `docs/mcp.md` no longer says sync is unavailable through MCP.
+
+Found by the release review of every error message (the snapshot set):
+
+- A check that could not run is never reported as a guess. When op, kubectl or gh is missing, opv says so (`dependency_missing`, exit 3). When one never answers, opv reports the service unavailable with the real number of attempts. Before, these read as "not signed in", "you may not delete secrets", "account not registered" or "needs the Manage permission", and `opv account list` and `opv access` exited 0.
+- `opv account list` and `opv access` report a missing op as an error instead of a guessed state.
+- An account named by `.opv` (or `OP_ACCOUNT`) that op doesn't know is "add this account" (`account_not_registered`, `opv login --add`; on macOS, add it in the 1Password app), not "not signed in". The message names where the account was chosen.
+- Next steps keep the flags that matter (`--apply`, `--confirm`, `--timeout`), never point at `--help` when the command can be run again, and a placeholder in a step is explained by its Do.
+- The budget error says what was already written when writes had started. `opv tidy` says "tidied" only when the tidy succeeded. A file-write error names the file, not opv's temporary file.
+- `opv status` and the plan and sync errors name the environment. A Kubernetes error names the namespace and the context separately.
+- A GitHub environment that is gone is reported as needing an owner to set it up, not as an unrecognised failure.
+- `opv run --json` without `--preview` says that `--json` needs `--preview`.
+- MCP honours `OPV_PROJECT` and uses the project's account, as the CLI does, and `opv_structure_apply` checks in the CLI's order.
+- An item listed with `"tags": null` no longer breaks the manifest listing.
+- The example Claude Code readiness hook reads `schema_version` 2 (it reported every opv 0.10 receipt as unconfirmed).
 
 ## [0.9.0] - 2026-10-15
 
