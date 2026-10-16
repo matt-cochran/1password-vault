@@ -48,9 +48,29 @@ fn claude_registering_again_changes_nothing() {
 #[test]
 fn claude_refuses_a_different_opv_entry() {
     let text = r#"{"mcpServers":{"opv":{"command":"/elsewhere/opv-mcp","args":[]}}}"#;
+    // A name clash is the person's choice of --name or --force: a usage problem (05.17).
+    assert_eq!(claude(text, false).unwrap_err().code_str(), "usage");
+}
+
+// 05.17: the conflict's Next is `opv mcp install --help` from the person's own command, so
+// it never drops `--project` the way the old fixed `--name opv-project` command did.
+#[test]
+fn a_conflict_steps_to_the_install_help() {
+    let text = r#"{"mcpServers":{"opv":{"command":"/elsewhere/opv-mcp","args":[]}}}"#;
+    let e = claude(text, false).unwrap_err();
+    let inv = crate::cause::Invocation::from_cli(&[
+        "opv".into(),
+        "mcp".into(),
+        "install".into(),
+        "--project".into(),
+        "../svc".into(),
+    ]);
     assert_eq!(
-        claude(text, false).unwrap_err().code().as_str(),
-        "policy_refused"
+        e.cause().expect("a catalog cause").0.step(&inv).1,
+        crate::cause::Next::Check(crate::cause::Cmd {
+            command: vec!["mcp".into(), "install".into()],
+            args: vec!["--help".into()],
+        })
     );
 }
 
@@ -63,7 +83,7 @@ fn claude_replaces_a_different_opv_entry_with_force() {
 #[test]
 fn claude_refuses_a_file_that_is_not_json() {
     assert_eq!(
-        claude("{not json", false).unwrap_err().code().as_str(),
+        claude("{not json", false).unwrap_err().code_str(),
         "config_invalid"
     );
 }
@@ -95,10 +115,7 @@ fn codex_registering_again_changes_nothing() {
 #[test]
 fn codex_refuses_a_different_opv_entry() {
     let text = "[mcp_servers.opv]\ncommand = \"/elsewhere/opv-mcp\"\nargs = []\n";
-    assert_eq!(
-        codex(text, false).unwrap_err().code().as_str(),
-        "policy_refused"
-    );
+    assert_eq!(codex(text, false).unwrap_err().code_str(), "usage");
 }
 
 #[test]

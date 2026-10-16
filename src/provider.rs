@@ -80,10 +80,12 @@ pub trait Provider: Sync {
         ))
     }
     /// Start a deploy sign-in for one run (FR-40). Runs before the credential is read, so a
-    /// machine that cannot hold it safely refuses with nothing read or changed.
+    /// machine that cannot hold it safely refuses with nothing read or changed. Only called
+    /// for a provider whose [`Provider::deploy_credential_fields`] the configuration
+    /// accepted, so this default is never reached.
     fn deploy_login(&self) -> Result<Box<dyn DeployLogin>, Error> {
-        Err(Error::Config(
-            format!("{} does not support deploy_credentials", self.label()).into(),
+        Err(unreachable_default(
+            "deploy_login of a provider without deploy credentials",
         ))
     }
     /// Mint the least-privilege deploy credential of `target` at the provider and return
@@ -125,13 +127,10 @@ pub trait Provider: Sync {
         kind: &str,
         section: &Section<'_>,
     ) -> Result<Box<dyn StoreConfig>, Error> {
-        Err(Error::Config(
-            format!(
-                "store {}: {} declares no store kind {kind:?}",
-                section.env(),
-                self.label()
-            )
-            .into(),
+        // Called only for a kind in `store_kinds`, which is empty here.
+        let _ = (kind, section);
+        Err(unreachable_default(
+            "parse_store of a provider without store kinds",
         ))
     }
     /// The stores of other providers this provider's runtime can bind (`secrets_in`, FR-39).
@@ -145,16 +144,16 @@ pub trait Provider: Sync {
         target: Box<dyn TargetConfig>,
         store: &dyn StoreConfig,
     ) -> Result<Box<dyn TargetConfig>, Error> {
-        let _ = target;
-        Err(Error::Config(
-            format!(
-                "{} cannot keep its secrets in {}",
-                self.label(),
-                store.describe()
-            )
-            .into(),
-        ))
+        // Called only for a pair `bindings` declares, which is empty here.
+        let _ = (target, store);
+        Err(unreachable_default("bind of a provider without bindings"))
     }
+}
+
+/// A provider-trait default that the configuration's own checks never let run: reaching it
+/// is an opv bug, never the person's configuration.
+fn unreachable_default(site: &'static str) -> Error {
+    crate::cause::Cause::Bug { site }.into()
 }
 
 /// One field of a `deploy_credentials` item (FR-40): its label and kind (concealed = secret,

@@ -1113,8 +1113,8 @@ environments = ["dev"]
         r.push_io_error(std::io::ErrorKind::NotFound);
         assert_eq!(
             doctor_lines(&r)[0],
-            "kubectl: FAIL dependency error: kubectl not found on PATH\n  install: brew install \
-             kubectl"
+            // R56: the catalog's message; the install line is its Do.
+            "kubectl: FAIL kubectl is not installed, or not on PATH"
         );
     }
 

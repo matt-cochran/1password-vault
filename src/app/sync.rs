@@ -3792,9 +3792,8 @@ mod tests {
             (e.exit_code(), e.to_string()),
             (
                 9,
-                "outcome unknown: Fly did not respond after 3 attempts (fly status); nothing \
-                 was changed. Check https://status.flyio.net, then re-run"
-                    .to_string()
+                // R51: the catalog's Unavailable; its Do names the status page.
+                "Fly did not answer after 3 attempts: it timed out".to_string()
             )
         );
     }

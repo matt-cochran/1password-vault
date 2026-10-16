@@ -1137,7 +1137,12 @@ fn exit_codes() {
     for cmd in [&["sync", "prod"][..], &["status", "prod"], &["doctor"]] {
         let r = no_op.run(cmd);
         assert_eq!(r.code, 3, "{cmd:?}: {}", r.all());
-        assert!(r.stderr.contains("dependency error"), "{}", r.stderr);
+        // Legacy "dependency error", or the catalog's ToolMissing (doctor's probe, R56).
+        assert!(
+            r.stderr.contains("dependency error") || r.stderr.contains("is not installed"),
+            "{}",
+            r.stderr
+        );
     }
     // 3: `flyctl` missing from PATH (dependency); nothing staged.
     let no_fly = Harness::build(&good_item(), true, false);

@@ -218,15 +218,15 @@ pub(crate) mod pipe {
         thread: Option<std::thread::JoinHandle<()>>,
     }
 
+    /// The user-only pipe could not be made (`what`: its security or the pipe itself): the
+    /// catalog's private-folder failure, with the OS error's kind, never its number.
     fn pipe_error(what: &str) -> Error {
-        Error::Dependency(
-            format!(
-                "cannot create the private pipe that hands the value to az ({what}, error {}); \
-             nothing was changed",
-                unsafe { GetLastError() }
-            )
-            .into(),
-        )
+        let _ = what;
+        crate::cause::Cause::PrivateDirFailed {
+            dir: std::path::PathBuf::from(r"\\.\pipe"),
+            io: std::io::Error::last_os_error().kind().into(),
+        }
+        .into()
     }
 
     /// One server instance of `path`, user-only.

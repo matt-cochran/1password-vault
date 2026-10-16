@@ -2008,19 +2008,16 @@ mod tests {
     }
 
     /// Found live: a person's read that waits on the 1Password app's approval prompt
-    /// times out like an outage; the message says to approve it.
+    /// times out like an outage. op's diagnosis reports the outage it observed (X13: never
+    /// the likeliest guess); naming the app prompt is op's diagnosis to add (R29).
     #[test]
-    fn read_outage_for_a_person_mentions_the_app_approval() {
+    fn read_outage_for_a_person_is_the_observed_outage() {
         let r = FakeRunner::default();
         r.push_unknowns("timeout", crate::runner::READ_ATTEMPTS);
         let e = crate::host::with_test_host(linux(), || {
             read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err()
         });
-        assert!(
-            e.to_string()
-                .contains("If the 1Password app is asking to approve access, approve it."),
-            "{e}"
-        );
+        assert_eq!(e.code_str(), "provider_unavailable");
     }
 
     #[test]
@@ -2031,12 +2028,8 @@ mod tests {
         let e = crate::host::with_test_host(ci, || {
             read_item_with(&r, &test_env(), &test_at(), &ci).unwrap_err()
         });
-        assert!(
-            matches!(&e, Error::Unknown(m) if m == "1Password did not respond after 3 \
-                attempts (op item get); nothing was changed. Check \
-                https://status.1password.com, then re-run"),
-            "{e:?}"
-        );
+        // R51: op's diagnosis of the unanswered read; its Do names the status page.
+        assert_eq!((e.exit_code(), e.code_str()), (9, "provider_unavailable"));
     }
 
     /// FR-26: a successful read never detects the host; a failed one does.

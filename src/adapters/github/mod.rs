@@ -143,3 +143,7 @@ impl StagedRuntime for Github<'_> {
         true
     }
 }
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod tests;
