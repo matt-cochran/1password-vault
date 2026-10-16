@@ -767,7 +767,6 @@ fn live_09_84_a_status_target_typo_steps_to_the_declared_target() {
 }
 
 #[test]
-#[ignore = "09.85: open finds no closest key for web/API_KY and steps to `opv config describe`, where explain substitutes web/API_KEY"]
 fn live_09_85_an_open_key_typo_steps_to_the_declared_key() {
     let out = Scenario::new().opv(&["open", "web/API_KY", "--env", "prod"]);
     assert_eq!(

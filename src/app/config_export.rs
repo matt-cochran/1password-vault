@@ -37,7 +37,10 @@ pub fn run(
             key: KeyName::new(r.key.clone()),
             target: None,
             state: match (&r.state, r.kind) {
-                (KeyState::RuleFailed(rule, _), _) => ValueState::RuleFailed { rule },
+                (KeyState::RuleFailed(rule, why), _) => ValueState::RuleFailed {
+                    rule,
+                    reason: Some(why.to_string()),
+                },
                 (KeyState::WrongKind, Kind::Secret) => ValueState::StoredAsText,
                 (KeyState::WrongKind, Kind::Config) => ValueState::ConcealedConfig,
                 _ => ValueState::Missing,

@@ -1688,6 +1688,58 @@ fn a4_keys_blocking_exits_6() {
     assert_eq!((c.code(), c.exit_code()), ("keys_blocking", 6));
 }
 
+fn blocking_row(state: ValueState) -> ValueRow {
+    ValueRow {
+        product: ProductName::new("web"),
+        key: KeyName::new("API_KEY"),
+        target: None,
+        state,
+    }
+}
+
+/// A4: sync's refusal keeps the rule's reason, so the person knows what to correct.
+#[test]
+fn a4_keys_blocking_names_the_rules_reason() {
+    let c = Cause::KeysBlocking {
+        env: EnvName::new("prod"),
+        rows: vec![blocking_row(ValueState::RuleFailed {
+            rule: "prefix",
+            reason: Some("expected prefix sk-".into()),
+        })],
+    };
+    assert!(
+        c.message().contains("prefix, expected prefix sk-"),
+        "{}",
+        c.message()
+    );
+}
+
+/// A missing value's Do says to click Edit: 1Password hides an empty field until then.
+#[test]
+fn values_needed_for_a_missing_value_says_to_click_edit() {
+    let c = Cause::ValuesNeeded {
+        env: EnvName::new("prod"),
+        rows: vec![blocking_row(ValueState::Missing)],
+    };
+    let d = c
+        .do_text_in(&inv(), &person_at_terminal())
+        .unwrap_or_default();
+    assert!(d.contains("click Edit"), "{d}");
+}
+
+/// A value stored as text is visible, so its Do has no click-Edit hint.
+#[test]
+fn values_needed_for_a_visible_value_has_no_click_edit_hint() {
+    let c = Cause::ValuesNeeded {
+        env: EnvName::new("prod"),
+        rows: vec![blocking_row(ValueState::StoredAsText)],
+    };
+    let d = c
+        .do_text_in(&inv(), &person_at_terminal())
+        .unwrap_or_default();
+    assert!(!d.contains("click Edit"), "{d}");
+}
+
 /// A5: a malformed entry of a repeatable option is named.
 #[test]
 fn a5_a_malformed_entry_is_named() {
@@ -2117,6 +2169,114 @@ fn a17_unavailable_names_the_status_page() {
     };
     let d = c.do_text(&inv()).unwrap_or_default();
     assert!(d.contains("https://status.flyio.net"), "{d}");
+}
+
+/// D6 (X26): a killed call is never reported as a timeout.
+#[test]
+fn d6_a_killed_unavailable_read_does_not_say_it_timed_out() {
+    let c = Cause::Unavailable {
+        system: System::Fly,
+        why: Unanswered::Killed { signal: 15 },
+        attempts: 1,
+        seen: fly_seen(),
+    };
+    assert!(!c.message().contains("timed out"), "{}", c.message());
+}
+
+/// D6 (X26): a lost reply is reported as lost.
+#[test]
+fn d6_a_lost_unavailable_read_says_its_reply_was_lost() {
+    let c = Cause::Unavailable {
+        system: System::Fly,
+        why: Unanswered::Lost,
+        attempts: 1,
+        seen: fly_seen(),
+    };
+    assert!(c.message().contains("reply was lost"), "{}", c.message());
+}
+
+/// D6: the runner's lost reply is its own exit class, never a timeout or a signal.
+#[test]
+fn d6_a_lost_exit_class_is_unanswered_because_lost() {
+    assert_eq!(ExitClass::Lost.unanswered(), Some(Unanswered::Lost));
+}
+
+fn doctor_inv(args: &[&str]) -> Invocation {
+    Invocation {
+        origin: Origin::Cli,
+        command: vec!["doctor".into()],
+        args: args.iter().map(|a| a.to_string()).collect(),
+        has_child: false,
+    }
+}
+
+fn unrecognized_op() -> Cause {
+    Cause::Unrecognized {
+        system: System::OnePassword,
+        established: Vec::new(),
+        env: Some(EnvName::new("dev")),
+        target: None,
+        seen: person(),
+    }
+}
+
+/// E1: under `opv doctor`, an unrecognised reply steps to the same check with the whole
+/// reply, not back to `opv doctor`.
+#[test]
+fn e1_unrecognized_under_doctor_steps_to_the_verbose_check() {
+    let (_, next) =
+        unrecognized_op().step_in(&doctor_inv(&["--env", "dev"]), &person_at_terminal());
+    assert_eq!(
+        next,
+        Next::Run(Cmd {
+            command: vec!["doctor".into()],
+            args: vec!["--env".into(), "dev".into(), "--verbose".into()],
+        })
+    );
+}
+
+/// E1: an unusable reply under `opv doctor` does not step back to `opv doctor`.
+#[test]
+fn e1_unexpected_output_under_doctor_does_not_step_to_plain_doctor() {
+    let c = Cause::UnexpectedOutput {
+        system: System::OnePassword,
+        at: None,
+        problem: OutputProblem::Unparseable,
+        seen: person(),
+    };
+    let (_, next) = c.step_in(&doctor_inv(&[]), &person_at_terminal());
+    assert_ne!(next, Next::Run(cmd(&["doctor"], &[])));
+}
+
+/// E1: once the whole reply is shown, the step under `opv doctor` is its help.
+#[test]
+fn e1_unrecognized_under_verbose_doctor_steps_to_its_help() {
+    let (_, next) = unrecognized_op().step_in(
+        &doctor_inv(&["--env", "dev", "--verbose"]),
+        &person_at_terminal(),
+    );
+    assert_eq!(next, Next::Check(cmd(&["doctor"], &["--help"])));
+}
+
+/// 09.85: a key typo given to `opv open` steps to the declared key, opened.
+#[test]
+fn n09_85_an_open_key_typo_steps_to_the_close_key() {
+    let c = Cause::NotDeclared {
+        kind: NameKind::Key,
+        given: "web/API_KY".into(),
+        candidates: vec!["web/API_KEY".into()],
+        closest: Closest::unique(&["web/API_KEY"]),
+    };
+    let inv = Invocation {
+        origin: Origin::Cli,
+        command: vec!["open".into()],
+        args: vec!["web/API_KY".into(), "--env".into(), "prod".into()],
+        has_child: false,
+    };
+    assert_eq!(
+        c.step_in(&inv, &person_at_terminal()).1,
+        Next::Run(cmd(&["open"], &["web/API_KEY", "--env", "prod"]))
+    );
 }
 
 /// A18 (01.12): only the person knows which environment they meant.

@@ -283,8 +283,10 @@ fn read_form(c: Cmd) -> Option<Cmd> {
         "bootstrap" | "target add" => Some(with_flag(c, "--dry-run")),
         "run" => Some(with_flag(c, "--preview")),
         _ => {
+            // 09.85: `open` writes nothing (it shows a 1Password link), so a unique close
+            // key is substituted into it as `explain` does, never refused for its browser.
             let effect = crate::schema::EFFECTS.iter().find(|e| e.command == path)?;
-            matches!(effect.effect, "reads" | "none").then_some(c)
+            matches!(effect.effect, "reads" | "none" | "opens_browser").then_some(c)
         }
     }
 }
@@ -295,6 +297,20 @@ fn sync_flag_takes_value(flag: &str) -> bool {
         flag,
         "--confirm" | "--expect-plan" | "--receipt" | "--prune-immutable" | "--approved"
     )
+}
+
+/// E1: under `opv doctor`, a step to `opv doctor` sends the person straight back to the
+/// report they are reading. The step forward is the same check with the tool's whole reply
+/// (`--verbose`); once that is shown too, the command's help.
+fn beyond_doctor(next: Next, inv: &Invocation) -> Next {
+    let to_doctor = matches!(&next, Next::Run(c) | Next::Check(c) if c.command == ["doctor"]);
+    if !to_doctor || !matches!(inv.command.as_slice(), [c] if c == "doctor") {
+        return next;
+    }
+    if inv.args.iter().any(|a| a == "--verbose") {
+        return help_of(inv);
+    }
+    Next::Run(with_flag(without_consent(inv_cmd(inv)), "--verbose"))
 }
 
 fn with_flag(mut c: Cmd, flag: &str) -> Cmd {
@@ -946,6 +962,10 @@ fn session_words(system: System, account: &Option<AccountId>, state: &SessionSta
 fn unanswered_words(w: &Unanswered) -> String {
     match w {
         Unanswered::Timeout => "it timed out".into(),
+        Unanswered::Killed { signal } => {
+            format!("it was stopped by signal {signal} before it answered")
+        }
+        Unanswered::Lost => "its reply was lost before opv could read it".into(),
         Unanswered::RateLimited {
             retry_after_seconds: Some(s),
         } => format!("it limited the request rate (it asked to wait {s} seconds)"),
@@ -960,7 +980,10 @@ fn unanswered_words(w: &Unanswered) -> String {
 fn value_state(s: &ValueState) -> String {
     match s {
         ValueState::Missing => "missing".into(),
-        ValueState::RuleFailed { rule } => format!("does not meet its rule: {rule}"),
+        ValueState::RuleFailed { rule, reason } => match reason {
+            Some(reason) => format!("does not meet its rule: {rule}, {reason}"),
+            None => format!("does not meet its rule: {rule}"),
+        },
         ValueState::StoredAsText => "stored as plain text, not concealed".into(),
         ValueState::ConcealedConfig => "a setting stored concealed".into(),
         ValueState::FieldNotCreated => "its field does not exist yet".into(),
@@ -1001,6 +1024,16 @@ fn reason_code(reason: &str) -> &str {
         && reason.len() <= 64
         && reason.chars().all(|c| c.is_ascii_alphanumeric());
     if word { reason } else { "unrecognised" }
+}
+
+/// A value 1Password shows only in edit mode: an empty field (found live, 0.9.x). The
+/// person looking for it must click Edit on the item first.
+fn hidden_when_empty(s: &ValueState) -> bool {
+    match s {
+        ValueState::Missing | ValueState::FieldNotCreated => true,
+        ValueState::RuleFailed { rule, .. } => *rule == "nonempty",
+        ValueState::StoredAsText | ValueState::ConcealedConfig => false,
+    }
 }
 
 fn value_fix(s: &ValueState) -> &'static str {
@@ -1977,6 +2010,7 @@ impl Cause {
         {
             p.next = rerun_without_consent(inv);
         }
+        p.next = beyond_doctor(p.next, inv);
         p.next = with_global_config(p.next, inv);
         if let Cause::NotSignedIn { system, .. } = self
             && let Some(v) = vendor_sign_in(*system)
@@ -3135,8 +3169,13 @@ impl Cause {
                                 env: env.clone(),
                             },
                             format!(
-                                "{} {name} in 1Password for environment {env}",
-                                value_fix(&first.state)
+                                "{} {name} in 1Password for environment {env}{}",
+                                value_fix(&first.state),
+                                if rows.iter().any(|r| hidden_when_empty(&r.state)) {
+                                    " (click Edit on the item: it hides empty fields until then)"
+                                } else {
+                                    ""
+                                }
                             ),
                         )),
                         Next::Run(cmd(&["open"], &[&name, "--env", env.as_str()])),

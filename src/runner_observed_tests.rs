@@ -34,6 +34,15 @@ fn timed_out_call_is_observed_as_timed_out() {
     assert_eq!(seen.map(|o| o.exit()), Some(ExitClass::TimedOut));
 }
 
+/// D6: a lost reply is its own exit class, so no diagnosis calls it a timeout or a kill.
+#[test]
+fn lost_reply_is_observed_as_lost() {
+    let r = FakeRunner::default();
+    r.push_unknown("lost");
+    let seen = failed_write(&r, &Call::new("flyctl", &["secrets", "deploy"]));
+    assert_eq!(seen.map(|o| o.exit()), Some(ExitClass::Lost));
+}
+
 #[test]
 fn call_that_could_not_start_is_observed_as_spawn_failed() {
     let r = FakeRunner::default();

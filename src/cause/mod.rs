@@ -86,10 +86,32 @@ impl Observed {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExitClass {
-    Code { code: i32 },
-    Signal { signal: i32 },
+    Code {
+        code: i32,
+    },
+    Signal {
+        signal: i32,
+    },
     TimedOut,
     SpawnFailed,
+    /// The call ran but opv could not collect its reply (a pipe failed, or opv could not
+    /// wait for it): its outcome is unknown, and it neither timed out nor was killed.
+    Lost,
+}
+
+impl ExitClass {
+    /// Why a call that ended this way never answered: opv's timeout, a signal, or a lost
+    /// reply. `None` when the call did answer (an exit code) or never started. Every
+    /// diagnosis takes its unfinished-call reason from here, so a killed or lost call is
+    /// never reported as a timeout (D6, X26).
+    pub fn unanswered(self) -> Option<Unanswered> {
+        match self {
+            ExitClass::TimedOut => Some(Unanswered::Timeout),
+            ExitClass::Signal { signal } => Some(Unanswered::Killed { signal }),
+            ExitClass::Lost => Some(Unanswered::Lost),
+            ExitClass::Code { .. } | ExitClass::SpawnFailed => None,
+        }
+    }
 }
 
 /// The upstream tool's reply, shown in the evidence box (§7.3). Scrubbed and stripped before
@@ -322,8 +344,18 @@ pub enum SessionState {
 #[serde(tag = "why", rename_all = "snake_case")]
 pub enum Unanswered {
     Timeout,
-    RateLimited { retry_after_seconds: Option<u64> },
-    ServerError { status: u16 },
+    /// The call was ended by this signal before it answered (not opv's own timeout).
+    Killed {
+        signal: i32,
+    },
+    /// The call ran but its reply was lost (see [`ExitClass::Lost`]).
+    Lost,
+    RateLimited {
+        retry_after_seconds: Option<u64>,
+    },
+    ServerError {
+        status: u16,
+    },
     Network,
 }
 
@@ -1030,7 +1062,13 @@ pub struct ValueRow {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ValueState {
     Missing,
-    RuleFailed { rule: &'static str },
+    /// The value fails `rule`; `reason` says why, in the rule's own fixed words (never the
+    /// value), when the caller knows it (A4: sync's refusal keeps the rule's reason).
+    RuleFailed {
+        rule: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     StoredAsText,
     ConcealedConfig,
     FieldNotCreated,

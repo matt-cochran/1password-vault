@@ -453,6 +453,7 @@ fn field_indices(
                 definition,
                 ValueState::RuleFailed {
                     rule: "one field per setting: rename or remove the duplicate field",
+                    reason: None,
                 },
             ));
         }
@@ -469,6 +470,7 @@ fn field_indices(
                     Kind::Secret => ValueState::StoredAsText,
                     Kind::Config => ValueState::RuleFailed {
                         rule: "a Text field: change its type in 1Password, keeping the value",
+                        reason: None,
                     },
                 };
                 return Err(field_to_fix(&recipe.environment, definition, state));
