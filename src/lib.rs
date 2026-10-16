@@ -13,6 +13,7 @@ pub mod config_edit;
 pub mod config_store;
 pub mod domain;
 pub mod error;
+pub mod hardening;
 pub mod host;
 pub mod json;
 pub mod output;

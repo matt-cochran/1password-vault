@@ -1710,6 +1710,8 @@ enum ConfigSource {
 }
 
 fn main() -> ExitCode {
+    // §9.2: harden before anything else, for every command, before parsing arguments.
+    opv::hardening::harden();
     // Credentials in opv's own environment are secrets for the whole run: the output guard
     // masks them wherever they would appear (design §8).
     opv::scrub::register_credential_env();
