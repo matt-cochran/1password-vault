@@ -1,0 +1,1 @@
+Error from server (Forbidden): deployments.apps "api" is forbidden: User "system:serviceaccount:opv-rec:opv-norbac" cannot get resource "deployments" in API group "apps" in the namespace "opv-rec"
