@@ -70,7 +70,7 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | | `OP_ACCOUNT` | the 1Password account to find a manifest in (an environment's own `account` is used for its reads) |
 | | `OPV_PRODUCT` | default for `--product` on `check`, `run`, `open`, `explain`, `status`, `plan` and `doctor --env`, never `sync`; stderr says `product <p> (from OPV_PRODUCT)` |
 | `--timeout <SECS>` | | budget for the whole run (default 1800); see [time limits](how-opv-handles-failures.md#time-limits-and-progress) |
-| `--verbose` | | one stderr line per call to `op` or the target CLI, with its scrubbed stderr |
+| `--verbose` | | one stderr line per call to `op` or the target CLI, with all of its scrubbed stderr; a failure's box and `evidence.upstream` hold the tool's complete reply, scrubbed |
 | `--color auto\|always\|never` | `NO_COLOR` | colour state words (`ok`, `warn`, `FAIL`, `saved`, `missing`, ...) on a terminal; JSON and values never |
 
 A typical session:
@@ -159,13 +159,15 @@ It reads each boundary item once per target, a run-only environment's too, so a 
 
 `--product <p>` (or `OPV_PRODUCT`) counts only that product's keys in every line. `--json` prints one document instead, with one entry per environment that adds up its targets:
 
+For example, `opv --config secrets.toml status --json` when `flyctl` fails with a reply opv does not recognise for both environments:
+
 ```json
-{"schema_version":1,"ok":false,"exit_code":4,"product":null,"environments":[{"name":"dev","target":null,"state":"run_only","keys":6,"saved":5,"skipped":0,"findings":1,"error_code":null,"error":null,"next":null},{"name":"prod","target":"fly","state":"not_checked","keys":null,"saved":null,"skipped":null,"findings":null,"error_code":"vault_no_access","error":"source error: ...","next":"op vault get vprd0000000000000000000001"}],"totals":{"environments":2,"findings":1},"next":"op vault get vprd0000000000000000000001","do":"grant this identity access to the vault ..."}
+{"schema_version":2,"ok":false,"exit_code":5,"product":null,"environments":[{"name":"prod","target":"fly","state":"not_checked","keys":null,"saved":null,"skipped":null,"findings":null,"error_code":"unrecognized_failure","error":"flyctl failed at Fly in a way opv does not recognise","next":"opv doctor --config secrets.toml"},{"name":"staging","target":"fly","state":"not_checked","keys":null,"saved":null,"skipped":null,"findings":null,"error_code":"unrecognized_failure","error":"flyctl failed at Fly in a way opv does not recognise","next":"opv doctor --config secrets.toml"}],"totals":{"environments":2,"findings":0},"next":"opv doctor --config secrets.toml","do":"read the reply of flyctl shown above; opv does not recognise it"}
 ```
 
 (The failure's `error` object, last in the document, is left out above.)
 
-`target` is the target section (`fly`, `azure`, `kubernetes`) or `null` for run-only; `state` is `checked`, `run_only` or `not_checked`. An environment that could not be read has `null` counts, its error code in `error_code`, the first line of its error in `error`, and in `next` the one command that runs as typed to get past it.
+`target` is the target section (`fly`, `azure`, `kubernetes`) or `null` for run-only; `state` is `checked`, `run_only` or `not_checked`. An environment that could not be read has `null` counts, its catalog code in `error_code` and the catalog message in `error` (the same `code` and `message` as its [error object](#json-contract)), and in `next` the one command that runs as typed to get past it.
 
 ### Every project: `opv projects` and `opv status --all`
 
@@ -295,7 +297,7 @@ The line is always `summary: written N · unchanged N · held N · deployed <rev
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "environment": "prod",
   "product": null,
   "targets": [{"target": "web", "provider": "fly", "deployed": false, "revision": null}],
@@ -411,7 +413,7 @@ All refusals are fail-closed, before anything is read from 1Password: a product 
 
 ### Delivery preview: `--preview`
 
-`opv run <env> [--product <p>] [--role <r>] --preview [--json]` prints what this run would deliver without reading a value and without running `op run` or `op read`; a command after `--` is refused. For each key it would deliver: product, key, `source` (`<product>/<KEY>`, or the `from` source), `destination` (`env:<NAME>` or `file:<relative path>` under `secrets_dir_env`) and its `roles`. Then the environment mode (`inherit` / `declared_only`), the secrets directory variable, file-delivery platform support with its reason, and the prerequisites `op` present (`yes`/`no`/`unknown`) and signed in (`yes`/`no`/`unknown`; a discovery that cannot be determined is `unknown`, never `no`). Keys excluded by role are listed under `withheld_by_role`, names only. `--json` prints one document (`schema_version` 1); the text form prints one line per key plus the summary lines.
+`opv run <env> [--product <p>] [--role <r>] --preview [--json]` prints what this run would deliver without reading a value and without running `op run` or `op read`; a command after `--` is refused. For each key it would deliver: product, key, `source` (`<product>/<KEY>`, or the `from` source), `destination` (`env:<NAME>` or `file:<relative path>` under `secrets_dir_env`) and its `roles`. Then the environment mode (`inherit` / `declared_only`), the secrets directory variable, file-delivery platform support with its reason, and the prerequisites `op` present (`yes`/`no`/`unknown`) and signed in (`yes`/`no`/`unknown`; a discovery that cannot be determined is `unknown`, never `no`). Keys excluded by role are listed under `withheld_by_role`, names only. `--json` prints one document (`schema_version` 2); the text form prints one line per key plus the summary lines.
 
 ### Remote development: `--remote`
 
@@ -679,7 +681,7 @@ Every command that takes `--json` (`doctor`, `check`, `status` including `status
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "ok": false,
   "exit_code": 2,
   "next": "opv init nope",
@@ -809,12 +811,12 @@ opv schema | jq -r '.error_codes[] | "\(.code) \(.retry)"'
 and nothing else. It contains names, states and counts only: no value, no value fragment,
 no value length and no guidance. Exit codes are unchanged. Findings (exit 8) keep the rows
 and add `ok: false`, `exit_code` and `error`; an error before the rows exist prints the
-[failure document](#json-contract). The top-level `schema_version` is `1`; adding a field
+[failure document](#json-contract). The top-level `schema_version` is `2` (since 0.10.0, when the error document changed); adding a field
 keeps it, while renaming or removing a field, or changing its meaning, increments it.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "ok": true,
   "environment": "prod",
   "product": null,
@@ -949,7 +951,7 @@ Rate limits: a cold whole-item read costs about 2 requests, so a fleet sync cost
 
 - Values travel only on stdin (on native Windows, a user-only named pipe for `az`) or in the environment of a child process. opv is designed to keep secret-kind values out of argv and reporting output; the private Azure credential-cache exception and other limits are described below.
 - One documented exception to "no files" (SR-4): with Azure `deploy_credentials`, the Azure CLI stores the service principal's secret in opv's private per-run `AZURE_CONFIG_DIR`, which is RAM-only on Linux/WSL, DPAPI-encrypted on Windows, and removed when the run ends. macOS is not supported for Azure deploy credentials.
-- The stderr of `op`, `flyctl`, `az` and `kubectl` is shown only scrubbed, at most 5 lines on failure (more with `--verbose`); their stdout and what opv sends on stdin are never shown ([details](how-opv-handles-failures.md#what-a-cli-said-without-the-secrets)).
+- The stderr of `op`, `flyctl`, `az` and `kubectl` is shown only scrubbed: on failure the error line plus the tail, at most 5 lines, and with `--verbose` all of it; their stdout and what opv sends on stdin are never shown ([details](how-opv-handles-failures.md#what-a-cli-said-without-the-secrets)).
 - `serde` can leave transient scratch copies of values in memory while parsing `op` output; opv wraps values in redacting, zeroizing types but cannot control those copies.
 - `config export` prints config-kind values by design, never secrets. A config key stored in a concealed field is accepted and delivered as a plain value, but opv never prints it: `config export` shows `<concealed in 1Password>` and `status` warns about it once per key.
 - `run` hands secret values to the child process through `op run`; the child can read them.

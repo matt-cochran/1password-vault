@@ -22,7 +22,7 @@ Next: opv doctor
 
 - **`opv:`** is the cause's message, filled from its subject: the vault, account, environment, target, key, file and line it is about.
 - **`checked:`** is the call opv made, names and IDs only, and the account it ran in when that is known. It is there only when an external call failed.
-- **The box** is what the tool replied: its last lines (at most 5, each cut at 240 characters), scrubbed (below). It is the only place another program's text appears. When opv cuts the tool's own advice because it conflicts with opv's steps, the footer says so. In a terminal without UTF-8 the box is ASCII (`--- … ---`, `| `).
+- **The box** is what the tool replied, scrubbed (below). It holds at most 5 lines, each cut at 240 characters: the tool's error line (op's `[ERROR] …`, or its first line) plus the last lines, so a long reply never loses the line that says what went wrong. Where lines were left out it says `… N lines left out`, and the footer says how many more `--verbose` shows. With `--verbose` the box holds the tool's complete reply, every line uncut, scrubbed the same way. It is the only place another program's text appears. When opv cuts the tool's own advice because it conflicts with opv's steps, the footer says so. In a terminal without UTF-8 the box is ASCII (`--- … ---`, `| `, `...`).
 - **`Do:`** is what to do first, when there is something to do: sign in, fill a value in 1Password, approve a plan, fix a field. A configuration error names `file:line: field`.
 - **`Next:`** is one command that runs as typed, always the last line: no prose, no placeholders. When the fix is not a command, it is the command you ran, to run again once `Do:` is done, with every flag you gave. A misspelt environment, product or key gets the same command with the closest declared name. When there is nothing to run, it says so (`Next: none`).
 - `run` is the exception: it exits with your command's own code and prints nothing of its own unless opv itself failed (`opv: ...`).
@@ -46,7 +46,7 @@ With `--json`, stdout is one document and the same text still goes to stderr. A 
     "upstream": {"source": "one_password", "tool": "1Password CLI", "version": null,
                  "exit": {"kind": "code", "code": 9},
                  "said": ["[ERROR] 2026/10/16 00:04:42 failed to DecodeSACredentials: invalid character '¢' looking for beginning of value"],
-                 "removed_advice": false, "untrusted": true}
+                 "truncated": false, "removed_advice": false, "untrusted": true, "omitted": 0}
   },
   "retry": "after_fix",
   "human_required": true,
@@ -64,7 +64,7 @@ With `--json`, stdout is one document and the same text still goes to stderr. A 
 | `subject` | the typed fields the message was filled from (names and IDs, never a value) |
 | `evidence.checked` | the call opv made (the `checked:` line), or `null` |
 | `evidence.account` | the 1Password account that call ran in, as an ID, or `null` |
-| `evidence.upstream` | the tool's reply (the box): `source`, `tool`, `version`, how it ended (`exit`), the scrubbed lines (`said`), `removed_advice`, and always `"untrusted": true`; `null` when no tool replied |
+| `evidence.upstream` | the tool's reply (the box): `source`, `tool`, `version`, how it ended (`exit`), the scrubbed lines the box shows (`said`: the error line plus the tail, or with `--verbose` / MCP `verbose` every line), `omitted` (how many lines were left out; 0 with `--verbose`), `truncated` (the reply was longer than the 64 KiB opv keeps, so only its end is there), `removed_advice`, and always `"untrusted": true`; `null` when no tool replied |
 | `retry` | `safe` (run the same command again now), `after_fix` (once `do` is done), `check_first` (something may already exist: run `next`, a read, before acting again) or `never` (the command itself must change: run `next`) |
 | `human_required` | `true` when only a person can take the next step; an assistant hands `do` and `next` to them |
 | `do` | the `Do:` line, or `null` |
@@ -87,7 +87,7 @@ The MCP server answers a failed tool call with `{"ok": false, "error": {…}}`, 
 - `--timeout <secs>` (default 1800) is one budget for the whole run, waits included. A read that fails is retried only while time remains.
 - Each call has its own limit as well: 15 s for a diagnosis, 60 s for a read, 120 s for a write, and 15 minutes for a write that waits for a rollout (`flyctl secrets deploy`, `az containerapp update`, `kubectl apply`/`replace`).
 - Anything that waits prints a progress line on stderr at least every 15 s: `waiting for revision ca-myapp--0000002: Provisioning, 45 s`.
-- `--verbose` prints one line per external call (program, arguments, duration, outcome), followed by the last 20 lines of that call's scrubbed stderr (`    stderr: ...`) and the size and shape of its result (`    stdout: 510 bytes, JSON object with keys: ...`). A result's content is never shown. This is how to see more of a failed call's reply than the 5 lines in the error's box; the box and `evidence.upstream` stay the same with `--verbose`. MCP tools take the same `verbose` flag.
+- `--verbose` passes everything through, scrubbed. It prints one line per external call (program, arguments, duration, outcome), followed by every line of that call's scrubbed stderr (`    stderr: ...`) and the size and shape of its result (`    stdout: 510 bytes, JSON object with keys: ...`). A failure's box and `evidence.upstream` then hold the tool's complete reply instead of the error line plus the tail. opv keeps the last 64 KiB of a call's stderr; a longer reply is marked (`stderr truncated: …` per call, `truncated: true` and a footer note in the box), never cut silently. A result's content is never shown. MCP tools take the same `verbose` flag and return the same reply.
 
 ```text
 op item get iprd --vault vprd --format json (0.02 s): exit 0
@@ -141,7 +141,7 @@ The stderr of every `op`, `flyctl`, `az`, `kubectl`, `gh` and `ssh` call is held
 - every value opv read or wrote in the run is replaced with `********`, in its raw form and its common encodings (JSON-escaped, quoted, base64, base64url, percent-encoded). The mask is always `********`, whatever the value's length;
 - so are the credentials in opv's own environment, registered when it starts: `OP_SERVICE_ACCOUNT_TOKEN`, every `OP_SESSION_*`, `OP_CONNECT_TOKEN`, `FLY_API_TOKEN`, `FLY_ACCESS_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, `AZURE_CLIENT_SECRET` and `ARM_CLIENT_SECRET`, and every token opv mints (`opv access --create`, `opv target credentials --create`);
 - patterns catch secrets opv never handled: JWTs, `Bearer` tokens, `OP_SESSION_*`, 1Password service-account tokens, Fly tokens, GitHub tokens, Azure SAS signatures, account keys and client secrets, connection strings with a password, PEM private keys, well-known API key prefixes, and `password=`, `token=`, `secret=`, `apikey=` assignments;
-- control characters, terminal escape sequences (colours, OSC 8 links, OSC 52 clipboard writes) and bidirectional overrides are removed, and lines are cut at 240 characters.
+- control characters, terminal escape sequences (colours, OSC 8 links, OSC 52 clipboard writes) and bidirectional overrides are removed. Without `--verbose` the box cuts lines at 240 characters; with it nothing is cut, and every line shown has been through the same scrubbing.
 
 Names and IDs stay readable: opv's own fields (environments, targets, keys, vault IDs, paths) are never value-matched, so a `--json` document stays valid even when a stored value is a word like `true`. A CLI's stdout and what opv sends on stdin are never shown. Masking can only catch values it knows or recognises: a value opv has not read yet (a failure during the item read itself) is masked by the patterns alone.
 
