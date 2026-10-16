@@ -23,6 +23,7 @@
 //! exit 9, NR-28); otherwise the step itself was refused ([`Error::Target`]).
 
 pub mod config;
+pub mod diagnose;
 pub mod external;
 pub mod runtime;
 pub mod store;
