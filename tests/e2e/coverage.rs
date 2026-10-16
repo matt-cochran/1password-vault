@@ -886,6 +886,20 @@ mod cases {
 
     // §4.6 outcomes, §4.7 tools, §4.10 delivery
 
+    pub fn unrecognized() -> Case {
+        // The recorded 404 of a listing in a GitHub environment, while the repository's
+        // environments read still lists that environment: opv cannot tell why (X13).
+        case(
+            Scenario::new()
+                .faults("[[fault]]\nprogram = \"gh\"\ncall = \"secret list\"\nkind = \"not_found\"\n")
+                .world(|w| {
+                    w["github"]["repos"]["e2e-org/e2e-app"]["environments"]["production"]
+                        ["listed_after_not_found"] = Value::Bool(true);
+                }),
+            &["plan", "prod", "--target", "gh"],
+        )
+    }
+
     pub fn partial() -> Case {
         // fly and gh are written, then the Kubernetes deployment is not found.
         case(Scenario::new(), &["sync", "prod", "--confirm", "prod"])
@@ -1459,6 +1473,7 @@ scenarios! {
         title_lookup => TitleLookup,
         input_invalid => InputInvalid,
         input_unreadable => InputUnreadable,
+        unrecognized => Unrecognized,
         partial => Partial,
         tool_missing => ToolMissing,
         delivery_unverified => DeliveryUnverified,

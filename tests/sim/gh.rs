@@ -88,6 +88,8 @@ pub fn fault(kind: Kind, _world: &World, args: &[String]) -> Reply {
 /// What a fault changes in the world before it is answered: a `not_found` on a listing or
 /// write in a GitHub environment is that environment missing (the recorded 404 says so), so
 /// the repository's environments read afterwards no longer lists it. `true` when it changed.
+/// An environment marked `"listed_after_not_found": true` stays listed: its 404 has a cause
+/// opv cannot see, so the scenario reaches the reply opv does not recognise.
 pub fn fault_effect(kind: Kind, world: &mut World, args: &[String]) -> bool {
     let w = call_words(args);
     let (repo, env) = (repo_of(args), env_of(args));
@@ -103,6 +105,10 @@ pub fn fault_effect(kind: Kind, world: &mut World, args: &[String]) -> bool {
                 .doc
                 .pointer_mut(&pointer)
                 .and_then(Value::as_object_mut)
+                .filter(|envs| {
+                    envs.get(&e)
+                        .is_some_and(|v| v["listed_after_not_found"] != Value::Bool(true))
+                })
                 .is_some_and(|envs| envs.remove(&e).is_some())
         }
         _ => false,
