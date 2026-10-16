@@ -514,8 +514,7 @@ fn a_failing_later_target_names_the_targets_already_synced() {
     *w.fail_import.borrow_mut() = Some("myapp-west".into());
     let err = sync_with(&w, &both(&w), SyncOpts::default()).0.unwrap_err();
     assert!(
-        err.to_string()
-            .contains("already synced by this run: prod/east"),
+        err.to_string().contains("already written: prod/east"),
         "{err}"
     );
 }

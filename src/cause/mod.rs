@@ -317,6 +317,9 @@ pub enum Refind {
     ByTitle,
     /// A person checks with this command before anything is re-created.
     Check(Cmd),
+    /// A person checks with this vendor command (the object lives only at the vendor, such
+    /// as a Fly deploy token: `flyctl tokens list --app <app>`).
+    Vendor(VendorCmd),
 }
 
 /// Every failure opv reports. Grouped as in design §4.

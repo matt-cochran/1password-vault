@@ -117,11 +117,17 @@ impl CommandRunner for World {
     fn probe(&self, call: &Call, limit: Duration) -> io::Result<Output> {
         self.record(call);
         if call.program == "flyctl" && call.args == ["auth", "whoami"] {
-            return Ok(if self.fly_signed_in {
-                Output::success("me@example.com\n")
-            } else {
-                Output::failure(1)
-            });
+            if self.fly_signed_in {
+                return Ok(Output::success("me@example.com\n"));
+            }
+            // flyctl's recorded signed-out reply, through the runner so the failure is
+            // observed and diagnosed (design §5).
+            let fake = crate::runner::fake::FakeRunner::default();
+            fake.push_with_stderr(
+                Output::failure(1),
+                include_str!("../../tests/fixtures/fly/failures/01-signed-out-whoami.stderr"),
+            );
+            return fake.probe(call, limit);
         }
         self.op.probe(call, limit)
     }
@@ -402,7 +408,7 @@ fn show_never_suggests_create_when_credentials_are_recorded() {
 fn show_names_the_provider_sign_in_before_create() {
     let mut w = World::new();
     w.fly_signed_in = false;
-    assert!(shown(&fleet(None), &w).contains("Do: log in: flyctl auth login"));
+    assert!(shown(&fleet(None), &w).contains("Do: sign in to Fly: flyctl auth login"));
 }
 
 #[test]

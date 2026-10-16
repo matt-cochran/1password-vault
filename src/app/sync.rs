@@ -264,7 +264,30 @@ fn after_targets(e: Error, env_name: &str, targets: &[(Ctx<'_>, Ports<'_>)], don
     if !rest.is_empty() {
         note.push_str(&format!("; not started: {}", rest.join(", ")));
     }
+    // A cataloged cause carries no free text to add to: the targets already synced are
+    // its `Partial` (design §4.6, FR-56).
+    if let Error::Catalog(c, up) = e {
+        return partial(*c, up, synced);
+    }
     with_note(e, &note)
+}
+
+/// `then`, after this run's writes `done`, as `Cause::Partial` (design §4.6; NR-10).
+fn partial(
+    then: crate::cause::Cause,
+    upstream: Option<Box<crate::cause::Upstream>>,
+    done: Vec<String>,
+) -> Error {
+    let cause = crate::cause::Cause::Partial {
+        done,
+        approval_used: None,
+        approval_scope: None,
+        then: Box::new(then),
+    };
+    match upstream {
+        Some(up) => Error::with_evidence(cause, *up),
+        None => cause.into(),
+    }
 }
 
 /// The command that finishes the run's job (FR-56): [`Report::next`] of all targets
@@ -1911,6 +1934,8 @@ fn confirm(
 /// errors already say what is known (NR-2).
 fn after_writes(e: Error, done: &[String]) -> Error {
     match e {
+        // A cataloged cause names the completed writes as its `Partial` (design §4.6).
+        Error::Catalog(c, up) if !done.is_empty() => partial(*c, up, done.to_vec()),
         e @ Error::Auth(_) if !done.is_empty() => e.map_text(|m| {
             format!(
                 "{m}\n  {} write(s) had completed: {}; re-running the same command is safe",
@@ -3317,11 +3342,10 @@ mod tests {
             ..opts()
         };
         let e = run(&f(), "prod", &r, &mut Vec::new(), &o).unwrap_err();
-        assert!(matches!(e, Error::Target(_)), "{e}");
-        // The failed import is followed only by the login check (FR-26): no list B, no
-        // unset, no deploy.
-        assert_eq!(r.calls.borrow().len(), 6);
-        assert_eq!(r.calls.borrow()[5].args, vec!["auth", "whoami"]);
+        assert_eq!(e.exit_code(), 5, "{e}");
+        // The failed import is diagnosed from its reply (design §5): no list B, no unset,
+        // no deploy, and no login check of its own.
+        assert_eq!(r.calls.borrow().len(), 5);
     }
 
     // ---- fly plan -------------------------------------------------------------------
@@ -3665,14 +3689,16 @@ mod tests {
             fly_with_prunable_staged(),
             whoami(),        // delivery recording: the account
             complete_item(), // delivery recording: the item, fresh
-            Out::failure(1), // unset
-            Out::failure(1), // auth whoami: signed out
         ]);
+        // unset: flyctl's recorded signed-out reply
+        r.push_with_stderr(
+            Out::failure(1),
+            include_str!("../../tests/fixtures/fly/failures/02-signed-out-secrets-list.stderr"),
+        );
         let e = sync_err(&r);
         assert!(
-            matches!(&e, Error::Auth(m) if m.ends_with(
-                "1 write(s) had completed: staged 2 secret(s); re-running the same command is safe"
-            )),
+            e.to_string()
+                .contains("already written: staged 2 secret(s)"),
             "{e}"
         );
     }

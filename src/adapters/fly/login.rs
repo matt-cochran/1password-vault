@@ -4,14 +4,16 @@
 //! environment's deploy identity always wins over one in the user's shell.
 
 use std::collections::BTreeMap;
-use std::io;
 
-use super::{FLYCTL, PROGRAM};
+use super::{CREDENTIAL_VARS, PROGRAM};
+use crate::cause::{
+    Cause, CommandId, CreateKind, DiagnoseContext, Principal, Refind, System, VarName, VendorCmd,
+};
 use crate::domain::{Kind, SecretValue};
 use crate::error::{Code, Error};
 use crate::host::Host;
 use crate::provider::{CredentialField, DeployLogin};
-use crate::runner::{Call, CommandRunner, Outcome};
+use crate::runner::{Call, CommandRunner, CreateOutcome};
 
 /// The field a Fly `deploy_credentials` item holds.
 pub const FIELDS: &[CredentialField] = &[CredentialField {
@@ -30,35 +32,58 @@ pub const TOKEN_EXPIRY_HOURS: u32 = 2160;
 pub const CLEANUP_HINT: &str =
     "run `flyctl tokens list --app <app>` to see its ID, then `flyctl tokens revoke <id>`";
 
-/// Read-only preflight before minting a deploy credential (FR-40): `flyctl auth whoami`,
-/// exit status only (its stdout names the account and is dropped unread, SR-1). Not signed
-/// in is `Error::Auth` (`Code::AuthRequired`) with `flyctl auth login`; a missing CLI is
-/// `Error::Dependency`.
+/// Read-only preflight before minting a deploy credential (FR-40). A Fly token in the
+/// shell (`FLY_API_TOKEN`, `FLY_ACCESS_TOKEN`) overrides the person's own login for every
+/// flyctl call, so no `flyctl auth login` can help: minting needs the person's own session
+/// without it (06.05, `Cause::NeedsOwnSession`). Otherwise `flyctl auth whoami`, exit status
+/// only (its stdout names the account and is dropped unread, SR-1); a failure is diagnosed
+/// from its reply (design §5), never assumed to be a sign-out (06.11).
 pub fn mint_preflight(r: &dyn CommandRunner) -> Result<(), Error> {
-    let host = Host::detect();
+    mint_preflight_on(r, &Host::detect())
+}
+
+fn mint_preflight_on(r: &dyn CommandRunner, host: &Host) -> Result<(), Error> {
+    if let Some(var) = host.token(CREDENTIAL_VARS) {
+        return Err(Cause::NeedsOwnSession {
+            command: CommandId(MINT_COMMAND.to_string()),
+            identity: Principal::ShellToken {
+                var: VarName::new(var),
+            },
+        }
+        .into());
+    }
+    let ctx = DiagnoseContext::default();
     match super::auth_whoami(r) {
         Ok(true) => Ok(()),
-        Ok(false) => Err(Error::Auth(
-            format!(
-                "not logged in to Fly ({PROGRAM} auth whoami failed)\n  log in: {PROGRAM} auth login"
-            )
-            .into(),
-        )),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Error::Dependency(
-            format!("{PROGRAM} not found on PATH\n  {}", host.install_hint(FLYCTL)).into(),
-        )),
-        Err(e) if e.kind() == io::ErrorKind::TimedOut => Err(super::whoami_unanswered(&e)),
-        Err(e) => Err(Error::Dependency(
-            format!("failed to run {PROGRAM} ({})", e.kind()).into(),
-        )),
+        Ok(false) => Err(super::failed_call(&ctx)),
+        Err(e) => Err(super::call_error(r, &|| *host, &e, &ctx)),
+    }
+}
+
+/// The command a minted credential comes from, as messages name it.
+const MINT_COMMAND: &str = "target credentials --create";
+
+/// The vendor read that shows whether a deploy token named `name` exists on `app`: the one
+/// check before anything is minted again (X5).
+fn tokens_list(app: &str) -> VendorCmd {
+    VendorCmd {
+        program: PROGRAM.to_string(),
+        args: ["tokens", "list", "--app", app]
+            .map(str::to_string)
+            .to_vec(),
     }
 }
 
 /// Mint a least-privilege Fly deploy token (FR-40): one
-/// `flyctl tokens create deploy --app <app> --name <name> --expiry 2160h` (90 days). The
-/// token is returned under [`TOKEN_FIELD`]; stdout is read once, trimmed and held only in a
-/// zeroizing [`SecretValue`], and is never put in argv or an error (SR-1/SR-3). An empty
-/// token is refused.
+/// `flyctl tokens create deploy --app <app> --name <name> --expiry 2160h` (90 days), run as
+/// a create ([`CommandRunner::create`], never retried). The token is returned under
+/// [`TOKEN_FIELD`]; stdout is read once, trimmed and held only in a zeroizing
+/// [`SecretValue`], and is never put in argv or an error (SR-1/SR-3). An empty token is
+/// refused.
+///
+/// When the outcome is unknown (a timeout, a kill, a lost reply), a token may exist whose
+/// secret was never stored: the step is to look for it with `flyctl tokens list --app <app>`
+/// and revoke it, never to mint again (06.10, X5).
 pub fn mint_deploy_credential(
     r: &dyn CommandRunner,
     app: &str,
@@ -69,58 +94,28 @@ pub fn mint_deploy_credential(
         "tokens", "create", "deploy", "--app", app, "--name", name, "--expiry", &expiry,
     ];
     let what = format!("{PROGRAM} tokens create deploy");
-    let out = match r.write(&Call::new(PROGRAM, &args)) {
-        Ok(Outcome::Done(out)) => out,
-        Ok(Outcome::Refused(out)) => {
-            // The sign-in was checked just before (`mint_preflight`): what is left is the
-            // app itself or this account's rights on it.
-            return Err(Error::Target(
-                format!(
-                    "{what} failed for app {app} (exit {}); no token was stored\n  the \
-                     logged-in Fly account was checked just before, so the app is missing \
-                     or this account cannot create tokens for it",
-                    out.status
-                )
-                .into(),
-            )
-            .with_do(format!(
-                "check that app {app} exists and that the logged-in Fly account is an admin \
-                 of its organization ({PROGRAM} apps list shows the apps it can see)"
-            )));
+    let refind = Refind::Vendor(tokens_list(app));
+    let ctx = DiagnoseContext {
+        create: Some((CreateKind::DeployToken, name.to_string(), refind.clone())),
+        write: true,
+        ..super::app_context(app)
+    };
+    let out = match r.create(&Call::new(PROGRAM, &args), CreateKind::DeployToken) {
+        Ok(CreateOutcome::Done(out)) => out,
+        // A definite refusal: nothing was made; the reply says why (design §5).
+        Ok(CreateOutcome::Refused(_)) => return Err(super::failed_call(&ctx)),
+        Ok(CreateOutcome::OutcomeUnknown(seen)) => {
+            let _ = crate::runner::take_failure_excerpt();
+            return Err(Cause::CreateOutcomeUnknown {
+                system: System::Fly,
+                kind: CreateKind::DeployToken,
+                name: name.to_string(),
+                refind,
+                seen,
+            }
+            .into());
         }
-        Ok(Outcome::Unknown {
-            status: Some(status),
-            ..
-        }) => {
-            return Err(Error::Unknown(
-                format!(
-                    "{what} failed (exit {status}); a token named {name:?} may or may not have \
-                     been created\n  next: check `{PROGRAM} tokens list --app {app}`, then re-run \
-                     the same command"
-                )
-                .into(),
-            ));
-        }
-        Ok(Outcome::Unknown { reason, .. }) => {
-            return Err(Error::Unknown(
-                format!(
-                    "{what}: {}; a token named {name:?} may or may not have been created\n  \
-                     next: re-run the same command",
-                    crate::runner::unknown_text(PROGRAM, reason)
-                )
-                .into(),
-            ));
-        }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Err(Error::Dependency(
-                format!("{PROGRAM} not found on PATH").into(),
-            ));
-        }
-        Err(e) => {
-            return Err(Error::Target(
-                format!("{what} could not start {PROGRAM} ({})", e.kind()).into(),
-            ));
-        }
+        Err(e) => return Err(super::call_error(r, &Host::detect, &e, &ctx)),
     };
     let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
     // From here on, any output that might echo it is scrubbed (SR-1).
