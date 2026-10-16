@@ -222,6 +222,23 @@ fn recording_08_vault_not_in_the_selected_account_is_ids_not_in_account() {
 }
 
 #[test]
+fn vault_list_not_a_vault_reply_without_a_named_vault_is_unrecognized() {
+    let (stderr, exit) = recorded("08-vault-not-found");
+    let stderr = stderr.replace("ZZZZZZZZZZZZZZZZZZZZZZZZZZ", "list");
+    let seen = observed("vault list --format json", exit, person());
+    assert_eq!(
+        diagnose_with(
+            seen,
+            &stderr,
+            &DiagnoseContext::default(),
+            &Facts::default()
+        )
+        .code(),
+        "unrecognized_failure"
+    );
+}
+
+#[test]
 fn recording_09_item_not_found_is_item_not_found() {
     let cause = diagnosed(
         "09-item-not-found",

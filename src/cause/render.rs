@@ -3902,7 +3902,7 @@ impl Cause {
                     input_kind(*kind),
                     path.display()
                 )),
-                help_of(inv),
+                Next::Rerun,
             ),
             ItemUnusable { title, problem, .. } => plan(
                 inspect(match problem {
