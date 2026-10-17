@@ -3382,6 +3382,9 @@ impl Cause {
                     }
                     // F4: setup's remaining steps are read by doctor, not a structure plan.
                     (None, ["setup"]) => Next::Run(cmd(&["doctor"], &[])),
+                    // C8: `mcp install`'s own failure (a usage conflict) steps to its own
+                    // Next, never a structure plan.
+                    (None, ["mcp", "install"]) => inner.next,
                     (None, _) => plan_read(inv),
                 };
                 plan(action, next)

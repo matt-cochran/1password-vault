@@ -653,7 +653,7 @@ opv delivery verify prod --product p --json   # each placement's own state vault
 | `opv config export <env> --json` | that environment's config-kind values |
 | `opv config import --vault V [--file F] [--project P] [--path D]...` | save a `secrets.toml` as the project manifest; never deletes the file |
 | `opv config edit` | edit in `$VISUAL`/`$EDITOR`, validate, diff, confirm, save unless changed meanwhile |
-| `opv config check --file F` | exit 8 with a diff when a committed copy differs from the manifest |
+| `opv config check --file F` | exit 2 with a diff when a committed copy differs from the manifest |
 
 Details, discovery and the review trade-off: [configuration in 1Password](configuration.md#configuration-in-1password). `init`, `add` and `item skeleton`: [configuration](configuration.md#start-from-an-existing-item-opv-init).
 
