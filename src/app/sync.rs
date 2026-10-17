@@ -520,6 +520,15 @@ struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
+    /// This target, for its preflight (design §6.6).
+    fn at(&self) -> preflight::At<'_> {
+        preflight::At {
+            fleet: self.fleet,
+            env: self.env_name,
+            name: self.target,
+        }
+    }
+
     /// A refusal found before the first write; on a guarded environment run without
     /// `--confirm` it also says the flag is needed, so one run reports both (H12).
     fn refusal(&self, e: Error) -> Error {
@@ -960,7 +969,7 @@ fn run_staged(
     store.validate(&batch).map_err(|e| c.refusal(e))?;
     c.require_confirm()?;
     // Last read-only step before the first write (NR-23, NR-24).
-    let skip_deploy = preflight::run(t, c.r, out, opts.json)?;
+    let skip_deploy = preflight::run(c.at(), t, c.r, out, opts.json)?;
     print_extras(out, &plan)?;
 
     let label = t.provider().label();
@@ -1287,7 +1296,7 @@ fn prepare_pinned(c: &Ctx<'_>, ports: &Ports<'_>, out: &mut dyn Write) -> Result
     )
     .map_err(|e| c.refusal(e))?;
     // The target's state, read-only, before its first read (NR-23, NR-25).
-    let skip_deploy = preflight::run(c.t, c.r, out, opts.json)?;
+    let skip_deploy = preflight::run(c.at(), c.t, c.r, out, opts.json)?;
     let (plan, listed) = plan_item(
         fleet,
         env_name,
@@ -2410,7 +2419,12 @@ fn plan_part<'f>(
 ) -> Result<PlanPart<'f>, Error> {
     let (_, t) = super::target(fleet, env_name, name)?;
     let (_, ports) = open_target(fleet, env_name, name, r)?;
-    preflight::read(t, r)?;
+    let at = preflight::At {
+        fleet,
+        env: env_name,
+        name,
+    };
+    preflight::read(at, t, r)?;
     let none = BTreeSet::new();
     let (mut plan, on_target, item_version, _) =
         read_and_plan_versioned(fleet, env_name, Some(name), r, Some(&ports), rotate, &none)?;

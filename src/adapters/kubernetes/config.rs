@@ -10,13 +10,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 
 use super::external::{self, Bridge, ExternalStore};
+use super::files::{self, Verdict as Readability};
 use super::runtime::{DEPLOY_RIGHTS, POLL_EVERY, WAIT_MAX, missing_rights};
 use super::{
     Effect, Failed, KUBECTL, KubeDeployment, KubeSecrets, KubeTarget, Kubectl, PROGRAM,
-    valid_label_value,
+    container_index, valid_label_value,
 };
 use crate::adapters::probe::{spawn_tool, version_in};
-use crate::cause::{Cause, FieldRule, PatternId, Unusable};
+use crate::cause::{Cause, EnvName, FieldRule, Guard, MountWhy, PatternId, TargetName, Unusable};
 use crate::config::{TEMPLATE_WORDS, section_invalid};
 use crate::error::Error;
 use crate::host::Host;
@@ -461,10 +462,14 @@ impl TargetConfig for KubernetesTarget {
         &'a self,
         env: &'a str,
         managed: BTreeSet<String>,
-        _files: &BTreeMap<String, crate::domain::runtime::FileMount>,
+        files: &BTreeMap<String, crate::domain::runtime::FileMount>,
         config: &BTreeSet<String>,
         r: &'a dyn CommandRunner,
     ) -> Result<Ports<'a>, Error> {
+        // This target's file keys (the runtime keeps the managed ones), each rendered per
+        // product under `secrets_dir` by the runtime (design §6.3).
+        let files = files.clone();
+        let dir = self.secrets_dir.clone();
         // The rollout and ExternalSecret waits have their own limit, and end earlier when
         // the run budget runs short, so their own message comes first (NR-4).
         let wait = WAIT_MAX;
@@ -485,6 +490,8 @@ impl TargetConfig for KubernetesTarget {
                     KubeDeployment::new(r, &self.target, managed)
                         .with_wait(POLL_EVERY, wait, move |d| r.pause(d, ""))
                         .with_config_in_store(self.config == ConfigRoute::Store)
+                        .with_config_names(config.clone())
+                        .with_files(dir, files)
                         .with_external(bridge),
                 ),
             });
@@ -504,7 +511,9 @@ impl TargetConfig for KubernetesTarget {
                 KubeDeployment::new(r, &self.target, managed)
                     .with_wait(POLL_EVERY, wait, move |d| r.pause(d, ""))
                     .with_config_in_store(self.config != ConfigRoute::Env)
-                    .with_configmaps(self.config == ConfigRoute::ConfigMap),
+                    .with_configmaps(self.config == ConfigRoute::ConfigMap)
+                    .with_config_names(config.clone())
+                    .with_files(dir, files),
             ),
         })
     }
@@ -531,6 +540,114 @@ impl TargetConfig for KubernetesTarget {
             checks,
             skip_deploy: None,
         })
+    }
+
+    /// With `secrets_dir` set (design §6.6), from the Deployment opv already reads (no
+    /// value in it): a foreign volume at a rendered directory, above it or below it, is
+    /// refused in every mode; a workload that cannot read the 0440 root-owned files, or
+    /// whose readability is unknown, is refused before any write under `sync` and is a
+    /// warning under `plan` and `status`; a root or group-0 workload is a warning in every
+    /// mode. A target with `secrets_dir` and no delivered file key still runs the check:
+    /// the setting says files are meant to go there.
+    fn preflight_files(
+        &self,
+        r: &dyn CommandRunner,
+        mode: PreflightMode,
+        files: &BTreeMap<String, crate::domain::runtime::FileMount>,
+    ) -> Result<Vec<Check>, Error> {
+        let Some(dir) = self.secrets_dir.as_deref() else {
+            return Ok(Vec::new());
+        };
+        let doc = Kubectl::new(r, &self.target).get_deployment()?;
+        let index = container_index(&doc, &self.target)?;
+        let container_path = format!("/spec/template/spec/containers/{index}");
+        let container = doc
+            .pointer(&format!("{container_path}/name"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let d = self.target.deployment.as_str();
+        // The directory of each product with a file key; a dir without `{product}` is one.
+        let dirs: BTreeSet<String> = if dir.contains("{product}") {
+            files
+                .values()
+                .map(|f| files::render_dir(dir, &f.product))
+                .collect()
+        } else {
+            BTreeSet::from([dir.to_string()])
+        };
+        for rendered in &dirs {
+            if let Some((volume, path)) = files::mount_conflict(&doc, &container, rendered) {
+                return Err(Cause::Guard {
+                    guard: Guard::MountPathInUse {
+                        workload: format!("deployment {d}"),
+                        container,
+                        path,
+                        volume,
+                        env: EnvName::new(&self.target.env),
+                        // Filled in by the caller, which knows the target's name.
+                        target: TargetName::new(""),
+                    },
+                }
+                .into());
+            }
+        }
+        let pod = doc.pointer("/spec/template/spec/securityContext");
+        let own = doc.pointer(&format!("{container_path}/securityContext"));
+        let run_as = [own, pod]
+            .into_iter()
+            .flatten()
+            .find_map(|s| s.get("runAsUser").and_then(serde_json::Value::as_u64))
+            .and_then(|u| u32::try_from(u).ok());
+        let warn = |name: String, detail: &str| Check {
+            name: name.into(),
+            outcome: Ok(Verdict::Warn(detail.to_string())),
+        };
+        let why = match files::readability(pod, own) {
+            Readability::Readable => return Ok(Vec::new()),
+            Readability::ReadableAsRoot => {
+                return Ok(vec![warn(
+                    format!("deployment {d} runs as root"),
+                    "every mounted file is readable by any process in the container; run as \
+                     a non-root user with fsGroup",
+                )]);
+            }
+            Readability::ReadableAsGroupZero => {
+                return Ok(vec![warn(
+                    format!("deployment {d} runs in group 0"),
+                    "every mounted file is readable by any process in group 0 in the \
+                     container; set fsGroup to a group only this container uses",
+                )]);
+            }
+            Readability::Unreadable => MountWhy::NoFsGroup,
+            Readability::Unknown => MountWhy::RunAsUnknown,
+        };
+        if mode == PreflightMode::Mutate {
+            return Err(Cause::MountUnreadable {
+                workload: format!("deployment {d}"),
+                container,
+                run_as,
+                why,
+                env: EnvName::new(&self.target.env),
+                // Filled in by the caller, which knows the target's name.
+                target: TargetName::new(""),
+            }
+            .into());
+        }
+        let who = match run_as {
+            Some(uid) => format!("runs as {uid}"),
+            None => "runs as an unknown user".to_string(),
+        };
+        Ok(vec![match why {
+            MountWhy::NoFsGroup => warn(
+                format!("deployment {d} sets no fsGroup and {who}"),
+                "the mounted files (0440, root-owned) would be unreadable",
+            ),
+            MountWhy::RunAsUnknown => warn(
+                format!("deployment {d} sets no fsGroup and {who}"),
+                "whether the mounted files (0440, root-owned) are readable is unknown",
+            ),
+        }])
     }
 
     fn doctor(&self, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Vec<Check> {
@@ -1767,3 +1884,7 @@ env_name = "{{KEY}}"
         );
     }
 }
+
+#[cfg(test)]
+#[path = "config_files_tests.rs"]
+mod config_files_tests;
