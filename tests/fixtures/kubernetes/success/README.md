@@ -16,3 +16,5 @@ Context `opv-rbac` is a ServiceAccount `opv-rec:opv-rbac` bound to a Role granti
 | 03-delete-secrets-missing-ignored | the first delete again, the Secret already gone | 0 | *(empty)* |
 
 The `no` answer of `auth can-i` is `../failures/02-can-i-create-secrets-no` (exit 1, stdout `no`). stderr was empty in every case here.
+
+The K1 recordings for ConfigMaps and mounted files (cases 04–17 here, with `cases.tsv`) are described in `../README.md`.

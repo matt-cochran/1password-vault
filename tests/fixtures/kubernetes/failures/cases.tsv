@@ -1,0 +1,32 @@
+case	exit	command
+08-can-i-create-configmaps-no	1	kubectl --context opv-noconfigmaps --namespace opv-rec --request-timeout=60s auth can-i create configmaps
+08-can-i-get-configmaps-no	1	kubectl --context opv-noconfigmaps --namespace opv-rec --request-timeout=60s auth can-i get configmaps
+08-can-i-list-configmaps-no	1	kubectl --context opv-noconfigmaps --namespace opv-rec --request-timeout=60s auth can-i list configmaps
+08-can-i-delete-configmaps-no	1	kubectl --context opv-noconfigmaps --namespace opv-rec --request-timeout=60s auth can-i delete configmaps
+08-forbidden-apply-configmap	1	kubectl --context opv-noconfigmaps --namespace opv-rec --request-timeout=120s apply -f - --server-side --field-manager=opv -o name
+08-forbidden-get-configmap	1	kubectl --context opv-noconfigmaps --namespace opv-rec --request-timeout=60s get configmap opv-api--log-level-abcdefghij --ignore-not-found -o 'jsonpath={.metadata.labels.opv-managed}{"\t"}{.data.value}'
+08-forbidden-list-configmaps	1	kubectl --context opv-noconfigmaps --namespace opv-rec --request-timeout=60s get configmap -l opv-managed=dev -o 'jsonpath={range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.opv-key}{"\t"}{.metadata.annotations.opv-version}{"\t"}{.metadata.annotations.opv-written}{"\t"}{.metadata.annotations.opv-env}{"\t"}{.metadata.annotations.opv-plan}{"\n"}{end}'
+08-forbidden-delete-configmap	1	kubectl --context opv-noconfigmaps --namespace opv-rec --request-timeout=120s delete configmap opv-api--log-level-abcdefghij --ignore-not-found
+09-immutable-configmap-apply-changed	1	kubectl --context opv-rbac --namespace opv-rec --request-timeout=120s apply -f - --server-side --field-manager=opv -o name
+09-notfound-configmap	1	kubectl --context opv-rbac --namespace opv-rec --request-timeout=60s get configmap opv-missing -o name
+10-forbidden-apply-configmap-create-rights-only	1	kubectl --context opv-designrights --namespace opv-rec --request-timeout=120s apply -f - --server-side --field-manager=opv -o name
+10-forbidden-apply-configmap-create-rights-only-unchanged	1	kubectl --context opv-designrights --namespace opv-rec --request-timeout=120s apply -f - --server-side --field-manager=opv -o name
+10-forbidden-apply-secret-create-rights-only	1	kubectl --context opv-designrights --namespace opv-rec --request-timeout=120s apply -f - --server-side --field-manager=opv -o name
+10-can-i-create-configmaps-yes-without-patch	0	kubectl --context opv-designrights --namespace opv-rec --request-timeout=60s auth can-i create configmaps
+10-can-i-patch-configmaps-no-without-patch	1	kubectl --context opv-designrights --namespace opv-rec --request-timeout=60s auth can-i patch configmaps
+10-forbidden-apply-configmap-patch-rights-only	1	kubectl --context opv-patchonly --namespace opv-rec --request-timeout=120s apply -f - --server-side --field-manager=opv -o name
+11-conflict-replace-deployment	1	kubectl --context opv-rbac --namespace opv-rec --request-timeout=120s replace -f - -o 'jsonpath={.metadata.generation}'
+12-invalid-replace-path-dotdot	1	kubectl --context opv-rbac --namespace opv-rec --request-timeout=120s replace -f - -o 'jsonpath={.metadata.generation}'
+12-invalid-replace-path-duplicate	1	kubectl --context opv-rbac --namespace opv-rec --request-timeout=120s replace -f - -o 'jsonpath={.metadata.generation}'
+12-invalid-replace-path-absolute	1	kubectl --context opv-rbac --namespace opv-rec --request-timeout=120s replace -f - -o 'jsonpath={.metadata.generation}'
+12-invalid-replace-path-dotdot-inner	1	kubectl --context opv-rbac --namespace opv-rec --request-timeout=120s replace -f - -o 'jsonpath={.metadata.generation}'
+12-invalid-replace-mode-out-of-range	1	kubectl --context opv-rbac --namespace opv-rec --request-timeout=120s replace -f - -o 'jsonpath={.metadata.generation}'
+12-invalid-replace-mountpath-duplicate	1	kubectl --context opv-rbac --namespace opv-rec --request-timeout=120s replace -f - -o 'jsonpath={.metadata.generation}'
+12-invalid-replace-volume-name-duplicate	1	kubectl --context opv-rbac --namespace opv-rec --request-timeout=120s replace -f - -o 'jsonpath={.metadata.generation}'
+12-warning-replace-overlapping-paths	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=120s replace -f - -o 'jsonpath={.metadata.generation}'
+13-get-pods-overlapping-paths	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=60s get pods -l app=api -o 'jsonpath={range .items[*]}{.metadata.name}{"\t"}{.metadata.ownerReferences[0].name}{"\t"}{range .status.initContainerStatuses[*]}{.state.waiting.reason}{" "}{end}{range .status.containerStatuses[*]}{.state.waiting.reason}{" "}{end}{"\n"}{end}'
+14-get-pods-missing-configmap-source-20s	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=60s get pods -l app=api -o 'jsonpath={range .items[*]}{.metadata.name}{"\t"}{.metadata.ownerReferences[0].name}{"\t"}{range .status.initContainerStatuses[*]}{.state.waiting.reason}{" "}{end}{range .status.containerStatuses[*]}{.state.waiting.reason}{" "}{end}{"\n"}{end}'
+14-get-pods-missing-configmap-source-120s	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=60s get pods -l app=api -o 'jsonpath={range .items[*]}{.metadata.name}{"\t"}{.metadata.ownerReferences[0].name}{"\t"}{range .status.initContainerStatuses[*]}{.state.waiting.reason}{" "}{end}{range .status.containerStatuses[*]}{.state.waiting.reason}{" "}{end}{"\n"}{end}'
+14-get-events-missing-configmap-source	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s get events --field-selector involvedObject.name=api-64c8949856-<POD>,reason=FailedMount -o 'jsonpath={range .items[*]}{.reason}{"\t"}{.message}{"\n"}{end}'
+14-get-pods-missing-secret-source-60s	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=60s get pods -l app=api -o 'jsonpath={range .items[*]}{.metadata.name}{"\t"}{.metadata.ownerReferences[0].name}{"\t"}{range .status.initContainerStatuses[*]}{.state.waiting.reason}{" "}{end}{range .status.containerStatuses[*]}{.state.waiting.reason}{" "}{end}{"\n"}{end}'
+14-get-events-missing-secret-source	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s get events --field-selector involvedObject.name=api-75767cbbb6-<POD>,reason=FailedMount -o 'jsonpath={range .items[*]}{.reason}{"\t"}{.message}{"\n"}{end}'

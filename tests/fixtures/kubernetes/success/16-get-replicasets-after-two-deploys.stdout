@@ -1,0 +1,1647 @@
+{
+    "apiVersion": "v1",
+    "items": [
+        {
+            "apiVersion": "apps/v1",
+            "kind": "ReplicaSet",
+            "metadata": {
+                "annotations": {
+                    "deployment.kubernetes.io/desired-replicas": "1",
+                    "deployment.kubernetes.io/max-replicas": "2",
+                    "deployment.kubernetes.io/revision": "11"
+                },
+                "creationTimestamp": "<TIME>",
+                "generation": 2,
+                "labels": {
+                    "app": "api",
+                    "pod-template-hash": "55c9d7ff9f"
+                },
+                "name": "api-55c9d7ff9f",
+                "namespace": "opv-rec",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "Deployment",
+                        "name": "api",
+                        "uid": "<UID_1>"
+                    }
+                ],
+                "resourceVersion": "<RV>",
+                "uid": "<UID_2>"
+            },
+            "spec": {
+                "replicas": 0,
+                "selector": {
+                    "matchLabels": {
+                        "app": "api",
+                        "pod-template-hash": "55c9d7ff9f"
+                    }
+                },
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "api",
+                            "pod-template-hash": "55c9d7ff9f"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "command": [
+                                    "sleep",
+                                    "infinity"
+                                ],
+                                "env": [
+                                    {
+                                        "name": "FLEET__API__DB_URL",
+                                        "valueFrom": {
+                                            "secretKeyRef": {
+                                                "key": "value",
+                                                "name": "opv-api--db-url-abcdefghij"
+                                            }
+                                        }
+                                    },
+                                    {
+                                        "name": "LOG_LEVEL",
+                                        "valueFrom": {
+                                            "configMapKeyRef": {
+                                                "key": "value",
+                                                "name": "opv-api--log-level-abcdefghij"
+                                            }
+                                        }
+                                    }
+                                ],
+                                "image": "ubuntu:24.04",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "api",
+                                "resources": {},
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/run/secrets/api",
+                                        "name": "opv-files-api",
+                                        "readOnly": true
+                                    }
+                                ]
+                            },
+                            {
+                                "command": [
+                                    "sleep",
+                                    "infinity"
+                                ],
+                                "image": "ubuntu:24.04",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "sidecar",
+                                "resources": {},
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File"
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "restartPolicy": "Always",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {
+                            "fsGroup": 20002,
+                            "runAsGroup": 10001,
+                            "runAsUser": 10001
+                        },
+                        "terminationGracePeriodSeconds": 1,
+                        "volumes": [
+                            {
+                                "name": "opv-files-api",
+                                "projected": {
+                                    "defaultMode": 288,
+                                    "sources": [
+                                        {
+                                            "secret": {
+                                                "items": [
+                                                    {
+                                                        "key": "value",
+                                                        "mode": 288,
+                                                        "path": "github-app/private-key"
+                                                    }
+                                                ],
+                                                "name": "opv-api--private-key-abcdefghij",
+                                                "optional": false
+                                            }
+                                        },
+                                        {
+                                            "configMap": {
+                                                "items": [
+                                                    {
+                                                        "key": "value",
+                                                        "mode": 288,
+                                                        "path": "github-app"
+                                                    }
+                                                ],
+                                                "name": "opv-api--otel-resource-abcdefghij",
+                                                "optional": false
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "observedGeneration": 2,
+                "replicas": 0,
+                "terminatingReplicas": 0
+            }
+        },
+        {
+            "apiVersion": "apps/v1",
+            "kind": "ReplicaSet",
+            "metadata": {
+                "annotations": {
+                    "deployment.kubernetes.io/desired-replicas": "1",
+                    "deployment.kubernetes.io/max-replicas": "2",
+                    "deployment.kubernetes.io/revision": "1"
+                },
+                "creationTimestamp": "<TIME>",
+                "generation": 2,
+                "labels": {
+                    "app": "api",
+                    "pod-template-hash": "59bd7c656"
+                },
+                "name": "api-59bd7c656",
+                "namespace": "opv-rec",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "Deployment",
+                        "name": "api",
+                        "uid": "<UID_1>"
+                    }
+                ],
+                "resourceVersion": "<RV>",
+                "uid": "<UID_3>"
+            },
+            "spec": {
+                "replicas": 0,
+                "selector": {
+                    "matchLabels": {
+                        "app": "api",
+                        "pod-template-hash": "59bd7c656"
+                    }
+                },
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "api",
+                            "pod-template-hash": "59bd7c656"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "command": [
+                                    "sleep",
+                                    "infinity"
+                                ],
+                                "env": [
+                                    {
+                                        "name": "FLEET__API__DB_URL",
+                                        "valueFrom": {
+                                            "secretKeyRef": {
+                                                "key": "value",
+                                                "name": "opv-api--db-url-abcdefghij"
+                                            }
+                                        }
+                                    },
+                                    {
+                                        "name": "FLEET__API__PRIVATE_KEY",
+                                        "valueFrom": {
+                                            "secretKeyRef": {
+                                                "key": "value",
+                                                "name": "opv-api--private-key-abcdefghij"
+                                            }
+                                        }
+                                    },
+                                    {
+                                        "name": "LOG_LEVEL",
+                                        "value": "opv-k8s-config-marker"
+                                    }
+                                ],
+                                "image": "ubuntu:24.04",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "api",
+                                "resources": {},
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File"
+                            },
+                            {
+                                "command": [
+                                    "sleep",
+                                    "infinity"
+                                ],
+                                "image": "ubuntu:24.04",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "sidecar",
+                                "resources": {},
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File"
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "restartPolicy": "Always",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {
+                            "runAsGroup": 10001,
+                            "runAsUser": 10001
+                        },
+                        "terminationGracePeriodSeconds": 1
+                    }
+                }
+            },
+            "status": {
+                "observedGeneration": 2,
+                "replicas": 0,
+                "terminatingReplicas": 0
+            }
+        },
+        {
+            "apiVersion": "apps/v1",
+            "kind": "ReplicaSet",
+            "metadata": {
+                "annotations": {
+                    "deployment.kubernetes.io/desired-replicas": "1",
+                    "deployment.kubernetes.io/max-replicas": "2",
+                    "deployment.kubernetes.io/revision": "13"
+                },
+                "creationTimestamp": "<TIME>",
+                "generation": 2,
+                "labels": {
+                    "app": "api",
+                    "pod-template-hash": "64c8949856"
+                },
+                "name": "api-64c8949856",
+                "namespace": "opv-rec",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "Deployment",
+                        "name": "api",
+                        "uid": "<UID_1>"
+                    }
+                ],
+                "resourceVersion": "<RV>",
+                "uid": "<UID_4>"
+            },
+            "spec": {
+                "replicas": 0,
+                "selector": {
+                    "matchLabels": {
+                        "app": "api",
+                        "pod-template-hash": "64c8949856"
+                    }
+                },
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "api",
+                            "pod-template-hash": "64c8949856"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "command": [
+                                    "sleep",
+                                    "infinity"
+                                ],
+                                "env": [
+                                    {
+                                        "name": "FLEET__API__DB_URL",
+                                        "valueFrom": {
+                                            "secretKeyRef": {
+                                                "key": "value",
+                                                "name": "opv-api--db-url-abcdefghij"
+                                            }
+                                        }
+                                    },
+                                    {
+                                        "name": "LOG_LEVEL",
+                                        "valueFrom": {
+                                            "configMapKeyRef": {
+                                                "key": "value",
+                                                "name": "opv-api--log-level-abcdefghij"
+                                            }
+                                        }
+                                    }
+                                ],
+                                "image": "ubuntu:24.04",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "api",
+                                "resources": {},
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/run/secrets/api",
+                                        "name": "opv-files-api",
+                                        "readOnly": true
+                                    }
+                                ]
+                            },
+                            {
+                                "command": [
+                                    "sleep",
+                                    "infinity"
+                                ],
+                                "image": "ubuntu:24.04",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "sidecar",
+                                "resources": {},
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File"
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "restartPolicy": "Always",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {
+                            "fsGroup": 10001,
+                            "runAsGroup": 10001,
+                            "runAsUser": 10001
+                        },
+                        "terminationGracePeriodSeconds": 1,
+                        "volumes": [
+                            {
+                                "name": "opv-files-api",
+                                "projected": {
+                                    "defaultMode": 288,
+                                    "sources": [
+                                        {
+                                            "secret": {
+                                                "items": [
+                                                    {
+                                                        "key": "value",
+                                                        "mode": 288,
+                                                        "path": "github-app/private-key"
+                                                    }
+                                                ],
+                                                "name": "opv-api--private-key-abcdefghij",
+                                                "optional": false
+                                            }
+                                        },
+                                        {
+                                            "configMap": {
+                                                "items": [
+                                                    {
+                                                        "key": "value",
+                                                        "mode": 288,
+                                                        "path": "otel/resource"
+                                                    }
+                                                ],
+                                                "name": "opv-missing",
+                                                "optional": false
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "observedGeneration": 2,
+                "replicas": 0,
+                "terminatingReplicas": 0
+            }
+        },
+        {
+            "apiVersion": "apps/v1",
+            "kind": "ReplicaSet",
+            "metadata": {
+                "annotations": {
+                    "deployment.kubernetes.io/desired-replicas": "1",
+                    "deployment.kubernetes.io/max-replicas": "2",
+                    "deployment.kubernetes.io/revision": "4",
+                    "deployment.kubernetes.io/revision-history": "2"
+                },
+                "creationTimestamp": "<TIME>",
+                "generation": 4,
+                "labels": {
+                    "app": "api",
+                    "pod-template-hash": "65bdd66d48"
+                },
+                "name": "api-65bdd66d48",
+                "namespace": "opv-rec",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "Deployment",
+                        "name": "api",
+                        "uid": "<UID_1>"
+                    }
+                ],
+                "resourceVersion": "<RV>",
+                "uid": "<UID_5>"
+            },
+            "spec": {
+                "replicas": 0,
+                "selector": {
+                    "matchLabels": {
+                        "app": "api",
+                        "pod-template-hash": "65bdd66d48"
+                    }
+                },
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "api",
+                            "pod-template-hash": "65bdd66d48"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "command": [
+                                    "sleep",
+                                    "infinity"
+                                ],
+                                "env": [
+                                    {
+                                        "name": "FLEET__API__DB_URL",
+                                        "valueFrom": {
+                                            "secretKeyRef": {
+                                                "key": "value",
+                                                "name": "opv-api--db-url-abcdefghij"
+                                            }
+                                        }
+                                    },
+                                    {
+                                        "name": "LOG_LEVEL",
+                                        "valueFrom": {
+                                            "configMapKeyRef": {
+                                                "key": "value",
+                                                "name": "opv-api--log-level-abcdefghij"
+                                            }
+                                        }
+                                    }
+                                ],
+                                "image": "ubuntu:24.04",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "api",
+                                "resources": {},
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/run/secrets/api",
+                                        "name": "opv-files-api",
+                                        "readOnly": true
+                                    }
+                                ]
+                            },
+                            {
+                                "command": [
+                                    "sleep",
+                                    "infinity"
+                                ],
+                                "image": "ubuntu:24.04",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "sidecar",
+                                "resources": {},
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File"
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "restartPolicy": "Always",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {
+                            "runAsGroup": 10001,
+                            "runAsUser": 10001
+                        },
+                        "terminationGracePeriodSeconds": 1,
+                        "volumes": [
+                            {
+                                "name": "opv-files-api",
+                                "projected": {
+                                    "defaultMode": 288,
+                                    "sources": [
+                                        {
+                                            "secret": {
+                                                "items": [
+                                                    {
+                                                        "key": "value",
+                                                        "mode": 288,
+                                                        "path": "github-app/private-key"
+                                                    }
+                                                ],
+                                                "name": "opv-api--private-key-abcdefghij",
+                                                "optional": false
+                                            }
+                                        },
+                                        {
+                                            "configMap": {
+                                                "items": [
+                                                    {
+                                                        "key": "value",
+                                                        "mode": 288,
+                                                        "path": "otel/resource"
+                                                    }
+                                                ],
+                                                "name": "opv-api--otel-resource-abcdefghij",
+                                                "optional": false
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "observedGeneration": 4,
+                "replicas": 0,
+                "terminatingReplicas": 0
+            }
+        },
+        {
+            "apiVersion": "apps/v1",
+            "kind": "ReplicaSet",
+            "metadata": {
+                "annotations": {
+                    "deployment.kubernetes.io/desired-replicas": "1",
+                    "deployment.kubernetes.io/max-replicas": "2",
+                    "deployment.kubernetes.io/revision": "10"
+                },
+                "creationTimestamp": "<TIME>",
+                "generation": 2,
+                "labels": {
+                    "app": "api",
+                    "pod-template-hash": "695ccd59ff"
+                },
+                "name": "api-695ccd59ff",
+                "namespace": "opv-rec",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "Deployment",
+                        "name": "api",
+                        "uid": "<UID_1>"
+                    }
+                ],
+                "resourceVersion": "<RV>",
+                "uid": "<UID_6>"
+            },
+            "spec": {
+                "replicas": 0,
+                "selector": {
+                    "matchLabels": {
+                        "app": "api",
+                        "pod-template-hash": "695ccd59ff"
+                    }
+                },
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "api",
+                            "pod-template-hash": "695ccd59ff"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "command": [
+                                    "sleep",
+                                    "infinity"
+                                ],
+                                "env": [
+                                    {
+                                        "name": "FLEET__API__DB_URL",
+                                        "valueFrom": {
+                                            "secretKeyRef": {
+                                                "key": "value",
+                                                "name": "opv-api--db-url-abcdefghij"
+                                            }
+                                        }
+                                    },
+                                    {
+                                        "name": "LOG_LEVEL",
+                                        "valueFrom": {
+                                            "configMapKeyRef": {
+                                                "key": "value",
+                                                "name": "opv-api--log-level-abcdefghij"
+                                            }
+                                        }
+                                    }
+                                ],
+                                "image": "ubuntu:24.04",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "api",
+                                "resources": {},
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/run/secrets/api",
+                                        "name": "opv-files-api",
+                                        "readOnly": true
+                                    }
+                                ]
+                            },
+                            {
+                                "command": [
+                                    "sleep",
+                                    "infinity"
+                                ],
+                                "image": "ubuntu:24.04",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "sidecar",
+                                "resources": {},
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File"
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "restartPolicy": "Always",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {
+                            "fsGroup": 20002,
+                            "runAsGroup": 10001,
+                            "runAsUser": 10001
+                        },
+                        "terminationGracePeriodSeconds": 1,
+                        "volumes": [
+                            {
+                                "name": "opv-files-api",
+                                "projected": {
+                                    "defaultMode": 288,
+                                    "sources": [
+                                        {
+                                            "secret": {
+                                                "items": [
+                                                    {
+                                                        "key": "value",
+                                                        "mode": 288,
+                                                        "path": "github-app/private-key"
+                                                    }
+                                                ],
+                                                "name": "opv-api--private-key-abcdefghij",
+                                                "optional": false
+                                            }
+                                        },
+                                        {
+                                            "configMap": {
+                                                "items": [
+                                                    {
+                                                        "key": "value",
+                                                        "mode": 288,
+                                                        "path": "otel/resource"
+                                                    }
+                                                ],
+                                                "name": "opv-api--otel-resource-abcdefghij",
+                                                "optional": false
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "observedGeneration": 2,
+                "replicas": 0,
+                "terminatingReplicas": 0
+            }
+        },
+        {
+            "apiVersion": "apps/v1",
+            "kind": "ReplicaSet",
+            "metadata": {
+                "annotations": {
+                    "deployment.kubernetes.io/desired-replicas": "1",
+                    "deployment.kubernetes.io/max-replicas": "2",
+                    "deployment.kubernetes.io/revision": "3"
+                },
+                "creationTimestamp": "<TIME>",
+                "generation": 2,
+                "labels": {
+                    "app": "api",
+                    "pod-template-hash": "6f585d7c8f"
+                },
+                "name": "api-6f585d7c8f",
+                "namespace": "opv-rec",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "Deployment",
+                        "name": "api",
+                        "uid": "<UID_1>"
+                    }
+                ],
+                "resourceVersion": "<RV>",
+                "uid": "<UID_7>"
+            },
+            "spec": {
+                "replicas": 0,
+                "selector": {
+                    "matchLabels": {
+                        "app": "api",
+                        "pod-template-hash": "6f585d7c8f"
+                    }
+                },
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "api",
+                            "pod-template-hash": "6f585d7c8f"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "command": [
+                                    "sleep",
+                                    "infinity"
+                                ],
+                                "env": [
+                                    {
+                                        "name": "FLEET__API__DB_URL",
+                                        "valueFrom": {
+                                            "secretKeyRef": {
+                                                "key": "value",
+                                                "name": "opv-api--db-url-abcdefghij"
+                                            }
+                                        }
+                                    },
+                                    {
+                                        "name": "LOG_LEVEL",
+                                        "valueFrom": {
+                                            "configMapKeyRef": {
+                                                "key": "value",
+                                                "name": "opv-api--log-level-abcdefghij"
+                                            }
+                                        }
+                                    }
+                                ],
+                                "image": "ubuntu:24.04",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "api",
+                                "resources": {},
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/run/secrets/api",
+                                        "name": "opv-files-api"
+                                    }
+                                ]
+                            },
+                            {
+                                "command": [
+                                    "sleep",
+                                    "infinity"
+                                ],
+                                "image": "ubuntu:24.04",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "sidecar",
+                                "resources": {},
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File"
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "restartPolicy": "Always",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {
+                            "runAsGroup": 10001,
+                            "runAsUser": 10001
+                        },
+                        "terminationGracePeriodSeconds": 1,
+                        "volumes": [
+                            {
+                                "name": "opv-files-api",
+                                "projected": {
+                                    "defaultMode": 420,
+                                    "sources": [
+                                        {
+                                            "secret": {
+                                                "items": [
+                                                    {
+                                                        "key": "value",
+                                                        "path": "github-app/private-key"
+                                                    }
+                                                ],
+                                                "name": "opv-api--private-key-abcdefghij"
+                                            }
+                                        },
+                                        {
+                                            "configMap": {
+                                                "items": [
+                                                    {
+                                                        "key": "value",
+                                                        "path": "otel/resource"
+                                                    }
+                                                ],
+                                                "name": "opv-api--otel-resource-abcdefghij"
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "observedGeneration": 2,
+                "replicas": 0,
+                "terminatingReplicas": 0
+            }
+        },
+        {
+            "apiVersion": "apps/v1",
+            "kind": "ReplicaSet",
+            "metadata": {
+                "annotations": {
+                    "deployment.kubernetes.io/desired-replicas": "1",
+                    "deployment.kubernetes.io/max-replicas": "2",
+                    "deployment.kubernetes.io/revision": "15"
+                },
+                "creationTimestamp": "<TIME>",
+                "generation": 2,
+                "labels": {
+                    "app": "api",
+                    "pod-template-hash": "75767cbbb6"
+                },
+                "name": "api-75767cbbb6",
+                "namespace": "opv-rec",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "Deployment",
+                        "name": "api",
+                        "uid": "<UID_1>"
+                    }
+                ],
+                "resourceVersion": "<RV>",
+                "uid": "<UID_8>"
+            },
+            "spec": {
+                "replicas": 0,
+                "selector": {
+                    "matchLabels": {
+                        "app": "api",
+                        "pod-template-hash": "75767cbbb6"
+                    }
+                },
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "api",
+                            "pod-template-hash": "75767cbbb6"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "command": [
+                                    "sleep",
+                                    "infinity"
+                                ],
+                                "env": [
+                                    {
+                                        "name": "FLEET__API__DB_URL",
+                                        "valueFrom": {
+                                            "secretKeyRef": {
+                                                "key": "value",
+                                                "name": "opv-api--db-url-abcdefghij"
+                                            }
+                                        }
+                                    },
+                                    {
+                                        "name": "LOG_LEVEL",
+                                        "valueFrom": {
+                                            "configMapKeyRef": {
+                                                "key": "value",
+                                                "name": "opv-api--log-level-abcdefghij"
+                                            }
+                                        }
+                                    }
+                                ],
+                                "image": "ubuntu:24.04",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "api",
+                                "resources": {},
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/run/secrets/api",
+                                        "name": "opv-files-api",
+                                        "readOnly": true
+                                    }
+                                ]
+                            },
+                            {
+                                "command": [
+                                    "sleep",
+                                    "infinity"
+                                ],
+                                "image": "ubuntu:24.04",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "sidecar",
+                                "resources": {},
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File"
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "restartPolicy": "Always",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {
+                            "fsGroup": 10001,
+                            "runAsGroup": 10001,
+                            "runAsUser": 10001
+                        },
+                        "terminationGracePeriodSeconds": 1,
+                        "volumes": [
+                            {
+                                "name": "opv-files-api",
+                                "projected": {
+                                    "defaultMode": 288,
+                                    "sources": [
+                                        {
+                                            "secret": {
+                                                "items": [
+                                                    {
+                                                        "key": "value",
+                                                        "mode": 288,
+                                                        "path": "github-app/private-key"
+                                                    }
+                                                ],
+                                                "name": "opv-missing",
+                                                "optional": false
+                                            }
+                                        },
+                                        {
+                                            "configMap": {
+                                                "items": [
+                                                    {
+                                                        "key": "value",
+                                                        "mode": 288,
+                                                        "path": "otel/resource"
+                                                    }
+                                                ],
+                                                "name": "opv-api--otel-resource-abcdefghij",
+                                                "optional": false
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "observedGeneration": 2,
+                "replicas": 0,
+                "terminatingReplicas": 0
+            }
+        },
+        {
+            "apiVersion": "apps/v1",
+            "kind": "ReplicaSet",
+            "metadata": {
+                "annotations": {
+                    "deployment.kubernetes.io/desired-replicas": "1",
+                    "deployment.kubernetes.io/max-replicas": "2",
+                    "deployment.kubernetes.io/revision": "6"
+                },
+                "creationTimestamp": "<TIME>",
+                "generation": 2,
+                "labels": {
+                    "app": "api",
+                    "pod-template-hash": "7646f4c857"
+                },
+                "name": "api-7646f4c857",
+                "namespace": "opv-rec",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "Deployment",
+                        "name": "api",
+                        "uid": "<UID_1>"
+                    }
+                ],
+                "resourceVersion": "<RV>",
+                "uid": "<UID_9>"
+            },
+            "spec": {
+                "replicas": 0,
+                "selector": {
+                    "matchLabels": {
+                        "app": "api",
+                        "pod-template-hash": "7646f4c857"
+                    }
+                },
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "api",
+                            "pod-template-hash": "7646f4c857"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "command": [
+                                    "sleep",
+                                    "infinity"
+                                ],
+                                "env": [
+                                    {
+                                        "name": "FLEET__API__DB_URL",
+                                        "valueFrom": {
+                                            "secretKeyRef": {
+                                                "key": "value",
+                                                "name": "opv-api--db-url-abcdefghij"
+                                            }
+                                        }
+                                    },
+                                    {
+                                        "name": "LOG_LEVEL",
+                                        "valueFrom": {
+                                            "configMapKeyRef": {
+                                                "key": "value",
+                                                "name": "opv-api--log-level-abcdefghij"
+                                            }
+                                        }
+                                    }
+                                ],
+                                "image": "ubuntu:24.04",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "api",
+                                "resources": {},
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/run/secrets/api",
+                                        "name": "opv-files-api",
+                                        "readOnly": true
+                                    }
+                                ]
+                            },
+                            {
+                                "command": [
+                                    "sleep",
+                                    "infinity"
+                                ],
+                                "image": "ubuntu:24.04",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "sidecar",
+                                "resources": {},
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File"
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "restartPolicy": "Always",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {
+                            "runAsUser": 0
+                        },
+                        "terminationGracePeriodSeconds": 1,
+                        "volumes": [
+                            {
+                                "name": "opv-files-api",
+                                "projected": {
+                                    "defaultMode": 288,
+                                    "sources": [
+                                        {
+                                            "secret": {
+                                                "items": [
+                                                    {
+                                                        "key": "value",
+                                                        "mode": 288,
+                                                        "path": "github-app/private-key"
+                                                    }
+                                                ],
+                                                "name": "opv-api--private-key-abcdefghij",
+                                                "optional": false
+                                            }
+                                        },
+                                        {
+                                            "configMap": {
+                                                "items": [
+                                                    {
+                                                        "key": "value",
+                                                        "mode": 288,
+                                                        "path": "otel/resource"
+                                                    }
+                                                ],
+                                                "name": "opv-api--otel-resource-abcdefghij",
+                                                "optional": false
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "observedGeneration": 2,
+                "replicas": 0,
+                "terminatingReplicas": 0
+            }
+        },
+        {
+            "apiVersion": "apps/v1",
+            "kind": "ReplicaSet",
+            "metadata": {
+                "annotations": {
+                    "deployment.kubernetes.io/desired-replicas": "1",
+                    "deployment.kubernetes.io/max-replicas": "2",
+                    "deployment.kubernetes.io/revision": "16",
+                    "deployment.kubernetes.io/revision-history": "5,8,12,14"
+                },
+                "creationTimestamp": "<TIME>",
+                "generation": 6,
+                "labels": {
+                    "app": "api",
+                    "pod-template-hash": "7d87cb47bc"
+                },
+                "name": "api-7d87cb47bc",
+                "namespace": "opv-rec",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "Deployment",
+                        "name": "api",
+                        "uid": "<UID_1>"
+                    }
+                ],
+                "resourceVersion": "<RV>",
+                "uid": "<UID_10>"
+            },
+            "spec": {
+                "replicas": 0,
+                "selector": {
+                    "matchLabels": {
+                        "app": "api",
+                        "pod-template-hash": "7d87cb47bc"
+                    }
+                },
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "api",
+                            "pod-template-hash": "7d87cb47bc"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "command": [
+                                    "sleep",
+                                    "infinity"
+                                ],
+                                "env": [
+                                    {
+                                        "name": "FLEET__API__DB_URL",
+                                        "valueFrom": {
+                                            "secretKeyRef": {
+                                                "key": "value",
+                                                "name": "opv-api--db-url-abcdefghij"
+                                            }
+                                        }
+                                    },
+                                    {
+                                        "name": "LOG_LEVEL",
+                                        "valueFrom": {
+                                            "configMapKeyRef": {
+                                                "key": "value",
+                                                "name": "opv-api--log-level-abcdefghij"
+                                            }
+                                        }
+                                    }
+                                ],
+                                "image": "ubuntu:24.04",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "api",
+                                "resources": {},
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/run/secrets/api",
+                                        "name": "opv-files-api",
+                                        "readOnly": true
+                                    }
+                                ]
+                            },
+                            {
+                                "command": [
+                                    "sleep",
+                                    "infinity"
+                                ],
+                                "image": "ubuntu:24.04",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "sidecar",
+                                "resources": {},
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File"
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "restartPolicy": "Always",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {
+                            "fsGroup": 10001,
+                            "runAsGroup": 10001,
+                            "runAsUser": 10001
+                        },
+                        "terminationGracePeriodSeconds": 1,
+                        "volumes": [
+                            {
+                                "name": "opv-files-api",
+                                "projected": {
+                                    "defaultMode": 288,
+                                    "sources": [
+                                        {
+                                            "secret": {
+                                                "items": [
+                                                    {
+                                                        "key": "value",
+                                                        "mode": 288,
+                                                        "path": "github-app/private-key"
+                                                    }
+                                                ],
+                                                "name": "opv-api--private-key-abcdefghij",
+                                                "optional": false
+                                            }
+                                        },
+                                        {
+                                            "configMap": {
+                                                "items": [
+                                                    {
+                                                        "key": "value",
+                                                        "mode": 288,
+                                                        "path": "otel/resource"
+                                                    }
+                                                ],
+                                                "name": "opv-api--otel-resource-abcdefghij",
+                                                "optional": false
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "observedGeneration": 6,
+                "replicas": 0,
+                "terminatingReplicas": 1
+            }
+        },
+        {
+            "apiVersion": "apps/v1",
+            "kind": "ReplicaSet",
+            "metadata": {
+                "annotations": {
+                    "deployment.kubernetes.io/desired-replicas": "1",
+                    "deployment.kubernetes.io/max-replicas": "2",
+                    "deployment.kubernetes.io/revision": "17"
+                },
+                "creationTimestamp": "<TIME>",
+                "generation": 1,
+                "labels": {
+                    "app": "api",
+                    "pod-template-hash": "94cbc6755"
+                },
+                "name": "api-94cbc6755",
+                "namespace": "opv-rec",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "Deployment",
+                        "name": "api",
+                        "uid": "<UID_1>"
+                    }
+                ],
+                "resourceVersion": "<RV>",
+                "uid": "<UID_11>"
+            },
+            "spec": {
+                "replicas": 1,
+                "selector": {
+                    "matchLabels": {
+                        "app": "api",
+                        "pod-template-hash": "94cbc6755"
+                    }
+                },
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "api",
+                            "pod-template-hash": "94cbc6755"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "command": [
+                                    "sleep",
+                                    "infinity"
+                                ],
+                                "env": [
+                                    {
+                                        "name": "FLEET__API__DB_URL",
+                                        "valueFrom": {
+                                            "secretKeyRef": {
+                                                "key": "value",
+                                                "name": "opv-api--db-url-abcdefghij"
+                                            }
+                                        }
+                                    },
+                                    {
+                                        "name": "LOG_LEVEL",
+                                        "valueFrom": {
+                                            "configMapKeyRef": {
+                                                "key": "value",
+                                                "name": "opv-api--log-level-klmnopqrst"
+                                            }
+                                        }
+                                    }
+                                ],
+                                "image": "ubuntu:24.04",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "api",
+                                "resources": {},
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/run/secrets/api",
+                                        "name": "opv-files-api",
+                                        "readOnly": true
+                                    }
+                                ]
+                            },
+                            {
+                                "command": [
+                                    "sleep",
+                                    "infinity"
+                                ],
+                                "image": "ubuntu:24.04",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "sidecar",
+                                "resources": {},
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File"
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "restartPolicy": "Always",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {
+                            "fsGroup": 10001,
+                            "runAsGroup": 10001,
+                            "runAsUser": 10001
+                        },
+                        "terminationGracePeriodSeconds": 1,
+                        "volumes": [
+                            {
+                                "name": "opv-files-api",
+                                "projected": {
+                                    "defaultMode": 288,
+                                    "sources": [
+                                        {
+                                            "secret": {
+                                                "items": [
+                                                    {
+                                                        "key": "value",
+                                                        "mode": 288,
+                                                        "path": "github-app/private-key"
+                                                    }
+                                                ],
+                                                "name": "opv-api--private-key-klmnopqrst",
+                                                "optional": false
+                                            }
+                                        },
+                                        {
+                                            "configMap": {
+                                                "items": [
+                                                    {
+                                                        "key": "value",
+                                                        "mode": 288,
+                                                        "path": "otel/resource"
+                                                    }
+                                                ],
+                                                "name": "opv-api--otel-resource-abcdefghij",
+                                                "optional": false
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "availableReplicas": 1,
+                "fullyLabeledReplicas": 1,
+                "observedGeneration": 1,
+                "readyReplicas": 1,
+                "replicas": 1,
+                "terminatingReplicas": 0
+            }
+        },
+        {
+            "apiVersion": "apps/v1",
+            "kind": "ReplicaSet",
+            "metadata": {
+                "annotations": {
+                    "deployment.kubernetes.io/desired-replicas": "1",
+                    "deployment.kubernetes.io/max-replicas": "2",
+                    "deployment.kubernetes.io/revision": "9",
+                    "deployment.kubernetes.io/revision-history": "7"
+                },
+                "creationTimestamp": "<TIME>",
+                "generation": 4,
+                "labels": {
+                    "app": "api",
+                    "pod-template-hash": "b6b86d7df"
+                },
+                "name": "api-b6b86d7df",
+                "namespace": "opv-rec",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "Deployment",
+                        "name": "api",
+                        "uid": "<UID_1>"
+                    }
+                ],
+                "resourceVersion": "<RV>",
+                "uid": "<UID_12>"
+            },
+            "spec": {
+                "replicas": 0,
+                "selector": {
+                    "matchLabels": {
+                        "app": "api",
+                        "pod-template-hash": "b6b86d7df"
+                    }
+                },
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "api",
+                            "pod-template-hash": "b6b86d7df"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "command": [
+                                    "sleep",
+                                    "infinity"
+                                ],
+                                "env": [
+                                    {
+                                        "name": "FLEET__API__DB_URL",
+                                        "valueFrom": {
+                                            "secretKeyRef": {
+                                                "key": "value",
+                                                "name": "opv-api--db-url-abcdefghij"
+                                            }
+                                        }
+                                    },
+                                    {
+                                        "name": "LOG_LEVEL",
+                                        "valueFrom": {
+                                            "configMapKeyRef": {
+                                                "key": "value",
+                                                "name": "opv-api--log-level-abcdefghij"
+                                            }
+                                        }
+                                    }
+                                ],
+                                "image": "ubuntu:24.04",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "api",
+                                "resources": {},
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/run/secrets/api",
+                                        "name": "opv-files-api",
+                                        "readOnly": true
+                                    }
+                                ]
+                            },
+                            {
+                                "command": [
+                                    "sleep",
+                                    "infinity"
+                                ],
+                                "image": "ubuntu:24.04",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "sidecar",
+                                "resources": {},
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File"
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "restartPolicy": "Always",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {
+                            "runAsUser": 10001
+                        },
+                        "terminationGracePeriodSeconds": 1,
+                        "volumes": [
+                            {
+                                "name": "opv-files-api",
+                                "projected": {
+                                    "defaultMode": 288,
+                                    "sources": [
+                                        {
+                                            "secret": {
+                                                "items": [
+                                                    {
+                                                        "key": "value",
+                                                        "mode": 288,
+                                                        "path": "github-app/private-key"
+                                                    }
+                                                ],
+                                                "name": "opv-api--private-key-abcdefghij",
+                                                "optional": false
+                                            }
+                                        },
+                                        {
+                                            "configMap": {
+                                                "items": [
+                                                    {
+                                                        "key": "value",
+                                                        "mode": 288,
+                                                        "path": "otel/resource"
+                                                    }
+                                                ],
+                                                "name": "opv-api--otel-resource-abcdefghij",
+                                                "optional": false
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "observedGeneration": 4,
+                "replicas": 0,
+                "terminatingReplicas": 0
+            }
+        }
+    ],
+    "kind": "List",
+    "metadata": {
+        "resourceVersion": ""
+    }
+}

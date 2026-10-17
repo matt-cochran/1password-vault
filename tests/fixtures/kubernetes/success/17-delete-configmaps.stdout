@@ -1,0 +1,2 @@
+configmap "opv-api--otel-resource-klmnopqrst" deleted from opv-rec namespace
+configmap "opv-api--otel-resource-uvwxyz2345" deleted from opv-rec namespace
