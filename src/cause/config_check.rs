@@ -73,6 +73,9 @@ pub enum ConfigCheck {
         env: String,
         target: String,
     },
+    /// A key with `file` under a target whose `config = "env"` delivers config as
+    /// environment variables: only a config object (a ConfigMap) can carry a file.
+    ConfigFileNeedsObject { key: String },
     /// A target with no provider section.
     NoProvider { known: Vec<String> },
     /// A store with no kind.
@@ -208,6 +211,10 @@ impl ConfigCheck {
             } => format!(
                 "lists environment {env}, which has deployment target {target}; remote profile \
                  {profile} may only name environments with no deployment target"
+            ),
+            ConfigFileNeedsObject { key } => format!(
+                "is \"env\", but key {key} sets file; a config key with a file needs config = \
+                 \"configmap\""
             ),
             NoProvider { known } => {
                 format!("names no provider (one of {})", list(known))
@@ -412,6 +419,7 @@ impl ConfigCheck {
             RemoteEnvironmentHasTarget { env, target, .. } => format!(
                 "remove {env} from {field}, or remove target {target} from environment {env}"
             ),
+            ConfigFileNeedsObject { .. } => "set config = \"configmap\"".to_string(),
             NoProvider { known } => {
                 format!("add one provider section ({}) under [{field}]", list(known))
             }

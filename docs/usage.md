@@ -774,6 +774,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `handoff_refused` | 6 | after_fix | no | another process connected to opv's private hand-off pipe; opv refused it and sent nothing |
 | `keys_blocking` | 6 | after_fix | yes | a write refused: keys are missing or failing a rule; nothing was written |
 | `local_io_failed` | 6 | after_fix | no | opv's own local input or output failed (a file, the current folder, standard output, ...) |
+| `mount_unreadable` | 6 | after_fix | no | the workload that would mount opv's secrets cannot read them; the fix is in its own manifest |
 | `plan_unknown` | 6 | never | no | no plan has this id |
 | `policy_refused` | 6 | never | no | opv refused the operation (a value too large, a name opv does not manage, a credential given as an option, ...) |
 | `private_dir_failed` | 6 | after_fix | no | opv could not make its private folder |

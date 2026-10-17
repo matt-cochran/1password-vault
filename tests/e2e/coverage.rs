@@ -77,6 +77,10 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "TargetDrift",
         "drift needs a pinned store opv-sim does not model (Azure Key Vault/ESO)",
     ),
+    // Built by the Kubernetes and Swarm preflights (src/adapters/kubernetes/diagnose.rs,
+    // §8.8). No committed scenario drives a workload the mounted secrets are unreadable to;
+    // K5/K6 wire it.
+    ("MountUnreadable", "K5/K6 wire it"),
     // A result, not a failure: `opv changed` reports it as `ok: true` with exit 10 in its
     // own document (src/app/changed.rs), never as an error, so no error snapshot exists.
     (

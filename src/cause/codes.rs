@@ -161,6 +161,9 @@ pub fn meaning(code: &str) -> &'static str {
         "update_refused" => {
             "the target refused the update and applied nothing; re-running repeats the refusal"
         }
+        "mount_unreadable" => {
+            "the workload that would mount opv's secrets cannot read them; the fix is in its own manifest"
+        }
         "declined" => "the person declined at opv's prompt; nothing was changed",
         "policy_refused" => {
             "opv refused the operation (a value too large, a name opv does not manage, a credential given as an option, ...)"
@@ -609,6 +612,14 @@ fn one_of_each() -> Vec<Cause> {
                 asked: "mode-x".into(),
                 allowed: vec!["mode-a".into(), "mode-b".into()],
             },
+        },
+        MountUnreadable {
+            workload: "api".into(),
+            container: "api".into(),
+            run_as: Some(10001),
+            why: MountWhy::NoFsGroup,
+            env: EnvName::new("env-prod"),
+            target: TargetName::new("tgt-web"),
         },
         CreateOutcomeUnknown {
             system: System::OnePassword,

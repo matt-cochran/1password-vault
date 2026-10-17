@@ -832,6 +832,17 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             vec!["env-dev", "prod-api/MY_TOKEN", "title-xyz"],
         ),
         (Bug { site: "site-xyz" }, vec!["site-xyz"]),
+        (
+            MountUnreadable {
+                workload: "work-xyz".into(),
+                container: "cont-xyz".into(),
+                run_as: Some(10001),
+                why: MountWhy::NoFsGroup,
+                env: EnvName::new("env-dev"),
+                target: TargetName::new("tgt-web"),
+            },
+            vec!["work-xyz", "cont-xyz", "10001"],
+        ),
     ]
 }
 
@@ -916,10 +927,11 @@ fn ordinal(c: &Cause) -> usize {
         TitleLookup { .. } => 72,
         PersonalNotSetUp { .. } => 73,
         TargetDrift { .. } => 75,
+        MountUnreadable { .. } => 76,
     }
 }
 
-const VARIANTS: usize = 76;
+const VARIANTS: usize = 77;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
@@ -1730,6 +1742,199 @@ fn a_target_name_rule_reads_as_plain_words() {
         PatternId::TargetName.words(),
         "lower-case letters, digits and -, starting with a letter"
     );
+}
+
+fn mount_unreadable() -> Cause {
+    Cause::MountUnreadable {
+        workload: "work-xyz".into(),
+        container: "cont-xyz".into(),
+        run_as: Some(10001),
+        why: MountWhy::NoFsGroup,
+        env: EnvName::new("env-dev"),
+        target: TargetName::new("tgt-web"),
+    }
+}
+
+fn mount_path_in_use() -> Cause {
+    Cause::Guard {
+        guard: Guard::MountPathInUse {
+            workload: "work-xyz".into(),
+            container: "cont-xyz".into(),
+            path: "/run/secrets/prod-api".into(),
+            volume: "foreign-vol".into(),
+            env: EnvName::new("env-prod"),
+            target: TargetName::new("tgt-web"),
+        },
+    }
+}
+
+fn config_file_needs_object() -> Cause {
+    Cause::ConfigInvalid {
+        source: file_source(),
+        at: None,
+        field: DottedPath(vec![
+            "environments".into(),
+            "prod".into(),
+            "targets".into(),
+            "web".into(),
+            "kubernetes".into(),
+            "config".into(),
+        ]),
+        rule: FieldRule::Check {
+            check: ConfigCheck::ConfigFileNeedsObject {
+                key: "TLS_CERT".into(),
+            },
+        },
+    }
+}
+
+fn container_path_rule() -> Cause {
+    Cause::ConfigInvalid {
+        source: file_source(),
+        at: None,
+        field: DottedPath(vec![
+            "environments".into(),
+            "prod".into(),
+            "targets".into(),
+            "web".into(),
+            "secrets_dir".into(),
+        ]),
+        rule: FieldRule::Pattern {
+            id: PatternId::ContainerPath,
+        },
+    }
+}
+
+#[test]
+fn a_mount_unreadable_has_its_own_code() {
+    assert_eq!(mount_unreadable().code(), "mount_unreadable");
+}
+
+#[test]
+fn a_mount_unreadable_exits_6() {
+    assert_eq!(mount_unreadable().exit_code(), 6);
+}
+
+#[test]
+fn a_mount_unreadable_retries_after_the_fix() {
+    assert_eq!(mount_unreadable().retry(), RetryClass::AfterFix);
+}
+
+#[test]
+fn a_mount_unreadable_names_the_workload_container_and_user() {
+    let m = mount_unreadable().message();
+    assert!(
+        m.contains("work-xyz") && m.contains("cont-xyz") && m.contains("10001"),
+        "{m}"
+    );
+}
+
+#[test]
+fn a_mount_unreadable_documents_its_code() {
+    let d = document(&mount_unreadable(), None, &inv(), false);
+    assert_eq!(d["code"], serde_json::json!("mount_unreadable"));
+}
+
+#[test]
+fn a_mount_path_in_use_is_a_policy_refusal() {
+    assert_eq!(mount_path_in_use().code(), "policy_refused");
+}
+
+#[test]
+fn a_mount_path_in_use_exits_6() {
+    assert_eq!(mount_path_in_use().exit_code(), 6);
+}
+
+#[test]
+fn a_mount_path_in_use_never_retries() {
+    assert_eq!(mount_path_in_use().retry(), RetryClass::Never);
+}
+
+#[test]
+fn a_mount_path_in_use_names_the_workload_path_and_volume() {
+    let m = mount_path_in_use().message();
+    assert!(
+        m.contains("work-xyz") && m.contains("/run/secrets/prod-api") && m.contains("foreign-vol"),
+        "{m}"
+    );
+}
+
+#[test]
+fn a_mount_path_in_use_documents_its_code() {
+    let d = document(&mount_path_in_use(), None, &inv(), false);
+    assert_eq!(d["code"], serde_json::json!("policy_refused"));
+}
+
+#[test]
+fn a_config_file_needs_object_is_config_invalid() {
+    assert_eq!(config_file_needs_object().code(), "config_invalid");
+}
+
+#[test]
+fn a_config_file_needs_object_exits_2() {
+    assert_eq!(config_file_needs_object().exit_code(), 2);
+}
+
+#[test]
+fn a_config_file_needs_object_retries_after_the_fix() {
+    assert_eq!(config_file_needs_object().retry(), RetryClass::AfterFix);
+}
+
+#[test]
+fn a_config_file_needs_object_names_the_key() {
+    assert!(config_file_needs_object().message().contains("TLS_CERT"));
+}
+
+#[test]
+fn a_config_file_needs_object_asks_for_a_configmap() {
+    let d = config_file_needs_object()
+        .do_text(&inv())
+        .unwrap_or_default();
+    assert!(d.contains("set config = \"configmap\""), "{d}");
+}
+
+#[test]
+fn a_config_file_needs_object_documents_its_code() {
+    let d = document(&config_file_needs_object(), None, &inv(), false);
+    assert_eq!(d["code"], serde_json::json!("config_invalid"));
+}
+
+#[test]
+fn a_container_path_rule_is_config_invalid() {
+    assert_eq!(container_path_rule().code(), "config_invalid");
+}
+
+#[test]
+fn a_container_path_rule_exits_2() {
+    assert_eq!(container_path_rule().exit_code(), 2);
+}
+
+#[test]
+fn a_container_path_rule_retries_after_the_fix() {
+    assert_eq!(container_path_rule().retry(), RetryClass::AfterFix);
+}
+
+#[test]
+fn a_container_path_rule_reads_as_plain_words() {
+    assert_eq!(
+        PatternId::ContainerPath.words(),
+        "an absolute path such as /run/secrets/{product}"
+    );
+}
+
+#[test]
+fn a_container_path_rule_asks_for_an_absolute_path() {
+    let d = container_path_rule().do_text(&inv()).unwrap_or_default();
+    assert!(
+        d.contains("use an absolute path such as /run/secrets/{product}"),
+        "{d}"
+    );
+}
+
+#[test]
+fn a_container_path_rule_documents_its_code() {
+    let d = document(&container_path_rule(), None, &inv(), false);
+    assert_eq!(d["code"], serde_json::json!("config_invalid"));
 }
 
 fn missing_op(platform: Platform, ci: bool) -> Cause {

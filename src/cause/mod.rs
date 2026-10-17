@@ -584,6 +584,17 @@ pub enum Cause {
     Guard {
         guard: Guard,
     },
+    /// A mounted secrets volume the workload cannot read, or whose readability is unknown
+    /// (delivery-transports §6.6): the fix is in the person's own manifest, so it has its
+    /// own code. Raised by the Kubernetes and Swarm preflights (K5/K6, §8.8).
+    MountUnreadable {
+        workload: String,
+        container: String,
+        run_as: Option<u32>,
+        why: MountWhy,
+        env: EnvName,
+        target: TargetName,
+    },
 
     // §4.6 outcomes, availability, budgets
     CreateOutcomeUnknown {
@@ -1178,6 +1189,16 @@ pub enum LocalOp {
     RandomSource,
 }
 
+/// Why a mounted secrets volume would be unreadable or is of unknown readability
+/// (delivery-transports §6.6): the workload sets no `fsGroup`, or its effective group is
+/// unknown. Shared by the Kubernetes and Swarm preflights.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MountWhy {
+    NoFsGroup,
+    RunAsUnknown,
+}
+
 /// opv's own refusals that are not person-only steps (§4.5).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "guard", rename_all = "snake_case")]
@@ -1210,6 +1231,16 @@ pub enum Guard {
         profile: ProfileName,
         asked: String,
         allowed: Vec<String>,
+    },
+    /// The `secrets_dir` path, or a parent or child of it, is already a volume of the
+    /// workload (delivery-transports §6.4): opv's secrets volume cannot go there.
+    MountPathInUse {
+        workload: String,
+        container: String,
+        path: String,
+        volume: String,
+        env: EnvName,
+        target: TargetName,
     },
     Declined,
 }
@@ -1421,6 +1452,7 @@ impl Cause {
                 self::Guard::Declined => "declined",
                 _ => "policy_refused",
             },
+            MountUnreadable { .. } => "mount_unreadable",
             CreateOutcomeUnknown { .. } => "create_outcome_unknown",
             WriteOutcomeUnknown { .. } => "outcome_unknown",
             Unavailable { .. } => "provider_unavailable",
@@ -1535,6 +1567,7 @@ impl Cause {
                 guard: self::Guard::Declined,
             } => 0,
             Guard { .. }
+            | MountUnreadable { .. }
             | NeedsTerminal { .. }
             | NeedsConfirm { .. }
             | ConfirmMismatch { .. }
