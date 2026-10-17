@@ -555,6 +555,7 @@ fn end_to_end() -> (tempfile::TempDir, PathBuf, FakeOp, Result<Applied, Error>) 
         provider: Some("fly".into()),
         fields: [("fly-app".to_string(), "myapp-billing-prod".to_string())].into(),
         products: vec!["billing".into()],
+        roles: vec![],
     };
     super::super::declare::target(&op, &path, &target).unwrap();
     let id = plan_of(&path, &op).plan_id;

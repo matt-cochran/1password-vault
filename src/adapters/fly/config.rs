@@ -198,16 +198,20 @@ impl Provider for FlyProvider {
         let template = values
             .get("secret_name")
             .map_or(FLEET_TEMPLATE, String::as_str);
-        let lines = [
+        let mut lines = vec![
             ("app", values.get("app")?.as_str()),
             ("secret_name", template),
         ];
+        if let Some(config) = values.get("config") {
+            lines.push(("config", config.as_str()));
+        }
         Some(init_lines("fly", lines))
     }
 }
 
-/// `opv target add` options of the Fly provider (H3): `--fly-app` and `--fly-secret-name`.
-static INIT_FIELDS: [InitField; 2] = [
+/// `opv target add` options of the Fly provider (H3): `--fly-app`, `--fly-secret-name` and
+/// `--fly-config`.
+static INIT_FIELDS: [InitField; 3] = [
     InitField {
         field: "app",
         help: "Fly app of the environment (not looked up; flyctl is not called)",
@@ -216,6 +220,11 @@ static INIT_FIELDS: [InitField; 2] = [
     InitField {
         field: "secret_name",
         help: "Fly secret name template (default FLEET__{PRODUCT}__{KEY}; {KEY} for bare names)",
+        required: false,
+    },
+    InitField {
+        field: "config",
+        help: "Where config keys go: secrets or none (optional)",
         required: false,
     },
 ];

@@ -18,6 +18,7 @@ pub const MCP_TOOLS: &[(&str, &str)] = &[
     ("opv_configuration", "config describe"),
     ("opv_access", "access"),
     ("opv_deployment_plan", "plan"),
+    ("opv_changed", "changed"),
     ("opv_declare_key", "add"),
     ("opv_declare_environment", "env add"),
     ("opv_declare_target", "target add"),

@@ -1175,6 +1175,62 @@ mod cases {
         )
         .mcp("opv_access", json!({}))
     }
+
+    // 0.11.0 MCP parity: `opv_changed` and the target options of `opv_declare_target`.
+
+    /// `opv changed` of an undeclared environment: the same refusal over MCP.
+    pub fn changed_not_declared() -> Case {
+        case(Scenario::new(), &["changed", "nope"])
+            .mcp("opv_changed", json!({"environment": "nope"}))
+    }
+
+    /// `op item list` answered as signed out (recording 07): the same sign-in refusal over
+    /// MCP, naming the same `opv changed` re-run.
+    pub fn changed_signed_out() -> Case {
+        case(
+            Scenario::new().faults(&fault("op", "item list", "signed_out")),
+            &["changed", "prod"],
+        )
+        .mcp("opv_changed", json!({"environment": "prod"}))
+    }
+
+    /// A relative `kubernetes.secrets_dir`: refused by the loader before anything is written,
+    /// over MCP as on the command line.
+    pub fn declare_target_secrets_dir_invalid() -> Case {
+        case(
+            Scenario::new(),
+            &[
+                "target",
+                "add",
+                "prod",
+                "cluster",
+                "--kubernetes-context",
+                "e2e-cluster",
+                "--kubernetes-deployment",
+                "e2e-app",
+                "--kubernetes-namespace",
+                "e2e-prod",
+                "--kubernetes-secrets-dir",
+                "run/secrets",
+                "--role",
+                "serve",
+            ],
+        )
+        .mcp(
+            "opv_declare_target",
+            json!({
+                "environment": "prod",
+                "target": "cluster",
+                "options": {
+                    "kubernetes-context": "e2e-cluster",
+                    "kubernetes-namespace": "e2e-prod",
+                    "kubernetes-deployment": "e2e-app",
+                    "kubernetes-secrets-dir": "run/secrets",
+                },
+                "roles": ["serve"],
+            }),
+        )
+    }
 }
 
 /// A scenario whose command has no `--json`: its variant is the one declared, pinned by the
@@ -1572,6 +1628,9 @@ scenarios! {
         concurrent_edit => ConcurrentEdit,
         in_no_account_on_the_machine => InOtherAccount,
         signed_out_access => NotSignedIn,
+        changed_not_declared => NotDeclared,
+        changed_signed_out => NotSignedIn,
+        declare_target_secrets_dir_invalid => ConfigInvalid,
     ],
     text: [
         copies_differ => CopiesDiffer,
@@ -1612,6 +1671,9 @@ scenarios! {
         owner_setup_required,
         signed_out_access,
         manifest_not_found,
+        changed_not_declared,
+        changed_signed_out,
+        declare_target_secrets_dir_invalid,
     ],
 }
 
