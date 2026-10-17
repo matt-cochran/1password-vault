@@ -141,6 +141,17 @@ pub fn document(e: &Error, inv: &Invocation, verbose: bool) -> serde_json::Value
     crate::cause::render::document(cause, upstream, inv, verbose)
 }
 
+/// The top-level keys of the `error` object for one cause, under `inv`, in order: what
+/// `opv schema` publishes as `documents.error`, generated so it cannot drift from the object.
+pub(crate) fn document_keys(cause: &Cause, inv: &Invocation) -> Vec<String> {
+    document(&Error::from(cause.clone()), inv, false)
+        .as_object()
+        .expect("the error document is an object")
+        .keys()
+        .cloned()
+        .collect()
+}
+
 /// `a` as one word of a `Next:` command, quoted only when the shell would split or expand
 /// it, so the command still runs as typed. Unix shells: single quotes. Windows: `\` and
 /// `~` need no quoting (neither cmd.exe nor PowerShell treats them specially inside a
