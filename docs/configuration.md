@@ -28,7 +28,7 @@ The configuration can live in 1Password as a **project manifest**: one Secure No
 
 ```sh
 opv config import --vault myapp-dev                     # validates ./secrets.toml, creates the manifest
-OPV_PROJECT=myapp opv config check --file secrets.toml  # identical? exit 0; else exit 8 with a diff
+OPV_PROJECT=myapp opv config check --file secrets.toml  # identical? exit 0; else exit 2 with a diff
 git rm secrets.toml                                     # opv never deletes it for you
 ```
 
@@ -38,7 +38,7 @@ git rm secrets.toml                                     # opv never deletes it f
 
 - `opv config export` prints the configuration as TOML (byte for byte as stored); `--json` as JSON. `opv config export <env> --json` still prints that environment's config-kind values.
 - `opv config edit` opens `$VISUAL` or `$EDITOR` (default `vi`) on a temporary copy (mode 0600, removed afterwards), validates it, shows the diff and asks once. It saves only when nobody changed the configuration since it was opened; otherwise it refuses and re-opens on the new version. It works on a `secrets.toml` too.
-- `opv config check --file <path>` compares a committed copy with the manifest: exit 8 with a diff when they differ. Teams that want pull-request review keep a copy and run it in CI; 1Password's item history records every change either way.
+- `opv config check --file <path>` compares a committed copy with the manifest: exit 2 with a diff when they differ. Teams that want pull-request review keep a copy and run it in CI; 1Password's item history records every change either way.
 
 ## The `secrets.toml` schema
 

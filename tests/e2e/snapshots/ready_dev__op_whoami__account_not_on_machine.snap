@@ -2,21 +2,20 @@
 
 ## text exit: 0
 ## text stdout
-ready: 1 blocking · 2 findings · receipt rcpt-<id>
+ready: 2 blocking · 2 findings · receipt rcpt-<id>
 PRODUCT  Local development
-shared   2/2
-web      8/8
 Needs attention:
-  [owner] selected_signed_out AE2EDEVACCOUNT000000000001 → opv login --account AE2EDEVACCOUNT000000000001
-  [owner] shared_sign_in_address AE2EDEVACCOUNT000000000001 → opv account list
-Next (owner): opv login --account AE2EDEVACCOUNT000000000001
+  [owner] selected_account_absent  → opv login --add
+  [owner] account_not_registered dev → opv login --add
+      Do: add account AE2EDEVACCOUNT000000000001 at op's prompt
+Next (owner): opv login --add
 
 ## text stderr
 using <SCENARIO>/project/secrets.toml
 
 ## json exit: 0
 ## json stdout
-{"schema_version":2,"ok":true,"receipt_id":"rcpt-<id>","opv_version":"0.10.0","config":{"source":"<SCENARIO>/project/secrets.toml"},"account":{"account_id":"AE2EDEVACCOUNT000000000001","by":"pointer"},"matrix":[{"environment":"dev","title":"Local development","product":"shared","target":null,"target_name":null,"keys":2,"saved":2,"findings":0,"delivered":true},{"environment":"dev","title":"Local development","product":"web","target":null,"target_name":null,"keys":8,"saved":8,"findings":0,"delivered":true}],"targets":[],"findings":[{"code":"selected_signed_out","scope":{"account":"AE2EDEVACCOUNT000000000001"},"blocking":true,"actor":"owner","effect":"signs_in","prerequisite":"opv login --account AE2EDEVACCOUNT000000000001","verify":"opv account list --json"},{"code":"shared_sign_in_address","scope":{"account":"AE2EDEVACCOUNT000000000001"},"blocking":false,"actor":"owner","effect":"none","prerequisite":"opv account list","verify":"opv account list --json"}],"next":{"actor":"owner","command":"opv login --account AE2EDEVACCOUNT000000000001"},"do":null}
+{"schema_version":2,"ok":true,"receipt_id":"rcpt-<id>","opv_version":"<version>","config":{"source":"<SCENARIO>/project/secrets.toml"},"account":null,"matrix":[],"targets":[],"findings":[{"code":"selected_account_absent","scope":{},"blocking":true,"actor":"owner","effect":"signs_in","prerequisite":"opv login --add","verify":"opv account list --json"},{"code":"account_not_registered","scope":{"environment":"dev"},"blocking":true,"actor":"owner","effect":"signs_in","prerequisite":"opv login --add","verify":"opv ready --json","do":"add account AE2EDEVACCOUNT000000000001 at op's prompt"}],"next":{"actor":"owner","command":"opv login --add"},"do":null}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml

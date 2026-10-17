@@ -716,6 +716,13 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             vec!["/work/secrets.toml"],
         ),
         (
+            StoreNotReady {
+                store: res(ResourceKind::ExternalStore, "store-op"),
+                reason: Some("InvalidProviderConfig".into()),
+            },
+            vec!["store-op", "InvalidProviderConfig"],
+        ),
+        (
             HandoffPipeContested {
                 system: System::Azure,
             },
@@ -882,19 +889,20 @@ fn ordinal(c: &Cause) -> usize {
         KeyNotDeclared { .. } => 61,
         KeysBlocking { .. } => 62,
         LocalIo { .. } => 63,
-        HandoffPipeContested { .. } => 64,
-        ConfigProposalInvalid { .. } => 65,
-        InputUnreadable { .. } => 66,
-        ItemUnusable { .. } => 67,
-        SecretNotStored { .. } => 68,
-        AccountRequired { .. } => 69,
-        SourceOnly { .. } => 70,
-        TitleLookup { .. } => 71,
-        PersonalNotSetUp { .. } => 72,
+        StoreNotReady { .. } => 64,
+        HandoffPipeContested { .. } => 65,
+        ConfigProposalInvalid { .. } => 66,
+        InputUnreadable { .. } => 67,
+        ItemUnusable { .. } => 68,
+        SecretNotStored { .. } => 69,
+        AccountRequired { .. } => 70,
+        SourceOnly { .. } => 71,
+        TitleLookup { .. } => 72,
+        PersonalNotSetUp { .. } => 73,
     }
 }
 
-const VARIANTS: usize = 73;
+const VARIANTS: usize = 74;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
@@ -2149,6 +2157,16 @@ fn a6_an_undeclared_key_names_its_environment() {
     );
 }
 
+/// A7: a store's reason is shown only as a code word, never as free text.
+#[test]
+fn a7_a_store_reason_that_is_not_a_code_is_never_echoed() {
+    let c = Cause::StoreNotReady {
+        store: res(ResourceKind::ExternalStore, "op-store"),
+        reason: Some("token=abc is wrong".into()),
+    };
+    assert!(!c.message().contains("abc"), "{}", c.message());
+}
+
 /// A7: a deployment that changed before the write is a target object.
 #[test]
 fn a7_a_deployment_changed_before_the_write_is_a_target_change() {
@@ -3298,6 +3316,24 @@ fn a22_a_partial_credentials_create_steps_to_its_show() {
             ])
         ),
         "opv target credentials prod --target web"
+    );
+}
+
+/// C8: a partial `mcp install` steps to the inner failure's own Next, never a structure plan.
+#[test]
+fn a_partial_mcp_install_steps_to_the_inner_next() {
+    let c = partial(
+        Cause::Usage {
+            problem: UsageProblem::ValueFormat {
+                flag: "--name".into(),
+                format: "letters, digits, '-' or '_'",
+            },
+        },
+        &["claude"],
+    );
+    assert_eq!(
+        next_in(&c, &cli(&["opv", "mcp", "install", "--client", "all"])),
+        "opv mcp install --help"
     );
 }
 
