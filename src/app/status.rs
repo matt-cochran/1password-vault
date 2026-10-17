@@ -18,9 +18,9 @@ use super::{
     JsonExtra, JsonPart, KeyNames, PinnedRow, Prefixed, check_product, ci_summary, count_line,
     findings_error, is_blocking, open_target, personal, placement, plan_item, plural, preflight,
     print_extras, print_legend, print_rows, product_names, read_and_plan, resolve_targets,
-    rows_item_url, scope_plan, target_runners, target_word, write_err, write_json,
+    rows_item_url, scope_plan, target_cell, target_runners, target_word, write_err, write_json,
 };
-use crate::cause::{Cause, Cmd, EnvName};
+use crate::cause::{Cause, Cmd, EnvName, TargetName};
 use crate::domain::provenance::latest;
 use crate::domain::{Binding, Fleet, KeyState, Row, StoreEntry, SyncPlan};
 use crate::error::Error;
@@ -60,13 +60,14 @@ pub fn run_scoped(
     out: &mut dyn Write,
     json: bool,
 ) -> Result<(), Error> {
-    run_targeted(fleet, env_name, &[], product, r, out, json)
+    run_targeted(fleet, env_name, &[], product, r, out, json, false)
 }
 
 /// [`run_scoped`] on every target of the environment, or the targets `--target` names
 /// (FR-56, [`resolve_targets`]), in name order. Text starts with one count line per
 /// target, then one table whose rows name their target; `--json` is one document whose
 /// rows each carry `target`. Findings add up over the targets.
+#[allow(clippy::too_many_arguments)]
 pub fn run_targeted(
     fleet: &Fleet,
     env_name: &str,
@@ -75,6 +76,7 @@ pub fn run_targeted(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
     json: bool,
+    fail_on_drift: bool,
 ) -> Result<(), Error> {
     check_product(fleet, product, Some(env_name))?;
     // Needs a target: `NothingInScope` naming the environment otherwise, before any call.
@@ -146,6 +148,9 @@ pub fn run_targeted(
                 link: link.as_deref(),
             },
         )?;
+        if let Some(e) = drift_error(&parts, env_name, fail_on_drift) {
+            return Err(e);
+        }
         return if n > 0 { Err(findings()) } else { Ok(()) };
     }
     for count in &counts {
@@ -169,6 +174,7 @@ pub fn run_targeted(
     }
     // Extras are about the 1Password item, the same for every target.
     print_extras(out, &parts[0].plan)?;
+    print_no_channel(out, env_name, fleet, &parts)?;
     print_concealed_config(out, &parts)?;
     let several = fleet
         .environments
@@ -189,16 +195,41 @@ pub fn run_targeted(
             writeln!(out, "{}: {}", p.t.provider().label(), s.line()).map_err(write_err)?;
         }
     }
+    if let Some(e) = drift_error(&parts, env_name, fail_on_drift) {
+        return Err(e);
+    }
     if n > 0 {
         return Err(findings());
     }
     Ok(())
 }
 
+/// The drift finding of `status --fail-on-drift` (C3): the first target whose pinned
+/// bindings drifted from 1Password, as the catalog's `TargetDrift` (exit 8,
+/// `target_drift`). `None` without the flag, or when nothing drifted.
+fn drift_error(parts: &[StatusPart<'_>], env_name: &str, fail_on_drift: bool) -> Option<Error> {
+    if !fail_on_drift {
+        return None;
+    }
+    let (target, names) = parts.iter().find_map(|p| {
+        let drift = &p.pinned.as_ref()?.drift;
+        (!drift.is_empty()).then_some((p.name.as_str(), drift))
+    })?;
+    Some(
+        Cause::TargetDrift {
+            env: EnvName::new(env_name),
+            target: TargetName::new(target),
+            names: names.clone(),
+        }
+        .into(),
+    )
+}
+
 /// What `status` read for one target (FR-56).
 struct StatusPart<'f> {
     name: String,
     t: &'f dyn TargetConfig,
+    fleet: &'f Fleet,
     plan: SyncPlan,
     listed: Vec<StoreEntry>,
     pinned: Option<PinnedStatus>,
@@ -207,7 +238,7 @@ struct StatusPart<'f> {
 }
 
 impl StatusPart<'_> {
-    /// The row's ON TARGET word.
+    /// The row's ON TARGET cell, with a config row's channel named (design §1.3, FM-02).
     fn word(&self, row: &Row) -> String {
         let name = self.t.env_name(&row.product, &row.key);
         let binding = self.pinned.as_ref().and_then(|p| p.rows.get(&name));
@@ -216,7 +247,17 @@ impl StatusPart<'_> {
             .held_immutable
             .iter()
             .any(|(p, k)| *p == row.product && *k == row.key);
-        target_word(row, held, binding).to_string()
+        let spec = self
+            .fleet
+            .products
+            .get(&row.product)
+            .and_then(|p| p.keys.get(&row.key));
+        target_cell(
+            row,
+            target_word(row, held, binding),
+            &self.t.channels(),
+            spec,
+        )
     }
 
     /// FR-42: the latest provenance stamp opv left on the target (pinned targets only).
@@ -236,7 +277,12 @@ fn status_part<'f>(
 ) -> Result<StatusPart<'f>, Error> {
     let (_, t) = super::target(fleet, env_name, name)?;
     let (_, ports) = open_target(fleet, env_name, name, r)?;
-    preflight::read(t, r)?;
+    let at = preflight::At {
+        fleet,
+        env: env_name,
+        name,
+    };
+    preflight::read(at, t, r)?;
     let none = BTreeSet::new();
     let (mut plan, listed) =
         read_and_plan(fleet, env_name, Some(name), r, Some(&ports), &none, &none)?;
@@ -253,6 +299,7 @@ fn status_part<'f>(
         Ports::Pinned { store, runtime } => Some(pinned_status(
             fleet,
             env_name,
+            name,
             t,
             &plan,
             &listed,
@@ -264,11 +311,41 @@ fn status_part<'f>(
     Ok(StatusPart {
         name: name.to_string(),
         t,
+        fleet,
         live: super::live_writes(&ports),
         plan,
         listed,
         pinned,
     })
+}
+
+/// A config key the target's channel leaves undelivered (design §1.3, FM-02): one warning
+/// per key, `<env>/<target>: warning: <product>/<KEY> not delivered (no config channel:
+/// <why>)`.
+fn print_no_channel(
+    out: &mut dyn Write,
+    env_name: &str,
+    fleet: &Fleet,
+    parts: &[StatusPart<'_>],
+) -> Result<(), Error> {
+    for p in parts {
+        for k in &p.plan.no_channel {
+            writeln!(
+                out,
+                "{}: warning: {} not delivered (no config channel: {})",
+                placement(env_name, &p.name),
+                crate::domain::key_label(&k.product, &k.key),
+                k.why
+            )
+            .map_err(write_err)?;
+        }
+        for line in
+            crate::app::file_destination_lines(fleet, env_name, &p.name, &p.t.channels(), &p.plan)
+        {
+            writeln!(out, "{line}").map_err(write_err)?;
+        }
+    }
+    Ok(())
 }
 
 /// M4 (owner ruling): one warning per config key whose 1Password field is concealed and
@@ -603,7 +680,12 @@ pub(crate) fn env_rows_keeping(
         crate::app::signin::open_targeted(fleet, env_name, Some(target), r, Reach::Target)?;
     let r: &dyn CommandRunner = &signed_in;
     let (_, ports) = open_target(fleet, env_name, target, r)?;
-    preflight::read(t, r)?;
+    let at = preflight::At {
+        fleet,
+        env: env_name,
+        name: target,
+    };
+    preflight::read(at, t, r)?;
     // read_and_plan by `mode`, keeping a copy of the fields before planning consumes them.
     let read = super::tidy::read_as(fleet, env_name, r, mode)?;
     if let Some(keep) = keep {
@@ -678,9 +760,11 @@ impl PinnedStatus {
 }
 
 /// Reads the runtime's bindings once and compares them with the plan (no write).
+#[allow(clippy::too_many_arguments)]
 fn pinned_status(
     fleet: &Fleet,
     env_name: &str,
+    target: &str,
     t: &dyn TargetConfig,
     plan: &SyncPlan,
     listed: &[StoreEntry],
@@ -690,6 +774,7 @@ fn pinned_status(
     let want = pinned_want(
         fleet,
         env_name,
+        target,
         t,
         plan,
         listed,
@@ -844,15 +929,16 @@ mod tests {
         assert_no_values(&out);
     }
 
-    /// M4: a config key kept concealed in 1Password warns once, naming the key.
+    /// M2: a config key on a target that declines config (Fly) warns once, naming the key
+    /// and why (design §1.3, FM-02).
     #[test]
-    fn status_warns_once_for_config_stored_concealed() {
+    fn status_warns_once_for_config_undelivered_on_fly() {
         let (_, out, _) = status_of(
             complete_with(secret("allumata", "SIGNUP_POLICY", POLICY)),
             fly_empty(),
         );
-        let want = "warning: allumata/SIGNUP_POLICY is concealed in 1Password but declared \
-                    config; it is delivered as a plain environment value";
+        let want = "prod/portfolio: warning: allumata/SIGNUP_POLICY not delivered \
+                    (no config channel: set fly.config)";
         assert_eq!(out.lines().filter(|l| *l == want).count(), 1, "{out}");
     }
 
@@ -902,7 +988,10 @@ mod tests {
         let row = |k: &str| out.lines().find(|l| l.contains(k)).unwrap().to_string();
         assert!(row("OPENAI_API_KEY").ends_with("unknown"), "{out}");
         assert!(row("INTEGRATION_ENC_KEY").ends_with("new"), "{out}");
-        assert!(row("SIGNUP_POLICY").ends_with("n/a"), "{out}");
+        assert!(
+            row("SIGNUP_POLICY").ends_with("not delivered (no config channel)"),
+            "{out}"
+        );
         assert!(out.contains("PRODUCT") && out.contains("TARGET"), "{out}");
     }
 

@@ -70,6 +70,78 @@ fn sync_new_secrets_without_deploy() {
     );
 }
 
+/// The fixture fleet with `fly.config = "secrets"` on its prod Fly target.
+fn config_secrets_fleet() -> crate::domain::Fleet {
+    let text = std::fs::read_to_string("tests/fixtures/secrets.toml")
+        .unwrap()
+        .replace(
+            "fly.secret_name = \"FLEET__{PRODUCT}__{KEY}\"\nstate_vault_id = \"sprd\"",
+            "fly.secret_name = \"FLEET__{PRODUCT}__{KEY}\"\nfly.config = \"secrets\"\nstate_vault_id = \"sprd\"",
+        );
+    config::parse(&text).unwrap()
+}
+
+/// A first sync that stages secrets on a secrets-config Fly target.
+fn sync_config_secrets(r: &FakeRunner) {
+    unrecorded_then(r, []);
+    let mut out = Vec::new();
+    let _ = sync::run(
+        &config_secrets_fleet(),
+        "prod",
+        r,
+        &mut out,
+        &SyncOpts::default(),
+    );
+}
+
+fn stage_responses() -> [Output; 6] {
+    [
+        complete_item(),
+        fly_empty(),
+        fly_app_ok(),
+        fly_releases("complete"),
+        ok(),
+        fly(&[(OPENAI_FLY, "d1")]),
+    ]
+}
+
+fn import_call(r: &FakeRunner) -> (Vec<String>, Vec<u8>) {
+    r.calls
+        .borrow()
+        .iter()
+        .find(|c| {
+            c.args.first().map(String::as_str) == Some("secrets")
+                && c.args.get(1).map(String::as_str) == Some("import")
+        })
+        .map(|c| (c.args.clone(), c.stdin.clone().unwrap_or_default()))
+        .expect("a staged import")
+}
+
+#[test]
+fn a_config_key_on_a_secrets_fly_target_is_staged_by_its_fly_name() {
+    let r = FakeRunner::new(stage_responses());
+    sync_config_secrets(&r);
+    let (_, stdin) = import_call(&r);
+    let stdin = String::from_utf8(stdin).unwrap();
+    assert!(stdin.contains("FLEET__ALLUMATA__SIGNUP_POLICY"), "{stdin}");
+}
+
+#[test]
+fn a_config_value_on_a_secrets_fly_target_never_reaches_argv() {
+    let r = FakeRunner::new(stage_responses());
+    sync_config_secrets(&r);
+    assert_eq!(
+        import_call(&r).0,
+        vec![
+            "secrets".to_string(),
+            "import".to_string(),
+            "--app".to_string(),
+            "mcproductlabs-portfolio-production".to_string(),
+            "--stage".to_string()
+        ]
+    );
+}
+
 #[test]
 fn sync_unchanged_with_deploy() {
     let a = || fly(&[(OPENAI_FLY, "dA"), (ENC_FLY, "dB")]);

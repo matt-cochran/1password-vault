@@ -35,6 +35,30 @@ fn fly_target(name: &str) -> Target {
         provider: Some("fly".into()),
         fields: [("fly-app".to_string(), format!("myapp-{name}"))].into(),
         products: vec!["api".into()],
+        roles: vec![],
+    }
+}
+
+/// Declared, with a key only the `serve` process reads: every target that delivers it must
+/// declare its `roles`.
+const ROLE_SCOPED: &str = "[environments.prod]\n\n[products.api.keys.API_TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]\nroles = [\"serve\"]\n";
+
+fn kubernetes_target(secrets_dir: &str) -> Target {
+    Target {
+        environment: "prod".into(),
+        name: "cluster".into(),
+        provider: Some("kubernetes".into()),
+        fields: [
+            ("kubernetes-context", "ctx"),
+            ("kubernetes-namespace", "app"),
+            ("kubernetes-deployment", "web"),
+            ("kubernetes-secrets-dir", secrets_dir),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect(),
+        products: vec!["api".into()],
+        roles: vec![],
     }
 }
 
@@ -173,4 +197,88 @@ fn a_key_for_an_undeclared_environment_steps_to_the_configuration() {
     k.environments = vec!["staging".into()];
     let e = key(&FakeRunner::default(), &path, &k).unwrap_err();
     assert_eq!(e.next_text().unwrap_or_default(), "opv config describe");
+}
+
+#[test]
+fn a_target_is_declared_with_its_roles() {
+    let (_d, path) = file(ROLE_SCOPED);
+    let mut t = fly_target("web");
+    t.roles = vec!["serve".into()];
+    target(&FakeRunner::default(), &path, &t).unwrap();
+    assert!(
+        text(&path).contains("roles = [\"serve\"]\n"),
+        "{}",
+        text(&path)
+    );
+}
+
+#[test]
+fn a_target_without_roles_for_a_role_scoped_key_is_config_invalid() {
+    let (_d, path) = file(ROLE_SCOPED);
+    let e = target(&FakeRunner::default(), &path, &fly_target("web")).unwrap_err();
+    assert_eq!(e.code_str(), "config_invalid");
+}
+
+#[test]
+fn a_kubernetes_target_is_declared_with_its_secrets_dir() {
+    let (_d, path) = file(FRESH);
+    target(
+        &FakeRunner::default(),
+        &path,
+        &kubernetes_target("/run/secrets/{product}"),
+    )
+    .unwrap();
+    assert!(
+        text(&path).contains("kubernetes.secrets_dir = \"/run/secrets/{product}\"\n"),
+        "{}",
+        text(&path)
+    );
+}
+
+#[test]
+fn a_relative_secrets_dir_is_config_invalid() {
+    let (_d, path) = file(FRESH);
+    let e = target(
+        &FakeRunner::default(),
+        &path,
+        &kubernetes_target("run/secrets"),
+    )
+    .unwrap_err();
+    assert_eq!(e.code_str(), "config_invalid");
+}
+
+#[test]
+fn a_relative_secrets_dir_refusal_names_the_field() {
+    let (_d, path) = file(FRESH);
+    let e = target(
+        &FakeRunner::default(),
+        &path,
+        &kubernetes_target("run/secrets"),
+    )
+    .unwrap_err();
+    assert!(e.mentions("kubernetes.secrets_dir"), "{}", e.text());
+}
+
+#[test]
+fn a_refused_secrets_dir_is_never_written() {
+    let (_d, path) = file(FRESH);
+    let _ = target(
+        &FakeRunner::default(),
+        &path,
+        &kubernetes_target("run/secrets"),
+    );
+    assert_eq!(text(&path), FRESH);
+}
+
+#[test]
+fn a_fly_target_is_declared_with_its_config_route() {
+    let (_d, path) = file(FRESH);
+    let mut t = fly_target("web");
+    t.fields.insert("fly-config".into(), "secrets".into());
+    target(&FakeRunner::default(), &path, &t).unwrap();
+    assert!(
+        text(&path).contains("fly.config = \"secrets\"\n"),
+        "{}",
+        text(&path)
+    );
 }

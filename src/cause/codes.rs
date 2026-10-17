@@ -161,6 +161,9 @@ pub fn meaning(code: &str) -> &'static str {
         "update_refused" => {
             "the target refused the update and applied nothing; re-running repeats the refusal"
         }
+        "mount_unreadable" => {
+            "the workload that would mount opv's secrets cannot read them; the fix is in its own manifest"
+        }
         "declined" => "the person declined at opv's prompt; nothing was changed",
         "policy_refused" => {
             "opv refused the operation (a value too large, a name opv does not manage, a credential given as an option, ...)"
@@ -232,6 +235,12 @@ pub fn meaning(code: &str) -> &'static str {
         "child_start_failed" => "the command opv run starts could not be started",
         "delivery_unverified" => {
             "a placement no longer holds what opv delivered, or could not be checked"
+        }
+        "target_drift" => {
+            "a pinned target no longer holds the version 1Password records (drift); opv sync restores it"
+        }
+        "source_changed" => {
+            "a source item changed since the last sync, or no source versions are recorded; the next step is the sync"
         }
         "local_io_failed" => {
             "opv's own local input or output failed (a file, the current folder, standard output, ...)"
@@ -412,7 +421,7 @@ fn variants(c: &Cause) -> Vec<Cause> {
 }
 
 /// One example of every cause (the renderer's own fixtures, design §11).
-fn one_of_each() -> Vec<Cause> {
+pub(crate) fn one_of_each() -> Vec<Cause> {
     use Cause::*;
     vec![
         ConfigNotFound {
@@ -604,6 +613,21 @@ fn one_of_each() -> Vec<Cause> {
                 allowed: vec!["mode-a".into(), "mode-b".into()],
             },
         },
+        MountUnreadable {
+            workload: "api".into(),
+            container: "api".into(),
+            run_as: Some(10001),
+            why: MountWhy::NoFsGroup,
+            env: EnvName::new("env-prod"),
+            target: TargetName::new("tgt-web"),
+        },
+        Guard {
+            guard: super::Guard::NoChannel {
+                target: TargetName::new("tgt-web"),
+                kind: "config",
+                why: "set fly.config".into(),
+            },
+        },
         CreateOutcomeUnknown {
             system: System::OnePassword,
             kind: CreateKind::ServiceAccount,
@@ -778,6 +802,15 @@ fn one_of_each() -> Vec<Cause> {
             state: Unverified::OtherAccount {
                 account: AccountId::new("ACC-OTHER"),
             },
+        },
+        TargetDrift {
+            env: EnvName::new("env-prod"),
+            target: TargetName::new("tgt-web"),
+            names: vec!["prod-api/KEY_X (KEY_X)".to_string()],
+        },
+        SourceChanged {
+            env: EnvName::new("env-prod"),
+            no_record: false,
         },
         KeyNotDeclared {
             key: KeyName::new("KEY_X"),

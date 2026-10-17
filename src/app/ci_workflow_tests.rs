@@ -276,3 +276,83 @@ fn a_github_target_without_deploy_credentials_names_config_edit() {
 fn a_target_with_deploy_credentials_gets_no_sign_in_note() {
     assert!(!workflow_of(&with_deploy_credentials(FLY_FLEET)).contains("not recorded yet"));
 }
+
+// --- the two §2.5 recipes (C5) ---------------------------------------------------------
+
+/// The fixtures' configuration: staging and prod, each with one Fly target and no
+/// `confirm_env`, so both sync directly.
+fn fixture_fleet() -> Fleet {
+    config::load("tests/fixtures/secrets.toml").unwrap()
+}
+
+/// The change workflow for `fleet`, as text.
+fn change_of(fleet: &Fleet, every: u8) -> String {
+    let mut out = Vec::new();
+    run_on_change(fleet, every, &mut out).unwrap();
+    text_of(&out)
+}
+
+/// The change workflow of `FLY_FLEET`, with `confirm_env` added when `confirm`.
+fn fly_change(confirm: bool, every: u8) -> String {
+    let text = if confirm {
+        FLY_FLEET.replace(
+            "[environments.prod]\n",
+            "[environments.prod]\nconfirm_env = true\n",
+        )
+    } else {
+        FLY_FLEET.to_string()
+    };
+    change_of(&config::parse(&text).unwrap(), every)
+}
+
+#[test]
+fn on_change_workflow_matches_the_fixture_golden() {
+    assert_eq!(
+        change_of(&fixture_fleet(), 15),
+        std::fs::read_to_string("tests/fixtures/ci/on-change.yml").unwrap()
+    );
+}
+
+#[test]
+fn drift_workflow_matches_the_fixture_golden() {
+    let mut out = Vec::new();
+    run_drift(&fixture_fleet(), &mut out).unwrap();
+    assert_eq!(
+        text_of(&out),
+        std::fs::read_to_string("tests/fixtures/ci/drift.yml").unwrap()
+    );
+}
+
+#[test]
+fn a_confirm_env_environment_gets_a_plan_job() {
+    assert!(fly_change(true, 15).contains("  plan-prod:\n"));
+}
+
+#[test]
+fn a_confirm_env_sync_is_gated_on_the_plans_id() {
+    assert!(fly_change(true, 15).contains(
+        "run: opv sync prod --deploy --expect-plan ${{ needs.plan-prod.outputs.plan_id }}"
+    ));
+}
+
+#[test]
+fn a_non_confirm_environment_syncs_directly() {
+    assert!(fly_change(false, 15).contains("        run: opv sync prod --deploy\n"));
+}
+
+#[test]
+fn every_thirty_sets_a_thirty_minute_cron() {
+    assert!(fly_change(false, 30).contains("cron: \"*/30 * * * *\""));
+}
+
+#[test]
+fn the_detect_step_branches_on_changed() {
+    assert!(fly_change(false, 15).contains("  10) echo \"$ENV=yes\" >> \"$GITHUB_OUTPUT\" ;;"));
+}
+
+#[test]
+fn the_change_workflow_puts_every_sync_in_one_concurrency_group() {
+    assert!(
+        fly_change(false, 15).contains("concurrency: {group: opv-sync, cancel-in-progress: false}")
+    );
+}

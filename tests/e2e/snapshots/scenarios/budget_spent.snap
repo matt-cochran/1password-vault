@@ -2,10 +2,13 @@
 
 ## text exit: 9
 ## text stdout
+prod/fly: warning: web/LOG_LEVEL not delivered (no config channel: set fly.config)
+prod/fly: warning: web/OTEL_RESOURCE not delivered (no config channel: set fly.config)
 prod/fly: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
-prod/fly: written: web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/MIGRATION_TOKEN (E2E__WEB__MIGRATION_TOKEN), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET)
-prod/fly: pending deploy (pass --deploy): web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/MIGRATION_TOKEN (E2E__WEB__MIGRATION_TOKEN), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET)
-prod/fly: summary: written 4 · unchanged 0 · held 0 · deployed no · pending 4 · pruned 0 · kept 0 · skipped 0
+prod/fly: written: web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET), web/TLS_CERTIFICATE (E2E__WEB__TLS_CERTIFICATE), web/TLS_PRIVATE_KEY (E2E__WEB__TLS_PRIVATE_KEY)
+prod/fly: extra, not pruned (pass --prune to remove): web/MIGRATION_TOKEN (E2E__WEB__MIGRATION_TOKEN)
+prod/fly: pending deploy (pass --deploy): web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET), web/TLS_CERTIFICATE (E2E__WEB__TLS_CERTIFICATE), web/TLS_PRIVATE_KEY (E2E__WEB__TLS_PRIVATE_KEY)
+prod/fly: summary: written 5 · unchanged 0 · held 0 · deployed no · pending 5 · pruned 0 · kept 1 · skipped 1
 
 ## text stderr
 using <SCENARIO>/project/secrets.toml

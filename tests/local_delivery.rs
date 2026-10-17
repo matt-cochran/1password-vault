@@ -278,3 +278,28 @@ fn a_refusal_of_the_step_steps_to_the_runs_preview() {
         "{err}"
     );
 }
+
+/// A4: the user docs' Docker Compose recipe is exactly the recorded fixture.
+#[test]
+fn the_documented_compose_recipe_equals_the_recorded_fixture() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let doc = std::fs::read_to_string(root.join("docs/local-development.md")).unwrap();
+    let fixture = std::fs::read_to_string(root.join("tests/fixtures/compose/recipe.yml")).unwrap();
+    let start = doc.find("```yaml\n").expect("a yaml recipe in the docs") + "```yaml\n".len();
+    let end = start
+        + doc[start..]
+            .find("\n```")
+            .expect("the recipe's closing fence");
+    assert_eq!(format!("{}\n", &doc[start..end]), fixture);
+}
+
+/// A4, FM-14: the compose docs state the same-user limit as the accepted residual.
+#[test]
+fn the_compose_docs_state_the_same_user_limit_as_the_accepted_residual() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let doc = std::fs::read_to_string(root.join("docs/local-development.md")).unwrap();
+    assert!(
+        doc.contains("same-user limit is the accepted residual of local file delivery"),
+        "{doc}"
+    );
+}

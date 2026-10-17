@@ -1,0 +1,59 @@
+case	exit	command
+04-can-i-create-configmaps-yes	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=60s auth can-i create configmaps
+04-can-i-get-configmaps-yes	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=60s auth can-i get configmaps
+04-can-i-list-configmaps-yes	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=60s auth can-i list configmaps
+04-can-i-delete-configmaps-yes	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=60s auth can-i delete configmaps
+05-apply-configmap-created	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=120s apply -f - --server-side --field-manager=opv -o name
+05-apply-configmap-unchanged	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=120s apply -f - --server-side --field-manager=opv -o name
+05-apply-configmap-second	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=120s apply -f - --server-side --field-manager=opv -o name
+05-get-configmap-value	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=60s get configmap opv-api--log-level-abcdefghij --ignore-not-found -o 'jsonpath={.metadata.labels.opv-managed}{"\t"}{.data.value}'
+05-get-configmap-value-missing	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=60s get configmap opv-missing --ignore-not-found -o 'jsonpath={.metadata.labels.opv-managed}{"\t"}{.data.value}'
+05-list-configmaps	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=60s get configmap -l opv-managed=dev -o 'jsonpath={range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.opv-key}{"\t"}{.metadata.annotations.opv-version}{"\t"}{.metadata.annotations.opv-written}{"\t"}{.metadata.annotations.opv-env}{"\t"}{.metadata.annotations.opv-plan}{"\n"}{end}'
+07-get-deployment-before-files	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=60s get deployment api -o json
+08-replace-files-volume	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=120s replace -f - -o 'jsonpath={.metadata.generation}'
+09-get-deployment-after-files	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=60s get deployment api -o json
+10-replace-files-volume-minimal	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=120s replace -f - -o 'jsonpath={.metadata.generation}'
+11-get-deployment-after-minimal	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=60s get deployment api -o json
+12-exec-nofsgroup-stat-fs	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-65bdd66d48-<POD> -c api -- stat -f -c %T /run/secrets/api
+12-exec-nofsgroup-stat-key	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-65bdd66d48-<POD> -c api -- stat -L -c '%a %u %g' /run/secrets/api/github-app/private-key
+12-exec-nofsgroup-stat-config	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-65bdd66d48-<POD> -c api -- stat -L -c '%a %u %g' /run/secrets/api/otel/resource
+12-exec-nofsgroup-id	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-65bdd66d48-<POD> -c api -- id
+12-exec-nofsgroup-read-key	1	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-65bdd66d48-<POD> -c api -- cat /run/secrets/api/github-app/private-key
+12-exec-nofsgroup-ls	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-65bdd66d48-<POD> -c api -- ls -la /run/secrets/api /run/secrets/api/github-app/
+12-exec-nofsgroup-sidecar-ls	2	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-65bdd66d48-<POD> -c sidecar -- ls /run/secrets/api
+12-exec-root-stat-fs	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-7646f4c857-<POD> -c api -- stat -f -c %T /run/secrets/api
+12-exec-root-stat-key	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-7646f4c857-<POD> -c api -- stat -L -c '%a %u %g' /run/secrets/api/github-app/private-key
+12-exec-root-stat-config	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-7646f4c857-<POD> -c api -- stat -L -c '%a %u %g' /run/secrets/api/otel/resource
+12-exec-root-id	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-7646f4c857-<POD> -c api -- id
+12-exec-root-read-key	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-7646f4c857-<POD> -c api -- cat /run/secrets/api/github-app/private-key
+12-exec-root-ls	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-7646f4c857-<POD> -c api -- ls -la /run/secrets/api /run/secrets/api/github-app/
+12-exec-root-sidecar-ls	2	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-7646f4c857-<POD> -c sidecar -- ls /run/secrets/api
+12-exec-fsgroup-stat-fs	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-7d87cb47bc-<POD> -c api -- stat -f -c %T /run/secrets/api
+12-exec-fsgroup-stat-key	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-7d87cb47bc-<POD> -c api -- stat -L -c '%a %u %g' /run/secrets/api/github-app/private-key
+12-exec-fsgroup-stat-config	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-7d87cb47bc-<POD> -c api -- stat -L -c '%a %u %g' /run/secrets/api/otel/resource
+12-exec-fsgroup-id	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-7d87cb47bc-<POD> -c api -- id
+12-exec-fsgroup-read-key	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-7d87cb47bc-<POD> -c api -- cat /run/secrets/api/github-app/private-key
+12-exec-fsgroup-ls	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-7d87cb47bc-<POD> -c api -- ls -la /run/secrets/api /run/secrets/api/github-app/
+12-exec-fsgroup-sidecar-ls	2	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-7d87cb47bc-<POD> -c sidecar -- ls /run/secrets/api
+12-exec-imagegid-stat-fs	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-b6b86d7df-<POD> -c api -- stat -f -c %T /run/secrets/api
+12-exec-imagegid-stat-key	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-b6b86d7df-<POD> -c api -- stat -L -c '%a %u %g' /run/secrets/api/github-app/private-key
+12-exec-imagegid-stat-config	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-b6b86d7df-<POD> -c api -- stat -L -c '%a %u %g' /run/secrets/api/otel/resource
+12-exec-imagegid-id	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-b6b86d7df-<POD> -c api -- id
+12-exec-imagegid-read-key	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-b6b86d7df-<POD> -c api -- cat /run/secrets/api/github-app/private-key
+12-exec-imagegid-ls	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-b6b86d7df-<POD> -c api -- ls -la /run/secrets/api /run/secrets/api/github-app/
+12-exec-imagegid-sidecar-ls	2	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-b6b86d7df-<POD> -c sidecar -- ls /run/secrets/api
+12-exec-fsgroup-other-stat-fs	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-695ccd59ff-<POD> -c api -- stat -f -c %T /run/secrets/api
+12-exec-fsgroup-other-stat-key	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-695ccd59ff-<POD> -c api -- stat -L -c '%a %u %g' /run/secrets/api/github-app/private-key
+12-exec-fsgroup-other-stat-config	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-695ccd59ff-<POD> -c api -- stat -L -c '%a %u %g' /run/secrets/api/otel/resource
+12-exec-fsgroup-other-id	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-695ccd59ff-<POD> -c api -- id
+12-exec-fsgroup-other-read-key	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-695ccd59ff-<POD> -c api -- cat /run/secrets/api/github-app/private-key
+12-exec-fsgroup-other-ls	0	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-695ccd59ff-<POD> -c api -- ls -la /run/secrets/api /run/secrets/api/github-app/
+12-exec-fsgroup-other-sidecar-ls	2	kubectl --context kind-opv-rec-k1 --namespace opv-rec --request-timeout=60s exec api-695ccd59ff-<POD> -c sidecar -- ls /run/secrets/api
+13-replace-missing-configmap-source	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=120s replace -f - -o 'jsonpath={.metadata.generation}'
+13-replace-missing-secret-source	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=120s replace -f - -o 'jsonpath={.metadata.generation}'
+15-replace-deploy-1	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=120s replace -f - -o 'jsonpath={.metadata.generation}'
+15-replace-deploy-2	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=120s replace -f - -o 'jsonpath={.metadata.generation}'
+16-get-replicasets-after-two-deploys	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=60s get replicasets -o json
+17-delete-configmaps	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=120s delete configmap opv-api--otel-resource-klmnopqrst opv-api--otel-resource-uvwxyz2345 --ignore-not-found
+17-delete-configmaps-missing-ignored	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=120s delete configmap opv-api--otel-resource-klmnopqrst opv-api--otel-resource-uvwxyz2345 --ignore-not-found
+17-delete-configmap-one	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=120s delete configmap opv-api--log-level-abcdefghij --ignore-not-found

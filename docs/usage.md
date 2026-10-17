@@ -14,6 +14,7 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | `opv access <env> [--target <t>] --create --github <owner/repo> [--github-env <e>] [--secret-name <n>]` | in your own terminal: create that identity's 1Password service account (exact grants, 90 days) and store its token as a GitHub secret on gh's stdin, never shown; checks gh, the repository and the environment first, asks once | 1Password and GitHub |
 | `opv access [<env>] [--target <t>] [--json]` | who needs each boundary and target, and who can read it now; the owner's command to create a reader ([usage](#who-can-read-each-vault-opv-access)) | nothing (read-only) |
 | `opv delivery verify <env> [--product <p>] [--target <t>] [--receipt <file>] [--json]` | does every placement of a product still hold what opv delivered ([usage](#delivery-receipts-opv-sync---receipt-and-opv-delivery-verify)) | nothing (read-only) |
+| `opv changed <env> [--product <p>] [--target <t>] [--json]` | whether a source item changed since the last sync: each placement's recorded `source versions` against the item's current version (values never shown); exit 10 when one did | nothing (read-only) |
 | `opv ci workflow <env> --target <name> [--github-env <environment>] [--deploy]` | print a ready-to-commit GitHub Actions workflow (YAML) that syncs one target, so an assistant never writes the workflow from scratch | nothing (read-only) |
 | `opv ready [<env>] [--json] [--save <file>]` | one receipt: every environment × product, findings, who acts and the next step | nothing |
 | `opv mcp install [--client claude\|codex\|all] [--project <dir>] [--name <n>] [--force] [--json]` | register opv's MCP server for a project with Claude Code (`.mcp.json`) and/or Codex (`~/.codex/config.toml`), merging into existing configuration ([MCP](mcp.md)) | the assistant's configuration |
@@ -33,7 +34,7 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | `opv setup [--product <p>] [--recipe <file>] [--account <a>]` | guided, resumable onboarding from `opv.setup.toml` ([guided setup](guided-setup.md)) | the 1Password item; needs your own terminal |
 | `opv doctor [--env <env> [--product <p>]] [--json]` | find setup problems and show the next step | nothing |
 | `opv check <env> [--product <p>] [--json]` | are the keys saved and valid? no target is contacted | nothing |
-| `opv status [<env>] [--product <p>] [--all] [--json] [--target <name>]` | 1Password and every target side by side, names only | nothing |
+| `opv status [<env>] [--product <p>] [--all] [--json] [--target <name>] [--fail-on-drift]` | 1Password and every target side by side, names only | nothing |
 | `opv plan <env> [--product <p>] [--rotate <product/KEY>] [--json] [--target <name>]` | what a sync would do on every target, and its one plan id | nothing |
 | `opv sync <env> [--deploy] [--prune] [--rotate <product/KEY>] [--expect-plan <id>] [--confirm <env>] [--product <p>] [--json] [--target <name>]` | write to every target; deploy only with `--deploy` | the targets |
 | `opv run <env> [--product <p>] [--role <r>] [--confirm <env>] -- <cmd>` | run a command with the keys as environment variables ([local development](local-development.md)); `--preview [--json]` reports what it would deliver without reading a value; `--remote <profile>` runs the profile's pinned command on its pinned SSH host instead; an environment with `confirm_env = true` needs `--confirm <env>` | nothing |
@@ -266,6 +267,23 @@ opv sync prod --deploy --prune           # also remove names no longer wanted, a
 - **Soft-deleted names (Key Vault).** A deleted secret name stays reserved until it is purged, so writing it again fails. opv prints the exact command, `az keyvault secret recover --vault-name <vault> --name <name>`; it never recovers or purges anything itself.
 - **Provenance.** Each Key Vault version opv writes is tagged, and each Kubernetes Secret, ExternalSecret and Deployment it writes is annotated, with `opv-version`, `opv-written` (UTC), `opv-env` and `opv-plan` (the [plan id](#review-then-apply-exactly-that-plan---expect-plan)). Never a value. `status` reads them back as one line, e.g. `Azure: last changed by opv 0.5.0 at 2026-10-08T14:02:11Z (plan 7f3c9a1e)`, and `status --json` as `provenance`. Nothing is stored anywhere else; Fly is not stamped.
 - **Access.** The app's identity needs read access to the vault secrets. `opv doctor` warns, with the grant command, if it cannot confirm that. If the identity really cannot read a secret, Azure refuses the new revision, the old one keeps serving, and `sync` reports it.
+
+#### Files and ConfigMaps on Kubernetes
+
+With `kubernetes.secrets_dir` set ([configuration](configuration.md#kubernetes-secrets--deployment)), a file key is written like any secret, as a new immutable Secret version (a config key with `file` as a ConfigMap version), and `--deploy` mounts it at `<secrets_dir>/<file>` in the target's container, in the same change that removes its variable. With `kubernetes.config = "configmap"`, config keys are written as immutable ConfigMap versions and bound with `configMapKeyRef`.
+
+- **Plan first.** `plan` shows where each key goes: its own `would write` line with `→ file <path>` for a file key and `→ ConfigMap, env` for a config key, and one `would deploy: volume opv-files-<product>` line per product whose volume changes, naming the directory, the number of files and the variables it removes:
+
+  ```text
+  prod/k8s: would write: web/TLS_PRIVATE_KEY (WEB_TLS_PRIVATE_KEY → file /run/secrets/web/tls/private-key)
+  prod/k8s: would write: web/LOG_LEVEL (LOG_LEVEL → ConfigMap, env)
+  prod/k8s: would deploy: volume opv-files-web, read-only at /run/secrets/web (1 file; env entries removed: WEB_TLS_PRIVATE_KEY)
+  ```
+
+- **Readability.** `sync` refuses before writing anything when the workload could not read the files (no `fsGroup` and a non-root user, or a user or group opv cannot tell): exit 6, `mount_unreadable`, with the `securityContext` line to add. `plan`, `status` and `doctor` print the same finding as a `warn` line. A workload running as root (or in group 0) syncs, with a warning on every run.
+- **After the deploy**, `status` prints one `chain:` line per file and ConfigMap key, e.g. `chain: web/TLS_PRIVATE_KEY (WEB_TLS_PRIVATE_KEY) → secret opv-web-tls-private-key-q3vz7kd2mx → file /run/secrets/web/tls/private-key`.
+- **Rollout and rollback.** A new version changes the Deployment, so `--deploy` starts a rollout and waits for it, exactly as for variables. Older Secret and ConfigMap versions still referenced by a ReplicaSet are kept, so `kubectl rollout undo` keeps working.
+- **No-log contract.** opv never writes a value to a log, but it cannot stop your app from doing so: on Kubernetes a container's stdout always reaches the node's log files. Read secrets from the files and never log them; the verification for each release scans pod and node logs for its test markers.
 
 #### Key Vault → Kubernetes through External Secrets (`secrets_in`)
 
@@ -572,7 +590,7 @@ It reads field names and types once, never values. Its output names `opv target 
 
 ## Named targets: `opv target add` and `opv target list`
 
-A target is one named deployment target under `[environments.<env>.targets.<name>]`. `opv target add <env> <name>` writes one: pass the provider's options (`opv target add --help` lists them) and opv infers the provider from them, or pass `--provider`. `--products <p>` (repeatable) limits what it delivers (without it, every non-source-only product), and `--deploy-credentials op://<vault>/<item>` records its least-privilege deploy identity. In the same step it finds or creates the target's state vault `<project>-<env>-<target>-state` and records its ID; the edit keeps comments, validates the whole configuration first and refuses a concurrent change. `--dry-run` changes nothing. It ends with `Next: opv access <env> --target <name>`. `opv target list [--env <env>]` is read-only and shows each target's provider, locator, products, deploy identity and state vault.
+A target is one named deployment target under `[environments.<env>.targets.<name>]`. `opv target add <env> <name>` writes one: pass the provider's options (`opv target add --help` lists them) and opv infers the provider from them, or pass `--provider`. `--products <p>` (repeatable) limits what it delivers (without it, every non-source-only product), `--role <name>` (repeatable) writes the target's `roles` (required when a delivered product's keys declare roles), and `--deploy-credentials op://<vault>/<item>` records its least-privilege deploy identity. In the same step it finds or creates the target's state vault `<project>-<env>-<target>-state` and records its ID; the edit keeps comments, validates the whole configuration first and refuses a concurrent change. `--dry-run` changes nothing. It ends with `Next: opv access <env> --target <name>`. `opv target list [--env <env>]` is read-only and shows each target's provider, locator, products, deploy identity and state vault.
 
 ```sh
 opv target add prod p-overflow --fly-app p-overflow-prod --products p
@@ -773,6 +791,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `handoff_refused` | 6 | after_fix | no | another process connected to opv's private hand-off pipe; opv refused it and sent nothing |
 | `keys_blocking` | 6 | after_fix | yes | a write refused: keys are missing or failing a rule; nothing was written |
 | `local_io_failed` | 6 | after_fix | no | opv's own local input or output failed (a file, the current folder, standard output, ...) |
+| `mount_unreadable` | 6 | after_fix | no | the workload that would mount opv's secrets cannot read them; the fix is in its own manifest |
 | `plan_unknown` | 6 | never | no | no plan has this id |
 | `policy_refused` | 6 | never | no | opv refused the operation (a value too large, a name opv does not manage, a credential given as an option, ...) |
 | `private_dir_failed` | 6 | after_fix | no | opv could not make its private folder |
@@ -789,11 +808,13 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `target_not_signed_in` | 7 | after_fix | yes | not signed in to the target CLI |
 | `delivery_unverified` | 8 | after_fix | yes | a placement no longer holds what opv delivered, or could not be checked |
 | `findings` | 8 | after_fix | yes | keys are missing or failing a rule (values are filled in 1Password by a person) |
+| `target_drift` | 8 | after_fix | no | a pinned target no longer holds the version 1Password records (drift); opv sync restores it |
 | `budget_spent` | 9 | after_fix/check_first | no | the run's --timeout budget was spent |
 | `create_outcome_unknown` | 9 | check_first/safe | no/yes | a create may or may not have happened; find it before creating again |
 | `outcome_unknown` | 9 | safe | no | a change may or may not have been applied; re-running is safe |
 | `provider_unavailable` | 9 | safe | no | a provider did not answer after its retries; nothing was changed |
 | `secret_not_stored` | 9 | never | yes | a secret-bearing object was made at the provider, but its secret was never stored; it is revoked, never made again |
+| `source_changed` | 10 | never | no | a source item changed since the last sync, or no source versions are recorded; the next step is the sync |
 | `internal_error` | 70 | never | no | opv hit an internal error; report it |
 | `interrupted` | 129/130/131/143 | safe | no | interrupted by SIGINT (130), SIGHUP (129), SIGQUIT (131) or SIGTERM (143) |
 <!-- error-codes:end -->
@@ -893,10 +914,57 @@ SSH key or any other field type it does not rewrite exactly; it says so in one n
 | 7 | authentication: not signed in to 1Password or the target CLI, or `deploy_credentials` rejected |
 | 8 | findings: `status`, `plan`, `check` (or `doctor --env`) found keys missing or failing a rule |
 | 9 | outcome unknown, or a provider did not answer: nothing is known to be broken; re-run the same command ([exit 9](how-opv-handles-failures.md#exit-9-re-run-the-same-command)) |
+| 10 | `opv changed` found a source item changed since the last sync (`source_changed`): a result, not a failure (`ok` is true), and the next step is the sync |
 | 70 | internal error: an opv bug; nothing to fix on your side. `Next: opv version`; report it with that output |
 | 129 / 130 / 131 / 143 | interrupted by SIGHUP (a closed terminal), Ctrl-C (SIGINT), SIGQUIT or SIGTERM (128 + the signal); safe to re-run |
 
 CI may retry a job that exited 9 when `error.retry` is `safe`; codes 2 to 8 and 70 need a fix first. `run` exits with the child's own exit code, which can equal one of these; opv's own errors print `opv: ...` on stderr. A closed stdout (`status | head`) does not change the result. With `--json`, `error.code` names the cause within a category ([codes](#json-contract)).
+
+## When sync runs: `opv changed`, the drift check and CI
+
+A sync is incremental when a job runs only after the source changed. `opv changed <env>` is
+read-only and compares each placement's recorded `source versions` with the item's current
+version (values never shown):
+
+| Result | Exit | Next step |
+|---|---|---|
+| `unchanged` | 0 | nothing |
+| `changed` | 10 | run the sync (on a guarded environment, `opv plan <env>` first) |
+| `no_record` | 10 | nothing recorded yet: sync once (`opv bootstrap` when the store is missing) |
+| unreadable | its own code | fix what the error names; never read as `unchanged` |
+
+Exit 10 is a result, not a failure (`ok` is true in `--json`). A wrapper that treats **any**
+non-zero exit as a failure fails on every legitimate change, so the sync never runs; one that
+ignores every non-zero exit hides `unreadable` and reports success while opv never saw the
+item. Keep exit 10 and fail on everything else:
+
+```sh
+set +e
+opv changed staging --json > changed.json
+rc=$?
+set -e
+case $rc in
+  0)  echo "staging=no"  >> "$GITHUB_OUTPUT" ;;   # unchanged
+  10) echo "staging=yes" >> "$GITHUB_OUTPUT" ;;   # changed: run the sync
+  *)  exit "$rc" ;;                               # unreadable: fail the job
+esac
+```
+
+For a scheduled check that does not sync, `opv status <env> --fail-on-drift` exits 8
+(`target_drift`) when a pinned target no longer holds the version 1Password records, and 0
+when it matches.
+
+Generate the ready-made workflows instead of writing them by hand:
+
+```sh
+opv ci workflow --on-change              # the change workflow, every 15 minutes
+opv ci workflow --on-change --every 30   # ... on a 30-minute cron
+opv ci workflow --drift                  # the nightly drift check
+```
+
+`--on-change` fills the environment matrix and the confirm split from each environment's
+`confirm_env`: a direct sync when it is false, a reviewed `plan` then `--expect-plan` sync
+when it is true. Copy them from [examples/ci-change-detection](../examples/ci-change-detection/).
 
 ## GitHub Actions example
 
@@ -907,7 +975,7 @@ jobs:
     env:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
       OP_CACHE: "false"
-      OPV_VERSION: v0.10.1  # pin the release you tested; bump it deliberately
+      OPV_VERSION: v0.11.0  # pin the release you tested; bump it deliberately
     steps:
       - uses: actions/checkout@v4
       - name: Install the 1Password CLI

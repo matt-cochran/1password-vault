@@ -16,8 +16,8 @@ use crate::error::Error;
 use crate::host::Host;
 use crate::ports::Ports;
 use crate::provider::{
-    Check, InitField, NameRules, Preflight, PreflightMode, Provider, Section, StoreConfig,
-    StoreNameRules, TargetConfig, eq_as, init_lines,
+    Channel, Channels, Check, FileCapability, InitField, NameRules, Preflight, PreflightMode,
+    Provider, Section, StoreConfig, StoreNameRules, TargetConfig, eq_as, init_lines,
 };
 use crate::runner::CommandRunner;
 
@@ -449,10 +449,25 @@ impl TargetConfig for AzureTarget {
         )
     }
 
+    /// Today: Key Vault secrets; config is a plain env value or a Key Vault reference,
+    /// never a file (design §1.1).
+    fn channels(&self) -> Channels {
+        Channels {
+            secret: Channel::Store { label: "Key Vault" },
+            config: match self.config {
+                ConfigRoute::Store => Channel::Store { label: "Key Vault" },
+                ConfigRoute::Env => Channel::RuntimeEnv,
+            },
+            files: FileCapability::None,
+        }
+    }
+
     fn open<'a>(
         &'a self,
         env: &'a str,
         managed: BTreeSet<String>,
+        _files: &BTreeMap<String, crate::domain::runtime::FileMount>,
+        _config: &BTreeSet<String>,
         r: &'a dyn CommandRunner,
     ) -> Result<Ports<'a>, Error> {
         // Directories a killed run left behind are removed at the start of every Azure run
@@ -701,7 +716,13 @@ environments = ["prod"]
         let r = crate::runner::fake::FakeRunner::new([crate::runner::Output::success(
             serde_json::to_vec(&vault).unwrap(),
         )]);
-        let ports = azure_of(&f, "prod").open("prod", BTreeSet::new(), &r);
+        let ports = azure_of(&f, "prod").open(
+            "prod",
+            BTreeSet::new(),
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &r,
+        );
         assert!(matches!(ports, Ok(Ports::Pinned { .. })));
     }
 

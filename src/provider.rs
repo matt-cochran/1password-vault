@@ -13,6 +13,7 @@ use serde::de::DeserializeOwned;
 use toml::Spanned;
 use toml::de::{DeValue, ValueDeserializer};
 
+use crate::domain::runtime::FileMount;
 use crate::domain::{Kind, SecretValue};
 use crate::error::Error;
 use crate::host::{Host, Tool};
@@ -336,6 +337,56 @@ impl<'a> Section<'a> {
     }
 }
 
+/// Where one kind of key goes on a target (design §1.1, §1.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Channel {
+    /// Written to a store; `label` names it in messages, e.g. `Kubernetes Secret`.
+    Store { label: &'static str },
+    /// A readable named variable (GitHub Actions variables).
+    Variables,
+    /// A plain runtime environment variable the target's runtime sets.
+    RuntimeEnv,
+    /// Deliberately not delivered; `why` completes `no config channel: <why>`. `sync`
+    /// refuses it unless the target spells the opt-out out (`config = "none"`).
+    None { why: &'static str },
+    /// Deliberately not delivered, by the target's own declaration; `sync` warns and goes
+    /// on, and `why` completes `no config channel: <why>`.
+    Declined { why: &'static str },
+}
+
+impl Channel {
+    /// The channel's label in messages and JSON (`via`): `Kubernetes Secret`, `GitHub
+    /// variable`, `env`, …; `None` when the channel delivers nothing.
+    pub fn label(&self) -> Option<&'static str> {
+        match self {
+            Channel::Store { label } => Some(label),
+            Channel::Variables => Some("GitHub variable"),
+            Channel::RuntimeEnv => Some("env"),
+            Channel::None { .. } | Channel::Declined { .. } => None,
+        }
+    }
+}
+
+/// How a target delivers file keys (design §1.1, §1.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileCapability {
+    /// opv writes the bytes to a filesystem the app reads; `dir` names it (a Kubernetes
+    /// `secrets_dir`, which may hold `{product}`).
+    Native { dir: String },
+    /// The app writes the files from the environment (Fly and its shim).
+    ViaApp { note: &'static str },
+    /// Not delivered as a file; the key goes on the secret channel by name.
+    None,
+}
+
+/// A target's channels, one per kind of key (design §1.1, §1.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Channels {
+    pub secret: Channel,
+    pub config: Channel,
+    pub files: FileCapability,
+}
+
 /// A validated, provider-specific target. Core code sees only this trait.
 pub trait TargetConfig: fmt::Debug + Send + Sync {
     /// The provider this target belongs to (its label names it in messages: "on Fly").
@@ -363,12 +414,19 @@ pub trait TargetConfig: fmt::Debug + Send + Sync {
     /// The configuration error for targets `first` and `second` (each named as `<env>
     /// (target <name>)`) sharing this target.
     fn shared_target_error(&self, first: &str, second: &str) -> String;
+    /// Where each kind of key goes on this target, and whether it delivers files (design
+    /// §1.1, §1.3). Required: a target cannot compile without declaring all three.
+    fn channels(&self) -> Channels;
     /// The store and runtime adapters of this target (FR-28). `managed` is every env name
     /// the template renders for a declared key (FR-8); the ports speak those names.
+    /// `config` is the subset that belongs to config keys, so a target with a separate
+    /// config object (a Kubernetes ConfigMap) never puts a secret there by mistake.
     fn open<'a>(
         &'a self,
         env: &'a str,
         managed: BTreeSet<String>,
+        files: &BTreeMap<String, FileMount>,
+        config: &BTreeSet<String>,
         r: &'a dyn CommandRunner,
     ) -> Result<Ports<'a>, Error>;
     /// Read-only checks of the target's own state (NR-23 to NR-25): `Err` stops the
@@ -379,6 +437,18 @@ pub trait TargetConfig: fmt::Debug + Send + Sync {
     /// budget, with progress); [`PreflightMode::Read`] never waits and reports it as a
     /// warning instead.
     fn preflight(&self, r: &dyn CommandRunner, mode: PreflightMode) -> Result<Preflight, Error>;
+    /// The checks of a target that mounts file keys (design §6.6), run right after
+    /// [`TargetConfig::preflight`] with the file keys this target delivers (env name →
+    /// product and path, as [`TargetConfig::open`] gets them). Returned like `preflight`'s
+    /// checks: `Err` refuses, each check is one line. Default: no file mount, no check.
+    fn preflight_files(
+        &self,
+        _r: &dyn CommandRunner,
+        _mode: PreflightMode,
+        _files: &BTreeMap<String, FileMount>,
+    ) -> Result<Vec<Check>, Error> {
+        Ok(Vec::new())
+    }
     /// `doctor` lines: tool versions and sign-in, never identities or values (FR-3).
     fn doctor(&self, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Vec<Check>;
     /// `explain` lines for a secret `product`/`key`: (label, value), e.g. ("fly name", ..).
@@ -505,5 +575,107 @@ pub fn system_of(provider: &dyn Provider) -> crate::cause::System {
         "azure" => System::Azure,
         "kubernetes" => System::Kubernetes,
         _ => System::GitHub,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One target per registered provider (`adapters::registry::PROVIDERS`), so the
+    /// contract test sees every provider. One secret key makes the configuration load.
+    const ALL_PROVIDERS: &str = r#"
+[environments.prod]
+boundaries.web = { vault_id = "vweb", item_id = "iweb" }
+
+[environments.prod.targets.fly]
+fly.app = "web-prod"
+fly.secret_name = "{KEY}"
+state_vault_id = "sfly"
+
+[environments.prod.targets.azure]
+azure.subscription = "00000000-0000-0000-0000-000000000000"
+azure.key_vault = "kv-web"
+azure.resource_group = "rg-web"
+azure.container_app = "ca-web"
+azure.identity = "system"
+azure.env_name = "{KEY}"
+state_vault_id = "saz"
+
+[environments.prod.targets.kubernetes]
+kubernetes.context = "kind-dev"
+kubernetes.namespace = "app"
+kubernetes.deployment = "web"
+kubernetes.env_name = "{KEY}"
+state_vault_id = "sk8s"
+
+[environments.prod.targets.github]
+github.repo = "org/web"
+state_vault_id = "sgh"
+
+[products.web.keys.DATABASE_URL]
+kind = "secret"
+environments = ["prod"]
+"#;
+
+    /// The contract test (design §1.1, §1.3): each provider's table, as today's behaviour.
+    #[test]
+    fn the_contract_lists_every_providers_channels() {
+        let fleet = crate::config::parse(ALL_PROVIDERS).expect("the fixture loads");
+        let prod = &fleet.environments["prod"].targets;
+        let table: Vec<(&str, Channels)> = crate::adapters::registry::PROVIDERS
+            .iter()
+            .map(|p| {
+                let section = p.section();
+                (section, prod[section].config.channels())
+            })
+            .collect();
+        assert_eq!(
+            table,
+            vec![
+                (
+                    "fly",
+                    Channels {
+                        secret: Channel::Store {
+                            label: "Fly secret"
+                        },
+                        config: Channel::Declined {
+                            why: "set fly.config",
+                        },
+                        files: FileCapability::ViaApp {
+                            note: "env at boot, written to files by the app's shim",
+                        },
+                    },
+                ),
+                (
+                    "azure",
+                    Channels {
+                        secret: Channel::Store { label: "Key Vault" },
+                        config: Channel::RuntimeEnv,
+                        files: FileCapability::None,
+                    },
+                ),
+                (
+                    "kubernetes",
+                    Channels {
+                        secret: Channel::Store {
+                            label: "Kubernetes Secret",
+                        },
+                        config: Channel::RuntimeEnv,
+                        files: FileCapability::None,
+                    },
+                ),
+                (
+                    "github",
+                    Channels {
+                        secret: Channel::Store {
+                            label: "GitHub secret"
+                        },
+                        config: Channel::Variables,
+                        files: FileCapability::None,
+                    },
+                ),
+            ]
+        );
     }
 }

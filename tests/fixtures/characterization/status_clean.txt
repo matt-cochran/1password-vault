@@ -5,7 +5,8 @@ prod/portfolio: 4 keys · 3 saved · 1 skipped · 0 findings · 2 not yet on Fly
 TARGET     PRODUCT   KEY                  KIND    STATE    ON TARGET
 portfolio  allumata  INTEGRATION_ENC_KEY  secret  saved    new
 portfolio  allumata  OPENAI_API_KEY       secret  saved    new
-portfolio  allumata  SIGNUP_POLICY        config  saved    n/a
+portfolio  allumata  SIGNUP_POLICY        config  saved    not delivered (no config channel)
 portfolio  allumata  STRIPE_SECRET_KEY    secret  skipped  n/a
+prod/portfolio: warning: allumata/SIGNUP_POLICY not delivered (no config channel: set fly.config)
 --- result
 Ok(())

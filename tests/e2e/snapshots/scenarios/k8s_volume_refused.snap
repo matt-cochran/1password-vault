@@ -1,0 +1,31 @@
+# k8s_volume_refused: opv sync prod --confirm prod --target k8s --deploy
+
+## text exit: 5
+## text stdout
+prod/k8s: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
+prod/k8s: written: web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/LOG_LEVEL (E2E__WEB__LOG_LEVEL), web/OTEL_RESOURCE (E2E__WEB__OTEL_RESOURCE), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET), web/TLS_CERTIFICATE (E2E__WEB__TLS_CERTIFICATE), web/TLS_PRIVATE_KEY (E2E__WEB__TLS_PRIVATE_KEY)
+prod/k8s: delivery: web not recorded: no delivery item is recorded for web on prod/k8s; opv bootstrap creates it
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: Kubernetes refused the update to deployment e2e-app in namespace e2e-prod: it failed validation
+  checked: kubectl --context e2e-cluster --namespace e2e-prod --request-timeout=120s replace -f - -o jsonpath (exit 1)
+--- kubectl replied, exit 1 ---
+| The Deployment "e2e-app" is invalid: spec.template.spec.containers[0].volumeMounts[1].mountPath: Invalid value: "/run/secrets/web": must be unique
+--- (scrubbed) ---
+Do: check the settings of deployment e2e-app in namespace e2e-prod against Kubernetes's rules
+Next: opv doctor --env prod
+
+## json exit: 5
+## json stdout
+{"schema_version":2,"ok":false,"exit_code":5,"next":"opv doctor --env prod","do":"check the settings of deployment e2e-app in namespace e2e-prod against Kubernetes's rules","error":{"code":"update_refused","category":"target","message":"Kubernetes refused the update to deployment e2e-app in namespace e2e-prod: it failed validation","subject":{"target":null,"system":"kubernetes","subject":{"kind":"deployment","name":"e2e-app","scope":"e2e-prod"},"why":{"why":"validation"},"env":"prod"},"evidence":{"checked":"kubectl --context e2e-cluster --namespace e2e-prod --request-timeout=120s replace -f - -o jsonpath","account":null,"upstream":{"source":"kubernetes","tool":"kubectl","version":null,"exit":{"kind":"code","code":1},"said":["The Deployment \"e2e-app\" is invalid: spec.template.spec.containers[0].volumeMounts[1].mountPath: Invalid value: \"/run/secrets/web\": must be unique"],"truncated":false,"removed_advice":false,"untrusted":true,"omitted":0}},"retry":"after_fix","human_required":false,"do":"check the settings of deployment e2e-app in namespace e2e-prod against Kubernetes's rules","next":"opv doctor --env prod","next_kind":"run"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: Kubernetes refused the update to deployment e2e-app in namespace e2e-prod: it failed validation
+  checked: kubectl --context e2e-cluster --namespace e2e-prod --request-timeout=120s replace -f - -o jsonpath (exit 1)
+--- kubectl replied, exit 1 ---
+| The Deployment "e2e-app" is invalid: spec.template.spec.containers[0].volumeMounts[1].mountPath: Invalid value: "/run/secrets/web": must be unique
+--- (scrubbed) ---
+Do: check the settings of deployment e2e-app in namespace e2e-prod against Kubernetes's rules
+Next: opv doctor --env prod

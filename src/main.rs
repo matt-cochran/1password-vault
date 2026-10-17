@@ -408,11 +408,8 @@ Examples:
   opv target add staging site --fly-app site-staging --dry-run";
 
 const TARGET_ADD_MORE: &str = "\
-Declares one named deployment target under [environments.<env>.targets.<name>]: the
-provider's options (listed above), the products it delivers and its deploy identity.
-In the same step it finds or creates the state vault <project>-<env>-<target>-state
-and records its ID. The edit keeps comments, validates
-the whole configuration first and refuses a concurrent change; --dry-run changes nothing.";
+Writes [environments.<env>.targets.<name>] and finds or creates its state vault
+<project>-<env>-<target>-state; keeps comments, validates first, refuses a concurrent change.";
 
 const TARGET_LIST_QUICK: &str = "\
 Examples:
@@ -675,6 +672,10 @@ enum Cmd {
         /// target, in name order.
         #[arg(long = "target", value_name = "NAME", requires = "env")]
         target: Vec<String>,
+        /// Exit 8 with `target_drift` when a pinned binding on the target no longer matches
+        /// 1Password. Without it, drift stays a printed line and the exit code is unchanged.
+        #[arg(long, requires = "env")]
+        fail_on_drift: bool,
     },
     /// List the projects whose configuration lives in 1Password (names only).
     ///
@@ -758,6 +759,21 @@ enum Cmd {
     /// Delivery receipts: whether a product's target still holds what opv delivered.
     #[command(subcommand)]
     Delivery(DeliveryCmd),
+    /// Whether a source item changed since the last sync (read-only; exit 10 when it did).
+    #[command(before_help = CHANGED_QUICK)]
+    Changed {
+        /// Environment name from the configuration (for example prod).
+        env: String,
+        /// Only this product.
+        #[arg(long)]
+        product: Option<String>,
+        /// Only this target (repeatable); default: every target that delivers the product.
+        #[arg(long)]
+        target: Vec<String>,
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print a ready-to-commit GitHub Actions workflow (YAML) for one target (read-only).
     #[command(subcommand)]
     Ci(CiCmd),
@@ -1334,6 +1350,12 @@ Examples:
   opv delivery verify prod --product api --target web          # one placement
   opv delivery verify prod --receipt api.receipt.json --json   # the kept receipt is still current?";
 
+const CHANGED_QUICK: &str = "\
+Examples:
+  opv changed prod                       # did any source item change since the last sync?
+  opv changed prod --product api         # only api's placements
+  opv changed prod --json                # one JSON document; exit 10 when something changed";
+
 #[derive(Subcommand)]
 enum CiCmd {
     /// Print a ready-to-commit GitHub Actions workflow (YAML) that syncs one target, so an
@@ -1341,16 +1363,37 @@ enum CiCmd {
     #[command(before_help = CI_WORKFLOW_QUICK)]
     Workflow {
         /// Environment name from the configuration (for example prod).
-        env: String,
+        #[arg(required_unless_present_any = ["on_change", "drift"])]
+        env: Option<String>,
         /// Target name whose provider setup step and sync command the workflow uses.
-        #[arg(long, value_name = "NAME")]
-        target: String,
+        #[arg(
+            long,
+            value_name = "NAME",
+            required_unless_present_any = ["on_change", "drift"],
+            conflicts_with_all = ["on_change", "drift"]
+        )]
+        target: Option<String>,
         /// GitHub environment the job declares (`environment:`); without it, none.
-        #[arg(long, value_name = "ENVIRONMENT")]
+        #[arg(long, value_name = "ENVIRONMENT", conflicts_with_all = ["on_change", "drift"])]
         github_env: Option<String>,
         /// Let the job deploy after syncing (adds --deploy to the sync command).
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["on_change", "drift"])]
         deploy: bool,
+        /// Print §2.5's change-detection workflow, one job per environment with a target.
+        #[arg(long, conflicts_with_all = ["drift", "target", "github_env", "deploy"])]
+        on_change: bool,
+        /// Print §2.5's nightly drift-check workflow for the same environments.
+        #[arg(long, conflicts_with_all = ["on_change", "target", "github_env", "deploy"])]
+        drift: bool,
+        /// Minutes between change checks (`--on-change` only); a divisor of 60, at most 59.
+        #[arg(
+            long,
+            value_name = "MINUTES",
+            default_value = "15",
+            value_parser = every_minutes,
+            requires = "on_change"
+        )]
+        every: u8,
     },
 }
 
@@ -1358,7 +1401,22 @@ const CI_WORKFLOW_QUICK: &str = "\
 Examples:
   opv ci workflow prod --target web                     # print the workflow for one target
   opv ci workflow prod --target web --github-env prod   # run the job in the prod environment
-  opv ci workflow prod --target web --deploy            # let the job deploy after syncing";
+  opv ci workflow prod --target web --deploy            # let the job deploy after syncing
+  opv ci workflow --on-change                           # the change workflow, every 15 minutes
+  opv ci workflow --on-change --every 30                # ... on a 30-minute cron
+  opv ci workflow --drift                               # the nightly drift check";
+
+/// `--every <minutes>`: a divisor of 60 (so the cron repeats every hour), at most 59.
+fn every_minutes(s: &str) -> Result<u8, String> {
+    let n: u8 = s
+        .parse()
+        .map_err(|_| "a whole number of minutes".to_string())?;
+    if (1..=59).contains(&n) && 60 % n == 0 {
+        Ok(n)
+    } else {
+        Err("a divisor of 60 between 1 and 59".to_string())
+    }
+}
 
 #[derive(Subcommand)]
 enum TargetCmd {
@@ -1378,6 +1436,10 @@ enum TargetCmd {
         /// non-source-only product.
         #[arg(long, value_delimiter = ',')]
         products: Vec<String>,
+        /// A process role this target delivers (repeat or comma-separate), written as its
+        /// `roles`; required when a delivered product's keys declare roles. Names only.
+        #[arg(long = "role", value_name = "ROLE", value_delimiter = ',')]
+        roles: Vec<String>,
         /// The item holding this target's least-privilege deploy identity
         /// (op://<vault>/<item>).
         #[arg(long, value_name = "OP_REF")]
@@ -2322,6 +2384,7 @@ impl Cmd {
         match self {
             Cmd::Check { env, .. }
             | Cmd::Run { env, .. }
+            | Cmd::Changed { env, .. }
             | Cmd::Config(ConfigCmd::Export { env: Some(env), .. })
             | Cmd::Item(ItemCmd::Skeleton { env, .. })
             | Cmd::Tidy { env, .. } => Some((env, Reach::Store)),
@@ -2392,6 +2455,7 @@ impl Cmd {
             | Cmd::Tidy { json, .. }
             | Cmd::Access { json, .. }
             | Cmd::Delivery(DeliveryCmd::Verify { json, .. })
+            | Cmd::Changed { json, .. }
             | Cmd::Target(TargetCmd::Add { json, .. })
             | Cmd::Target(TargetCmd::List { json, .. })
             | Cmd::Adopt { json, .. }
@@ -3044,6 +3108,16 @@ fn run(
             runner,
         );
     }
+    if let Cmd::Changed {
+        env,
+        product,
+        target,
+        json,
+    } = &cmd
+    {
+        let fleet = loaded?;
+        return opv::app::changed::run(&fleet, env, product.as_deref(), target, runner, *json, out);
+    }
     run_other(cmd, loaded, source.as_deref(), runner, out).map(|()| 0)
 }
 
@@ -3408,6 +3482,7 @@ fn run_other(
         Cmd::Setup { .. } => unreachable!("handled before configuration discovery"),
         Cmd::Login { .. } => unreachable!("handled before configuration discovery"),
         Cmd::Run { .. } => unreachable!("handled by run"),
+        Cmd::Changed { .. } => unreachable!("handled by run"),
         Cmd::Init { .. } => unreachable!("handled by run_init"),
         Cmd::Add { .. } => unreachable!("handled by run_edit"),
         Cmd::Target(TargetCmd::Add { .. }) => unreachable!("handled by run_edit"),
@@ -3552,8 +3627,33 @@ fn run_other(
             target,
             github_env,
             deploy,
+            on_change,
+            drift,
+            every,
         }) => {
-            opv::app::ci_workflow::run(&loaded?, &env, &target, github_env.as_deref(), deploy, out)
+            if on_change {
+                opv::app::ci_workflow::run_on_change(&loaded?, every, out)
+            } else if drift {
+                opv::app::ci_workflow::run_drift(&loaded?, out)
+            } else {
+                match (env.as_deref(), target.as_deref()) {
+                    (Some(env), Some(target)) => opv::app::ci_workflow::run(
+                        &loaded?,
+                        env,
+                        target,
+                        github_env.as_deref(),
+                        deploy,
+                        out,
+                    ),
+                    _ => Err(opv::cause::Cause::Usage {
+                        problem: opv::cause::UsageProblem::NeedsFlag {
+                            flag: "ci workflow".into(),
+                            needs: "an environment and --target, or --on-change/--drift".into(),
+                        },
+                    }
+                    .into()),
+                }
+            }
         }
         Cmd::Ready { env, json, save } => opv::app::ready::run(
             &loaded?,
@@ -3575,10 +3675,20 @@ fn run_other(
             product,
             json,
             target,
+            fail_on_drift,
             ..
-        } => status::run_targeted(&loaded?, &env, &target, product.as_deref(), r, out, json)
-            // An adapter's cause names the environment the command ran for (L10 follow-up).
-            .map_err(|e| e.in_env(&env)),
+        } => status::run_targeted(
+            &loaded?,
+            &env,
+            &target,
+            product.as_deref(),
+            r,
+            out,
+            json,
+            fail_on_drift,
+        )
+        // An adapter's cause names the environment the command ran for (L10 follow-up).
+        .map_err(|e| e.in_env(&env)),
         Cmd::Plan(a) => sync::plan_rotating(
             &loaded?,
             &a.env,
@@ -3911,6 +4021,7 @@ fn run_edit(
             name,
             provider,
             products,
+            roles,
             deploy_credentials,
             project,
             dry_run,
@@ -3922,6 +4033,7 @@ fn run_edit(
                 provider,
                 fields: target_options.clone(),
                 products,
+                roles,
                 deploy_credentials,
                 project,
                 dry_run,

@@ -41,6 +41,9 @@ pub struct PlanIdInput<'a> {
     pub version_ids: bool,
     /// The store name of `(product, key)` in this environment, when it has one.
     pub name_of: &'a dyn Fn(&str, &str) -> Option<String>,
+    /// The route each delivered name takes (M4, §4.3): `secret`, `config`, or
+    /// `file:<path>` (a file key on a Native target). `None` adds nothing to the hash.
+    pub routes: &'a dyn Fn(&str, &str) -> Option<String>,
     /// `--expect-plan`: a value stamped with this id was written by a run of this very plan
     /// (FR-42), so it is this plan's own partial apply, not a change to the plan.
     pub own_plan: Option<&'a str>,
@@ -106,6 +109,11 @@ pub fn plan_id(input: &PlanIdInput<'_>, plan: &SyncPlan) -> String {
     for r in &plan.rows {
         put(&r.product);
         put(&r.key);
+        // The route is part of the reviewed plan (M4, §4.3): moving a key between env and
+        // file, or between channels, changes the id. A route is a name or a path.
+        if let Some(route) = (input.routes)(&r.product, &r.key) {
+            put(&route);
+        }
         put(match r.kind {
             Kind::Secret => "secret",
             Kind::Config => "config",
@@ -352,6 +360,7 @@ mod tests {
             prune: vec![],
             held_from_prune: vec![],
             config: BTreeMap::new(),
+            no_channel: Vec::new(),
             concealed_config: Vec::new(),
             drift: Vec::new(),
             undelivered: Vec::new(),
@@ -380,6 +389,7 @@ mod tests {
                 version_ids: true,
                 rotate: &BTreeSet::new(),
                 name_of: &|_, k| Some(k.to_string()),
+                routes: &|_, _| None,
                 own_plan: None,
             },
             plan,
@@ -401,6 +411,7 @@ mod tests {
                 version_ids: false,
                 rotate: &set,
                 name_of: &|_, k| Some(k.to_string()),
+                routes: &|_, _| None,
                 own_plan: None,
             },
             &plan_with(&[]),
@@ -449,6 +460,32 @@ mod tests {
         );
     }
 
+    /// M4 (§4.3): the same names with another route (env vs file) give another id.
+    #[test]
+    fn plan_id_changes_with_a_rows_route() {
+        let plan = plan_with(&[]);
+        let with_route = |route: &'static str| {
+            plan_id(
+                &PlanIdInput {
+                    env: "prod",
+                    product: None,
+                    item_version: Some(1),
+                    listed: &[],
+                    version_ids: false,
+                    rotate: &BTreeSet::new(),
+                    name_of: &|_, k| Some(k.to_string()),
+                    routes: &move |_, _| Some(route.to_string()),
+                    own_plan: None,
+                },
+                &plan,
+            )
+        };
+        assert_ne!(
+            with_route("secret"),
+            with_route("file:github-app/private-key")
+        );
+    }
+
     /// SR-1: the same names with another value give the same id: no value goes in.
     #[test]
     fn plan_id_ignores_values() {
@@ -472,6 +509,7 @@ mod tests {
                     version_ids: false,
                     rotate: &BTreeSet::new(),
                     name_of: &|_, k| Some(k.to_string()),
+                    routes: &|_, _| None,
                     own_plan: None,
                 },
                 &p,
@@ -507,6 +545,7 @@ mod tests {
                 version_ids: true,
                 rotate: &BTreeSet::new(),
                 name_of: &|_, k| Some(k.to_string()),
+                routes: &|_, _| None,
                 own_plan: own,
             },
             plan,

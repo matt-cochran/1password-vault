@@ -11,9 +11,10 @@ structural changes in their own terminal, and entering every secret value in 1Pa
 | `opv_configuration` | `opv config describe` | none | nothing | environment names, confirmation flags, product/key names and kinds, and each target's provider, delivered products and whether its state vault and deploy identity are declared |
 | `opv_access` | `opv access` | optional environment and target | nothing | per environment: each CI or deploy identity's service-account name, vaults, permissions and state, findings with their next step, how many grants were `checked` and how many readers were `unclassified`, and for each identity missing a grant the person's `opv access … --create` command |
 | `opv_deployment_plan` | `opv plan --json` | declared environment, optional targets, product and `rotate` (`PRODUCT/KEY` entries) | nothing | each row's target, product, key and action (`write`, `unset`, `hold`, `none`), the `plan_id`, and the `approve_command` (with the same `--target`, `--product` and `--rotate`) a person runs to approve it; no execution |
+| `opv_changed` | `opv changed --json` | declared environment, optional targets and product | nothing | per placement its product, target and state (`unchanged`, `changed`, `no_record`), and for a changed one each source item's id with its `recorded` and `current` version numbers; `next` and `do`. Item ids and version numbers only, never a value; a changed item (the CLI's exit 10) is a successful answer. A sync still needs a person's approval |
 | `opv_declare_key` | `opv add` | product, key, kind, environments, rules, guidance, immutable | local `secrets.toml` | `changed` |
 | `opv_declare_environment` | `opv env add` | environment | local `secrets.toml` | `changed` |
-| `opv_declare_target` | `opv target add` | environment, target, provider, public provider options, products | local `secrets.toml` | `changed` |
+| `opv_declare_target` | `opv target add` | environment, target, provider, public provider options (for example `fly-config`, `kubernetes-config`, `kubernetes-secrets-dir`), products, roles | local `secrets.toml` | `changed` |
 | `opv_structure_plan` | `opv structure plan` | none | nothing | the structural plan and its `plan_id` |
 | `opv_structure_apply` | `opv structure apply <PLAN_ID>` | `plan_id` | 1Password structure, then `secrets.toml` IDs | created public IDs, links for key entry, added field names |
 | `opv_generate` | `opv generate <env> <product/KEY>…` | declared environment and 1–20 `product/KEY` names | 1Password values (empty fields only) | each generated key's product, key, `encoding` (`base64` or `hex`) and recipe `bytes`; never a value |
@@ -27,7 +28,8 @@ return a projection of it: `opv_ready` keeps each finding's code, scope names
 (environment, target, product, key), blocking flag, actor, effect and step, each target's
 state, and the counts, never a message or verification text; `opv_access` keeps the
 fields in the table above, never a raw `op` command or message; `opv_deployment_plan`
-names each row's action as `write`, `unset`, `hold` or `none`. The CLI apply and sync
+names each row's action as `write`, `unset`, `hold` or `none`; `opv_changed` keeps each
+placement's names and state and each moved item's id and version numbers. The CLI apply and sync
 still require the person's own `opv approve` first.
 
 No tool accepts or returns a secret value, an arbitrary command, a file path, an
@@ -162,7 +164,7 @@ Any other client runs the same command, for example:
 
 ## Read-only inspection
 
-`opv_ready`, `opv_configuration`, `opv_access`, `opv_deployment_plan`,
+`opv_ready`, `opv_configuration`, `opv_access`, `opv_deployment_plan`, `opv_changed`,
 `opv_delivery_preview` and `opv_structure_plan` (and the `opv_declare_*` tools, which
 edit only the local file) run on a runner that refuses every write and inherited
 execution beneath the application code, including layout tidying the CLI planning path

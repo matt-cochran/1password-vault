@@ -69,6 +69,26 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "SecretNotStored",
         "no recording of `op service-account create`",
     ),
+    // Drift is a pinned binding whose version differs from the store's current one. The only
+    // pinned target opv-sim models is plain Kubernetes, whose store takes the current version
+    // from the Deployment's own binding (src/adapters/kubernetes/store.rs `read`), so the two
+    // never differ. Where they can (Azure Key Vault through External Secrets,
+    // src/adapters/azure/keyvault.rs, src/adapters/kubernetes/external.rs, or the K5 volume
+    // bindings) opv-sim models nothing; reached by src/app/azure_tests.rs. The flag's other
+    // side, a target with nothing pinned exiting 0, is scenarios/changed.rs. Drop this when a
+    // scenario or the K5 bindings make it reachable.
+    (
+        "TargetDrift",
+        "drift needs a pinned store opv-sim does not model (Azure Key Vault/ESO)",
+    ),
+    // A result, not a failure: `opv changed` reports it as `ok: true` with exit 10 in its
+    // own document (src/app/changed.rs), never as an error, so no error snapshot exists. Its
+    // states are snapshotted as successful results in scenarios/changed.rs
+    // (snapshots/changed/).
+    (
+        "SourceChanged",
+        "a successful result (exit 10), never an error document",
+    ),
 ];
 
 fn snapshots() -> PathBuf {
@@ -403,6 +423,9 @@ impl Scenario {
             .replace_all(&s, r#""platform":"<platform>""#);
         let s = re(r"\bin \d+(\.\d+)? ?(ms|s)\b").replace_all(&s, "in <delay>");
         let s = re(r"rcpt-[0-9a-f]+").replace_all(&s, "rcpt-<id>");
+        // A Kubernetes object's version id is random (src/adapters/kubernetes/mod.rs
+        // `new_version`).
+        let s = re(r"\b(opv-e2e-[a-z0-9-]*-)[a-z2-7]{10}\b").replace_all(&s, "${1}<id>");
         // opv's own version changes every release; a snapshot must not.
         let s = s.replace(
             &format!(r#""opv_version":"{}""#, env!("CARGO_PKG_VERSION")),
@@ -534,13 +557,13 @@ mod cases {
         case(
             Scenario::new().config(|c| {
                 c.replacen(
-                    "state_vault_id = \"vE2ESTATEGH000000000000001\"\n",
-                    "state_vault_id = \"vE2ESTATEGH000000000000001\"\n\n\
+                    "state_vault_id = \"vE2ESTATEGH000000000000001\"\nroles = [\"serve\"]\n",
+                    "state_vault_id = \"vE2ESTATEGH000000000000001\"\nroles = [\"serve\"]\n\n\
                      [environments.staging]\ntitle = \"Staging\"\norder = 3\n\
                      boundaries.web = { vault_id = \"vE2EWEBDEV0000000000000001\", item_id = \"iE2EWEBDEV0000000000000001\" }\n\n\
                      [environments.staging.targets.fly]\nfly.app = \"e2e-app-staging\"\n\
                      fly.secret_name = \"E2E__{PRODUCT}__{KEY}\"\n\
-                     state_vault_id = \"vE2ESTATEFLY00000000000001\"\n",
+                     state_vault_id = \"vE2ESTATEFLY00000000000001\"\nroles = [\"serve\"]\n",
                     1,
                 )
                 .replace(
@@ -615,10 +638,10 @@ mod cases {
     }
 
     pub fn key_not_declared() -> Case {
-        // TLS_CERTIFICATE is declared for dev only.
+        // OTEL_RESOURCE is declared for prod only.
         case(
             Scenario::new(),
-            &["explain", "web/TLS_CERTIFICATE", "--env", "prod"],
+            &["explain", "web/OTEL_RESOURCE", "--env", "dev"],
         )
     }
 
@@ -728,12 +751,12 @@ mod cases {
     // §4.5 guards, §4.8 person-only steps, §4.9 approvals
 
     pub fn guard() -> Case {
-        // The builder profile allows prod only.
+        // The builder profile allows dev only (O9: it may name no deployed environment).
         case(
             Scenario::new(),
             &[
                 "run",
-                "dev",
+                "prod",
                 "--preview",
                 "--product",
                 "web",
@@ -745,7 +768,7 @@ mod cases {
         )
         .mcp(
             "opv_delivery_preview",
-            json!({"environment": "dev", "product": "web", "role": "serve", "remote": "builder"}),
+            json!({"environment": "prod", "product": "web", "role": "serve", "remote": "builder"}),
         )
     }
 
@@ -913,8 +936,11 @@ mod cases {
     }
 
     pub fn partial() -> Case {
-        // fly and gh are written, then the Kubernetes deployment is not found.
-        case(Scenario::new(), &["sync", "prod", "--confirm", "prod"])
+        // fly and gh are written, then Kubernetes refuses the first Secret (403).
+        case(
+            Scenario::new().faults(&fault("kubectl", "apply", "forbidden")),
+            &["sync", "prod", "--confirm", "prod"],
+        )
     }
 
     pub fn tool_missing() -> Case {
@@ -976,17 +1002,16 @@ mod cases {
     }
 
     pub fn target_refused() -> Case {
-        // A Deployment mid-rollout (the recorded `kubectl get deployment`): the update waits.
+        // K-R4: the team's own projected volume names a ConfigMap the namespace does not
+        // hold, so the new pod waits in `ContainerCreating` and the rollout is still in
+        // progress when the wait ends.
         case(
             Scenario::new().world(|w| {
-                let path = Path::new(ROOT).join("tests/fixtures/kubernetes/deployment-get.json");
-                let mut d: Value =
-                    serde_json::from_str(&std::fs::read_to_string(path).expect("fixture"))
-                        .expect("fixture");
-                d["metadata"]["name"] = json!("e2e-app");
-                d["metadata"]["namespace"] = json!("e2e-prod");
-                w["kubernetes"]["contexts"]["e2e-cluster"]["namespaces"]["e2e-prod"]
-                    ["deployments"] = json!([d]);
+                let spec = pod_spec(w);
+                spec["volumes"] = json!([{"name": "settings", "projected": {"sources": [
+                    {"configMap": {"name": "e2e-app-settings"}}]}}]);
+                spec["containers"][0]["volumeMounts"] =
+                    json!([{"name": "settings", "mountPath": "/etc/e2e-app", "readOnly": true}]);
             }),
             &[
                 "sync",
@@ -1034,6 +1059,72 @@ mod cases {
                 web_prod_api_key(w, |f| f["value"] = json!("x".repeat(1024 * 1024 + 1)));
             }),
             &["sync", "prod", "--confirm", "prod", "--target", "k8s"],
+        )
+    }
+
+    /// The e2e Deployment's pod spec in `w` (tests/e2e/app/world.json).
+    fn pod_spec(w: &mut Value) -> &mut Value {
+        w.pointer_mut(
+            "/kubernetes/contexts/e2e-cluster/namespaces/e2e-prod/deployments/0/spec/template/spec",
+        )
+        .expect("the e2e Deployment")
+    }
+
+    const K8S_SYNC: &[&str] = &[
+        "sync",
+        "prod",
+        "--confirm",
+        "prod",
+        "--target",
+        "k8s",
+        "--deploy",
+    ];
+
+    /// Design §6.6: no `fsGroup` and a non-root user, so the mounted 0440 files would be
+    /// unreadable; refused before any write.
+    pub fn k8s_mount_unreadable() -> Case {
+        case(
+            Scenario::new().world(|w| {
+                pod_spec(w)["securityContext"] = json!({"runAsUser": 10001, "runAsGroup": 10001});
+            }),
+            K8S_SYNC,
+        )
+    }
+
+    /// Design §6.8: another volume is mounted above the files' directory.
+    pub fn k8s_mount_path_in_use() -> Case {
+        case(
+            Scenario::new().world(|w| {
+                let spec = pod_spec(w);
+                spec["volumes"] = json!([{"name": "tls", "secret": {"secretName": "e2e-app-tls"}}]);
+                spec["containers"][0]["volumeMounts"] =
+                    json!([{"name": "tls", "mountPath": "/run/secrets", "readOnly": true}]);
+            }),
+            K8S_SYNC,
+        )
+    }
+
+    /// K-R2: an `opv-files-` volume left at the files' directory, so the replace carries two
+    /// mounts at one path and the API server refuses it (422).
+    pub fn k8s_volume_refused() -> Case {
+        case(
+            Scenario::new().world(|w| {
+                let spec = pod_spec(w);
+                spec["volumes"] = json!([{"name": "opv-files-legacy", "emptyDir": {}}]);
+                spec["containers"][0]["volumeMounts"] =
+                    json!([{"name": "opv-files-legacy", "mountPath": "/run/secrets/web"}]);
+            }),
+            K8S_SYNC,
+        )
+    }
+
+    /// Design §6.5: no `delete configmaps` on a `configmap` target; refused before any write.
+    pub fn k8s_configmap_right_missing() -> Case {
+        case(
+            Scenario::new().world(|w| {
+                w["kubernetes"]["contexts"]["e2e-cluster"]["denied"] = json!(["delete configmaps"]);
+            }),
+            K8S_SYNC,
         )
     }
 
@@ -1151,6 +1242,62 @@ mod cases {
         )
         .mcp("opv_access", json!({}))
     }
+
+    // 0.11.0 MCP parity: `opv_changed` and the target options of `opv_declare_target`.
+
+    /// `opv changed` of an undeclared environment: the same refusal over MCP.
+    pub fn changed_not_declared() -> Case {
+        case(Scenario::new(), &["changed", "nope"])
+            .mcp("opv_changed", json!({"environment": "nope"}))
+    }
+
+    /// `op item list` answered as signed out (recording 07): the same sign-in refusal over
+    /// MCP, naming the same `opv changed` re-run.
+    pub fn changed_signed_out() -> Case {
+        case(
+            Scenario::new().faults(&fault("op", "item list", "signed_out")),
+            &["changed", "prod"],
+        )
+        .mcp("opv_changed", json!({"environment": "prod"}))
+    }
+
+    /// A relative `kubernetes.secrets_dir`: refused by the loader before anything is written,
+    /// over MCP as on the command line.
+    pub fn declare_target_secrets_dir_invalid() -> Case {
+        case(
+            Scenario::new(),
+            &[
+                "target",
+                "add",
+                "prod",
+                "cluster",
+                "--kubernetes-context",
+                "e2e-cluster",
+                "--kubernetes-deployment",
+                "e2e-app",
+                "--kubernetes-namespace",
+                "e2e-prod",
+                "--kubernetes-secrets-dir",
+                "run/secrets",
+                "--role",
+                "serve",
+            ],
+        )
+        .mcp(
+            "opv_declare_target",
+            json!({
+                "environment": "prod",
+                "target": "cluster",
+                "options": {
+                    "kubernetes-context": "e2e-cluster",
+                    "kubernetes-namespace": "e2e-prod",
+                    "kubernetes-deployment": "e2e-app",
+                    "kubernetes-secrets-dir": "run/secrets",
+                },
+                "roles": ["serve"],
+            }),
+        )
+    }
 }
 
 /// A scenario whose command has no `--json`: its variant is the one declared, pinned by the
@@ -1228,7 +1375,7 @@ mod text_cases {
         )
     }
 
-    /// The plan `opv run prod --product web --role serve --remote builder --confirm prod`
+    /// The plan `opv run dev --product web --role serve --remote builder`
     /// hands `remote-send` (the step after `op run`, which opv-sim does not model).
     fn remote_plan(workdir: &str, command: &[&str]) -> String {
         json!({
@@ -1238,10 +1385,10 @@ mod text_cases {
             "header": {
                 "keys": ["API_KEY", "DATABASE_URL", "LOG_LEVEL", "SESSION_SECRET"], "files": [],
                 "dir_env": "WEB_SECRETS_DIR", "workdir": workdir, "command": command,
-                "outer": {"env": "prod", "product": "web", "profile": "builder",
+                "outer": {"env": "dev", "product": "web", "profile": "builder",
                           "command": ["run"],
-                          "args": ["prod", "--product", "web", "--role", "serve", "--remote",
-                                   "builder", "--confirm", "prod"],
+                          "args": ["dev", "--product", "web", "--role", "serve", "--remote",
+                                   "builder"],
                           "has_child": false}}
         })
         .to_string()
@@ -1270,7 +1417,7 @@ mod text_cases {
                     "/usr/local/bin/opv",
                     "run",
                     "--env",
-                    "prod",
+                    "dev",
                     "--product",
                     "web",
                 ],
@@ -1548,6 +1695,13 @@ scenarios! {
         concurrent_edit => ConcurrentEdit,
         in_no_account_on_the_machine => InOtherAccount,
         signed_out_access => NotSignedIn,
+        changed_not_declared => NotDeclared,
+        changed_signed_out => NotSignedIn,
+        declare_target_secrets_dir_invalid => ConfigInvalid,
+        k8s_mount_unreadable => MountUnreadable,
+        k8s_mount_path_in_use => Guard,
+        k8s_volume_refused => TargetRefused,
+        k8s_configmap_right_missing => MissingRight,
     ],
     text: [
         copies_differ => CopiesDiffer,
@@ -1588,6 +1742,9 @@ scenarios! {
         owner_setup_required,
         signed_out_access,
         manifest_not_found,
+        changed_not_declared,
+        changed_signed_out,
+        declare_target_secrets_dir_invalid,
     ],
 }
 

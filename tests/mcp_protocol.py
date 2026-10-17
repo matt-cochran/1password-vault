@@ -47,7 +47,7 @@ with tempfile.TemporaryDirectory() as directory:
             'opv_ready', 'opv_configuration', 'opv_deployment_plan', 'opv_access',
             'opv_structure_plan', 'opv_structure_apply', 'opv_declare_key',
             'opv_declare_environment', 'opv_declare_target', 'opv_generate', 'opv_sync',
-            'opv_delivery_preview'}
+            'opv_delivery_preview', 'opv_changed'}
         # The inspection tools, the plans and the delivery preview are read-only;
         # declarations edit the local file, generate fills empty 1Password fields, and
         # structure apply and sync need a person's terminal approval.

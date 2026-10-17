@@ -14,6 +14,7 @@ use super::*;
 use crate::adapters::fake_op::FakeOp;
 use crate::app::sync::{self, SyncOpts};
 use crate::app::testutil::{fly_app_ok, fly_releases, ok};
+use crate::runner::fake::FakeRunner;
 use crate::runner::{Call, Outcome, Output};
 
 const MARK: &str = "DELIVERYMARK";
@@ -413,6 +414,30 @@ fn a_new_key_changes_the_binding_set() {
 }
 
 #[test]
+fn the_binding_set_of_a_secrets_fly_target_includes_its_config_keys() {
+    let fleet = crate::config::parse(
+        "[environments.prod]\n\
+         boundaries.p = { vault_id = \"v\", item_id = \"i\" }\n\
+         [environments.prod.targets.app]\n\
+         state_vault_id = \"s\"\n\
+         fly.app = \"myapp\"\n\
+         fly.secret_name = \"FLEET__{PRODUCT}__{KEY}\"\n\
+         fly.config = \"secrets\"\n\
+         delivery_items = { p = \"di\" }\n\
+         [products.p.keys.SIGNUP_POLICY]\n\
+         kind = \"config\"\n\
+         environments = [\"prod\"]\n",
+    )
+    .unwrap();
+    let names: Vec<String> = bindings(&fleet, "prod", "app", "p")
+        .unwrap()
+        .into_iter()
+        .map(|b| b.name)
+        .collect();
+    assert_eq!(names, vec!["FLEET__P__SIGNUP_POLICY".to_string()]);
+}
+
+#[test]
 fn another_app_cannot_reuse_the_revision() {
     let (w, fleet) = delivered();
     let mut moved = fleet.clone();
@@ -470,6 +495,65 @@ fn a_delivery_item_keeps_its_notes() {
             .iter()
             .any(|f| f["purpose"] == "NOTES")
     );
+}
+
+/// The delivery item's recorded `source versions` text, if the field is there.
+fn source_versions(w: &World, fleet: &Fleet, product: &str) -> Option<String> {
+    let id = &fleet.environments["prod"].targets["app"].delivery_items[product];
+    w.op.item(id)["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["label"] == "source versions")
+        .and_then(|f| f["value"].as_str())
+        .map(str::to_string)
+}
+
+#[test]
+fn a_confirmed_sync_records_each_source_items_version() {
+    let (w, fleet) = delivered();
+    let source = &fleet.environments["prod"].boundaries["api"];
+    let expected = format!(
+        "v1|{}|{}\n",
+        source.item_id,
+        w.op.item(&source.item_id)["version"]
+    );
+    assert_eq!(source_versions(&w, &fleet, "api"), Some(expected));
+}
+
+#[test]
+fn an_unconfirmed_sync_keeps_the_recorded_source_versions() {
+    let (w, fleet) = delivered();
+    let source = &fleet.environments["prod"].boundaries["api"];
+    let before = format!(
+        "v1|{}|{}\n",
+        source.item_id,
+        w.op.item(&source.item_id)["version"]
+    );
+    w.set_value("api", "TOKEN", &format!("tok2-{MARK}"));
+    w.fail_import.set(true);
+    let _ = sync_all(&w, &fleet);
+    assert_eq!(source_versions(&w, &fleet, "api"), Some(before));
+}
+
+#[test]
+fn changed_is_unchanged_after_a_confirmed_sync() {
+    let (w, fleet) = delivered();
+    let source = &fleet.environments["prod"].boundaries["api"];
+    let delivery = &fleet.environments["prod"].targets["app"].delivery_items["api"];
+    let list = format!(
+        "[{{\"id\":\"{}\",\"version\":{}}},{{\"id\":\"{delivery}\",\"version\":9}},\
+         {{\"id\":\"itm-deploy-creds\",\"version\":8}}]",
+        source.item_id,
+        w.op.item(&source.item_id)["version"]
+    );
+    let r = FakeRunner::new([
+        Output::success(list),
+        Output::success(source_versions(&w, &fleet, "api").unwrap()),
+        Output::success(source_versions(&w, &fleet, "web").unwrap()),
+    ]);
+    let res = crate::app::changed::run(&fleet, "prod", None, &[], &r, false, &mut Vec::new());
+    assert_eq!(res.unwrap(), 0);
 }
 
 #[test]
@@ -1160,4 +1244,23 @@ fn verify_with_nothing_in_scope_fails() {
 fn an_account_whoami_cannot_name_is_an_error() {
     let r = crate::runner::fake::FakeRunner::new([Output::success("{}")]);
     assert!(account_id(&r).is_err());
+}
+
+/// M3, §4.4: a key whose roles miss the target's roles is not in the target's binding set,
+/// so a confirmed sync of the rest can mint a receipt.
+#[test]
+fn a_key_withheld_by_the_targets_roles_is_not_bound() {
+    let text = crate::app::testutil::role_fixture_text().replacen(
+        "state_vault_id = \"sprd\"\nroles = [\"serve\", \"migrate\"]",
+        "state_vault_id = \"sprd\"\nroles = [\"serve\"]",
+        1,
+    );
+    let fleet =
+        crate::config::parse(&format!("{text}\n{}", crate::app::testutil::ROLE_KEYS)).unwrap();
+    let names: Vec<String> = bindings(&fleet, "prod", "portfolio", "allumata")
+        .unwrap()
+        .into_iter()
+        .map(|b| b.name)
+        .collect();
+    assert!(!names.contains(&"FLEET__ALLUMATA__DATABASE_URL_UNPOOLED".to_string()));
 }

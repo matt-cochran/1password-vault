@@ -584,6 +584,17 @@ pub enum Cause {
     Guard {
         guard: Guard,
     },
+    /// A mounted secrets volume the workload cannot read, or whose readability is unknown
+    /// (delivery-transports §6.6): the fix is in the person's own manifest, so it has its
+    /// own code. Raised by the Kubernetes and Swarm preflights (K5/K6, §8.8).
+    MountUnreadable {
+        workload: String,
+        container: String,
+        run_as: Option<u32>,
+        why: MountWhy,
+        env: EnvName,
+        target: TargetName,
+    },
 
     // §4.6 outcomes, availability, budgets
     CreateOutcomeUnknown {
@@ -768,6 +779,23 @@ pub enum Cause {
         target: TargetName,
         product: ProductName,
         state: Unverified,
+    },
+    /// A pinned target's binding no longer matches 1Password (C3): `status --fail-on-drift`
+    /// reports it as a finding (exit 8, `target_drift`).
+    TargetDrift {
+        env: EnvName,
+        target: TargetName,
+        /// The store names that drifted, in the order `status` prints them.
+        names: Vec<String>,
+    },
+    /// A source item changed since the last sync, or no recorded source versions exist
+    /// (`delivery-transports` §2.2). A result, not a failure: `ok: true`, exit 10; the
+    /// step it names is the sync (or `opv bootstrap` when no delivery item is recorded).
+    SourceChanged {
+        env: EnvName,
+        /// No `source versions` recorded for the placement: its delivery item is missing,
+        /// or an older opv synced it and never wrote the field.
+        no_record: bool,
     },
     /// opv's own local input or output failed (writing a file, finding the working folder,
     /// its own executable or the home folder, writing to stdout).
@@ -1161,6 +1189,16 @@ pub enum LocalOp {
     RandomSource,
 }
 
+/// Why a mounted secrets volume would be unreadable or is of unknown readability
+/// (delivery-transports §6.6): the workload sets no `fsGroup`, or its effective group is
+/// unknown. Shared by the Kubernetes and Swarm preflights.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MountWhy {
+    NoFsGroup,
+    RunAsUnknown,
+}
+
 /// opv's own refusals that are not person-only steps (§4.5).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "guard", rename_all = "snake_case")]
@@ -1194,7 +1232,25 @@ pub enum Guard {
         asked: String,
         allowed: Vec<String>,
     },
+    /// The `secrets_dir` path, or a parent or child of it, is already a volume of the
+    /// workload (delivery-transports §6.4): opv's secrets volume cannot go there.
+    MountPathInUse {
+        workload: String,
+        container: String,
+        path: String,
+        volume: String,
+        env: EnvName,
+        target: TargetName,
+    },
     Declined,
+    /// A key's kind has no channel on the target (design §1.3, §1.5): `sync` refuses it
+    /// (`policy_refused`, exit 6, retry never) unless the target declares
+    /// `config = "none"`.
+    NoChannel {
+        target: TargetName,
+        kind: &'static str,
+        why: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -1335,6 +1391,19 @@ impl Cause {
         self
     }
 
+    /// This cause with its target name filled in when it was left empty (a Kubernetes
+    /// preflight refusal is raised where the target's name is unknown, design §6.6).
+    pub fn in_target(mut self, name: &str) -> Cause {
+        match &mut self {
+            Cause::MountUnreadable { target, .. }
+            | Cause::Guard {
+                guard: Guard::MountPathInUse { target, .. },
+            } if target.as_str().is_empty() => *target = TargetName::new(name),
+            _ => {}
+        }
+        self
+    }
+
     /// The stable machine-readable code (public contract, `schema_version` 2).
     pub fn code(&self) -> &'static str {
         use Cause::*;
@@ -1404,6 +1473,7 @@ impl Cause {
                 self::Guard::Declined => "declined",
                 _ => "policy_refused",
             },
+            MountUnreadable { .. } => "mount_unreadable",
             CreateOutcomeUnknown { .. } => "create_outcome_unknown",
             WriteOutcomeUnknown { .. } => "outcome_unknown",
             Unavailable { .. } => "provider_unavailable",
@@ -1439,6 +1509,8 @@ impl Cause {
             RemoteVersionMismatch { .. } => "remote_version_mismatch",
             ChildStartFailed { .. } => "child_start_failed",
             DeliveryUnverified { .. } => "delivery_unverified",
+            TargetDrift { .. } => "target_drift",
+            SourceChanged { .. } => "source_changed",
             LocalIo { .. } => "local_io_failed",
             StoreNotReady { .. } => "owner_setup_required",
             HandoffPipeContested { .. } => "handoff_refused",
@@ -1516,6 +1588,7 @@ impl Cause {
                 guard: self::Guard::Declined,
             } => 0,
             Guard { .. }
+            | MountUnreadable { .. }
             | NeedsTerminal { .. }
             | NeedsConfirm { .. }
             | ConfirmMismatch { .. }
@@ -1535,7 +1608,8 @@ impl Cause {
             | InOtherAccount { .. }
             | NeedsOwnSession { .. }
             | CredentialRejected { .. } => 7,
-            ValuesNeeded { .. } | DeliveryUnverified { .. } => 8,
+            ValuesNeeded { .. } | DeliveryUnverified { .. } | TargetDrift { .. } => 8,
+            SourceChanged { .. } => 10,
             CreateOutcomeUnknown { .. }
             | WriteOutcomeUnknown { .. }
             | Unavailable { .. }
@@ -1589,6 +1663,7 @@ impl Cause {
             | ConfigProposalInvalid { .. }
             | SecretNotStored { .. }
             | SourceOnly { .. }
+            | SourceChanged { .. }
             | Bug { .. } => RetryClass::Never,
             _ => RetryClass::AfterFix,
         }

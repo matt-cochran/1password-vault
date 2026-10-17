@@ -8,7 +8,10 @@
 //! | `check_access` | `auth can-i <verb> <resource>` for get/create/patch/delete/list secrets, get/update deployments, list replicasets and pods | reads |
 //!
 //! `apply` edits only managed env entries of the managed container: `valueFrom.secretKeyRef
-//! {name: opv-<store>-<version>, key: value}` for secrets, `value` for config. Kubernetes
+//! {name: opv-<store>-<version>, key: value}` for secrets, `configMapKeyRef` for config on a
+//! `configmap` target, `value` for plain config. With `secrets_dir`, a file key is an item of
+//! its product's projected volume `opv-files-<product>`, mounted read-only into the managed
+//! container only, and never an env entry (design §6.3). Kubernetes
 //! rejects the `replace` when the Deployment changed since it was read (K3), which is reported
 //! as "changed while opv applied; nothing applied" (outcome unknown, safe to re-run).
 //!
@@ -25,11 +28,13 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use super::external::{self, Bridge, Listed, Sync, external_name, split_external_name};
+use super::files::{self, ObjectKind};
 use super::{
     Effect, KubeTarget, Kubectl, LABEL_MANAGED, VALUE_KEY, container_env, container_index,
-    digest_hex, secret_name, secret_ref, split_secret_name, store_name, text, valid_label_value,
+    digest_hex, secret_name, split_secret_name, store_name, text, valid_label_value,
 };
 use crate::cause::{Cause, EnvName, Guard, OutputProblem, Refusal, StoreObject, System};
+use crate::domain::runtime::FileMount;
 use crate::domain::{
     AccessFinding, Binding, Health, RawSpec, Revision, RuntimeChange, RuntimeSnapshot,
 };
@@ -59,7 +64,7 @@ const REVISION_ANNOTATION: &str = "deployment.kubernetes.io/revision";
 /// The operator rights opv needs, each with its fixed reason. Every one is required:
 /// `doctor` fails without it, and `sync` refuses before its first write without the ones
 /// only a deploy uses ([`DEPLOY_RIGHTS`]).
-const ACCESS: [(&str, &str, &str); 9] = [
+const ACCESS: [(&str, &str, &str); 14] = [
     (
         "get",
         "secrets",
@@ -105,6 +110,31 @@ const ACCESS: [(&str, &str, &str); 9] = [
         "pods",
         "your kubectl identity cannot list Pods, so sync --deploy cannot wait for the rollout",
     ),
+    (
+        "get",
+        "configmaps",
+        "your kubectl identity cannot read ConfigMaps in this namespace, so sync cannot tell whether a config key is already written; grant it with a namespaced Role in that namespace, never a ClusterRole",
+    ),
+    (
+        "list",
+        "configmaps",
+        "your kubectl identity cannot list ConfigMaps, so opv cannot find the config versions it wrote; grant it with a namespaced Role in that namespace, never a ClusterRole",
+    ),
+    (
+        "create",
+        "configmaps",
+        "your kubectl identity cannot create ConfigMaps, so sync cannot write a config key; grant it with a namespaced Role in that namespace, never a ClusterRole",
+    ),
+    (
+        "patch",
+        "configmaps",
+        "your kubectl identity cannot patch ConfigMaps, which `apply --server-side` needs to update one; grant it with a namespaced Role in that namespace, never a ClusterRole",
+    ),
+    (
+        "delete",
+        "configmaps",
+        "your kubectl identity cannot delete ConfigMaps, so sync --deploy cannot remove superseded config versions; grant it with a namespaced Role in that namespace, never a ClusterRole",
+    ),
 ];
 
 /// The rights opv needs on ExternalSecrets when secrets come from a named store (FR-39).
@@ -137,11 +167,12 @@ const EXTERNAL_ACCESS: [(&str, &str, &str); 5] = [
 ];
 
 /// The rights only `sync --deploy` uses, after the new revision is live: listing Pods and
-/// ReplicaSets for the health wait, deleting superseded versions (Secrets, or
+/// ReplicaSets for the health wait, deleting superseded versions (Secrets, ConfigMaps, or
 /// ExternalSecrets with a named store). `sync` checks them before its first write, so a
 /// missing one never turns a successful deploy into a failure (FR-32).
-pub(crate) const DEPLOY_RIGHTS: [(&str, &str); 3] = [
+pub(crate) const DEPLOY_RIGHTS: [(&str, &str); 4] = [
     ("delete", "secrets"),
+    ("delete", "configmaps"),
     ("list", "replicasets"),
     ("list", "pods"),
 ];
@@ -221,9 +252,21 @@ pub struct KubeDeployment<'a> {
     wait_max: Duration,
     /// `kubernetes.config = "store"`: config keys are Secrets bound by reference.
     config_in_store: bool,
+    /// `kubernetes.config = "configmap"`: config keys are ConfigMaps, so the operator also
+    /// needs the configmap rights.
+    configmaps: bool,
     /// Secrets come from a named store through ExternalSecrets (FR-39); `None`: opv's own
     /// immutable Secrets.
     external: Option<Bridge<'a>>,
+    /// `kubernetes.secrets_dir` as written (may hold `{product}`, design §6.2); `None`: no
+    /// key is a file.
+    secrets_dir: Option<String>,
+    /// The managed env names delivered as files (design §6.3): never an env entry, always
+    /// an item of their product's projected volume. Empty without `secrets_dir`.
+    files: BTreeMap<String, FileMount>,
+    /// The managed env names that belong to config keys: on a `configmap` target they bind
+    /// a ConfigMap, never a Secret.
+    config_names: BTreeSet<String>,
 }
 
 impl<'a> KubeDeployment<'a> {
@@ -241,8 +284,33 @@ impl<'a> KubeDeployment<'a> {
             poll_every: POLL_EVERY,
             wait_max: WAIT_MAX,
             config_in_store: false,
+            configmaps: false,
             external: None,
+            secrets_dir: None,
+            files: BTreeMap::new(),
+            config_names: BTreeSet::new(),
         }
+    }
+
+    /// Deliver the file keys `files` (env name → product and path) as files under `dir`
+    /// (`kubernetes.secrets_dir`, design §6.3). Names that are not managed are ignored;
+    /// without a `dir` no key is a file.
+    pub fn with_files(mut self, dir: Option<String>, files: BTreeMap<String, FileMount>) -> Self {
+        self.files = match &dir {
+            Some(_) => files
+                .into_iter()
+                .filter(|(name, _)| self.managed.contains(name))
+                .collect(),
+            None => BTreeMap::new(),
+        };
+        self.secrets_dir = dir;
+        self
+    }
+
+    /// The env names of config keys, which bind a ConfigMap on a `configmap` target.
+    pub fn with_config_names(mut self, names: BTreeSet<String>) -> Self {
+        self.config_names = names;
+        self
     }
 
     /// Bind secrets from a named store through the External Secrets Operator (FR-39):
@@ -256,6 +324,12 @@ impl<'a> KubeDeployment<'a> {
     /// Route config keys through Secrets like secret keys (`kubernetes.config = "store"`).
     pub fn with_config_in_store(mut self, yes: bool) -> Self {
         self.config_in_store = yes;
+        self
+    }
+
+    /// Check the configmap rights too (`kubernetes.config = "configmap"`, K3).
+    pub fn with_configmaps(mut self, yes: bool) -> Self {
+        self.configmaps = yes;
         self
     }
 
@@ -283,6 +357,44 @@ impl<'a> KubeDeployment<'a> {
         self.k.target
     }
 
+    /// The mount of `name` with the target's `secrets_dir`, when it is a file key.
+    fn file_of(&self, name: &str) -> Option<(&str, &FileMount)> {
+        let dir = self.secrets_dir.as_deref()?;
+        self.files.get(name).map(|f| (dir, f))
+    }
+
+    /// `name` is a config key bound through a ConfigMap (`kubernetes.config = "configmap"`).
+    fn in_configmap(&self, name: &str) -> bool {
+        self.configmaps && self.config_names.contains(name)
+    }
+
+    /// The kind of object that holds `name`'s pinned versions.
+    fn kind_of(&self, name: &str) -> ObjectKind {
+        if self.in_configmap(name) {
+            ObjectKind::ConfigMap
+        } else {
+            ObjectKind::Secret
+        }
+    }
+
+    /// The products with a file key, each once.
+    fn file_products(&self) -> BTreeSet<&str> {
+        self.files.values().map(|f| f.product.as_str()).collect()
+    }
+
+    /// The file bindings opv's volumes hold in `doc`, by product then path (design §6.3).
+    fn file_state(&self, doc: &Value) -> Result<FileState, Error> {
+        let Some(dir) = self.secrets_dir.as_deref() else {
+            return Ok(FileState::new());
+        };
+        let container = container_name(doc, container_index(doc, self.t())?);
+        Ok(self
+            .file_products()
+            .into_iter()
+            .map(|p| (p.to_string(), files::read_bindings(doc, &container, p, dir)))
+            .collect())
+    }
+
     /// The managed entries of the managed container's env, in order.
     fn managed_env(&self, doc: &Value) -> Result<Vec<Value>, Error> {
         let i = container_index(doc, self.t())?;
@@ -299,10 +411,15 @@ impl<'a> KubeDeployment<'a> {
             .is_some_and(|n| self.managed.contains(n))
     }
 
-    /// SHA-256 of the canonical JSON of `spec` without the managed env entries (FR-31).
+    /// SHA-256 of the canonical JSON of `spec` without the managed env entries and opv's
+    /// own `opv-files-*` volumes and mounts (FR-31, design §6.3), so opv's own file changes
+    /// never count as an unmanaged change.
     fn fingerprint(&self, doc: &Value) -> Result<String, Error> {
         let i = container_index(doc, self.t())?;
-        let mut spec = doc.get("spec").cloned().unwrap_or(Value::Null);
+        let mut spec = files::strip_managed(doc)
+            .get("spec")
+            .cloned()
+            .unwrap_or(Value::Null);
         if let Some(env) = spec
             .pointer_mut(&format!("/template/spec/containers/{i}/env"))
             .and_then(Value::as_array_mut)
@@ -310,6 +427,79 @@ impl<'a> KubeDeployment<'a> {
             env.retain(|e| !self.is_managed(e));
         }
         Ok(hex::encode(Sha256::digest(spec.to_string().as_bytes())))
+    }
+
+    /// Puts the pinned file keys of `change` into their products' projected volumes in
+    /// container `index` of `doc` only (FM-08), removing their env entries in the same
+    /// replace (design §6.3). A product's volume keeps the items `before` bound for its
+    /// other file keys; unbinding its last file key removes the volume and the mount.
+    /// `objects` is env name → the object each pin binds (under ExternalSecrets, the
+    /// ExternalSecret's target Secret, design §6.5); no value ever enters the Deployment.
+    fn apply_files(
+        &self,
+        doc: &mut Value,
+        index: usize,
+        change: &RuntimeChange,
+        objects: &BTreeMap<String, String>,
+        before: &Value,
+    ) -> Result<(), Error> {
+        let Some(dir) = self.secrets_dir.as_deref() else {
+            return Ok(());
+        };
+        let touched: BTreeSet<&str> = change
+            .pin
+            .keys()
+            .chain(change.unbind.iter())
+            .filter_map(|n| self.file_of(n).map(|(_, f)| f.product.as_str()))
+            .collect();
+        if touched.is_empty() {
+            return Ok(());
+        }
+        let container = container_name(doc, index);
+        for product in touched {
+            let current = files::read_bindings(before, &container, product, dir);
+            let mut items: Vec<(String, ObjectKind, String)> = Vec::new();
+            let mut names: Vec<String> = Vec::new();
+            for (name, mount) in self.files.iter().filter(|(_, f)| f.product == product) {
+                if change.unbind.iter().any(|u| u == name) {
+                    continue;
+                }
+                let object = match objects.get(name) {
+                    Some(object) => Some((object.clone(), self.kind_of(name))),
+                    None => match current.get(&mount.path) {
+                        Some(files::Binding::Bound { object, kind }) => {
+                            Some((object.clone(), *kind))
+                        }
+                        _ => None,
+                    },
+                };
+                if let Some((object, kind)) = object {
+                    items.push((object, kind, mount.path.clone()));
+                    names.push(name.clone());
+                }
+            }
+            // By path, so one set of file keys always renders one volume.
+            items.sort_by(|a, b| a.2.cmp(&b.2));
+            let items: Vec<(&str, ObjectKind, &str)> = items
+                .iter()
+                .map(|(o, k, p)| (o.as_str(), *k, p.as_str()))
+                .collect();
+            files::apply_files(doc, &container, product, dir, &items, &names);
+        }
+        // A file key never keeps an env entry (design §6.8: otherwise a bug).
+        let left = container_env(doc, index);
+        if change.pin.keys().any(|n| {
+            self.file_of(n).is_some()
+                && left
+                    .iter()
+                    .any(|e| e.get("name").and_then(Value::as_str) == Some(n.as_str()))
+        }) {
+            return Err(Cause::Bug {
+                site: "kubernetes: a file key is still an env entry after apply",
+            }
+            .into());
+        }
+        Ok(())
     }
 
     /// The rollout state of `doc` for generation `generation`, as `kubectl rollout status` judges
@@ -611,30 +801,50 @@ pub(crate) fn answered_no(stdout: &[u8]) -> bool {
         == Some("no")
 }
 
-/// How one managed env entry binds its name. With `external` (the opv ExternalSecrets by
+/// opv's volumes in a Deployment: product → mounted path → binding (design §6.3).
+type FileState = BTreeMap<String, BTreeMap<String, files::Binding>>;
+
+/// The name of container `index` of `doc`'s pod template.
+fn container_name(doc: &Value, index: usize) -> String {
+    doc.pointer(&format!("/spec/template/spec/containers/{index}/name"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// How a bound object name pins `env_name`. With `external` (the opv ExternalSecrets by
 /// name, FR-39), a bound Secret is an ExternalSecret's and its version is the store version
 /// the ExternalSecret pins; one whose ExternalSecret is gone shows its name's id, which no
 /// store version equals, so the next deploy re-pins it.
+fn pinned_of(object: &str, env_name: &str, external: Option<&BTreeMap<String, Listed>>) -> Binding {
+    let pinned = match external {
+        None => split_secret_name(object).map(|(s, v)| (s.to_string(), v.to_string())),
+        Some(es) => match es.get(object) {
+            Some(l) => Some((l.key.clone(), l.version.clone())),
+            None => split_external_name(object).map(|(s, id)| (s.to_string(), id.to_string())),
+        },
+    };
+    match pinned {
+        Some((store, version)) if store == store_name(env_name) => Binding::Pinned {
+            store_name: store,
+            version,
+        },
+        _ => Binding::Other,
+    }
+}
+
+/// How one managed env entry binds its name: by reference to an object of `kind` (a
+/// ConfigMap only for config on a `configmap` target, K5), or a plain value. A reference
+/// to the other kind is `Other`, so it is re-pinned.
 fn binding_of(
     entry: &Value,
     env_name: &str,
+    kind: ObjectKind,
     external: Option<&BTreeMap<String, Listed>>,
 ) -> Binding {
-    if let Some(r) = secret_ref(entry) {
-        let pinned = match external {
-            None => split_secret_name(r).map(|(s, v)| (s.to_string(), v.to_string())),
-            Some(es) => match es.get(r) {
-                Some(l) => Some((l.key.clone(), l.version.clone())),
-                None => split_external_name(r).map(|(s, id)| (s.to_string(), id.to_string())),
-            },
-        };
-        return match pinned {
-            Some((store, version)) if store == store_name(env_name) => Binding::Pinned {
-                store_name: store,
-                version,
-            },
-            _ => Binding::Other,
-        };
+    if let Some(r) = kind.bound_ref(entry) {
+        let external = external.filter(|_| kind == ObjectKind::Secret);
+        return pinned_of(r, env_name, external);
     }
     if entry.get("valueFrom").is_some() {
         return Binding::Other;
@@ -643,6 +853,28 @@ fn binding_of(
     Binding::Plain {
         digest: digest_hex(value),
     }
+}
+
+/// How file key `env_name` at `path` is bound, from its product's volume `read` (design
+/// §6.3): `None` when the product has no opv volume at all (not bound yet, like an absent
+/// env entry); `Other` for a missing path, a mount that is not opv's, or an object of
+/// the wrong kind.
+fn file_binding_of(
+    read: &BTreeMap<String, files::Binding>,
+    path: &str,
+    env_name: &str,
+    kind: ObjectKind,
+    external: Option<&BTreeMap<String, Listed>>,
+) -> Option<Binding> {
+    if read.is_empty() {
+        return None;
+    }
+    Some(match read.get(path) {
+        Some(files::Binding::Bound { object, kind: k }) if *k == kind => {
+            pinned_of(object, env_name, external)
+        }
+        _ => Binding::Other,
+    })
 }
 
 /// Replace the entry named `name` in `env`, or append it. Later duplicates of the name are
@@ -679,14 +911,38 @@ impl PinnedRuntime for KubeDeployment<'_> {
                 )
             }
         };
-        let bindings = self
+        let mut bindings: BTreeMap<String, Binding> = self
             .managed_env(&doc)?
             .iter()
             .filter_map(|e| {
                 let name = e.get("name")?.as_str()?;
-                Some((name.to_string(), binding_of(e, name, external.as_ref())))
+                // A file key that is still an env entry is not bound as opv binds it.
+                let binding = match self.file_of(name) {
+                    Some(_) => Binding::Other,
+                    None => binding_of(e, name, self.kind_of(name), external.as_ref()),
+                };
+                Some((name.to_string(), binding))
             })
             .collect();
+        // File keys read back from their product's projected volume (design §6.3).
+        let state = self.file_state(&doc)?;
+        for (name, mount) in &self.files {
+            if bindings.contains_key(name) {
+                continue;
+            }
+            let Some(read) = state.get(&mount.product) else {
+                continue;
+            };
+            if let Some(b) = file_binding_of(
+                read,
+                &mount.path,
+                name,
+                self.kind_of(name),
+                external.as_ref(),
+            ) {
+                bindings.insert(name.clone(), b);
+            }
+        }
         // The revision is the generation the current spec produced (`apply` returns the
         // same), rolled out or not.
         let revision = doc
@@ -740,11 +996,19 @@ impl PinnedRuntime for KubeDeployment<'_> {
             let n = e.get("name").and_then(Value::as_str).unwrap_or("");
             !change.unbind.iter().any(|u| u == n)
         });
-        for (name, secret) in &secrets {
+        for (name, object) in &secrets {
+            if self.file_of(name).is_some() {
+                // A file key is an item of its product's volume, never an env entry.
+                continue;
+            }
+            let reference = match self.kind_of(name) {
+                ObjectKind::ConfigMap => "configMapKeyRef",
+                ObjectKind::Secret => "secretKeyRef",
+            };
             upsert(
                 &mut env,
-                json!({"name": name, "valueFrom": {"secretKeyRef":
-                    {"name": secret, "key": VALUE_KEY}}}),
+                json!({"name": name, "valueFrom": {reference:
+                    {"name": object, "key": VALUE_KEY}}}),
             );
         }
         for (name, value) in &change.set {
@@ -757,6 +1021,7 @@ impl PinnedRuntime for KubeDeployment<'_> {
                 site: "kubernetes: the managed container is not an object",
             })?;
         container.insert("env".into(), Value::Array(env));
+        self.apply_files(&mut doc, i, change, &secrets, &snapshot.spec.0)?;
         if let Some(o) = doc.as_object_mut() {
             o.remove("status");
         }
@@ -799,7 +1064,9 @@ impl PinnedRuntime for KubeDeployment<'_> {
                 .k
                 .explain(failed, Effect::Write, self.t().deployment_ref()));
         }
-        if self.managed_env(&fresh)? == self.managed_env(&doc)? {
+        if self.managed_env(&fresh)? == self.managed_env(&doc)?
+            && self.file_state(&fresh)? == self.file_state(&doc)?
+        {
             let generation = fresh
                 .pointer("/metadata/generation")
                 .and_then(Value::as_u64)
@@ -883,14 +1150,82 @@ impl PinnedRuntime for KubeDeployment<'_> {
         ))
     }
 
+    /// Through an ExternalSecret, a ConfigMap or a mounted file (design §6.7); a Secret
+    /// bound as env is one hop, so it has no chain.
     fn chain(&self, name: &str, version: &str) -> Option<String> {
-        let bridge = self.external.as_ref()?;
-        let es = external_name(&store_name(name), version)?;
-        let id = external::external_id(version)?;
-        Some(format!(
-            "{name} → {} ({id}…) → ExternalSecret {es} → env {name}",
-            bridge.describe
-        ))
+        let file = self
+            .file_of(name)
+            .map(|(dir, f)| format!("file {}/{}", files::render_dir(dir, &f.product), f.path));
+        let end = file.clone().unwrap_or_else(|| format!("env {name}"));
+        if let Some(bridge) = &self.external {
+            let es = external_name(&store_name(name), version)?;
+            let id = external::external_id(version)?;
+            return Some(format!(
+                "{name} → {} ({id}…) → ExternalSecret {es} → {end}",
+                bridge.describe
+            ));
+        }
+        let object = secret_name(&store_name(name), version);
+        match self.kind_of(name) {
+            ObjectKind::ConfigMap => Some(format!("{name} → configmap {object} → {end}")),
+            ObjectKind::Secret => file.map(|_| format!("{name} → secret {object} → {end}")),
+        }
+    }
+
+    /// One `volume …` change per product whose projected volume a deploy of
+    /// `pin` would change (design §6.7): a file key gets a new version, or a file key's
+    /// binding is not the one opv writes (no volume yet, a missing item or mount, or still
+    /// an env entry, which the same replace removes). Reads the Deployment only when the
+    /// target mounts files.
+    fn deploy_preview(&self, pin: &BTreeSet<String>) -> Result<Vec<String>, Error> {
+        let Some(dir) = self.secrets_dir.as_deref() else {
+            return Ok(Vec::new());
+        };
+        if self.files.is_empty() {
+            return Ok(Vec::new());
+        }
+        let doc = self.k.get_deployment()?;
+        let i = container_index(&doc, self.t())?;
+        let container = container_name(&doc, i);
+        let in_env: BTreeSet<String> = container_env(&doc, i)
+            .iter()
+            .filter_map(|e| e.get("name").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        let mut lines = Vec::new();
+        for product in self.file_products() {
+            let read = files::read_bindings(&doc, &container, product, dir);
+            let keys: Vec<(&String, &FileMount)> = self
+                .files
+                .iter()
+                .filter(|(_, f)| f.product == product)
+                .collect();
+            let removed: Vec<&str> = keys
+                .iter()
+                .filter(|(n, _)| in_env.contains(*n))
+                .map(|(n, _)| n.as_str())
+                .collect();
+            let changes = keys.iter().any(|(n, f)| {
+                pin.contains(*n) || !matches!(read.get(&f.path), Some(files::Binding::Bound { .. }))
+            }) || !removed.is_empty();
+            if !changes {
+                continue;
+            }
+            let count = match keys.len() {
+                1 => "1 file".to_string(),
+                n => format!("{n} files"),
+            };
+            let removed = if removed.is_empty() {
+                String::new()
+            } else {
+                format!("; env entries removed: {}", removed.join(", "))
+            };
+            lines.push(format!(
+                "volume opv-files-{}, read-only at {} ({count}{removed})",
+                product.replace('_', "-"),
+                files::render_dir(dir, product),
+            ));
+        }
+        Ok(lines)
     }
 
     /// The operator's own rights (`kubectl auth can-i`, K5): exit 0 yes, exit 1 no. Pods
@@ -898,8 +1233,10 @@ impl PinnedRuntime for KubeDeployment<'_> {
     /// do not matter; each finding names the verb and resource. `doctor` fails on any;
     /// `sync` checks [`DEPLOY_RIGHTS`] before its first write.
     fn check_access(&self, _names: &[String]) -> Result<Vec<AccessFinding>, Error> {
-        missing_rights(&self.k, self.external.is_some(), |_, _| true)
-            .map(|found| found.into_iter().map(|(f, _)| f).collect())
+        missing_rights(&self.k, self.external.is_some(), |_, resource| {
+            self.configmaps || resource != "configmaps"
+        })
+        .map(|found| found.into_iter().map(|(f, _)| f).collect())
     }
 }
 
@@ -951,6 +1288,10 @@ pub(crate) fn missing_rights(
     }
     Ok(found)
 }
+
+#[cfg(test)]
+#[path = "runtime_files_tests.rs"]
+mod runtime_files_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1523,6 +1864,27 @@ mod tests {
         let r = FakeRunner::new((0..9).map(|_| ok("yes")));
         with_rt(&r, |rt| rt.check_access(&[])).unwrap();
         assert_eq!(args(&r, 0)[5..], ["auth", "can-i", "get", "secrets"]);
+    }
+
+    /// K3: a `config = "configmap"` target also needs the configmap rights.
+    #[test]
+    fn check_access_asks_for_configmap_rights_on_a_configmap_target() {
+        let r = FakeRunner::new((0..14).map(|_| ok("yes")));
+        let (t, m) = (target(), managed());
+        KubeDeployment::new(&r, &t, m)
+            .with_configmaps(true)
+            .check_access(&[])
+            .unwrap();
+        assert!(all_argv(&r).contains("auth can-i patch configmaps"));
+    }
+
+    /// K3: an env-route target never asks for configmap rights.
+    #[test]
+    fn check_access_skips_configmap_rights_on_an_env_target() {
+        let r = FakeRunner::new((0..9).map(|_| ok("yes")));
+        let (t, m) = (target(), managed());
+        KubeDeployment::new(&r, &t, m).check_access(&[]).unwrap();
+        assert!(!all_argv(&r).contains("configmaps"));
     }
 
     #[test]
