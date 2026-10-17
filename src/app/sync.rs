@@ -770,11 +770,13 @@ enum Prepared {
         plan: SyncPlan,
         list_a: Vec<StoreEntry>,
         var_plan: Option<super::variables::VarPlan>,
+        source_versions: BTreeMap<String, u64>,
     },
     Pinned {
         plan: SyncPlan,
         listed: Vec<StoreEntry>,
         skip_deploy: Option<String>,
+        source_versions: BTreeMap<String, u64>,
     },
 }
 
@@ -802,6 +804,7 @@ fn apply(
                 plan,
                 list_a,
                 var_plan,
+                source_versions,
             },
         ) => run_staged(
             c,
@@ -811,6 +814,7 @@ fn apply(
                 plan,
                 list_a,
                 var_plan,
+                source_versions,
                 plan_id: plan_id.to_string(),
             },
             out,
@@ -821,6 +825,7 @@ fn apply(
                 plan,
                 listed,
                 skip_deploy,
+                source_versions,
             },
         ) => run_pinned(
             c,
@@ -830,6 +835,7 @@ fn apply(
                 plan,
                 listed,
                 skip_deploy,
+                source_versions,
                 plan_id: plan_id.to_string(),
             },
             out,
@@ -845,7 +851,7 @@ fn prepare_staged(
     store: &dyn StagedStore,
 ) -> Result<Planned, Error> {
     let (fleet, env_name, t) = (c.fleet, c.env_name, c.t);
-    let (plan, list_a, item_version) = read_and_plan_versioned(
+    let (plan, list_a, item_version, source_versions) = read_and_plan_versioned(
         fleet,
         env_name,
         Some(c.target),
@@ -876,6 +882,7 @@ fn prepare_staged(
             plan,
             list_a,
             var_plan,
+            source_versions,
         },
     })
 }
@@ -885,6 +892,8 @@ struct Staged {
     plan: SyncPlan,
     list_a: Vec<StoreEntry>,
     var_plan: Option<super::variables::VarPlan>,
+    /// The `version` read from each boundary item, by id (C2).
+    source_versions: BTreeMap<String, u64>,
     /// The run's plan id (FR-41).
     plan_id: String,
 }
@@ -902,6 +911,7 @@ fn run_staged(
         plan,
         list_a,
         var_plan,
+        source_versions,
         plan_id,
     } = staged;
     let vars = store.variables();
@@ -942,7 +952,15 @@ fn run_staged(
             .filter(|row| row.target == TargetState::Present)
             .map(|row| t.env_name(&row.product, &row.key))
             .collect();
-        record_delivery(c, &written, &identical, &list_b, &mut report, out)?;
+        record_delivery(
+            c,
+            &written,
+            &identical,
+            &list_b,
+            &source_versions,
+            &mut report,
+            out,
+        )?;
     }
     for (name, _) in &batch {
         let (a, b) = (digest(&list_a, name), digest(&list_b, name));
@@ -1082,6 +1100,7 @@ fn record_delivery(
     written: &BTreeSet<String>,
     identical: &BTreeSet<String>,
     listing: &[StoreEntry],
+    source_versions: &BTreeMap<String, u64>,
     report: &mut Report,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
@@ -1094,6 +1113,7 @@ fn record_delivery(
         written,
         identical,
         listing,
+        source_versions,
         &report.plan_id,
         c.r,
     );
@@ -1206,7 +1226,7 @@ fn print_held(
 /// call to the target) its state (NR-23, NR-25) and its listing.
 fn prepare_pinned(c: &Ctx<'_>, ports: &Ports<'_>, out: &mut dyn Write) -> Result<Planned, Error> {
     let (fleet, env_name, opts) = (c.fleet, c.env_name, c.opts);
-    let (fields, item_version) = read_item_fields(fleet, env_name, c.r)?;
+    let (fields, item_version, source_versions) = read_item_fields(fleet, env_name, c.r)?;
     // Blocking rows refuse before any call to the target.
     let copy = fields.iter().map(copy_field).collect();
     let target = Some(c.target);
@@ -1245,6 +1265,7 @@ fn prepare_pinned(c: &Ctx<'_>, ports: &Ports<'_>, out: &mut dyn Write) -> Result
             plan,
             listed,
             skip_deploy,
+            source_versions,
         },
     })
 }
@@ -1255,6 +1276,8 @@ struct Pinned {
     listed: Vec<StoreEntry>,
     /// Preflight's line to print instead of a deploy (nothing to restart).
     skip_deploy: Option<String>,
+    /// The `version` read from each boundary item, by id (C2).
+    source_versions: BTreeMap<String, u64>,
     /// The run's plan id (FR-41).
     plan_id: String,
 }
@@ -1281,6 +1304,7 @@ fn run_pinned(
         plan,
         listed,
         skip_deploy,
+        source_versions,
         plan_id,
     } = pinned;
     // FR-42: what every write below records on the target. Never a value.
@@ -1349,7 +1373,15 @@ fn run_pinned(
                 }),
             }
         }
-        record_delivery(c, &confirmed, &identical, &after, &mut report, out)?;
+        record_delivery(
+            c,
+            &confirmed,
+            &identical,
+            &after,
+            &source_versions,
+            &mut report,
+            out,
+        )?;
     }
 
     // 4–5. What the runtime binds now, and what must change. Under `--product` another
@@ -2313,7 +2345,7 @@ fn plan_part<'f>(
     let (_, ports) = open_target(fleet, env_name, name, r)?;
     preflight::read(t, r)?;
     let none = BTreeSet::new();
-    let (mut plan, on_target, item_version) =
+    let (mut plan, on_target, item_version, _) =
         read_and_plan_versioned(fleet, env_name, Some(name), r, Some(&ports), rotate, &none)?;
     let scope = match product {
         Some(p) => {
