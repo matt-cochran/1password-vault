@@ -1,0 +1,17 @@
+name: opv-recipe
+services:
+  serve:
+    image: journeeze:local
+    networks:
+      default: null
+    user: ':'
+    volumes:
+      - type: bind
+        source: /run/user/1000/opv-run.4242-abcdef
+        target: /run/secrets/journeeze
+        read_only: true
+        bind:
+          create_host_path: true
+networks:
+  default:
+    name: opv-recipe_default
