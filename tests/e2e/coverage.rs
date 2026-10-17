@@ -38,6 +38,13 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "Bug",
         "an internal error: reachable only through a bug in opv",
     ),
+    // Built by the External Secrets preflight when a ClusterSecretStore is not Ready
+    // (src/adapters/kubernetes/external.rs); no committed scenario drives that store into a
+    // write.
+    (
+        "StoreNotReady",
+        "no scenario drives a not-ready ClusterSecretStore into a write",
+    ),
     // The receiver speaks protocol 1 (src/app/remote_delivery.rs PROTOCOL); another
     // protocol's handshake would be invented output: there is no recording of one.
     (
@@ -396,6 +403,11 @@ impl Scenario {
             .replace_all(&s, r#""platform":"<platform>""#);
         let s = re(r"\bin \d+(\.\d+)? ?(ms|s)\b").replace_all(&s, "in <delay>");
         let s = re(r"rcpt-[0-9a-f]+").replace_all(&s, "rcpt-<id>");
+        // opv's own version changes every release; a snapshot must not.
+        let s = s.replace(
+            &format!(r#""opv_version":"{}""#, env!("CARGO_PKG_VERSION")),
+            r#""opv_version":"<version>""#,
+        );
         s.replace(" (op in WSL does not see the Windows app's accounts)", "")
     }
 }
@@ -992,6 +1004,39 @@ mod cases {
         )
     }
 
+    /// J7: a value Fly's import parser would mangle is a blocking row of the plan, so
+    /// `sync` refuses with `keys_blocking` before the write-side guard could fire.
+    pub fn fly_value_rule_refused() -> Case {
+        case(
+            Scenario::new().world(|w| {
+                web_prod_api_key(w, |f| f["value"] = json!("sk-a\"#e2e-marker"));
+            }),
+            &["sync", "prod", "--confirm", "prod", "--target", "fly"],
+        )
+    }
+
+    /// J7: a value larger than a GitHub secret can hold is a blocking row of the plan, so
+    /// `sync` refuses with `keys_blocking` before the write-side guard could fire.
+    pub fn github_value_rule_refused() -> Case {
+        case(
+            Scenario::new().world(|w| {
+                web_prod_api_key(w, |f| f["value"] = json!("x".repeat(50_000)));
+            }),
+            &["sync", "prod", "--confirm", "prod", "--target", "gh"],
+        )
+    }
+
+    /// J7: a value an environment variable cannot hold is a blocking row of the plan, so
+    /// `sync` refuses with `keys_blocking` before the write-side guard could fire.
+    pub fn kubernetes_value_rule_refused() -> Case {
+        case(
+            Scenario::new().world(|w| {
+                web_prod_api_key(w, |f| f["value"] = json!("x".repeat(1024 * 1024 + 1)));
+            }),
+            &["sync", "prod", "--confirm", "prod", "--target", "k8s"],
+        )
+    }
+
     pub fn budget_spent() -> Case {
         // fly is written, then op hangs past the run's 3-second budget.
         case(
@@ -1025,6 +1070,17 @@ mod cases {
     /// reply without saving the world).
     fn web_dev_api_key(w: &mut Value, edit: fn(&mut Value)) {
         item(w, "iE2EWEBDEV0000000000000001", |i| {
+            for f in i["fields"].as_array_mut().expect("fields") {
+                if f["label"] == "API_KEY" {
+                    edit(f);
+                }
+            }
+        });
+    }
+
+    /// The production item's API_KEY, edited (the value a target's own rules judge).
+    fn web_prod_api_key(w: &mut Value, edit: impl Fn(&mut Value)) {
+        item(w, WEB_PROD_ITEM, |i| {
             for f in i["fields"].as_array_mut().expect("fields") {
                 if f["label"] == "API_KEY" {
                     edit(f);
@@ -1483,6 +1539,9 @@ scenarios! {
         create_outcome_unknown => CreateOutcomeUnknown,
         write_outcome_unknown => WriteOutcomeUnknown,
         target_refused => TargetRefused,
+        fly_value_rule_refused => KeysBlocking,
+        github_value_rule_refused => KeysBlocking,
+        kubernetes_value_rule_refused => KeysBlocking,
         budget_spent => Partial,
         interrupted => Interrupted,
         read_back_missing => ReadBackMissing,

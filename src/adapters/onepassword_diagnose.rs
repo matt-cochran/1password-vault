@@ -310,8 +310,12 @@ fn account_not_on_machine(
                 var: VarName::new(OP_ACCOUNT),
             }
         }
-        _ => match (&ctx.env, &ctx.account) {
-            (Some(env), Some(a)) if a.as_str().eq_ignore_ascii_case(&given) => {
+        _ => match (&ctx.env, &ctx.account, &ctx.account_from) {
+            // An account the environment took from its checkout's `.opv` was chosen there.
+            (_, Some(a), Some(path)) if a.as_str().eq_ignore_ascii_case(&given) => {
+                AccountSource::DotOpv { path: path.clone() }
+            }
+            (Some(env), Some(a), _) if a.as_str().eq_ignore_ascii_case(&given) => {
                 AccountSource::Environment { env: env.clone() }
             }
             _ if flag.is_some() => AccountSource::Flag,

@@ -1013,6 +1013,13 @@ fn cluster_secret_store_not_ready_refusal_is_the_cluster_admins_to_fix() {
     assert_eq!(e.code_str(), "owner_setup_required");
 }
 
+/// A7: the refusal names the store's condition reason code, never its message.
+#[test]
+fn cluster_secret_store_not_ready_refusal_names_its_reason_code() {
+    let (_, e) = refused(not_ready);
+    assert!(e.to_string().contains("InvalidProviderConfig"), "{e}");
+}
+
 #[test]
 fn missing_cluster_secret_store_refuses_before_any_write() {
     let (sim, e) = refused(|w| w.cluster_store = None);

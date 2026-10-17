@@ -155,6 +155,16 @@ fn simulate(program: &str, args: &[String]) -> i32 {
         Ok(f) => f,
         Err(e) => return fail(&e),
     };
+    // A standing condition a fault declares holds from the scenario's first call on.
+    if program == "op"
+        && faults
+            .iter()
+            .any(|f| f.program == "op" && f.kind == Kind::AccountNotOnMachine)
+        && op::account_not_on_machine(&mut world, args)
+        && let Err(e) = world.save()
+    {
+        return fail(&e);
+    }
     let hit = faults::hit(&world, &faults, program, &w);
     let action = match hit.as_ref().map(|f| f.kind) {
         Some(Kind::ToolMissing) => return 127,
