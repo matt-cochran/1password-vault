@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `opv ui`: the key-name rule is stated in plain words, a findings list cut at five says how many more there are, and the copy status labels its next command.
 - `opv setup` checks the shape of its 1Password item reads like every other read, so an unexpected reply is `unexpected_output`.
 
+- An account `op account list` lists is no longer reported as "not added to op on this machine" when `op whoami` can't find it, which happens with several accounts on one sign-in address. opv now checks the listing: a listed account needs a sign-in, and only an absent one is an account to add (#165).
+- Kubernetes: `opv doctor`, `opv ready` and the sync preflight check the `patch` right on Secrets and ExternalSecrets, which `kubectl apply --server-side` needs to write them. Before, an identity with exactly the checked rights passed `doctor` and then failed `sync` with a 403.
+
 ### Internal
 
 - The simulator plays a recorded `op signin` (#160 scenario now runs). A coverage gate proves sync refuses every value a store would reject as `keys_blocking`, never an internal error. The security tests copy their configuration into their own temporary directory, so a developer's `.opv` can't change them.
