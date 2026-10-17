@@ -2033,6 +2033,29 @@ pub(crate) mod testutil {
         config::parse(&format!("{text}\n{extra}")).unwrap()
     }
 
+    /// `text` with every `[environments.<env>.targets.<name>]` table removed: a remote
+    /// profile may only name environments with no deployment target (O9, R1).
+    pub fn without_targets(text: &str) -> String {
+        let mut out = String::new();
+        let mut in_target = false;
+        for line in text.lines() {
+            if line.starts_with('[') {
+                in_target = line.starts_with("[environments.") && line.contains(".targets.");
+            }
+            if !in_target {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    /// The fixture with every deployment target removed (see [`without_targets`]).
+    pub fn fleet_without_targets(extra: &str) -> Fleet {
+        let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+        config::parse(&format!("{}\n{extra}", without_targets(&text))).unwrap()
+    }
+
     /// Two prod keys scoped to the process roles `serve` and `migrate` (#136).
     pub const ROLE_KEYS: &str = "\
 [products.allumata.keys.SERVE_TOKEN]

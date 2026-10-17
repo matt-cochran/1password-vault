@@ -1527,6 +1527,23 @@ fn validate_remotes(
                 ),
             );
         }
+        // O9: a remote profile reaches a host over SSH by pinning a host, a user and a
+        // command; a deployed environment's values must reach it only through the CI sync,
+        // so a profile may name only environments with no deployment target.
+        if let Some((env, target)) = r.environments.iter().find_map(|e| {
+            let env = environments.get(e)?;
+            let target = env.targets.keys().next()?;
+            Some((e, target))
+        }) {
+            return invalid(
+                "environments",
+                check(ConfigCheck::RemoteEnvironmentHasTarget {
+                    profile: name.clone(),
+                    env: env.clone(),
+                    target: target.clone(),
+                }),
+            );
+        }
         if let Some(roles) = &r.roles {
             if roles.is_empty() {
                 return invalid("roles", check(ConfigCheck::EmptyRemoteRoles));
@@ -2338,6 +2355,35 @@ mod tests {
     fn an_unknown_local_environment_mode_is_refused() {
         let t = with_file("k").replace("declared_only", "everything");
         assert!(parse(&t).is_err());
+    }
+
+    // --- #136, O9/R1: remote profiles refuse deployed environments ---
+
+    /// `base` plus a reviewed remote profile for `allumata` with `fields`.
+    fn remote_over(base: &str, fields: &str) -> String {
+        format!(
+            "{base}\n[products.allumata.remotes.builder]\nhost = \"builder.example.internal\"\n\
+             user = \"dev\"\nhost_key = \"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestMarkerHostKeyNotARealKey139\"\n\
+             opv = \"/usr/local/bin/opv\"\nworkdir = \"/home/dev/src/app\"\ncommand = [\"cargo\", \"run\"]\n{fields}"
+        )
+    }
+
+    #[test]
+    fn a_remote_profile_refusal_names_the_profile_the_environment_and_the_target() {
+        assert_eq!(
+            check_of(&remote_over(&ok(), "environments = [\"prod\"]")),
+            ConfigCheck::RemoteEnvironmentHasTarget {
+                profile: "builder".into(),
+                env: "prod".into(),
+                target: "portfolio".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_remote_profile_over_a_target_less_environment_loads() {
+        let base = format!("{}\n[environments.dev]\n", ok());
+        assert!(parse(&remote_over(&base, "environments = [\"dev\"]")).is_ok());
     }
 
     /// `text` with boundary `b` recorded in `env` (IDs `v<b>` and `i<b>`).
