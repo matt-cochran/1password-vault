@@ -368,7 +368,7 @@ impl App {
             }
             Key::Char('c') => {
                 self.status = match &self.snap.next {
-                    Some((_, c)) => format!("command: {c}"),
+                    Some((_, c)) => format!("next command: {c}"),
                     None => "nothing to copy".into(),
                 };
             }
