@@ -1756,6 +1756,9 @@ impl Cause {
                     list(allowed)
                 ),
                 self::Guard::Declined => "you declined, so nothing changed".to_string(),
+                self::Guard::NoChannel { target, kind, why } => {
+                    format!("target {target} has no {kind} channel: {why}")
+                }
             },
             CreateOutcomeUnknown {
                 system,
@@ -3283,6 +3286,19 @@ impl Cause {
                     Next::Run(cmd(&["config", "edit"], &[])),
                 ),
                 self::Guard::Declined => plan(None, Next::Rerun),
+                self::Guard::NoChannel { target, .. } => plan(
+                    inspect(format!(
+                        "set config = \"none\" on target {target} to deliver no config there, \
+                         or pick a target with a config channel"
+                    )),
+                    match inv_env(inv) {
+                        Some(env) => Next::Check(cmd(
+                            &["plan"],
+                            &[env, "--target", target.as_str()],
+                        )),
+                        None => help_of(inv),
+                    },
+                ),
             },
             CreateOutcomeUnknown {
                 system: _,

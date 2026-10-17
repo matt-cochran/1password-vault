@@ -18,7 +18,7 @@ use super::{
     JsonExtra, JsonPart, KeyNames, PinnedRow, Prefixed, check_product, ci_summary, count_line,
     findings_error, is_blocking, open_target, personal, placement, plan_item, plural, preflight,
     print_extras, print_legend, print_rows, product_names, read_and_plan, resolve_targets,
-    rows_item_url, scope_plan, target_runners, target_word, write_err, write_json,
+    rows_item_url, scope_plan, target_cell, target_runners, target_word, write_err, write_json,
 };
 use crate::cause::{Cause, Cmd, EnvName, TargetName};
 use crate::domain::provenance::latest;
@@ -174,6 +174,7 @@ pub fn run_targeted(
     }
     // Extras are about the 1Password item, the same for every target.
     print_extras(out, &parts[0].plan)?;
+    print_no_channel(out, env_name, &parts)?;
     print_concealed_config(out, &parts)?;
     let several = fleet
         .environments
@@ -236,7 +237,7 @@ struct StatusPart<'f> {
 }
 
 impl StatusPart<'_> {
-    /// The row's ON TARGET word.
+    /// The row's ON TARGET cell, with a config row's channel named (design §1.3, FM-02).
     fn word(&self, row: &Row) -> String {
         let name = self.t.env_name(&row.product, &row.key);
         let binding = self.pinned.as_ref().and_then(|p| p.rows.get(&name));
@@ -245,7 +246,7 @@ impl StatusPart<'_> {
             .held_immutable
             .iter()
             .any(|(p, k)| *p == row.product && *k == row.key);
-        target_word(row, held, binding).to_string()
+        target_cell(row, target_word(row, held, binding), &self.t.channels())
     }
 
     /// FR-42: the latest provenance stamp opv left on the target (pinned targets only).
@@ -298,6 +299,29 @@ fn status_part<'f>(
         listed,
         pinned,
     })
+}
+
+/// A config key the target's channel leaves undelivered (design §1.3, FM-02): one warning
+/// per key, `<env>/<target>: warning: <product>/<KEY> not delivered (no config channel:
+/// <why>)`.
+fn print_no_channel(
+    out: &mut dyn Write,
+    env_name: &str,
+    parts: &[StatusPart<'_>],
+) -> Result<(), Error> {
+    for p in parts {
+        for k in &p.plan.no_channel {
+            writeln!(
+                out,
+                "{}: warning: {} not delivered (no config channel: {})",
+                placement(env_name, &p.name),
+                crate::domain::key_label(&k.product, &k.key),
+                k.why
+            )
+            .map_err(write_err)?;
+        }
+    }
+    Ok(())
 }
 
 /// M4 (owner ruling): one warning per config key whose 1Password field is concealed and
@@ -873,15 +897,16 @@ mod tests {
         assert_no_values(&out);
     }
 
-    /// M4: a config key kept concealed in 1Password warns once, naming the key.
+    /// M2: a config key on a target that declines config (Fly) warns once, naming the key
+    /// and why (design §1.3, FM-02).
     #[test]
-    fn status_warns_once_for_config_stored_concealed() {
+    fn status_warns_once_for_config_undelivered_on_fly() {
         let (_, out, _) = status_of(
             complete_with(secret("allumata", "SIGNUP_POLICY", POLICY)),
             fly_empty(),
         );
-        let want = "warning: allumata/SIGNUP_POLICY is concealed in 1Password but declared \
-                    config; it is delivered as a plain environment value";
+        let want = "prod/portfolio: warning: allumata/SIGNUP_POLICY not delivered \
+                    (no config channel: set fly.config)";
         assert_eq!(out.lines().filter(|l| *l == want).count(), 1, "{out}");
     }
 
@@ -931,7 +956,10 @@ mod tests {
         let row = |k: &str| out.lines().find(|l| l.contains(k)).unwrap().to_string();
         assert!(row("OPENAI_API_KEY").ends_with("unknown"), "{out}");
         assert!(row("INTEGRATION_ENC_KEY").ends_with("new"), "{out}");
-        assert!(row("SIGNUP_POLICY").ends_with("n/a"), "{out}");
+        assert!(
+            row("SIGNUP_POLICY").ends_with("not delivered (no config channel)"),
+            "{out}"
+        );
         assert!(out.contains("PRODUCT") && out.contains("TARGET"), "{out}");
     }
 

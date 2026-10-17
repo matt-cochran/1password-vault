@@ -1212,6 +1212,14 @@ pub enum Guard {
         allowed: Vec<String>,
     },
     Declined,
+    /// A key's kind has no channel on the target (design §1.3, §1.5): `sync` refuses it
+    /// (`policy_refused`, exit 6, retry never) unless the target declares
+    /// `config = "none"`.
+    NoChannel {
+        target: TargetName,
+        kind: &'static str,
+        why: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]

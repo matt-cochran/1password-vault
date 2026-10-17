@@ -2,6 +2,7 @@
 
 ## text exit: 9
 ## text stdout
+prod/fly: warning: web/LOG_LEVEL not delivered (no config channel: set fly.config)
 prod/fly: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
 prod/fly: written: web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET)
 prod/fly: extra, not pruned (pass --prune to remove): web/MIGRATION_TOKEN (E2E__WEB__MIGRATION_TOKEN)

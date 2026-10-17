@@ -610,6 +610,13 @@ fn one_of_each() -> Vec<Cause> {
                 allowed: vec!["mode-a".into(), "mode-b".into()],
             },
         },
+        Guard {
+            guard: super::Guard::NoChannel {
+                target: TargetName::new("tgt-web"),
+                kind: "config",
+                why: "set fly.config".into(),
+            },
+        },
         CreateOutcomeUnknown {
             system: System::OnePassword,
             kind: CreateKind::ServiceAccount,

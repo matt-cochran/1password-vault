@@ -37,8 +37,8 @@ use super::{
     JsonPart, KeyNames, Prefixed, check_product, ci_summary, compare, findings_error, is_blocking,
     managed_names, open_target, placement, plan_id_of, plan_item, plural, preflight, print_extras,
     print_legend, print_rows, product_names, read_and_plan_versioned, read_item_fields,
-    resolve_targets, rows_item_url, scope_plan, target_runners, target_word, unmanaged_on_target,
-    write_err, write_json,
+    resolve_targets, rows_item_url, scope_plan, target_cell, target_runners, target_word,
+    unmanaged_on_target, write_err, write_json,
 };
 use crate::cause::{
     Cause, Closest, Cmd, EnvName, KeyName, NameKind, PlanId, PlanScope, ProductKey, ProductName,
@@ -781,10 +781,50 @@ enum Prepared {
 /// Read and plan target `c` (no write): the item, the store listing and, on a pinned
 /// target, its state (NR-23). Blocking rows refuse here, before any target is written.
 fn prepare(c: &Ctx<'_>, ports: &Ports<'_>, out: &mut dyn Write) -> Result<Planned, Error> {
-    match ports {
+    let planned = match ports {
         Ports::Staged { store, .. } => prepare_staged(c, ports, store.as_ref()),
         Ports::Pinned { .. } => prepare_pinned(c, ports, out),
+    }?;
+    let plan = match &planned.prepared {
+        Prepared::Staged { plan, .. } | Prepared::Pinned { plan, .. } => plan,
+    };
+    guard_no_channel(c.target, &plan.no_channel, out)?;
+    Ok(planned)
+}
+
+/// The refusal of `keys`' first `None`-channel key (`Guard::NoChannel`, design §1.3,
+/// §1.5), if any: `sync` returns it before any write.
+fn no_channel_refusal(target: &str, keys: &[crate::domain::plan::NoChannelKey]) -> Option<Cause> {
+    keys.iter().find(|k| k.refused).map(|k| Cause::Guard {
+        guard: crate::cause::Guard::NoChannel {
+            target: TargetName::new(target),
+            kind: "config",
+            why: k.why.to_string(),
+        },
+    })
+}
+
+/// The target's config-channel guard, before any write (design §1.3, §1.5): a `None`
+/// channel refuses (`Guard::NoChannel`, `policy_refused`); a `Declined` one warns once per
+/// key and the sync goes on. `out` is already prefixed `{env}/{target}: `.
+fn guard_no_channel(
+    target: &str,
+    keys: &[crate::domain::plan::NoChannelKey],
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    if let Some(cause) = no_channel_refusal(target, keys) {
+        return Err(cause.into());
     }
+    for k in keys {
+        writeln!(
+            out,
+            "warning: {} not delivered (no config channel: {})",
+            key_label(&k.product, &k.key),
+            k.why
+        )
+        .map_err(write_err)?;
+    }
+    Ok(())
 }
 
 /// Carry out `prepared` on target `c` under the run's plan id `plan_id`.
@@ -2167,6 +2207,19 @@ pub fn plan_rotating(
     }
     // Extras are about the 1Password item, the same for every target.
     print_extras(out, &parts[0].plan)?;
+    // A config key the target's channel leaves undelivered (design §1.3, FM-02).
+    for p in &parts {
+        for k in &p.plan.no_channel {
+            writeln!(
+                out,
+                "{}: warning: {} not delivered (no config channel: {})",
+                placement(env_name, &p.name),
+                key_label(&k.product, &k.key),
+                k.why
+            )
+            .map_err(write_err)?;
+        }
+    }
     for p in &parts {
         let mut out = Prefixed::new(out, format!("{}: ", placement(env_name, &p.name)));
         p.print_changes(&mut out, fleet, env_name, n > 0)?;
@@ -2209,17 +2262,20 @@ impl PlanPart<'_> {
         self.plan.rows.iter().filter(|r| is_blocking(r)).count()
     }
 
-    /// The row's ON TARGET word: `rotate` for a `--rotate`d key, else [`target_word`].
+    /// The row's ON TARGET cell: `rotate` for a `--rotate`d key, else [`target_word`],
+    /// with a config row's channel named (design §1.3, FM-02).
     fn word(&self, row: &Row) -> String {
-        if super::rotated(&self.rotate, row) {
-            return "rotate".to_string();
-        }
-        let held = self
-            .plan
-            .held_immutable
-            .iter()
-            .any(|(p, k)| *p == row.product && *k == row.key);
-        target_word(row, held, None).to_string()
+        let word = if super::rotated(&self.rotate, row) {
+            "rotate"
+        } else {
+            let held = self
+                .plan
+                .held_immutable
+                .iter()
+                .any(|(p, k)| *p == row.product && *k == row.key);
+            target_word(row, held, None)
+        };
+        target_cell(row, word, &self.t.channels())
     }
 
     /// `prod/web: 4 keys · 0 findings · 1 to stage · …` (NR-16).
@@ -2566,6 +2622,39 @@ mod tests {
     }
     fn opts() -> SyncOpts {
         SyncOpts::default()
+    }
+
+    fn no_channel_key(name: &str, refused: bool) -> crate::domain::plan::NoChannelKey {
+        crate::domain::plan::NoChannelKey {
+            product: "p".into(),
+            key: name.into(),
+            why: "set fly.config",
+            refused,
+        }
+    }
+
+    /// A config key on a target with no config channel ([`Channel::None`]) is refused with
+    /// `policy_refused` (design §1.3, §1.5).
+    #[test]
+    fn a_none_config_channel_is_refused_with_policy_refused() {
+        let cause = no_channel_refusal("t", &[no_channel_key("K", true)]).unwrap();
+        assert_eq!(cause.code(), "policy_refused");
+    }
+
+    /// A config key the target declined is warned, not refused (design §1.3): the guard
+    /// returns `Ok` and prints the warning line.
+    #[test]
+    fn a_declined_config_key_is_warned_not_refused() {
+        let mut out = Vec::new();
+        guard_no_channel("t", &[no_channel_key("K", false)], &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("warning: p/K not delivered (no config channel: set fly.config)"));
+    }
+
+    /// A declined config channel produces no refusal at all (design §1.3).
+    #[test]
+    fn a_declined_config_channel_produces_no_refusal() {
+        assert!(no_channel_refusal("t", &[no_channel_key("K", false)]).is_none());
     }
 
     /// FR-46 (live smoke): a target whose writes are live has nothing to deploy, so the

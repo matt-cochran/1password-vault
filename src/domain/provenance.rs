@@ -352,6 +352,7 @@ mod tests {
             prune: vec![],
             held_from_prune: vec![],
             config: BTreeMap::new(),
+            no_channel: Vec::new(),
             concealed_config: Vec::new(),
             drift: Vec::new(),
             undelivered: Vec::new(),

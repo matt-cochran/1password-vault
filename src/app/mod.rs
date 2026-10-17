@@ -108,7 +108,7 @@ use crate::domain::{
 };
 use crate::error::Error;
 use crate::ports::{PinnedStore, Ports, Store};
-use crate::provider::TargetConfig;
+use crate::provider::{Channels, TargetConfig};
 use crate::runner::CommandRunner;
 
 /// Store digests are not computable locally (D0 Q4, ruling P1): every key present on the
@@ -503,7 +503,8 @@ pub(crate) fn write_json(
         let plan = part.plan;
         let on = env.targets.get(part.target);
         let name_of = |p: &str, k: &str| on.map(|t| t.config.env_name(p, k));
-        let part_rows = json_rows(part, &name_of, extra.link);
+        let channels = on.map(|t| t.config.channels());
+        let part_rows = json_rows(part, &name_of, extra.link, channels.as_ref());
         changed = match (changed, changes(plan, &part_rows, part.pinned)) {
             ("some", _) | (_, "some") => "some",
             ("unknown", _) | (_, "unknown") => "unknown",
@@ -589,6 +590,7 @@ fn json_rows(
     part: &JsonPart<'_>,
     name_of: &dyn Fn(&str, &str) -> Option<String>,
     link: Option<&str>,
+    channels: Option<&Channels>,
 ) -> Vec<JsonRow> {
     let plan = part.plan;
     let (var_set, var_prune): (&[String], &[String]) = match part.vars {
@@ -633,6 +635,19 @@ fn json_rows(
                 .as_deref()
                 .and_then(|n| part.pinned.and_then(|m| m.get(n)));
             let rotate = part.rotate.is_some_and(|s| rotated(s, r));
+            let (via, delivered_as) = match channels {
+                Some(ch) => {
+                    let channel = match r.kind {
+                        Kind::Config => &ch.config,
+                        Kind::Secret => &ch.secret,
+                    };
+                    match channel.label() {
+                        Some(label) => (Some(label), Some("env")),
+                        None => (None, None),
+                    }
+                }
+                None => (None, None),
+            };
             JsonRow {
                 binding: bound.map(|b| b.binding),
                 pending_deploy: bound.map(|b| b.pending_deploy),
@@ -641,6 +656,8 @@ fn json_rows(
                 open_url: link.filter(|_| is_blocking(r)).map(str::to_string),
                 target: Some(part.target.to_string()),
                 rotate,
+                via,
+                delivered_as,
                 ..JsonRow::new(r, target_name, json_target(r.kind, r.target), action)
             }
         })
@@ -729,6 +746,21 @@ pub(crate) struct JsonRow {
     product: Option<String>,
     key: String,
     kind: &'static str,
+    /// The key's kind channel (`secret` / `config`, design §6.7); always present.
+    channel: &'static str,
+    /// The channel's label (`Kubernetes Secret`, `GitHub variable`, `env`, …), when the
+    /// channel delivers; left out otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    via: Option<&'static str>,
+    /// How the value reaches the app when `via` is known (`env`); left out otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delivered_as: Option<&'static str>,
+    /// The file transform's name (M4/M5); reserved, always absent in M2.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    form: Option<&'static str>,
+    /// The file's path on the target (M4/M5); reserved, always absent in M2.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
     state: &'static str,
     rule: Option<&'static str>,
     /// Why `rule` failed (FR-22): from the rule's fixed set or the configuration only.
@@ -776,6 +808,11 @@ impl JsonRow {
             product: Some(String::from(&r.product)),
             key: r.key.clone(),
             kind: kind_label(r.kind),
+            channel: kind_label(r.kind),
+            via: None,
+            delivered_as: None,
+            form: None,
+            path: None,
             state: json_state(&r.state),
             rule: json_rule(&r.state),
             reason: json_reason(&r.state),
@@ -996,6 +1033,21 @@ pub(crate) fn target_word(r: &Row, held: bool, binding: Option<&PinnedRow>) -> &
     }
 }
 
+/// The ON TARGET cell of `r`, naming its channel (design §1.3, FM-02): a config row reads
+/// `<word>, via <label>` (or `via <label>` when the word is `n/a`), or
+/// `not delivered (no config channel)` when the target's config channel delivers nothing.
+/// A secret row keeps its word.
+pub(crate) fn target_cell(r: &Row, word: &str, channels: &Channels) -> String {
+    if r.kind != Kind::Config {
+        return word.to_string();
+    }
+    match channels.config.label() {
+        Some(label) if word == "n/a" => format!("via {label}"),
+        Some(label) => format!("{word}, via {label}"),
+        None => "not delivered (no config channel)".to_string(),
+    }
+}
+
 /// The source and target words and what each means, one line per word (`opv help states`,
 /// H5). The JSON `state` and `target_state` fields keep their own stable spellings.
 pub const STATES_HELP: &str = "\
@@ -1021,8 +1073,9 @@ ON TARGET: the key on its deployment target (the TARGET column names the target)
   rotate      an immutable key this plan replaces because --rotate named it
   extra       on the target but not wanted in this environment; not pruned without --prune
   drift       the running app is bound to something other than what opv last wrote
-  n/a         not delivered to the target (config keys, unless the target takes config as
-              variables, and skipped keys not on the target)
+  n/a         not delivered to the target (skipped keys not on the target); a config row
+              never reads plain n/a: it names its channel (`via env`, `via GitHub
+              variable`) or reads `not delivered (no config channel)`
 
 Missing and failed are findings: status, plan and check exit 8 and print an
 open: link to the item in 1Password (opv open <[product/]KEY> --env <env>).";
@@ -1459,6 +1512,7 @@ pub(crate) fn scope_plan(plan: &mut SyncPlan, product: &str, names: &HashSet<Str
     plan.prune.retain(|n| names.contains(n));
     plan.held_from_prune.retain(|(p, _, _)| p == product);
     plan.config.retain(|p, _| p == product);
+    plan.no_channel.retain(|k| k.product == product);
     plan.concealed_config.retain(|(p, _)| p == product);
 }
 
