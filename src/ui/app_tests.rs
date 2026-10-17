@@ -327,6 +327,14 @@ fn opening_ci_access_loads_it() {
 }
 
 #[test]
+fn c_copies_the_next_command_with_a_next_command_label() {
+    let mut a = app();
+    a.snap.next = Some(("owner".into(), "opv ready".into()));
+    press(&mut a, &[Key::Char('c')]);
+    assert_eq!(a.status, "next command: opv ready");
+}
+
+#[test]
 fn ctrl_c_quits_from_the_overview() {
     assert_eq!(press(&mut app(), &[Key::Interrupt]), Effect::Quit);
 }
