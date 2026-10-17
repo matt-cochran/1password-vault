@@ -457,6 +457,7 @@ impl TargetConfig for KubernetesTarget {
         env: &'a str,
         managed: BTreeSet<String>,
         _files: &BTreeMap<String, crate::domain::runtime::FileMount>,
+        config: &BTreeSet<String>,
         r: &'a dyn CommandRunner,
     ) -> Result<Ports<'a>, Error> {
         // The rollout and ExternalSecret waits have their own limit, and end earlier when
@@ -483,12 +484,22 @@ impl TargetConfig for KubernetesTarget {
                 ),
             });
         }
+        let store = KubeSecrets::new(r, &self.target, managed.clone());
+        let store = match self.config {
+            ConfigRoute::ConfigMap => store.with_config(
+                KubeSecrets::new(r, &self.target, managed.clone())
+                    .with_kind(super::store::ObjectKind::ConfigMap),
+                config.clone(),
+            ),
+            ConfigRoute::Env | ConfigRoute::Store => store,
+        };
         Ok(Ports::Pinned {
-            store: Box::new(KubeSecrets::new(r, &self.target, managed.clone())),
+            store: Box::new(store),
             runtime: Box::new(
                 KubeDeployment::new(r, &self.target, managed)
                     .with_wait(POLL_EVERY, wait, move |d| r.pause(d, ""))
-                    .with_config_in_store(self.config == ConfigRoute::Store),
+                    .with_config_in_store(self.config != ConfigRoute::Env)
+                    .with_configmaps(self.config == ConfigRoute::ConfigMap),
             ),
         })
     }
@@ -759,8 +770,13 @@ impl KubernetesTarget {
     /// access`).
     fn access_check(&self, r: &dyn CommandRunner) -> Result<Verdict, Error> {
         let external = self.store.is_some();
-        let needed = |_: &str, resource: &str| !external || resource != "secrets";
+        let needed = |_: &str, resource: &str| {
+            (!external || resource != "secrets")
+                && (resource != "configmaps" || self.config == ConfigRoute::ConfigMap)
+        };
         match missing_rights(&Kubectl::new(r, &self.target), false, needed) {
+            // A configmap target needs the configmap rights like any other (§6.5); the grant
+            // names a Role in the target's namespace (FM-09).
             Ok(found) => match found.into_iter().next() {
                 None => Ok(Verdict::Ok(format!(
                     "has every right sync needs in namespace {}",
@@ -779,8 +795,9 @@ impl KubernetesTarget {
     fn deploy_rights(&self, r: &dyn CommandRunner) -> Result<(), Error> {
         let external = self.store.is_some();
         let pick = |verb: &str, resource: &str| {
-            DEPLOY_RIGHTS.contains(&(verb, resource))
-                || (external && verb == "delete" && resource == external::RESOURCE)
+            (resource != "configmaps" || self.config == ConfigRoute::ConfigMap)
+                && (DEPLOY_RIGHTS.contains(&(verb, resource))
+                    || (external && verb == "delete" && resource == external::RESOURCE))
         };
         let found = missing_rights(&Kubectl::new(r, &self.target), external, pick)?;
         match found.into_iter().next() {
@@ -1220,7 +1237,13 @@ environments = ["dev"]
         let t = target();
         let r = FakeRunner::new([]);
         assert!(matches!(
-            t.open("dev", BTreeSet::new(), &BTreeMap::new(), &r),
+            t.open(
+                "dev",
+                BTreeSet::new(),
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+                &r
+            ),
             Ok(Ports::Pinned { .. })
         ));
     }
@@ -1229,7 +1252,13 @@ environments = ["dev"]
     fn open_makes_no_calls() {
         let t = target();
         let r = FakeRunner::new([]);
-        let _ = t.open("dev", BTreeSet::new(), &BTreeMap::new(), &r);
+        let _ = t.open(
+            "dev",
+            BTreeSet::new(),
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &r,
+        );
         assert!(r.calls.borrow().is_empty());
     }
 
@@ -1302,6 +1331,51 @@ environments = ["dev"]
                 "kubernetes access: ok has every right sync needs in namespace myapp",
             ]
         );
+    }
+
+    /// A healthy `config = "configmap"` cluster: three kubectl checks and fourteen can-i.
+    fn healthy_configmap() -> Vec<Output> {
+        let mut v = vec![
+            ok("Client Version: v1.31.2\nKustomize Version: v5.4.2\n"),
+            ok("kind-opv\n"),
+            ok("Client Version: v1.31.2\nServer Version: v1.31.0\n"),
+        ];
+        v.extend((0..14).map(|_| ok("yes\n")));
+        v
+    }
+
+    /// FM-09: a missing configmap right fails `doctor`, and its line says to grant it by a
+    /// Role in the target's namespace.
+    #[test]
+    fn doctor_names_a_missing_configmap_right_as_a_namespaced_role() {
+        let mut g = healthy_configmap();
+        // ACCESS order: nine secret/deployment rights, then `get configmaps` (can-i #9).
+        g[12] = Output {
+            status: 1,
+            stdout: zeroize::Zeroizing::new(b"no\n".to_vec()),
+        };
+        let r = FakeRunner::new(g);
+        let mut t = target();
+        t.config = ConfigRoute::ConfigMap;
+        let checks = t.doctor(&r, &host);
+        let line = match &checks[3].outcome {
+            Err(e) => e.do_text().unwrap_or_default(),
+            Ok(v) => format!("{v:?}"),
+        };
+        assert!(line.contains("a Role in namespace"), "{line}");
+    }
+
+    /// K3: an env-route target never asks for configmap rights.
+    #[test]
+    fn doctor_never_asks_for_configmap_rights_on_an_env_target() {
+        let r = FakeRunner::new(healthy());
+        let _ = doctor_lines(&r);
+        let asked = r
+            .calls
+            .borrow()
+            .iter()
+            .any(|c| c.args.iter().any(|a| a == "configmaps"));
+        assert!(!asked);
     }
 
     #[test]
@@ -1435,10 +1509,12 @@ environments = ["dev"]
         );
     }
 
-    /// The `kubectl auth can-i` answers of `preflight` (Mutate): `no` for `denied`.
+    /// The `kubectl auth can-i` answers of `preflight` (Mutate): `no` for `denied`. The
+    /// caller's target is env-route, so the configmap-only right is not asked.
     fn deploy_rights(denied: &str) -> Vec<Output> {
         DEPLOY_RIGHTS
             .iter()
+            .filter(|(_, resource)| *resource != "configmaps")
             .map(|(verb, resource)| {
                 if format!("{verb} {resource}") == denied {
                     Output {

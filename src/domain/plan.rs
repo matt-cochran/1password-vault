@@ -780,6 +780,7 @@ mod tests {
             _env: &'a str,
             _managed: BTreeSet<String>,
             _files: &BTreeMap<String, crate::domain::runtime::FileMount>,
+            _config: &BTreeSet<String>,
             _r: &'a dyn crate::runner::CommandRunner,
         ) -> Result<crate::ports::Ports<'a>, crate::error::Error> {
             unimplemented!("the plan test never opens the target")

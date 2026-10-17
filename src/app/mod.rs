@@ -1881,7 +1881,29 @@ pub(crate) fn open_target<'a>(
     let (_, t) = target(fleet, env_name, name)?;
     let managed = managed_names(fleet, env_name, name)?.into_iter().collect();
     let files = file_mounts(fleet, env_name, name)?;
-    Ok((t, t.open(env_name, managed, &files, r)?))
+    let config = config_names(fleet, env_name, name)?;
+    Ok((t, t.open(env_name, managed, &files, &config, r)?))
+}
+
+/// The env names target `name` renders for config keys of the products it delivers: the
+/// subset of its managed set that is config, never secret (FR-14, design §6.2).
+pub(crate) fn config_names(
+    fleet: &Fleet,
+    env_name: &str,
+    name: &str,
+) -> Result<BTreeSet<String>, Error> {
+    let (_, t) = target(fleet, env_name, name)?;
+    Ok(fleet
+        .products
+        .iter()
+        .filter(|(p, _)| fleet.delivers(env_name, name, p))
+        .flat_map(|(p, prod)| {
+            prod.keys
+                .iter()
+                .filter(|(_, s)| s.kind == Kind::Config)
+                .map(move |(k, _)| t.env_name(p, k))
+        })
+        .collect())
 }
 
 /// Every name target `name` renders for a declared key of a product it delivers: its

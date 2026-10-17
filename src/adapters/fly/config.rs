@@ -294,6 +294,7 @@ impl TargetConfig for FlyTarget {
         _env: &'a str,
         _managed: BTreeSet<String>,
         _files: &BTreeMap<String, crate::domain::runtime::FileMount>,
+        _config: &BTreeSet<String>,
         r: &'a dyn CommandRunner,
     ) -> Result<Ports<'a>, Error> {
         let fly = || Fly {
@@ -433,7 +434,13 @@ mod tests {
         let t = fleet_target("FLEET__{PRODUCT}__{KEY}");
         let r = FakeRunner::new([]);
         assert!(matches!(
-            t.open("prod", BTreeSet::new(), &BTreeMap::new(), &r),
+            t.open(
+                "prod",
+                BTreeSet::new(),
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+                &r
+            ),
             Ok(Ports::Staged { .. })
         ));
     }

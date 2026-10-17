@@ -419,11 +419,14 @@ pub trait TargetConfig: fmt::Debug + Send + Sync {
     fn channels(&self) -> Channels;
     /// The store and runtime adapters of this target (FR-28). `managed` is every env name
     /// the template renders for a declared key (FR-8); the ports speak those names.
+    /// `config` is the subset that belongs to config keys, so a target with a separate
+    /// config object (a Kubernetes ConfigMap) never puts a secret there by mistake.
     fn open<'a>(
         &'a self,
         env: &'a str,
         managed: BTreeSet<String>,
         files: &BTreeMap<String, FileMount>,
+        config: &BTreeSet<String>,
         r: &'a dyn CommandRunner,
     ) -> Result<Ports<'a>, Error>;
     /// Read-only checks of the target's own state (NR-23 to NR-25): `Err` stops the

@@ -59,7 +59,7 @@ const REVISION_ANNOTATION: &str = "deployment.kubernetes.io/revision";
 /// The operator rights opv needs, each with its fixed reason. Every one is required:
 /// `doctor` fails without it, and `sync` refuses before its first write without the ones
 /// only a deploy uses ([`DEPLOY_RIGHTS`]).
-const ACCESS: [(&str, &str, &str); 9] = [
+const ACCESS: [(&str, &str, &str); 14] = [
     (
         "get",
         "secrets",
@@ -105,6 +105,31 @@ const ACCESS: [(&str, &str, &str); 9] = [
         "pods",
         "your kubectl identity cannot list Pods, so sync --deploy cannot wait for the rollout",
     ),
+    (
+        "get",
+        "configmaps",
+        "your kubectl identity cannot read ConfigMaps in this namespace, so sync cannot tell whether a config key is already written; grant it with a namespaced Role in that namespace, never a ClusterRole",
+    ),
+    (
+        "list",
+        "configmaps",
+        "your kubectl identity cannot list ConfigMaps, so opv cannot find the config versions it wrote; grant it with a namespaced Role in that namespace, never a ClusterRole",
+    ),
+    (
+        "create",
+        "configmaps",
+        "your kubectl identity cannot create ConfigMaps, so sync cannot write a config key; grant it with a namespaced Role in that namespace, never a ClusterRole",
+    ),
+    (
+        "patch",
+        "configmaps",
+        "your kubectl identity cannot patch ConfigMaps, which `apply --server-side` needs to update one; grant it with a namespaced Role in that namespace, never a ClusterRole",
+    ),
+    (
+        "delete",
+        "configmaps",
+        "your kubectl identity cannot delete ConfigMaps, so sync --deploy cannot remove superseded config versions; grant it with a namespaced Role in that namespace, never a ClusterRole",
+    ),
 ];
 
 /// The rights opv needs on ExternalSecrets when secrets come from a named store (FR-39).
@@ -137,11 +162,12 @@ const EXTERNAL_ACCESS: [(&str, &str, &str); 5] = [
 ];
 
 /// The rights only `sync --deploy` uses, after the new revision is live: listing Pods and
-/// ReplicaSets for the health wait, deleting superseded versions (Secrets, or
+/// ReplicaSets for the health wait, deleting superseded versions (Secrets, ConfigMaps, or
 /// ExternalSecrets with a named store). `sync` checks them before its first write, so a
 /// missing one never turns a successful deploy into a failure (FR-32).
-pub(crate) const DEPLOY_RIGHTS: [(&str, &str); 3] = [
+pub(crate) const DEPLOY_RIGHTS: [(&str, &str); 4] = [
     ("delete", "secrets"),
+    ("delete", "configmaps"),
     ("list", "replicasets"),
     ("list", "pods"),
 ];
@@ -221,6 +247,9 @@ pub struct KubeDeployment<'a> {
     wait_max: Duration,
     /// `kubernetes.config = "store"`: config keys are Secrets bound by reference.
     config_in_store: bool,
+    /// `kubernetes.config = "configmap"`: config keys are ConfigMaps, so the operator also
+    /// needs the configmap rights.
+    configmaps: bool,
     /// Secrets come from a named store through ExternalSecrets (FR-39); `None`: opv's own
     /// immutable Secrets.
     external: Option<Bridge<'a>>,
@@ -241,6 +270,7 @@ impl<'a> KubeDeployment<'a> {
             poll_every: POLL_EVERY,
             wait_max: WAIT_MAX,
             config_in_store: false,
+            configmaps: false,
             external: None,
         }
     }
@@ -256,6 +286,12 @@ impl<'a> KubeDeployment<'a> {
     /// Route config keys through Secrets like secret keys (`kubernetes.config = "store"`).
     pub fn with_config_in_store(mut self, yes: bool) -> Self {
         self.config_in_store = yes;
+        self
+    }
+
+    /// Check the configmap rights too (`kubernetes.config = "configmap"`, K3).
+    pub fn with_configmaps(mut self, yes: bool) -> Self {
+        self.configmaps = yes;
         self
     }
 
@@ -898,8 +934,10 @@ impl PinnedRuntime for KubeDeployment<'_> {
     /// do not matter; each finding names the verb and resource. `doctor` fails on any;
     /// `sync` checks [`DEPLOY_RIGHTS`] before its first write.
     fn check_access(&self, _names: &[String]) -> Result<Vec<AccessFinding>, Error> {
-        missing_rights(&self.k, self.external.is_some(), |_, _| true)
-            .map(|found| found.into_iter().map(|(f, _)| f).collect())
+        missing_rights(&self.k, self.external.is_some(), |_, resource| {
+            self.configmaps || resource != "configmaps"
+        })
+        .map(|found| found.into_iter().map(|(f, _)| f).collect())
     }
 }
 
@@ -1523,6 +1561,27 @@ mod tests {
         let r = FakeRunner::new((0..9).map(|_| ok("yes")));
         with_rt(&r, |rt| rt.check_access(&[])).unwrap();
         assert_eq!(args(&r, 0)[5..], ["auth", "can-i", "get", "secrets"]);
+    }
+
+    /// K3: a `config = "configmap"` target also needs the configmap rights.
+    #[test]
+    fn check_access_asks_for_configmap_rights_on_a_configmap_target() {
+        let r = FakeRunner::new((0..14).map(|_| ok("yes")));
+        let (t, m) = (target(), managed());
+        KubeDeployment::new(&r, &t, m)
+            .with_configmaps(true)
+            .check_access(&[])
+            .unwrap();
+        assert!(all_argv(&r).contains("auth can-i patch configmaps"));
+    }
+
+    /// K3: an env-route target never asks for configmap rights.
+    #[test]
+    fn check_access_skips_configmap_rights_on_an_env_target() {
+        let r = FakeRunner::new((0..9).map(|_| ok("yes")));
+        let (t, m) = (target(), managed());
+        KubeDeployment::new(&r, &t, m).check_access(&[]).unwrap();
+        assert!(!all_argv(&r).contains("configmaps"));
     }
 
     #[test]
