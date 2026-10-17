@@ -17,7 +17,7 @@ retrying op vault list (3/3) in <delay>
 
 ## json exit: 0
 ## json stdout
-{"schema_version":2,"ok":true,"receipt_id":"rcpt-<id>","opv_version":"0.10.0","config":{"source":"<SCENARIO>/project/secrets.toml"},"account":{"account_id":"AE2EDEVACCOUNT000000000001","by":"pointer"},"matrix":[],"targets":[],"findings":[{"code":"shared_sign_in_address","scope":{"account":"AE2EDEVACCOUNT000000000001"},"blocking":false,"actor":"owner","effect":"none","prerequisite":"opv account list","verify":"opv account list --json"},{"code":"account_not_registered","scope":{"environment":"dev"},"blocking":true,"actor":"owner","effect":"signs_in","prerequisite":"opv login --add","verify":"opv ready --json","do":"add account AE2EDEVACCOUNT000000000001 at op's prompt"}],"next":{"actor":"owner","command":"opv login --add"},"do":null}
+{"schema_version":2,"ok":true,"receipt_id":"rcpt-<id>","opv_version":"<version>","config":{"source":"<SCENARIO>/project/secrets.toml"},"account":{"account_id":"AE2EDEVACCOUNT000000000001","by":"pointer"},"matrix":[],"targets":[],"findings":[{"code":"shared_sign_in_address","scope":{"account":"AE2EDEVACCOUNT000000000001"},"blocking":false,"actor":"owner","effect":"none","prerequisite":"opv account list","verify":"opv account list --json"},{"code":"account_not_registered","scope":{"environment":"dev"},"blocking":true,"actor":"owner","effect":"signs_in","prerequisite":"opv login --add","verify":"opv ready --json","do":"add account AE2EDEVACCOUNT000000000001 at op's prompt"}],"next":{"actor":"owner","command":"opv login --add"},"do":null}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml

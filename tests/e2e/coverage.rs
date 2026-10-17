@@ -403,6 +403,11 @@ impl Scenario {
             .replace_all(&s, r#""platform":"<platform>""#);
         let s = re(r"\bin \d+(\.\d+)? ?(ms|s)\b").replace_all(&s, "in <delay>");
         let s = re(r"rcpt-[0-9a-f]+").replace_all(&s, "rcpt-<id>");
+        // opv's own version changes every release; a snapshot must not.
+        let s = s.replace(
+            &format!(r#""opv_version":"{}""#, env!("CARGO_PKG_VERSION")),
+            r#""opv_version":"<version>""#,
+        );
         s.replace(" (op in WSL does not see the Windows app's accounts)", "")
     }
 }
