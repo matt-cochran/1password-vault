@@ -769,6 +769,15 @@ pub enum Cause {
         product: ProductName,
         state: Unverified,
     },
+    /// A source item changed since the last sync, or no recorded source versions exist
+    /// (`delivery-transports` §2.2). A result, not a failure: `ok: true`, exit 10; the
+    /// step it names is the sync (or `opv bootstrap` when no delivery item is recorded).
+    SourceChanged {
+        env: EnvName,
+        /// No `source versions` recorded for the placement: its delivery item is missing,
+        /// or an older opv synced it and never wrote the field.
+        no_record: bool,
+    },
     /// opv's own local input or output failed (writing a file, finding the working folder,
     /// its own executable or the home folder, writing to stdout).
     LocalIo {
@@ -1439,6 +1448,7 @@ impl Cause {
             RemoteVersionMismatch { .. } => "remote_version_mismatch",
             ChildStartFailed { .. } => "child_start_failed",
             DeliveryUnverified { .. } => "delivery_unverified",
+            SourceChanged { .. } => "source_changed",
             LocalIo { .. } => "local_io_failed",
             StoreNotReady { .. } => "owner_setup_required",
             HandoffPipeContested { .. } => "handoff_refused",
@@ -1536,6 +1546,7 @@ impl Cause {
             | NeedsOwnSession { .. }
             | CredentialRejected { .. } => 7,
             ValuesNeeded { .. } | DeliveryUnverified { .. } => 8,
+            SourceChanged { .. } => 10,
             CreateOutcomeUnknown { .. }
             | WriteOutcomeUnknown { .. }
             | Unavailable { .. }
@@ -1589,6 +1600,7 @@ impl Cause {
             | ConfigProposalInvalid { .. }
             | SecretNotStored { .. }
             | SourceOnly { .. }
+            | SourceChanged { .. }
             | Bug { .. } => RetryClass::Never,
             _ => RetryClass::AfterFix,
         }

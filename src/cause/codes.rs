@@ -233,6 +233,9 @@ pub fn meaning(code: &str) -> &'static str {
         "delivery_unverified" => {
             "a placement no longer holds what opv delivered, or could not be checked"
         }
+        "source_changed" => {
+            "a source item changed since the last sync, or no source versions are recorded; the next step is the sync"
+        }
         "local_io_failed" => {
             "opv's own local input or output failed (a file, the current folder, standard output, ...)"
         }
@@ -778,6 +781,10 @@ fn one_of_each() -> Vec<Cause> {
             state: Unverified::OtherAccount {
                 account: AccountId::new("ACC-OTHER"),
             },
+        },
+        SourceChanged {
+            env: EnvName::new("env-prod"),
+            no_record: false,
         },
         KeyNotDeclared {
             key: KeyName::new("KEY_X"),

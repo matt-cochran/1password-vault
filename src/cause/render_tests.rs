@@ -688,6 +688,13 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             vec!["env-prod", "tgt-web", "prod-api", "ACC-OTHER"],
         ),
         (
+            SourceChanged {
+                env: EnvName::new("env-prod"),
+                no_record: true,
+            },
+            vec!["env-prod", "bootstrap"],
+        ),
+        (
             KeyNotDeclared {
                 key: KeyName::new("KEY_X"),
                 env: EnvName::new("env-prod"),
@@ -885,6 +892,7 @@ fn ordinal(c: &Cause) -> usize {
         RemoteVersionMismatch { .. } => 57,
         ChildStartFailed { .. } => 58,
         DeliveryUnverified { .. } => 59,
+        SourceChanged { .. } => 74,
         Bug { .. } => 60,
         KeyNotDeclared { .. } => 61,
         KeysBlocking { .. } => 62,
@@ -902,7 +910,7 @@ fn ordinal(c: &Cause) -> usize {
     }
 }
 
-const VARIANTS: usize = 74;
+const VARIANTS: usize = 75;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
@@ -1004,6 +1012,18 @@ fn in_no_account_on_the_machine() -> Cause {
         },
         other => other,
     }
+}
+
+#[test]
+fn a_source_changed_sync_is_a_run() {
+    let cause = Cause::SourceChanged {
+        env: EnvName::new("env-prod"),
+        no_record: false,
+    };
+    assert_eq!(
+        crate::cause::render::next_kind(&cause.step(&inv()).1),
+        "run"
+    );
 }
 
 #[test]

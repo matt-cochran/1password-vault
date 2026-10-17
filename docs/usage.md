@@ -14,6 +14,7 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | `opv access <env> [--target <t>] --create --github <owner/repo> [--github-env <e>] [--secret-name <n>]` | in your own terminal: create that identity's 1Password service account (exact grants, 90 days) and store its token as a GitHub secret on gh's stdin, never shown; checks gh, the repository and the environment first, asks once | 1Password and GitHub |
 | `opv access [<env>] [--target <t>] [--json]` | who needs each boundary and target, and who can read it now; the owner's command to create a reader ([usage](#who-can-read-each-vault-opv-access)) | nothing (read-only) |
 | `opv delivery verify <env> [--product <p>] [--target <t>] [--receipt <file>] [--json]` | does every placement of a product still hold what opv delivered ([usage](#delivery-receipts-opv-sync---receipt-and-opv-delivery-verify)) | nothing (read-only) |
+| `opv changed <env> [--product <p>] [--target <t>] [--json]` | whether a source item changed since the last sync: each placement's recorded `source versions` against the item's current version (values never shown); exit 10 when one did | nothing (read-only) |
 | `opv ci workflow <env> --target <name> [--github-env <environment>] [--deploy]` | print a ready-to-commit GitHub Actions workflow (YAML) that syncs one target, so an assistant never writes the workflow from scratch | nothing (read-only) |
 | `opv ready [<env>] [--json] [--save <file>]` | one receipt: every environment × product, findings, who acts and the next step | nothing |
 | `opv mcp install [--client claude\|codex\|all] [--project <dir>] [--name <n>] [--force] [--json]` | register opv's MCP server for a project with Claude Code (`.mcp.json`) and/or Codex (`~/.codex/config.toml`), merging into existing configuration ([MCP](mcp.md)) | the assistant's configuration |
@@ -794,6 +795,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `outcome_unknown` | 9 | safe | no | a change may or may not have been applied; re-running is safe |
 | `provider_unavailable` | 9 | safe | no | a provider did not answer after its retries; nothing was changed |
 | `secret_not_stored` | 9 | never | yes | a secret-bearing object was made at the provider, but its secret was never stored; it is revoked, never made again |
+| `source_changed` | 10 | never | no | a source item changed since the last sync, or no source versions are recorded; the next step is the sync |
 | `internal_error` | 70 | never | no | opv hit an internal error; report it |
 | `interrupted` | 129/130/131/143 | safe | no | interrupted by SIGINT (130), SIGHUP (129), SIGQUIT (131) or SIGTERM (143) |
 <!-- error-codes:end -->
@@ -893,6 +895,7 @@ SSH key or any other field type it does not rewrite exactly; it says so in one n
 | 7 | authentication: not signed in to 1Password or the target CLI, or `deploy_credentials` rejected |
 | 8 | findings: `status`, `plan`, `check` (or `doctor --env`) found keys missing or failing a rule |
 | 9 | outcome unknown, or a provider did not answer: nothing is known to be broken; re-run the same command ([exit 9](how-opv-handles-failures.md#exit-9-re-run-the-same-command)) |
+| 10 | `opv changed` found a source item changed since the last sync (`source_changed`): a result, not a failure (`ok` is true), and the next step is the sync |
 | 70 | internal error: an opv bug; nothing to fix on your side. `Next: opv version`; report it with that output |
 | 129 / 130 / 131 / 143 | interrupted by SIGHUP (a closed terminal), Ctrl-C (SIGINT), SIGQUIT or SIGTERM (128 + the signal); safe to re-run |
 

@@ -69,6 +69,12 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "SecretNotStored",
         "no recording of `op service-account create`",
     ),
+    // A result, not a failure: `opv changed` reports it as `ok: true` with exit 10 in its
+    // own document (src/app/changed.rs), never as an error, so no error snapshot exists.
+    (
+        "SourceChanged",
+        "a successful result (exit 10), never an error document",
+    ),
 ];
 
 fn snapshots() -> PathBuf {

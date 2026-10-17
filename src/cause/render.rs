@@ -2077,6 +2077,15 @@ impl Cause {
                 "opv cannot confirm that product {product} is delivered to target {target} in environment {env}: {}",
                 unverified_words(state)
             ),
+            SourceChanged { env, no_record } => {
+                if *no_record {
+                    format!(
+                        "no source versions are recorded for environment {env}: run opv bootstrap to record delivery items"
+                    )
+                } else {
+                    format!("the source items of environment {env} changed since the last sync")
+                }
+            }
             LocalIo { op, path, io } => {
                 if path.as_os_str().is_empty() {
                     format!("opv could not {}: {}", local_op(*op), io_words(*io))
@@ -3881,6 +3890,16 @@ impl Cause {
                 ),
                 Unverified::Unverifiable => plan(None, Next::None(NoNext::NothingToRun)),
             },
+            SourceChanged { env, no_record } => {
+                if *no_record {
+                    plan(
+                        inspect("run opv bootstrap to record delivery items"),
+                        Next::Handoff(cmd(&["bootstrap"], &[])),
+                    )
+                } else {
+                    plan(None, Next::Run(cmd(&["sync"], &[env.as_str(), "--deploy"])))
+                }
+            }
             LocalIo {
                 path,
                 io: IoKind::NotAPlainFile,
