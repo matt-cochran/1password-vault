@@ -130,7 +130,8 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 | Variant | Fields | Code | Retry | Do | Next |
 |---|---|---|---|---|---|
 | `TargetRefused` | system; subject; serving: Option<Revision>; why: Validation / Quota / Unhealthy{new_revision} / NoRevision | update_refused / target_unhealthy | after_fix | per why (authorization goes to `MissingRight`) | `opv doctor --env E --target T` [R45, R47, R48] |
-| `Guard` | guard: Guard (ValueTooLarge{key, limit, store} / NotManagedByOpv{name, store} / CredentialAsOption{option} / ProviderHidesValues{provider} / ImmutableWithoutRotate{key} / GenerateRefused{key, reason} / RemoteProfileRefuses{profile, asked, allowed} / …) | policy_refused | never | per guard | per guard [R46, R64, R79] |
+| `Guard` | guard: Guard (ValueTooLarge{key, limit, store} / NotManagedByOpv{name, store} / CredentialAsOption{option} / ProviderHidesValues{provider} / ImmutableWithoutRotate{key} / GenerateRefused{key, reason} / RemoteProfileRefuses{profile, asked, allowed} / MountPathInUse{workload, container, path, volume} / …) | policy_refused | never | per guard | per guard [R46, R64, R79] |
+| `MountUnreadable` | workload; container; run_as: Option<u32>; why: NoFsGroup / RunAsUnknown; env; target | **mount_unreadable** | after_fix | "set spec.template.spec.securityContext.fsGroup (any group, for example 10001), or runAsUser: 0. Nothing was written." | `opv plan <env> --target <t>` (K5/K6 wire it) |
 
 ### 4.6 Outcomes, availability and budgets
 
@@ -194,7 +195,7 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 
 ### 4.11 Codes
 
-- **New:** config_source_mismatch, config_unreadable, config_not_editable, copies_differ, unknown_target, unknown_role, unknown_profile, ambiguous_name, choice_required, nothing_in_scope, already_declared, target_not_signed_in, own_session_required, credential_rejected, resource_not_found, create_outcome_unknown, budget_spent, concurrent_edit, tool_unusable, unexpected_output, unrecognized_failure, declined, file_too_open, input_invalid, approval_used, plan_unknown, private_dir_failed, remote_unreachable, remote_version_mismatch, child_start_failed, delivery_unverified, target_drift, source_changed, internal_error.
+- **New:** config_source_mismatch, config_unreadable, config_not_editable, copies_differ, unknown_target, unknown_role, unknown_profile, ambiguous_name, choice_required, nothing_in_scope, already_declared, target_not_signed_in, own_session_required, credential_rejected, resource_not_found, create_outcome_unknown, budget_spent, concurrent_edit, tool_unusable, unexpected_output, unrecognized_failure, declined, file_too_open, input_invalid, approval_used, plan_unknown, private_dir_failed, remote_unreachable, remote_version_mismatch, child_start_failed, delivery_unverified, target_drift, source_changed, mount_unreadable, internal_error.
 - **Removed:** source_error, target_error, auth_required, desktop_app_unavailable (now a `NotSignedIn` state), op_unexpected (now `unrecognized_failure`), duplicate_scope (now `input_invalid`), credential_rejected for op's prompt (now `NotSignedIn`), and the MCP-only codes.
 - **Exit 70 (internal error)** is new; it follows `EX_SOFTWARE`.
 
@@ -203,7 +204,8 @@ Under FR-60 (one way only) nothing keeps the old names. The `--json` `schema_ver
 ### 4.12 Field rules (`ConfigInvalid`)
 
 `FieldRule` is an enum, so the configuration's Do is built from the field and the rule, and never derived from the line text:
-- `Pattern{id}`: each pattern has a plain-words description ("key names use A–Z, 0–9 and _"), never a regex in text;
+- `Pattern{id}`: each pattern has a plain-words description ("key names use A–Z, 0–9 and _", `ContainerPath`: "an absolute path such as /run/secrets/{product}"), never a regex in text;
+- `Check{check}`: a check between fields ([`ConfigCheck`]), with its own words and fix, e.g. `ConfigFileNeedsObject{key}` under `config = "env"` asks for `config = "configmap"`;
 - `Reserved{set}`;
 - `Empty`;
 - `Type{expected}`;

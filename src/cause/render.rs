@@ -932,10 +932,11 @@ fn rule_words(field: &str, rule: &FieldRule) -> (String, String) {
         ),
         FieldRule::Pattern { id } => {
             let words = id.words();
-            (
-                format!("{field} must be {words}"),
-                format!("change {field} to {words}"),
-            )
+            let fix = match id {
+                PatternId::ContainerPath => format!("use {words}"),
+                _ => format!("change {field} to {words}"),
+            };
+            (format!("{field} must be {words}"), fix)
         }
         FieldRule::Reserved { set } => (
             format!("{field} uses a reserved name (reserved: {})", list(set)),
@@ -1755,8 +1756,39 @@ impl Cause {
                     "remote profile {profile} does not allow {asked}; it allows {}",
                     list(allowed)
                 ),
+                self::Guard::MountPathInUse {
+                    workload,
+                    container,
+                    path,
+                    volume,
+                    env: _,
+                    target: _,
+                } => format!(
+                    "container {container} of {workload} already mounts volume {volume} over {path}, so opv's secrets volume cannot go there"
+                ),
                 self::Guard::Declined => "you declined, so nothing changed".to_string(),
             },
+            MountUnreadable {
+                workload,
+                container,
+                run_as,
+                why,
+                env: _,
+                target: _,
+            } => {
+                let who = match run_as {
+                    Some(uid) => format!("runs as uid {uid}"),
+                    None => "runs as an unknown user".to_string(),
+                };
+                match why {
+                    MountWhy::NoFsGroup => format!(
+                        "container {container} of {workload} {who} and sets no fsGroup, so the mounted secrets files would be unreadable"
+                    ),
+                    MountWhy::RunAsUnknown => format!(
+                        "container {container} of {workload} {who}, with no fsGroup or runAsGroup, so whether the mounted secrets files are readable is unknown"
+                    ),
+                }
+            }
             CreateOutcomeUnknown {
                 system,
                 kind,
@@ -3294,8 +3326,27 @@ impl Cause {
                     )),
                     Next::Run(cmd(&["config", "edit"], &[])),
                 ),
+                self::Guard::MountPathInUse {
+                    workload: _,
+                    container: _,
+                    path: _,
+                    volume,
+                    env,
+                    target,
+                } => plan(
+                    inspect(format!(
+                        "choose another secrets_dir, or remove volume {volume}"
+                    )),
+                    Next::Check(cmd(&["plan"], &[env.as_str(), "--target", target.as_str()])),
+                ),
                 self::Guard::Declined => plan(None, Next::Rerun),
             },
+            MountUnreadable { env, target, .. } => plan(
+                inspect(
+                    "set spec.template.spec.securityContext.fsGroup (any group, for example 10001), or runAsUser: 0. Nothing was written.",
+                ),
+                Next::Check(cmd(&["plan"], &[env.as_str(), "--target", target.as_str()])),
+            ),
             CreateOutcomeUnknown {
                 system: _,
                 kind,

@@ -490,6 +490,9 @@ pub enum PatternId {
     Guid,
     /// An Azure tenant: its ID or its domain.
     AzureTenant,
+    /// A container path (`secrets_dir`, delivery-transports §6.2): an absolute path with no
+    /// `..`, such as `/run/secrets/{product}`.
+    ContainerPath,
 }
 
 impl PatternId {
@@ -527,6 +530,7 @@ impl PatternId {
             PatternId::AzureTenant => {
                 "a tenant ID (a GUID) or a tenant domain, such as contoso.onmicrosoft.com"
             }
+            PatternId::ContainerPath => "an absolute path such as /run/secrets/{product}",
         }
     }
 }
