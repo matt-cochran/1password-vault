@@ -26,10 +26,13 @@ use crate::cause::{
 };
 use crate::domain::rules::{SIGNOZ_BODY, SIGNOZ_PREFIX};
 use crate::domain::{
-    Boundary, Environment, Fleet, ItemRef, KeySpec, Product, Target, boundary_missing, key_label,
+    Boundary, Environment, Fleet, ItemRef, KeySpec, Kind, Product, Target, boundary_missing,
+    key_label,
 };
 use crate::error::Error;
-use crate::provider::{NameRules, Section, StoreConfig, StoreNameRules, TargetConfig};
+use crate::provider::{
+    Channel, FileCapability, NameRules, Section, StoreConfig, StoreNameRules, TargetConfig,
+};
 
 mod locate;
 
@@ -1179,6 +1182,7 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
     check_scopes(&fleet, doc)?;
     check_boundaries(&fleet, doc)?;
     check_target_roles(&fleet, doc)?;
+    check_file_mounts(&fleet, doc)?;
     check_names(&fleet, doc)?;
     check_personal(&fleet, doc)?;
     check_evidence_width(&fleet, doc)?;
@@ -1240,6 +1244,98 @@ fn check_target_roles(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
                         ));
                     }
                 }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `secrets_dir` mount rules (design §6.2): the file keys of two products must land in
+/// distinct directories, a config key with `file` needs a config object, and one product's
+/// file paths must not nest. Targets without a native file capability are unchanged.
+fn check_file_mounts(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
+    for (env_name, env) in &fleet.environments {
+        for (target_name, target) in &env.targets {
+            let channels = target.config.channels();
+            let FileCapability::Native { dir } = &channels.files else {
+                continue;
+            };
+            let section = target.config.provider().section();
+            let dir_path = [
+                "environments",
+                env_name,
+                "targets",
+                target_name,
+                section,
+                "secrets_dir",
+            ];
+            let config_path = [
+                "environments",
+                env_name,
+                "targets",
+                target_name,
+                section,
+                "config",
+            ];
+            // The directory each product with a file key renders, in product order.
+            let mut rendered: Vec<(String, String, String)> = Vec::new();
+            for (product, p) in &fleet.products {
+                if !fleet.delivers(env_name, target_name, product) {
+                    continue;
+                }
+                let mut files: Vec<(&str, &str)> = Vec::new();
+                for (key, spec) in &p.keys {
+                    if !spec.environments.iter().any(|e| e == env_name) {
+                        continue;
+                    }
+                    let Some(file) = spec.file.as_deref() else {
+                        continue;
+                    };
+                    if spec.kind == Kind::Config && matches!(channels.config, Channel::RuntimeEnv) {
+                        return Err(doc.invalid(
+                            &config_path,
+                            check(ConfigCheck::ConfigFileNeedsObject {
+                                key: format!("{product}/{key}"),
+                            }),
+                        ));
+                    }
+                    files.push((key.as_str(), file));
+                }
+                // (d) Within one product, no `file` is a parent of another's.
+                let mut seen: Vec<(&str, &str)> = Vec::new();
+                for (key, file) in &files {
+                    if let Some((other_key, parent)) = seen.iter().find(|(_, o)| {
+                        *o == *file
+                            || file.starts_with(&format!("{o}/"))
+                            || o.starts_with(&format!("{file}/"))
+                    }) {
+                        return Err(doc.invalid(
+                            &["products", product, "keys", key, "file"],
+                            FieldRule::Collision {
+                                rendered: parent.to_string(),
+                                other: dotted(&["products", product, "keys", other_key, "file"]),
+                            },
+                        ));
+                    }
+                    seen.push((key, file));
+                }
+                if files.is_empty() {
+                    continue;
+                }
+                // (a) and (b): two products may not render the same directory.
+                let rendered_dir = dir.replace("{product}", &product.replace('_', "-"));
+                if let Some((_, other, other_key)) =
+                    rendered.iter().find(|(d, ..)| d == &rendered_dir)
+                {
+                    return Err(doc.invalid(
+                        &dir_path,
+                        FieldRule::Collision {
+                            rendered: rendered_dir.clone(),
+                            other: dotted(&["products", other, "keys", other_key, "file"]),
+                        },
+                    ));
+                }
+                rendered.push((rendered_dir, product.clone(), files[0].0.to_string()));
             }
         }
     }
@@ -1706,7 +1802,10 @@ fn validate_local(doc: &Doc<'_>, product: &str, p: &crate::domain::Product) -> R
     let mut seen: Vec<(&str, &str)> = Vec::new();
     for (key, path) in &files {
         let file_path = ["products", product, "keys", key.as_str(), "file"];
-        if dir_env.is_none() {
+        // A product without a `[products.<p>.local]` section runs nowhere locally; its file
+        // keys are delivered by a target's own filesystem (a target's `secrets_dir`,
+        // design §6.2, checked by `check_file_mounts`), so only the path rules apply.
+        if dir_env.is_none() && p.local.is_some() {
             return Err(doc.invalid_at(dotted(&dir_path), &file_path, FieldRule::Missing));
         }
         let parts: Vec<&str> = path.split('/').collect();

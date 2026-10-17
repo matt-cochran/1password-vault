@@ -370,8 +370,9 @@ impl Channel {
 /// How a target delivers file keys (design §1.1, §1.3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileCapability {
-    /// opv writes the bytes to a filesystem the app reads; `dir` names it.
-    Native { dir: &'static str },
+    /// opv writes the bytes to a filesystem the app reads; `dir` names it (a Kubernetes
+    /// `secrets_dir`, which may hold `{product}`).
+    Native { dir: String },
     /// The app writes the files from the environment (Fly and its shim).
     ViaApp { note: &'static str },
     /// Not delivered as a file; the key goes on the secret channel by name.

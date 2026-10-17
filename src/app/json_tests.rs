@@ -425,7 +425,7 @@ fn native_channels() -> crate::provider::Channels {
         secret: crate::provider::Channel::RuntimeEnv,
         config: crate::provider::Channel::RuntimeEnv,
         files: crate::provider::FileCapability::Native {
-            dir: "/etc/secrets",
+            dir: "/etc/secrets".to_string(),
         },
     }
 }
