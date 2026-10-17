@@ -25,6 +25,7 @@
 pub mod config;
 pub mod diagnose;
 pub mod external;
+pub mod files;
 pub mod runtime;
 pub mod store;
 
