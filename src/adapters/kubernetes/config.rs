@@ -22,8 +22,9 @@ use crate::error::Error;
 use crate::host::Host;
 use crate::ports::Ports;
 use crate::provider::{
-    Check, InitField, NameRules, Preflight, PreflightMode, Provider, Section, StoreBinding,
-    StoreConfig, StoreNameRules, TargetConfig, Verdict, eq_as, init_lines,
+    Channel, Channels, Check, FileCapability, InitField, NameRules, Preflight, PreflightMode,
+    Provider, Section, StoreBinding, StoreConfig, StoreNameRules, TargetConfig, Verdict, eq_as,
+    init_lines,
 };
 use crate::runner::CommandRunner;
 
@@ -387,6 +388,23 @@ impl TargetConfig for KubernetesTarget {
              binds",
             t.deployment, t.namespace, t.context, self.env_name_template
         )
+    }
+
+    /// Today: immutable Secret versions; config is a plain env value or the store, and a
+    /// file key is delivered by name as a secret (design §1.1).
+    fn channels(&self) -> Channels {
+        Channels {
+            secret: Channel::Store {
+                label: "Kubernetes Secret",
+            },
+            config: match self.config {
+                ConfigRoute::Store => Channel::Store {
+                    label: "Kubernetes Secret",
+                },
+                ConfigRoute::Env => Channel::RuntimeEnv,
+            },
+            files: FileCapability::None,
+        }
     }
 
     fn open<'a>(
