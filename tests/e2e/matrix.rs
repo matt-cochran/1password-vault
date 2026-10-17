@@ -335,6 +335,11 @@ impl Scenario {
         let s = s.replace(&real, "<SCENARIO>").replace(&root, "<SCENARIO>");
         let s = delay_re().replace_all(&s, "in <delay>");
         let s = receipt_re().replace_all(&s, "rcpt-<id>");
+        // opv's own version changes every release; a snapshot must not.
+        let s = s.replace(
+            &format!(r#""opv_version":"{}""#, env!("CARGO_PKG_VERSION")),
+            r#""opv_version":"<version>""#,
+        );
         // The host's platform (WSL or plain Linux, read from the kernel) is not the
         // scenario's: a snapshot must match on every builder.
         let s = platform_re().replace_all(&s, r#""platform":"<platform>""#);
