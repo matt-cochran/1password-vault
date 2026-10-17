@@ -87,8 +87,16 @@ impl ObjectKind {
         }
     }
 
+    /// The source's field name in a projected volume (`secret`, `configMap`, design §6.3).
+    pub(crate) fn projected_field(self) -> &'static str {
+        match self {
+            Self::Secret => "secret",
+            Self::ConfigMap => "configMap",
+        }
+    }
+
     /// The object name an env entry binds through `valueFrom.<ref>` with key `value`.
-    fn bound_ref(self, entry: &Value) -> Option<&str> {
+    pub(crate) fn bound_ref(self, entry: &Value) -> Option<&str> {
         let key = match self {
             Self::Secret => "secretKeyRef",
             Self::ConfigMap => "configMapKeyRef",

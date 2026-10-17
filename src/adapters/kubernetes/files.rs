@@ -11,22 +11,8 @@ pub const FILE_MODE: u32 = 288;
 /// The API server's default `projected.defaultMode`, added when omitted (K1, A5).
 pub const SERVER_DEFAULT_MODE: u32 = 420;
 
-/// Which kind of immutable object backs one mounted file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ObjectKind {
-    Secret,
-    ConfigMap,
-}
-
-impl ObjectKind {
-    /// The projected source's field name in the Deployment.
-    fn field(self) -> &'static str {
-        match self {
-            ObjectKind::Secret => "secret",
-            ObjectKind::ConfigMap => "configMap",
-        }
-    }
-}
+/// Which kind of immutable object backs one mounted file: the store's own kind (K3).
+pub use super::store::ObjectKind;
 
 /// Why a file binding is not the one opv wrote (design §6.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,7 +54,7 @@ pub fn volume(product: &str, _dir: &str, items: &[(&str, ObjectKind, &str)]) -> 
                 json!([{"key": "value", "path": path, "mode": FILE_MODE}]),
             );
             let mut one = Map::new();
-            one.insert(kind.field().to_string(), Value::Object(source));
+            one.insert(kind.projected_field().to_string(), Value::Object(source));
             Value::Object(one)
         })
         .collect();
@@ -302,6 +288,12 @@ fn volume_name(product: &str) -> String {
 }
 
 fn expected_dir(dir: &str, product: &str) -> String {
+    render_dir(dir, product)
+}
+
+/// `secrets_dir` with `{product}` rendered (`_` → `-`, design §6.2): where `product`'s
+/// files are mounted.
+pub fn render_dir(dir: &str, product: &str) -> String {
     dir.replace("{product}", &rendered(product))
 }
 

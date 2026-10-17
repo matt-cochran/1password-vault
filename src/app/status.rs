@@ -277,7 +277,12 @@ fn status_part<'f>(
 ) -> Result<StatusPart<'f>, Error> {
     let (_, t) = super::target(fleet, env_name, name)?;
     let (_, ports) = open_target(fleet, env_name, name, r)?;
-    preflight::read(t, r)?;
+    let at = preflight::At {
+        fleet,
+        env: env_name,
+        name,
+    };
+    preflight::read(at, t, r)?;
     let none = BTreeSet::new();
     let (mut plan, listed) =
         read_and_plan(fleet, env_name, Some(name), r, Some(&ports), &none, &none)?;
@@ -674,7 +679,12 @@ pub(crate) fn env_rows_keeping(
         crate::app::signin::open_targeted(fleet, env_name, Some(target), r, Reach::Target)?;
     let r: &dyn CommandRunner = &signed_in;
     let (_, ports) = open_target(fleet, env_name, target, r)?;
-    preflight::read(t, r)?;
+    let at = preflight::At {
+        fleet,
+        env: env_name,
+        name: target,
+    };
+    preflight::read(at, t, r)?;
     // read_and_plan by `mode`, keeping a copy of the fields before planning consumes them.
     let read = super::tidy::read_as(fleet, env_name, r, mode)?;
     if let Some(keep) = keep {

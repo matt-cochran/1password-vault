@@ -69,6 +69,13 @@ impl Error {
         Error::Catalog(Box::new((*cause).in_env(env)), upstream)
     }
 
+    /// This error with its cause's target name filled in when the adapter that raised it
+    /// did not know it (a preflight refusal names `opv plan <env> --target <name>`).
+    pub fn in_target(self, target: &str) -> Error {
+        let Error::Catalog(cause, upstream) = self;
+        Error::Catalog(Box::new((*cause).in_target(target)), upstream)
+    }
+
     /// The cause and its evidence.
     pub fn parts(&self) -> (&Cause, Option<&Upstream>) {
         let Error::Catalog(c, up) = self;

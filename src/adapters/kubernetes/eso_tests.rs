@@ -1492,3 +1492,100 @@ fn sync_json_carries_no_value() {
         "{out}"
     );
 }
+
+// ---- file keys (K5, design §6.3, §6.5, §6.6) ----
+
+/// [`fleet_a`] with `secrets_dir`, `API_KEY` delivered as the file `api/key`.
+fn fleet_files() -> Fleet {
+    let text = toml("dev", "kubernetes.secrets_dir = \"/run/secrets/{product}\"").replace(
+        "[products.app.keys.API_KEY]\nkind = \"secret\"\n",
+        "[products.app.keys.API_KEY]\nkind = \"secret\"\nfile = \"api/key\"\n",
+    );
+    config::parse(&text).unwrap()
+}
+
+/// A world whose recorded Deployment runs with `security` as its pod security context.
+fn sim_with_security(security: Value) -> Sim {
+    let sim = Sim::new(item_with(API_V1));
+    sim.world.borrow_mut().deployment["spec"]["template"]["spec"]["securityContext"] = security;
+    sim
+}
+
+/// The recorded Deployment sets no `fsGroup` and no `runAsUser`: unknown, so refused.
+#[test]
+fn sync_of_a_file_key_on_an_unreadable_workload_is_mount_unreadable() {
+    let sim = Sim::new(item_with(API_V1));
+    let (res, _) = sync_on(&sim, &fleet_files(), &deploy());
+    assert_eq!(res.unwrap_err().code_str(), "mount_unreadable");
+}
+
+#[test]
+fn sync_of_a_file_key_on_an_unreadable_workload_writes_nothing() {
+    let sim = Sim::new(item_with(API_V1));
+    let _ = sync_on(&sim, &fleet_files(), &deploy());
+    assert_eq!(sim.writes(), 0);
+}
+
+#[test]
+fn status_of_a_file_key_on_an_unreadable_workload_warns_without_refusing() {
+    let sim = Sim::new(item_with(API_V1));
+    let (res, _) = status_on(&sim, &fleet_files());
+    let notes = sim.notes.borrow();
+    assert!(
+        res.is_ok()
+            && notes.iter().any(|n| n
+                == "warn  deployment api sets no fsGroup and runs as an unknown user: whether \
+                    the mounted files (0440, root-owned) are readable is unknown"),
+        "{res:?} {notes:?}"
+    );
+}
+
+/// §6.5: the projected source names the ExternalSecret's target Secret (same name).
+#[test]
+fn a_file_key_mounts_the_secret_of_its_external_secret() {
+    let sim = sim_with_security(json!({"runAsUser": 10001, "fsGroup": 10001}));
+    let (res, out) = sync_on(&sim, &fleet_files(), &deploy());
+    let w = sim.world.borrow();
+    let source = w.deployment["spec"]["template"]["spec"]["volumes"][0]["projected"]["sources"][0]
+        ["secret"]["name"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        res.is_ok() && source.starts_with("opv-api-key-") && w.externals.contains_key(&source),
+        "{res:?} {source} {out}"
+    );
+}
+
+#[test]
+fn a_file_key_under_external_secrets_keeps_no_env_entry() {
+    let sim = sim_with_security(json!({"runAsUser": 10001, "fsGroup": 10001}));
+    let (res, _) = sync_on(&sim, &fleet_files(), &deploy());
+    assert_eq!((res.is_ok(), sim.env_entry("API_KEY")), (true, Value::Null));
+}
+
+/// FM-13: a root workload can read the files, so sync goes on and prints the warn line.
+#[test]
+fn a_root_workload_syncs_and_prints_the_root_warn_line() {
+    let sim = sim_with_security(json!({"runAsUser": 0}));
+    let (res, out) = sync_on(&sim, &fleet_files(), &deploy());
+    assert!(
+        res.is_ok()
+            && out.contains(
+                "warn  deployment api runs as root: every mounted file is readable by any \
+                 process in the container; run as a non-root user with fsGroup"
+            ),
+        "{res:?} {out}"
+    );
+}
+
+#[test]
+fn a_file_key_under_external_secrets_reads_back_current() {
+    let sim = sim_with_security(json!({"runAsUser": 10001, "fsGroup": 10001}));
+    let (first, _) = sync_on(&sim, &fleet_files(), &deploy());
+    let (second, _) = sync_on(&sim, &fleet_files(), &deploy());
+    assert_eq!(
+        (first.is_ok(), second.is_ok(), sim.writes()),
+        (true, true, 0)
+    );
+}

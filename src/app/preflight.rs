@@ -25,9 +25,33 @@
 use std::io::Write;
 
 use super::write_err;
+use crate::domain::Fleet;
 use crate::error::Error;
-use crate::provider::{PreflightMode, TargetConfig};
+use crate::provider::{Check, Preflight, PreflightMode, TargetConfig};
 use crate::runner::CommandRunner;
+
+/// Which target of which environment a preflight checks: the file keys it delivers and the
+/// target's name, which the adapter does not know (it is filled into the refusal).
+pub(crate) struct At<'a> {
+    pub fleet: &'a Fleet,
+    pub env: &'a str,
+    pub name: &'a str,
+}
+
+/// The target's own checks, then its file-mount checks (design §6.6), in `mode`.
+fn checks(
+    at: &At<'_>,
+    t: &dyn TargetConfig,
+    r: &dyn CommandRunner,
+    mode: PreflightMode,
+) -> Result<Preflight, Error> {
+    let at_target = |e: Error| e.in_target(at.name);
+    let mut pre = t.preflight(r, mode).map_err(at_target)?;
+    let files = super::file_mounts(at.fleet, at.env, at.name)?;
+    let more: Vec<Check> = t.preflight_files(r, mode, &files).map_err(at_target)?;
+    pre.checks.extend(more);
+    Ok(pre)
+}
 
 /// Step 3 for a mutating command: the target's own state, waiting for an update in
 /// progress. A failed check refuses the run; every other check returned prints one line in
@@ -35,12 +59,13 @@ use crate::runner::CommandRunner;
 /// of a deploy when the runtime has nothing to restart. With `notes`, the lines go to
 /// stderr instead (`sync --json` keeps stdout one document).
 pub(crate) fn run(
+    at: At<'_>,
     t: &dyn TargetConfig,
     r: &dyn CommandRunner,
     out: &mut dyn Write,
     notes: bool,
 ) -> Result<Option<String>, Error> {
-    let pre = t.preflight(r, PreflightMode::Mutate)?;
+    let pre = checks(&at, t, r, PreflightMode::Mutate)?;
     for c in pre.checks {
         let line = c.outcome?.line(&c.name);
         if notes {
@@ -54,8 +79,8 @@ pub(crate) fn run(
 
 /// Step 3 for a read command: never waits; each warning is one note on stderr, so
 /// `--json` output stays a single document.
-pub(crate) fn read(t: &dyn TargetConfig, r: &dyn CommandRunner) -> Result<(), Error> {
-    for c in t.preflight(r, PreflightMode::Read)?.checks {
+pub(crate) fn read(at: At<'_>, t: &dyn TargetConfig, r: &dyn CommandRunner) -> Result<(), Error> {
+    for c in checks(&at, t, r, PreflightMode::Read)?.checks {
         r.note(&c.outcome?.line(&c.name));
     }
     Ok(())

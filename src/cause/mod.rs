@@ -1391,6 +1391,19 @@ impl Cause {
         self
     }
 
+    /// This cause with its target name filled in when it was left empty (a Kubernetes
+    /// preflight refusal is raised where the target's name is unknown, design §6.6).
+    pub fn in_target(mut self, name: &str) -> Cause {
+        match &mut self {
+            Cause::MountUnreadable { target, .. }
+            | Cause::Guard {
+                guard: Guard::MountPathInUse { target, .. },
+            } if target.as_str().is_empty() => *target = TargetName::new(name),
+            _ => {}
+        }
+        self
+    }
+
     /// The stable machine-readable code (public contract, `schema_version` 2).
     pub fn code(&self) -> &'static str {
         use Cause::*;

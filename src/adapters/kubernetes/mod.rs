@@ -626,14 +626,6 @@ pub(crate) fn container_env(deployment: &Value, index: usize) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-/// The Secret an env entry binds through `valueFrom.secretKeyRef` with key `value`.
-pub(crate) fn secret_ref(entry: &Value) -> Option<&str> {
-    let r = entry.pointer("/valueFrom/secretKeyRef")?;
-    (r.get("key").and_then(Value::as_str) == Some(VALUE_KEY))
-        .then(|| r.get("name").and_then(Value::as_str))
-        .flatten()
-}
-
 #[cfg(test)]
 pub(crate) mod testutil {
     //! Recorded K1 fixtures (`tests/fixtures/kubernetes/`) and fake-runner helpers.

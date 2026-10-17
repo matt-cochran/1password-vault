@@ -437,6 +437,18 @@ pub trait TargetConfig: fmt::Debug + Send + Sync {
     /// budget, with progress); [`PreflightMode::Read`] never waits and reports it as a
     /// warning instead.
     fn preflight(&self, r: &dyn CommandRunner, mode: PreflightMode) -> Result<Preflight, Error>;
+    /// The checks of a target that mounts file keys (design §6.6), run right after
+    /// [`TargetConfig::preflight`] with the file keys this target delivers (env name →
+    /// product and path, as [`TargetConfig::open`] gets them). Returned like `preflight`'s
+    /// checks: `Err` refuses, each check is one line. Default: no file mount, no check.
+    fn preflight_files(
+        &self,
+        _r: &dyn CommandRunner,
+        _mode: PreflightMode,
+        _files: &BTreeMap<String, FileMount>,
+    ) -> Result<Vec<Check>, Error> {
+        Ok(Vec::new())
+    }
     /// `doctor` lines: tool versions and sign-in, never identities or values (FR-3).
     fn doctor(&self, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Vec<Check>;
     /// `explain` lines for a secret `product`/`key`: (label, value), e.g. ("fly name", ..).
