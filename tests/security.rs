@@ -13,9 +13,10 @@
 #![cfg(unix)]
 
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
 use serde_json::{Value, json};
@@ -70,7 +71,16 @@ case "$1" in
   item)
     e="${FAKE_OP_ITEM_EXIT:-$FAKE_OP_EXIT}"
     [ -n "$e" ] && exit "$e"
+    # `opv changed` lists one vault (FM-12); the shape follows
+    # tests/fixtures/op/success/s05-item-list.stdout: id and version only.
+    if [ "$2" = "list" ]; then printf '[{"id":"iprd","version":2}]\n'; exit 0; fi
     cat "$FAKE_FIX/item.json"; exit 0 ;;
+  read)
+    # `opv changed` reads only the delivery item's `source versions` field: opv's own
+    # `v1|<item_id>|<version>` format, ids and integers only.
+    e="${FAKE_OP_READ_EXIT:-$FAKE_OP_EXIT}"
+    [ -n "$e" ] && exit "$e"
+    printf 'v1|iprd|1\n'; exit 0 ;;
   vault)
     # NR-26 probe: its output names the vault and must never be echoed.
     [ -n "$FAKE_OP_VAULT_EXIT" ] && exit "$FAKE_OP_VAULT_EXIT"
@@ -172,6 +182,53 @@ fn good_fields(openai: &str) -> Vec<Value> {
 
 fn good_item() -> String {
     item(good_fields(OPENAI))
+}
+
+/// M5 (delivery-transports §1.6, §6.7): a Fly target that delivers config as Fly secrets, so
+/// a plan/status row carries `channel`, `via`, `delivered_as` and `form`, plus a file key
+/// row and a recorded delivery item for `opv changed`.
+const NO_VALUE_CONFIG: &str = r#"
+[environments.prod]
+boundaries.allumata = { vault_id = "vprd", item_id = "iprd" }
+
+[environments.prod.targets.portfolio]
+fly.app = "mcproductlabs-portfolio-production"
+fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+fly.config = "secrets"
+state_vault_id = "sprd"
+delivery_items = { allumata = "dprd" }
+
+[products.allumata.keys.OPENAI_API_KEY]
+kind = "secret"
+environments = ["prod"]
+
+[products.allumata.keys.SIGNUP_POLICY]
+kind = "config"
+environments = ["prod"]
+
+[products.allumata.keys.TLS_KEY]
+kind = "secret"
+environments = ["prod"]
+file = "tls/key"
+
+[products.allumata.local]
+secrets_dir_env = "APP_SECRETS_DIR"
+"#;
+
+/// One value marker per declared key of [`NO_VALUE_CONFIG`], so a single marker check finds
+/// any of them; the item id matches the recorded `op item list` reply.
+fn no_value_item() -> String {
+    let a = Some("allumata");
+    item(vec![
+        field(a, "OPENAI_API_KEY", "CONCEALED", Some(OPENAI)),
+        field(
+            a,
+            "SIGNUP_POLICY",
+            "STRING",
+            Some("S7MARKERVALUEsignup0006"),
+        ),
+        field(a, "TLS_KEY", "CONCEALED", Some("S7MARKERVALUEtls0007")),
+    ])
 }
 
 /// List A: the skipped Stripe key is on Fly (a prune candidate) plus an unmanaged secret.
@@ -402,6 +459,92 @@ impl Harness {
             .iter()
             .filter(|c| c.prog == "flyctl" && c.argv.get(1).map(String::as_str) == Some(sub))
             .count()
+    }
+}
+
+/// A minimal JSON-RPC client for the real `opv mcp serve` stdio server, started with the
+/// harness's fake `PATH`, environment and project (M5, delivery-transports §1.6).
+struct Mcp {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    stdout: BufReader<std::process::ChildStdout>,
+    next: u64,
+}
+
+impl Mcp {
+    fn start(h: &Harness, project: &Path) -> Mcp {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_opv"))
+            .env_remove("GITHUB_STEP_SUMMARY")
+            .args(["mcp", "serve", "--project"])
+            .arg(project)
+            .env_clear()
+            .env("PATH", &h.bin)
+            .env("TMPDIR", &h.tmp)
+            .env("OPV_TEST_BACKOFF_SCALE", "0")
+            .env("FAKE_REC", &h.rec)
+            .env("FAKE_FIX", &h.fix)
+            .envs(h.env.iter().map(|(k, v)| (k, v)))
+            .current_dir(&h.cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = BufReader::new(child.stdout.take().unwrap());
+        let mut mcp = Mcp {
+            child,
+            stdin,
+            stdout,
+            next: 1,
+        };
+        let initialized = mcp.call(
+            "initialize",
+            &json!({"protocolVersion": "2025-11-25", "capabilities": {},
+                    "clientInfo": {"name": "security-test", "version": "1"}}),
+        );
+        assert!(initialized.get("result").is_some(), "{initialized}");
+        mcp.notify("notifications/initialized", &json!({}));
+        mcp
+    }
+
+    fn send(&mut self, message: Value) {
+        writeln!(self.stdin, "{message}").unwrap();
+        self.stdin.flush().unwrap();
+    }
+
+    fn notify(&mut self, method: &str, params: &Value) {
+        self.send(json!({"jsonrpc": "2.0", "method": method, "params": params}));
+    }
+
+    fn call(&mut self, method: &str, params: &Value) -> Value {
+        let id = self.next;
+        self.next += 1;
+        self.send(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
+        loop {
+            let mut line = String::new();
+            self.stdout.read_line(&mut line).unwrap();
+            let reply: Value = serde_json::from_str(&line).unwrap();
+            if reply.get("id") == Some(&json!(id)) {
+                return reply;
+            }
+        }
+    }
+
+    /// The text of a `tools/call` result (the tool's one JSON document).
+    fn tool_text(&mut self, name: &str, arguments: &Value) -> String {
+        let reply = self.call("tools/call", &json!({"name": name, "arguments": arguments}));
+        reply["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+}
+
+impl Drop for Mcp {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -2603,4 +2746,85 @@ fn env_file_given_to_config_import_never_prints_a_value() {
         "config import --file .env",
         &format!("{}{}", r.stdout, r.stderr),
     );
+}
+
+// --- M5 (delivery-transports §1.6): no value on any machine-readable surface ---
+//
+// ConfigMap rows need a fake `kubectl`; the Kubernetes e2e canary scan covers them in K6.
+// The deployment-plan projection is not one of `agent_view`'s builders: `opv_deployment_plan`
+// returns the reduced `plan_receipt` built in `src/mcp.rs` (rows of names, `plan_id` and an
+// `approve_command`), so no `agent_view` projection forwards `JsonRow`s and `agent_view.rs`
+// is unchanged. `opv_delivery_preview` does share the CLI's `delivery_preview` builder.
+
+/// M5: `plan --json` for a Fly target that delivers config as secrets, with a file key row,
+/// holds no value (the new `channel`, `via`, `delivered_as`, `form` and `path` fields name
+/// routes, never values).
+#[test]
+fn plan_json_with_fly_config_and_file_rows_never_prints_a_value() {
+    let mut h = Harness::new(&no_value_item());
+    h.use_config(NO_VALUE_CONFIG);
+    let r = h.run(&["plan", "prod", "--json"]);
+    assert_no_marker("plan --json", &format!("{}{}", r.stdout, r.stderr));
+}
+
+/// M5: `status --json` over the same rows holds no value.
+#[test]
+fn status_json_with_fly_config_and_file_rows_never_prints_a_value() {
+    let mut h = Harness::new(&no_value_item());
+    h.use_config(NO_VALUE_CONFIG);
+    let r = h.run(&["status", "prod", "--json"]);
+    assert_no_marker("status --json", &format!("{}{}", r.stdout, r.stderr));
+}
+
+/// M5: the `changed --json` document names item ids and version integers only, no value.
+#[test]
+fn changed_json_never_prints_a_value() {
+    let mut h = Harness::new(&no_value_item());
+    h.use_config(NO_VALUE_CONFIG);
+    let r = h.run(&["changed", "prod", "--json"]);
+    assert_no_marker("changed --json", &format!("{}{}", r.stdout, r.stderr));
+}
+
+/// M5: the MCP `opv_deployment_plan` answer (a plan projection) holds no value.
+#[test]
+fn mcp_deployment_plan_never_prints_a_value() {
+    let mut h = Harness::new(&no_value_item());
+    h.use_config(NO_VALUE_CONFIG);
+    let project = h.fix.clone();
+    let mut mcp = Mcp::start(&h, &project);
+    let text = mcp.tool_text("opv_deployment_plan", &json!({"environment": "prod"}));
+    assert_no_marker("opv_deployment_plan", &text);
+}
+
+/// M5: the MCP `opv_delivery_preview` answer (the shared CLI document) holds no value.
+#[test]
+fn mcp_delivery_preview_never_prints_a_value() {
+    let mut h = Harness::new(&no_value_item());
+    h.use_config(NO_VALUE_CONFIG);
+    let project = h.fix.clone();
+    let mut mcp = Mcp::start(&h, &project);
+    let text = mcp.tool_text(
+        "opv_delivery_preview",
+        &json!({"environment": "prod", "product": "allumata"}),
+    );
+    assert_no_marker("opv_delivery_preview", &text);
+}
+
+/// M5 (FM-04): MCP and CLI plan the same thing. `opv_deployment_plan` is a projection of
+/// the CLI's `plan --json` document (`plan_receipt` in `src/mcp.rs`: names, actions and the
+/// plan id, never the whole row), so the documents cannot be equal byte for byte; equal plan
+/// ids prove the same plan, since the id hashes every row's channel and form (M4).
+#[test]
+fn mcp_deployment_plan_has_the_cli_plan_id() {
+    let mut h = Harness::new(&no_value_item());
+    h.use_config(NO_VALUE_CONFIG);
+    // The fake `flyctl secrets list` answers list A first and list B after; start past A so
+    // both plans read the same target state.
+    fs::write(h.rec.join(".lists"), "1\n").unwrap();
+    let cli: Value = serde_json::from_str(&h.run(&["plan", "prod", "--json"]).stdout).unwrap();
+    let project = h.fix.clone();
+    let mut mcp = Mcp::start(&h, &project);
+    let text = mcp.tool_text("opv_deployment_plan", &json!({"environment": "prod"}));
+    let tool: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(tool["plan_id"], cli["plan_id"], "{text}");
 }
