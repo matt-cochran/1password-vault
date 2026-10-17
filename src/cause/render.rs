@@ -2077,6 +2077,11 @@ impl Cause {
                 "opv cannot confirm that product {product} is delivered to target {target} in environment {env}: {}",
                 unverified_words(state)
             ),
+            TargetDrift { env, target, names } => format!(
+                "target {target} in environment {env} has {} that no longer match 1Password: {}",
+                plural(names.len(), "binding", "bindings"),
+                list(names)
+            ),
             LocalIo { op, path, io } => {
                 if path.as_os_str().is_empty() {
                     format!("opv could not {}: {}", local_op(*op), io_words(*io))
@@ -3881,6 +3886,10 @@ impl Cause {
                 ),
                 Unverified::Unverifiable => plan(None, Next::None(NoNext::NothingToRun)),
             },
+            TargetDrift { env, target, .. } => plan(
+                inspect("re-run the sync to restore 1Password's values"),
+                Next::Check(cmd(&["plan"], &[env.as_str(), "--target", target.as_str()])),
+            ),
             LocalIo {
                 path,
                 io: IoKind::NotAPlainFile,

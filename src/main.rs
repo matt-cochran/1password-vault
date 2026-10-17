@@ -675,6 +675,10 @@ enum Cmd {
         /// target, in name order.
         #[arg(long = "target", value_name = "NAME", requires = "env")]
         target: Vec<String>,
+        /// Exit 8 with `target_drift` when a pinned binding on the target no longer matches
+        /// 1Password. Without it, drift stays a printed line and the exit code is unchanged.
+        #[arg(long, requires = "env")]
+        fail_on_drift: bool,
     },
     /// List the projects whose configuration lives in 1Password (names only).
     ///
@@ -3575,10 +3579,20 @@ fn run_other(
             product,
             json,
             target,
+            fail_on_drift,
             ..
-        } => status::run_targeted(&loaded?, &env, &target, product.as_deref(), r, out, json)
-            // An adapter's cause names the environment the command ran for (L10 follow-up).
-            .map_err(|e| e.in_env(&env)),
+        } => status::run_targeted(
+            &loaded?,
+            &env,
+            &target,
+            product.as_deref(),
+            r,
+            out,
+            json,
+            fail_on_drift,
+        )
+        // An adapter's cause names the environment the command ran for (L10 follow-up).
+        .map_err(|e| e.in_env(&env)),
         Cmd::Plan(a) => sync::plan_rotating(
             &loaded?,
             &a.env,

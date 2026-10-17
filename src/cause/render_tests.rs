@@ -688,6 +688,14 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             vec!["env-prod", "tgt-web", "prod-api", "ACC-OTHER"],
         ),
         (
+            TargetDrift {
+                env: EnvName::new("env-prod"),
+                target: TargetName::new("tgt-web"),
+                names: vec!["prod-api/KEY_X (KEY_X)".to_string()],
+            },
+            vec!["env-prod", "tgt-web", "prod-api/KEY_X (KEY_X)"],
+        ),
+        (
             KeyNotDeclared {
                 key: KeyName::new("KEY_X"),
                 env: EnvName::new("env-prod"),
@@ -899,10 +907,11 @@ fn ordinal(c: &Cause) -> usize {
         SourceOnly { .. } => 71,
         TitleLookup { .. } => 72,
         PersonalNotSetUp { .. } => 73,
+        TargetDrift { .. } => 74,
     }
 }
 
-const VARIANTS: usize = 74;
+const VARIANTS: usize = 75;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
@@ -1647,6 +1656,14 @@ fn a_used_approval_reads_the_plan_of_the_same_scope() {
 #[test]
 fn a_changed_plan_reads_the_plan_of_the_same_scope() {
     assert_eq!(next_of(&fixture(51)).as_deref(), Some(SCOPED_PLAN));
+}
+
+#[test]
+fn a_target_drift_plans_the_environment_and_target() {
+    assert_eq!(
+        next_of(&fixture(74)).as_deref(),
+        Some("opv plan env-prod --target tgt-web")
+    );
 }
 
 #[test]

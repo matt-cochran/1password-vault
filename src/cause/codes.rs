@@ -233,6 +233,9 @@ pub fn meaning(code: &str) -> &'static str {
         "delivery_unverified" => {
             "a placement no longer holds what opv delivered, or could not be checked"
         }
+        "target_drift" => {
+            "a pinned target no longer holds the version 1Password records (drift); opv sync restores it"
+        }
         "local_io_failed" => {
             "opv's own local input or output failed (a file, the current folder, standard output, ...)"
         }
@@ -778,6 +781,11 @@ fn one_of_each() -> Vec<Cause> {
             state: Unverified::OtherAccount {
                 account: AccountId::new("ACC-OTHER"),
             },
+        },
+        TargetDrift {
+            env: EnvName::new("env-prod"),
+            target: TargetName::new("tgt-web"),
+            names: vec!["prod-api/KEY_X (KEY_X)".to_string()],
         },
         KeyNotDeclared {
             key: KeyName::new("KEY_X"),

@@ -20,7 +20,7 @@ use super::{
     print_extras, print_legend, print_rows, product_names, read_and_plan, resolve_targets,
     rows_item_url, scope_plan, target_runners, target_word, write_err, write_json,
 };
-use crate::cause::{Cause, Cmd, EnvName};
+use crate::cause::{Cause, Cmd, EnvName, TargetName};
 use crate::domain::provenance::latest;
 use crate::domain::{Binding, Fleet, KeyState, Row, StoreEntry, SyncPlan};
 use crate::error::Error;
@@ -60,13 +60,14 @@ pub fn run_scoped(
     out: &mut dyn Write,
     json: bool,
 ) -> Result<(), Error> {
-    run_targeted(fleet, env_name, &[], product, r, out, json)
+    run_targeted(fleet, env_name, &[], product, r, out, json, false)
 }
 
 /// [`run_scoped`] on every target of the environment, or the targets `--target` names
 /// (FR-56, [`resolve_targets`]), in name order. Text starts with one count line per
 /// target, then one table whose rows name their target; `--json` is one document whose
 /// rows each carry `target`. Findings add up over the targets.
+#[allow(clippy::too_many_arguments)]
 pub fn run_targeted(
     fleet: &Fleet,
     env_name: &str,
@@ -75,6 +76,7 @@ pub fn run_targeted(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
     json: bool,
+    fail_on_drift: bool,
 ) -> Result<(), Error> {
     check_product(fleet, product, Some(env_name))?;
     // Needs a target: `NothingInScope` naming the environment otherwise, before any call.
@@ -146,6 +148,9 @@ pub fn run_targeted(
                 link: link.as_deref(),
             },
         )?;
+        if let Some(e) = drift_error(&parts, env_name, fail_on_drift) {
+            return Err(e);
+        }
         return if n > 0 { Err(findings()) } else { Ok(()) };
     }
     for count in &counts {
@@ -189,10 +194,34 @@ pub fn run_targeted(
             writeln!(out, "{}: {}", p.t.provider().label(), s.line()).map_err(write_err)?;
         }
     }
+    if let Some(e) = drift_error(&parts, env_name, fail_on_drift) {
+        return Err(e);
+    }
     if n > 0 {
         return Err(findings());
     }
     Ok(())
+}
+
+/// The drift finding of `status --fail-on-drift` (C3): the first target whose pinned
+/// bindings drifted from 1Password, as the catalog's `TargetDrift` (exit 8,
+/// `target_drift`). `None` without the flag, or when nothing drifted.
+fn drift_error(parts: &[StatusPart<'_>], env_name: &str, fail_on_drift: bool) -> Option<Error> {
+    if !fail_on_drift {
+        return None;
+    }
+    let (target, names) = parts.iter().find_map(|p| {
+        let drift = &p.pinned.as_ref()?.drift;
+        (!drift.is_empty()).then_some((p.name.as_str(), drift))
+    })?;
+    Some(
+        Cause::TargetDrift {
+            env: EnvName::new(env_name),
+            target: TargetName::new(target),
+            names: names.clone(),
+        }
+        .into(),
+    )
 }
 
 /// What `status` read for one target (FR-56).
