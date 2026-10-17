@@ -42,7 +42,7 @@ pub mod config;
 pub mod diagnose;
 pub mod login;
 
-pub use config::{FLYCTL_TESTED, FlyTarget, PROVIDER};
+pub use config::{FLYCTL_TESTED, FlyConfig, FlyTarget, PROVIDER};
 
 use std::collections::BTreeSet;
 use std::io;

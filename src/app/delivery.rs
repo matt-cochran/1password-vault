@@ -60,6 +60,14 @@ pub fn bindings(
     product: &str,
 ) -> Result<Vec<BindingRef>, Error> {
     let (_, t) = super::target(fleet, env_name, target)?;
+    // A config key whose target stores it (`fly.config = "secrets"`) is bound exactly
+    // like a secret: the config channel names the same store as the secret channel. A
+    // pinned target (Kubernetes, Azure) names one store for both too, but binds its
+    // store-routed config through the runtime, not as a secret binding.
+    let channels = t.channels();
+    let config_in_secret_store = channels.config.label().is_some()
+        && channels.config.label() == channels.secret.label()
+        && t.runtime_subject().is_none();
     if !fleet.delivers(env_name, target, product) {
         return Ok(Vec::new());
     }
@@ -71,7 +79,10 @@ pub fn bindings(
     let mut out: Vec<BindingRef> = prod
         .keys
         .iter()
-        .filter(|(_, s)| s.kind == Kind::Secret && !s.personal)
+        .filter(|(_, s)| {
+            (s.kind == Kind::Secret || (s.kind == Kind::Config && config_in_secret_store))
+                && !s.personal
+        })
         .filter(|(_, s)| rules::applies(s, env_name, env, product))
         // Target roles (M3, delivery-transports §4.4): a key whose roles miss the target's
         // is not desired there, so it is not part of the target's binding set.

@@ -8,8 +8,7 @@ use serde::Deserialize;
 
 use super::{CREDENTIAL_VARS, FLYCTL, Fly, PROGRAM, auth_whoami};
 use crate::adapters::probe::{parse_version, spawn_tool, version_in};
-use crate::cause::FieldRule;
-use crate::cause::{Cause, DiagnoseContext, Unusable};
+use crate::cause::{Cause, ConfigCheck, DiagnoseContext, FieldRule, Unusable};
 use crate::config::{ID_SHAPE, TEMPLATE_WORDS, check_ident, is_id, section_invalid};
 use crate::domain::SecretValue;
 use crate::error::Error;
@@ -36,6 +35,36 @@ pub static PROVIDER: FlyProvider = FlyProvider;
 #[derive(Debug)]
 pub struct FlyProvider;
 
+/// Where a Fly target's config (text) keys go (§7.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlyConfig {
+    /// `fly.config` unset: opv does not deliver config, and says so.
+    Unset,
+    /// `fly.config = "secrets"`: config keys are stored and bound exactly like secrets.
+    Secrets,
+    /// `fly.config = "none"`: the target intentionally carries no config.
+    None,
+}
+
+impl FlyConfig {
+    fn parse(raw: Option<&str>) -> Result<Self, Error> {
+        match raw {
+            None => Ok(Self::Unset),
+            Some("secrets") => Ok(Self::Secrets),
+            Some("none") => Ok(Self::None),
+            Some(_) => Err(section_invalid(
+                "fly.config",
+                FieldRule::Check {
+                    check: ConfigCheck::NotOneOf {
+                        allowed: vec!["secrets".to_string(), "none".to_string()],
+                        closest: None,
+                    },
+                },
+            )),
+        }
+    }
+}
+
 /// The Fly.io target of one environment (§10.3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlyTarget {
@@ -43,6 +72,8 @@ pub struct FlyTarget {
     /// Fly secret name template containing `{KEY}` and optionally `{PRODUCT}`; defines the
     /// managed set (FR-8). Two keys rendering one name are refused at load (FR-30).
     pub secret_name_template: String,
+    /// Where config (text) keys go (`fly.config`).
+    pub config: FlyConfig,
 }
 
 impl FlyTarget {
@@ -61,6 +92,7 @@ impl FlyTarget {
 struct RawFly {
     app: String,
     secret_name: String,
+    config: Option<String>,
 }
 
 impl Provider for FlyProvider {
@@ -86,6 +118,7 @@ impl Provider for FlyProvider {
         let env = section.env();
         let f: RawFly = section.deserialize()?;
         check_app(env, &f.app)?;
+        let config = FlyConfig::parse(f.config.as_deref())?;
         if !f.secret_name.contains("{KEY}") {
             return Err(section_invalid(
                 "fly.secret_name",
@@ -97,6 +130,7 @@ impl Provider for FlyProvider {
         Ok(Box::new(FlyTarget {
             app: f.app,
             secret_name_template: f.secret_name,
+            config,
         }))
     }
 
@@ -228,16 +262,27 @@ impl TargetConfig for FlyTarget {
         )
     }
 
-    /// Today: Fly secrets only; Fly delivers no config, and its shim turns the delivered
-    /// secret back into a file (design §1.1).
+    /// Fly secrets go to `flyctl secrets import --stage`. Config follows `fly.config`:
+    /// `secrets` routes it through that same store and bind path, `none` declines it, and
+    /// unset declines with an instruction. Its shim turns the delivered secret back into a
+    /// file (design §1.1).
     fn channels(&self) -> Channels {
+        let config = match self.config {
+            FlyConfig::Secrets => Channel::Store {
+                label: "Fly secret",
+            },
+            FlyConfig::None => Channel::Declined {
+                why: "fly.config = none",
+            },
+            FlyConfig::Unset => Channel::Declined {
+                why: "set fly.config",
+            },
+        };
         Channels {
             secret: Channel::Store {
                 label: "Fly secret",
             },
-            config: Channel::Declined {
-                why: "set fly.config",
-            },
+            config,
             files: FileCapability::ViaApp {
                 note: "env at boot, written to files by the app's shim",
             },
@@ -365,6 +410,7 @@ mod tests {
         FlyTarget {
             app: "a".into(),
             secret_name_template: template.into(),
+            config: FlyConfig::Unset,
         }
     }
 
@@ -399,6 +445,25 @@ mod tests {
                 .as_deref(),
             Some("fly.app = \"my-app\"\nfly.secret_name = \"FLEET__{PRODUCT}__{KEY}\"\n")
         );
+    }
+
+    #[test]
+    fn unknown_fly_config_value_names_the_field() {
+        let e = crate::config::parse(
+            "[environments.prod]\n\
+             boundaries.p = { vault_id = \"v\", item_id = \"i\" }\n\
+             [environments.prod.targets.t]\n\
+             fly.app = \"a\"\n\
+             fly.secret_name = \"{KEY}\"\n\
+             fly.config = \"env\"\n\
+             state_vault_id = \"s\"\n\
+             [products.p.keys.K]\n\
+             kind = \"secret\"\n\
+             environments = [\"prod\"]\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("fly.config must be one of secrets, none"), "{e}");
     }
 
     /// Under deploy credentials a failed `auth whoami` is expected, not a sign-out.
