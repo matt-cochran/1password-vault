@@ -248,20 +248,30 @@ fn vaults_unlisted_after_sign_in_never_name_setup() {
     );
 }
 
-// #159: `op whoami --account <id>` answers, then `op vault list` says no one is signed in:
-// the account's own sign-in, from op's reply (no longer a Legacy source_error).
+// #167: a live session (`op whoami` names the account) whose `op vault list` says no one
+// is signed in is the sign-in op asks for, not an error: the recorded reply now starts the
+// interactive sign-in instead of answering op_not_signed_in.
 #[test]
-fn a_signed_out_vault_list_under_a_live_session_is_op_not_signed_in() {
+fn a_signed_out_vault_list_under_a_live_session_starts_the_sign_in() {
     let r = crate::runner::fake::FakeRunner::new([ok("2.40.0"), ok(WHOAMI_A)]);
     r.push_with_stderr(Output::failure(1), SIGNED_OUT);
+    // The interactive sign-in: `op account list`, the post-sign-in `op whoami`, the final
+    // `op vault list`.
+    r.responses
+        .borrow_mut()
+        .push_back(Ok(ok(r#"[{"url":"x"}]"#)));
+    r.responses.borrow_mut().push_back(Ok(ok(WHOAMI_A)));
+    r.responses.borrow_mut().push_back(Ok(ok("[]")));
     let mut backend = Observed { r };
-    let e = prepare(
-        Some("ACCOUNT0000000000000000001"),
-        &mut backend,
-        &mut Ui::new(vec![], &[]),
-    )
-    .unwrap_err();
-    assert_eq!(e.code_str(), "op_not_signed_in");
+    let mut ui = Ui::new(vec![], &[]);
+    let _ = prepare(Some("ACCOUNT0000000000000000001"), &mut backend, &mut ui);
+    assert!(
+        ui.messages
+            .iter()
+            .any(|m| m.contains("Sign in to 1Password")),
+        "{:?}",
+        ui.messages
+    );
 }
 
 // 05.26: a failing item step is diagnosed from op's reply, naming no generic "this step".
