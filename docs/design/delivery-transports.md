@@ -4,8 +4,8 @@ Status: **design for 0.11.0 and 0.12.0** (#136). This document replaces the cont
 
 | Release | Scope | Status |
 |---|---|---|
-| 0.11.0 | the channel model (§1); change detection, the drift check and the CI recipes (§2); the README section (§3); target `roles` and verbatim file bytes (§4); the local Docker Compose recipe (§5); Kubernetes ConfigMaps and mounted files (§6); config on Fly (§7); a Docker Swarm target (§8); the webhook secret mapping; a tagged-release verification (§12) | designed for implementation |
-| 0.12.0 | a GCP Secret Manager store, a `vm` target and the portable VM startup step, tested in GCP (§9) | designed for implementation |
+| 0.11.0 | the channel model (§1); change detection, the drift check and the CI recipes (§2); the README section (§3); target `roles` and verbatim file bytes (§4); the local Docker Compose recipe (§5); Kubernetes ConfigMaps and mounted files (§6); config on Fly (§7); the webhook secret mapping; the remote-profile refusal for deployed environments (R1, §15); a tagged-release verification (§12) | designed for implementation |
+| 0.12.0 | a Docker Swarm target (§8; moved from 0.11.0 by the owner, §15); a GCP Secret Manager store, a `vm` target and the portable VM startup step, tested in GCP (§9) | designed for implementation |
 | later | an AWS Secrets Manager store; Fly file delivery; the 1Password Events API trigger | design only |
 
 **Conventions**
@@ -71,7 +71,7 @@ Every target declares, per key kind, **where that kind goes**, and whether it ca
 | Local `opv run` | process env, or files in a RAM dir | process env | native (tmpfs dir) | today |
 | Fly | Fly secrets (staged, then deployed) | **Fly secrets too** (new): the only runtime channel opv can write through Fly's API, because `fly.toml [env]` needs a deploy of the app's config | **via the app**: env at boot, written to files by Journeeze's shim (`ced358d:crates/jz_host/src/fleet_secrets.rs:90`); native `[[files]]` only once §7.3 is answered | config new in 0.11.0 |
 | Kubernetes | immutable versioned Secret | **immutable versioned ConfigMap** (new `kubernetes.config = "configmap"`); today: plain env `value` or the store | native: one projected volume (Secret and ConfigMap sources) | ConfigMap and files new in 0.11.0 |
-| Docker Swarm | versioned Swarm secret (files at `/run/secrets/…`) | versioned Swarm config (files), or service env for config without `file` | native | new in 0.11.0 |
+| Docker Swarm | versioned Swarm secret (files at `/run/secrets/…`) | versioned Swarm config (files), or service env for config without `file` | native | new in 0.12.0 |
 | GitHub Actions | repository/environment secrets | variables (`docs/configuration.md:427`) | none: a file key is delivered by name as a secret | today |
 | Azure Container Apps | Key Vault versions bound by reference | app env, or the store (`azure.config`, `src/adapters/azure/config.rs:170-174`; `docs/configuration.md:338`) | none today; a Key Vault secret volume is design only **[A28]** | today |
 | VMs (GCP) | Secret Manager, latest version | Secret Manager too, labelled `opv-kind=config`, read by the same startup step | native: the startup step writes tmpfs files | new in 0.12.0 |
@@ -103,6 +103,11 @@ fn channels(&self) -> Channels;   // no default body
   - `plan` and `status` print one `warn` line;
   - `sync` **refuses** it (`Guard::NoChannel`, §1.5), unless the target spells out `config = "none"`. Then each run still prints a warn line, but the sync goes on.
 - `FileCapability::None` means a file key is delivered on the secret channel by its name, with a one-time warn line: `file destination not honoured on <target>`.
+- **Config is not secret (camp 1).** Several config channels are readable by more than the app: a plain env entry or a ConfigMap (§6.2), Swarm service env, which passes through the docker CLI's argv (§8.2), the VM's `.env` (§9.2), a GitHub variable. So:
+  - `plan` and `status` show **each config key's channel** on its row, and in `--json` as `via` (§6.7), taken from the target's `Channels` label: `env`, `ConfigMap`, `Fly secret`, `Swarm config`, `Swarm env`, `Secret Manager`, `GitHub variable`. A person reviewing a plan sees where every setting lands.
+  - **Anything sensitive must be declared `kind = "secret"`** (`docs/configuration.md:138`). opv cannot tell a sensitive text value from a harmless one, and doesn't guess.
+  - A config key whose 1Password field is **concealed** keeps today's handling. Where the config channel is a readable variable store (GitHub variables), the target refuses it with `concealed-config` (`src/app/variables.rs:79-84`; `docs/configuration.md:427`). Everywhere else it is delivered with today's warning, `warning: <product/KEY> is concealed in 1Password but declared config; it is delivered as a plain environment value` (`src/app/status.rs:278-293`). The new Swarm env channel refuses it like GitHub (§8.2). The new ConfigMap, Fly and VM channels warn.
+  - Rejected (FMECA FM-02): making env routing of config an explicit opt-in per target. It contradicts camp 1, which the owner chose: config is declared non-secret, and the declaration is the control.
 - A contract test in `src/provider.rs` checks that every registered provider declares channels, and that a target configured with `config = "none"` maps to `Channel::None`.
 
 ### 1.4 Rejected alternatives
@@ -122,6 +127,20 @@ fn channels(&self) -> Channels;   // no default body
 |---|---|---|---|---|---|---|
 | a key's kind has no channel on the target | `Guard` **new** `NoChannel{target, kind, why}` | policy_refused | 6 | never | "set config = \"none\" on target <t> to deliver no config there, or pick a target with a config channel" | `opv plan <env> --target <t>` |
 | `config = "none"` on a target that has a channel | none: allowed, with a warn line per run | — | — | — | — | — |
+
+### 1.6 Machine-readable surfaces (no value on any of them)
+
+One invariant covers every document opv emits for a machine or an agent: **no secret or config value appears in it.** Today it is written for the CLI (`docs/usage.md:680`), and the MCP server already shares the CLI's builders. This release adds fields and documents, so it names them all:
+
+| Surface | Built by | New in this design |
+|---|---|---|
+| CLI `--json` (`plan`, `status`, `sync`, `delivery verify`, …) | `JsonRow` (`src/app/mod.rs:735-760`) and each command's document | `channel`, `via`, `delivered_as`, `form`, `path` (§6.7); the `changed` document (§2.2) |
+| MCP tools (`opv mcp serve`, `src/mcp.rs`; for example `opv_deployment_plan`, `opv_delivery_preview`) | the same projections as the CLI, byte for byte (`src/app/agent_view.rs:1-6`); failures are the `--json` error object (`src/mcp.rs:11-16`) | the plan projection carries the new fields, each passed through `identifier` (`src/app/agent_view.rs:12-18`) |
+| delivery receipts (`delivery_receipts/1`) and the delivery item's `source versions` field | `src/app/delivery.rs` (`record`) | `v1|<item_id>|<version>` lines: ids and integers (§2.2) |
+| error documents (`--json` and MCP) | `src/cause/render.rs` | the §1.5, §2.6, §6.8, §8.8 and §9.6 rows |
+| the VM map rendered from `plan --json` (§9.2) | CI | kind, id and destination only |
+
+**Test (deliverable M5).** The existing marker scan (`tests/security.rs:1-27`: every fake value contains `S7MARKER`, so one substring check finds any of them) is extended to `changed --json`, to `plan`/`status --json` with file, ConfigMap and Fly-config rows, and to the MCP tools `opv_deployment_plan` and `opv_delivery_preview` through `tests/mcp_protocol.py`. No new serializer is added for MCP; a new field reaches MCP only through `agent_view`.
 
 ## 2. When sync runs: change detection, drift and CI
 
@@ -177,7 +196,8 @@ opv changed <env> [--target <t>] [--product <p>] [--json]
   ```
   It holds ids and integers only.
 - **Over-triggering is safe.** Any edit bumps the version, even of a field this environment doesn't use (`docs/usage.md:230`). A person's run may also tidy the layout (`docs/usage.md:60`). The resulting sync writes nothing when nothing differs (`docs/usage.md:259`).
-- **No self-trigger loop.** CI's service account never writes to 1Password (`docs/usage.md:60`), and the delivery item lives in the state vault, which is not a source.
+- **No self-trigger loop.** CI's service account never writes to a **source** item: it never tidies (`docs/usage.md:60`). It does write the delivery item, in the target's state vault: the evidence lines already today (`record`, `src/app/delivery.rs:358`), and `source versions` from C2. That write bumps only the delivery item's own version. `opv changed` compares only the source items above, by id, never the delivery item or the `deploy_credentials` item that may share the state vault, so the write cannot make it report `changed`. C2 tests exactly that: a sync, then `changed` is `unchanged`.
+- **Downstream CI must branch on exit 10.** A wrapper that treats every non-zero exit as failure fails on each legitimate change; one that ignores non-zero exits hides `unreadable`. The shipped example branches (§2.5), `opv ci workflow --on-change` emits that branch (C5), and the README section and `docs/usage.md` show it (C6).
 - **A configuration file in git** (`secrets.toml`) triggers the sync through the workflow's `push` path instead (§2.5).
 
 **Rejected:** comparing value fingerprints (what `delivery verify` does, `src/app/delivery.rs:9-16`). That reads every value; the version check needs none.
@@ -302,7 +322,10 @@ jobs:
 ```
 
 - **`opv ci workflow`** (`src/app/ci_workflow.rs:24-40`) gains `--on-change`, which prints these two workflows for a configuration, filling the environment matrix and the confirm split from `confirm_env` (deliverable C5).
-- **Schedule load** is 96 checks a day per environment, each one `op item list` per vault plus one `op read`. Service-account rate limits are **[A29]**.
+- **Schedule load** is 96 checks a day per environment, each one `op item list` per vault plus one `op read`. Service-account rate limits are **[A29]**. Therefore:
+  - **The schedule is configurable:** `opv ci workflow --on-change --every <minutes>` (default 15) sets the cron (C5).
+  - **One listing per vault per run.** `changed` already lists each vault once and takes every item id it needs from that one reply (§2.2); it never lists per item.
+  - **A rate-limit reply is typed.** C1 classifies `op`'s rate-limit reply as `Unavailable{OnePassword, RateLimited{retry_after_seconds}}` (the existing `Unanswered::RateLimited`, `src/cause/mod.rs:378-380`; no adapter produces it today), exit 9, never `unchanged` **[A32]**. opv doesn't sleep inside a run. The detect step retries `changed` once after `retry_after_seconds` (capped at 120 s; 30 s when the reply names none) and otherwise fails; the next scheduled run is the back-off. C5's output carries that retry; the §2.5 listing shows the shape without it.
 
 ### 2.6 Causes and codes for §2
 
@@ -379,6 +402,7 @@ A key keeps its rendered target name as its identity: its managed name (`src/app
 1. `normalized` returns `None` for a key with `file`.
 2. For a key with `file`, when there is no target or the target's `files` capability is `Native`, `single_line`, `no_surrounding_space` and the transform don't apply. `nonempty`, `max_len` and the prefix rules still do, and the staged value is the stored value. Targets that stage it as a variable keep every rule.
 3. `docs/configuration.md` `:661-726` states the exception.
+4. **One key, two forms, shown.** A file key delivered to a target whose `files` capability is not `Native` keeps every variable rule. Without a declared `transform`, a multi-line value or a trailing newline fails `single_line` or `no_surrounding_space` there (`src/domain/rules.rs:297-302`): a loud finding, not a silent change. With `transform = "pem_private_key"` declared, that target gets the one-line form while a `Native` target gets the stored bytes. `plan` shows the form on each row (text `file (verbatim)`, `env (pem_private_key)`, `env`; JSON `delivered_as` and `form`, §6.7), so the difference is visible at review. A `FileCapability::None` target adds the `file destination not honoured on <target>` warn line (§1.3); a `ViaApp` target (Fly) prints `file via the app (<note>)`.
 
 ### 4.6 Journeeze's mapping
 
@@ -396,7 +420,9 @@ A key keeps its rendered target name as its identity: its managed name (`src/app
 | `DATABASE_URL_UNPOOLED` | `database/owner-url` | migrate | `ced358d:crates/jz_host/src/lib.rs:203` |
 | `JOURNEEZE_APP_PASSWORD` | `database/app-password` | migrate | `ced358d:crates/jz_host/src/lib.rs:204` |
 
-- **Webhook secret.** The shim's `SERVE` list (`ced358d:crates/jz_host/src/fleet_secrets.rs:40`) lacks it, so on the shared Fly host it **is not delivered** today. This document states that rather than implying otherwise. opv's fixture consumer already expects it (`tests/mounted_consumer.rs:16-24`).
+- **Webhook secret.** The shim's `SERVE` list (`ced358d:crates/jz_host/src/fleet_secrets.rs:40-76`) lacks it, so on the shared Fly host it **is not delivered** today. This document states that rather than implying otherwise. opv's fixture consumer already expects it (`tests/mounted_consumer.rs:16-24`).
+  - Adding it to opv's mapping (A3) is not enough on Fly: the shim must also list it. That one-line change is in Journeeze, made by its maintainers, and A3 names it as an external dependency. Until it lands, the webhook secret reaches Fly only as an env variable the shim ignores, and A3 says so rather than claiming delivery.
+  - What proves what: `opv run … --preview --json` proves the mapping; V8 and V10 on kind prove file delivery of `github/webhook-secret` (no shim there); only a Journeeze-side test of `SERVE` plus the §7.4 staging step 3 prove it on Fly. V10/V14 can't, since the verification cluster runs no shim.
 - **Reading.** `MountedSecretStore` reads with `tokio::fs::read`, so it follows symlinks, and maps every error to `NotFound` (`ced358d:crates/jz_secrets/src/lib.rs:40-45`). An unreadable file looks missing, which is why readability is checked before delivery (§5, §6.6, §8.4, §9.3).
 - **The mapping lives in Journeeze's opv manifest** **[A1]**.
 
@@ -447,7 +473,7 @@ Instead:
 - `docs/local-development.md` gets a Docker Compose section;
 - `opv run --preview` prints `containers: run as <uid>:<gid> (OPV_UID:OPV_GID) to read these files`.
 
-**Limits:** the same user, the Docker daemon, the `docker` group and container root can read the directory (`docs/design/local-delivery.md:41-56`).
+**Limits:** the same user, the Docker daemon, the `docker` group and container root can read the directory (`docs/design/local-delivery.md:41-56`). This is the **accepted residual** of local delivery (owner decision, §0; R4): the recipe stays fail-closed and `read_only`, and the limit stays documented. Narrowing it further (a dedicated delivery user, per-role subdirectories) is recorded as an open idea in §15, not designed.
 
 ## 6. Kubernetes: ConfigMaps and mounted files (0.11.0)
 
@@ -473,7 +499,7 @@ roles = ["serve"]
 ```
 
 - **`config = "configmap"`** (new, in `ConfigRoute`, `src/adapters/kubernetes/config.rs:85-93`). Each config value version becomes an immutable ConfigMap `opv-<store>-<id>`: `data.value`, the same labels and annotations as Secrets (`src/adapters/kubernetes/mod.rs:77-93`), `immutable: true`.
-  - A config key without `file` is bound as env `valueFrom.configMapKeyRef {name, key: value}`.
+  - A config key without `file` is bound as env `valueFrom.configMapKeyRef {name, key: value}`. Like a plain env `value`, it is readable by anyone who can read the ConfigMap or the pod spec; that is why config is declared non-secret and each row shows its channel (§1.3).
   - A config key with `file` becomes a `configMap` source in the projected volume (§6.3).
   - ConfigMaps can be read back, so `plan` compares values exactly, as for Secrets (`src/adapters/kubernetes/store.rs`, the compare-before-write read).
   - `opv init` writes `configmap` for new targets. Existing targets keep `env` until changed; O1 decides whether the default flips.
@@ -502,6 +528,10 @@ roles = ["serve"]
 - **Projected volume.** opv keeps one immutable object per value version, and a projected volume merges many objects, Secrets and ConfigMaps alike, into one directory **[A2]**. Rejected: one combined Secret per product, which breaks versioning and pruning; and `subPath` mounts.
 - **`items[].path`** is the key's `file` **[A2]**; the key is `value` (`src/adapters/kubernetes/mod.rs:77`), the same under ExternalSecrets (`src/adapters/kubernetes/external.rs:163-165`).
 - **Mode 0440 (288).** Files are root-owned, with the group of `fsGroup` **[A3]**. 0400 would block a non-root app; 0444 is rejected.
+- **Who can read them (FMECA FM-08).** `fsGroup` is pod-wide, and Secret and ConfigMap projections have no per-file owner, so "0400 owned by the app's uid" is not available on Kubernetes. The reader set is narrowed by isolation instead:
+  - the volume is per product (`opv-files-<product>`), and its `volumeMount` goes **only into the target's container** (`kubernetes.container`, `docs/configuration.md:396`). Another container in the pod, a sidecar for example, has no such path, even though it shares `fsGroup`;
+  - opv never sets `fsGroup` (O2, O6); the person's manifest owns it. The docs recommend a group used by this product's container alone;
+  - what remains readable, by design: processes inside the target container that run as root or in `fsGroup`, and node root (R1 in §14). V9 records `stat` and `id` in the app container and checks that a second container has no mount.
 - **`readOnly: true`**, and `optional: false` on every source **[A7]**.
 - **The volume is `opv-files-<product>`.** The `opv-files-` prefix is reserved (`docs/usage.md:261`).
 - **A file key never keeps an env entry**: the same replace removes it. When a product's last file key goes, its volume and mount go too.
@@ -513,11 +543,13 @@ roles = ["serve"]
 - **Write, then deploy**, as today (`docs/usage.md:246-249`).
 - **Refresh is a rollout.** Kubernetes refreshes a projected object in running pods only when its content changes. opv's objects are immutable, and each version has a new name (`src/adapters/kubernetes/store.rs:203`). The kubelet doesn't watch immutable objects **[A4]**. A new version therefore changes the template, starts a rolling update and goes through the health wait (`src/adapters/kubernetes/runtime.rs:815-860`).
 - **A missing source** leaves the pod in `ContainerCreating`, which isn't one of `STUCK_REASONS` **[A7]**. The rollout then fails at the progress deadline (`:315-327`). O10.
+- **Logs (FMECA FM-03).** A secret is never written to a workload's log. opv can't enforce that on Kubernetes: a container's stdout always reaches the node's log files through the kubelet, and there is no per-workload log driver to check, so opv prints no warning here. The contract is the app's: read from files, never log a value. `docs/usage.md` states it (K6), and the verification canary scan includes `kubectl logs` and the node's `/var/log/pods` (V16).
 - **Superseded-version clean-up already covers volumes and ConfigMaps.** Any string in the Deployment or any ReplicaSet keeps its object (`referenced_names`, `src/adapters/kubernetes/store.rs:257-284`). It is extended from Secrets to ConfigMaps by kind, with the same label selector. Rollback keeps working (`docs/usage.md:264`).
 
 ### 6.5 RBAC and ExternalSecrets
 
 - **New rights, for `configmap` only:** `get`, `list`, `create` and `delete` on configmaps. They are added to `ACCESS` (`src/adapters/kubernetes/runtime.rs:62-118`), and `delete configmaps` to `DEPLOY_RIGHTS` (`:133-137`).
+- **Scope of those rights (FMECA FM-09).** They are granted by a namespaced Role in the target's namespace only, never a ClusterRole; the docs and the §12.1 kit say so. `resourceNames` can't narrow them: Kubernetes doesn't apply it to `create` or `list`, and opv's names change with every version. The added power is small, because a ConfigMap only takes effect once the Deployment points at it, and the identity can already change the Deployment. The detection is the nightly drift check (§2.3): an out-of-band ConfigMap, or a repointed binding, is `Other`/drift (§6.3), so `status --fail-on-drift` exits 8 `target_drift`. opv's own ConfigMaps are immutable, so their content can't be edited in place.
 - Volume mounts need no pod RBAC; the kubelet mounts them (`:886-889`) **[A6]**.
 - **ExternalSecrets:** the projected source names the ExternalSecret's target Secret, which has the same name (`src/adapters/kubernetes/external.rs:162`). Each ExternalSecret pins one Key Vault version (`:165`), so no live change follows a refresh. Clean-up is unchanged (`:655-661`).
 - **Pod Security** `restricted` allows these volumes and `fsGroup` **[A11]**.
@@ -529,12 +561,13 @@ The preflight reads the Deployment opv already reads (`src/adapters/kubernetes/m
 | `fsGroup` | Effective `runAsUser` | Verdict |
 |---|---|---|
 | set | any | readable **[A3]** |
-| unset | 0 | readable |
+| unset | 0 | readable, **with a warn line** (the workload runs as root) |
 | unset | set, not 0 | **unreadable** |
 | unset | unset | **unknown** |
 
 - It is a pure `files::readability`, run in `KubernetesTarget::preflight` (`src/adapters/kubernetes/config.rs:435`).
 - `sync` refuses an unreadable or unknown verdict before writing; `plan`, `status` and `doctor` warn (`src/provider.rs:374-381`). O2.
+- A root workload (FMECA FM-13) is readable, so nothing is refused, but every `plan`, `status` and `doctor` prints `warn: deployment <d> runs as root: every mounted file is readable by any process in the container; run as a non-root user with fsGroup`. `sync` prints it too and goes on.
 - Journeeze runs as uid 10001 (`ced358d:deploy/Dockerfile:34`, `:43`), so it needs `fsGroup`.
 
 ### 6.7 Plan and status
@@ -546,7 +579,7 @@ prod/k8s: would deploy: volume opv-files-journeeze, read-only at /run/secrets/jo
 warn: deployment journeeze sets no fsGroup and runs as 10001: the mounted files (0440, root-owned) would be unreadable
 ```
 
-- `JsonRow` (`src/app/mod.rs:735-760`) gains `channel` (`secret` / `config`), `delivered_as` (`env` / `file`) and `path`. The change is additive.
+- `JsonRow` (`src/app/mod.rs:735-760`) gains `channel` (`secret` / `config`), `via` (the channel's label: `Kubernetes Secret`, `ConfigMap`, `env`, `Fly secret`, …; §1.3), `delivered_as` (`env` / `file`), `form` (`verbatim` for a file on a `Native` target, the transform's name when one applies, absent otherwise; §4.5) and `path`. The change is additive.
 - `chain:` lines (`src/app/status.rs:666`; `src/adapters/kubernetes/runtime.rs:876-885`) cover files and ConfigMaps.
 
 ### 6.8 Causes
@@ -579,7 +612,7 @@ These use kind, set up as in `tests/fixtures/kubernetes/success/README.md:3-5`. 
 | K-R6 | `get replicasets -o json` after two deploys | references |
 | K-R7 | `apply -f - --server-side --field-manager=opv -o name` of a ConfigMap; `auth can-i create configmaps` (yes and no); `delete configmap …` | the ConfigMap store; the simulator today infers non-Secret kinds from the Secret recordings (`tests/sim/kube.rs:12-14`) |
 
-Until K-R2 and K-R4 exist, the simulator answers exit 86 (`tests/sim/recordings.rs:9`), and the coverage gate lists them as exempt.
+Until K-R2 and K-R4 exist, the simulator answers exit 86 (`tests/sim/recordings.rs:9`), and the coverage gate lists them as exempt. **The exemption is for work in progress only (FMECA FM-10).** K3, K4, K5 and K6 merge only when K1 is merged and its README marks **[A2]**, **[A3]**, **[A5]** and **[A7]** confirmed, or §6 has been amended where one was refuted; K6 merges only with K-R2 and K-R4 reached, not exempt.
 
 ### 6.10 Tests
 
@@ -601,6 +634,7 @@ Until K-R2 and K-R4 exist, the simulator answers exit 86 (`tests/sim/recordings.
   - From 0.12.0, unset is refused (`NoChannel`). O15 decides this schedule.
 - **Precedence.** A Fly secret and an `[env]` entry with the same name: which wins is **[A30]**. `plan` warns when a config key's name also appears in `fly.toml`'s `[env]`, if the file is present in the checkout.
 - **Channels:** secret → `Store{"Fly secrets"}`; config → `Store{"Fly secrets"}` or `None{"fly.config = none"}`; files → `ViaApp{"the app writes env to files (Journeeze's shim)"}`.
+- **Config stays config.** A Fly secret hides the value from `fly secrets list`, but the app still sees config as env at boot, so the §1.3 rules hold unchanged: each row shows `channel: config` and `Fly secret`, anything sensitive is `kind = "secret"`, and a concealed config field gets today's warning.
 
 ### 7.2 Files on Fly: established
 
@@ -628,7 +662,7 @@ Until these are answered, the shim stays (`ced358d:crates/jz_host/src/fleet_secr
   4. a production canary, then all machines;
   5. remove the shim.
 
-## 8. Docker Swarm target (0.11.0)
+## 8. Docker Swarm target (0.12.0; moved from 0.11.0 by the owner, §15)
 
 ### 8.1 Recorded so far (read-only, no swarm)
 
@@ -654,7 +688,7 @@ roles = ["serve"]
 - **Channels:**
   - secret → versioned Swarm secrets (files; Swarm has no secret-to-env binding, so **every delivered secret needs `file`**, or the load fails);
   - config with `file` → versioned Swarm configs (files);
-  - config without `file` → service env through `--env-add NAME=value`. That puts the config value in the docker CLI's argv on the CI runner, so a config key stored concealed is refused, as on GitHub (`docs/configuration.md:427`);
+  - config without `file` → service env through `--env-add NAME=value`. That puts the config value in the docker CLI's argv on the CI runner and in `service inspect`, so a config key stored concealed is refused, as on GitHub (`docs/configuration.md:427`). Every other config key goes this way as declared, and its row shows `Swarm env` (§1.3);
   - files → `Native`.
 - **Calls.** Every call carries `--context`, and `DOCKER_HOST`, `DOCKER_CONTEXT` and `DOCKER_CONFIG` are dropped from its environment. `ssh://` endpoints are normal here.
 - **Paths.** `secrets_dir` must be under `/run/secrets` **[A13]**. Each key's Swarm `target` is the path relative to `/run/secrets`.
@@ -674,13 +708,15 @@ roles = ["serve"]
 - **Read:** `service inspect <svc> --format '{{json .Spec}}'` and `'{{json .PreviousSpec}}'`. These hold names, targets and env, never secret data.
 - **Bindings:** match entries by `File.Name` (secrets and configs) and by env name. An entry is `Pinned` when its name splits as `opv-<store>-<id>` and the owner and mode match.
 - **Apply:** one `service update --detach=false` with `--secret-rm/--secret-add source=<new>,target=<rel>,uid=,gid=,mode=0400`, the `--config-*` equivalents, and `--env-add` **[A17]**.
-  - **There is no compare-and-set through the CLI** **[A18]**. opv compares the Spec before and after, outside its own entries (the Kubernetes `changed_paths` idea, `src/adapters/kubernetes/runtime.rs:139-174`). A difference is `TargetRefused{ChangedOutsideOpv{after_apply: true}}` (`src/cause/mod.rs:1101-1104`).
+  - **There is no compare-and-set through the CLI** **[A18]**. opv compares the Spec before and after, outside its own entries (the Kubernetes `changed_paths` idea, `src/adapters/kubernetes/runtime.rs:139-174`). A difference is `TargetRefused{ChangedOutsideOpv{after_apply: true}}` (`src/cause/mod.rs:1101-1104`), exit 5 `update_refused`, naming the changed Spec paths.
+  - **Syncs for one target are serialized (FMECA FM-06).** The CI recipe already runs every sync in one concurrency group (`concurrency: {group: opv-sync}`, §2.5), and `opv ci workflow --on-change` keeps it. That leaves the window to actors outside opv, and the before/after comparison reports them. opv doesn't add a lock of its own: Swarm offers none to the CLI **[A18]**.
 - **Owner:** `swarm.files_owner`, or else a numeric `ContainerSpec.User`. Anything else is `MountUnreadable{RunAsUnknown}`. Swarm sets the owner per file, so 0400 works **[A17]**.
 - **Health:** poll `UpdateStatus` until `completed`. `paused` and `rollback_*` are unhealthy **[A19]**. Progress lines and the wait limit are as on Kubernetes (`src/adapters/kubernetes/runtime.rs:40-46`).
 
 ### 8.5 Rollout, scaling, clean-up
 
 - The rollout follows the service's own `UpdateConfig`, which opv never changes.
+- **Logs (FMECA FM-03).** A secret is never written to a workload's log. Unlike Kubernetes, a Swarm service declares its log driver (`TaskTemplate.LogDriver` in the Spec opv already reads **[A33]**). `plan` and `status` print one warn line when it is unset or writes to the node's disk (`json-file`, `local`, `journald`): `warn: service <svc> logs to <driver> on each node; a value it prints is kept on disk`. opv never changes it. The canary scan includes `docker service logs` (§12.3).
 - New replicas get the current Spec.
 - After a healthy update, opv deletes `opv-managed=<env>` secrets and configs that neither `Spec` nor `PreviousSpec` references, so `docker service rollback` keeps working. Swarm's own refusal to remove an object in use counts as "kept".
 
@@ -716,7 +752,7 @@ These follow §6.7:
 - **S-R1:** `swarm init`, and `swarm leave --force` at the end.
 - **S-R2:** `secret create` (stdin), the same again (exists), and an oversize value **[A16]**; `config create` likewise.
 - **S-R3:** `secret ls` and `config ls --format json`; `secret inspect` (no data **[A14]**); `config inspect` (data **[A31]**).
-- **S-R4:** `service create --user 10001:10001 --secret source=…,target=journeeze/database/url,uid=10001,gid=10001,mode=0400 --config … --env …`; `service inspect` (Spec) **[A13]**, **[A17]**.
+- **S-R4:** `service create --user 10001:10001 --secret source=…,target=journeeze/database/url,uid=10001,gid=10001,mode=0400 --config … --env …`, once with `--log-driver none`; `service inspect` (Spec) **[A13]**, **[A17]**, **[A33]**.
 - **S-R5:** `service update --detach=false --secret-rm/--secret-add/--config-*/--env-add`; then `UpdateStatus`, `PreviousSpec` and `Version` **[A18]**, **[A19]**.
 - **S-R6:** `docker exec` into a task: `stat -f -c %T`, `stat -c "%a %u %g"`, `id`.
 - **S-R7:** `secret rm` while in use **[A15]**.
@@ -759,10 +795,10 @@ The script:
 2. **Directory:** `mount -t tmpfs -o size=1m,mode=0700,uid=<uid>,gid=<gid>,nosuid,nodev,noexec tmpfs <dir>`. It refuses a directory that is already mounted, and never writes to disk.
 3. **Files:** the map has lines `<kind><TAB><id><TAB><dest>`.
    - `<dest>` is a relative path, checked with Journeeze's segment rule (`ced358d:crates/jz_secrets/src/lib.rs:23-34`), or `env:<NAME>` for a config key without `file`.
-   - Each value is fetched and decoded through a pipe into `(umask 377; cat > <file>.tmp)`, then `chown`, `chmod 0400` and renamed into place. Parent directories are 0500.
-   - `env:` lines go to `<dir>/.env` (0400), which the unit passes as `--env-file`. That file holds config only.
+   - Each reply is fetched with `curl -fsS -o <file>.reply.tmp` and decoded into `<file>.tmp`, both created under `umask 377`. POSIX `sh` has no `pipefail`, so the script never judges a fetch by a pipeline's status (FMECA FM-01): a non-zero `curl` status, an empty body, or a failed decode exits non-zero **before** any `chown` or rename, and an `EXIT` trap removes every `.tmp` file. Only then `chown`, `chmod 0400` and rename into place. Parent directories are 0500.
+   - `env:` lines go to `<dir>/.env` (0400), which the unit passes as `--env-file`. That file holds config only, which is readable through `docker inspect` once in the container's env; that is why config is declared non-secret (§1.3).
    - Values never appear in argv, the environment or a log.
-4. **Failure:** any failure exits non-zero and names the id and the HTTP status, never a value. The container unit `Requires=` the step, so a VM never starts the app without its files.
+4. **Failure:** any failure exits non-zero and names the id and the HTTP status (or `curl`'s exit code), never a value. A short or empty file is never installed. The container unit `Requires=` the step, so a VM never starts the app without its files.
 5. **`--check`:** prints each path as present or absent, with its size.
 
 **The map** is non-secret. CI renders it from `opv plan <env> --target <t> --json` (`target_name`, `channel`, `path`; §6.7).
@@ -888,7 +924,7 @@ By hand, `systemctl restart opv-vm-secrets journeeze` refreshes one VM.
 ### 9.9 Tests
 
 - `tests/sim/gcloud.rs` answers from G-R1 to G-R7 only, plus E2E scenarios.
-- `tests/vm_step.rs` runs the script with a fake `curl` answering from G-R8. It checks the modes, the owner, that no value reaches argv or the environment (`/proc/<pid>/cmdline` and `environ` snapshots), and the traversal refusal. Root-only parts are skipped and the test says so.
+- `tests/vm_step.rs` runs the script with a fake `curl` answering from G-R8. It checks the modes, the owner, that no value reaches argv or the environment (`/proc/<pid>/cmdline` and `environ` snapshots), and the traversal refusal. It also checks the failure path (FMECA FM-01): a fake `curl` that answers 403, one that exits 18 after a partial body, an empty body and an undecodable body each exit non-zero naming the id, and leave no file and no `.tmp` behind. Root-only parts are skipped and the test says so.
 
 ## 10. Scaling and rotation on every platform
 
@@ -909,56 +945,65 @@ Each deliverable has at most four owned files, exact pointers and named tests. H
 
 ### 11.1 opv 0.11.0
 
+Docker Swarm moved to 0.12.0 (owner, §15), so S1–S5 and the Swarm causes are in §11.2. R1 (the remote-profile refusal, §15) is new here; it is a deliverable id, not risk R1 of §14. Changes from the FMECA review are marked with their FM number (§14.1).
+
 | ID | Deliverable | owned_files | Prereq. | h | Acceptance criteria |
 |---|---|---|---|---|---|
 | M1 | `Channels` contract | `src/provider.rs` (`channels()` required, next to `open` `:366-373`; `Channels`, `Channel`, `FileCapability`; the contract test), `src/ports.rs` (`variables` loses its default, `:44-49`), the four `config.rs` adapters (Fly `:231`, Azure `:452`, GitHub `:304`, Kubernetes `:392`: declare today's channels only) | — | 4 | Every provider declares channels; a provider without them doesn't compile. Today's behaviour is unchanged (all existing tests pass). The contract test lists each provider's table and matches §1.1's "today" column. |
-| M2 | Route by channel, and `NoChannel` | `src/domain/plan.rs` (config branch `:420-428`), `src/app/mod.rs` (`json_target` `:904-913`, `JsonRow` `:735-760`: `channel`), `src/cause/mod.rs` (`Guard::NoChannel`), `src/cause/render.rs` | M1 | 4 | A config key on a `Channel::None` target: `plan` and `status` print the warn line, `sync` refuses with `policy_refused`, and `config = "none"` gives a warn only. No row says plain `n/a` for config. |
+| M2 | Route by channel, and `NoChannel` | `src/domain/plan.rs` (config branch `:420-428`), `src/app/mod.rs` (`json_target` `:904-913`, `JsonRow` `:735-760`: `channel`, `via`, `delivered_as`, `form`), `src/cause/mod.rs` (`Guard::NoChannel`), `src/cause/render.rs` | M1 | 4 | A config key on a `Channel::None` target: `plan` and `status` print the warn line, `sync` refuses with `policy_refused`, and `config = "none"` gives a warn only. No row says plain `n/a` for config. **FM-02:** every config row, text and `--json`, names its channel (`env`, `ConfigMap`, `Fly secret`, `GitHub variable`, …); a concealed config field is still refused on GitHub variables and still warned elsewhere (snapshots of both). |
 | M3 | Target `roles` | `src/domain/model.rs` (`:226-244`), `src/config.rs` (`:724-742`, `:1704-1722`), `src/domain/plan.rs` (`:296-321`), `docs/design/local-delivery.md` (`:79`) | — | 4 | Disjoint roles mean not desired, and prune would remove the binding. Load refusals: missing, undeclared, empty. Targets without role keys are unchanged. |
-| M4 | Verbatim bytes, `FileMount`, plumbing, plan id | `src/domain/convention.rs` (`:263-303`), `src/domain/runtime.rs` (`FileMount`), `src/app/mod.rs` (`open_target` `:1696-1704`, `file_mounts` next to `:1708-1721`, plan id `:200-230`); `src/domain/plan.rs` `evaluate` is shared, so M4 follows M2 and M3 | M2, M3 | 5 | A multi-line PEM with a trailing newline in a file key passes `check` without a target and stages verbatim to a `Native` target. The tidy keeps `x\n` in a file key and still trims a non-file key. Fly keeps `single_line` and `pem_private_key`. The plan id differs by channel and form. |
-| C1 | `opv changed` | `src/app/changed.rs` (new: versions via `op item list` per vault, the field via `op read`, states, exit 10), `src/main.rs` (subcommand next to `Delivery` `:760`), `src/cause/mod.rs` (`SourceChanged`, exit 10, `source_changed`), `docs/usage.md` (commands table `:16-18`, exit codes `:887-896`) | — | 5 | FakeRunner: unchanged → 0; a version bump → 10 naming the item; a missing field or delivery item → 10 `no_record`; an `op` failure → its own exit, never 0. No `op item get` and no value-bearing call appears in the recorded calls. JSON matches §2.2. |
-| C2 | Record source versions on sync | `src/app/delivery.rs` (`record`, near the evidence lines `:5-13`; the new field `source versions`), `src/app/sync.rs` (pass the item versions read, `read_item_fields` `src/app/mod.rs:186-193`), `docs/design/delivery-receipts.md` | C1 | 3 | After a confirmed sync the delivery item holds one `v1|<item_id>|<version>` line per source item. An unconfirmed sync records nothing. `opv changed` then reports `unchanged`. |
+| M4 | Verbatim bytes, `FileMount`, plumbing, plan id | `src/domain/convention.rs` (`:263-303`), `src/domain/runtime.rs` (`FileMount`), `src/app/mod.rs` (`open_target` `:1696-1704`, `file_mounts` next to `:1708-1721`, plan id `:200-230`); `src/domain/plan.rs` `evaluate` is shared, so M4 follows M2 and M3 | M2, M3 | 6 | A multi-line PEM with a trailing newline in a file key passes `check` without a target and stages verbatim to a `Native` target. The tidy keeps `x\n` in a file key and still trims a non-file key. Fly keeps `single_line` and `pem_private_key`. The plan id differs by channel and form. **FM-07:** the same file key shows `file (verbatim)` on a `Native` target and `env (pem_private_key)` on Fly in one plan; without a declared transform, Fly reports the `single_line` finding instead of changing the value. |
+| M5 | No-value test over every machine-readable surface (§1.6) | `tests/security.rs`, `tests/mcp_protocol.py`, `src/app/agent_view.rs` (the plan projection carries `channel`, `via`, `delivered_as`, `form`, `path` through `identifier`) | M2, M4, C1 | 3 | **FM-04:** the `S7MARKER` scan passes over `changed --json`, `plan`/`status --json` with file, ConfigMap and Fly-config rows, and the MCP tools `opv_deployment_plan` and `opv_delivery_preview`; the MCP plan document equals the CLI's byte for byte. |
+| C1 | `opv changed` | `src/app/changed.rs` (new: versions via `op item list` per vault, the field via `op read`, states, exit 10), `src/main.rs` (subcommand next to `Delivery` `:760`), `src/cause/mod.rs` (`SourceChanged`, exit 10, `source_changed`), `docs/usage.md` (commands table `:16-18`, exit codes `:887-896`) | — | 6 | FakeRunner: unchanged → 0; a version bump → 10 naming the item; a missing field or delivery item → 10 `no_record`; an `op` failure → its own exit, never 0. No `op item get` and no value-bearing call appears in the recorded calls. JSON matches §2.2. **FM-12:** one `op item list` per vault per run however many items it watches; a rate-limit reply → exit 9 `Unavailable{RateLimited}` with the retry time when given **[A32]**. |
+| C2 | Record source versions on sync | `src/app/delivery.rs` (`record`, near the evidence lines `:5-13`; the new field `source versions`), `src/app/sync.rs` (pass the item versions read, `read_item_fields` `src/app/mod.rs:186-193`), `docs/design/delivery-receipts.md` | C1 | 3 | After a confirmed sync the delivery item holds one `v1|<item_id>|<version>` line per source item. An unconfirmed sync records nothing. **FM-05:** `opv changed` then reports `unchanged`, also when the delivery item and the `deploy_credentials` item share the state vault with a source's vault listing. |
 | C3 | `status --fail-on-drift` | `src/app/status.rs` (drift `:634-661`, exit), `src/main.rs` (flag), `src/cause/mod.rs` (`TargetDrift`, `target_drift`) | — | 2 | With drift and the flag, exit 8 `target_drift`; without the flag the exit code is unchanged (snapshot). |
 | C4 | e2e coverage for C1–C3 | `tests/e2e/scenarios/changed.rs` (new), `tests/e2e/app/world.json` (item versions), `tests/e2e/coverage.rs` | C1–C3 | 4 | Snapshots for each `changed` state, the drift exit, and the canary scan. |
-| C5 | `opv ci workflow --on-change` | `src/app/ci_workflow.rs` (`run` `:24-40`, `Job`), `src/main.rs` (flag at `CiCmd::Workflow` `:3550`) | C1, C3 | 3 | Prints the two §2.5 workflows for the configuration, with `confirm_env` environments planned and gated. It is a golden test, and `actionlint` passes on the output. |
-| C6 | CI example and README section | `examples/ci-change-detection/` (README, both workflows, `install-opv` action), `README.md` (the §3 text), `docs/usage.md` (a "When sync runs" section) | C1, C3 | 3 | The examples equal C5's output for the example configuration, and `actionlint` passes. The README section reads as in §3 and its links resolve. |
-| A3 | Webhook secret in Journeeze's mapping | the Journeeze opv manifest (a person's edit), `docs/local-development.md` (example) | — | 1 | `opv run dev --product journeeze --role serve --preview --json` lists `github/webhook-secret`; `tests/mounted_consumer.rs:16-24` passes. |
-| A4 | `OPV_UID`/`OPV_GID` and the compose docs | `src/app/local_delivery.rs` (`child_env` `:174-191`), `src/app/delivery_preview.rs` (the `containers:` line), `docs/local-development.md` (after `:87`), `tests/fixtures/compose/README.md` | O4 | 3 | A file-delivering run's child has both ids; a run without files has neither. The preview prints the line. The docs' compose file equals `tests/fixtures/compose/recipe.yml`. |
-| F1 | Config on Fly | `src/adapters/fly/config.rs` (`fly.config` near `:45-99`; `channels`), `src/adapters/fly/store.rs` (or the staged store: config through `variables` → secrets), `docs/configuration.md` (`:347-352`) | M2 | 4 | `fly.config = "secrets"` stages config keys like secrets (FakeRunner, stdin only). Unset warns. `none` warns per run. The ledger covers config names. |
-| K1 | kubectl recordings K-R1–K-R7 | `tests/fixtures/kubernetes/success/`, `…/failures/`, READMEs | kind | 4 | Recorded as in `tests/fixtures/kubernetes/success/README.md:3-5`. **[A2]**, **[A3]**, **[A5]**, **[A7]** confirmed or refuted, and §6 amended where refuted. The cluster is deleted. |
-| K2 | `secrets_dir` and `config = "configmap"` config | `src/adapters/kubernetes/config.rs` (`ConfigRoute` `:85-93`, `Raw` `:119-130`, `checked` `:140-172`, `KubernetesTarget` `:96-107`, `INIT_FIELDS` `:49-80`, `channels`) | M1, M4 | 3 | The §6.2 load rules each have a unit test naming the field. `opv init` writes `configmap`. |
-| K3 | ConfigMap store | `src/adapters/kubernetes/store.rs` (kind parameter: Secret or ConfigMap, same name scheme; `referenced_names` `:257-284` already kind-agnostic), `src/adapters/kubernetes/runtime.rs` (`ACCESS` `:62-118` and `DEPLOY_RIGHTS` `:133-137` gain configmaps), `store_tests.rs` | K1, K2 | 4 | A ConfigMap write sends the value on stdin only, compares exactly, and cleans up superseded versions like Secrets. The configmaps rights appear in `doctor` and preflight. |
-| K4 | Pure volume functions | `src/adapters/kubernetes/files.rs` (new), `files_tests.rs` (new), `src/adapters/kubernetes/mod.rs` (`:25-29`) | K1, K2 | 5 | Golden JSON = §6.3. `read_bindings` handles each `Other` case on the K-R3 shape. `readability` = §6.6. `mount_conflict`. A no-value property test. |
-| K5 | Wire into `KubeDeployment` and the preflight | `src/adapters/kubernetes/runtime.rs` (`new` `:213-232`, `bindings` `:658-694`, `apply` `:697-772`, `fingerprint` `:293-304`, reconcile `:788-797`, `chain` `:876-885`), `src/adapters/kubernetes/config.rs` (`preflight` `:435`) | K3, K4, X1 | 6 | FakeRunner on `deployment-get.json`: the volume is added, the env entry removed, `configMapKeyRef` used for config, `K7` kept. The bindings read back. Mutate refuses unreadable with no `apply` call; Read warns. Existing tests pass. |
-| K6 | Kubernetes output, docs, E2E | `src/app/sync.rs` (`would …` near `:2011`), `tests/e2e/scenarios/k8s_files.rs` (new) with `tests/e2e/app/`, `docs/usage.md` (`:232-267`), `docs/configuration.md` (`:398`, `:461`) | K5, M2 | 6 | The §6.7 lines appear. The §6.10 snapshots are reviewed. K-R2 and K-R4 are reached or exempt. The canary scan is clean. |
-| X1 | Shared new causes | `src/cause/mod.rs` (`MountUnreadable`, `Guard::MountPathInUse`, `ConfigCheck::{ConfigFileNeedsObject, SwarmSecretWithoutFile}`, `PatternId::{ContainerPath, SwarmSecretsDir}`, `System::Docker`, object `SwarmManager`), `src/cause/render.rs`, `src/adapters/kubernetes/diagnose.rs` (the 422 phrase), `docs/design/error-catalog.md` (§4.4–§4.12) | K1 | 5 | Every §6.8 and §8.8 row is tested for code, exit, retry, text and JSON. K-R2 diagnoses as `update_refused`. |
-| S1 | Swarm recordings S-R1–S-R9 (**after O13**) | `tests/fixtures/docker/swarm/` | O13 | 3 | Recorded with markers; **[A12]**–**[A19]** and **[A31]** confirmed or refuted; the swarm is left. |
-| S2 | Swarm config and wrapper | `src/adapters/swarm/config.rs` (new; pattern `src/adapters/kubernetes/config.rs:30-280`), `src/adapters/swarm/mod.rs` (new: names, the `docker --context` wrapper with a scoped env as in `src/adapters/kubernetes/mod.rs:384-410`), `src/adapters/mod.rs`, `src/provider.rs` (registry) | M1, M4 | 5 | §8.2 parses. Load refusals are tested. `DOCKER_HOST`, `DOCKER_CONTEXT` and `DOCKER_CONFIG` never reach a call. |
-| S3 | Swarm store (secrets and configs) | `src/adapters/swarm/store.rs` (new), `store_tests.rs` | S1, S2 | 5 | Tests over S-R2, S-R3, S-R7. Values go on stdin only. Clean-up keeps `PreviousSpec` references. |
-| S4 | Swarm runtime | `src/adapters/swarm/runtime.rs` (new), `runtime_tests.rs` | S1, S3, X1 | 6 | Over S-R4, S-R5, S-R8: the argv, health states, `ChangedOutsideOpv`, the owner rules, `--env-add` for config only. |
-| S5 | Swarm diagnosis, simulator, E2E | `src/adapters/swarm/diagnose.rs` (new), `tests/sim/docker.rs` (new) + `tests/sim/opv_sim.rs` `TOOLS`, `tests/e2e/scenarios/swarm.rs` (new), `tests/e2e/matrix.rs` (`:110-125`, `:351`) | S4 | 7 | The recorded not-a-manager and unreachable replies diagnose as in §8.8. E2E plan, sync, status and canary pass. An unrecorded call is exit 86. |
-| V1 | Tagged-release verification | `docs/verification/v0.11.0-file-delivery.md` + directory | the tag | 6 | §12.1 passes, or its deviations are recorded. |
+| C5 | `opv ci workflow --on-change` | `src/app/ci_workflow.rs` (`run` `:24-40`, `Job`), `src/main.rs` (flags at `CiCmd::Workflow` `:3550`) | C1, C3 | 4 | Prints the two §2.5 workflows for the configuration, with `confirm_env` environments planned and gated. It is a golden test, and `actionlint` passes on the output. **FM-11:** the detect step branches 0 / 10 / other. **FM-12:** `--every <minutes>` sets the cron (default 15); exit 9 with a retry time retries `changed` once, capped at 120 s. **FM-06:** every sync job is in one concurrency group. |
+| C6 | CI example and README section | `examples/ci-change-detection/` (README, both workflows, `install-opv` action), `README.md` (the §3 text), `docs/usage.md` (a "When sync runs" section) | C1, C3 | 3 | The examples equal C5's output for the example configuration, and `actionlint` passes. The README section reads as in §3 and its links resolve. **FM-11:** the example README and `docs/usage.md` show the exit-10 branch and say why "any non-zero is a failure" is wrong for `changed`. |
+| A3 | Webhook secret in Journeeze's mapping | the Journeeze opv manifest (a person's edit), `docs/local-development.md` (example) | — | 1 | `opv run dev --product journeeze --role serve --preview --json` lists `github/webhook-secret`; `tests/mounted_consumer.rs:16-24` passes. **FM-15:** the Journeeze-side `SERVE` edit (`ced358d:crates/jz_host/src/fleet_secrets.rs:40-76`) is filed with its maintainers as an external dependency, and nothing in opv's docs claims Fly delivery of the webhook secret until it lands (§4.6). |
+| A4 | `OPV_UID`/`OPV_GID` and the compose docs | `src/app/local_delivery.rs` (`child_env` `:174-191`), `src/app/delivery_preview.rs` (the `containers:` line), `docs/local-development.md` (after `:87`), `tests/fixtures/compose/README.md` | O4 | 3 | A file-delivering run's child has both ids; a run without files has neither. The preview prints the line. The docs' compose file equals `tests/fixtures/compose/recipe.yml`. **FM-14:** the docs state the same-user limit as the accepted residual (§5). |
+| F1 | Config on Fly | `src/adapters/fly/config.rs` (`fly.config` near `:45-99`; `channels`), `src/adapters/fly/store.rs` (or the staged store: config through `variables` → secrets), `docs/configuration.md` (`:347-352`) | M2 | 4 | `fly.config = "secrets"` stages config keys like secrets (FakeRunner, stdin only). Unset warns. `none` warns per run. The ledger covers config names. **FM-02:** config rows show `Fly secret`; a concealed config field gets today's warning. |
+| K1 | kubectl recordings K-R1–K-R7 | `tests/fixtures/kubernetes/success/`, `…/failures/`, READMEs | kind | 4 | Recorded as in `tests/fixtures/kubernetes/success/README.md:3-5`. **[A2]**, **[A3]**, **[A5]**, **[A7]** confirmed or refuted in the README, and §6 amended where refuted. The cluster is deleted. |
+| K2 | `secrets_dir` and `config = "configmap"` config | `src/adapters/kubernetes/config.rs` (`ConfigRoute` `:85-93`, `Raw` `:119-130`, `checked` `:140-172`, `KubernetesTarget` `:96-107`, `INIT_FIELDS` `:49-80`, `channels`) | M1, M4 | 3 | The §6.2 load rules each have a unit test naming the field. `opv init` writes `configmap`. (No recording gate: nothing here depends on K-R1–K-R7.) |
+| K3 | ConfigMap store | `src/adapters/kubernetes/store.rs` (kind parameter: Secret or ConfigMap, same name scheme; `referenced_names` `:257-284` already kind-agnostic), `src/adapters/kubernetes/runtime.rs` (`ACCESS` `:62-118` and `DEPLOY_RIGHTS` `:133-137` gain configmaps), `store_tests.rs` | K1, K2 | 4 | A ConfigMap write sends the value on stdin only, compares exactly, and cleans up superseded versions like Secrets. The configmaps rights appear in `doctor` and preflight. **FM-09:** `doctor` names them as rights of a namespaced Role. **FM-10:** merges only after the K1 gate of §6.9. |
+| K4 | Pure volume functions | `src/adapters/kubernetes/files.rs` (new), `files_tests.rs` (new), `src/adapters/kubernetes/mod.rs` (`:25-29`) | K1, K2 | 5 | Golden JSON = §6.3. `read_bindings` handles each `Other` case on the K-R3 shape. `readability` = §6.6. `mount_conflict`. A no-value property test. **FM-13:** `readability` returns readable-as-root as its own verdict. **FM-10:** merges only after the K1 gate. |
+| K5 | Wire into `KubeDeployment` and the preflight | `src/adapters/kubernetes/runtime.rs` (`new` `:213-232`, `bindings` `:658-694`, `apply` `:697-772`, `fingerprint` `:293-304`, reconcile `:788-797`, `chain` `:876-885`), `src/adapters/kubernetes/config.rs` (`preflight` `:435`) | K3, K4, X1 | 6 | FakeRunner on `deployment-get.json`: the volume is added, the env entry removed, `configMapKeyRef` used for config, `K7` kept. The bindings read back. Mutate refuses unreadable with no `apply` call; Read warns. Existing tests pass. **FM-08:** the mount is added to the target's container only; a second container gets none. **FM-13:** a root workload syncs and prints the root warn line. **FM-10:** merges only after the K1 gate. |
+| K6 | Kubernetes output, docs, E2E | `src/app/sync.rs` (`would …` near `:2011`), `tests/e2e/scenarios/k8s_files.rs` (new) with `tests/e2e/app/`, `docs/usage.md` (`:232-267`), `docs/configuration.md` (`:398`, `:461`) | K5, M2 | 7 | The §6.7 lines appear. The §6.10 snapshots are reviewed. The canary scan is clean. **FM-10:** K-R2 and K-R4 are reached, not exempt. **FM-03:** `docs/usage.md` states the no-log contract. **FM-08/FM-09:** `docs/configuration.md` says the volume mounts into the target's container only, recommends an `fsGroup` used by that container alone, and grants the configmap rights by a namespaced Role. |
+| X1 | Shared new causes (Kubernetes) | `src/cause/mod.rs` (`MountUnreadable`, `Guard::MountPathInUse`, `ConfigCheck::ConfigFileNeedsObject`, `PatternId::ContainerPath`), `src/cause/render.rs`, `src/adapters/kubernetes/diagnose.rs` (the 422 phrase), `docs/design/error-catalog.md` (§4.4–§4.12) | K1 | 4 | Every §6.8 row is tested for code, exit, retry, text and JSON. K-R2 diagnoses as `update_refused`. |
+| R1 | Remote profiles refuse deployed environments (O9, §15) | `src/config.rs` (`validate_remotes` `:1452`), `src/cause/config_check.rs` (new `ConfigCheck::RemoteEnvironmentHasTarget{profile, env, target}`), `docs/configuration.md` (`:174`), `tests/e2e/app/secrets.toml` (`:120-128`) | — | 3 | Load refuses a `[products.<p>.remotes.<r>]` profile whose `environments` include one with any target (Fly, Kubernetes, Azure, GitHub, Swarm, VM): `config_invalid`, exit 2, naming the profile, the environment and one target. A profile over target-less environments loads unchanged. The e2e profile moves to a target-less environment (R12 in §14 closes). |
+| V1 | Tagged-release verification | `docs/verification/v0.11.0-file-delivery.md` + directory | the tag | 6 | §12.1 passes, or its deviations are recorded. **FM-03:** V16 includes pod and node logs. **FM-08:** V9 includes the sidecar check. |
 
 **0.11.0 sequencing**
-- Critical path: M1 → M2 → M4 → K2 → K3 → K5 → K6 (32 h), with M3 and K1 alongside.
-- Change detection (C1 → C2 → C4; C3, C5, C6) is independent (about 23 h).
-- F1 follows M2 (4 h).
-- Swarm (S1 → S5, about 26 h) waits for O13 and runs in parallel; it can slip to 0.12.0 without touching anything else.
-- **Total about 113 h.**
+- Critical path: M1 → M2 → M4 → K2 → K4 → K5 → K6 (35 h), with M3, K1 → X1 and K3 alongside; then V1 on the tag.
+- Change detection (C1 → C2 → C4; C3, C5, C6) is independent (22 h). M5 follows C1 and M4 (3 h).
+- F1 follows M2 (4 h). R1, A3 and A4 have no prerequisite in this table.
+- **Total 93 h.** Before this revision the rows summed to 110 h (the text said about 113 h). Swarm S1–S5 (26 h) and X1's Swarm causes (1 h) moved to 0.12.0; R1 adds 3 h; the FMECA changes add 7 h (M4 +1, M5 3, C1 +1, C5 +1, K6 +1).
 
-### 11.2 opv 0.12.0 (GCP first)
+### 11.2 opv 0.12.0 (Swarm, and GCP first)
 
 | ID | Deliverable | owned_files | Prereq. | h | Acceptance criteria |
 |---|---|---|---|---|---|
+| S1 | Swarm recordings S-R1–S-R9 (**after O13**) | `tests/fixtures/docker/swarm/` | O13 | 3 | Recorded with markers; **[A12]**–**[A19]**, **[A31]** and **[A33]** confirmed or refuted in the README, and §8 amended where refuted; the swarm is left. |
+| S2 | Swarm config and wrapper | `src/adapters/swarm/config.rs` (new; pattern `src/adapters/kubernetes/config.rs:30-280`), `src/adapters/swarm/mod.rs` (new: names, the `docker --context` wrapper with a scoped env as in `src/adapters/kubernetes/mod.rs:384-410`), `src/adapters/mod.rs`, `src/provider.rs` (registry) | M1, M4 | 5 | §8.2 parses. Load refusals are tested. `DOCKER_HOST`, `DOCKER_CONTEXT` and `DOCKER_CONFIG` never reach a call. **FM-02:** config rows show `Swarm config` or `Swarm env`. (No recording gate: nothing here depends on S-R1–S-R9.) |
+| S3 | Swarm store (secrets and configs) | `src/adapters/swarm/store.rs` (new), `store_tests.rs` | S1, S2 | 5 | Tests over S-R2, S-R3, S-R7. Values go on stdin only. Clean-up keeps `PreviousSpec` references. **FM-10:** merges only after S1's README marks the assumptions it uses confirmed, or §8 is amended. |
+| S4 | Swarm runtime | `src/adapters/swarm/runtime.rs` (new), `runtime_tests.rs` | S1, S3, X2 | 7 | Over S-R4, S-R5, S-R8: the argv, health states, `ChangedOutsideOpv`, the owner rules, `--env-add` for config only. **FM-06:** a Spec change outside opv's entries after the update is exit 5 `update_refused` naming the paths. **FM-03:** the log-driver warn line for an unset or on-disk driver; none for `none`. **FM-10:** merges only after the S1 gate. |
+| S5 | Swarm diagnosis, simulator, E2E | `src/adapters/swarm/diagnose.rs` (new), `tests/sim/docker.rs` (new) + `tests/sim/opv_sim.rs` `TOOLS`, `tests/e2e/scenarios/swarm.rs` (new), `tests/e2e/matrix.rs` (`:110-125`, `:351`) | S4, X2 | 7 | The recorded not-a-manager and unreachable replies diagnose as in §8.8. E2E plan, sync, status and canary pass. An unrecorded call is exit 86. |
+| X2 | Swarm causes (moved out of X1) | `src/cause/mod.rs` (`ConfigCheck::SwarmSecretWithoutFile`, `PatternId::SwarmSecretsDir`, `System::Docker`, object `SwarmManager`), `src/cause/render.rs`, `docs/design/error-catalog.md` | S1 | 2 | Every §8.8 row is tested for code, exit, retry, text and JSON. |
+| S6 | Swarm verification | `docs/verification/v0.12.0-swarm.md` + directory | the tag, O13 | 3 | §12.3 passes, or its deviations are recorded. |
 | G1 | gcloud recordings G-R1–G-R8 | `tests/fixtures/gcloud/` | O14 | 4 | Recorded with markers; **[A20]**–**[A26]** confirmed or refuted; the project is deleted. |
 | G2 | GCP store config and names | `src/adapters/gcp/config.rs` (new; beside `src/adapters/azure/store.rs:159`), `src/adapters/gcp/mod.rs` (the `gcloud` wrapper), `src/host.rs` (`Tool` gcloud near `:381`) | M1 | 4 | `[stores.x] gcp_secret_manager` parses; name rules are tested; doctor lists gcloud. |
 | G3 | GCP store operations | `src/adapters/gcp/store.rs` (new), `store_tests.rs` | G1, G2 | 6 | Over G-R2 to G-R5. Stdin only. Versions older than the previous one are disabled. `opv-kind` labels are set. |
 | G4 | GCP diagnosis and causes | `src/adapters/gcp/diagnose.rs` (new), `src/cause/mod.rs` (`System::Gcp`, `GrantModel::GcpIam`, `CloudApi`), `src/cause/render.rs`, `docs/design/error-catalog.md` | G1 | 4 | Every §9.6 row is tested from G-R6 and G-R7. |
-| G5 | `vm` target and `LatestRuntime` | `src/adapters/vm/config.rs` (new), `src/adapters/vm/runtime.rs` (new), `src/adapters/mod.rs`, `src/provider.rs` | G3 | 5 | `--deploy` prints `Next: <restart_hint>`. The channels are declared. A secret without `file` is refused. The `chain:` lines appear. |
-| G6 | VM startup script and cloud-init | `deploy/vm/opv-vm-secrets.sh`, `deploy/vm/cloud-init.yaml`, `deploy/vm/README.md`, `tests/vm_step.rs` | G1 | 6 | The GCP branch writes tmpfs files (dir 0700, files 0400, `--owner`) and `.env`. No value appears in argv or env snapshots. Traversal is refused. Failure exits non-zero naming the id. `--check` prints presence only. The Azure and AWS branches are marked "unverified". |
+| G5 | `vm` target and `LatestRuntime` | `src/adapters/vm/config.rs` (new), `src/adapters/vm/runtime.rs` (new), `src/adapters/mod.rs`, `src/provider.rs` | G3 | 5 | `--deploy` prints `Next: <restart_hint>`. The channels are declared. A secret without `file` is refused. The `chain:` lines appear. **FM-02:** config rows show `Secret Manager`, delivered as `env` or `file`. |
+| G6 | VM startup script and cloud-init | `deploy/vm/opv-vm-secrets.sh`, `deploy/vm/cloud-init.yaml`, `deploy/vm/README.md`, `tests/vm_step.rs` | G1 | 7 | The GCP branch writes tmpfs files (dir 0700, files 0400, `--owner`) and `.env`. No value appears in argv or env snapshots. Traversal is refused. Failure exits non-zero naming the id. `--check` prints presence and size only. The Azure and AWS branches are marked "unverified". **FM-01:** the fetch uses `curl -fsS`; a 403, a partial body (curl exit 18), an empty body and an undecodable body each exit non-zero before any `chown` or rename, and leave no file and no `.tmp`; no fetch is judged by a pipeline's status. |
 | G7 | GCP simulator and E2E | `tests/sim/gcloud.rs`, `tests/sim/opv_sim.rs`, `tests/e2e/scenarios/gcp_vm.rs`, `tests/e2e/matrix.rs` | G4, G5 | 6 | Plan, sync, status, 403, API disabled and canary pass from recordings. |
-| G8 | GCP verification | `docs/verification/v0.12.0-gcp-vm.md` + directory | the tag | 5 | §12.2 passes, or its deviations are recorded. |
+| G8 | GCP verification | `docs/verification/v0.12.0-gcp-vm.md` + directory | the tag | 6 | §12.2 passes, or its deviations are recorded, including step 8 (**FM-01**: a blocked metadata server leaves the app stopped). |
 
-**0.12.0:** critical path G1 → G3 → G5 → G7 (21 h); **total about 40 h**.
+**0.12.0 sequencing**
+- Swarm (waits for O13): S2 → S3 → S4 → S5 (24 h; S1 and X2 alongside), then S6 on the tag. Swarm total 32 h.
+- GCP (waits for O14): G1 → G3 → G5 → G7 (21 h), then G8 on the tag. GCP total 42 h.
+- The two tracks share nothing but M1 and M4, which ship in 0.11.0; either can slip without the other.
+- **Total 74 h** (was 40 h): Swarm S1–S5 (26 h) and X2 (2 h) moved in; the FMECA changes add 6 h (S4 +1, S6 3, G6 +1, G8 +1).
 
 **Later:** AWS (the G2–G4 pattern, plus G6's branch verified), Fly files after F1–F4, and the Events API trigger (O16).
 
@@ -977,9 +1022,8 @@ Evidence goes in `docs/verification/v0.11.0-file-delivery.md` and its directory.
 
 **Prerequisites:**
 - kind and kubectl, with kind in `~/.local/bin` and a throwaway cluster (the owner allowed this); versions as in `tests/fixtures/kubernetes/failures/README.md:9-12`;
-- a single-node swarm only after O13;
 - `gh`, `jq`, `script`, and a `journeeze-saas` worktree at `ced358d`;
-- a test vault with `journeeze`, environments `verify`, `verify-nofsgroup` and `verify-swarm`, the eleven §4.6 keys plus `LOG_LEVEL` (config), and a state vault;
+- a test vault with `journeeze`, environments `verify` and `verify-nofsgroup`, the eleven §4.6 keys plus `LOG_LEVEL` (config), and a state vault;
 - two service accounts, reader and deployer, created by the person and exported only in the CI-like shell.
 
 **Kit:**
@@ -987,10 +1031,10 @@ Evidence goes in `docs/verification/v0.11.0-file-delivery.md` and its directory.
 - A Dockerfile: pinned debian-slim, `USER 10001`, nothing else.
 - `k8s/`:
   - namespace;
-  - ServiceAccount `opv-ci` with a Role of exactly `ACCESS` plus configmaps (§6.5), and its own context;
-  - `jzverify` with `automountServiceAccountToken: false` and `fsGroup: 10001`;
+  - ServiceAccount `opv-ci` with a namespaced Role (no ClusterRole) of exactly `ACCESS` plus configmaps (§6.5), and its own context;
+  - `jzverify` with `automountServiceAccountToken: false`, `fsGroup: 10001`, and a second `sidecar` container (the same image, `sleep`);
   - `jzverify-nofsgroup` with `runAsUser: 10001`.
-- `swarm/`, and `compose.yml` (the §5 recipe).
+- `compose.yml` (the §5 recipe).
 
 **Steps.** Everything runs inside `script -q E/transcript.txt`.
 
@@ -1004,15 +1048,15 @@ Evidence goes in `docs/verification/v0.11.0-file-delivery.md` and its directory.
 | V6 | `opv changed verify` | exit 0 `unchanged` |
 | V7 | `kubectl get deployment -o json \| jq`; `kubectl get secret,configmap -l opv-managed=verify -o name` | the §6.3 shape; no file-key env; no migrate object |
 | V8 | `kubectl logs deploy/jzverify` | 9 `match` (PEM, `db-url\n`); `LOG_LEVEL` matches; migrate absent; traversal refused; no marker in env |
-| V9 | `kubectl exec … stat -f -c %T; stat -L -c "%a %u %g" …; id; command -v op opv \|\| echo none; ls /var/run/secrets/kubernetes.io` | `tmpfs`; `440 0 10001`; `none`; no token |
+| V9 | `kubectl exec … stat -f -c %T; stat -L -c "%a %u %g" …; id; command -v op opv \|\| echo none; ls /var/run/secrets/kubernetes.io`; then `kubectl exec -c sidecar … ls /run/secrets/journeeze` | `tmpfs`; `440 0 10001`; `none`; no token; the sidecar has no such path (§6.3) |
 | V10 | the person edits the webhook marker; `opv changed verify` (exit 10, naming the item); `opv sync verify --deploy`; logs | the new Secret version; healthy; `match`; the old version kept for the old ReplicaSet; `changed` is then 0 |
 | V11 | drift: `kubectl set env deployment/jzverify LOG_LEVEL=tampered`; `opv status verify --fail-on-drift`; `opv delivery verify verify --json`; then `opv sync verify --deploy` | exit 8 `target_drift`; exit 8 `delivery_unverified`; the sync restores it |
 | V12 | `opv sync verify-nofsgroup --deploy` | `mount_unreadable`, exit 6, nothing written |
-| V13 | Swarm (if O13): V4–V10 against `verify-swarm`; `docker exec` into a task for `stat` and `id` | files `400 10001 10001` on tmpfs |
-| V14 | **no 1Password at runtime:** revoke both service accounts; `kubectl rollout restart`; `docker service update --force`; then logs | all `match` |
+| V13 | (Swarm moved to 0.12.0: §12.3) | — |
+| V14 | **no 1Password at runtime:** revoke both service accounts; `kubectl rollout restart`; then logs | all `match` |
 | V15 | local: `opv run dev … -- docker compose run --rm serve`; `docker compose config` outside opv | the verdicts; exit 15 outside |
-| V16 | canary scan over the transcript, Deployments, ReplicaSets, events and `service inspect`, for the markers and their base64 forms | zero hits outside the stores' own data |
-| V17 | `kind delete cluster`; `docker swarm leave --force` | gone |
+| V16 | canary scan over the transcript, Deployments, ReplicaSets, events, `kubectl logs` of every pod and the kind node's `/var/log/pods` (`docker exec <node> grep -r`), for the markers and their base64 forms | zero hits outside the stores' own data |
+| V17 | `kind delete cluster` | gone |
 
 ### 12.2 0.12.0: GCP VMs
 
@@ -1022,8 +1066,19 @@ Evidence goes in `docs/verification/v0.11.0-file-delivery.md` and its directory.
 4. Rotate: edit a marker, `opv changed` (10), `opv sync`, `restart_hint`, and the new digest matches.
 5. Scale to 3: the new VM matches.
 6. Revoke the service accounts, recreate a VM: it still matches.
-7. Run the canary scan over the transcript, the serial console and the instance logs.
-8. Delete the project.
+7. Run the canary scan over the transcript, the serial console, the instance logs and `journalctl -u opv-vm-secrets`.
+8. On one VM, block the metadata server (`iptables`) and restart the step: it exits non-zero naming the id, `--check` shows the path absent, and `journeeze.service` doesn't start (FMECA FM-01).
+9. Delete the project.
+
+### 12.3 0.12.0: Docker Swarm
+
+On a single-node swarm (O13), with an environment `verify-swarm` in the test vault and the kit's `swarm/` directory:
+1. V3–V10 of §12.1 against `verify-swarm`.
+2. `docker exec` into a task: `stat -f -c %T`, `stat -c "%a %u %g"`, `id`: files `400 10001 10001` on tmpfs.
+3. `plan` warns about the service's log driver unless the kit sets `--log-driver none` (§8.5).
+4. Revoke the service accounts; `docker service update --force`; all `match`.
+5. The canary scan over the transcript, `service inspect` and `docker service logs`.
+6. `docker swarm leave --force`.
 
 ## 13. Assumptions
 
@@ -1060,6 +1115,8 @@ Evidence goes in `docs/verification/v0.11.0-file-delivery.md` and its directory.
 | A29 | A 15-minute schedule of `op item list` and `op read` stays within service-account rate limits | V3–V10 timing, and the 1Password documentation on limits |
 | A30 | Precedence between a Fly secret and `[env]` of the same name | a Fly spike, part of O8 |
 | A31 | `docker config inspect` returns a config's data | S-R3 |
+| A32 | `op` signals a service-account rate limit in a reply opv can recognise, optionally with a retry time | the 1Password documentation on limits; a recorded reply if one can be provoked, otherwise C1 classifies only what the documentation states |
+| A33 | A Swarm service's Spec carries its log driver as `TaskTemplate.LogDriver`, absent when the daemon default applies | S-R4 |
 
 ## 14. Open risks
 
@@ -1077,8 +1134,32 @@ Evidence goes in `docs/verification/v0.11.0-file-delivery.md` and its directory.
 | R10 | A missing mounted object stalls a rollout until the deadline | rare / medium | opv writes first; O10 |
 | R11 | Non-UTF-8 or NUL values can't be file keys (`src/app/local_delivery.rs:295`) | rare / low | pre-existing |
 | R12 | The e2e app has a remote profile for `prod` (`tests/e2e/app/secrets.toml:120-128`), which may conflict with the principle | possible / medium | O9 |
-| R13 | 0.11.0 grew to about 113 h | likely / medium | Swarm (S1–S5) and C5 can slip without touching the rest |
-| R14 | Service-account rate limits under a 15-minute schedule **[A29]** | possible / medium | make the schedule configurable; back off on 429 (`Unavailable{RateLimited}`) |
+| R13 | 0.11.0 is 93 h and 0.12.0 is 74 h, built on assumptions the recordings settle | likely / medium | Swarm moved to 0.12.0 (§15); K3–K6 and S3–S4 merge only after their recordings (§6.9, §11; FM-10); C5 and C6 can slip without touching the rest |
+| R14 | Service-account rate limits under a 15-minute schedule **[A29]** | possible / medium | `--every`, one listing per vault, a typed rate-limit reply and one retry (§2.5; FM-12) |
+| R15 | A workload logs a value, and the node keeps it on disk | possible / high | the app's contract (§6.4); the Swarm log-driver warning (§8.5); the canary scan over pod, node and service logs (V16, §12.3) |
+| R16 | A sensitive value declared `config` is readable through its channel (env, ConfigMap, argv, `.env`) | possible / high | camp 1: config is declared non-secret; each row shows its channel; sensitive values are `kind = "secret"`; concealed config refused or warned as today (§1.3; FM-02) |
+
+### 14.1 FMECA review (2026-10-17)
+
+A camp-1 FMECA of this design (`.delivery/v0110-fmeca-136-camp1/1792224193645/analysis-report.md` in the design worktree, not in git; run against `e21d19e`) proposed fifteen changes. Each claim was checked against the design and the code before it was applied.
+
+| FM | Changed | As proposed, or adjusted |
+|---|---|---|
+| FM-01 | §9.2, §9.9, §12.2 step 8; G6, G8 | as proposed: `curl -fsS`, no pipeline status, `EXIT` trap |
+| FM-02 | §1.3, §6.2, §7.1, §8.2, §9.2; M2, F1, S2, G5; R16 | **manager's decision:** env routing of config is **not** made opt-in (camp 1 declares config non-secret, and the owner chose camp 1). Instead every row shows its channel, sensitive values are `kind = "secret"`, and concealed config keeps today's handling: refused on GitHub variables (and Swarm env), warned elsewhere |
+| FM-03 | §6.4, §8.5, §8.9, §12.1 V16, §12.3; K6, S4, V1; A33, R15 | adjusted: Kubernetes has no per-workload log driver, so no warning there; the warning is Swarm-only |
+| FM-04 | new §1.6; new deliverable M5 | adjusted: an MCP server does exist (`src/mcp.rs`, sharing `src/app/agent_view.rs` with the CLI); the review found none. M5 extends the existing marker scan to it |
+| FM-05 | §2.2; C2 | as proposed: the CI service account writes the delivery item (it already writes evidence), never a source item |
+| FM-06 | §8.4; C5, S4 | as proposed; the CI concurrency group already existed (§2.5) |
+| FM-07 | §4.5; M4 | adjusted: without a declared transform the divergence is a loud `single_line` finding, not silent; the warn line applies to `FileCapability::None` only |
+| FM-08 | §6.3, §12.1 V9; K5, K6, V1 | adjusted: `fsGroup` is pod-wide and projections have no per-file owner, so "per-product `fsGroup`, 0400 with that owner" is not possible; the mount goes into the target's container only |
+| FM-09 | §6.5, §12.1 kit; K3, K6 | adjusted: `resourceNames` can't restrict `create` or `list`; namespaced Role plus the nightly drift check |
+| FM-10 | §6.9; K3–K6, S3, S4; R13 | adjusted: the gate is on K3–K6 and S3–S4, not K2 and S2, which use no recording |
+| FM-11 | §2.2; C5, C6 | as proposed |
+| FM-12 | §2.5; C1, C5; A32, R14 | adjusted: the listing was already once per vault; no adapter produces `RateLimited` today, so C1 adds it |
+| FM-13 | §6.6; K4, K5 | as proposed |
+| FM-14 | §5, §15 | as proposed: restated as the accepted residual; narrowing it is an open idea |
+| FM-15 | §4.6; A3 | adjusted: the verification cluster runs no shim, so V10/V14 can't prove the Fly path; the Journeeze `SERVE` edit is an external dependency of A3 |
 
 ## 15. Decisions on the open questions (2026-10-17)
 
@@ -1088,6 +1169,8 @@ Evidence goes in `docs/verification/v0.11.0-file-delivery.md` and its directory.
 - **O13: Swarm recordings.** A temporary single-node swarm on the development machine is approved for recording (`docker swarm init`, then `docker swarm leave --force`). Nothing is pulled or exposed.
 - **O14: GCP project.** Decided when 0.12.0 starts.
 - **Scope.** Docker Swarm (S1–S5) moves to 0.12.0 alongside the VM work. 0.11.0 is the channel model, change detection with its CI recipe and README, Kubernetes ConfigMaps and file mounts, Fly config, the webhook mapping, verbatim files, R1 and verification.
+
+**Open (from the FMECA, FM-14; not designed):** narrowing who can read the local RAM directory below "the same user": a dedicated low-privilege delivery user, or one subdirectory per role. Today's limit stays the accepted residual (§5, R4).
 
 **Taken as recommended (technical; the owner may overrule):**
 
