@@ -727,6 +727,12 @@ struct RawTarget {
     /// The products it delivers (FR-48).
     #[serde(default)]
     products: Option<Vec<String>>,
+    /// The process roles this target serves (M3, §4.4). `None`: no scoping — every delivered
+    /// key is delivered, as before — but a target that delivers a product whose keys declare
+    /// roles must still declare `roles`. A key whose `roles` miss this target's is not
+    /// desired here, so `--deploy --prune` removes an existing binding.
+    #[serde(default)]
+    roles: Option<Vec<String>>,
     /// `op://<vault>/<item>` holding the target's deploy identity (FR-40).
     #[serde(default)]
     deploy_credentials: Option<String>,
@@ -1073,6 +1079,7 @@ fn target(
         name: name.to_string(),
         config,
         products: raw.products,
+        roles: raw.roles,
         deploy_credentials,
         state_vault_id,
         delivery_items,
@@ -1171,11 +1178,72 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
     };
     check_scopes(&fleet, doc)?;
     check_boundaries(&fleet, doc)?;
+    check_target_roles(&fleet, doc)?;
     check_names(&fleet, doc)?;
     check_personal(&fleet, doc)?;
     check_evidence_width(&fleet, doc)?;
     check_delivery_items(&fleet, doc)?;
     Ok(fleet)
+}
+
+/// A process role name (M3, #136): `^[a-z0-9-]{1,32}$`, so a shell never has to quote it.
+fn is_role_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 32
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// Target-level process roles (M3, §4.4). A target that delivers a product whose keys
+/// declare roles must also declare `roles`; every declared role must be a valid role and be
+/// declared by a key of a product the target delivers (product-wide: a role says which
+/// process a key is for, whichever environment it is desired in). A target with no such
+/// product is unchanged.
+fn check_target_roles(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
+    for (env_name, env) in &fleet.environments {
+        for (name, target) in &env.targets {
+            let path = ["environments", env_name, "targets", name, "roles"];
+            let mut declared: BTreeSet<&str> = BTreeSet::new();
+            let mut role_scoped = false;
+            for (product, p) in &fleet.products {
+                if !fleet.delivers(env_name, name, product) {
+                    continue;
+                }
+                for spec in p.keys.values() {
+                    if let Some(roles) = &spec.roles {
+                        role_scoped = true;
+                        declared.extend(roles.iter().map(String::as_str));
+                    }
+                }
+            }
+            match &target.roles {
+                None if role_scoped => {
+                    return Err(doc.invalid(&path, FieldRule::Missing));
+                }
+                None => {}
+                Some(roles) => {
+                    if roles.is_empty() {
+                        return Err(doc.invalid(&path, check(ConfigCheck::EmptyRoles)));
+                    }
+                    if roles.iter().any(|r| !is_role_name(r)) {
+                        return Err(doc.invalid(
+                            &path,
+                            FieldRule::Pattern {
+                                id: PatternId::RoleName,
+                            },
+                        ));
+                    }
+                    if let Some(x) = roles.iter().find(|r| !declared.contains(r.as_str())) {
+                        return Err(doc.invalid(
+                            &path,
+                            undeclared(Declared::Role, x, declared.iter().copied()),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// FR-58: a recorded delivery item belongs to a product its target delivers; any other
@@ -1723,20 +1791,13 @@ fn validate_key(
         if roles.is_empty() {
             return Err(invalid(&["roles"], check(ConfigCheck::EmptyRoles)));
         }
-        for role in roles {
-            let ok = !role.is_empty()
-                && role.len() <= 32
-                && role
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-            if !ok {
-                return Err(invalid(
-                    &["roles"],
-                    FieldRule::Pattern {
-                        id: PatternId::RoleName,
-                    },
-                ));
-            }
+        if roles.iter().any(|role| !is_role_name(role)) {
+            return Err(invalid(
+                &["roles"],
+                FieldRule::Pattern {
+                    id: PatternId::RoleName,
+                },
+            ));
         }
     }
     for env in &spec.rules.refuse_in {
@@ -4155,6 +4216,69 @@ environments = ["prod"]
     fn a_bad_role_names_the_roles_field() {
         let text = with_prod_key("p", "K1", "roles = [\"Serve\"]\n");
         assert_eq!(field_of(&text), "products.p.keys.K1.roles");
+    }
+
+    // --- target-level roles (#136, M3) ---
+
+    /// The fixture plus a prod target `products = ["p"]` line, a target `roles` line
+    /// and a prod key with `key_roles`.
+    fn with_target_roles(target_roles: &str, key_roles: &str) -> String {
+        let text = with_prod_key("p", "K1", &format!("roles = {key_roles}\n"));
+        replaced(
+            &text,
+            "state_vault_id = \"sprd\"\n",
+            &format!("state_vault_id = \"sprd\"\nproducts = [\"p\"]\n{target_roles}\n"),
+        )
+    }
+
+    #[test]
+    fn a_listed_role_scoped_product_on_a_target_without_roles_is_refused() {
+        let text = with_prod_key("p", "K1", "roles = [\"serve\"]\n");
+        let text = replaced(
+            &text,
+            "state_vault_id = \"sprd\"\n",
+            "state_vault_id = \"sprd\"\nproducts = [\"p\"]\n",
+        );
+        assert_eq!(
+            invalid(&text),
+            (
+                "environments.prod.targets.portfolio.roles".to_string(),
+                FieldRule::Missing
+            )
+        );
+    }
+
+    #[test]
+    fn a_target_role_no_delivered_key_declares_is_refused() {
+        let text = with_target_roles("roles = [\"serve\"]", "[\"migrate\"]");
+        assert!(matches!(
+            check_of(&text),
+            ConfigCheck::Undeclared { kind: Declared::Role, ref name, .. } if name == "serve"
+        ));
+    }
+
+    #[test]
+    fn an_empty_target_roles_list_is_refused() {
+        let text = with_target_roles("roles = []", "[\"serve\"]");
+        assert_eq!(check_of(&text), ConfigCheck::EmptyRoles);
+    }
+
+    #[test]
+    fn a_target_role_a_delivered_key_declares_loads() {
+        let text = with_target_roles("roles = [\"serve\"]", "[\"serve\"]");
+        assert!(parse(&text).is_ok());
+    }
+
+    #[test]
+    fn a_default_target_delivering_role_scoped_keys_is_refused() {
+        let text = with_prod_key("p", "K1", "roles = [\"serve\"]\n");
+        assert_eq!(
+            invalid(&text),
+            (
+                "environments.prod.targets.portfolio.roles".to_string(),
+                FieldRule::Missing
+            )
+        );
     }
 
     /// 03.01: a reserved directory variable is refused as reserved, not as a pattern it

@@ -232,6 +232,11 @@ pub struct Target {
     /// The products this target delivers (FR-48); `None`: every non-source-only product
     /// with a key desired in the environment. See [`Fleet::delivers`].
     pub products: Option<Vec<String>>,
+    /// The process roles this target serves (#136, §4.4). `None`: every role — but a target
+    /// that delivers any product whose keys declare roles must still declare `roles` at load
+    /// (missing, undeclared or empty is refused). A key whose `roles` miss this target's is
+    /// not desired here, so `--deploy --prune` removes an existing binding.
+    pub roles: Option<Vec<String>>,
     /// The item holding this target's least-privilege deploy identity (FR-40), read by
     /// `status`, `plan` and `sync` to sign the target CLI in for the run only.
     pub deploy_credentials: Option<ItemRef>,
@@ -251,6 +256,7 @@ impl PartialEq for Target {
         self.name == other.name
             && self.config.eq_dyn(other.config.as_ref())
             && self.products == other.products
+            && self.roles == other.roles
             && self.deploy_credentials == other.deploy_credentials
             && self.state_vault_id == other.state_vault_id
             && self.delivery_items == other.delivery_items
@@ -265,6 +271,7 @@ impl Clone for Target {
             name: self.name.clone(),
             config: self.config.clone_box(),
             products: self.products.clone(),
+            roles: self.roles.clone(),
             deploy_credentials: self.deploy_credentials.clone(),
             state_vault_id: self.state_vault_id.clone(),
             delivery_items: self.delivery_items.clone(),
