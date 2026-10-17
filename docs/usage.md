@@ -268,6 +268,15 @@ opv sync prod --deploy --prune           # also remove names no longer wanted, a
 - **Provenance.** Each Key Vault version opv writes is tagged, and each Kubernetes Secret, ExternalSecret and Deployment it writes is annotated, with `opv-version`, `opv-written` (UTC), `opv-env` and `opv-plan` (the [plan id](#review-then-apply-exactly-that-plan---expect-plan)). Never a value. `status` reads them back as one line, e.g. `Azure: last changed by opv 0.5.0 at 2026-10-08T14:02:11Z (plan 7f3c9a1e)`, and `status --json` as `provenance`. Nothing is stored anywhere else; Fly is not stamped.
 - **Access.** The app's identity needs read access to the vault secrets. `opv doctor` warns, with the grant command, if it cannot confirm that. If the identity really cannot read a secret, Azure refuses the new revision, the old one keeps serving, and `sync` reports it.
 
+#### Files and ConfigMaps on Kubernetes
+
+With `kubernetes.secrets_dir` set ([configuration](configuration.md#kubernetes-secrets--deployment)), a file key is written like any secret, as a new immutable Secret version, and `--deploy` mounts it at `<secrets_dir>/<file>` in the target's container, in the same change that removes its variable. With `kubernetes.config = "configmap"`, config keys are written as immutable ConfigMap versions and bound with `configMapKeyRef`.
+
+- **Plan first.** `plan` shows where each key goes: `→ file <path>` for a file key, `→ ConfigMap, env` for config, and one `would deploy: volume opv-files-<product>` line naming the directory, the number of files and the variables it removes.
+- **Readability.** `sync` refuses before writing anything when the workload could not read the files (no `fsGroup` and a non-root user): exit 6, `mount_unreadable`, with the `securityContext` line to add. A workload running as root syncs, with a warning on every run.
+- **Rollout and rollback.** A new version changes the Deployment, so `--deploy` starts a rollout and waits for it, exactly as for variables. Older Secret and ConfigMap versions still referenced by a ReplicaSet are kept, so `kubectl rollout undo` keeps working.
+- **No-log contract.** opv never writes a value to a log, but it cannot stop your app from doing so: on Kubernetes a container's stdout always reaches the node's log files. Read secrets from the files and never log them; the verification for each release scans pod and node logs for its test markers.
+
 #### Key Vault → Kubernetes through External Secrets (`secrets_in`)
 
 With `secrets_in` (see [configuration](configuration.md#secrets-in-a-named-store-storesname-and-secrets_in)) the same commands run, with these differences:

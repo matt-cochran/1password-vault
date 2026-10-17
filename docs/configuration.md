@@ -398,11 +398,32 @@ kubernetes.namespace  = "myapp"                     # required
 kubernetes.deployment = "api"                       # required
 kubernetes.container  = "api"                       # optional when the pod has one container
 kubernetes.env_name   = "FLEET__{PRODUCT}__{KEY}"   # optional; defines target names
-kubernetes.config     = "env"                       # or "store"
+kubernetes.config     = "configmap"                 # or "env" (the default when unset) or "store"
+kubernetes.secrets_dir = "/run/secrets/{product}"   # optional: file keys become files here
+roles = ["serve"]                                   # required when a delivered key declares roles
 state_vault_id = "vdev-state"
 ```
 
 opv always passes `--context` and `--namespace`, so it never acts on whatever context your shell has selected. Each secret value becomes an immutable Kubernetes Secret named `opv-<name>-<random id>` (the id says nothing about the value), labelled `opv-managed=<env>`, and the Deployment's variable points at it with `secretKeyRef`. An unchanged value writes nothing (opv compares it with the bound Secret); a changed value is a new Secret. After a healthy rollout opv deletes the older Secrets that neither the Deployment nor any ReplicaSet references, and `--prune` removes a key that is no longer declared. The Secret name is the variable name lower-cased with `_` changed to `-`; that part is also the `opv-key` label value, so it must match `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` with at most 63 characters, and collisions are an error. A longer name is refused when the configuration loads (`renders Kubernetes name of N characters, which must match …`). A key whose variable name starts or ends with `_` (a Secret name starting or ending in `-`) is refused the same way, naming the key and its line.
+
+**Config (`kubernetes.config`).** Where config keys go:
+
+| Value | Config keys become | Readable by |
+|---|---|---|
+| `env` (default when unset) | plain `value` entries on the Deployment | anyone who can read the Deployment |
+| `configmap` (what `opv init` and `opv target add` write) | immutable ConfigMaps `opv-<name>-<random id>`, bound with `configMapKeyRef` | anyone who can read ConfigMaps or the Deployment |
+| `store` | Secrets, like secret keys | as Secrets |
+
+ConfigMaps are versioned, compared exactly and cleaned up like Secrets. Config is declared non-secret, so a ConfigMap is the right place for it; every `plan` and `status` row names its channel.
+
+**Files (`kubernetes.secrets_dir`).** Without it, no key is a file and everything is a variable. With it, every delivered key that has `file = "<relative/path>"` is mounted at `<secrets_dir>/<path>` and only there: its variable is removed in the same change. `{product}` in the directory renders the product name (`_` becomes `-`); it is required when two products deliver file keys to one target, and two products may not render the same directory. The directory must be absolute and normalised, not `/`, not under `/proc`, `/sys`, `/dev` or `/var/run/secrets/kubernetes.io`, at most 255 bytes, with no `:` or whitespace. A config key with `file` needs `config = "configmap"` or `"store"`, and within one product no key's `file` may be a parent directory of another's (`a` and `a/b`): Kubernetes accepts that volume with only a warning and the pod never starts.
+
+- **How it is mounted.** One projected volume per product, `opv-files-<product>`, holds one item per file key, each pointing at that key's immutable Secret (or ConfigMap) version. The `opv-files-` prefix is reserved for opv. The volume is read-only and mounted **only into the target's container** (`kubernetes.container`); other containers in the pod, a sidecar for example, get no mount.
+- **Who can read the files.** Files are mode 0440, owned by root with the pod's `fsGroup` as group. Kubernetes has no per-file owner for these volumes, so set `spec.template.spec.securityContext.fsGroup` to a group that **this product's container alone** uses. opv never sets `fsGroup`. Before any write, `sync` checks the Deployment's security context: a workload that sets no `fsGroup` and runs as a non-root user (or whose user or group opv cannot tell) is refused as `mount_unreadable` with nothing written; `plan`, `status` and `doctor` print the same finding as a warning. A workload running as root (or in group 0) can read the files; opv prints a warning on every run and goes on.
+- **A path already in use.** If the target container already mounts another volume at the directory, above it or inside it, `sync` refuses (`policy_refused`) and names the volume.
+- **Refresh.** A new value is a new object version, so the Deployment changes and Kubernetes rolls out new pods; running pods never see a value change in place.
+
+**Rights.** opv needs `get`, `create`, `patch`, `list` and `delete` on Secrets, `get` and `update` on Deployments, and `list` on ReplicaSets and Pods; a `configmap` target also needs `get`, `list`, `create`, `patch` and `delete` on ConfigMaps (`apply --server-side` is authorised as `patch`, and as `create` for a new object). Grant them with a **namespaced Role** in the target's namespace, never a ClusterRole. `opv doctor` checks each one and names the grant.
 
 ### GitHub Actions: repository and environment secrets
 
