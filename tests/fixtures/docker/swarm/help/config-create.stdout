@@ -1,0 +1,8 @@
+
+Usage:  docker config create [OPTIONS] CONFIG file|-
+
+Create a config from a file or STDIN
+
+Options:
+  -l, --label list               Config labels
+      --template-driver string   Template driver

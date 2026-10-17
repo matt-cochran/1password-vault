@@ -1,47 +1,392 @@
-# Delivery transports: containers, Fly and the shared-host shim
+# Delivery: one source of truth, synced by CI into each platform's channels
 
-Status: **container transport — design for implementation in 0.11.0** (#136). **Fly — design only.** The owner's decisions of 2026-10-16 (`.delivery/v0101/decisions-136.md:5-13`, a local delivery file, not in git) are binding here:
+Status: **design for 0.11.0 and 0.12.0** (#136). This document replaces the container-transport design of `3b8e180` (`3b8e180:docs/design/delivery-transports.md`): opv no longer starts containers.
 
-1. 0.11.0 implements the container transport (a host RAM-only directory bind-mounted read-only into the container) and a recorded verification run of the tagged release. Fly stays design-only.
-2. When Fly is implemented, migration credentials live in a separate migration app (its own opv target), never on the serving app.
-3. File-destination keys deliver the stored bytes verbatim (multi-line PEM, trailing newline). No staging transform applies at delivery.
-4. Journeeze's serve role mapping gains `GITHUB_WEBHOOK_SECRET` → `github/webhook-secret`.
-
-Defaults the owner took without asking: a runtime whose UID mapping can't be determined is refused, never answered with world-readable files; the same-user isolation limit is documented; macOS and Windows file delivery stays refused.
-
-Conventions in this document: a **fact** carries a `file:line` citation (opv at `origin/dev` `ab88b30`) or a `commit:path:line` citation (Journeeze at `ced358d`). **[Assumption An]** marks something not verified; §12 lists them all. Recorded tool replies are under `tests/fixtures/docker/` (README there); nothing in this design depends on a reply nobody recorded.
-
-## 1. The one contract, several transports
-
-Every transport delivers the same declared contract, which local delivery already uses:
-
-| Part | Where it is declared | Example |
+| Release | Scope | Status |
 |---|---|---|
-| Source | the key's own field, or `from = "<product>/<KEY>"` | `journeeze/GITHUB_APP_PRIVATE_KEY` |
-| Destination | `file = "<lowercase/dash segments>"` | `github-app/private-key` |
-| Directory variable | `[products.<p>.local] secrets_dir_env` | `JZ_VAULT_DIR` |
-| Role | `roles = [...]` on the key (0.9.0); none means every role | `["migrate"]` for `DATABASE_URL_UNPOOLED` |
-| Environment mode | `[products.<p>.local] environment` | `declared_only` |
-| Bytes | always verbatim for a file destination (§5) | a PEM with its line breaks and final newline |
+| 0.11.0 | the channel model (§1); change detection, the drift check and the CI recipes (§2); the README section (§3); target `roles` and verbatim file bytes (§4); the local Docker Compose recipe (§5); Kubernetes ConfigMaps and mounted files (§6); config on Fly (§7); a Docker Swarm target (§8); the webhook secret mapping; a tagged-release verification (§12) | designed for implementation |
+| 0.12.0 | a GCP Secret Manager store, a `vm` target and the portable VM startup step, tested in GCP (§9) | designed for implementation |
+| later | an AWS Secrets Manager store; Fly file delivery; the 1Password Events API trigger | design only |
 
-The rules don't change between transports:
-- Bytes are delivered exactly: no interpolation, transform or newline change (§5).
-- Files are 0400 inside a 0700 directory that lives in RAM.
-- Names follow the consumer's contract.
-- A key outside the run's role is never resolved.
-- An unsupported transport fails closed, with a metadata-only reason. It never falls back to disk or to plain environment variables.
+**Conventions**
+- A **fact** carries a citation:
+  - `path:line` with no commit means opv at `ab88b30`, the base of this branch; this commit changes no code;
+  - `ced358d:path:line` means Journeeze (`journeeze-saas`);
+  - `3b8e180:path` means the previous design commit on this branch;
+  - a URL with a date cites public vendor documentation, as read on that date.
+- Recorded tool output lives under `tests/fixtures/`. This commit adds:
+  - `tests/fixtures/compose/` (Docker Compose 2.32.4);
+  - `tests/fixtures/docker/swarm/` (Docker 27.5.1 / Engine 29.8.1; help text, and replies from a node outside a swarm);
+  - `tests/fixtures/fly/help/` (flyctl 0.4.111 help text).
+- No reply in this design is invented. §6.9, §8.9 and §9.8 list the replies still to record.
+- **[An]** marks an assumption that nobody has verified. §13 lists each one with the check that settles it.
 
-`opv run --preview` and `opv_delivery_preview` report what a transport would deliver without reading a value. Each transport sets the preview's `transport` field (`src/app/delivery_preview.rs:222`).
+## 0. Owner decisions (2026-10-16/17)
 
-### 1.1 Journeeze's mapping (serve and migrate)
+These are binding. They are restated here because the delivery notes are not in git.
 
-The names are Journeeze's own store constants. The serve list is the shim's `SERVE` list (`ced358d:crates/jz_host/src/fleet_secrets.rs:40-76`) **plus the webhook secret** (decision 4). The migrate list is the shim's `MIGRATE` list (`ced358d:crates/jz_host/src/fleet_secrets.rs:79-82`).
+**Camp 1: one source of truth (2026-10-17).** opv works like Doppler or Infisical:
+- 1Password is the single source of truth for both **config and secrets**.
+- `opv sync` runs from CI and puts each kind into the platform's right channel.
+- At runtime nothing reads 1Password, opv or git.
+- A target that has no channel for a kind must say so (§1). Config is never silently `n/a`.
 
-| Key | Destination | Roles | Destination constant |
+**The principle (2026-10-17).** 1Password is used only in two places: on a developer's machine (`opv run`) and in CI/CD (`opv sync`, signed in with a service account). Production and every deployed environment never need 1Password, opv or a 1Password credential at runtime. The running app reads only what its platform provides. It follows that:
+- Kubernetes and Swarm delivery is set up by `opv sync` from CI.
+- The tagged-release verification shows the sync running as CI runs it, then a workload reading its files with no 1Password access.
+- Anything that puts `op`, a 1Password service-account token or opv into a runtime image, pod, task or VM is out of scope (§1.4).
+
+**Change detection is a priority (2026-10-17).** When 1Password changes, CI must notice and sync. A scheduled drift check fails when a platform has drifted from 1Password (§2).
+
+**Decoupling (2026-10-17).** Journeeze runs only on Fly today but must not be tightly coupled to Fly. Its contract is secrets as files under `JZ_VAULT_DIR` (`ced358d:crates/jz_secrets/src/lib.rs:1-4`, `ced358d:crates/jz_host/src/lib.rs:193-198`). That contract is the decoupling layer.
+
+**Scope (2026-10-17):**
+- a Docker Swarm target (§8);
+- plain Docker on VMs in any cloud, where CI syncs into the cloud's secret manager and a startup step that is not opv fetches the values with the VM's own identity (§9). GCP comes first, in 0.12.0; AWS is design only;
+- one scaling and rotation table (§10);
+- the 0.11.0 / 0.12.0 split (§11).
+
+**Revised 2026-10-17 (supersedes the first 2026-10-16 decision):**
+- opv never starts or controls containers.
+- The local mechanism is the existing wrapper. There is no `opv run shell`.
+- Cloud secrets go into the platform's own store. Kubernetes file keys are Secret volume mounts.
+- For Fly, investigate file delivery; where it isn't possible, Journeeze's shim stays.
+- Journeeze keeps `MountedSecretStore`.
+
+**Still standing from 2026-10-16:**
+- A file key delivers the stored bytes verbatim; no transform applies at delivery.
+- `GITHUB_WEBHOOK_SECRET` → `github/webhook-secret` in Journeeze's serve role.
+- Fly migration credentials live in a separate migration app (design only).
+- A verification run against the tagged release.
+- The same-user isolation limit is documented for local delivery; macOS and Windows local file delivery stays refused.
+
+## 1. The channel model
+
+### 1.1 The contract
+
+Every target declares, per key kind, **where that kind goes**, and whether it can deliver **files**. opv then routes each key by its kind, and never decides per key by chance.
+
+| Target | Secret channel | Config channel | File capability | Status |
+|---|---|---|---|---|
+| Local `opv run` | process env, or files in a RAM dir | process env | native (tmpfs dir) | today |
+| Fly | Fly secrets (staged, then deployed) | **Fly secrets too** (new): the only runtime channel opv can write through Fly's API, because `fly.toml [env]` needs a deploy of the app's config | **via the app**: env at boot, written to files by Journeeze's shim (`ced358d:crates/jz_host/src/fleet_secrets.rs:90`); native `[[files]]` only once §7.3 is answered | config new in 0.11.0 |
+| Kubernetes | immutable versioned Secret | **immutable versioned ConfigMap** (new `kubernetes.config = "configmap"`); today: plain env `value` or the store | native: one projected volume (Secret and ConfigMap sources) | ConfigMap and files new in 0.11.0 |
+| Docker Swarm | versioned Swarm secret (files at `/run/secrets/…`) | versioned Swarm config (files), or service env for config without `file` | native | new in 0.11.0 |
+| GitHub Actions | repository/environment secrets | variables (`docs/configuration.md:427`) | none: a file key is delivered by name as a secret | today |
+| Azure Container Apps | Key Vault versions bound by reference | app env, or the store (`azure.config`, `src/adapters/azure/config.rs:170-174`; `docs/configuration.md:338`) | none today; a Key Vault secret volume is design only **[A28]** | today |
+| VMs (GCP) | Secret Manager, latest version | Secret Manager too, labelled `opv-kind=config`, read by the same startup step | native: the startup step writes tmpfs files | new in 0.12.0 |
+| VMs (AWS) | Secrets Manager | SSM Parameter Store (`String`) **[A27]** | native, as for GCP | design only |
+| VMs (Azure) | Key Vault | Key Vault (tagged `opv-kind=config`) | native, as for GCP | design only |
+
+### 1.2 Today: config is silently `n/a`
+
+- The staged store's config channel is an optional method that **defaults to none**: `StagedStore::variables` returns `None` unless a target overrides it, and "config is not delivered by this target" (`src/ports.rs:44-49`). Only GitHub overrides it (`docs/configuration.md:427`).
+- `plan` gathers config values (`src/domain/plan.rs:420-428`), and a target that takes none shows them as `n/a`: "not delivered to the target (config keys, except GitHub variables …)" (`docs/usage.md:131`). Fly delivers no config at all.
+- Pinned runtimes set config through `RuntimeChange::set` (`src/domain/runtime.rs:47-50`). Azure and Kubernetes already split config from secrets with `config = "env" | "store"` (`src/adapters/azure/config.rs:170-174`; `src/adapters/kubernetes/config.rs:85-93`; `docs/configuration.md:338`, `:461`).
+
+### 1.3 How the contract appears in code
+
+The contract becomes a **required** method on `TargetConfig` (`src/provider.rs`, next to `open` at `:366-373`). It has no default, so a new target can't compile without declaring all three:
+
+```rust
+pub struct Channels {
+    pub secret: Channel,      // e.g. Channel::Store { label: "Kubernetes Secret" }
+    pub config: Channel,      // Channel::Store / Variables / RuntimeEnv / None { why }
+    pub files: FileCapability // Native { dir } / ViaApp { note } / None
+}
+fn channels(&self) -> Channels;   // no default body
+```
+
+- `Channel::None { why }` is a deliberate statement. Its row reads `not delivered (<target> has no config channel: <why>)`. It is never the plain `n/a`.
+- `StagedStore::variables` (`src/ports.rs:44-49`) loses its default body. GitHub keeps its implementation; Fly implements config as Fly secrets (§7).
+- `plan::evaluate` (`src/domain/plan.rs:420-428`) routes each ready key by `channels()`. A key whose kind has `Channel::None` adds a `no_channel` finding:
+  - `plan` and `status` print one `warn` line;
+  - `sync` **refuses** it (`Guard::NoChannel`, §1.5), unless the target spells out `config = "none"`. Then each run still prints a warn line, but the sync goes on.
+- `FileCapability::None` means a file key is delivered on the secret channel by its name, with a one-time warn line: `file destination not honoured on <target>`.
+- A contract test in `src/provider.rs` checks that every registered provider declares channels, and that a target configured with `config = "none"` maps to `Channel::None`.
+
+### 1.4 Rejected alternatives
+
+| Alternative | Why rejected |
+|---|---|
+| The container transport of `3b8e180` | the owner dropped it |
+| **Anything that puts `op`, a service-account token or opv into a runtime image, pod, task or VM**: an init container or sidecar reading 1Password; the 1Password Kubernetes Operator or Connect in the cluster; a CSI driver with a 1Password provider; the earlier Fly guest step `opv local-delivery --from-env` (`3b8e180:docs/design/delivery-transports.md` §6 item 3); opv in Journeeze's image (same file, §6.1 step 1); `op` or opv in the VM startup step | **out of scope by the owner's principle.** Each would also hand the runtime a credential that can read the vault. |
+| Config read at runtime from git (`fly.toml [env]` or a committed `.env`) | the owner decided camp 1: 1Password holds config too, and runtime reads neither 1Password nor git |
+| Keeping config `n/a` by default | the owner ruled it out; a silent skip hides a real gap |
+| `opv run shell` | the owner ruled it out |
+| A compose-file readability check | not cheap and not reliable (§5.3) |
+
+### 1.5 Causes for the channel model
+
+| Situation | Variant | Code | Exit | Retry | Do | Next |
+|---|---|---|---|---|---|---|
+| a key's kind has no channel on the target | `Guard` **new** `NoChannel{target, kind, why}` | policy_refused | 6 | never | "set config = \"none\" on target <t> to deliver no config there, or pick a target with a config channel" | `opv plan <env> --target <t>` |
+| `config = "none"` on a target that has a channel | none: allowed, with a warn line per run | — | — | — | — | — |
+
+## 2. When sync runs: change detection, drift and CI
+
+### 2.1 What exists today
+
+| Command | Reads | Exit codes | Source |
+|---|---|---|---|
+| `opv status <env>` | 1Password values, target listing, bindings | 8 only for missing or failing keys; extras and drift alone exit 0 | `src/app/status.rs:5-6`; `docs/usage.md:108` |
+| `opv delivery verify <env> [--product p]` | the delivery item, the values, the target's listing | 8 `delivery_unverified`, with states `ChangedOnTarget`, `ChangedInOnePassword`, `NotRecorded` and others | `docs/usage.md:16`, `:479-485`; `src/app/delivery.rs:589-609`; `docs/design/error-catalog.md:187` |
+| `opv plan` / `sync --expect-plan` | values; the plan id covers the item's version, and "Any edit to the item changes it" | 6 for a stale plan | `docs/usage.md:213-232` |
+| `opv ready` | every environment × product | findings | `docs/usage.md:18` |
+| `opv ci workflow <env> --target <t>` | the configuration | prints a sync workflow | `docs/usage.md:17`; `src/app/ci_workflow.rs:1-12` |
+
+The exit codes are 0, 2–9 and 70 (`docs/usage.md:887-896`). **No code says "the source changed since the last sync"**, and `status` doesn't fail on drift.
+
+### 2.2 Detection by item version: `opv changed`
+
+**The signal.**
+- Every 1Password item has a `version` that 1Password bumps on every edit. opv's own model says so: "bumped by 1Password on every edit" (`src/adapters/onepassword.rs:74-76`).
+- `op item list` returns it as metadata, without any field values: `"version": 1` next to `id`, `title`, `tags` and `vault` (`tests/fixtures/op/success/s05-item-list.stdout:1-15`).
+- The manifest adapter already parses it (`Row.version`, `src/adapters/onepassword_manifest.rs:55-61`; the manifest's own version, `:507`).
+- A sync already reads the environment's item version (`read_item_fields` returns it, `src/app/mod.rs:186-193`).
+
+**What a sync must record (new).** The delivery item of each placement (`opv · delivery · <product> · <target>`, `src/app/delivery.rs:5-13`) gains one non-secret field, `source versions`. After a sync whose writes the target confirmed, the field holds one line per source item the plan read:
+```text
+v1|<item_id>|<version>
+```
+The source items are each boundary item of the environment that the placement draws from (FR-57; shared keys name their source's item, `src/app/delivery.rs:46-52`), plus the manifest item when the configuration lives in 1Password. Recording happens in `record`, next to the evidence lines (`src/app/delivery.rs:5-13`). The receipt schema stays `delivery_receipts/1`; the field is additive.
+
+**The command.**
+```text
+opv changed <env> [--target <t>] [--product <p>] [--json]
+```
+- **Metadata only.** It never reads a value:
+  - current versions: `op item list --vault <vault> --format json`, once per vault, picking the item ids it needs. It never runs `op item get` on a boundary item.
+  - recorded versions: `op read "op://<state vault>/<delivery item>/source versions"`, which reads **that one field**. This matters because the delivery item also holds the evidence key (`src/app/delivery.rs:44-45`).
+- **Per placement**, one state:
+
+| State | Meaning | Exit contribution |
+|---|---|---|
+| `unchanged` | every source item's version equals the recorded one | 0 |
+| `changed` | some item's version differs; the item ids and both version numbers are listed | **10** |
+| `no_record` | no delivery item recorded for the placement (`delivery_items`, `src/domain/model.rs:240-243`), or the field is absent (an older opv synced it) | **10**, with `Next: opv bootstrap` when the delivery item itself is missing |
+| `unreadable` | 1Password or the state vault couldn't be read | that error's own exit (4, 7 or 9), **never 0** |
+
+- **Exit 10 is new:** `source_changed`, "the source changed since the last sync (or none is recorded)". It is not a failure; the next step is the sync. `Next: opv sync <env> --deploy` (or `opv plan <env>` for a `confirm_env` environment).
+- **JSON:**
+  ```json
+  {"schema_version": 2, "ok": true, "environment": "prod", "changed": true,
+   "placements": [{"product": "journeeze", "target": "k8s", "state": "changed",
+     "items": [{"item_id": "…", "recorded": 41, "current": 42}]}],
+   "next": "opv plan prod", "do": null}
+  ```
+  It holds ids and integers only.
+- **Over-triggering is safe.** Any edit bumps the version, even of a field this environment doesn't use (`docs/usage.md:230`). A person's run may also tidy the layout (`docs/usage.md:60`). The resulting sync writes nothing when nothing differs (`docs/usage.md:259`).
+- **No self-trigger loop.** CI's service account never writes to 1Password (`docs/usage.md:60`), and the delivery item lives in the state vault, which is not a source.
+- **A configuration file in git** (`secrets.toml`) triggers the sync through the workflow's `push` path instead (§2.5).
+
+**Rejected:** comparing value fingerprints (what `delivery verify` does, `src/app/delivery.rs:9-16`). That reads every value; the version check needs none.
+
+### 2.3 The drift check
+
+Drift means the platform no longer holds what 1Password says.
+
+- **`opv delivery verify <env> --json`** already exits 8 with `delivery_unverified` and names the state (`src/app/delivery.rs:589-609`). `ChangedOnTarget` is the drift; `ChangedInOnePassword` is the case §2.2 catches more cheaply. It reads values, which CI may do.
+- **New: `opv status <env> --fail-on-drift`.** It exits 8 with a new code, `target_drift`, when any pinned binding shows drift. Today drift is a printed line only (`src/app/status.rs:634-661`). The text is unchanged; the exit code changes only under the flag.
+- The scheduled job (§2.5) runs both and fails on either.
+
+### 2.4 The 1Password Events API (investigated; not designed in)
+
+Established from 1Password's reference (https://www.1password.dev/events-api/reference/, read 2026-10-17; `developer.1password.com/docs/events-api/reference/` redirects there):
+- endpoints `POST /api/v2/auditevents`, `/api/v2/itemusages`, `/api/v2/signinattempts`, plus `GET /api/v2/auth/introspect`;
+- a bearer token whose "features" select the endpoints;
+- **polling with a cursor** (`ResetCursor`, then a saved `cursor` and `has_more`). No webhooks are described;
+- item-usage records carry `item_uuid`, `vault_uuid`, `used_version`, `timestamp` and `action`. The actions include `server-update`, and are "only captured from client apps using 1Password 8.4.0 or later";
+- audit events carry `action` (for example `update`), `object_type` (`item`, `vault`) and `object_uuid`.
+
+**Needs a live check (never called here):**
+- which plans include it (the page doesn't say);
+- whether `server-update` fires for every edit, including CLI (`op`) and service-account writes;
+- the latency;
+- whether item usages cover the vaults opv uses ("items in shared vaults").
+
+**Recommendation:** keep `opv changed` (polling item versions) as the 0.11.0 mechanism. It works on every plan, needs no new credential, and is exact. An Events API trigger would be a later, optional accelerator: a small poller that runs `opv changed` when it sees `server-update` for a watched `item_uuid`. It needs its own Events token in CI. Owner decision O16.
+
+### 2.5 CI recipes (GitHub Actions)
+
+These are shipped as `examples/ci-change-detection/` (deliverable C6). They follow the existing example's install and checksum steps (`examples/github-ci/sync-ci-secrets.yml:26-34`).
+
+**Secrets handling:**
+- **Two service accounts.** A **reader** (read-only on the environment's vaults and the state vault, as `opv access` creates it, `docs/usage.md:473`) runs `changed`, `plan` and the drift check. A **deployer**, held in a GitHub *environment* secret, runs `sync`. With required reviewers on that environment, its token is released only after approval.
+- Tokens are referenced as `${{ secrets.… }}` and passed through `env:` only on the steps that need them. They are never echoed and never written to files.
+- GitHub masks registered secrets in logs. opv also registers `OP_SERVICE_ACCOUNT_TOKEN` and scrubs it from its own output (`docs/how-opv-handles-failures.md:142`).
+- The workflows print names, ids and states only. `opv … --json` holds no value (`docs/usage.md:680`).
+
+```yaml
+# .github/workflows/opv-sync-on-change.yml
+name: opv: sync when 1Password changes
+on:
+  schedule: [{cron: "*/15 * * * *"}]       # the change check, every 15 minutes
+  push: {branches: [main], paths: [secrets.toml]}
+  workflow_dispatch:
+permissions: {contents: read}
+concurrency: {group: opv-sync, cancel-in-progress: false}
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    strategy: {matrix: {env: [staging, prod]}}
+    outputs:
+      staging: ${{ steps.c.outputs.staging }}
+      prod: ${{ steps.c.outputs.prod }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-opv      # op CLI + opv, checksum-verified
+      - id: c
+        env: {OP_SERVICE_ACCOUNT_TOKEN: "${{ secrets.OPV_READER_TOKEN }}"}
+        run: |
+          set +e; opv changed ${{ matrix.env }} --json > changed.json; rc=$?; set -e
+          case $rc in
+            0)  echo "${{ matrix.env }}=no"  >> "$GITHUB_OUTPUT" ;;
+            10) echo "${{ matrix.env }}=yes" >> "$GITHUB_OUTPUT" ;;
+            *)  exit $rc ;;                       # unreadable is a failure, never "unchanged"
+          esac
+  sync-staging:                                   # confirm_env = false: apply directly
+    needs: detect
+    if: needs.detect.outputs.staging == 'yes' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-opv
+      - env: {OP_SERVICE_ACCOUNT_TOKEN: "${{ secrets.OPV_DEPLOY_TOKEN }}"}
+        run: opv sync staging --deploy
+  plan-prod:                                      # confirm_env = true: a reviewed plan
+    needs: detect
+    if: needs.detect.outputs.prod == 'yes' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs: {plan_id: "${{ steps.p.outputs.plan_id }}"}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-opv
+      - id: p
+        env: {OP_SERVICE_ACCOUNT_TOKEN: "${{ secrets.OPV_READER_TOKEN }}"}
+        run: |
+          opv plan prod > plan.txt                # names only
+          cat plan.txt >> "$GITHUB_STEP_SUMMARY"  # the reviewer reads this
+          echo "plan_id=$(opv plan prod --json | jq -r .plan_id)" >> "$GITHUB_OUTPUT"
+  sync-prod:
+    needs: plan-prod
+    runs-on: ubuntu-latest
+    environment: production                       # required reviewers approve the summary's plan
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-opv
+      - env: {OP_SERVICE_ACCOUNT_TOKEN: "${{ secrets.OPV_DEPLOY_TOKEN }}"}
+        run: opv sync prod --deploy --expect-plan ${{ needs.plan-prod.outputs.plan_id }}
+```
+
+- On a guarded environment, `--expect-plan` stands in for `--confirm`. A sync refuses (exit 6) if anything changed after the review (`docs/usage.md:213-232`). The reviewer approves exactly the plan id in the job summary.
+- `opv approve` is for assistant-prepared plans in a person's own terminal (`docs/usage.md:24`, `:234`). It isn't used in CI.
+
+```yaml
+# .github/workflows/opv-drift.yml
+name: opv: drift check
+on: {schedule: [{cron: "23 4 * * *"}], workflow_dispatch: {}}
+permissions: {contents: read}
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    strategy: {fail-fast: false, matrix: {env: [staging, prod]}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-opv
+      - env: {OP_SERVICE_ACCOUNT_TOKEN: "${{ secrets.OPV_READER_TOKEN }}"}
+        run: |
+          opv status ${{ matrix.env }} --fail-on-drift     # exit 8 target_drift on drift
+          opv delivery verify ${{ matrix.env }} --json      # exit 8 delivery_unverified
+```
+
+- **`opv ci workflow`** (`src/app/ci_workflow.rs:24-40`) gains `--on-change`, which prints these two workflows for a configuration, filling the environment matrix and the confirm split from `confirm_env` (deliverable C5).
+- **Schedule load** is 96 checks a day per environment, each one `op item list` per vault plus one `op read`. Service-account rate limits are **[A29]**.
+
+### 2.6 Causes and codes for §2
+
+| Situation | Variant | Code | Exit | Retry | Do | Next |
+|---|---|---|---|---|---|---|
+| the source changed since the last sync | **`SourceChanged`** (new; a result, not an error: `ok: true`) | **source_changed** | **10** | — | — | `opv sync <env> --deploy`, or `opv plan <env>` on a guarded environment |
+| no recorded source versions | `SourceChanged{no_record}` | source_changed | 10 | — | "run opv bootstrap to record delivery items" when none exist | `opv bootstrap` / the sync |
+| drift under `--fail-on-drift` | **`TargetDrift`** (new) `{env, target, names}` | **target_drift** | 8 | after_fix | "re-run the sync to restore 1Password's values" | `opv sync <env> --deploy` |
+
+Exit 10 joins the table in `docs/usage.md:887-896` and §4.11 of the catalog.
+
+## 3. README draft (deliverable D-README)
+
+Below is the README text for the owner to read. It goes into `README.md` as a new section after the introduction.
+
+> ## How opv works: one source of truth, synced by CI
+>
+> 1Password holds everything your app is configured with: its settings and its secrets. Nothing else does. opv moves those values to where they are needed and never anywhere else.
+>
+> ```mermaid
+> flowchart LR
+>   OP[(1Password<br/>config + secrets)]
+>   DEV[Your laptop<br/>opv run]
+>   CI[CI/CD<br/>opv changed · opv sync · drift check]
+>   K8S[Kubernetes<br/>Secrets · ConfigMaps · mounted files]
+>   SW[Docker Swarm<br/>secrets · configs]
+>   FLY[Fly.io<br/>Fly secrets]
+>   VM[VMs<br/>cloud secret manager]
+>   OP -- your own sign-in --> DEV
+>   OP -- service account --> CI
+>   CI --> K8S & SW & FLY & VM
+> ```
+>
+> - **Local development:** `opv run dev -- <your command>` starts your app with the values it needs, as variables or as files in a private in-memory folder, and cleans up when it stops. Values never touch your disk.
+> - **CI/CD:** a workflow runs `opv sync` with a 1Password service account. opv writes secrets and settings into each platform's own place: Kubernetes Secrets and ConfigMaps, Swarm secrets, Fly secrets, a cloud secret manager.
+> - **Production never touches 1Password.** Your running app reads only what its platform gives it. There is no 1Password token, no opv, and no `op` in your images or servers.
+> - **Staying in step:** a scheduled job runs `opv changed`, which notices when someone edits a value in 1Password and triggers the sync. Production syncs wait for a reviewer to approve the exact plan. A nightly drift check fails if a platform no longer matches 1Password.
+>
+> Copy the ready-made workflows: [examples/ci-change-detection](examples/ci-change-detection/).
+
+## 4. Shared changes
+
+### 4.1 The binding name stays the rendered name
+
+A key keeps its rendered target name as its identity: its managed name (`src/app/mod.rs:1708-1721`), its store name (`src/adapters/kubernetes/mod.rs:256-259`) and its plan row (`src/app/mod.rs:735-760`). The file path and the channel are extra, names-only data. Moving a key between env and file, or between channels, creates no new value versions; one deploy moves the binding.
+
+### 4.2 Plumbing
+
+- `TargetConfig::open` (`src/provider.rs:366-373`) gains `files: &BTreeMap<String, FileMount>`. It is computed next to `managed_names` (`src/app/mod.rs:1700-1721`).
+- `FileMount { product, path }` is a new names-only type in `src/domain/runtime.rs`.
+- `channels()` (§1.3) replaces any ad hoc "does this target take config" check.
+
+### 4.3 Plan id
+
+`PlanIdInput` (`src/app/mod.rs:200-230`, `src/domain/provenance.rs:51`) adds each delivered name's channel and form: `secret`, `config`, or `file:<path>`. A plan reviewed under one routing never matches a sync under another.
+
+### 4.4 Target-level `roles`
+
+- `RawTarget` (`src/config.rs:724-742`) and `Target` (`src/domain/model.rs:226-244`) gain `roles`.
+- In `plan::evaluate` (`src/domain/plan.rs:296-321`), a key whose `roles` miss the target's is not desired there, so `--deploy --prune` removes an existing binding (`docs/usage.md:261`).
+- Load rules: a target that delivers a product whose keys declare roles must declare `roles`; each role must be declared by some key; an empty list is refused (as for keys, `src/config.rs:1704-1722`).
+- This changes "roles never reach `sync` or a target" (`docs/design/local-delivery.md:79`; `src/domain/model.rs:115-116`).
+- Migration material on Kubernetes and Swarm is out of scope; run migrations with `opv run --role migrate`. Fly's migration app uses the same field (§7.4).
+
+### 4.5 Verbatim bytes for file keys
+
+**Today:**
+- Local delivery writes the bytes `op run` gives it, unchanged (`src/app/local_delivery.rs:304-317`; `tests/local_delivery.rs:203-221`).
+- `pem_private_key` turns a multi-line PEM into one line (`src/domain/rules.rs:288-296`). `single_line` and `no_surrounding_space` (`:297-302`) apply in `plan::evaluate` even without a target (`src/domain/plan.rs:194-198`, `:309`), and the evaluated value is what gets staged.
+- The tidy trims a trailing `\n`, `\r` or space (`src/domain/convention.rs:263-303`), which contradicts the verbatim decision.
+- Non-UTF-8 values panic the local step at `std::env::vars()` (`src/app/local_delivery.rs:295`).
+
+**Changes:**
+1. `normalized` returns `None` for a key with `file`.
+2. For a key with `file`, when there is no target or the target's `files` capability is `Native`, `single_line`, `no_surrounding_space` and the transform don't apply. `nonempty`, `max_len` and the prefix rules still do, and the staged value is the stored value. Targets that stage it as a variable keep every rule.
+3. `docs/configuration.md` `:661-726` states the exception.
+
+### 4.6 Journeeze's mapping
+
+| Key | Destination | Roles | Constant |
 |---|---|---|---|
 | `DATABASE_URL` | `database/url` | serve | `ced358d:crates/jz_host/src/lib.rs:92` |
 | `GITHUB_APP_PRIVATE_KEY` | `github-app/private-key` | serve | `ced358d:crates/jz_github/src/lib.rs:67` |
-| `GITHUB_WEBHOOK_SECRET` | `github/webhook-secret` | serve | `ced358d:crates/jz_github/src/events.rs:251` — **new in the mapping** |
+| `GITHUB_WEBHOOK_SECRET` | `github/webhook-secret` | serve | `ced358d:crates/jz_github/src/events.rs:251`. **New in the mapping.** |
 | `TYPESAFE_JEV_API_KEY` | `jev/api-key` | serve | `ced358d:crates/jz_jev/src/live.rs:24` |
 | `BLOB_ACCESS_KEY_ID` | `blob/access-key-id` | serve | `ced358d:crates/jz_blob/src/s3.rs:20` |
 | `BLOB_SECRET_ACCESS_KEY` | `blob/secret-access-key` | serve | `ced358d:crates/jz_blob/src/s3.rs:21` |
@@ -51,471 +396,708 @@ The names are Journeeze's own store constants. The serve list is the shim's `SER
 | `DATABASE_URL_UNPOOLED` | `database/owner-url` | migrate | `ced358d:crates/jz_host/src/lib.rs:203` |
 | `JOURNEEZE_APP_PASSWORD` | `database/app-password` | migrate | `ced358d:crates/jz_host/src/lib.rs:204` |
 
-- **Every key carries explicit `roles`.** A key without `roles` goes to every role (`src/app/delivery_preview.rs:92-96`), which would put serving material on the migration app of §6.
-- **The webhook secret.** The app reads `github/webhook-secret` before it checks `X-Hub-Signature-256` (`ced358d:crates/jz_github/src/events.rs:251`). The shim's `SERVE` list doesn't contain it (`ced358d:crates/jz_host/src/fleet_secrets.rs:40-76`). So while the shim stays the default on the shared host, the webhook secret is **not delivered by the shim**. That absence is stated, not implied away. opv's fixture consumer already expects it in the serve mapping (`tests/mounted_consumer.rs:16-24`).
-- **The directory variable** is `JZ_VAULT_DIR`, default `/run/secrets/journeeze` (`ced358d:crates/jz_host/src/lib.rs:193-199`).
-- **Where the mapping is declared.** Journeeze has no opv configuration in its repository at `ced358d` (no `secrets.toml`). The mapping lives in its opv configuration, which is assumed to be a manifest in 1Password **[A1]**. The verification (§7) declares the same mapping for a test product.
+- **Webhook secret.** The shim's `SERVE` list (`ced358d:crates/jz_host/src/fleet_secrets.rs:40`) lacks it, so on the shared Fly host it **is not delivered** today. This document states that rather than implying otherwise. opv's fixture consumer already expects it (`tests/mounted_consumer.rs:16-24`).
+- **Reading.** `MountedSecretStore` reads with `tokio::fs::read`, so it follows symlinks, and maps every error to `NotFound` (`ced358d:crates/jz_secrets/src/lib.rs:40-45`). An unreadable file looks missing, which is why readability is checked before delivery (§5, §6.6, §8.4, §9.3).
+- **The mapping lives in Journeeze's opv manifest** **[A1]**.
+
+## 5. Local: the wrapper and the Docker Compose recipe
+
+`opv run` writes file keys into a 0700 tmpfs directory as 0400 files (`src/app/local_delivery.rs:243-279`, `:296-320`) and sets the directory variable (`:186-189`). **There is no `--dir-env` on `opv run`** (`src/main.rs:697-728`). The variable comes from `[products.<p>.local] secrets_dir_env` (`src/app/run.rs:466-467`); see O5.
 
 ```toml
 [products.journeeze.local]
 environment = "declared_only"
-secrets_dir_env = "JZ_VAULT_DIR"
-
-[products.journeeze.keys.GITHUB_WEBHOOK_SECRET]
-kind = "secret"
-environments = ["dev", "staging", "prod"]
-file = "github/webhook-secret"
-roles = ["serve"]
-# … the other ten keys as in the table, each with file and roles
+secrets_dir_env = "OPV_SECRETS_DIR"
 ```
 
-## 2. Platform matrix
-
-| Transport | Status in 0.11.0 | Where values live | Role separation | Evidence |
-|---|---|---|---|---|
-| Local process, Linux/WSL | implemented | `op run` env, then a tmpfs directory | the selection never resolves another role's keys | `src/app/local_delivery.rs:283-350` |
-| Local process, macOS / Windows | refused for file keys | n/a | n/a | `src/app/local_delivery.rs:196-201` |
-| Container, WSL 2 + Docker Desktop (WSL integration) | **implemented** | host tmpfs directory, bind-mounted read-only; the container sees tmpfs | same as local | recorded: `tests/fixtures/docker/success/05`, `08` |
-| Container, native Linux + Docker Engine (rootful) | **implemented once its replies are recorded** (README item 1); refused (`mapping_unknown`) until then | same | same | **[A2]** |
-| Container, rootless Docker | refused (`rootless`) | n/a | n/a | the container user isn't the host user (`failures/01` shows another uid is denied) |
-| Container, Docker with `userns-remap` | refused (`userns_remap`) | n/a | n/a | as above |
-| Container, Docker Desktop on native Linux or macOS | refused (`desktop_outside_wsl`, or `ram_dir_unavailable` on macOS) | n/a | n/a | how the mount is shared isn't recorded **[A3]** |
-| Container, any remote daemon (`tcp://`, `ssh://`, `npipe://`) | refused (`remote_endpoint`) | n/a | n/a | a bind source names a path on the daemon's host, not here |
-| Container, rootless Podman (`--userns=keep-id`) | **implemented once its replies are recorded** (README item 6); refused (`not_verified`) until then | host tmpfs, bind-mounted read-only | same | **[A4]** |
-| Container, rootful or remote Podman | refused (`host_user_is_root` / `remote_endpoint`) | n/a | n/a | — |
-| Container, macOS / Windows hosts | refused (`ram_dir_unavailable`, no RAM directory) | n/a | n/a | `src/app/local_delivery.rs:197-201` |
-| Fly machine, entrypoint step, separate migration app | **design only** (§6) | Fly secrets (env at boot), then a tmpfs directory in the guest | serving and migration material on different Fly apps | — |
-| Fly `[[files]]` from a secret | **rejected as default** | written by Fly into the guest root filesystem | none | not RAM-only; a spike would have to show otherwise |
-| Kubernetes, Azure | out of scope | provider secret stores | n/a | #40–#42 deferred |
-
-## 3. Container transport (0.11.0)
-
-### 3.1 The CLI surface: a reviewed container profile
-
-**Choice:** a product declares reviewed container profiles next to its keys, the same shape as #139's remote profiles (`src/domain/model.rs:161-186`). The person runs one by name:
-
-```text
-opv run <env> [--product <p>] --role <r> --container <profile> [--confirm <env>] [-- <container args>]
-opv run <env> [--product <p>] --role <r> --container <profile> --preview [--json]
+```yaml
+# compose.yml (recorded verbatim as tests/fixtures/compose/recipe.yml)
+services:
+  serve:
+    image: journeeze:local
+    command: ["serve"]
+    user: "${OPV_UID:?run this under opv run}:${OPV_GID:?run this under opv run}"
+    environment: {JZ_VAULT_DIR: /run/secrets/journeeze}
+    volumes:
+      - {type: bind, source: "${OPV_SECRETS_DIR:?run this under opv run}", target: /run/secrets/journeeze, read_only: true}
+    logging: {driver: none}
 ```
+
+Run it with `opv run dev --product journeeze --role serve -- docker compose up`.
+
+| Line | Why | Evidence |
+|---|---|---|
+| `user:` is the invoking user | another container uid is denied; container root reads the files anyway | `3b8e180:tests/fixtures/docker/failures/01-run-as-other-uid-denied.stderr`; `3b8e180:tests/fixtures/docker/success/05-run-as-host-user-reads.stdout`; `…/success/07-run-as-root-reads.stdout` |
+| not `${UID}:${GID}` | `UID` isn't exported and `GID` doesn't exist, so compose renders `user: ':'` | `tests/fixtures/compose/05-bash-uid-not-in-environment.stdout:1-3`; `tests/fixtures/compose/06-naive-config-dir-set-uid-unset.stderr:1-2`, `.stdout:7` |
+| `${…:?…}` | outside opv, compose refuses with exit 15 | `tests/fixtures/compose/03-recipe-config-outside-opv.stderr:1`; under opv `tests/fixtures/compose/02-recipe-config-under-opv.stdout:13-18` |
+| long `type: bind` | the short form sets `create_host_path: true` (`tests/fixtures/compose/06-naive-config-dir-set-uid-unset.stdout:13-14`), and Docker Desktop then creates a root-owned source (`3b8e180:tests/fixtures/docker/failures/03-bind-source-missing.host-ls`) | as cited |
+| `read_only` | the app can't write | `3b8e180:tests/fixtures/docker/failures/02-readonly-mount-write-refused.stderr` |
+| `logging: none` | the default `json-file` driver writes output to disk | `3b8e180:tests/fixtures/docker/success/16-info-logging-driver.stdout` |
+| RAM inside the container | the bind shows as tmpfs (WSL 2 with Docker Desktop) | `3b8e180:tests/fixtures/docker/success/08-mountinfo-in-container.stdout` |
+
+**`OPV_UID` and `OPV_GID` (new).** Under `declared_only`, only `BASICS` pass through (`src/app/local_delivery.rs:36-49`, `:183`). A run that delivers files sets both variables, as the effective ids, in `child_env` (`:186-189`). O4.
+
+**5.3 The readability check is rejected; the requirement is documented instead.**
+- opv can't know the effective user: it comes from compose's interpolation, overrides and `.env`, or the image's `USER`.
+- `docker compose config` prints interpolated values (`tests/fixtures/compose/02-recipe-config-under-opv.stdout:7-8`), so it could leak a value into opv's output.
+- opv can't tell which command after `--` is compose.
+
+Instead:
+- the recipe fails closed outside opv;
+- `docs/local-development.md` gets a Docker Compose section;
+- `opv run --preview` prints `containers: run as <uid>:<gid> (OPV_UID:OPV_GID) to read these files`.
+
+**Limits:** the same user, the Docker daemon, the `docker` group and container root can read the directory (`docs/design/local-delivery.md:41-56`).
+
+## 6. Kubernetes: ConfigMaps and mounted files (0.11.0)
+
+### 6.1 Today
+
+- Secrets are immutable versioned Secrets `opv-<store>-<id>` (`src/adapters/kubernetes/mod.rs:5-10`; `immutable: true`, `src/adapters/kubernetes/store.rs:203`).
+- They are bound as env `valueFrom.secretKeyRef` (`src/adapters/kubernetes/runtime.rs:10-11`, `:732-738`; `src/adapters/kubernetes/mod.rs:11-13`).
+- Config is a plain `value` env entry, or goes through the store (`src/adapters/kubernetes/runtime.rs:740-742`; `docs/configuration.md:461`).
+- Writes are a `kubectl replace` with `resourceVersion` (`:697-772`).
+- The recorded shape is `tests/fixtures/kubernetes/deployment-get.json:47-69`.
+
+### 6.2 Configuration
 
 ```toml
-[products.journeeze.containers.serve]
-runtime = "docker"                            # "docker" or "podman"
-image = "journeeze@sha256:…"                  # never starts with "-"; see the digest rule below
-mount_at = "/run/secrets/journeeze"           # absolute; where the RAM directory appears, read-only
-environments = ["dev", "staging"]             # whose values may go to this container
-roles = ["serve"]                             # optional; default every role the keys declare
-publish = ["127.0.0.1:18088:18088"]           # optional; -p entries
-network = "bridge"                            # optional; a network name
-command = ["serve"]                           # optional; the container's arguments after the image
-container_user = "10001:10001"                # optional; podman only (keep-id:uid=,gid=); refused for docker
+[environments.prod.targets.k8s]
+kubernetes.context     = "prod-cluster"
+kubernetes.namespace   = "journeeze"
+kubernetes.deployment  = "journeeze"
+kubernetes.env_name    = "FLEET__{PRODUCT}__{KEY}"
+kubernetes.config      = "configmap"                # new value; "env" and "store" stay
+kubernetes.secrets_dir = "/run/secrets/{product}"   # new: file keys become files here
+roles = ["serve"]
 ```
 
-- **Words after `--` are the container's arguments only.** They go after the image and replace `command`. The runtime never parses them as its own flags. So `--user 0`, `-e`, `--env-file`, `--privileged` or another `--mount` can't be smuggled in: everything before the image comes from the reviewed profile, built by one function (§3.4).
-- `--container` conflicts with `--remote` (a `Usage{ConflictsWith}`, as `--remote` does with `-- <command>` at `src/main.rs:3006-3016`).
-- Unlike `--remote`, a container run needs no terminal (`src/main.rs:3019` requires one for remote). The values stay on this machine, as in a local run. A `confirm_env` environment still needs `--confirm` (`src/main.rs:3037`).
-- No MCP tool runs a container. MCP gets the preview only (§3.7).
+- **`config = "configmap"`** (new, in `ConfigRoute`, `src/adapters/kubernetes/config.rs:85-93`). Each config value version becomes an immutable ConfigMap `opv-<store>-<id>`: `data.value`, the same labels and annotations as Secrets (`src/adapters/kubernetes/mod.rs:77-93`), `immutable: true`.
+  - A config key without `file` is bound as env `valueFrom.configMapKeyRef {name, key: value}`.
+  - A config key with `file` becomes a `configMap` source in the projected volume (§6.3).
+  - ConfigMaps can be read back, so `plan` compares values exactly, as for Secrets (`src/adapters/kubernetes/store.rs`, the compare-before-write read).
+  - `opv init` writes `configmap` for new targets. Existing targets keep `env` until changed; O1 decides whether the default flips.
+- **`secrets_dir`** (new, optional). It goes into `Raw` (`src/adapters/kubernetes/config.rs:119-130`) and `KubernetesTarget` (`:96-107`).
+  - Unset: no key is a file, exactly as today.
+  - Set: every delivered key with `file` is mounted at `<dir>/<file>`, and only there.
+  - `{product}` renders the product name (`_` → `-`). It is required when two products have file keys, and two products may not render the same directory.
+  - Load rules in `Raw::checked` (`:140-172`): absolute and normalised; not `/`; not under `/proc`, `/sys`, `/dev` or `/var/run/secrets/kubernetes.io`; at most 255 bytes, with no `:` or whitespace.
+  - A config key with `file` needs `config = "configmap"` or `"store"`.
+- **Channels:** secret → `Store{"Kubernetes Secret"}`; config → `Store{"ConfigMap"}`, `RuntimeEnv`, or `Store{"Kubernetes Secret"}`, per `config`; files → `Native` when `secrets_dir` is set, otherwise `None`.
 
-**Why a profile, and the alternatives I rejected:**
-
-| Alternative | Why rejected |
-|---|---|
-| `opv run … --container docker -- <docker run flags> <image> <args>` | opv would have to parse Docker's flag grammar to keep `--user`, `-e`, `--env-file`, `--privileged`, `--userns` and extra mounts out. A later `--user` overrides an earlier one. A deny-list over another tool's grammar isn't poka-yoke. |
-| `transport = "container"` on `[products.<p>.local]` | One product runs both as a process and in a container. A product-wide switch silently changes every `opv run`, and still needs the image and mount somewhere. |
-| A new `opv container run` subcommand | It duplicates `run`'s selection, roles, `--confirm`, preview and `Outer` plumbing. FR-60 allows one way only. |
-| A `local-delivery --container` mode the person calls directly | `local-delivery` is a hidden internal step (`src/main.rs:883`). Its errors already render against the person's `opv run` (`src/app/local_delivery.rs:126-148`). |
-
-**Digest rule.** An `image` for an environment with `confirm_env = true` must be pinned by digest (`@sha256:`), checked at load. For other environments a tag is allowed. This needs an owner decision (§13 D5).
-
-### 3.2 The process chain
-
-```text
-opv run dev --product journeeze --role serve --container serve
-  ├─ select keys (roles) ─ profile checks ─ runtime probe (§3.3)        ← all before any 1Password read
-  └─ op run -- opv local-delivery --key … --file K=path … --dir-env JZ_VAULT_DIR --container '<plan>' -- <args>
-       ├─ sweep: dead opv-run.<pid>-* directories; labelled containers of dead runs (§3.5)
-       ├─ the probe again, with the runtime client's own environment (authoritative)
-       ├─ PrivateDir under $XDG_RUNTIME_DIR (tmpfs, 0700), files 0400
-       └─ docker run --rm --name opv-<product>-<pid>-<rand> --label io.opv.run=<pid> --label io.opv.uid=<uid>
-                     --log-driver none
-                     --mount type=bind,src=<ramdir>,dst=/run/secrets/journeeze,readonly
-                     --user <uid>:<gid>
-                     -e JZ_VAULT_DIR=/run/secrets/journeeze [-e <CONFIG_KEY> …]
-                     [-p …] [--network …] <image> <args>
-```
-
-- `op run` stays the only thing that resolves references and stays the parent, so it still masks values in the output (`src/app/run.rs:1-12`). The step gets values in its environment, exactly as today (`src/app/local_delivery.rs:295`).
-- `<plan>` is JSON, like `remote-send --plan` (`src/app/run.rs:418-447`). It carries names, paths and the profile only: profile name, runtime, image, `mount_at`, `publish`, `network`, the config key names to pass, the mapping the outer probe found, and the `Outer` run. It never carries a value.
-
-### 3.3 The runtime probe: UID and user namespaces
-
-**The problem.** The files are 0400, owned by the host user (`src/app/local_delivery.rs:274`). The container's process has to be that user, as the host kernel sees it. Recorded:
-- the host user (uid 1000) reads the file in the container (`success/05`);
-- another container uid (10001) gets `Permission denied` (`failures/01`);
-- container root reads it anyway (`success/07`).
-
-**The probe**, one function `container::probe(runtime, env) -> Result<Mapping, Cause>`. It is bounded by the runner's captured-call budget, and it uses only the recorded calls:
-
-| Order | Call (exact; recorded) | Accept | Otherwise |
-|---|---|---|---|
-| 0 | `geteuid()` | not 0 | `ContainerUnsupported{HostUserIsRoot}` |
-| 1 | `DOCKER_HOST` if set, else `docker context inspect --format '{{json .Endpoints.docker.Host}}'` (`success/14`) | a JSON string starting `unix://` | `RemoteEndpoint{scheme}`; an unreadable reply is `MappingUnknown` |
-| 2 | `docker info --format '{{json .SecurityOptions}}'` (`success/02`) | a JSON **array** of `name=<x>[,k=v]` strings whose names are all recorded as safe (today `seccomp`, `cgroupns`) | `name=rootless` → `Rootless`; `name=userns` → `UserNamespaceRemap`; any other name → `MappingUnknown` (until recorded); stdout `null` with `Cannot connect to the Docker daemon` on stderr → `Unavailable{Docker, DaemonNotRunning}` (`failures/05`, which **exits 0**) |
-| 3 | `docker version --format '{{json .}}'` (`success/01`) | `Server.Platform.Name` doesn't start with `Docker Desktop`; or it does, `Server.KernelVersion` ends with `-microsoft-standard-WSL2`, and opv itself runs on WSL (`Host::detect`) | `DesktopOutsideWsl` |
-| — | Podman: `podman info --format json` | `host.security.rootless == true`, `host.serviceIsRemote == false` **[A4]** | otherwise refused; **until the README item 6 replies are recorded, every Podman run is `NotVerified`** |
-
-The result:
-
-- `HostUser{uid, gid}` (Docker): `--user <euid>:<egid>`.
-- `KeepId{uid, gid}` (Podman): `--userns=keep-id`, or `--userns=keep-id:uid=U,gid=G` when the profile sets `container_user`. The host user then appears as the image's own user (Journeeze runs as uid 10001: `ced358d:deploy/Dockerfile`, the `useradd --uid 10001` and `USER journeeze` lines) **[A4]**.
-
-**When the probe runs:**
-- In the outer `opv run`, before `op run`, so a refusal reads nothing from 1Password.
-- Again in the step, with the client's exact environment, right before any file is written. That second probe is authoritative. If its mapping differs from the plan's, the run is refused (`MappingChanged`) and nothing is written.
-
-**Why Docker Desktop is accepted only on WSL.** Recorded on WSL 2: the bind source shows up in the container as `tmpfs`, `ro`, `uid=1000`, `mode=700` (`success/08`), so values stay in RAM. How Docker Desktop shares a native Linux or macOS path into its VM is not recorded, and the host-side `statfs` check can't see it **[A3]**.
-
-**Fail closed on parse.** The parser accepts only the recorded shapes. `null`, an object where an array is expected, or an unknown option name are each `MappingUnknown`, never "no options" (`failures/05` shows exit 0 with `null`).
-
-### 3.4 The container's environment and arguments
-
-One pure function, `container::run_argv(plan, mapping, dir, name, pid, uid) -> Vec<String>`, builds the runtime command. opv always adds:
-
-| Flag | Why |
-|---|---|
-| `run --rm` | no stopped container keeps the mount reference |
-| `--name opv-<product>-<pid>-<16 hex>` | `rm -f` by name on every exit path (`success/12`) |
-| `--label io.opv.run=<step pid> --label io.opv.uid=<uid>` | the sweep finds containers of dead runs (`success/17`) |
-| `--log-driver none` | the daemon's default `json-file` driver writes the app's output to disk (`success/16`); with `none` the attached client still prints it (`success/15`) |
-| `--mount type=bind,src=<ramdir>,dst=<mount_at>,readonly` | read-only (`failures/02`). `--mount`, not `-v`. Neither refuses a missing source on Docker Desktop (`failures/03`), so opv keeps the directory alive until the client exits (§3.5). |
-| `--user <uid>:<gid>` / `--userns=keep-id[:uid=,gid=]` | §3.3 |
-| `-e <secrets_dir_env>=<mount_at>` | a container path, not a secret |
-| `-e <NAME>` for each selected `kind = "config"` key without `file` | name only. The runtime copies the value from the client's environment, so the value is never in argv **[A5]**. |
-
-And from the profile only: `-p <publish>…`, `--network <network>`, then `<image>`, then the container arguments.
-
-- **The runtime client's environment** is `BASICS` (`src/app/local_delivery.rs:38-51`) plus the runtime's own variables (`DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`, `DOCKER_CERT_PATH`, `DOCKER_TLS_VERIFY`; for Podman `CONTAINER_HOST`, `CONTAINER_CONNECTION`, `CONTAINERS_CONF`, `XDG_RUNTIME_DIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`) plus the selected config keys. It never holds a secret-kind key, an `OP_*` variable or `OPV_RUN_OUTER`.
-- **No secret-kind key reaches the container as a variable.** At load, every `kind = "secret"` key that a profile's environments and roles could deliver must have `file`. Otherwise the load fails with `ConfigInvalid` / `ContainerSecretWithoutFile` (§3.8). The step checks again: each `--key` is either a `--file` key or a config name in the plan, or it is a `Bug`.
-- **The container's environment** is exactly the `-e` list. The runtime doesn't inherit the client's environment.
-- **No `-t`.** Signal forwarding (sig-proxy) works without a TTY (`success/09`).
-
-### 3.5 The RAM directory, the mount and cleanup on every exit path
-
-The directory is today's `PrivateDir` (`src/ramdir.rs:147-218`):
-- under `runtime_dir_support()` (`src/app/local_delivery.rs:196-217`): absolute, user-owned, tmpfs or ramfs;
-- `opv-run.<pid>-<random>`, created 0700, never an existing path;
-- files written by `write_file`: 0400, `O_EXCL`, `O_NOFOLLOW`, synced (`src/app/local_delivery.rs:243-279`).
-
-It is bind-mounted read-only at `mount_at`. On WSL 2 + Docker Desktop, the container sees the same tmpfs (`success/08`).
-
-**Needed change (D4):** today the step starts its child with `Command::status()` and doesn't register it as the running child (`src/app/local_delivery.rs:325-329`). The signal handler forwards only to a tracked child (`src/runner.rs:1976-1978`, `:2168-2190`). In container mode the step spawns the client, tracks it with `signals::track`, and registers the container name in a new `signals::register_container(program, name)` registry.
-
-| Exit path | What happens | Evidence |
-|---|---|---|
-| The app exits (any code) | the client exits with the container's code; the step runs `<runtime> rm -f <name>` (idempotent, exit 0 when already gone) and drops the directory | `failures/07`, `failures/09`; `--rm` already removed it (`success/10`) |
-| SIGINT / SIGTERM / SIGHUP / SIGQUIT to the step | the handler (`src/runner.rs:2037-2054`) forwards to the tracked client (SIGQUIT as SIGTERM), which sig-proxies to the container; after `SIGNAL_GRACE` (5 s, `src/runner.rs:311`) it SIGKILLs the client; **new:** then `rm -f <name>` (bounded, output discarded), because a killed client leaves the container running; then `run_cleanups()` removes the directory; exit 128 + signal | `success/09` (exit 143); `success/11` |
-| Ctrl-C at the terminal | the foreground process group (outer opv, `op run`, the step, the client) gets SIGINT; the step's handler does the above | |
-| A refusal or error before the client starts (probe, write failure) | `PrivateDir` is dropped (`src/ramdir.rs:213-218`), and nothing ran | |
-| A panic in the step | unwinding drops `PrivateDir` (the release profile doesn't set `panic = "abort"`: no `panic` key in `Cargo.toml`); the container, if started, is caught by the next sweep | |
-| The step is SIGKILLed, or power is lost | the files stay in RAM and the container keeps running. Removing the directory empties the container's view. The next `opv run` that delivers files sweeps both: directories of dead pids (`src/ramdir.rs:65-84`) and, **new**, `<runtime> ps -a --filter label=io.opv.uid=<uid> --format '{{.Names}} {{.Label "io.opv.run"}}'`, then `rm -f` for each dead pid. Logout clears `$XDG_RUNTIME_DIR`. | `success/11`, `13`, `17`, `18` |
-| The outer `opv run` alone is killed | **pre-existing gap:** `run` keeps default signal handling (`src/main.rs:2667-2676`), so `op run`, the step and the container live on until the app exits. This is not new to containers (§11 R9). | |
-
-**Debris on Docker Desktop:** if a bind source is missing, Docker Desktop creates it as a root-owned 0755 directory in the user's runtime directory (`failures/03`, `.host-ls`). The sweep leaves directories it doesn't own alone (`src/ramdir.rs:80`). The step must therefore never remove the directory before the client has exited, and it never does: drop order and the signal order above.
-
-### 3.6 What is never done
-
-- No value in argv: not the runtime's, not the step's (key names, paths and the plan only), not `ps` output. Tested by D3 (a property test over `run_argv`) and D8 (`calls.log`).
-- No secret in an environment variable: not in the client's environment, not via `-e NAME=value`, not via `--env-file`. The only `-e` with `=` is the directory variable, whose value is a container path.
-- No secret in an image layer. opv never runs `build`, `commit`, `cp` or `export`. Bind mounts are not part of a container's filesystem layers **[A6]**.
-- No secret in an ordinary file. The only files are under the tmpfs `PrivateDir`. `--log-driver none` keeps the daemon from writing the app's output to its disk logs (`success/16`). opv writes no `cidfile` (the name is chosen up front).
-- No fallback: no world-readable files, no `chmod`/`chown` to fit a container user, no `--user 0`, no environment-variable delivery when files can't be delivered.
-- No container runs as root by opv's doing: `--user`/`keep-id` is always set, and no profile field can remove it.
-- No MCP tool starts a container, writes a profile value, or returns anything but the preview.
-
-### 3.7 Preview additions (metadata only)
-
-`opv run <env> … --container <c> --preview [--json]` and `opv_delivery_preview` with a new optional `container` argument (a profile name) call the same builder (`src/app/delivery_preview.rs:121`). New fields (the existing ones are unchanged):
+### 6.3 The Deployment patch
 
 ```json
-{
-  "transport": "container",
-  "container": {
-    "profile": "serve", "runtime": "docker", "image": "journeeze@sha256:…",
-    "mount_at": "/run/secrets/journeeze", "command": ["serve"],
-    "publish": ["127.0.0.1:18088:18088"], "network": "bridge",
-    "environments": ["dev", "staging"], "roles": ["serve"],
-    "runtime_on_path": "yes",
-    "endpoint": "local",
-    "uid_mapping": "host_user",
-    "uid_mapping_reason": null,
-    "container_user": "1000:1000",
-    "env_names": ["JZ_VAULT_DIR"],
-    "run": ["docker", "run", "--rm", "--name", "<name>", "--label", "io.opv.run=<pid>", "…",
-            "--mount", "type=bind,src=<ramdir>,dst=/run/secrets/journeeze,readonly", "--user", "1000:1000",
-            "-e", "JZ_VAULT_DIR=/run/secrets/journeeze", "journeeze@sha256:…", "serve"]
-  },
-  "container_profiles": ["migrate", "serve"],
-  "keys": [{"key": "GITHUB_APP_PRIVATE_KEY", "destination": "file:github-app/private-key",
-            "bytes": "verbatim", "staging_transform": "pem_private_key", "…": "…"}]
-}
+"volumes": [{"name": "opv-files-journeeze", "projected": {"defaultMode": 288, "sources": [
+  {"secret":    {"name": "opv-fleet--journeeze--github-app-private-key-q3vz7kd2mx", "optional": false,
+                 "items": [{"key": "value", "path": "github-app/private-key", "mode": 288}]}},
+  {"configMap": {"name": "opv-fleet--journeeze--otel-resource-xk2m4n6p8q", "optional": false,
+                 "items": [{"key": "value", "path": "otel/resource", "mode": 288}]}}
+]}}],
+"containers": [{"name": "journeeze",
+  "env": [{"name": "LOG_LEVEL", "valueFrom": {"configMapKeyRef": {"name": "opv-log-level-h6tn4wbr5e", "key": "value"}}}],
+  "volumeMounts": [{"name": "opv-files-journeeze", "mountPath": "/run/secrets/journeeze", "readOnly": true}]}]
 ```
 
-- `runtime_on_path`: found by looking on `PATH`, never by running it, like `ssh_present` (`src/app/delivery_preview.rs:229-234`).
-- `endpoint` and `uid_mapping` come from the probe's read-only calls (§3.3). A probe that can't finish gives `unknown`, never `no` or a guessed mapping. This is the same rule as `prerequisites` (`src/app/delivery_preview.rs:236-253`).
-- `bytes` is `verbatim` for every `file:` destination. `staging_transform` names a declared transform and says that it applies to target staging only (§5).
-- The text form adds `transport: container profile serve (docker, image …, mounted read-only at …, runs as 1000:1000)` and `uid mapping: host_user | refused (<reason>) | unknown`.
+- **Projected volume.** opv keeps one immutable object per value version, and a projected volume merges many objects, Secrets and ConfigMaps alike, into one directory **[A2]**. Rejected: one combined Secret per product, which breaks versioning and pruning; and `subPath` mounts.
+- **`items[].path`** is the key's `file` **[A2]**; the key is `value` (`src/adapters/kubernetes/mod.rs:77`), the same under ExternalSecrets (`src/adapters/kubernetes/external.rs:163-165`).
+- **Mode 0440 (288).** Files are root-owned, with the group of `fsGroup` **[A3]**. 0400 would block a non-root app; 0444 is rejected.
+- **`readOnly: true`**, and `optional: false` on every source **[A7]**.
+- **The volume is `opv-files-<product>`.** The `opv-files-` prefix is reserved (`docs/usage.md:261`).
+- **A file key never keeps an env entry**: the same replace removes it. When a product's last file key goes, its volume and mount go too.
+- **`bindings()`** (`src/adapters/kubernetes/runtime.rs:658-694`) reads file bindings from the volume items, and config env bindings from `configMapKeyRef` (beside `secret_ref`, `src/adapters/kubernetes/mod.rs:628-634`). Anything else is `Other`: a missing item, a mount that is missing, not read-only or at a different path, or a name that is still an env entry. `Other` shows as drift and is re-pinned under `--deploy`.
+- **`fingerprint()`** (`:293-304`) and the reconcile comparison (`:788-797`) strip opv's volumes and mounts. They normalise server defaults **[A5]**.
 
-### 3.8 New failures, as catalog causes
+### 6.4 Rollout, refresh and clean-up
 
-Every failure is a `Cause` (`docs/design/error-catalog.md` §2). Existing variants are reused where they fit. **New** marks new variants, fields and codes.
+- **Write, then deploy**, as today (`docs/usage.md:246-249`).
+- **Refresh is a rollout.** Kubernetes refreshes a projected object in running pods only when its content changes. opv's objects are immutable, and each version has a new name (`src/adapters/kubernetes/store.rs:203`). The kubelet doesn't watch immutable objects **[A4]**. A new version therefore changes the template, starts a rolling update and goes through the health wait (`src/adapters/kubernetes/runtime.rs:815-860`).
+- **A missing source** leaves the pod in `ContainerCreating`, which isn't one of `STUCK_REASONS` **[A7]**. The rollout then fails at the progress deadline (`:315-327`). O10.
+- **Superseded-version clean-up already covers volumes and ConfigMaps.** Any string in the Deployment or any ReplicaSet keeps its object (`referenced_names`, `src/adapters/kubernetes/store.rs:257-284`). It is extended from Secrets to ConfigMaps by kind, with the same label selector. Rollback keeps working (`docs/usage.md:264`).
 
-| Variant | Fields | Code | Exit | Retry | Message (example) | Do | Next |
-|---|---|---|---|---|---|---|---|
-| **`ContainerUnsupported`** (new) | runtime: Docker / Podman; why: **Rootless / UserNamespaceRemap / RemoteEndpoint{scheme} / DesktopOutsideWsl / HostUserIsRoot / MappingUnknown{call} / MappingChanged / NotVerified**; env; product; profile | **container_unsupported** | 6 | after_fix | "opv can't deliver files to this container: rootless Docker runs it as a user that isn't you, so it couldn't read them. Nothing was read from 1Password." | per why: Rootless → "use rootful Docker, or rootless Podman with keep-id"; Remap → "run Docker without userns-remap, or use Podman"; RemoteEndpoint → `Unset{DOCKER_HOST}` / "switch to this machine's daemon: docker context use default"; DesktopOutsideWsl → "run it from WSL 2 with Docker Desktop's WSL integration"; HostUserIsRoot → "run opv as your own user"; MappingUnknown → "<runtime>'s reply is shown above; opv doesn't recognise it"; MappingChanged → "the container runtime changed during the run"; NotVerified → "use Docker; opv hasn't verified Podman yet" | `opv run <env> --product <p> --role <r> --container <c> --preview` (Check) |
-| `Unavailable` (new why and systems) | system: **Docker / Podman**; why: **DaemonNotRunning**; seen | provider_unavailable | 9 | safe | "the Docker daemon isn't running (Cannot connect to the Docker daemon …)" | "start Docker Desktop, or the docker service" | Rerun |
-| `ToolMissing` (new tools) | tool: **docker / podman**; platform; shell | dependency_missing | 3 | after_fix | "docker isn't installed or isn't on PATH" | the typed install line (`src/host.rs:245` registry) | Rerun |
-| `NotDeclared` (new kind) | kind: **ContainerProfile**; given; candidates; closest | unknown_profile | 2 | never | "no container profile 'srve' for journeeze" | — | Rerun with the unique closest (the kind's code is mapped next to `src/cause/mod.rs:1355`) |
-| `Guard` (new guard) | **ContainerProfileRefuses{profile, asked, allowed}** | policy_refused | 6 | never | "container profile serve doesn't take environment prod (it takes dev, staging)" | "use a profile that allows it, or add it to the profile (opv config edit)" | `opv run <env> … --preview` |
-| `Usage` | ConflictsWith{`--container`, `--remote`} | usage | 2 | never | "--container can't be used with --remote" | — | Rerun without one |
-| `ConfigInvalid` (new checks) | **ContainerSecretWithoutFile{key, profile}**, **ContainerUserOnDocker{profile}**, **ContainerNeedsSecretsDir{profile}**, **ContainerImageUnpinned{profile, env}**; field rules Pattern / Missing / Reserved for `image` (non-empty, no whitespace, not starting with `-`), `mount_at` (absolute, not `/`, no `..`, not under `/proc`, `/sys`, `/dev`), `publish`, `network`, `runtime` | config_invalid | 2 | after_fix | "products.journeeze.keys.DATABASE_URL is a secret delivered to container profile serve but has no file: a container gets secrets only as files" | "add file = \"database/url\", or kind = \"config\" if it isn't a secret" | `opv config edit` |
-| `RamDirUnavailable` | unchanged (purpose FileDelivery) | ram_dir_unavailable | 6 | after_fix | as today | as today | the run's preview |
-| `PrivateDirFailed` | unchanged | private_dir_failed | 6 | after_fix | as today | as today | Rerun |
-| `ChildStartFailed` | program: docker / podman | child_start_failed | 3 | after_fix | "docker couldn't be started" | "check that docker is on PATH" | Rerun |
-| **`ContainerLeft`** (new) | runtime; name; seen | **container_left** | — (the app's exit code is kept, FR-4) | check_first | "container opv-journeeze-… is still there after the run" | "remove it: docker rm -f <name>" | Check: `docker ps -a --filter name=<name>` (a typed `Vendor` step) |
-| `Interrupted` | unchanged | interrupted | 128+sig | safe | as today | — | Rerun |
+### 6.5 RBAC and ExternalSecrets
 
-- **Exit codes from the app.** `docker run` itself uses 125 (daemon or image: `failures/04`, `06`) and 127 (command not in the image: `failures/08`). The app can use those codes too. opv doesn't capture the client's stderr: that would put the app's output through opv. So the code is passed through as the app's (FR-4), and the probe catches what it can first. This limit is stated in §11 R7.
-- **Internal steps never name themselves.** Every cause above renders against the person's `opv run` (`Outer`, `src/app/local_delivery.rs:126-148`), never `local-delivery` or `opv doctor` (X25).
-- `human_required` is false for all of them (no handoff). The `--confirm` handoff stays `NeedsConfirm`.
+- **New rights, for `configmap` only:** `get`, `list`, `create` and `delete` on configmaps. They are added to `ACCESS` (`src/adapters/kubernetes/runtime.rs:62-118`), and `delete configmaps` to `DEPLOY_RIGHTS` (`:133-137`).
+- Volume mounts need no pod RBAC; the kubelet mounts them (`:886-889`) **[A6]**.
+- **ExternalSecrets:** the projected source names the ExternalSecret's target Secret, which has the same name (`src/adapters/kubernetes/external.rs:162`). Each ExternalSecret pins one Key Vault version (`:165`), so no live change follows a refresh. Clean-up is unchanged (`:655-661`).
+- **Pod Security** `restricted` allows these volumes and `fsGroup` **[A11]**.
 
-### 3.9 Limits, stated plainly
+### 6.6 Readability preflight
 
-- The container daemon, root on the host, and anyone in the `docker` group (root-equivalent) can read the directory.
-- Container root can read the files (`success/07`). opv never runs the container as root, but an image could escalate inside the container through a setuid binary. That gives no more access to these files than the host user already has.
-- Every process of the same host user can read the files and `docker exec` into the container while it runs, as today for a local process (`docs/design/local-delivery.md:41-56`).
-- tmpfs pages can be swapped to disk. The app's own core dumps are the image's business (opv disables only its own: `src/runner.rs:1889-1890`).
+The preflight reads the Deployment opv already reads (`src/adapters/kubernetes/mod.rs:542-554`), which holds no value.
 
-### 3.10 Tests
+| `fsGroup` | Effective `runAsUser` | Verdict |
+|---|---|---|
+| set | any | readable **[A3]** |
+| unset | 0 | readable |
+| unset | set, not 0 | **unreadable** |
+| unset | unset | **unknown** |
 
-**Recordings** (`tests/fixtures/docker/`, README there): 18 success and 9 failure cases recorded for this design. The README lists what is still to record before each refused row of §2 can change: native Docker Engine, rootless Docker, `userns-remap`, Docker Desktop outside WSL, a remote endpoint, Podman rootless and rootful. No test or simulator reply may stand in for those.
+- It is a pure `files::readability`, run in `KubernetesTarget::preflight` (`src/adapters/kubernetes/config.rs:435`).
+- `sync` refuses an unreadable or unknown verdict before writing; `plan`, `status` and `doctor` warn (`src/provider.rs:374-381`). O2.
+- Journeeze runs as uid 10001 (`ced358d:deploy/Dockerfile:34`, `:43`), so it needs `fsGroup`.
+
+### 6.7 Plan and status
+
+```text
+prod/k8s: would write: journeeze/GITHUB_APP_PRIVATE_KEY (FLEET__JOURNEEZE__GITHUB_APP_PRIVATE_KEY → file /run/secrets/journeeze/github-app/private-key)
+prod/k8s: would write: journeeze/LOG_LEVEL (LOG_LEVEL → ConfigMap, env)
+prod/k8s: would deploy: volume opv-files-journeeze, read-only at /run/secrets/journeeze (2 files; env entries removed: FLEET__JOURNEEZE__GITHUB_APP_PRIVATE_KEY)
+warn: deployment journeeze sets no fsGroup and runs as 10001: the mounted files (0440, root-owned) would be unreadable
+```
+
+- `JsonRow` (`src/app/mod.rs:735-760`) gains `channel` (`secret` / `config`), `delivered_as` (`env` / `file`) and `path`. The change is additive.
+- `chain:` lines (`src/app/status.rs:666`; `src/adapters/kubernetes/runtime.rs:876-885`) cover files and ConfigMaps.
+
+### 6.8 Causes
+
+| Situation | Variant | Code | Exit | Retry | Do | Next |
+|---|---|---|---|---|---|---|
+| bad `secrets_dir` | `ConfigInvalid` `Pattern{ContainerPath}` (new id) | config_invalid | 2 | after_fix | "use an absolute path such as /run/secrets/{product}" | `opv config edit` |
+| directory or volume-name collision | `ConfigInvalid` `Collision` | config_invalid | 2 | after_fix | "put {product} in secrets_dir" | `opv config edit` |
+| a config key with `file` under `config = "env"` | `ConfigInvalid` new `ConfigFileNeedsObject{key}` | config_invalid | 2 | after_fix | "set config = \"configmap\"" | `opv config edit` |
+| target `roles` missing, undeclared or empty | `ConfigInvalid` `Missing` / `Check{NotOneOf}` / `Check{EmptyRoles}` (`src/config.rs:1704-1708`) | config_invalid | 2 | after_fix | "add roles to the target" | `opv config edit` |
+| the path, or a parent or child of it, is in use by a foreign volume | `Guard` new `MountPathInUse{workload, container, path, volume}` | policy_refused | 6 | never | "choose another secrets_dir, or remove volume <v>" | `opv plan …` |
+| unreadable or unknown (§6.6) | new **`MountUnreadable`** `{workload, container, run_as, why: NoFsGroup / RunAsUnknown}` | **mount_unreadable** | 6 | after_fix | "set spec.template.spec.securityContext.fsGroup (any group, for example 10001), or runAsUser: 0. Nothing was written." | `opv plan …` |
+| 422 on replace | `TargetRefused{Validation}` (`src/cause/mod.rs:1084`) + a new phrase in `src/adapters/kubernetes/diagnose.rs` | update_refused | 5 | after_fix | "kubectl's reply is shown above" | `opv doctor …` |
+| missing configmap rights | `MissingRight{K8sRbac{verb, configmaps}}` (existing model) | permission_denied | 5 | after_fix | the typed grant | `opv doctor …` |
+| a file key left as env after `apply` | `Bug` | internal_error | 70 | never | — | `opv version` |
+
+`MountUnreadable` gets its own code because its fix is in the person's manifest. Swarm (§8.8) reuses it.
+
+### 6.9 kubectl replies to record
+
+These use kind, set up as in `tests/fixtures/kubernetes/success/README.md:3-5`. The simulator renders `get -o json` and `replace` from the world (`tests/sim/kube.rs:12-14`, `:310-367`).
+
+| # | Command | For |
+|---|---|---|
+| K-R1 | `replace` with the §6.3 volume | nested paths, `mode`, `configMap` sources **[A2]** |
+| K-R2 | `replace` with `path: ../x`, and with a duplicate path | the 422 text |
+| K-R3 | `get deployment -o json` after K-R1 | server defaults **[A5]** |
+| K-R4 | `get pods -o jsonpath=<PODS_PATH>` (`src/adapters/kubernetes/runtime.rs:56`) with a missing source | **[A7]** |
+| K-R5 | `exec … stat -f -c %T`, `stat -L -c "%a %u %g"`, `id`: no `fsGroup` at uid 10001, `fsGroup: 10001`, root | **[A2]**, **[A3]** |
+| K-R6 | `get replicasets -o json` after two deploys | references |
+| K-R7 | `apply -f - --server-side --field-manager=opv -o name` of a ConfigMap; `auth can-i create configmaps` (yes and no); `delete configmap …` | the ConfigMap store; the simulator today infers non-Secret kinds from the Secret recordings (`tests/sim/kube.rs:12-14`) |
+
+Until K-R2 and K-R4 exist, the simulator answers exit 86 (`tests/sim/recordings.rs:9`), and the coverage gate lists them as exempt.
+
+### 6.10 Tests
 
 | Layer | What | Where |
 |---|---|---|
-| Unit (D3) | the probe's decision for each recorded reply: `success/01`+`02`+`14` on WSL → `HostUser{1000,1000}`; `failures/05` → `Unavailable{DaemonNotRunning}`; `null` without stderr → `MappingUnknown`; an option name not in the recorded set → `MappingUnknown`; `DOCKER_HOST=tcp://…` → `RemoteEndpoint`; euid 0 → `HostUserIsRoot`; Podman → `NotVerified` until recorded. `run_argv` golden output, and a property test: no environment value ever appears in argv | `src/app/container_tests.rs` |
-| Unit (D1) | every load refusal of §3.8; the TOML example loads | `src/config.rs` tests |
-| Unit (D2) | each new cause's code, exit, retry, text and `--json`; no step names `local-delivery` or `doctor` | `src/cause/render_tests.rs` |
-| Integration (D8) | the real binary `opv local-delivery … --container <plan> -- …` with marker values in its environment and opv-sim's `docker` first on `PATH`: the consumer reads every serve file byte for byte (PEM with a trailing newline); no migration file; the client's environment holds no marker (the sim logs names); argv holds no marker; SIGTERM → exit 143, directory gone, container removed; SIGKILL of the step, then a second run → directory and container swept | `tests/container_delivery.rs` |
-| Simulator (D8) | **a fake container runtime**: `opv-sim` gains `docker` (and `podman` once recorded). `world.json` `containers`: `flavour` (`desktop_wsl` from the recordings; others only after recording), `daemon` up or down, `images`, `running` (name, labels, pid). It answers `context inspect`, `info`, `version`, `ps`, `rm -f` only from recordings. `run` checks opv's flags (mount source exists, is opv's tmpfs directory, 0700, files 0400, owned by the uid; `--user` equals it; `--log-driver none`; no `-e NAME=value` other than the directory variable; no `--env-file`/`--privileged`/`--userns=host`), records the call, then runs the container arguments as a local child. Its environment is the `-e` names copied from the client, with the directory variable rewritten from `mount_at` to the source (a documented substitution, as the simulated `ssh` runs the remote side locally: `tests/sim/ssh.rs:251-257`). The exit code and SIGTERM are forwarded. Faults: `daemon_down` (`failures/05`, `06`), `image_absent` (`04`), `command_missing` (`08`), `client_killed_container_survives` (`success/11`) | `tests/sim/container.rs`, `tests/sim/opv_sim.rs` (`TOOLS`) |
-| E2E (D8) | snapshots: the preview for the recorded flavour (text and JSON, CLI = MCP); each reachable refusal (`RemoteEndpoint`, `HostUserIsRoot` via the sim's reported euid, `MappingUnknown`, `NotVerified`, `DaemonNotRunning`, `ToolMissing{docker}`, `ContainerSecretWithoutFile`); a canary scan of stdout, stderr, the `--json` document, `calls.log` and the sim state | `tests/e2e/scenarios/container.rs`, `tests/e2e/coverage.rs` (variants not reachable until recorded, such as `Rootless` and `UserNamespaceRemap`, are listed as exempt with that reason) |
-| Real tools | the tagged-release verification (§7); the simulator doesn't model `op run` (`tests/sim/op.rs:139` has no `run` arm) | evidence files |
+| Unit | volume golden JSON; `read_bindings` for each `Other` case; `readability`; `strip_managed`; a no-value property test | `src/adapters/kubernetes/files.rs`, `files_tests.rs` |
+| Unit (FakeRunner) | `apply` on `deployment-get.json`: volume added, env entry removed, `K7` kept; ConfigMap write and compare | `runtime.rs`, `store.rs` tests |
+| E2E | `e2e-prod` gets a Deployment from the recording (`tests/e2e/app/world.json` is empty today). The e2e k8s target (`tests/e2e/app/secrets.toml:35-41`) gets `secrets_dir`, `config = "configmap"` and `roles`. Snapshots and the canary scan. | `tests/e2e/scenarios/k8s_files.rs` |
 
-## 4. Code pointers
+## 7. Fly: config channel, files and the migration app
 
-| Concern | File | Today |
-|---|---|---|
-| Profile struct | `src/domain/model.rs` (next to `Remote`, `:161-186`; `Product.remotes`, `:153`) | — |
-| Load rules | `src/config.rs` (next to `validate_remotes`, called at `:1160`, and `validate_local`, `:1575-1610`) | — |
-| Probe, argv, sweep parsing | `src/app/container.rs` (new) | — |
-| Step | `src/app/local_delivery.rs:283-350` | runs a process |
-| Signals | `src/runner.rs:1893-2190` | directories only |
-| Run wiring | `src/app/run.rs:152-158` (`Launch`), `:339-347` (delivery args), `:451-471` (`delivery_args`); `src/main.rs:698-728` (`Run` flags), `:2972-3048` (dispatch) | local and remote |
-| Preview | `src/app/delivery_preview.rs:121-226`; MCP `src/mcp.rs:400-415` | local and remote |
+### 7.1 Config as Fly secrets (0.11.0)
 
-## 5. Verbatim bytes for file keys
+- **Channel.** Fly's runtime env can be written through its API only as secrets. `[env]` in `fly.toml` belongs to the app's deployed configuration. Config keys therefore go to Fly secrets under the same name template (`src/adapters/fly/config.rs:45-53`), staged and deployed exactly like secrets (`docs/configuration.md:352`).
+- **Comparison.** Fly hides values, so config gets the same digest-and-ledger treatment as secrets (`docs/usage.md:240`).
+- **Opt-in by declaration.**
+  - New `fly.config = "secrets" | "none"`.
+  - Unset on a target that delivers config keys: `plan` and `status` warn `config not delivered: set fly.config` in 0.11.0. Today these keys are silently `n/a` (`docs/usage.md:131`), and turning them on for every Fly app on upgrade would stage new secrets and restart machines without anyone asking.
+  - From 0.12.0, unset is refused (`NoChannel`). O15 decides this schedule.
+- **Precedence.** A Fly secret and an `[env]` entry with the same name: which wins is **[A30]**. `plan` warns when a config key's name also appears in `fly.toml`'s `[env]`, if the file is present in the checkout.
+- **Channels:** secret → `Store{"Fly secrets"}`; config → `Store{"Fly secrets"}` or `None{"fly.config = none"}`; files → `ViaApp{"the app writes env to files (Journeeze's shim)"}`.
 
-**What opv does today:**
-- **Delivery writes what `op run` gave it**, unchanged: `value.as_bytes()` of the step's environment variable (`src/app/local_delivery.rs:304-317`). A multi-line value and a trailing newline arrive byte for byte (`tests/local_delivery.rs:203-221`). No rule or transform runs in `opv run` on the delivery path.
-- **`pem_private_key` is a staging transform.** `rules::check` turns a multi-line PEM into one line before the always-on rules (`src/domain/rules.rs:288-296`; test `:858`). It runs for check, plan and sync (`src/domain/plan.rs:309`), never for delivery. A key with `file` and this transform therefore reaches a local file as the stored multi-line bytes, and a Fly target as one line.
-- **The always-on rules** `single_line` and `no_surrounding_space` (`src/domain/rules.rs:297-302`) are applied by `plan::evaluate` **even when the environment has no target** (`src/domain/plan.rs:196-198`, `:309`). So a multi-line file key without a transform fails `opv check` in a run-only environment.
-- **The tidy rewrites stored values.** `convention::normalized` trims a trailing `\n`, `\r` or space when the trimmed value passes the rules, for any key without a transform (`src/domain/convention.rs:273-302`). A person's run writes that back into 1Password (`src/app/tidy.rs` `tidy` → `onepassword_tidy::write`). A file key stored as `secret\n` would lose its newline: **this contradicts decision 3**.
-- Values are environment variables, so they are UTF-8 without NUL. `std::env::vars()` (`src/app/local_delivery.rs:295`) panics on a non-UTF-8 variable. A binary file value isn't deliverable (§11 R10).
+### 7.2 Files on Fly: established
 
-**Changes (D7):**
-1. `convention::normalized` returns `None` for a key with `file`. The tidy never rewrites a file key's stored value.
-2. `plan::evaluate`: for a key with `file` and no target (`opts.target == None`), `single_line` and `no_surrounding_space` aren't applied. `nonempty`, `max_len` and the prefix rules still are. Where a target stages the key, every rule and the transform apply to the **staged copy only**.
-3. The preview shows `bytes: verbatim` and names any `staging_transform` (§3.7).
-4. `docs/configuration.md`'s rules reference states the exception.
+- `--file-secret /path/inside/machine=SECRET`: "where SECRET is the name of the secret. The content of the secret must be base64 encoded." It exists on `machine run`, `machine update` and `deploy` (`tests/fixtures/fly/help/machine-run.stdout:59-66`, `tests/fixtures/fly/help/machine-update.stdout:57-64`, `tests/fixtures/fly/help/deploy.stdout:113-117`), in flyctl v0.4.111 (`tests/fixtures/fly/failures/12-version.stdout:1`).
+- opv would stage a separate base64 copy (`…__FILE`) of each file key, which keeps the bytes verbatim in one line.
+- Journeeze runs on the infra repo's shared fleet. Its launcher clears the environment (`ced358d:fly.toml:1-10`) and builds the machine configuration in `fly/shared-host/assemble.py` (not read **[A10]**). So `[[files]]` in Journeeze's own `fly.toml` wouldn't apply.
 
-## 6. Fly: a separate migration app (design only)
+### 7.3 Files on Fly: needs a live check (a throwaway app; O8)
 
-**Today:** Fly delivers app secrets to every machine of the app as environment variables at boot. opv syncs them as `FLEET__<PRODUCT>__<KEY>` (or the target's `secret_name`). Journeeze's shim (`jz_host::fleet_secrets`, switched on by `JZ_VAULT_FROM_ENV=fleet`: `ced358d:crates/jz_host/src/fleet_secrets.rs:90-91`, `ced358d:fly.toml:23`) writes the delivered variables as 0400 files on tmpfs and re-execs itself without them (`ced358d:crates/jz_host/src/fleet_secrets.rs:281-316`). Journeeze runs on the infra repo's shared fleet, not on its own Fly app (`ced358d:fly.toml:1-10`). Its migration container gets only its catalog `migration_env` (`ced358d:crates/jz_host/src/fleet_secrets.rs:86-89`, a comment; the infra repo wasn't read **[A7]**).
+- F1: does `fly.toml` `[[files]] secret_name` behave like `--file-secret`? **[A9]**
+- F2: where does the file land (the root filesystem, or RAM), with what mode and owner? Does `--rootfs-persist` (`tests/fixtures/fly/help/machine-run.stdout:104-107`) keep it? **[A9]**
+- F3: are the bytes decoded exactly?
+- F4: does `secrets deploy` rewrite the file?
 
-**Design (decision 2): two Fly apps, two opv targets per environment.**
+Until these are answered, the shim stays (`ced358d:crates/jz_host/src/fleet_secrets.rs:90`, `ced358d:fly.toml:21-23`). It reads only platform-provided env.
+
+### 7.4 Separate migration app (design only)
+
+- Two targets per environment: `fly = { app = "journeeze-staging" }, roles = ["serve"]` and `fly = { app = "journeeze-migrate-staging" }, roles = ["migrate"]`, using the target `roles` of §4.4.
+- No opv in either image.
+- Shim retirement, every live step authorized by a person:
+  1. the base64 staging;
+  2. the launcher's `[[files]]`, with the shim still on;
+  3. staging switches, and every serve name reads, **including `github/webhook-secret`**;
+  4. a production canary, then all machines;
+  5. remove the shim.
+
+## 8. Docker Swarm target (0.11.0)
+
+### 8.1 Recorded so far (read-only, no swarm)
+
+- `docker secret create [OPTIONS] SECRET [file|-]` takes `--label` (`tests/fixtures/docker/swarm/help/secret-create.stdout:2`, `:8`).
+- `docker config create [OPTIONS] CONFIG file|-` takes `--label` (`tests/fixtures/docker/swarm/help/config-create.stdout:2`, `:7`).
+- `secret ls` takes `--filter` and `--format json` (`tests/fixtures/docker/swarm/help/secret-ls.stdout:10-16`); `secret rm` is at `tests/fixtures/docker/swarm/help/secret-rm.stdout:2`.
+- `service update` takes `--secret-add` and `--secret-rm` (`tests/fixtures/docker/swarm/help/service-update.stdout:125-126`), `--config-add` and `--config-rm` (`:10-12`), `--env-add` and `--env-rm` (`:32-34`), `--detach` (`:20-21`), and the `--update-*` and `--rollback*` options (`:110-148`).
+- `docker info --format '{{json .Swarm}}'` on a node outside a swarm prints `"LocalNodeState":"inactive","ControlAvailable":false` (`tests/fixtures/docker/swarm/01-info-swarm-inactive.stdout:1`).
+- `secret ls` there fails with "This node is not a swarm manager", exit 1 (`tests/fixtures/docker/swarm/02-secret-ls-not-a-manager.stderr:1`). `service inspect` fails with a different wrapper (`tests/fixtures/docker/swarm/03-service-inspect-not-a-manager.stderr:1`).
+
+### 8.2 Configuration and channels
 
 ```toml
-[environments.staging.targets.journeeze]            # the serving app
-fly = { app = "journeeze-staging" }
-products = ["journeeze"]
-roles = ["serve"]                                    # new: which roles' keys this target receives
-
-[environments.staging.targets.journeeze-migrate]    # the migration app
-fly = { app = "journeeze-migrate-staging" }
-products = ["journeeze"]
-roles = ["migrate"]
+[environments.prod.targets.swarm]
+swarm.context     = "prod-manager"            # a docker context naming a manager (ssh:// or unix://)
+swarm.service     = "journeeze_serve"
+swarm.secret_name = "FLEET__{PRODUCT}__{KEY}"
+swarm.secrets_dir = "/run/secrets/{product}"
+swarm.files_owner = "10001:10001"             # optional; else a numeric user from the service
+roles = ["serve"]
 ```
 
-1. **Targets take `roles`.** `sync` stages a key to a target only when `select` (`src/app/delivery_preview.rs:59-102`) would deliver it for one of the target's roles. This is the first time roles reach a target; today "Roles never reach `sync` or a target" (`docs/design/local-delivery.md:79`), so that sentence changes. Load rules fail closed:
-   - a target that places a product whose keys declare roles must declare `roles`, as `run` needs `--role`;
-   - a key whose roles exclude every role of a target is never staged there.
-2. **The serving app never receives migration material**, not even in its init process's environment. The one-app limit (every machine's init gets every app secret) no longer applies to the serving app.
-3. **The guest step** is the same `local-delivery`, with `--from-env <prefix>` mapping the target's secret names back to keys. It uses the `--role` of its app (`serve` on the serving app; `migrate` in the migration app's one-off machine). Missing or failing keys stop the start with a names-only message.
-4. **Verbatim bytes through Fly env.** A Fly secret is an environment variable, and opv stages one line (`src/domain/rules.rs:288-298`). To keep decision 3 for Fly, a file key would be staged as base64 of the stored bytes under a separate name (for example `FLEET__JOURNEEZE__GITHUB_APP_PRIVATE_KEY__B64`), and `--from-env` would decode it. The shim keeps reading the existing name during migration. That is an owner decision for when Fly is implemented (§13 D7).
-5. **`[[files]]` with `secret_name`** stays rejected: it lands in the guest's root filesystem, not in RAM.
+- **Channels:**
+  - secret → versioned Swarm secrets (files; Swarm has no secret-to-env binding, so **every delivered secret needs `file`**, or the load fails);
+  - config with `file` → versioned Swarm configs (files);
+  - config without `file` → service env through `--env-add NAME=value`. That puts the config value in the docker CLI's argv on the CI runner, so a config key stored concealed is refused, as on GitHub (`docs/configuration.md:427`);
+  - files → `Native`.
+- **Calls.** Every call carries `--context`, and `DOCKER_HOST`, `DOCKER_CONTEXT` and `DOCKER_CONFIG` are dropped from its environment. `ssh://` endpoints are normal here.
+- **Paths.** `secrets_dir` must be under `/run/secrets` **[A13]**. Each key's Swarm `target` is the path relative to `/run/secrets`.
 
-### 6.1 Migration plan for the shim (human-authorized at every live step)
+### 8.3 Store: versioned secrets and configs
 
-| Step | Who | Change | Exit criterion |
+| Operation | Call (values on stdin only) | Notes |
+|---|---|---|
+| list | `docker --context c secret ls --filter label=opv-managed=<env> --format json`; the same for `config ls` | names and labels; secret data is never returned **[A14]** |
+| write | `docker --context c secret create --label opv-managed=<env> --label opv-key=<store> --label opv-version=… --label opv-written=… --label opv-env=… --label opv-plan=… opv-<store>-<id> -`; the same with `config create` | the Kubernetes name and id scheme (`src/adapters/kubernetes/mod.rs:262-281`); provenance as labels (`src/domain/provenance.rs:235-242`) |
+| compare | secrets: the version ledger with keyed fingerprints, as on Fly (`docs/usage.md:240`); configs: `config inspect` returns the data **[A31]**, so the compare is exact | |
+| delete | `secret rm` / `config rm` | refused by Swarm while in use **[A15]** |
+| size | 500 KB **[A16]** | `Guard{ValueTooLarge}` |
+
+### 8.4 Runtime
+
+- **Read:** `service inspect <svc> --format '{{json .Spec}}'` and `'{{json .PreviousSpec}}'`. These hold names, targets and env, never secret data.
+- **Bindings:** match entries by `File.Name` (secrets and configs) and by env name. An entry is `Pinned` when its name splits as `opv-<store>-<id>` and the owner and mode match.
+- **Apply:** one `service update --detach=false` with `--secret-rm/--secret-add source=<new>,target=<rel>,uid=,gid=,mode=0400`, the `--config-*` equivalents, and `--env-add` **[A17]**.
+  - **There is no compare-and-set through the CLI** **[A18]**. opv compares the Spec before and after, outside its own entries (the Kubernetes `changed_paths` idea, `src/adapters/kubernetes/runtime.rs:139-174`). A difference is `TargetRefused{ChangedOutsideOpv{after_apply: true}}` (`src/cause/mod.rs:1101-1104`).
+- **Owner:** `swarm.files_owner`, or else a numeric `ContainerSpec.User`. Anything else is `MountUnreadable{RunAsUnknown}`. Swarm sets the owner per file, so 0400 works **[A17]**.
+- **Health:** poll `UpdateStatus` until `completed`. `paused` and `rollback_*` are unhealthy **[A19]**. Progress lines and the wait limit are as on Kubernetes (`src/adapters/kubernetes/runtime.rs:40-46`).
+
+### 8.5 Rollout, scaling, clean-up
+
+- The rollout follows the service's own `UpdateConfig`, which opv never changes.
+- New replicas get the current Spec.
+- After a healthy update, opv deletes `opv-managed=<env>` secrets and configs that neither `Spec` nor `PreviousSpec` references, so `docker service rollback` keeps working. Swarm's own refusal to remove an object in use counts as "kept".
+
+### 8.6 Permissions
+
+Swarm has no RBAC: a client that reaches a manager's API controls the swarm. CI uses a dedicated context: `ssh://deploy@manager` with a CI-only key, or mutual TLS. `doctor` requires `ControlAvailable: true` (the recorded shape: `tests/fixtures/docker/swarm/01-info-swarm-inactive.stdout:1`). `deploy_credentials` doesn't apply, as on Kubernetes (`src/adapters/kubernetes/config.rs:223-233`).
+
+### 8.7 Plan and status
+
+These follow §6.7:
+- `would write: journeeze/DATABASE_URL (FLEET__JOURNEEZE__DATABASE_URL → file /run/secrets/journeeze/database/url)`;
+- `would deploy: service journeeze_serve (2 secrets, 1 config, 1 env repointed; files 10001:10001 0400)`;
+- `chain: DATABASE_URL → Swarm secret opv-…-h6tn4wbr5e → file …`.
+
+### 8.8 Causes
+
+| Situation | Variant | Code | Exit | Retry | Do | Next |
+|---|---|---|---|---|---|---|
+| not a manager (recorded `02`, `03`) | `OwnerSetupRequired` new object `SwarmManager{context}` | owner_setup_required | 5 | after_fix | "point swarm.context at a manager node" | `opv doctor …` |
+| daemon unreachable | `Unavailable{system: Docker (new), Network}` (text: `3b8e180:tests/fixtures/docker/failures/05-daemon-unreachable.stderr`, kept) | provider_unavailable | 9 | safe | "check the connection to <context>" | rerun |
+| context missing | `NotFound{DockerContext, LocalContextMissing}` | resource_not_found | 5 | after_fix | "docker context create <c> --docker host=ssh://…" | `docker context ls` |
+| service missing | `NotFound{Service, ConfigField{swarm.service}}` | resource_not_found | 5 | after_fix | "check swarm.service" | `docker --context c service ls` |
+| lost create | reconcile by listing, else `CreateOutcomeUnknown{Check}` | create_outcome_unknown | 9 | check_first | — | `docker --context c secret ls --filter name=<n>` |
+| update paused or rolled back | `TargetRefused{Unhealthy}` | target_unhealthy | 5 | after_fix | "the previous tasks keep serving; nothing pruned" | `docker --context c service ps <svc>` |
+| Spec changed during the update | `TargetRefused{ChangedOutsideOpv{after_apply}}` | update_refused | 5 | check_first | — | `opv status <env>` |
+| owner unknown | `MountUnreadable{RunAsUnknown}` | mount_unreadable | 6 | after_fix | "set swarm.files_owner, or a numeric user on the service" | `opv plan …` |
+| a secret without `file`, a bad `secrets_dir`, or a concealed config bound to env | `ConfigInvalid` new `SwarmSecretWithoutFile{key}`, `Pattern{SwarmSecretsDir}`; the existing `concealed-config` refusal | config_invalid / findings | 2 / 8 | after_fix | as worded | `opv config edit` |
+| too large | `Guard{ValueTooLarge}` | policy_refused | 6 | never | as today | as today |
+| docker missing | `ToolMissing{docker}` | dependency_missing | 3 | after_fix | install line | rerun |
+
+### 8.9 Recordings still needed (a single-node swarm; **`docker swarm init` needs the owner's approval first**, O13)
+
+- **S-R1:** `swarm init`, and `swarm leave --force` at the end.
+- **S-R2:** `secret create` (stdin), the same again (exists), and an oversize value **[A16]**; `config create` likewise.
+- **S-R3:** `secret ls` and `config ls --format json`; `secret inspect` (no data **[A14]**); `config inspect` (data **[A31]**).
+- **S-R4:** `service create --user 10001:10001 --secret source=…,target=journeeze/database/url,uid=10001,gid=10001,mode=0400 --config … --env …`; `service inspect` (Spec) **[A13]**, **[A17]**.
+- **S-R5:** `service update --detach=false --secret-rm/--secret-add/--config-*/--env-add`; then `UpdateStatus`, `PreviousSpec` and `Version` **[A18]**, **[A19]**.
+- **S-R6:** `docker exec` into a task: `stat -f -c %T`, `stat -c "%a %u %g"`, `id`.
+- **S-R7:** `secret rm` while in use **[A15]**.
+- **S-R8:** a failing update with `--update-failure-action pause` and with `rollback`.
+- **S-R9:** `docker --context nonexistent info`.
+
+Of `3b8e180`'s `tests/fixtures/docker/` set, this commit keeps only what the Swarm target reuses: `success/01-version`, `success/14-context-endpoint`, `failures/05-daemon-unreachable`, `failures/06-daemon-unreachable-run`. The rest stay citable at `3b8e180`.
+
+### 8.10 Tests
+
+- **Unit:** builders, Spec parsing over S-R4/S-R5, `PreviousSpec` references, owner rules.
+- **Simulator:** `tests/sim/docker.rs` (new). It answers only from recordings, and anything else is exit 86. Register `docker` in `TOOLS` (`tests/sim/opv_sim.rs`) and in `SIMULATED` (`tests/e2e/matrix.rs:351`).
+- **E2E:** `tests/e2e/scenarios/swarm.rs`.
+
+## 9. Docker on VMs in any cloud (0.12.0: GCP first; AWS later)
+
+### 9.1 Shape
+
+```text
+CI:   opv changed → opv sync prod        (service account → 1Password; CI's cloud identity → secret manager)
+VM:   every boot → opv-vm-secrets (not opv; VM identity → secret manager → tmpfs, 0700/0400, container's uid)
+            → docker run --user <uid> --mount type=bind,src=/run/opv-secrets/journeeze,dst=/run/secrets/journeeze,readonly
+scale: the autoscaler boots VMs; each runs the same two steps
+rotate: opv sync → the cloud's rolling restart or replace (vm.restart_hint)
+```
+
+### 9.2 The startup step: one script, three providers
+
+`deploy/vm/opv-vm-secrets.sh` is POSIX `sh`. It is not opv, never touches 1Password, and contains no credential.
+
+| | GCP | Azure | AWS |
 |---|---|---|---|
-| 0 | opv | ship target `roles`, `local-delivery --from-env`, and the base64 file-key staging (if adopted) in a tagged release, with fixture tests: exact bytes including PEM and a trailing newline, migration keys absent from the serving app's synced set, canary values absent from logs | tests in CI; `opv plan` for both targets reviewed |
-| 1 | Journeeze maintainers and infra | create the migration app; add opv to the image with a **second**, unused entrypoint; the shim stays the default | image builds; `opv run --preview` for both roles matches §1.1 |
-| 2 | a person, staging | switch staging to the opv entrypoint (`JZ_VAULT_FROM_ENV` unset); keep the shim in the image | `MountedSecretStore` reads every §1.1 serve name, **including `github/webhook-secret`**; the serving app's secret list has no migrate key; evidence recorded |
-| 3 | a person, production | canary one machine, then all | same checks; rollback is reverting the entrypoint |
-| 4 | Journeeze maintainers | remove the shim and close its ADR exception | only after step 3 has run cleanly for an agreed period |
+| Identity | VM service account; token from `http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token` (`Metadata-Flavor: Google`) **[A20]** | managed identity via IMDS `http://169.254.169.254/metadata/identity/oauth2/token?resource=https://vault.azure.net` (`Metadata: true`) **[A20]** | instance role through the `aws` CLI chain **[A20]** |
+| Secrets | `GET …/v1/projects/<p>/secrets/<id>/versions/latest:access` → `payload.data` (base64) **[A21]** | `GET https://<vault>.vault.azure.net/secrets/<name>?api-version=7.4` → `value` **[A21]** | `aws secretsmanager get-secret-value --secret-id <id> --query SecretBinary --output text` **[A21]** |
+| Config | Secret Manager, the same call | Key Vault, the same call | `aws ssm get-parameter --name <n> --query Parameter.Value --output text` **[A27]** |
+| Tools | `curl`, `jq`, `base64` | `curl`, `jq` | `aws`, `base64` |
 
-Each step can be reverted without touching values. Existing Fly secret names are kept (the base64 copies are additions).
+The script:
+1. **Arguments:** `--provider gcp|azure|aws --map <file> --dir <path> --owner <uid>:<gid>`, plus `--project`, `--vault` or `--region`.
+2. **Directory:** `mount -t tmpfs -o size=1m,mode=0700,uid=<uid>,gid=<gid>,nosuid,nodev,noexec tmpfs <dir>`. It refuses a directory that is already mounted, and never writes to disk.
+3. **Files:** the map has lines `<kind><TAB><id><TAB><dest>`.
+   - `<dest>` is a relative path, checked with Journeeze's segment rule (`ced358d:crates/jz_secrets/src/lib.rs:23-34`), or `env:<NAME>` for a config key without `file`.
+   - Each value is fetched and decoded through a pipe into `(umask 377; cat > <file>.tmp)`, then `chown`, `chmod 0400` and renamed into place. Parent directories are 0500.
+   - `env:` lines go to `<dir>/.env` (0400), which the unit passes as `--env-file`. That file holds config only.
+   - Values never appear in argv, the environment or a log.
+4. **Failure:** any failure exits non-zero and names the id and the HTTP status, never a value. The container unit `Requires=` the step, so a VM never starts the app without its files.
+5. **`--check`:** prints each path as present or absent, with its size.
 
-## 7. Verification against the tagged release
+**The map** is non-secret. CI renders it from `opv plan <env> --target <t> --json` (`target_name`, `channel`, `path`; §6.7).
 
-The in-tree fixture proves the mechanism with the build under test (`tests/mounted_consumer.rs:1-8`). This run proves the **released artifact**, through real `op run` and a real container runtime, with Journeeze's real `MountedSecretStore` (`ced358d:crates/jz_secrets/src/lib.rs:11-47`). A person runs it, in their own terminal, after `v0.11.0` is published. No production value is used. The test values are markers entered by the person (human-only value entry), never credentials.
+**cloud-init** (`deploy/vm/cloud-init.yaml`, GCP):
 
-**Where evidence is recorded:** `docs/verification/v0.11.0-container-delivery.md` (the record) and `docs/verification/v0.11.0-container-delivery/` (raw files and the verifier's source). It goes in a PR to `dev`, linked from `CHANGELOG.md` `[0.11.0]` and from #136.
+```yaml
+#cloud-config
+write_files:
+  - {path: /usr/local/sbin/opv-vm-secrets, permissions: "0755", content: "…the script…"}
+  - path: /etc/opv-vm-secrets/journeeze.map
+    content: |
+      secret	fleet--journeeze--database-url	database/url
+      secret	fleet--journeeze--github-app-private-key	github-app/private-key
+      config	log-level	env:LOG_LEVEL
+  - path: /etc/systemd/system/opv-vm-secrets.service
+    content: |
+      [Unit]
+      Before=journeeze.service
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/local/sbin/opv-vm-secrets --provider gcp --project my-proj --map /etc/opv-vm-secrets/journeeze.map --dir /run/opv-secrets/journeeze --owner 10001:10001
+  - path: /etc/systemd/system/journeeze.service
+    content: |
+      [Unit]
+      Requires=opv-vm-secrets.service docker.service
+      After=opv-vm-secrets.service docker.service
+      [Service]
+      ExecStart=/usr/bin/docker run --rm --name journeeze --user 10001:10001 --log-driver none --env-file /run/opv-secrets/journeeze/.env --mount type=bind,src=/run/opv-secrets/journeeze,dst=/run/secrets/journeeze,readonly -e JZ_VAULT_DIR=/run/secrets/journeeze -p 18088:18088 journeeze@sha256:…
+      ExecStop=/usr/bin/docker stop journeeze
+runcmd: [[systemctl, daemon-reload], [systemctl, enable, --now, journeeze.service]]
+```
+
+- **systemd units run every boot**, while `runcmd` alone runs once per instance **[A22]**. tmpfs is empty after each reboot, so the step must run every boot.
+- **Rejected:** a tiny binary. It is harder to audit on a VM and needs a build per architecture (O11).
+
+### 9.3 Limits
+
+The files are 0400, owned by the container's uid (§5's rule; `3b8e180:tests/fixtures/docker/failures/01-run-as-other-uid-denied.stderr`). VM root, the `docker` group and any process that can obtain the VM identity's token can read the values **[A20]**. That is the cloud's own model; it is documented.
+
+### 9.4 The `vm` target and the GCP Secret Manager store
+
+```toml
+[stores.gcp-prod]
+gcp_secret_manager = { project = "my-proj" }
+
+[environments.prod.targets.vms]
+vm.store        = "gcp-prod"
+vm.secret_name  = "FLEET__{PRODUCT}__{KEY}"
+vm.secrets_dir  = "/run/opv-secrets/{product}"
+vm.restart_hint = "gcloud compute instance-groups managed rolling-action restart journeeze-mig --region us-central1"
+roles = ["serve"]
+```
+
+**Store.** `gcp_secret_manager` is a new `StoreConfig` next to Key Vault (`src/adapters/azure/store.rs:159`; the binding table, `src/adapters/kubernetes/config.rs:109-113`). It implements `PinnedStore` (`src/ports.rs:66-93`):
+
+| Operation | Call (values on stdin) |
+|---|---|
+| list | `gcloud secrets list --project p --filter='labels.opv-managed=<env>' --format=json(name,labels,annotations)` |
+| read (exact compare, as Key Vault does: `docs/usage.md:240`) | `gcloud secrets versions access latest --secret <id> --out-file=-` **[A23]** |
+| create | `gcloud secrets create <id> --replication-policy=automatic --labels=opv-managed=<env>,opv-key=<store>,opv-kind=<secret\|config> --data-file=-` |
+| write | `gcloud secrets versions add <id> --data-file=-` |
+| provenance | `gcloud secrets update <id> --update-annotations=opv-version=…,opv-written=…,opv-env=…,opv-plan=…` **[A24]** |
+| superseded | disable versions older than the previous one; never destroy (O12) |
+| prune | `gcloud secrets delete <id> --quiet`, only with `opv-managed=<env>` |
+
+- **Names:** ids are `store_name` (`src/adapters/kubernetes/mod.rs:256-259`) **[A25]**. Values are bytes, so they stay verbatim.
+- **Channels:** secret and config → `Store{"Secret Manager"}`; files → `Native` (written by the VM step).
+- **Runtime.** `LatestRuntime` implements `PinnedRuntime` (`src/ports.rs:105-130`):
+  - `bindings` pin each name to the latest enabled version;
+  - `apply` is a no-op;
+  - `await_healthy` is `Healthy`;
+  - `sync --deploy` prints `Next: <restart_hint>` as a typed `Vendor` step. opv never restarts VMs.
+- **Permissions:**
+  - CI identity: `roles/secretmanager.admin`, or `secrets.create/get/list/update/delete` and `versions.add/access/list/enable/disable` **[A26]**;
+  - VM identity: `roles/secretmanager.secretAccessor` on each managed secret;
+  - `doctor` checks the CI side, and warns with the exact grant command for the VM side (as Azure does, `docs/usage.md:268`).
+- **Output:** `chain: DATABASE_URL → GCP Secret Manager my-proj/fleet--journeeze--database-url (v7) → VM file /run/opv-secrets/journeeze/database/url`. The summary says `deployed no (VMs read it at their next start: <restart_hint>)`.
+
+### 9.5 AWS (design only)
+
+- **Secrets:** `aws secretsmanager create-secret --secret-binary fileb:///dev/stdin --tags …` and `put-secret-value` **[A27]**. `AWSCURRENT` and `AWSPREVIOUS` stay, so superseded handling is a no-op.
+- **Config:** SSM `put-parameter --type String` **[A27]**.
+- **Rights:** the CI role needs `secretsmanager:*Secret*`, `ssm:PutParameter/GetParameter`; the instance role needs `GetSecretValue` and `ssm:GetParameter` on the managed ARNs.
+
+### 9.6 Causes (GCP)
+
+| Situation | Variant | Code | Exit | Retry | Do | Next |
+|---|---|---|---|---|---|---|
+| not signed in | `NotSignedIn{Gcp}` (new system) | target_not_signed_in | 7 | after_fix | "gcloud auth login; in CI, the job's workload identity" | rerun |
+| 403 | `MissingRight{GcpIam{role, resource}}` (new grant model) | permission_denied | 5 | after_fix | "ask an owner to grant <role> on <resource> to <principal>" | `opv doctor …` |
+| API disabled | `OwnerSetupRequired{CloudApi{secretmanager.googleapis.com}}` | owner_setup_required | 5 | after_fix | "gcloud services enable secretmanager.googleapis.com --project p" | `opv doctor …` |
+| project or secret missing | `NotFound` | resource_not_found | 5 | after_fix | "check the store's project" | `gcloud secrets list --project p` |
+| network, 429, 5xx | `Unavailable{Gcp, …}` | provider_unavailable | 9 | safe | — | rerun |
+| lost `versions add` | `WriteOutcomeUnknown` (reconciled by listing versions) | outcome_unknown | 9 | safe | — | rerun |
+| gcloud missing | `ToolMissing{gcloud}` | dependency_missing | 3 | after_fix | install line | rerun |
+| the VM identity lacks access | an `AccessFinding` warning (`src/domain/runtime.rs:80-86`) | — | — | — | the grant command | — |
+| a secret key without `file` | `ConfigInvalid` new `VmSecretWithoutFile{key}` | config_invalid | 2 | after_fix | as worded | `opv config edit` |
+
+The script's own failures are not opv causes. It prints a fixed text per case to journald, with no value and no token.
+
+### 9.7 Rotation
+
+1. `opv sync` writes a new version.
+2. The person or CI runs `restart_hint`: a rolling restart or replace of the managed instance group, the scale set or the Auto Scaling group.
+3. Each VM fetches the latest version at boot.
+4. The next sync disables versions older than the previous one.
+
+By hand, `systemctl restart opv-vm-secrets journeeze` refreshes one VM.
+
+### 9.8 Recordings (a throwaway GCP project, run by the owner; O14)
+
+- **G-R1:** `gcloud version`; `auth list --format=json`, with and without an account.
+- **G-R2:** `secrets create --data-file=-`, and the same again.
+- **G-R3:** `versions add`, `versions list`, `versions access latest --out-file=-` (marker), `versions disable` **[A23]**.
+- **G-R4:** `secrets list --filter=labels…`; `secrets update --update-annotations` **[A24]**.
+- **G-R5:** `secrets delete --quiet`; access to a missing secret.
+- **G-R6:** without rights; with the API disabled; with an unknown project.
+- **G-R7:** `HTTPS_PROXY=http://127.0.0.1:9 gcloud secrets list`.
+- **G-R8:** on a GCE VM: the metadata token reply, the REST `:access` reply (marker), and the script's `--check` **[A20]**, **[A21]**.
+
+### 9.9 Tests
+
+- `tests/sim/gcloud.rs` answers from G-R1 to G-R7 only, plus E2E scenarios.
+- `tests/vm_step.rs` runs the script with a fake `curl` answering from G-R8. It checks the modes, the owner, that no value reaches argv or the environment (`/proc/<pid>/cmdline` and `environ` snapshots), and the traversal refusal. Root-only parts are skipped and the test says so.
+
+## 10. Scaling and rotation on every platform
+
+| Platform | Secrets | Config | A new replica gets them by | Rotation | Old versions | 1Password at runtime |
+|---|---|---|---|---|---|---|
+| Local `opv run` | env or tmpfs files | env | each run reads anew | stop and rerun | none | the developer's own session |
+| Local Compose | the run's tmpfs dir, bind-mounted | env | `--scale` shares the run's dir | rerun under `opv run` | none | the developer's own session |
+| Kubernetes | immutable Secret per version, projected volume or env | immutable ConfigMap per version | pods mount the template's objects | `opv sync --deploy` → template change → rolling update → health wait | kept while any ReplicaSet references them (`src/adapters/kubernetes/store.rs:257-271`) | none |
+| Swarm | Swarm secret per version (files) | Swarm config per version, or service env | tasks get the current Spec | `opv sync --deploy` → `service update` per `UpdateConfig` → `UpdateStatus` | kept while `Spec` or `PreviousSpec` references them | none |
+| VMs (GCP; AWS and Azure later) | secret manager, latest | secret manager (GCP), SSM (AWS) | each boot runs the startup step | `opv sync` → `restart_hint` (rolling) | GCP: current and previous enabled; AWS and Key Vault keep history | none |
+| Fly | Fly secrets (env at boot; the shim writes files) | Fly secrets (new) | each machine boots with the app's secrets | `opv sync --deploy` → `secrets deploy` restarts machines | n/a | none |
+| Azure Container Apps | Key Vault, by reference | app env or the store | new replicas of the revision | `opv sync --deploy` → new revision | Key Vault history | none |
+| GitHub Actions | secrets | variables | each workflow run reads them | `opv sync` (live at once) | n/a | none |
+
+## 11. Implementation plan
+
+Each deliverable has at most four owned files, exact pointers and named tests. Hours assume reading the pointers first.
+
+### 11.1 opv 0.11.0
+
+| ID | Deliverable | owned_files | Prereq. | h | Acceptance criteria |
+|---|---|---|---|---|---|
+| M1 | `Channels` contract | `src/provider.rs` (`channels()` required, next to `open` `:366-373`; `Channels`, `Channel`, `FileCapability`; the contract test), `src/ports.rs` (`variables` loses its default, `:44-49`), the four `config.rs` adapters (Fly `:231`, Azure `:452`, GitHub `:304`, Kubernetes `:392`: declare today's channels only) | — | 4 | Every provider declares channels; a provider without them doesn't compile. Today's behaviour is unchanged (all existing tests pass). The contract test lists each provider's table and matches §1.1's "today" column. |
+| M2 | Route by channel, and `NoChannel` | `src/domain/plan.rs` (config branch `:420-428`), `src/app/mod.rs` (`json_target` `:904-913`, `JsonRow` `:735-760`: `channel`), `src/cause/mod.rs` (`Guard::NoChannel`), `src/cause/render.rs` | M1 | 4 | A config key on a `Channel::None` target: `plan` and `status` print the warn line, `sync` refuses with `policy_refused`, and `config = "none"` gives a warn only. No row says plain `n/a` for config. |
+| M3 | Target `roles` | `src/domain/model.rs` (`:226-244`), `src/config.rs` (`:724-742`, `:1704-1722`), `src/domain/plan.rs` (`:296-321`), `docs/design/local-delivery.md` (`:79`) | — | 4 | Disjoint roles mean not desired, and prune would remove the binding. Load refusals: missing, undeclared, empty. Targets without role keys are unchanged. |
+| M4 | Verbatim bytes, `FileMount`, plumbing, plan id | `src/domain/convention.rs` (`:263-303`), `src/domain/runtime.rs` (`FileMount`), `src/app/mod.rs` (`open_target` `:1696-1704`, `file_mounts` next to `:1708-1721`, plan id `:200-230`); `src/domain/plan.rs` `evaluate` is shared, so M4 follows M2 and M3 | M2, M3 | 5 | A multi-line PEM with a trailing newline in a file key passes `check` without a target and stages verbatim to a `Native` target. The tidy keeps `x\n` in a file key and still trims a non-file key. Fly keeps `single_line` and `pem_private_key`. The plan id differs by channel and form. |
+| C1 | `opv changed` | `src/app/changed.rs` (new: versions via `op item list` per vault, the field via `op read`, states, exit 10), `src/main.rs` (subcommand next to `Delivery` `:760`), `src/cause/mod.rs` (`SourceChanged`, exit 10, `source_changed`), `docs/usage.md` (commands table `:16-18`, exit codes `:887-896`) | — | 5 | FakeRunner: unchanged → 0; a version bump → 10 naming the item; a missing field or delivery item → 10 `no_record`; an `op` failure → its own exit, never 0. No `op item get` and no value-bearing call appears in the recorded calls. JSON matches §2.2. |
+| C2 | Record source versions on sync | `src/app/delivery.rs` (`record`, near the evidence lines `:5-13`; the new field `source versions`), `src/app/sync.rs` (pass the item versions read, `read_item_fields` `src/app/mod.rs:186-193`), `docs/design/delivery-receipts.md` | C1 | 3 | After a confirmed sync the delivery item holds one `v1|<item_id>|<version>` line per source item. An unconfirmed sync records nothing. `opv changed` then reports `unchanged`. |
+| C3 | `status --fail-on-drift` | `src/app/status.rs` (drift `:634-661`, exit), `src/main.rs` (flag), `src/cause/mod.rs` (`TargetDrift`, `target_drift`) | — | 2 | With drift and the flag, exit 8 `target_drift`; without the flag the exit code is unchanged (snapshot). |
+| C4 | e2e coverage for C1–C3 | `tests/e2e/scenarios/changed.rs` (new), `tests/e2e/app/world.json` (item versions), `tests/e2e/coverage.rs` | C1–C3 | 4 | Snapshots for each `changed` state, the drift exit, and the canary scan. |
+| C5 | `opv ci workflow --on-change` | `src/app/ci_workflow.rs` (`run` `:24-40`, `Job`), `src/main.rs` (flag at `CiCmd::Workflow` `:3550`) | C1, C3 | 3 | Prints the two §2.5 workflows for the configuration, with `confirm_env` environments planned and gated. It is a golden test, and `actionlint` passes on the output. |
+| C6 | CI example and README section | `examples/ci-change-detection/` (README, both workflows, `install-opv` action), `README.md` (the §3 text), `docs/usage.md` (a "When sync runs" section) | C1, C3 | 3 | The examples equal C5's output for the example configuration, and `actionlint` passes. The README section reads as in §3 and its links resolve. |
+| A3 | Webhook secret in Journeeze's mapping | the Journeeze opv manifest (a person's edit), `docs/local-development.md` (example) | — | 1 | `opv run dev --product journeeze --role serve --preview --json` lists `github/webhook-secret`; `tests/mounted_consumer.rs:16-24` passes. |
+| A4 | `OPV_UID`/`OPV_GID` and the compose docs | `src/app/local_delivery.rs` (`child_env` `:174-191`), `src/app/delivery_preview.rs` (the `containers:` line), `docs/local-development.md` (after `:87`), `tests/fixtures/compose/README.md` | O4 | 3 | A file-delivering run's child has both ids; a run without files has neither. The preview prints the line. The docs' compose file equals `tests/fixtures/compose/recipe.yml`. |
+| F1 | Config on Fly | `src/adapters/fly/config.rs` (`fly.config` near `:45-99`; `channels`), `src/adapters/fly/store.rs` (or the staged store: config through `variables` → secrets), `docs/configuration.md` (`:347-352`) | M2 | 4 | `fly.config = "secrets"` stages config keys like secrets (FakeRunner, stdin only). Unset warns. `none` warns per run. The ledger covers config names. |
+| K1 | kubectl recordings K-R1–K-R7 | `tests/fixtures/kubernetes/success/`, `…/failures/`, READMEs | kind | 4 | Recorded as in `tests/fixtures/kubernetes/success/README.md:3-5`. **[A2]**, **[A3]**, **[A5]**, **[A7]** confirmed or refuted, and §6 amended where refuted. The cluster is deleted. |
+| K2 | `secrets_dir` and `config = "configmap"` config | `src/adapters/kubernetes/config.rs` (`ConfigRoute` `:85-93`, `Raw` `:119-130`, `checked` `:140-172`, `KubernetesTarget` `:96-107`, `INIT_FIELDS` `:49-80`, `channels`) | M1, M4 | 3 | The §6.2 load rules each have a unit test naming the field. `opv init` writes `configmap`. |
+| K3 | ConfigMap store | `src/adapters/kubernetes/store.rs` (kind parameter: Secret or ConfigMap, same name scheme; `referenced_names` `:257-284` already kind-agnostic), `src/adapters/kubernetes/runtime.rs` (`ACCESS` `:62-118` and `DEPLOY_RIGHTS` `:133-137` gain configmaps), `store_tests.rs` | K1, K2 | 4 | A ConfigMap write sends the value on stdin only, compares exactly, and cleans up superseded versions like Secrets. The configmaps rights appear in `doctor` and preflight. |
+| K4 | Pure volume functions | `src/adapters/kubernetes/files.rs` (new), `files_tests.rs` (new), `src/adapters/kubernetes/mod.rs` (`:25-29`) | K1, K2 | 5 | Golden JSON = §6.3. `read_bindings` handles each `Other` case on the K-R3 shape. `readability` = §6.6. `mount_conflict`. A no-value property test. |
+| K5 | Wire into `KubeDeployment` and the preflight | `src/adapters/kubernetes/runtime.rs` (`new` `:213-232`, `bindings` `:658-694`, `apply` `:697-772`, `fingerprint` `:293-304`, reconcile `:788-797`, `chain` `:876-885`), `src/adapters/kubernetes/config.rs` (`preflight` `:435`) | K3, K4, X1 | 6 | FakeRunner on `deployment-get.json`: the volume is added, the env entry removed, `configMapKeyRef` used for config, `K7` kept. The bindings read back. Mutate refuses unreadable with no `apply` call; Read warns. Existing tests pass. |
+| K6 | Kubernetes output, docs, E2E | `src/app/sync.rs` (`would …` near `:2011`), `tests/e2e/scenarios/k8s_files.rs` (new) with `tests/e2e/app/`, `docs/usage.md` (`:232-267`), `docs/configuration.md` (`:398`, `:461`) | K5, M2 | 6 | The §6.7 lines appear. The §6.10 snapshots are reviewed. K-R2 and K-R4 are reached or exempt. The canary scan is clean. |
+| X1 | Shared new causes | `src/cause/mod.rs` (`MountUnreadable`, `Guard::MountPathInUse`, `ConfigCheck::{ConfigFileNeedsObject, SwarmSecretWithoutFile}`, `PatternId::{ContainerPath, SwarmSecretsDir}`, `System::Docker`, object `SwarmManager`), `src/cause/render.rs`, `src/adapters/kubernetes/diagnose.rs` (the 422 phrase), `docs/design/error-catalog.md` (§4.4–§4.12) | K1 | 5 | Every §6.8 and §8.8 row is tested for code, exit, retry, text and JSON. K-R2 diagnoses as `update_refused`. |
+| S1 | Swarm recordings S-R1–S-R9 (**after O13**) | `tests/fixtures/docker/swarm/` | O13 | 3 | Recorded with markers; **[A12]**–**[A19]** and **[A31]** confirmed or refuted; the swarm is left. |
+| S2 | Swarm config and wrapper | `src/adapters/swarm/config.rs` (new; pattern `src/adapters/kubernetes/config.rs:30-280`), `src/adapters/swarm/mod.rs` (new: names, the `docker --context` wrapper with a scoped env as in `src/adapters/kubernetes/mod.rs:384-410`), `src/adapters/mod.rs`, `src/provider.rs` (registry) | M1, M4 | 5 | §8.2 parses. Load refusals are tested. `DOCKER_HOST`, `DOCKER_CONTEXT` and `DOCKER_CONFIG` never reach a call. |
+| S3 | Swarm store (secrets and configs) | `src/adapters/swarm/store.rs` (new), `store_tests.rs` | S1, S2 | 5 | Tests over S-R2, S-R3, S-R7. Values go on stdin only. Clean-up keeps `PreviousSpec` references. |
+| S4 | Swarm runtime | `src/adapters/swarm/runtime.rs` (new), `runtime_tests.rs` | S1, S3, X1 | 6 | Over S-R4, S-R5, S-R8: the argv, health states, `ChangedOutsideOpv`, the owner rules, `--env-add` for config only. |
+| S5 | Swarm diagnosis, simulator, E2E | `src/adapters/swarm/diagnose.rs` (new), `tests/sim/docker.rs` (new) + `tests/sim/opv_sim.rs` `TOOLS`, `tests/e2e/scenarios/swarm.rs` (new), `tests/e2e/matrix.rs` (`:110-125`, `:351`) | S4 | 7 | The recorded not-a-manager and unreachable replies diagnose as in §8.8. E2E plan, sync, status and canary pass. An unrecorded call is exit 86. |
+| V1 | Tagged-release verification | `docs/verification/v0.11.0-file-delivery.md` + directory | the tag | 6 | §12.1 passes, or its deviations are recorded. |
+
+**0.11.0 sequencing**
+- Critical path: M1 → M2 → M4 → K2 → K3 → K5 → K6 (32 h), with M3 and K1 alongside.
+- Change detection (C1 → C2 → C4; C3, C5, C6) is independent (about 23 h).
+- F1 follows M2 (4 h).
+- Swarm (S1 → S5, about 26 h) waits for O13 and runs in parallel; it can slip to 0.12.0 without touching anything else.
+- **Total about 113 h.**
+
+### 11.2 opv 0.12.0 (GCP first)
+
+| ID | Deliverable | owned_files | Prereq. | h | Acceptance criteria |
+|---|---|---|---|---|---|
+| G1 | gcloud recordings G-R1–G-R8 | `tests/fixtures/gcloud/` | O14 | 4 | Recorded with markers; **[A20]**–**[A26]** confirmed or refuted; the project is deleted. |
+| G2 | GCP store config and names | `src/adapters/gcp/config.rs` (new; beside `src/adapters/azure/store.rs:159`), `src/adapters/gcp/mod.rs` (the `gcloud` wrapper), `src/host.rs` (`Tool` gcloud near `:381`) | M1 | 4 | `[stores.x] gcp_secret_manager` parses; name rules are tested; doctor lists gcloud. |
+| G3 | GCP store operations | `src/adapters/gcp/store.rs` (new), `store_tests.rs` | G1, G2 | 6 | Over G-R2 to G-R5. Stdin only. Versions older than the previous one are disabled. `opv-kind` labels are set. |
+| G4 | GCP diagnosis and causes | `src/adapters/gcp/diagnose.rs` (new), `src/cause/mod.rs` (`System::Gcp`, `GrantModel::GcpIam`, `CloudApi`), `src/cause/render.rs`, `docs/design/error-catalog.md` | G1 | 4 | Every §9.6 row is tested from G-R6 and G-R7. |
+| G5 | `vm` target and `LatestRuntime` | `src/adapters/vm/config.rs` (new), `src/adapters/vm/runtime.rs` (new), `src/adapters/mod.rs`, `src/provider.rs` | G3 | 5 | `--deploy` prints `Next: <restart_hint>`. The channels are declared. A secret without `file` is refused. The `chain:` lines appear. |
+| G6 | VM startup script and cloud-init | `deploy/vm/opv-vm-secrets.sh`, `deploy/vm/cloud-init.yaml`, `deploy/vm/README.md`, `tests/vm_step.rs` | G1 | 6 | The GCP branch writes tmpfs files (dir 0700, files 0400, `--owner`) and `.env`. No value appears in argv or env snapshots. Traversal is refused. Failure exits non-zero naming the id. `--check` prints presence only. The Azure and AWS branches are marked "unverified". |
+| G7 | GCP simulator and E2E | `tests/sim/gcloud.rs`, `tests/sim/opv_sim.rs`, `tests/e2e/scenarios/gcp_vm.rs`, `tests/e2e/matrix.rs` | G4, G5 | 6 | Plan, sync, status, 403, API disabled and canary pass from recordings. |
+| G8 | GCP verification | `docs/verification/v0.12.0-gcp-vm.md` + directory | the tag | 5 | §12.2 passes, or its deviations are recorded. |
+
+**0.12.0:** critical path G1 → G3 → G5 → G7 (21 h); **total about 40 h**.
+
+**Later:** AWS (the G2–G4 pattern, plus G6's branch verified), Fly files after F1–F4, and the Events API trigger (O16).
+
+## 12. Verification against the tagged releases
+
+### 12.1 0.11.0
+
+**What it proves.**
+- The release artifact syncs the way CI runs it: a 1Password service account, `CI=true`, no person's session.
+- Workloads then read their files with **no 1Password access**: no `op`, no opv and no token in the image, pod or task, and the service account is revoked before the final restart.
+- `opv changed` triggers on an edit.
+- The drift check fails on drift.
+- The local Compose run works.
+
+Evidence goes in `docs/verification/v0.11.0-file-delivery.md` and its directory. The markers are those of `tests/mounted_consumer.rs:13-52`, plus a config marker.
 
 **Prerequisites:**
-- Linux or WSL 2 with a user-owned tmpfs `$XDG_RUNTIME_DIR`; Docker Desktop with WSL integration (the recorded flavour). Native Docker Engine and rootless Podman runs are added as extra matrix rows only if their recordings have landed.
-- `gh`, `op` signed in as the person, `jq`, `script`, a checkout of `journeeze-saas` at `ced358d`, Rust.
-- A test vault holding a test product `jzverify` with a `verify` environment (no target). Its keys are the eleven names of §1.1 with the same `file` and `roles`, plus two container profiles: `serve` (roles serve) and `migrate` (roles migrate), `image = "opv-verify-136@sha256:<digest from V2>"`, `mount_at = "/run/secrets/journeeze"`.
-- Marker values, entered by the person: those of `tests/mounted_consumer.rs:13-52`, including the multi-line PEM with a trailing newline and `test-marker-db-url\n` with a trailing newline. The migrate keys hold `test-marker-owner-url` and `test-marker-app-password`. All markers go in `E/markers.txt`, one per line. Whether 1Password stores a trailing newline as entered is **[A8]**; if it can't, the record says so.
+- kind and kubectl, with kind in `~/.local/bin` and a throwaway cluster (the owner allowed this); versions as in `tests/fixtures/kubernetes/failures/README.md:9-12`;
+- a single-node swarm only after O13;
+- `gh`, `jq`, `script`, and a `journeeze-saas` worktree at `ced358d`;
+- a test vault with `journeeze`, environments `verify`, `verify-nofsgroup` and `verify-swarm`, the eleven §4.6 keys plus `LOG_LEVEL` (config), and a state vault;
+- two service accounts, reader and deployer, created by the person and exported only in the CI-like shell.
 
-**Steps** (`E/` is the evidence directory; every command's stdout, stderr and exit code go to the named file):
+**Kit:**
+- `opv-verify-136`, about 80 lines against `jz_secrets` at `ced358d`: `check serve|migrate` prints `<name>: match|differ|absent` by SHA-256, refuses `../etc/passwd` (`ced358d:crates/jz_secrets/src/lib.rs:32`), compares `LOG_LEVEL`, and reports any marker in the environment. `loop` repeats it.
+- A Dockerfile: pinned debian-slim, `USER 10001`, nothing else.
+- `k8s/`:
+  - namespace;
+  - ServiceAccount `opv-ci` with a Role of exactly `ACCESS` plus configmaps (§6.5), and its own context;
+  - `jzverify` with `automountServiceAccountToken: false` and `fsGroup: 10001`;
+  - `jzverify-nofsgroup` with `runAsUser: 10001`.
+- `swarm/`, and `compose.yml` (the §5 recipe).
 
-| # | Action | Evidence file | Pass |
-|---|---|---|---|
-| V1 | `gh release download v0.11.0 -R matt-cochran/1password-vault -p opv-x86_64-unknown-linux-musl -p SHA256SUMS -D E/bin`; `(cd E/bin && sha256sum -c --ignore-missing SHA256SUMS)`; `gh attestation verify E/bin/opv-x86_64-unknown-linux-musl -R matt-cochran/1password-vault`; `chmod +x` it; `E/bin/opv-x86_64-unknown-linux-musl --version`; put `E/bin` first on `PATH` as `opv` | `01-download.txt` | checksum OK, attestation verified, version `0.11.0` (asset names and checksums: `.github/workflows/release.yml:91-124`; attestation: `:153`, `:159`) |
-| V2 | build the verifier (V-kit below); `docker build -t opv-verify-136 E/kit`; `docker image inspect --format '{{.Id}}' opv-verify-136` | `02-kit-build.txt` | the image id is recorded and used as the profile's digest |
-| V3 | `docker version --format '{{json .}}'`; `docker info --format '{{json .SecurityOptions}}'`; `docker context inspect --format '{{json .Endpoints.docker.Host}}'` | `03-runtime.txt` | same shapes as `tests/fixtures/docker/success/01`, `02`, `14` |
-| V4 | `opv run verify --product jzverify --role serve --container serve --preview --json`, the same for `migrate`; then the MCP `opv_delivery_preview` call with the same arguments (through `opv mcp serve` and a JSON-RPC client, as `tests/mcp_protocol.py` does) | `04-preview-serve.json`, `04-preview-migrate.json`, `04-mcp-serve.json` | `jq -S` of the CLI and MCP documents are identical; `uid_mapping` is `host_user`; every file key shows `bytes: verbatim`; `withheld_by_role` holds the other role's keys |
-| V5 | `opv run verify --product jzverify --role serve --container serve -- check serve` | `05-serve.txt` | 9 lines `<name>: match`; `database/owner-url: absent`; `database/app-password: absent`; `../etc/passwd: refused`; `env: no marker`; exit 0 |
-| V6 | the same with `--role migrate --container migrate -- check migrate` | `06-migrate.txt` | the 2 migrate names match; every serve name `absent`; exit 0 |
-| V7 | refusals: `opv run verify --product jzverify --container serve -- check serve` (no `--role`: `choice_required`); `DOCKER_HOST=tcp://127.0.0.1:9 opv run verify --product jzverify --role serve --container serve -- check serve` (`container_unsupported`, remote endpoint) | `07-refusals.txt` | the expected codes; exits 2 and 6; each refusal says nothing was read |
-| V8 | signal: start `opv run … --role serve --container serve -- hold` (the verifier sleeps); `pkill -TERM -f 'local-delivery'`; then `docker ps -a --filter label=io.opv.uid=$(id -u) --format '{{.Names}}'` and `ls -A "$XDG_RUNTIME_DIR" \| grep '^opv-run\.' \|\| true` | `08-sigterm.txt` | exit 143; no container; no directory |
-| V9 | kill: the same with `pkill -KILL -f 'local-delivery'`; `docker ps …` (one container listed); then V5 again; `docker ps …` and `ls …` again | `09-sigkill.txt` | after the second run: no labelled container, no stale directory |
-| V10 | canary scan while V8's container runs, and after: `docker inspect <name>` (Env, Args, Mounts); `docker inspect --format '{{.HostConfig.LogConfig.Type}}' <name>`; `ps -eo args`; the step's and the client's `/proc/<pid>/cmdline`; the client's `/proc/<pid>/environ` (the person's own process); `docker history --no-trunc opv-verify-136`; then `grep -c -F -f E/markers.txt` over all of these and over the whole terminal transcript (`script -q E/10-transcript.txt` around V4–V9) | `10-canary.txt` | zero marker hits; log type `none` |
-| V11 | optional, owner-approved only: `opv run staging --product journeeze --role serve --container serve --confirm staging` with the real Journeeze image (pinned digest); `curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:18088/readyz` | `11-journeeze.txt` (status codes only) | `/readyz` 200; no value recorded |
+**Steps.** Everything runs inside `script -q E/transcript.txt`.
 
-**V-kit** (`docs/verification/v0.11.0-container-delivery/kit/`, committed with the evidence):
-- `Cargo.toml`: a binary crate that depends on `jz_secrets` and `jz_core` by path, from a `journeeze-saas` worktree at `ced358d` (`git -C journeeze-saas worktree add <dir> ced358d`), plus `tokio` and `sha2`.
-- `src/main.rs`, about 80 lines. With `MountedSecretStore::new($JZ_VAULT_DIR)`, mode `check serve|migrate`:
-  - reads each §1.1 name and compares its SHA-256 to the marker digests compiled in (markers only, so their digests are public);
-  - prints `<name>: match|differ|absent`;
-  - reads `../etc/passwd` and expects `PermissionDenied` (`ced358d:crates/jz_secrets/src/lib.rs:23-34`);
-  - checks that no environment variable equals a marker.
-  Mode `hold` sleeps 60 s. It prints names and verdicts only.
-- `Dockerfile`: `FROM debian:bookworm-slim@sha256:<pinned>`, copy the binary, `USER 10001` (as Journeeze: `ced358d:deploy/Dockerfile`), `ENTRYPOINT ["/usr/local/bin/opv-verify-136"]`.
-
-**The record** (`docs/verification/v0.11.0-container-delivery.md`) states:
-- who ran it, the date, the host flavour;
-- the opv tag and binary SHA-256, the attestation result;
-- the Docker versions, the kit's image id and the Journeeze commit;
-- one table of V1–V11 with pass or fail and the evidence file;
-- any deviation, with the reason.
-It contains no value. The markers are listed, because they are not secrets.
-
-## 8. Implementation plan
-
-Each deliverable is one module or one feature in at most four files, with exact pointers. Estimates are hours for a careful worker who reads the pointers first.
-
-| ID | Deliverable | owned_files | Prerequisites | Est. (h) | Acceptance criteria |
-|---|---|---|---|---|---|
-| D1 | Container profiles in the configuration | `src/domain/model.rs` (add `Container` next to `Remote` `:161-186`; `Product.containers` next to `remotes` `:153`), `src/config.rs` (add `validate_containers`; call it next to `validate_remotes` at `:1160`), `src/cause/config_check.rs` (4 new `ConfigCheck` variants) | — | 5 | The §3.1 TOML loads. Each load refusal of §3.8 has a unit test naming the dotted path: image empty, with whitespace, or starting `-`; `mount_at` relative, `/`, with `..`, or under `/proc` `/sys` `/dev`; unknown runtime; `container_user` with docker; empty or undeclared environments; undeclared roles; a deliverable secret key without `file`; file keys without `secrets_dir_env`; an unpinned image for a `confirm_env` environment (if §13 D5 is adopted). `cargo test` passes. |
-| D2 | Catalog causes for containers | `src/cause/mod.rs` (`ContainerUnsupported`, `ContainerWhy`, `ContainerLeft`, `Guard::ContainerProfileRefuses`, `Unanswered::DaemonNotRunning`; codes `:1395-1445`, exits `:1450-1540`), `src/cause/subject.rs` (`System::{Docker,Podman}` `:94`, `NameKind::ContainerProfile` `:166`), `src/cause/render.rs` (text, Do, Next), `docs/design/error-catalog.md` (§4.10 rows, §4.11 new codes) | — | 5 | The code, exit and retry of every §3.8 row are tested. Render tests cover text and `--json` for each `why`. No step names `local-delivery` or `opv doctor`. Every Next round-trips through clap (existing contract test). `human_required` is false. |
-| D3 | The probe, argv builder and sweep parser | `src/app/container.rs` (new: `probe`, `decide`, `run_argv`, `parse_labelled`), `src/app/container_tests.rs` (new), `src/app/mod.rs` (`pub mod container;`), `src/host.rs` (`Tool` entries for docker and podman, next to `op` at `:381`) | D2 | 6 | Unit tests read `tests/fixtures/docker/` files verbatim, and the §3.10 D3 cases pass. `run_argv` matches a golden list for the §3.1 profile. A property test with random marker values finds none in the argv. Podman returns `NotVerified` while `tests/fixtures/podman/` is absent. No call or template is used outside those recorded. |
-| D4 | The step's container mode and signal cleanup | `src/app/local_delivery.rs` (container mode in `run` `:283-350`: plan parsing, second probe, `sweep_containers`, tracked spawn, `rm -f` after exit), `src/runner.rs` (`signals`: `register_container`/`unregister_container`; `stop_and_exit` `:2037` runs `rm -f` after `forward` and before `run_cleanups`; `track` usable by the step), `src/main.rs` (`LocalDelivery` gets `--container <plan>` at `:883-893` and `:2744-2771`) | D2, D3 | 6 | Unit tests: the plan round-trips; a key that is neither a file nor a planned config name is `Bug`; the client's environment has no secret key and no `OP_*`. Integration tests use a stub that only logs argv and env names, then runs the command (it prints no runtime output, so it invents none): SIGTERM gives 143, the directory is gone and `rm -f` was called; SIGKILL, then a rerun, sweeps. |
-| D5 | `opv run --container` | `src/main.rs` (`Run` gets `--container <PROFILE>` `:698-728`; the conflict with `--remote`; preview pass-through `:2983-3005`), `src/app/run.rs` (`Launch::Container` `:152-158`; profile checks like `remote_profile` `:161-201`; the outer probe before `op run`; `container_args` next to `delivery_args` `:451-471`) | D1, D3, D4 | 4 | `opv run dev --role serve --container serve -- x` builds one `op run` call whose argv holds the plan and no value (FakeRunner, as `src/app/run.rs:561-631`). A refused probe makes no `op` call. `--container` with `--remote` is `usage`. `--confirm` is required for `confirm_env`. |
-| D6 | Preview, MCP and user docs | `src/app/delivery_preview.rs` (§3.7 fields in `build_for` `:121-226` and `write_text` `:295-388`), `src/mcp.rs` (`container` argument of `opv_delivery_preview` `:400-415`, `:1174-1190`), `docs/mcp.md`, `docs/local-development.md` (a "Containers" section after `:87`) | D1, D3 | 4 | CLI and MCP documents are identical for the same arguments (existing parity test extended). An unknown probe gives `unknown`, never `no`. Each file key shows `bytes: verbatim`. The docs example runs as written against the simulator. |
-| D7 | Verbatim bytes for file keys | `src/domain/convention.rs` (`normalized` `:263-303`), `src/domain/plan.rs` (`evaluate` `:290-330`), `docs/configuration.md` (rules reference `:665-680`) | — | 3 | A file key holding a multi-line PEM with a trailing newline passes `opv check` in a run-only environment. The tidy leaves `x\n` in a file key untouched and still trims a non-file key. With a target, a multi-line file key without a transform still fails `single_line`, and with `pem_private_key` it stages one line. |
-| D8 | Fake container runtime, integration and E2E | `tests/sim/container.rs` (new), `tests/sim/opv_sim.rs` (`TOOLS` `:37-45`, dispatch), `tests/container_delivery.rs` (new), `tests/e2e/scenarios/container.rs` (new) and `tests/e2e/coverage.rs` (exemptions) | D4, D5, D6 | 8 | Every §3.10 integration, simulator and E2E case passes, and the snapshots are reviewed. A reply without a recording fails with exit 86 (`tests/sim/recordings.rs:9`). The canary scan finds no marker. The coverage gate lists every new variant, as reached or exempt with a reason. |
-
-Critical path: D2 → D3 → D4 → D5 → D8 (29 h). D1, D6 and D7 run in parallel. Total: 41 h. The verification (§7) follows the release tag. Podman support is a follow-up deliverable that needs the README item 6 recordings first.
-
-## 9. Self-vet: poka-yoke
-
-| Mistake | How it is prevented | Kind |
+| # | Action | Pass |
 |---|---|---|
-| A secret passed as a container variable | load refuses a deliverable secret without `file`; the step refuses an unplanned key; `-e` only by name | Type and test |
-| Docker flags smuggled through the person's words | words after `--` go after the image; everything before it comes from `run_argv` | Structure |
-| The container runs as a user that can't read, so someone "fixes" it with 0444 | no code path changes modes; refusal with a reason instead | Structure and test |
-| A probe reply misread as "no special options" | the parser accepts only recorded shapes; `null` is unknown (`failures/05`) | Test over recordings |
-| A bind to a remote host's path | the endpoint must be `unix://` | Test |
-| The directory removed before the client exits (Docker Desktop re-creates it as root: `failures/03`) | drop and signal order: client, then `rm -f`, then the directory | Test (D4) |
-| A killed client leaves the container (`success/11`) | `rm -f` by name on every path, and the label sweep | Test (D4, D8) |
-| Container output written to the daemon's disk logs (`success/16`) | `--log-driver none` always | Golden argv |
-| The tidy changes a file key's stored bytes | `normalized` skips file keys | Test (D7) |
-| A simulated reply nobody recorded | exit 86 (`tests/sim/recordings.rs:9`) | Existing guard |
+| V1 | `gh release download v0.11.0`, `sha256sum -c`, `gh attestation verify`, `--version` (`.github/workflows/release.yml:91-124`, `:153`, `:159`) | verified; `0.11.0` |
+| V2 | `kind create cluster --name opv-verify-136`; build and `kind load docker-image`; `kubectl apply -f k8s/` | the Deployments exist |
+| V3 | CI-like shell (`env -i … CI=true OP_SERVICE_ACCOUNT_TOKEN=<reader>`): `opv changed verify --json` before any sync | exit 10, `no_record` |
+| V4 | `opv doctor`, then `opv plan verify --json` | checks OK; 9 serve rows `file`; `LOG_LEVEL` `channel: config` (ConfigMap); migrate keys not desired |
+| V5 | with the deployer token: `opv sync verify --deploy --expect-plan <id>` | exit 0, healthy |
+| V6 | `opv changed verify` | exit 0 `unchanged` |
+| V7 | `kubectl get deployment -o json \| jq`; `kubectl get secret,configmap -l opv-managed=verify -o name` | the §6.3 shape; no file-key env; no migrate object |
+| V8 | `kubectl logs deploy/jzverify` | 9 `match` (PEM, `db-url\n`); `LOG_LEVEL` matches; migrate absent; traversal refused; no marker in env |
+| V9 | `kubectl exec … stat -f -c %T; stat -L -c "%a %u %g" …; id; command -v op opv \|\| echo none; ls /var/run/secrets/kubernetes.io` | `tmpfs`; `440 0 10001`; `none`; no token |
+| V10 | the person edits the webhook marker; `opv changed verify` (exit 10, naming the item); `opv sync verify --deploy`; logs | the new Secret version; healthy; `match`; the old version kept for the old ReplicaSet; `changed` is then 0 |
+| V11 | drift: `kubectl set env deployment/jzverify LOG_LEVEL=tampered`; `opv status verify --fail-on-drift`; `opv delivery verify verify --json`; then `opv sync verify --deploy` | exit 8 `target_drift`; exit 8 `delivery_unverified`; the sync restores it |
+| V12 | `opv sync verify-nofsgroup --deploy` | `mount_unreadable`, exit 6, nothing written |
+| V13 | Swarm (if O13): V4–V10 against `verify-swarm`; `docker exec` into a task for `stat` and `id` | files `400 10001 10001` on tmpfs |
+| V14 | **no 1Password at runtime:** revoke both service accounts; `kubectl rollout restart`; `docker service update --force`; then logs | all `match` |
+| V15 | local: `opv run dev … -- docker compose run --rm serve`; `docker compose config` outside opv | the verdicts; exit 15 outside |
+| V16 | canary scan over the transcript, Deployments, ReplicaSets, events and `service inspect`, for the markers and their base64 forms | zero hits outside the stores' own data |
+| V17 | `kind delete cluster`; `docker swarm leave --force` | gone |
 
-## 10. Self-vet: security
+### 12.2 0.12.0: GCP VMs
 
-Secret bytes must not reach MCP responses, agent context, argv, the environment, logs, or disk outside tmpfs.
+1. In a throwaway project, CI-like: `opv changed` (exit 10), then `opv sync`, then render the map from `plan --json`.
+2. Create an instance template with the §9.2 cloud-init and a VM service account with `secretAccessor` only; a managed instance group of size 2.
+3. Check on each VM: `journalctl -u opv-vm-secrets` (no value), `--check`, the kit's verdicts, `findmnt` (`tmpfs`), `stat` (`400 10001 10001`), and `command -v op opv` (none).
+4. Rotate: edit a marker, `opv changed` (10), `opv sync`, `restart_hint`, and the new digest matches.
+5. Scale to 3: the new VM matches.
+6. Revoke the service accounts, recreate a VM: it still matches.
+7. Run the canary scan over the transcript, the serial console and the instance logs.
+8. Delete the project.
 
-| Channel | Control | Residual |
+## 13. Assumptions
+
+| # | Assumption | Settled by |
 |---|---|---|
-| MCP responses | no tool runs a container; the preview reads identifiers and three fixed-template runtime calls; every output passes the `OutputGuard` | Low |
-| Agent context | the same as MCP for tools. An agent with a shell as the user can read the files or `docker exec` (R1) | **High, accepted** (decision Q7) |
-| argv | the plan and `run_argv` hold names, paths, the image and labels; tested | Low |
-| Environment | secrets live only in the step's environment (from `op run`) and never reach the client or container; `OP_*` is stripped (`src/app/local_delivery.rs:182`) | Medium: the step's `/proc/<pid>/environ` is readable by the same user (as today) |
-| Logs | `--log-driver none`; opv logs names only; `op run` masks attached output | Low; the app's own logging is the app's |
-| Disk outside tmpfs | host check (`statfs`) plus `success/08` (tmpfs inside the container on WSL 2 + Docker Desktop); no layers, no cidfile, no log file | Medium: swap; unrecorded flavours are refused |
+| A1 | Journeeze's opv configuration is a 1Password manifest | its maintainers |
+| A2 | A projected volume merges Secrets and ConfigMaps into one directory; nested `items[].path` is allowed and `..` isn't; Secret-backed volumes are tmpfs | K-R1, K-R2, K-R5; V9 |
+| A3 | Without `fsGroup` the files are `0:0`; with it, the group is `fsGroup`, which is also supplementary for the processes | K-R5; V9 |
+| A4 | The kubelet doesn't refresh immutable objects; a template change rolls out | K-R6; V10 |
+| A5 | The API server adds defaults to the stored volume | K-R3 |
+| A6 | Pods need no RBAC to mount Secrets or ConfigMaps | V8 |
+| A7 | A missing projected source leaves the pod `ContainerCreating` | K-R4 |
+| A8 | 1Password keeps a trailing newline, and `opv sync` preserves it | V8 |
+| A9 | `[[files]] secret_name` equals `--file-secret`; placement, mode and refresh are unknown | F1–F4 |
+| A10 | The infra launcher builds Journeeze's machine configuration | the infra repo |
+| A11 | Pod Security `restricted` allows projected volumes and `fsGroup` | V2, with a labelled namespace |
+| A12 | Swarm secrets and configs are immutable; secrets are tmpfs files under `/run/secrets` | S-R2, S-R6 |
+| A13 | A Swarm secret `target` may be a nested relative path | S-R4 |
+| A14 | Swarm never returns secret data | S-R3 |
+| A15 | Swarm refuses to remove an object in use | S-R7 |
+| A16 | The Swarm size limit is 500 KB | S-R2 |
+| A17 | `--secret-add …uid=,gid=,mode=` sets owner and mode | S-R4, S-R6 |
+| A18 | The docker CLI has no compare-and-set on `service update` (no version flag appears in `tests/fixtures/docker/swarm/help/service-update.stdout`) | S-R5 |
+| A19 | `UpdateStatus.State` takes the values `completed`, `paused` and `rollback_*`; `Version.Index` increases | S-R5, S-R8 |
+| A20 | The metadata and IMDS endpoints and the AWS CLI chain work as described; `curl`, `jq` and `base64` are on stock images; every process on the VM can reach the metadata server | G-R8 |
+| A21 | The §9.2 read calls return the stated fields | G-R8 (GCP); later for Azure and AWS |
+| A22 | `runcmd` runs once per instance; enabled systemd units run every boot | G8 reboot test |
+| A23 | `versions access --out-file=-` writes raw bytes to stdout | G-R3 |
+| A24 | Annotations accept the stamp's values | G-R4 |
+| A25 | Secret ids allow `store_name`'s alphabet | G-R2 |
+| A26 | The listed IAM permissions suffice | G-R6 |
+| A27 | The AWS CLI reads `fileb:///dev/stdin`; SSM `String` parameters suit config | later AWS recordings |
+| A28 | Azure Container Apps can mount Key Vault secrets as files | an Azure spike (not planned) |
+| A29 | A 15-minute schedule of `op item list` and `op read` stays within service-account rate limits | V3–V10 timing, and the 1Password documentation on limits |
+| A30 | Precedence between a Fly secret and `[env]` of the same name | a Fly spike, part of O8 |
+| A31 | `docker config inspect` returns a config's data | S-R3 |
 
-## 11. Open risks
+## 14. Open risks
 
 | # | Risk | Likelihood / impact | Mitigation or acceptance |
 |---|---|---|---|
-| R1 | Any process of the same host user, and any agent with that user's shell, can read the tmpfs files, the step's environment, and `docker exec` into the container | likely / high | accepted and documented (decision Q7); not a sandbox |
-| R2 | The Docker daemon, host root and the `docker` group read the mount; container root reads it (`success/07`) | certain / high on a shared host | documented; opv never runs the container as root; use only on a host you control |
-| R3 | SIGKILL of the step leaves the container running with the files until the next sweep (`success/11`) | unlikely / medium | the label sweep at the next file-delivery run; directory removal empties the mount (`success/13`); logout clears tmpfs |
-| R4 | A probe/run race: the daemon or context changes between the step's probe and `docker run` | rare / medium | the step probes with the client's exact environment immediately before; the window is milliseconds |
-| R5 | A local `unix://` socket forwarded from a remote daemon (`ssh -L`) passes the endpoint check | rare / high | not detectable from the client; documented. The source path wouldn't exist on the remote host; Docker there would create an empty directory or fail, so the app fails closed |
-| R6 | A missing bind source becomes a root-owned directory on Docker Desktop (`failures/03`); a removal race would start the app with no secrets and leave debris the sweep won't touch | rare / low | ordering (§3.5); the app fails closed on missing secrets; the debris is empty and in tmpfs |
-| R7 | Exit codes 125 and 127 can be Docker's or the app's (`failures/04`, `06`, `08`) | occasional / low | passed through as the app's (FR-4); the probe catches daemon and endpoint failures first; documented |
-| R8 | Swap can write tmpfs pages to disk; the app's core dumps are not opv's | possible / medium | documented, as for local delivery |
-| R9 | Killing only the outer `opv run` leaves `op run`, the step and the container running (`src/main.rs:2667-2676`) | occasional / medium | pre-existing; owner decision §13 D8 |
-| R10 | A non-UTF-8 environment variable panics the step at `std::env::vars()` (`src/app/local_delivery.rs:295`); values with NUL or non-UTF-8 bytes can't be file keys | rare / low | pre-existing; switch to `vars_os` and refuse a non-UTF-8 file value by name (a small follow-up) |
-| R11 | Whether `op run` preserves a trailing newline into the environment, and whether 1Password stores one as entered, is unverified **[A8]** | unknown / medium | §7 V5 tests it with `test-marker-db-url\n` |
-| R12 | Native Docker Engine, rootless Docker, `userns-remap`, Podman and Docker Desktop outside WSL are unrecorded | certain / medium (refusals until recorded) | fail closed; the README to-record list |
-| R13 | The image itself is trusted with the values | certain / high | the digest rule for `confirm_env` environments; reviewing the profile is the control |
-| R14 | `-e NAME` copying a config value from the client relies on Docker's documented behaviour **[A5]** | low / low | D8's simulator checks that config values reach the container; V5 checks it for real |
+| R1 | Kubernetes: `get secrets` in the namespace, node root or `exec` reads values | certain / high | the platform's model; opv needs only §6.5 |
+| R2 | Swarm: any manager-API client controls the swarm | certain / high | a CI-only context and key |
+| R3 | VMs: root, the `docker` group or the identity token reads values | certain / high | the cloud's model; per-secret `secretAccessor` |
+| R4 | Local: the same user, the daemon and container root read the directory | likely / high | accepted and documented |
+| R5 | Enabling `secrets_dir` or `configmap` on an existing Kubernetes target removes env entries the app may still read | likely on first use / high | opt-in; `plan` lists the removals |
+| R6 | Enabling `fly.config` stages new secrets and restarts machines | likely on first use / medium | opt-in, with a warn line first (O15) |
+| R7 | `opv changed` over-triggers on any edit, tidy included | certain / low | the sync is idempotent (`docs/usage.md:259`) |
+| R8 | A sync that wrote but wasn't confirmed records no versions, so `changed` keeps saying `changed` | occasional / low | the next sync confirms and records; it is safe to re-run |
+| R9 | Swarm has no compare-and-set **[A18]** | rare / medium | before and after comparison |
+| R10 | A missing mounted object stalls a rollout until the deadline | rare / medium | opv writes first; O10 |
+| R11 | Non-UTF-8 or NUL values can't be file keys (`src/app/local_delivery.rs:295`) | rare / low | pre-existing |
+| R12 | The e2e app has a remote profile for `prod` (`tests/e2e/app/secrets.toml:120-128`), which may conflict with the principle | possible / medium | O9 |
+| R13 | 0.11.0 grew to about 113 h | likely / medium | Swarm (S1–S5) and C5 can slip without touching the rest |
+| R14 | Service-account rate limits under a 15-minute schedule **[A29]** | possible / medium | make the schedule configurable; back off on 429 (`Unavailable{RateLimited}`) |
 
-## 12. Assumptions
+## 15. Owner decisions needed
 
-- **A1** Journeeze's opv configuration is a 1Password manifest. No `secrets.toml` exists in `journeeze-saas` at `ced358d`.
-- **A2** Rootful Docker Engine on native Linux reports the same `info`/`version` shapes and mounts tmpfs the same way as the recorded Docker Desktop engine. It stays refused until recorded.
-- **A3** Docker Desktop outside WSL 2 may share host paths through a VM file-sharing layer. It is refused because nothing is recorded.
-- **A4** Rootless Podman's `--userns=keep-id[:uid=,gid=]` maps the host user as documented, and `podman info` exposes `rootless` and `serviceIsRemote`. It stays `NotVerified` until recorded.
-- **A5** `docker run -e NAME` (no `=`) copies `NAME` from the client's environment.
-- **A6** Bind mounts are not part of a container's image layers or of `docker commit` output.
-- **A7** The infra launcher's migration container gets only `migration_env`; the infra repo wasn't read.
-- **A8** `op run` passes a stored trailing newline into the variable, and 1Password stores one when it is entered.
-- **A9** The Journeeze image runs correctly as a uid other than 10001 under Docker's `--user` (it has no passwd entry for the host uid; its `/app` files are root-owned and world-readable from `COPY`). V11 checks it.
-
-## 13. Owner decisions needed
-
-| # | Decision | Recommendation |
-|---|---|---|
-| D1 | A reviewed container profile (`--container <profile>`) rather than `--container <runtime> -- <docker args>` | adopt (§3.1) |
-| D2 | Allow `-- <args>` to replace the profile's `command` (container arguments only) | allow; they never reach the runtime's flag parser |
-| D3 | Rootless Docker refused in 0.11.0. It could be supported by running as container root, which maps to the host user. | refuse; container root is the wrong default |
-| D4 | Docker Desktop accepted only on WSL 2 (the recorded flavour) | adopt; widen per recording |
-| D5 | A digest-pinned `image` required for `confirm_env` environments | adopt |
-| D6 | File keys exempt from `single_line`/`no_surrounding_space` where no target stages them, and never tidied (§5) | adopt; it follows from decision 3 |
-| D7 | Fly: stage file keys as base64 under a `__B64` name so Fly delivery is verbatim | decide when Fly is implemented |
-| D8 | Close the outer-kill gap (R9), for example by having the step leave when its parent `op run` is gone | a follow-up issue; not container-specific |
-| D9 | Target-level `roles` for the migration app (changes `docs/design/local-delivery.md:79`) | adopt with Fly |
-| D10 | Evidence location `docs/verification/`; whether V11 (real Journeeze image, staging values) is run | adopt the location; V11 at the owner's discretion |
-| D11 | Who records the Podman and native-Engine replies (README items 1–7), and whether Podman ships in 0.11.0 | record before the 0.11.0 tag, or ship Podman as `not_verified` |
-
-## 14. What stays out of scope
-
-- Remote development delivery (#139) has its own design: [remote delivery](remote-delivery.md).
-- Kubernetes and Azure mounted delivery (#40–#42) are deferred.
-- Windows and macOS file delivery stays refused: neither has a user-owned RAM filesystem opv can verify.
-- Implementing Fly (§6) and retiring the shim are later releases.
+| # | Decision | Options | Recommendation |
+|---|---|---|---|
+| O1 | Kubernetes defaults: files by opt-in `secrets_dir`; config route for existing targets | opt-in / automatic; keep `env` / flip to `configmap` | opt-in files; `configmap` for new targets only |
+| O2 | `sync` when Kubernetes readability is unknown | refuse / warn / opv sets `fsGroup` / 0444 | refuse |
+| O3 | Target-level `roles` | adopt / no | adopt |
+| O4 | `OPV_UID`/`OPV_GID` in local file runs | add / docs only | add |
+| O5 | `--dir-env` on `opv run` | flag / config only | config only |
+| O6 | opv sets the app's directory variable on Deployments and services | yes / no | no |
+| O7 | Where V1–V17 run | local kind and swarm / GitHub Actions | local |
+| O8 | A throwaway Fly app for F1–F4 and A30 | authorize / defer | defer; the shim stays |
+| O9 | Remote profiles for deployed environments | allow / refuse at load | decide separately |
+| O10 | `list events` to fail fast on a missing mounted object | add / accept the deadline | accept |
+| O11 | VM step as a script or a binary | script / binary | script |
+| O12 | GCP superseded versions | disable older than previous / keep / destroy | disable |
+| O13 | Approve `docker swarm init` for S-R1–S-R9 | approve / not now | approve |
+| O14 | A throwaway GCP project for G-R1–G-R8 and G8 | approve / not now | approve before 0.12.0 |
+| O15 | Fly config switch-on: unset `fly.config` warns in 0.11.0 and is refused in 0.12.0 | this schedule / default `secrets` now / refuse now | this schedule |
+| O16 | An Events API trigger (needs an Events token in CI, a Business plan, and a live check of `server-update` coverage) | later / never | later, as an accelerator to `opv changed` |
+| O17 | Exit 10 `source_changed` as a non-failure result code | adopt / reuse exit 8 | adopt: CI must tell "changed" from "broken" |

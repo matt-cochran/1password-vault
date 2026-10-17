@@ -1,2 +1,0 @@
-docker: Error response from daemon: No such image: opv-recording-absent-image:0.
-See 'docker run --help'.
