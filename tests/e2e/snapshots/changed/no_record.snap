@@ -1,0 +1,18 @@
+# opv changed prod
+
+## text exit: 10
+## text stdout
+prod/fly web: no source versions recorded
+prod/gh web: no source versions recorded
+prod/k8s web: no source versions recorded
+Next: opv bootstrap
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+
+## json exit: 10
+## json stdout
+{"schema_version":2,"ok":true,"environment":"prod","changed":true,"placements":[{"product":"web","target":"fly","state":"no_record"},{"product":"web","target":"gh","state":"no_record"},{"product":"web","target":"k8s","state":"no_record"}],"next":"opv bootstrap","do":"run opv bootstrap to record delivery items"}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
