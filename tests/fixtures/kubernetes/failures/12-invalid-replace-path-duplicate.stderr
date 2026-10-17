@@ -1,0 +1,3 @@
+The Deployment "api" is invalid: 
+* spec.template.spec.volumes[0].projected: Invalid value: "opv-api--otel-resource-abcdefghij": conflicting duplicate paths
+* spec.template.spec.containers[0].volumeMounts[0].name: Not found: "opv-files-api"

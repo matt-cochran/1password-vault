@@ -1,0 +1,3 @@
+The Deployment "api" is invalid: 
+* spec.template.spec.volumes[0].projected.sources[0].secret.items[0].path: Invalid value: "/x": must be a relative path
+* spec.template.spec.containers[0].volumeMounts[0].name: Not found: "opv-files-api"

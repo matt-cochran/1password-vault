@@ -509,6 +509,7 @@ roles = ["serve"]
   - `{product}` renders the product name (`_` → `-`). It is required when two products have file keys, and two products may not render the same directory.
   - Load rules in `Raw::checked` (`:140-172`): absolute and normalised; not `/`; not under `/proc`, `/sys`, `/dev` or `/var/run/secrets/kubernetes.io`; at most 255 bytes, with no `:` or whitespace.
   - A config key with `file` needs `config = "configmap"` or `"store"`.
+  - No key's `file` may be a parent directory of another's within one product (`a` and `a/b`). The API server accepts that volume with only a `Warning:` and the pod never starts (K1: `failures/12-warning-replace-overlapping-paths`); `..`, absolute and duplicate paths it refuses itself (K-R2).
 - **Channels:** secret → `Store{"Kubernetes Secret"}`; config → `Store{"ConfigMap"}`, `RuntimeEnv`, or `Store{"Kubernetes Secret"}`, per `config`; files → `Native` when `secrets_dir` is set, otherwise `None`.
 
 ### 6.3 The Deployment patch
@@ -536,7 +537,7 @@ roles = ["serve"]
 - **The volume is `opv-files-<product>`.** The `opv-files-` prefix is reserved (`docs/usage.md:261`).
 - **A file key never keeps an env entry**: the same replace removes it. When a product's last file key goes, its volume and mount go too.
 - **`bindings()`** (`src/adapters/kubernetes/runtime.rs:658-694`) reads file bindings from the volume items, and config env bindings from `configMapKeyRef` (beside `secret_ref`, `src/adapters/kubernetes/mod.rs:628-634`). Anything else is `Other`: a missing item, a mount that is missing, not read-only or at a different path, or a name that is still an env entry. `Other` shows as drift and is re-pinned under `--deploy`.
-- **`fingerprint()`** (`:293-304`) and the reconcile comparison (`:788-797`) strip opv's volumes and mounts. They normalise server defaults **[A5]**.
+- **`fingerprint()`** (`:293-304`) and the reconcile comparison (`:788-797`) strip opv's volumes and mounts. They normalise server defaults **[A5]**: K1 found one, `projected.defaultMode: 420` when it is omitted; the §6.3 volume, every field explicit, is stored exactly as sent.
 
 ### 6.4 Rollout, refresh and clean-up
 
@@ -548,7 +549,7 @@ roles = ["serve"]
 
 ### 6.5 RBAC and ExternalSecrets
 
-- **New rights, for `configmap` only:** `get`, `list`, `create` and `delete` on configmaps. They are added to `ACCESS` (`src/adapters/kubernetes/runtime.rs:62-118`), and `delete configmaps` to `DEPLOY_RIGHTS` (`:133-137`).
+- **New rights, for `configmap` only:** `get`, `list`, `create`, `patch` and `delete` on configmaps. opv writes with `apply --server-side`, which the API server authorises as `patch`, and as `create` too for a new object (K1: `tests/fixtures/kubernetes/failures/10-*`); `auth can-i create` alone answers `yes` for an identity whose apply is refused. The same hole exists today for Secrets: `ACCESS` checks `create secrets` but not `patch secrets`. They are added to `ACCESS` (`src/adapters/kubernetes/runtime.rs:62-118`), and `delete configmaps` to `DEPLOY_RIGHTS` (`:133-137`).
 - **Scope of those rights (FMECA FM-09).** They are granted by a namespaced Role in the target's namespace only, never a ClusterRole; the docs and the §12.1 kit say so. `resourceNames` can't narrow them: Kubernetes doesn't apply it to `create` or `list`, and opv's names change with every version. The added power is small, because a ConfigMap only takes effect once the Deployment points at it, and the identity can already change the Deployment. The detection is the nightly drift check (§2.3): an out-of-band ConfigMap, or a repointed binding, is `Other`/drift (§6.3), so `status --fail-on-drift` exits 8 `target_drift`. opv's own ConfigMaps are immutable, so their content can't be edited in place.
 - Volume mounts need no pod RBAC; the kubelet mounts them (`:886-889`) **[A6]**.
 - **ExternalSecrets:** the projected source names the ExternalSecret's target Secret, which has the same name (`src/adapters/kubernetes/external.rs:162`). Each ExternalSecret pins one Key Vault version (`:165`), so no live change follows a refresh. Clean-up is unchanged (`:655-661`).
@@ -558,12 +559,16 @@ roles = ["serve"]
 
 The preflight reads the Deployment opv already reads (`src/adapters/kubernetes/mod.rs:542-554`), which holds no value.
 
-| `fsGroup` | Effective `runAsUser` | Verdict |
-|---|---|---|
-| set | any | readable **[A3]** |
-| unset | 0 | readable, **with a warn line** (the workload runs as root) |
-| unset | set, not 0 | **unreadable** |
-| unset | unset | **unknown** |
+| `fsGroup` | Effective `runAsUser` | Effective `runAsGroup` | Verdict |
+|---|---|---|---|
+| set | any | any | readable **[A3]** |
+| unset | 0 | any | readable, **with a warn line** (the workload runs as root) |
+| unset | set, not 0 | 0 | readable, **with a warn line** (the workload runs in group 0, which owns every mounted file) |
+| unset | set, not 0 | set, not 0 | **unreadable** |
+| unset | set, not 0 | unset | **unknown** |
+| unset | unset | any | **unknown** |
+
+Amended by K1 (`tests/fixtures/kubernetes/README.md`, K-R5 `imagegid`): with `runAsUser: 10001` and no `runAsGroup`, the primary group comes from the image's `/etc/passwd`, and is 0 when the image has no entry for the uid; the 0440 root:root files were then readable. So the verdict also reads the effective `runAsGroup`, and an unset one is unknown, not unreadable.
 
 - It is a pure `files::readability`, run in `KubernetesTarget::preflight` (`src/adapters/kubernetes/config.rs:435`).
 - `sync` refuses an unreadable or unknown verdict before writing; `plan`, `status` and `doctor` warn (`src/provider.rs:374-381`). O2.
@@ -1085,12 +1090,12 @@ On a single-node swarm (O13), with an environment `verify-swarm` in the test vau
 | # | Assumption | Settled by |
 |---|---|---|
 | A1 | Journeeze's opv configuration is a 1Password manifest | its maintainers |
-| A2 | A projected volume merges Secrets and ConfigMaps into one directory; nested `items[].path` is allowed and `..` isn't; Secret-backed volumes are tmpfs | K-R1, K-R2, K-R5; V9 |
-| A3 | Without `fsGroup` the files are `0:0`; with it, the group is `fsGroup`, which is also supplementary for the processes | K-R5; V9 |
+| A2 | A projected volume merges Secrets and ConfigMaps into one directory; nested `items[].path` is allowed and `..` isn't; Secret-backed volumes are tmpfs | K-R1, K-R2, K-R5; V9. **K1: confirmed**; overlapping file/directory paths are not refused (§6.2) |
+| A3 | Without `fsGroup` the files are `0:0`; with it, the group is `fsGroup`, which is also supplementary for the processes | K-R5; V9. **K1: confirmed**; §6.6 amended for a primary group of 0 |
 | A4 | The kubelet doesn't refresh immutable objects; a template change rolls out | K-R6; V10 |
-| A5 | The API server adds defaults to the stored volume | K-R3 |
+| A5 | The API server adds defaults to the stored volume | K-R3. **K1: confirmed**, only `projected.defaultMode: 420` |
 | A6 | Pods need no RBAC to mount Secrets or ConfigMaps | V8 |
-| A7 | A missing projected source leaves the pod `ContainerCreating` | K-R4 |
+| A7 | A missing projected source leaves the pod `ContainerCreating` | K-R4. **K1: confirmed** for a missing Secret and a missing ConfigMap |
 | A8 | 1Password keeps a trailing newline, and `opv sync` preserves it | V8 |
 | A9 | `[[files]] secret_name` equals `--file-secret`; placement, mode and refresh are unknown | F1–F4 |
 | A10 | The infra launcher builds Journeeze's machine configuration | the infra repo |

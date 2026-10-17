@@ -95,3 +95,7 @@ is the fixed unreachable address the case chose, not a generated port.
   `tests/fixtures/external-secrets/clustersecretstore-ready.json`.
 - A silently dropped network (timeout) and rate limiting (429): kind cannot produce them without
   extra tooling.
+
+## ConfigMaps and mounted files (K1)
+
+Cases 08–14 (with `cases.tsv`), recorded 2026-10-17, are described in `../README.md`.

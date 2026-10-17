@@ -1,0 +1,1 @@
+Error from server (Forbidden): configmaps is forbidden: User "system:serviceaccount:opv-rec:opv-noconfigmaps" cannot list resource "configmaps" in API group "" in the namespace "opv-rec"
