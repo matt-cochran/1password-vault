@@ -1,0 +1,280 @@
+Script started on 2026-10-17 18:11:29-04:00 [COMMAND="bash <scratch>/v1.sh" <not executed on terminal>]
+$ gh release download v0.11.0 -R <owner>/1password-vault
+Finding assets to download...
+Downloading opv...
+Downloading opv-aarch64-apple-darwin...
+Downloading opv-aarch64-pc-windows-msvc.exe...
+Downloading opv-aarch64-unknown-linux-musl...
+Downloading opv-x86_64-apple-darwin...
+Downloading opv-x86_64-pc-windows-msvc.exe...
+Downloading opv-x86_64-unknown-linux-musl...
+Downloading SHA256SUMS...
+exit=0
+SHA256SUMS
+opv
+opv-aarch64-apple-darwin
+opv-aarch64-pc-windows-msvc.exe
+opv-aarch64-unknown-linux-musl
+opv-x86_64-apple-darwin
+opv-x86_64-pc-windows-msvc.exe
+opv-x86_64-unknown-linux-musl
+$ sha256sum -c SHA256SUMS
+opv: OK
+opv-aarch64-apple-darwin: OK
+opv-aarch64-pc-windows-msvc.exe: OK
+opv-aarch64-unknown-linux-musl: OK
+opv-x86_64-apple-darwin: OK
+opv-x86_64-pc-windows-msvc.exe: OK
+opv-x86_64-unknown-linux-musl: OK
+exit=0
+$ gh attestation verify opv -R <owner>/1password-vault
+Loaded digest sha256:3a6be218cb8b6dfb3d57cb68f103bc2b3e7c225bf542d368e4021d7003271536 for file://opv
+Loaded 2 attestations from GitHub API
+
+The following policy criteria will be enforced:
+- Predicate type must match:................ https://slsa.dev/provenance/v1
+- Source Repository Owner URI must match:... https://github.com/<owner>
+- Source Repository URI must match:......... https://github.com/<owner>/1password-vault
+- Subject Alternative Name must match regex: (?i)^https://github\.com/<owner>/1password-vault/
+- OIDC Issuer must match:................... https://token.actions.githubusercontent.com
+
+✓ Verification succeeded!
+
+The following 2 attestations matched the policy criteria
+
+- Attestation #1
+  - Build repo:..... <owner>/1password-vault
+  - Build workflow:. .github/workflows/release.yml@refs/tags/v0.11.0
+  - Signer repo:.... <owner>/1password-vault
+  - Signer workflow: .github/workflows/release.yml@refs/tags/v0.11.0
+
+- Attestation #2
+  - Build repo:..... <owner>/1password-vault
+  - Build workflow:. .github/workflows/release.yml@refs/tags/v0.11.0
+  - Signer repo:.... <owner>/1password-vault
+  - Signer workflow: .github/workflows/release.yml@refs/tags/v0.11.0
+
+exit=0
+$ gh attestation verify opv-x86_64-unknown-linux-musl -R <owner>/1password-vault
+Loaded digest sha256:3a6be218cb8b6dfb3d57cb68f103bc2b3e7c225bf542d368e4021d7003271536 for file://opv-x86_64-unknown-linux-musl
+Loaded 2 attestations from GitHub API
+
+The following policy criteria will be enforced:
+- Predicate type must match:................ https://slsa.dev/provenance/v1
+- Source Repository Owner URI must match:... https://github.com/<owner>
+- Source Repository URI must match:......... https://github.com/<owner>/1password-vault
+- Subject Alternative Name must match regex: (?i)^https://github\.com/<owner>/1password-vault/
+- OIDC Issuer must match:................... https://token.actions.githubusercontent.com
+
+✓ Verification succeeded!
+
+The following 2 attestations matched the policy criteria
+
+- Attestation #1
+  - Build repo:..... <owner>/1password-vault
+  - Build workflow:. .github/workflows/release.yml@refs/tags/v0.11.0
+  - Signer repo:.... <owner>/1password-vault
+  - Signer workflow: .github/workflows/release.yml@refs/tags/v0.11.0
+
+- Attestation #2
+  - Build repo:..... <owner>/1password-vault
+  - Build workflow:. .github/workflows/release.yml@refs/tags/v0.11.0
+  - Signer repo:.... <owner>/1password-vault
+  - Signer workflow: .github/workflows/release.yml@refs/tags/v0.11.0
+
+exit=0
+$ HOME=<scratch> OPV_NO_SKILL=1 ./opv --version
+opv 0.11.0
+exit=0
+$ HOME=<scratch> OPV_NO_SKILL=1 ./opv mcp serve --help >/dev/null
+exit=0
+$ npm install --prefix <scratch>/npm @<npm-scope>/opv@0.11.0
+npm warn install-scripts   @<npm-scope>/opv@0.11.0 (postinstall: node install.js)
+npm warn install-scripts
+npm warn install-scripts Run `npm install-scripts ls` to review, or `npm install-scripts approve <pkg>` to allow.
+$ HOME=<scratch> OPV_NO_SKILL=1 <scratch>/npm/node_modules/.bin/opv --version
+opv is not installed at ~/.local/bin; run: npm rebuild -g @<npm-scope>/opv --allow-scripts=@<npm-scope>/opv
+opv: no prebuilt binary is available for linux-x64.
+opv: expected the optional dependency @<npm-scope>/opv-linux-x64 to be installed.
+opv: supported platforms: linux-x64, linux-arm64, darwin-x64, darwin-arm64, win32-x64, win32-arm64
+opv: reinstall with "npm i -g @<npm-scope>/opv" on a supported platform, or use a release binary.
+exit=1
+$ sha256 of the npm platform binary vs the release asset
+sha256sum: '<scratch>/npm/node_modules/@<npm-scope>/opv-linux-x64/bin/opv*': No such file or directory
+3a6be218cb8b6dfb3d57cb68f103bc2b3e7c225bf542d368e4021d7003271536  opv-x86_64-unknown-linux-musl
+
+Script done on 2026-10-17 18:12:02-04:00 [COMMAND_EXIT_CODE="0"]
+Script started on 2026-10-17 18:14:54-04:00 [COMMAND="bash <scratch>/v2.sh" <not executed on terminal>]
+=== V2
+$ kind version; kubectl version --client
+kind v0.33.0 go1.26.7 linux/amd64
+Client Version: v1.36.1
+Kustomize Version: v5.8.1
+$ kind create cluster --name opv-verify-136 --kubeconfig <scratch>/kubeconfig
+Creating cluster "opv-verify-136" ...
+
+ ✓ Ensuring node image (kindest/node:v1.37.0) 🖼️
+
+ ✓ Preparing nodes 📦 
+
+ ✓ Writing configuration 📜
+
+ ✓ Starting control-plane 🕹️
+
+ ✓ Installing CNI 🔌
+
+ ✓ Installing StorageClass 💾
+Set kubectl context to "kind-opv-verify-136"
+You can now use your cluster with:
+
+kubectl cluster-info --context kind-opv-verify-136 --kubeconfig <scratch>/kubeconfig
+
+Thanks for using kind! 😊
+exit=0
+$ kubectl version (server)
+Server Version: v1.37.0
+$ docker build -t opv-verify-136:0.11.0 <context: Dockerfile + release build>
+sha256:8b52566e64c0d28095f47bae0e1c6d0c7df256cb5bc436788a8eed2373e947e7
+exit=0
+$ docker run --rm opv-verify-136:0.11.0 sh -c id  (the image user)
+uid=10001 gid=0(root) groups=0(root)
+exit=0
+$ docker run --rm --entrypoint sh opv-verify-136:0.11.0 -c "command -v op opv || echo none"
+none
+$ kind load docker-image opv-verify-136:0.11.0 --name opv-verify-136
+Image: "opv-verify-136:0.11.0" with ID "sha256:8b52566e64c0d28095f47bae0e1c6d0c7df256cb5bc436788a8eed2373e947e7" not yet present on node "opv-verify-136-control-plane", loading...
+exit=0
+$ kubectl apply -f k8s/
+namespace/jzverify created
+serviceaccount/opv-ci created
+role.rbac.authorization.k8s.io/opv-ci created
+rolebinding.rbac.authorization.k8s.io/opv-ci created
+deployment.apps/jzverify created
+deployment.apps/jzverify-nofsgroup created
+exit=0
+$ kubectl -n jzverify rollout status deploy/jzverify deploy/jzverify-nofsgroup --timeout=120s
+Waiting for deployment "jzverify" rollout to finish: 0 of 1 updated replicas are available...
+deployment "jzverify" successfully rolled out
+deployment "jzverify-nofsgroup" successfully rolled out
+$ kubectl -n jzverify get deployments,pods
+NAME READY UP-TO-DATE AVAILABLE AGE
+deployment.apps/jzverify 1/1 1 1 7s
+deployment.apps/jzverify-nofsgroup 1/1 1 1 7s
+    
+NAME READY STATUS RESTARTS AGE
+pod/jzverify-bc87d8c4f-2hwjw 2/2 Running 0 7s
+pod/jzverify-nofsgroup-6f48f64cc4-t6sjz 1/1 Running 0 7s
+$ kubectl get clusterrolebindings -o json | jq names bound to opv-ci (expect none)
+(end)
+
+Script done on 2026-10-17 18:15:35-04:00 [COMMAND_EXIT_CODE="0"]
+Script started on 2026-10-17 18:15:52-04:00 [COMMAND="bash <scratch>/v2b.sh" <not executed on terminal>]
+=== V2 (kit): the opv-ci context, built without the token in argv or output
+$ KUBECONFIG=<scratch>/kubeconfig-opv-ci kubectl auth whoami; auth can-i --list -n jzverify
+ATTRIBUTE                                           VALUE
+Username                                            system:serviceaccount:jzverify:opv-ci
+UID                                                 <uid>
+Groups                                              [system:serviceaccounts system:serviceaccounts:jzverify system:authenticated]
+Extra: authentication.kubernetes.io/credential-id   [JTI=<jti>]
+Resources                                       Non-Resource URLs                      Resource Names   Verbs
+configmaps                                      []                                     []               [get list create patch delete]
+secrets                                         []                                     []               [get list create patch delete]
+clustertrustbundles.certificates.k8s.io         []                                     []               [get list watch]
+deployments.apps                                []                                     []               [get update]
+pods                                            []                                     []               [list]
+replicasets.apps                                []                                     []               [list]
+$ ... auth can-i list secrets -n default (expect no)
+no
+$ ... auth can-i get secrets --all-namespaces (expect no)
+no
+=== baseline before any sync: kubectl logs deploy/jzverify -c journeeze (first pass)
+database/url: absent
+github-app/private-key: absent
+github/webhook-secret: absent
+jev/api-key: absent
+blob/access-key-id: absent
+blob/secret-access-key: absent
+guide-assets/signing-key: absent
+otel/endpoint: absent
+otel/headers: absent
+database/owner-url: absent
+database/app-password: absent
+traversal ../etc/passwd: refused
+LOG_LEVEL: absent
+marker in env: none
+result: FAIL
+
+Script done on 2026-10-17 18:15:54-04:00 [COMMAND_EXIT_CODE="0"]
+Script started on 2026-10-17 18:16:05-04:00 [COMMAND="bash <scratch>/v15.sh" <not executed on terminal>]
+=== V15 (second half only): docker compose config outside opv
+$ env -u OPV_UID -u OPV_GID -u OPV_SECRETS_DIR docker compose -f kit/compose.yml config
+error while interpolating services.serve.user: required variable OPV_UID is missing a value: run this under opv run
+exit=15
+
+Script done on 2026-10-17 18:16:05-04:00 [COMMAND_EXIT_CODE="0"]
+Script started on 2026-10-17 18:16:23-04:00 [COMMAND="bash <scratch>/v16.sh" <not executed on terminal>]
+=== V16: canary scan (patterns: every marker, its full-value base64 and offset base64 forms; pattern file kept outside the record)
+patterns: 35
+transcript: lines=208 hits=0
+deployments+replicasets (all namespaces): lines=795 hits=0
+events (all namespaces): lines=1622 hits=0
+kubectl logs, every pod, all containers: lines=627 hits=0
+$ docker exec opv-verify-136-control-plane grep -r -c -F -f <patterns> /var/log/pods
+Successfully copied 2.56kB to opv-verify-136-control-plane:/tmp/canary.txt
+files under /var/log/pods: 12
+grep: /tmp/canary.txt: No such file or directory
+files with hits: 0
+rm: cannot remove '/tmp/canary.txt': No such file or directory
+secrets/configmaps labelled opv-managed (the stores' own data): 0
+=== V17
+$ kind delete cluster --name opv-verify-136
+Deleting cluster "opv-verify-136" ...
+Deleted nodes: ["opv-verify-136-control-plane"]
+exit=0
+$ kind get clusters
+No kind clusters found.
+$ docker ps -a --filter name=opv-verify-136 (expect empty)
+(end)
+
+Script done on 2026-10-17 18:16:28-04:00 [COMMAND_EXIT_CODE="0"]
+Script started on 2026-10-17 18:16:44-04:00 [COMMAND="bash <scratch>/v16b.sh" <not executed on terminal>]
+=== V16 node-log re-run: the first node scan above did not run (docker cp target missing; grep errored), so V2 is repeated and the node scan re-run with the patterns on stdin
+kind create exit=0
+kind load exit=0
+apply exit=0
+Waiting for deployment spec update to be observed...
+Waiting for deployment spec update to be observed...
+Waiting for deployment "jzverify" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "jzverify" rollout to finish: 0 of 1 updated replicas are available...
+deployment "jzverify" successfully rolled out
+deployment "jzverify-nofsgroup" successfully rolled out
+pod log files under /var/log/pods (jzverify): 3
+control: lines in the jzverify logs that read 'result:': n/a
+$ docker exec -i <node> grep -r -l -F -f /dev/stdin /var/log/pods < <patterns>
+grep exit=1 (1 = no hit)
+$ kubectl logs every pod, all containers
+0
+grep exit=1 (1 = no hit)
+=== V17 (again)
+Deleting cluster "opv-verify-136" ...
+Deleted nodes: ["opv-verify-136-control-plane"]
+exit=0
+No kind clusters found.
+
+Script done on 2026-10-17 18:17:58-04:00 [COMMAND_EXIT_CODE="0"]
+Script started on 2026-10-17 18:20:15-04:00 [COMMAND="bash <scratch>/v1npm.sh" <not executed on terminal>]
+=== V1 addendum: the npm package, re-checked
+22:20:15Z
+$ npm view @<npm-scope>/opv-linux-x64@0.11.0 version
+0.11.0
+$ npm install --prefix <scratch>/npm3 @<npm-scope>/opv@0.11.0
+
+added 2 packages in 1s
+$ HOME=<scratch> OPV_NO_SKILL=1 <scratch>/npm3/node_modules/.bin/opv --version
+opv 0.11.0
+exit=0
+$ sha256 of the npm platform binary vs the release asset
+3a6be218cb8b6dfb3d57cb68f103bc2b3e7c225bf542d368e4021d7003271536  <scratch>/npm3/node_modules/@<npm-scope>/opv-linux-x64/bin/opv
+3a6be218cb8b6dfb3d57cb68f103bc2b3e7c225bf542d368e4021d7003271536  <scratch>/rel/opv-x86_64-unknown-linux-musl
+
+Script done on 2026-10-17 18:20:17-04:00 [COMMAND_EXIT_CODE="0"]

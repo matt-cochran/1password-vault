@@ -1,0 +1,10 @@
+# The §5 recipe (tests/fixtures/compose/recipe.yml), with the kit's image and command.
+services:
+  serve:
+    image: opv-verify-136:0.11.0
+    command: ["check", "serve"]
+    user: "${OPV_UID:?run this under opv run}:${OPV_GID:?run this under opv run}"
+    environment: {JZ_VAULT_DIR: /run/secrets/journeeze}
+    volumes:
+      - {type: bind, source: "${OPV_SECRETS_DIR:?run this under opv run}", target: /run/secrets/journeeze, read_only: true}
+    logging: {driver: none}

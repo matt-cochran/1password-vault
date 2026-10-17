@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jzverify-nofsgroup
+  namespace: jzverify
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: jzverify-nofsgroup}
+  template:
+    metadata:
+      labels: {app: jzverify-nofsgroup}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: journeeze
+          image: opv-verify-136:0.11.0
+          imagePullPolicy: Never
+          args: ["loop", "serve", "30"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}

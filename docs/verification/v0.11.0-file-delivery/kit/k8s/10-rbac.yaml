@@ -1,0 +1,44 @@
+# opv's CI identity: exactly ACCESS (v0.11.0 src/adapters/kubernetes/runtime.rs:62-118),
+# configmaps included (§6.5). A namespaced Role, never a ClusterRole (FM-09).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: opv-ci
+  namespace: jzverify
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: opv-ci
+  namespace: jzverify
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "update"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: opv-ci
+  namespace: jzverify
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: opv-ci
+subjects:
+  - kind: ServiceAccount
+    name: opv-ci
+    namespace: jzverify

@@ -1,0 +1,34 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jzverify
+  namespace: jzverify
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: jzverify}
+  template:
+    metadata:
+      labels: {app: jzverify}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: journeeze
+          image: opv-verify-136:0.11.0
+          imagePullPolicy: Never
+          args: ["loop", "serve", "30"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+        - name: sidecar
+          image: opv-verify-136:0.11.0
+          imagePullPolicy: Never
+          command: ["sleep", "infinity"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
