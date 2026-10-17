@@ -3319,6 +3319,24 @@ fn a22_a_partial_credentials_create_steps_to_its_show() {
     );
 }
 
+/// C8: a partial `mcp install` steps to the inner failure's own Next, never a structure plan.
+#[test]
+fn a_partial_mcp_install_steps_to_the_inner_next() {
+    let c = partial(
+        Cause::Usage {
+            problem: UsageProblem::ValueFormat {
+                flag: "--name".into(),
+                format: "letters, digits, '-' or '_'",
+            },
+        },
+        &["claude"],
+    );
+    assert_eq!(
+        next_in(&c, &cli(&["opv", "mcp", "install", "--client", "all"])),
+        "opv mcp install --help"
+    );
+}
+
 /// D3 (A14): a built step keeps the invocation's `--project` when it takes one.
 #[test]
 fn d3_a_built_step_keeps_the_project_flag() {

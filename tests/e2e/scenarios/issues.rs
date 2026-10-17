@@ -362,3 +362,30 @@ fn issue_160_login_to_b_while_a_is_signed_in_signs_in_to_b() {
     };
     assert_eq!(code, 0);
 }
+
+// ---------------------------------------------------------------------------------------
+// C8: `mcp install --client all` keeps the client it already registered when a later one
+// fails, instead of losing that record (R53, X20).
+// ---------------------------------------------------------------------------------------
+
+/// With codex's file holding a conflicting entry, claude is registered first; the failure
+/// must still name claude as already registered.
+#[test]
+fn mcp_install_all_names_the_client_registered_before_a_later_client_failed() {
+    let s = Scenario::new(|_| {});
+    let codex = s.root.path().join("codex");
+    std::fs::create_dir_all(&codex).unwrap();
+    std::fs::write(
+        codex.join("config.toml"),
+        "[mcp_servers.opv]\ncommand = \"/elsewhere/opv-mcp\"\nargs = []\n",
+    )
+    .unwrap();
+    let out = s.opv_with(
+        &["mcp", "install", "--client", "all", "--json"],
+        &[("CODEX_HOME", codex.to_str().unwrap())],
+    );
+    assert_eq!(
+        document(&out)["error"]["subject"]["done"],
+        serde_json::json!(["claude"])
+    );
+}
