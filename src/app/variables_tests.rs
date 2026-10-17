@@ -325,7 +325,7 @@ fn a_declined_config_channel_reads_not_delivered() {
         files: crate::provider::FileCapability::None,
     };
     assert_eq!(
-        crate::app::target_cell(&row, "new", &channels),
+        crate::app::target_cell(&row, "new", &channels, None),
         "not delivered (no config channel)"
     );
 }

@@ -466,6 +466,7 @@ impl TargetConfig for AzureTarget {
         &'a self,
         env: &'a str,
         managed: BTreeSet<String>,
+        _files: &BTreeMap<String, crate::domain::runtime::FileMount>,
         r: &'a dyn CommandRunner,
     ) -> Result<Ports<'a>, Error> {
         // Directories a killed run left behind are removed at the start of every Azure run
@@ -714,7 +715,7 @@ environments = ["prod"]
         let r = crate::runner::fake::FakeRunner::new([crate::runner::Output::success(
             serde_json::to_vec(&vault).unwrap(),
         )]);
-        let ports = azure_of(&f, "prod").open("prod", BTreeSet::new(), &r);
+        let ports = azure_of(&f, "prod").open("prod", BTreeSet::new(), &BTreeMap::new(), &r);
         assert!(matches!(ports, Ok(Ports::Pinned { .. })));
     }
 

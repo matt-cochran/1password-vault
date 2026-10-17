@@ -13,6 +13,7 @@ use serde::de::DeserializeOwned;
 use toml::Spanned;
 use toml::de::{DeValue, ValueDeserializer};
 
+use crate::domain::runtime::FileMount;
 use crate::domain::{Kind, SecretValue};
 use crate::error::Error;
 use crate::host::{Host, Tool};
@@ -421,6 +422,7 @@ pub trait TargetConfig: fmt::Debug + Send + Sync {
         &'a self,
         env: &'a str,
         managed: BTreeSet<String>,
+        files: &BTreeMap<String, FileMount>,
         r: &'a dyn CommandRunner,
     ) -> Result<Ports<'a>, Error>;
     /// Read-only checks of the target's own state (NR-23 to NR-25): `Err` stops the

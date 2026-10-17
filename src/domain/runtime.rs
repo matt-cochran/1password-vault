@@ -4,6 +4,15 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+/// A file key's destination on a target (M4, §4.2): names only, never a value. The
+/// rendered target name keys it; `product` and `path` say whose file it is and where it
+/// goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileMount {
+    pub product: String,
+    pub path: String,
+}
+
 /// How a runtime binds one managed env name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Binding {

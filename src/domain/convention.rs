@@ -269,6 +269,10 @@ pub fn normalized(
     value: &SecretValue,
 ) -> Option<(SecretValue, Fix)> {
     let env = fleet.environments.get(env_name)?;
+    // A file key is delivered as those exact bytes (M4, §4.5): the tidy never trims it.
+    if spec.file.is_some() {
+        return None;
+    }
     let v = value.expose();
     if v.is_empty() || spec.rules.transform.is_some() {
         return None;

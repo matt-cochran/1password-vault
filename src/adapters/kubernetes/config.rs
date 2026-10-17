@@ -411,6 +411,7 @@ impl TargetConfig for KubernetesTarget {
         &'a self,
         env: &'a str,
         managed: BTreeSet<String>,
+        _files: &BTreeMap<String, crate::domain::runtime::FileMount>,
         r: &'a dyn CommandRunner,
     ) -> Result<Ports<'a>, Error> {
         // The rollout and ExternalSecret waits have their own limit, and end earlier when
@@ -1005,7 +1006,7 @@ environments = ["dev"]
         let t = target();
         let r = FakeRunner::new([]);
         assert!(matches!(
-            t.open("dev", BTreeSet::new(), &r),
+            t.open("dev", BTreeSet::new(), &BTreeMap::new(), &r),
             Ok(Ports::Pinned { .. })
         ));
     }
@@ -1014,7 +1015,7 @@ environments = ["dev"]
     fn open_makes_no_calls() {
         let t = target();
         let r = FakeRunner::new([]);
-        let _ = t.open("dev", BTreeSet::new(), &r);
+        let _ = t.open("dev", BTreeSet::new(), &BTreeMap::new(), &r);
         assert!(r.calls.borrow().is_empty());
     }
 
