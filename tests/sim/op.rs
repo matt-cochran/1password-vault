@@ -98,6 +98,30 @@ fn family(w: &[String]) -> &str {
     w.first().map(String::as_str).unwrap_or("")
 }
 
+/// `account_not_on_machine` is a standing condition, not an event: when a scenario injects
+/// it into any `op` call, the account that scenario selects is absent from the machine for
+/// every call, so `op account list` never lists it (#165: opv checks the listing before it
+/// calls an account missing). Applied once, at the scenario's first `op` call; the removed
+/// account is remembered so a later call cannot remove another one. Returns whether the
+/// world changed.
+pub fn account_not_on_machine(world: &mut World, args: &[String]) -> bool {
+    if world.doc["op"]["not_on_machine"].is_string() {
+        return false;
+    }
+    let Some(id) = named_account(args)
+        .and_then(|n| find_account(world, &n))
+        .or_else(|| default_account(world))
+        .map(|a| id_of(&a))
+    else {
+        return false;
+    };
+    if let Some(list) = world.doc["op"]["accounts"].as_array_mut() {
+        list.retain(|a| a["id"].as_str() != Some(id.as_str()));
+    }
+    world.doc["op"]["not_on_machine"] = serde_json::json!(id);
+    true
+}
+
 /// The recorded reply for `kind` on this call, with the call's names substituted.
 pub fn fault(kind: Kind, world: &World, args: &[String]) -> Reply {
     let w = call_words(args);
