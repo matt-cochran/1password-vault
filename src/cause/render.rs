@@ -823,7 +823,10 @@ fn grant_words(
             resource: kind,
             namespace,
         } => match namespace {
-            Some(ns) => format!("ask a cluster admin to let {who} {verb} {kind} in namespace {ns}"),
+            // A namespaced Role, never a ClusterRole (delivery-transports FM-09).
+            Some(ns) => format!(
+                "ask a cluster admin to let {who} {verb} {kind} through a Role in namespace {ns}"
+            ),
             None => format!("ask a cluster admin to let {who} {verb} {kind}"),
         },
         GrantModel::OnePasswordRole => {
