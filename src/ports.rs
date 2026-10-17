@@ -42,10 +42,9 @@ pub trait StagedStore: Store {
     /// Removes `names` as a pending change.
     fn remove(&self, names: &[String]) -> Result<(), Error>;
     /// The store's config channel (FR-46), when it delivers config keys itself: GitHub
-    /// variables. `None` (the default): config is not delivered by this target.
-    fn variables(&self) -> Option<&dyn VariableStore> {
-        None
-    }
+    /// variables. `None`: config is not delivered by this target. Required: every staged
+    /// store declares its config channel (design §1.3).
+    fn variables(&self) -> Option<&dyn VariableStore>;
 }
 
 /// Config delivered as named, readable values (FR-46): GitHub Actions variables. Config is

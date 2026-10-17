@@ -16,8 +16,8 @@ use crate::error::Error;
 use crate::host::Host;
 use crate::ports::Ports;
 use crate::provider::{
-    Check, InitField, NameRules, Preflight, PreflightMode, Provider, Section, TargetConfig,
-    Verdict, eq_as, init_lines,
+    Channel, Channels, Check, FileCapability, InitField, NameRules, Preflight, PreflightMode,
+    Provider, Section, TargetConfig, Verdict, eq_as, init_lines,
 };
 use crate::runner::CommandRunner;
 
@@ -226,6 +226,22 @@ impl TargetConfig for FlyTarget {
             "environments {first} and {second} both use Fly app {:?} with fly.secret_name {:?}",
             self.app, self.secret_name_template
         )
+    }
+
+    /// Today: Fly secrets only; Fly delivers no config, and its shim turns the delivered
+    /// secret back into a file (design §1.1).
+    fn channels(&self) -> Channels {
+        Channels {
+            secret: Channel::Store {
+                label: "Fly secret",
+            },
+            config: Channel::None {
+                why: "Fly has no config channel today",
+            },
+            files: FileCapability::ViaApp {
+                note: "env at boot, written to files by the app's shim",
+            },
+        }
     }
 
     fn open<'a>(

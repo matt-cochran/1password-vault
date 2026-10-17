@@ -59,7 +59,7 @@ use crate::domain::SecretValue;
 use crate::domain::plan::StoreEntry;
 use crate::error::Error;
 use crate::host::{Host, Tool};
-use crate::ports::{StagedRuntime, StagedStore, Store};
+use crate::ports::{StagedRuntime, StagedStore, Store, VariableStore};
 use crate::provider::{Check, Preflight, Verdict};
 use crate::runner::{Call, CommandRunner, Outcome, Output, PROBE_TIMEOUT, Wait};
 
@@ -131,6 +131,11 @@ impl StagedStore for Fly<'_> {
     }
     fn remove(&self, names: &[String]) -> Result<(), Error> {
         unset_staged(self.runner, self.app, names)
+    }
+    /// Fly delivers no config through a readable variable store today: config keys are not
+    /// delivered here (design §1.1, §7).
+    fn variables(&self) -> Option<&dyn VariableStore> {
+        None
     }
 }
 

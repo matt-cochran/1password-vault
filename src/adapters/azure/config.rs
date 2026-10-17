@@ -16,8 +16,8 @@ use crate::error::Error;
 use crate::host::Host;
 use crate::ports::Ports;
 use crate::provider::{
-    Check, InitField, NameRules, Preflight, PreflightMode, Provider, Section, StoreConfig,
-    StoreNameRules, TargetConfig, eq_as, init_lines,
+    Channel, Channels, Check, FileCapability, InitField, NameRules, Preflight, PreflightMode,
+    Provider, Section, StoreConfig, StoreNameRules, TargetConfig, eq_as, init_lines,
 };
 use crate::runner::CommandRunner;
 
@@ -447,6 +447,19 @@ impl TargetConfig for AzureTarget {
             "environments {first} and {second} both use Key Vault {:?} with azure.env_name {:?}",
             self.key_vault, self.env_name_template
         )
+    }
+
+    /// Today: Key Vault secrets; config is a plain env value or a Key Vault reference,
+    /// never a file (design §1.1).
+    fn channels(&self) -> Channels {
+        Channels {
+            secret: Channel::Store { label: "Key Vault" },
+            config: match self.config {
+                ConfigRoute::Store => Channel::Store { label: "Key Vault" },
+                ConfigRoute::Env => Channel::RuntimeEnv,
+            },
+            files: FileCapability::None,
+        }
     }
 
     fn open<'a>(

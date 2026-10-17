@@ -27,8 +27,8 @@ use crate::error::Error;
 use crate::host::Host;
 use crate::ports::Ports;
 use crate::provider::{
-    Check, InitField, NameRules, Preflight, PreflightMode, Provider, Section, TargetConfig,
-    Verdict, eq_as, init_lines,
+    Channel, Channels, Check, FileCapability, InitField, NameRules, Preflight, PreflightMode,
+    Provider, Section, TargetConfig, Verdict, eq_as, init_lines,
 };
 use crate::runner::{Call, CommandRunner, PROBE_TIMEOUT};
 
@@ -300,6 +300,17 @@ impl TargetConfig for GithubTarget {
              prune what the other stages",
             repos.join(", ")
         )
+    }
+    /// Today: repository/environment secrets; config is a GitHub variable, and a file key
+    /// is delivered by name as a secret (design §1.1).
+    fn channels(&self) -> Channels {
+        Channels {
+            secret: Channel::Store {
+                label: "GitHub secret",
+            },
+            config: Channel::Variables,
+            files: FileCapability::None,
+        }
     }
     fn open<'a>(
         &'a self,
