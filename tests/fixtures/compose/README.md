@@ -13,4 +13,4 @@ The paths are markers: `/run/user/1000/opv-run.4242-abcdef` stands for opv's pri
 | 05-bash-uid-not-in-environment | `bash -c 'echo "shell UID=$UID"; env \| grep -c "^UID="; env \| grep -c "^GID="'` | 1 | bash has `UID` as a shell variable, not in the environment; no `GID` |
 | 06-naive-config-dir-set-uid-unset | `OPV_SECRETS_DIR=… bash -c 'docker compose … -f naive.yml config'` | 0 | `user: ':'`; the short `:ro` form sets `create_host_path: true` |
 
-`recipe.yml` is the recipe in `docs/design/delivery-transports.md` §5. `naive.yml` is the `${UID}:${GID}` form the design rejects.
+`recipe.yml` is the recipe in `docs/local-development.md` (Docker Compose) and `docs/design/delivery-transports.md` §5; the user doc's copy must equal this file. `naive.yml` is the `${UID}:${GID}` form the design rejects.

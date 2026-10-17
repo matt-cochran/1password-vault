@@ -174,12 +174,28 @@ pub fn build_for(
     } else {
         environment_mode
     };
-    let file_delivery = match crate::app::local_delivery::runtime_dir_support() {
-        Ok(_) => json!({"supported": true, "reason": Value::Null}),
-        Err(why) => json!({
-            "supported": false,
-            "reason": crate::app::local_delivery::ram_dir_reason(&why),
-        }),
+    let (file_delivery_supported, file_delivery) =
+        match crate::app::local_delivery::runtime_dir_support() {
+            Ok(_) => (true, json!({"supported": true, "reason": Value::Null})),
+            Err(why) => (
+                false,
+                json!({
+                    "supported": false,
+                    "reason": crate::app::local_delivery::ram_dir_reason(&why),
+                }),
+            ),
+        };
+    // A4: the Compose `user:` the recipe needs, so the container reads the RAM directory as
+    // the same user. In the shared document so `opv_delivery_preview` carries it too.
+    let has_file = selection
+        .delivered
+        .iter()
+        .any(|(_, spec)| spec.file.is_some());
+    let containers = if has_file && remote_doc.is_none() && file_delivery_supported {
+        crate::app::local_delivery::effective_ids()
+            .map(|(uid, gid)| format!("run as {uid}:{gid} (OPV_UID:OPV_GID) to read these files"))
+    } else {
+        None
     };
     let keys: Vec<Value> = selection
         .delivered
@@ -204,7 +220,7 @@ pub fn build_for(
             })
         })
         .collect();
-    Ok(json!({
+    let mut doc = json!({
         "schema_version": SCHEMA_VERSION,
         "environment": env_name,
         "product": product_name,
@@ -222,7 +238,13 @@ pub fn build_for(
         "transport": if remote.is_some() { "remote" } else { "local" },
         "remote": remote_doc,
         "remote_profiles": prod.remotes.keys().collect::<Vec<_>>(),
-    }))
+    });
+    // Only a file run has a container user line; omitted otherwise so a document without
+    // files is unchanged.
+    if let Some(line) = containers {
+        doc["containers"] = json!(line);
+    }
+    Ok(doc)
 }
 
 /// Whether the OpenSSH client is on PATH (`yes`/`no`), found by looking, never by running.
@@ -349,6 +371,16 @@ fn write_text(doc: &Value, out: &mut dyn Write) -> io::Result<()> {
                 fd["reason"].as_str().unwrap_or("unknown")
             )?;
         }
+    }
+    // A4: a local file run reads its files as the invoking user; the Compose recipe's
+    // `user:` needs the same effective ids. The line lives in the shared document, so it is
+    // printed here and returned by `opv_delivery_preview` alike.
+    if has_file
+        && !r.is_object()
+        && fd["supported"].as_bool().unwrap_or(false)
+        && let Some(line) = doc["containers"].as_str()
+    {
+        writeln!(out, "containers: {line}")?;
     }
     if r.is_object() {
         writeln!(
