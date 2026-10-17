@@ -2756,26 +2756,38 @@ impl Cause {
                     )
                 };
                 let next = if *system == System::OnePassword {
-                    let mut args = Vec::new();
-                    if let Some(a) = account {
-                        args.push("--account".to_string());
-                        args.push(a.to_string());
+                    // #167: under `opv login` itself, `opv login` again loops; the step is
+                    // op's own sign-in, which a person runs in their own terminal.
+                    if inv.command.first().map(String::as_str) == Some("login") {
+                        let mut args = vec!["signin".to_string()];
+                        if let Some(a) = account {
+                            args.push("--account".to_string());
+                            args.push(a.to_string());
+                        }
+                        Next::Vendor(VendorCmd {
+                            program: "op".into(),
+                            args,
+                        })
+                    } else {
+                        let mut args = Vec::new();
+                        if let Some(a) = account {
+                            args.push("--account".to_string());
+                            args.push(a.to_string());
+                        }
+                        // An MCP call has no command line to repeat: the step is the login
+                        // alone, never a login inside a login.
+                        if matches!(inv.origin, crate::cause::Origin::Cli) && !inv.command.is_empty()
+                        {
+                            args.push("--".into());
+                            args.push("opv".into());
+                            args.extend(inv.command.iter().cloned());
+                            args.extend(inv.args.iter().cloned());
+                        }
+                        Next::Handoff(Cmd {
+                            command: vec!["login".into()],
+                            args,
+                        })
                     }
-                    // `opv login` itself, or an MCP call with no command line to repeat: the
-                    // step is the login alone, never a login inside a login.
-                    if matches!(inv.origin, crate::cause::Origin::Cli)
-                        && !inv.command.is_empty()
-                        && inv.command.first().map(String::as_str) != Some("login")
-                    {
-                        args.push("--".into());
-                        args.push("opv".into());
-                        args.extend(inv.command.iter().cloned());
-                        args.extend(inv.args.iter().cloned());
-                    }
-                    Next::Handoff(Cmd {
-                        command: vec!["login".into()],
-                        args,
-                    })
                 } else {
                     Next::Rerun
                 };
