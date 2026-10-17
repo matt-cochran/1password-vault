@@ -1,0 +1,29 @@
+# opv plan prod --target k8s
+## exit: 0
+## stdout
+prod/k8s: 10 keys · 0 findings · 7 to write · 0 held (immutable) · 0 to prune · 0 unmanaged on Kubernetes (never touched)
+TARGET  PRODUCT  KEY              KIND    STATE    ON TARGET
+k8s     shared   DATABASE_URL     secret  saved    n/a
+k8s     shared   FEATURE_FLAGS    config  saved    via ConfigMap
+k8s     web      API_KEY          secret  saved    new
+k8s     web      DATABASE_URL     secret  saved    new
+    shared from shared/DATABASE_URL
+k8s     web      LOG_LEVEL        config  saved    via ConfigMap
+k8s     web      MIGRATION_TOKEN  secret  skipped  n/a
+k8s     web      OTEL_RESOURCE    config  saved    via ConfigMap · file (verbatim)
+k8s     web      SESSION_SECRET   secret  saved    new
+k8s     web      TLS_CERTIFICATE  secret  saved    new · file (verbatim)
+k8s     web      TLS_PRIVATE_KEY  secret  saved    new · file (verbatim)
+warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
+prod/k8s: would write: web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET)
+prod/k8s: would write: web/TLS_CERTIFICATE (E2E__WEB__TLS_CERTIFICATE → file /run/secrets/web/tls/certificate)
+prod/k8s: would write: web/TLS_PRIVATE_KEY (E2E__WEB__TLS_PRIVATE_KEY → file /run/secrets/web/tls/private-key)
+prod/k8s: would write: web/LOG_LEVEL (E2E__WEB__LOG_LEVEL → ConfigMap, env)
+prod/k8s: would write: web/OTEL_RESOURCE (E2E__WEB__OTEL_RESOURCE → file /run/secrets/web/otel/resource)
+prod/k8s: would deploy: volume opv-files-web, read-only at /run/secrets/web (3 files)
+plan <plan> (1Password item v2): sync --expect-plan <plan> applies exactly this plan and refuses if the item, the target or secrets.toml changed
+Next: opv sync prod --target k8s --deploy --expect-plan <plan>
+
+## stderr
+using <SCENARIO>/project/secrets.toml
+

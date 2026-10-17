@@ -377,12 +377,75 @@ fn a_github_config_rows_via_names_its_channel() {
     );
 }
 
-/// A config row on Kubernetes (`config = env`) names its channel `via: "env"` (design §6.7).
+/// A config row on Kubernetes (`config = "configmap"`) names its channel `via:
+/// "ConfigMap"` (design §6.7).
 #[test]
-fn a_kubernetes_config_rows_via_is_env() {
+fn a_kubernetes_configmap_config_rows_via_is_configmap() {
     assert_eq!(
         e2e_row("FEATURE_FLAGS", crate::domain::Kind::Config, "k8s").via,
-        Some("env")
+        Some("ConfigMap")
+    );
+}
+
+/// The e2e app's web row `key` on target `target` (a `web` section field).
+fn e2e_web_row(key: &str, kind: crate::domain::Kind, target: &str) -> super::JsonRow {
+    let fleet = e2e_fleet();
+    let field = crate::domain::ItemField {
+        section: "web".into(),
+        ..e2e_field(key, kind)
+    };
+    let plan = crate::domain::build_plan(
+        &fleet,
+        "prod",
+        vec![field],
+        &[],
+        &std::collections::BTreeSet::new(),
+        &|_| None,
+    );
+    let channels = fleet.environments["prod"].targets[target].config.channels();
+    let part = super::JsonPart {
+        target,
+        plan: &plan,
+        pinned: None,
+        rotate: None,
+        vars: None,
+    };
+    super::json_rows(
+        &fleet,
+        &part,
+        &|_: &str, _: &str| None,
+        None,
+        Some(&channels),
+    )
+    .into_iter()
+    .find(|r| r.key == key)
+    .unwrap()
+}
+
+/// A file key on Kubernetes with `secrets_dir` arrives as a file (design §6.7).
+#[test]
+fn a_kubernetes_file_rows_delivered_as_is_file() {
+    assert_eq!(
+        e2e_web_row("TLS_PRIVATE_KEY", crate::domain::Kind::Secret, "k8s").delivered_as,
+        Some("file")
+    );
+}
+
+/// A file key on Kubernetes keeps its bytes as stored (design §4.5).
+#[test]
+fn a_kubernetes_file_rows_form_is_verbatim() {
+    assert_eq!(
+        e2e_web_row("TLS_PRIVATE_KEY", crate::domain::Kind::Secret, "k8s").form,
+        Some("verbatim".to_string())
+    );
+}
+
+/// A file key on Kubernetes names its path (design §6.7).
+#[test]
+fn a_kubernetes_file_rows_path_is_its_file() {
+    assert_eq!(
+        e2e_web_row("TLS_PRIVATE_KEY", crate::domain::Kind::Secret, "k8s").path,
+        Some("tls/private-key".to_string())
     );
 }
 

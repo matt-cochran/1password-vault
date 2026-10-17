@@ -299,6 +299,7 @@ fn status_part<'f>(
         Ports::Pinned { store, runtime } => Some(pinned_status(
             fleet,
             env_name,
+            name,
             t,
             &plan,
             &listed,
@@ -759,9 +760,11 @@ impl PinnedStatus {
 }
 
 /// Reads the runtime's bindings once and compares them with the plan (no write).
+#[allow(clippy::too_many_arguments)]
 fn pinned_status(
     fleet: &Fleet,
     env_name: &str,
+    target: &str,
     t: &dyn TargetConfig,
     plan: &SyncPlan,
     listed: &[StoreEntry],
@@ -771,6 +774,7 @@ fn pinned_status(
     let want = pinned_want(
         fleet,
         env_name,
+        target,
         t,
         plan,
         listed,

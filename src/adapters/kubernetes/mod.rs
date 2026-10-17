@@ -210,6 +210,11 @@ impl Failed {
                 _ => {}
             },
             Cause::WriteOutcomeUnknown { subject, .. } => *subject = about,
+            // A 422 names the object only inside kubectl's reply; the refused write is
+            // about `about` (the replaced Deployment, design §6.8).
+            Cause::TargetRefused { subject, .. } if subject.name.as_str().is_empty() => {
+                *subject = about
+            }
             // The refused right is on this target's Deployment or in its namespace; `auth
             // can-i` answers "no" without naming the namespace it asked about.
             Cause::MissingRight {

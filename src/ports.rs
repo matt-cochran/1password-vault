@@ -16,7 +16,7 @@
 use crate::domain::{
     AccessFinding, Health, Revision, RuntimeChange, RuntimeSnapshot, SecretValue, Stamp, StoreEntry,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::Error;
 
@@ -130,6 +130,13 @@ pub trait PinnedRuntime {
     /// default holds nothing outside its revisions.
     fn release(&self, _names: &[String]) -> Result<(), Error> {
         Ok(())
+    }
+    /// What a deploy that pins new versions of env names `pin` would change beyond the
+    /// bindings themselves, one text each for its `would deploy: <text>` line (design
+    /// §6.7: a Kubernetes volume of mounted files). Read-only; names and paths only. The
+    /// default changes nothing else.
+    fn deploy_preview(&self, _pin: &BTreeSet<String>) -> Result<Vec<String>, Error> {
+        Ok(Vec::new())
     }
 }
 

@@ -467,9 +467,21 @@ impl<'t> Doc<'t> {
         if field.0.first().map(String::as_str) == base.first().copied() {
             return e;
         }
-        let mut full: Vec<&str> = base.to_vec();
-        full.extend(field.0.iter().map(String::as_str));
-        self.invalid(&full, rule.clone())
+        let under_base = |f: &DottedPath| {
+            let mut full: Vec<String> = base.iter().map(|s| s.to_string()).collect();
+            full.extend(f.0.iter().cloned());
+            DottedPath(full)
+        };
+        // A field the rule names beside this one is in the same section.
+        let rule = match rule {
+            FieldRule::ConflictsWith { field: other } => FieldRule::ConflictsWith {
+                field: under_base(other),
+            },
+            other => other.clone(),
+        };
+        let full = under_base(field);
+        let full: Vec<&str> = full.0.iter().map(String::as_str).collect();
+        self.invalid(&full, rule)
     }
 
     /// The value at `path`, with its place in the file.
@@ -929,6 +941,7 @@ fn target_of(
         ));
     }
     p.bind(target, store.as_ref())
+        .map_err(|e| doc.place(e, &base))
 }
 
 /// One identifier at `path`: non-empty, unpadded, and accepted by `ok` (safe in argv).

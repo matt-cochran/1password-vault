@@ -1,0 +1,10 @@
+# opv sync prod --confirm prod --target k8s --deploy
+## exit: 6
+## stdout
+
+## stderr
+using <SCENARIO>/project/secrets.toml
+opv: container e2e-app of deployment e2e-app already mounts volume tls over /run/secrets, so opv's secrets volume cannot go there
+Do: choose another secrets_dir, or remove volume tls
+Next: opv plan prod --target k8s
+

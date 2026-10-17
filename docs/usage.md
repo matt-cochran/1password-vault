@@ -270,10 +270,18 @@ opv sync prod --deploy --prune           # also remove names no longer wanted, a
 
 #### Files and ConfigMaps on Kubernetes
 
-With `kubernetes.secrets_dir` set ([configuration](configuration.md#kubernetes-secrets--deployment)), a file key is written like any secret, as a new immutable Secret version, and `--deploy` mounts it at `<secrets_dir>/<file>` in the target's container, in the same change that removes its variable. With `kubernetes.config = "configmap"`, config keys are written as immutable ConfigMap versions and bound with `configMapKeyRef`.
+With `kubernetes.secrets_dir` set ([configuration](configuration.md#kubernetes-secrets--deployment)), a file key is written like any secret, as a new immutable Secret version (a config key with `file` as a ConfigMap version), and `--deploy` mounts it at `<secrets_dir>/<file>` in the target's container, in the same change that removes its variable. With `kubernetes.config = "configmap"`, config keys are written as immutable ConfigMap versions and bound with `configMapKeyRef`.
 
-- **Plan first.** `plan` shows where each key goes: `→ file <path>` for a file key, `→ ConfigMap, env` for config, and one `would deploy: volume opv-files-<product>` line naming the directory, the number of files and the variables it removes.
-- **Readability.** `sync` refuses before writing anything when the workload could not read the files (no `fsGroup` and a non-root user): exit 6, `mount_unreadable`, with the `securityContext` line to add. A workload running as root syncs, with a warning on every run.
+- **Plan first.** `plan` shows where each key goes: its own `would write` line with `→ file <path>` for a file key and `→ ConfigMap, env` for a config key, and one `would deploy: volume opv-files-<product>` line per product whose volume changes, naming the directory, the number of files and the variables it removes:
+
+  ```text
+  prod/k8s: would write: web/TLS_PRIVATE_KEY (WEB_TLS_PRIVATE_KEY → file /run/secrets/web/tls/private-key)
+  prod/k8s: would write: web/LOG_LEVEL (LOG_LEVEL → ConfigMap, env)
+  prod/k8s: would deploy: volume opv-files-web, read-only at /run/secrets/web (1 file; env entries removed: WEB_TLS_PRIVATE_KEY)
+  ```
+
+- **Readability.** `sync` refuses before writing anything when the workload could not read the files (no `fsGroup` and a non-root user, or a user or group opv cannot tell): exit 6, `mount_unreadable`, with the `securityContext` line to add. `plan`, `status` and `doctor` print the same finding as a `warn` line. A workload running as root (or in group 0) syncs, with a warning on every run.
+- **After the deploy**, `status` prints one `chain:` line per file and ConfigMap key, e.g. `chain: web/TLS_PRIVATE_KEY (WEB_TLS_PRIVATE_KEY) → secret opv-web-tls-private-key-q3vz7kd2mx → file /run/secrets/web/tls/private-key`.
 - **Rollout and rollback.** A new version changes the Deployment, so `--deploy` starts a rollout and waits for it, exactly as for variables. Older Secret and ConfigMap versions still referenced by a ReplicaSet are kept, so `kubectl rollout undo` keeps working.
 - **No-log contract.** opv never writes a value to a log, but it cannot stop your app from doing so: on Kubernetes a container's stdout always reaches the node's log files. Read secrets from the files and never log them; the verification for each release scans pod and node logs for its test markers.
 

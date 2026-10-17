@@ -8,5 +8,6 @@ mod scenarios {
     pub mod changed;
     pub mod issue_159;
     pub mod issues;
+    pub mod k8s_files;
     pub mod live_audit;
 }

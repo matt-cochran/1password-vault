@@ -1,0 +1,17 @@
+# opv sync prod --confirm prod --target k8s --deploy
+## exit: 5
+## stdout
+prod/k8s: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
+prod/k8s: written: web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/LOG_LEVEL (E2E__WEB__LOG_LEVEL), web/OTEL_RESOURCE (E2E__WEB__OTEL_RESOURCE), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET), web/TLS_CERTIFICATE (E2E__WEB__TLS_CERTIFICATE), web/TLS_PRIVATE_KEY (E2E__WEB__TLS_PRIVATE_KEY)
+prod/k8s: delivery: web not recorded: no delivery item is recorded for web on prod/k8s; opv bootstrap creates it
+
+## stderr
+using <SCENARIO>/project/secrets.toml
+opv: Kubernetes refused the update to deployment e2e-app in namespace e2e-prod: it failed validation
+  checked: kubectl --context e2e-cluster --namespace e2e-prod --request-timeout=120s replace -f - -o jsonpath (exit 1)
+--- kubectl replied, exit 1 ---
+| The Deployment "e2e-app" is invalid: spec.template.spec.containers[0].volumeMounts[1].mountPath: Invalid value: "/run/secrets/web": must be unique
+--- (scrubbed) ---
+Do: check the settings of deployment e2e-app in namespace e2e-prod against Kubernetes's rules
+Next: opv doctor --env prod
+

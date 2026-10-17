@@ -3,6 +3,7 @@
 ## text exit: 7
 ## text stdout
 prod/fly: warning: web/LOG_LEVEL not delivered (no config channel: set fly.config)
+prod/fly: warning: web/OTEL_RESOURCE not delivered (no config channel: set fly.config)
 
 ## text stderr
 using <SCENARIO>/project/secrets.toml
