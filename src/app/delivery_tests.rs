@@ -664,6 +664,30 @@ fn the_text_report_words_its_states() {
     );
 }
 
+/// A13: a named target that delivers a product with no secret says so.
+#[test]
+fn a_named_target_that_delivers_no_secret_says_so() {
+    let (w, fleet) = no_secrets();
+    let e = verify(
+        &fleet,
+        "prod",
+        None,
+        &["app".to_string()],
+        None,
+        &w,
+        false,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        cause_of(&e),
+        crate::cause::Cause::NothingInScope {
+            what: crate::cause::Scope::NoSecretDelivered { target },
+            ..
+        } if target.as_str() == "app"
+    ));
+}
+
 /// 01.18: with `--target`, nothing in scope names that target.
 #[test]
 fn nothing_to_verify_on_a_named_target_names_it() {
@@ -766,6 +790,28 @@ fn two_targets() -> (World, Fleet) {
         target_toml("a", "app-a", &[("api", &a)])
             .replace("delivery_items", "products = [\"api\"]\ndelivery_items"),
         target_toml("b", "app-b", &[("api", &b)])
+            .replace("delivery_items", "products = [\"api\"]\ndelivery_items"),
+    ))
+    .unwrap();
+    let w = World {
+        op,
+        fly: RefCell::default(),
+        fail_import: std::cell::Cell::new(false),
+    };
+    (w, fleet)
+}
+
+/// prod with target `app` that delivers `api`, whose only key is config: the target
+/// delivers a product but no secret.
+fn no_secrets() -> (World, Fleet) {
+    let op = FakeOp::default();
+    let id = values_item(&op);
+    let api = delivery_item(&op, "api", "app");
+    let fleet = crate::config::parse(&format!(
+        "[environments.prod]\nboundaries.api = {{ vault_id = \"{VALUES}\", item_id = \"{id}\" }}\n\
+         {}[products.api]\n[products.api.keys.MODE]\nkind = \"config\"\n\
+         environments = [\"prod\"]\n",
+        target_toml("app", "myapp", &[("api", &api)])
             .replace("delivery_items", "products = [\"api\"]\ndelivery_items"),
     ))
     .unwrap();

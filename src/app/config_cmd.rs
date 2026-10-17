@@ -201,7 +201,7 @@ fn normalize_paths(given: &[String]) -> Result<Vec<String>, Error> {
     Ok(paths)
 }
 
-/// `config check --file <path>`: exit 8 with a diff when the file differs from the
+/// `config check --file <path>`: exit 2 with a diff when the file differs from the
 /// manifest (line endings aside).
 pub fn check(
     found: &Found,

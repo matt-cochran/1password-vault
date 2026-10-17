@@ -1191,22 +1191,29 @@ fn read_fresh(
     vault: &str,
     account: Option<&str>,
 ) -> Result<Output, Error> {
-    successful(
+    let args = [
+        "item",
+        "get",
+        id,
+        "--vault",
+        vault,
+        "--format",
+        "json",
+        crate::adapters::onepassword::NO_CACHE,
+    ];
+    let output = successful(
         backend,
-        &[
-            "item",
-            "get",
-            id,
-            "--vault",
-            vault,
-            "--format",
-            "json",
-            crate::adapters::onepassword::NO_CACHE,
-        ],
+        &args,
         None,
         &op_context(account, Some(item_ref(id, vault)), false),
         &Facts::from_process_env(),
-    )
+    )?;
+    // 09.74, C20: setup's item read shape-checks op's reply exactly as the op reader does,
+    // while the runner still holds the call, so JSON of another shape is this call's
+    // `UnexpectedOutput` rather than being read as an item.
+    crate::adapters::onepassword_tidy::check(&output.stdout)
+        .map_err(|e| crate::adapters::onepassword::unreadable_reply(&args, &e))?;
+    Ok(output)
 }
 
 /// True when `now` is a later state of the item than `then`: another version, or (when

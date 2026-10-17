@@ -106,6 +106,49 @@ fn the_sync_confirmation_names_the_command_it_runs() {
 }
 
 #[test]
+fn the_needs_attention_panel_states_the_total_when_findings_exceed_five() {
+    let mut a = app();
+    a.snap.findings = (0..6)
+        .map(|_| crate::ui::model::Finding {
+            code: "personal_key_missing".into(),
+            environment: Some("local".into()),
+            product: Some("api".into()),
+            key: Some("OPENAI_API_KEY".into()),
+            blocking: false,
+            actor: "owner".into(),
+            effect: "writes_1password".into(),
+            prerequisite: "opv open api/OPENAI_API_KEY --env local".into(),
+            message: None,
+        })
+        .collect();
+    assert!(frame(&a, 140, 36).contains("6 findings"));
+}
+
+#[test]
+fn the_needs_attention_note_counts_the_findings_beyond_the_five_shown() {
+    let snap = Snapshot {
+        findings: (0..6)
+            .map(|_| crate::ui::model::Finding {
+                code: "personal_key_missing".into(),
+                environment: Some("local".into()),
+                product: Some("api".into()),
+                key: Some("OPENAI_API_KEY".into()),
+                blocking: false,
+                actor: "owner".into(),
+                effect: "writes_1password".into(),
+                prerequisite: "opv open api/OPENAI_API_KEY --env local".into(),
+                message: None,
+            })
+            .collect(),
+        ..Snapshot::default()
+    };
+    assert_eq!(
+        findings_overflow_note(&snap),
+        Some("… and 1 more (opv ready)".to_string())
+    );
+}
+
+#[test]
 fn the_key_bar_lists_the_keys() {
     let mut a = app();
     a.handle(Key::Down);

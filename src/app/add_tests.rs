@@ -371,20 +371,34 @@ fn the_then_line_says_the_check_adds_the_field_when_signed_in() {
     );
 }
 
-/// C14: a loader refusal of the text add would write points at no line of it.
+/// C14: the loader refuses the text `add` built, so nothing was written.
+fn refused_proposal() -> Added {
+    let mut args = new_key("api/STRIPE_KEY");
+    args.rules = vec!["regex=([a-z".into()];
+    add_to(COMMENTED, args)
+}
+
+/// C14: the refusal of add's proposed text uses the catalog wording that says nothing
+/// was written.
 #[test]
-fn a_refusal_of_the_proposed_text_names_no_line() {
-    let file = format!(
-        "{COMMENTED}\n[products.my_app.keys.K]\nkind = \"secret\"\nenvironments = [\"prod\"]\n"
-    )
-    .replace(
-        "[environments.prod]\n",
-        "[environments.prod]\nboundaries.my_app = { vault_id = \"vprd\", item_id = \"iprd\" }\n",
-    );
-    let a = add_to(&file, new_key("my-app/K"));
-    assert!(!matches!(
+fn a_refusal_of_the_proposed_text_says_nothing_was_written() {
+    let a = refused_proposal();
+    assert!(a.err().contains("nothing was written"), "{}", a.err());
+}
+
+/// C14: the refusal is the catalog's proposed-change cause, not the file's own invalid one.
+#[test]
+fn a_refusal_of_the_proposed_text_is_marked_from_the_proposal() {
+    let a = refused_proposal();
+    assert!(matches!(
         a.res.as_ref().unwrap_err().cause(),
-        Some((Cause::ConfigInvalid { at: Some(_), .. }, _))
+        Some((
+            Cause::ConfigProposalInvalid {
+                from_proposal: true,
+                ..
+            },
+            _
+        ))
     ));
 }
 

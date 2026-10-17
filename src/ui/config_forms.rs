@@ -33,13 +33,17 @@ pub struct AddEnvForm {
 /// Err(one English sentence) when: key is not ^[A-Z][A-Z0-9_]*$; product is None, or not ^[a-z][a-z0-9_-]*$; personal and allow_same_value are both set; personal and kind is Config.
 pub fn add_key_command(form: &AddKeyForm) -> Result<Vec<String>, String> {
     if !is_key_name(&form.key) {
-        return Err(format!("key {:?} must match ^[A-Z][A-Z0-9_]*$.", form.key));
+        return Err(format!(
+            "key {:?} is not a valid name: start with a capital letter and use A-Z, 0-9 or _.",
+            form.key
+        ));
     }
     if let Some(product) = &form.product
         && !is_product_name(product)
     {
         return Err(format!(
-            "product {product:?} must match ^[a-z][a-z0-9_-]*$."
+            "product {product:?} is not a valid name: start with a lowercase letter and use \
+             a-z, 0-9, _ or -."
         ));
     }
     if form.product.is_none() {
@@ -88,7 +92,8 @@ pub fn add_key_command(form: &AddKeyForm) -> Result<Vec<String>, String> {
 pub fn add_env_command(form: &AddEnvForm, existing: &[String]) -> Result<Vec<String>, String> {
     if !is_env_name(&form.name) {
         return Err(format!(
-            "environment name {:?} must match ^[A-Za-z0-9][A-Za-z0-9_-]*$.",
+            "environment name {:?} is not a valid name: start with a letter or digit and use \
+             A-Z, a-z, 0-9, _ or -.",
             form.name
         ));
     }

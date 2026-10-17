@@ -39,6 +39,42 @@ fn calls_from_failed_call(text: &str) -> bool {
     })
 }
 
+/// J7: `host::lost_call` fabricates a `Lost` reply for a runner that reported a call
+/// unanswered without observing it (an in-memory double). It is production code, but it is
+/// reached only from the no-observation fallback of `take_observed()`/`take_failure()`: the
+/// runners opv ships observe every attempt, so it never fires on a product path. A new
+/// caller has to be added here on purpose.
+#[test]
+fn only_the_unobserved_fallback_fabricates_a_lost_reply() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    rust_files(&root.join("src"), &mut files);
+    let mut callers: Vec<String> = files
+        .iter()
+        .filter(|p| !is_test_file(p))
+        .filter(|p| {
+            std::fs::read_to_string(p)
+                .expect("source is UTF-8")
+                .contains("lost_call(")
+        })
+        .map(|p| {
+            p.strip_prefix(root)
+                .expect("under the crate")
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect();
+    callers.sort();
+    assert_eq!(
+        callers,
+        vec![
+            "src/adapters/fly/mod.rs".to_string(),
+            "src/adapters/kubernetes/mod.rs".to_string(),
+            "src/host.rs".to_string(),
+        ]
+    );
+}
+
 #[test]
 fn only_the_runner_builds_an_observed() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));

@@ -1033,14 +1033,14 @@ environments = ["dev"]
         Output::success(s.as_bytes().to_vec())
     }
 
-    /// kubectl version, context, cluster, then eight `auth can-i` answers.
+    /// kubectl version, context, cluster, then nine `auth can-i` answers.
     fn healthy() -> Vec<Output> {
         let mut v = vec![
             ok("Client Version: v1.31.2\nKustomize Version: v5.4.2\n"),
             ok("kind-opv\n"),
             ok("Client Version: v1.31.2\nServer Version: v1.31.0\n"),
         ];
-        v.extend((0..8).map(|_| ok("yes\n")));
+        v.extend((0..9).map(|_| ok("yes\n")));
         v
     }
 
@@ -1266,7 +1266,7 @@ environments = ["dev"]
             .skip(3)
             .filter(|c| c.args.iter().any(|a| a == "can-i"))
             .count();
-        assert_eq!(can_i, 8);
+        assert_eq!(can_i, 9);
     }
 
     // named stores and secrets_in (FR-39) ------------------------------------------------

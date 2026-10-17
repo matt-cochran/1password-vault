@@ -5,7 +5,7 @@
 //! | `bindings` | `get deployment <d> -o json` | read |
 //! | `apply` | `replace -f - -o jsonpath={.metadata.generation}` (whole Deployment on stdin, with its `resourceVersion`) | write |
 //! | `await_healthy` | per poll: `get deployment`; while not rolled out, `get replicasets -o json` and `get pods -l <selector> -o jsonpath=<name, owner, waiting reasons>` | reads |
-//! | `check_access` | `auth can-i <verb> <resource>` for get/create/delete/list secrets, get/update deployments, list replicasets and pods | reads |
+//! | `check_access` | `auth can-i <verb> <resource>` for get/create/patch/delete/list secrets, get/update deployments, list replicasets and pods | reads |
 //!
 //! `apply` edits only managed env entries of the managed container: `valueFrom.secretKeyRef
 //! {name: opv-<store>-<version>, key: value}` for secrets, `value` for config. Kubernetes
@@ -59,7 +59,7 @@ const REVISION_ANNOTATION: &str = "deployment.kubernetes.io/revision";
 /// The operator rights opv needs, each with its fixed reason. Every one is required:
 /// `doctor` fails without it, and `sync` refuses before its first write without the ones
 /// only a deploy uses ([`DEPLOY_RIGHTS`]).
-const ACCESS: [(&str, &str, &str); 8] = [
+const ACCESS: [(&str, &str, &str); 9] = [
     (
         "get",
         "secrets",
@@ -69,6 +69,11 @@ const ACCESS: [(&str, &str, &str); 8] = [
         "create",
         "secrets",
         "your kubectl identity cannot create Secrets in this namespace",
+    ),
+    (
+        "patch",
+        "secrets",
+        "your kubectl identity cannot patch Secrets, which server-side apply needs to write them",
     ),
     (
         "delete",
@@ -103,7 +108,7 @@ const ACCESS: [(&str, &str, &str); 8] = [
 ];
 
 /// The rights opv needs on ExternalSecrets when secrets come from a named store (FR-39).
-const EXTERNAL_ACCESS: [(&str, &str, &str); 4] = [
+const EXTERNAL_ACCESS: [(&str, &str, &str); 5] = [
     (
         "get",
         external::RESOURCE,
@@ -118,6 +123,11 @@ const EXTERNAL_ACCESS: [(&str, &str, &str); 4] = [
         "create",
         external::RESOURCE,
         "your kubectl identity cannot create ExternalSecrets, so sync cannot bind a new version",
+    ),
+    (
+        "patch",
+        external::RESOURCE,
+        "your kubectl identity cannot patch ExternalSecrets, which server-side apply needs to write them",
     ),
     (
         "delete",
@@ -1447,7 +1457,7 @@ mod tests {
 
     #[test]
     fn check_access_reports_each_denied_right() {
-        let r = FakeRunner::new([ok("yes"), ok("yes")]);
+        let r = FakeRunner::new([ok("yes"), ok("yes"), ok("yes")]);
         r.responses.borrow_mut().push_back(Ok(Output {
             status: 1,
             stdout: zeroize::Zeroizing::new(b"no\n".to_vec()),
@@ -1510,9 +1520,44 @@ mod tests {
 
     #[test]
     fn check_access_asks_kubectl_auth_can_i() {
-        let r = FakeRunner::new((0..8).map(|_| ok("yes")));
+        let r = FakeRunner::new((0..9).map(|_| ok("yes")));
         with_rt(&r, |rt| rt.check_access(&[])).unwrap();
         assert_eq!(args(&r, 0)[5..], ["auth", "can-i", "get", "secrets"]);
+    }
+
+    #[test]
+    fn missing_rights_reports_a_denied_patch_on_secrets() {
+        let r = FakeRunner::new([Output {
+            status: 1,
+            stdout: zeroize::Zeroizing::new(b"no\n".to_vec()),
+        }]);
+        let found = missing_rights(&Kubectl::new(&r, &target()), false, |verb, resource| {
+            verb == "patch" && resource == "secrets"
+        })
+        .unwrap();
+        assert_eq!(
+            found
+                .iter()
+                .map(|(f, _)| f.store_name.as_str())
+                .collect::<Vec<_>>(),
+            ["patch secrets"]
+        );
+    }
+
+    #[test]
+    fn missing_rights_reports_a_denied_patch_on_externalsecrets() {
+        let r = FakeRunner::new([Output {
+            status: 1,
+            stdout: zeroize::Zeroizing::new(b"no\n".to_vec()),
+        }]);
+        let found = missing_rights(&Kubectl::new(&r, &target()), true, |verb, resource| {
+            verb == "patch" && resource == external::RESOURCE
+        })
+        .unwrap();
+        assert_eq!(
+            found.first().map(|(f, _)| f.store_name.clone()),
+            Some(format!("patch {}", external::RESOURCE))
+        );
     }
 
     #[test]

@@ -99,7 +99,7 @@ It checks the file, `op` and its sign-in, `flyctl` and its sign-in, and whether 
 Give `opv target add <env> <name>` the provider's options: `--azure-subscription <guid> --azure-key-vault <vault> --azure-resource-group <rg> --azure-container-app <app>` (`--azure-identity` defaults to `system`), or `--kubernetes-context <ctx> --kubernetes-namespace <ns> --kubernetes-deployment <deployment>`. `opv target add --help` lists every option; [configuration.md](configuration.md#targets-by-provider) explains each field. Ask the user for those names; they are not secrets. Nothing is looked up, and a bad value is refused before any 1Password call.
 
 - **Azure.** The user runs `az login`. The app's identity must be able to read the vault. If `opv doctor` warns about it, show the user the grant command it prints, which looks like `az role assignment create --assignee <principal> --role "Key Vault Secrets User" --scope <vault id>`. Run it only with their yes. The person running opv needs rights to write secrets to the vault and to update the Container App.
-- **Kubernetes.** The user's kubeconfig must contain the named `context`. `opv doctor` checks with `kubectl auth can-i` that they may manage Secrets and update the Deployment; if not, tell the user which right is missing.
+- **Kubernetes.** The user's kubeconfig must contain the named `context`. `opv doctor` checks with `kubectl auth can-i` that they may create and patch Secrets and update the Deployment; if not, tell the user which right is missing.
 - **Key Vault → Kubernetes (`secrets_in`).** For a cluster that reads secrets from Key Vault, add a `[stores.<name>]` table and `secrets_in = "<name>"` to the kubernetes section ([configuration.md](configuration.md#secrets-in-a-named-store-storesname-and-secrets_in)). The cluster needs the External Secrets Operator and a `ClusterSecretStore` that can read the vault; `opv doctor` checks both. If they are missing, show the user these steps and run them only with their yes (a cluster admin does them once):
 
   ```sh
@@ -120,7 +120,7 @@ Give `opv target add <env> <name>` the provider's options: `--azure-subscription
         serviceAccountRef: { name: external-secrets, namespace: external-secrets }
   ```
 
-  The identity the store uses needs the "Key Vault Secrets User" role on the vault, and the person running opv needs to write secrets to the vault and to get, list, create and delete `externalsecrets.external-secrets.io` in the namespace. Never put credential values in the YAML; reference a Kubernetes Secret or a workload identity.
+  The identity the store uses needs the "Key Vault Secrets User" role on the vault, and the person running opv needs to write secrets to the vault and to get, list, create, patch and delete `externalsecrets.external-secrets.io` in the namespace. Never put credential values in the YAML; reference a Kubernetes Secret or a workload identity.
 - On both, `opv sync <env>` only writes new versions. `opv sync <env> --deploy` makes the app use them and waits until it is healthy. `--prune` removes old entries only after that. If an environment has `confirm_env = true`, the user must also approve repeating the name: `--confirm <env>`.
 - Never copy secret values out of Key Vault or a Kubernetes Secret, and never run `az keyvault secret show` or `kubectl get secret -o yaml` to check them. Use `opv status` and `opv plan`.
 
