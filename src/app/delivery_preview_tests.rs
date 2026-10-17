@@ -284,6 +284,40 @@ fn the_preview_names_a_file_keys_relative_destination() {
     assert_eq!(key["destination"], json!("file:db/migrate-pem"));
 }
 
+/// A4: a supported local file run's preview prints the container user line from the
+/// shared document (host-independent: the document is built here, not probed).
+#[test]
+fn the_preview_prints_the_containers_line_for_a_supported_file_run() {
+    let doc = json!({
+        "keys": [{"destination": "file:db/migrate-pem"}],
+        "file_delivery": {"supported": true, "reason": null},
+        "containers": "run as 4242:4343 (OPV_UID:OPV_GID) to read these files",
+        "remote": null,
+    });
+    let mut out = Vec::new();
+    write_text(&doc, &mut out).unwrap();
+    assert!(
+        String::from_utf8(out)
+            .unwrap()
+            .contains("containers: run as 4242:4343 (OPV_UID:OPV_GID) to read these files")
+    );
+}
+
+/// A4: when file delivery is unsupported the preview prints no container user line, even
+/// if the document carries one.
+#[test]
+fn the_preview_prints_no_containers_line_when_file_delivery_is_unsupported() {
+    let doc = json!({
+        "keys": [{"destination": "file:db/migrate-pem"}],
+        "file_delivery": {"supported": false, "reason": "no RAM directory"},
+        "containers": "run as 4242:4343 (OPV_UID:OPV_GID) to read these files",
+        "remote": null,
+    });
+    let mut out = Vec::new();
+    write_text(&doc, &mut out).unwrap();
+    assert!(!String::from_utf8(out).unwrap().contains("containers:"));
+}
+
 #[test]
 fn the_preview_reports_a_keys_declared_roles() {
     let doc = build(
