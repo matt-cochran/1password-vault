@@ -38,6 +38,13 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "Bug",
         "an internal error: reachable only through a bug in opv",
     ),
+    // Built by the External Secrets preflight when a ClusterSecretStore is not Ready
+    // (src/adapters/kubernetes/external.rs); no committed scenario drives that store into a
+    // write.
+    (
+        "StoreNotReady",
+        "no scenario drives a not-ready ClusterSecretStore into a write",
+    ),
     // The receiver speaks protocol 1 (src/app/remote_delivery.rs PROTOCOL); another
     // protocol's handshake would be invented output: there is no recording of one.
     (

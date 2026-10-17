@@ -798,6 +798,10 @@ fn one_of_each() -> Vec<Cause> {
             path: PathBuf::from("/work/secrets.toml"),
             io: IoKind::PermissionDenied,
         },
+        StoreNotReady {
+            store: res(ResourceKind::ExternalStore, "store-op"),
+            reason: Some("InvalidProviderConfig".into()),
+        },
         HandoffPipeContested {
             system: System::Azure,
         },
