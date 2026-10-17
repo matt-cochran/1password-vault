@@ -104,6 +104,20 @@ fn products_in_scope(
     Ok(out)
 }
 
+/// Whether target `target` of `env_name` delivers the product in scope at all: `only`
+/// when given, otherwise any product. True even when none of the delivered product's keys
+/// are secrets, so a target that delivers no secret is told apart from one that delivers
+/// no product (A13).
+fn delivers_product(fleet: &Fleet, env_name: &str, target: &str, only: Option<&str>) -> bool {
+    match only {
+        Some(p) => fleet.delivers(env_name, target, p),
+        None => fleet
+            .products
+            .keys()
+            .any(|p| fleet.delivers(env_name, target, p)),
+    }
+}
+
 /// The 1Password account this session reaches (`op whoami`'s account UUID; the same for a
 /// person and a service account of that account). A receipt is bound to it, so an account
 /// that cannot be told is an error: never a receipt minted or judged under a guess.
@@ -645,8 +659,15 @@ pub fn verify(
         )?);
     }
     if checks.is_empty() {
-        // 01.18: with `--target`, the one target named; otherwise the environment's.
+        // 01.18: with `--target`, the one target named; otherwise the environment's. A13:
+        // that target delivering a product with no secret is `NoSecretDelivered`; one
+        // delivering no product (or not the requested one) stays `NoTargetDelivers`.
         let what = match (names.as_slice(), targets.is_empty()) {
+            ([t], false) if delivers_product(fleet, env_name, t, only) => {
+                InScope::NoSecretDelivered {
+                    target: TargetName::new(t),
+                }
+            }
             ([t], false) => InScope::NoTargetDelivers {
                 target: TargetName::new(t),
             },
