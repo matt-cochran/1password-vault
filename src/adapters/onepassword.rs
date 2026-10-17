@@ -13,7 +13,8 @@
 //!   read; own 15 s limit), then `op vault get`. The runner's observation of the call and
 //!   its scrubbed reply are the error's evidence. The host is detected only on failure.
 //!   For diagnosis only `user_type` is
-//!   parsed from `whoami`, and only the entry count from `account list`; identity is never
+//!   parsed from `whoami`, and only the entry count and the selected account from
+//!   `account list` (#165); identity is never
 //!   printed or kept. [`account`] parses `account_uuid` and the sign-in host, identifiers
 //!   only, to build 1Password's private item link ([`item_link`], H1).
 //! - An item write pipes the full current item to `op item edit <item_id> --vault <vault_id>
@@ -152,7 +153,8 @@ pub enum Session {
 /// Calls: `op whoami --format json`; only if it fails, and only outside CI and without a
 /// non-interactive credential, `op account list --format json`. Both are diagnosis probes
 /// with their own [`PROBE_TIMEOUT`]. Never an item read (FR-13). From `whoami` only
-/// `user_type` is parsed; from `account list` only the number of entries. `op` missing is
+/// `user_type` is parsed; from `account list` the number of entries and, when whoami named
+/// an account op does not know, whether that account is listed (#165). `op` missing is
 /// `Err(Dependency)` with the install hint. `host` is called only when needed.
 pub fn diagnose(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Session, Error> {
     let who = match r.probe(
@@ -178,25 +180,39 @@ pub fn diagnose(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Sessio
         return Ok(Session::NotSignedIn);
     }
     // L9: an account op does not know is the strategy's to name (case 02), not a sign-in.
-    if let Some(f) = crate::runner::take_failure() {
-        let cause = super::onepassword_diagnose::diagnose(
+    // Take the whoami failure now, before the `account list` probe can overwrite it (#165).
+    let whoami = crate::runner::take_failure().map(|f| {
+        super::onepassword_diagnose::diagnose(
             f.seen.clone(),
             f.stderr(),
             &crate::cause::DiagnoseContext::default(),
-        );
-        if matches!(cause, Cause::AccountNotOnMachine { .. }) {
-            return Ok(Session::AccountAbsent(Box::new(cause)));
-        }
+        )
+    });
+    let listing = r.probe(
+        &Call::new(OP, &["account", "list", "--format", "json"]),
+        PROBE_TIMEOUT,
+    );
+    // #165: whoami's "no account found for filter" alone is not proof the account is
+    // missing: with several accounts on one sign-in address it can name an account this
+    // machine lists. Only an account absent from the listing is one to add; one that is
+    // listed has no usable session (the person signs in to it).
+    let listed = match whoami.as_ref() {
+        Some(Cause::AccountNotOnMachine { account, .. }) => listing
+            .as_ref()
+            .is_ok_and(|o| o.status == 0 && account_listed(&o.stdout, account)),
+        _ => false,
+    };
+    if let Some(cause @ Cause::AccountNotOnMachine { .. }) = whoami {
+        return Ok(if listed {
+            Session::NotSignedIn
+        } else {
+            Session::AccountAbsent(Box::new(cause))
+        });
     }
-    Ok(
-        match r.probe(
-            &Call::new(OP, &["account", "list", "--format", "json"]),
-            PROBE_TIMEOUT,
-        ) {
-            Ok(o) if o.status == 0 && account_count(&o.stdout) == Some(0) => Session::NoAccount,
-            _ => Session::NotSignedIn,
-        },
-    )
+    Ok(match listing {
+        Ok(o) if o.status == 0 && account_count(&o.stdout) == Some(0) => Session::NoAccount,
+        _ => Session::NotSignedIn,
+    })
 }
 
 /// #157: the session a read-only command checks before it classifies any vault, so a
@@ -266,6 +282,35 @@ fn identity_type(stdout: &[u8]) -> IdentityType {
         Some(_) => IdentityType::User,
         None if w.user_uuid.is_some() => IdentityType::User,
         None => IdentityType::Unknown,
+    }
+}
+
+/// The account text an [`AccountRef`] names (an ID, email or shorthand), or `None` when it
+/// names no particular account.
+fn account_ref_text(r: &AccountRef) -> Option<&str> {
+    match r {
+        AccountRef::Id(id) => Some(id.as_str()),
+        AccountRef::Email(s) | AccountRef::Shorthand(s) => Some(s.as_str()),
+        AccountRef::Unnamed | AccountRef::Any => None,
+    }
+}
+
+/// Whether `op account list --format json` lists the account `who` names, matched by
+/// account UUID, user UUID, email, shorthand or sign-in address (ignoring case) exactly as
+/// [`super::onepassword_manifest::resolve_from`] matches. A listing that cannot be read, or
+/// names no account, is not listed.
+fn account_listed(stdout: &[u8], who: &AccountRef) -> bool {
+    let Some(who) = account_ref_text(who) else {
+        return false;
+    };
+    let Ok(accounts) = serde_json::from_slice::<Vec<super::onepassword_manifest::Account>>(stdout)
+    else {
+        return false;
+    };
+    match super::onepassword_manifest::resolve_from(&accounts, who, AccountSource::Flag) {
+        Ok(_) => true,
+        // An address or email several accounts share is several listed accounts.
+        Err(e) => !matches!(e.cause(), Some((Cause::AccountNotOnMachine { .. }, _))),
     }
 }
 
@@ -2283,7 +2328,7 @@ mod tests {
     }
 
     /// L9: `op whoami` for an account op does not know (recorded case 02) is that
-    /// account to add, never a sign-in.
+    /// account to add, never a sign-in. `op account list` (#165) must not list it.
     #[test]
     fn whoami_without_the_selected_account_is_an_account_to_add() {
         let r = FakeRunner::default();
@@ -2291,9 +2336,35 @@ mod tests {
             Output::failure(1),
             include_str!("../../tests/fixtures/op/failures/02-account-not-on-machine.stderr"),
         );
+        r.push_with_stderr(
+            Output::success(
+                r#"[{"url":"my.1password.com","email":"a@example.com","account_uuid":"AAAAAAAAAAAAAAAAAAAAAAAAAA"}]"#,
+            ),
+            "",
+        );
         let h = Host::from_env(&FakeEnv::new("linux"));
         let e = session_error(diagnose(&r, &|| h).unwrap(), &h, None, None).unwrap();
         assert_eq!(e.code_str(), "account_not_registered");
+    }
+
+    /// #165: `op whoami` refuses the selected account while `op account list` lists it
+    /// (two accounts on one sign-in address): the session is unusable, not an account to add.
+    #[test]
+    fn whoami_filter_account_listed_is_not_signed_in() {
+        let r = FakeRunner::default();
+        r.push_with_stderr(
+            Output::failure(1),
+            include_str!("../../tests/fixtures/op/failures/02-account-not-on-machine.stderr"),
+        );
+        r.push_with_stderr(
+            Output::success(
+                r#"[{"url":"my.1password.com","email":"a@example.com","account_uuid":"ZZZZZZZZZZZZZZZZZZZZZZZZZZ"}]"#,
+            ),
+            "",
+        );
+        let h = Host::from_env(&FakeEnv::new("linux"));
+        let e = session_error(diagnose(&r, &|| h).unwrap(), &h, None, None).unwrap();
+        assert_eq!(e.code_str(), "op_not_signed_in");
     }
 
     #[test]
