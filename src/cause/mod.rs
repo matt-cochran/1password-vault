@@ -769,6 +769,14 @@ pub enum Cause {
         product: ProductName,
         state: Unverified,
     },
+    /// A pinned target's binding no longer matches 1Password (C3): `status --fail-on-drift`
+    /// reports it as a finding (exit 8, `target_drift`).
+    TargetDrift {
+        env: EnvName,
+        target: TargetName,
+        /// The store names that drifted, in the order `status` prints them.
+        names: Vec<String>,
+    },
     /// opv's own local input or output failed (writing a file, finding the working folder,
     /// its own executable or the home folder, writing to stdout).
     LocalIo {
@@ -1439,6 +1447,7 @@ impl Cause {
             RemoteVersionMismatch { .. } => "remote_version_mismatch",
             ChildStartFailed { .. } => "child_start_failed",
             DeliveryUnverified { .. } => "delivery_unverified",
+            TargetDrift { .. } => "target_drift",
             LocalIo { .. } => "local_io_failed",
             StoreNotReady { .. } => "owner_setup_required",
             HandoffPipeContested { .. } => "handoff_refused",
@@ -1535,7 +1544,7 @@ impl Cause {
             | InOtherAccount { .. }
             | NeedsOwnSession { .. }
             | CredentialRejected { .. } => 7,
-            ValuesNeeded { .. } | DeliveryUnverified { .. } => 8,
+            ValuesNeeded { .. } | DeliveryUnverified { .. } | TargetDrift { .. } => 8,
             CreateOutcomeUnknown { .. }
             | WriteOutcomeUnknown { .. }
             | Unavailable { .. }

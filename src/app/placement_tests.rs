@@ -237,13 +237,13 @@ fn plan_id(w: &World, fleet: &Fleet, only: &[&str]) -> String {
 
 fn status_text(w: &World, fleet: &Fleet) -> String {
     let mut out = Vec::new();
-    let _ = status::run_targeted(fleet, "prod", &[], None, w, &mut out, false);
+    let _ = status::run_targeted(fleet, "prod", &[], None, w, &mut out, false, false);
     String::from_utf8(out).unwrap()
 }
 
 fn status_doc(w: &World, fleet: &Fleet) -> Value {
     let mut out = Vec::new();
-    let _ = status::run_targeted(fleet, "prod", &[], None, w, &mut out, true);
+    let _ = status::run_targeted(fleet, "prod", &[], None, w, &mut out, true, false);
     serde_json::from_slice(&out).unwrap()
 }
 

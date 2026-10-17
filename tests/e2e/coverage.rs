@@ -69,6 +69,14 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "SecretNotStored",
         "no recording of `op service-account create`",
     ),
+    // Drift is read from a pinned runtime and store: Azure Key Vault through External Secrets
+    // (src/adapters/azure/keyvault.rs, src/adapters/kubernetes/external.rs), or the K5 volume
+    // bindings. opv-sim models neither, so no scenario reaches it; reached by
+    // src/app/azure_tests.rs. Drop this when a scenario or the K5 bindings make it reachable.
+    (
+        "TargetDrift",
+        "drift needs a pinned store opv-sim does not model (Azure Key Vault/ESO)",
+    ),
 ];
 
 fn snapshots() -> PathBuf {
