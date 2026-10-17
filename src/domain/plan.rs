@@ -10,6 +10,7 @@ use std::fmt;
 use crate::domain::model::{Fleet, KeySpec, Kind};
 use crate::domain::rules::{self, Reason};
 use crate::domain::secret::SecretValue;
+use crate::provider::Channel;
 
 /// One field of the 1Password item, as produced by the source adapter.
 /// `Debug` never prints the value.
@@ -95,6 +96,16 @@ pub struct Row {
     pub shared_by: Vec<(String, String)>,
 }
 
+/// A config key the target's channel leaves undelivered (design §1.3): `refused` when the
+/// channel is `None` (`sync` refuses, `policy_refused`), false when the target declined it
+/// (`sync` warns and goes on).
+pub struct NoChannelKey {
+    pub product: String,
+    pub key: String,
+    pub why: &'static str,
+    pub refused: bool,
+}
+
 pub struct SyncPlan {
     pub rows: Vec<Row>,
     /// (section, label) in the item but not declared for any environment of that product.
@@ -114,6 +125,9 @@ pub struct SyncPlan {
     pub held_from_prune: Vec<(String, String, String)>,
     /// product -> key -> value, config keys only.
     pub config: BTreeMap<String, BTreeMap<String, String>>,
+    /// Config keys the target's channel does not deliver (design §1.3): `None` refuses,
+    /// `Declined` warns. Never in `config`.
+    pub no_channel: Vec<NoChannelKey>,
     /// (product, key): config keys whose 1Password field is concealed (M4, owner ruling).
     /// Accepted and delivered as plain environment values, but their values are never
     /// printed, and `status` warns once per key.
@@ -281,6 +295,7 @@ pub fn build_with(
         prune: Vec::new(),
         held_from_prune: Vec::new(),
         config: BTreeMap::new(),
+        no_channel: Vec::new(),
         concealed_config: Vec::new(),
         drift: Vec::new(),
         undelivered: Vec::new(),
@@ -429,13 +444,42 @@ pub fn build_with(
                     row.state = KeyState::Ready;
                     match spec.kind {
                         Kind::Config => {
-                            if concealed {
-                                plan.concealed_config.push((product.clone(), key.clone()));
+                            // The target's config channel routes the key (design §1.3,
+                            // §1.5): a delivered key is planned as before; a `None` or
+                            // `Declined` channel leaves it out and records why. A target
+                            // that leaves the key's product out keeps today's behaviour.
+                            let channel = target_name.as_ref().and_then(|_| {
+                                opts.target
+                                    .and_then(|t| env.targets.get(t))
+                                    .map(|t| t.config.channels().config)
+                            });
+                            match channel {
+                                Some(Channel::None { why }) => {
+                                    plan.no_channel.push(NoChannelKey {
+                                        product: product.clone(),
+                                        key: key.clone(),
+                                        why,
+                                        refused: true,
+                                    });
+                                }
+                                Some(Channel::Declined { why }) => {
+                                    plan.no_channel.push(NoChannelKey {
+                                        product: product.clone(),
+                                        key: key.clone(),
+                                        why,
+                                        refused: false,
+                                    });
+                                }
+                                _ => {
+                                    if concealed {
+                                        plan.concealed_config.push((product.clone(), key.clone()));
+                                    }
+                                    plan.config
+                                        .entry(product.clone())
+                                        .or_default()
+                                        .insert(key.clone(), value.expose().to_string());
+                                }
                             }
-                            plan.config
-                                .entry(product.clone())
-                                .or_default()
-                                .insert(key.clone(), value.expose().to_string());
                         }
                         Kind::Secret => {
                             if let Some(target_digest) = target_entry {
@@ -776,13 +820,34 @@ mod tests {
         }
     }
 
+    /// A config key on a target that delivers config (Kubernetes `config = env`) goes to
+    /// `config`, never to `stage` (design §1.3, §1.5). Fly, which declines config, is
+    /// covered by the JSON and status tests.
     #[test]
     fn config_goes_to_config_map_not_stage() {
-        let p = plan(
-            vec![config_field("allumata", "SIGNUP_POLICY", "invite_only")],
+        let fleet = config::parse(
+            "[environments.prod]\n\
+             boundaries.p = { vault_id = \"v\", item_id = \"i\" }\n\
+             [environments.prod.targets.k]\n\
+             state_vault_id = \"s\"\n\
+             kubernetes.context = \"ctx\"\n\
+             kubernetes.namespace = \"ns\"\n\
+             kubernetes.deployment = \"dep\"\n\
+             kubernetes.env_name = \"K__{KEY}\"\n\
+             [products.p.keys.SIGNUP_POLICY]\n\
+             kind = \"config\"\n\
+             environments = [\"prod\"]\n",
+        )
+        .unwrap();
+        let p = build(
+            &fleet,
+            "prod",
+            vec![config_field("p", "SIGNUP_POLICY", "invite_only")],
             &[],
+            &no_rotate(),
+            &none,
         );
-        assert_eq!(p.config["allumata"]["SIGNUP_POLICY"], "invite_only");
+        assert_eq!(p.config["p"]["SIGNUP_POLICY"], "invite_only");
         assert!(p.stage.is_empty());
     }
 

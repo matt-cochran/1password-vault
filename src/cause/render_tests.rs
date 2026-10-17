@@ -413,6 +413,16 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             vec!["prof-box", "mode-x", "mode-a", "mode-b"],
         ),
         (
+            Guard {
+                guard: super::super::Guard::NoChannel {
+                    target: TargetName::new("tgt-web"),
+                    kind: "config",
+                    why: "set fly.config".into(),
+                },
+            },
+            vec!["tgt-web", "config", "set fly.config"],
+        ),
+        (
             CreateOutcomeUnknown {
                 system: System::OnePassword,
                 kind: CreateKind::ServiceAccount,
@@ -880,6 +890,9 @@ fn ordinal(c: &Cause) -> usize {
         OwnerSetupRequired { .. } => 26,
         NotFound { .. } => 27,
         TargetRefused { .. } => 28,
+        Guard {
+            guard: super::super::Guard::NoChannel { .. },
+        } => 76,
         Guard { .. } => 29,
         CreateOutcomeUnknown { .. } => 30,
         WriteOutcomeUnknown { .. } => 31,

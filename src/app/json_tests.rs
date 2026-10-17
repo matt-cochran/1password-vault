@@ -295,6 +295,73 @@ pub(crate) fn undocumented(doc: &serde_json::Value, name: &str) -> Vec<String> {
         .collect()
 }
 
+/// The e2e app's prod targets (Fly, Kubernetes, GitHub) with one config and one secret
+/// field, so `json_rows` can be driven per provider.
+fn e2e_fleet() -> crate::domain::Fleet {
+    crate::config::load("tests/e2e/app/secrets.toml").unwrap()
+}
+
+fn e2e_field(key: &str, kind: crate::domain::Kind) -> crate::domain::ItemField {
+    crate::domain::ItemField {
+        section: "shared".into(),
+        label: key.into(),
+        kind,
+        value: crate::domain::SecretValue::new("on".into()),
+        concealed: false,
+    }
+}
+
+fn e2e_row(key: &str, kind: crate::domain::Kind, target: &str) -> super::JsonRow {
+    let fleet = e2e_fleet();
+    let plan = crate::domain::build_plan(
+        &fleet,
+        "prod",
+        vec![e2e_field(key, kind)],
+        &[],
+        &std::collections::BTreeSet::new(),
+        &|_| None,
+    );
+    let channels = fleet.environments["prod"].targets[target].config.channels();
+    let part = super::JsonPart {
+        target,
+        plan: &plan,
+        pinned: None,
+        rotate: None,
+        vars: None,
+    };
+    super::json_rows(&part, &|_: &str, _: &str| None, None, Some(&channels))
+        .into_iter()
+        .find(|r| r.key == key)
+        .unwrap()
+}
+
+/// A config row on GitHub names its channel `via: "GitHub variable"` (design §6.7).
+#[test]
+fn a_github_config_rows_via_names_its_channel() {
+    assert_eq!(
+        e2e_row("FEATURE_FLAGS", crate::domain::Kind::Config, "gh").via,
+        Some("GitHub variable")
+    );
+}
+
+/// A config row on Kubernetes (`config = env`) names its channel `via: "env"` (design §6.7).
+#[test]
+fn a_kubernetes_config_rows_via_is_env() {
+    assert_eq!(
+        e2e_row("FEATURE_FLAGS", crate::domain::Kind::Config, "k8s").via,
+        Some("env")
+    );
+}
+
+/// A secret row's `channel` reads `secret` (design §6.7).
+#[test]
+fn a_secret_rows_channel_reads_secret() {
+    assert_eq!(
+        e2e_row("DATABASE_URL", crate::domain::Kind::Secret, "gh").channel,
+        "secret"
+    );
+}
+
 #[test]
 fn the_schema_lists_every_row_field_in_order() {
     let row = crate::domain::Row {
@@ -313,6 +380,10 @@ fn the_schema_lists_every_row_field_in_order() {
         drift: Some(false),
         chain: Some("a → b".into()),
         open_url: Some("https://start.1password.com/open/i".into()),
+        via: Some("env"),
+        delivered_as: Some("env"),
+        form: Some("file"),
+        path: Some("/app/config".into()),
         ..super::JsonRow::new(&row, Some("NAME".into()), Some("present"), None)
     };
     let v = serde_json::to_value(&full).unwrap();

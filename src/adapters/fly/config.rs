@@ -235,8 +235,8 @@ impl TargetConfig for FlyTarget {
             secret: Channel::Store {
                 label: "Fly secret",
             },
-            config: Channel::None {
-                why: "Fly has no config channel today",
+            config: Channel::Declined {
+                why: "set fly.config",
             },
             files: FileCapability::ViaApp {
                 note: "env at boot, written to files by the app's shim",

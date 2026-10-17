@@ -1767,6 +1767,9 @@ impl Cause {
                     "container {container} of {workload} already mounts volume {volume} over {path}, so opv's secrets volume cannot go there"
                 ),
                 self::Guard::Declined => "you declined, so nothing changed".to_string(),
+                self::Guard::NoChannel { target, kind, why } => {
+                    format!("target {target} has no {kind} channel: {why}")
+                }
             },
             MountUnreadable {
                 workload,
@@ -3340,6 +3343,19 @@ impl Cause {
                     Next::Check(cmd(&["plan"], &[env.as_str(), "--target", target.as_str()])),
                 ),
                 self::Guard::Declined => plan(None, Next::Rerun),
+                self::Guard::NoChannel { target, .. } => plan(
+                    inspect(format!(
+                        "set config = \"none\" on target {target} to deliver no config there, \
+                         or pick a target with a config channel"
+                    )),
+                    match inv_env(inv) {
+                        Some(env) => Next::Check(cmd(
+                            &["plan"],
+                            &[env, "--target", target.as_str()],
+                        )),
+                        None => help_of(inv),
+                    },
+                ),
             },
             MountUnreadable { env, target, .. } => plan(
                 inspect(

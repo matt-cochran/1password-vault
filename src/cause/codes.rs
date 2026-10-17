@@ -621,6 +621,13 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
             env: EnvName::new("env-prod"),
             target: TargetName::new("tgt-web"),
         },
+        Guard {
+            guard: super::Guard::NoChannel {
+                target: TargetName::new("tgt-web"),
+                kind: "config",
+                why: "set fly.config".into(),
+            },
+        },
         CreateOutcomeUnknown {
             system: System::OnePassword,
             kind: CreateKind::ServiceAccount,

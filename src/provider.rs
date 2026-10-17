@@ -345,8 +345,25 @@ pub enum Channel {
     Variables,
     /// A plain runtime environment variable the target's runtime sets.
     RuntimeEnv,
-    /// Deliberately not delivered; `why` completes `no config channel: <why>`.
+    /// Deliberately not delivered; `why` completes `no config channel: <why>`. `sync`
+    /// refuses it unless the target spells the opt-out out (`config = "none"`).
     None { why: &'static str },
+    /// Deliberately not delivered, by the target's own declaration; `sync` warns and goes
+    /// on, and `why` completes `no config channel: <why>`.
+    Declined { why: &'static str },
+}
+
+impl Channel {
+    /// The channel's label in messages and JSON (`via`): `Kubernetes Secret`, `GitHub
+    /// variable`, `env`, …; `None` when the channel delivers nothing.
+    pub fn label(&self) -> Option<&'static str> {
+        match self {
+            Channel::Store { label } => Some(label),
+            Channel::Variables => Some("GitHub variable"),
+            Channel::RuntimeEnv => Some("env"),
+            Channel::None { .. } | Channel::Declined { .. } => None,
+        }
+    }
 }
 
 /// How a target delivers file keys (design §1.1, §1.3).
@@ -604,8 +621,8 @@ environments = ["prod"]
                         secret: Channel::Store {
                             label: "Fly secret"
                         },
-                        config: Channel::None {
-                            why: "Fly has no config channel today",
+                        config: Channel::Declined {
+                            why: "set fly.config",
                         },
                         files: FileCapability::ViaApp {
                             note: "env at boot, written to files by the app's shim",
