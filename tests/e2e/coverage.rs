@@ -999,6 +999,39 @@ mod cases {
         )
     }
 
+    /// J7: a value Fly's import parser would mangle is a blocking row of the plan, so
+    /// `sync` refuses with `keys_blocking` before the write-side guard could fire.
+    pub fn fly_value_rule_refused() -> Case {
+        case(
+            Scenario::new().world(|w| {
+                web_prod_api_key(w, |f| f["value"] = json!("sk-a\"#e2e-marker"));
+            }),
+            &["sync", "prod", "--confirm", "prod", "--target", "fly"],
+        )
+    }
+
+    /// J7: a value larger than a GitHub secret can hold is a blocking row of the plan, so
+    /// `sync` refuses with `keys_blocking` before the write-side guard could fire.
+    pub fn github_value_rule_refused() -> Case {
+        case(
+            Scenario::new().world(|w| {
+                web_prod_api_key(w, |f| f["value"] = json!("x".repeat(50_000)));
+            }),
+            &["sync", "prod", "--confirm", "prod", "--target", "gh"],
+        )
+    }
+
+    /// J7: a value an environment variable cannot hold is a blocking row of the plan, so
+    /// `sync` refuses with `keys_blocking` before the write-side guard could fire.
+    pub fn kubernetes_value_rule_refused() -> Case {
+        case(
+            Scenario::new().world(|w| {
+                web_prod_api_key(w, |f| f["value"] = json!("x".repeat(1024 * 1024 + 1)));
+            }),
+            &["sync", "prod", "--confirm", "prod", "--target", "k8s"],
+        )
+    }
+
     pub fn budget_spent() -> Case {
         // fly is written, then op hangs past the run's 3-second budget.
         case(
@@ -1032,6 +1065,17 @@ mod cases {
     /// reply without saving the world).
     fn web_dev_api_key(w: &mut Value, edit: fn(&mut Value)) {
         item(w, "iE2EWEBDEV0000000000000001", |i| {
+            for f in i["fields"].as_array_mut().expect("fields") {
+                if f["label"] == "API_KEY" {
+                    edit(f);
+                }
+            }
+        });
+    }
+
+    /// The production item's API_KEY, edited (the value a target's own rules judge).
+    fn web_prod_api_key(w: &mut Value, edit: impl Fn(&mut Value)) {
+        item(w, WEB_PROD_ITEM, |i| {
             for f in i["fields"].as_array_mut().expect("fields") {
                 if f["label"] == "API_KEY" {
                     edit(f);
@@ -1490,6 +1534,9 @@ scenarios! {
         create_outcome_unknown => CreateOutcomeUnknown,
         write_outcome_unknown => WriteOutcomeUnknown,
         target_refused => TargetRefused,
+        fly_value_rule_refused => KeysBlocking,
+        github_value_rule_refused => KeysBlocking,
+        kubernetes_value_rule_refused => KeysBlocking,
         budget_spent => Partial,
         interrupted => Interrupted,
         read_back_missing => ReadBackMissing,
