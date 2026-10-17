@@ -143,6 +143,33 @@ fn plan_success() {
     golden("plan_success", &plan_json(complete_item()));
 }
 
+/// The fixture fleet with `fly.config = "secrets"` on its prod Fly target.
+fn config_secrets_fleet() -> crate::domain::Fleet {
+    let text = std::fs::read_to_string("tests/fixtures/secrets.toml")
+        .unwrap()
+        .replace(
+            "fly.secret_name = \"FLEET__{PRODUCT}__{KEY}\"\nstate_vault_id = \"sprd\"",
+            "fly.secret_name = \"FLEET__{PRODUCT}__{KEY}\"\nfly.config = \"secrets\"\nstate_vault_id = \"sprd\"",
+        );
+    crate::config::parse(&text).unwrap()
+}
+
+#[test]
+fn a_config_row_on_a_secrets_fly_target_reports_via_fly_secret() {
+    let fleet = config_secrets_fleet();
+    let r = FakeRunner::new([complete_item(), fly(&[(OPENAI_FLY, "d1")])]);
+    let mut out = Vec::new();
+    let _ = sync::plan_scoped(&fleet, "prod", None, &r, &mut out, true);
+    let doc: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let row = doc["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["key"] == "SIGNUP_POLICY")
+        .unwrap();
+    assert_eq!(row["via"], serde_json::json!("Fly secret"));
+}
+
 #[test]
 fn plan_findings() {
     golden(
@@ -295,6 +322,350 @@ pub(crate) fn undocumented(doc: &serde_json::Value, name: &str) -> Vec<String> {
         .collect()
 }
 
+/// The e2e app's prod targets (Fly, Kubernetes, GitHub) with one config and one secret
+/// field, so `json_rows` can be driven per provider.
+fn e2e_fleet() -> crate::domain::Fleet {
+    crate::config::load("tests/e2e/app/secrets.toml").unwrap()
+}
+
+fn e2e_field(key: &str, kind: crate::domain::Kind) -> crate::domain::ItemField {
+    crate::domain::ItemField {
+        section: "shared".into(),
+        label: key.into(),
+        kind,
+        value: crate::domain::SecretValue::new("on".into()),
+        concealed: false,
+    }
+}
+
+fn e2e_row(key: &str, kind: crate::domain::Kind, target: &str) -> super::JsonRow {
+    let fleet = e2e_fleet();
+    let plan = crate::domain::build_plan(
+        &fleet,
+        "prod",
+        vec![e2e_field(key, kind)],
+        &[],
+        &std::collections::BTreeSet::new(),
+        &|_| None,
+    );
+    let channels = fleet.environments["prod"].targets[target].config.channels();
+    let part = super::JsonPart {
+        target,
+        plan: &plan,
+        pinned: None,
+        rotate: None,
+        vars: None,
+    };
+    super::json_rows(
+        &fleet,
+        &part,
+        &|_: &str, _: &str| None,
+        None,
+        Some(&channels),
+    )
+    .into_iter()
+    .find(|r| r.key == key)
+    .unwrap()
+}
+
+/// A config row on GitHub names its channel `via: "GitHub variable"` (design §6.7).
+#[test]
+fn a_github_config_rows_via_names_its_channel() {
+    assert_eq!(
+        e2e_row("FEATURE_FLAGS", crate::domain::Kind::Config, "gh").via,
+        Some("GitHub variable")
+    );
+}
+
+/// A config row on Kubernetes (`config = "configmap"`) names its channel `via:
+/// "ConfigMap"` (design §6.7).
+#[test]
+fn a_kubernetes_configmap_config_rows_via_is_configmap() {
+    assert_eq!(
+        e2e_row("FEATURE_FLAGS", crate::domain::Kind::Config, "k8s").via,
+        Some("ConfigMap")
+    );
+}
+
+/// The e2e app's web row `key` on target `target` (a `web` section field).
+fn e2e_web_row(key: &str, kind: crate::domain::Kind, target: &str) -> super::JsonRow {
+    let fleet = e2e_fleet();
+    let field = crate::domain::ItemField {
+        section: "web".into(),
+        ..e2e_field(key, kind)
+    };
+    let plan = crate::domain::build_plan(
+        &fleet,
+        "prod",
+        vec![field],
+        &[],
+        &std::collections::BTreeSet::new(),
+        &|_| None,
+    );
+    let channels = fleet.environments["prod"].targets[target].config.channels();
+    let part = super::JsonPart {
+        target,
+        plan: &plan,
+        pinned: None,
+        rotate: None,
+        vars: None,
+    };
+    super::json_rows(
+        &fleet,
+        &part,
+        &|_: &str, _: &str| None,
+        None,
+        Some(&channels),
+    )
+    .into_iter()
+    .find(|r| r.key == key)
+    .unwrap()
+}
+
+/// A file key on Kubernetes with `secrets_dir` arrives as a file (design §6.7).
+#[test]
+fn a_kubernetes_file_rows_delivered_as_is_file() {
+    assert_eq!(
+        e2e_web_row("TLS_PRIVATE_KEY", crate::domain::Kind::Secret, "k8s").delivered_as,
+        Some("file")
+    );
+}
+
+/// A file key on Kubernetes keeps its bytes as stored (design §4.5).
+#[test]
+fn a_kubernetes_file_rows_form_is_verbatim() {
+    assert_eq!(
+        e2e_web_row("TLS_PRIVATE_KEY", crate::domain::Kind::Secret, "k8s").form,
+        Some("verbatim".to_string())
+    );
+}
+
+/// A file key on Kubernetes names its path (design §6.7).
+#[test]
+fn a_kubernetes_file_rows_path_is_its_file() {
+    assert_eq!(
+        e2e_web_row("TLS_PRIVATE_KEY", crate::domain::Kind::Secret, "k8s").path,
+        Some("tls/private-key".to_string())
+    );
+}
+
+/// A secret row's `channel` reads `secret` (design §6.7).
+#[test]
+fn a_secret_rows_channel_reads_secret() {
+    assert_eq!(
+        e2e_row("DATABASE_URL", crate::domain::Kind::Secret, "gh").channel,
+        "secret"
+    );
+}
+
+/// A fleet with two file keys (one plain, one `pem_private_key`) on the Fly target; the
+/// `json_rows` tests pass the target's channels in by hand.
+fn file_fleet() -> crate::domain::Fleet {
+    crate::config::parse(
+        "[environments.prod]\n\
+         boundaries.p = { vault_id = \"v\", item_id = \"i\" }\n\
+         [environments.prod.targets.fly]\n\
+         fly.app = \"app\"\n\
+         fly.secret_name = \"{KEY}\"\n\
+         state_vault_id = \"s\"\n\
+         [products.p.local]\n\
+         secrets_dir_env = \"P_SECRETS_DIR\"\n\
+         [products.p.keys.PRIVATE_KEY]\n\
+         kind = \"secret\"\n\
+         environments = [\"prod\"]\n\
+         file = \"github-app/private-key\"\n\
+         [products.p.keys.PRIVATE_KEY_T]\n\
+         kind = \"secret\"\n\
+         environments = [\"prod\"]\n\
+         file = \"github-app/private-key-t\"\n\
+         rules = { transform = \"pem_private_key\" }\n",
+    )
+    .unwrap()
+}
+
+fn native_channels() -> crate::provider::Channels {
+    crate::provider::Channels {
+        secret: crate::provider::Channel::RuntimeEnv,
+        config: crate::provider::Channel::RuntimeEnv,
+        files: crate::provider::FileCapability::Native {
+            dir: "/etc/secrets".to_string(),
+        },
+    }
+}
+
+fn fly_channels() -> crate::provider::Channels {
+    crate::provider::Channels {
+        secret: crate::provider::Channel::Store {
+            label: "Fly secrets",
+        },
+        config: crate::provider::Channel::Store {
+            label: "Fly secrets",
+        },
+        files: crate::provider::FileCapability::ViaApp {
+            note: "the app writes env to files (Journeeze's shim)",
+        },
+    }
+}
+
+fn file_field(key: &str) -> crate::domain::ItemField {
+    crate::domain::ItemField {
+        section: "shared".into(),
+        label: key.into(),
+        kind: crate::domain::Kind::Secret,
+        value: crate::domain::SecretValue::new("x".into()),
+        concealed: true,
+    }
+}
+
+fn file_json_row(key: &str, channels: &crate::provider::Channels) -> super::JsonRow {
+    let fleet = file_fleet();
+    let plan = crate::domain::build_plan(
+        &fleet,
+        "prod",
+        vec![file_field(key)],
+        &[],
+        &std::collections::BTreeSet::new(),
+        &|_| None,
+    );
+    let part = super::JsonPart {
+        target: "fly",
+        plan: &plan,
+        pinned: None,
+        rotate: None,
+        vars: None,
+    };
+    super::json_rows(
+        &fleet,
+        &part,
+        &|_, k| Some(k.to_string()),
+        None,
+        Some(channels),
+    )
+    .into_iter()
+    .find(|r| r.key == key)
+    .unwrap()
+}
+
+/// M4 (§4.5/§6.7): on a Native target a file key is delivered as the file itself.
+#[test]
+fn a_native_file_row_is_delivered_as_a_verbatim_file() {
+    let row = file_json_row("PRIVATE_KEY", &native_channels());
+    assert_eq!(
+        (row.delivered_as, row.form.as_deref(), row.path.as_deref()),
+        (
+            Some("file"),
+            Some("verbatim"),
+            Some("github-app/private-key")
+        )
+    );
+}
+
+/// M4 (§4.5/§6.7): where the app writes the file from the environment, the row names the
+/// transform's one-line form.
+#[test]
+fn a_fly_file_row_is_delivered_as_env_with_the_transform() {
+    let row = file_json_row("PRIVATE_KEY_T", &fly_channels());
+    assert_eq!(
+        (row.delivered_as, row.form.as_deref()),
+        (Some("env"), Some("pem_private_key"))
+    );
+}
+
+/// M4 (§4.5): the text row names the form too: `file (verbatim)` on a Native target.
+#[test]
+fn a_native_file_cell_names_the_verbatim_file() {
+    let fleet = file_fleet();
+    let row = crate::domain::Row {
+        product: "p".into(),
+        key: "PRIVATE_KEY".into(),
+        kind: crate::domain::Kind::Secret,
+        state: crate::domain::KeyState::Ready,
+        target: crate::domain::TargetState::Absent,
+        guidance: String::new(),
+        source: None,
+        shared_by: Vec::new(),
+    };
+    let spec = &fleet.products["p"].keys["PRIVATE_KEY"];
+    assert_eq!(
+        super::target_cell(&row, "new", &native_channels(), Some(spec)),
+        "new · file (verbatim)"
+    );
+}
+
+/// M4 (§4.2): the plumbing names every delivered file key by its rendered name.
+#[test]
+fn file_mounts_names_every_delivered_file_key() {
+    let fleet = file_fleet();
+    assert_eq!(
+        super::file_mounts(&fleet, "prod", "fly").unwrap(),
+        std::collections::BTreeMap::from([
+            (
+                "PRIVATE_KEY".to_string(),
+                crate::domain::runtime::FileMount {
+                    product: "p".into(),
+                    path: "github-app/private-key".into(),
+                },
+            ),
+            (
+                "PRIVATE_KEY_T".to_string(),
+                crate::domain::runtime::FileMount {
+                    product: "p".into(),
+                    path: "github-app/private-key-t".into(),
+                },
+            ),
+        ])
+    );
+}
+
+/// M4 (§1.3): a target that does not honour file destinations warns, once per file key.
+#[test]
+fn a_target_without_file_support_warns_for_a_file_key() {
+    let fleet = file_fleet();
+    let plan = crate::domain::build_plan(
+        &fleet,
+        "prod",
+        vec![file_field("PRIVATE_KEY")],
+        &[],
+        &std::collections::BTreeSet::new(),
+        &|_| None,
+    );
+    let none = crate::provider::Channels {
+        secret: crate::provider::Channel::RuntimeEnv,
+        config: crate::provider::Channel::RuntimeEnv,
+        files: crate::provider::FileCapability::None,
+    };
+    assert_eq!(
+        super::file_destination_lines(&fleet, "prod", "fly", &none, &plan),
+        vec![
+            "prod/fly: warning: p/PRIVATE_KEY file destination not honoured on fly".to_string(),
+            "prod/fly: warning: p/PRIVATE_KEY_T file destination not honoured on fly".to_string(),
+        ]
+    );
+}
+
+/// M4 (§1.3): a target that delivers files through the app notes how, once per file key.
+#[test]
+fn a_via_app_file_destination_is_noted_for_a_file_key() {
+    let fleet = file_fleet();
+    let plan = crate::domain::build_plan(
+        &fleet,
+        "prod",
+        vec![file_field("PRIVATE_KEY")],
+        &[],
+        &std::collections::BTreeSet::new(),
+        &|_| None,
+    );
+    assert_eq!(
+        super::file_destination_lines(&fleet, "prod", "fly", &fly_channels(), &plan),
+        vec![
+            "prod/fly: note: p/PRIVATE_KEY file via the app (the app writes env to files (Journeeze's shim))"
+                .to_string(),
+            "prod/fly: note: p/PRIVATE_KEY_T file via the app (the app writes env to files (Journeeze's shim))"
+                .to_string(),
+        ]
+    );
+}
+
 #[test]
 fn the_schema_lists_every_row_field_in_order() {
     let row = crate::domain::Row {
@@ -313,6 +684,10 @@ fn the_schema_lists_every_row_field_in_order() {
         drift: Some(false),
         chain: Some("a → b".into()),
         open_url: Some("https://start.1password.com/open/i".into()),
+        via: Some("env"),
+        delivered_as: Some("env"),
+        form: Some("file".to_string()),
+        path: Some("/app/config".into()),
         ..super::JsonRow::new(&row, Some("NAME".into()), Some("present"), None)
     };
     let v = serde_json::to_value(&full).unwrap();

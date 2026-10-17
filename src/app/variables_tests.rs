@@ -59,13 +59,23 @@ fn signup(value: &str, concealed: bool) -> ItemField {
 /// The staging plan of an item holding only SIGNUP_POLICY, and its variable plan.
 fn planned(field: Option<ItemField>, vars: &FakeVars) -> (SyncPlan, VarPlan) {
     let f = fleet();
-    let mut p = plan::build(
+    let none = BTreeSet::new();
+    // Plan with no target: the config map is filled whatever the target's channel, and the
+    // variable channel -- which runs only for a store that reads values back (GitHub) -- is
+    // exercised here against Fly's names with a fake store.
+    let mut p = plan::build_with(
         &f,
         "staging",
         field.into_iter().collect(),
         &[],
-        &BTreeSet::new(),
-        &|_| None,
+        &plan::PlanOptions {
+            target: None,
+            rotate: &none,
+            prune_immutable: &none,
+            digest: &|_| None,
+            target_check: &|_, _| None,
+            current: None,
+        },
     );
     let (name, t) = f.environments["staging"]
         .targets
@@ -171,13 +181,20 @@ fn a_store_refusal_fails_the_row() {
         }
     }
     let f = fleet();
-    let mut p = plan::build(
+    let none = BTreeSet::new();
+    let mut p = plan::build_with(
         &f,
         "staging",
         vec![signup("open", false)],
         &[],
-        &BTreeSet::new(),
-        &|_| None,
+        &plan::PlanOptions {
+            target: None,
+            rotate: &none,
+            prune_immutable: &none,
+            digest: &|_| None,
+            target_check: &|_, _| None,
+            current: None,
+        },
     );
     let (name, t) = f.environments["staging"]
         .targets
@@ -284,6 +301,33 @@ fn an_undelivered_row_reads_not_applicable() {
         shared_by: Vec::new(),
     };
     assert_eq!(crate::app::target_word(&row, false, None), "n/a");
+}
+
+/// A config row on a target that declined config (Fly) reads `not delivered (no config
+/// channel)`, never a bare word (design §1.3, FM-02).
+#[test]
+fn a_declined_config_channel_reads_not_delivered() {
+    let row = crate::domain::Row {
+        product: "allumata".into(),
+        key: "SIGNUP_POLICY".into(),
+        kind: Kind::Config,
+        state: KeyState::Ready,
+        target: TargetState::Absent,
+        guidance: String::new(),
+        source: None,
+        shared_by: Vec::new(),
+    };
+    let channels = crate::provider::Channels {
+        secret: crate::provider::Channel::RuntimeEnv,
+        config: crate::provider::Channel::Declined {
+            why: "set fly.config",
+        },
+        files: crate::provider::FileCapability::None,
+    };
+    assert_eq!(
+        crate::app::target_cell(&row, "new", &channels, None),
+        "not delivered (no config channel)"
+    );
 }
 
 #[test]

@@ -84,6 +84,31 @@ Each Worker or service is its own product, run with its own `--product`. A key t
 
 What opv cannot do: stop the app (or another process of the same user) from logging or copying what it receives. This narrows what reaches the app; it is not a sandbox.
 
+## Docker Compose
+
+Compose reads `${VAR}` from the environment `opv run` sets, so run it under opv: `opv run dev -- docker compose up`. Use the recipe below so the container reads `file` keys as you do. `${OPV_UID:?run this under opv run}` and `${OPV_GID:?run this under opv run}` make Compose fail closed (exit 15) outside `opv run`; `OPV_UID` and `OPV_GID` are the effective ids opv adds to the child for a run that delivers files, and `${OPV_SECRETS_DIR:?…}` is the `secrets_dir_env` variable from the product's `local` table.
+
+```yaml
+services:
+  serve:
+    image: journeeze:local
+    command: ["serve"]
+    user: "${OPV_UID:?run this under opv run}:${OPV_GID:?run this under opv run}"
+    environment:
+      JZ_VAULT_DIR: /run/secrets/journeeze
+    volumes:
+      - type: bind
+        source: "${OPV_SECRETS_DIR:?run this under opv run}"
+        target: /run/secrets/journeeze
+        read_only: true
+    logging:
+      driver: none
+```
+
+`opv run dev --product journeeze --role serve --preview` prints `containers: run as <uid>:<gid> (OPV_UID:OPV_GID) to read these files`, so you can see the ids the recipe will use. The long `type: bind` form matters: the short `:ro` form makes Compose create a root-owned source path when it is missing.
+
+The same-user limit is the accepted residual of local file delivery: the files are readable by you, the Docker daemon, the `docker` group and container root, and opv cannot narrow that below your own user. The recipe stays fail-closed outside `opv run` and mounts the directory `read_only`, so the container cannot write it. Narrowing the limit further (a dedicated delivery user, per-role directories) is an open idea, not something opv does today.
+
 ## Remote development: `run --remote`
 
 When the app builds and runs on a remote machine, do not copy a `.env` there. Declare a reviewed profile for the product, and let opv carry the values over SSH into the remote app's RAM:

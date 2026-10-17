@@ -1,0 +1,20 @@
+# k8s_mount_unreadable: opv sync prod --confirm prod --target k8s --deploy
+
+## text exit: 6
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: container e2e-app of deployment e2e-app runs as uid 10001 and sets no fsGroup, so the mounted secrets files would be unreadable
+Do: set spec.template.spec.securityContext.fsGroup (any group, for example 10001), or runAsUser: 0. Nothing was written.
+Next: opv plan prod --target k8s
+
+## json exit: 6
+## json stdout
+{"schema_version":2,"ok":false,"exit_code":6,"next":"opv plan prod --target k8s","do":"set spec.template.spec.securityContext.fsGroup (any group, for example 10001), or runAsUser: 0. Nothing was written.","error":{"code":"mount_unreadable","category":"policy","message":"container e2e-app of deployment e2e-app runs as uid 10001 and sets no fsGroup, so the mounted secrets files would be unreadable","subject":{"target":"k8s","workload":"deployment e2e-app","container":"e2e-app","run_as":10001,"why":"no_fs_group","env":"prod"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"set spec.template.spec.securityContext.fsGroup (any group, for example 10001), or runAsUser: 0. Nothing was written.","next":"opv plan prod --target k8s","next_kind":"check"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: container e2e-app of deployment e2e-app runs as uid 10001 and sets no fsGroup, so the mounted secrets files would be unreadable
+Do: set spec.template.spec.securityContext.fsGroup (any group, for example 10001), or runAsUser: 0. Nothing was written.
+Next: opv plan prod --target k8s

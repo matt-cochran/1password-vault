@@ -69,6 +69,7 @@ fn status_document() -> Vec<u8> {
         prune: Vec::new(),
         held_from_prune: Vec::new(),
         config: Default::default(),
+        no_channel: Vec::new(),
         concealed_config: Vec::new(),
         drift: Vec::new(),
         undelivered: Vec::new(),

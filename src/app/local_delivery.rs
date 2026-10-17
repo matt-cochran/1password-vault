@@ -187,7 +187,30 @@ pub fn child_env(
         out.retain(|(k, _)| k != var);
         out.push((var.clone(), dir.to_string()));
     }
+    if !d.files.is_empty()
+        && let Some((uid, gid)) = effective_ids()
+    {
+        out.retain(|(k, _)| k != "OPV_UID" && k != "OPV_GID");
+        out.push(("OPV_UID".to_string(), uid.to_string()));
+        out.push(("OPV_GID".to_string(), gid.to_string()));
+    }
     out
+}
+
+/// The process's effective user and group ids: what a Compose `user:` needs to read the
+/// RAM directory as the same user (the accepted residual of local file delivery, §5).
+/// `None` off unix, where file delivery is refused and there is no `user:` to fill in.
+#[cfg(unix)]
+pub(crate) fn effective_ids() -> Option<(u32, u32)> {
+    Some((
+        rustix::process::geteuid().as_raw(),
+        rustix::process::getegid().as_raw(),
+    ))
+}
+
+#[cfg(not(unix))]
+pub(crate) fn effective_ids() -> Option<(u32, u32)> {
+    None
 }
 
 /// The user-owned, RAM-backed `$XDG_RUNTIME_DIR` file delivery needs (#136), or why it is

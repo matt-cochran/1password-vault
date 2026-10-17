@@ -16,7 +16,7 @@
 use crate::domain::{
     AccessFinding, Health, Revision, RuntimeChange, RuntimeSnapshot, SecretValue, Stamp, StoreEntry,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::Error;
 
@@ -42,10 +42,9 @@ pub trait StagedStore: Store {
     /// Removes `names` as a pending change.
     fn remove(&self, names: &[String]) -> Result<(), Error>;
     /// The store's config channel (FR-46), when it delivers config keys itself: GitHub
-    /// variables. `None` (the default): config is not delivered by this target.
-    fn variables(&self) -> Option<&dyn VariableStore> {
-        None
-    }
+    /// variables. `None`: config is not delivered by this target. Required: every staged
+    /// store declares its config channel (design §1.3).
+    fn variables(&self) -> Option<&dyn VariableStore>;
 }
 
 /// Config delivered as named, readable values (FR-46): GitHub Actions variables. Config is
@@ -131,6 +130,13 @@ pub trait PinnedRuntime {
     /// default holds nothing outside its revisions.
     fn release(&self, _names: &[String]) -> Result<(), Error> {
         Ok(())
+    }
+    /// What a deploy that pins new versions of env names `pin` would change beyond the
+    /// bindings themselves, one text each for its `would deploy: <text>` line (design
+    /// §6.7: a Kubernetes volume of mounted files). Read-only; names and paths only. The
+    /// default changes nothing else.
+    fn deploy_preview(&self, _pin: &BTreeSet<String>) -> Result<Vec<String>, Error> {
+        Ok(Vec::new())
     }
 }
 

@@ -1,0 +1,13 @@
+# opv sync prod --confirm prod --target k8s --deploy
+## exit: 0
+## stdout
+prod/k8s: warn  deployment e2e-app runs as root: every mounted file is readable by any process in the container; run as a non-root user with fsGroup
+prod/k8s: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
+prod/k8s: written: web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/LOG_LEVEL (E2E__WEB__LOG_LEVEL), web/OTEL_RESOURCE (E2E__WEB__OTEL_RESOURCE), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET), web/TLS_CERTIFICATE (E2E__WEB__TLS_CERTIFICATE), web/TLS_PRIVATE_KEY (E2E__WEB__TLS_PRIVATE_KEY)
+prod/k8s: delivery: web not recorded: no delivery item is recorded for web on prod/k8s; opv bootstrap creates it
+prod/k8s: deployed revision 2: web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/LOG_LEVEL (E2E__WEB__LOG_LEVEL), web/OTEL_RESOURCE (E2E__WEB__OTEL_RESOURCE), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET), web/TLS_CERTIFICATE (E2E__WEB__TLS_CERTIFICATE), web/TLS_PRIVATE_KEY (E2E__WEB__TLS_PRIVATE_KEY)
+prod/k8s: summary: written 7 · unchanged 0 · held 0 · deployed 2 · pending 0 · pruned 0 · kept 0 · skipped 1
+
+## stderr
+using <SCENARIO>/project/secrets.toml
+

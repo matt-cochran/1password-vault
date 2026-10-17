@@ -27,16 +27,19 @@ Two environments:
   and `web` boundary items. `personal_vault`/`personal_item` name the developer's own item.
 - `prod` — `confirm_env = true`, one target per provider, and the reviewed `builder`
   remote profile. Fly app `e2e-app-prod`, Kubernetes context `e2e-cluster` / namespace
-  `e2e-prod`, GitHub repo `e2e-org/e2e-app` environment `production`. Each target has a
-  `state_vault_id` for its state items.
+  `e2e-prod` (Deployment `e2e-app`, container `e2e-app` beside a `sidecar`, config as
+  ConfigMaps, file keys mounted under `/run/secrets/{product}`), GitHub repo
+  `e2e-org/e2e-app` environment `production`. Each target has a `state_vault_id` for its
+  state items.
 
 Two products:
 
 - `shared` — `source_only`, holding `DATABASE_URL` (secret) and `FEATURE_FLAGS` (config).
 - `web` — `API_KEY` (secret), `LOG_LEVEL` (config), `DATABASE_URL` shared from
   `shared/DATABASE_URL`, `SESSION_SECRET` (`roles = ["serve"]`), `MIGRATION_TOKEN`
-  (`roles = ["migrate"]`), file keys `TLS_CERTIFICATE`/`TLS_PRIVATE_KEY` (dev, written under
-  `WEB_SECRETS_DIR`), and the personal `PERSONAL_LLM_KEY` (dev).
+  (`roles = ["migrate"]`), file keys `TLS_CERTIFICATE`/`TLS_PRIVATE_KEY` (dev and prod;
+  written under `WEB_SECRETS_DIR` locally, mounted on Kubernetes), the config file key
+  `OTEL_RESOURCE` (prod), and the personal `PERSONAL_LLM_KEY` (dev).
 
 Every key is declared for exactly the environments that use it. The `web` boundary item
 holds the `web` section, the `shared` boundary item the `shared` section; a `from` key

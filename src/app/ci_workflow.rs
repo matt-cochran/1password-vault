@@ -15,9 +15,9 @@
 use std::io::Write;
 
 use super::write_err;
-use crate::cause::Cmd;
 use crate::cause::render::cmd_text;
-use crate::domain::Fleet;
+use crate::cause::{Cause, Cmd, UsageProblem};
+use crate::domain::{Environment, Fleet};
 use crate::error::Error;
 use crate::provider::Provider;
 
@@ -47,6 +47,218 @@ pub fn run(
     let mut yaml = sign_in_note(&job, t.provider(), recorded).unwrap_or_default();
     yaml.push_str(&workflow(&job, t.provider().ci_setup_step()));
     out.write_all(yaml.as_bytes()).map_err(write_err)
+}
+
+/// Print §2.5's change-detection workflow (`--on-change`): every environment that has a
+/// target, planned when `confirm_env` is set and synced directly otherwise, checked every
+/// `every` minutes. Read-only output.
+pub fn run_on_change(fleet: &Fleet, every: u8, out: &mut dyn Write) -> Result<(), Error> {
+    let envs = recipe_envs(fleet)?;
+    out.write_all(on_change(&envs, every).as_bytes())
+        .map_err(write_err)
+}
+
+/// Print §2.5's nightly drift-check workflow (`--drift`) for the same environments.
+/// Read-only output.
+pub fn run_drift(fleet: &Fleet, out: &mut dyn Write) -> Result<(), Error> {
+    let envs = recipe_envs(fleet)?;
+    out.write_all(drift(&envs).as_bytes()).map_err(write_err)
+}
+
+/// The environments the two recipes cover: each with at least one target, in the
+/// configuration's order (`order`, then name), as `access` and `ready` order them. A name
+/// that is not a valid GitHub job/output identifier is a usage error (a word could not
+/// name a job or an `outputs` key).
+fn recipe_envs(fleet: &Fleet) -> Result<Vec<&Environment>, Error> {
+    let mut ordered: Vec<&Environment> = fleet
+        .environments
+        .values()
+        .filter(|e| !e.targets.is_empty())
+        .collect();
+    ordered.sort_by_key(|e| (e.order.unwrap_or(i64::MAX), e.name.clone()));
+    for e in &ordered {
+        if !e
+            .name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Err(Cause::Usage {
+                problem: UsageProblem::ValueFormat {
+                    flag: format!("environment {}", e.name),
+                    format: "letters, digits, '-' or '_'",
+                },
+            }
+            .into());
+        }
+    }
+    Ok(ordered)
+}
+
+/// The change-detection run block of §2.5 (FM-11, FM-12): 0 / 10 / other, and one retry
+/// after a typed rate-limit reply's `retry_after_seconds` (30 s when it names none), capped
+/// at 120 s. `$ENV` comes from the step's `env:`, never from a `${{ }}` interpolation.
+const DETECT: &str = "\
+set +e; opv changed \"$ENV\" --json > changed.json; rc=$?; set -e
+if [ \"$rc\" -eq 9 ]; then
+  wait=$(jq -r '[.. | .retry_after_seconds? // empty][0] // 30' changed.json)
+  [ \"$wait\" -gt 120 ] && wait=120
+  sleep \"$wait\"
+  set +e; opv changed \"$ENV\" --json > changed.json; rc=$?; set -e
+fi
+case $rc in
+  0)  echo \"$ENV=no\"  >> \"$GITHUB_OUTPUT\" ;;
+  10) echo \"$ENV=yes\" >> \"$GITHUB_OUTPUT\" ;;
+  *)  exit \"$rc\" ;;
+esac";
+
+/// `text` with every line prefixed by `n` spaces, as the body of a YAML block scalar.
+fn indented(text: &str, n: usize) -> String {
+    let pad = " ".repeat(n);
+    let mut out = String::new();
+    for line in text.lines() {
+        out.push_str(&pad);
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// The whole change workflow: a `detect` job over `envs`' matrix, then each environment's
+/// plan (when `confirm_env`) and sync jobs. FM-06: one `concurrency` group holds every
+/// sync job, so two runs never sync at once.
+fn on_change(envs: &[&Environment], every: u8) -> String {
+    let names: Vec<&str> = envs.iter().map(|e| e.name.as_str()).collect();
+    let matrix = names.join(", ");
+    let mut s = String::new();
+    s.push_str("# .github/workflows/opv-sync-on-change.yml\n");
+    s.push_str("name: \"opv: sync when 1Password changes\"\n");
+    s.push_str("on:\n");
+    s.push_str(&format!("  schedule: [{{cron: \"*/{every} * * * *\"}}]\n"));
+    s.push_str("  push: {branches: [main], paths: [secrets.toml]}\n");
+    s.push_str("  workflow_dispatch:\n");
+    s.push_str("permissions: {contents: read}\n");
+    s.push_str("concurrency: {group: opv-sync, cancel-in-progress: false}\n");
+    s.push_str("jobs:\n");
+    s.push_str("  detect:\n");
+    s.push_str("    runs-on: ubuntu-latest\n");
+    s.push_str(&format!("    strategy: {{matrix: {{env: [{matrix}]}}}}\n"));
+    s.push_str("    outputs:\n");
+    for n in &names {
+        s.push_str(&format!("      {n}: ${{{{ steps.c.outputs.{n} }}}}\n"));
+    }
+    s.push_str("    steps:\n");
+    s.push_str("      - uses: actions/checkout@v4\n");
+    s.push_str("      - uses: ./.github/actions/install-opv\n");
+    s.push_str("      - id: c\n");
+    s.push_str("        env:\n");
+    s.push_str("          OP_SERVICE_ACCOUNT_TOKEN: \"${{ secrets.OPV_READER_TOKEN }}\"\n");
+    s.push_str("          ENV: ${{ matrix.env }}\n");
+    s.push_str("        run: |\n");
+    s.push_str(&indented(DETECT, 10));
+    for e in envs {
+        append_plan_and_sync(&mut s, e);
+    }
+    s
+}
+
+/// One environment's jobs: `plan-<env>` then `sync-<env>` when `confirm_env`, else only a
+/// direct `sync-<env>`. The sync's `if:` gates it on `detect`'s output for the environment.
+fn append_plan_and_sync(s: &mut String, e: &Environment) {
+    let name = e.name.as_str();
+    let condition = format!("needs.detect.outputs.{name} == 'yes' || github.event_name == 'push'");
+    if e.confirm_env {
+        s.push_str(&format!("  plan-{name}:\n"));
+        s.push_str("    needs: detect\n");
+        s.push_str(&format!("    if: {condition}\n"));
+        s.push_str("    runs-on: ubuntu-latest\n");
+        s.push_str("    outputs: {plan_id: \"${{ steps.p.outputs.plan_id }}\"}\n");
+        s.push_str("    steps:\n");
+        s.push_str("      - uses: actions/checkout@v4\n");
+        s.push_str("      - uses: ./.github/actions/install-opv\n");
+        s.push_str("      - id: p\n");
+        s.push_str("        env:\n");
+        s.push_str("          OP_SERVICE_ACCOUNT_TOKEN: \"${{ secrets.OPV_READER_TOKEN }}\"\n");
+        s.push_str("        run: |\n");
+        s.push_str(&format!("          opv plan {name} > plan.txt\n"));
+        s.push_str("          cat plan.txt >> \"$GITHUB_STEP_SUMMARY\"\n");
+        s.push_str(&format!(
+            "          echo \"plan_id=$(opv plan {name} --json | jq -r .plan_id)\" >> \"$GITHUB_OUTPUT\"\n"
+        ));
+    }
+    s.push_str(&format!("  sync-{name}:\n"));
+    if e.confirm_env {
+        s.push_str(&format!("    needs: [detect, plan-{name}]\n"));
+    } else {
+        s.push_str("    needs: detect\n");
+    }
+    s.push_str(&format!("    if: {condition}\n"));
+    s.push_str("    runs-on: ubuntu-latest\n");
+    s.push_str(&format!("    environment: {name}\n"));
+    s.push_str("    steps:\n");
+    s.push_str("      - uses: actions/checkout@v4\n");
+    s.push_str("      - uses: ./.github/actions/install-opv\n");
+    for step in provider_setup(e) {
+        s.push_str(step);
+        s.push('\n');
+    }
+    s.push_str("      - env:\n");
+    s.push_str("          OP_SERVICE_ACCOUNT_TOKEN: \"${{ secrets.OPV_DEPLOY_TOKEN }}\"\n");
+    let expect = if e.confirm_env {
+        format!(" --expect-plan ${{{{ needs.plan-{name}.outputs.plan_id }}}}")
+    } else {
+        String::new()
+    };
+    s.push_str(&format!("        run: opv sync {name} --deploy{expect}\n"));
+}
+
+/// The CI setup step of every distinct provider among `e`'s targets, in target name order
+/// (each provider once), as [`workflow`] prints it.
+fn provider_setup(e: &Environment) -> Vec<&'static str> {
+    let mut seen: Vec<&'static str> = Vec::new();
+    let mut steps = Vec::new();
+    for t in e.targets.values() {
+        let p = t.config.provider();
+        if seen.contains(&p.section()) {
+            continue;
+        }
+        seen.push(p.section());
+        if let Some(step) = p.ci_setup_step() {
+            steps.push(step);
+        }
+    }
+    steps
+}
+
+/// The whole drift workflow: one `drift` job over `envs`' matrix. `--fail-on-drift` names
+/// `target_drift`, `delivery verify --json` names `delivery_unverified` (both exit 8).
+fn drift(envs: &[&Environment]) -> String {
+    let names: Vec<&str> = envs.iter().map(|e| e.name.as_str()).collect();
+    let matrix = names.join(", ");
+    let mut s = String::new();
+    s.push_str("# .github/workflows/opv-drift.yml\n");
+    s.push_str("name: \"opv: drift check\"\n");
+    s.push_str("on: {schedule: [{cron: \"23 4 * * *\"}], workflow_dispatch: {}}\n");
+    s.push_str("permissions: {contents: read}\n");
+    s.push_str("jobs:\n");
+    s.push_str("  drift:\n");
+    s.push_str("    runs-on: ubuntu-latest\n");
+    s.push_str(&format!(
+        "    strategy: {{fail-fast: false, matrix: {{env: [{matrix}]}}}}\n"
+    ));
+    s.push_str("    steps:\n");
+    s.push_str("      - uses: actions/checkout@v4\n");
+    s.push_str("      - uses: ./.github/actions/install-opv\n");
+    s.push_str("      - env:\n");
+    s.push_str("          OP_SERVICE_ACCOUNT_TOKEN: \"${{ secrets.OPV_READER_TOKEN }}\"\n");
+    s.push_str("          ENV: ${{ matrix.env }}\n");
+    s.push_str("        run: |\n");
+    s.push_str(
+        "          opv status \"$ENV\" --fail-on-drift      # exit 8 target_drift on drift\n",
+    );
+    s.push_str(
+        "          opv delivery verify \"$ENV\" --json       # exit 8 delivery_unverified\n",
+    );
+    s
 }
 
 /// What the job syncs.

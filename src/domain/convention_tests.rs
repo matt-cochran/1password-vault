@@ -387,6 +387,30 @@ fn a_duplicate_of_a_secret_is_kept_concealed() {
 }
 
 #[test]
+fn a_file_keys_trailing_newline_is_kept() {
+    let mut f = fleet();
+    f.products
+        .get_mut("api")
+        .unwrap()
+        .keys
+        .get_mut("OPENAI_API_KEY")
+        .unwrap()
+        .file = Some("github-app/private-key".into());
+    let spec = &f.products["api"].keys["OPENAI_API_KEY"];
+    let v = SecretValue::new("x\n".into());
+    assert!(normalized(&f, "dev", "api", "OPENAI_API_KEY", spec, &v).is_none());
+}
+
+#[test]
+fn a_non_file_keys_trailing_newline_is_still_trimmed() {
+    let f = fleet();
+    let spec = &f.products["api"].keys["OPENAI_API_KEY"];
+    let v = SecretValue::new("sk-x\n".into());
+    let (fixed, fix) = normalized(&f, "dev", "api", "OPENAI_API_KEY", spec, &v).unwrap();
+    assert_eq!((fixed.expose(), fix), ("sk-x", Fix::Trimmed));
+}
+
+#[test]
 fn a_trailing_newline_is_removed_when_the_rules_reject_it() {
     let l = with(
         &[("api", "OPENAI_API_KEY", "CONCEALED", "sk-x\n")],

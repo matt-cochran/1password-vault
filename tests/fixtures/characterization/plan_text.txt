@@ -5,11 +5,12 @@ prod/portfolio: 4 keys · 0 findings · 2 to stage · 0 held (immutable) · 0 to
 TARGET     PRODUCT   KEY                  KIND    STATE    ON TARGET
 portfolio  allumata  INTEGRATION_ENC_KEY  secret  saved    new
 portfolio  allumata  OPENAI_API_KEY       secret  saved    unknown
-portfolio  allumata  SIGNUP_POLICY        config  saved    n/a
+portfolio  allumata  SIGNUP_POLICY        config  saved    not delivered (no config channel)
 portfolio  allumata  STRIPE_SECRET_KEY    secret  skipped  n/a
 unknown: Fly does not reveal stored values, so opv cannot compare them; sync stages them and compares digests (opv help states)
+prod/portfolio: warning: allumata/SIGNUP_POLICY not delivered (no config channel: set fly.config)
 prod/portfolio: would stage: allumata/INTEGRATION_ENC_KEY (FLEET__ALLUMATA__INTEGRATION_ENC_KEY), allumata/OPENAI_API_KEY (FLEET__ALLUMATA__OPENAI_API_KEY)
-plan b23ff43d (1Password item v1): sync --expect-plan b23ff43d applies exactly this plan and refuses if the item, the target or secrets.toml changed
-Next: opv sync prod --deploy --expect-plan b23ff43d
+plan 375730d8 (1Password item v1): sync --expect-plan 375730d8 applies exactly this plan and refuses if the item, the target or secrets.toml changed
+Next: opv sync prod --deploy --expect-plan 375730d8
 --- result
 Ok(())

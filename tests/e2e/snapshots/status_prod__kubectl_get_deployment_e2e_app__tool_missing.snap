@@ -1,4 +1,4 @@
-# status_prod__kubectl_get_secret__tool_missing: opv status prod | fault tool_missing on kubectl get secret
+# status_prod__kubectl_get_deployment_e2e_app__tool_missing: opv status prod | fault tool_missing on kubectl get deployment e2e-app
 
 ## text exit: 3
 ## text stdout

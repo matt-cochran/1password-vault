@@ -741,6 +741,33 @@ fn drift_is_flagged_in_status_json() {
 }
 
 #[test]
+fn status_fail_on_drift_exits_8_when_a_binding_drifted() {
+    let sim = drifted();
+    let mut out = Vec::new();
+    let res =
+        super::status::run_targeted(&fleet_a(), "prod", &[], None, &sim, &mut out, false, true);
+    assert_eq!(res.unwrap_err().exit_code(), 8);
+}
+
+#[test]
+fn status_fail_on_drift_reports_target_drift_when_a_binding_drifted() {
+    let sim = drifted();
+    let mut out = Vec::new();
+    let res =
+        super::status::run_targeted(&fleet_a(), "prod", &[], None, &sim, &mut out, false, true);
+    assert_eq!(res.unwrap_err().code_str(), "target_drift");
+}
+
+#[test]
+fn status_without_fail_on_drift_stays_ok_when_a_binding_drifted() {
+    let sim = drifted();
+    let mut out = Vec::new();
+    let res =
+        super::status::run_targeted(&fleet_a(), "prod", &[], None, &sim, &mut out, false, false);
+    assert!(res.is_ok(), "{res:?}");
+}
+
+#[test]
 fn drift_is_left_without_deploy() {
     let sim = drifted();
     sync_on(&sim, &fleet_a(), &SyncOpts::default()).0.unwrap();

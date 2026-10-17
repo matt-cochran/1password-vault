@@ -310,6 +310,36 @@
             "type": "CONCEALED",
             "label": "MIGRATION_TOKEN",
             "value": "test-marker-e2e-prod-web-migration-token"
+          },
+          {
+            "id": "web_tls_certificate",
+            "section": {
+              "id": "web",
+              "label": "web"
+            },
+            "type": "CONCEALED",
+            "label": "TLS_CERTIFICATE",
+            "value": "test-marker-e2e-prod-web-tls-certificate"
+          },
+          {
+            "id": "web_tls_private_key",
+            "section": {
+              "id": "web",
+              "label": "web"
+            },
+            "type": "CONCEALED",
+            "label": "TLS_PRIVATE_KEY",
+            "value": "test-marker-e2e-prod-web-tls-private-key"
+          },
+          {
+            "id": "web_otel_resource",
+            "section": {
+              "id": "web",
+              "label": "web"
+            },
+            "type": "STRING",
+            "label": "OTEL_RESOURCE",
+            "value": "test-marker-e2e-prod-web-otel-resource"
           }
         ]
       },
@@ -367,7 +397,7 @@
             "type": "STRING",
             "purpose": "NOTES",
             "label": "notesPlain",
-            "value": "# opv managed configuration\n\nopv reads this note to know which keys the project **e2e-app** needs and where each environment keeps them. **No secret values are stored here.**\n\n- Values: in each environment's own item (its `vault_id` and `item_id` below). Open one with `opv open KEY --env ENV`.\n- Change keys with `opv add KEY` or `opv config edit`. Hand edits are fine inside the code block while it stays valid TOML; opv reads only the code block.\n- About opv: https://github.com/matt-cochran/1password-vault\n\n```toml\n# The end-to-end test application (design §13.2). It holds IDs, names and rules only,\n# never a value: every field in tests/e2e/app/world.json carries a marker.\n#\n# File route:     opv --config tests/e2e/app/secrets.toml config describe --json\n# Manifest route: OPV_PROJECT=e2e-app opv config describe --json\n#                 (the item \"opv · e2e-app\" lives in world.json and its notes hold this\n#                  same TOML; tests/e2e/app/manifest/ keeps the committed copy)\n\n# Local development: no targets here, so the personal key is allowed. The team values\n# live in the two boundary items recorded below.\n[environments.dev]\ntitle = \"Local development\"\norder = 1\nboundaries.shared = { vault_id = \"vE2ESHAREDDEV00000000000001\", item_id = \"iE2ESHAREDDEV00000000000001\" }\nboundaries.web    = { vault_id = \"vE2EWEBDEV0000000000000001\", item_id = \"iE2EWEBDEV0000000000000001\" }\npersonal_vault = \"e2e-dev-private\"\npersonal_item  = \"e2e-app · dev (personal)\"\n\n# Production: locked behind confirm_env, one target per provider, and a reviewed remote\n# execution profile for the builder host.\n[environments.prod]\ntitle = \"Production\"\norder = 2\nconfirm_env = true\nboundaries.shared = { vault_id = \"vE2ESHAREDPROD0000000000001\", item_id = \"iE2ESHAREDPROD0000000000001\" }\nboundaries.web    = { vault_id = \"vE2EWEBPROD000000000000001\", item_id = \"iE2EWEBPROD000000000000001\" }\n\n# The Fly target: one secret per rendered name.\n[environments.prod.targets.fly]\nfly.app = \"e2e-app-prod\"\nfly.secret_name = \"E2E__{PRODUCT}__{KEY}\"\nstate_vault_id = \"vE2ESTATEFLY00000000000001\"\n\n# The Kubernetes target: the Deployment reads names from the e2e-prod namespace.\n[environments.prod.targets.k8s]\nkubernetes.context = \"e2e-cluster\"\nkubernetes.namespace = \"e2e-prod\"\nkubernetes.deployment = \"e2e-app\"\nkubernetes.env_name = \"E2E__{PRODUCT}__{KEY}\"\nstate_vault_id = \"vE2ESTATEK8S00000000000001\"\n\n# The GitHub target: repository secrets and variables, plus the production environment.\n[environments.prod.targets.gh]\ngithub.repo = \"e2e-org/e2e-app\"\ngithub.environment = \"production\"\ngithub.secret_name = \"E2E__{PRODUCT}__{KEY}\"\nstate_vault_id = \"vE2ESTATEGH000000000000001\"\n\n# A source-only home for a value more than one product reads. It is never delivered.\n[products.shared]\nsource_only = true\nboundary = \"shared\"\n\n[products.shared.keys.DATABASE_URL]\nkind = \"secret\"\nenvironments = [\"dev\", \"prod\"]\nguidance = \"the one connection string the fleet reads\"\n\n[products.shared.keys.FEATURE_FLAGS]\nkind = \"config\"\nenvironments = [\"dev\", \"prod\"]\nrules = { enum = [\"on\", \"off\"] }\n\n# The web product: its own keys, one shared key, two role-scoped keys, two file keys and\n# one personal key.\n[products.web]\nboundary = \"web\"\n\n[products.web.keys.DATABASE_URL]\nkind = \"secret\"\nfrom = \"shared/DATABASE_URL\"\nenvironments = [\"dev\", \"prod\"]\n\n[products.web.keys.API_KEY]\nkind = \"secret\"\nenvironments = [\"dev\", \"prod\"]\nguidance = \"the service's own API key\"\n\n[products.web.keys.LOG_LEVEL]\nkind = \"config\"\nenvironments = [\"dev\", \"prod\"]\nrules = { enum = [\"debug\", \"info\", \"warn\"] }\n\n# The serving process gets this; the migrating process does not.\n[products.web.keys.SESSION_SECRET]\nkind = \"secret\"\nenvironments = [\"dev\", \"prod\"]\nroles = [\"serve\"]\n\n# The migrating process gets this; the serving process does not.\n[products.web.keys.MIGRATION_TOKEN]\nkind = \"secret\"\nenvironments = [\"dev\", \"prod\"]\nroles = [\"migrate\"]\n\n# File keys: under `opv run`, their values are written into WEB_SECRETS_DIR at these\n# relative paths instead of the environment.\n[products.web.keys.TLS_CERTIFICATE]\nkind = \"secret\"\nenvironments = [\"dev\"]\nfile = \"tls/certificate\"\n\n[products.web.keys.TLS_PRIVATE_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\nfile = \"tls/private-key\"\n\n# Each developer keeps their own LLM key in their own item.\n[products.web.keys.PERSONAL_LLM_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\npersonal = true\nguidance = \"your own key, billed to you\"\n\n[products.web.local]\nenvironment = \"declared_only\"\nsecrets_dir_env = \"WEB_SECRETS_DIR\"\n\n# The reviewed remote profile: a pinned host, roles and command.\n[products.web.remotes.builder]\nhost = \"builder.example.test\"\nuser = \"deploy\"\nhost_key = \"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIe2eMarkerHostKeyNotARealKey000000\"\nenvironments = [\"prod\"]\nroles = [\"serve\", \"migrate\"]\nopv = \"/usr/local/bin/opv\"\nworkdir = \"/srv/e2e-app\"\ncommand = [\"/usr/local/bin/opv\", \"run\", \"--env\", \"prod\", \"--product\", \"web\"]\n```\n"
+            "value": "# opv managed configuration\n\nopv reads this note to know which keys the project **e2e-app** needs and where each environment keeps them. **No secret values are stored here.**\n\n- Values: in each environment's own item (its `vault_id` and `item_id` below). Open one with `opv open KEY --env ENV`.\n- Change keys with `opv add KEY` or `opv config edit`. Hand edits are fine inside the code block while it stays valid TOML; opv reads only the code block.\n- About opv: https://github.com/matt-cochran/1password-vault\n\n```toml\n# The end-to-end test application (design §13.2). It holds IDs, names and rules only,\n# never a value: every field in tests/e2e/app/world.json carries a marker.\n#\n# File route:     opv --config tests/e2e/app/secrets.toml config describe --json\n# Manifest route: OPV_PROJECT=e2e-app opv config describe --json\n#                 (the item \"opv · e2e-app\" lives in world.json and its notes hold this\n#                  same TOML; tests/e2e/app/manifest/ keeps the committed copy)\n\n# Local development: no targets here, so the personal key is allowed. The team values\n# live in the two boundary items recorded below.\n[environments.dev]\ntitle = \"Local development\"\norder = 1\nboundaries.shared = { vault_id = \"vE2ESHAREDDEV00000000000001\", item_id = \"iE2ESHAREDDEV00000000000001\" }\nboundaries.web    = { vault_id = \"vE2EWEBDEV0000000000000001\", item_id = \"iE2EWEBDEV0000000000000001\" }\npersonal_vault = \"e2e-dev-private\"\npersonal_item  = \"e2e-app · dev (personal)\"\n\n# Production: locked behind confirm_env and one target per provider.\n[environments.prod]\ntitle = \"Production\"\norder = 2\nconfirm_env = true\nboundaries.shared = { vault_id = \"vE2ESHAREDPROD0000000000001\", item_id = \"iE2ESHAREDPROD0000000000001\" }\nboundaries.web    = { vault_id = \"vE2EWEBPROD000000000000001\", item_id = \"iE2EWEBPROD000000000000001\" }\n\n# The Fly target: one secret per rendered name.\n[environments.prod.targets.fly]\nfly.app = \"e2e-app-prod\"\nfly.secret_name = \"E2E__{PRODUCT}__{KEY}\"\nstate_vault_id = \"vE2ESTATEFLY00000000000001\"\nroles = [\"serve\"]\n\n# The Kubernetes target: the Deployment reads names from the e2e-prod namespace. Config\n# keys are ConfigMaps, and file keys are mounted under /run/secrets/<product> in the\n# e2e-app container only (the pod also runs a sidecar).\n[environments.prod.targets.k8s]\nkubernetes.context = \"e2e-cluster\"\nkubernetes.namespace = \"e2e-prod\"\nkubernetes.deployment = \"e2e-app\"\nkubernetes.container = \"e2e-app\"\nkubernetes.env_name = \"E2E__{PRODUCT}__{KEY}\"\nkubernetes.config = \"configmap\"\nkubernetes.secrets_dir = \"/run/secrets/{product}\"\nstate_vault_id = \"vE2ESTATEK8S00000000000001\"\nroles = [\"serve\"]\n\n# The GitHub target: repository secrets and variables, plus the production environment.\n[environments.prod.targets.gh]\ngithub.repo = \"e2e-org/e2e-app\"\ngithub.environment = \"production\"\ngithub.secret_name = \"E2E__{PRODUCT}__{KEY}\"\nstate_vault_id = \"vE2ESTATEGH000000000000001\"\nroles = [\"serve\"]\n\n# A source-only home for a value more than one product reads. It is never delivered.\n[products.shared]\nsource_only = true\nboundary = \"shared\"\n\n[products.shared.keys.DATABASE_URL]\nkind = \"secret\"\nenvironments = [\"dev\", \"prod\"]\nguidance = \"the one connection string the fleet reads\"\n\n[products.shared.keys.FEATURE_FLAGS]\nkind = \"config\"\nenvironments = [\"dev\", \"prod\"]\nrules = { enum = [\"on\", \"off\"] }\n\n# The web product: its own keys, one shared key, two role-scoped keys, three file keys\n# and one personal key.\n[products.web]\nboundary = \"web\"\n\n[products.web.keys.DATABASE_URL]\nkind = \"secret\"\nfrom = \"shared/DATABASE_URL\"\nenvironments = [\"dev\", \"prod\"]\n\n[products.web.keys.API_KEY]\nkind = \"secret\"\nenvironments = [\"dev\", \"prod\"]\nguidance = \"the service's own API key\"\n\n[products.web.keys.LOG_LEVEL]\nkind = \"config\"\nenvironments = [\"dev\", \"prod\"]\nrules = { enum = [\"debug\", \"info\", \"warn\"] }\n\n# The serving process gets this; the migrating process does not.\n[products.web.keys.SESSION_SECRET]\nkind = \"secret\"\nenvironments = [\"dev\", \"prod\"]\nroles = [\"serve\"]\n\n# The migrating process gets this; the serving process does not.\n[products.web.keys.MIGRATION_TOKEN]\nkind = \"secret\"\nenvironments = [\"dev\", \"prod\"]\nroles = [\"migrate\"]\n\n# File keys: under `opv run`, their values are written into WEB_SECRETS_DIR at these\n# relative paths instead of the environment; on the Kubernetes target they are mounted\n# under kubernetes.secrets_dir.\n[products.web.keys.TLS_CERTIFICATE]\nkind = \"secret\"\nenvironments = [\"dev\", \"prod\"]\nfile = \"tls/certificate\"\n\n[products.web.keys.TLS_PRIVATE_KEY]\nkind = \"secret\"\nenvironments = [\"dev\", \"prod\"]\nfile = \"tls/private-key\"\n\n# A config file key: a ConfigMap item of the same volume on Kubernetes.\n[products.web.keys.OTEL_RESOURCE]\nkind = \"config\"\nenvironments = [\"prod\"]\nfile = \"otel/resource\"\n\n# Each developer keeps their own LLM key in their own item.\n[products.web.keys.PERSONAL_LLM_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\npersonal = true\nguidance = \"your own key, billed to you\"\n\n[products.web.local]\nenvironment = \"declared_only\"\nsecrets_dir_env = \"WEB_SECRETS_DIR\"\n\n# The reviewed remote profile: a pinned host, roles and command.\n[products.web.remotes.builder]\nhost = \"builder.example.test\"\nuser = \"deploy\"\nhost_key = \"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIe2eMarkerHostKeyNotARealKey000000\"\nenvironments = [\"dev\"]\nroles = [\"serve\", \"migrate\"]\nopv = \"/usr/local/bin/opv\"\nworkdir = \"/srv/e2e-app\"\ncommand = [\"/usr/local/bin/opv\", \"run\", \"--env\", \"dev\", \"--product\", \"web\"]\n```\n"
           },
           {
             "id": "project",
@@ -431,9 +461,186 @@
         "namespaces": {
           "e2e-prod": {
             "secrets": [],
-            "deployments": [],
-            "replicasets": [],
-            "pods": []
+            "deployments": [
+              {
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "metadata": {
+                  "annotations": {
+                    "deployment.kubernetes.io/revision": "1"
+                  },
+                  "creationTimestamp": "2026-10-17T00:00:00Z",
+                  "generation": 1,
+                  "labels": {
+                    "app": "e2e-app"
+                  },
+                  "name": "e2e-app",
+                  "namespace": "e2e-prod",
+                  "resourceVersion": "1",
+                  "uid": "00000000-0000-4000-8000-000000000001"
+                },
+                "spec": {
+                  "progressDeadlineSeconds": 600,
+                  "replicas": 1,
+                  "revisionHistoryLimit": 10,
+                  "selector": {
+                    "matchLabels": {
+                      "app": "e2e-app"
+                    }
+                  },
+                  "strategy": {
+                    "rollingUpdate": {
+                      "maxSurge": "25%",
+                      "maxUnavailable": "25%"
+                    },
+                    "type": "RollingUpdate"
+                  },
+                  "template": {
+                    "metadata": {
+                      "labels": {
+                        "app": "e2e-app"
+                      }
+                    },
+                    "spec": {
+                      "containers": [
+                        {
+                          "command": [
+                            "sleep",
+                            "infinity"
+                          ],
+                          "image": "ubuntu:24.04",
+                          "imagePullPolicy": "IfNotPresent",
+                          "name": "e2e-app",
+                          "resources": {},
+                          "terminationMessagePath": "/dev/termination-log",
+                          "terminationMessagePolicy": "File"
+                        },
+                        {
+                          "command": [
+                            "sleep",
+                            "infinity"
+                          ],
+                          "image": "ubuntu:24.04",
+                          "imagePullPolicy": "IfNotPresent",
+                          "name": "sidecar",
+                          "resources": {},
+                          "terminationMessagePath": "/dev/termination-log",
+                          "terminationMessagePolicy": "File"
+                        }
+                      ],
+                      "dnsPolicy": "ClusterFirst",
+                      "restartPolicy": "Always",
+                      "schedulerName": "default-scheduler",
+                      "securityContext": {
+                        "fsGroup": 10001,
+                        "runAsGroup": 10001,
+                        "runAsUser": 10001
+                      },
+                      "terminationGracePeriodSeconds": 1
+                    }
+                  }
+                },
+                "status": {
+                  "availableReplicas": 1,
+                  "conditions": [
+                    {
+                      "lastTransitionTime": "2026-10-17T00:00:00Z",
+                      "lastUpdateTime": "2026-10-17T00:00:00Z",
+                      "message": "Deployment has minimum availability.",
+                      "reason": "MinimumReplicasAvailable",
+                      "status": "True",
+                      "type": "Available"
+                    },
+                    {
+                      "lastTransitionTime": "2026-10-17T00:00:00Z",
+                      "lastUpdateTime": "2026-10-17T00:00:00Z",
+                      "message": "ReplicaSet \"e2e-app-59bd7c656\" has successfully progressed.",
+                      "reason": "NewReplicaSetAvailable",
+                      "status": "True",
+                      "type": "Progressing"
+                    }
+                  ],
+                  "observedGeneration": 1,
+                  "readyReplicas": 1,
+                  "replicas": 1,
+                  "terminatingReplicas": 0,
+                  "updatedReplicas": 1
+                }
+              }
+            ],
+            "replicasets": [
+              {
+                "apiVersion": "apps/v1",
+                "kind": "ReplicaSet",
+                "metadata": {
+                  "name": "e2e-app-59bd7c656",
+                  "namespace": "e2e-prod",
+                  "labels": {
+                    "app": "e2e-app"
+                  },
+                  "annotations": {
+                    "deployment.kubernetes.io/revision": "1"
+                  },
+                  "ownerReferences": [
+                    {
+                      "apiVersion": "apps/v1",
+                      "kind": "Deployment",
+                      "name": "e2e-app",
+                      "controller": true
+                    }
+                  ]
+                },
+                "spec": {
+                  "replicas": 1,
+                  "template": {
+                    "metadata": {
+                      "labels": {
+                        "app": "e2e-app"
+                      }
+                    },
+                    "spec": {
+                      "containers": [
+                        {
+                          "command": [
+                            "sleep",
+                            "infinity"
+                          ],
+                          "image": "ubuntu:24.04",
+                          "imagePullPolicy": "IfNotPresent",
+                          "name": "e2e-app",
+                          "resources": {},
+                          "terminationMessagePath": "/dev/termination-log",
+                          "terminationMessagePolicy": "File"
+                        },
+                        {
+                          "command": [
+                            "sleep",
+                            "infinity"
+                          ],
+                          "image": "ubuntu:24.04",
+                          "imagePullPolicy": "IfNotPresent",
+                          "name": "sidecar",
+                          "resources": {},
+                          "terminationMessagePath": "/dev/termination-log",
+                          "terminationMessagePolicy": "File"
+                        }
+                      ],
+                      "dnsPolicy": "ClusterFirst",
+                      "restartPolicy": "Always",
+                      "schedulerName": "default-scheduler",
+                      "securityContext": {
+                        "fsGroup": 10001,
+                        "runAsGroup": 10001,
+                        "runAsUser": 10001
+                      },
+                      "terminationGracePeriodSeconds": 1
+                    }
+                  }
+                }
+              }
+            ],
+            "pods": [],
+            "configmaps": []
           }
         }
       }

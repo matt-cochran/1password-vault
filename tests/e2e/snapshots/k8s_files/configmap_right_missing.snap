@@ -1,0 +1,11 @@
+# opv sync prod --confirm prod --target k8s --deploy
+## exit: 5
+## stdout
+
+## stderr
+using <SCENARIO>/project/secrets.toml
+opv: you may not delete configmaps in namespace e2e-prod (context e2e-cluster, Kubernetes)
+  checked: kubectl --context e2e-cluster --namespace e2e-prod --request-timeout=60s auth can-i delete configmaps (exit 1)
+Do: ask a cluster admin to let you delete configmaps through a Role in namespace e2e-prod
+Next: opv doctor --env prod
+

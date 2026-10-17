@@ -1,0 +1,2 @@
+cat: /run/secrets/api/github-app/private-key: Permission denied
+command terminated with exit code 1

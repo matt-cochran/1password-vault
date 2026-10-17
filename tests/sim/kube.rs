@@ -9,9 +9,29 @@
 //! one `secret "<name>" deleted from <ns> namespace` line per deleted object, nothing for a
 //! missing one), `version` and `config get-contexts` (failures 04, 07).
 //!
-//! Inferred, not recorded: `-o name` and `delete` of kinds other than Secret reuse the Secret
-//! recordings with the kind's `<resource>.<group>` word; `-o json` and `-o jsonpath=…`
-//! render the world's own objects (the scenario's documents) rather than a recording.
+//! The ConfigMap store (K-R7, `tests/fixtures/kubernetes/README.md`): `auth can-i <verb>
+//! configmaps` `yes` (success 04) and `no` (failures 08, and 10 for `patch`), `apply -o name`
+//! (success 05: `configmap/<name>`), `delete configmap …` (success 17), a 403 on each verb
+//! (failures 08; `create` from failures 10) and a missing ConfigMap (failures 09).
+//!
+//! The Deployment `replace` (K-R1, K-R3): the API server stores the volume, env and mounts
+//! exactly as sent and adds only `projected.defaultMode: 420` when it is omitted (success
+//! 08–11); `-o jsonpath={.metadata.generation}` prints the bare number (success 08). A
+//! replace that puts two mounts at one path in a container is refused with the 422 of
+//! K-R2 (failures 12-invalid-replace-mountpath-duplicate), and nothing is stored.
+//!
+//! The rollout is the world's own: a stored template that changed starts a new revision
+//! with its own ReplicaSet. When every source of every projected volume exists, the
+//! Deployment reads back rolled out at once. When one is missing (K-R4), the API server
+//! still accepts the replace (success 13), the new pod waits in `ContainerCreating` (failures
+//! 14, the `get pods` reply opv's rollout wait reads), and the Deployment stays at one new
+//! replica of two. The progress deadline is not modelled: K1 did not record a rollout that
+//! reached it.
+//!
+//! Inferred, not recorded: `-o name` and `delete` of kinds other than Secret and ConfigMap
+//! reuse the Secret recordings with the kind's `<resource>.<group>` word; `-o json` and
+//! `-o jsonpath=…` render the world's own objects (the scenario's documents) rather than a
+//! recording.
 //!
 //! ```json
 //! "kubernetes": {
@@ -47,6 +67,9 @@ const OK: &str = "kubernetes/success";
 /// The Secret name and namespace in the success recordings.
 const RECORDED_SECRET: &str = "opv-api--db-url-abcdefghij";
 const RECORDED_NS: &str = "opv-rec";
+/// The ConfigMap of success 05 (`apply -o name`) and the first of success 17 (`delete`).
+const RECORDED_CONFIGMAP: &str = "opv-api--otel-resource-abcdefghij";
+const RECORDED_CONFIGMAP_DELETED: &str = "opv-api--otel-resource-klmnopqrst";
 const RECORDED_USER: &str = "system:serviceaccount:opv-rec:opv-norbac";
 
 pub fn call_words(args: &[String]) -> Vec<String> {
@@ -104,6 +127,9 @@ fn case(c: &str, subs: &[(&str, String)]) -> Reply {
 
 /// The recorded 403 for `verb` on `res` named `name`.
 fn forbidden(t: &Target, verb: &str, res: &str, name: &str) -> Reply {
+    if res == "configmaps" {
+        return forbidden_configmap(t, verb, name);
+    }
     let (c, recorded_name) = match (verb, res) {
         ("get", "secrets") => ("02-forbidden-get-secret", "\"opv-present\""),
         ("list", "secrets") => ("02-forbidden-list-secrets", ""),
@@ -129,9 +155,80 @@ fn forbidden(t: &Target, verb: &str, res: &str, name: &str) -> Reply {
     case(c, &subs)
 }
 
+/// The recorded 403 for `verb` on ConfigMaps (K-R7: failures 08 as an identity without
+/// configmap rights, 10 as one without `create`).
+fn forbidden_configmap(t: &Target, verb: &str, name: &str) -> Reply {
+    let (c, user, recorded_name) = match verb {
+        "patch" => (
+            "08-forbidden-apply-configmap",
+            "opv-noconfigmaps",
+            "opv-api--log-level-klmnopqrst",
+        ),
+        "get" => (
+            "08-forbidden-get-configmap",
+            "opv-noconfigmaps",
+            "opv-api--log-level-abcdefghij",
+        ),
+        "list" => ("08-forbidden-list-configmaps", "opv-noconfigmaps", ""),
+        "delete" => (
+            "08-forbidden-delete-configmap",
+            "opv-noconfigmaps",
+            "opv-api--log-level-abcdefghij",
+        ),
+        "create" => (
+            "10-forbidden-apply-configmap-patch-rights-only",
+            "opv-patchonly",
+            "opv-api--log-level-klmnopqrst",
+        ),
+        _ => return Reply::no_recording(&format!("forbidden on kubectl {verb} configmaps"), DIR),
+    };
+    let mut subs = vec![
+        (
+            format!("system:serviceaccount:{RECORDED_NS}:{user}"),
+            t.user.clone(),
+        ),
+        (
+            format!("the namespace \"{RECORDED_NS}\""),
+            format!("the namespace \"{}\"", t.ns),
+        ),
+    ];
+    if !recorded_name.is_empty() {
+        subs.push((format!("\"{recorded_name}\""), format!("\"{name}\"")));
+    }
+    let subs: Vec<(&str, String)> = subs.iter().map(|(a, b)| (a.as_str(), b.clone())).collect();
+    case(c, &subs)
+}
+
+/// `auth can-i <verb> <res>`: the recorded `yes`, or `no` when the world denies it.
+fn can_i(verb: &str, res: &str, denied: bool) -> Reply {
+    if res != "configmaps" {
+        return if denied {
+            case("02-can-i-create-secrets-no", &[])
+        } else {
+            recorded(&format!("{OK}/01-can-i-create-secrets-yes"), &[])
+        };
+    }
+    match (verb, denied) {
+        ("patch", true) => case("10-can-i-patch-configmaps-no-without-patch", &[]),
+        ("create" | "get" | "list" | "delete", true) => {
+            case(&format!("08-can-i-{verb}-configmaps-no"), &[])
+        }
+        ("create" | "get" | "list" | "delete", false) => {
+            recorded(&format!("{OK}/04-can-i-{verb}-configmaps-yes"), &[])
+        }
+        // `patch configmaps` granted: the K-R7 Roles answered every granted verb `yes`.
+        (_, false) => recorded(&format!("{OK}/04-can-i-create-configmaps-yes"), &[]),
+        (_, true) => Reply::no_recording(&format!("kubectl auth can-i {verb} {res} (no)"), DIR),
+    }
+}
+
 /// The recorded 404 for `res` named `name`.
 fn not_found(res: &str, name: &str) -> Reply {
     match res {
+        "configmaps" => case(
+            "09-notfound-configmap",
+            &[("\"opv-missing\"", format!("\"{name}\""))],
+        ),
         "secrets" => case(
             "03-notfound-secret",
             &[("\"opv-missing\"", format!("\"{name}\""))],
@@ -273,11 +370,8 @@ pub fn run(world: &mut World, args: &[String]) -> Reply {
     );
     match ws.as_slice() {
         ["auth", "can-i", verb, res] => {
-            if denied(verb, &resource(res).0) {
-                case("02-can-i-create-secrets-no", &[])
-            } else {
-                recorded(&format!("{OK}/01-can-i-create-secrets-yes"), &[])
-            }
+            let res = resource(res).0;
+            can_i(verb, &res, denied(verb, &res))
         }
         ["get", kind, rest @ ..] => {
             let (res, _, singular) = resource(kind);
@@ -301,6 +395,11 @@ pub fn run(world: &mut World, args: &[String]) -> Reply {
                         return forbidden(&t, "list", &res, "");
                     }
                     let sel = flag(args, "-l").or_else(|| flag(args, "--selector"));
+                    if res == "pods"
+                        && let Some(stuck) = stuck_pods(world, &base, sel)
+                    {
+                        return stuck;
+                    }
                     let picked: Vec<Value> = all.into_iter().filter(|o| selects(sel, o)).collect();
                     output(args, &picked, &singular, true)
                 }
@@ -327,6 +426,12 @@ pub fn run(world: &mut World, args: &[String]) -> Reply {
             };
             if denied(rbac, &res) {
                 return forbidden(&t, rbac, &res, &name);
+            }
+            if verb == "replace" && res == "deployments" {
+                if let Some(refused) = invalid_deployment(&doc) {
+                    return refused;
+                }
+                rollout(world, &base, &mut doc);
             }
             let list = world.array_at(&format!("{base}/{res}"));
             let at = list
@@ -382,6 +487,208 @@ pub fn run(world: &mut World, args: &[String]) -> Reply {
     }
 }
 
+/// K-R2: the API server's 422 for a Deployment whose container mounts two volumes at one
+/// path (failures 12-invalid-replace-mountpath-duplicate), the recorded Deployment, container
+/// and mount positions and path replaced by the call's own. `None` when nothing is invalid.
+fn invalid_deployment(doc: &Value) -> Option<Reply> {
+    let containers = doc
+        .pointer("/spec/template/spec/containers")
+        .and_then(Value::as_array)?;
+    for (ci, c) in containers.iter().enumerate() {
+        let mut seen = std::collections::BTreeSet::new();
+        for (mi, m) in c["volumeMounts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            let Some(path) = m["mountPath"].as_str() else {
+                continue;
+            };
+            if !seen.insert(path) {
+                let name = doc["metadata"]["name"].as_str().unwrap_or_default();
+                return Some(case(
+                    "12-invalid-replace-mountpath-duplicate",
+                    &[
+                        ("\"api\"", format!("\"{name}\"")),
+                        ("containers[0]", format!("containers[{ci}]")),
+                        ("volumeMounts[1]", format!("volumeMounts[{mi}]")),
+                        ("\"/run/secrets/api\"", format!("\"{path}\"")),
+                    ],
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// The objects every projected volume of `deployment`'s pod template names that the
+/// namespace at `base` does not hold, as `(kind word, name)`.
+fn missing_sources(world: &World, base: &str, deployment: &Value) -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
+    for v in deployment
+        .pointer("/spec/template/spec/volumes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        for s in v
+            .pointer("/projected/sources")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            for (field, res, word) in [
+                ("secret", "secrets", "secret"),
+                ("configMap", "configmaps", "configmap"),
+            ] {
+                let Some(name) = s[field]["name"].as_str() else {
+                    continue;
+                };
+                if s[field]["optional"].as_bool() == Some(true) {
+                    continue;
+                }
+                if !objects(world, base, res)
+                    .iter()
+                    .any(|o| o["metadata"]["name"] == name)
+                {
+                    out.push((word, name.to_string()));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A stable ReplicaSet name for a pod template: `<deployment>-<10 characters>`.
+fn replicaset_name(deployment: &str, template: &Value) -> String {
+    use sha2::{Digest, Sha256};
+    const ALPHABET: &[u8] = b"bcdfghjklmnpqrstvwxz2456789";
+    let digest = Sha256::digest(template.to_string().as_bytes());
+    let hash: String = digest
+        .iter()
+        .take(10)
+        .map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char)
+        .collect();
+    format!("{deployment}-{hash}")
+}
+
+/// The world's rollout of a replaced Deployment `doc` (module docs): the API server's
+/// one default (K-R3), a new revision and ReplicaSet when the template changed, and a
+/// status that is rolled out, or one new replica waiting when a source is missing (K-R4).
+fn rollout(world: &mut World, base: &str, doc: &mut Value) {
+    for v in doc
+        .pointer_mut("/spec/template/spec/volumes")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(p) = v.get_mut("projected").and_then(Value::as_object_mut) {
+            p.entry("defaultMode").or_insert(json!(420));
+        }
+    }
+    let name = doc["metadata"]["name"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let before = objects(world, base, "deployments")
+        .into_iter()
+        .find(|o| o["metadata"]["name"] == name.as_str())
+        .unwrap_or_default();
+    let revision = |d: &Value| {
+        d.pointer("/metadata/annotations/deployment.kubernetes.io~1revision")
+            .and_then(Value::as_str)
+            .and_then(|r| r.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    let template = doc["spec"]["template"].clone();
+    let rs = replicaset_name(&name, &template);
+    let mut current = revision(&before);
+    if before["spec"]["template"] != template {
+        let sets = world.array_at(&format!("{base}/replicasets"));
+        let highest = sets.iter().map(revision).max().unwrap_or(0).max(current);
+        current = highest + 1;
+        sets.retain(|s| s["metadata"]["name"] != rs.as_str());
+        sets.push(json!({
+            "apiVersion": "apps/v1",
+            "kind": "ReplicaSet",
+            "metadata": {
+                "name": rs,
+                "labels": template["metadata"]["labels"],
+                "annotations": {"deployment.kubernetes.io/revision": current.to_string()},
+                "ownerReferences": [{"apiVersion": "apps/v1", "kind": "Deployment",
+                    "name": name, "controller": true}],
+            },
+            "spec": {"replicas": doc["spec"]["replicas"], "template": template},
+        }));
+    }
+    doc["metadata"]["annotations"]["deployment.kubernetes.io/revision"] =
+        json!(current.to_string());
+    let generation = before["metadata"]["generation"].as_u64().unwrap_or(0) + 1;
+    let replicas = doc["spec"]["replicas"].as_u64().unwrap_or(1);
+    doc["status"] = if missing_sources(world, base, doc).is_empty() {
+        json!({
+            "observedGeneration": generation,
+            "replicas": replicas,
+            "updatedReplicas": replicas,
+            "readyReplicas": replicas,
+            "availableReplicas": replicas,
+        })
+    } else {
+        json!({
+            "observedGeneration": generation,
+            "replicas": replicas + 1,
+            "updatedReplicas": 1,
+            "readyReplicas": replicas,
+            "availableReplicas": replicas,
+            "unavailableReplicas": 1,
+        })
+    };
+}
+
+/// K-R4: the pods `selector` picks while a Deployment there waits on a missing source — the
+/// recorded reply (failures 14) with its ReplicaSet names, pod suffixes and namespace
+/// replaced by the world's. `None` when no selected Deployment waits on one.
+fn stuck_pods(world: &World, base: &str, selector: Option<&str>) -> Option<Reply> {
+    let deployments = objects(world, base, "deployments");
+    let d = deployments.iter().find(|d| {
+        let labels = json!({"metadata": {"labels": d["spec"]["template"]["metadata"]["labels"]}});
+        selects(selector, &labels)
+    })?;
+    let (kind, _) = missing_sources(world, base, d).into_iter().next()?;
+    let name = d["metadata"]["name"].as_str().unwrap_or_default();
+    let new = replicaset_name(name, &d["spec"]["template"]);
+    let sets = objects(world, base, "replicasets");
+    let old = sets
+        .iter()
+        .filter_map(|s| s["metadata"]["name"].as_str())
+        .find(|s| *s != new && s.starts_with(&format!("{name}-")))
+        .unwrap_or_default()
+        .to_string();
+    let (c, recorded_new) = if kind == "configmap" {
+        ("14-get-pods-missing-configmap-source-20s", "api-64c8949856")
+    } else {
+        ("14-get-pods-missing-secret-source-60s", "api-75767cbbb6")
+    };
+    // A pod name is its ReplicaSet's and a 5-character suffix (the recording's `<POD>`).
+    let pod = |rs: &str| {
+        format!(
+            "{rs}-{}",
+            &replicaset_name(rs, &json!(rs))[rs.len() + 1..][..5]
+        )
+    };
+    let recorded_pod = format!("{recorded_new}-<POD>");
+    Some(case(
+        c,
+        &[
+            (recorded_pod.as_str(), pod(&new)),
+            ("api-7d87cb47bc-<POD>", pod(&old)),
+            (recorded_new, new.clone()),
+            ("api-7d87cb47bc", old.clone()),
+        ],
+    ))
+}
+
 /// The first stdout line (with its newline) of success recording `case`.
 fn success_line(case: &str) -> String {
     let r = recorded(&format!("{OK}/{case}"), &[]);
@@ -389,21 +696,29 @@ fn success_line(case: &str) -> String {
     text.split_inclusive('\n').next().unwrap_or("").to_string()
 }
 
-/// `kubectl delete`'s reply: success 03's line for each object deleted, in the call's order
-/// (03-delete-secrets-missing-ignored: nothing for a name that was not there).
+/// `kubectl delete`'s reply: success 03's line (17's for a ConfigMap) for each object
+/// deleted, in the call's order (03-delete-secrets-missing-ignored,
+/// 17-delete-configmaps-missing-ignored: nothing for a name that was not there).
 fn deleted(singular: &str, gone: &[&str], ns: &str) -> Reply {
-    let line = success_line("03-delete-secrets");
+    let (line, recorded) = if singular == "configmap" {
+        (
+            success_line("17-delete-configmaps"),
+            format!("configmap \"{RECORDED_CONFIGMAP_DELETED}\""),
+        )
+    } else {
+        (
+            success_line("03-delete-secrets"),
+            format!("secret \"{RECORDED_SECRET}\""),
+        )
+    };
     let out: String = gone
         .iter()
         .map(|n| {
-            line.replace(
-                &format!("secret \"{RECORDED_SECRET}\""),
-                &format!("{singular} \"{n}\""),
-            )
-            .replace(
-                &format!(" {RECORDED_NS} namespace"),
-                &format!(" {ns} namespace"),
-            )
+            line.replace(&recorded, &format!("{singular} \"{n}\""))
+                .replace(
+                    &format!(" {RECORDED_NS} namespace"),
+                    &format!(" {ns} namespace"),
+                )
         })
         .collect();
     Reply::ok(out)
@@ -444,15 +759,22 @@ fn output(args: &[String], objs: &[Value], singular: &str, list: bool) -> Reply 
         objs.first().cloned().unwrap_or(Value::Null)
     };
     if fmt == "name" {
-        let line = success_line("02-apply-secret-created");
+        let (line, recorded) = if singular == "configmap" {
+            (
+                success_line("05-apply-configmap-created"),
+                format!("configmap/{RECORDED_CONFIGMAP}"),
+            )
+        } else {
+            (
+                success_line("02-apply-secret-created"),
+                format!("secret/{RECORDED_SECRET}"),
+            )
+        };
         let lines: String = objs
             .iter()
             .map(|o| {
                 let name = o["metadata"]["name"].as_str().unwrap_or("");
-                line.replace(
-                    &format!("secret/{RECORDED_SECRET}"),
-                    &format!("{singular}/{name}"),
-                )
+                line.replace(&recorded, &format!("{singular}/{name}"))
             })
             .collect();
         return Reply::ok(lines);

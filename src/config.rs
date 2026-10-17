@@ -26,10 +26,13 @@ use crate::cause::{
 };
 use crate::domain::rules::{SIGNOZ_BODY, SIGNOZ_PREFIX};
 use crate::domain::{
-    Boundary, Environment, Fleet, ItemRef, KeySpec, Product, Target, boundary_missing, key_label,
+    Boundary, Environment, Fleet, ItemRef, KeySpec, Kind, Product, Target, boundary_missing,
+    key_label,
 };
 use crate::error::Error;
-use crate::provider::{NameRules, Section, StoreConfig, StoreNameRules, TargetConfig};
+use crate::provider::{
+    Channel, FileCapability, NameRules, Section, StoreConfig, StoreNameRules, TargetConfig,
+};
 
 mod locate;
 
@@ -464,9 +467,21 @@ impl<'t> Doc<'t> {
         if field.0.first().map(String::as_str) == base.first().copied() {
             return e;
         }
-        let mut full: Vec<&str> = base.to_vec();
-        full.extend(field.0.iter().map(String::as_str));
-        self.invalid(&full, rule.clone())
+        let under_base = |f: &DottedPath| {
+            let mut full: Vec<String> = base.iter().map(|s| s.to_string()).collect();
+            full.extend(f.0.iter().cloned());
+            DottedPath(full)
+        };
+        // A field the rule names beside this one is in the same section.
+        let rule = match rule {
+            FieldRule::ConflictsWith { field: other } => FieldRule::ConflictsWith {
+                field: under_base(other),
+            },
+            other => other.clone(),
+        };
+        let full = under_base(field);
+        let full: Vec<&str> = full.0.iter().map(String::as_str).collect();
+        self.invalid(&full, rule)
     }
 
     /// The value at `path`, with its place in the file.
@@ -727,6 +742,12 @@ struct RawTarget {
     /// The products it delivers (FR-48).
     #[serde(default)]
     products: Option<Vec<String>>,
+    /// The process roles this target serves (M3, §4.4). `None`: no scoping — every delivered
+    /// key is delivered, as before — but a target that delivers a product whose keys declare
+    /// roles must still declare `roles`. A key whose `roles` miss this target's is not
+    /// desired here, so `--deploy --prune` removes an existing binding.
+    #[serde(default)]
+    roles: Option<Vec<String>>,
     /// `op://<vault>/<item>` holding the target's deploy identity (FR-40).
     #[serde(default)]
     deploy_credentials: Option<String>,
@@ -920,6 +941,7 @@ fn target_of(
         ));
     }
     p.bind(target, store.as_ref())
+        .map_err(|e| doc.place(e, &base))
 }
 
 /// One identifier at `path`: non-empty, unpadded, and accepted by `ok` (safe in argv).
@@ -1073,6 +1095,7 @@ fn target(
         name: name.to_string(),
         config,
         products: raw.products,
+        roles: raw.roles,
         deploy_credentials,
         state_vault_id,
         delivery_items,
@@ -1171,11 +1194,165 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
     };
     check_scopes(&fleet, doc)?;
     check_boundaries(&fleet, doc)?;
+    check_target_roles(&fleet, doc)?;
+    check_file_mounts(&fleet, doc)?;
     check_names(&fleet, doc)?;
     check_personal(&fleet, doc)?;
     check_evidence_width(&fleet, doc)?;
     check_delivery_items(&fleet, doc)?;
     Ok(fleet)
+}
+
+/// A process role name (M3, #136): `^[a-z0-9-]{1,32}$`, so a shell never has to quote it.
+fn is_role_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 32
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// Target-level process roles (M3, §4.4). A target that delivers a product whose keys
+/// declare roles must also declare `roles`; every declared role must be a valid role and be
+/// declared by a key of a product the target delivers (product-wide: a role says which
+/// process a key is for, whichever environment it is desired in). A target with no such
+/// product is unchanged.
+fn check_target_roles(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
+    for (env_name, env) in &fleet.environments {
+        for (name, target) in &env.targets {
+            let path = ["environments", env_name, "targets", name, "roles"];
+            let mut declared: BTreeSet<&str> = BTreeSet::new();
+            let mut role_scoped = false;
+            for (product, p) in &fleet.products {
+                if !fleet.delivers(env_name, name, product) {
+                    continue;
+                }
+                for spec in p.keys.values() {
+                    if let Some(roles) = &spec.roles {
+                        role_scoped = true;
+                        declared.extend(roles.iter().map(String::as_str));
+                    }
+                }
+            }
+            match &target.roles {
+                None if role_scoped => {
+                    return Err(doc.invalid(&path, FieldRule::Missing));
+                }
+                None => {}
+                Some(roles) => {
+                    if roles.is_empty() {
+                        return Err(doc.invalid(&path, check(ConfigCheck::EmptyRoles)));
+                    }
+                    if roles.iter().any(|r| !is_role_name(r)) {
+                        return Err(doc.invalid(
+                            &path,
+                            FieldRule::Pattern {
+                                id: PatternId::RoleName,
+                            },
+                        ));
+                    }
+                    if let Some(x) = roles.iter().find(|r| !declared.contains(r.as_str())) {
+                        return Err(doc.invalid(
+                            &path,
+                            undeclared(Declared::Role, x, declared.iter().copied()),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `secrets_dir` mount rules (design §6.2): the file keys of two products must land in
+/// distinct directories, a config key with `file` needs a config object, and one product's
+/// file paths must not nest. Targets without a native file capability are unchanged.
+fn check_file_mounts(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
+    for (env_name, env) in &fleet.environments {
+        for (target_name, target) in &env.targets {
+            let channels = target.config.channels();
+            let FileCapability::Native { dir } = &channels.files else {
+                continue;
+            };
+            let section = target.config.provider().section();
+            let dir_path = [
+                "environments",
+                env_name,
+                "targets",
+                target_name,
+                section,
+                "secrets_dir",
+            ];
+            let config_path = [
+                "environments",
+                env_name,
+                "targets",
+                target_name,
+                section,
+                "config",
+            ];
+            // The directory each product with a file key renders, in product order.
+            let mut rendered: Vec<(String, String, String)> = Vec::new();
+            for (product, p) in &fleet.products {
+                if !fleet.delivers(env_name, target_name, product) {
+                    continue;
+                }
+                let mut files: Vec<(&str, &str)> = Vec::new();
+                for (key, spec) in &p.keys {
+                    if !spec.environments.iter().any(|e| e == env_name) {
+                        continue;
+                    }
+                    let Some(file) = spec.file.as_deref() else {
+                        continue;
+                    };
+                    if spec.kind == Kind::Config && matches!(channels.config, Channel::RuntimeEnv) {
+                        return Err(doc.invalid(
+                            &config_path,
+                            check(ConfigCheck::ConfigFileNeedsObject {
+                                key: format!("{product}/{key}"),
+                            }),
+                        ));
+                    }
+                    files.push((key.as_str(), file));
+                }
+                // (d) Within one product, no `file` is a parent of another's.
+                let mut seen: Vec<(&str, &str)> = Vec::new();
+                for (key, file) in &files {
+                    if let Some((other_key, parent)) = seen.iter().find(|(_, o)| {
+                        *o == *file
+                            || file.starts_with(&format!("{o}/"))
+                            || o.starts_with(&format!("{file}/"))
+                    }) {
+                        return Err(doc.invalid(
+                            &["products", product, "keys", key, "file"],
+                            FieldRule::Collision {
+                                rendered: parent.to_string(),
+                                other: dotted(&["products", product, "keys", other_key, "file"]),
+                            },
+                        ));
+                    }
+                    seen.push((key, file));
+                }
+                if files.is_empty() {
+                    continue;
+                }
+                // (a) and (b): two products may not render the same directory.
+                let rendered_dir = dir.replace("{product}", &product.replace('_', "-"));
+                if let Some((_, other, other_key)) =
+                    rendered.iter().find(|(d, ..)| d == &rendered_dir)
+                {
+                    return Err(doc.invalid(
+                        &dir_path,
+                        FieldRule::Collision {
+                            rendered: rendered_dir.clone(),
+                            other: dotted(&["products", other, "keys", other_key, "file"]),
+                        },
+                    ));
+                }
+                rendered.push((rendered_dir, product.clone(), files[0].0.to_string()));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// FR-58: a recorded delivery item belongs to a product its target delivers; any other
@@ -1527,6 +1704,23 @@ fn validate_remotes(
                 ),
             );
         }
+        // O9: a remote profile reaches a host over SSH by pinning a host, a user and a
+        // command; a deployed environment's values must reach it only through the CI sync,
+        // so a profile may name only environments with no deployment target.
+        if let Some((env, target)) = r.environments.iter().find_map(|e| {
+            let env = environments.get(e)?;
+            let target = env.targets.keys().next()?;
+            Some((e, target))
+        }) {
+            return invalid(
+                "environments",
+                check(ConfigCheck::RemoteEnvironmentHasTarget {
+                    profile: name.clone(),
+                    env: env.clone(),
+                    target: target.clone(),
+                }),
+            );
+        }
         if let Some(roles) = &r.roles {
             if roles.is_empty() {
                 return invalid("roles", check(ConfigCheck::EmptyRemoteRoles));
@@ -1621,7 +1815,10 @@ fn validate_local(doc: &Doc<'_>, product: &str, p: &crate::domain::Product) -> R
     let mut seen: Vec<(&str, &str)> = Vec::new();
     for (key, path) in &files {
         let file_path = ["products", product, "keys", key.as_str(), "file"];
-        if dir_env.is_none() {
+        // A product without a `[products.<p>.local]` section runs nowhere locally; its file
+        // keys are delivered by a target's own filesystem (a target's `secrets_dir`,
+        // design §6.2, checked by `check_file_mounts`), so only the path rules apply.
+        if dir_env.is_none() && p.local.is_some() {
             return Err(doc.invalid_at(dotted(&dir_path), &file_path, FieldRule::Missing));
         }
         let parts: Vec<&str> = path.split('/').collect();
@@ -1706,20 +1903,13 @@ fn validate_key(
         if roles.is_empty() {
             return Err(invalid(&["roles"], check(ConfigCheck::EmptyRoles)));
         }
-        for role in roles {
-            let ok = !role.is_empty()
-                && role.len() <= 32
-                && role
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-            if !ok {
-                return Err(invalid(
-                    &["roles"],
-                    FieldRule::Pattern {
-                        id: PatternId::RoleName,
-                    },
-                ));
-            }
+        if roles.iter().any(|role| !is_role_name(role)) {
+            return Err(invalid(
+                &["roles"],
+                FieldRule::Pattern {
+                    id: PatternId::RoleName,
+                },
+            ));
         }
     }
     for env in &spec.rules.refuse_in {
@@ -2338,6 +2528,35 @@ mod tests {
     fn an_unknown_local_environment_mode_is_refused() {
         let t = with_file("k").replace("declared_only", "everything");
         assert!(parse(&t).is_err());
+    }
+
+    // --- #136, O9/R1: remote profiles refuse deployed environments ---
+
+    /// `base` plus a reviewed remote profile for `allumata` with `fields`.
+    fn remote_over(base: &str, fields: &str) -> String {
+        format!(
+            "{base}\n[products.allumata.remotes.builder]\nhost = \"builder.example.internal\"\n\
+             user = \"dev\"\nhost_key = \"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestMarkerHostKeyNotARealKey139\"\n\
+             opv = \"/usr/local/bin/opv\"\nworkdir = \"/home/dev/src/app\"\ncommand = [\"cargo\", \"run\"]\n{fields}"
+        )
+    }
+
+    #[test]
+    fn a_remote_profile_refusal_names_the_profile_the_environment_and_the_target() {
+        assert_eq!(
+            check_of(&remote_over(&ok(), "environments = [\"prod\"]")),
+            ConfigCheck::RemoteEnvironmentHasTarget {
+                profile: "builder".into(),
+                env: "prod".into(),
+                target: "portfolio".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_remote_profile_over_a_target_less_environment_loads() {
+        let base = format!("{}\n[environments.dev]\n", ok());
+        assert!(parse(&remote_over(&base, "environments = [\"dev\"]")).is_ok());
     }
 
     /// `text` with boundary `b` recorded in `env` (IDs `v<b>` and `i<b>`).
@@ -4109,6 +4328,69 @@ environments = ["prod"]
     fn a_bad_role_names_the_roles_field() {
         let text = with_prod_key("p", "K1", "roles = [\"Serve\"]\n");
         assert_eq!(field_of(&text), "products.p.keys.K1.roles");
+    }
+
+    // --- target-level roles (#136, M3) ---
+
+    /// The fixture plus a prod target `products = ["p"]` line, a target `roles` line
+    /// and a prod key with `key_roles`.
+    fn with_target_roles(target_roles: &str, key_roles: &str) -> String {
+        let text = with_prod_key("p", "K1", &format!("roles = {key_roles}\n"));
+        replaced(
+            &text,
+            "state_vault_id = \"sprd\"\n",
+            &format!("state_vault_id = \"sprd\"\nproducts = [\"p\"]\n{target_roles}\n"),
+        )
+    }
+
+    #[test]
+    fn a_listed_role_scoped_product_on_a_target_without_roles_is_refused() {
+        let text = with_prod_key("p", "K1", "roles = [\"serve\"]\n");
+        let text = replaced(
+            &text,
+            "state_vault_id = \"sprd\"\n",
+            "state_vault_id = \"sprd\"\nproducts = [\"p\"]\n",
+        );
+        assert_eq!(
+            invalid(&text),
+            (
+                "environments.prod.targets.portfolio.roles".to_string(),
+                FieldRule::Missing
+            )
+        );
+    }
+
+    #[test]
+    fn a_target_role_no_delivered_key_declares_is_refused() {
+        let text = with_target_roles("roles = [\"serve\"]", "[\"migrate\"]");
+        assert!(matches!(
+            check_of(&text),
+            ConfigCheck::Undeclared { kind: Declared::Role, ref name, .. } if name == "serve"
+        ));
+    }
+
+    #[test]
+    fn an_empty_target_roles_list_is_refused() {
+        let text = with_target_roles("roles = []", "[\"serve\"]");
+        assert_eq!(check_of(&text), ConfigCheck::EmptyRoles);
+    }
+
+    #[test]
+    fn a_target_role_a_delivered_key_declares_loads() {
+        let text = with_target_roles("roles = [\"serve\"]", "[\"serve\"]");
+        assert!(parse(&text).is_ok());
+    }
+
+    #[test]
+    fn a_default_target_delivering_role_scoped_keys_is_refused() {
+        let text = with_prod_key("p", "K1", "roles = [\"serve\"]\n");
+        assert_eq!(
+            invalid(&text),
+            (
+                "environments.prod.targets.portfolio.roles".to_string(),
+                FieldRule::Missing
+            )
+        );
     }
 
     /// 03.01: a reserved directory variable is refused as reserved, not as a pattern it

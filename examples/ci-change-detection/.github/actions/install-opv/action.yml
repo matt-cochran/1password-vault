@@ -1,0 +1,24 @@
+name: Install opv
+description: >-
+  Install the 1Password CLI and opv (checksum-verified) on a GitHub-hosted
+  Linux runner. Pin `version` to the release you tested.
+inputs:
+  version:
+    description: The opv release tag to install, for example v0.11.0.
+    required: false
+    default: v0.11.0
+runs:
+  using: composite
+  steps:
+    - name: Install the 1Password CLI
+      uses: 1password/install-cli-action@v1
+    - name: Install opv
+      shell: bash
+      env:
+        OPV_VERSION: ${{ inputs.version }}
+      run: |
+        base=https://github.com/matt-cochran/1password-vault/releases/download/$OPV_VERSION
+        curl -fsSLO "$base/opv-x86_64-unknown-linux-musl"
+        curl -fsSLO "$base/SHA256SUMS"
+        sha256sum -c SHA256SUMS --ignore-missing
+        install -m 0755 opv-x86_64-unknown-linux-musl /usr/local/bin/opv

@@ -1,0 +1,17 @@
+# .github/workflows/opv-drift.yml
+name: "opv: drift check"
+on: {schedule: [{cron: "23 4 * * *"}], workflow_dispatch: {}}
+permissions: {contents: read}
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    strategy: {fail-fast: false, matrix: {env: [prod, staging]}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-opv
+      - env:
+          OP_SERVICE_ACCOUNT_TOKEN: "${{ secrets.OPV_READER_TOKEN }}"
+          ENV: ${{ matrix.env }}
+        run: |
+          opv status "$ENV" --fail-on-drift      # exit 8 target_drift on drift
+          opv delivery verify "$ENV" --json       # exit 8 delivery_unverified

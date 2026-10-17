@@ -823,7 +823,10 @@ fn grant_words(
             resource: kind,
             namespace,
         } => match namespace {
-            Some(ns) => format!("ask a cluster admin to let {who} {verb} {kind} in namespace {ns}"),
+            // A namespaced Role, never a ClusterRole (delivery-transports FM-09).
+            Some(ns) => format!(
+                "ask a cluster admin to let {who} {verb} {kind} through a Role in namespace {ns}"
+            ),
             None => format!("ask a cluster admin to let {who} {verb} {kind}"),
         },
         GrantModel::OnePasswordRole => {
@@ -932,10 +935,11 @@ fn rule_words(field: &str, rule: &FieldRule) -> (String, String) {
         ),
         FieldRule::Pattern { id } => {
             let words = id.words();
-            (
-                format!("{field} must be {words}"),
-                format!("change {field} to {words}"),
-            )
+            let fix = match id {
+                PatternId::ContainerPath => format!("use {words}"),
+                _ => format!("change {field} to {words}"),
+            };
+            (format!("{field} must be {words}"), fix)
         }
         FieldRule::Reserved { set } => (
             format!("{field} uses a reserved name (reserved: {})", list(set)),
@@ -1755,8 +1759,42 @@ impl Cause {
                     "remote profile {profile} does not allow {asked}; it allows {}",
                     list(allowed)
                 ),
+                self::Guard::MountPathInUse {
+                    workload,
+                    container,
+                    path,
+                    volume,
+                    env: _,
+                    target: _,
+                } => format!(
+                    "container {container} of {workload} already mounts volume {volume} over {path}, so opv's secrets volume cannot go there"
+                ),
                 self::Guard::Declined => "you declined, so nothing changed".to_string(),
+                self::Guard::NoChannel { target, kind, why } => {
+                    format!("target {target} has no {kind} channel: {why}")
+                }
             },
+            MountUnreadable {
+                workload,
+                container,
+                run_as,
+                why,
+                env: _,
+                target: _,
+            } => {
+                let who = match run_as {
+                    Some(uid) => format!("runs as uid {uid}"),
+                    None => "runs as an unknown user".to_string(),
+                };
+                match why {
+                    MountWhy::NoFsGroup => format!(
+                        "container {container} of {workload} {who} and sets no fsGroup, so the mounted secrets files would be unreadable"
+                    ),
+                    MountWhy::RunAsUnknown => format!(
+                        "container {container} of {workload} {who}, with no fsGroup or runAsGroup, so whether the mounted secrets files are readable is unknown"
+                    ),
+                }
+            }
             CreateOutcomeUnknown {
                 system,
                 kind,
@@ -2077,6 +2115,20 @@ impl Cause {
                 "opv cannot confirm that product {product} is delivered to target {target} in environment {env}: {}",
                 unverified_words(state)
             ),
+            TargetDrift { env, target, names } => format!(
+                "target {target} in environment {env} has {} that no longer match 1Password: {}",
+                plural(names.len(), "binding", "bindings"),
+                list(names)
+            ),
+            SourceChanged { env, no_record } => {
+                if *no_record {
+                    format!(
+                        "no source versions are recorded for environment {env}: run opv bootstrap to record delivery items"
+                    )
+                } else {
+                    format!("the source items of environment {env} changed since the last sync")
+                }
+            }
             LocalIo { op, path, io } => {
                 if path.as_os_str().is_empty() {
                     format!("opv could not {}: {}", local_op(*op), io_words(*io))
@@ -2742,26 +2794,38 @@ impl Cause {
                     )
                 };
                 let next = if *system == System::OnePassword {
-                    let mut args = Vec::new();
-                    if let Some(a) = account {
-                        args.push("--account".to_string());
-                        args.push(a.to_string());
+                    // #167: under `opv login` itself, `opv login` again loops; the step is
+                    // op's own sign-in, which a person runs in their own terminal.
+                    if inv.command.first().map(String::as_str) == Some("login") {
+                        let mut args = vec!["signin".to_string()];
+                        if let Some(a) = account {
+                            args.push("--account".to_string());
+                            args.push(a.to_string());
+                        }
+                        Next::Vendor(VendorCmd {
+                            program: "op".into(),
+                            args,
+                        })
+                    } else {
+                        let mut args = Vec::new();
+                        if let Some(a) = account {
+                            args.push("--account".to_string());
+                            args.push(a.to_string());
+                        }
+                        // An MCP call has no command line to repeat: the step is the login
+                        // alone, never a login inside a login.
+                        if matches!(inv.origin, crate::cause::Origin::Cli) && !inv.command.is_empty()
+                        {
+                            args.push("--".into());
+                            args.push("opv".into());
+                            args.extend(inv.command.iter().cloned());
+                            args.extend(inv.args.iter().cloned());
+                        }
+                        Next::Handoff(Cmd {
+                            command: vec!["login".into()],
+                            args,
+                        })
                     }
-                    // `opv login` itself, or an MCP call with no command line to repeat: the
-                    // step is the login alone, never a login inside a login.
-                    if matches!(inv.origin, crate::cause::Origin::Cli)
-                        && !inv.command.is_empty()
-                        && inv.command.first().map(String::as_str) != Some("login")
-                    {
-                        args.push("--".into());
-                        args.push("opv".into());
-                        args.extend(inv.command.iter().cloned());
-                        args.extend(inv.args.iter().cloned());
-                    }
-                    Next::Handoff(Cmd {
-                        command: vec!["login".into()],
-                        args,
-                    })
                 } else {
                     Next::Rerun
                 };
@@ -3268,8 +3332,40 @@ impl Cause {
                     )),
                     Next::Run(cmd(&["config", "edit"], &[])),
                 ),
+                self::Guard::MountPathInUse {
+                    workload: _,
+                    container: _,
+                    path: _,
+                    volume,
+                    env,
+                    target,
+                } => plan(
+                    inspect(format!(
+                        "choose another secrets_dir, or remove volume {volume}"
+                    )),
+                    Next::Check(cmd(&["plan"], &[env.as_str(), "--target", target.as_str()])),
+                ),
                 self::Guard::Declined => plan(None, Next::Rerun),
+                self::Guard::NoChannel { target, .. } => plan(
+                    inspect(format!(
+                        "set config = \"none\" on target {target} to deliver no config there, \
+                         or pick a target with a config channel"
+                    )),
+                    match inv_env(inv) {
+                        Some(env) => Next::Check(cmd(
+                            &["plan"],
+                            &[env, "--target", target.as_str()],
+                        )),
+                        None => help_of(inv),
+                    },
+                ),
             },
+            MountUnreadable { env, target, .. } => plan(
+                inspect(
+                    "set spec.template.spec.securityContext.fsGroup (any group, for example 10001), or runAsUser: 0. Nothing was written.",
+                ),
+                Next::Check(cmd(&["plan"], &[env.as_str(), "--target", target.as_str()])),
+            ),
             CreateOutcomeUnknown {
                 system: _,
                 kind,
@@ -3881,6 +3977,20 @@ impl Cause {
                 ),
                 Unverified::Unverifiable => plan(None, Next::None(NoNext::NothingToRun)),
             },
+            TargetDrift { env, target, .. } => plan(
+                inspect("re-run the sync to restore 1Password's values"),
+                Next::Check(cmd(&["plan"], &[env.as_str(), "--target", target.as_str()])),
+            ),
+            SourceChanged { env, no_record } => {
+                if *no_record {
+                    plan(
+                        inspect("run opv bootstrap to record delivery items"),
+                        Next::Handoff(cmd(&["bootstrap"], &[])),
+                    )
+                } else {
+                    plan(None, Next::Run(cmd(&["sync"], &[env.as_str(), "--deploy"])))
+                }
+            }
             LocalIo {
                 path,
                 io: IoKind::NotAPlainFile,

@@ -1,0 +1,21 @@
+name: opv-recipe
+services:
+  serve:
+    command:
+      - serve
+    environment:
+      JZ_VAULT_DIR: /run/secrets/journeeze
+    image: journeeze:local
+    logging:
+      driver: none
+    networks:
+      default: null
+    user: 1000:1000
+    volumes:
+      - type: bind
+        source: /run/user/1000/opv-run.4242-abcdef
+        target: /run/secrets/journeeze
+        read_only: true
+networks:
+  default:
+    name: opv-recipe_default

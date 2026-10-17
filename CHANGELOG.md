@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-17
+
+1Password stays the single source of truth for config and secrets: `opv sync` runs from CI and puts each kind into the platform's own channel, and nothing in production needs 1Password or opv at runtime (#136; design: `docs/design/delivery-transports.md`).
+
+### Added
+
+- `opv changed <env> [--product p] [--target t] [--json]` tells CI whether a source item changed since the last confirmed sync, from item version numbers only (one `op item list` per vault, never a value). Exit 0: unchanged; **exit 10** (`source_changed`): something changed, run a sync; any other exit is a failure. A confirmed sync now records each source item's version in the placement's delivery item, so `changed` can compare. A rate-limited listing exits 9 with the retry time.
+- `opv status --fail-on-drift` exits 8 (`target_drift`) when a platform no longer matches 1Password; without the flag the exit code is unchanged.
+- `opv ci workflow --on-change [--every <minutes>]` and `--drift` print the two GitHub Actions workflows: a scheduled change check that syncs only on exit 10 (every sync job in one concurrency group, `confirm_env` environments gated), and a nightly drift check. A ready-made example is in `examples/ci-change-detection/`, and the README has a "how opv works" section.
+- Kubernetes ConfigMaps: `kubernetes.config = "configmap"` writes config keys as immutable, versioned ConfigMaps bound with `configMapKeyRef`, compared exactly and cleaned up like Secrets. It needs `get`, `list`, `create`, `patch` and `delete` on ConfigMaps, all checked by `doctor` (`sync` checks `delete` before its first write); grant them with a namespaced Role. It cannot be combined with `secrets_in`, which is refused at load (`config_invalid`).
+- Kubernetes files: `kubernetes.secrets_dir = "/run/secrets/{product}"` mounts every delivered key that has `file` as a read-only file (mode 0440) in a projected volume `opv-files-<product>`, in the target's container only, and removes its variable. A file key's bytes are delivered exactly as stored, multi-line PEM and trailing newline included. `plan` names each file's path and the volume a deploy would change (`would deploy: volume opv-files-<product>, …`), and `status` chains each file to its Secret or ConfigMap. Before writing, `sync` refuses a workload that could not read the files (`mount_unreadable`, exit 6, with the `fsGroup` line to add) and a directory another volume already uses (`policy_refused`); `plan`, `status` and `doctor` warn about an unreadable workload, and a workload running as root gets a warning on every run.
+- Fly: `fly.config = "secrets"` delivers config keys as Fly secrets; `"none"` declares that config is not delivered there, with a warning per run.
+- Every `plan` and `status` row, text and `--json`, names its channel: `channel`, `via` (`Fly secret`, `Kubernetes Secret`, `ConfigMap`, `GitHub variable`, `env`, …), `delivered_as` (`env` or `file`), `form` and `path`. The plan id now covers each key's channel and form.
+- MCP: an `opv_changed` tool (item ids and version numbers only); `opv_declare_target` and `opv target add` accept `roles` (`--role`), `kubernetes.secrets_dir` and `fly.config`.
+- `opv run` adds `OPV_UID` and `OPV_GID` to a child that receives files, and `docs/local-development.md` has a Docker Compose recipe that reads them.
+
+### Changed
+
+- **Breaking: a target that delivers a product whose keys declare `roles` must declare `roles` itself.** Before, such a target silently got every role's keys. Now the configuration is refused at load (`config_invalid`, exit 2, naming the target's `roles`). The fix is one line on the target, listing the roles it serves:
+
+  ```toml
+  [environments.prod.targets.web]
+  roles = ["serve"]
+  ```
+
+  A key whose roles the target doesn't list is not desired there, and `--prune` removes it. Targets of products without role-scoped keys are unchanged.
+- New Kubernetes targets get `kubernetes.config = "configmap"` from `opv init` and `opv target add`. Existing targets without `config` keep `env`.
+- A remote development profile (`[products.<p>.remotes.<r>]`) may no longer name an environment that has a deployment target: such a profile is refused at load (`config_invalid`, exit 2, naming the profile, the environment and one target). Remote delivery is for development environments; deployed ones get their values from CI.
+- A config key on a target with no config channel is no longer shown as `n/a`: `plan` and `status` print a warning and `sync` refuses (`policy_refused`), unless the target declares `config = "none"`.
+- The new exit code **10** (`source_changed`) belongs to `opv changed` only. Scripts that treat every non-zero exit as a failure must branch on it.
+- The Kubernetes RBAC grant in an error now names "a Role in namespace <ns>".
+
+### Fixed
+
+- `opv schema`'s `documents.error` is generated from the real error object, so it no longer lists the removed `detail` field (#166).
+- `opv login` with a stale session whose vault list is signed out now asks for the password instead of exiting with "not currently signed in" (#167).
+- A key withheld by a target's roles is no longer counted in that target's binding set.
+- Kubernetes and Azure: `sync` no longer writes or binds the keys of a `source_only` product on a target. Before, on Kubernetes, a whole-environment `sync --deploy` whose source-only product held a config key stopped with `policy_refused` ("was not created by opv").
+
 ## [0.10.1] - 2026-10-17
 
 ### Fixed

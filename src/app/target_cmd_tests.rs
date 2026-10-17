@@ -24,6 +24,17 @@ kind = \"secret\"
 environments = [\"dev\"]
 ";
 
+/// A fleet whose one key only the `serve` process reads (delivery-transports §4.4).
+const ROLE_FLEET: &str = "\
+[environments.dev]
+boundaries.api = { vault_id = \"vdev\", item_id = \"idev\" }
+
+[products.api.keys.OPENAI_API_KEY]
+kind = \"secret\"
+environments = [\"dev\"]
+roles = [\"serve\"]
+";
+
 /// The same fleet with a target `site` already declared in dev.
 const WITH_TARGET: &str = "\
 [environments.dev]
@@ -278,7 +289,16 @@ fn a_duplicate_target_name_points_to_config_edit() {
 
 /// The fragment `target add` builds for dev/site.
 fn site_body() -> String {
-    target_table("dev", "site", "fly.app = \"x\"\n", &[], None, None, &[])
+    target_table(
+        "dev",
+        "site",
+        "fly.app = \"x\"\n",
+        &[],
+        &[],
+        None,
+        None,
+        &[],
+    )
 }
 
 #[test]
@@ -626,4 +646,37 @@ fn list_json_prints_every_documented_field() {
             "deploy_credentials": false,
         }])
     );
+}
+
+#[test]
+fn add_writes_the_roles_it_was_given() {
+    let mut args = add_args("dev", "site");
+    args.roles = vec!["serve".into()];
+    let a = add_to(ROLE_FLEET, args);
+    assert!(a.text().contains("roles = [\"serve\"]\n"), "{}", a.text());
+}
+
+#[test]
+fn add_writes_a_repeated_role_once() {
+    let mut args = add_args("dev", "site");
+    args.roles = vec!["serve".into(), "serve".into()];
+    let a = add_to(ROLE_FLEET, args);
+    assert!(a.text().contains("roles = [\"serve\"]\n"), "{}", a.text());
+}
+
+#[test]
+fn the_written_target_loads_with_its_roles() {
+    let mut args = add_args("dev", "site");
+    args.roles = vec!["serve".into()];
+    let a = add_to(ROLE_FLEET, args);
+    assert_eq!(
+        a.fleet().environments["dev"].targets["site"].roles,
+        Some(vec!["serve".to_string()])
+    );
+}
+
+#[test]
+fn add_without_roles_for_a_role_scoped_key_is_config_invalid() {
+    let a = add_to(ROLE_FLEET, add_args("dev", "site"));
+    assert_eq!(a.res.as_ref().unwrap_err().code_str(), "config_invalid");
 }

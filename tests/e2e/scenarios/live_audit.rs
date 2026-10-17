@@ -1218,6 +1218,54 @@ fn live_09_mcp_deployment_plan_prints_no_value() {
 }
 
 #[test]
+fn live_09_mcp_changed_with_no_delivery_item_is_an_ok_answer() {
+    let doc = Scenario::new()
+        .account(DEV_ACCOUNT)
+        .mcp("opv_changed", json!({"environment": "prod"}));
+    assert_eq!(doc["ok"], true, "{doc}");
+}
+
+#[test]
+fn live_09_mcp_changed_with_no_delivery_item_says_it_changed() {
+    let doc = Scenario::new()
+        .account(DEV_ACCOUNT)
+        .mcp("opv_changed", json!({"environment": "prod"}));
+    assert_eq!(doc["changed"], true, "{doc}");
+}
+
+#[test]
+fn live_09_mcp_changed_prints_no_value() {
+    let doc = Scenario::new()
+        .account(DEV_ACCOUNT)
+        .mcp("opv_changed", json!({"environment": "prod"}));
+    let text = doc.to_string();
+    assert_eq!(
+        canaries().into_iter().find(|c| text.contains(c.as_str())),
+        None,
+        "{doc}"
+    );
+}
+
+#[test]
+fn live_09_mcp_declare_target_with_a_secrets_dir_and_roles_is_declared() {
+    let doc = Scenario::new().account(DEV_ACCOUNT).mcp(
+        "opv_declare_target",
+        json!({
+            "environment": "prod",
+            "target": "cluster",
+            "options": {
+                "kubernetes-context": "e2e-cluster",
+                "kubernetes-namespace": "e2e-prod",
+                "kubernetes-deployment": "e2e-worker",
+                "kubernetes-secrets-dir": "/run/secrets/{product}",
+            },
+            "roles": ["serve"],
+        }),
+    );
+    assert_eq!(doc["changed"], true, "{doc}");
+}
+
+#[test]
 fn live_09_mcp_deployment_plan_for_a_path_is_unknown_env() {
     let doc = Scenario::new()
         .account(DEV_ACCOUNT)

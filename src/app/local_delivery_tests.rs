@@ -153,6 +153,39 @@ fn the_directory_variable_names_the_private_directory() {
     assert!(env.contains(&("JZ_SECRETS_DIR".into(), "/run/user/1/opv-run.1-x".into())));
 }
 
+/// O4, A4: a run that delivers files tells the child its effective uid, for Compose's
+/// `user:` so the container reads the RAM directory as the same user.
+#[cfg(unix)]
+#[test]
+fn a_file_delivering_run_passes_the_effective_uid() {
+    let (uid, _) = effective_ids().unwrap();
+    let env = child_env(&mounted(), &inherited(), Some("/run/user/1/opv-run.1-x"));
+    assert!(env.contains(&("OPV_UID".to_string(), uid.to_string())));
+}
+
+/// O4, A4: the same run tells the child its effective gid.
+#[cfg(unix)]
+#[test]
+fn a_file_delivering_run_passes_the_effective_gid() {
+    let (_, gid) = effective_ids().unwrap();
+    let env = child_env(&mounted(), &inherited(), Some("/run/user/1/opv-run.1-x"));
+    assert!(env.contains(&("OPV_GID".to_string(), gid.to_string())));
+}
+
+/// O4, A4: a run that delivers no files does not set `OPV_UID`.
+#[test]
+fn a_run_without_files_passes_no_uid() {
+    let env = child_env(&worker(), &inherited(), None);
+    assert!(!names(&env).contains(&"OPV_UID"));
+}
+
+/// O4, A4: a run that delivers no files does not set `OPV_GID`.
+#[test]
+fn a_run_without_files_passes_no_gid() {
+    let env = child_env(&worker(), &inherited(), None);
+    assert!(!names(&env).contains(&"OPV_GID"));
+}
+
 #[cfg(unix)]
 mod files {
     use super::super::write_file;

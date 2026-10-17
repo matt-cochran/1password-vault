@@ -1,0 +1,6 @@
+services:
+  serve:
+    image: journeeze:local
+    user: "${UID}:${GID}"
+    volumes:
+      - "${OPV_SECRETS_DIR}:/run/secrets/journeeze:ro"

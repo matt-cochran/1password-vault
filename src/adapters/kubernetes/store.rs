@@ -1,11 +1,12 @@
-//! Kubernetes Secrets as a [`PinnedStore`] (FR-29, FR-32, FR-38).
+//! Kubernetes Secrets — and, when `kubernetes.config = "configmap"`, ConfigMaps — as a
+//! [`PinnedStore`] (FR-29, FR-32, FR-38; delivery-transports §11.1, K3).
 //!
 //! | op | argv (after the scope flags) | effect |
 //! |---|---|---|
-//! | `list` | `get secret -l opv-managed=<env> -o jsonpath=<name, opv-key>` | read |
-//! | `read` | `get deployment <d> -o json`, then `get secret <s> --ignore-not-found -o jsonpath=<opv-managed, data.value>` | read |
-//! | `write_one` | `read` (above); if the bound value differs or none is bound, `apply -f - --server-side --field-manager=opv -o name` of a new `opv-<store>-<random id>` (manifest on stdin); a lost apply is reconciled with `get secret <s> --ignore-not-found -o jsonpath=<opv-managed, data.value>` | reads, write |
-//! | `delete` | `get secret -l opv-managed=<env>,opv-key=<store> …`, `get deployment`, `get replicasets -o json`, then `delete secret <names…> --ignore-not-found` | reads, write |
+//! | `list` | `get <secret\|configmap> -l opv-managed=<env> -o jsonpath=<name, opv-key>` | read |
+//! | `read` | `get deployment <d> -o json`, then `get <secret\|configmap> <s> --ignore-not-found -o jsonpath=<opv-managed, data.value>` | read |
+//! | `write_one` | `read` (above); if the bound value differs or none is bound, `apply -f - --server-side --field-manager=opv -o name` of a new `opv-<store>-<random id>` (manifest on stdin); a lost apply is reconciled with `get <secret\|configmap> <s> --ignore-not-found -o jsonpath=<opv-managed, data.value>` | reads, write |
+//! | `delete` | `get <secret\|configmap> -l opv-managed=<env>,opv-key=<store> …`, `get deployment`, `get replicasets -o json`, then `delete <secret\|configmap> <names…> --ignore-not-found` | reads, write |
 //!
 //! Lists never ask for `-o json` (it returns `data`, K2) and writes ask for `-o name` (`-o
 //! json` echoes `data`, K1). Version ids are random (FR-38, SR-1): nothing in a name, label or
@@ -26,7 +27,7 @@ use zeroize::Zeroizing;
 
 use super::{
     Effect, KubeTarget, Kubectl, LABEL_KEY, LABEL_MANAGED, VALUE_KEY, container_env,
-    container_index, new_version, secret_name, secret_ref, split_secret_name, store_name, text,
+    container_index, new_version, secret_name, split_secret_name, store_name, text,
     valid_label_value,
 };
 use crate::domain::provenance::{STAMP_ENV, STAMP_PLAN, STAMP_VERSION, STAMP_WRITTEN};
@@ -50,7 +51,73 @@ const LIST_PATH: &str = concat!(
 );
 const VALUE_PATH: &str = r#"jsonpath={.metadata.labels.opv-managed}{"\t"}{.data.value}"#;
 
-/// The Secrets of one Kubernetes target.
+/// The kind of object a [`KubeSecrets`] store reads and writes (delivery-transports §11.1,
+/// K3). Name scheme, ownership labels, provenance annotations, immutability, the
+/// compare-before-write and the clean-up of superseded versions are the same for both; only
+/// the kubectl resource, the manifest's `kind`/`type` and the value encoding differ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObjectKind {
+    Secret,
+    ConfigMap,
+}
+
+impl ObjectKind {
+    /// The singular name `kubectl get|delete <kind>` takes, and the prefix `apply -o name`
+    /// echoes (`secret/…`, `configmap/…`).
+    fn singular(self) -> &'static str {
+        match self {
+            Self::Secret => "secret",
+            Self::ConfigMap => "configmap",
+        }
+    }
+
+    /// The `kind` of the manifest this store applies.
+    fn kind(self) -> &'static str {
+        match self {
+            Self::Secret => "Secret",
+            Self::ConfigMap => "ConfigMap",
+        }
+    }
+
+    /// The field of an unreadable value, in the message.
+    fn value_label(self) -> &'static str {
+        match self {
+            Self::Secret => "Secret value",
+            Self::ConfigMap => "ConfigMap value",
+        }
+    }
+
+    /// The source's field name in a projected volume (`secret`, `configMap`, design §6.3).
+    pub(crate) fn projected_field(self) -> &'static str {
+        match self {
+            Self::Secret => "secret",
+            Self::ConfigMap => "configMap",
+        }
+    }
+
+    /// The object name an env entry binds through `valueFrom.<ref>` with key `value`.
+    pub(crate) fn bound_ref(self, entry: &Value) -> Option<&str> {
+        let key = match self {
+            Self::Secret => "secretKeyRef",
+            Self::ConfigMap => "configMapKeyRef",
+        };
+        let r = entry.pointer(&format!("/valueFrom/{key}"))?;
+        (r.get("key").and_then(Value::as_str) == Some(VALUE_KEY))
+            .then(|| r.get("name").and_then(Value::as_str))
+            .flatten()
+    }
+
+    /// The stored [`VALUE_PATH`] field as bytes: base64 for a Secret, plain text for a
+    /// ConfigMap.
+    fn decode(self, stored: &str) -> Option<Zeroizing<Vec<u8>>> {
+        match self {
+            Self::Secret => STANDARD.decode(stored.trim()).ok().map(Zeroizing::new),
+            Self::ConfigMap => Some(Zeroizing::new(stored.as_bytes().to_vec())),
+        }
+    }
+}
+
+/// The Secrets (and ConfigMaps) of one Kubernetes target.
 pub struct KubeSecrets<'a> {
     k: Kubectl<'a>,
     /// Managed env names (from the template, FR-8): the names this port speaks.
@@ -60,11 +127,20 @@ pub struct KubeSecrets<'a> {
     /// Every string of the Deployment and its ReplicaSets, read once, after the healthy
     /// rollout that precedes any delete.
     referenced: OnceCell<BTreeSet<String>>,
-    /// The opv Secrets of this environment as `list` read them this run: `(secret name,
+    /// The opv objects of this environment as `list` read them this run: `(object name,
     /// store name, stamp)`.
     listed: OnceCell<Vec<(String, String, Option<Stamp>)>>,
     /// Source of new version ids: the OS RNG ([`new_version`]); fixed in tests.
     ids: fn() -> Result<String, Error>,
+    /// The kind this store reads and writes.
+    kind: ObjectKind,
+    /// Config keys' own store when the target routes config to a ConfigMap (K3): `read`,
+    /// `write_one` and `delete` route each name in `config_names` to it.
+    config: Option<Box<KubeSecrets<'a>>>,
+    /// The env names of config keys (from the configuration, never inferred from what the
+    /// Deployment binds): only these ever go to the ConfigMap store, so a secret never
+    /// becomes a ConfigMap.
+    config_names: BTreeSet<String>,
 }
 
 impl<'a> KubeSecrets<'a> {
@@ -80,6 +156,9 @@ impl<'a> KubeSecrets<'a> {
             referenced: OnceCell::new(),
             listed: OnceCell::new(),
             ids: new_version,
+            kind: ObjectKind::Secret,
+            config: None,
+            config_names: BTreeSet::new(),
         }
     }
 
@@ -90,8 +169,34 @@ impl<'a> KubeSecrets<'a> {
         self
     }
 
+    /// The same store reading and writing `kind` (K3): the ConfigMap store `open` routes
+    /// config keys to, and the tests.
+    pub fn with_kind(mut self, kind: ObjectKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    /// Give this store a second, ConfigMap-kind store for the config keys' env names
+    /// `names` (K3). With no `config` store every name stays here.
+    pub fn with_config(mut self, config: KubeSecrets<'a>, names: BTreeSet<String>) -> Self {
+        self.config = Some(Box::new(config));
+        self.config_names = names;
+        self
+    }
+
     fn t(&self) -> &KubeTarget {
         self.k.target
+    }
+
+    /// The ConfigMap store `name` belongs to: when this store has one and `name` is a config
+    /// key's (K3). `read`, `write_one` and `delete` delegate there. The kind comes from the
+    /// configuration, never from what the Deployment binds today, so a new secret key is
+    /// never written as a ConfigMap.
+    fn config_store(&self, name: &str) -> Result<Option<&KubeSecrets<'a>>, Error> {
+        Ok(self
+            .config
+            .as_deref()
+            .filter(|_| self.config_names.contains(name)))
     }
 
     /// `(secret name, store name)` of every opv Secret matching `selector`. Entries whose
@@ -106,14 +211,14 @@ impl<'a> KubeSecrets<'a> {
 
     /// [`Self::names`] with each Secret's provenance stamp (FR-42), when it carries one.
     fn stamped(&self, selector: &str) -> Result<Vec<(String, String, Option<Stamp>)>, Error> {
-        let what = "kubectl get secret";
+        let what = format!("kubectl get {}", self.kind.singular());
         let out = self.k.run(
             Effect::Read,
-            what,
-            &["get", "secret", "-l", selector, "-o", LIST_PATH],
+            &what,
+            &["get", self.kind.singular(), "-l", selector, "-o", LIST_PATH],
             None,
         )?;
-        Ok(text(&out, what)?
+        Ok(text(&out, &what)?
             .lines()
             .filter_map(|line| {
                 let mut fields = line.split('\t');
@@ -132,13 +237,13 @@ impl<'a> KubeSecrets<'a> {
     /// `(opv-managed label, value)` of Secret `name` (`""` when unlabelled), `None` when it
     /// does not exist. The value is decoded into zeroized memory only (K2).
     fn held(&self, name: &str) -> Result<Option<(String, SecretValue)>, Error> {
-        let what = format!("kubectl get secret {name}");
+        let what = format!("kubectl get {} {name}", self.kind.singular());
         let out = self.k.run(
             Effect::Read,
             &what,
             &[
                 "get",
-                "secret",
+                self.kind.singular(),
                 name,
                 "--ignore-not-found",
                 "-o",
@@ -146,7 +251,7 @@ impl<'a> KubeSecrets<'a> {
             ],
             None,
         )?;
-        let Some((env, b64)) = text(&out, &what)?.split_once('\t') else {
+        let Some((env, stored)) = text(&out, &what)?.split_once('\t') else {
             return Ok(None);
         };
         // Not a UTF-8 value under data.<VALUE_KEY>: it was changed outside opv.
@@ -155,34 +260,38 @@ impl<'a> KubeSecrets<'a> {
                 &what,
                 None,
                 crate::cause::OutputProblem::InvalidValue {
-                    what: "Secret value",
+                    what: self.kind.value_label(),
                 },
                 crate::cause::During::Read,
             )
         };
-        let bytes = Zeroizing::new(STANDARD.decode(b64.trim()).map_err(|_| unreadable())?);
+        let bytes = self.kind.decode(stored).ok_or_else(unreadable)?;
         let value = std::str::from_utf8(&bytes).map_err(|_| unreadable())?;
         Ok(Some((env.to_string(), SecretValue::new(value.to_string()))))
     }
 
-    /// store name → version bound by the managed container (one Deployment read).
+    /// store name → version bound by the managed container, as an env reference or as a
+    /// source of opv's own `opv-files-*` volumes (design §6.3; one Deployment read).
     fn bound(&self) -> Result<&BTreeMap<String, String>, Error> {
         if let Some(b) = self.bound.get() {
             return Ok(b);
         }
         let d = self.k.get_deployment()?;
         let i = container_index(&d, self.t())?;
-        let map = container_env(&d, i)
+        let env = container_env(&d, i);
+        let mounted = mounted_sources(&d, self.kind);
+        let map = env
             .iter()
-            .filter_map(secret_ref)
+            .filter_map(|e| self.kind.bound_ref(e))
+            .chain(mounted.iter().map(String::as_str))
             .filter_map(split_secret_name)
             .map(|(s, v)| (s.to_string(), v.to_string()))
             .collect();
         Ok(self.bound.get_or_init(|| map))
     }
 
-    /// The immutable Secret manifest for `value`; the only place a value is encoded.
-    /// The Secret also carries opv's provenance stamp as annotations (FR-42; never a value).
+    /// The immutable manifest for `value`; the only place a value is encoded. It also
+    /// carries opv's provenance stamp as annotations (FR-42; never a value).
     fn manifest(
         &self,
         name: &str,
@@ -191,9 +300,9 @@ impl<'a> KubeSecrets<'a> {
         stamp: &Stamp,
     ) -> Zeroizing<Vec<u8>> {
         let t = self.t();
-        let head = json!({
+        let mut head = json!({
             "apiVersion": "v1",
-            "kind": "Secret",
+            "kind": self.kind.kind(),
             "metadata": {
                 "name": name,
                 "namespace": t.namespace,
@@ -201,15 +310,29 @@ impl<'a> KubeSecrets<'a> {
                 "annotations": super::annotations(stamp),
             },
             "immutable": true,
-            "type": "Opaque",
-        })
-        .to_string();
-        let b64_len = value.expose().len().div_ceil(3) * 4;
-        let mut doc = Zeroizing::new(String::with_capacity(head.len() + b64_len + 32));
+        });
+        if self.kind == ObjectKind::Secret {
+            // A ConfigMap has no `type` (delivery-transports §11.1).
+            head["type"] = json!("Opaque");
+        }
+        let head = head.to_string();
+        let encoded_len = match self.kind {
+            ObjectKind::Secret => value.expose().len().div_ceil(3) * 4 + 2,
+            ObjectKind::ConfigMap => value.expose().len() + 2,
+        };
+        let mut doc = Zeroizing::new(String::with_capacity(head.len() + encoded_len + 32));
         doc.push_str(&head[..head.len() - 1]);
-        doc.push_str(&format!(",\"data\":{{\"{VALUE_KEY}\":\""));
-        STANDARD.encode_string(value.expose().as_bytes(), &mut doc);
-        doc.push_str("\"}}");
+        doc.push_str(&format!(",\"data\":{{\"{VALUE_KEY}\":"));
+        match self.kind {
+            ObjectKind::Secret => {
+                doc.push('"');
+                STANDARD.encode_string(value.expose().as_bytes(), &mut doc);
+                doc.push('"');
+            }
+            // ConfigMap data holds the plain text, JSON-escaped in zeroized memory.
+            ObjectKind::ConfigMap => push_json_string(&mut doc, value.expose()),
+        }
+        doc.push_str("}}");
         Zeroizing::new(std::mem::take(&mut *doc).into_bytes())
     }
 
@@ -272,6 +395,29 @@ pub(crate) fn referenced_names(k: &Kubectl<'_>) -> Result<BTreeSet<String>, Erro
 }
 
 /// Collect every string value in `v`.
+/// The object names the `kind` sources of opv's `opv-files-*` projected volumes in
+/// Deployment `d` name (design §6.3), in volume and source order.
+fn mounted_sources(d: &Value, kind: ObjectKind) -> Vec<String> {
+    d.pointer("/spec/template/spec/volumes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|v| {
+            v.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|n| n.starts_with("opv-files-"))
+        })
+        .filter_map(|v| v.pointer("/projected/sources").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|s| {
+            s.get(kind.projected_field())?
+                .get("name")?
+                .as_str()
+                .map(str::to_string)
+        })
+        .collect()
+}
+
 fn strings(v: &Value, out: &mut BTreeSet<String>) {
     match v {
         Value::String(s) => {
@@ -286,6 +432,31 @@ fn strings(v: &Value, out: &mut BTreeSet<String>) {
 /// Exact, constant-time equality of two values (FR-31, SR-1).
 fn same(a: &SecretValue, b: &SecretValue) -> bool {
     a.expose().as_bytes().ct_eq(b.expose().as_bytes()).into()
+}
+
+/// Write `s` as a JSON string into `out` (zeroized memory), escaping what JSON requires; a
+/// ConfigMap's `data` is plain text, so it is never base64-encoded (K3).
+fn push_json_string(out: &mut String, s: &str) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => {
+                out.push_str("\\u00");
+                out.push(HEX[(c as usize >> 4) & 0xf] as char);
+                out.push(HEX[c as usize & 0xf] as char);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
 }
 
 /// The first rule a Kubernetes target refuses `(name, value)` for, with its fixed reason
@@ -329,7 +500,7 @@ impl Store for KubeSecrets<'_> {
             }
         }
         let _ = self.listed.set(listed);
-        Ok(self
+        let mut out: Vec<StoreEntry> = self
             .managed
             .iter()
             .filter_map(|n| {
@@ -341,7 +512,12 @@ impl Store for KubeSecrets<'_> {
                     stamp: stamp.clone(),
                 })
             })
-            .collect())
+            .collect();
+        if let Some(config) = &self.config {
+            out.extend(config.list()?);
+            out.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+        Ok(out)
     }
 
     fn refusal(&self, name: &str, value: &SecretValue) -> Option<(&'static str, &'static str)> {
@@ -353,6 +529,9 @@ impl PinnedStore for KubeSecrets<'_> {
     /// The value and version the Deployment binds for `name`; `None` when it binds none or
     /// the bound Secret is gone (the next write re-creates it).
     fn read(&self, name: &str) -> Result<Option<(SecretValue, String)>, Error> {
+        if let Some(store) = self.config_store(name)? {
+            return store.read(name);
+        }
         let store = store_name(name);
         let Some(version) = self.bound()?.get(&store).cloned() else {
             return Ok(None);
@@ -367,6 +546,9 @@ impl PinnedStore for KubeSecrets<'_> {
     /// A lost write is reconciled by reading the new Secret back (NR-2); if that fails too, the
     /// next run writes another id and the unreferenced one is collected after a healthy rollout.
     fn write_one(&self, name: &str, value: &SecretValue, stamp: &Stamp) -> Result<String, Error> {
+        if let Some(store) = self.config_store(name)? {
+            return store.write_one(name, value, stamp);
+        }
         // `sync` refuses every such value as a blocking row before any write (its pinned
         // plan asks this store's `refusal`), so one that reaches here is opv's bug.
         if refusal(name, value).is_some() {
@@ -387,7 +569,7 @@ impl PinnedStore for KubeSecrets<'_> {
         let store = store_name(name);
         let version = (self.ids)()?;
         let secret = secret_name(&store, &version);
-        let what = format!("kubectl apply secret {secret}");
+        let what = format!("kubectl apply {} {secret}", self.kind.singular());
         let body = self.manifest(&secret, &store, value, stamp);
         let apply = [
             "apply",
@@ -404,7 +586,7 @@ impl PinnedStore for KubeSecrets<'_> {
         {
             Outcome::Done(out) => {
                 let echoed = text(&out, &what)?.trim();
-                if echoed != format!("secret/{secret}") {
+                if echoed != format!("{}/{secret}", self.kind.singular()) {
                     // The apply answered without confirming the Secret it wrote.
                     let subject = crate::cause::ResourceRef {
                         kind: crate::cause::ResourceKind::Secret,
@@ -435,6 +617,9 @@ impl PinnedStore for KubeSecrets<'_> {
     /// Deployment nor any ReplicaSet references (FR-32). Called only after a healthy
     /// rollout; a version still in a ReplicaSet's history is kept for `rollout undo`.
     fn delete(&self, name: &str) -> Result<bool, Error> {
+        if let Some(store) = self.config_store(name)? {
+            return store.delete(name);
+        }
         self.delete_unreferenced(name, None).map(|kept| kept == 0)
     }
 
@@ -442,6 +627,9 @@ impl PinnedStore for KubeSecrets<'_> {
     /// `keep_version` that neither the Deployment nor any ReplicaSet references (FR-32).
     /// Only Secrets labelled for this environment are ever candidates.
     fn collect_superseded(&self, name: &str, keep_version: &str) -> Result<(), Error> {
+        if let Some(store) = self.config_store(name)? {
+            return store.collect_superseded(name, keep_version);
+        }
         self.delete_unreferenced(name, Some(keep_version)).map(drop)
     }
 }
@@ -482,8 +670,8 @@ impl KubeSecrets<'_> {
         if doomed.is_empty() {
             return Ok(kept);
         }
-        let what = format!("kubectl delete secret ({store})");
-        let mut args = vec!["delete", "secret"];
+        let what = format!("kubectl delete {} ({store})", self.kind.singular());
+        let mut args = vec!["delete", self.kind.singular()];
         args.extend(&doomed);
         args.push("--ignore-not-found");
         match self.k.call(Effect::Write, &what, &args, None, &[])? {
@@ -891,6 +1079,40 @@ mod tests {
         );
     }
 
+    /// `get deployment api -o json` after the §6.3 volume (K-R3): the private key and the
+    /// OTel resource are items of `opv-files-api`, not env entries.
+    const AFTER_FILES: &str = include_str!(
+        "../../../tests/fixtures/kubernetes/success/09-get-deployment-after-files.stdout"
+    );
+
+    /// A store of `kind` on the K1 Deployment (container `api`), whose objects were named
+    /// with the env template `{PRODUCT}__{KEY}`.
+    fn with_mounted<T>(r: &FakeRunner, kind: ObjectKind, f: impl FnOnce(&KubeSecrets) -> T) -> T {
+        let t = KubeTarget {
+            container: Some("api".into()),
+            ..target()
+        };
+        let names = ["API__PRIVATE_KEY", "API__OTEL_RESOURCE"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        f(&KubeSecrets::new(r, &t, names).with_kind(kind))
+    }
+
+    #[test]
+    fn read_of_a_mounted_file_key_reads_the_secret_its_volume_names() {
+        let r = FakeRunner::new([ok(AFTER_FILES), ok("")]);
+        let _ = with_mounted(&r, ObjectKind::Secret, |s| s.read("API__PRIVATE_KEY"));
+        assert!(all_argv(&r).contains("get secret opv-api--private-key-abcdefghij"));
+    }
+
+    #[test]
+    fn read_of_a_mounted_config_file_key_reads_the_configmap_its_volume_names() {
+        let r = FakeRunner::new([ok(AFTER_FILES), ok("")]);
+        let _ = with_mounted(&r, ObjectKind::ConfigMap, |s| s.read("API__OTEL_RESOURCE"));
+        assert!(all_argv(&r).contains("get configmap opv-api--otel-resource-abcdefghij"));
+    }
+
     #[test]
     fn read_of_unbound_name_is_none() {
         let r = FakeRunner::new([ok(DEPLOYMENT)]);
@@ -1026,5 +1248,158 @@ mod tests {
     fn list_names_only_managed_env_names() {
         let r = FakeRunner::new([ok("opv-other-s7aw2ylfpc\tother\n")]);
         assert!(with_store(&r, |s| s.list()).unwrap().is_empty());
+    }
+
+    // ConfigMap store (K3, delivery-transports §11.1) ---------------------------------
+
+    /// ConfigMap recordings (namespace `opv-rec`, env names `API__LOG_LEVEL` /
+    /// `API__OTEL_RESOURCE`).
+    const APPLY_CONFIGMAP_CREATED: &str = include_str!(
+        "../../../tests/fixtures/kubernetes/success/05-apply-configmap-created.stdout"
+    );
+    const APPLY_CONFIGMAP_SECOND: &str =
+        include_str!("../../../tests/fixtures/kubernetes/success/05-apply-configmap-second.stdout");
+    const GET_CONFIGMAP_VALUE: &str =
+        include_str!("../../../tests/fixtures/kubernetes/success/05-get-configmap-value.stdout");
+    const LIST_CONFIGMAPS: &str =
+        include_str!("../../../tests/fixtures/kubernetes/success/05-list-configmaps.stdout");
+    const DELETE_CONFIGMAP_ONE: &str =
+        include_str!("../../../tests/fixtures/kubernetes/success/17-delete-configmap-one.stdout");
+    const FORBIDDEN_APPLY_CONFIGMAP: &str = include_str!(
+        "../../../tests/fixtures/kubernetes/failures/08-forbidden-apply-configmap.stderr"
+    );
+    const FORBIDDEN_GET_CONFIGMAP: &str = include_str!(
+        "../../../tests/fixtures/kubernetes/failures/08-forbidden-get-configmap.stderr"
+    );
+
+    /// The recorded Deployment with the ConfigMap version `abcdefghij` bound to
+    /// `API__LOG_LEVEL`.
+    fn configmap_deployment() -> Output {
+        json(&deployment_with(|d| {
+            d["spec"]["template"]["spec"]["containers"][0]["env"][1] = json!({
+                "name": "API__LOG_LEVEL",
+                "valueFrom": {
+                    "configMapKeyRef": {"key": "value", "name": "opv-api--log-level-abcdefghij"},
+                },
+            });
+        }))
+    }
+
+    fn with_configmap_store<T>(r: &FakeRunner, f: impl FnOnce(&KubeSecrets) -> T) -> T {
+        let t = target();
+        f(&KubeSecrets::new(r, &t, managed())
+            .with_ids(fixed_id)
+            .with_kind(ObjectKind::ConfigMap))
+    }
+
+    /// The manifest a ConfigMap write sent (call 1: call 0 reads the Deployment).
+    fn written_configmap(value: &str) -> Value {
+        let r = FakeRunner::new([ok(DEPLOYMENT), ok(APPLY_CONFIGMAP_CREATED)]);
+        let _ = with_configmap_store(&r, |s| {
+            s.write_one("API__OTEL_RESOURCE", &sv(value), &stamp())
+        });
+        serde_json::from_str(&stdin_text(&r, 1)).unwrap()
+    }
+
+    #[test]
+    fn configmap_write_manifest_is_a_configmap() {
+        assert_eq!(written_configmap(MARK)["kind"], json!("ConfigMap"));
+    }
+
+    #[test]
+    fn configmap_write_manifest_has_no_type() {
+        assert!(written_configmap(MARK).get("type").is_none());
+    }
+
+    #[test]
+    fn configmap_write_holds_the_plain_value_not_base64() {
+        assert_eq!(written_configmap(MARK)["data"]["value"], json!(MARK));
+    }
+
+    #[test]
+    fn configmap_write_sends_the_value_on_stdin_only() {
+        let r = FakeRunner::new([ok(DEPLOYMENT), ok(APPLY_CONFIGMAP_CREATED)]);
+        let _ = with_configmap_store(&r, |s| {
+            s.write_one("API__OTEL_RESOURCE", &sv(MARK), &stamp())
+        });
+        assert!(!r.argv_contains(MARK) && stdin_text(&r, 1).contains(MARK));
+    }
+
+    #[test]
+    fn unchanged_configmap_value_writes_nothing() {
+        let r = FakeRunner::new([configmap_deployment(), ok(GET_CONFIGMAP_VALUE)]);
+        let _ = with_configmap_store(&r, |s| {
+            s.write_one("API__LOG_LEVEL", &sv("S7MARKER-log-level"), &stamp())
+        });
+        assert!(!all_argv(&r).contains("apply"));
+    }
+
+    #[test]
+    fn changed_configmap_value_writes_a_new_version() {
+        let r = FakeRunner::new([
+            configmap_deployment(),
+            ok(GET_CONFIGMAP_VALUE),
+            ok(APPLY_CONFIGMAP_SECOND),
+        ]);
+        let v = with_configmap_store(&r, |s| {
+            s.write_one("API__LOG_LEVEL", &sv("S7MARKER-log-level-2"), &stamp())
+        });
+        assert_eq!(v.unwrap(), ID);
+    }
+
+    #[test]
+    fn superseded_configmap_versions_are_deleted_with_delete_configmap() {
+        let r = FakeRunner::new([
+            ok(LIST_CONFIGMAPS),
+            ok(DEPLOYMENT),
+            ok(REPLICASETS),
+            ok(DELETE_CONFIGMAP_ONE),
+        ]);
+        let _ = with_configmap_store(&r, |s| s.delete_unreferenced("API__LOG_LEVEL", None));
+        assert!(all_argv(&r).contains("delete configmap"));
+    }
+
+    /// K3: on a `config = "configmap"` target a config key is read from the ConfigMap
+    /// store (only that store reads the Deployment).
+    #[test]
+    fn config_route_reads_a_config_key_from_the_configmap_store() {
+        let r = FakeRunner::new([configmap_deployment(), ok(GET_CONFIGMAP_VALUE)]);
+        let t = target();
+        let config = KubeSecrets::new(&r, &t, managed())
+            .with_ids(fixed_id)
+            .with_kind(ObjectKind::ConfigMap);
+        let names = BTreeSet::from(["API__LOG_LEVEL".to_string()]);
+        let store = KubeSecrets::new(&r, &t, managed()).with_config(config, names);
+        assert!(store.read("API__LOG_LEVEL").unwrap().is_some());
+    }
+
+    /// K3: on a `config = "configmap"` target a secret key nothing binds yet is still
+    /// written as a Secret, never a ConfigMap.
+    #[test]
+    fn config_route_writes_a_new_secret_key_as_a_secret() {
+        let r = FakeRunner::new([ok(DEPLOYMENT), ok("secret/x")]);
+        let t = target();
+        let config = KubeSecrets::new(&r, &t, managed())
+            .with_ids(fixed_id)
+            .with_kind(ObjectKind::ConfigMap);
+        let names = BTreeSet::from(["API__LOG_LEVEL".to_string()]);
+        let store = KubeSecrets::new(&r, &t, managed())
+            .with_ids(fixed_id)
+            .with_config(config, names);
+        let _ = store.write_one("NEW_KEY", &sv(MARK), &stamp());
+        let sent: Value = serde_json::from_str(&stdin_text(&r, 1)).unwrap();
+        assert_eq!(sent["kind"], json!("Secret"));
+    }
+
+    #[test]
+    fn forbidden_configmap_apply_is_a_permission_denied() {
+        let r = FakeRunner::default();
+        r.push_with_stderr(ok(DEPLOYMENT), "");
+        r.push_with_stderr(Output::failure(1), FORBIDDEN_APPLY_CONFIGMAP);
+        (0..crate::runner::READ_ATTEMPTS)
+            .for_each(|_| r.push_with_stderr(Output::failure(1), FORBIDDEN_GET_CONFIGMAP));
+        let e = with_configmap_store(&r, |s| s.write_one("API__LOG_LEVEL", &sv(MARK), &stamp()))
+            .unwrap_err();
+        assert_eq!(e.code_str(), "permission_denied");
     }
 }

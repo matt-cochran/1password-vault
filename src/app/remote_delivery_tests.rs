@@ -279,9 +279,12 @@ fn profile(fields: &str) -> String {
     )
 }
 
+fn base() -> String {
+    without_targets(&std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap())
+}
+
 fn loads(fields: &str) -> Result<crate::domain::Fleet, Error> {
-    let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
-    crate::config::parse(&format!("{text}\n{}", profile(fields)))
+    crate::config::parse(&format!("{}\n{}", base(), profile(fields)))
 }
 
 fn remote_fleet() -> crate::domain::Fleet {
@@ -312,24 +315,21 @@ fn a_profile_for_an_undeclared_role_is_refused() {
 fn a_host_that_looks_like_an_ssh_option_is_refused() {
     let text = profile("environments = [\"prod\"]")
         .replace("builder.example.internal", "-oProxyCommand=x");
-    let base = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
-    assert!(crate::config::parse(&format!("{base}\n{text}")).is_err());
+    assert!(crate::config::parse(&format!("{}\n{text}", base())).is_err());
 }
 
 #[test]
 fn a_host_key_with_a_host_name_is_refused() {
     let text =
         profile("environments = [\"prod\"]").replace(HOST_KEY, &format!("builder {HOST_KEY}"));
-    let base = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
-    assert!(crate::config::parse(&format!("{base}\n{text}")).is_err());
+    assert!(crate::config::parse(&format!("{}\n{text}", base())).is_err());
 }
 
 #[test]
 fn a_remote_opv_path_with_shell_characters_is_refused() {
     let text =
         profile("environments = [\"prod\"]").replace("/usr/local/bin/opv", "/usr/bin/opv;rm");
-    let base = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
-    assert!(crate::config::parse(&format!("{base}\n{text}")).is_err());
+    assert!(crate::config::parse(&format!("{}\n{text}", base())).is_err());
 }
 
 // --- opv run --remote -------------------------------------------------------------------
