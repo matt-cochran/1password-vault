@@ -10,7 +10,7 @@ use std::fmt;
 use crate::domain::model::{Fleet, KeySpec, Kind};
 use crate::domain::rules::{self, Reason};
 use crate::domain::secret::SecretValue;
-use crate::provider::Channel;
+use crate::provider::{Channel, FileCapability};
 
 /// One field of the 1Password item, as produced by the source adapter.
 /// `Debug` never prints the value.
@@ -332,7 +332,17 @@ pub fn build_with(
             )),
             _ if withheld_by_role => Ok(None),
             Some((kind, value)) if kind == spec.kind => {
-                rules::check(product, key, spec, env_name, env, value)
+                // A file key delivered as a file (no target or a Native target) is staged
+                // verbatim (M4, §4.5): the transform and the line-shape rules do not apply.
+                let verbatim = spec.file.is_some()
+                    && match opts.target {
+                        None => true,
+                        Some(t) => matches!(
+                            env.targets.get(t).map(|tt| tt.config.channels().files),
+                            Some(FileCapability::Native { .. })
+                        ),
+                    };
+                rules::check_verbatim(product, key, spec, env_name, env, value, verbatim)
                     .map_err(|e| KeyState::RuleFailed(e.rule, e.reason))
             }
             other => {
@@ -696,6 +706,216 @@ mod tests {
             &none,
         );
         assert!(p.stage.iter().any(|(name, _)| name == "K"));
+    }
+
+    /// A test-only target that mounts files (`FileCapability::Native`, M4). No adapter
+    /// returns it yet (Kubernetes gets it in K2), so the staging tests drive it directly.
+    #[derive(Debug, Clone)]
+    struct NativeTarget;
+
+    impl crate::provider::TargetConfig for NativeTarget {
+        fn provider(&self) -> &'static dyn crate::provider::Provider {
+            crate::adapters::registry::DEFAULT
+        }
+        fn env_name(&self, product: &str, key: &str) -> String {
+            format!("{}_{}", product.to_uppercase(), key)
+        }
+        fn target_locator(&self) -> String {
+            "native".into()
+        }
+        fn store_name(&self, env_name: &str) -> String {
+            env_name.into()
+        }
+        fn name_rules(&self) -> crate::provider::NameRules {
+            crate::provider::NameRules {
+                env_label: "env name",
+                store: None,
+            }
+        }
+        fn same_target(&self, other: &dyn crate::provider::TargetConfig) -> bool {
+            other.as_any().downcast_ref::<NativeTarget>().is_some()
+        }
+        fn shared_target_error(&self, first: &str, second: &str) -> String {
+            format!("{first} and {second} share a target")
+        }
+        fn channels(&self) -> crate::provider::Channels {
+            crate::provider::Channels {
+                secret: crate::provider::Channel::Store {
+                    label: "Kubernetes Secret",
+                },
+                config: crate::provider::Channel::RuntimeEnv,
+                files: crate::provider::FileCapability::Native {
+                    dir: "/etc/secrets",
+                },
+            }
+        }
+        fn open<'a>(
+            &'a self,
+            _env: &'a str,
+            _managed: BTreeSet<String>,
+            _files: &BTreeMap<String, crate::domain::runtime::FileMount>,
+            _r: &'a dyn crate::runner::CommandRunner,
+        ) -> Result<crate::ports::Ports<'a>, crate::error::Error> {
+            unimplemented!("the plan test never opens the target")
+        }
+        fn preflight(
+            &self,
+            _r: &dyn crate::runner::CommandRunner,
+            _mode: crate::provider::PreflightMode,
+        ) -> Result<crate::provider::Preflight, crate::error::Error> {
+            unimplemented!()
+        }
+        fn doctor(
+            &self,
+            _r: &dyn crate::runner::CommandRunner,
+            _host: &dyn Fn() -> crate::host::Host,
+        ) -> Vec<crate::provider::Check> {
+            Vec::new()
+        }
+        fn explain(&self, _product: &str, _key: &str) -> Vec<(&'static str, String)> {
+            Vec::new()
+        }
+        fn eq_dyn(&self, other: &dyn crate::provider::TargetConfig) -> bool {
+            other.as_any().downcast_ref::<NativeTarget>().is_some()
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn clone_box(&self) -> Box<dyn crate::provider::TargetConfig> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// A fleet with two file keys (one plain, one `pem_private_key`) and a Fly target; a
+    /// test-only `native` target is added so the Native file path can be exercised.
+    fn file_fleet() -> Fleet {
+        let mut fleet = config::parse(
+            "[environments.prod]\n\
+             boundaries.p = { vault_id = \"v\", item_id = \"i\" }\n\
+             [environments.prod.targets.fly]\n\
+             fly.app = \"app\"\n\
+             fly.secret_name = \"{KEY}\"\n\
+             state_vault_id = \"s\"\n\
+             [products.p.local]\n\
+             secrets_dir_env = \"P_SECRETS_DIR\"\n\
+             [products.p.keys.PRIVATE_KEY]\n\
+             kind = \"secret\"\n\
+             environments = [\"prod\"]\n\
+             file = \"github-app/private-key\"\n\
+             [products.p.keys.PRIVATE_KEY_T]\n\
+             kind = \"secret\"\n\
+             environments = [\"prod\"]\n\
+             file = \"github-app/private-key-t\"\n\
+             rules = { transform = \"pem_private_key\" }\n",
+        )
+        .unwrap();
+        let fly = fleet.environments["prod"].targets["fly"].clone();
+        fleet.environments.get_mut("prod").unwrap().targets.insert(
+            "native".into(),
+            crate::domain::model::Target {
+                name: "native".into(),
+                config: Box::new(NativeTarget),
+                ..fly
+            },
+        );
+        fleet
+    }
+
+    /// A multi-line PEM and its one-line form.
+    fn pem(label: &str) -> (String, String) {
+        let der: Vec<u8> = std::iter::once(0x30u8)
+            .chain((0..150u8).map(|i| i.wrapping_mul(7)))
+            .collect();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&der);
+        let lines: Vec<&str> = b64
+            .as_bytes()
+            .chunks(64)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect();
+        let multi = format!(
+            "-----BEGIN {label}-----\n{}\n-----END {label}-----\n",
+            lines.join("\n")
+        );
+        let single = format!("-----BEGIN {label}-----{b64}-----END {label}-----");
+        (multi, single)
+    }
+
+    /// `build_with` for one chosen target (or none).
+    fn plan_on(fleet: &Fleet, target: Option<&str>, item: Vec<ItemField>) -> SyncPlan {
+        let none = BTreeSet::new();
+        build_with(
+            fleet,
+            "prod",
+            item,
+            &[],
+            &PlanOptions {
+                target,
+                rotate: &none,
+                prune_immutable: &none,
+                digest: &|_| None,
+                target_check: &|_, _| None,
+                current: None,
+            },
+        )
+    }
+
+    /// M4 (§4.5): a multi-line PEM with a trailing newline in a file key passes check with
+    /// no target.
+    #[test]
+    fn a_multiline_pem_file_key_passes_check_without_a_target() {
+        let (multi, _) = pem("RSA PRIVATE KEY");
+        let p = plan_on(
+            &file_fleet(),
+            None,
+            vec![secret("p", "PRIVATE_KEY", &multi)],
+        );
+        assert_eq!(row(&p, "PRIVATE_KEY").state, KeyState::Ready);
+    }
+
+    /// M4 (§4.5): the same key stages its exact bytes to a Native target.
+    #[test]
+    fn a_multiline_pem_file_key_stages_verbatim_to_a_native_target() {
+        let (multi, _) = pem("RSA PRIVATE KEY");
+        let p = plan_on(
+            &file_fleet(),
+            Some("native"),
+            vec![secret("p", "PRIVATE_KEY", &multi)],
+        );
+        assert_eq!(
+            p.stage.first().map(|(_, v)| v.expose()),
+            Some(multi.as_str())
+        );
+    }
+
+    /// M4 (§4.5): on Fly (a `ViaApp` target) the same key without a transform reports
+    /// `single_line` rather than changing the value.
+    #[test]
+    fn on_fly_a_file_key_without_a_transform_fails_single_line() {
+        let (multi, _) = pem("RSA PRIVATE KEY");
+        let p = plan_on(
+            &file_fleet(),
+            Some("fly"),
+            vec![secret("p", "PRIVATE_KEY", &multi)],
+        );
+        assert!(matches!(
+            row(&p, "PRIVATE_KEY").state,
+            KeyState::RuleFailed("single_line", _)
+        ));
+    }
+
+    /// M4 (§4.5): with `transform = "pem_private_key"` on Fly, the one-line form stages.
+    #[test]
+    fn on_fly_a_file_key_with_pem_private_key_stages_the_one_line_form() {
+        let (multi, single) = pem("RSA PRIVATE KEY");
+        let p = plan_on(
+            &file_fleet(),
+            Some("fly"),
+            vec![secret("p", "PRIVATE_KEY_T", &multi)],
+        );
+        assert_eq!(
+            p.stage.first().map(|(_, v)| v.expose()),
+            Some(single.as_str())
+        );
     }
 
     #[test]

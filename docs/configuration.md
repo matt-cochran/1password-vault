@@ -664,6 +664,8 @@ Rules go in a key's `rules = { ... }` table. A failure names the key, the rule a
 
 Always on, for every key (after a `pem_private_key` transform, see below): `nonempty`; `single_line` (no `\n`, `\r` or NUL); `no_surrounding_space`; `max_len` (59,000 bytes).
 
+One exception: a key with `file = "<relative/path>"` delivered to a target that writes files to a filesystem the app reads is staged and delivered **verbatim**, so `single_line`, `no_surrounding_space` and `ensure_prefix` are skipped and the stored bytes are kept exactly (a PEM's trailing newline included); `nonempty`, `max_len` and the declared rules still apply. A declared `transform` runs first, so a `pem_private_key` file key is still delivered as one line. On a target without such a file channel the key is delivered as a variable, and the always-on rules apply as usual.
+
 | Rule | Meaning |
 |---|---|
 | `prefix = "sk-"` | value starts with the prefix |

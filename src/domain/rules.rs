@@ -264,6 +264,23 @@ pub fn check(
     env: &Environment,
     value: &SecretValue,
 ) -> Result<Option<SecretValue>, RuleFailure> {
+    check_verbatim(product, key, spec, env_name, env, value, false)
+}
+
+/// [`check`] with `verbatim` (M4, §4.5): a file key delivered as a file skips the transform,
+/// the line-shape rules and `ensure_prefix`, and stages the stored bytes unchanged. The
+/// other rule sets keep applying. Every caller that is not a file key delivered as a file
+/// passes false.
+#[allow(clippy::too_many_arguments)]
+pub fn check_verbatim(
+    product: &str,
+    key: &str,
+    spec: &KeySpec,
+    env_name: &str,
+    env: &Environment,
+    value: &SecretValue,
+    verbatim: bool,
+) -> Result<Option<SecretValue>, RuleFailure> {
     let fail_with = |rule: &'static str, reason: Reason| RuleFailure {
         key: key.to_string(),
         rule,
@@ -289,16 +306,24 @@ pub fn check(
     // A PEM private key is multi-line in 1Password (a concealed field holds it as pasted or
     // as the downloaded `.pem`). Normalise it to one line *before* the always-on rules so the
     // single-line Fly import format can carry it; every later rule sees the normalised value.
-    let pem: Option<Zeroizing<String>> = match r.transform.as_deref() {
-        Some(PEM_PRIVATE_KEY) => Some(pem_private_key(v).map_err(|why| fail("transform", why))?),
-        _ => None,
+    let pem: Option<Zeroizing<String>> = if verbatim {
+        None
+    } else {
+        match r.transform.as_deref() {
+            Some(PEM_PRIVATE_KEY) => {
+                Some(pem_private_key(v).map_err(|why| fail("transform", why))?)
+            }
+            _ => None,
+        }
     };
     let v: &str = pem.as_deref().map_or(v, String::as_str);
-    if v.contains(['\n', '\r', '\0']) {
-        return Err(fail("single_line", REASON_MULTILINE));
-    }
-    if v.trim() != v {
-        return Err(fail("no_surrounding_space", REASON_SURROUNDING_SPACE));
+    if !verbatim {
+        if v.contains(['\n', '\r', '\0']) {
+            return Err(fail("single_line", REASON_MULTILINE));
+        }
+        if v.trim() != v {
+            return Err(fail("no_surrounding_space", REASON_SURROUNDING_SPACE));
+        }
     }
     if v.len() > MAX_LEN {
         return Err(fail("max_len", REASON_TOO_LONG));
@@ -328,6 +353,9 @@ pub fn check(
         if let Some(why) = why {
             return Err(fail_with("prefix_by_mode", why));
         }
+    }
+    if verbatim {
+        return Ok(Some(SecretValue::new(v.to_string())));
     }
     if let Some(pat) = &r.regex {
         // FR-24 (0.6.0): `regex` checks the value as staged, after `ensure_prefix`

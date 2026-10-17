@@ -2251,6 +2251,11 @@ pub fn plan_rotating(
             )
             .map_err(write_err)?;
         }
+        for line in
+            super::file_destination_lines(fleet, env_name, &p.name, &p.t.channels(), &p.plan)
+        {
+            writeln!(out, "{line}").map_err(write_err)?;
+        }
     }
     for p in &parts {
         let mut out = Prefixed::new(out, format!("{}: ", placement(env_name, &p.name)));
@@ -2273,6 +2278,7 @@ pub fn plan_rotating(
 struct PlanPart<'f> {
     name: String,
     t: &'f dyn TargetConfig,
+    fleet: &'f Fleet,
     plan: SyncPlan,
     item_version: Option<u64>,
     /// The target applies writes at once (FR-46).
@@ -2307,7 +2313,12 @@ impl PlanPart<'_> {
                 .any(|(p, k)| *p == row.product && *k == row.key);
             target_word(row, held, None)
         };
-        target_cell(row, word, &self.t.channels())
+        let spec = self
+            .fleet
+            .products
+            .get(&row.product)
+            .and_then(|p| p.keys.get(&row.key));
+        target_cell(row, word, &self.t.channels(), spec)
     }
 
     /// `prod/web: 4 keys · 0 findings · 1 to stage · …` (NR-16).
@@ -2449,6 +2460,7 @@ fn plan_part<'f>(
     Ok(PlanPart {
         name: name.to_string(),
         t,
+        fleet,
         unmanaged: unmanaged_on_target(fleet, env_name, name, &on_target)?.len(),
         plan,
         item_version,

@@ -174,7 +174,7 @@ pub fn run_targeted(
     }
     // Extras are about the 1Password item, the same for every target.
     print_extras(out, &parts[0].plan)?;
-    print_no_channel(out, env_name, &parts)?;
+    print_no_channel(out, env_name, fleet, &parts)?;
     print_concealed_config(out, &parts)?;
     let several = fleet
         .environments
@@ -229,6 +229,7 @@ fn drift_error(parts: &[StatusPart<'_>], env_name: &str, fail_on_drift: bool) ->
 struct StatusPart<'f> {
     name: String,
     t: &'f dyn TargetConfig,
+    fleet: &'f Fleet,
     plan: SyncPlan,
     listed: Vec<StoreEntry>,
     pinned: Option<PinnedStatus>,
@@ -246,7 +247,17 @@ impl StatusPart<'_> {
             .held_immutable
             .iter()
             .any(|(p, k)| *p == row.product && *k == row.key);
-        target_cell(row, target_word(row, held, binding), &self.t.channels())
+        let spec = self
+            .fleet
+            .products
+            .get(&row.product)
+            .and_then(|p| p.keys.get(&row.key));
+        target_cell(
+            row,
+            target_word(row, held, binding),
+            &self.t.channels(),
+            spec,
+        )
     }
 
     /// FR-42: the latest provenance stamp opv left on the target (pinned targets only).
@@ -294,6 +305,7 @@ fn status_part<'f>(
     Ok(StatusPart {
         name: name.to_string(),
         t,
+        fleet,
         live: super::live_writes(&ports),
         plan,
         listed,
@@ -307,6 +319,7 @@ fn status_part<'f>(
 fn print_no_channel(
     out: &mut dyn Write,
     env_name: &str,
+    fleet: &Fleet,
     parts: &[StatusPart<'_>],
 ) -> Result<(), Error> {
     for p in parts {
@@ -319,6 +332,11 @@ fn print_no_channel(
                 k.why
             )
             .map_err(write_err)?;
+        }
+        for line in
+            crate::app::file_destination_lines(fleet, env_name, &p.name, &p.t.channels(), &p.plan)
+        {
+            writeln!(out, "{line}").map_err(write_err)?;
         }
     }
     Ok(())

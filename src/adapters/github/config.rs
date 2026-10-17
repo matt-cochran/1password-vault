@@ -316,6 +316,7 @@ impl TargetConfig for GithubTarget {
         &'a self,
         _env: &'a str,
         _managed: BTreeSet<String>,
+        _files: &BTreeMap<String, crate::domain::runtime::FileMount>,
         r: &'a dyn CommandRunner,
     ) -> Result<Ports<'a>, Error> {
         let gh = || super::Github {

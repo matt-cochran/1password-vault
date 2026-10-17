@@ -103,12 +103,12 @@ use std::io::{self, Write};
 use crate::adapters::onepassword;
 use crate::domain::plan;
 use crate::domain::{
-    Environment, Fleet, KeyState, Kind, Row, SecretValue, StoreEntry, SyncPlan, TargetState,
-    key_label,
+    Environment, Fleet, KeySpec, KeyState, Kind, Row, SecretValue, StoreEntry, SyncPlan,
+    TargetState, key_label,
 };
 use crate::error::Error;
 use crate::ports::{PinnedStore, Ports, Store};
-use crate::provider::{Channels, TargetConfig};
+use crate::provider::{Channels, FileCapability, TargetConfig};
 use crate::runner::CommandRunner;
 
 /// Store digests are not computable locally (D0 Q4, ruling P1): every key present on the
@@ -229,6 +229,21 @@ pub(crate) fn plan_id_of(
         let t = fleet.environments.get(env_name)?.targets.get(target)?;
         Some(t.config.env_name(p, k))
     };
+    // The route each name takes (M4, §4.3): a file key on a Native target is
+    // `file:<path>`; every other key is on its kind's channel.
+    let routes = |p: &str, k: &str| -> Option<String> {
+        let t = fleet.environments.get(env_name)?.targets.get(target)?;
+        let spec = fleet.products.get(p)?.keys.get(k)?;
+        if let Some(path) = &spec.file
+            && matches!(t.config.channels().files, FileCapability::Native { .. })
+        {
+            return Some(format!("file:{path}"));
+        }
+        Some(match spec.kind {
+            Kind::Secret => "secret".to_string(),
+            Kind::Config => "config".to_string(),
+        })
+    };
     crate::domain::provenance::plan_id(
         &crate::domain::provenance::PlanIdInput {
             env: env_name,
@@ -238,6 +253,7 @@ pub(crate) fn plan_id_of(
             version_ids: matches!(ports, Ports::Pinned { .. }),
             rotate,
             name_of: &name_of,
+            routes: &routes,
             own_plan,
         },
         plan,
@@ -519,7 +535,7 @@ pub(crate) fn write_json(
         let on = env.targets.get(part.target);
         let name_of = |p: &str, k: &str| on.map(|t| t.config.env_name(p, k));
         let channels = on.map(|t| t.config.channels());
-        let part_rows = json_rows(part, &name_of, extra.link, channels.as_ref());
+        let part_rows = json_rows(fleet, part, &name_of, extra.link, channels.as_ref());
         changed = match (changed, changes(plan, &part_rows, part.pinned)) {
             ("some", _) | (_, "some") => "some",
             ("unknown", _) | (_, "unknown") => "unknown",
@@ -602,6 +618,7 @@ pub(crate) fn write_json(
 
 /// The JSON rows of one target's part, each naming the target (FR-56).
 fn json_rows(
+    fleet: &Fleet,
     part: &JsonPart<'_>,
     name_of: &dyn Fn(&str, &str) -> Option<String>,
     link: Option<&str>,
@@ -650,19 +667,53 @@ fn json_rows(
                 .as_deref()
                 .and_then(|n| part.pinned.and_then(|m| m.get(n)));
             let rotate = part.rotate.is_some_and(|s| rotated(s, r));
-            let (via, delivered_as) = match channels {
-                Some(ch) => {
-                    let channel = match r.kind {
-                        Kind::Config => &ch.config,
-                        Kind::Secret => &ch.secret,
-                    };
-                    match channel.label() {
-                        Some(label) => (Some(label), Some("env")),
-                        None => (None, None),
+            // A file key names how it arrives (M4, §4.5): the exact bytes on a Native
+            // target, the transform's one-line form (or the plain env value) elsewhere.
+            let spec = fleet
+                .products
+                .get(&r.product)
+                .and_then(|p| p.keys.get(&r.key));
+            let native =
+                channels.is_some_and(|ch| matches!(ch.files, FileCapability::Native { .. }));
+            let (via, delivered_as, form, path) =
+                if let Some(file) = spec.and_then(|s| s.file.as_deref()) {
+                    let label = channels.and_then(|ch| {
+                        let channel = match r.kind {
+                            Kind::Config => &ch.config,
+                            Kind::Secret => &ch.secret,
+                        };
+                        channel.label()
+                    });
+                    if native {
+                        (
+                            label,
+                            Some("file"),
+                            Some("verbatim".to_string()),
+                            Some(file.to_string()),
+                        )
+                    } else {
+                        (
+                            label,
+                            Some("env"),
+                            spec.and_then(|s| s.rules.transform.clone()),
+                            None,
+                        )
                     }
-                }
-                None => (None, None),
-            };
+                } else {
+                    match channels {
+                        Some(ch) => {
+                            let channel = match r.kind {
+                                Kind::Config => &ch.config,
+                                Kind::Secret => &ch.secret,
+                            };
+                            match channel.label() {
+                                Some(label) => (Some(label), Some("env"), None, None),
+                                None => (None, None, None, None),
+                            }
+                        }
+                        None => (None, None, None, None),
+                    }
+                };
             JsonRow {
                 binding: bound.map(|b| b.binding),
                 pending_deploy: bound.map(|b| b.pending_deploy),
@@ -673,6 +724,8 @@ fn json_rows(
                 rotate,
                 via,
                 delivered_as,
+                form,
+                path,
                 ..JsonRow::new(r, target_name, json_target(r.kind, r.target), action)
             }
         })
@@ -767,13 +820,14 @@ pub(crate) struct JsonRow {
     /// channel delivers; left out otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     via: Option<&'static str>,
-    /// How the value reaches the app when `via` is known (`env`); left out otherwise.
+    /// How the value reaches the app (`env` / `file`); left out otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     delivered_as: Option<&'static str>,
-    /// The file transform's name (M4/M5); reserved, always absent in M2.
+    /// The file transform's name (`verbatim` for a file on a Native target, the declared
+    /// transform's name when one applies); absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
-    form: Option<&'static str>,
-    /// The file's path on the target (M4/M5); reserved, always absent in M2.
+    form: Option<String>,
+    /// The file's path on the target (M4); absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<String>,
     state: &'static str,
@@ -1051,16 +1105,72 @@ pub(crate) fn target_word(r: &Row, held: bool, binding: Option<&PinnedRow>) -> &
 /// The ON TARGET cell of `r`, naming its channel (design §1.3, FM-02): a config row reads
 /// `<word>, via <label>` (or `via <label>` when the word is `n/a`), or
 /// `not delivered (no config channel)` when the target's config channel delivers nothing.
-/// A secret row keeps its word.
-pub(crate) fn target_cell(r: &Row, word: &str, channels: &Channels) -> String {
-    if r.kind != Kind::Config {
-        return word.to_string();
-    }
-    match channels.config.label() {
-        Some(label) if word == "n/a" => format!("via {label}"),
-        Some(label) => format!("{word}, via {label}"),
-        None => "not delivered (no config channel)".to_string(),
-    }
+/// A file key then names its form (M4, §4.5): `file (verbatim)` on a Native target, or
+/// `env (<transform>)`/`env`. A secret row otherwise keeps its word.
+pub(crate) fn target_cell(
+    r: &Row,
+    word: &str,
+    channels: &Channels,
+    spec: Option<&KeySpec>,
+) -> String {
+    let word = if r.kind != Kind::Config {
+        word.to_string()
+    } else {
+        match channels.config.label() {
+            Some(label) if word == "n/a" => format!("via {label}"),
+            Some(label) => format!("{word}, via {label}"),
+            None => "not delivered (no config channel)".to_string(),
+        }
+    };
+    let Some(_) = spec.and_then(|s| s.file.as_deref()) else {
+        return word;
+    };
+    let form = match channels.files {
+        FileCapability::Native { .. } => "file (verbatim)".to_string(),
+        _ => match spec.and_then(|s| s.rules.transform.as_deref()) {
+            Some(t) => format!("env ({t})"),
+            None => "env".to_string(),
+        },
+    };
+    format!("{word} · {form}")
+}
+
+/// File-key destination lines for one target (design §1.3, M4): a `warning` for a target
+/// that does not honour file destinations, a `note` for one where the app writes the
+/// files from the environment. One per file key of the plan, in row order.
+pub(crate) fn file_destination_lines(
+    fleet: &Fleet,
+    env_name: &str,
+    target: &str,
+    channels: &Channels,
+    plan: &SyncPlan,
+) -> Vec<String> {
+    plan.rows
+        .iter()
+        .filter(|r| {
+            fleet
+                .products
+                .get(&r.product)
+                .and_then(|p| p.keys.get(&r.key))
+                .is_some_and(|s| s.file.is_some())
+        })
+        .map(|r| match channels.files {
+            FileCapability::Native { .. } => String::new(),
+            FileCapability::ViaApp { note } => format!(
+                "{}: note: {} file via the app ({})",
+                placement(env_name, target),
+                key_label(&r.product, &r.key),
+                note
+            ),
+            FileCapability::None => format!(
+                "{}: warning: {} file destination not honoured on {}",
+                placement(env_name, target),
+                key_label(&r.product, &r.key),
+                target
+            ),
+        })
+        .filter(|l| !l.is_empty())
+        .collect()
 }
 
 /// The source and target words and what each means, one line per word (`opv help states`,
@@ -1770,7 +1880,8 @@ pub(crate) fn open_target<'a>(
 ) -> Result<(&'a dyn TargetConfig, Ports<'a>), Error> {
     let (_, t) = target(fleet, env_name, name)?;
     let managed = managed_names(fleet, env_name, name)?.into_iter().collect();
-    Ok((t, t.open(env_name, managed, r)?))
+    let files = file_mounts(fleet, env_name, name)?;
+    Ok((t, t.open(env_name, managed, &files, r)?))
 }
 
 /// Every name target `name` renders for a declared key of a product it delivers: its
@@ -1787,6 +1898,47 @@ pub(crate) fn managed_names(
         .filter(|(p, _)| fleet.delivers(env_name, name, p))
         .flat_map(|(p, prod)| prod.keys.keys().map(move |k| t.env_name(p, k)))
         .collect())
+}
+
+/// Every file key target `name` of `env_name` delivers, by rendered name (M4, §4.2): the
+/// [`FileMount`](crate::domain::runtime::FileMount) of each key with a `file`, respecting
+/// the target's roles and the key's environment and mode exactly as a delivery does.
+/// Names only.
+pub(crate) fn file_mounts(
+    fleet: &Fleet,
+    env_name: &str,
+    name: &str,
+) -> Result<BTreeMap<String, crate::domain::runtime::FileMount>, Error> {
+    let (_, t) = target(fleet, env_name, name)?;
+    let env = fleet.environment(env_name)?;
+    let served = env.targets.get(name).and_then(|t| t.roles.as_deref());
+    let mut out = BTreeMap::new();
+    for (p, prod) in &fleet.products {
+        if !fleet.delivers(env_name, name, p) {
+            continue;
+        }
+        for (k, s) in &prod.keys {
+            let Some(path) = s.file.as_deref() else {
+                continue;
+            };
+            if !crate::domain::rules::applies(s, env_name, env, p) {
+                continue;
+            }
+            if let (Some(roles), Some(served)) = (&s.roles, served)
+                && !roles.iter().any(|r| served.contains(r))
+            {
+                continue;
+            }
+            out.insert(
+                t.env_name(p, k),
+                crate::domain::runtime::FileMount {
+                    product: p.clone(),
+                    path: path.to_string(),
+                },
+            );
+        }
+    }
+    Ok(out)
 }
 
 /// Names on the target that the template does not render for any declared key: other
