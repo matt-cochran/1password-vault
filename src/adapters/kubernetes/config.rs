@@ -47,7 +47,7 @@ const CHECKS: [&str; 4] = [
 const INIT_FLEET_TEMPLATE: &str = "FLEET__{PRODUCT}__{KEY}";
 
 /// `opv target add` options of the Kubernetes provider (H3), in the order they are written.
-static INIT_FIELDS: [InitField; 6] = [
+static INIT_FIELDS: [InitField; 7] = [
     InitField {
         field: "context",
         help: "kubeconfig context (kubectl config get-contexts -o name)",
@@ -76,6 +76,11 @@ static INIT_FIELDS: [InitField; 6] = [
     InitField {
         field: "config",
         help: "Where config keys go: env, store or configmap (default for new targets)",
+        required: false,
+    },
+    InitField {
+        field: "secrets_dir",
+        help: "Directory file keys are mounted in, e.g. /run/secrets/{product} (optional)",
         required: false,
     },
 ];

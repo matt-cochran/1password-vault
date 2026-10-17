@@ -49,6 +49,9 @@ pub struct AddArgs {
     pub fields: BTreeMap<String, String>,
     /// `--products <p>[,<p>…]`: the products it delivers; empty means every product.
     pub products: Vec<String>,
+    /// `--role <name>` (repeatable): the process roles it delivers, written as the target's
+    /// `roles` (delivery-transports §4.4); names only. Empty: no `roles` line.
+    pub roles: Vec<String>,
     /// `--deploy-credentials op://<vault>/<item>` (FR-40).
     pub deploy_credentials: Option<String>,
     /// `--project <name>`: the project naming the state vault; default: the repository's.
@@ -174,6 +177,7 @@ fn add_inner(
             &args.name,
             &section,
             &products,
+            &args.roles,
             args.deploy_credentials.as_deref(),
             Some(state_vault_id),
             items,
@@ -354,12 +358,15 @@ pub(crate) fn checked_products(fleet: &Fleet, given: &[String]) -> Result<Vec<St
 }
 
 /// The fragment inserting one target under `[environments.<env>.targets.<name>]`: the
-/// provider's section, `products`, `deploy_credentials` and `state_vault_id`, in that order.
+/// provider's section, `products`, `roles`, `deploy_credentials` and `state_vault_id`, in
+/// that order. `roles` are written as given, duplicates dropped; the loader checks them.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn target_table(
     env: &str,
     name: &str,
     section: &str,
     products: &[String],
+    roles: &[String],
     deploy: Option<&str>,
     state_vault_id: Option<&str>,
     items: &[(String, String)],
@@ -372,6 +379,16 @@ pub(crate) fn target_table(
             .map(|p| toml::Value::String(p.clone()).to_string())
             .collect();
         s.push_str(&format!("products = [{}]\n", list.join(", ")));
+    }
+    if !roles.is_empty() {
+        let mut list: Vec<String> = Vec::new();
+        for r in roles {
+            let quoted = toml::Value::String(r.clone()).to_string();
+            if !list.contains(&quoted) {
+                list.push(quoted);
+            }
+        }
+        s.push_str(&format!("roles = [{}]\n", list.join(", ")));
     }
     if let Some(d) = deploy {
         s.push_str(&format!(

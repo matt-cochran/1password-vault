@@ -408,11 +408,8 @@ Examples:
   opv target add staging site --fly-app site-staging --dry-run";
 
 const TARGET_ADD_MORE: &str = "\
-Declares one named deployment target under [environments.<env>.targets.<name>]: the
-provider's options (listed above), the products it delivers and its deploy identity.
-In the same step it finds or creates the state vault <project>-<env>-<target>-state
-and records its ID. The edit keeps comments, validates
-the whole configuration first and refuses a concurrent change; --dry-run changes nothing.";
+Writes [environments.<env>.targets.<name>] and finds or creates its state vault
+<project>-<env>-<target>-state; keeps comments, validates first, refuses a concurrent change.";
 
 const TARGET_LIST_QUICK: &str = "\
 Examples:
@@ -1439,6 +1436,10 @@ enum TargetCmd {
         /// non-source-only product.
         #[arg(long, value_delimiter = ',')]
         products: Vec<String>,
+        /// A process role this target delivers (repeat or comma-separate), written as its
+        /// `roles`; required when a delivered product's keys declare roles. Names only.
+        #[arg(long = "role", value_name = "ROLE", value_delimiter = ',')]
+        roles: Vec<String>,
         /// The item holding this target's least-privilege deploy identity
         /// (op://<vault>/<item>).
         #[arg(long, value_name = "OP_REF")]
@@ -4020,6 +4021,7 @@ fn run_edit(
             name,
             provider,
             products,
+            roles,
             deploy_credentials,
             project,
             dry_run,
@@ -4031,6 +4033,7 @@ fn run_edit(
                 provider,
                 fields: target_options.clone(),
                 products,
+                roles,
                 deploy_credentials,
                 project,
                 dry_run,
