@@ -414,6 +414,30 @@ fn a_new_key_changes_the_binding_set() {
 }
 
 #[test]
+fn the_binding_set_of_a_secrets_fly_target_includes_its_config_keys() {
+    let fleet = crate::config::parse(
+        "[environments.prod]\n\
+         boundaries.p = { vault_id = \"v\", item_id = \"i\" }\n\
+         [environments.prod.targets.app]\n\
+         state_vault_id = \"s\"\n\
+         fly.app = \"myapp\"\n\
+         fly.secret_name = \"FLEET__{PRODUCT}__{KEY}\"\n\
+         fly.config = \"secrets\"\n\
+         delivery_items = { p = \"di\" }\n\
+         [products.p.keys.SIGNUP_POLICY]\n\
+         kind = \"config\"\n\
+         environments = [\"prod\"]\n",
+    )
+    .unwrap();
+    let names: Vec<String> = bindings(&fleet, "prod", "app", "p")
+        .unwrap()
+        .into_iter()
+        .map(|b| b.name)
+        .collect();
+    assert_eq!(names, vec!["FLEET__P__SIGNUP_POLICY".to_string()]);
+}
+
+#[test]
 fn another_app_cannot_reuse_the_revision() {
     let (w, fleet) = delivered();
     let mut moved = fleet.clone();

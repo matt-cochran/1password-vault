@@ -336,7 +336,7 @@ How the values travel depends on the field kind:
 
 - A **secret** (concealed field) is stored in the target's secret store and bound to the app as a reference to one exact version.
 - **Config** (text field) is set as a plain environment variable on the app. Set `config = "store"` to keep config in the store too. There is no way to put a secret in a plain variable.
-- On Fly, config is not synced; deployment tooling reads it with `opv config export <env> --json`.
+- On Fly, config is synced only when `fly.config = "secrets"`; otherwise deployment tooling reads it with `opv config export <env> --json`.
 - On GitHub Actions, secrets become Actions **secrets** and config becomes Actions **variables**.
 
 ### Fly
@@ -345,9 +345,12 @@ How the values travel depends on the field kind:
 [environments.prod.targets.shared]
 fly.app  = "myapp-production"                  # required; passed as --app on every flyctl call
 fly.secret_name = "FLEET__{PRODUCT}__{KEY}"    # optional; defines target names; one product may use "{KEY}"
+fly.config = "secrets"                         # optional: secrets (store config too) or none
 deploy_credentials = "op://infra-prod/fly-deploy"
 state_vault_id = "vprd-state"
 ```
+
+`fly.config` decides what happens to config (text) keys. `secrets` stages them in Fly secrets under the same name template and deploys them exactly like secrets (`flyctl secrets import --stage`, values on stdin, compared by digest). `none` says the target deliberately carries no config, and each run warns `not delivered (no config channel: fly.config = none)`. Unset warns `not delivered (no config channel: set fly.config)` in 0.11.0 and will be refused from 0.12.0. Config stays config: the app sees it as an environment variable at boot, plan rows show it `via Fly secret`, and anything sensitive must be `kind = "secret"`.
 
 Secrets are staged with `flyctl secrets import --stage` (values on stdin) and deployed with `flyctl secrets deploy` only under `sync --deploy`. Fly does not reveal stored values, so opv compares digests after staging ([change detection](usage.md#change-detection-on-fly)). With one product, `secret_name = "{KEY}"` delivers bare names, and two targets may not share an app within one environment. `deploy_credentials` can hold a `FLY_API_TOKEN` for the app ([above](#account-and-deploy-credentials)).
 

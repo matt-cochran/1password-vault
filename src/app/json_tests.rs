@@ -143,6 +143,33 @@ fn plan_success() {
     golden("plan_success", &plan_json(complete_item()));
 }
 
+/// The fixture fleet with `fly.config = "secrets"` on its prod Fly target.
+fn config_secrets_fleet() -> crate::domain::Fleet {
+    let text = std::fs::read_to_string("tests/fixtures/secrets.toml")
+        .unwrap()
+        .replace(
+            "fly.secret_name = \"FLEET__{PRODUCT}__{KEY}\"\nstate_vault_id = \"sprd\"",
+            "fly.secret_name = \"FLEET__{PRODUCT}__{KEY}\"\nfly.config = \"secrets\"\nstate_vault_id = \"sprd\"",
+        );
+    crate::config::parse(&text).unwrap()
+}
+
+#[test]
+fn a_config_row_on_a_secrets_fly_target_reports_via_fly_secret() {
+    let fleet = config_secrets_fleet();
+    let r = FakeRunner::new([complete_item(), fly(&[(OPENAI_FLY, "d1")])]);
+    let mut out = Vec::new();
+    let _ = sync::plan_scoped(&fleet, "prod", None, &r, &mut out, true);
+    let doc: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let row = doc["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["key"] == "SIGNUP_POLICY")
+        .unwrap();
+    assert_eq!(row["via"], serde_json::json!("Fly secret"));
+}
+
 #[test]
 fn plan_findings() {
     golden(
