@@ -289,6 +289,13 @@ pub fn build_with(
         tidy_error: None,
     };
 
+    // Target-level roles (M3, §4.4): a key whose `roles` miss the target's is not desired
+    // here, exactly like a key the target's rules do not select: it is pruned, not staged.
+    let target_roles: Option<&[String]> = opts
+        .target
+        .and_then(|t| env.targets.get(t))
+        .and_then(|t| t.roles.as_deref());
+
     // `Ok(None)` means the key is not desired here. `refuse_in` is checked first and
     // whatever the field's kind: a non-empty field in a refused environment blocks even
     // though the key is not otherwise desired there (FR-15). `rules::applies` is evaluated
@@ -300,11 +307,15 @@ pub fn build_with(
      -> Result<Option<SecretValue>, KeyState> {
         let refused =
             rules::refused_in(spec, env_name) && field.is_some_and(|(_, v)| !v.expose().is_empty());
+        let withheld_by_role = spec.roles.as_deref().is_some_and(|roles| {
+            target_roles.is_some_and(|served| !roles.iter().any(|r| served.contains(r)))
+        });
         match field {
             _ if refused => Err(KeyState::RuleFailed(
                 "refuse_in",
                 Reason::Fixed(rules::REASON_REFUSED),
             )),
+            _ if withheld_by_role => Ok(None),
             Some((kind, value)) if kind == spec.kind => {
                 rules::check(product, key, spec, env_name, env, value)
                     .map_err(|e| KeyState::RuleFailed(e.rule, e.reason))
@@ -564,6 +575,84 @@ mod tests {
         vec![secret("allumata", "INTEGRATION_ENC_KEY", &b64_32())]
     }
     const ENC: &str = "FLEET__ALLUMATA__INTEGRATION_ENC_KEY";
+
+    /// A one-product fleet (M3): the prod target `t` and key `K` are given `target_roles` /
+    /// `key_roles` in code, and `SERVE_KEY` declares `serve` so the target's own roles always
+    /// have a declaring key. The base document carries no roles, so the load cannot fail on a
+    /// role rule and the test drives `build`'s role filtering alone.
+    fn role_fleet(target_roles: &[&str], key_roles: &[&str]) -> Fleet {
+        let mut fleet = config::parse(
+            "[environments.prod]\n\
+             boundaries.p = { vault_id = \"v\", item_id = \"i\" }\n\
+             [environments.prod.targets.t]\n\
+             fly.app = \"app\"\n\
+             fly.secret_name = \"{KEY}\"\n\
+             state_vault_id = \"s\"\n\
+             [products.p.keys.K]\n\
+             kind = \"secret\"\n\
+             environments = [\"prod\"]\n\
+             [products.p.keys.SERVE_KEY]\n\
+             kind = \"secret\"\n\
+             environments = [\"prod\"]\n",
+        )
+        .unwrap();
+        let roles = |r: &[&str]| -> Option<Vec<String>> {
+            Some(r.iter().map(|s| (*s).to_string()).collect())
+        };
+        fleet
+            .environments
+            .get_mut("prod")
+            .unwrap()
+            .targets
+            .get_mut("t")
+            .unwrap()
+            .roles = roles(target_roles);
+        fleet
+            .products
+            .get_mut("p")
+            .unwrap()
+            .keys
+            .get_mut("K")
+            .unwrap()
+            .roles = roles(key_roles);
+        fleet
+            .products
+            .get_mut("p")
+            .unwrap()
+            .keys
+            .get_mut("SERVE_KEY")
+            .unwrap()
+            .roles = roles(&["serve"]);
+        fleet
+    }
+
+    #[test]
+    fn a_key_whose_roles_miss_the_targets_roles_is_pruned() {
+        let fleet = role_fleet(&["serve"], &["migrate"]);
+        let p = build(
+            &fleet,
+            "prod",
+            vec![secret("p", "K", "sk-1")],
+            &[fly_secret("K", None)],
+            &no_rotate(),
+            &none,
+        );
+        assert_eq!(p.prune, vec!["K".to_string()]);
+    }
+
+    #[test]
+    fn a_key_whose_roles_meet_the_targets_roles_is_staged() {
+        let fleet = role_fleet(&["serve"], &["serve"]);
+        let p = build(
+            &fleet,
+            "prod",
+            vec![secret("p", "K", "sk-1")],
+            &[],
+            &no_rotate(),
+            &none,
+        );
+        assert!(p.stage.iter().any(|(name, _)| name == "K"));
+    }
 
     #[test]
     fn missing_section_reports_every_key_missing() {
@@ -1085,6 +1174,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
                     name: "ci".to_string(),
                     config: Box::new(target),
                     products: Some(vec!["api".to_string()]),
+                    roles: None,
                     deploy_credentials: None,
                     state_vault_id: "sci".to_string(),
                     delivery_items: BTreeMap::new(),

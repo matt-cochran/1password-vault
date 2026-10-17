@@ -2046,14 +2046,35 @@ environments = [\"prod\"]
 roles = [\"migrate\"]
 ";
 
+    /// The fixture TOML with `roles` on every target. The committed fixture declares no
+    /// role-scoped keys, so its targets carry no roles; a test that appends [`ROLE_KEYS`]
+    /// (or any role-scoped key) needs this text, or the load is refused (M3, §4.4).
+    pub fn role_fixture_text() -> String {
+        std::fs::read_to_string("tests/fixtures/secrets.toml")
+            .unwrap()
+            .replace(
+                "state_vault_id = \"sstg\"",
+                "state_vault_id = \"sstg\"\nroles = [\"serve\", \"migrate\"]",
+            )
+            .replace(
+                "state_vault_id = \"sprd\"",
+                "state_vault_id = \"sprd\"\nroles = [\"serve\", \"migrate\"]",
+            )
+    }
+
+    /// [`role_fixture_text`] plus extra TOML appended (e.g. [`ROLE_KEYS`]).
+    pub fn role_fleet_with(extra: &str) -> Fleet {
+        config::parse(&format!("{}\n{extra}", role_fixture_text())).unwrap()
+    }
+
     /// The fixture fleet plus the two role-scoped keys.
     pub fn role_fleet() -> Fleet {
-        fleet_with(ROLE_KEYS)
+        role_fleet_with(ROLE_KEYS)
     }
 
     /// [`role_fleet`] plus a local delivery section and a `migrate`-scoped file key.
     pub fn role_local_fleet() -> Fleet {
-        fleet_with(&format!(
+        role_fleet_with(&format!(
             "{ROLE_KEYS}\n[products.allumata.keys.MIGRATE_PEM]
 kind = \"secret\"
 environments = [\"prod\"]
