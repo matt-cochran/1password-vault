@@ -4,6 +4,7 @@
 //! removed and a file that sets it fails at load (see `crate::config`).
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -288,6 +289,10 @@ pub struct Environment {
     /// The 1Password account every `op` call for this environment uses (FR-40): a sign-in
     /// address or account ID. `None`: op's default (or the service account in CI).
     pub account: Option<String>,
+    /// The `.opv` file the account in [`Environment::account`] came from, when the
+    /// configuration named none (FR-40). The diagnosis then names that file, not the
+    /// environment; `None` means the account was declared in the configuration.
+    pub account_from: Option<PathBuf>,
     /// Display name for people (`opv ui`, `ready`); the key stays `name` (FR-55).
     pub title: Option<String>,
     /// Who the environment is for (free text, e.g. `devops`): a person who cannot open it is

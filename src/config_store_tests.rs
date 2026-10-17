@@ -823,6 +823,30 @@ fn an_environments_own_account_wins_over_the_manifests() {
     assert_eq!(fleet.environments["dev"].account.as_deref(), Some("home"));
 }
 
+/// v0101: a file configuration that takes its account from the checkout's `.opv` records
+/// that file, so the diagnosis can name `.opv`, not the environment.
+#[test]
+fn a_file_config_records_the_dot_opv_its_account_came_from() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(FILE_NAME), TOML).unwrap();
+    std::fs::write(
+        dir.path().join(DOT_FILE),
+        "account = \"AENV00000000000000000000AA\"\n",
+    )
+    .unwrap();
+    let found = Found::File {
+        store: FileStore {
+            path: dir.path().join(FILE_NAME),
+        },
+        given: None,
+    };
+    let fleet = found.load(&FakeOp::default()).unwrap();
+    assert_eq!(
+        fleet.environments["dev"].account_from,
+        Some(dir.path().join(DOT_FILE))
+    );
+}
+
 // --- the project's 1Password account (FR-40, NR-7; found in a live run-through) ---
 
 const TWO_ACCOUNTS: &str = r#"[

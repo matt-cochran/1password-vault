@@ -438,20 +438,26 @@ impl Found {
         let mut fleet = parse_from(self, &snap.text)?;
         // The account the configuration came from (a manifest's), or for a file the
         // account recorded in the nearest `.opv` (FR-40): environments naming none use it.
-        let account = match self {
+        let (account, account_from) = match self {
             Found::Manifest(ManifestStore {
                 account: Some(a), ..
-            }) => Some(a.clone()),
-            Found::File { store, .. } => store
-                .path
-                .parent()
-                .and_then(pointer_account)
-                .filter(|_| Host::detect().op_credential.is_none()),
-            _ => None,
+            }) => (Some(a.clone()), None),
+            Found::File { store, .. } if Host::detect().op_credential.is_none() => {
+                match store.path.parent() {
+                    Some(parent) => (pointer_account(parent), find_dot_opv(parent)),
+                    None => (None, None),
+                }
+            }
+            _ => (None, None),
         };
         if let Some(a) = account {
             for env in fleet.environments.values_mut() {
-                env.account.get_or_insert_with(|| a.clone());
+                // An account the configuration itself declares keeps its environment origin;
+                // one taken from the `.opv` records that file so the diagnosis can name it.
+                if env.account.is_none() {
+                    env.account = Some(a.clone());
+                    env.account_from = account_from.clone();
+                }
             }
         }
         Ok(fleet)

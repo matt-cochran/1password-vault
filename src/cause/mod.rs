@@ -1663,4 +1663,7 @@ pub struct DiagnoseContext {
     pub write: bool,
     /// The account the call was made in (1Password).
     pub account: Option<AccountId>,
+    /// The `.opv` file the account came from, when the configuration named none (FR-40):
+    /// the account's source is that file, not the environment.
+    pub account_from: Option<PathBuf>,
 }
