@@ -16,7 +16,7 @@ use super::{
     valid_label_value,
 };
 use crate::adapters::probe::{spawn_tool, version_in};
-use crate::cause::{Cause, FieldRule, Unusable};
+use crate::cause::{Cause, FieldRule, PatternId, Unusable};
 use crate::config::{TEMPLATE_WORDS, section_invalid};
 use crate::error::Error;
 use crate::host::Host;
@@ -75,7 +75,7 @@ static INIT_FIELDS: [InitField; 6] = [
     },
     InitField {
         field: "config",
-        help: "Where config keys go: env (default) or store",
+        help: "Where config keys go: env, store or configmap (default for new targets)",
         required: false,
     },
 ];
@@ -83,14 +83,15 @@ static INIT_FIELDS: [InitField; 6] = [
 /// A DNS-1123 label as shown to the user.
 const LABEL_PATTERN: &str = "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ (at most 63 characters)";
 
-/// Where the Deployment reads configuration keys: plain `value` env entries (`Env`) or
-/// Secrets like secret keys (`Store`).
+/// Where the Deployment reads configuration keys: plain `value` env entries (`Env`),
+/// Secrets like secret keys (`Store`) or ConfigMaps (`ConfigMap`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ConfigRoute {
     #[default]
     Env,
     Store,
+    ConfigMap,
 }
 
 /// The Kubernetes target of one environment (FR-38).
@@ -102,6 +103,9 @@ pub struct KubernetesTarget {
     /// Env-name template with `{KEY}` and optionally `{PRODUCT}`.
     pub env_name_template: String,
     pub config: ConfigRoute,
+    /// Where file keys are mounted (`secrets_dir`, design §6.2); `None`: no key is a file.
+    /// May hold `{product}`.
+    pub secrets_dir: Option<String>,
     /// The named store secrets live in (`secrets_in`, FR-39), bound through the External
     /// Secrets Operator; `None`: opv's own immutable Secrets.
     pub store: Option<Box<dyn StoreConfig>>,
@@ -127,12 +131,34 @@ struct Raw {
     env_name: Option<String>,
     #[serde(default)]
     config: ConfigRoute,
+    #[serde(default)]
+    secrets_dir: Option<String>,
 }
 
 /// A Kubernetes name (DNS-1123 label), in words.
 const LABEL_WORDS: &str = "a Kubernetes name: lower-case letters, digits and -, starting and ending with a letter or digit, at most 63 characters";
 /// A kubeconfig context name, in words.
 const CONTEXT_WORDS: &str = "a kubeconfig context name: letters, digits and _ . : / @ + -, not starting with - (kubectl config get-contexts -o name lists them)";
+
+/// The roots a `secrets_dir` may not be, or live under (design §6.2): they hold kernel
+/// files or the service-account token.
+const FORBIDDEN_DIRS: [&str; 4] = ["/proc", "/sys", "/dev", "/var/run/secrets/kubernetes.io"];
+
+/// A Kubernetes `secrets_dir` (design §6.2): absolute and normalised (no `.`/`..`, `//` or
+/// trailing `/`), not `/`, outside [`FORBIDDEN_DIRS`], at most 255 bytes, with no `:` or
+/// whitespace. `{product}` is allowed.
+fn is_container_path(s: &str) -> bool {
+    s.starts_with('/')
+        && s.len() <= 255
+        && !s.contains(':')
+        && !s.chars().any(char::is_whitespace)
+        && s.split('/')
+            .skip(1)
+            .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+        && !FORBIDDEN_DIRS
+            .iter()
+            .any(|p| s == *p || s.starts_with(&format!("{p}/")))
+}
 
 impl Raw {
     /// The section's identifiers checked (FR-37): the context goes into argv (never read as
@@ -160,11 +186,24 @@ impl Raw {
                 return Err(bad(field, LABEL_WORDS));
             }
         }
-        match self.env_name.take() {
-            Some(t) if t.contains("{KEY}") => Ok(t),
-            Some(_) => Err(bad("env_name", TEMPLATE_WORDS)),
-            None => Err(section_invalid("kubernetes.env_name", FieldRule::Missing)),
+        let template = match self.env_name.take() {
+            Some(t) if t.contains("{KEY}") => t,
+            Some(_) => return Err(bad("env_name", TEMPLATE_WORDS)),
+            None => return Err(section_invalid("kubernetes.env_name", FieldRule::Missing)),
+        };
+        if self
+            .secrets_dir
+            .as_deref()
+            .is_some_and(|d| !is_container_path(d))
+        {
+            return Err(section_invalid(
+                "kubernetes.secrets_dir",
+                FieldRule::Pattern {
+                    id: PatternId::ContainerPath,
+                },
+            ));
         }
+        Ok(template)
     }
 }
 
@@ -188,6 +227,7 @@ impl Raw {
             },
             env_name_template,
             config: self.config,
+            secrets_dir: self.secrets_dir,
             store: None,
         }
     }
@@ -249,6 +289,7 @@ impl Provider for KubernetesProvider {
             let v = match (values.get(f.field), f.field) {
                 (Some(v), _) => v.as_str(),
                 (None, "env_name") => INIT_FLEET_TEMPLATE,
+                (None, "config") => "configmap",
                 (None, _) => continue,
             };
             lines.push((f.field, v));
@@ -401,9 +442,13 @@ impl TargetConfig for KubernetesTarget {
                 ConfigRoute::Store => Channel::Store {
                     label: "Kubernetes Secret",
                 },
+                ConfigRoute::ConfigMap => Channel::Store { label: "ConfigMap" },
                 ConfigRoute::Env => Channel::RuntimeEnv,
             },
-            files: FileCapability::None,
+            files: match &self.secrets_dir {
+                Some(dir) => FileCapability::Native { dir: dir.clone() },
+                None => FileCapability::None,
+            },
         }
     }
 
@@ -609,6 +654,15 @@ impl TargetConfig for KubernetesTarget {
                 lines.push(("routing", routing));
                 lines
             }
+            ConfigRoute::ConfigMap => vec![
+                ("env name", self.env_name_of(product, key)),
+                (
+                    "routing",
+                    "ConfigMap reference pinned to one version (kubernetes.config = \
+                     \"configmap\")"
+                        .into(),
+                ),
+            ],
         })
     }
 
@@ -815,6 +869,166 @@ environments = ["dev"]
     fn config_route_store_is_accepted() {
         let f = parse(&with("api\"\n", "api\"\nconfig = \"store\"\n")).unwrap();
         assert_eq!(kube_of(&f, "dev").config, ConfigRoute::Store);
+    }
+
+    #[test]
+    fn config_route_configmap_is_accepted() {
+        let f = parse(&with("api\"\n", "api\"\nconfig = \"configmap\"\n")).unwrap();
+        assert_eq!(kube_of(&f, "dev").config, ConfigRoute::ConfigMap);
+    }
+
+    #[test]
+    fn configmap_config_uses_the_configmap_channel() {
+        assert_eq!(
+            bound_target("config = \"configmap\"").channels().config,
+            Channel::Store { label: "ConfigMap" }
+        );
+    }
+
+    #[test]
+    fn a_secrets_dir_gives_a_native_file_channel() {
+        assert_eq!(
+            bound_target("secrets_dir = \"/run/secrets/{product}\"")
+                .channels()
+                .files,
+            FileCapability::Native {
+                dir: "/run/secrets/{product}".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn init_section_writes_configmap_for_a_new_target() {
+        let text = PROVIDER
+            .init_section(&BTreeMap::from([
+                ("context", "kind-opv".to_string()),
+                ("namespace", "myapp".to_string()),
+                ("deployment", "api".to_string()),
+            ]))
+            .unwrap();
+        assert!(text.contains("kubernetes.config = \"configmap\""), "{text}");
+    }
+
+    #[test]
+    fn a_product_secrets_dir_loads() {
+        assert!(
+            parse(&with(
+                "api\"\n",
+                "api\"\nsecrets_dir = \"/run/secrets/{product}\"\n"
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_relative_secrets_dir_is_refused() {
+        let e = err(&with("api\"\n", "api\"\nsecrets_dir = \"run/secrets\"\n"));
+        assert!(e.contains("kubernetes.secrets_dir"), "{e}");
+    }
+
+    #[test]
+    fn a_root_secrets_dir_is_refused() {
+        let e = err(&with("api\"\n", "api\"\nsecrets_dir = \"/\"\n"));
+        assert!(e.contains("kubernetes.secrets_dir"), "{e}");
+    }
+
+    #[test]
+    fn a_secrets_dir_under_proc_is_refused() {
+        let e = err(&with("api\"\n", "api\"\nsecrets_dir = \"/proc/x\"\n"));
+        assert!(e.contains("kubernetes.secrets_dir"), "{e}");
+    }
+
+    #[test]
+    fn a_secrets_dir_under_the_service_account_directory_is_refused() {
+        let e = err(&with(
+            "api\"\n",
+            "api\"\nsecrets_dir = \"/var/run/secrets/kubernetes.io/x\"\n",
+        ));
+        assert!(e.contains("kubernetes.secrets_dir"), "{e}");
+    }
+
+    #[test]
+    fn a_secrets_dir_with_a_parent_segment_is_refused() {
+        let e = err(&with("api\"\n", "api\"\nsecrets_dir = \"/run/../x\"\n"));
+        assert!(e.contains("kubernetes.secrets_dir"), "{e}");
+    }
+
+    #[test]
+    fn a_secrets_dir_with_a_colon_is_refused() {
+        let e = err(&with("api\"\n", "api\"\nsecrets_dir = \"/run/se:crets\"\n"));
+        assert!(e.contains("kubernetes.secrets_dir"), "{e}");
+    }
+
+    #[test]
+    fn a_secrets_dir_with_a_space_is_refused() {
+        let e = err(&with(
+            "api\"\n",
+            "api\"\nsecrets_dir = \"/run/my secrets\"\n",
+        ));
+        assert!(e.contains("kubernetes.secrets_dir"), "{e}");
+    }
+
+    #[test]
+    fn a_secrets_dir_over_255_bytes_is_refused() {
+        let long = format!("/{}", "a".repeat(255));
+        let e = err(&with(
+            "api\"\n",
+            &format!("api\"\nsecrets_dir = \"{long}\"\n"),
+        ));
+        assert!(e.contains("kubernetes.secrets_dir"), "{e}");
+    }
+
+    /// A dev environment whose Kubernetes target mounts files at `secrets_dir`.
+    fn mounted(secrets_dir: &str, config: &str) -> String {
+        format!(
+            "[environments.dev]\n[environments.dev.targets.app]\nstate_vault_id = \"s\"\n\
+             [environments.dev.targets.app.kubernetes]\ncontext = \"kind-opv\"\n\
+             namespace = \"myapp\"\ndeployment = \"api\"\nenv_name = \"{{KEY}}\"\n\
+             secrets_dir = \"{secrets_dir}\"\n{config}"
+        )
+    }
+
+    #[test]
+    fn two_products_with_file_keys_and_no_product_placeholder_are_refused() {
+        let keys = "[products.a.keys.F]\nkind = \"secret\"\nenvironments = [\"dev\"]\nfile = \"cert\"\n\
+                    [products.b.keys.F]\nkind = \"secret\"\nenvironments = [\"dev\"]\nfile = \"cert\"\n";
+        let e = err(&doc(&mounted("/run/secrets", ""), keys));
+        assert!(e.contains("kubernetes.secrets_dir"), "{e}");
+    }
+
+    #[test]
+    fn two_products_rendering_the_same_secrets_dir_are_refused() {
+        let keys = "[products.a_b.keys.F]\nkind = \"secret\"\nenvironments = [\"dev\"]\nfile = \"cert\"\n\
+                    [products.a-b.keys.F]\nkind = \"secret\"\nenvironments = [\"dev\"]\nfile = \"cert\"\n";
+        let e = err(&doc(&mounted("/run/secrets/{product}", ""), keys));
+        assert!(e.contains("kubernetes.secrets_dir"), "{e}");
+    }
+
+    #[test]
+    fn a_config_file_key_under_the_env_route_needs_an_object() {
+        let keys =
+            "[products.a.keys.F]\nkind = \"config\"\nenvironments = [\"dev\"]\nfile = \"cert\"\n";
+        let e = err(&doc(&mounted("/run/secrets/{product}", ""), keys));
+        assert!(e.contains("kubernetes.config"), "{e}");
+    }
+
+    #[test]
+    fn nested_file_paths_in_one_product_are_refused() {
+        let keys = "[products.a.keys.C]\nkind = \"secret\"\nenvironments = [\"dev\"]\nfile = \"a/b\"\n\
+                    [products.a.keys.P]\nkind = \"secret\"\nenvironments = [\"dev\"]\nfile = \"a\"\n";
+        let e = err(&doc(&mounted("/run/secrets/{product}", ""), keys));
+        assert!(
+            e.contains("products.a.keys.P.file") && e.contains("products.a.keys.C.file"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn a_mounted_file_path_that_climbs_out_is_refused() {
+        let keys =
+            "[products.a.keys.C]\nkind = \"secret\"\nenvironments = [\"dev\"]\nfile = \"../c\"\n";
+        let e = err(&doc(&mounted("/run/secrets/{product}", ""), keys));
+        assert!(e.contains("products.a.keys.C.file"), "{e}");
     }
 
     #[test]
