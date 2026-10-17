@@ -364,7 +364,7 @@ config     = "env"                         # or "store" (a ConfigMap-free design
   Old versions are reclaimed as Kubernetes trims the history.
 - **Access** (FR-33 as amended by R6): the Deployment's ServiceAccount needs no secret access
   (kubelet mounts the env); `doctor` checks the operator's own rights with
-  `kubectl auth can-i` for get/create/delete/list secrets, get/update deployments and list
+  `kubectl auth can-i` for get/create/patch/delete/list secrets, get/update deployments and list
   replicasets and pods. As built, every right a sync needs is required: `doctor` fails a
   missing one naming the `create role` / `create rolebinding` commands that grant exactly it,
   and `sync` refuses before its first write without the rights only a deploy uses (delete
@@ -425,7 +425,7 @@ secrets_in = "prod-vault"                  # optional; default = the runtime's o
   external-secrets)`). Core config parses `[stores.*]` generically and dispatches to the provider
   that declared the kind. Adding a store kind or binding changes no core code.
 - **doctor / preflight.** For an ESO binding: the `externalsecrets.external-secrets.io` CRD exists;
-  the named `ClusterSecretStore` exists and is `Ready`; opv can create ExternalSecrets in the
+  the named `ClusterSecretStore` exists and is `Ready`; opv can create and patch ExternalSecrets in the
   namespace (`auth can-i`); plus the Key Vault checks of the store. A `ClusterSecretStore` that is
   not Ready is a refusal before any write, naming its condition message.
 - **explain / status.** Show the chain per key: `DB_URL → Key Vault kv-myapp-prod (v4668…) →
