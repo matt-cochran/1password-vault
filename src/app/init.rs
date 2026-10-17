@@ -38,8 +38,8 @@ use std::path::Path;
 use super::write_err;
 use crate::adapters::onepassword_init::{self, FieldShape};
 use crate::cause::{
-    Cause, Closest, Cmd, DottedPath, FieldRule, InputKind, NameKind, PatternId, StoreObject,
-    UsageProblem,
+    Cause, Closest, Cmd, ConfigCheck, DottedPath, FieldRule, InputKind, NameKind, PatternId,
+    StoreObject, UsageProblem,
 };
 use crate::config;
 use crate::config_edit::{self, ConfigDoc};
@@ -1195,6 +1195,34 @@ fn add_env_on(
         added.push(name);
     }
     // The item is one boundary (FR-57): every product it gives the environment shares it.
+    // FR-55: a personal key lives in each person's own item, so an item giving the
+    // environment only personal keys is not its shared item and cannot be its boundary.
+    if !added_ids.is_empty()
+        && added_ids.iter().all(|(product, key)| {
+            fleet
+                .products
+                .get(product)
+                .and_then(|p| p.keys.get(key))
+                .is_some_and(|spec| spec.personal)
+        })
+    {
+        return Err(Cause::ConfigProposalInvalid {
+            source: store.cause_source(),
+            field: DottedPath(vec![
+                "environments".into(),
+                args.env.clone(),
+                "boundaries".into(),
+            ]),
+            rule: FieldRule::Check {
+                check: ConfigCheck::PersonalItemBoundary {
+                    env: args.env.clone(),
+                    item: item.name.clone(),
+                },
+            },
+            from_proposal: true,
+        }
+        .into());
+    }
     let boundaries: BTreeSet<&str> = products.iter().map(|p| fleet.boundary_of(p)).collect();
     if boundaries.len() > 1 {
         // The item is one boundary: every product it holds names the same one.
