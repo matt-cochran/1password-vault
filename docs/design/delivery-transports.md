@@ -1080,7 +1080,35 @@ Evidence goes in `docs/verification/v0.11.0-file-delivery.md` and its directory.
 | R13 | 0.11.0 grew to about 113 h | likely / medium | Swarm (S1–S5) and C5 can slip without touching the rest |
 | R14 | Service-account rate limits under a 15-minute schedule **[A29]** | possible / medium | make the schedule configurable; back off on 429 (`Unavailable{RateLimited}`) |
 
-## 15. Owner decisions needed
+## 15. Decisions on the open questions (2026-10-17)
+
+**By the owner:**
+
+- **O9: remote SSH profiles.** A remote profile may only allow environments that have no deployment target. Config load refuses a profile that allows an environment with a target (Fly, Kubernetes, Azure, GitHub, Swarm, VM), because that environment's values must reach it only through the CI sync. This is a 0.11.0 deliverable (R1).
+- **O13: Swarm recordings.** A temporary single-node swarm on the development machine is approved for recording (`docker swarm init`, then `docker swarm leave --force`). Nothing is pulled or exposed.
+- **O14: GCP project.** Decided when 0.12.0 starts.
+- **Scope.** Docker Swarm (S1–S5) moves to 0.12.0 alongside the VM work. 0.11.0 is the channel model, change detection with its CI recipe and README, Kubernetes ConfigMaps and file mounts, Fly config, the webhook mapping, verbatim files, R1 and verification.
+
+**Taken as recommended (technical; the owner may overrule):**
+
+| | Decision |
+|---|---|
+| O1 | Kubernetes file delivery is opt-in through `secrets_dir`. ConfigMaps are used for newly created targets only; existing targets keep plain env config until they opt in. |
+| O2 | When the pod's ability to read the files can't be established (no `fsGroup` or `runAsUser`), sync refuses (`mount_unreadable`) and names the one manifest line that fixes it. |
+| O3 | Target-level `roles` are adopted, so migration material never reaches a serving target. |
+| O4 | `OPV_UID` and `OPV_GID` are added for local file runs (not secrets). |
+| O5 | No `--dir-env` flag: the directory variable comes from `secrets_dir_env` in config only. |
+| O6 | opv doesn't set the app's directory variable (`JZ_VAULT_DIR`). The app's manifest owns it. |
+| O7 | 0.11.0 is verified locally with kind and a CI-like shell; GitHub Actions comes later. |
+| O8 | The Fly live file check is deferred. The Journeeze shim stays until it's done. |
+| O10 | Accept the rollout deadline. No new `list events` permission. |
+| O11 | The VM startup step is a POSIX shell script. |
+| O12 | GCP versions older than the previous one are disabled, never destroyed. |
+| O15 | An unset `fly.config` warns in 0.11.0 and is refused in 0.12.0. |
+| O16 | An Events API trigger comes later, as an optional accelerator to `opv changed`. |
+| O17 | New exit code 10 (`source_changed`). |
+
+## 16. Owner decisions needed (as originally listed)
 
 | # | Decision | Options | Recommendation |
 |---|---|---|---|
