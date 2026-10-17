@@ -96,7 +96,10 @@ fn add_key_rejects_a_key_that_is_not_uppercase() {
     };
     assert_eq!(
         add_key_command(&form),
-        Err("key \"token\" must match ^[A-Z][A-Z0-9_]*$.".to_string())
+        Err(
+            "key \"token\" is not a valid name: start with a capital letter and use A-Z, 0-9 or _."
+                .to_string()
+        )
     );
 }
 
@@ -108,7 +111,10 @@ fn add_key_rejects_an_empty_key() {
     };
     assert_eq!(
         add_key_command(&form),
-        Err("key \"\" must match ^[A-Z][A-Z0-9_]*$.".to_string())
+        Err(
+            "key \"\" is not a valid name: start with a capital letter and use A-Z, 0-9 or _."
+                .to_string()
+        )
     );
 }
 
@@ -120,7 +126,11 @@ fn add_key_rejects_a_product_that_is_not_lowercase() {
     };
     assert_eq!(
         add_key_command(&form),
-        Err("product \"API\" must match ^[a-z][a-z0-9_-]*$.".to_string())
+        Err(
+            "product \"API\" is not a valid name: start with a lowercase letter and use \
+             a-z, 0-9, _ or -."
+                .to_string()
+        )
     );
 }
 
@@ -132,7 +142,11 @@ fn add_key_rejects_an_empty_product() {
     };
     assert_eq!(
         add_key_command(&form),
-        Err("product \"\" must match ^[a-z][a-z0-9_-]*$.".to_string())
+        Err(
+            "product \"\" is not a valid name: start with a lowercase letter and use \
+             a-z, 0-9, _ or -."
+                .to_string()
+        )
     );
 }
 
@@ -218,7 +232,11 @@ fn add_env_rejects_a_name_with_a_space() {
     };
     assert_eq!(
         add_env_command(&form, &[]),
-        Err("environment name \"bad name\" must match ^[A-Za-z0-9][A-Za-z0-9_-]*$.".to_string())
+        Err(
+            "environment name \"bad name\" is not a valid name: start with a letter or digit \
+             and use A-Z, a-z, 0-9, _ or -."
+                .to_string()
+        )
     );
 }
 
@@ -230,7 +248,11 @@ fn add_env_rejects_an_empty_name() {
     };
     assert_eq!(
         add_env_command(&form, &[]),
-        Err("environment name \"\" must match ^[A-Za-z0-9][A-Za-z0-9_-]*$.".to_string())
+        Err(
+            "environment name \"\" is not a valid name: start with a letter or digit \
+             and use A-Z, a-z, 0-9, _ or -."
+                .to_string()
+        )
     );
 }
 
@@ -240,5 +262,43 @@ fn add_env_rejects_a_name_already_declared() {
     assert_eq!(
         add_env_command(&env_form(), &existing),
         Err("environment dev already exists.".to_string())
+    );
+}
+
+// ---- refusals describe the naming rule in words, never a pattern ----
+
+#[test]
+fn add_key_refusal_states_the_naming_rule_without_a_pattern() {
+    let form = AddKeyForm {
+        key: "token".to_string(),
+        ..key_form()
+    };
+    let message = add_key_command(&form).unwrap_err();
+    assert!(message.contains("start with a capital letter"), "{message}");
+}
+
+#[test]
+fn add_key_product_refusal_states_the_naming_rule_without_a_pattern() {
+    let form = AddKeyForm {
+        product: Some("API".to_string()),
+        ..key_form()
+    };
+    let message = add_key_command(&form).unwrap_err();
+    assert!(
+        message.contains("start with a lowercase letter"),
+        "{message}"
+    );
+}
+
+#[test]
+fn add_env_refusal_states_the_naming_rule_without_a_pattern() {
+    let form = AddEnvForm {
+        name: "bad name".to_string(),
+        ..env_form()
+    };
+    let message = add_env_command(&form, &[]).unwrap_err();
+    assert!(
+        message.contains("start with a letter or digit"),
+        "{message}"
     );
 }

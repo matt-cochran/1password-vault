@@ -330,6 +330,21 @@ fn wrong_kind_has_specific_repair_and_preserves_existing_item() {
 }
 
 #[test]
+fn an_item_read_of_another_shape_is_unexpected_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = recipe(dir.path());
+    let mut replies = metadata();
+    replies.extend([
+        ok(r#"[{"id":"item-id","title":"api"}]"#),
+        ok(r#"{"category":"SECURE_NOTE","fields":[{"section":{"id":"api","label":"api"},"label":"API_KEY","type":5}]}"#),
+    ]);
+    let mut backend = Fake::new(replies);
+    let mut ui = Ui::new(vec![], &[]);
+    let error = run(&path, None, None, None, &mut backend, &mut ui).unwrap_err();
+    assert_eq!(error.code_str(), "unexpected_output");
+}
+
+#[test]
 fn conflicting_configuration_is_refused_before_any_vendor_call() {
     let dir = tempfile::tempdir().unwrap();
     let path = recipe(dir.path());

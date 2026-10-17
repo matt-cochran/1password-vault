@@ -247,21 +247,23 @@ pub fn run(
     w(out, format!("Next: {check}"))
 }
 
-/// A loader refusal of the text add would write. Its line number points into text that
-/// was never saved, so it is dropped; the field and the rule stay (C14).
+/// A loader refusal of the text add proposed (and did not write) is the catalog's
+/// `ConfigProposalInvalid`, whose message says nothing was written (F2, C14). Its line
+/// number points into text that was never saved, so it is dropped; the field and the rule
+/// stay, and the field came from opv's proposal only (`from_proposal`).
 fn proposed(e: Error) -> Error {
     let Error::Catalog(cause, upstream) = e;
     let cause = match *cause {
         Cause::ConfigInvalid {
             source,
-            at: _,
             field,
             rule,
-        } => Cause::ConfigInvalid {
+            ..
+        } => Cause::ConfigProposalInvalid {
             source,
-            at: None,
             field,
             rule,
+            from_proposal: true,
         },
         other => other,
     };

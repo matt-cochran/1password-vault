@@ -244,7 +244,7 @@ version). Needs your own interactive terminal.";
 
 const CONFIG_CHECK_QUICK: &str = "\
 Examples:
-  opv config check --file secrets.toml   # exit 8 with a diff when the copy differs";
+  opv config check --file secrets.toml   # exit 2 with a diff when the copy differs";
 
 const CONFIG_CHECK_MORE: &str = "\
 Compares a committed copy with the project's manifest (for review in CI). Changes nothing.";
@@ -1578,7 +1578,7 @@ enum ConfigCmd {
     /// confirmed; refuses (and re-opens) when someone changed it meanwhile.
     #[command(before_help = EDIT_QUICK, after_help = EDIT_MORE)]
     Edit,
-    /// Compare a committed copy with the project's manifest; exit 8 with a diff when they
+    /// Compare a committed copy with the project's manifest; exit 2 with a diff when they
     /// differ (for review in CI).
     #[command(before_help = CONFIG_CHECK_QUICK, after_help = CONFIG_CHECK_MORE)]
     Check {
@@ -4151,10 +4151,29 @@ fn mcp_install(
         })?);
     }
     if matches!(client, McpClient::Codex | McpClient::All) {
-        let path = mi::codex_config()?;
-        done.push(mi::register("codex", &path, |t| {
-            mi::merge_codex(t, &path, name, &command, &args, force)
-        })?);
+        let codex = mi::codex_config().and_then(|path| {
+            mi::register("codex", &path, |t| {
+                mi::merge_codex(t, &path, name, &command, &args, force)
+            })
+        });
+        match codex {
+            Ok(registered) => done.push(registered),
+            // R53/X20: an earlier client is already registered; the failure names it (as
+            // "already written") instead of dropping the record with the raw failure.
+            Err(e) if !done.is_empty() => {
+                let Error::Catalog(then, upstream) = e;
+                return Err(Error::Catalog(
+                    Box::new(opv::cause::Cause::Partial {
+                        done: done.iter().map(|d| d.client.to_string()).collect(),
+                        approval_used: None,
+                        approval_scope: None,
+                        then,
+                    }),
+                    upstream,
+                ));
+            }
+            Err(e) => return Err(e),
+        }
     }
     if json {
         let doc = serde_json::json!({
@@ -4654,6 +4673,16 @@ mod tests {
     fn config_check_without_a_manifest_names_the_manifest() {
         let e = manifest_missing_for_check(std::path::Path::new("/work/app"));
         assert_eq!(e.code_str(), "manifest_not_found");
+    }
+
+    /// C8: a differing copy exits 2, so config check's help says 2, never the old 8.
+    #[test]
+    fn config_check_help_names_the_exit_code_for_a_difference() {
+        let (_, _, short) = leaf_helps()
+            .into_iter()
+            .find(|(name, _, _)| name == "config check")
+            .expect("config check is a leaf");
+        assert!(short.contains("exit 2 with a diff"), "{short}");
     }
 
     /// M8: `--json` before `--` without `--preview` is refused, never run as the child

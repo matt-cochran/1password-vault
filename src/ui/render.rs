@@ -155,6 +155,15 @@ fn summary_cell(s: &Snapshot, env: &str, product: &str) -> (String, Style) {
     }
 }
 
+/// `… and N more (opv ready)` when the findings list is cut at five, else `None`.
+pub fn findings_overflow_note(s: &Snapshot) -> Option<String> {
+    s.findings
+        .len()
+        .checked_sub(5)
+        .filter(|extra| *extra > 0)
+        .map(|extra| format!("… and {extra} more (opv ready)"))
+}
+
 fn overview(f: &mut Frame, area: Rect, app: &App) {
     let s = &app.snap;
     let parts = Layout::default()
@@ -213,6 +222,9 @@ fn overview(f: &mut Frame, area: Rect, app: &App) {
         }
         lines.push(Line::styled(format!("    → {}", fnd.prerequisite), DIM));
     }
+    if let Some(note) = findings_overflow_note(s) {
+        lines.push(Line::styled(note, DIM));
+    }
     if let Some((actor, cmd)) = &s.next {
         lines.push(Line::from(vec![
             Span::styled("Next ", BOLD),
@@ -225,11 +237,17 @@ fn overview(f: &mut Frame, area: Rect, app: &App) {
             lines.push(Line::styled(l, if i == 0 { WARN } else { DIM }));
         }
     }
+    // The list below shows at most five findings: name the total, so "cut at 5" is never silent.
+    let attention_title = match s.findings.len() {
+        0 => " Needs attention ".to_string(),
+        1 => " Needs attention · 1 finding ".to_string(),
+        n => format!(" Needs attention · {n} findings "),
+    };
     f.render_widget(
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Needs attention "),
+                .title(attention_title),
         ),
         parts[1],
     );
