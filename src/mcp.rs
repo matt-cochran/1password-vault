@@ -2490,7 +2490,7 @@ rules = { prefix = "sk_" }
 
     /// #139: the role fleet with one reviewed remote profile for prod's serve role.
     fn remote_fleet() -> crate::domain::Fleet {
-        crate::app::testutil::fleet_with(&format!(
+        crate::app::testutil::fleet_without_targets(&format!(
             "{}\n[products.allumata.remotes.builder]\nhost = \"builder.example.internal\"\n\
              user = \"dev\"\nhost_key = \"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestMarkerHostKey\"\n\
              environments = [\"prod\"]\nopv = \"/usr/local/bin/opv\"\nworkdir = \"/srv/app\"\n\

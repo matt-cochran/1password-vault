@@ -723,12 +723,12 @@ mod cases {
     // §4.5 guards, §4.8 person-only steps, §4.9 approvals
 
     pub fn guard() -> Case {
-        // The builder profile allows prod only.
+        // The builder profile allows dev only (O9: it may name no deployed environment).
         case(
             Scenario::new(),
             &[
                 "run",
-                "dev",
+                "prod",
                 "--preview",
                 "--product",
                 "web",
@@ -740,7 +740,7 @@ mod cases {
         )
         .mcp(
             "opv_delivery_preview",
-            json!({"environment": "dev", "product": "web", "role": "serve", "remote": "builder"}),
+            json!({"environment": "prod", "product": "web", "role": "serve", "remote": "builder"}),
         )
     }
 
@@ -1223,7 +1223,7 @@ mod text_cases {
         )
     }
 
-    /// The plan `opv run prod --product web --role serve --remote builder --confirm prod`
+    /// The plan `opv run dev --product web --role serve --remote builder`
     /// hands `remote-send` (the step after `op run`, which opv-sim does not model).
     fn remote_plan(workdir: &str, command: &[&str]) -> String {
         json!({
@@ -1233,10 +1233,10 @@ mod text_cases {
             "header": {
                 "keys": ["API_KEY", "DATABASE_URL", "LOG_LEVEL", "SESSION_SECRET"], "files": [],
                 "dir_env": "WEB_SECRETS_DIR", "workdir": workdir, "command": command,
-                "outer": {"env": "prod", "product": "web", "profile": "builder",
+                "outer": {"env": "dev", "product": "web", "profile": "builder",
                           "command": ["run"],
-                          "args": ["prod", "--product", "web", "--role", "serve", "--remote",
-                                   "builder", "--confirm", "prod"],
+                          "args": ["dev", "--product", "web", "--role", "serve", "--remote",
+                                   "builder"],
                           "has_child": false}}
         })
         .to_string()
@@ -1265,7 +1265,7 @@ mod text_cases {
                     "/usr/local/bin/opv",
                     "run",
                     "--env",
-                    "prod",
+                    "dev",
                     "--product",
                     "web",
                 ],

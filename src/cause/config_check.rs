@@ -65,6 +65,14 @@ pub enum ConfigCheck {
     EmptyRemoteRoles,
     /// `environments = []` on a remote profile.
     EmptyRemoteEnvironments,
+    /// A remote profile names an environment that has a deployment target (O9): its values
+    /// must reach the host only through the CI sync, so a profile may name only target-less
+    /// environments.
+    RemoteEnvironmentHasTarget {
+        profile: String,
+        env: String,
+        target: String,
+    },
     /// A target with no provider section.
     NoProvider { known: Vec<String> },
     /// A store with no kind.
@@ -193,6 +201,14 @@ impl ConfigCheck {
             EmptyProducts | EmptyRoles | EmptyRemoteRoles | EmptyRemoteEnvironments => {
                 "is an empty list".into()
             }
+            RemoteEnvironmentHasTarget {
+                profile,
+                env,
+                target,
+            } => format!(
+                "lists environment {env}, which has deployment target {target}; remote profile \
+                 {profile} may only name environments with no deployment target"
+            ),
             NoProvider { known } => {
                 format!("names no provider (one of {})", list(known))
             }
@@ -393,6 +409,9 @@ impl ConfigCheck {
             EmptyRemoteEnvironments => {
                 format!("list in {field} the environments whose values may go to this host")
             }
+            RemoteEnvironmentHasTarget { env, target, .. } => format!(
+                "remove {env} from {field}, or remove target {target} from environment {env}"
+            ),
             NoProvider { known } => {
                 format!("add one provider section ({}) under [{field}]", list(known))
             }
