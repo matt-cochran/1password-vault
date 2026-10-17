@@ -354,7 +354,6 @@ fn issue_157_access_reports_the_vault_outside_the_account_and_checks_the_others(
 /// live (recording 13), so login signs in to B and runs its command.
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "#160: unverified end to end; opv-sim does not play op signin (recording 13 is interactive), so login stops at exit 7 after `op signin --force --account B`"]
 fn issue_160_login_to_b_while_a_is_signed_in_signs_in_to_b() {
     let s = Scenario::new(|w| sign_in(w, |id| id == PROJECT));
     let Some(code) = s.login_in(&s.project(), &["--account", OTHER, "--", "true"]) else {
@@ -388,4 +387,41 @@ fn mcp_install_all_names_the_client_registered_before_a_later_client_failed() {
         document(&out)["error"]["subject"]["done"],
         serde_json::json!(["claude"])
     );
+}
+
+/// #160: `op signin --force --account B` is played from recording 13 and starts B's
+/// session, so the simulated machine holds B signed in afterwards.
+#[cfg(target_os = "linux")]
+#[test]
+fn issue_160_signin_to_b_leaves_b_signed_in_on_the_simulated_machine() {
+    let s = Scenario::new(|w| sign_in(w, |id| id == PROJECT));
+    if s.login_in(&s.project(), &["--account", OTHER, "--", "true"])
+        .is_none()
+    {
+        return; // no `script` on this machine: nothing to run the terminal under
+    }
+    let accounts = s.world_now()["op"]["accounts"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        accounts
+            .iter()
+            .find(|a| a["id"] == OTHER)
+            .is_some_and(|a| a["signed_in"] == true)
+    );
+}
+
+/// #160: recording 13 only covers `op signin` while another account's session is live. With
+/// none, real op prompts, which the simulator does not model.
+#[test]
+fn issue_160_signin_without_another_live_session_is_unsupported() {
+    let s = Scenario::new(|w| sign_in(w, |_| false));
+    let out = Command::new(s.bin().join("op"))
+        .args(["signin", "--force", "--account", OTHER])
+        .env("OPV_SIM_WORLD", s.world())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(87));
 }

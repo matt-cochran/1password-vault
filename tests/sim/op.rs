@@ -22,6 +22,11 @@
 //! the world's rows in the fields opv reads, one compact line, and are not taken from a
 //! recording.
 //!
+//! `op signin --force --account <id>` with a live session for another account on the same
+//! sign-in address is recording 13 (a success with no output): it marks that account signed in
+//! for the calls after it (#160). With no such session, real op prompts, which the simulator
+//! does not model.
+//!
 //! ```json
 //! "op": {
 //!   "default_account": "AAAA…",             // op's own default when no --account / OP_ACCOUNT
@@ -171,7 +176,9 @@ pub fn run(world: &mut World, args: &[String]) -> Reply {
                 None => fault(Kind::SignedOut, world, args),
             };
         };
-        if !a["signed_in"].as_bool().unwrap_or(false) {
+        // A sign-in establishes the session, so `op signin` is answered even for an account
+        // with none yet (#160); every other call needs an existing one.
+        if !a["signed_in"].as_bool().unwrap_or(false) && family(&w) != "signin" {
             let other = accounts(world)
                 .iter()
                 .any(|o| o["id"] != a["id"] && o["signed_in"].as_bool().unwrap_or(false));
@@ -224,6 +231,26 @@ pub fn run(world: &mut World, args: &[String]) -> Reply {
         },
         ["item", "create"] => item_create(world, &acct, args),
         ["item", "edit", item] => item_edit(world, &acct, item, args),
+        ["signin", ..] => {
+            // #160: `op signin --force --account B` succeeds while another account's session
+            // on the same sign-in address is live (recording 13, exit 0, no output). With no
+            // such session, real op prompts, which the simulator does not model.
+            let live_elsewhere = accounts(world).iter().any(|a| {
+                a["id"].as_str() != Some(&acct) && a["signed_in"].as_bool().unwrap_or(false)
+            });
+            if !live_elsewhere {
+                return Reply::unsupported("op", args);
+            }
+            // The sign-in starts this account's session, so the calls after it see it signed
+            // in.
+            if let Some(account) = world.doc["op"]["accounts"]
+                .as_array_mut()
+                .and_then(|all| all.iter_mut().find(|a| a["id"].as_str() == Some(&acct)))
+            {
+                account["signed_in"] = json!(true);
+            }
+            recorded(&format!("{DIR}/13-b-signin-with-a-session-live"), &[])
+        }
         _ => Reply::unsupported("op", args),
     }
 }
