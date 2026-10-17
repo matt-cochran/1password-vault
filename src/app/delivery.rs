@@ -44,6 +44,9 @@ use crate::runner::CommandRunner;
 
 const RECEIPT_FIELD: &str = "receipt";
 const KEY_FIELD: &str = "evidence key";
+/// The non-secret field a sync records for `opv changed` (C2): one `v1|<item_id>|<version>`
+/// line per source item, ids and integers only. Written only after a confirmed sync.
+const SOURCE_VERSIONS_FIELD: &str = "source versions";
 
 /// The binding set of `product` on target `target` of `env_name`: exactly the secrets the
 /// target delivers for it, by target name, with the 1Password field each value comes from
@@ -248,6 +251,9 @@ struct StateItem {
     receipt: Option<Receipt>,
     key: Option<Zeroizing<String>>,
     evidence: Vec<Evidence>,
+    /// The `source versions` text the item held when read (C2): kept when this run does not
+    /// mint a receipt and re-emitted unchanged.
+    source_versions: Option<String>,
     raw: Zeroizing<Vec<u8>>,
 }
 
@@ -289,6 +295,7 @@ fn read_state(
     let mut receipt = None;
     let mut key = None;
     let mut evidence = Vec::new();
+    let mut source_versions = None;
     for f in doc["fields"].as_array().into_iter().flatten() {
         let (Some(label), Some(value)) = (f["label"].as_str(), f["value"].as_str()) else {
             continue;
@@ -296,6 +303,7 @@ fn read_state(
         match label {
             RECEIPT_FIELD => receipt = serde_json::from_str::<Receipt>(value).ok(),
             KEY_FIELD if !value.is_empty() => key = Some(Zeroizing::new(value.to_string())),
+            SOURCE_VERSIONS_FIELD => source_versions = Some(value.to_string()),
             name => {
                 if let Some(e) = decode_evidence(name, value) {
                     evidence.push(e);
@@ -308,6 +316,7 @@ fn read_state(
         receipt,
         key,
         evidence,
+        source_versions,
         raw,
     }))
 }
@@ -371,7 +380,8 @@ pub struct Recorded {
 ///   (`identical`), with its store version in `listed`, gets a fresh evidence line in the
 ///   placement's delivery item: these lines are the ledger `plan` judges by;
 /// - once every name of the binding set was confirmed so, a revision is minted (an
-///   unchanged binding set and evidence keep their revision).
+///   unchanged binding set and evidence keep their revision) and the placement's
+///   `source versions` field records each source item's version (C2).
 ///
 /// A placement without a recorded delivery item gets nothing (`opv bootstrap` creates it).
 /// Only that placement's own item is read and written.
@@ -384,6 +394,7 @@ pub fn record(
     written: &BTreeSet<String>,
     identical: &BTreeSet<String>,
     listed: &[StoreEntry],
+    source_versions: &BTreeMap<String, u64>,
     plan_id: &str,
     r: &dyn CommandRunner,
 ) -> Result<Recorded, Error> {
@@ -507,11 +518,18 @@ pub fn record(
             None
         };
         let kept = receipt.as_ref().or(state.receipt.as_ref());
+        // C2: only a minted receipt records versions; an unconfirmed placement keeps the
+        // field it already had.
+        let minted_versions = why.is_empty().then(|| versions_text(&set, source_versions));
+        let write_versions = minted_versions
+            .as_deref()
+            .or(state.source_versions.as_deref());
         let changed = state.key.is_none()
             || lines(&state.evidence) != lines(&evidence)
-            || kept.map(|k| &k.revision) != state.receipt.as_ref().map(|k| &k.revision);
+            || kept.map(|k| &k.revision) != state.receipt.as_ref().map(|k| &k.revision)
+            || write_versions != state.source_versions.as_deref();
         if changed {
-            write_state(r, env, &state, kept, &key, &evidence)?;
+            write_state(r, env, &state, kept, &key, &evidence, write_versions)?;
         }
         match receipt {
             Some(rec) => out.minted.push(rec),
@@ -531,8 +549,22 @@ fn lines(evidence: &[Evidence]) -> Vec<String> {
     out
 }
 
+/// The `source versions` text of `set` (C2): one `v1|<item_id>|<version>` line per distinct
+/// source item id, sorted by item id, versions from `source_versions`.
+fn versions_text(set: &[BindingRef], source_versions: &BTreeMap<String, u64>) -> String {
+    let ids: BTreeSet<&str> = set.iter().map(|b| b.source.item_id.as_str()).collect();
+    let mut out = String::new();
+    for id in ids {
+        if let Some(version) = source_versions.get(id) {
+            out.push_str(&format!("v1|{id}|{version}\n"));
+        }
+    }
+    out
+}
+
 /// Rewrite the placement's delivery item `state`: its notes kept, then the receipt (when
-/// one was ever minted), the key and one concealed evidence field per name.
+/// one was ever minted), the recorded source versions (C2), the key and one concealed
+/// evidence field per name.
 fn write_state(
     r: &dyn CommandRunner,
     env: &crate::domain::Environment,
@@ -540,6 +572,7 @@ fn write_state(
     receipt: Option<&Receipt>,
     key: &str,
     evidence: &[Evidence],
+    source_versions: Option<&str>,
 ) -> Result<(), Error> {
     let mut doc: Value = serde_json::from_slice(&state.raw).map_err(|_| {
         Error::from(Cause::Bug {
@@ -561,6 +594,12 @@ fn write_state(
         })?;
         fields.push(
             json!({"id": "receipt", "label": RECEIPT_FIELD, "type": "STRING", "value": receipt_json}),
+        );
+    }
+    if let Some(text) = source_versions {
+        fields.push(
+            json!({"id": "source-versions", "label": SOURCE_VERSIONS_FIELD,
+                            "type": "STRING", "value": text}),
         );
     }
     fields

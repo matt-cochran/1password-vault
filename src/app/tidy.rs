@@ -291,6 +291,9 @@ pub(crate) struct Read {
     /// The item's `version` integer as last read (after a tidy, the tidied item's): an
     /// input of the plan id (FR-41).
     pub version: Option<u64>,
+    /// The `version` integer read from each boundary item, by its item id (C2): what a sync
+    /// records in the delivery item's `source versions` field.
+    pub item_versions: BTreeMap<String, u64>,
     /// The declared keys whose field is missing or empty ([`needing_values`]): `run` names
     /// them before the command starts, so an empty value is never passed silently.
     pub needing_values: Vec<String>,
@@ -411,6 +414,7 @@ fn read_in(
         tidy_error: None,
         tidy_failure: None,
         version: None,
+        item_versions: BTreeMap::new(),
         needing_values: Vec::new(),
         identity: None,
     }))
@@ -425,6 +429,7 @@ fn merge(read: &mut Read, part: Read) {
     read.tidy_error = read.tidy_error.or(part.tidy_error);
     read.tidy_failure = read.tidy_failure.take().or(part.tidy_failure);
     read.version = read.version.zip(part.version).map(|(a, b)| a + b);
+    read.item_versions.extend(part.item_versions);
     read.needing_values.extend(part.needing_values);
     read.identity = read.identity.or(part.identity);
 }
@@ -449,6 +454,9 @@ fn read_item_as(
                 who: Option<Identity>| {
         let mut res = finish(layout, fleet, env_name, env, b, changes, error);
         res.version = version;
+        if let Some(v) = version {
+            res.item_versions.insert(b.item_id.clone(), v);
+        }
         res.identity = who;
         res
     };
@@ -787,6 +795,7 @@ fn finish(
         tidy_error,
         tidy_failure: None,
         version: None,
+        item_versions: BTreeMap::new(),
         identity: None,
     }
 }

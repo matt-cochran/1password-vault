@@ -14,6 +14,7 @@ use super::*;
 use crate::adapters::fake_op::FakeOp;
 use crate::app::sync::{self, SyncOpts};
 use crate::app::testutil::{fly_app_ok, fly_releases, ok};
+use crate::runner::fake::FakeRunner;
 use crate::runner::{Call, Outcome, Output};
 
 const MARK: &str = "DELIVERYMARK";
@@ -470,6 +471,65 @@ fn a_delivery_item_keeps_its_notes() {
             .iter()
             .any(|f| f["purpose"] == "NOTES")
     );
+}
+
+/// The delivery item's recorded `source versions` text, if the field is there.
+fn source_versions(w: &World, fleet: &Fleet, product: &str) -> Option<String> {
+    let id = &fleet.environments["prod"].targets["app"].delivery_items[product];
+    w.op.item(id)["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["label"] == "source versions")
+        .and_then(|f| f["value"].as_str())
+        .map(str::to_string)
+}
+
+#[test]
+fn a_confirmed_sync_records_each_source_items_version() {
+    let (w, fleet) = delivered();
+    let source = &fleet.environments["prod"].boundaries["api"];
+    let expected = format!(
+        "v1|{}|{}\n",
+        source.item_id,
+        w.op.item(&source.item_id)["version"]
+    );
+    assert_eq!(source_versions(&w, &fleet, "api"), Some(expected));
+}
+
+#[test]
+fn an_unconfirmed_sync_keeps_the_recorded_source_versions() {
+    let (w, fleet) = delivered();
+    let source = &fleet.environments["prod"].boundaries["api"];
+    let before = format!(
+        "v1|{}|{}\n",
+        source.item_id,
+        w.op.item(&source.item_id)["version"]
+    );
+    w.set_value("api", "TOKEN", &format!("tok2-{MARK}"));
+    w.fail_import.set(true);
+    let _ = sync_all(&w, &fleet);
+    assert_eq!(source_versions(&w, &fleet, "api"), Some(before));
+}
+
+#[test]
+fn changed_is_unchanged_after_a_confirmed_sync() {
+    let (w, fleet) = delivered();
+    let source = &fleet.environments["prod"].boundaries["api"];
+    let delivery = &fleet.environments["prod"].targets["app"].delivery_items["api"];
+    let list = format!(
+        "[{{\"id\":\"{}\",\"version\":{}}},{{\"id\":\"{delivery}\",\"version\":9}},\
+         {{\"id\":\"itm-deploy-creds\",\"version\":8}}]",
+        source.item_id,
+        w.op.item(&source.item_id)["version"]
+    );
+    let r = FakeRunner::new([
+        Output::success(list),
+        Output::success(source_versions(&w, &fleet, "api").unwrap()),
+        Output::success(source_versions(&w, &fleet, "web").unwrap()),
+    ]);
+    let res = crate::app::changed::run(&fleet, "prod", None, &[], &r, false, &mut Vec::new());
+    assert_eq!(res.unwrap(), 0);
 }
 
 #[test]
