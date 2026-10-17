@@ -2082,6 +2082,15 @@ impl Cause {
                 plural(names.len(), "binding", "bindings"),
                 list(names)
             ),
+            SourceChanged { env, no_record } => {
+                if *no_record {
+                    format!(
+                        "no source versions are recorded for environment {env}: run opv bootstrap to record delivery items"
+                    )
+                } else {
+                    format!("the source items of environment {env} changed since the last sync")
+                }
+            }
             LocalIo { op, path, io } => {
                 if path.as_os_str().is_empty() {
                     format!("opv could not {}: {}", local_op(*op), io_words(*io))
@@ -3890,6 +3899,16 @@ impl Cause {
                 inspect("re-run the sync to restore 1Password's values"),
                 Next::Check(cmd(&["plan"], &[env.as_str(), "--target", target.as_str()])),
             ),
+            SourceChanged { env, no_record } => {
+                if *no_record {
+                    plan(
+                        inspect("run opv bootstrap to record delivery items"),
+                        Next::Handoff(cmd(&["bootstrap"], &[])),
+                    )
+                } else {
+                    plan(None, Next::Run(cmd(&["sync"], &[env.as_str(), "--deploy"])))
+                }
+            }
             LocalIo {
                 path,
                 io: IoKind::NotAPlainFile,

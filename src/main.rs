@@ -762,6 +762,21 @@ enum Cmd {
     /// Delivery receipts: whether a product's target still holds what opv delivered.
     #[command(subcommand)]
     Delivery(DeliveryCmd),
+    /// Whether a source item changed since the last sync (read-only; exit 10 when it did).
+    #[command(before_help = CHANGED_QUICK)]
+    Changed {
+        /// Environment name from the configuration (for example prod).
+        env: String,
+        /// Only this product.
+        #[arg(long)]
+        product: Option<String>,
+        /// Only this target (repeatable); default: every target that delivers the product.
+        #[arg(long)]
+        target: Vec<String>,
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print a ready-to-commit GitHub Actions workflow (YAML) for one target (read-only).
     #[command(subcommand)]
     Ci(CiCmd),
@@ -1337,6 +1352,12 @@ Examples:
   opv delivery verify prod --product api                       # each placement: verified, changed, or not delivered
   opv delivery verify prod --product api --target web          # one placement
   opv delivery verify prod --receipt api.receipt.json --json   # the kept receipt is still current?";
+
+const CHANGED_QUICK: &str = "\
+Examples:
+  opv changed prod                       # did any source item change since the last sync?
+  opv changed prod --product api         # only api's placements
+  opv changed prod --json                # one JSON document; exit 10 when something changed";
 
 #[derive(Subcommand)]
 enum CiCmd {
@@ -2326,6 +2347,7 @@ impl Cmd {
         match self {
             Cmd::Check { env, .. }
             | Cmd::Run { env, .. }
+            | Cmd::Changed { env, .. }
             | Cmd::Config(ConfigCmd::Export { env: Some(env), .. })
             | Cmd::Item(ItemCmd::Skeleton { env, .. })
             | Cmd::Tidy { env, .. } => Some((env, Reach::Store)),
@@ -2396,6 +2418,7 @@ impl Cmd {
             | Cmd::Tidy { json, .. }
             | Cmd::Access { json, .. }
             | Cmd::Delivery(DeliveryCmd::Verify { json, .. })
+            | Cmd::Changed { json, .. }
             | Cmd::Target(TargetCmd::Add { json, .. })
             | Cmd::Target(TargetCmd::List { json, .. })
             | Cmd::Adopt { json, .. }
@@ -3048,6 +3071,16 @@ fn run(
             runner,
         );
     }
+    if let Cmd::Changed {
+        env,
+        product,
+        target,
+        json,
+    } = &cmd
+    {
+        let fleet = loaded?;
+        return opv::app::changed::run(&fleet, env, product.as_deref(), target, runner, *json, out);
+    }
     run_other(cmd, loaded, source.as_deref(), runner, out).map(|()| 0)
 }
 
@@ -3412,6 +3445,7 @@ fn run_other(
         Cmd::Setup { .. } => unreachable!("handled before configuration discovery"),
         Cmd::Login { .. } => unreachable!("handled before configuration discovery"),
         Cmd::Run { .. } => unreachable!("handled by run"),
+        Cmd::Changed { .. } => unreachable!("handled by run"),
         Cmd::Init { .. } => unreachable!("handled by run_init"),
         Cmd::Add { .. } => unreachable!("handled by run_edit"),
         Cmd::Target(TargetCmd::Add { .. }) => unreachable!("handled by run_edit"),

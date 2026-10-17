@@ -77,6 +77,12 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "TargetDrift",
         "drift needs a pinned store opv-sim does not model (Azure Key Vault/ESO)",
     ),
+    // A result, not a failure: `opv changed` reports it as `ok: true` with exit 10 in its
+    // own document (src/app/changed.rs), never as an error, so no error snapshot exists.
+    (
+        "SourceChanged",
+        "a successful result (exit 10), never an error document",
+    ),
 ];
 
 fn snapshots() -> PathBuf {

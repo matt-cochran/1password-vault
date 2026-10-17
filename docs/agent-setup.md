@@ -130,6 +130,7 @@ Give `opv target add <env> <name>` the provider's options: `--azure-subscription
 opv ready                  # every environment x product at once
 opv access --json          # who can read each vault; the owner's command for a read-only CI reader
 opv delivery verify prod --product api --json   # does the target still hold what opv delivered? (revision, never a value)
+opv changed prod --json    # did a source item change since the last sync? (exit 10 when it did)
 opv status staging         # one environment's rows
 opv history prod --json    # what opv last wrote to a target: time, plan id, changed outside opv
 ```

@@ -236,6 +236,9 @@ pub fn meaning(code: &str) -> &'static str {
         "target_drift" => {
             "a pinned target no longer holds the version 1Password records (drift); opv sync restores it"
         }
+        "source_changed" => {
+            "a source item changed since the last sync, or no source versions are recorded; the next step is the sync"
+        }
         "local_io_failed" => {
             "opv's own local input or output failed (a file, the current folder, standard output, ...)"
         }
@@ -786,6 +789,10 @@ fn one_of_each() -> Vec<Cause> {
             env: EnvName::new("env-prod"),
             target: TargetName::new("tgt-web"),
             names: vec!["prod-api/KEY_X (KEY_X)".to_string()],
+        },
+        SourceChanged {
+            env: EnvName::new("env-prod"),
+            no_record: false,
         },
         KeyNotDeclared {
             key: KeyName::new("KEY_X"),

@@ -19,6 +19,7 @@ pub mod approve;
 #[cfg(test)]
 mod azure_tests;
 pub mod bootstrap;
+pub mod changed;
 #[cfg(test)]
 mod characterization_tests;
 pub(crate) mod ci_summary;

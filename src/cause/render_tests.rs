@@ -696,6 +696,13 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             vec!["env-prod", "tgt-web", "prod-api/KEY_X (KEY_X)"],
         ),
         (
+            SourceChanged {
+                env: EnvName::new("env-prod"),
+                no_record: true,
+            },
+            vec!["env-prod", "bootstrap"],
+        ),
+        (
             KeyNotDeclared {
                 key: KeyName::new("KEY_X"),
                 env: EnvName::new("env-prod"),
@@ -893,6 +900,7 @@ fn ordinal(c: &Cause) -> usize {
         RemoteVersionMismatch { .. } => 57,
         ChildStartFailed { .. } => 58,
         DeliveryUnverified { .. } => 59,
+        SourceChanged { .. } => 74,
         Bug { .. } => 60,
         KeyNotDeclared { .. } => 61,
         KeysBlocking { .. } => 62,
@@ -907,11 +915,11 @@ fn ordinal(c: &Cause) -> usize {
         SourceOnly { .. } => 71,
         TitleLookup { .. } => 72,
         PersonalNotSetUp { .. } => 73,
-        TargetDrift { .. } => 74,
+        TargetDrift { .. } => 75,
     }
 }
 
-const VARIANTS: usize = 75;
+const VARIANTS: usize = 76;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
@@ -1013,6 +1021,18 @@ fn in_no_account_on_the_machine() -> Cause {
         },
         other => other,
     }
+}
+
+#[test]
+fn a_source_changed_sync_is_a_run() {
+    let cause = Cause::SourceChanged {
+        env: EnvName::new("env-prod"),
+        no_record: false,
+    };
+    assert_eq!(
+        crate::cause::render::next_kind(&cause.step(&inv()).1),
+        "run"
+    );
 }
 
 #[test]
@@ -1661,7 +1681,7 @@ fn a_changed_plan_reads_the_plan_of_the_same_scope() {
 #[test]
 fn a_target_drift_plans_the_environment_and_target() {
     assert_eq!(
-        next_of(&fixture(74)).as_deref(),
+        next_of(&fixture(75)).as_deref(),
         Some("opv plan env-prod --target tgt-web")
     );
 }

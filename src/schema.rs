@@ -125,6 +125,13 @@ pub const EFFECTS: &[Effect] = &[
         ask_user_first: false,
     },
     Effect {
+        command: "changed",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    Effect {
         command: "ci workflow",
         effect: "reads",
         needs_terminal: false,
@@ -722,6 +729,7 @@ fn documents() -> Value {
         "account use": "{account_id, path}: the .opv file written",
         "config export": "with <ENV>: the config-kind values, always {product: {KEY: value}}; with --json and no <ENV>: the configuration itself (IDs, names, kinds, rules); no frame on success",
         "delivery verify": "{environment, placements: [{product, target, revision, state, reason, names: [{name, state}], deployed, receipt_revision?}]}: every placement of the product, each with its target and state; --target narrows to one placement; a receipt kept from sync --receipt must be the current delivery",
+        "changed": "{environment, changed, placements: [{product, target, state (unchanged|changed|no_record), items?: [{item_id, recorded, current?}]}], next, do}: each placement's recorded source versions against the item's current version (item IDs and version numbers only, never a value); exit 10 when something changed, with ok true",
         "schema": "this document",
         "skill install": "{written: [{target, path}], kept: [{target, path, reason}]}",
         "skill status": "{copies: [{scope, target, path, version, edited, current}]}",

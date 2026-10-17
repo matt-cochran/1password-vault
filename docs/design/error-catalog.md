@@ -187,13 +187,14 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 | `ChildStartFailed` | program; workdir; io; host | **child_start_failed** | 3 | after_fix | local: "check that <program> is on PATH"; remote: "check command and workdir of remote profile <p> (opv config edit)" | rerun [R80] |
 | `DeliveryUnverified` | env; target; product; state: NotRecorded / Superseded{receipt} / OtherAccount{account} / ChangedOnTarget / ChangedInOnePassword / Unverifiable{cause} | **delivery_unverified** | 8 | after_fix | per state | per state [R82, R84] |
 | `TargetDrift` | env; target; names: Vec<String> | **target_drift** | 8 | after_fix | "re-run the sync to restore 1Password's values" | `opv plan <env> --target <t>` |
+| `SourceChanged` | env; no_record: bool | **source_changed** | 10 | never | no_record: "run opv bootstrap to record delivery items" | no_record: `opv bootstrap`; else the sync: `opv sync <env> --deploy` (or `opv plan <env>` on a guarded environment). A result, not a failure (`ok: true`) [R83] |
 | `Bug` | site: InvariantId (static) | **internal_error** | 70 | never | "report this as an opv bug: <issues URL>" | `opv version` [R85] |
 
 `McpClientProtocolFailed` [R86] is not an opv cause: it is the MCP transport's own error, reported by the MCP library.
 
 ### 4.11 Codes
 
-- **New:** config_source_mismatch, config_unreadable, config_not_editable, copies_differ, unknown_target, unknown_role, unknown_profile, ambiguous_name, choice_required, nothing_in_scope, already_declared, target_not_signed_in, own_session_required, credential_rejected, resource_not_found, create_outcome_unknown, budget_spent, concurrent_edit, tool_unusable, unexpected_output, unrecognized_failure, declined, file_too_open, input_invalid, approval_used, plan_unknown, private_dir_failed, remote_unreachable, remote_version_mismatch, child_start_failed, delivery_unverified, target_drift, internal_error.
+- **New:** config_source_mismatch, config_unreadable, config_not_editable, copies_differ, unknown_target, unknown_role, unknown_profile, ambiguous_name, choice_required, nothing_in_scope, already_declared, target_not_signed_in, own_session_required, credential_rejected, resource_not_found, create_outcome_unknown, budget_spent, concurrent_edit, tool_unusable, unexpected_output, unrecognized_failure, declined, file_too_open, input_invalid, approval_used, plan_unknown, private_dir_failed, remote_unreachable, remote_version_mismatch, child_start_failed, delivery_unverified, target_drift, source_changed, internal_error.
 - **Removed:** source_error, target_error, auth_required, desktop_app_unavailable (now a `NotSignedIn` state), op_unexpected (now `unrecognized_failure`), duplicate_scope (now `input_invalid`), credential_rejected for op's prompt (now `NotSignedIn`), and the MCP-only codes.
 - **Exit 70 (internal error)** is new; it follows `EX_SOFTWARE`.
 
