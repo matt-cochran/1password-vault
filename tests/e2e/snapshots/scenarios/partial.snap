@@ -4,13 +4,14 @@
 ## text stdout
 prod/fly: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
 prod/fly: delivery: web not recorded: no delivery item is recorded for web on prod/fly; opv bootstrap creates it
-prod/fly: written: web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/MIGRATION_TOKEN (E2E__WEB__MIGRATION_TOKEN), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET)
-prod/fly: pending deploy (pass --deploy): web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/MIGRATION_TOKEN (E2E__WEB__MIGRATION_TOKEN), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET)
-prod/fly: summary: written 4 · unchanged 0 · held 0 · deployed no · pending 4 · pruned 0 · kept 0 · skipped 0
+prod/fly: written: web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET)
+prod/fly: extra, not pruned (pass --prune to remove): web/MIGRATION_TOKEN (E2E__WEB__MIGRATION_TOKEN)
+prod/fly: pending deploy (pass --deploy): web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET)
+prod/fly: summary: written 3 · unchanged 0 · held 0 · deployed no · pending 3 · pruned 0 · kept 1 · skipped 1
 prod/gh: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
 prod/gh: delivery: web not recorded: no delivery item is recorded for web on prod/gh; opv bootstrap creates it
-prod/gh: written: web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/MIGRATION_TOKEN (E2E__WEB__MIGRATION_TOKEN), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET), web/LOG_LEVEL (E2E__WEB__LOG_LEVEL)
-prod/gh: summary: written 5 · unchanged 0 · held 0 · deployed no · pending 0 · pruned 0 · kept 0 · skipped 0
+prod/gh: written: web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET), web/LOG_LEVEL (E2E__WEB__LOG_LEVEL)
+prod/gh: summary: written 4 · unchanged 0 · held 0 · deployed no · pending 0 · pruned 0 · kept 0 · skipped 1
 
 ## text stderr
 using <SCENARIO>/project/secrets.toml

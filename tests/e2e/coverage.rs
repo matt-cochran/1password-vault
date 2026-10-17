@@ -548,13 +548,13 @@ mod cases {
         case(
             Scenario::new().config(|c| {
                 c.replacen(
-                    "state_vault_id = \"vE2ESTATEGH000000000000001\"\n",
-                    "state_vault_id = \"vE2ESTATEGH000000000000001\"\n\n\
+                    "state_vault_id = \"vE2ESTATEGH000000000000001\"\nroles = [\"serve\"]\n",
+                    "state_vault_id = \"vE2ESTATEGH000000000000001\"\nroles = [\"serve\"]\n\n\
                      [environments.staging]\ntitle = \"Staging\"\norder = 3\n\
                      boundaries.web = { vault_id = \"vE2EWEBDEV0000000000000001\", item_id = \"iE2EWEBDEV0000000000000001\" }\n\n\
                      [environments.staging.targets.fly]\nfly.app = \"e2e-app-staging\"\n\
                      fly.secret_name = \"E2E__{PRODUCT}__{KEY}\"\n\
-                     state_vault_id = \"vE2ESTATEFLY00000000000001\"\n",
+                     state_vault_id = \"vE2ESTATEFLY00000000000001\"\nroles = [\"serve\"]\n",
                     1,
                 )
                 .replace(

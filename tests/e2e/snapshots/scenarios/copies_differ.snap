@@ -22,8 +22,7 @@
  personal_vault = "e2e-dev-private"
  personal_item  = "e2e-app · dev (personal)"
  
- # Production: locked behind confirm_env, one target per provider, and a reviewed remote
- # execution profile for the builder host.
+ # Production: locked behind confirm_env and one target per provider.
  [environments.prod]
  title = "Production"
  order = 2
@@ -36,6 +35,7 @@
  fly.app = "e2e-app-prod"
  fly.secret_name = "E2E__{PRODUCT}__{KEY}"
  state_vault_id = "vE2ESTATEFLY00000000000001"
+ roles = ["serve"]
  
  # The Kubernetes target: the Deployment reads names from the e2e-prod namespace.
  [environments.prod.targets.k8s]
@@ -44,6 +44,7 @@
  kubernetes.deployment = "e2e-app"
  kubernetes.env_name = "E2E__{PRODUCT}__{KEY}"
  state_vault_id = "vE2ESTATEK8S00000000000001"
+ roles = ["serve"]
  
  # The GitHub target: repository secrets and variables, plus the production environment.
  [environments.prod.targets.gh]
@@ -51,6 +52,7 @@
  github.environment = "production"
  github.secret_name = "E2E__{PRODUCT}__{KEY}"
  state_vault_id = "vE2ESTATEGH000000000000001"
+ roles = ["serve"]
  
  # A source-only home for a value more than one product reads. It is never delivered.
  [products.shared]
@@ -128,11 +130,11 @@
  host = "builder.example.test"
  user = "deploy"
  host_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIe2eMarkerHostKeyNotARealKey000000"
- environments = ["prod"]
+ environments = ["dev"]
  roles = ["serve", "migrate"]
  opv = "/usr/local/bin/opv"
  workdir = "/srv/e2e-app"
- command = ["/usr/local/bin/opv", "run", "--env", "prod", "--product", "web"]
+ command = ["/usr/local/bin/opv", "run", "--env", "dev", "--product", "web"]
 
 ## text stderr
 opv: secrets.toml and the 1Password manifest opv · e2e-app differ

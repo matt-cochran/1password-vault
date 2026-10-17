@@ -3,7 +3,7 @@
 ## text exit: 5
 ## text stdout
 prod/k8s: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
-prod/k8s: written: web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/MIGRATION_TOKEN (E2E__WEB__MIGRATION_TOKEN), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET)
+prod/k8s: written: web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET)
 prod/k8s: unchanged: E2E__SHARED__DATABASE_URL
 prod/k8s: delivery: web not recorded: no delivery item is recorded for web on prod/k8s; opv bootstrap creates it
 

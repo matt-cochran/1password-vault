@@ -1161,3 +1161,22 @@ fn an_account_whoami_cannot_name_is_an_error() {
     let r = crate::runner::fake::FakeRunner::new([Output::success("{}")]);
     assert!(account_id(&r).is_err());
 }
+
+/// M3, §4.4: a key whose roles miss the target's roles is not in the target's binding set,
+/// so a confirmed sync of the rest can mint a receipt.
+#[test]
+fn a_key_withheld_by_the_targets_roles_is_not_bound() {
+    let text = crate::app::testutil::role_fixture_text().replacen(
+        "state_vault_id = \"sprd\"\nroles = [\"serve\", \"migrate\"]",
+        "state_vault_id = \"sprd\"\nroles = [\"serve\"]",
+        1,
+    );
+    let fleet =
+        crate::config::parse(&format!("{text}\n{}", crate::app::testutil::ROLE_KEYS)).unwrap();
+    let names: Vec<String> = bindings(&fleet, "prod", "portfolio", "allumata")
+        .unwrap()
+        .into_iter()
+        .map(|b| b.name)
+        .collect();
+    assert!(!names.contains(&"FLEET__ALLUMATA__DATABASE_URL_UNPOOLED".to_string()));
+}

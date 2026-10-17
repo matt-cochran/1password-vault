@@ -64,11 +64,18 @@ pub fn bindings(
         return Ok(Vec::new());
     };
     let env = fleet.environment(env_name)?;
+    let served = env.targets.get(target).and_then(|t| t.roles.as_deref());
     let mut out: Vec<BindingRef> = prod
         .keys
         .iter()
         .filter(|(_, s)| s.kind == Kind::Secret && !s.personal)
         .filter(|(_, s)| rules::applies(s, env_name, env, product))
+        // Target roles (M3, delivery-transports §4.4): a key whose roles miss the target's
+        // is not desired there, so it is not part of the target's binding set.
+        .filter(|(_, s)| match (&s.roles, served) {
+            (Some(roles), Some(served)) => roles.iter().any(|r| served.contains(r)),
+            _ => true,
+        })
         .map(|(k, s)| {
             let (sp, sk) = s.source().unwrap_or((product, k));
             Ok(BindingRef {
