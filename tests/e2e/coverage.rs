@@ -69,16 +69,22 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "SecretNotStored",
         "no recording of `op service-account create`",
     ),
-    // Drift is read from a pinned runtime and store: Azure Key Vault through External Secrets
-    // (src/adapters/azure/keyvault.rs, src/adapters/kubernetes/external.rs), or the K5 volume
-    // bindings. opv-sim models neither, so no scenario reaches it; reached by
-    // src/app/azure_tests.rs. Drop this when a scenario or the K5 bindings make it reachable.
+    // Drift is a pinned binding whose version differs from the store's current one. The only
+    // pinned target opv-sim models is plain Kubernetes, whose store takes the current version
+    // from the Deployment's own binding (src/adapters/kubernetes/store.rs `read`), so the two
+    // never differ. Where they can (Azure Key Vault through External Secrets,
+    // src/adapters/azure/keyvault.rs, src/adapters/kubernetes/external.rs, or the K5 volume
+    // bindings) opv-sim models nothing; reached by src/app/azure_tests.rs. The flag's other
+    // side, a target with nothing pinned exiting 0, is scenarios/changed.rs. Drop this when a
+    // scenario or the K5 bindings make it reachable.
     (
         "TargetDrift",
         "drift needs a pinned store opv-sim does not model (Azure Key Vault/ESO)",
     ),
     // A result, not a failure: `opv changed` reports it as `ok: true` with exit 10 in its
-    // own document (src/app/changed.rs), never as an error, so no error snapshot exists.
+    // own document (src/app/changed.rs), never as an error, so no error snapshot exists. Its
+    // states are snapshotted as successful results in scenarios/changed.rs
+    // (snapshots/changed/).
     (
         "SourceChanged",
         "a successful result (exit 10), never an error document",
