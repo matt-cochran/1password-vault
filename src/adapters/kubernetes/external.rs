@@ -357,6 +357,23 @@ fn owner_setup(name: &str) -> Error {
     .into()
 }
 
+/// The not-ready ClusterSecretStore `name`, carrying the condition's reason code (never its
+/// message) so the refusal names why a cluster admin must act (06.52). `shown` is a
+/// [`StoreState::NotReady`] display: "Ready=False, reason Valid".
+fn store_not_ready(name: &str, shown: &str) -> Error {
+    Cause::StoreNotReady {
+        store: ResourceRef {
+            kind: ResourceKind::ExternalStore,
+            name: ResourceName::new(name),
+            scope: None,
+        },
+        reason: shown
+            .rsplit_once(", reason ")
+            .map(|(_, code)| code.to_string()),
+    }
+    .into()
+}
+
 /// The operator object: not installed, or too old to serve the API opv writes.
 const OPERATOR: &str = "External Secrets Operator";
 /// The operator object when it is installed but does not serve [`API`].
@@ -404,6 +421,7 @@ pub(crate) fn diagnose_failed(
     match store_state(k, &bridge.cluster_store, &bridge.locator) {
         // Every state of the store and of its credential is a cluster admin's to fix; the
         // operator's events only told opv that the store is at fault.
+        Ok(StoreState::NotReady(why)) => store_not_ready(&bridge.cluster_store, &why),
         Ok(_) => owner_setup(&bridge.cluster_store),
         Err(e) => e,
     }
@@ -514,8 +532,8 @@ pub(crate) fn preflight(
     operator_served(k)?;
     let mut checks = Vec::new();
     let name = format!("cluster secret store {cluster_store}");
-    let refuse_or_warn = |checks: &mut Vec<Check>, msg: String| match mode {
-        PreflightMode::Mutate => Err(owner_setup(cluster_store)),
+    let refuse_or_warn = |checks: &mut Vec<Check>, msg: String, cause: Error| match mode {
+        PreflightMode::Mutate => Err(cause),
         PreflightMode::Read => {
             checks.push(Check {
                 name: name.clone().into(),
@@ -530,6 +548,7 @@ pub(crate) fn preflight(
         StoreState::NotReady(why) => refuse_or_warn(
             &mut checks,
             format!("ClusterSecretStore {cluster_store} is not Ready ({why}) (`{css_cmd}`)"),
+            store_not_ready(cluster_store, &why),
         )?,
         StoreState::Ready { names_store: false } => checks.push(Check {
             name: name.clone().into(),
@@ -585,7 +604,8 @@ pub(crate) fn doctor(
     }
     let css_cmd = k.command(&format!("describe {STORE_RESOURCE} {cluster_store}"));
     let css = store_state(k, cluster_store, locator).and_then(|s| match s {
-        StoreState::Missing | StoreState::NotReady(_) => Err(owner_setup(cluster_store)),
+        StoreState::Missing => Err(owner_setup(cluster_store)),
+        StoreState::NotReady(why) => Err(store_not_ready(cluster_store, &why)),
         StoreState::Ready { names_store: false } => Ok(Verdict::Warn(format!(
             "{cluster_store} is Ready, but its settings never name {locator}; check that it \
              reads {describe} (`{css_cmd}`)"
@@ -998,6 +1018,14 @@ mod tests {
         }
     }
 
+    /// The not-ready store's object, when the diagnosis names it as the new cause.
+    fn not_ready_object(e: &Error) -> Option<String> {
+        match e.cause() {
+            Some((Cause::StoreNotReady { store, .. }, _)) => Some(store.name.as_str().to_string()),
+            _ => None,
+        }
+    }
+
     fn not_ready_store() -> Output {
         store_with(|v| {
             v["status"]["conditions"][0]["status"] = json!("False");
@@ -1005,10 +1033,24 @@ mod tests {
         })
     }
 
+    fn not_ready_store_without_a_reason() -> Output {
+        store_with(|v| {
+            let c = &mut v["status"]["conditions"][0];
+            c["status"] = json!("False");
+            c.as_object_mut().expect("condition").remove("reason");
+        })
+    }
+
+    fn store_without_a_ready_condition() -> Output {
+        store_with(|v| {
+            v["status"]["conditions"] = json!([]);
+        })
+    }
+
     #[test]
     fn store_not_ready_is_the_cluster_admins_to_fix() {
         let e = diagnosis_error(Some(true), vec![not_ready_store()]);
-        assert_eq!(owner_object(&e).as_deref(), Some("prod-vault"));
+        assert_eq!(not_ready_object(&e).as_deref(), Some("prod-vault"));
     }
 
     /// 06.52: the store's Ready message is operator-written text, never echoed.
@@ -1025,6 +1067,20 @@ mod tests {
             store_state(&Kubectl::new(&r, &t), "prod-vault", "kv-opv-fixture").unwrap(),
             StoreState::NotReady("Ready=False, reason Valid".into())
         );
+    }
+
+    /// A7: a store that is not Ready and names no reason code omits the reason clause.
+    #[test]
+    fn store_not_ready_without_a_reason_omits_the_clause() {
+        let e = diagnosis_error(Some(true), vec![not_ready_store_without_a_reason()]);
+        assert!(!e.to_string().contains("reason:"), "{e}");
+    }
+
+    /// A7: a store with no Ready condition omits the reason clause.
+    #[test]
+    fn store_without_a_ready_condition_omits_the_clause() {
+        let e = diagnosis_error(Some(true), vec![store_without_a_ready_condition()]);
+        assert!(!e.to_string().contains("reason:"), "{e}");
     }
 
     #[test]

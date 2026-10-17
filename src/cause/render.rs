@@ -1104,6 +1104,15 @@ fn local_op(op: LocalOp) -> &'static str {
     }
 }
 
+/// A condition's reason code as shown: a CamelCase word only (names only, X19); anything
+/// else is upstream free text and is never echoed.
+fn reason_code(reason: &str) -> &str {
+    let word = !reason.is_empty()
+        && reason.len() <= 64
+        && reason.chars().all(|c| c.is_ascii_alphanumeric());
+    if word { reason } else { "unrecognised" }
+}
+
 /// A value 1Password shows only in edit mode: an empty field (found live, 0.9.x). The
 /// person looking for it must click Edit on the item first.
 fn hidden_when_empty(s: &ValueState) -> bool {
@@ -2080,6 +2089,14 @@ impl Cause {
                     )
                 }
             }
+            StoreNotReady { store, reason } => match reason {
+                Some(reason) => format!(
+                    "{} is not ready (reason: {})",
+                    resource_words(store),
+                    reason_code(reason)
+                ),
+                None => format!("{} is not ready", resource_words(store)),
+            },
             HandoffPipeContested { system } => format!(
                 "another process connected to opv's private pipe for {}'s CLI and was refused; nothing was sent to it",
                 system.label()
@@ -3894,6 +3911,25 @@ impl Cause {
                     }
                 }),
                 Next::Rerun,
+            ),
+            StoreNotReady { store, reason } => plan(
+                Some((
+                    Action::OwnerSetup {
+                        object: store.clone(),
+                    },
+                    match reason {
+                        Some(reason) => format!(
+                            "ask a cluster admin to make {} ready (its reason: {})",
+                            resource_words(store),
+                            reason_code(reason)
+                        ),
+                        None => format!(
+                            "ask a cluster admin to make {} ready",
+                            resource_words(store)
+                        ),
+                    },
+                )),
+                Next::Check(cmd(&["ready"], &[])),
             ),
             HandoffPipeContested { .. } => plan(
                 inspect(
