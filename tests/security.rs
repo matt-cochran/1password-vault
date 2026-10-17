@@ -962,7 +962,7 @@ fn no_account_is_auth_with_login_add() {
         let r = h.run(cmd);
         assert_eq!(r.code, 7, "{cmd:?}: {}", r.all());
         for want in [
-            "is not added to op on this machine",
+            "no 1Password account is added to op on this machine",
             "at op's prompt",
             "opv login --add",
         ] {
