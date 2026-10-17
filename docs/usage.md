@@ -903,6 +903,52 @@ SSH key or any other field type it does not rewrite exactly; it says so in one n
 
 CI may retry a job that exited 9 when `error.retry` is `safe`; codes 2 to 8 and 70 need a fix first. `run` exits with the child's own exit code, which can equal one of these; opv's own errors print `opv: ...` on stderr. A closed stdout (`status | head`) does not change the result. With `--json`, `error.code` names the cause within a category ([codes](#json-contract)).
 
+## When sync runs: `opv changed`, the drift check and CI
+
+A sync is incremental when a job runs only after the source changed. `opv changed <env>` is
+read-only and compares each placement's recorded `source versions` with the item's current
+version (values never shown):
+
+| Result | Exit | Next step |
+|---|---|---|
+| `unchanged` | 0 | nothing |
+| `changed` | 10 | run the sync (on a guarded environment, `opv plan <env>` first) |
+| `no_record` | 10 | nothing recorded yet: sync once (`opv bootstrap` when the store is missing) |
+| unreadable | its own code | fix what the error names; never read as `unchanged` |
+
+Exit 10 is a result, not a failure (`ok` is true in `--json`). A wrapper that treats **any**
+non-zero exit as a failure fails on every legitimate change, so the sync never runs; one that
+ignores every non-zero exit hides `unreadable` and reports success while opv never saw the
+item. Keep exit 10 and fail on everything else:
+
+```sh
+set +e
+opv changed staging --json > changed.json
+rc=$?
+set -e
+case $rc in
+  0)  echo "staging=no"  >> "$GITHUB_OUTPUT" ;;   # unchanged
+  10) echo "staging=yes" >> "$GITHUB_OUTPUT" ;;   # changed: run the sync
+  *)  exit "$rc" ;;                               # unreadable: fail the job
+esac
+```
+
+For a scheduled check that does not sync, `opv status <env> --fail-on-drift` exits 8
+(`target_drift`) when a pinned target no longer holds the version 1Password records, and 0
+when it matches.
+
+Generate the ready-made workflows instead of writing them by hand:
+
+```sh
+opv ci workflow --on-change              # the change workflow, every 15 minutes
+opv ci workflow --on-change --every 30   # ... on a 30-minute cron
+opv ci workflow --drift                  # the nightly drift check
+```
+
+`--on-change` fills the environment matrix and the confirm split from each environment's
+`confirm_env`: a direct sync when it is false, a reviewed `plan` then `--expect-plan` sync
+when it is true. Copy them from [examples/ci-change-detection](../examples/ci-change-detection/).
+
 ## GitHub Actions example
 
 ```yaml
