@@ -463,15 +463,18 @@ fn item_context(env: &Environment, b: &Boundary, write: bool) -> DiagnoseContext
         create: None,
         write,
         account: env.account.as_deref().map(AccountId::new),
+        account_from: env.account_from.clone(),
     }
 }
 
 /// The account the call was made in: the call site's, else none (op's default).
 fn account_source(ctx: &DiagnoseContext) -> AccountSource {
-    match (&ctx.account, &ctx.env) {
-        (Some(_), Some(env)) => AccountSource::Environment { env: env.clone() },
-        (Some(_), None) => AccountSource::Flag,
-        (None, _) => AccountSource::OpDefault,
+    match (&ctx.account, &ctx.account_from, &ctx.env) {
+        // The environment's account came from the checkout's `.opv`: it was chosen there.
+        (Some(_), Some(path), _) => AccountSource::DotOpv { path: path.clone() },
+        (Some(_), None, Some(env)) => AccountSource::Environment { env: env.clone() },
+        (Some(_), None, None) => AccountSource::Flag,
+        (None, ..) => AccountSource::OpDefault,
     }
 }
 
@@ -2055,6 +2058,20 @@ mod tests {
         let r = FakeRunner::new([Output::failure(1), Output::failure(1), accounts(0)]);
         let e = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err();
         assert_eq!(e.code_str(), "account_not_registered");
+    }
+
+    /// v0101: a session with no account, whose environment took its account from the
+    /// checkout's `.opv`, names `.opv` rather than the environment.
+    #[test]
+    fn a_no_account_read_from_dot_opv_names_dot_opv() {
+        let env = Environment {
+            account: Some("AENV00000000000000000000AA".into()),
+            account_from: Some(std::path::PathBuf::from("/work/.opv")),
+            ..test_env()
+        };
+        let r = FakeRunner::new([Output::failure(1), Output::failure(1), accounts(0)]);
+        let e = read_item_with(&r, &env, &test_at(), &linux()).unwrap_err();
+        assert!(e.to_string().contains("the .opv file /work/.opv"), "{e}");
     }
 
     /// E2 (X13): a read that keeps ending with an exit other than op's own failure (124

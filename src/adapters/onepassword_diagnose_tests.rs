@@ -9,8 +9,8 @@
 use super::{Facts, SessionCheck, VaultSearch, diagnose_with, placed, search_vault, session_for};
 use crate::cause::{
     AccountId, AccountRef, AccountSource, CallId, Cause, CreateKind, CredentialProblem,
-    CredentialRef, DiagnoseContext, ExitClass, Observed, Principal, Refind, SessionState, System,
-    VarName, VaultId,
+    CredentialRef, DiagnoseContext, EnvName, ExitClass, Observed, Principal, Refind, SessionState,
+    System, VarName, VaultId,
 };
 use crate::runner::Output;
 use crate::runner::fake::FakeRunner;
@@ -725,6 +725,54 @@ fn an_unknown_account_from_dot_opv_names_dot_opv() {
         case_02_with(&facts),
         Cause::AccountNotOnMachine {
             selected_by: AccountSource::DotOpv { .. },
+            ..
+        }
+    ));
+}
+
+/// v0101: an environment's account taken from the checkout's `.opv` pointer names that
+/// file, even when no `.opv` is found from the current directory.
+#[test]
+fn an_environment_account_taken_from_dot_opv_names_dot_opv() {
+    let ctx = DiagnoseContext {
+        env: Some(EnvName::new("prod")),
+        account: Some(AccountId::new("ZZZZZZZZZZZZZZZZZZZZZZZZZZ")),
+        account_from: Some(std::path::PathBuf::from("/work/.opv")),
+        ..DiagnoseContext::default()
+    };
+    assert!(matches!(
+        diagnosed(
+            "02-account-not-on-machine",
+            "whoami --account ZZZZZZZZZZZZZZZZZZZZZZZZZZ",
+            person(),
+            &ctx,
+            &Facts::default(),
+        ),
+        Cause::AccountNotOnMachine {
+            selected_by: AccountSource::DotOpv { .. },
+            ..
+        }
+    ));
+}
+
+/// v0101: an account written in the configuration itself keeps naming the environment.
+#[test]
+fn an_account_declared_in_the_configuration_names_the_environment() {
+    let ctx = DiagnoseContext {
+        env: Some(EnvName::new("prod")),
+        account: Some(AccountId::new("ZZZZZZZZZZZZZZZZZZZZZZZZZZ")),
+        ..DiagnoseContext::default()
+    };
+    assert!(matches!(
+        diagnosed(
+            "02-account-not-on-machine",
+            "whoami --account ZZZZZZZZZZZZZZZZZZZZZZZZZZ",
+            person(),
+            &ctx,
+            &Facts::default(),
+        ),
+        Cause::AccountNotOnMachine {
+            selected_by: AccountSource::Environment { .. },
             ..
         }
     ));
