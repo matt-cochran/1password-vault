@@ -25,8 +25,7 @@ boundaries.web    = { vault_id = "vE2EWEBDEV0000000000000001", item_id = "iE2EWE
 personal_vault = "e2e-dev-private"
 personal_item  = "e2e-app · dev (personal)"
 
-# Production: locked behind confirm_env, one target per provider, and a reviewed remote
-# execution profile for the builder host.
+# Production: locked behind confirm_env and one target per provider.
 [environments.prod]
 title = "Production"
 order = 2
@@ -39,14 +38,21 @@ boundaries.web    = { vault_id = "vE2EWEBPROD000000000000001", item_id = "iE2EWE
 fly.app = "e2e-app-prod"
 fly.secret_name = "E2E__{PRODUCT}__{KEY}"
 state_vault_id = "vE2ESTATEFLY00000000000001"
+roles = ["serve"]
 
-# The Kubernetes target: the Deployment reads names from the e2e-prod namespace.
+# The Kubernetes target: the Deployment reads names from the e2e-prod namespace. Config
+# keys are ConfigMaps, and file keys are mounted under /run/secrets/<product> in the
+# e2e-app container only (the pod also runs a sidecar).
 [environments.prod.targets.k8s]
 kubernetes.context = "e2e-cluster"
 kubernetes.namespace = "e2e-prod"
 kubernetes.deployment = "e2e-app"
+kubernetes.container = "e2e-app"
 kubernetes.env_name = "E2E__{PRODUCT}__{KEY}"
+kubernetes.config = "configmap"
+kubernetes.secrets_dir = "/run/secrets/{product}"
 state_vault_id = "vE2ESTATEK8S00000000000001"
+roles = ["serve"]
 
 # The GitHub target: repository secrets and variables, plus the production environment.
 [environments.prod.targets.gh]
@@ -54,6 +60,7 @@ github.repo = "e2e-org/e2e-app"
 github.environment = "production"
 github.secret_name = "E2E__{PRODUCT}__{KEY}"
 state_vault_id = "vE2ESTATEGH000000000000001"
+roles = ["serve"]
 
 # A source-only home for a value more than one product reads. It is never delivered.
 [products.shared]
@@ -70,8 +77,8 @@ kind = "config"
 environments = ["dev", "prod"]
 rules = { enum = ["on", "off"] }
 
-# The web product: its own keys, one shared key, two role-scoped keys, two file keys and
-# one personal key.
+# The web product: its own keys, one shared key, two role-scoped keys, three file keys
+# and one personal key.
 [products.web]
 boundary = "web"
 
@@ -103,16 +110,23 @@ environments = ["dev", "prod"]
 roles = ["migrate"]
 
 # File keys: under `opv run`, their values are written into WEB_SECRETS_DIR at these
-# relative paths instead of the environment.
+# relative paths instead of the environment; on the Kubernetes target they are mounted
+# under kubernetes.secrets_dir.
 [products.web.keys.TLS_CERTIFICATE]
 kind = "secret"
-environments = ["dev"]
+environments = ["dev", "prod"]
 file = "tls/certificate"
 
 [products.web.keys.TLS_PRIVATE_KEY]
 kind = "secret"
-environments = ["dev"]
+environments = ["dev", "prod"]
 file = "tls/private-key"
+
+# A config file key: a ConfigMap item of the same volume on Kubernetes.
+[products.web.keys.OTEL_RESOURCE]
+kind = "config"
+environments = ["prod"]
+file = "otel/resource"
 
 # Each developer keeps their own LLM key in their own item.
 [products.web.keys.PERSONAL_LLM_KEY]
@@ -130,9 +144,9 @@ secrets_dir_env = "WEB_SECRETS_DIR"
 host = "builder.example.test"
 user = "deploy"
 host_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIe2eMarkerHostKeyNotARealKey000000"
-environments = ["prod"]
+environments = ["dev"]
 roles = ["serve", "migrate"]
 opv = "/usr/local/bin/opv"
 workdir = "/srv/e2e-app"
-command = ["/usr/local/bin/opv", "run", "--env", "prod", "--product", "web"]
+command = ["/usr/local/bin/opv", "run", "--env", "dev", "--product", "web"]
 ```

@@ -3,7 +3,7 @@
 //! that name exactly from those lines. There is no second store: nothing reads or writes a
 //! section of the values item.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::adapters::fake_op::FakeOp;
 use crate::domain::plan::{StoreEntry, TargetState};
@@ -53,6 +53,11 @@ fn listed(version: &str) -> Vec<StoreEntry> {
 /// A sync wrote NAME, and the store now lists it at `version`.
 fn record(op: &FakeOp, fleet: &Fleet, version: &str) {
     let written = BTreeSet::from([NAME.to_string()]);
+    let item = fleet.environments["dev"].boundaries["api"].item_id.clone();
+    let source_versions = BTreeMap::from([(
+        item.clone(),
+        op.item(&item)["version"].as_u64().unwrap_or(0),
+    )]);
     super::delivery::record(
         fleet,
         "dev",
@@ -61,6 +66,7 @@ fn record(op: &FakeOp, fleet: &Fleet, version: &str) {
         &written,
         &BTreeSet::new(),
         &listed(version),
+        &source_versions,
         "plan",
         op,
     )

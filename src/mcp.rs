@@ -124,6 +124,10 @@ pub struct DeclareTarget {
     /// Products it delivers; empty means every product except source-only ones.
     #[serde(default)]
     products: Vec<String>,
+    /// Process roles this target delivers (`opv target add --role`), written as its `roles`;
+    /// needed when a delivered product's keys declare roles. Names only.
+    #[serde(default)]
+    roles: Vec<String>,
     /// As the CLI's --verbose: an error's upstream reply in full.
     #[serde(default)]
     verbose: bool,
@@ -150,6 +154,23 @@ pub struct DeploymentPlanScope {
     /// `PRODUCT/KEY` immutable keys to plan as replaced even though present (`--rotate`).
     #[serde(default)]
     rotate: Vec<String>,
+    /// As the CLI's --verbose: an error's upstream reply in full.
+    #[serde(default)]
+    verbose: bool,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChangedScope {
+    /// A declared environment name, not a path, command, credential, or value.
+    environment: String,
+    /// Only these named targets (empty: every target of the environment), as
+    /// `opv changed --target` takes them.
+    #[serde(default)]
+    targets: Vec<String>,
+    /// Only this declared product.
+    #[serde(default)]
+    product: Option<String>,
     /// As the CLI's --verbose: an error's upstream reply in full.
     #[serde(default)]
     verbose: bool,
@@ -379,6 +400,19 @@ impl Server {
     }
 
     #[tool(
+        name = "opv_changed",
+        description = "Whether a source item in 1Password changed since the last sync, for one declared environment (or only the given targets and product): each placement's product, target and state (unchanged; changed; no_record when no sync recorded its source versions) and, for a changed one, each source item's id with its recorded and current version numbers, plus the next step. Returns item ids and version numbers only, never a value. Changes nothing: a sync still needs a person's approval (opv_deployment_plan, then the person's opv approve in their own terminal).",
+        annotations(read_only_hint = true, destructive_hint = false)
+    )]
+    async fn changed(&self, Parameters(args): Parameters<ChangedScope>) -> String {
+        let verbose = args.verbose;
+        self.serialized("opv_changed", false, verbose, move |project| {
+            changed(project, &args)
+        })
+        .await
+    }
+
+    #[tool(
         name = "opv_access",
         description = "Who needs which 1Password vault for CI and deploys, and who can read it now: each identity (a target's deploy identity, an environment's CI reader) with its service-account name, vaults, permissions and state (present, missing, read-only needed, not visible, not in this account), findings with their next step, and for each identity missing a grant the exact owner command that creates it and stores its token as a GitHub secret without showing it (`opv access <env> [--target <t>] --create --github <owner/repo> --github-env <github environment>`; the person runs it, filling in the repository and GitHub environment the CI job uses). Never a token or value. Changes nothing.",
         annotations(read_only_hint = true, destructive_hint = false)
@@ -485,7 +519,7 @@ impl Server {
 
     #[tool(
         name = "opv_declare_target",
-        description = "Declare a new named deploy target in this project's secrets.toml (provider and public options such as the Fly app, the products it delivers). Never changes an existing target (refused as already_declared) and never takes deploy credentials. Edits the local file only; its state vault and delivery items come from the next approved structural plan. Syncing or deploying to it stays a separately approved step.",
+        description = "Declare a new named deploy target in this project's secrets.toml (provider and public options by flag name, such as fly-app, fly-config, kubernetes-config or kubernetes-secrets-dir; the products and process roles it delivers). Names and paths only, never a value. Never changes an existing target (refused as already_declared) and never takes deploy credentials. Edits the local file only; its state vault and delivery items come from the next approved structural plan. Syncing or deploying to it stays a separately approved step.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1129,6 +1163,106 @@ fn deployment_plan_from_fleet<R: CommandRunner>(
     receipt_answer(&call, r, &bytes, result, |doc| plan_receipt(doc, &scope))
 }
 
+/// `opv_changed`'s call: `opv changed <env>` with its targets and product (names already
+/// checked).
+fn changed_call(args: &ChangedScope) -> ToolCall {
+    let mut words = vec![args.environment.clone()];
+    words.extend(scope_flags(&args.targets, args.product.as_ref(), &[]));
+    ToolCall::new("opv_changed", &["changed"], words, args.verbose)
+}
+
+/// `opv_changed`: the document `opv changed <env> [--target t]… [--product p] --json` prints
+/// ([`crate::app::changed::run`]) on the read-only runner, projected. A changed source item
+/// (the CLI's exit 10) is a successful answer; any other failure is the CLI's `error`.
+fn changed(project: &std::path::Path, args: &ChangedScope) -> Value {
+    if let Some(refused) =
+        scope_refusal(&args.environment, &args.targets, args.product.as_ref(), &[])
+    {
+        return ToolCall::new("opv_changed", &["changed"], Vec::new(), args.verbose)
+            .refused(refused);
+    }
+    let call = changed_call(args);
+    let r = read_only(INSPECT_BUDGET);
+    let fleet = match load_fleet(project, &r) {
+        Ok(fleet) => fleet,
+        Err(e) => return call.failed(&e),
+    };
+    let mut bytes = zeroize::Zeroizing::new(Vec::new());
+    let result = crate::app::changed::run(
+        &fleet,
+        &args.environment,
+        args.product.as_deref(),
+        &args.targets,
+        &r,
+        true,
+        &mut *bytes,
+    )
+    .map(|_exit| ());
+    receipt_answer(&call, &r, &bytes, result, changed_receipt)
+}
+
+/// One placement of the `opv changed --json` document, field by field: checked names, one
+/// of the three states, and each moved item's id and version numbers.
+fn changed_placement(p: &Value) -> Option<Value> {
+    let product = p["product"].as_str().filter(|s| identifier(s))?;
+    let target = p["target"].as_str().filter(|s| identifier(s))?;
+    let state = p["state"]
+        .as_str()
+        .filter(|s| ["unchanged", "changed", "no_record"].contains(s))?;
+    let mut out = json!({"product": product, "target": target, "state": state});
+    let items: Vec<Value> = p["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|i| {
+            let id = i["item_id"]
+                .as_str()
+                .filter(|s| s.len() <= 64 && crate::config::is_id(s))?;
+            let mut item = json!({"item_id": id, "recorded": i["recorded"].as_u64()?});
+            if let Some(current) = i["current"].as_u64() {
+                item["current"] = json!(current);
+            }
+            Some(item)
+        })
+        .collect();
+    if !items.is_empty() {
+        out["items"] = json!(items);
+    }
+    Some(out)
+}
+
+/// The `opv changed --json` document as the MCP answer: a new response built field by
+/// field, never a value.
+fn changed_receipt(doc: &Value) -> Option<Value> {
+    if doc.get("schema_version").and_then(Value::as_u64)
+        != Some(u64::from(crate::json::SCHEMA_VERSION))
+    {
+        return None;
+    }
+    let environment = doc["environment"].as_str().filter(|e| identifier(e))?;
+    let changed = doc["changed"].as_bool()?;
+    let placements: Vec<Value> = doc["placements"]
+        .as_array()?
+        .iter()
+        .filter_map(changed_placement)
+        .collect();
+    // opv's own step, rendered from checked names: one line.
+    let step = |k: &str| {
+        doc[k]
+            .as_str()
+            .filter(|s| s.len() <= 300 && !s.chars().any(char::is_control))
+    };
+    Some(json!({
+        "ok": true,
+        "environment": environment,
+        "changed": changed,
+        "placements": placements,
+        "next": step("next"),
+        "do": step("do"),
+        "human_action": "Item ids and version numbers only. A sync needs a person's approval: call opv_deployment_plan, and the person runs its approve_command in their own terminal.",
+    }))
+}
+
 /// The sync scope a deployment plan's `approve_command` names: its targets, product and
 /// rotate entries; `--deploy` and `--prune` are the person's to add.
 fn plan_sync_scope(args: &DeploymentPlanScope) -> crate::app::approve::SyncScope {
@@ -1362,6 +1496,7 @@ fn declare_target(project: &std::path::Path, args: DeclareTarget) -> Value {
     let names = [("environment", &args.environment), ("target", &args.target)]
         .into_iter()
         .chain(args.products.iter().map(|p| ("products", p)))
+        .chain(args.roles.iter().map(|r| ("roles", r)))
         .chain(args.options.keys().map(|k| ("options", k)));
     let bad = names
         .into_iter()
@@ -1385,7 +1520,7 @@ fn declare_target(project: &std::path::Path, args: DeclareTarget) -> Value {
     let call = ToolCall::new(
         "opv_declare_target",
         &["target", "add"],
-        vec![args.environment.clone(), args.target.clone()],
+        declare_target_words(&args),
         args.verbose,
     );
     if let Some(option) = args.options.keys().find(|k| k.contains("credential")) {
@@ -1407,10 +1542,37 @@ fn declare_target(project: &std::path::Path, args: DeclareTarget) -> Value {
         provider: args.provider,
         fields: args.options,
         products: args.products,
+        roles: args.roles,
     };
     declared(project, &call, |r, path| {
         crate::app::declare::target(r, path, &t)
     })
+}
+
+/// `opv target add <env> <name>` with the provider, options, products and roles the tool
+/// was given, in that order, so a step that repeats the command names the same target. The
+/// names are checked and the option values are public one-line names or paths; a
+/// credential option is left out.
+fn declare_target_words(args: &DeclareTarget) -> Vec<String> {
+    let mut words = vec![args.environment.clone(), args.target.clone()];
+    if let Some(p) = args.provider.as_ref().filter(|p| identifier(p)) {
+        words.extend(["--provider".to_string(), p.clone()]);
+    }
+    // A deploy credential is refused, never repeated.
+    for (flag, value) in args
+        .options
+        .iter()
+        .filter(|(k, _)| !k.contains("credential"))
+    {
+        words.extend([format!("--{flag}"), value.clone()]);
+    }
+    for p in &args.products {
+        words.extend(["--products".to_string(), p.clone()]);
+    }
+    for r in &args.roles {
+        words.extend(["--role".to_string(), r.clone()]);
+    }
+    words
 }
 
 /// `target` of `env` when `fleet` already declares it: this tool never changes one.
@@ -2490,7 +2652,7 @@ rules = { prefix = "sk_" }
 
     /// #139: the role fleet with one reviewed remote profile for prod's serve role.
     fn remote_fleet() -> crate::domain::Fleet {
-        crate::app::testutil::fleet_with(&format!(
+        crate::app::testutil::fleet_without_targets(&format!(
             "{}\n[products.allumata.remotes.builder]\nhost = \"builder.example.internal\"\n\
              user = \"dev\"\nhost_key = \"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestMarkerHostKey\"\n\
              environments = [\"prod\"]\nopv = \"/usr/local/bin/opv\"\nworkdir = \"/srv/app\"\n\
@@ -3014,6 +3176,7 @@ rules = { prefix = "sk_" }
             provider: None,
             options: [("deploy-credentials".to_string(), "x".to_string())].into(),
             products: vec![],
+            roles: vec![],
             verbose: false,
         };
         assert_eq!(
@@ -3104,5 +3267,62 @@ rules = { prefix = "sk_" }
     fn an_unknown_environment_names_the_declared_ones() {
         let fleet = crate::app::testutil::role_fleet();
         assert!(unknown_env(&fleet, "nope").message().contains("prod"));
+    }
+
+    fn changed_doc() -> Value {
+        json!({"schema_version": 2, "ok": true, "environment": "prod", "changed": true,
+            "placements": [{"product": "web", "target": "fly", "state": "changed",
+                "items": [{"item_id": "iabc123", "recorded": 3, "current": 4, "value": "SECRET_MARKER"}]},
+                {"product": "web", "target": "gh", "state": "no_record"}],
+            "next": "opv plan prod", "do": "review the plan", "value": "SECRET_MARKER"})
+    }
+
+    #[test]
+    fn a_changed_source_is_an_ok_answer() {
+        assert_eq!(changed_receipt(&changed_doc()).unwrap()["ok"], true);
+    }
+
+    #[test]
+    fn a_changed_answer_keeps_each_items_versions() {
+        assert_eq!(
+            changed_receipt(&changed_doc()).unwrap()["placements"][0]["items"],
+            json!([{"item_id": "iabc123", "recorded": 3, "current": 4}])
+        );
+    }
+
+    #[test]
+    fn a_changed_answer_drops_values_even_when_the_source_contains_them() {
+        assert!(
+            !changed_receipt(&changed_doc())
+                .unwrap_or_default()
+                .to_string()
+                .contains("SECRET_MARKER")
+        );
+    }
+
+    #[test]
+    fn a_changed_answer_drops_a_placement_with_an_unknown_state() {
+        let mut doc = changed_doc();
+        doc["placements"][1]["state"] = json!("SECRET_MARKER");
+        assert_eq!(
+            changed_receipt(&doc).unwrap()["placements"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn a_changed_scope_with_a_target_that_is_not_a_name_is_usage() {
+        let args = ChangedScope {
+            environment: "prod".into(),
+            targets: vec!["not a name".into()],
+            product: None,
+            verbose: false,
+        };
+        assert_eq!(
+            changed(std::path::Path::new("/nonexistent"), &args)["error"]["code"],
+            "usage"
+        );
     }
 }

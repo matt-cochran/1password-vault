@@ -33,6 +33,11 @@ opv already produces three kinds of evidence. This adds the fourth:
   (a Fly digest, a Key Vault version id, a GitHub `updatedAt`) and a keyed fingerprint of
   the 1Password value written (HMAC-SHA256 under the ledger key, FR-54). It is visible only
   to someone who can already read the values. Never in output, logs or argv.
+- **Recorded source versions** (C2): the delivery item also holds a non-secret
+  `source versions` field, one `v1|<item_id>|<version>` line per source item the sync read,
+  sorted by item id and holding ids and integers only. It is written only after a sync whose
+  writes the target confirmed; an unconfirmed sync keeps whatever the item already held.
+  `opv changed` reads that one field back and compares each version with `op item list`.
 - **Public receipt**: the JSON a person or agent keeps, with names, ids and times only (§4).
 
 ## 3. Semantics (acceptance 2–4)

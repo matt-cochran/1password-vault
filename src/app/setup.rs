@@ -263,14 +263,23 @@ fn sign_in(
     backend.native()?;
     ui.show(&format!("1Password CLI: ready ({})", version(backend)?))?;
     match account {
-        Some(a) if backend.session_for(a) == SessionCheck::SignedIn => {
-            let vaults = backend.call(&VAULT_LIST, None)?;
-            if vaults.status != 0 {
-                return Err(vault_list_failed(account));
-            }
-            return Ok(vaults);
-        }
         Some(a) => {
+            if backend.session_for(a) == SessionCheck::SignedIn {
+                let vaults = backend.call(&VAULT_LIST, None)?;
+                if vaults.status == 0 {
+                    return Ok(vaults);
+                }
+                let failed = vault_list_failed(account);
+                // #167: a stale `OP_SESSION_*` can make a plain `op whoami` still name the
+                // account while its vault list says no one is signed in. That is not an
+                // answer to return; it is the sign-in op asks for.
+                if failed.code_str() != "op_not_signed_in" {
+                    return Err(failed);
+                }
+                // The stale list is expected to fail: its reply attaches to nothing.
+                let _ = crate::runner::take_observed();
+                let _ = crate::runner::take_failure_excerpt();
+            }
             start_sign_in(Some(a), backend, ui)?;
             match backend.session_for(a) {
                 // A check that could not tell leaves it to the vault list below.

@@ -565,6 +565,84 @@ fn login_runs_no_command_when_the_vault_list_fails_under_a_live_session() {
     assert!(b.children.borrow().is_empty());
 }
 
+/// op's reply to `op vault list` without a session (recorded case 06).
+const SIGNED_OUT_VAULT_LIST: &str =
+    include_str!("../../tests/fixtures/op/failures/06-signed-out-vault-list.stderr");
+
+/// [`Backend`] over the runner's fake, so a failed `op vault list` is diagnosed from op's
+/// own reply (#159) exactly as the live runtime does, with the session answers and
+/// sign-ins it recorded (#167).
+struct Observed {
+    r: crate::runner::fake::FakeRunner,
+    sessions: RefCell<VecDeque<SessionCheck>>,
+    sign_ins: RefCell<Vec<Option<String>>>,
+}
+
+impl Observed {
+    /// A live-looking session for the account asked for whose `op vault list` replies
+    /// "not currently signed in" (a stale `OP_SESSION_*`), then a vault list that works.
+    fn with_a_signed_out_vault_list() -> Self {
+        let r = crate::runner::fake::FakeRunner::new([Output::success(b"2.40.0".to_vec())]);
+        r.push_with_stderr(Output::failure(7), SIGNED_OUT_VAULT_LIST);
+        r.responses
+            .borrow_mut()
+            .push_back(Ok(Output::success(br#"[{"url":"x"}]"#.to_vec())));
+        r.responses
+            .borrow_mut()
+            .push_back(Ok(Output::success(b"[]".to_vec())));
+        Self {
+            r,
+            sessions: RefCell::new(VecDeque::new()),
+            sign_ins: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl Backend for Observed {
+    fn native(&self) -> Result<(), Error> {
+        Ok(())
+    }
+    fn call(&self, args: &[&str], stdin: Option<&[u8]>) -> Result<Output, Error> {
+        use crate::runner::{Call, CommandRunner, Outcome};
+        match self
+            .r
+            .read(&Call::new("op", args).with_stdin(stdin), &[])
+            .unwrap()
+        {
+            Outcome::Done(o) | Outcome::Refused(o) => Ok(o),
+            Outcome::Unknown { .. } => unreachable!("no unknown outcome is queued"),
+        }
+    }
+    fn session_for(&self, _: &str) -> SessionCheck {
+        self.sessions
+            .borrow_mut()
+            .pop_front()
+            .unwrap_or(SessionCheck::SignedIn)
+    }
+    fn sign_in(&mut self, account: Option<&str>, _: bool) -> Result<(), Error> {
+        self.sign_ins.borrow_mut().push(account.map(str::to_owned));
+        Ok(())
+    }
+}
+
+/// #167: a live-looking session whose `op vault list` says no one is signed in (a stale
+/// `OP_SESSION_*`) still reaches op's own sign-in, instead of looping on `opv login`.
+#[test]
+fn a_live_session_with_a_signed_out_vault_list_starts_the_interactive_sign_in() {
+    let mut b = Observed::with_a_signed_out_vault_list();
+    let _ = run_or(None, Some(B), None, &[], &mut b, &mut Ui::default());
+    assert_eq!(*b.sign_ins.borrow(), [Some(B.to_string())]);
+}
+
+/// #167: only op's not-signed-in reply starts the sign-in; any other vault-list failure
+/// is still returned, and no sign-in runs.
+#[test]
+fn a_live_session_whose_vault_list_fails_otherwise_runs_no_sign_in() {
+    let mut b = signed_in_vault_list_failing();
+    let _ = run_or(None, Some(B), None, &[], &mut b, &mut Ui::default());
+    assert!(b.sign_ins.is_empty());
+}
+
 #[test]
 fn a_failed_vault_list_under_a_live_session_never_steps_to_login() {
     let f = fleet(Some(B), None);
@@ -685,8 +763,10 @@ fn a_failed_check_after_signing_in_is_op_not_signed_in() {
     assert_eq!(still_other_account().code_str(), "op_not_signed_in");
 }
 
+/// #167: under `opv login` itself, the step is op's own sign-in, never `opv login` again
+/// (which loops).
 #[test]
-fn a_failed_check_steps_to_login_with_the_account_id() {
+fn a_failed_check_under_login_steps_to_the_vendor_sign_in() {
     let e = still_other_account();
     let (cause, _) = e.cause().expect("a catalog cause");
     let inv = crate::cause::Invocation::from_cli(&[
@@ -697,9 +777,13 @@ fn a_failed_check_steps_to_login_with_the_account_id() {
     ]);
     assert_eq!(
         cause.step(&inv).1,
-        crate::cause::Next::Handoff(crate::cause::Cmd {
-            command: vec!["login".into()],
-            args: vec!["--account".into(), "ALABS000000000000000000001".into()],
+        crate::cause::Next::Vendor(crate::cause::VendorCmd {
+            program: "op".into(),
+            args: vec![
+                "signin".into(),
+                "--account".into(),
+                "ALABS000000000000000000001".into(),
+            ],
         })
     );
 }

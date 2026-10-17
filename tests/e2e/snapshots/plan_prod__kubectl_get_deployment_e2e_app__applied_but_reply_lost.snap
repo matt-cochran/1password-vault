@@ -1,0 +1,26 @@
+# plan_prod__kubectl_get_deployment_e2e_app__applied_but_reply_lost: opv plan prod | fault applied_but_reply_lost on kubectl get deployment e2e-app
+
+## text exit: 9
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+retrying kubectl (2/3) in <delay>
+retrying kubectl (3/3) in <delay>
+opv: Kubernetes did not answer after 3 attempts: it was stopped by signal 9 before it answered
+  checked: kubectl --context e2e-cluster --namespace e2e-prod --request-timeout=60s get deployment e2e-app -o json (stopped by signal 9)
+Do: check Kubernetes's status page (your cluster provider's status page) or the network
+Next: opv plan prod
+
+## json exit: 9
+## json stdout
+{"schema_version":2,"ok":false,"exit_code":9,"next":"opv plan prod --json","do":"check Kubernetes's status page (your cluster provider's status page) or the network","error":{"code":"provider_unavailable","category":"unknown","message":"Kubernetes did not answer after 3 attempts: it was stopped by signal 9 before it answered","subject":{"attempts":3,"system":"kubernetes","why":{"why":"killed","signal":9}},"evidence":{"checked":"kubectl --context e2e-cluster --namespace e2e-prod --request-timeout=60s get deployment e2e-app -o json","account":null,"upstream":null},"retry":"safe","human_required":false,"do":"check Kubernetes's status page (your cluster provider's status page) or the network","next":"opv plan prod --json","next_kind":"rerun"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+retrying kubectl (2/3) in <delay>
+retrying kubectl (3/3) in <delay>
+opv: Kubernetes did not answer after 3 attempts: it was stopped by signal 9 before it answered
+  checked: kubectl --context e2e-cluster --namespace e2e-prod --request-timeout=60s get deployment e2e-app -o json (stopped by signal 9)
+Do: check Kubernetes's status page (your cluster provider's status page) or the network
+Next: opv plan prod --json

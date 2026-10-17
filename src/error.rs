@@ -69,6 +69,13 @@ impl Error {
         Error::Catalog(Box::new((*cause).in_env(env)), upstream)
     }
 
+    /// This error with its cause's target name filled in when the adapter that raised it
+    /// did not know it (a preflight refusal names `opv plan <env> --target <name>`).
+    pub fn in_target(self, target: &str) -> Error {
+        let Error::Catalog(cause, upstream) = self;
+        Error::Catalog(Box::new((*cause).in_target(target)), upstream)
+    }
+
     /// The cause and its evidence.
     pub fn parts(&self) -> (&Cause, Option<&Upstream>) {
         let Error::Catalog(c, up) = self;
@@ -139,6 +146,17 @@ pub fn render_text(e: &Error, inv: &Invocation, verbose: bool, utf8: bool, colou
 pub fn document(e: &Error, inv: &Invocation, verbose: bool) -> serde_json::Value {
     let (cause, upstream) = e.parts();
     crate::cause::render::document(cause, upstream, inv, verbose)
+}
+
+/// The top-level keys of the `error` object for one cause, under `inv`, in order: what
+/// `opv schema` publishes as `documents.error`, generated so it cannot drift from the object.
+pub(crate) fn document_keys(cause: &Cause, inv: &Invocation) -> Vec<String> {
+    document(&Error::from(cause.clone()), inv, false)
+        .as_object()
+        .expect("the error document is an object")
+        .keys()
+        .cloned()
+        .collect()
 }
 
 /// `a` as one word of a `Next:` command, quoted only when the shell would split or expand

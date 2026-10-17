@@ -1,0 +1,61 @@
+# .github/workflows/opv-sync-on-change.yml
+name: "opv: sync when 1Password changes"
+on:
+  schedule: [{cron: "*/15 * * * *"}]
+  push: {branches: [main], paths: [secrets.toml]}
+  workflow_dispatch:
+permissions: {contents: read}
+concurrency: {group: opv-sync, cancel-in-progress: false}
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    strategy: {matrix: {env: [prod, staging]}}
+    outputs:
+      prod: ${{ steps.c.outputs.prod }}
+      staging: ${{ steps.c.outputs.staging }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-opv
+      - id: c
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: "${{ secrets.OPV_READER_TOKEN }}"
+          ENV: ${{ matrix.env }}
+        run: |
+          set +e; opv changed "$ENV" --json > changed.json; rc=$?; set -e
+          if [ "$rc" -eq 9 ]; then
+            wait=$(jq -r '[.. | .retry_after_seconds? // empty][0] // 30' changed.json)
+            [ "$wait" -gt 120 ] && wait=120
+            sleep "$wait"
+            set +e; opv changed "$ENV" --json > changed.json; rc=$?; set -e
+          fi
+          case $rc in
+            0)  echo "$ENV=no"  >> "$GITHUB_OUTPUT" ;;
+            10) echo "$ENV=yes" >> "$GITHUB_OUTPUT" ;;
+            *)  exit "$rc" ;;
+          esac
+  sync-prod:
+    needs: detect
+    if: needs.detect.outputs.prod == 'yes' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-opv
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@1.6
+      - env:
+          OP_SERVICE_ACCOUNT_TOKEN: "${{ secrets.OPV_DEPLOY_TOKEN }}"
+        run: opv sync prod --deploy
+  sync-staging:
+    needs: detect
+    if: needs.detect.outputs.staging == 'yes' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-opv
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@1.6
+      - env:
+          OP_SERVICE_ACCOUNT_TOKEN: "${{ secrets.OPV_DEPLOY_TOKEN }}"
+        run: opv sync staging --deploy

@@ -19,6 +19,7 @@ pub mod approve;
 #[cfg(test)]
 mod azure_tests;
 pub mod bootstrap;
+pub mod changed;
 #[cfg(test)]
 mod characterization_tests;
 pub(crate) mod ci_summary;
@@ -102,12 +103,12 @@ use std::io::{self, Write};
 use crate::adapters::onepassword;
 use crate::domain::plan;
 use crate::domain::{
-    Environment, Fleet, KeyState, Kind, Row, SecretValue, StoreEntry, SyncPlan, TargetState,
-    key_label,
+    Environment, Fleet, KeySpec, KeyState, Kind, Row, SecretValue, StoreEntry, SyncPlan,
+    TargetState, key_label,
 };
 use crate::error::Error;
 use crate::ports::{PinnedStore, Ports, Store};
-use crate::provider::TargetConfig;
+use crate::provider::{Channels, FileCapability, TargetConfig};
 use crate::runner::CommandRunner;
 
 /// Store digests are not computable locally (D0 Q4, ruling P1): every key present on the
@@ -152,9 +153,23 @@ pub(crate) fn read_and_plan(
     Ok((plan, listed))
 }
 
-/// [`read_and_plan`] that also returns the item's `version` integer, for the plan id
-/// (FR-41). Still one item read (FR-13), plus a person's tidy (FR-43): the version is the
-/// tidied item's, so a plan that tidied and the sync after it agree.
+/// The item fields, the item's `version` and each boundary item's `version` by id (C2):
+/// [`read_item_fields`]'s result.
+pub(crate) type ItemRead = (Vec<plan::ItemField>, Option<u64>, BTreeMap<String, u64>);
+
+/// A plan, its store listing, the item's `version` and each boundary item's `version` by id
+/// (C2): [`read_and_plan_versioned`]'s result.
+pub(crate) type VersionedPlan = (
+    SyncPlan,
+    Vec<StoreEntry>,
+    Option<u64>,
+    BTreeMap<String, u64>,
+);
+
+/// [`read_and_plan`] that also returns the item's `version` integer and the `version` read
+/// from each boundary item by id (C2), for the plan id (FR-41) and the delivery recording.
+/// Still one item read (FR-13), plus a person's tidy (FR-43): the version is the tidied
+/// item's, so a plan that tidied and the sync after it agree.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn read_and_plan_versioned(
     fleet: &Fleet,
@@ -164,7 +179,7 @@ pub(crate) fn read_and_plan_versioned(
     ports: Option<&Ports<'_>>,
     rotate: &BTreeSet<(String, String)>,
     prune_immutable: &BTreeSet<(String, String)>,
-) -> Result<(SyncPlan, Vec<StoreEntry>, Option<u64>), Error> {
+) -> Result<VersionedPlan, Error> {
     let read = tidy::read(fleet, env_name, r)?;
     let ledgers = placement_ledgers(fleet, env_name, target, ports, r);
     let (mut plan, listed) = plan_item_with(
@@ -179,18 +194,19 @@ pub(crate) fn read_and_plan_versioned(
     )?;
     plan.tidy = read.changes;
     plan.tidy_error = read.tidy_error;
-    Ok((plan, listed, read.version))
+    Ok((plan, listed, read.version, read.item_versions))
 }
 
-/// The environment's item fields and `version` integer (FR-41): its one read by IDs
-/// (FR-13), tolerant and tidied when a person runs opv (FR-43, [`tidy::read`]).
+/// The environment's item fields, `version` integer (FR-41) and per-boundary-item versions
+/// (C2): its one read by IDs (FR-13), tolerant and tidied when a person runs opv (FR-43,
+/// [`tidy::read`]).
 pub(crate) fn read_item_fields(
     fleet: &Fleet,
     env_name: &str,
     r: &dyn CommandRunner,
-) -> Result<(Vec<plan::ItemField>, Option<u64>), Error> {
+) -> Result<ItemRead, Error> {
     let read = tidy::read(fleet, env_name, r)?;
-    Ok((read.fields, read.version))
+    Ok((read.fields, read.version, read.item_versions))
 }
 
 /// The plan id (FR-41) of `plan`, built against `listed` on target `target` behind `ports`
@@ -213,6 +229,21 @@ pub(crate) fn plan_id_of(
         let t = fleet.environments.get(env_name)?.targets.get(target)?;
         Some(t.config.env_name(p, k))
     };
+    // The route each name takes (M4, §4.3): a file key on a Native target is
+    // `file:<path>`; every other key is on its kind's channel.
+    let routes = |p: &str, k: &str| -> Option<String> {
+        let t = fleet.environments.get(env_name)?.targets.get(target)?;
+        let spec = fleet.products.get(p)?.keys.get(k)?;
+        if let Some(path) = &spec.file
+            && matches!(t.config.channels().files, FileCapability::Native { .. })
+        {
+            return Some(format!("file:{path}"));
+        }
+        Some(match spec.kind {
+            Kind::Secret => "secret".to_string(),
+            Kind::Config => "config".to_string(),
+        })
+    };
     crate::domain::provenance::plan_id(
         &crate::domain::provenance::PlanIdInput {
             env: env_name,
@@ -222,6 +253,7 @@ pub(crate) fn plan_id_of(
             version_ids: matches!(ports, Ports::Pinned { .. }),
             rotate,
             name_of: &name_of,
+            routes: &routes,
             own_plan,
         },
         plan,
@@ -502,7 +534,8 @@ pub(crate) fn write_json(
         let plan = part.plan;
         let on = env.targets.get(part.target);
         let name_of = |p: &str, k: &str| on.map(|t| t.config.env_name(p, k));
-        let part_rows = json_rows(part, &name_of, extra.link);
+        let channels = on.map(|t| t.config.channels());
+        let part_rows = json_rows(fleet, part, &name_of, extra.link, channels.as_ref());
         changed = match (changed, changes(plan, &part_rows, part.pinned)) {
             ("some", _) | (_, "some") => "some",
             ("unknown", _) | (_, "unknown") => "unknown",
@@ -585,9 +618,11 @@ pub(crate) fn write_json(
 
 /// The JSON rows of one target's part, each naming the target (FR-56).
 fn json_rows(
+    fleet: &Fleet,
     part: &JsonPart<'_>,
     name_of: &dyn Fn(&str, &str) -> Option<String>,
     link: Option<&str>,
+    channels: Option<&Channels>,
 ) -> Vec<JsonRow> {
     let plan = part.plan;
     let (var_set, var_prune): (&[String], &[String]) = match part.vars {
@@ -632,6 +667,53 @@ fn json_rows(
                 .as_deref()
                 .and_then(|n| part.pinned.and_then(|m| m.get(n)));
             let rotate = part.rotate.is_some_and(|s| rotated(s, r));
+            // A file key names how it arrives (M4, §4.5): the exact bytes on a Native
+            // target, the transform's one-line form (or the plain env value) elsewhere.
+            let spec = fleet
+                .products
+                .get(&r.product)
+                .and_then(|p| p.keys.get(&r.key));
+            let native =
+                channels.is_some_and(|ch| matches!(ch.files, FileCapability::Native { .. }));
+            let (via, delivered_as, form, path) =
+                if let Some(file) = spec.and_then(|s| s.file.as_deref()) {
+                    let label = channels.and_then(|ch| {
+                        let channel = match r.kind {
+                            Kind::Config => &ch.config,
+                            Kind::Secret => &ch.secret,
+                        };
+                        channel.label()
+                    });
+                    if native {
+                        (
+                            label,
+                            Some("file"),
+                            Some("verbatim".to_string()),
+                            Some(file.to_string()),
+                        )
+                    } else {
+                        (
+                            label,
+                            Some("env"),
+                            spec.and_then(|s| s.rules.transform.clone()),
+                            None,
+                        )
+                    }
+                } else {
+                    match channels {
+                        Some(ch) => {
+                            let channel = match r.kind {
+                                Kind::Config => &ch.config,
+                                Kind::Secret => &ch.secret,
+                            };
+                            match channel.label() {
+                                Some(label) => (Some(label), Some("env"), None, None),
+                                None => (None, None, None, None),
+                            }
+                        }
+                        None => (None, None, None, None),
+                    }
+                };
             JsonRow {
                 binding: bound.map(|b| b.binding),
                 pending_deploy: bound.map(|b| b.pending_deploy),
@@ -640,6 +722,10 @@ fn json_rows(
                 open_url: link.filter(|_| is_blocking(r)).map(str::to_string),
                 target: Some(part.target.to_string()),
                 rotate,
+                via,
+                delivered_as,
+                form,
+                path,
                 ..JsonRow::new(r, target_name, json_target(r.kind, r.target), action)
             }
         })
@@ -728,6 +814,22 @@ pub(crate) struct JsonRow {
     product: Option<String>,
     key: String,
     kind: &'static str,
+    /// The key's kind channel (`secret` / `config`, design §6.7); always present.
+    channel: &'static str,
+    /// The channel's label (`Kubernetes Secret`, `GitHub variable`, `env`, …), when the
+    /// channel delivers; left out otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    via: Option<&'static str>,
+    /// How the value reaches the app (`env` / `file`); left out otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delivered_as: Option<&'static str>,
+    /// The file transform's name (`verbatim` for a file on a Native target, the declared
+    /// transform's name when one applies); absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    form: Option<String>,
+    /// The file's path on the target (M4); absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
     state: &'static str,
     rule: Option<&'static str>,
     /// Why `rule` failed (FR-22): from the rule's fixed set or the configuration only.
@@ -775,6 +877,11 @@ impl JsonRow {
             product: Some(String::from(&r.product)),
             key: r.key.clone(),
             kind: kind_label(r.kind),
+            channel: kind_label(r.kind),
+            via: None,
+            delivered_as: None,
+            form: None,
+            path: None,
             state: json_state(&r.state),
             rule: json_rule(&r.state),
             reason: json_reason(&r.state),
@@ -995,6 +1102,77 @@ pub(crate) fn target_word(r: &Row, held: bool, binding: Option<&PinnedRow>) -> &
     }
 }
 
+/// The ON TARGET cell of `r`, naming its channel (design §1.3, FM-02): a config row reads
+/// `<word>, via <label>` (or `via <label>` when the word is `n/a`), or
+/// `not delivered (no config channel)` when the target's config channel delivers nothing.
+/// A file key then names its form (M4, §4.5): `file (verbatim)` on a Native target, or
+/// `env (<transform>)`/`env`. A secret row otherwise keeps its word.
+pub(crate) fn target_cell(
+    r: &Row,
+    word: &str,
+    channels: &Channels,
+    spec: Option<&KeySpec>,
+) -> String {
+    let word = if r.kind != Kind::Config {
+        word.to_string()
+    } else {
+        match channels.config.label() {
+            Some(label) if word == "n/a" => format!("via {label}"),
+            Some(label) => format!("{word}, via {label}"),
+            None => "not delivered (no config channel)".to_string(),
+        }
+    };
+    let Some(_) = spec.and_then(|s| s.file.as_deref()) else {
+        return word;
+    };
+    let form = match channels.files {
+        FileCapability::Native { .. } => "file (verbatim)".to_string(),
+        _ => match spec.and_then(|s| s.rules.transform.as_deref()) {
+            Some(t) => format!("env ({t})"),
+            None => "env".to_string(),
+        },
+    };
+    format!("{word} · {form}")
+}
+
+/// File-key destination lines for one target (design §1.3, M4): a `warning` for a target
+/// that does not honour file destinations, a `note` for one where the app writes the
+/// files from the environment. One per file key of the plan, in row order.
+pub(crate) fn file_destination_lines(
+    fleet: &Fleet,
+    env_name: &str,
+    target: &str,
+    channels: &Channels,
+    plan: &SyncPlan,
+) -> Vec<String> {
+    plan.rows
+        .iter()
+        .filter(|r| {
+            fleet
+                .products
+                .get(&r.product)
+                .and_then(|p| p.keys.get(&r.key))
+                .is_some_and(|s| s.file.is_some())
+        })
+        .map(|r| match channels.files {
+            FileCapability::Native { .. } => String::new(),
+            FileCapability::ViaApp { note } => format!(
+                "{}: note: {} file via the app ({})",
+                placement(env_name, target),
+                key_label(&r.product, &r.key),
+                note
+            ),
+            FileCapability::None => format!(
+                "{}: warning: {} file destination not honoured on {}",
+                placement(env_name, target),
+                key_label(&r.product, &r.key),
+                target
+            ),
+        })
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
 /// The source and target words and what each means, one line per word (`opv help states`,
 /// H5). The JSON `state` and `target_state` fields keep their own stable spellings.
 pub const STATES_HELP: &str = "\
@@ -1020,8 +1198,9 @@ ON TARGET: the key on its deployment target (the TARGET column names the target)
   rotate      an immutable key this plan replaces because --rotate named it
   extra       on the target but not wanted in this environment; not pruned without --prune
   drift       the running app is bound to something other than what opv last wrote
-  n/a         not delivered to the target (config keys, unless the target takes config as
-              variables, and skipped keys not on the target)
+  n/a         not delivered to the target (skipped keys not on the target); a config row
+              never reads plain n/a: it names its channel (`via env`, `via GitHub
+              variable`) or reads `not delivered (no config channel)`
 
 Missing and failed are findings: status, plan and check exit 8 and print an
 open: link to the item in 1Password (opv open <[product/]KEY> --env <env>).";
@@ -1458,6 +1637,7 @@ pub(crate) fn scope_plan(plan: &mut SyncPlan, product: &str, names: &HashSet<Str
     plan.prune.retain(|n| names.contains(n));
     plan.held_from_prune.retain(|(p, _, _)| p == product);
     plan.config.retain(|p, _| p == product);
+    plan.no_channel.retain(|k| k.product == product);
     plan.concealed_config.retain(|(p, _)| p == product);
 }
 
@@ -1485,6 +1665,11 @@ impl KeyNames {
                 })
                 .collect(),
         })
+    }
+
+    /// `product/KEY` of env name `name`; `None` when it is no declared key's.
+    pub(crate) fn key(&self, name: &str) -> Option<&str> {
+        self.labels.get(name).map(String::as_str)
     }
 
     /// `product/KEY (NAME)`; the bare name when it is no declared key's.
@@ -1700,7 +1885,30 @@ pub(crate) fn open_target<'a>(
 ) -> Result<(&'a dyn TargetConfig, Ports<'a>), Error> {
     let (_, t) = target(fleet, env_name, name)?;
     let managed = managed_names(fleet, env_name, name)?.into_iter().collect();
-    Ok((t, t.open(env_name, managed, r)?))
+    let files = file_mounts(fleet, env_name, name)?;
+    let config = config_names(fleet, env_name, name)?;
+    Ok((t, t.open(env_name, managed, &files, &config, r)?))
+}
+
+/// The env names target `name` renders for config keys of the products it delivers: the
+/// subset of its managed set that is config, never secret (FR-14, design §6.2).
+pub(crate) fn config_names(
+    fleet: &Fleet,
+    env_name: &str,
+    name: &str,
+) -> Result<BTreeSet<String>, Error> {
+    let (_, t) = target(fleet, env_name, name)?;
+    Ok(fleet
+        .products
+        .iter()
+        .filter(|(p, _)| fleet.delivers(env_name, name, p))
+        .flat_map(|(p, prod)| {
+            prod.keys
+                .iter()
+                .filter(|(_, s)| s.kind == Kind::Config)
+                .map(move |(k, _)| t.env_name(p, k))
+        })
+        .collect())
 }
 
 /// Every name target `name` renders for a declared key of a product it delivers: its
@@ -1717,6 +1925,47 @@ pub(crate) fn managed_names(
         .filter(|(p, _)| fleet.delivers(env_name, name, p))
         .flat_map(|(p, prod)| prod.keys.keys().map(move |k| t.env_name(p, k)))
         .collect())
+}
+
+/// Every file key target `name` of `env_name` delivers, by rendered name (M4, §4.2): the
+/// [`FileMount`](crate::domain::runtime::FileMount) of each key with a `file`, respecting
+/// the target's roles and the key's environment and mode exactly as a delivery does.
+/// Names only.
+pub(crate) fn file_mounts(
+    fleet: &Fleet,
+    env_name: &str,
+    name: &str,
+) -> Result<BTreeMap<String, crate::domain::runtime::FileMount>, Error> {
+    let (_, t) = target(fleet, env_name, name)?;
+    let env = fleet.environment(env_name)?;
+    let served = env.targets.get(name).and_then(|t| t.roles.as_deref());
+    let mut out = BTreeMap::new();
+    for (p, prod) in &fleet.products {
+        if !fleet.delivers(env_name, name, p) {
+            continue;
+        }
+        for (k, s) in &prod.keys {
+            let Some(path) = s.file.as_deref() else {
+                continue;
+            };
+            if !crate::domain::rules::applies(s, env_name, env, p) {
+                continue;
+            }
+            if let (Some(roles), Some(served)) = (&s.roles, served)
+                && !roles.iter().any(|r| served.contains(r))
+            {
+                continue;
+            }
+            out.insert(
+                t.env_name(p, k),
+                crate::domain::runtime::FileMount {
+                    product: p.clone(),
+                    path: path.to_string(),
+                },
+            );
+        }
+    }
+    Ok(out)
 }
 
 /// Names on the target that the template does not render for any declared key: other
@@ -2033,6 +2282,29 @@ pub(crate) mod testutil {
         config::parse(&format!("{text}\n{extra}")).unwrap()
     }
 
+    /// `text` with every `[environments.<env>.targets.<name>]` table removed: a remote
+    /// profile may only name environments with no deployment target (O9, R1).
+    pub fn without_targets(text: &str) -> String {
+        let mut out = String::new();
+        let mut in_target = false;
+        for line in text.lines() {
+            if line.starts_with('[') {
+                in_target = line.starts_with("[environments.") && line.contains(".targets.");
+            }
+            if !in_target {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    /// The fixture with every deployment target removed (see [`without_targets`]).
+    pub fn fleet_without_targets(extra: &str) -> Fleet {
+        let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+        config::parse(&format!("{}\n{extra}", without_targets(&text))).unwrap()
+    }
+
     /// Two prod keys scoped to the process roles `serve` and `migrate` (#136).
     pub const ROLE_KEYS: &str = "\
 [products.allumata.keys.SERVE_TOKEN]
@@ -2046,14 +2318,35 @@ environments = [\"prod\"]
 roles = [\"migrate\"]
 ";
 
+    /// The fixture TOML with `roles` on every target. The committed fixture declares no
+    /// role-scoped keys, so its targets carry no roles; a test that appends [`ROLE_KEYS`]
+    /// (or any role-scoped key) needs this text, or the load is refused (M3, §4.4).
+    pub fn role_fixture_text() -> String {
+        std::fs::read_to_string("tests/fixtures/secrets.toml")
+            .unwrap()
+            .replace(
+                "state_vault_id = \"sstg\"",
+                "state_vault_id = \"sstg\"\nroles = [\"serve\", \"migrate\"]",
+            )
+            .replace(
+                "state_vault_id = \"sprd\"",
+                "state_vault_id = \"sprd\"\nroles = [\"serve\", \"migrate\"]",
+            )
+    }
+
+    /// [`role_fixture_text`] plus extra TOML appended (e.g. [`ROLE_KEYS`]).
+    pub fn role_fleet_with(extra: &str) -> Fleet {
+        config::parse(&format!("{}\n{extra}", role_fixture_text())).unwrap()
+    }
+
     /// The fixture fleet plus the two role-scoped keys.
     pub fn role_fleet() -> Fleet {
-        fleet_with(ROLE_KEYS)
+        role_fleet_with(ROLE_KEYS)
     }
 
     /// [`role_fleet`] plus a local delivery section and a `migrate`-scoped file key.
     pub fn role_local_fleet() -> Fleet {
-        fleet_with(&format!(
+        role_fleet_with(&format!(
             "{ROLE_KEYS}\n[products.allumata.keys.MIGRATE_PEM]
 kind = \"secret\"
 environments = [\"prod\"]

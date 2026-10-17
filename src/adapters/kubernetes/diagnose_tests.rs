@@ -472,3 +472,84 @@ fn a_rejected_deploy_credential_names_the_credential() {
         "deploy_credentials_failed"
     );
 }
+
+// --- a 422 replace refusal is an update refusal (K-R2, design §6.8) ---------------------------
+
+#[test]
+fn a_422_mode_out_of_range_is_an_update_refusal() {
+    assert_eq!(
+        fixture_code!(
+            "12-invalid-replace-mode-out-of-range",
+            &["replace", "-f", "-"]
+        ),
+        "update_refused"
+    );
+}
+
+#[test]
+fn a_422_duplicate_mount_path_is_an_update_refusal() {
+    assert_eq!(
+        fixture_code!(
+            "12-invalid-replace-mountpath-duplicate",
+            &["replace", "-f", "-"]
+        ),
+        "update_refused"
+    );
+}
+
+#[test]
+fn a_422_absolute_item_path_is_an_update_refusal() {
+    assert_eq!(
+        fixture_code!("12-invalid-replace-path-absolute", &["replace", "-f", "-"]),
+        "update_refused"
+    );
+}
+
+#[test]
+fn a_422_inner_dotdot_item_path_is_an_update_refusal() {
+    assert_eq!(
+        fixture_code!(
+            "12-invalid-replace-path-dotdot-inner",
+            &["replace", "-f", "-"]
+        ),
+        "update_refused"
+    );
+}
+
+#[test]
+fn a_422_dotdot_item_path_is_an_update_refusal() {
+    assert_eq!(
+        fixture_code!("12-invalid-replace-path-dotdot", &["replace", "-f", "-"]),
+        "update_refused"
+    );
+}
+
+#[test]
+fn a_422_duplicate_projected_path_is_an_update_refusal() {
+    assert_eq!(
+        fixture_code!("12-invalid-replace-path-duplicate", &["replace", "-f", "-"]),
+        "update_refused"
+    );
+}
+
+#[test]
+fn a_422_duplicate_volume_name_is_an_update_refusal() {
+    assert_eq!(
+        fixture_code!(
+            "12-invalid-replace-volume-name-duplicate",
+            &["replace", "-f", "-"]
+        ),
+        "update_refused"
+    );
+}
+
+#[test]
+fn a_422_immutable_field_is_an_update_refusal() {
+    assert_eq!(
+        fixture_code!(
+            "09-immutable-configmap-apply-changed",
+            &["apply", "--server-side", "-f", "-"]
+        ),
+        "update_refused"
+    );
+}

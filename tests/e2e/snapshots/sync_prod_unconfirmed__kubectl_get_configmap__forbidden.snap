@@ -1,0 +1,34 @@
+# sync_prod_unconfirmed__kubectl_get_configmap__forbidden: opv sync prod | fault forbidden on kubectl get configmap
+
+## text exit: 5
+## text stdout
+prod/fly: warning: web/LOG_LEVEL not delivered (no config channel: set fly.config)
+prod/fly: warning: web/OTEL_RESOURCE not delivered (no config channel: set fly.config)
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+retrying kubectl (2/3) in <delay>
+retrying kubectl (3/3) in <delay>
+opv: you may not list configmaps in namespace e2e-prod (context e2e-cluster, Kubernetes)
+  checked: kubectl --context e2e-cluster --namespace e2e-prod --request-timeout=60s get configmap -l opv-managed -o jsonpath (exit 1)
+--- kubectl replied, exit 1 ---
+| Error from server (Forbidden): configmaps is forbidden: User "system:serviceaccount:e2e-prod:opv" cannot list resource "configmaps" in API group "" in the namespace "e2e-prod"
+--- (scrubbed) ---
+Do: ask a cluster admin to let you list configmaps through a Role in namespace e2e-prod
+Next: opv doctor --env prod
+
+## json exit: 5
+## json stdout
+{"schema_version":2,"ok":false,"exit_code":5,"next":"opv doctor --env prod","do":"ask a cluster admin to let you list configmaps through a Role in namespace e2e-prod","error":{"code":"permission_denied","category":"target","message":"you may not list configmaps in namespace e2e-prod (context e2e-cluster, Kubernetes)","subject":{"target":null,"system":"kubernetes","resource":{"kind":"namespace","name":"e2e-prod","scope":"context e2e-cluster"},"right":{"verb":{"verb":"list","resource":"configmaps"}},"grant":{"model":"k8s_rbac","verb":"list","resource":"configmaps","namespace":"e2e-prod"},"env":"prod"},"evidence":{"checked":"kubectl --context e2e-cluster --namespace e2e-prod --request-timeout=60s get configmap -l opv-managed -o jsonpath","account":null,"upstream":{"source":"kubernetes","tool":"kubectl","version":null,"exit":{"kind":"code","code":1},"said":["Error from server (Forbidden): configmaps is forbidden: User \"system:serviceaccount:e2e-prod:opv\" cannot list resource \"configmaps\" in API group \"\" in the namespace \"e2e-prod\""],"truncated":false,"removed_advice":false,"untrusted":true,"omitted":0}},"retry":"after_fix","human_required":true,"do":"ask a cluster admin to let you list configmaps through a Role in namespace e2e-prod","next":"opv doctor --env prod","next_kind":"run"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+retrying kubectl (2/3) in <delay>
+retrying kubectl (3/3) in <delay>
+opv: you may not list configmaps in namespace e2e-prod (context e2e-cluster, Kubernetes)
+  checked: kubectl --context e2e-cluster --namespace e2e-prod --request-timeout=60s get configmap -l opv-managed -o jsonpath (exit 1)
+--- kubectl replied, exit 1 ---
+| Error from server (Forbidden): configmaps is forbidden: User "system:serviceaccount:e2e-prod:opv" cannot list resource "configmaps" in API group "" in the namespace "e2e-prod"
+--- (scrubbed) ---
+Do: ask a cluster admin to let you list configmaps through a Role in namespace e2e-prod
+Next: opv doctor --env prod

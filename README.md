@@ -13,6 +13,31 @@ Deliver 1Password-managed secrets to application runtimes and CI, with validatio
 
 1Password owns the values. Your runtime consumes them. `opv` connects the two and nothing else: no server, no independent secrets store, no encryption of its own, and no command intended to print secret-kind values. Non-secret account selection and configuration may be recorded locally. What to sync is a small configuration of IDs, key names and validation rules, never values, kept in 1Password next to the secrets or in a committed `secrets.toml`.
 
+## How opv works: one source of truth, synced by CI
+
+1Password holds everything your app is configured with: its settings and its secrets. Nothing else does. opv moves those values to where they are needed and never anywhere else.
+
+```mermaid
+flowchart LR
+  OP[(1Password<br/>config + secrets)]
+  DEV[Your laptop<br/>opv run]
+  CI[CI/CD<br/>opv changed · opv sync · drift check]
+  K8S[Kubernetes<br/>Secrets · ConfigMaps · mounted files]
+  SW[Docker Swarm<br/>secrets · configs]
+  FLY[Fly.io<br/>Fly secrets]
+  VM[VMs<br/>cloud secret manager]
+  OP -- your own sign-in --> DEV
+  OP -- service account --> CI
+  CI --> K8S & SW & FLY & VM
+```
+
+- **Local development:** `opv run dev -- <your command>` starts your app with the values it needs, as variables or as files in a private in-memory folder, and cleans up when it stops. Values never touch your disk.
+- **CI/CD:** a workflow runs `opv sync` with a 1Password service account. opv writes secrets and settings into each platform's own place: Kubernetes Secrets and ConfigMaps, Swarm secrets, Fly secrets, a cloud secret manager.
+- **Production never touches 1Password.** Your running app reads only what its platform gives it. There is no 1Password token, no opv, and no `op` in your images or servers.
+- **Staying in step:** a scheduled job runs `opv changed`, which notices when someone edits a value in 1Password and triggers the sync. Production syncs wait for a reviewer to approve the exact plan. A nightly drift check fails if a platform no longer matches 1Password.
+
+Copy the ready-made workflows: [examples/ci-change-detection](examples/ci-change-detection/).
+
 ## Quick start
 
 Install with npm, on macOS, Linux, WSL or Windows ([other ways](docs/install.md)):

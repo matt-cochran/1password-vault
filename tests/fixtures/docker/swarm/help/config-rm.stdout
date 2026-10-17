@@ -1,0 +1,7 @@
+
+Usage:  docker config rm CONFIG [CONFIG...]
+
+Remove one or more configs
+
+Aliases:
+  docker config rm, docker config remove

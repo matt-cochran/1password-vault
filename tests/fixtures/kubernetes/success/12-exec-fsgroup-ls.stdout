@@ -1,0 +1,14 @@
+/run/secrets/api:
+total 4
+drwxrwsrwt 3 root 10001  120 <DATE> .
+drwxr-xr-x 4 root root  4096 <DATE> ..
+drwxr-sr-x 4 root 10001   80 <DATE> ..<TIMESTAMP_DIR>
+lrwxrwxrwx 1 root 10001   32 <DATE> ..data -> ..<TIMESTAMP_DIR>
+lrwxrwxrwx 1 root 10001   17 <DATE> github-app -> ..data/github-app
+lrwxrwxrwx 1 root 10001   11 <DATE> otel -> ..data/otel
+
+/run/secrets/api/github-app/:
+total 4
+drwxr-sr-x 2 root 10001 60 <DATE> .
+drwxr-sr-x 4 root 10001 80 <DATE> ..
+-r--r----- 1 root 10001 20 <DATE> private-key

@@ -6,7 +6,7 @@
 
 use crate::cause::{
     Cause, CredentialProblem, CredentialRef, DiagnoseContext, ExitClass, GrantModel, NamedBy,
-    NotFoundState, Observed, Principal, ResourceKind, ResourceName, ResourceRef, Right,
+    NotFoundState, Observed, Principal, Refusal, ResourceKind, ResourceName, ResourceRef, Right,
     SessionState, System, Unanswered,
 };
 
@@ -28,6 +28,8 @@ enum Rule {
     NotFound,
     /// External Secrets Operator not installed (`resource type` / raw-discovery NotFound).
     EsoMissing,
+    /// A 422 validation refusal: `The <Kind> "<name>" is invalid: …`.
+    Validation,
     /// The API server did not answer (`connection refused` / `was refused`).
     Network,
 }
@@ -39,6 +41,9 @@ enum Rule {
 const PHRASES: &[(&str, Rule)] = &[
     ("You must be logged in to the server", Rule::SignedOut),
     ("(Forbidden)", Rule::Forbidden),
+    // A replace refused with 422 names the invalid field(s) after `is invalid:`; it must be
+    // read before the generic phrases (a 422's detail may hold `does not exist`/`not found`).
+    ("is invalid:", Rule::Validation),
     ("does not exist", Rule::ContextMissing),
     (
         "the server could not find the requested resource",
@@ -94,6 +99,7 @@ fn apply(rule: Rule, seen: Observed, stderr: &str, ctx: &DiagnoseContext) -> Cau
         Rule::ContextMissing => context_missing(seen, stderr, ctx),
         Rule::NotFound => not_found(seen, stderr, ctx),
         Rule::EsoMissing => eso_missing(),
+        Rule::Validation => validation(seen, ctx),
         Rule::Network => Cause::Unavailable {
             system: System::Kubernetes,
             why: Unanswered::Network,
@@ -204,6 +210,22 @@ fn not_found(seen: Observed, stderr: &str, ctx: &DiagnoseContext) -> Cause {
             flag: "--context".to_string(),
         }),
         state: NotFoundState::Missing,
+        seen,
+    }
+}
+
+/// A 422 validation refusal: the server refused the update and named the invalid fields.
+fn validation(seen: Observed, ctx: &DiagnoseContext) -> Cause {
+    Cause::TargetRefused {
+        system: System::Kubernetes,
+        subject: ctx.resource.clone().unwrap_or_else(|| ResourceRef {
+            kind: ResourceKind::Deployment,
+            name: ResourceName::new(""),
+            scope: None,
+        }),
+        why: Refusal::Validation,
+        env: ctx.env.clone(),
+        target: ctx.target.clone(),
         seen,
     }
 }

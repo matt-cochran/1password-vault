@@ -173,7 +173,7 @@ Optional, for `opv run` only (targets ignore both). `environment = "declared_onl
 
 ### Remote development: `[products.<p>.remotes.<name>]`
 
-Optional, for `opv run --remote <name>` only. A reviewed profile pins where a product's values may go over SSH and what runs there: `host`, `port` (default 22), `user`, `host_key` (the host's public key as `<type> <base64>`, for example from `ssh-keyscan`, without the host name; types `ssh-ed25519`, `ecdsa-sha2-nistp256/384/521`, `ssh-rsa`), `environments` (at least one defined environment whose values may go there), `roles` (optional; roles the product's keys declare), `opv` and `workdir` (absolute remote paths of letters, digits and `. _ / + -`, no `..`), `command` (the program and its arguments; no control character but newline and tab) and `identity_file` (optional; default the SSH agent). Every field is checked at load. Recipe: [local development](local-development.md#remote-development-run---remote); guarantees and limits: [design](design/remote-delivery.md).
+Optional, for `opv run --remote <name>` only. A reviewed profile pins where a product's values may go over SSH and what runs there: `host`, `port` (default 22), `user`, `host_key` (the host's public key as `<type> <base64>`, for example from `ssh-keyscan`, without the host name; types `ssh-ed25519`, `ecdsa-sha2-nistp256/384/521`, `ssh-rsa`), `environments` (at least one defined environment, each with no deployment target, whose values may go there: a deployed environment's values reach the host only through the CI sync), `roles` (optional; roles the product's keys declare), `opv` and `workdir` (absolute remote paths of letters, digits and `. _ / + -`, no `..`), `command` (the program and its arguments; no control character but newline and tab) and `identity_file` (optional; default the SSH agent). Every field is checked at load. Recipe: [local development](local-development.md#remote-development-run---remote); guarantees and limits: [design](design/remote-delivery.md).
 
 ### Targets: where products deploy
 
@@ -336,7 +336,7 @@ How the values travel depends on the field kind:
 
 - A **secret** (concealed field) is stored in the target's secret store and bound to the app as a reference to one exact version.
 - **Config** (text field) is set as a plain environment variable on the app. Set `config = "store"` to keep config in the store too. There is no way to put a secret in a plain variable.
-- On Fly, config is not synced; deployment tooling reads it with `opv config export <env> --json`.
+- On Fly, config is synced only when `fly.config = "secrets"`; otherwise deployment tooling reads it with `opv config export <env> --json`.
 - On GitHub Actions, secrets become Actions **secrets** and config becomes Actions **variables**.
 
 ### Fly
@@ -345,9 +345,12 @@ How the values travel depends on the field kind:
 [environments.prod.targets.shared]
 fly.app  = "myapp-production"                  # required; passed as --app on every flyctl call
 fly.secret_name = "FLEET__{PRODUCT}__{KEY}"    # optional; defines target names; one product may use "{KEY}"
+fly.config = "secrets"                         # optional: secrets (store config too) or none
 deploy_credentials = "op://infra-prod/fly-deploy"
 state_vault_id = "vprd-state"
 ```
+
+`fly.config` decides what happens to config (text) keys. `secrets` stages them in Fly secrets under the same name template and deploys them exactly like secrets (`flyctl secrets import --stage`, values on stdin, compared by digest). `none` says the target deliberately carries no config, and each run warns `not delivered (no config channel: fly.config = none)`. Unset warns `not delivered (no config channel: set fly.config)` in 0.11.0 and will be refused from 0.12.0. Config stays config: the app sees it as an environment variable at boot, plan rows show it `via Fly secret`, and anything sensitive must be `kind = "secret"`.
 
 Secrets are staged with `flyctl secrets import --stage` (values on stdin) and deployed with `flyctl secrets deploy` only under `sync --deploy`. Fly does not reveal stored values, so opv compares digests after staging ([change detection](usage.md#change-detection-on-fly)). With one product, `secret_name = "{KEY}"` delivers bare names, and two targets may not share an app within one environment. `deploy_credentials` can hold a `FLY_API_TOKEN` for the app ([above](#account-and-deploy-credentials)).
 
@@ -395,11 +398,32 @@ kubernetes.namespace  = "myapp"                     # required
 kubernetes.deployment = "api"                       # required
 kubernetes.container  = "api"                       # optional when the pod has one container
 kubernetes.env_name   = "FLEET__{PRODUCT}__{KEY}"   # optional; defines target names
-kubernetes.config     = "env"                       # or "store"
+kubernetes.config     = "configmap"                 # or "env" (the default when unset) or "store"
+kubernetes.secrets_dir = "/run/secrets/{product}"   # optional: file keys become files here
+roles = ["serve"]                                   # required when a delivered key declares roles
 state_vault_id = "vdev-state"
 ```
 
 opv always passes `--context` and `--namespace`, so it never acts on whatever context your shell has selected. Each secret value becomes an immutable Kubernetes Secret named `opv-<name>-<random id>` (the id says nothing about the value), labelled `opv-managed=<env>`, and the Deployment's variable points at it with `secretKeyRef`. An unchanged value writes nothing (opv compares it with the bound Secret); a changed value is a new Secret. After a healthy rollout opv deletes the older Secrets that neither the Deployment nor any ReplicaSet references, and `--prune` removes a key that is no longer declared. The Secret name is the variable name lower-cased with `_` changed to `-`; that part is also the `opv-key` label value, so it must match `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` with at most 63 characters, and collisions are an error. A longer name is refused when the configuration loads (`renders Kubernetes name of N characters, which must match …`). A key whose variable name starts or ends with `_` (a Secret name starting or ending in `-`) is refused the same way, naming the key and its line.
+
+**Config (`kubernetes.config`).** Where config keys go:
+
+| Value | Config keys become | Readable by |
+|---|---|---|
+| `env` (default when unset) | plain `value` entries on the Deployment | anyone who can read the Deployment |
+| `configmap` (what `opv init` and `opv target add` write) | immutable ConfigMaps `opv-<name>-<random id>`, bound with `configMapKeyRef` | anyone who can read ConfigMaps or the Deployment |
+| `store` | Secrets, like secret keys | as Secrets |
+
+ConfigMaps are versioned, compared exactly and cleaned up like Secrets. Config is declared non-secret, so a ConfigMap is the right place for it; every `plan` and `status` row names its channel. `configmap` cannot be combined with `secrets_in` (External Secrets bind every key from the named store), and is refused when the configuration loads; use `env` or `store` there.
+
+**Files (`kubernetes.secrets_dir`).** Without it, no key is a file and everything is a variable. With it, every delivered key that has `file = "<relative/path>"` is mounted at `<secrets_dir>/<path>` and only there: its variable is removed in the same change. `{product}` in the directory renders the product name (`_` becomes `-`); it is required when two products deliver file keys to one target, and two products may not render the same directory. The directory must be absolute and normalised, not `/`, not under `/proc`, `/sys`, `/dev` or `/var/run/secrets/kubernetes.io`, at most 255 bytes, with no `:` or whitespace. A config key with `file` needs `config = "configmap"` or `"store"`, and within one product no key's `file` may be a parent directory of another's (`a` and `a/b`): Kubernetes accepts that volume with only a warning and the pod never starts.
+
+- **How it is mounted.** One projected volume per product, `opv-files-<product>`, holds one item per file key, each pointing at that key's immutable Secret (or ConfigMap) version. The `opv-files-` prefix is reserved for opv. The volume is read-only and mounted **only into the target's container** (`kubernetes.container`); other containers in the pod, a sidecar for example, get no mount.
+- **Who can read the files.** Files are mode 0440, owned by root with the pod's `fsGroup` as group. Kubernetes has no per-file owner for these volumes, so set `spec.template.spec.securityContext.fsGroup` to a group that **this product's container alone** uses. opv never sets `fsGroup`. Before any write, `sync` checks the Deployment's security context: a workload that sets no `fsGroup` and runs as a non-root user (or whose user or group opv cannot tell) is refused as `mount_unreadable` with nothing written; `plan`, `status` and `doctor` print the same finding as a warning. A workload running as root (or in group 0) can read the files; opv prints a warning on every run and goes on.
+- **A path already in use.** If the target container already mounts another volume at the directory, above it or inside it, `plan`, `status` and `sync` refuse (`policy_refused`, exit 6) and name the volume, and `doctor` reports it.
+- **Refresh.** A new value is a new object version, so the Deployment changes and Kubernetes rolls out new pods; running pods never see a value change in place.
+
+**Rights.** opv needs `get`, `create`, `patch`, `list` and `delete` on Secrets, `get` and `update` on Deployments, and `list` on ReplicaSets and Pods; a `configmap` target also needs `get`, `list`, `create`, `patch` and `delete` on ConfigMaps (`apply --server-side` is authorised as `patch`, and as `create` for a new object). Grant them with a **namespaced Role** in the target's namespace, never a ClusterRole. `opv doctor` checks each one and names the grant; `sync` checks the rights only a deploy uses (`delete`, and `list` on ReplicaSets and Pods) before its first write.
 
 ### GitHub Actions: repository and environment secrets
 
@@ -663,6 +687,8 @@ opv add shared/OPENAI_API_KEY --kind secret --env dev --personal # each develope
 Rules go in a key's `rules = { ... }` table. A failure names the key, the rule and a reason, never the value.
 
 Always on, for every key (after a `pem_private_key` transform, see below): `nonempty`; `single_line` (no `\n`, `\r` or NUL); `no_surrounding_space`; `max_len` (59,000 bytes).
+
+One exception: a key with `file = "<relative/path>"` delivered to a target that writes files to a filesystem the app reads is staged and delivered **verbatim**, so `single_line`, `no_surrounding_space` and `ensure_prefix` are skipped and the stored bytes are kept exactly (a PEM's trailing newline included); `nonempty`, `max_len` and the declared rules still apply. A declared `transform` runs first, so a `pem_private_key` file key is still delivered as one line. On a target without such a file channel the key is delivered as a variable, and the always-on rules apply as usual.
 
 | Rule | Meaning |
 |---|---|

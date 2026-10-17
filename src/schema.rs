@@ -18,6 +18,7 @@ pub const MCP_TOOLS: &[(&str, &str)] = &[
     ("opv_configuration", "config describe"),
     ("opv_access", "access"),
     ("opv_deployment_plan", "plan"),
+    ("opv_changed", "changed"),
     ("opv_declare_key", "add"),
     ("opv_declare_environment", "env add"),
     ("opv_declare_target", "target add"),
@@ -119,6 +120,13 @@ pub const EFFECTS: &[Effect] = &[
     },
     Effect {
         command: "delivery verify",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    Effect {
+        command: "changed",
         effect: "reads",
         needs_terminal: false,
         handles_values: false,
@@ -627,6 +635,11 @@ fn documents() -> Value {
         "product",
         "key",
         "kind",
+        "channel",
+        "via?",
+        "delivered_as?",
+        "form?",
+        "path?",
         "state",
         "rule",
         "reason",
@@ -648,7 +661,7 @@ fn documents() -> Value {
         },
         "row": row,
         "key_ref": key_ref,
-        "error": ["code", "category", "message", "detail", "retry", "human_required", "do", "next"],
+        "error": error_fields(),
         "tidy": ["action", "name"],
         "status": [
             "environment", "product", "changes", "rows", "extras", "undelivered?", "unreferenced_sources?", "drift?", "tidy?", "tidy_error?", "stage",
@@ -722,10 +735,37 @@ fn documents() -> Value {
         "account use": "{account_id, path}: the .opv file written",
         "config export": "with <ENV>: the config-kind values, always {product: {KEY: value}}; with --json and no <ENV>: the configuration itself (IDs, names, kinds, rules); no frame on success",
         "delivery verify": "{environment, placements: [{product, target, revision, state, reason, names: [{name, state}], deployed, receipt_revision?}]}: every placement of the product, each with its target and state; --target narrows to one placement; a receipt kept from sync --receipt must be the current delivery",
+        "changed": "{environment, changed, placements: [{product, target, state (unchanged|changed|no_record), items?: [{item_id, recorded, current?}]}], next, do}: each placement's recorded source versions against the item's current version (item IDs and version numbers only, never a value); exit 10 when something changed, with ok true",
         "schema": "this document",
         "skill install": "{written: [{target, path}], kept: [{target, path, reason}]}",
         "skill status": "{copies: [{scope, target, path, version, edited, current}]}",
     })
+}
+
+/// `documents.error`: the top-level keys of the real `error` object, generated from the
+/// catalog's one example of every cause (as [`error_codes`] is from the code table), so the
+/// published list cannot drift from the object. A key only some causes carry is marked `?`.
+fn error_fields() -> Vec<String> {
+    let inv =
+        crate::cause::Invocation::from_cli(&["opv".to_string(), "status".into(), "prod".into()]);
+    let docs: Vec<Vec<String>> = crate::cause::codes::one_of_each()
+        .iter()
+        .map(|cause| crate::error::document_keys(cause, &inv))
+        .collect();
+    let mut fields: Vec<String> = Vec::new();
+    for doc in &docs {
+        for key in doc {
+            if !fields.iter().any(|f| f.trim_end_matches('?') == key) {
+                let every = docs.iter().all(|d| d.contains(key));
+                fields.push(if every {
+                    key.clone()
+                } else {
+                    format!("{key}?")
+                });
+            }
+        }
+    }
+    fields
 }
 
 /// The public error codes, generated from the catalog ([`crate::cause::codes::table`]):
@@ -783,6 +823,63 @@ mod tests {
             .filter(|cli| !names.contains(cli))
             .collect();
         assert!(missing.is_empty(), "MCP tools without EFFECTS: {missing:?}");
+    }
+
+    /// #166: the `error` list is generated from the real object, so a field added to or
+    /// removed from the error document fails here.
+    #[test]
+    fn schema_error_fields_match_every_causes_error_object() {
+        let doc = describe(&clap::Command::new("opv"), "test");
+        let listed: std::collections::BTreeSet<String> = doc["documents"]["error"]
+            .as_array()
+            .expect("documents.error is a list")
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .unwrap_or_default()
+                    .trim_end_matches('?')
+                    .to_string()
+            })
+            .collect();
+        let inv = crate::cause::Invocation::from_cli(&[
+            "opv".to_string(),
+            "status".into(),
+            "prod".into(),
+        ]);
+        let differing: Vec<&str> = crate::cause::codes::one_of_each()
+            .iter()
+            .filter(|cause| {
+                let keys: std::collections::BTreeSet<String> =
+                    crate::cause::render::document(cause, None, &inv, false)
+                        .as_object()
+                        .expect("the error document is an object")
+                        .keys()
+                        .cloned()
+                        .collect();
+                keys != listed
+            })
+            .map(|cause| cause.code())
+            .collect();
+        assert!(
+            differing.is_empty(),
+            "causes whose error keys differ from documents.error: {differing:?}"
+        );
+    }
+
+    /// #166: the error object has no `detail`; the schema must not list one.
+    #[test]
+    fn schema_error_fields_do_not_include_detail() {
+        let doc = describe(&clap::Command::new("opv"), "test");
+        let lists_detail = doc["documents"]["error"]
+            .as_array()
+            .expect("documents.error is a list")
+            .iter()
+            .any(|v| v.as_str() == Some("detail"));
+        assert!(
+            !lists_detail,
+            "documents.error still lists detail: {}",
+            doc["documents"]["error"]
+        );
     }
 
     #[test]

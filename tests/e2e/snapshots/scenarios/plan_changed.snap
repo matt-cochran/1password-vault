@@ -5,19 +5,19 @@
 
 ## text stderr
 using <SCENARIO>/project/secrets.toml
-opv: the plan changed since it was made: deadbeef is now 346d7a62
-Do: review the new plan 346d7a62
+opv: the plan changed since it was made: deadbeef is now 623778c8
+Do: review the new plan 623778c8
 Next: opv plan prod
 
 ## json exit: 6
 ## json stdout
-{"schema_version":2,"ok":false,"exit_code":6,"next":"opv plan prod","do":"review the new plan 346d7a62","error":{"code":"stale_plan","category":"policy","message":"the plan changed since it was made: deadbeef is now 346d7a62","subject":{"scope":{"kind":"sync","env":"prod","targets":[],"product":null,"deploy":false,"prune":false,"rotate":[]},"old":"deadbeef","new":"346d7a62"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":"review the new plan 346d7a62","next":"opv plan prod","next_kind":"check"}}
+{"schema_version":2,"ok":false,"exit_code":6,"next":"opv plan prod","do":"review the new plan 623778c8","error":{"code":"stale_plan","category":"policy","message":"the plan changed since it was made: deadbeef is now 623778c8","subject":{"scope":{"kind":"sync","env":"prod","targets":[],"product":null,"deploy":false,"prune":false,"rotate":[]},"old":"deadbeef","new":"623778c8"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":"review the new plan 623778c8","next":"opv plan prod","next_kind":"check"}}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml
-opv: the plan changed since it was made: deadbeef is now 346d7a62
-Do: review the new plan 346d7a62
+opv: the plan changed since it was made: deadbeef is now 623778c8
+Do: review the new plan 623778c8
 Next: opv plan prod
 
 ## mcp opv_sync {"environment":"prod","plan_id":"deadbeef"}
-{"ok":false,"error":{"code":"stale_plan","category":"policy","message":"the plan changed since it was made: deadbeef is now 346d7a62","subject":{"scope":{"kind":"sync","env":"prod","targets":[],"product":null,"deploy":false,"prune":false,"rotate":[]},"old":"deadbeef","new":"346d7a62"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":"review the new plan 346d7a62","next":"opv plan prod","next_kind":"check"}}
+{"ok":false,"error":{"code":"stale_plan","category":"policy","message":"the plan changed since it was made: deadbeef is now 623778c8","subject":{"scope":{"kind":"sync","env":"prod","targets":[],"product":null,"deploy":false,"prune":false,"rotate":[]},"old":"deadbeef","new":"623778c8"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":"review the new plan 623778c8","next":"opv plan prod","next_kind":"check"}}

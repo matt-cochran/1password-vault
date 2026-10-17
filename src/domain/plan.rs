@@ -10,6 +10,7 @@ use std::fmt;
 use crate::domain::model::{Fleet, KeySpec, Kind};
 use crate::domain::rules::{self, Reason};
 use crate::domain::secret::SecretValue;
+use crate::provider::{Channel, FileCapability};
 
 /// One field of the 1Password item, as produced by the source adapter.
 /// `Debug` never prints the value.
@@ -95,6 +96,16 @@ pub struct Row {
     pub shared_by: Vec<(String, String)>,
 }
 
+/// A config key the target's channel leaves undelivered (design §1.3): `refused` when the
+/// channel is `None` (`sync` refuses, `policy_refused`), false when the target declined it
+/// (`sync` warns and goes on).
+pub struct NoChannelKey {
+    pub product: String,
+    pub key: String,
+    pub why: &'static str,
+    pub refused: bool,
+}
+
 pub struct SyncPlan {
     pub rows: Vec<Row>,
     /// (section, label) in the item but not declared for any environment of that product.
@@ -114,6 +125,9 @@ pub struct SyncPlan {
     pub held_from_prune: Vec<(String, String, String)>,
     /// product -> key -> value, config keys only.
     pub config: BTreeMap<String, BTreeMap<String, String>>,
+    /// Config keys the target's channel does not deliver (design §1.3): `None` refuses,
+    /// `Declined` warns. Never in `config`.
+    pub no_channel: Vec<NoChannelKey>,
     /// (product, key): config keys whose 1Password field is concealed (M4, owner ruling).
     /// Accepted and delivered as plain environment values, but their values are never
     /// printed, and `status` warns once per key.
@@ -281,6 +295,7 @@ pub fn build_with(
         prune: Vec::new(),
         held_from_prune: Vec::new(),
         config: BTreeMap::new(),
+        no_channel: Vec::new(),
         concealed_config: Vec::new(),
         drift: Vec::new(),
         undelivered: Vec::new(),
@@ -288,6 +303,13 @@ pub fn build_with(
         tidy: Vec::new(),
         tidy_error: None,
     };
+
+    // Target-level roles (M3, §4.4): a key whose `roles` miss the target's is not desired
+    // here, exactly like a key the target's rules do not select: it is pruned, not staged.
+    let target_roles: Option<&[String]> = opts
+        .target
+        .and_then(|t| env.targets.get(t))
+        .and_then(|t| t.roles.as_deref());
 
     // `Ok(None)` means the key is not desired here. `refuse_in` is checked first and
     // whatever the field's kind: a non-empty field in a refused environment blocks even
@@ -300,13 +322,27 @@ pub fn build_with(
      -> Result<Option<SecretValue>, KeyState> {
         let refused =
             rules::refused_in(spec, env_name) && field.is_some_and(|(_, v)| !v.expose().is_empty());
+        let withheld_by_role = spec.roles.as_deref().is_some_and(|roles| {
+            target_roles.is_some_and(|served| !roles.iter().any(|r| served.contains(r)))
+        });
         match field {
             _ if refused => Err(KeyState::RuleFailed(
                 "refuse_in",
                 Reason::Fixed(rules::REASON_REFUSED),
             )),
+            _ if withheld_by_role => Ok(None),
             Some((kind, value)) if kind == spec.kind => {
-                rules::check(product, key, spec, env_name, env, value)
+                // A file key delivered as a file (no target or a Native target) is staged
+                // verbatim (M4, §4.5): the transform and the line-shape rules do not apply.
+                let verbatim = spec.file.is_some()
+                    && match opts.target {
+                        None => true,
+                        Some(t) => matches!(
+                            env.targets.get(t).map(|tt| tt.config.channels().files),
+                            Some(FileCapability::Native { .. })
+                        ),
+                    };
+                rules::check_verbatim(product, key, spec, env_name, env, value, verbatim)
                     .map_err(|e| KeyState::RuleFailed(e.rule, e.reason))
             }
             other => {
@@ -334,6 +370,24 @@ pub fn build_with(
                 Some(t) if delivered => Some(fleet.target_name(env_name, t, product, key)),
                 _ => None,
             };
+            // `fly.config = "secrets"` routes a config key through the target's secret
+            // store (design §7.1): the config channel is then the same store as the
+            // secret channel, so the key is staged, compared and pruned like a secret.
+            // A pinned target (Kubernetes, Azure) also names one store for both, but it
+            // delivers store-routed config through its runtime's bindings, not by staging.
+            let config_as_secret = target_name.is_some()
+                && opts.target.is_some_and(|t| {
+                    env.targets.get(t).is_some_and(|t| {
+                        let ch = t.config.channels();
+                        matches!(
+                            (&ch.config, &ch.secret),
+                            (
+                                Channel::Store { label: config },
+                                Channel::Store { label: secret }
+                            ) if config == secret
+                        ) && t.config.runtime_subject().is_none()
+                    })
+                });
             let target_entry = target_name
                 .as_deref()
                 .and_then(|n| on_target.get(n).copied());
@@ -370,10 +424,12 @@ pub fn build_with(
             // A ready secret the target cannot carry is a failing rule, in plan and status
             // exactly as in sync.
             let outcome = match (outcome, spec.kind, target_name.as_deref()) {
-                (Ok(Some(v)), Kind::Secret, Some(name)) => match (opts.target_check)(name, &v) {
-                    Some((rule, why)) => Err(KeyState::RuleFailed(rule, Reason::Fixed(why))),
-                    None => Ok(Some(v)),
-                },
+                (Ok(Some(v)), kind, Some(name)) if kind == Kind::Secret || config_as_secret => {
+                    match (opts.target_check)(name, &v) {
+                        Some((rule, why)) => Err(KeyState::RuleFailed(rule, Reason::Fixed(why))),
+                        None => Ok(Some(v)),
+                    }
+                }
                 (o, _, _) => o,
             };
 
@@ -397,10 +453,11 @@ pub fn build_with(
             match outcome {
                 Ok(None) => {
                     // Not desired in this environment: prune if it is a managed Fly name,
-                    // unless it is immutable and not explicitly released.
-                    if let (Kind::Secret, Some(_), Some(name)) =
-                        (spec.kind, target_entry, target_name)
-                    {
+                    // unless it is immutable and not explicitly released. A config key on
+                    // a secrets-config Fly target is managed the same way.
+                    let managed = spec.kind == Kind::Secret
+                        || (spec.kind == Kind::Config && config_as_secret);
+                    if let (true, Some(_), Some(name)) = (managed, target_entry, target_name) {
                         let pair = (product.clone(), key.clone());
                         if spec.immutable && !opts.prune_immutable.contains(&pair) {
                             plan.held_from_prune.push((pair.0, pair.1, name));
@@ -417,16 +474,50 @@ pub fn build_with(
                 Ok(Some(value)) => {
                     row.state = KeyState::Ready;
                     match spec.kind {
-                        Kind::Config => {
-                            if concealed {
+                        Kind::Config if !config_as_secret => {
+                            // The target's config channel routes the key (design §1.3,
+                            // §1.5): a delivered key is planned as before; a `None` or
+                            // `Declined` channel leaves it out and records why. A target
+                            // that leaves the key's product out keeps today's behaviour.
+                            let channel = target_name.as_ref().and_then(|_| {
+                                opts.target
+                                    .and_then(|t| env.targets.get(t))
+                                    .map(|t| t.config.channels().config)
+                            });
+                            match channel {
+                                Some(Channel::None { why }) => {
+                                    plan.no_channel.push(NoChannelKey {
+                                        product: product.clone(),
+                                        key: key.clone(),
+                                        why,
+                                        refused: true,
+                                    });
+                                }
+                                Some(Channel::Declined { why }) => {
+                                    plan.no_channel.push(NoChannelKey {
+                                        product: product.clone(),
+                                        key: key.clone(),
+                                        why,
+                                        refused: false,
+                                    });
+                                }
+                                _ => {
+                                    if concealed {
+                                        plan.concealed_config.push((product.clone(), key.clone()));
+                                    }
+                                    plan.config
+                                        .entry(product.clone())
+                                        .or_default()
+                                        .insert(key.clone(), value.expose().to_string());
+                                }
+                            }
+                        }
+                        Kind::Secret | Kind::Config => {
+                            // A concealed config key delivered through the secret store is
+                            // concealed exactly as one delivered as a plain value.
+                            if spec.kind == Kind::Config && concealed {
                                 plan.concealed_config.push((product.clone(), key.clone()));
                             }
-                            plan.config
-                                .entry(product.clone())
-                                .or_default()
-                                .insert(key.clone(), value.expose().to_string());
-                        }
-                        Kind::Secret => {
                             if let Some(target_digest) = target_entry {
                                 row.target = match ((opts.digest)(&value), target_digest) {
                                     (Some(local), Some(remote)) if local == remote => {
@@ -565,6 +656,295 @@ mod tests {
     }
     const ENC: &str = "FLEET__ALLUMATA__INTEGRATION_ENC_KEY";
 
+    /// A one-product fleet (M3): the prod target `t` and key `K` are given `target_roles` /
+    /// `key_roles` in code, and `SERVE_KEY` declares `serve` so the target's own roles always
+    /// have a declaring key. The base document carries no roles, so the load cannot fail on a
+    /// role rule and the test drives `build`'s role filtering alone.
+    fn role_fleet(target_roles: &[&str], key_roles: &[&str]) -> Fleet {
+        let mut fleet = config::parse(
+            "[environments.prod]\n\
+             boundaries.p = { vault_id = \"v\", item_id = \"i\" }\n\
+             [environments.prod.targets.t]\n\
+             fly.app = \"app\"\n\
+             fly.secret_name = \"{KEY}\"\n\
+             state_vault_id = \"s\"\n\
+             [products.p.keys.K]\n\
+             kind = \"secret\"\n\
+             environments = [\"prod\"]\n\
+             [products.p.keys.SERVE_KEY]\n\
+             kind = \"secret\"\n\
+             environments = [\"prod\"]\n",
+        )
+        .unwrap();
+        let roles = |r: &[&str]| -> Option<Vec<String>> {
+            Some(r.iter().map(|s| (*s).to_string()).collect())
+        };
+        fleet
+            .environments
+            .get_mut("prod")
+            .unwrap()
+            .targets
+            .get_mut("t")
+            .unwrap()
+            .roles = roles(target_roles);
+        fleet
+            .products
+            .get_mut("p")
+            .unwrap()
+            .keys
+            .get_mut("K")
+            .unwrap()
+            .roles = roles(key_roles);
+        fleet
+            .products
+            .get_mut("p")
+            .unwrap()
+            .keys
+            .get_mut("SERVE_KEY")
+            .unwrap()
+            .roles = roles(&["serve"]);
+        fleet
+    }
+
+    #[test]
+    fn a_key_whose_roles_miss_the_targets_roles_is_pruned() {
+        let fleet = role_fleet(&["serve"], &["migrate"]);
+        let p = build(
+            &fleet,
+            "prod",
+            vec![secret("p", "K", "sk-1")],
+            &[fly_secret("K", None)],
+            &no_rotate(),
+            &none,
+        );
+        assert_eq!(p.prune, vec!["K".to_string()]);
+    }
+
+    #[test]
+    fn a_key_whose_roles_meet_the_targets_roles_is_staged() {
+        let fleet = role_fleet(&["serve"], &["serve"]);
+        let p = build(
+            &fleet,
+            "prod",
+            vec![secret("p", "K", "sk-1")],
+            &[],
+            &no_rotate(),
+            &none,
+        );
+        assert!(p.stage.iter().any(|(name, _)| name == "K"));
+    }
+
+    /// A test-only target that mounts files (`FileCapability::Native`, M4). No adapter
+    /// returns it yet (Kubernetes gets it in K2), so the staging tests drive it directly.
+    #[derive(Debug, Clone)]
+    struct NativeTarget;
+
+    impl crate::provider::TargetConfig for NativeTarget {
+        fn provider(&self) -> &'static dyn crate::provider::Provider {
+            crate::adapters::registry::DEFAULT
+        }
+        fn env_name(&self, product: &str, key: &str) -> String {
+            format!("{}_{}", product.to_uppercase(), key)
+        }
+        fn target_locator(&self) -> String {
+            "native".into()
+        }
+        fn store_name(&self, env_name: &str) -> String {
+            env_name.into()
+        }
+        fn name_rules(&self) -> crate::provider::NameRules {
+            crate::provider::NameRules {
+                env_label: "env name",
+                store: None,
+            }
+        }
+        fn same_target(&self, other: &dyn crate::provider::TargetConfig) -> bool {
+            other.as_any().downcast_ref::<NativeTarget>().is_some()
+        }
+        fn shared_target_error(&self, first: &str, second: &str) -> String {
+            format!("{first} and {second} share a target")
+        }
+        fn channels(&self) -> crate::provider::Channels {
+            crate::provider::Channels {
+                secret: crate::provider::Channel::Store {
+                    label: "Kubernetes Secret",
+                },
+                config: crate::provider::Channel::RuntimeEnv,
+                files: crate::provider::FileCapability::Native {
+                    dir: "/etc/secrets".to_string(),
+                },
+            }
+        }
+        fn open<'a>(
+            &'a self,
+            _env: &'a str,
+            _managed: BTreeSet<String>,
+            _files: &BTreeMap<String, crate::domain::runtime::FileMount>,
+            _config: &BTreeSet<String>,
+            _r: &'a dyn crate::runner::CommandRunner,
+        ) -> Result<crate::ports::Ports<'a>, crate::error::Error> {
+            unimplemented!("the plan test never opens the target")
+        }
+        fn preflight(
+            &self,
+            _r: &dyn crate::runner::CommandRunner,
+            _mode: crate::provider::PreflightMode,
+        ) -> Result<crate::provider::Preflight, crate::error::Error> {
+            unimplemented!()
+        }
+        fn doctor(
+            &self,
+            _r: &dyn crate::runner::CommandRunner,
+            _host: &dyn Fn() -> crate::host::Host,
+        ) -> Vec<crate::provider::Check> {
+            Vec::new()
+        }
+        fn explain(&self, _product: &str, _key: &str) -> Vec<(&'static str, String)> {
+            Vec::new()
+        }
+        fn eq_dyn(&self, other: &dyn crate::provider::TargetConfig) -> bool {
+            other.as_any().downcast_ref::<NativeTarget>().is_some()
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn clone_box(&self) -> Box<dyn crate::provider::TargetConfig> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// A fleet with two file keys (one plain, one `pem_private_key`) and a Fly target; a
+    /// test-only `native` target is added so the Native file path can be exercised.
+    fn file_fleet() -> Fleet {
+        let mut fleet = config::parse(
+            "[environments.prod]\n\
+             boundaries.p = { vault_id = \"v\", item_id = \"i\" }\n\
+             [environments.prod.targets.fly]\n\
+             fly.app = \"app\"\n\
+             fly.secret_name = \"{KEY}\"\n\
+             state_vault_id = \"s\"\n\
+             [products.p.local]\n\
+             secrets_dir_env = \"P_SECRETS_DIR\"\n\
+             [products.p.keys.PRIVATE_KEY]\n\
+             kind = \"secret\"\n\
+             environments = [\"prod\"]\n\
+             file = \"github-app/private-key\"\n\
+             [products.p.keys.PRIVATE_KEY_T]\n\
+             kind = \"secret\"\n\
+             environments = [\"prod\"]\n\
+             file = \"github-app/private-key-t\"\n\
+             rules = { transform = \"pem_private_key\" }\n",
+        )
+        .unwrap();
+        let fly = fleet.environments["prod"].targets["fly"].clone();
+        fleet.environments.get_mut("prod").unwrap().targets.insert(
+            "native".into(),
+            crate::domain::model::Target {
+                name: "native".into(),
+                config: Box::new(NativeTarget),
+                ..fly
+            },
+        );
+        fleet
+    }
+
+    /// A multi-line PEM and its one-line form.
+    fn pem(label: &str) -> (String, String) {
+        let der: Vec<u8> = std::iter::once(0x30u8)
+            .chain((0..150u8).map(|i| i.wrapping_mul(7)))
+            .collect();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&der);
+        let lines: Vec<&str> = b64
+            .as_bytes()
+            .chunks(64)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect();
+        let multi = format!(
+            "-----BEGIN {label}-----\n{}\n-----END {label}-----\n",
+            lines.join("\n")
+        );
+        let single = format!("-----BEGIN {label}-----{b64}-----END {label}-----");
+        (multi, single)
+    }
+
+    /// `build_with` for one chosen target (or none).
+    fn plan_on(fleet: &Fleet, target: Option<&str>, item: Vec<ItemField>) -> SyncPlan {
+        let none = BTreeSet::new();
+        build_with(
+            fleet,
+            "prod",
+            item,
+            &[],
+            &PlanOptions {
+                target,
+                rotate: &none,
+                prune_immutable: &none,
+                digest: &|_| None,
+                target_check: &|_, _| None,
+                current: None,
+            },
+        )
+    }
+
+    /// M4 (§4.5): a multi-line PEM with a trailing newline in a file key passes check with
+    /// no target.
+    #[test]
+    fn a_multiline_pem_file_key_passes_check_without_a_target() {
+        let (multi, _) = pem("RSA PRIVATE KEY");
+        let p = plan_on(
+            &file_fleet(),
+            None,
+            vec![secret("p", "PRIVATE_KEY", &multi)],
+        );
+        assert_eq!(row(&p, "PRIVATE_KEY").state, KeyState::Ready);
+    }
+
+    /// M4 (§4.5): the same key stages its exact bytes to a Native target.
+    #[test]
+    fn a_multiline_pem_file_key_stages_verbatim_to_a_native_target() {
+        let (multi, _) = pem("RSA PRIVATE KEY");
+        let p = plan_on(
+            &file_fleet(),
+            Some("native"),
+            vec![secret("p", "PRIVATE_KEY", &multi)],
+        );
+        assert_eq!(
+            p.stage.first().map(|(_, v)| v.expose()),
+            Some(multi.as_str())
+        );
+    }
+
+    /// M4 (§4.5): on Fly (a `ViaApp` target) the same key without a transform reports
+    /// `single_line` rather than changing the value.
+    #[test]
+    fn on_fly_a_file_key_without_a_transform_fails_single_line() {
+        let (multi, _) = pem("RSA PRIVATE KEY");
+        let p = plan_on(
+            &file_fleet(),
+            Some("fly"),
+            vec![secret("p", "PRIVATE_KEY", &multi)],
+        );
+        assert!(matches!(
+            row(&p, "PRIVATE_KEY").state,
+            KeyState::RuleFailed("single_line", _)
+        ));
+    }
+
+    /// M4 (§4.5): with `transform = "pem_private_key"` on Fly, the one-line form stages.
+    #[test]
+    fn on_fly_a_file_key_with_pem_private_key_stages_the_one_line_form() {
+        let (multi, single) = pem("RSA PRIVATE KEY");
+        let p = plan_on(
+            &file_fleet(),
+            Some("fly"),
+            vec![secret("p", "PRIVATE_KEY_T", &multi)],
+        );
+        assert_eq!(
+            p.stage.first().map(|(_, v)| v.expose()),
+            Some(single.as_str())
+        );
+    }
+
     #[test]
     fn missing_section_reports_every_key_missing() {
         let p = plan(vec![], &[]);
@@ -687,14 +1067,115 @@ mod tests {
         }
     }
 
+    /// A config key on a target that delivers config (Kubernetes `config = env`) goes to
+    /// `config`, never to `stage` (design §1.3, §1.5). Fly, which declines config, is
+    /// covered by the JSON and status tests.
     #[test]
     fn config_goes_to_config_map_not_stage() {
-        let p = plan(
-            vec![config_field("allumata", "SIGNUP_POLICY", "invite_only")],
+        let fleet = config::parse(
+            "[environments.prod]\n\
+             boundaries.p = { vault_id = \"v\", item_id = \"i\" }\n\
+             [environments.prod.targets.k]\n\
+             state_vault_id = \"s\"\n\
+             kubernetes.context = \"ctx\"\n\
+             kubernetes.namespace = \"ns\"\n\
+             kubernetes.deployment = \"dep\"\n\
+             kubernetes.env_name = \"K__{KEY}\"\n\
+             [products.p.keys.SIGNUP_POLICY]\n\
+             kind = \"config\"\n\
+             environments = [\"prod\"]\n",
+        )
+        .unwrap();
+        let p = build(
+            &fleet,
+            "prod",
+            vec![config_field("p", "SIGNUP_POLICY", "invite_only")],
             &[],
+            &no_rotate(),
+            &none,
         );
-        assert_eq!(p.config["allumata"]["SIGNUP_POLICY"], "invite_only");
+        assert_eq!(p.config["p"]["SIGNUP_POLICY"], "invite_only");
         assert!(p.stage.is_empty());
+    }
+
+    /// A one-product Fly fleet whose prod target declares `fly.config = <value>` (empty:
+    /// no line) and one config key.
+    fn fly_config_fleet(value: &str) -> Fleet {
+        let line = if value.is_empty() {
+            String::new()
+        } else {
+            format!("fly.config = \"{value}\"\n")
+        };
+        config::parse(&format!(
+            "[environments.prod]\n\
+             boundaries.p = {{ vault_id = \"v\", item_id = \"i\" }}\n\
+             [environments.prod.targets.portfolio]\n\
+             fly.app = \"a-prd\"\n\
+             fly.secret_name = \"FLEET__{{PRODUCT}}__{{KEY}}\"\n\
+             {line}\
+             state_vault_id = \"s\"\n\
+             [products.p.keys.SIGNUP_POLICY]\n\
+             kind = \"config\"\n\
+             environments = [\"prod\"]\n",
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn config_key_on_a_secrets_fly_target_is_staged() {
+        let fleet = fly_config_fleet("secrets");
+        let p = build(
+            &fleet,
+            "prod",
+            vec![config_field("p", "SIGNUP_POLICY", "invite_only")],
+            &[],
+            &no_rotate(),
+            &none,
+        );
+        assert_eq!(
+            p.stage.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["FLEET__P__SIGNUP_POLICY"]
+        );
+    }
+
+    #[test]
+    fn config_key_on_an_unset_fly_target_warns_to_set_fly_config() {
+        let fleet = fly_config_fleet("");
+        let p = build(
+            &fleet,
+            "prod",
+            vec![config_field("p", "SIGNUP_POLICY", "invite_only")],
+            &[],
+            &no_rotate(),
+            &none,
+        );
+        assert_eq!(p.no_channel[0].why, "set fly.config");
+    }
+
+    #[test]
+    fn config_key_on_a_none_fly_target_warns_fly_config_none() {
+        let fleet = fly_config_fleet("none");
+        let p = build(
+            &fleet,
+            "prod",
+            vec![config_field("p", "SIGNUP_POLICY", "invite_only")],
+            &[],
+            &no_rotate(),
+            &none,
+        );
+        assert_eq!(p.no_channel[0].why, "fly.config = none");
+    }
+
+    #[test]
+    fn concealed_config_on_a_secrets_fly_target_is_flagged() {
+        let fleet = fly_config_fleet("secrets");
+        let mut field = config_field("p", "SIGNUP_POLICY", "invite_only");
+        field.concealed = true;
+        let p = build(&fleet, "prod", vec![field], &[], &no_rotate(), &none);
+        assert_eq!(
+            p.concealed_config,
+            vec![("p".to_string(), "SIGNUP_POLICY".to_string())]
+        );
     }
 
     #[test]
@@ -887,6 +1368,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
             t.config = Box::new(crate::adapters::fly::FlyTarget {
                 app,
                 secret_name_template: "FLEET__{KEY}".into(),
+                config: crate::adapters::fly::FlyConfig::Unset,
             });
         }
         let fly = [fly_secret("FLEET__BOTH", None)];
@@ -1085,6 +1567,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
                     name: "ci".to_string(),
                     config: Box::new(target),
                     products: Some(vec!["api".to_string()]),
+                    roles: None,
                     deploy_credentials: None,
                     state_vault_id: "sci".to_string(),
                     delivery_items: BTreeMap::new(),

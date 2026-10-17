@@ -195,6 +195,8 @@ pub struct Target {
     pub fields: BTreeMap<String, String>,
     /// The products it delivers; empty means every product.
     pub products: Vec<String>,
+    /// The process roles it delivers (the target's `roles`); names only. Empty: none.
+    pub roles: Vec<String>,
 }
 
 /// Declare a new target in the configuration at `path`, without its state vault: the
@@ -222,6 +224,7 @@ pub fn target(r: &dyn CommandRunner, path: &Path, t: &Target) -> Result<bool, Er
         provider: t.provider.clone(),
         fields: t.fields.clone(),
         products: t.products.clone(),
+        roles: t.roles.clone(),
         ..Default::default()
     };
     let (provider, values) = target_cmd::provider_and_values(&args)?;
@@ -234,6 +237,7 @@ pub fn target(r: &dyn CommandRunner, path: &Path, t: &Target) -> Result<bool, Er
         &t.name,
         &section,
         &products,
+        &t.roles,
         None,
         None,
         &[],

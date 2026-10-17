@@ -25,6 +25,7 @@
 pub mod config;
 pub mod diagnose;
 pub mod external;
+pub mod files;
 pub mod runtime;
 pub mod store;
 
@@ -209,6 +210,11 @@ impl Failed {
                 _ => {}
             },
             Cause::WriteOutcomeUnknown { subject, .. } => *subject = about,
+            // A 422 names the object only inside kubectl's reply; the refused write is
+            // about `about` (the replaced Deployment, design §6.8).
+            Cause::TargetRefused { subject, .. } if subject.name.as_str().is_empty() => {
+                *subject = about
+            }
             // The refused right is on this target's Deployment or in its namespace; `auth
             // can-i` answers "no" without naming the namespace it asked about.
             Cause::MissingRight {
@@ -623,14 +629,6 @@ pub(crate) fn container_env(deployment: &Value, index: usize) -> Vec<Value> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default()
-}
-
-/// The Secret an env entry binds through `valueFrom.secretKeyRef` with key `value`.
-pub(crate) fn secret_ref(entry: &Value) -> Option<&str> {
-    let r = entry.pointer("/valueFrom/secretKeyRef")?;
-    (r.get("key").and_then(Value::as_str) == Some(VALUE_KEY))
-        .then(|| r.get("name").and_then(Value::as_str))
-        .flatten()
 }
 
 #[cfg(test)]

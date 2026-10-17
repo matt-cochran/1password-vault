@@ -787,6 +787,22 @@ fn target_checks(
                 for c in target.config.doctor(&runner, host) {
                     report.push(&c.name, c.outcome);
                 }
+                // The mounted files' checks (design §6.6), as `plan` and `status` run
+                // them: a warning for a workload that could not read them.
+                let files = super::file_mounts(fleet, env_name, &name).and_then(|files| {
+                    target
+                        .config
+                        .preflight_files(&runner, crate::provider::PreflightMode::Read, &files)
+                        .map_err(|e| e.in_target(&name))
+                });
+                match files {
+                    Ok(checks) => {
+                        for c in checks {
+                            report.push(&c.name, c.outcome);
+                        }
+                    }
+                    Err(e) => report.push(FILES_CHECK, Err(e)),
+                }
             }
             Err(e) => {
                 // The failed call's scrubbed reply (the cause's evidence), for the text
@@ -835,6 +851,8 @@ fn target_checks(
 
 /// The check that a target's state vault is visible (FR-56).
 const STATE_VAULT_CHECK: &str = "state vault";
+/// The check of where a target mounts file keys (design §6.6), when it cannot run.
+const FILES_CHECK: &str = "mounted files";
 
 /// Whether target `target`'s state vault `vault_id` is visible to the environment's
 /// account: one `op vault get`, exit status only (its output names the vault and is

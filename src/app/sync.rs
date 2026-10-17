@@ -37,8 +37,8 @@ use super::{
     JsonPart, KeyNames, Prefixed, check_product, ci_summary, compare, findings_error, is_blocking,
     managed_names, open_target, placement, plan_id_of, plan_item, plural, preflight, print_extras,
     print_legend, print_rows, product_names, read_and_plan_versioned, read_item_fields,
-    resolve_targets, rows_item_url, scope_plan, target_runners, target_word, unmanaged_on_target,
-    write_err, write_json,
+    resolve_targets, rows_item_url, scope_plan, target_cell, target_runners, target_word,
+    unmanaged_on_target, write_err, write_json,
 };
 use crate::cause::{
     Cause, Closest, Cmd, EnvName, KeyName, NameKind, PlanId, PlanScope, ProductKey, ProductName,
@@ -53,7 +53,7 @@ use crate::domain::{
 };
 use crate::error::Error;
 use crate::ports::{PinnedRuntime, PinnedStore, Ports, StagedRuntime, StagedStore};
-use crate::provider::TargetConfig;
+use crate::provider::{Channel, FileCapability, TargetConfig};
 use crate::runner::{Call, CommandRunner};
 
 /// Flags of `sync`.
@@ -520,6 +520,15 @@ struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
+    /// This target, for its preflight (design §6.6).
+    fn at(&self) -> preflight::At<'_> {
+        preflight::At {
+            fleet: self.fleet,
+            env: self.env_name,
+            name: self.target,
+        }
+    }
+
     /// A refusal found before the first write; on a guarded environment run without
     /// `--confirm` it also says the flag is needed, so one run reports both (H12).
     fn refusal(&self, e: Error) -> Error {
@@ -770,21 +779,63 @@ enum Prepared {
         plan: SyncPlan,
         list_a: Vec<StoreEntry>,
         var_plan: Option<super::variables::VarPlan>,
+        source_versions: BTreeMap<String, u64>,
     },
     Pinned {
         plan: SyncPlan,
         listed: Vec<StoreEntry>,
         skip_deploy: Option<String>,
+        source_versions: BTreeMap<String, u64>,
     },
 }
 
 /// Read and plan target `c` (no write): the item, the store listing and, on a pinned
 /// target, its state (NR-23). Blocking rows refuse here, before any target is written.
 fn prepare(c: &Ctx<'_>, ports: &Ports<'_>, out: &mut dyn Write) -> Result<Planned, Error> {
-    match ports {
+    let planned = match ports {
         Ports::Staged { store, .. } => prepare_staged(c, ports, store.as_ref()),
         Ports::Pinned { .. } => prepare_pinned(c, ports, out),
+    }?;
+    let plan = match &planned.prepared {
+        Prepared::Staged { plan, .. } | Prepared::Pinned { plan, .. } => plan,
+    };
+    guard_no_channel(c.target, &plan.no_channel, out)?;
+    Ok(planned)
+}
+
+/// The refusal of `keys`' first `None`-channel key (`Guard::NoChannel`, design §1.3,
+/// §1.5), if any: `sync` returns it before any write.
+fn no_channel_refusal(target: &str, keys: &[crate::domain::plan::NoChannelKey]) -> Option<Cause> {
+    keys.iter().find(|k| k.refused).map(|k| Cause::Guard {
+        guard: crate::cause::Guard::NoChannel {
+            target: TargetName::new(target),
+            kind: "config",
+            why: k.why.to_string(),
+        },
+    })
+}
+
+/// The target's config-channel guard, before any write (design §1.3, §1.5): a `None`
+/// channel refuses (`Guard::NoChannel`, `policy_refused`); a `Declined` one warns once per
+/// key and the sync goes on. `out` is already prefixed `{env}/{target}: `.
+fn guard_no_channel(
+    target: &str,
+    keys: &[crate::domain::plan::NoChannelKey],
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    if let Some(cause) = no_channel_refusal(target, keys) {
+        return Err(cause.into());
     }
+    for k in keys {
+        writeln!(
+            out,
+            "warning: {} not delivered (no config channel: {})",
+            key_label(&k.product, &k.key),
+            k.why
+        )
+        .map_err(write_err)?;
+    }
+    Ok(())
 }
 
 /// Carry out `prepared` on target `c` under the run's plan id `plan_id`.
@@ -802,6 +853,7 @@ fn apply(
                 plan,
                 list_a,
                 var_plan,
+                source_versions,
             },
         ) => run_staged(
             c,
@@ -811,6 +863,7 @@ fn apply(
                 plan,
                 list_a,
                 var_plan,
+                source_versions,
                 plan_id: plan_id.to_string(),
             },
             out,
@@ -821,6 +874,7 @@ fn apply(
                 plan,
                 listed,
                 skip_deploy,
+                source_versions,
             },
         ) => run_pinned(
             c,
@@ -830,6 +884,7 @@ fn apply(
                 plan,
                 listed,
                 skip_deploy,
+                source_versions,
                 plan_id: plan_id.to_string(),
             },
             out,
@@ -845,7 +900,7 @@ fn prepare_staged(
     store: &dyn StagedStore,
 ) -> Result<Planned, Error> {
     let (fleet, env_name, t) = (c.fleet, c.env_name, c.t);
-    let (plan, list_a, item_version) = read_and_plan_versioned(
+    let (plan, list_a, item_version, source_versions) = read_and_plan_versioned(
         fleet,
         env_name,
         Some(c.target),
@@ -876,6 +931,7 @@ fn prepare_staged(
             plan,
             list_a,
             var_plan,
+            source_versions,
         },
     })
 }
@@ -885,6 +941,8 @@ struct Staged {
     plan: SyncPlan,
     list_a: Vec<StoreEntry>,
     var_plan: Option<super::variables::VarPlan>,
+    /// The `version` read from each boundary item, by id (C2).
+    source_versions: BTreeMap<String, u64>,
     /// The run's plan id (FR-41).
     plan_id: String,
 }
@@ -902,6 +960,7 @@ fn run_staged(
         plan,
         list_a,
         var_plan,
+        source_versions,
         plan_id,
     } = staged;
     let vars = store.variables();
@@ -910,7 +969,7 @@ fn run_staged(
     store.validate(&batch).map_err(|e| c.refusal(e))?;
     c.require_confirm()?;
     // Last read-only step before the first write (NR-23, NR-24).
-    let skip_deploy = preflight::run(t, c.r, out, opts.json)?;
+    let skip_deploy = preflight::run(c.at(), t, c.r, out, opts.json)?;
     print_extras(out, &plan)?;
 
     let label = t.provider().label();
@@ -942,7 +1001,15 @@ fn run_staged(
             .filter(|row| row.target == TargetState::Present)
             .map(|row| t.env_name(&row.product, &row.key))
             .collect();
-        record_delivery(c, &written, &identical, &list_b, &mut report, out)?;
+        record_delivery(
+            c,
+            &written,
+            &identical,
+            &list_b,
+            &source_versions,
+            &mut report,
+            out,
+        )?;
     }
     for (name, _) in &batch {
         let (a, b) = (digest(&list_a, name), digest(&list_b, name));
@@ -1082,6 +1149,7 @@ fn record_delivery(
     written: &BTreeSet<String>,
     identical: &BTreeSet<String>,
     listing: &[StoreEntry],
+    source_versions: &BTreeMap<String, u64>,
     report: &mut Report,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
@@ -1094,6 +1162,7 @@ fn record_delivery(
         written,
         identical,
         listing,
+        source_versions,
         &report.plan_id,
         c.r,
     );
@@ -1206,7 +1275,7 @@ fn print_held(
 /// call to the target) its state (NR-23, NR-25) and its listing.
 fn prepare_pinned(c: &Ctx<'_>, ports: &Ports<'_>, out: &mut dyn Write) -> Result<Planned, Error> {
     let (fleet, env_name, opts) = (c.fleet, c.env_name, c.opts);
-    let (fields, item_version) = read_item_fields(fleet, env_name, c.r)?;
+    let (fields, item_version, source_versions) = read_item_fields(fleet, env_name, c.r)?;
     // Blocking rows refuse before any call to the target.
     let copy = fields.iter().map(copy_field).collect();
     let target = Some(c.target);
@@ -1227,7 +1296,7 @@ fn prepare_pinned(c: &Ctx<'_>, ports: &Ports<'_>, out: &mut dyn Write) -> Result
     )
     .map_err(|e| c.refusal(e))?;
     // The target's state, read-only, before its first read (NR-23, NR-25).
-    let skip_deploy = preflight::run(c.t, c.r, out, opts.json)?;
+    let skip_deploy = preflight::run(c.at(), c.t, c.r, out, opts.json)?;
     let (plan, listed) = plan_item(
         fleet,
         env_name,
@@ -1245,6 +1314,7 @@ fn prepare_pinned(c: &Ctx<'_>, ports: &Ports<'_>, out: &mut dyn Write) -> Result
             plan,
             listed,
             skip_deploy,
+            source_versions,
         },
     })
 }
@@ -1255,6 +1325,8 @@ struct Pinned {
     listed: Vec<StoreEntry>,
     /// Preflight's line to print instead of a deploy (nothing to restart).
     skip_deploy: Option<String>,
+    /// The `version` read from each boundary item, by id (C2).
+    source_versions: BTreeMap<String, u64>,
     /// The run's plan id (FR-41).
     plan_id: String,
 }
@@ -1281,6 +1353,7 @@ fn run_pinned(
         plan,
         listed,
         skip_deploy,
+        source_versions,
         plan_id,
     } = pinned;
     // FR-42: what every write below records on the target. Never a value.
@@ -1288,6 +1361,7 @@ fn run_pinned(
     let want = pinned_want(
         fleet,
         env_name,
+        c.target,
         c.t,
         &plan,
         &listed,
@@ -1349,7 +1423,15 @@ fn run_pinned(
                 }),
             }
         }
-        record_delivery(c, &confirmed, &identical, &after, &mut report, out)?;
+        record_delivery(
+            c,
+            &confirmed,
+            &identical,
+            &after,
+            &source_versions,
+            &mut report,
+            out,
+        )?;
     }
 
     // 4–5. What the runtime binds now, and what must change. Under `--product` another
@@ -1706,11 +1788,14 @@ fn change_names(c: &RuntimeChange) -> Vec<String> {
 
 /// The desired store and env state of `plan` (FR-14, FR-31). Secrets are always
 /// store-routed; config is store-routed when `config_in_store`, and then read and compared
-/// like a secret. `listed` carries the versions the plan's reads found.
+/// like a secret. `listed` carries the versions the plan's reads found. Only the products
+/// target `target` delivers are wanted there: a source-only product's keys never are
+/// (FR-47), so they are never written, bound or reported for it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pinned_want(
     fleet: &Fleet,
     env_name: &str,
+    target: &str,
     t: &dyn TargetConfig,
     plan: &SyncPlan,
     listed: &[StoreEntry],
@@ -1732,10 +1817,11 @@ pub(crate) fn pinned_want(
         plain: BTreeMap::new(),
         refused: Vec::new(),
     };
+    let delivered = |p: &str| fleet.delivers(env_name, target, p);
     for row in plan
         .rows
         .iter()
-        .filter(|r| r.kind == Kind::Secret && r.state == KeyState::Ready)
+        .filter(|r| r.kind == Kind::Secret && r.state == KeyState::Ready && delivered(&r.product))
     {
         let name = name_of(&row.product, &row.key);
         let write = staged
@@ -1748,7 +1834,7 @@ pub(crate) fn pinned_want(
         }
         want.store.insert(name, StoreWant { current, write });
     }
-    for (product, keys) in &plan.config {
+    for (product, keys) in plan.config.iter().filter(|(p, _)| delivered(p)) {
         for (key, value) in keys {
             let name = name_of(product, key);
             if !config_in_store {
@@ -2167,6 +2253,24 @@ pub fn plan_rotating(
     }
     // Extras are about the 1Password item, the same for every target.
     print_extras(out, &parts[0].plan)?;
+    // A config key the target's channel leaves undelivered (design §1.3, FM-02).
+    for p in &parts {
+        for k in &p.plan.no_channel {
+            writeln!(
+                out,
+                "{}: warning: {} not delivered (no config channel: {})",
+                placement(env_name, &p.name),
+                key_label(&k.product, &k.key),
+                k.why
+            )
+            .map_err(write_err)?;
+        }
+        for line in
+            super::file_destination_lines(fleet, env_name, &p.name, &p.t.channels(), &p.plan)
+        {
+            writeln!(out, "{line}").map_err(write_err)?;
+        }
+    }
     for p in &parts {
         let mut out = Prefixed::new(out, format!("{}: ", placement(env_name, &p.name)));
         p.print_changes(&mut out, fleet, env_name, n > 0)?;
@@ -2188,12 +2292,17 @@ pub fn plan_rotating(
 struct PlanPart<'f> {
     name: String,
     t: &'f dyn TargetConfig,
+    fleet: &'f Fleet,
     plan: SyncPlan,
     item_version: Option<u64>,
     /// The target applies writes at once (FR-46).
     live: bool,
     /// The config channel (FR-46): what sync would set and prune.
     var_plan: super::variables::VarPlan,
+    /// Config keys a pinned store holds that sync would write (design §6.7), env names.
+    config_writes: Vec<String>,
+    /// What a deploy would change beyond the bindings, one `would deploy:` line each.
+    deploy: Vec<String>,
     /// `stage` on a staging target, else `write`.
     verb: &'static str,
     /// This target's plan id (FR-41), one input of the run's.
@@ -2209,17 +2318,42 @@ impl PlanPart<'_> {
         self.plan.rows.iter().filter(|r| is_blocking(r)).count()
     }
 
-    /// The row's ON TARGET word: `rotate` for a `--rotate`d key, else [`target_word`].
+    /// The row's ON TARGET cell: `rotate` for a `--rotate`d key, else [`target_word`],
+    /// with a config row's channel named (design §1.3, FM-02).
     fn word(&self, row: &Row) -> String {
-        if super::rotated(&self.rotate, row) {
-            return "rotate".to_string();
+        let word = if super::rotated(&self.rotate, row) {
+            "rotate"
+        } else {
+            let held = self
+                .plan
+                .held_immutable
+                .iter()
+                .any(|(p, k)| *p == row.product && *k == row.key);
+            target_word(row, held, None)
+        };
+        let spec = self
+            .fleet
+            .products
+            .get(&row.product)
+            .and_then(|p| p.keys.get(&row.key));
+        target_cell(row, word, &self.t.channels(), spec)
+    }
+
+    /// Where env name `name` arrives when it is more than a variable on the target's
+    /// secret channel (design §6.7): `file <dir>/<path>` for a file key on a target that
+    /// mounts files, `<channel>, env` for a config key a store holds (`ConfigMap, env`).
+    fn route(&self, names: &KeyNames, name: &str) -> Option<String> {
+        let (product, key) = names.key(name)?.split_once('/')?;
+        let spec = self.fleet.products.get(product)?.keys.get(key)?;
+        let channels = self.t.channels();
+        if let (Some(path), FileCapability::Native { dir }) = (&spec.file, &channels.files) {
+            let dir = dir.replace("{product}", &product.replace('_', "-"));
+            return Some(format!("file {dir}/{path}"));
         }
-        let held = self
-            .plan
-            .held_immutable
-            .iter()
-            .any(|(p, k)| *p == row.product && *k == row.key);
-        target_word(row, held, None).to_string()
+        match (&spec.kind, &channels.config) {
+            (Kind::Config, Channel::Store { label }) => Some(format!("{label}, env")),
+            _ => None,
+        }
     }
 
     /// `prod/web: 4 keys · 0 findings · 1 to stage · …` (NR-16).
@@ -2230,7 +2364,7 @@ impl PlanPart<'_> {
             placement(env_name, &self.name),
             plural(self.plan.rows.len(), "key", "keys"),
             plural(self.findings(), "finding", "findings"),
-            self.plan.stage.len() + self.var_plan.set.len(),
+            self.plan.stage.len() + self.var_plan.set.len() + self.config_writes.len(),
             self.verb,
             self.plan.held_immutable.len(),
             self.plan.prune.len() + self.var_plan.prune.len(),
@@ -2255,15 +2389,33 @@ impl PlanPart<'_> {
             .iter()
             .map(|(n, _)| n.as_str())
             .chain(self.var_plan.set.iter().map(String::as_str))
+            .chain(self.config_writes.iter().map(String::as_str))
             .collect();
-        if !staged.is_empty() {
-            // Findings block the sync, so nothing is staged until they are fixed (bug 10).
-            let when = if blocked {
-                " once the findings are fixed"
-            } else {
-                ""
-            };
-            line(format!("would {verb}{when}: {}", names.join(&staged)))?;
+        // Findings block the sync, so nothing is staged until they are fixed (bug 10).
+        let when = if blocked {
+            " once the findings are fixed"
+        } else {
+            ""
+        };
+        // A key that arrives as a mounted file or through a config object gets its own
+        // line naming where it goes (design §6.7); the others share one line.
+        let mut plain: Vec<&str> = Vec::new();
+        let mut routed: Vec<(&str, String)> = Vec::new();
+        for n in &staged {
+            match self.route(&names, n) {
+                Some(route) => routed.push((n, route)),
+                None => plain.push(n),
+            }
+        }
+        if !plain.is_empty() {
+            line(format!("would {verb}{when}: {}", names.join(&plain)))?;
+        }
+        for (n, route) in &routed {
+            let key = names.key(n).unwrap_or(n);
+            line(format!("would {verb}{when}: {key} ({n} → {route})"))?;
+        }
+        for change in &self.deploy {
+            line(format!("would deploy{when}: {change}"))?;
         }
         let prunes: Vec<String> = plan
             .prune
@@ -2311,9 +2463,14 @@ fn plan_part<'f>(
 ) -> Result<PlanPart<'f>, Error> {
     let (_, t) = super::target(fleet, env_name, name)?;
     let (_, ports) = open_target(fleet, env_name, name, r)?;
-    preflight::read(t, r)?;
+    let at = preflight::At {
+        fleet,
+        env: env_name,
+        name,
+    };
+    preflight::read(at, t, r)?;
     let none = BTreeSet::new();
-    let (mut plan, on_target, item_version) =
+    let (mut plan, on_target, item_version, _) =
         read_and_plan_versioned(fleet, env_name, Some(name), r, Some(&ports), rotate, &none)?;
     let scope = match product {
         Some(p) => {
@@ -2354,6 +2511,26 @@ fn plan_part<'f>(
         rotate,
         None,
     );
+    // What a pinned target's sync would write beyond the staged secrets, and what its deploy
+    // would change beyond the bindings (design §6.7). Display only: the plan id above is
+    // what `sync` re-derives.
+    let (config_writes, deploy) = match &ports {
+        Ports::Pinned { store, runtime } => {
+            let config_writes = if runtime.config_in_store() {
+                config_writes(fleet, env_name, name, t, &plan, store.as_ref())?
+            } else {
+                Vec::new()
+            };
+            let pin: BTreeSet<String> = plan
+                .stage
+                .iter()
+                .map(|(n, _)| n.clone())
+                .chain(config_writes.iter().cloned())
+                .collect();
+            (config_writes, runtime.deploy_preview(&pin)?)
+        }
+        Ports::Staged { .. } => (Vec::new(), Vec::new()),
+    };
     let verb = match ports {
         Ports::Staged { .. } if !live => "stage",
         _ => "write",
@@ -2361,15 +2538,51 @@ fn plan_part<'f>(
     Ok(PlanPart {
         name: name.to_string(),
         t,
+        fleet,
         unmanaged: unmanaged_on_target(fleet, env_name, name, &on_target)?.len(),
         plan,
         item_version,
         live,
         var_plan,
+        config_writes,
+        deploy,
         verb,
         id,
         rotate: rotate.clone(),
     })
+}
+
+/// The env names of the config keys of `plan` a pinned store holds (`config = "store"` or
+/// `"configmap"`) whose value would be written: absent there, or bound to another value.
+/// Each is read and compared exactly, as `sync` does ([`pinned_want`]); only the products
+/// target `target` delivers.
+fn config_writes(
+    fleet: &Fleet,
+    env_name: &str,
+    target: &str,
+    t: &dyn TargetConfig,
+    plan: &SyncPlan,
+    store: &dyn PinnedStore,
+) -> Result<Vec<String>, Error> {
+    let mut out = Vec::new();
+    let delivered = plan
+        .config
+        .iter()
+        .filter(|(p, _)| fleet.delivers(env_name, target, p));
+    for (product, keys) in delivered {
+        for (key, value) in keys {
+            let name = t.env_name(product, key);
+            let desired = SecretValue::new(value.clone());
+            let same = match store.read(&name)? {
+                Some((current, _)) => compare(&current, &desired) == Same,
+                None => false,
+            };
+            if !same {
+                out.push(name);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// `plan <id> (1Password item v<n>): sync --expect-plan <id> applies exactly this plan`
@@ -2566,6 +2779,39 @@ mod tests {
     }
     fn opts() -> SyncOpts {
         SyncOpts::default()
+    }
+
+    fn no_channel_key(name: &str, refused: bool) -> crate::domain::plan::NoChannelKey {
+        crate::domain::plan::NoChannelKey {
+            product: "p".into(),
+            key: name.into(),
+            why: "set fly.config",
+            refused,
+        }
+    }
+
+    /// A config key on a target with no config channel ([`Channel::None`]) is refused with
+    /// `policy_refused` (design §1.3, §1.5).
+    #[test]
+    fn a_none_config_channel_is_refused_with_policy_refused() {
+        let cause = no_channel_refusal("t", &[no_channel_key("K", true)]).unwrap();
+        assert_eq!(cause.code(), "policy_refused");
+    }
+
+    /// A config key the target declined is warned, not refused (design §1.3): the guard
+    /// returns `Ok` and prints the warning line.
+    #[test]
+    fn a_declined_config_key_is_warned_not_refused() {
+        let mut out = Vec::new();
+        guard_no_channel("t", &[no_channel_key("K", false)], &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("warning: p/K not delivered (no config channel: set fly.config)"));
+    }
+
+    /// A declined config channel produces no refusal at all (design §1.3).
+    #[test]
+    fn a_declined_config_channel_produces_no_refusal() {
+        assert!(no_channel_refusal("t", &[no_channel_key("K", false)]).is_none());
     }
 
     /// FR-46 (live smoke): a target whose writes are live has nothing to deploy, so the
@@ -3818,5 +4064,117 @@ mod tests {
         .into();
         let e = partial(refused, &["api/TOKEN".to_string()], PlanScope::Structural);
         assert!(e.to_string().contains("api/TOKEN"), "{e}");
+    }
+
+    // ---- design §6.7: where each key goes on a Kubernetes target -----------------------
+
+    /// What `plan` prints as the k8s target's changes in the e2e app (`secrets_dir`,
+    /// `config = "configmap"`), with `stage` staged secrets, `config` config writes and
+    /// `deploy` the runtime's preview.
+    fn k8s_changes(stage: &[&str], config: &[&str], deploy: &[&str]) -> String {
+        let fleet = crate::config::load("tests/e2e/app/secrets.toml").unwrap();
+        let mut plan =
+            crate::domain::build_plan(&fleet, "prod", vec![], &[], &BTreeSet::new(), &|_| None);
+        plan.stage = stage
+            .iter()
+            .map(|n| (n.to_string(), SecretValue::new("S7MARKER".into())))
+            .collect();
+        let part = PlanPart {
+            name: "k8s".into(),
+            t: fleet.environments["prod"].targets["k8s"].config.as_ref(),
+            fleet: &fleet,
+            plan,
+            item_version: None,
+            live: false,
+            var_plan: Default::default(),
+            config_writes: config.iter().map(|n| n.to_string()).collect(),
+            deploy: deploy.iter().map(|n| n.to_string()).collect(),
+            verb: "write",
+            id: String::new(),
+            unmanaged: 0,
+            rotate: BTreeSet::new(),
+        };
+        let mut out = Vec::new();
+        part.print_changes(&mut out, &fleet, "prod", false).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn a_file_key_is_planned_to_its_mounted_path() {
+        assert!(
+            k8s_changes(&["E2E__WEB__TLS_PRIVATE_KEY"], &[], &[]).contains(
+                "would write: web/TLS_PRIVATE_KEY (E2E__WEB__TLS_PRIVATE_KEY → file \
+             /run/secrets/web/tls/private-key)\n"
+            )
+        );
+    }
+
+    #[test]
+    fn a_config_file_key_is_planned_to_its_mounted_path() {
+        assert!(
+            k8s_changes(&[], &["E2E__WEB__OTEL_RESOURCE"], &[]).contains(
+                "would write: web/OTEL_RESOURCE (E2E__WEB__OTEL_RESOURCE → file \
+             /run/secrets/web/otel/resource)\n"
+            )
+        );
+    }
+
+    #[test]
+    fn a_configmap_config_key_is_planned_as_a_configmap_bound_to_env() {
+        assert!(
+            k8s_changes(&[], &["E2E__WEB__LOG_LEVEL"], &[])
+                .contains("would write: web/LOG_LEVEL (E2E__WEB__LOG_LEVEL → ConfigMap, env)\n")
+        );
+    }
+
+    #[test]
+    fn a_plain_secret_stays_on_the_shared_write_line() {
+        assert!(
+            k8s_changes(
+                &["E2E__WEB__API_KEY", "E2E__WEB__TLS_PRIVATE_KEY"],
+                &[],
+                &[]
+            )
+            .contains("would write: web/API_KEY (E2E__WEB__API_KEY)\n")
+        );
+    }
+
+    #[test]
+    fn a_volume_change_is_one_would_deploy_line() {
+        let volume = "volume opv-files-web, read-only at /run/secrets/web (3 files)";
+        assert!(
+            k8s_changes(&["E2E__WEB__TLS_PRIVATE_KEY"], &[], &[volume])
+                .contains(&format!("would deploy: {volume}\n"))
+        );
+    }
+
+    /// FR-47: a source-only product's config key is never wanted on a pinned target, so a
+    /// deploy never binds a name opv does not manage there.
+    #[test]
+    fn a_source_only_config_key_is_not_wanted_on_a_pinned_target() {
+        let fleet = crate::config::load("tests/e2e/app/secrets.toml").unwrap();
+        let field = ItemField {
+            section: "shared".into(),
+            label: "FEATURE_FLAGS".into(),
+            kind: Kind::Config,
+            value: SecretValue::new("off".into()),
+            concealed: false,
+        };
+        let plan =
+            crate::domain::build_plan(&fleet, "prod", vec![field], &[], &BTreeSet::new(), &|_| {
+                None
+            });
+        let r = FakeRunner::new([]);
+        let (t, ports) = open_target(&fleet, "prod", "k8s", &r).unwrap();
+        let Ports::Pinned { store, .. } = ports else {
+            panic!("a pinned target");
+        };
+        let want = pinned_want(&fleet, "prod", "k8s", t, &plan, &[], store.as_ref(), false);
+        assert!(
+            !want
+                .unwrap()
+                .plain
+                .contains_key("E2E__SHARED__FEATURE_FLAGS")
+        );
     }
 }

@@ -10,20 +10,22 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 
 use super::external::{self, Bridge, ExternalStore};
+use super::files::{self, Verdict as Readability};
 use super::runtime::{DEPLOY_RIGHTS, POLL_EVERY, WAIT_MAX, missing_rights};
 use super::{
     Effect, Failed, KUBECTL, KubeDeployment, KubeSecrets, KubeTarget, Kubectl, PROGRAM,
-    valid_label_value,
+    container_index, valid_label_value,
 };
 use crate::adapters::probe::{spawn_tool, version_in};
-use crate::cause::{Cause, FieldRule, Unusable};
+use crate::cause::{Cause, EnvName, FieldRule, Guard, MountWhy, PatternId, TargetName, Unusable};
 use crate::config::{TEMPLATE_WORDS, section_invalid};
 use crate::error::Error;
 use crate::host::Host;
 use crate::ports::Ports;
 use crate::provider::{
-    Check, InitField, NameRules, Preflight, PreflightMode, Provider, Section, StoreBinding,
-    StoreConfig, StoreNameRules, TargetConfig, Verdict, eq_as, init_lines,
+    Channel, Channels, Check, FileCapability, InitField, NameRules, Preflight, PreflightMode,
+    Provider, Section, StoreBinding, StoreConfig, StoreNameRules, TargetConfig, Verdict, eq_as,
+    init_lines,
 };
 use crate::runner::CommandRunner;
 
@@ -46,7 +48,7 @@ const CHECKS: [&str; 4] = [
 const INIT_FLEET_TEMPLATE: &str = "FLEET__{PRODUCT}__{KEY}";
 
 /// `opv target add` options of the Kubernetes provider (H3), in the order they are written.
-static INIT_FIELDS: [InitField; 6] = [
+static INIT_FIELDS: [InitField; 7] = [
     InitField {
         field: "context",
         help: "kubeconfig context (kubectl config get-contexts -o name)",
@@ -74,7 +76,12 @@ static INIT_FIELDS: [InitField; 6] = [
     },
     InitField {
         field: "config",
-        help: "Where config keys go: env (default) or store",
+        help: "Where config keys go: env, store or configmap (default for new targets)",
+        required: false,
+    },
+    InitField {
+        field: "secrets_dir",
+        help: "Directory file keys are mounted in, e.g. /run/secrets/{product} (optional)",
         required: false,
     },
 ];
@@ -82,14 +89,15 @@ static INIT_FIELDS: [InitField; 6] = [
 /// A DNS-1123 label as shown to the user.
 const LABEL_PATTERN: &str = "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ (at most 63 characters)";
 
-/// Where the Deployment reads configuration keys: plain `value` env entries (`Env`) or
-/// Secrets like secret keys (`Store`).
+/// Where the Deployment reads configuration keys: plain `value` env entries (`Env`),
+/// Secrets like secret keys (`Store`) or ConfigMaps (`ConfigMap`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ConfigRoute {
     #[default]
     Env,
     Store,
+    ConfigMap,
 }
 
 /// The Kubernetes target of one environment (FR-38).
@@ -101,6 +109,9 @@ pub struct KubernetesTarget {
     /// Env-name template with `{KEY}` and optionally `{PRODUCT}`.
     pub env_name_template: String,
     pub config: ConfigRoute,
+    /// Where file keys are mounted (`secrets_dir`, design §6.2); `None`: no key is a file.
+    /// May hold `{product}`.
+    pub secrets_dir: Option<String>,
     /// The named store secrets live in (`secrets_in`, FR-39), bound through the External
     /// Secrets Operator; `None`: opv's own immutable Secrets.
     pub store: Option<Box<dyn StoreConfig>>,
@@ -126,12 +137,34 @@ struct Raw {
     env_name: Option<String>,
     #[serde(default)]
     config: ConfigRoute,
+    #[serde(default)]
+    secrets_dir: Option<String>,
 }
 
 /// A Kubernetes name (DNS-1123 label), in words.
 const LABEL_WORDS: &str = "a Kubernetes name: lower-case letters, digits and -, starting and ending with a letter or digit, at most 63 characters";
 /// A kubeconfig context name, in words.
 const CONTEXT_WORDS: &str = "a kubeconfig context name: letters, digits and _ . : / @ + -, not starting with - (kubectl config get-contexts -o name lists them)";
+
+/// The roots a `secrets_dir` may not be, or live under (design §6.2): they hold kernel
+/// files or the service-account token.
+const FORBIDDEN_DIRS: [&str; 4] = ["/proc", "/sys", "/dev", "/var/run/secrets/kubernetes.io"];
+
+/// A Kubernetes `secrets_dir` (design §6.2): absolute and normalised (no `.`/`..`, `//` or
+/// trailing `/`), not `/`, outside [`FORBIDDEN_DIRS`], at most 255 bytes, with no `:` or
+/// whitespace. `{product}` is allowed.
+fn is_container_path(s: &str) -> bool {
+    s.starts_with('/')
+        && s.len() <= 255
+        && !s.contains(':')
+        && !s.chars().any(char::is_whitespace)
+        && s.split('/')
+            .skip(1)
+            .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+        && !FORBIDDEN_DIRS
+            .iter()
+            .any(|p| s == *p || s.starts_with(&format!("{p}/")))
+}
 
 impl Raw {
     /// The section's identifiers checked (FR-37): the context goes into argv (never read as
@@ -159,11 +192,24 @@ impl Raw {
                 return Err(bad(field, LABEL_WORDS));
             }
         }
-        match self.env_name.take() {
-            Some(t) if t.contains("{KEY}") => Ok(t),
-            Some(_) => Err(bad("env_name", TEMPLATE_WORDS)),
-            None => Err(section_invalid("kubernetes.env_name", FieldRule::Missing)),
+        let template = match self.env_name.take() {
+            Some(t) if t.contains("{KEY}") => t,
+            Some(_) => return Err(bad("env_name", TEMPLATE_WORDS)),
+            None => return Err(section_invalid("kubernetes.env_name", FieldRule::Missing)),
+        };
+        if self
+            .secrets_dir
+            .as_deref()
+            .is_some_and(|d| !is_container_path(d))
+        {
+            return Err(section_invalid(
+                "kubernetes.secrets_dir",
+                FieldRule::Pattern {
+                    id: PatternId::ContainerPath,
+                },
+            ));
         }
+        Ok(template)
     }
 }
 
@@ -187,6 +233,7 @@ impl Raw {
             },
             env_name_template,
             config: self.config,
+            secrets_dir: self.secrets_dir,
             store: None,
         }
     }
@@ -248,6 +295,7 @@ impl Provider for KubernetesProvider {
             let v = match (values.get(f.field), f.field) {
                 (Some(v), _) => v.as_str(),
                 (None, "env_name") => INIT_FLEET_TEMPLATE,
+                (None, "config") => "configmap",
                 (None, _) => continue,
             };
             lines.push((f.field, v));
@@ -270,6 +318,20 @@ impl Provider for KubernetesProvider {
             }
             .into());
         };
+        // Under ExternalSecrets every key is bound from the named store's Secrets; no
+        // ConfigMap is ever written there, so `configmap` would silently become plain env
+        // values. Refused instead (`env` or `store` say what happens).
+        if t.config == ConfigRoute::ConfigMap {
+            return Err(section_invalid(
+                "kubernetes.config",
+                FieldRule::ConflictsWith {
+                    field: crate::cause::DottedPath(vec![
+                        "kubernetes".to_string(),
+                        "secrets_in".to_string(),
+                    ]),
+                },
+            ));
+        }
         Ok(Box::new(KubernetesTarget {
             store: Some(store.clone_box()),
             ..t.clone()
@@ -389,12 +451,39 @@ impl TargetConfig for KubernetesTarget {
         )
     }
 
+    /// Today: immutable Secret versions; config is a plain env value or the store, and a
+    /// file key is delivered by name as a secret (design §1.1).
+    fn channels(&self) -> Channels {
+        Channels {
+            secret: Channel::Store {
+                label: "Kubernetes Secret",
+            },
+            config: match self.config {
+                ConfigRoute::Store => Channel::Store {
+                    label: "Kubernetes Secret",
+                },
+                ConfigRoute::ConfigMap => Channel::Store { label: "ConfigMap" },
+                ConfigRoute::Env => Channel::RuntimeEnv,
+            },
+            files: match &self.secrets_dir {
+                Some(dir) => FileCapability::Native { dir: dir.clone() },
+                None => FileCapability::None,
+            },
+        }
+    }
+
     fn open<'a>(
         &'a self,
         env: &'a str,
         managed: BTreeSet<String>,
+        files: &BTreeMap<String, crate::domain::runtime::FileMount>,
+        config: &BTreeSet<String>,
         r: &'a dyn CommandRunner,
     ) -> Result<Ports<'a>, Error> {
+        // This target's file keys (the runtime keeps the managed ones), each rendered per
+        // product under `secrets_dir` by the runtime (design §6.3).
+        let files = files.clone();
+        let dir = self.secrets_dir.clone();
         // The rollout and ExternalSecret waits have their own limit, and end earlier when
         // the run budget runs short, so their own message comes first (NR-4).
         let wait = WAIT_MAX;
@@ -415,16 +504,30 @@ impl TargetConfig for KubernetesTarget {
                     KubeDeployment::new(r, &self.target, managed)
                         .with_wait(POLL_EVERY, wait, move |d| r.pause(d, ""))
                         .with_config_in_store(self.config == ConfigRoute::Store)
+                        .with_config_names(config.clone())
+                        .with_files(dir, files)
                         .with_external(bridge),
                 ),
             });
         }
+        let store = KubeSecrets::new(r, &self.target, managed.clone());
+        let store = match self.config {
+            ConfigRoute::ConfigMap => store.with_config(
+                KubeSecrets::new(r, &self.target, managed.clone())
+                    .with_kind(super::store::ObjectKind::ConfigMap),
+                config.clone(),
+            ),
+            ConfigRoute::Env | ConfigRoute::Store => store,
+        };
         Ok(Ports::Pinned {
-            store: Box::new(KubeSecrets::new(r, &self.target, managed.clone())),
+            store: Box::new(store),
             runtime: Box::new(
                 KubeDeployment::new(r, &self.target, managed)
                     .with_wait(POLL_EVERY, wait, move |d| r.pause(d, ""))
-                    .with_config_in_store(self.config == ConfigRoute::Store),
+                    .with_config_in_store(self.config != ConfigRoute::Env)
+                    .with_configmaps(self.config == ConfigRoute::ConfigMap)
+                    .with_config_names(config.clone())
+                    .with_files(dir, files),
             ),
         })
     }
@@ -451,6 +554,114 @@ impl TargetConfig for KubernetesTarget {
             checks,
             skip_deploy: None,
         })
+    }
+
+    /// With `secrets_dir` set (design §6.6), from the Deployment opv already reads (no
+    /// value in it): a foreign volume at a rendered directory, above it or below it, is
+    /// refused in every mode; a workload that cannot read the 0440 root-owned files, or
+    /// whose readability is unknown, is refused before any write under `sync` and is a
+    /// warning under `plan` and `status`; a root or group-0 workload is a warning in every
+    /// mode. A target with `secrets_dir` and no delivered file key still runs the check:
+    /// the setting says files are meant to go there.
+    fn preflight_files(
+        &self,
+        r: &dyn CommandRunner,
+        mode: PreflightMode,
+        files: &BTreeMap<String, crate::domain::runtime::FileMount>,
+    ) -> Result<Vec<Check>, Error> {
+        let Some(dir) = self.secrets_dir.as_deref() else {
+            return Ok(Vec::new());
+        };
+        let doc = Kubectl::new(r, &self.target).get_deployment()?;
+        let index = container_index(&doc, &self.target)?;
+        let container_path = format!("/spec/template/spec/containers/{index}");
+        let container = doc
+            .pointer(&format!("{container_path}/name"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let d = self.target.deployment.as_str();
+        // The directory of each product with a file key; a dir without `{product}` is one.
+        let dirs: BTreeSet<String> = if dir.contains("{product}") {
+            files
+                .values()
+                .map(|f| files::render_dir(dir, &f.product))
+                .collect()
+        } else {
+            BTreeSet::from([dir.to_string()])
+        };
+        for rendered in &dirs {
+            if let Some((volume, path)) = files::mount_conflict(&doc, &container, rendered) {
+                return Err(Cause::Guard {
+                    guard: Guard::MountPathInUse {
+                        workload: format!("deployment {d}"),
+                        container,
+                        path,
+                        volume,
+                        env: EnvName::new(&self.target.env),
+                        // Filled in by the caller, which knows the target's name.
+                        target: TargetName::new(""),
+                    },
+                }
+                .into());
+            }
+        }
+        let pod = doc.pointer("/spec/template/spec/securityContext");
+        let own = doc.pointer(&format!("{container_path}/securityContext"));
+        let run_as = [own, pod]
+            .into_iter()
+            .flatten()
+            .find_map(|s| s.get("runAsUser").and_then(serde_json::Value::as_u64))
+            .and_then(|u| u32::try_from(u).ok());
+        let warn = |name: String, detail: &str| Check {
+            name: name.into(),
+            outcome: Ok(Verdict::Warn(detail.to_string())),
+        };
+        let why = match files::readability(pod, own) {
+            Readability::Readable => return Ok(Vec::new()),
+            Readability::ReadableAsRoot => {
+                return Ok(vec![warn(
+                    format!("deployment {d} runs as root"),
+                    "every mounted file is readable by any process in the container; run as \
+                     a non-root user with fsGroup",
+                )]);
+            }
+            Readability::ReadableAsGroupZero => {
+                return Ok(vec![warn(
+                    format!("deployment {d} runs in group 0"),
+                    "every mounted file is readable by any process in group 0 in the \
+                     container; set fsGroup to a group only this container uses",
+                )]);
+            }
+            Readability::Unreadable => MountWhy::NoFsGroup,
+            Readability::Unknown => MountWhy::RunAsUnknown,
+        };
+        if mode == PreflightMode::Mutate {
+            return Err(Cause::MountUnreadable {
+                workload: format!("deployment {d}"),
+                container,
+                run_as,
+                why,
+                env: EnvName::new(&self.target.env),
+                // Filled in by the caller, which knows the target's name.
+                target: TargetName::new(""),
+            }
+            .into());
+        }
+        let who = match run_as {
+            Some(uid) => format!("runs as {uid}"),
+            None => "runs as an unknown user".to_string(),
+        };
+        Ok(vec![match why {
+            MountWhy::NoFsGroup => warn(
+                format!("deployment {d} sets no fsGroup and {who}"),
+                "the mounted files (0440, root-owned) would be unreadable",
+            ),
+            MountWhy::RunAsUnknown => warn(
+                format!("deployment {d} sets no fsGroup and {who}"),
+                "whether the mounted files (0440, root-owned) are readable is unknown",
+            ),
+        }])
     }
 
     fn doctor(&self, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Vec<Check> {
@@ -590,6 +801,15 @@ impl TargetConfig for KubernetesTarget {
                 lines.push(("routing", routing));
                 lines
             }
+            ConfigRoute::ConfigMap => vec![
+                ("env name", self.env_name_of(product, key)),
+                (
+                    "routing",
+                    "ConfigMap reference pinned to one version (kubernetes.config = \
+                     \"configmap\")"
+                        .into(),
+                ),
+            ],
         })
     }
 
@@ -686,8 +906,13 @@ impl KubernetesTarget {
     /// access`).
     fn access_check(&self, r: &dyn CommandRunner) -> Result<Verdict, Error> {
         let external = self.store.is_some();
-        let needed = |_: &str, resource: &str| !external || resource != "secrets";
+        let needed = |_: &str, resource: &str| {
+            (!external || resource != "secrets")
+                && (resource != "configmaps" || self.config == ConfigRoute::ConfigMap)
+        };
         match missing_rights(&Kubectl::new(r, &self.target), false, needed) {
+            // A configmap target needs the configmap rights like any other (§6.5); the grant
+            // names a Role in the target's namespace (FM-09).
             Ok(found) => match found.into_iter().next() {
                 None => Ok(Verdict::Ok(format!(
                     "has every right sync needs in namespace {}",
@@ -706,8 +931,9 @@ impl KubernetesTarget {
     fn deploy_rights(&self, r: &dyn CommandRunner) -> Result<(), Error> {
         let external = self.store.is_some();
         let pick = |verb: &str, resource: &str| {
-            DEPLOY_RIGHTS.contains(&(verb, resource))
-                || (external && verb == "delete" && resource == external::RESOURCE)
+            (resource != "configmaps" || self.config == ConfigRoute::ConfigMap)
+                && (DEPLOY_RIGHTS.contains(&(verb, resource))
+                    || (external && verb == "delete" && resource == external::RESOURCE))
         };
         let found = missing_rights(&Kubectl::new(r, &self.target), external, pick)?;
         match found.into_iter().next() {
@@ -796,6 +1022,166 @@ environments = ["dev"]
     fn config_route_store_is_accepted() {
         let f = parse(&with("api\"\n", "api\"\nconfig = \"store\"\n")).unwrap();
         assert_eq!(kube_of(&f, "dev").config, ConfigRoute::Store);
+    }
+
+    #[test]
+    fn config_route_configmap_is_accepted() {
+        let f = parse(&with("api\"\n", "api\"\nconfig = \"configmap\"\n")).unwrap();
+        assert_eq!(kube_of(&f, "dev").config, ConfigRoute::ConfigMap);
+    }
+
+    #[test]
+    fn configmap_config_uses_the_configmap_channel() {
+        assert_eq!(
+            bound_target("config = \"configmap\"").channels().config,
+            Channel::Store { label: "ConfigMap" }
+        );
+    }
+
+    #[test]
+    fn a_secrets_dir_gives_a_native_file_channel() {
+        assert_eq!(
+            bound_target("secrets_dir = \"/run/secrets/{product}\"")
+                .channels()
+                .files,
+            FileCapability::Native {
+                dir: "/run/secrets/{product}".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn init_section_writes_configmap_for_a_new_target() {
+        let text = PROVIDER
+            .init_section(&BTreeMap::from([
+                ("context", "kind-opv".to_string()),
+                ("namespace", "myapp".to_string()),
+                ("deployment", "api".to_string()),
+            ]))
+            .unwrap();
+        assert!(text.contains("kubernetes.config = \"configmap\""), "{text}");
+    }
+
+    #[test]
+    fn a_product_secrets_dir_loads() {
+        assert!(
+            parse(&with(
+                "api\"\n",
+                "api\"\nsecrets_dir = \"/run/secrets/{product}\"\n"
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_relative_secrets_dir_is_refused() {
+        let e = err(&with("api\"\n", "api\"\nsecrets_dir = \"run/secrets\"\n"));
+        assert!(e.contains("kubernetes.secrets_dir"), "{e}");
+    }
+
+    #[test]
+    fn a_root_secrets_dir_is_refused() {
+        let e = err(&with("api\"\n", "api\"\nsecrets_dir = \"/\"\n"));
+        assert!(e.contains("kubernetes.secrets_dir"), "{e}");
+    }
+
+    #[test]
+    fn a_secrets_dir_under_proc_is_refused() {
+        let e = err(&with("api\"\n", "api\"\nsecrets_dir = \"/proc/x\"\n"));
+        assert!(e.contains("kubernetes.secrets_dir"), "{e}");
+    }
+
+    #[test]
+    fn a_secrets_dir_under_the_service_account_directory_is_refused() {
+        let e = err(&with(
+            "api\"\n",
+            "api\"\nsecrets_dir = \"/var/run/secrets/kubernetes.io/x\"\n",
+        ));
+        assert!(e.contains("kubernetes.secrets_dir"), "{e}");
+    }
+
+    #[test]
+    fn a_secrets_dir_with_a_parent_segment_is_refused() {
+        let e = err(&with("api\"\n", "api\"\nsecrets_dir = \"/run/../x\"\n"));
+        assert!(e.contains("kubernetes.secrets_dir"), "{e}");
+    }
+
+    #[test]
+    fn a_secrets_dir_with_a_colon_is_refused() {
+        let e = err(&with("api\"\n", "api\"\nsecrets_dir = \"/run/se:crets\"\n"));
+        assert!(e.contains("kubernetes.secrets_dir"), "{e}");
+    }
+
+    #[test]
+    fn a_secrets_dir_with_a_space_is_refused() {
+        let e = err(&with(
+            "api\"\n",
+            "api\"\nsecrets_dir = \"/run/my secrets\"\n",
+        ));
+        assert!(e.contains("kubernetes.secrets_dir"), "{e}");
+    }
+
+    #[test]
+    fn a_secrets_dir_over_255_bytes_is_refused() {
+        let long = format!("/{}", "a".repeat(255));
+        let e = err(&with(
+            "api\"\n",
+            &format!("api\"\nsecrets_dir = \"{long}\"\n"),
+        ));
+        assert!(e.contains("kubernetes.secrets_dir"), "{e}");
+    }
+
+    /// A dev environment whose Kubernetes target mounts files at `secrets_dir`.
+    fn mounted(secrets_dir: &str, config: &str) -> String {
+        format!(
+            "[environments.dev]\n[environments.dev.targets.app]\nstate_vault_id = \"s\"\n\
+             [environments.dev.targets.app.kubernetes]\ncontext = \"kind-opv\"\n\
+             namespace = \"myapp\"\ndeployment = \"api\"\nenv_name = \"{{KEY}}\"\n\
+             secrets_dir = \"{secrets_dir}\"\n{config}"
+        )
+    }
+
+    #[test]
+    fn two_products_with_file_keys_and_no_product_placeholder_are_refused() {
+        let keys = "[products.a.keys.F]\nkind = \"secret\"\nenvironments = [\"dev\"]\nfile = \"cert\"\n\
+                    [products.b.keys.F]\nkind = \"secret\"\nenvironments = [\"dev\"]\nfile = \"cert\"\n";
+        let e = err(&doc(&mounted("/run/secrets", ""), keys));
+        assert!(e.contains("kubernetes.secrets_dir"), "{e}");
+    }
+
+    #[test]
+    fn two_products_rendering_the_same_secrets_dir_are_refused() {
+        let keys = "[products.a_b.keys.F]\nkind = \"secret\"\nenvironments = [\"dev\"]\nfile = \"cert\"\n\
+                    [products.a-b.keys.F]\nkind = \"secret\"\nenvironments = [\"dev\"]\nfile = \"cert\"\n";
+        let e = err(&doc(&mounted("/run/secrets/{product}", ""), keys));
+        assert!(e.contains("kubernetes.secrets_dir"), "{e}");
+    }
+
+    #[test]
+    fn a_config_file_key_under_the_env_route_needs_an_object() {
+        let keys =
+            "[products.a.keys.F]\nkind = \"config\"\nenvironments = [\"dev\"]\nfile = \"cert\"\n";
+        let e = err(&doc(&mounted("/run/secrets/{product}", ""), keys));
+        assert!(e.contains("kubernetes.config"), "{e}");
+    }
+
+    #[test]
+    fn nested_file_paths_in_one_product_are_refused() {
+        let keys = "[products.a.keys.C]\nkind = \"secret\"\nenvironments = [\"dev\"]\nfile = \"a/b\"\n\
+                    [products.a.keys.P]\nkind = \"secret\"\nenvironments = [\"dev\"]\nfile = \"a\"\n";
+        let e = err(&doc(&mounted("/run/secrets/{product}", ""), keys));
+        assert!(
+            e.contains("products.a.keys.P.file") && e.contains("products.a.keys.C.file"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn a_mounted_file_path_that_climbs_out_is_refused() {
+        let keys =
+            "[products.a.keys.C]\nkind = \"secret\"\nenvironments = [\"dev\"]\nfile = \"../c\"\n";
+        let e = err(&doc(&mounted("/run/secrets/{product}", ""), keys));
+        assert!(e.contains("products.a.keys.C.file"), "{e}");
     }
 
     #[test]
@@ -987,7 +1373,13 @@ environments = ["dev"]
         let t = target();
         let r = FakeRunner::new([]);
         assert!(matches!(
-            t.open("dev", BTreeSet::new(), &r),
+            t.open(
+                "dev",
+                BTreeSet::new(),
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+                &r
+            ),
             Ok(Ports::Pinned { .. })
         ));
     }
@@ -996,7 +1388,13 @@ environments = ["dev"]
     fn open_makes_no_calls() {
         let t = target();
         let r = FakeRunner::new([]);
-        let _ = t.open("dev", BTreeSet::new(), &r);
+        let _ = t.open(
+            "dev",
+            BTreeSet::new(),
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &r,
+        );
         assert!(r.calls.borrow().is_empty());
     }
 
@@ -1069,6 +1467,51 @@ environments = ["dev"]
                 "kubernetes access: ok has every right sync needs in namespace myapp",
             ]
         );
+    }
+
+    /// A healthy `config = "configmap"` cluster: three kubectl checks and fourteen can-i.
+    fn healthy_configmap() -> Vec<Output> {
+        let mut v = vec![
+            ok("Client Version: v1.31.2\nKustomize Version: v5.4.2\n"),
+            ok("kind-opv\n"),
+            ok("Client Version: v1.31.2\nServer Version: v1.31.0\n"),
+        ];
+        v.extend((0..14).map(|_| ok("yes\n")));
+        v
+    }
+
+    /// FM-09: a missing configmap right fails `doctor`, and its line says to grant it by a
+    /// Role in the target's namespace.
+    #[test]
+    fn doctor_names_a_missing_configmap_right_as_a_namespaced_role() {
+        let mut g = healthy_configmap();
+        // ACCESS order: nine secret/deployment rights, then `get configmaps` (can-i #9).
+        g[12] = Output {
+            status: 1,
+            stdout: zeroize::Zeroizing::new(b"no\n".to_vec()),
+        };
+        let r = FakeRunner::new(g);
+        let mut t = target();
+        t.config = ConfigRoute::ConfigMap;
+        let checks = t.doctor(&r, &host);
+        let line = match &checks[3].outcome {
+            Err(e) => e.do_text().unwrap_or_default(),
+            Ok(v) => format!("{v:?}"),
+        };
+        assert!(line.contains("a Role in namespace"), "{line}");
+    }
+
+    /// K3: an env-route target never asks for configmap rights.
+    #[test]
+    fn doctor_never_asks_for_configmap_rights_on_an_env_target() {
+        let r = FakeRunner::new(healthy());
+        let _ = doctor_lines(&r);
+        let asked = r
+            .calls
+            .borrow()
+            .iter()
+            .any(|c| c.args.iter().any(|a| a == "configmaps"));
+        assert!(!asked);
     }
 
     #[test]
@@ -1202,10 +1645,12 @@ environments = ["dev"]
         );
     }
 
-    /// The `kubectl auth can-i` answers of `preflight` (Mutate): `no` for `denied`.
+    /// The `kubectl auth can-i` answers of `preflight` (Mutate): `no` for `denied`. The
+    /// caller's target is env-route, so the configmap-only right is not asked.
     fn deploy_rights(denied: &str) -> Vec<Output> {
         DEPLOY_RIGHTS
             .iter()
+            .filter(|(_, resource)| *resource != "configmaps")
             .map(|(verb, resource)| {
                 if format!("{verb} {resource}") == denied {
                     Output {
@@ -1306,6 +1751,32 @@ env_name = "{{KEY}}"
         assert_eq!(
             t.secrets_in().map(|s| s.describe()),
             Some("Key Vault kv-myapp-prod".into())
+        );
+    }
+
+    #[test]
+    fn configmap_config_under_secrets_in_is_refused_at_load() {
+        let e = err(&bound(
+            "secrets_in = \"prod-vault\"\nconfig = \"configmap\"",
+            DB_URL,
+        ));
+        assert!(
+            e.contains(
+                "environments.dev.targets.app.kubernetes.config cannot be set together with \
+                 environments.dev.targets.app.kubernetes.secrets_in"
+            ),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn store_config_under_secrets_in_loads() {
+        assert!(
+            parse(&bound(
+                "secrets_in = \"prod-vault\"\nconfig = \"store\"",
+                DB_URL
+            ))
+            .is_ok()
         );
     }
 
@@ -1453,3 +1924,7 @@ env_name = "{{KEY}}"
         );
     }
 }
+
+#[cfg(test)]
+#[path = "config_files_tests.rs"]
+mod config_files_tests;
