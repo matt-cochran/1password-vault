@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-10-17
+
+### Fixed
+
+- `opv init <env> --add-env` refuses an item that holds only personal keys before it proposes or writes anything. Personal keys live in each person's own item, so that item can't be the environment's boundary. The error names the item and asks for the environment's shared item.
+- A Kubernetes external secret store that isn't ready is reported with its reason code wherever opv meets it: preflight, `opv doctor` and the diagnosis after a failed sync. A store with no reason is described without one.
+- `opv delivery verify` on a target whose products deliver no secret says so, instead of reporting that nothing is delivered.
+- With no 1Password account added on the machine, the error says no account is added rather than naming an invented one.
+- An account taken from the project's `.opv` is named as coming from `.opv`, not from the environment.
+- `opv mcp install --client all` reports the clients it already registered when a later client fails, and its next step is the failed client's own. Help text and docs give the config check's exit code as 2.
+- `opv add` reports a refused proposal as a refused proposal (`config_proposal_invalid`), saying nothing was written.
+- `opv ui`: the key-name rule is stated in plain words, a findings list cut at five says how many more there are, and the copy status labels its next command.
+- `opv setup` checks the shape of its 1Password item reads like every other read, so an unexpected reply is `unexpected_output`.
+
+### Internal
+
+- The simulator plays a recorded `op signin` (#160 scenario now runs). A coverage gate proves sync refuses every value a store would reject as `keys_blocking`, never an internal error. The security tests copy their configuration into their own temporary directory, so a developer's `.opv` can't change them.
+
 ## [0.10.0] - 2026-10-16
 
 Every failure is now one typed cause from a closed catalog (#157, #159, #160; design: `docs/design/error-catalog.md`). This changes the `--json` error object and removes error codes; see Changed.
