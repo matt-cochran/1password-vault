@@ -1172,6 +1172,62 @@ impl PinnedRuntime for KubeDeployment<'_> {
         }
     }
 
+    /// One `volume …` change per product whose projected volume a deploy of
+    /// `pin` would change (design §6.7): a file key gets a new version, or a file key's
+    /// binding is not the one opv writes (no volume yet, a missing item or mount, or still
+    /// an env entry, which the same replace removes). Reads the Deployment only when the
+    /// target mounts files.
+    fn deploy_preview(&self, pin: &BTreeSet<String>) -> Result<Vec<String>, Error> {
+        let Some(dir) = self.secrets_dir.as_deref() else {
+            return Ok(Vec::new());
+        };
+        if self.files.is_empty() {
+            return Ok(Vec::new());
+        }
+        let doc = self.k.get_deployment()?;
+        let i = container_index(&doc, self.t())?;
+        let container = container_name(&doc, i);
+        let in_env: BTreeSet<String> = container_env(&doc, i)
+            .iter()
+            .filter_map(|e| e.get("name").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        let mut lines = Vec::new();
+        for product in self.file_products() {
+            let read = files::read_bindings(&doc, &container, product, dir);
+            let keys: Vec<(&String, &FileMount)> = self
+                .files
+                .iter()
+                .filter(|(_, f)| f.product == product)
+                .collect();
+            let removed: Vec<&str> = keys
+                .iter()
+                .filter(|(n, _)| in_env.contains(*n))
+                .map(|(n, _)| n.as_str())
+                .collect();
+            let changes = keys.iter().any(|(n, f)| {
+                pin.contains(*n) || !matches!(read.get(&f.path), Some(files::Binding::Bound { .. }))
+            }) || !removed.is_empty();
+            if !changes {
+                continue;
+            }
+            let count = match keys.len() {
+                1 => "1 file".to_string(),
+                n => format!("{n} files"),
+            };
+            let removed = if removed.is_empty() {
+                String::new()
+            } else {
+                format!("; env entries removed: {}", removed.join(", "))
+            };
+            lines.push(format!(
+                "volume opv-files-{}, read-only at {} ({count}{removed})",
+                product.replace('_', "-"),
+                files::render_dir(dir, product),
+            ));
+        }
+        Ok(lines)
+    }
+
     /// The operator's own rights (`kubectl auth can-i`, K5): exit 0 yes, exit 1 no. Pods
     /// need no Secret access of their own (the kubelet resolves `secretKeyRef`), so `names`
     /// do not matter; each finding names the verb and resource. `doctor` fails on any;

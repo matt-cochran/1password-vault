@@ -1,0 +1,20 @@
+# k8s_mount_path_in_use: opv sync prod --confirm prod --target k8s --deploy
+
+## text exit: 6
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: container e2e-app of deployment e2e-app already mounts volume tls over /run/secrets, so opv's secrets volume cannot go there
+Do: choose another secrets_dir, or remove volume tls
+Next: opv plan prod --target k8s
+
+## json exit: 6
+## json stdout
+{"schema_version":2,"ok":false,"exit_code":6,"next":"opv plan prod --target k8s","do":"choose another secrets_dir, or remove volume tls","error":{"code":"policy_refused","category":"policy","message":"container e2e-app of deployment e2e-app already mounts volume tls over /run/secrets, so opv's secrets volume cannot go there","subject":{"guard":{"guard":"mount_path_in_use","workload":"deployment e2e-app","container":"e2e-app","path":"/run/secrets","volume":"tls","env":"prod","target":"k8s"}},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":"choose another secrets_dir, or remove volume tls","next":"opv plan prod --target k8s","next_kind":"check"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: container e2e-app of deployment e2e-app already mounts volume tls over /run/secrets, so opv's secrets volume cannot go there
+Do: choose another secrets_dir, or remove volume tls
+Next: opv plan prod --target k8s

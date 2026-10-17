@@ -53,7 +53,7 @@ use crate::domain::{
 };
 use crate::error::Error;
 use crate::ports::{PinnedRuntime, PinnedStore, Ports, StagedRuntime, StagedStore};
-use crate::provider::TargetConfig;
+use crate::provider::{Channel, FileCapability, TargetConfig};
 use crate::runner::{Call, CommandRunner};
 
 /// Flags of `sync`.
@@ -1361,6 +1361,7 @@ fn run_pinned(
     let want = pinned_want(
         fleet,
         env_name,
+        c.target,
         c.t,
         &plan,
         &listed,
@@ -1787,11 +1788,14 @@ fn change_names(c: &RuntimeChange) -> Vec<String> {
 
 /// The desired store and env state of `plan` (FR-14, FR-31). Secrets are always
 /// store-routed; config is store-routed when `config_in_store`, and then read and compared
-/// like a secret. `listed` carries the versions the plan's reads found.
+/// like a secret. `listed` carries the versions the plan's reads found. Only the products
+/// target `target` delivers are wanted there: a source-only product's keys never are
+/// (FR-47), so they are never written, bound or reported for it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pinned_want(
     fleet: &Fleet,
     env_name: &str,
+    target: &str,
     t: &dyn TargetConfig,
     plan: &SyncPlan,
     listed: &[StoreEntry],
@@ -1813,10 +1817,11 @@ pub(crate) fn pinned_want(
         plain: BTreeMap::new(),
         refused: Vec::new(),
     };
+    let delivered = |p: &str| fleet.delivers(env_name, target, p);
     for row in plan
         .rows
         .iter()
-        .filter(|r| r.kind == Kind::Secret && r.state == KeyState::Ready)
+        .filter(|r| r.kind == Kind::Secret && r.state == KeyState::Ready && delivered(&r.product))
     {
         let name = name_of(&row.product, &row.key);
         let write = staged
@@ -1829,7 +1834,7 @@ pub(crate) fn pinned_want(
         }
         want.store.insert(name, StoreWant { current, write });
     }
-    for (product, keys) in &plan.config {
+    for (product, keys) in plan.config.iter().filter(|(p, _)| delivered(p)) {
         for (key, value) in keys {
             let name = name_of(product, key);
             if !config_in_store {
@@ -2294,6 +2299,10 @@ struct PlanPart<'f> {
     live: bool,
     /// The config channel (FR-46): what sync would set and prune.
     var_plan: super::variables::VarPlan,
+    /// Config keys a pinned store holds that sync would write (design §6.7), env names.
+    config_writes: Vec<String>,
+    /// What a deploy would change beyond the bindings, one `would deploy:` line each.
+    deploy: Vec<String>,
     /// `stage` on a staging target, else `write`.
     verb: &'static str,
     /// This target's plan id (FR-41), one input of the run's.
@@ -2330,6 +2339,23 @@ impl PlanPart<'_> {
         target_cell(row, word, &self.t.channels(), spec)
     }
 
+    /// Where env name `name` arrives when it is more than a variable on the target's
+    /// secret channel (design §6.7): `file <dir>/<path>` for a file key on a target that
+    /// mounts files, `<channel>, env` for a config key a store holds (`ConfigMap, env`).
+    fn route(&self, names: &KeyNames, name: &str) -> Option<String> {
+        let (product, key) = names.key(name)?.split_once('/')?;
+        let spec = self.fleet.products.get(product)?.keys.get(key)?;
+        let channels = self.t.channels();
+        if let (Some(path), FileCapability::Native { dir }) = (&spec.file, &channels.files) {
+            let dir = dir.replace("{product}", &product.replace('_', "-"));
+            return Some(format!("file {dir}/{path}"));
+        }
+        match (&spec.kind, &channels.config) {
+            (Kind::Config, Channel::Store { label }) => Some(format!("{label}, env")),
+            _ => None,
+        }
+    }
+
     /// `prod/web: 4 keys · 0 findings · 1 to stage · …` (NR-16).
     fn count(&self, env_name: &str) -> String {
         format!(
@@ -2338,7 +2364,7 @@ impl PlanPart<'_> {
             placement(env_name, &self.name),
             plural(self.plan.rows.len(), "key", "keys"),
             plural(self.findings(), "finding", "findings"),
-            self.plan.stage.len() + self.var_plan.set.len(),
+            self.plan.stage.len() + self.var_plan.set.len() + self.config_writes.len(),
             self.verb,
             self.plan.held_immutable.len(),
             self.plan.prune.len() + self.var_plan.prune.len(),
@@ -2363,15 +2389,33 @@ impl PlanPart<'_> {
             .iter()
             .map(|(n, _)| n.as_str())
             .chain(self.var_plan.set.iter().map(String::as_str))
+            .chain(self.config_writes.iter().map(String::as_str))
             .collect();
-        if !staged.is_empty() {
-            // Findings block the sync, so nothing is staged until they are fixed (bug 10).
-            let when = if blocked {
-                " once the findings are fixed"
-            } else {
-                ""
-            };
-            line(format!("would {verb}{when}: {}", names.join(&staged)))?;
+        // Findings block the sync, so nothing is staged until they are fixed (bug 10).
+        let when = if blocked {
+            " once the findings are fixed"
+        } else {
+            ""
+        };
+        // A key that arrives as a mounted file or through a config object gets its own
+        // line naming where it goes (design §6.7); the others share one line.
+        let mut plain: Vec<&str> = Vec::new();
+        let mut routed: Vec<(&str, String)> = Vec::new();
+        for n in &staged {
+            match self.route(&names, n) {
+                Some(route) => routed.push((n, route)),
+                None => plain.push(n),
+            }
+        }
+        if !plain.is_empty() {
+            line(format!("would {verb}{when}: {}", names.join(&plain)))?;
+        }
+        for (n, route) in &routed {
+            let key = names.key(n).unwrap_or(n);
+            line(format!("would {verb}{when}: {key} ({n} → {route})"))?;
+        }
+        for change in &self.deploy {
+            line(format!("would deploy{when}: {change}"))?;
         }
         let prunes: Vec<String> = plan
             .prune
@@ -2467,6 +2511,26 @@ fn plan_part<'f>(
         rotate,
         None,
     );
+    // What a pinned target's sync would write beyond the staged secrets, and what its deploy
+    // would change beyond the bindings (design §6.7). Display only: the plan id above is
+    // what `sync` re-derives.
+    let (config_writes, deploy) = match &ports {
+        Ports::Pinned { store, runtime } => {
+            let config_writes = if runtime.config_in_store() {
+                config_writes(fleet, env_name, name, t, &plan, store.as_ref())?
+            } else {
+                Vec::new()
+            };
+            let pin: BTreeSet<String> = plan
+                .stage
+                .iter()
+                .map(|(n, _)| n.clone())
+                .chain(config_writes.iter().cloned())
+                .collect();
+            (config_writes, runtime.deploy_preview(&pin)?)
+        }
+        Ports::Staged { .. } => (Vec::new(), Vec::new()),
+    };
     let verb = match ports {
         Ports::Staged { .. } if !live => "stage",
         _ => "write",
@@ -2480,10 +2544,45 @@ fn plan_part<'f>(
         item_version,
         live,
         var_plan,
+        config_writes,
+        deploy,
         verb,
         id,
         rotate: rotate.clone(),
     })
+}
+
+/// The env names of the config keys of `plan` a pinned store holds (`config = "store"` or
+/// `"configmap"`) whose value would be written: absent there, or bound to another value.
+/// Each is read and compared exactly, as `sync` does ([`pinned_want`]); only the products
+/// target `target` delivers.
+fn config_writes(
+    fleet: &Fleet,
+    env_name: &str,
+    target: &str,
+    t: &dyn TargetConfig,
+    plan: &SyncPlan,
+    store: &dyn PinnedStore,
+) -> Result<Vec<String>, Error> {
+    let mut out = Vec::new();
+    let delivered = plan
+        .config
+        .iter()
+        .filter(|(p, _)| fleet.delivers(env_name, target, p));
+    for (product, keys) in delivered {
+        for (key, value) in keys {
+            let name = t.env_name(product, key);
+            let desired = SecretValue::new(value.clone());
+            let same = match store.read(&name)? {
+                Some((current, _)) => compare(&current, &desired) == Same,
+                None => false,
+            };
+            if !same {
+                out.push(name);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// `plan <id> (1Password item v<n>): sync --expect-plan <id> applies exactly this plan`
@@ -3965,5 +4064,117 @@ mod tests {
         .into();
         let e = partial(refused, &["api/TOKEN".to_string()], PlanScope::Structural);
         assert!(e.to_string().contains("api/TOKEN"), "{e}");
+    }
+
+    // ---- design §6.7: where each key goes on a Kubernetes target -----------------------
+
+    /// What `plan` prints as the k8s target's changes in the e2e app (`secrets_dir`,
+    /// `config = "configmap"`), with `stage` staged secrets, `config` config writes and
+    /// `deploy` the runtime's preview.
+    fn k8s_changes(stage: &[&str], config: &[&str], deploy: &[&str]) -> String {
+        let fleet = crate::config::load("tests/e2e/app/secrets.toml").unwrap();
+        let mut plan =
+            crate::domain::build_plan(&fleet, "prod", vec![], &[], &BTreeSet::new(), &|_| None);
+        plan.stage = stage
+            .iter()
+            .map(|n| (n.to_string(), SecretValue::new("S7MARKER".into())))
+            .collect();
+        let part = PlanPart {
+            name: "k8s".into(),
+            t: fleet.environments["prod"].targets["k8s"].config.as_ref(),
+            fleet: &fleet,
+            plan,
+            item_version: None,
+            live: false,
+            var_plan: Default::default(),
+            config_writes: config.iter().map(|n| n.to_string()).collect(),
+            deploy: deploy.iter().map(|n| n.to_string()).collect(),
+            verb: "write",
+            id: String::new(),
+            unmanaged: 0,
+            rotate: BTreeSet::new(),
+        };
+        let mut out = Vec::new();
+        part.print_changes(&mut out, &fleet, "prod", false).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn a_file_key_is_planned_to_its_mounted_path() {
+        assert!(
+            k8s_changes(&["E2E__WEB__TLS_PRIVATE_KEY"], &[], &[]).contains(
+                "would write: web/TLS_PRIVATE_KEY (E2E__WEB__TLS_PRIVATE_KEY → file \
+             /run/secrets/web/tls/private-key)\n"
+            )
+        );
+    }
+
+    #[test]
+    fn a_config_file_key_is_planned_to_its_mounted_path() {
+        assert!(
+            k8s_changes(&[], &["E2E__WEB__OTEL_RESOURCE"], &[]).contains(
+                "would write: web/OTEL_RESOURCE (E2E__WEB__OTEL_RESOURCE → file \
+             /run/secrets/web/otel/resource)\n"
+            )
+        );
+    }
+
+    #[test]
+    fn a_configmap_config_key_is_planned_as_a_configmap_bound_to_env() {
+        assert!(
+            k8s_changes(&[], &["E2E__WEB__LOG_LEVEL"], &[])
+                .contains("would write: web/LOG_LEVEL (E2E__WEB__LOG_LEVEL → ConfigMap, env)\n")
+        );
+    }
+
+    #[test]
+    fn a_plain_secret_stays_on_the_shared_write_line() {
+        assert!(
+            k8s_changes(
+                &["E2E__WEB__API_KEY", "E2E__WEB__TLS_PRIVATE_KEY"],
+                &[],
+                &[]
+            )
+            .contains("would write: web/API_KEY (E2E__WEB__API_KEY)\n")
+        );
+    }
+
+    #[test]
+    fn a_volume_change_is_one_would_deploy_line() {
+        let volume = "volume opv-files-web, read-only at /run/secrets/web (3 files)";
+        assert!(
+            k8s_changes(&["E2E__WEB__TLS_PRIVATE_KEY"], &[], &[volume])
+                .contains(&format!("would deploy: {volume}\n"))
+        );
+    }
+
+    /// FR-47: a source-only product's config key is never wanted on a pinned target, so a
+    /// deploy never binds a name opv does not manage there.
+    #[test]
+    fn a_source_only_config_key_is_not_wanted_on_a_pinned_target() {
+        let fleet = crate::config::load("tests/e2e/app/secrets.toml").unwrap();
+        let field = ItemField {
+            section: "shared".into(),
+            label: "FEATURE_FLAGS".into(),
+            kind: Kind::Config,
+            value: SecretValue::new("off".into()),
+            concealed: false,
+        };
+        let plan =
+            crate::domain::build_plan(&fleet, "prod", vec![field], &[], &BTreeSet::new(), &|_| {
+                None
+            });
+        let r = FakeRunner::new([]);
+        let (t, ports) = open_target(&fleet, "prod", "k8s", &r).unwrap();
+        let Ports::Pinned { store, .. } = ports else {
+            panic!("a pinned target");
+        };
+        let want = pinned_want(&fleet, "prod", "k8s", t, &plan, &[], store.as_ref(), false);
+        assert!(
+            !want
+                .unwrap()
+                .plain
+                .contains_key("E2E__SHARED__FEATURE_FLAGS")
+        );
     }
 }

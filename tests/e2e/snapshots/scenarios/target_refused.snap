@@ -3,24 +3,23 @@
 ## text exit: 5
 ## text stdout
 prod/k8s: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
-prod/k8s: written: web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET)
-prod/k8s: unchanged: E2E__SHARED__DATABASE_URL
+prod/k8s: written: web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/LOG_LEVEL (E2E__WEB__LOG_LEVEL), web/OTEL_RESOURCE (E2E__WEB__OTEL_RESOURCE), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET), web/TLS_CERTIFICATE (E2E__WEB__TLS_CERTIFICATE), web/TLS_PRIVATE_KEY (E2E__WEB__TLS_PRIVATE_KEY)
 prod/k8s: delivery: web not recorded: no delivery item is recorded for web on prod/k8s; opv bootstrap creates it
 
 ## text stderr
 using <SCENARIO>/project/secrets.toml
-opv: revision 6 of deployment e2e-app in namespace e2e-prod at Kubernetes is still rolling out; opv pruned nothing
-  checked: kubectl --context e2e-cluster --namespace e2e-prod --request-timeout=60s get deployment e2e-app -o json (exit 0)
-Do: wait for revision 6 of deployment e2e-app in namespace e2e-prod to finish rolling out
+opv: revision 2 of deployment e2e-app in namespace e2e-prod at Kubernetes is still rolling out; opv pruned nothing
+  checked: kubectl --context e2e-cluster --namespace e2e-prod --request-timeout=60s get pods -l app -o jsonpath (exit 0)
+Do: wait for revision 2 of deployment e2e-app in namespace e2e-prod to finish rolling out
 Next: opv doctor --env prod --target k8s
 
 ## json exit: 5
 ## json stdout
-{"schema_version":2,"ok":false,"exit_code":5,"next":"opv doctor --env prod --target k8s","do":"wait for revision 6 of deployment e2e-app in namespace e2e-prod to finish rolling out","error":{"code":"update_refused","category":"target","message":"revision 6 of deployment e2e-app in namespace e2e-prod at Kubernetes is still rolling out; opv pruned nothing","subject":{"target":"k8s","system":"kubernetes","subject":{"kind":"deployment","name":"e2e-app","scope":"e2e-prod"},"why":{"why":"in_progress","revision":"6"},"env":"prod"},"evidence":{"checked":"kubectl --context e2e-cluster --namespace e2e-prod --request-timeout=60s get deployment e2e-app -o json","account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"wait for revision 6 of deployment e2e-app in namespace e2e-prod to finish rolling out","next":"opv doctor --env prod --target k8s","next_kind":"run"}}
+{"schema_version":2,"ok":false,"exit_code":5,"next":"opv doctor --env prod --target k8s","do":"wait for revision 2 of deployment e2e-app in namespace e2e-prod to finish rolling out","error":{"code":"update_refused","category":"target","message":"revision 2 of deployment e2e-app in namespace e2e-prod at Kubernetes is still rolling out; opv pruned nothing","subject":{"target":"k8s","system":"kubernetes","subject":{"kind":"deployment","name":"e2e-app","scope":"e2e-prod"},"why":{"why":"in_progress","revision":"2"},"env":"prod"},"evidence":{"checked":"kubectl --context e2e-cluster --namespace e2e-prod --request-timeout=60s get pods -l app -o jsonpath","account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"wait for revision 2 of deployment e2e-app in namespace e2e-prod to finish rolling out","next":"opv doctor --env prod --target k8s","next_kind":"run"}}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml
-opv: revision 6 of deployment e2e-app in namespace e2e-prod at Kubernetes is still rolling out; opv pruned nothing
-  checked: kubectl --context e2e-cluster --namespace e2e-prod --request-timeout=60s get deployment e2e-app -o json (exit 0)
-Do: wait for revision 6 of deployment e2e-app in namespace e2e-prod to finish rolling out
+opv: revision 2 of deployment e2e-app in namespace e2e-prod at Kubernetes is still rolling out; opv pruned nothing
+  checked: kubectl --context e2e-cluster --namespace e2e-prod --request-timeout=60s get pods -l app -o jsonpath (exit 0)
+Do: wait for revision 2 of deployment e2e-app in namespace e2e-prod to finish rolling out
 Next: opv doctor --env prod --target k8s

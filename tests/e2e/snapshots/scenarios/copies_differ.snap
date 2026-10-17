@@ -37,12 +37,17 @@
  state_vault_id = "vE2ESTATEFLY00000000000001"
  roles = ["serve"]
  
- # The Kubernetes target: the Deployment reads names from the e2e-prod namespace.
+ # The Kubernetes target: the Deployment reads names from the e2e-prod namespace. Config
+ # keys are ConfigMaps, and file keys are mounted under /run/secrets/<product> in the
+ # e2e-app container only (the pod also runs a sidecar).
  [environments.prod.targets.k8s]
  kubernetes.context = "e2e-cluster"
  kubernetes.namespace = "e2e-prod"
  kubernetes.deployment = "e2e-app"
+ kubernetes.container = "e2e-app"
  kubernetes.env_name = "E2E__{PRODUCT}__{KEY}"
+ kubernetes.config = "configmap"
+ kubernetes.secrets_dir = "/run/secrets/{product}"
  state_vault_id = "vE2ESTATEK8S00000000000001"
  roles = ["serve"]
  
@@ -69,8 +74,8 @@
  environments = ["dev", "prod"]
  rules = { enum = ["on", "off"] }
  
- # The web product: its own keys, one shared key, two role-scoped keys, two file keys and
- # one personal key.
+ # The web product: its own keys, one shared key, two role-scoped keys, three file keys
+ # and one personal key.
  [products.web]
  boundary = "web"
  
@@ -103,16 +108,23 @@
  roles = ["migrate"]
  
  # File keys: under `opv run`, their values are written into WEB_SECRETS_DIR at these
- # relative paths instead of the environment.
+ # relative paths instead of the environment; on the Kubernetes target they are mounted
+ # under kubernetes.secrets_dir.
  [products.web.keys.TLS_CERTIFICATE]
  kind = "secret"
- environments = ["dev"]
+ environments = ["dev", "prod"]
  file = "tls/certificate"
  
  [products.web.keys.TLS_PRIVATE_KEY]
  kind = "secret"
- environments = ["dev"]
+ environments = ["dev", "prod"]
  file = "tls/private-key"
+ 
+ # A config file key: a ConfigMap item of the same volume on Kubernetes.
+ [products.web.keys.OTEL_RESOURCE]
+ kind = "config"
+ environments = ["prod"]
+ file = "otel/resource"
  
  # Each developer keeps their own LLM key in their own item.
  [products.web.keys.PERSONAL_LLM_KEY]

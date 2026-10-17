@@ -1667,6 +1667,11 @@ impl KeyNames {
         })
     }
 
+    /// `product/KEY` of env name `name`; `None` when it is no declared key's.
+    pub(crate) fn key(&self, name: &str) -> Option<&str> {
+        self.labels.get(name).map(String::as_str)
+    }
+
     /// `product/KEY (NAME)`; the bare name when it is no declared key's.
     pub(crate) fn label(&self, name: &str) -> String {
         match self.labels.get(name) {

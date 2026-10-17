@@ -1,4 +1,4 @@
-# local_file_too_open: opv sync prod --approved 11133b78
+# local_file_too_open: opv sync prod --approved 623778c8
 
 ## text exit: 6
 ## text stdout
@@ -19,5 +19,5 @@ opv: <SCENARIO>/home/.local/state/opv/approvals has mode 0755; opv needs 0700 or
 Do: chmod 700 <SCENARIO>/home/.local/state/opv/approvals
 Next: opv plan prod --json
 
-## mcp opv_sync {"environment":"prod","plan_id":"11133b78"}
+## mcp opv_sync {"environment":"prod","plan_id":"623778c8"}
 {"ok":false,"error":{"code":"file_too_open","category":"policy","message":"<SCENARIO>/home/.local/state/opv/approvals has mode 0755; opv needs 0700 or stricter","subject":{"want":448,"path":"<SCENARIO>/home/.local/state/opv/approvals","mode":493},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"chmod 700 <SCENARIO>/home/.local/state/opv/approvals","next":"opv plan prod --json","next_kind":"check"}}

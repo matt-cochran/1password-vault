@@ -318,6 +318,20 @@ impl Provider for KubernetesProvider {
             }
             .into());
         };
+        // Under ExternalSecrets every key is bound from the named store's Secrets; no
+        // ConfigMap is ever written there, so `configmap` would silently become plain env
+        // values. Refused instead (`env` or `store` say what happens).
+        if t.config == ConfigRoute::ConfigMap {
+            return Err(section_invalid(
+                "kubernetes.config",
+                FieldRule::ConflictsWith {
+                    field: crate::cause::DottedPath(vec![
+                        "kubernetes".to_string(),
+                        "secrets_in".to_string(),
+                    ]),
+                },
+            ));
+        }
         Ok(Box::new(KubernetesTarget {
             store: Some(store.clone_box()),
             ..t.clone()
@@ -1737,6 +1751,32 @@ env_name = "{{KEY}}"
         assert_eq!(
             t.secrets_in().map(|s| s.describe()),
             Some("Key Vault kv-myapp-prod".into())
+        );
+    }
+
+    #[test]
+    fn configmap_config_under_secrets_in_is_refused_at_load() {
+        let e = err(&bound(
+            "secrets_in = \"prod-vault\"\nconfig = \"configmap\"",
+            DB_URL,
+        ));
+        assert!(
+            e.contains(
+                "environments.dev.targets.app.kubernetes.config cannot be set together with \
+                 environments.dev.targets.app.kubernetes.secrets_in"
+            ),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn store_config_under_secrets_in_loads() {
+        assert!(
+            parse(&bound(
+                "secrets_in = \"prod-vault\"\nconfig = \"store\"",
+                DB_URL
+            ))
+            .is_ok()
         );
     }
 

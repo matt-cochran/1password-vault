@@ -270,16 +270,20 @@ impl<'a> KubeSecrets<'a> {
         Ok(Some((env.to_string(), SecretValue::new(value.to_string()))))
     }
 
-    /// store name → version bound by the managed container (one Deployment read).
+    /// store name → version bound by the managed container, as an env reference or as a
+    /// source of opv's own `opv-files-*` volumes (design §6.3; one Deployment read).
     fn bound(&self) -> Result<&BTreeMap<String, String>, Error> {
         if let Some(b) = self.bound.get() {
             return Ok(b);
         }
         let d = self.k.get_deployment()?;
         let i = container_index(&d, self.t())?;
-        let map = container_env(&d, i)
+        let env = container_env(&d, i);
+        let mounted = mounted_sources(&d, self.kind);
+        let map = env
             .iter()
             .filter_map(|e| self.kind.bound_ref(e))
+            .chain(mounted.iter().map(String::as_str))
             .filter_map(split_secret_name)
             .map(|(s, v)| (s.to_string(), v.to_string()))
             .collect();
@@ -391,6 +395,29 @@ pub(crate) fn referenced_names(k: &Kubectl<'_>) -> Result<BTreeSet<String>, Erro
 }
 
 /// Collect every string value in `v`.
+/// The object names the `kind` sources of opv's `opv-files-*` projected volumes in
+/// Deployment `d` name (design §6.3), in volume and source order.
+fn mounted_sources(d: &Value, kind: ObjectKind) -> Vec<String> {
+    d.pointer("/spec/template/spec/volumes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|v| {
+            v.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|n| n.starts_with("opv-files-"))
+        })
+        .filter_map(|v| v.pointer("/projected/sources").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|s| {
+            s.get(kind.projected_field())?
+                .get("name")?
+                .as_str()
+                .map(str::to_string)
+        })
+        .collect()
+}
+
 fn strings(v: &Value, out: &mut BTreeSet<String>) {
     match v {
         Value::String(s) => {
@@ -1050,6 +1077,40 @@ mod tests {
             (v.expose(), ver.as_str()),
             ("opv-k8s-marker-1", "q3vz7kd2mx")
         );
+    }
+
+    /// `get deployment api -o json` after the §6.3 volume (K-R3): the private key and the
+    /// OTel resource are items of `opv-files-api`, not env entries.
+    const AFTER_FILES: &str = include_str!(
+        "../../../tests/fixtures/kubernetes/success/09-get-deployment-after-files.stdout"
+    );
+
+    /// A store of `kind` on the K1 Deployment (container `api`), whose objects were named
+    /// with the env template `{PRODUCT}__{KEY}`.
+    fn with_mounted<T>(r: &FakeRunner, kind: ObjectKind, f: impl FnOnce(&KubeSecrets) -> T) -> T {
+        let t = KubeTarget {
+            container: Some("api".into()),
+            ..target()
+        };
+        let names = ["API__PRIVATE_KEY", "API__OTEL_RESOURCE"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        f(&KubeSecrets::new(r, &t, names).with_kind(kind))
+    }
+
+    #[test]
+    fn read_of_a_mounted_file_key_reads_the_secret_its_volume_names() {
+        let r = FakeRunner::new([ok(AFTER_FILES), ok("")]);
+        let _ = with_mounted(&r, ObjectKind::Secret, |s| s.read("API__PRIVATE_KEY"));
+        assert!(all_argv(&r).contains("get secret opv-api--private-key-abcdefghij"));
+    }
+
+    #[test]
+    fn read_of_a_mounted_config_file_key_reads_the_configmap_its_volume_names() {
+        let r = FakeRunner::new([ok(AFTER_FILES), ok("")]);
+        let _ = with_mounted(&r, ObjectKind::ConfigMap, |s| s.read("API__OTEL_RESOURCE"));
+        assert!(all_argv(&r).contains("get configmap opv-api--otel-resource-abcdefghij"));
     }
 
     #[test]

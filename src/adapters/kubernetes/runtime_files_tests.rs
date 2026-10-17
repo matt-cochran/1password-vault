@@ -578,3 +578,81 @@ fn lost_apply_whose_volume_did_not_land_is_a_change_before_the_write() {
         "{e}"
     );
 }
+
+// ---- deploy_preview: the plan's `would deploy: volume …` (design §6.7) -----------------
+
+#[test]
+fn preview_of_the_recorded_deployment_names_the_volume_and_the_env_entry_it_removes() {
+    let r = FakeRunner::new([ok(BEFORE_FILES)]);
+    assert_eq!(
+        on_recorded(&r, |rt| rt.deploy_preview(&BTreeSet::new())).unwrap(),
+        vec![
+            "volume opv-files-api, read-only at /run/secrets/api (2 files; env entries removed: \
+             FLEET__API__PRIVATE_KEY)"
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn preview_of_a_bound_volume_with_nothing_new_changes_nothing() {
+    let r = FakeRunner::new([ok(AFTER_FILES)]);
+    assert!(
+        on_read_back(&r, |rt| rt.deploy_preview(&BTreeSet::new()))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn preview_of_a_new_version_of_a_bound_file_key_names_the_volume() {
+    let r = FakeRunner::new([ok(AFTER_FILES)]);
+    assert_eq!(
+        on_read_back(&r, |rt| rt.deploy_preview(&names(&["API__PRIVATE_KEY"]))).unwrap(),
+        vec!["volume opv-files-api, read-only at /run/secrets/api (2 files)".to_string()]
+    );
+}
+
+#[test]
+fn preview_on_a_target_without_files_reads_nothing() {
+    let r = FakeRunner::new([]);
+    let t = target();
+    let _ = KubeDeployment::new(&r, &t, names(&["LOG_LEVEL"])).deploy_preview(&BTreeSet::new());
+    assert!(r.calls.borrow().is_empty());
+}
+
+// ---- K-R2: the API server refuses a volume it cannot accept (design §6.8) ---------------
+
+/// The 422 of a second mount at `/run/secrets/api` (K-R2).
+const MOUNT_PATH_TAKEN: &str = include_str!(
+    "../../../tests/fixtures/kubernetes/failures/12-invalid-replace-mountpath-duplicate.stderr"
+);
+
+/// `apply` of [`recorded_change`] refused with [`MOUNT_PATH_TAKEN`], the Deployment read
+/// back unchanged.
+fn refused_volume() -> crate::error::Error {
+    let r = FakeRunner::default();
+    r.push_with_stderr(ok(BEFORE_FILES), "");
+    r.push_with_stderr(crate::runner::Output::failure(1), MOUNT_PATH_TAKEN);
+    r.push_with_stderr(ok(BEFORE_FILES), "");
+    on_recorded(&r, |rt| {
+        let snap = rt.bindings().unwrap();
+        rt.apply(&recorded_change(), &snap).unwrap_err()
+    })
+}
+
+#[test]
+fn a_refused_volume_is_update_refused() {
+    assert_eq!(refused_volume().code_str(), "update_refused");
+}
+
+#[test]
+fn a_refused_volume_names_the_replaced_deployment() {
+    assert!(
+        refused_volume()
+            .to_string()
+            .contains("the update to deployment api in namespace opv-spike"),
+        "{}",
+        refused_volume()
+    );
+}

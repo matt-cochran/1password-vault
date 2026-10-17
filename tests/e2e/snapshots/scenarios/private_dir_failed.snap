@@ -1,4 +1,4 @@
-# private_dir_failed: opv sync prod --approved 11133b78
+# private_dir_failed: opv sync prod --approved 623778c8
 
 ## text exit: 6
 ## text stdout
@@ -19,5 +19,5 @@ opv: cannot make a private folder in <SCENARIO>/home/.local/state/opv/approvals:
 Do: check free space and permissions in <SCENARIO>/home/.local/state/opv/approvals
 Next: opv plan prod --json
 
-## mcp opv_sync {"environment":"prod","plan_id":"11133b78"}
+## mcp opv_sync {"environment":"prod","plan_id":"623778c8"}
 {"ok":false,"error":{"code":"private_dir_failed","category":"policy","message":"cannot make a private folder in <SCENARIO>/home/.local/state/opv/approvals: an input or output error","subject":{"io":"other","dir":"<SCENARIO>/home/.local/state/opv/approvals"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"check free space and permissions in <SCENARIO>/home/.local/state/opv/approvals","next":"opv plan prod --json","next_kind":"check"}}

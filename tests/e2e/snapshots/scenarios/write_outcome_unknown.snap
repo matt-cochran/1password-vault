@@ -3,6 +3,7 @@
 ## text exit: 9
 ## text stdout
 prod/fly: warning: web/LOG_LEVEL not delivered (no config channel: set fly.config)
+prod/fly: warning: web/OTEL_RESOURCE not delivered (no config channel: set fly.config)
 prod/fly: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
 
 ## text stderr

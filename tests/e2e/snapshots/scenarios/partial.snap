@@ -3,37 +3,39 @@
 ## text exit: 5
 ## text stdout
 prod/fly: warning: web/LOG_LEVEL not delivered (no config channel: set fly.config)
+prod/fly: warning: web/OTEL_RESOURCE not delivered (no config channel: set fly.config)
 prod/fly: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
 prod/fly: delivery: web not recorded: no delivery item is recorded for web on prod/fly; opv bootstrap creates it
-prod/fly: written: web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET)
+prod/fly: written: web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET), web/TLS_CERTIFICATE (E2E__WEB__TLS_CERTIFICATE), web/TLS_PRIVATE_KEY (E2E__WEB__TLS_PRIVATE_KEY)
 prod/fly: extra, not pruned (pass --prune to remove): web/MIGRATION_TOKEN (E2E__WEB__MIGRATION_TOKEN)
-prod/fly: pending deploy (pass --deploy): web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET)
-prod/fly: summary: written 3 · unchanged 0 · held 0 · deployed no · pending 3 · pruned 0 · kept 1 · skipped 1
+prod/fly: pending deploy (pass --deploy): web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET), web/TLS_CERTIFICATE (E2E__WEB__TLS_CERTIFICATE), web/TLS_PRIVATE_KEY (E2E__WEB__TLS_PRIVATE_KEY)
+prod/fly: summary: written 5 · unchanged 0 · held 0 · deployed no · pending 5 · pruned 0 · kept 1 · skipped 1
 prod/gh: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
 prod/gh: delivery: web not recorded: no delivery item is recorded for web on prod/gh; opv bootstrap creates it
-prod/gh: written: web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET), web/LOG_LEVEL (E2E__WEB__LOG_LEVEL)
-prod/gh: summary: written 4 · unchanged 0 · held 0 · deployed no · pending 0 · pruned 0 · kept 0 · skipped 1
+prod/gh: written: web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET), web/TLS_CERTIFICATE (E2E__WEB__TLS_CERTIFICATE), web/TLS_PRIVATE_KEY (E2E__WEB__TLS_PRIVATE_KEY), web/LOG_LEVEL (E2E__WEB__LOG_LEVEL), web/OTEL_RESOURCE (E2E__WEB__OTEL_RESOURCE)
+prod/gh: summary: written 7 · unchanged 0 · held 0 · deployed no · pending 0 · pruned 0 · kept 0 · skipped 1
+prod/k8s: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
 
 ## text stderr
 using <SCENARIO>/project/secrets.toml
-opv: deployment e2e-app in namespace e2e-prod was not found at Kubernetes; already written: prod/fly, prod/gh
-  checked: kubectl --context e2e-cluster --namespace e2e-prod --request-timeout=60s get deployment e2e-app -o json (exit 1)
+opv: you may not patch secrets in namespace e2e-prod (context e2e-cluster, Kubernetes); already written: prod/fly, prod/gh
+  checked: kubectl --context e2e-cluster --namespace e2e-prod --request-timeout=120s apply -f - --server-side --field-manager -o name (exit 1)
 --- kubectl replied, exit 1 ---
-| Error from server (NotFound): deployments.apps "e2e-app" not found
+| Error from server (Forbidden): secrets "opv-e2e--web--api-key-<id>" is forbidden: User "system:serviceaccount:e2e-prod:opv" cannot patch resource "secrets" in API group "" in the namespace "e2e-prod"
 --- (scrubbed) ---
-Do: check kubernetes.deployment, which names deployment e2e-app in namespace e2e-prod (opv config edit) (already written: prod/fly, prod/gh)
+Do: ask a cluster admin to let you patch secrets through a Role in namespace e2e-prod (already written: prod/fly, prod/gh)
 Next: opv plan prod
 
 ## json exit: 5
 ## json stdout
-{"schema_version":2,"ok":false,"exit_code":5,"next":"opv plan prod","do":"check kubernetes.deployment, which names deployment e2e-app in namespace e2e-prod (opv config edit) (already written: prod/fly, prod/gh)","error":{"code":"resource_not_found","category":"target","message":"deployment e2e-app in namespace e2e-prod was not found at Kubernetes; already written: prod/fly, prod/gh","subject":{"then":{"state":"missing","system":"kubernetes","resource":{"kind":"deployment","name":"e2e-app","scope":"e2e-prod"},"named_by":{"by":"config_field","path":["kubernetes","deployment"]}},"done":["prod/fly","prod/gh"],"approval_used":null,"approval_scope":{"kind":"sync","env":"prod","targets":[],"product":null,"deploy":false,"prune":false,"rotate":[]}},"evidence":{"checked":"kubectl --context e2e-cluster --namespace e2e-prod --request-timeout=60s get deployment e2e-app -o json","account":null,"upstream":{"source":"kubernetes","tool":"kubectl","version":null,"exit":{"kind":"code","code":1},"said":["Error from server (NotFound): deployments.apps \"e2e-app\" not found"],"truncated":false,"removed_advice":false,"untrusted":true,"omitted":0}},"retry":"check_first","human_required":false,"do":"check kubernetes.deployment, which names deployment e2e-app in namespace e2e-prod (opv config edit) (already written: prod/fly, prod/gh)","next":"opv plan prod","next_kind":"check"}}
+{"schema_version":2,"ok":false,"exit_code":5,"next":"opv plan prod","do":"ask a cluster admin to let you patch secrets through a Role in namespace e2e-prod (already written: prod/fly, prod/gh)","error":{"code":"permission_denied","category":"target","message":"you may not patch secrets in namespace e2e-prod (context e2e-cluster, Kubernetes); already written: prod/fly, prod/gh","subject":{"then":{"target":null,"system":"kubernetes","resource":{"kind":"namespace","name":"e2e-prod","scope":"context e2e-cluster"},"right":{"verb":{"verb":"patch","resource":"secrets"}},"grant":{"model":"k8s_rbac","verb":"patch","resource":"secrets","namespace":"e2e-prod"},"env":"prod"},"done":["prod/fly","prod/gh"],"approval_used":null,"approval_scope":{"kind":"sync","env":"prod","targets":[],"product":null,"deploy":false,"prune":false,"rotate":[]}},"evidence":{"checked":"kubectl --context e2e-cluster --namespace e2e-prod --request-timeout=120s apply -f - --server-side --field-manager -o name","account":null,"upstream":{"source":"kubernetes","tool":"kubectl","version":null,"exit":{"kind":"code","code":1},"said":["Error from server (Forbidden): secrets \"opv-e2e--web--api-key-<id>\" is forbidden: User \"system:serviceaccount:e2e-prod:opv\" cannot patch resource \"secrets\" in API group \"\" in the namespace \"e2e-prod\""],"truncated":false,"removed_advice":false,"untrusted":true,"omitted":0}},"retry":"check_first","human_required":true,"do":"ask a cluster admin to let you patch secrets through a Role in namespace e2e-prod (already written: prod/fly, prod/gh)","next":"opv plan prod","next_kind":"check"}}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml
-opv: deployment e2e-app in namespace e2e-prod was not found at Kubernetes; already written: prod/fly, prod/gh
-  checked: kubectl --context e2e-cluster --namespace e2e-prod --request-timeout=60s get deployment e2e-app -o json (exit 1)
+opv: you may not patch secrets in namespace e2e-prod (context e2e-cluster, Kubernetes); already written: prod/fly, prod/gh
+  checked: kubectl --context e2e-cluster --namespace e2e-prod --request-timeout=120s apply -f - --server-side --field-manager -o name (exit 1)
 --- kubectl replied, exit 1 ---
-| Error from server (NotFound): deployments.apps "e2e-app" not found
+| Error from server (Forbidden): secrets "opv-e2e--web--api-key-<id>" is forbidden: User "system:serviceaccount:e2e-prod:opv" cannot patch resource "secrets" in API group "" in the namespace "e2e-prod"
 --- (scrubbed) ---
-Do: check kubernetes.deployment, which names deployment e2e-app in namespace e2e-prod (opv config edit) (already written: prod/fly, prod/gh)
+Do: ask a cluster admin to let you patch secrets through a Role in namespace e2e-prod (already written: prod/fly, prod/gh)
 Next: opv plan prod
