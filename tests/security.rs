@@ -270,6 +270,12 @@ impl Harness {
             p
         };
         let (bin, rec, fix, tmp, cwd) = (mk("bin"), mk("rec"), mk("fix"), mk("tmp"), mk("cwd"));
+        // The shared fixture lives in the repository, where the nearest `.opv` up to the
+        // repository root (FR-40, src/config_store.rs) would select a real account and
+        // change test outcomes. Copy it into this harness's own temp dir so no repository
+        // `.opv` can apply (v0101-security-hermetic).
+        let config = root.path().join("secrets.toml");
+        fs::copy(CONFIG, &config).unwrap();
         let cat = ["/bin/cat", "/usr/bin/cat"]
             .into_iter()
             .find(|p| Path::new(p).exists())
@@ -301,7 +307,7 @@ impl Harness {
             tmp,
             cwd,
             env,
-            config: PathBuf::from(CONFIG),
+            config,
         }
     }
 
