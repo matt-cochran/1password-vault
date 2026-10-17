@@ -655,7 +655,7 @@ fn documents() -> Value {
         },
         "row": row,
         "key_ref": key_ref,
-        "error": ["code", "category", "message", "detail", "retry", "human_required", "do", "next"],
+        "error": error_fields(),
         "tidy": ["action", "name"],
         "status": [
             "environment", "product", "changes", "rows", "extras", "undelivered?", "unreferenced_sources?", "drift?", "tidy?", "tidy_error?", "stage",
@@ -736,6 +736,32 @@ fn documents() -> Value {
     })
 }
 
+/// `documents.error`: the top-level keys of the real `error` object, generated from the
+/// catalog's one example of every cause (as [`error_codes`] is from the code table), so the
+/// published list cannot drift from the object. A key only some causes carry is marked `?`.
+fn error_fields() -> Vec<String> {
+    let inv =
+        crate::cause::Invocation::from_cli(&["opv".to_string(), "status".into(), "prod".into()]);
+    let docs: Vec<Vec<String>> = crate::cause::codes::one_of_each()
+        .iter()
+        .map(|cause| crate::error::document_keys(cause, &inv))
+        .collect();
+    let mut fields: Vec<String> = Vec::new();
+    for doc in &docs {
+        for key in doc {
+            if !fields.iter().any(|f| f.trim_end_matches('?') == key) {
+                let every = docs.iter().all(|d| d.contains(key));
+                fields.push(if every {
+                    key.clone()
+                } else {
+                    format!("{key}?")
+                });
+            }
+        }
+    }
+    fields
+}
+
 /// The public error codes, generated from the catalog ([`crate::cause::codes::table`]):
 /// `exit_code`, `retry` and `human_required` are the code's first (its lowest exit code),
 /// and `exit_codes` and `retry_classes` list every one its causes have.
@@ -791,6 +817,63 @@ mod tests {
             .filter(|cli| !names.contains(cli))
             .collect();
         assert!(missing.is_empty(), "MCP tools without EFFECTS: {missing:?}");
+    }
+
+    /// #166: the `error` list is generated from the real object, so a field added to or
+    /// removed from the error document fails here.
+    #[test]
+    fn schema_error_fields_match_every_causes_error_object() {
+        let doc = describe(&clap::Command::new("opv"), "test");
+        let listed: std::collections::BTreeSet<String> = doc["documents"]["error"]
+            .as_array()
+            .expect("documents.error is a list")
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .unwrap_or_default()
+                    .trim_end_matches('?')
+                    .to_string()
+            })
+            .collect();
+        let inv = crate::cause::Invocation::from_cli(&[
+            "opv".to_string(),
+            "status".into(),
+            "prod".into(),
+        ]);
+        let differing: Vec<&str> = crate::cause::codes::one_of_each()
+            .iter()
+            .filter(|cause| {
+                let keys: std::collections::BTreeSet<String> =
+                    crate::cause::render::document(cause, None, &inv, false)
+                        .as_object()
+                        .expect("the error document is an object")
+                        .keys()
+                        .cloned()
+                        .collect();
+                keys != listed
+            })
+            .map(|cause| cause.code())
+            .collect();
+        assert!(
+            differing.is_empty(),
+            "causes whose error keys differ from documents.error: {differing:?}"
+        );
+    }
+
+    /// #166: the error object has no `detail`; the schema must not list one.
+    #[test]
+    fn schema_error_fields_do_not_include_detail() {
+        let doc = describe(&clap::Command::new("opv"), "test");
+        let lists_detail = doc["documents"]["error"]
+            .as_array()
+            .expect("documents.error is a list")
+            .iter()
+            .any(|v| v.as_str() == Some("detail"));
+        assert!(
+            !lists_detail,
+            "documents.error still lists detail: {}",
+            doc["documents"]["error"]
+        );
     }
 
     #[test]

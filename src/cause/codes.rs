@@ -418,7 +418,7 @@ fn variants(c: &Cause) -> Vec<Cause> {
 }
 
 /// One example of every cause (the renderer's own fixtures, design §11).
-fn one_of_each() -> Vec<Cause> {
+pub(crate) fn one_of_each() -> Vec<Cause> {
     use Cause::*;
     vec![
         ConfigNotFound {
