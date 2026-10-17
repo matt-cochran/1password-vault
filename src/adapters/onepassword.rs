@@ -475,9 +475,6 @@ fn account_source(ctx: &DiagnoseContext) -> AccountSource {
     }
 }
 
-/// Stands in for the account when op knows none at all (`op account list` is empty).
-const NO_ACCOUNT_YET: &str = "for this project";
-
 /// The 1Password app holds op's accounts here (macOS, Windows, or op.exe from WSL), so an
 /// account is added there, never with `op account add`.
 fn accounts_in_app(host: &Host) -> bool {
@@ -516,11 +513,10 @@ fn session_cause(
             },
         }),
         Session::AccountAbsent(cause) => Some(*cause),
+        // No account at all is on this machine, so any account will do (the `Any` form);
+        // an account the caller selected but op does not know keeps its id.
         Session::NoAccount => Some(Cause::AccountNotOnMachine {
-            account: ctx.account.clone().map_or_else(
-                || AccountRef::Shorthand(NO_ACCOUNT_YET.to_string()),
-                AccountRef::Id,
-            ),
+            account: ctx.account.clone().map_or(AccountRef::Any, AccountRef::Id),
             selected_by: account_source(ctx),
             in_app: accounts_in_app(host),
         }),
@@ -2103,6 +2099,17 @@ mod tests {
     fn wsl_windows_op_no_account_never_offers_opv_login_add() {
         let e = session_error(Session::NoAccount, &wsl_windows_op(), None, Some("dev")).unwrap();
         assert_ne!(e.next_text().as_deref(), Some("opv login --add"));
+    }
+
+    /// A21: with no account at all on the machine, the session names any account to add,
+    /// never a project shorthand (the `Any` form, design §4.3).
+    #[test]
+    fn a_no_account_session_says_no_account_is_added() {
+        let e = session_error(Session::NoAccount, &linux(), None, Some("dev")).unwrap();
+        assert_eq!(
+            e.to_string(),
+            "no 1Password account is added to op on this machine"
+        );
     }
 
     /// I6: child stdout (which can carry values, and whoami's identity) never reaches the
