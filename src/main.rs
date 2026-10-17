@@ -1366,16 +1366,37 @@ enum CiCmd {
     #[command(before_help = CI_WORKFLOW_QUICK)]
     Workflow {
         /// Environment name from the configuration (for example prod).
-        env: String,
+        #[arg(required_unless_present_any = ["on_change", "drift"])]
+        env: Option<String>,
         /// Target name whose provider setup step and sync command the workflow uses.
-        #[arg(long, value_name = "NAME")]
-        target: String,
+        #[arg(
+            long,
+            value_name = "NAME",
+            required_unless_present_any = ["on_change", "drift"],
+            conflicts_with_all = ["on_change", "drift"]
+        )]
+        target: Option<String>,
         /// GitHub environment the job declares (`environment:`); without it, none.
-        #[arg(long, value_name = "ENVIRONMENT")]
+        #[arg(long, value_name = "ENVIRONMENT", conflicts_with_all = ["on_change", "drift"])]
         github_env: Option<String>,
         /// Let the job deploy after syncing (adds --deploy to the sync command).
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["on_change", "drift"])]
         deploy: bool,
+        /// Print §2.5's change-detection workflow, one job per environment with a target.
+        #[arg(long, conflicts_with_all = ["drift", "target", "github_env", "deploy"])]
+        on_change: bool,
+        /// Print §2.5's nightly drift-check workflow for the same environments.
+        #[arg(long, conflicts_with_all = ["on_change", "target", "github_env", "deploy"])]
+        drift: bool,
+        /// Minutes between change checks (`--on-change` only); a divisor of 60, at most 59.
+        #[arg(
+            long,
+            value_name = "MINUTES",
+            default_value = "15",
+            value_parser = every_minutes,
+            requires = "on_change"
+        )]
+        every: u8,
     },
 }
 
@@ -1383,7 +1404,22 @@ const CI_WORKFLOW_QUICK: &str = "\
 Examples:
   opv ci workflow prod --target web                     # print the workflow for one target
   opv ci workflow prod --target web --github-env prod   # run the job in the prod environment
-  opv ci workflow prod --target web --deploy            # let the job deploy after syncing";
+  opv ci workflow prod --target web --deploy            # let the job deploy after syncing
+  opv ci workflow --on-change                           # the change workflow, every 15 minutes
+  opv ci workflow --on-change --every 30                # ... on a 30-minute cron
+  opv ci workflow --drift                               # the nightly drift check";
+
+/// `--every <minutes>`: a divisor of 60 (so the cron repeats every hour), at most 59.
+fn every_minutes(s: &str) -> Result<u8, String> {
+    let n: u8 = s
+        .parse()
+        .map_err(|_| "a whole number of minutes".to_string())?;
+    if (1..=59).contains(&n) && 60 % n == 0 {
+        Ok(n)
+    } else {
+        Err("a divisor of 60 between 1 and 59".to_string())
+    }
+}
 
 #[derive(Subcommand)]
 enum TargetCmd {
@@ -3590,8 +3626,33 @@ fn run_other(
             target,
             github_env,
             deploy,
+            on_change,
+            drift,
+            every,
         }) => {
-            opv::app::ci_workflow::run(&loaded?, &env, &target, github_env.as_deref(), deploy, out)
+            if on_change {
+                opv::app::ci_workflow::run_on_change(&loaded?, every, out)
+            } else if drift {
+                opv::app::ci_workflow::run_drift(&loaded?, out)
+            } else {
+                match (env.as_deref(), target.as_deref()) {
+                    (Some(env), Some(target)) => opv::app::ci_workflow::run(
+                        &loaded?,
+                        env,
+                        target,
+                        github_env.as_deref(),
+                        deploy,
+                        out,
+                    ),
+                    _ => Err(opv::cause::Cause::Usage {
+                        problem: opv::cause::UsageProblem::NeedsFlag {
+                            flag: "ci workflow".into(),
+                            needs: "an environment and --target, or --on-change/--drift".into(),
+                        },
+                    }
+                    .into()),
+                }
+            }
         }
         Cmd::Ready { env, json, save } => opv::app::ready::run(
             &loaded?,
