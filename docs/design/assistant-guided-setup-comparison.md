@@ -204,3 +204,150 @@ What the numbers show:
     - It is checked against the record that `opv apply` writes; "opv-written" alone is not a control.
 13. **Receipts carry their age and the item versions they saw.** `next` shows the age, and the promotion gate recomputes in CI and never trusts a receipt.
 14. **Restate the superseded parts under Part VI:** §4.1, §5, §6.1, Part V phase E and Part VII decisions 4 and 5.
+
+---
+
+# Third pass: the second reframe (§24, R8–R11)
+
+**Subject:** §24 at the branch tip (`7534fb8`), read together with the owner's decisions of 2026-10-18. These decisions bind the calibration:
+1. Access control is 1Password's vault permissions.
+2. CI runs opv, and opv carries values only in memory and over stdin or a pipe.
+3. Defects inside third-party tools are out of opv's scope.
+4. "The assistant" is always an external model.
+
+**Inputs:** six worker analyses of §24 at `0cfc96c`, with 87 raw failure modes.
+
+**Record:** `assistant-guided-setup-reframe2-technical-plan` with six children `asgr2-<k>-technical-plan`, in the same store as the earlier passes. Exports are in `.delivery/fmeca/export/`. `fmeca-mcp check` prints `ok` for all 21 logs. The calibration rules are the same as before.
+
+## 5. Three-way comparison: as written → reframe 1 → reframe 2
+
+Columns are as in section 1. Each cell reads written → R1–R7 → R8–R11.
+
+| Perspective | FMs | Raw H/M/L | Res ≥ M | Response classes (minor / restr. / re-arch) | `ready` |
+|---|---|---|---|---|---|
+| Cross-cutting (parent) | 5 → 6 → 5 | 3/2/0 → 4/2/0 → 2/3/0 | 2 → 2 → **1** | 0/3/2 → 0/3/3 → 0/5/**0** | false → false → false |
+| Runtime | 6 → 5 → 7 | 3/3/0 → 2/1/2 → 1/4/2 | 2 → 2 → 2 | 0/6/0 → 2/3/0 → 2/5/0 | false → false → false |
+| Ergonomics | 9 → 8 → 9 | 1/8/0 → 1/6/1 → 1/7/1 | 0 → 0 → 0 | 0/9/0 → 1/7/0 → 1/8/0 | true → true → true |
+| Confidentiality | 11 → 12 → 15 | 2/8/1 → 3/8/1 → 1/13/1 | 2 → 2 → **0** | 1/10/0 → 1/11/0 → 1/14/0 | false → false → **true** |
+| Consistency | 9 → 9 → 12 | 3/6/0 → 2/7/0 → 3/9/0 | 1 → 1 → 1 | 0/9/0 → 0/9/0 → 0/12/0 | false → false → false |
+| Recovery | 8 → 9 → 9 | 0/6/2 → 0/7/2 → 0/7/2 | 0 → 0 → 0 | 2/6/0 → 2/7/0 → 2/7/0 | true → true → true |
+| Adoption | 6 → 7 → 8 | 0/6/0 → 1/5/1 → 1/6/1 | 0 → 0 → 0 | 0/6/0 → 1/6/0 → 1/7/0 | true → true → true |
+| **Total** | **54 → 56 → 65** | **12/39/3 → 13/36/7 → 9/49/7** | **7 → 7 → 4** | **3/49/2 → 7/46/3 → 7/58/0** | **3 → 3 → 4 of 7** |
+
+**Critical items:** 2 → 3 → **1**. The one left is `fm-asg-honest-limit-understated`.
+
+**Mitigations:** all of them are planned and none is verified. `verified.ready` is false in all 21 sessions.
+
+**How the reframe-2 set was built:**
+- **54 of the 56 after-pass failure modes were carried.** `fm-asgr-deployed-actuator-undefined` is eliminated by R8: whoever 1Password lets write a vault writes it, and CI only delivers. `fm-asg-r4-platform-channels` was merged into `fm-asg-honest-limit-understated`, because both now have one root: access that 1Password or a platform grants.
+- **`fm-consistency-policy-relaxation` (review M4) is back.** R8 moves relaxation approval to PR review and the check, replacing R6's person `opv apply`.
+- **10 failure modes are new.** Nine come from the workers and one from my own review (the CI courier).
+- **Of the 87 worker findings:** 9 became new failure modes, 72 merged into carried ones, and 6 were dropped:
+  - core dumps: already handled in `src/hardening.rs`;
+  - channel and kind mismatch: belongs to delivery-transports' own FMECA;
+  - a DevOps person writing directly to a platform: already detected by `opv status` and `opv history` as "changed outside opv";
+  - offboarding a developer: decision 1, it is 1Password administration;
+  - a value pasted while filling by hand: covered by P-6;
+  - ephemeral lanes: phase H.
+- **Decision 3:** no worker recorded a third-party-tool defect as its own failure mode. The CI courier failure mode covers only how opv hands a value to a tool. What the tool does with it afterwards is excluded under decision 3.
+
+### The seven residual mediums from the earlier passes
+
+| # | Residual | Status under R8–R11 | Why |
+|---|---|---|---|
+| 1 | `fm-asg-honest-limit-understated` (H3) | **Still medium**, narrowed | R9 keeps production off developer machines by vault permission, and local values are sandbox-grade. Three paths remain: DevOps machines (by design), migrated projects whose groups still let developers read production vaults, and production platform logins left on a laptop. opv can only report them. This becomes an owner acceptance under decision 1, with the separate admin account as the stronger option. Reclassified from structural to cross_cutting: closing it is 1Password and platform configuration, not an opv architecture change |
+| 2 | `fm-asg-r4-platform-channels` | **Merged into #1** | The same root, access granted outside opv. `doctor` reports production platform logins |
+| 3 | `fm-confidentiality-run-encoding-miss` (H4) | **Now low** | On a developer machine `opv run` injects sandbox-grade values, so a missed encoding is a test key to rotate. The DevOps-machine case is #1 |
+| 4 | `fm-confidentiality-r2-kind-downgrade` | **Now low** | §24 makes secret→config a flagged PR change whose check fails until accepted. A credential-shaped check in CI runs before any sync |
+| 5 | `fm-runtime-rotation-revokes-in-use` (M11) | **Still medium** (raw high → medium) | R11's overlap and observed rollout leave two paths: a process that read the old value at boot and is invisible to rollout status, and an undeclared outside consumer. Phase G, not 0.12.0 |
+| 6 | `fm-runtime-retire-prunes-read-key` | **Still medium** (raw high → medium) | Low in generated languages, because the build fails while the key is still read. Still medium where the scanner is the fallback: `needs` at the deployed revision misses dynamic or lazy reads |
+| 7 | `fm-consistency-scanner-missed-names` | **Still medium** | Impossible in generated languages (R10). Unchanged for the scanner fallback |
+
+**Out of scope under decision 3:** none of the seven. None of them is a defect inside a third-party tool.
+
+### New risks R8–R11 introduce
+
+All are recorded with a planned mitigation and a low residual:
+
+| Failure mode | From | Raw | The risk |
+|---|---|---|---|
+| `fm-runtime-set-not-delivered` | R8 | **high** | A value filled in the 1Password app is `set`, and the gate passes, while CI hasn't delivered it. Fix: the gate requires delivery evidence whose version equals the item version, and CI runs `opv changed` then `opv sync` on a schedule |
+| `fm-consistency-generated-module-stale` | R10 | **high** | A generated module not regenerated after a contract change voids R10's retire and boot guarantees. Fix: CI regenerates and diffs, and the module embeds the contract digest |
+| `fm-asgr2-capability-misread` | R8 | medium | 1Password doesn't always expose effective permissions, so `next` names the wrong actor. Fix: an `unknown` capability state |
+| `fm-runtime-module-required-ignores-presence` | R10 | medium | The boot check demands a key that is excepted in that environment, so the deploy rolls back |
+| `fm-confidentiality-module-prints-value` | R10 | medium | The generated check prints a value in a startup error, outside opv's scrubber |
+| `fm-confidentiality-ci-courier-argv-env` | R8, decision 2 | medium | A transport puts a value in argv, the environment or a file on the CI runner. Fix: one stdin/pipe-only courier and a transport test with S7MARKER |
+| `fm-consistency-app-fill-wrong-binding` | R8 | medium | A value is filled in the app under another label or item, so opv keeps asking for it |
+| `fm-ergonomics-team-dev-env-gaps` | R8 | medium | Grant lag, missing personal items, or later keys missing from a team-managed environment |
+| `fm-adoption-codegen-language-gap` | R10 | medium | Four languages first, and adoption needs refactoring, so guarantees differ across a portfolio |
+| `fm-consistency-policy-relaxation` | R8 replaces R6 | medium | Relaxations are approved by ordinary PR review again |
+
+**Surfaced, not introduced:** `fm-confidentiality-assistant-reads-env-for-names`. §3.2 asks the assistant to find names the scanner can't, so it opens `.env` files. Under R9 those values are sandbox-grade. The fix is names-only tools (#176) plus a guard against reading `.env*`.
+
+## 6. Where `re_architecture` items cluster now
+
+| Pass | `re_architecture` | Component |
+|---|---|---|
+| As written | 2 | The value boundary against a same-user shell |
+| Reframe 1 | 3 | The same, plus deployed-tier actuation (R1 × R4) |
+| Reframe 2 | **0** | — |
+
+Two moves account for the drop to zero:
+- **Deployed-tier actuation is eliminated by R8.** People with vault write access fill values, and CI only delivers.
+- **The value-boundary cluster is no longer structural for opv.** R8 and R9 put the tier boundary in 1Password's vault permissions (decision 1), so what remains is configuration plus an owner acceptance.
+
+This is a reclassification, not a disappearance. The residual is still medium and still the one critical item. It now lives in 1Password group membership and platform logins, which opv reports but cannot change.
+
+## 7. Verdict
+
+**The numbers support adopting R8–R11, together with R1–R7 and the corrections in section 8, as the 0.12.0 direction.**
+
+| | As written | R1–R7 | R8–R11 |
+|---|---|---|---|
+| Structural (`re_architecture`) items | 2 | 3 | 0 |
+| Critical items | 2 | 3 | 1 |
+| Residual medium | 7 | 7 | 4 |
+| Raw high | 12 | 13 | 9 |
+| Sessions ready on planned changes | 3 | 3 | 4 |
+
+The failure-mode count rises to 65 because R8 (capability, app-side filling, the CI courier) and R10 (generated modules) add surface. All ten new failure modes reach a low residual with a design-text or test change.
+
+**Which reframes do the most work:**
+- **R10** moves the most. Retire, scanner coverage, the shrinking contract and generated encodings all improve. Its cost is four new failure modes (stale module, required set, printed value, language gap), all cheap to close. Its guarantees stop at the four generated languages, which is why two of the four remaining mediums survive.
+- **R8 and R9** remove the structural cluster by delegating access to 1Password. That is right only if the owner accepts the DevOps-machine residual and teams actually tighten vault groups; opv can report loose groups but not fix them.
+
+**The four remaining mediums:**
+- **H3 (owner acceptance).** Accept it explicitly under decision 1 and recommend the separate admin account.
+- **Rotation and retire (phases G and C).** They don't block 0.12.0.
+- **Scanner coverage for non-generated languages.** It is mitigated by stated coverage and doesn't block 0.12.0.
+
+**The `evaluate` review against reframe 2.** Its "core four value states first" advice still removes the tier-equality and `.env.example` oracles, and now two R10-adjacent states (`suspect`, `placeholder`) as well. Its demotion of the guard rules is confirmed: under R9 they are defence in depth on sandbox-grade machines.
+
+## 8. Remaining corrections to the design text after §24
+
+Still open from section 4:
+1. H1: "approved" must mean the digest recorded by the person's last `opv apply`, or, under R8, the merged contract checked by CI. Pick one and test the hand-edited `secrets.toml` case.
+2. Drop the `.env.example` equality check, or compute it only in CI against the default branch.
+3. The MCP tool count is 13, not 11; add the deprecation phase.
+4. Make the redaction rule consistent. P-5 says "every injected value", §22.1 says secrets of 8 bytes or more, §4.4 ties it to agent mode, G27 says the child is unscrubbed, and decision 4 says agent mode. Make it "always on, secrets of 8 bytes or more", and note that `op run` already masks exact values.
+5. Change §22.1's "eliminated" to "reduced" for M1, M9, H1 and H2. §24's claim table should say "a developer machine reaches only local/dev **where vault groups are tight**; opv reports loose groups".
+6. Keep "same value as a lower tier" off assistant surfaces. R9 makes dev readable by design, so the bit discloses an equal production value.
+7. R3's assistant-triggered local import contradicts R1, R8 ("people set up values"), #173 and #176. Restrict it to an explicit local tier with provenance, or drop it.
+8. R5 and R6 file ownership: names leave only by retire; `ignore` is re-checked; annotations live outside generated contracts; the bindings file is committed and checked against the recorded apply.
+9. Receipts carry their age and the item versions they saw; the gate recomputes in CI.
+10. Restate §4.1, §5, §6.1, Part V phase E and Part VII decisions 4 and 5 under Parts VI and §24. The third-pass workers still read "approve runs the person's steps" as current.
+
+New from §24:
+
+11. **Relaxations: R6 or R8?** R6 says a relaxation needs the person's `opv apply`; R8 says relaxations "show in the PR diff and the check". State one rule. If it's the PR, make relaxations a separate required check status.
+12. **§23 is answered by R8.** Mark merge-time application as declined. CI does not write to 1Password beyond delivery evidence (decision 2). Remove the open question.
+13. **Set is not delivered.** The promotion gate must require delivery evidence equal to the item version, not just `set`. The CI recipe runs `opv changed` and `opv sync` on a schedule, so values filled in the app are delivered.
+14. **Capability needs an `unknown` state** with its source. A 1Password refusal is a typed finding.
+15. **R10 module rules:**
+    - the required set is per environment (contract × presence);
+    - errors name only the key and the rule;
+    - CI checks freshness against an embedded contract digest;
+    - each component states whether it uses the module.
+16. **The courier rule from decision 2 belongs in R8 as a testable invariant:** stdin or a private pipe only, with a transport test. Verify that the Key Vault path ("named pipe or stdin") has an `az` input that is neither an argument nor a file.
+17. **Emergencies:** "no special path" should name 1Password's account recovery and a second writer per deployed-tier vault, which `opv people` reports.
+18. **A-1 is still open.** R9(a)'s separate admin account is the stronger form, and the DevOps-machine residual needs the owner's explicit acceptance.
