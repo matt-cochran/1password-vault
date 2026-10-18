@@ -1425,6 +1425,15 @@ impl Cause {
                 plural(names.len(), "a name", "names"),
                 list_of(names)
             ),
+            RetireStillRead { key, env, files } => match files.as_slice() {
+                [] => format!(
+                    "cannot retire {key} in {env}: no deployed receipt records the revision its code was deployed at, so it may still read the key"
+                ),
+                many => format!(
+                    "cannot retire {key} in {env}: the deployed code still reads it at {}",
+                    list_of(many)
+                ),
+            },
             NotDeclared {
                 kind,
                 given,
@@ -4268,6 +4277,12 @@ impl Cause {
                 inspect(format!(
                     "declare {} with opv add, or stop reading them",
                     list_of(names)
+                )),
+                Next::Rerun,
+            ),
+            RetireStillRead { key, env, files: _ } => plan(
+                inspect(format!(
+                    "deploy a revision that no longer reads {key} in {env}, or stop reading it, then retire again"
                 )),
                 Next::Rerun,
             ),

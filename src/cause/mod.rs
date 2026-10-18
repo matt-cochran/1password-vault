@@ -487,6 +487,16 @@ pub enum Cause {
     NeedsUndeclared {
         names: Vec<String>,
     },
+    /// The deployed code still reads a key a person asked to retire (design Part V, row
+    /// `retire`): retirement prunes a key from a target only once the deployed revision no
+    /// longer binds it, so pruning now would break the running application. An empty
+    /// `files` means no deployed receipt records the revision, which is the same refusal.
+    /// Names and `file:line` only; never a value.
+    RetireStillRead {
+        key: KeyName,
+        env: EnvName,
+        files: Vec<String>,
+    },
 
     // §4.2 names and usage
     NotDeclared {
@@ -1470,6 +1480,7 @@ impl Cause {
             ManifestExists { .. } => "manifest_exists",
             InventoryIncomplete { .. } => "inventory_incomplete",
             NeedsUndeclared { .. } => "needs_undeclared",
+            RetireStillRead { .. } => "retire_still_read",
             NotDeclared { kind, .. } => match kind {
                 NameKind::Environment => "unknown_env",
                 NameKind::Target => "unknown_target",
@@ -1587,6 +1598,7 @@ impl Cause {
             | ConfigInvalid { .. }
             | ContractStale { .. }
             | NeedsUndeclared { .. }
+            | RetireStillRead { .. }
             | ValueInTextField { .. }
             | BoundaryMissing { .. }
             | StateVaultMissing { .. }

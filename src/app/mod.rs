@@ -69,6 +69,7 @@ pub mod receipt_age;
 pub mod remote_delivery;
 pub mod remote_diagnose;
 pub mod repair;
+pub mod retire;
 pub mod rule_source;
 pub mod run;
 pub mod set;

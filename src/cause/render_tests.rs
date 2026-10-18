@@ -903,6 +903,14 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             },
             vec!["env-stage", "shared"],
         ),
+        (
+            RetireStillRead {
+                key: KeyName::new("OPENAI_API_KEY"),
+                env: EnvName::new("env-prod"),
+                files: vec!["src/lib.rs:12".into()],
+            },
+            vec!["OPENAI_API_KEY", "env-prod", "src/lib.rs:12"],
+        ),
     ]
 }
 
@@ -998,10 +1006,11 @@ fn ordinal(c: &Cause) -> usize {
         GateFailed { .. } => 79,
         NeedsUndeclared { .. } => 80,
         ImportTierRefused { .. } => 83,
+        RetireStillRead { .. } => 84,
     }
 }
 
-const VARIANTS: usize = 84;
+const VARIANTS: usize = 85;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()

@@ -123,6 +123,9 @@ pub fn meaning(code: &str) -> &'static str {
         "needs_undeclared" => {
             "the code reads names the contract declares nowhere and the default branch does not declare either"
         }
+        "retire_still_read" => {
+            "the deployed code still reads a key a person asked to retire, or no receipt records the deployed revision"
+        }
         "unknown_env" => "the environment is not declared",
         "unknown_target" => "the target is not declared for the environment",
         "unknown_product" => "the product is not declared",
@@ -527,6 +530,11 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
         },
         NeedsUndeclared {
             names: vec!["API_KEY".into(), "DB_URL".into()],
+        },
+        RetireStillRead {
+            key: KeyName::new("OPENAI_API_KEY"),
+            env: EnvName::new("env-prod"),
+            files: vec!["src/lib.rs:12".into()],
         },
         NotDeclared {
             kind: NameKind::Environment,
