@@ -1545,6 +1545,9 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
                 allow_same_value: false,
                 file: None,
                 roles: None,
+                value_source: None,
+                expires: None,
+                lifecycle: Default::default(),
             }
         }
         let target = GithubTarget {

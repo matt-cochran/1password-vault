@@ -123,6 +123,20 @@ pub struct KeySpec {
     /// Roles apply to local `run` delivery only, never to sync or a target.
     #[serde(default)]
     pub roles: Option<Vec<String>>,
+    /// Key attribute (Part V, `key-attrs`): who or what produces the value
+    /// (`source = "person" | "generated" | "derived"`). Absent: not declared. `derived`
+    /// requires `from`; `generated` requires a generate recipe
+    /// ([`KeySpec::has_generate_recipe`]). Validated at load: see `crate::config`.
+    #[serde(default, rename = "source")]
+    pub value_source: Option<ValueSource>,
+    /// Key attribute (Part V, `key-attrs`): the calendar date the value should be rotated by
+    /// (`expires = "YYYY-MM-DD"`). Absent: no date recorded.
+    #[serde(default)]
+    pub expires: Option<Date>,
+    /// Key attribute (Part V, `key-attrs`): where the key is in its life
+    /// (`active` / `retiring` / `retired`). Absent: `active`.
+    #[serde(default)]
+    pub lifecycle: Lifecycle,
 }
 
 impl KeySpec {
@@ -161,6 +175,111 @@ impl KeySpec {
     /// Whether the key is present (not `except`ed) in `env`.
     pub fn is_desired_in(&self, env: &str) -> bool {
         crate::domain::presence::present_in(self, env) == crate::domain::presence::Presence::Present
+    }
+
+    /// Whether this key's rules give a generate recipe: the pure part of
+    /// [`crate::app::generate::recipe`]. Mirrors the refusals there (a provider-issued prefix
+    /// rule, a personal key, a shared key, or no in-range byte count), so `source =
+    /// "generated"` names a key opv can actually generate. `generate.rs` evaluates the same
+    /// conditions.
+    pub fn has_generate_recipe(&self) -> bool {
+        let r = &self.rules;
+        if r.prefix.is_some() || r.ensure_prefix.is_some() || r.prefix_by_mode.is_some() {
+            return false;
+        }
+        if self.personal || self.from.is_some() {
+            return false;
+        }
+        matches!(
+            (r.base64_bytes, r.hex_bytes),
+            (Some(n), None) | (None, Some(n)) if (16..=1024).contains(&n)
+        )
+    }
+}
+
+/// Key attribute (Part V, `key-attrs`): who or what produces a key's value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ValueSource {
+    /// A person fetches it (only `person` needs a human).
+    Person,
+    /// opv makes it from the key's byte-count rule.
+    Generated,
+    /// Another key's value, named by `from`.
+    Derived,
+}
+
+/// Key attribute (Part V, `key-attrs`): where a key is in its life. Absent: `active`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Lifecycle {
+    #[default]
+    Active,
+    Retiring,
+    Retired,
+}
+
+/// Key attribute (Part V, `key-attrs`): a calendar date (`expires = "YYYY-MM-DD"`),
+/// validated at parse and ordered chronologically, so a later expiry compares greater.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Date {
+    year: u16,
+    month: u8,
+    day: u8,
+}
+
+impl Date {
+    /// The calendar date `year-month-day`, or `None` when it is not one (a month outside
+    /// 1–12, a day outside the month, or a leap day on a non-leap year).
+    pub fn new(year: u16, month: u8, day: u8) -> Option<Self> {
+        let last = match month {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 if is_leap(year) => 29,
+            2 => 28,
+            _ => return None,
+        };
+        (year != 0 && (1..=last).contains(&day)).then_some(Self { year, month, day })
+    }
+}
+
+/// A Gregorian leap year.
+fn is_leap(year: u16) -> bool {
+    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
+}
+
+impl std::str::FromStr for Date {
+    type Err = String;
+
+    /// A `YYYY-MM-DD` date, or the words to write instead. Never echoes the input.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let b = text.as_bytes();
+        let shape = "is not a date; write it as YYYY-MM-DD";
+        if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+            return Err(shape.to_string());
+        }
+        let number = |range: std::ops::Range<usize>| -> Option<u16> {
+            let digits = &b[range];
+            digits.iter().all(u8::is_ascii_digit).then(|| {
+                digits
+                    .iter()
+                    .fold(0u16, |n, d| n * 10 + u16::from(d - b'0'))
+            })
+        };
+        let year = number(0..4).ok_or_else(|| shape.to_string())?;
+        let month = number(5..7).ok_or_else(|| shape.to_string())?;
+        let day = number(8..10).ok_or_else(|| shape.to_string())?;
+        Date::new(year, month as u8, day as u8).ok_or_else(|| shape.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Date {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let text = String::deserialize(deserializer)?;
+        text.parse().map_err(serde::de::Error::custom)
     }
 }
 
