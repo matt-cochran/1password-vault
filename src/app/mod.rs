@@ -1997,15 +1997,33 @@ pub(crate) fn unmanaged_on_target<'a>(
         .collect())
 }
 
+/// Every `.rs` file under `dir`, recursively (`src/app/propose/` included), for the guards.
+#[cfg(test)]
+fn rust_files(dir: &str) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![std::path::PathBuf::from(dir)];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+#[cfg(test)]
 /// FR-12, §8 item 27: use cases reach a target only through the ports. `init` writes a
 /// provider section by design (FR-37), so it may name an adapter.
-#[cfg(test)]
 #[test]
 fn use_cases_name_no_target_adapter() {
     let mut hits = Vec::new();
     for dir in ["src/app", "src/domain"] {
-        for e in std::fs::read_dir(dir).unwrap() {
-            let p = e.unwrap().path();
+        for p in rust_files(dir) {
             let exempt = ["init.rs", "characterization_tests.rs"];
             if exempt.iter().any(|x| p.ends_with(x)) {
                 continue;
@@ -2194,9 +2212,7 @@ fn core_modules_name_no_provider() {
             .map(std::path::PathBuf::from)
             .collect();
     for dir in ["src/app", "src/domain", "src/config"] {
-        for e in std::fs::read_dir(dir).unwrap() {
-            files.push(e.unwrap().path());
-        }
+        files.extend(rust_files(dir));
     }
     let hits: Vec<String> = files
         .iter()

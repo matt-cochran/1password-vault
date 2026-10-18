@@ -52,7 +52,7 @@ fn compose_environment_names_are_observed() {
 #[test]
 fn kubernetes_env_names_are_observed() {
     let observed = names(
-        &Kubernetes,
+        &K8sManifest,
         "kubernetes.yaml",
         include_str!("../../tests/fixtures/scan/manifests/kubernetes.yaml"),
     );
@@ -71,7 +71,7 @@ fn kubernetes_env_names_are_observed() {
 #[test]
 fn fly_env_names_are_observed() {
     let observed = names(
-        &Fly,
+        &FlyToml,
         "fly.toml",
         include_str!("../../tests/fixtures/scan/manifests/fly.toml"),
     );

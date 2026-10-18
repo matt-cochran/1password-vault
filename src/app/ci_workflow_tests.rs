@@ -432,7 +432,7 @@ fn the_relaxations_job_uses_the_workflow_token() {
 fn the_relaxations_job_requires_approval_at_the_head() {
     assert!(
         fly_workflow(None, false)
-            .contains("select(.state == \\\"APPROVED\\\" and .commit_id == \\\"$head\\\")")
+            .contains("select(.state == \"APPROVED\" and .commit_id == $head)")
     );
 }
 

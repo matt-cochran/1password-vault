@@ -468,8 +468,10 @@ fn relaxations_job() -> String {
     s.push_str("            echo \"no contract relaxations\"\n");
     s.push_str("            exit 0\n");
     s.push_str("          fi\n");
-    s.push_str("          head=$(gh pr view \"$PR\" --json headRefOid --jq .headRefOid)\n");
-    s.push_str("          approved=$(gh api \"repos/$REPO/pulls/$PR/reviews\" --jq \"[.[] | select(.state == \\\"APPROVED\\\" and .commit_id == \\\"$head\\\")] | length\")\n");
+    s.push_str("          api=\"https://api.github.com/repos/$REPO/pulls/$PR\"\n");
+    s.push_str("          auth=\"Authorization: Bearer $GH_TOKEN\"\n");
+    s.push_str("          head=$(curl -fsSL -H \"$auth\" \"$api\" | jq -r .head.sha)\n");
+    s.push_str("          approved=$(curl -fsSL -H \"$auth\" \"$api/reviews\" | jq --arg head \"$head\" '[.[] | select(.state == \"APPROVED\" and .commit_id == $head)] | length')\n");
     s.push_str("          if [ \"$approved\" -eq 0 ]; then\n");
     s.push_str("            echo \"contract relaxations need an approving review at $head:\"\n");
     s.push_str("            jq . <<<\"$relaxations\"\n");

@@ -98,8 +98,10 @@ jobs:
             echo "no contract relaxations"
             exit 0
           fi
-          head=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
-          approved=$(gh api "repos/$REPO/pulls/$PR/reviews" --jq "[.[] | select(.state == \"APPROVED\" and .commit_id == \"$head\")] | length")
+          api="https://api.github.com/repos/$REPO/pulls/$PR"
+          auth="Authorization: Bearer $GH_TOKEN"
+          head=$(curl -fsSL -H "$auth" "$api" | jq -r .head.sha)
+          approved=$(curl -fsSL -H "$auth" "$api/reviews" | jq --arg head "$head" '[.[] | select(.state == "APPROVED" and .commit_id == $head)] | length')
           if [ "$approved" -eq 0 ]; then
             echo "contract relaxations need an approving review at $head:"
             jq . <<<"$relaxations"

@@ -29,8 +29,8 @@ fn patterns() -> [&'static dyn Pattern; 9] {
         &crate::scan::lang::Go,
         &crate::scan::manifests::DotEnv,
         &crate::scan::manifests::Compose,
-        &crate::scan::manifests::Kubernetes,
-        &crate::scan::manifests::Fly,
+        &crate::scan::manifests::K8sManifest,
+        &crate::scan::manifests::FlyToml,
         &crate::scan::manifests::GithubActions,
     ]
 }
@@ -246,14 +246,14 @@ fn observation_span(
     observation: &Observation,
     texts: &mut BTreeMap<String, Option<String>>,
 ) -> String {
-    use crate::scan::manifests::{Compose, DotEnv, Fly, GithubActions, Kubernetes};
+    use crate::scan::manifests::{Compose, DotEnv, FlyToml, GithubActions, K8sManifest};
     // A manifest line can carry a literal value (`.env.example`, Compose `NAME=…`, a
     // Kubernetes `value:`, a fly.toml `[env]` entry): its span hashes the NAME, never the line.
     let manifest = [
         &DotEnv as &dyn crate::scan::Pattern,
         &Compose,
-        &Kubernetes,
-        &Fly,
+        &K8sManifest,
+        &FlyToml,
         &GithubActions,
     ]
     .iter()

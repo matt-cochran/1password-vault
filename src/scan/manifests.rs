@@ -97,9 +97,9 @@ impl Pattern for Compose {
 }
 
 /// Kubernetes manifests (a file with a `kind:`): `env:` items and referenced keys.
-pub struct Kubernetes;
+pub struct K8sManifest;
 
-impl Pattern for Kubernetes {
+impl Pattern for K8sManifest {
     fn language(&self) -> &'static str {
         "kubernetes"
     }
@@ -166,9 +166,9 @@ impl Pattern for Kubernetes {
 }
 
 /// `fly.toml`: the keys of the `[env]` table.
-pub struct Fly;
+pub struct FlyToml;
 
-impl Pattern for Fly {
+impl Pattern for FlyToml {
     fn language(&self) -> &'static str {
         "fly"
     }
