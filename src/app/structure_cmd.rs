@@ -100,7 +100,7 @@ pub(crate) fn plan_scoped(
     json: bool,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    let text = crate::config::read_merged(&scope.path)?;
+    let text = scope.config.read_merged(r)?;
     let p = structure::plan(r, &text, &scope.project, &scope.account)?;
     if json {
         return write_json(out, &agent_view::plan_projection(&p));

@@ -405,3 +405,168 @@ fn the_apply_report_never_holds_a_value() {
     .unwrap();
     assert!(!format!("{applied:?}").contains(MARKER));
 }
+
+// Manifest projects (D-G): the ids live in the manifest's `opv-bindings` block ---------------
+
+/// The checkout's `.opv`: the project and the account its manifest is found in.
+fn dot_opv(dir: &std::path::Path) {
+    std::fs::write(
+        dir.join(crate::config_store::DOT_FILE),
+        format!("project = \"myapp\"\naccount = \"{ACCOUNT}\"\n"),
+    )
+    .unwrap();
+}
+
+/// A checkout whose configuration is the manifest `opv · myapp` with `contract` as its
+/// contract block and `block` as its `opv-bindings` block, found by the checkout's `.opv`.
+/// Returns the manifest's item id and its configuration.
+fn manifest_in(
+    op: &FakeOp,
+    contract: &str,
+    block: Option<&str>,
+) -> (tempfile::TempDir, String, ConfigAt) {
+    use crate::adapters::onepassword_manifest::template;
+    use crate::config_store::{Found, Request, locate, manifest_tags, manifest_title};
+    let mut notes = format!("```toml\n{contract}```\n");
+    if let Some(ids) = block {
+        notes.push_str(&format!("```toml opv-bindings\n{ids}```\n"));
+    }
+    let mut item = template(
+        &manifest_title("myapp"),
+        "myapp",
+        &manifest_tags(None, &[]),
+        "",
+    );
+    item["fields"][0]["value"] = serde_json::json!(notes);
+    let id = op.insert("myapp-dev", item);
+    let dir = tempfile::tempdir().unwrap();
+    dot_opv(dir.path());
+    let req = Request {
+        start: dir.path().to_path_buf(),
+        ..Request::default()
+    };
+    let Found::Manifest(m) = locate(&req, op).unwrap() else {
+        unreachable!("no secrets.toml in a fresh directory")
+    };
+    (dir, id, ConfigAt::Manifest(m))
+}
+
+/// A manifest project whose contract block still holds [`INLINE`]'s ids.
+fn inline_manifest_world() -> (tempfile::TempDir, String, ConfigAt, FakeOp) {
+    let op = FakeOp::default();
+    let item_id = op.insert("vdev0000000000000000000001", item("app", "API_KEY"));
+    let (dir, id, at) = manifest_in(&op, &INLINE.replace("ITEM", &item_id), None);
+    (dir, id, at, op)
+}
+
+/// A manifest project holding [`FLEET`], its ids in the `opv-bindings` block.
+fn fleet_manifest_world() -> (tempfile::TempDir, String, ConfigAt, FakeOp) {
+    let op = FakeOp::default();
+    let item_id = op.insert("vdev0000000000000000000001", item("core", "SESSION_KEY"));
+    let (contract, ids) = bindings::split(&FLEET.replace("ITEM", &item_id));
+    let (dir, id, at) = manifest_in(&op, &contract, Some(&ids.render()));
+    (dir, id, at, op)
+}
+
+/// `opv apply` of whatever the manifest project `at` needs, confirmed.
+fn apply_manifest(op: &FakeOp, at: &ConfigAt) -> Result<Applied, Error> {
+    apply_at(
+        op,
+        &tty(),
+        at,
+        "myapp",
+        ACCOUNT,
+        None,
+        ApplyOpts::default(),
+        &mut |_| true,
+        &mut Vec::new(),
+    )
+}
+
+/// The notes of the manifest item `id`.
+fn notes_of(op: &FakeOp, id: &str) -> String {
+    op.item(id)["fields"][0]["value"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn a_manifest_with_inline_ids_proposes_the_move() {
+    let (_d, _id, at, op) = inline_manifest_world();
+    let proposal =
+        crate::app::propose::structure::propose_structure_at(&op, &at, "myapp", ACCOUNT, &[], &[])
+            .unwrap();
+    assert!(
+        proposal
+            .steps
+            .iter()
+            .any(|s| matches!(s, Step::MoveIds { .. }))
+    );
+}
+
+#[test]
+fn a_manifest_move_leaves_no_id_in_the_contract_block() {
+    let (_d, id, at, op) = inline_manifest_world();
+    apply_manifest(&op, &at).unwrap();
+    let contract = crate::adapters::onepassword_manifest::config_text(&notes_of(&op, &id));
+    assert!(!contract.contains("vault_id"));
+}
+
+#[test]
+fn a_manifest_move_records_the_id_in_the_bindings_block() {
+    let (_d, id, at, op) = inline_manifest_world();
+    apply_manifest(&op, &at).unwrap();
+    let block = crate::adapters::onepassword_manifest::bindings_text(&notes_of(&op, &id));
+    assert!(
+        block
+            .unwrap_or_default()
+            .contains("environments.dev.boundaries.app.vault_id")
+    );
+}
+
+#[test]
+fn an_accepted_manifest_plan_creates_the_missing_item() {
+    let (_d, _id, at, op) = fleet_manifest_world();
+    apply_manifest(&op, &at).unwrap();
+    assert!(
+        op.items
+            .borrow()
+            .iter()
+            .any(|i| i["title"] == "myapp · core · staging values")
+    );
+}
+
+#[test]
+fn a_manifest_apply_records_a_created_boundary_in_the_bindings_block() {
+    let (_d, id, at, op) = fleet_manifest_world();
+    apply_manifest(&op, &at).unwrap();
+    let block = crate::adapters::onepassword_manifest::bindings_text(&notes_of(&op, &id));
+    assert!(
+        block
+            .unwrap_or_default()
+            .contains("environments.staging.boundaries.core.item_id")
+    );
+}
+
+#[test]
+fn a_manifest_apply_writes_no_local_record() {
+    let (d, _id, at, op) = fleet_manifest_world();
+    apply_manifest(&op, &at).unwrap();
+    assert!(!d.path().join(bindings::APPLIED).exists());
+}
+
+#[test]
+fn a_second_manifest_apply_finds_no_steps() {
+    let (_d, _id, at, op) = fleet_manifest_world();
+    apply_manifest(&op, &at).unwrap();
+    assert_eq!(apply_manifest(&op, &at).unwrap().steps_run, 0);
+}
+
+#[test]
+fn scope_accepts_a_manifest() {
+    let op = FakeOp::default();
+    let (dir, _id, _at) = manifest_in(&op, &INLINE.replace("ITEM", "item"), None);
+    let scope = crate::app::structure::scope(dir.path(), &op).unwrap();
+    assert!(matches!(scope.config, ConfigAt::Manifest(_)));
+}

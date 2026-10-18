@@ -29,7 +29,7 @@ fn workspace() -> (tempfile::TempDir, PathBuf, FakeOp) {
 
 fn scope_of(path: &Path) -> Scope {
     Scope {
-        path: path.to_path_buf(),
+        config: structure::ConfigAt::File(path.to_path_buf()),
         project: "myapp".into(),
         account: ACCOUNT.into(),
     }

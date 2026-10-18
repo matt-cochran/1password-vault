@@ -14,6 +14,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::app::bootstrap::{BoundaryStep, StateStep};
+use crate::app::structure::ConfigAt;
 use crate::app::{generate, structure};
 use crate::cause::{Cause, GivenBy};
 use crate::config;
@@ -92,25 +93,48 @@ pub fn propose_structure(
     rebind: &[String],
     generate: &[(String, Vec<String>)],
 ) -> Result<StructureProposal, Error> {
-    let text = std::fs::read_to_string(contract_path).map_err(|e| {
-        Error::from(Cause::ConfigUnreadable {
-            path: contract_path.to_path_buf(),
-            io: e.kind().into(),
-            given_by: GivenBy::Discovered,
-        })
-    })?;
+    let at = ConfigAt::File(contract_path.to_path_buf());
+    propose_structure_at(r, &at, project, account, rebind, generate)
+}
+
+/// [`propose_structure`] for the configuration `at`: a file and its sibling bindings, or a
+/// manifest's contract block and its `opv-bindings` block (D-G). Reads only.
+pub fn propose_structure_at(
+    r: &dyn CommandRunner,
+    at: &ConfigAt,
+    project: &str,
+    account: &str,
+    rebind: &[String],
+    generate: &[(String, Vec<String>)],
+) -> Result<StructureProposal, Error> {
+    let (text, bound) = match at {
+        ConfigAt::File(contract_path) => (read_contract(contract_path)?, None),
+        ConfigAt::Manifest(m) => {
+            let (text, ids) = m.read_for_proposal(r)?;
+            (text, Some(ids))
+        }
+    };
 
     // (1) The one-time id move (D-G). `split` takes the ids out of the text; the dedicated
-    // `load_for_move` reader confirms the inline form and would refuse a broken one.
+    // move reader (`load_for_move`, a manifest's `read_for_move`) confirms the inline form
+    // and would refuse a broken one.
     let (contract_now, moved) = bindings::split(&text);
     let has_move = !moved.is_empty();
     if has_move {
-        let (_fleet, _ids) = config::load_for_move(contract_path)?;
+        let (_fleet, _ids) = match at {
+            ConfigAt::File(contract_path) => config::load_for_move(contract_path)?,
+            ConfigAt::Manifest(m) => m.read_for_move(r)?,
+        };
     }
 
-    // The bindings the proposal leaves behind: the sibling file plus the moved ids, with
-    // every rebound environment's ids dropped so apply records new ones.
-    let mut after = bindings::read_sibling(contract_path)?.union(moved.clone());
+    // The bindings the proposal leaves behind: the sibling file (a manifest's bindings
+    // block) plus the moved ids, with every rebound environment's ids dropped so apply
+    // records new ones.
+    let bound = match at {
+        ConfigAt::File(contract_path) => bindings::read_sibling(contract_path)?,
+        ConfigAt::Manifest(_) => bound.unwrap_or_default(),
+    };
+    let mut after = bound.union(moved.clone());
     for env in rebind {
         after = without_env(&after, env)?;
     }
@@ -155,6 +179,17 @@ pub fn propose_structure(
         structure: plan,
         contract_after,
         bindings_after,
+    })
+}
+
+/// The contract file at `contract_path`, as written.
+fn read_contract(contract_path: &Path) -> Result<String, Error> {
+    std::fs::read_to_string(contract_path).map_err(|e| {
+        Error::from(Cause::ConfigUnreadable {
+            path: contract_path.to_path_buf(),
+            io: e.kind().into(),
+            given_by: GivenBy::Discovered,
+        })
     })
 }
 
