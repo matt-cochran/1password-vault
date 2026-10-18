@@ -15,6 +15,7 @@ pub mod account;
 pub mod add;
 pub mod adopt;
 pub mod agent_view;
+pub mod apply;
 pub mod approve;
 #[cfg(test)]
 mod azure_tests;
