@@ -481,7 +481,7 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
             "plan_id": "plan --json prints plan_id when the plan is clean; it covers exactly the targets planned (every target of the environment, or those --target names); sync --expect-plan <plan_id> applies exactly that plan to the same targets or fails with stale_plan (exit 6) and changes nothing",
             "targets": "status, plan and sync cover every target of the environment in name order, or only those --target names (repeatable); every row and key reference names its target",
             "run": "run always passes op:// references to op run, so op run masks values in the child's output; a value needing a fix a person's tidy would make is warned about on stderr, never injected",
-            "schema_version": "2 since 0.10.0 (the error document and its codes changed); stays 2 while fields are only added; changes when a field changes meaning",
+            "schema_version": "3 since 0.12.0 (next became the typed {kind, actor, command} object); stays 3 while fields are only added; changes when a field changes meaning",
         },
         "global_flags": global,
         "commands": commands,

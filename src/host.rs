@@ -1374,8 +1374,8 @@ mod tests {
             false,
         );
         assert_eq!(
-            (doc["next_kind"].clone(), doc["next"].clone()),
-            (serde_json::json!("handoff"), serde_json::json!("opv apply"))
+            doc["next"],
+            serde_json::json!({"kind": "apply", "actor": "person", "command": "opv apply"})
         );
     }
 
