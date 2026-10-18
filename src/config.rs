@@ -26,8 +26,8 @@ use crate::cause::{
 };
 use crate::domain::rules::{SIGNOZ_BODY, SIGNOZ_PREFIX};
 use crate::domain::{
-    Boundary, Environment, Fleet, ItemRef, KeySpec, Kind, Product, Target, boundary_missing,
-    key_label,
+    Boundary, Environment, Fleet, ItemRef, KeySpec, Kind, Product, Target, ValueSource,
+    boundary_missing, key_label,
 };
 use crate::error::Error;
 use crate::provider::{
@@ -1874,6 +1874,32 @@ fn validate_key(
                 id: PatternId::KeyName,
             },
         ));
+    }
+    // Key attributes (Part V, `key-attrs`): `source` must agree with the declaration it
+    // names (D-G: refused, never a finding). `derived` names another key via `from`;
+    // `generated` names a key whose rules give a generate recipe, mirroring the refusals of
+    // `crate::app::generate::recipe` (provider-issued prefix, personal, shared, byte count).
+    match (spec.value_source, &spec.from) {
+        (Some(ValueSource::Derived), None) => {
+            return Err(invalid(&["from"], FieldRule::Missing));
+        }
+        (Some(source), Some(_)) if source != ValueSource::Derived => {
+            return Err(invalid(
+                &["source"],
+                FieldRule::ConflictsWith {
+                    field: dotted(&path(&["from"])),
+                },
+            ));
+        }
+        (Some(ValueSource::Generated), None) if !spec.has_generate_recipe() => {
+            return Err(invalid(
+                &["source"],
+                FieldRule::Type {
+                    expected: "generated only when the key has a base64_bytes or hex_bytes rule",
+                },
+            ));
+        }
+        _ => {}
     }
     // PATH finds `op`, HOME and XDG_CONFIG_HOME locate its configuration, OP_* holds its
     // sign-in.

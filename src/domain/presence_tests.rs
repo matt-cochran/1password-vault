@@ -26,6 +26,9 @@ fn key(environments: Option<&[&str]>, except: &[(&str, &str)]) -> KeySpec {
         allow_same_value: false,
         file: None,
         roles: None,
+        value_source: None,
+        expires: None,
+        lifecycle: Default::default(),
     }
 }
 

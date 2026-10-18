@@ -17,8 +17,8 @@ pub mod presence;
 pub mod secret;
 
 pub use model::{
-    Boundary, Environment, Fleet, ItemRef, KeySpec, Kind, OneOrMany, Origin, PrefixByMode, Product,
-    Rules, Target, boundary_missing, key_label,
+    Boundary, Date, Environment, Fleet, ItemRef, KeySpec, Kind, Lifecycle, OneOrMany, Origin,
+    PrefixByMode, Product, Rules, Target, ValueSource, boundary_missing, key_label,
 };
 pub use secret::SecretValue;
 pub mod plan;
@@ -30,3 +30,7 @@ pub use provenance::Stamp;
 pub use runtime::{
     AccessFinding, Binding, Health, RawSpec, Revision, RuntimeChange, RuntimeSnapshot,
 };
+
+#[cfg(test)]
+#[path = "key_attrs_tests.rs"]
+mod key_attrs_tests;
