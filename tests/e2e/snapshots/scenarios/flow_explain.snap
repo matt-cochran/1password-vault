@@ -1,0 +1,27 @@
+# flow_explain: opv explain web/PERSONAL_LLM_KEY
+
+## text exit: 0
+## text stdout
+web/PERSONAL_LLM_KEY in dev
+  kind:       secret (concealed field)
+  source:     own field
+  personal:   each person's own item
+  held in:    dev
+  target:     none (run-only)
+  rules:      -
+  immutable:  no
+  guidance:   your own key, billed to you
+  open:       opv open web/PERSONAL_LLM_KEY --env dev
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+
+## json exit: 0
+## json stdout
+{"schema_version":3,"ok":true,"environment":"dev","product":"web","key":"PERSONAL_LLM_KEY","kind":"secret","field":"concealed field","source":"own field","personal":true,"boundary":null,"environments":["dev"],"targets":[],"delivered_to":[],"rules":[],"immutable":false,"guidance":"your own key, billed to you","required_here":true,"shared_from":null,"shared_by":[],"next":{"kind":"none","actor":"person","command":null},"do":null}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+
+## mcp opv_explain {"key":"web/PERSONAL_LLM_KEY"}
+{"schema_version":3,"ok":true,"environment":"dev","product":"web","key":"PERSONAL_LLM_KEY","kind":"secret","field":"concealed field","source":"own field","personal":true,"boundary":null,"environments":["dev"],"targets":[],"delivered_to":[],"rules":[],"immutable":false,"guidance":"your own key, billed to you","required_here":true,"shared_from":null,"shared_by":[],"next":{"kind":"none","actor":"person","command":null},"do":null}

@@ -1,0 +1,18 @@
+# apply_person_only: opv apply
+
+## text exit: 6
+## text stdout
+
+## text stderr
+opv: opv apply runs only in a person's terminal; this shell looks like an assistant (OPV_AGENT)
+Do: run it in your own terminal
+Next: opv apply
+
+## json exit: 6
+## json stdout
+{"schema_version":3,"ok":false,"exit_code":6,"next":{"kind":"apply","actor":"person","command":"opv apply"},"do":"run it in your own terminal","error":{"code":"person_only","category":"policy","message":"opv apply runs only in a person's terminal; this shell looks like an assistant (OPV_AGENT)","subject":{"marker":"opv_agent","command":{"command":["apply"],"args":[]}},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":true,"do":"run it in your own terminal","next":{"kind":"apply","actor":"person","command":"opv apply"}}}
+
+## json stderr
+opv: opv apply runs only in a person's terminal; this shell looks like an assistant (OPV_AGENT)
+Do: run it in your own terminal
+Next: opv apply

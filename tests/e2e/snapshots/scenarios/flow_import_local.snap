@@ -1,0 +1,21 @@
+# flow_import_local: opv import dev --from local.env
+
+## text exit: 0
+## text stdout
+dev: 2 found · 1 written · 1 need a decision
+  web/API_KEY                      skipped: already set (--replace web/API_KEY to take the found value)  (from API_KEY)
+  web/SESSION_SECRET               import (written)  (from SESSION_SECRET)
+Next: opv ready dev
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+
+## json exit: 0
+## json stdout
+{"schema_version":3,"ok":true,"environment":"dev","applied":true,"rows":[{"found":["API_KEY"],"product":"web","key":"API_KEY","action":"skipped_already_set","rule":null},{"found":["SESSION_SECRET"],"product":"web","key":"SESSION_SECRET","action":"imported","rule":null}],"writes":1,"decisions_needed":1,"next":{"kind":"run","actor":"assistant","command":"opv ready dev"},"do":null}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+
+## mcp opv_import_local {"env":"dev","file":"local.env"}
+{"schema_version":3,"ok":true,"environment":"dev","applied":true,"rows":[{"found":["API_KEY"],"product":"web","key":"API_KEY","action":"skipped_already_set","rule":null},{"found":["SESSION_SECRET"],"product":"web","key":"SESSION_SECRET","action":"imported","rule":null}],"writes":1,"decisions_needed":1,"next":{"kind":"run","actor":"assistant","command":"opv ready dev"},"do":null}
