@@ -31,7 +31,7 @@ pub struct ErrorDoc {
     #[serde(rename = "do", default)]
     pub act: Option<String>,
     /// The one command that runs next, when any.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::json::next_command")]
     pub next: Option<String>,
 }
 

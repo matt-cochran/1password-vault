@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "ok": true,
   "environment": "prod",
   "product": null,
@@ -69,6 +69,10 @@
       }
     ]
   },
-  "next": "opv sync prod --deploy",
+  "next": {
+    "kind": "run",
+    "actor": "assistant",
+    "command": "opv sync prod --deploy"
+  },
   "do": null
 }

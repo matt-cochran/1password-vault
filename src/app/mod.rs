@@ -440,8 +440,11 @@ pub(crate) fn compare(current: &SecretValue, desired: &SecretValue) -> plan::Cur
 /// show these and never a step of their own (07.06, 07.07).
 pub(crate) fn own_step(e: &Error) -> (Option<String>, Option<String>) {
     let doc = crate::error::document(e, &crate::error::invocation(), false);
-    let text = |k: &str| doc[k].as_str().map(str::to_string);
-    (text("do"), text("next"))
+    (
+        doc["do"].as_str().map(str::to_string),
+        // Schema 3: the typed `next` carries the command in its own field.
+        doc["next"]["command"].as_str().map(str::to_string),
+    )
 }
 
 pub(crate) fn write_err(e: io::Error) -> Error {

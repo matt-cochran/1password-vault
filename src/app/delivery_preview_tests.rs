@@ -215,7 +215,7 @@ fn a_withheld_file_key_is_absent_from_the_local_delivery_step() {
 // --- the metadata-only preview document ----------------------------------------------
 
 #[test]
-fn the_preview_document_is_schema_version_one() {
+fn the_preview_document_is_the_contract_version() {
     let doc = build(
         &role_fleet(),
         "prod",
@@ -224,7 +224,7 @@ fn the_preview_document_is_schema_version_one() {
         &signed_in(),
     )
     .unwrap();
-    assert_eq!(doc["schema_version"], json!(2));
+    assert_eq!(doc["schema_version"], json!(3));
 }
 
 #[test]

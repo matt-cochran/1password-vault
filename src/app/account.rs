@@ -169,6 +169,9 @@ pub struct Report {
     pub selected: Option<Selected>,
     pub accounts: Vec<AccountRow>,
     pub findings: Vec<Finding>,
+    // The frame turns a body's own `next` command into the schema-3 object; read the command
+    // back from either shape (06.04).
+    #[serde(default, deserialize_with = "crate::json::next_command")]
     pub next: Option<String>,
 }
 

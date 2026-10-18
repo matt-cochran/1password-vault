@@ -2296,7 +2296,7 @@ mod tests {
         assert_eq!(
             (doc["schema_version"].as_u64(), checks),
             (
-                Some(2),
+                Some(3),
                 [
                     ("config", "ok"),
                     ("op", "ok"),

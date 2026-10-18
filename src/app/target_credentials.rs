@@ -122,7 +122,10 @@ fn step_toward(e: &Error, create: &Cmd) -> Step {
     let doc = crate::error::document(e, &inv, false);
     Step {
         action: doc["do"].as_str().map(str::to_string),
-        next: doc["next"].as_str().unwrap_or("none").to_string(),
+        next: doc["next"]["command"]
+            .as_str()
+            .unwrap_or("none")
+            .to_string(),
     }
 }
 

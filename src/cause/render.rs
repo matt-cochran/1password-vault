@@ -9,6 +9,7 @@ use super::evidence;
 use super::situation::{RefusedBecause, Situation};
 use super::*;
 use crate::error::shell_word;
+use crate::json::{NextActor, NextKind};
 
 /// Flags only a person may add (§6.2): a command carrying one is always a `Handoff`.
 const PERSON_ONLY_FLAGS: [&str; 4] = [
@@ -4203,16 +4204,34 @@ impl Cause {
 
 // --- output ----------------------------------------------------------------------------------
 
-/// `next_kind` of the document.
-pub fn next_kind(n: &Next) -> &'static str {
+/// The [`NextKind`] and [`NextActor`] a catalog step maps to (schema 3).
+pub fn next_kind_actor(n: &Next) -> (NextKind, NextActor) {
     match n {
-        Next::Rerun => "rerun",
-        Next::Run(_) => "run",
-        Next::Check(_) => "check",
-        Next::Handoff(_) => "handoff",
-        Next::Vendor(_) => "vendor",
-        Next::None(_) => "none",
+        Next::Rerun | Next::Run(_) | Next::Check(_) => (NextKind::Run, NextActor::Assistant),
+        // A person's own terminal: a sign-in is an `authorize`, every other handoff the
+        // person's `apply`.
+        Next::Handoff(c) if is_sign_in(c) => (NextKind::Authorize, NextActor::Person),
+        Next::Handoff(_) => (NextKind::Apply, NextActor::Person),
+        Next::Vendor(_) => (NextKind::Run, NextActor::Person),
+        Next::None(_) => (NextKind::None, NextActor::Person),
     }
+}
+
+/// True when a handoff command is a sign-in/login (`opv login`, `op signin`).
+fn is_sign_in(c: &Cmd) -> bool {
+    c.command.first().map(String::as_str) == Some("login")
+        || c.to_argv().iter().any(|w| w == "signin")
+}
+
+/// The typed `next` object of the error document (schema 3): `kind`, `actor` and the exact
+/// command (or `null`).
+pub fn next_value(n: &Next, inv: &Invocation) -> serde_json::Value {
+    let (kind, actor) = next_kind_actor(n);
+    serde_json::json!({
+        "kind": kind,
+        "actor": actor,
+        "command": next_text(n, inv),
+    })
 }
 
 /// The Next as a command line; `None` when there is nothing to run.
@@ -4352,8 +4371,7 @@ pub fn document(
         "retry": cause.retry(),
         "human_required": cause.human_required(inv),
         "do": do_with_reply(cause, upstream.is_some(), p.do_text),
-        "next": next_text(&p.next, inv),
-        "next_kind": next_kind(&p.next),
+        "next": next_value(&p.next, inv),
     })
 }
 
