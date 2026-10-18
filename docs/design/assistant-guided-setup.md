@@ -438,7 +438,212 @@ Each phase lands with:
 
 ---
 
-# Part VI: decisions for the owner
+# Part VI: reframings (2026-10-18)
+
+The review and the FMECAs found risks that Parts I–IV answer one by one: an extra check here, a guard rule there. The owner asked a better question. Can the problem be reframed, by giving each part of the work to the right kind of tool, so that whole classes of risk cannot be expressed **and** the experience gets simpler at the same time? This part tries seven reframings, keeps the ones that pay off, and drops the ones that don't. The owner also decided (2026-10-18) that the rule-predicate oracle (review H1) is fixed in the 0.12.0 design, not as a 0.11.x patch.
+
+## 20. The three kinds of work
+
+Every input or decision in the system is one of three kinds:
+
+| Kind | Examples | Who produces it | How opv treats it |
+|---|---|---|---|
+| **Deterministic** | the names the code reads, the plan, value states, ordering, imports, generation, delivery | opv's code | computed; never accepted from a client |
+| **Categorical** | a key's kind, source, scope, presence, catalog shape, tier, an `except`, an ambiguity resolution, approve or decline | the assistant or the person | **chosen from a closed set opv enumerates**; nothing else parses |
+| **Generative** | understanding intent, choosing among categories, prose guidance for an unknown provider, conversation | the assistant | kept outside opv, or stored only as screened, labelled, inert text |
+
+**The governing rule:** a client can hand opv a **choice** (categorical), a **name** that opv's grammar validates, or a **reference** (a path or an id). It never hands opv **content** that opv evaluates against a value. Every risk in the review's High list breaks this rule:
+- **H1:** a regular expression is content evaluated against a value.
+- **H2:** a caller's `.env` is content compared with a value.
+- **H4:** a command's output is content derived from a value.
+
+## 21. Seven attempts
+
+### R1. The assistant plans; it never actuates
+
+- **Today, and in Parts I–IV:** the assistant applies approved plans (`opv_structure_apply`, `opv_sync`). Approval is a separate act in the person's terminal, recorded in an approval file with a 15-minute window.
+- **The reframe:** only two actuators exist.
+  - **The person's terminal:** `opv apply` shows the plan, the person confirms, and it runs in one process. Value entry and imports happen there too.
+  - **CI:** scheduled, approved syncs with the target's own identity.
+- **The assistant's role:** it reads state and proposes. It never writes to 1Password or to a target.
+
+What it removes:
+- the approval file, its window and the race between `approve` and `apply` (review M3);
+- plan replay;
+- the assistant running a person-only step (P-20);
+- the need for agent mode to be a security control (review M2): it becomes presentation only.
+
+What it simplifies: the person runs one command instead of two, `approve` then the assistant's `apply`. The assistant's tool surface loses every write tool.
+
+What it costs: nothing changes in 1Password or on a platform unless a person or CI acts. Today that's already true in effect, because every write needs the person's approval, and 1Password asks the person to authorize it.
+
+**Verdict: keep.** It shrinks the surface and removes a class of races.
+
+### R2. A categorical intent language instead of commands
+
+- **The reframe:** the assistant's only write is to the **contract**, through one tool, `opv_propose`, that takes an *intent document*. Its fields are:
+  - names, checked by grammar;
+  - enumerated attributes: kind, source, scope, presence, tier;
+  - **catalog shape names with no parameters**: `stripe_secret`, `base64_bytes_32`, `https_url`;
+  - references: paths and ids;
+  - optional guidance.
+- **What can't be expressed:** a regex, a prefix string, an `enum=` list or any other parameterized rule. Those come only from the catalog or from a person editing the contract in review.
+- **What opv returns:** the contract diff and the plan it implies. Nothing is written until a person runs `opv apply`, or merges the contract change in a pull request (R6).
+
+What it removes:
+- **H1 entirely:** the assistant cannot choose a predicate, so there is no adaptive oracle;
+- free-text value paste into most fields (P-2): only guidance stays free text, it is screened, and it is stored labelled `assistant_written`;
+- the schema test conflict the review found (M13);
+- most of the per-command shapes the assistant has to learn (C8, M14).
+
+What it simplifies: the assistant fills one form, the same way across Claude Code, Cursor and Codex. opv explains every refusal against the form.
+
+**Verdict: keep.** This is the core of the reframe.
+
+### R3. A data diode for values
+
+- **The reframe:** values flow one way only:
+  - **in:** a person, a file reference, a generator or a provisioner, into the store;
+  - **onward:** the store, into the platforms, into the application.
+- **What may flow back to the control plane,** where the assistant lives, is fixed in advance:
+  - **presence:** absent, empty or set;
+  - **results of predicates fixed before the question is asked:** catalog shapes, and rules a person approved;
+  - **comparisons between stored values that the contract fixes,** such as the same value across tiers.
+
+  Nothing the caller supplies at question time ever meets a value. A non-adaptive predicate set bounds what can leak to a few fixed bits per key, and the caller cannot choose which bits.
+- **Imports become write-only.** `import <file>` reports per key `imported`, `skipped: already set` or `skipped: empty`. It never reports "differs", and it never overwrites a value without a person's `opv apply`.
+
+What it removes: H2 (caller-steered equality), and the `.env.example` comparison in #177 (conflict 1 in the review). "Equal to the example file" becomes a fixed check against the committed example, and it is only a warning. It also gives one invariant to test, in place of a list of special cases.
+
+What it simplifies: for the **local tier**, importing a `.env` can run straight from the assistant's request, because it is write-only and reports presence only. "Import my `.env`" then needs no person step at all for local development, which is the commonest first experience.
+
+**Verdict: keep.** It replaces several point fixes with one rule.
+
+### R4. Tiered sight: deployed tiers are seen through receipts, not reads
+
+- **The problem behind review H3:** an assistant with a shell on the person's laptop can reach whatever the person's sessions can reach: `op read`, `kubectl get secret`, `az keyvault secret show`. No opv design closes that. 1Password's JSON for an item includes concealed values (opv reads items with `op item get --format json`), so there is no read that returns metadata alone.
+- **The reframe:** the laptop never *needs* to read a deployed tier.
+  - Production and staging are read by **CI identities only**.
+  - CI publishes a **value-free state receipt** (opv already has `opv ready --save` and delivery receipts), signed by the run.
+  - The assistant and the person see deployed tiers' state through those receipts.
+  - The laptop's session needs access to local and dev only. A person enters a production value through a 1Password link, so the CLI never reads it.
+
+What it removes: the worst case of H3. On a laptop that follows the tier policy, an assistant with a shell can at most reach local and dev values. The guard rules (P-4) become defence in depth, not the main control.
+
+What it costs:
+- deployed-tier state is as fresh as the last CI run. A `refresh` action can trigger one.
+- **Assumption A-1, to check in a spike:** whether 1Password lets a person create and fill fields in a vault without being able to read its items. If it doesn't, the strongest form needs a separate owner account for entering deployed-tier values, and opv can only *detect and warn* when the laptop's session can read a deployed tier (an `access` finding), not prevent it.
+
+**Verdict: keep, as tier policy plus receipts.** The strongest form waits on A-1.
+
+### R5. The contract is observed, then annotated
+
+- **The reframe:** people and assistants don't author key lists. The scanner observes what the code reads. The contract becomes **the observed names plus categorical annotations**: kind, source, scope, presence, shape, and `ignore` with a reason.
+- **What the assistant contributes:** annotations, and names in code the scanner cannot read, tagged `assistant_supplied` and shown as such.
+
+What it removes:
+- most drift between code and contract: a new name appears as unannotated, never silently missing;
+- junk keys from false positives (review M9): `ignore` is an annotation, so a junk name never becomes a required key.
+
+What it simplifies: adding a dependency's key needs no declaration step. The pull request shows "1 new name: annotate it", with the catalog's suggestion pre-filled.
+
+**Verdict: keep for the code-facing half.** Keys no code reads, such as CI-only or platform-only keys, are still declared, categorically.
+
+### R6. The contract changes only through review; relaxations are categorical and loud
+
+- **The reframe:**
+  - The contract lives in the repository (decision 1).
+  - **Bindings** (vault and item ids, targets) live in a separate, opv-written file. Neither an assistant nor a pull request edits them; only `opv apply` and `opv target add` do.
+  - **Policy relaxations** are categorical attributes that opv marks as relaxations: `except <production-tier env>`, `allow_same_value`, removing a shape, presence narrowing.
+  - The plan for a change that contains one shows it first, with its reason. It needs the person's `opv apply` (R1) and fails the `needs`/`ready` gate in CI until then.
+
+What it removes: review M4, a pull request or assistant quietly weakening policy, and review M10, the `all` default pushing junk into production. A new key's plan asks "a value, or `except`?" for each production-tier environment, as a categorical choice.
+
+**Verdict: keep.**
+
+### R7. Value access in code is bound to a purpose
+
+- **The reframe, in the Rust:** `SecretValue::expose()` takes a **purpose token** from a closed set: `DeliverToStore`, `DeliverToPlatform`, `DeliverToChild`, `EvaluateFixedPredicate(PredicateId)` and `CompareFixedPair(KeyRef, KeyRef)`.
+  - Each token can only be minted by the module that owns that purpose, the pattern `Observed` already uses.
+  - The predicate and comparison tokens can only return the closed `ValueState`.
+- This is the code form of R3. It makes "a new feature compares a value with caller input" fail review structurally, because no token for it exists. The canary scan stays as the second layer.
+
+What it removes: the review's M1 (a sealed trait seals nothing inside one crate) by changing the mechanism, not by adding a lint.
+
+**Verdict: keep.** It lands with the 0.12.0 contract hardening.
+
+### Attempts that did not pan out
+
+| Attempt | Why it was dropped |
+|---|---|
+| **opv as the assistant's only shell** (a sandbox) | It depends on each harness, breaks the assistant's normal work (editing code, running tests), and is not opv's job. R4 gets most of the benefit by policy. |
+| **Store digests so comparisons don't need values** | A digest of a low-entropy value is an oracle in itself, and digests are already kept out of outputs for that reason. |
+| **Redact in the assistant, not in opv** | It moves trust to the component we trust least. |
+| **A per-session copy of the vault with dummy values for the assistant** | It duplicates the store, invites drift, and the assistant still can't see real values, so there's no gain. |
+| **Remove the assistant from setup entirely** (a wizard instead) | It loses the generative parts that matter: reading arbitrary code, writing guidance, conversation. R2 keeps those and removes the rest. |
+
+## 22. The synthesis: planner, compiler, actuators, diode
+
+```
+ Assistant (planner) ──categorical intent, names, references──▶ opv (compiler / reconciler)
+       ▲                                                            │ plan
+       │ value-free state: inventory, needs, next, receipts         ▼
+       │                                                  Actuators: the person's terminal (opv apply)
+       │                                                             CI (scheduled, approved syncs)
+       │                                                            │
+       └────────────── presence + fixed predicates only ◀── Store ──▶ Platforms ──▶ Application
+                          (the diode)                     (values flow this way only)
+```
+
+**The assistant's whole surface:**
+- `opv_state`: the inventory matrix, needs, value states and receipts for deployed tiers;
+- `opv_next`: one action and the queue;
+- `opv_propose`: an intent document in, a contract diff and plan out;
+- `opv_import_local`: a file reference in; write-only, local tier only;
+- `opv_explain`: why a key or plan is the way it is.
+
+That is 5 tools, down from 11, all of them without side effects outside the local contract and the local tier.
+
+**The person's whole surface:** `opv apply`, `opv set` (masked entry), the 1Password links opv gives, and reading the plan.
+
+**CI's surface:** `opv sync`, `opv changed`, `opv ready --gate`, receipts.
+
+### 22.1 What the reframe does to the risks
+
+| Risk | Parts I–IV answer | After the reframe |
+|---|---|---|
+| H1: rule-predicate oracle | approve rules before they count | **eliminated** (R2, R3, R7): no client-supplied predicate exists |
+| H2: equality the caller steers | drop the `.env.example` check; make imports person-only | **eliminated** (R3): write-only imports; fixed comparisons only |
+| H3: an assistant shell reaches values | guard rules; an honest limit | **reduced to the local tier** (R4); the strongest form waits on A-1 |
+| H4: `opv run` output | redaction tied to agent mode | **reduced:** under R4 the local tier holds only local values. Redaction stays (secret values of 8+ bytes, always on), as defence in depth |
+| M1: a trait seals nothing | a sealed trait | **eliminated** by a different mechanism (R7) |
+| M2: agent mode can be spoofed | detection | **no longer a security control** (R1) |
+| M3: approve/apply race, window expiry | keep approve approve-only | **eliminated** (R1: one process) |
+| M4: a PR weakens policy | split bindings | **eliminated** (R6) |
+| M9: scanner junk keys | an ignore list | **eliminated** (R5: `ignore` is an annotation) |
+| M10: the `all` default and production | ask per production environment | **eliminated** (R6: a categorical question in the plan) |
+| M13: free-text screening, rule parameters | screening | **reduced to guidance only** (R2) |
+| M14: a parallel command surface | a migration plan | **reduced:** 5 assistant tools replace 11 (still needs a deprecation plan) |
+| P-20: assistant hangs on a prompt | agent mode | **eliminated** (R1: the assistant runs nothing that prompts) |
+
+### 22.2 What it does to the experience
+
+| Journey | Parts I–IV | After the reframe |
+|---|---|---|
+| First local setup from a `.env` | plan, then the person approves, then the assistant applies, then the person imports | the assistant imports the local `.env` (write-only), proposes the contract, and the person runs **one** `opv apply` |
+| Adding a dependency's key | declare, plan, approve, apply | the PR shows "1 new name" with the catalog's suggestion; the assistant annotates it; the merge plus one `opv apply` creates the fields everywhere |
+| Seeing production's state | a laptop read of the production vault | the latest CI receipt; no production access on the laptop |
+| Person actions for a typical change | 2 to 3 commands, plus a time window | 1 command, no window |
+
+## 23. Open questions the reframe raises
+
+- **A-1 (spike):** can a 1Password person write into a vault without reading it? This decides between R4's strong and weak forms.
+- **Receipt freshness:** how stale may deployed-tier state be before `next` asks for a CI refresh? Proposed: a receipt older than the newest relevant item version is `stale` (opv already compares item versions in `opv changed`).
+- **Merge-time application:** can merging a contract change trigger CI to apply the parts that need no person (deployed-tier structure, generated values) under the CI identity? That would make a person's `opv apply` necessary only for person-sourced values and relaxations. This is a good fit, but it gives CI write access to deployed-tier structure, which needs its own access review.
+
+---
+
+# Part VII: decisions for the owner
 
 Each one is explained, with a recommendation.
 
