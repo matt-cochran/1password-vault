@@ -674,6 +674,10 @@ The owner's direction (2026-10-18): access control is **1Password's job and alre
 - Inside that run, opv itself is the courier. Using a service account that can only read the values vault, it reads each value from 1Password into its own process memory and writes it straight to the platform's channel: Fly secrets on stdin, Kubernetes Secrets and ConfigMaps by `kubectl apply` on stdin, Key Vault through the named pipe or stdin, GitHub secrets by `gh secret set` on stdin.
 - **A value never appears in the CI job's logs, files, environment variables or command arguments**, so no person or tool reading CI sees it. The scrubber (NR-31) masks any value a platform tool echoes.
 - Something has to carry the bytes from 1Password to the platform. The only alternative is the platform reading 1Password itself at runtime, which the owner ruled out: production never needs 1Password. So the value's only stop on the CI runner is opv's memory, for the length of the run.
+- **Scope boundary (owner, 2026-10-18).**
+  - **opv is responsible** for running every step that touches a value: getting it from 1Password, then executing the platform tool (`flyctl`, `kubectl`, `az`, `gh`) in a way that exposes nothing. That means stdin or a private pipe, never arguments or inherited environment, never files, and output scrubbed before it is shown.
+  - **opv is not responsible** for what another tool does with a value once it has it. A defect in `az` or `flyctl` that logs or leaks a value is outside opv's purview. opv's scrubber still masks a value such a tool echoes back to opv, as best-effort defence, not as a guarantee.
+  - **FMECA treatment:** failure modes inside third-party tools are recorded as out of scope, not as opv risks.
 - CI also posts the value-free plan and key × environment matrix as a check on pull requests that change the contract.
 - Its only 1Password write is delivery evidence, holding no values, in the target's state vault, as since 0.7.0.
 
