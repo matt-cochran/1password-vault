@@ -2814,6 +2814,17 @@ fn a14_differing_copies_are_not_human_required() {
     assert!(!c.human_required(&inv()));
 }
 
+/// D-G: the differing-copies advice names the plain `config export` (no `--with-ids`).
+#[test]
+fn copies_differ_advice_names_the_plain_export() {
+    let c = Cause::CopiesDiffer {
+        file: PathBuf::from("secrets.toml"),
+        manifest: "opv shop".into(),
+    };
+    let d = c.do_text(&inv()).unwrap_or_default();
+    assert!(d.contains("opv config export --toml >"), "{d}");
+}
+
 /// A14: one ambiguous manifest is singular.
 #[test]
 fn a14_one_manifest_matches_in_the_singular() {

@@ -130,6 +130,35 @@ pub fn export(
     }
 }
 
+/// `config export [--toml|--json]` without ids (D-G, the default): the contract itself,
+/// validated, with every 1Password id left where it lives (a file project's
+/// `secrets.bindings.toml`, a manifest's `opv-bindings` block). `--with-ids` (debugging
+/// only) prints the merged form through [`export`].
+pub fn export_contract(
+    found: &Found,
+    format: Format,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let snap = found.store().read(r)?;
+    store::parse_from(found, &snap.text)?;
+    let (contract, _) = config::bindings::split(&snap.text);
+    write_text(&contract, format, out)
+}
+
+/// Write an already-validated configuration `text` in `format` (shared by the export forms).
+fn write_text(text: &str, format: Format, out: &mut dyn Write) -> Result<(), Error> {
+    match format {
+        Format::Toml => out.write_all(text.as_bytes()).map_err(write_err),
+        Format::Json => {
+            let v: toml::Value = toml::from_str(text).map_err(|_| bug("config export: parse"))?;
+            let s =
+                serde_json::to_string_pretty(&v).map_err(|_| bug("config export: serialize"))?;
+            line(out, s)
+        }
+    }
+}
+
 /// `config import` arguments.
 #[derive(Debug, Clone)]
 pub struct ImportArgs {
