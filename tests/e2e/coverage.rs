@@ -1495,6 +1495,12 @@ fn snapshot_test(name: &str, build: fn() -> Case, text_only: bool) {
     if !cfg!(target_os = "linux") && LINUX_WORDED.contains(&name) {
         return;
     }
+    if name == "private_dir_failed" && skip_under_root(effective_uid()) {
+        eprintln!(
+            "skipped: private_dir_failed needs a non-root user: root ignores directory modes"
+        );
+        return;
+    }
     let got = record(name, build, text_only);
     let path = snapshot_path(name);
     if updating() {
@@ -2121,4 +2127,26 @@ fn i8_mcp_with_two_accounts_and_no_dot_opv_is_account_required() {
     let (tool, args) = c.mcp.clone().expect("an MCP call");
     let answer = c.scenario.mcp(tool, &args);
     assert_eq!(answer["error"]["code"], "account_required", "{answer}");
+}
+
+/// The effective uid of this test process (never root off Unix).
+#[cfg(unix)]
+fn effective_uid() -> u32 {
+    // SAFETY: `geteuid` only reads the process's effective user id.
+    unsafe { libc::geteuid() as u32 }
+}
+
+#[cfg(not(unix))]
+fn effective_uid() -> u32 {
+    1
+}
+
+/// `private_dir_failed` needs a real directory mode, which root ignores: skip it as root.
+fn skip_under_root(euid: u32) -> bool {
+    euid == 0
+}
+
+#[test]
+fn non_root_does_not_skip_private_dir() {
+    assert!(!skip_under_root(1000));
 }
