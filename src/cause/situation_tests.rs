@@ -72,9 +72,9 @@ refusal_rows! {
         { let mut s = base(); s.ci = true; s },
         cmd(&["flyctl", "auth", "login"]),
         Some(RefusedBecause::Ci);
-    ci_refuses_approve:
+    ci_refuses_apply:
         { let mut s = base(); s.ci = true; s },
-        cmd(&["approve"]),
+        cmd(&["apply"]),
         Some(RefusedBecause::Ci);
     ci_refuses_setup:
         { let mut s = base(); s.ci = true; s },

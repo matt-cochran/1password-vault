@@ -126,17 +126,8 @@ pub(crate) fn target_text(
             format: "^[a-z][a-z0-9-]*$",
         }));
     }
-    let args = target_cmd::AddArgs {
-        env: spec.env.clone(),
-        name: spec.name.clone(),
-        provider: spec.provider.clone(),
-        fields: spec.fields.clone(),
-        products: spec.products.clone(),
-        roles: spec.roles.clone(),
-        deploy_credentials: spec.deploy_credentials.clone(),
-        ..Default::default()
-    };
-    let (provider, values) = target_cmd::provider_and_values(&args)?;
+    let (provider, values) =
+        target_cmd::provider_and_values(spec.provider.as_deref(), &spec.fields)?;
     let section = provider.init_section(&values).ok_or_else(|| {
         usage(UsageProblem::ValueFormat {
             flag: "the target".into(),

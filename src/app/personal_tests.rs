@@ -114,47 +114,6 @@ fn merged_fields_never_takes_the_team_item_field_for_a_personal_key() {
     assert_eq!(merged[0].value.expose(), "sk-personal");
 }
 
-#[test]
-fn check_shows_the_personal_key_as_a_row() {
-    let op = FakeOp::default();
-    op.vaults
-        .borrow_mut()
-        .push(("vpriv0000000000000000000001".into(), "Private".into()));
-    let mut personal = item_with("api", "OPENAI_API_KEY", "CONCEALED", "sk-personal");
-    personal["title"] = json!("My Keys");
-    op.insert("Private", personal);
-    // A team key keeps api's boundary in use; the personal key is added beside it.
-    let team_id = op.insert(
-        "myapp-dev",
-        json!({
-            "title": "dev", "category": "SECURE_NOTE", "version": 1,
-            "fields": [{
-                "id": "f_API_KEY", "type": "CONCEALED", "label": "API_KEY",
-                "value": "team-value",
-                "section": {"id": "s_api", "label": "api"}
-            }]
-        }),
-    );
-    let f = crate::config::parse(&format!(
-        r#"
-[environments.dev]
-personal_item = "My Keys"
-boundaries.api = {{ vault_id = "vdev0000000000000000000001", item_id = "{team_id}" }}
-[products.api.keys.API_KEY]
-kind = "secret"
-environments = ["dev"]
-[products.api.keys.OPENAI_API_KEY]
-kind = "secret"
-environments = ["dev"]
-personal = true
-"#
-    ))
-    .unwrap();
-    let mut out = Vec::new();
-    crate::app::local::check(&f, "dev", Some("api"), &op, &mut out, false).unwrap();
-    assert!(String::from_utf8(out).unwrap().contains("OPENAI_API_KEY"));
-}
-
 /// A run whose personal item does not exist: the `git` probe, then three empty `op vault
 /// list` answers (Private, Employee, Personal).
 fn run_without_a_personal_item() -> (FakeRunner, Error) {

@@ -26,13 +26,10 @@ use crate::error::Error;
 use crate::host::Host;
 use crate::runner::CommandRunner;
 
-/// The file `init` writes, in the directory it is given (the current directory).
-pub const FILE_NAME: &str = "secrets.toml";
-
 /// The boundary group of several products that share one item (FR-57).
 pub const SHARED_BOUNDARY: &str = "core";
 
-/// `opv init` arguments.
+/// The arguments of a `--from-item` proposal.
 #[derive(Debug, Clone, Default)]
 pub struct InitArgs {
     pub env: String,
@@ -41,13 +38,9 @@ pub struct InitArgs {
     /// `--product`: the product the item's unsectioned fields (and `--from`'s keys) belong
     /// to.
     pub product: Option<String>,
-    pub force: bool,
-    /// `--from`: declare every key of a dotenv file, and with `apply` import its values
-    /// (#90).
-    pub from: Option<FromFile>,
 }
 
-/// `opv init <env> --from <file.env> [--config KEY]... [--secret KEY]... [--apply]` (#90).
+/// The `.env` file of `opv propose setup --names-from` (#90): names only.
 #[derive(Debug, Clone, Default)]
 pub struct FromFile {
     pub path: std::path::PathBuf,
@@ -55,8 +48,6 @@ pub struct FromFile {
     pub config: Vec<String>,
     /// Keys declared as secret whatever their name suggests.
     pub secret: Vec<String>,
-    /// Create, declare and import; without it nothing is written anywhere.
-    pub apply: bool,
 }
 
 /// The keys of a `--from` file: names and kinds, and which are empty. Never a value.
@@ -191,19 +182,6 @@ fn proposal_invalid(e: Error, base: Option<&str>) -> Error {
     e
 }
 
-/// When a parent directory already holds a `secrets.toml` (the FR-25 discovery walk from
-/// `dir`'s parent), a one-line note naming it: the new file takes precedence below `dir`.
-/// Never a refusal.
-pub fn ancestor_note(dir: &Path) -> Option<String> {
-    let found = config::discover(dir.parent()?)?;
-    Some(format!(
-        "note: {} also exists; the new {FILE_NAME} takes precedence for commands run from {} \
-         and below",
-        found.display(),
-        dir.display()
-    ))
-}
-
 /// Arguments that need no 1Password call: the environment name (a bare TOML key), vault,
 /// item and product.
 fn check_args(args: &InitArgs) -> Result<(), Error> {
@@ -241,17 +219,6 @@ fn check_args(args: &InitArgs) -> Result<(), Error> {
         }));
     }
     Ok(())
-}
-
-/// The vault title `bootstrap` uses for an environment: `<project>-<env>`.
-pub fn default_vault(project: &str, env: &str) -> String {
-    format!("{project}-{env}")
-}
-
-/// The item title `bootstrap` uses for an environment: `<project> · <env> values`, so it
-/// reads apart from the project's manifest (`opv · <project>`) in the same vault.
-pub fn default_item(project: &str, env: &str) -> String {
-    format!("{project} · {env} values")
 }
 
 /// The target appeared (a file, directory or symlink) while init was working and `--force`
@@ -521,7 +488,6 @@ pub(crate) fn plan_item(
         vault: vault_title.to_string(),
         item: item_title.to_string(),
         product: product.map(str::to_string),
-        ..InitArgs::default()
     };
     check_args(&args)?;
     let vault = onepassword_init::find_vault(r, vault_title, &Host::detect)?.found()?;
@@ -554,10 +520,6 @@ fn setup_steps(d: &Declared) -> Vec<String> {
     }
     steps
 }
-
-#[cfg(test)]
-#[path = "init_tests.rs"]
-mod tests;
 
 #[cfg(test)]
 #[path = "init_from_tests.rs"]

@@ -3,9 +3,9 @@
 //! `UPDATE_GOLDEN=1` rewrites them in `tests/fixtures/json/`. Every fixture value carries
 //! [`MARKER`]; no golden may contain it (SR-1).
 
+use super::status;
 use super::sync::{self, SyncOpts};
 use super::testutil::*;
-use super::{local, skeleton, status};
 use crate::error::Error;
 use crate::runner::fake::FakeRunner;
 
@@ -177,26 +177,6 @@ fn plan_findings() {
     );
 }
 
-fn check_json(item: crate::runner::Output) -> String {
-    let r = FakeRunner::new([item]);
-    let mut out = Vec::new();
-    let res = local::check(&fleet(), "prod", Some("allumata"), &r, &mut out, true);
-    framed(&out, &res, "opv check prod --product allumata --json")
-}
-
-#[test]
-fn check_success() {
-    golden("check_success", &check_json(complete_item()));
-}
-
-#[test]
-fn check_findings() {
-    golden(
-        "check_findings",
-        &check_json(item_without("allumata", "OPENAI_API_KEY")),
-    );
-}
-
 fn sync_json(r: &FakeRunner) -> String {
     let opts = SyncOpts {
         json: true,
@@ -266,27 +246,6 @@ fn explain_success() {
 #[test]
 fn explain_undeclared_key() {
     golden("explain_undeclared", &explain_json("allumata/OPENAI_KEY"));
-}
-
-#[test]
-fn skeleton_success() {
-    let r = FakeRunner::new([item_without("allumata", "OPENAI_API_KEY"), ok()]);
-    let mut out = Vec::new();
-    let res = skeleton::run_as(&fleet(), "prod", &r, &mut out, true);
-    golden(
-        "skeleton_success",
-        &framed(&out, &res, "opv item skeleton prod --json"),
-    );
-}
-
-#[test]
-fn skeleton_unknown_environment() {
-    let mut out = Vec::new();
-    let res = skeleton::run_as(&fleet(), "qa", &FakeRunner::new([]), &mut out, true);
-    golden(
-        "skeleton_unknown_env",
-        &framed(&out, &res, "opv item skeleton qa --json"),
-    );
 }
 
 // ---- The schema covers every field (A4): links (H1), changes (H8), shared keys (FR-45),

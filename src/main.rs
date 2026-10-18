@@ -5063,7 +5063,7 @@ mod tests {
     /// on an auth or unknown failure).
     #[test]
     fn no_help_example_chains_a_writing_command() {
-        let writes = ["item skeleton", "sync", "init", "setup"];
+        let writes = ["apply", "sync", "import", "set", "setup"];
         let mut texts = vec![cli_command().render_long_help().to_string()];
         texts.extend(leaf_helps().into_iter().map(|(_, long, _)| long));
         for t in &texts {

@@ -1072,7 +1072,6 @@ fn local_op(op: LocalOp) -> &'static str {
         LocalOp::CurrentExe => "find its own program file",
         LocalOp::HomeDir => "find your home folder",
         LocalOp::Stdout => "write to standard output",
-        LocalOp::Stdin => "read standard input",
         LocalOp::McpHandshake => {
             "complete the MCP handshake with its client over standard input and output"
         }
@@ -1483,7 +1482,6 @@ impl Cause {
                     "{} already exists, and opv replaces it only with --force",
                     path.display()
                 ),
-                UsageProblem::Removed { what, .. } => what.to_string(),
                 UsageProblem::Rejected { message, .. } => message.clone(),
             },
             AlreadyDeclared { kind, name } => {
@@ -1736,9 +1734,6 @@ impl Cause {
                 self::Guard::NotManagedByOpv { name } => {
                     format!("{name} was not created by opv, so opv does not change it")
                 }
-                self::Guard::CredentialAsOption { option } => format!(
-                    "{option} would put a credential on the command line, so opv refuses it"
-                ),
                 self::Guard::ProviderHidesValues { system } => format!(
                     "{} does not show stored values, so opv cannot compare them",
                     system.label()
@@ -2746,10 +2741,7 @@ impl Cause {
                         Some(cmd) => run_or_handoff(cmd),
                         None => help_of(inv),
                     },
-                    UsageProblem::UseInstead { command }
-                    | UsageProblem::Removed {
-                        instead: command, ..
-                    } => run_or_handoff(command.clone()),
+                    UsageProblem::UseInstead { command } => run_or_handoff(command.clone()),
                     UsageProblem::Rejected { help, .. } => {
                         let mut command = help.clone();
                         command.push("--help".into());
@@ -3319,10 +3311,6 @@ impl Cause {
                 self::Guard::NotManagedByOpv { name } => plan(
                     inspect(format!("leave {name} as it is, or manage it outside opv")),
                     Next::None(NoNext::NothingToRun),
-                ),
-                self::Guard::CredentialAsOption { option } => plan(
-                    inspect(format!("keep the credential in 1Password, not in {option}")),
-                    help_of(inv),
                 ),
                 // F2 (R46): the values come from the person, never from the provider.
                 self::Guard::ProviderHidesValues { system: _ } => plan(
@@ -4046,7 +4034,6 @@ impl Cause {
                     LocalOp::Stdout => {
                         "check where standard output goes (a closed pipe, a full disk)".to_string()
                     }
-                    LocalOp::Stdin => "answer at the prompt, or run this in a terminal".to_string(),
                     LocalOp::McpHandshake | LocalOp::McpSession => {
                         "check that the assistant's client starts opv mcp serve and speaks MCP over standard input and output".to_string()
                     }

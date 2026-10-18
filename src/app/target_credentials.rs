@@ -24,7 +24,7 @@
 //! made, and its Next is a read, never the mint again (X5, X20).
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::setup::Interaction;
 use super::tidy::require_person;
@@ -34,6 +34,7 @@ use crate::cause::{
     Cause, Cmd, ConfigSource, GivenBy, Guard, Invocation, NameKind, NotEditable, Origin, Refind,
     UsageProblem, VendorCmd,
 };
+use crate::config_store::{ConfigStore, FileStore, Replaced, Snapshot};
 use crate::domain::{Fleet, SecretValue, Target};
 use crate::error::Error;
 use crate::provider::Provider;
@@ -367,20 +368,19 @@ pub fn run(
     drop(fields);
     // Only the item's reference is recorded; the token itself stays in 1Password.
     let reference = format!("op://{}/{}", state_vault, item.id);
-    super::propose::declare::set_target_deploy_credentials(r, config, env, name, &reference)
-        .map_err(|e| {
-            let done = vec![
-                minted.clone(),
-                format!(
-                    "1Password item {} in vault {}, to record as deploy_credentials = \
+    set_target_deploy_credentials(r, config, env, name, &reference).map_err(|e| {
+        let done = vec![
+            minted.clone(),
+            format!(
+                "1Password item {} in vault {}, to record as deploy_credentials = \
                      {reference:?} under [{}]",
-                    item.id,
-                    state_vault,
-                    target_section(env, name)
-                ),
-            ];
-            after_mint(e, done)
-        })?;
+                item.id,
+                state_vault,
+                target_section(env, name)
+            ),
+        ];
+        after_mint(e, done)
+    })?;
     writeln!(
         out,
         "minted {credential:?} and stored it as item {} in vault {}; nothing was printed",
@@ -393,6 +393,102 @@ pub fn run(
         crate::cause::render::cmd_text(&doctor_cmd(env, name))
     )
     .map_err(write_err)
+}
+
+/// The file store, validating a text as it will load once the structural plan's IDs are
+/// recorded.
+struct Declaring(FileStore);
+
+impl ConfigStore for Declaring {
+    fn describe(&self) -> String {
+        self.0.describe()
+    }
+    fn read(&self, r: &dyn CommandRunner) -> Result<Snapshot, Error> {
+        self.0.read(r)
+    }
+    fn read_for_write(&self, r: &dyn CommandRunner) -> Result<Snapshot, Error> {
+        self.0.read_for_write(r)
+    }
+    fn replace(
+        &self,
+        r: &dyn CommandRunner,
+        base: &Snapshot,
+        text: &str,
+    ) -> Result<Replaced, Error> {
+        self.0.replace(r, base, text)
+    }
+    fn source(&self) -> crate::config::Source<'_> {
+        self.0.source()
+    }
+    fn parse(&self, text: &str) -> Result<Fleet, Error> {
+        crate::config::parse_at(&crate::app::structure::trial_text(text)?, self.0.source())
+    }
+}
+
+fn read(path: &Path) -> Result<String, Error> {
+    std::fs::read_to_string(path)
+        .map_err(|e| crate::config_store::unreadable(path, &e, GivenBy::Discovered))
+}
+
+fn store(path: &Path) -> Result<Declaring, Error> {
+    let text = read(path)?;
+    if crate::app::bootstrap::is_generated(&text) {
+        return Err(Cause::ConfigNotEditable {
+            source: ConfigSource::File {
+                path: PathBuf::from(path),
+                given_by: GivenBy::Discovered,
+            },
+            reason: NotEditable::Generated { generator: None },
+        }
+        .into());
+    }
+    Ok(Declaring(FileStore {
+        path: PathBuf::from(path),
+    }))
+}
+
+/// Record `deploy_credentials` on an existing target in the configuration at `path`
+/// (FR-40). `reference` is an `op://<vault>/<item>` reference (an identifier, never a
+/// value). The same validated, concurrency-checked edit as `opv apply`: every
+/// comment and line is kept, a generated configuration is refused, and a concurrent change
+/// writes nothing.
+fn set_target_deploy_credentials(
+    r: &dyn CommandRunner,
+    path: &Path,
+    env: &str,
+    target: &str,
+    reference: &str,
+) -> Result<(), Error> {
+    let store = store(path)?;
+    let base = store.read_for_write(r)?;
+    let mut doc = crate::app::bootstrap::parse_doc(&base.text)?;
+    let declared: Vec<String> = doc
+        .get("environments")
+        .and_then(|e| e.get(env))
+        .and_then(|e| e.get("targets"))
+        .and_then(toml_edit::Item::as_table_like)
+        .map(|t| t.iter().map(|(k, _)| k.to_string()).collect())
+        .unwrap_or_default();
+    let table = doc
+        .get_mut("environments")
+        .and_then(|e| e.get_mut(env))
+        .and_then(|e| e.get_mut("targets"))
+        .and_then(|t| t.get_mut(target))
+        .and_then(toml_edit::Item::as_table_like_mut)
+        .ok_or_else(|| -> Error {
+            Cause::NotDeclared {
+                kind: NameKind::Target,
+                given: target.to_string(),
+                candidates: declared,
+                closest: None,
+            }
+            .into()
+        })?;
+    table.insert("deploy_credentials", toml_edit::value(reference));
+    let text = doc.to_string();
+    store.parse(&text)?;
+    crate::config_store::save(&store, r, &base, &text)?;
+    Ok(())
 }
 
 #[cfg(test)]

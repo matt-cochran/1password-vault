@@ -59,7 +59,7 @@ environments = [\"dev\"]
 
 // --- regressions of the audit findings (06-targets.md) -------------------------------
 
-/// The fragment `target add` builds for dev/site.
+/// The fragment `propose target` builds for dev/site.
 fn site_body() -> String {
     target_table(
         "dev",
@@ -155,7 +155,7 @@ fn list_without_targets_says_none() {
     let fleet = config::parse(FLEET).unwrap();
     assert_eq!(
         list_text(&fleet, &ListArgs::default()),
-        "no environment declares a deploy target\nNext: opv target add --help\n"
+        "no environment declares a deploy target\nNext: opv propose target --help\n"
     );
 }
 

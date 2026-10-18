@@ -193,18 +193,6 @@ fn leftover_field_of_a_shared_key_is_an_extra() {
 }
 
 #[test]
-fn product_check_reports_the_missing_source_of_its_shared_key() {
-    let r = FakeRunner::new([complete_item()]);
-    let mut out = Vec::new();
-    let _ = super::local::check(&fleet_shared(), "prod", Some("worker"), &r, &mut out, false);
-    assert!(
-        text_of(&out).contains("api/DATABASE_URL: missing (affects worker/DATABASE_URL)"),
-        "{}",
-        text_of(&out)
-    );
-}
-
-#[test]
 fn explain_shows_the_shared_chain() {
     let mut out = Vec::new();
     crate::app::testutil::explain(
@@ -238,14 +226,6 @@ fn explain_of_a_source_names_the_keys_sharing_it() {
         "{}",
         text_of(&out)
     );
-}
-
-#[test]
-fn skeleton_creates_no_field_for_a_shared_key() {
-    let r = FakeRunner::new([complete_item(), ok()]);
-    let mut out = Vec::new();
-    super::skeleton::run(&fleet_shared(), "prod", &r, &mut out).unwrap();
-    assert!(!text_of(&out).contains("worker/"), "{}", text_of(&out));
 }
 
 #[test]

@@ -863,35 +863,6 @@ fn status_json_rows_carry_target_name() {
 
 // ---- P1: check guidance is not a next step -------------------------------------------
 
-#[test]
-fn check_labels_guidance_as_guidance() {
-    let r = FakeRunner::new([item_without("allumata", "OPENAI_API_KEY")]);
-    let mut out = Vec::new();
-    let _ = super::local::check(&fleet(), "prod", Some("allumata"), &r, &mut out, false);
-    assert!(
-        text_of(&out).contains("\n  guidance: OpenAI platform / API keys\n"),
-        "{}",
-        text_of(&out)
-    );
-}
-
-#[test]
-fn check_findings_next_step_opens_the_first_key() {
-    let r = FakeRunner::new([item_without("allumata", "OPENAI_API_KEY")]);
-    let res = super::local::check(
-        &fleet(),
-        "prod",
-        Some("allumata"),
-        &r,
-        &mut Vec::new(),
-        false,
-    );
-    assert_eq!(
-        crate::app::testutil::next_of_error(&res.unwrap_err()),
-        "opv open allumata/OPENAI_API_KEY --env prod"
-    );
-}
-
 // ---- A7 / FR-41: plan ids and --expect-plan (Fly) ---------------------------------------
 
 /// The plan id `opv plan prod --json` reports for the item and an empty Fly app.
@@ -1183,15 +1154,6 @@ fn sync_with_an_undeclared_product_suggests_its_plan() {
         ),
         Some("opv plan prod --product allumata".into())
     );
-}
-
-/// M4: `check` counts its findings once, on the error line (`opv: 1 finding`).
-#[test]
-fn check_with_findings_does_not_count_them_on_stdout() {
-    let r = FakeRunner::new([item_without("allumata", "OPENAI_API_KEY")]);
-    let mut out = Vec::new();
-    let _ = super::local::check(&fleet(), "prod", Some("allumata"), &r, &mut out, false);
-    assert!(!text_of(&out).contains("finding"), "{}", text_of(&out));
 }
 
 /// The Next a cataloged error renders for the command line `line` (a unit test has no CLI

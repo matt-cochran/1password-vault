@@ -160,7 +160,7 @@ pub struct Upstream {
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
 pub struct Invocation {
     pub origin: Origin,
-    /// Subcommand path (`["run"]`, `["target", "add"]`).
+    /// Subcommand path (`["run"]`, `["target", "list"]`).
     pub command: Vec<String>,
     /// Every flag and positional argument before `--`, in order, as the person gave them.
     pub args: Vec<String>,
@@ -1098,11 +1098,6 @@ pub enum UsageProblem {
     FileExists {
         path: PathBuf,
     },
-    /// A removed form (FR-60): what was removed, and the command that does it now.
-    Removed {
-        what: &'static str,
-        instead: Cmd,
-    },
     /// A command line the parser refused: its own first line (it names the argument it
     /// could not place), and the subcommand path whose help to read (empty: `opv --help`).
     Rejected {
@@ -1223,8 +1218,6 @@ pub enum LocalOp {
     CurrentExe,
     HomeDir,
     Stdout,
-    /// Standard input (a prompt's answer).
-    Stdin,
     /// The MCP session with its client over standard input and output: the handshake.
     McpHandshake,
     /// The MCP session after the handshake.
@@ -1255,9 +1248,6 @@ pub enum Guard {
     },
     NotManagedByOpv {
         name: String,
-    },
-    CredentialAsOption {
-        option: String,
     },
     ProviderHidesValues {
         system: System,

@@ -21,34 +21,6 @@ use crate::domain::Fleet;
 use crate::error::Error;
 use crate::provider::{InitField, Provider, init_flag};
 
-/// `opv target add` arguments.
-#[derive(Debug, Clone, Default)]
-pub struct AddArgs {
-    /// Environment name from the configuration.
-    pub env: String,
-    /// New target name (`^[a-z][a-z0-9-]*$`).
-    pub name: String,
-    /// `--provider`: `fly`, `azure`, `kubernetes`, `github`; `None` infers it from the
-    /// provider options given, as `opv init` does.
-    pub provider: Option<String>,
-    /// The provider's options, by flag (`fly-app` → its value); validated against the
-    /// provider's [`InitField`]s.
-    pub fields: BTreeMap<String, String>,
-    /// `--products <p>[,<p>…]`: the products it delivers; empty means every product.
-    pub products: Vec<String>,
-    /// `--role <name>` (repeatable): the process roles it delivers, written as the target's
-    /// `roles` (delivery-transports §4.4); names only. Empty: no `roles` line.
-    pub roles: Vec<String>,
-    /// `--deploy-credentials op://<vault>/<item>` (FR-40).
-    pub deploy_credentials: Option<String>,
-    /// `--project <name>`: the project naming the state vault; default: the repository's.
-    pub project: Option<String>,
-    /// `--dry-run`: print what would be written and created, change nothing.
-    pub dry_run: bool,
-    /// `--json`: print one document (A5).
-    pub json: bool,
-}
-
 /// `target list --env <ENV> [--json]`.
 #[derive(Debug, Clone, Default)]
 pub struct ListArgs {
@@ -107,22 +79,23 @@ fn bug(site: &'static str) -> Error {
 /// with the options checked against its [`InitField`]s: unknown option, another provider's
 /// option, or a missing required one is refused (H3).
 pub(crate) fn provider_and_values(
-    args: &AddArgs,
+    provider: Option<&str>,
+    fields: &BTreeMap<String, String>,
 ) -> Result<(&'static dyn Provider, BTreeMap<&'static str, String>), Error> {
-    let provider = match &args.provider {
+    let provider = match provider {
         Some(named) => registry::find(named).ok_or_else(|| {
             usage(UsageProblem::ValueFormat {
                 flag: format!("--provider {named}"),
                 format: "a provider opv knows (opv propose target --help lists them)",
             })
         })?,
-        None => inferred_provider(args)?,
+        None => inferred_provider(fields)?,
     };
     if provider.init_fields().is_empty() {
         return Err(by_hand());
     }
     let mut values = BTreeMap::new();
-    for (flag, value) in &args.fields {
+    for (flag, value) in fields {
         let (owner, field) = find_field(flag).ok_or_else(|| {
             usage(UsageProblem::UnknownFlag {
                 flag: format!("--{flag}"),
@@ -154,10 +127,10 @@ pub(crate) fn provider_and_values(
 
 /// The one provider whose options `args` gives, when `--provider` is omitted: none or
 /// several are refused, naming what to pass.
-fn inferred_provider(args: &AddArgs) -> Result<&'static dyn Provider, Error> {
+fn inferred_provider(fields: &BTreeMap<String, String>) -> Result<&'static dyn Provider, Error> {
     // Each provider whose option was given, with the first such flag.
     let mut owners: Vec<(&'static dyn Provider, &str)> = Vec::new();
-    for flag in args.fields.keys() {
+    for flag in fields.keys() {
         if let Some((p, _)) = find_field(flag)
             && !owners.iter().any(|(o, _)| o.section() == p.section())
         {
@@ -444,7 +417,7 @@ pub fn list(fleet: &Fleet, args: &ListArgs, out: &mut dyn Write) -> Result<(), E
         writeln!(
             out,
             "Next: {}",
-            crate::cause::render::cmd_text(&opv(&["target", "add"], &["--help"]))
+            crate::cause::render::cmd_text(&opv(&["propose", "target"], &["--help"]))
         )
         .map_err(write_err)?;
     }

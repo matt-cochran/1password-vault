@@ -610,7 +610,7 @@ fn command_entry(cmd: &clap::Command, path: &str) -> Value {
     })
 }
 
-/// `(provider section, required)` when `long` is a provider's `opv target add` option
+/// `(provider section, required)` when `long` is a provider's `opv propose target` option
 /// (`azure-key-vault`).
 fn provider_option(long: &str) -> Option<(&'static str, bool)> {
     crate::adapters::registry::PROVIDERS.iter().find_map(|p| {

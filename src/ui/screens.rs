@@ -256,7 +256,7 @@ pub fn adopt(f: &mut Frame, area: Rect, app: &App, env: &str, from: &str) {
     f.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).title(" Adopt ")),
+            .block(Block::default().borders(Borders::ALL).title(" Import ")),
         area,
     );
 }

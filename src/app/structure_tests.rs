@@ -540,32 +540,30 @@ fn a_configuration_changed_during_apply_is_never_overwritten() {
 
 // End to end (#133 acceptance) -------------------------------------------------------------
 
-/// An assistant declares a new product key and a new target, plans, and a person confirms
-/// and applies it (authorized by a closure, as `opv apply` does); what is left is entering
-/// values in 1Password.
+/// A new product key and a new target are declared in the configuration (as `opv propose
+/// key` and `opv propose target` write them), and a person confirms and applies the plan
+/// (authorized by a closure, as `opv apply` does); what is left is entering values in
+/// 1Password.
 fn end_to_end() -> (tempfile::TempDir, PathBuf, FakeOp, Result<Applied, Error>) {
-    let (d, path, op) = workspace();
-    let mut key = crate::app::propose::declare::Key {
-        product: "billing".into(),
-        key: "WEBHOOK_SECRET".into(),
-        kind: "secret".into(),
-        environments: vec!["prod".into()],
-        guidance: Some("Stripe dashboard > Webhooks".into()),
-        ..Default::default()
-    };
-    crate::app::propose::declare::key(&op, &path, &key).unwrap();
-    key.key = "PUBLISHABLE_KEY".into();
-    key.kind = "config".into();
-    crate::app::propose::declare::key(&op, &path, &key).unwrap();
-    let target = crate::app::propose::declare::Target {
-        environment: "prod".into(),
-        name: "billing".into(),
-        provider: Some("fly".into()),
-        fields: [("fly-app".to_string(), "myapp-billing-prod".to_string())].into(),
-        products: vec!["billing".into()],
-        roles: vec![],
-    };
-    crate::app::propose::declare::target(&op, &path, &target).unwrap();
+    let declared = format!(
+        "{FLEET}{}",
+        r#"
+[environments.prod.targets.billing]
+fly.app = "myapp-billing-prod"
+fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+products = ["billing"]
+
+[products.billing.keys.WEBHOOK_SECRET]
+kind = "secret"
+environments = ["prod"]
+guidance = "Stripe dashboard > Webhooks"
+
+[products.billing.keys.PUBLISHABLE_KEY]
+kind = "config"
+environments = ["prod"]
+"#
+    );
+    let (d, path, op) = workspace_with(&declared);
     let id = plan_of(&path, &op).plan_id;
     let res = apply(&op, &path, "myapp", ACCOUNT, &id, &mut approve_all);
     (d, path, op, res)
