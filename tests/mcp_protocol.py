@@ -10,9 +10,13 @@ import threading
 
 root = pathlib.Path(__file__).resolve().parents[1]
 binary = pathlib.Path(sys.argv[1]).resolve()
+# The contract and its sibling bindings: since 0.12.0 ids live only in the bindings file (D-G),
+# so the project has to carry both or every command that resolves a boundary fails config_invalid.
+fixtures = root / 'tests/fixtures/mcp'
 with tempfile.TemporaryDirectory() as directory:
     project = pathlib.Path(directory)
-    shutil.copyfile(root / 'tests/fixtures/secrets.toml', project / 'secrets.toml')
+    shutil.copyfile(fixtures / 'secrets.toml', project / 'secrets.toml')
+    shutil.copyfile(fixtures / 'secrets.bindings.toml', project / 'secrets.bindings.toml')
     process = subprocess.Popen([str(binary), 'mcp', 'serve', '--project', str(project)],
                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.DEVNULL, text=True)
@@ -97,7 +101,8 @@ with tempfile.TemporaryDirectory() as directory:
         # A failure is the --json document's error object: cause, steps and who acts.
         error = result['error']
         assert {'code', 'category', 'message', 'subject', 'evidence', 'retry',
-                'human_required', 'do', 'next', 'next_kind'} <= set(error), error
+                'human_required', 'do', 'next'} <= set(error), error
+        assert set(error['next']) == {'kind', 'actor', 'command'}, error
         assert isinstance(error['human_required'], bool), error
         # Every tool takes the CLI's verbose flag.
         assert all('verbose' in (tool.get('inputSchema', {}).get('properties') or {})
