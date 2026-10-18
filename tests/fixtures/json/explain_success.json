@@ -26,6 +26,16 @@
       ]
     }
   ],
+  "delivered_to": [
+    {
+      "environment": "prod",
+      "target": "portfolio",
+      "product": "allumata",
+      "item": "opv · delivery · allumata · portfolio",
+      "item_id": null,
+      "records": false
+    }
+  ],
   "rules": [
     "prefix = \"sk-\"",
     "not_prefix = \"sk-or-\""

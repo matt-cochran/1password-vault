@@ -692,6 +692,7 @@ fn documents() -> Value {
             "environment", "product", "key", "kind", "field", "source", "personal",
             "boundary: {name, vault_id, item_id}",
             "targets: [{name, provider, rendered_name, details: [{label, value}]}]",
+            "delivered_to: [{environment, target, product, item, item_id, records}]",
             "rules", "immutable", "guidance", "required_here", "shared_from", "shared_by",
             "reference", "inspect", "readers: {deploy: [service account], ci}",
             "explain --target: {environment, target, provider, locator, products, deploy_credentials, state_vault_id, deploy_account}"
