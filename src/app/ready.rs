@@ -974,6 +974,7 @@ pub fn run(
                     .and_then(|e| e.title.as_deref()),
                 deployed: *deployed,
                 fields,
+                tier: fleet.environments[name].tier,
             },
         )
         .collect();

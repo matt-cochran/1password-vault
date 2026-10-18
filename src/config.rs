@@ -26,7 +26,7 @@ use crate::cause::{
 };
 use crate::domain::rules::{SIGNOZ_BODY, SIGNOZ_PREFIX};
 use crate::domain::{
-    Boundary, Environment, Fleet, ItemRef, KeySpec, Kind, Product, Target, boundary_missing,
+    Boundary, Environment, Fleet, ItemRef, KeySpec, Kind, Product, Target, Tier, boundary_missing,
     key_label,
 };
 use crate::error::Error;
@@ -711,6 +711,10 @@ struct RawEnvironment {
     /// `sync` needs `--confirm <env>` (NR-20).
     #[serde(default)]
     confirm_env: bool,
+    /// How far this environment's values may travel (FR-59); absent: derived from the
+    /// name or title.
+    #[serde(default)]
+    tier: Option<Tier>,
     /// The 1Password account for this environment's `op` calls (FR-40).
     #[serde(default)]
     account: Option<String>,
@@ -981,6 +985,28 @@ fn environment(
             },
         ));
     }
+    let tier = match e.tier {
+        Some(tier) => tier,
+        None => crate::domain::health::default_tier(name, e.title.as_deref()),
+    };
+    if tier == Tier::Local {
+        if !e.targets.is_empty() {
+            return Err(doc.invalid(
+                &["environments", name, "tier"],
+                FieldRule::ConflictsWith {
+                    field: DottedPath(vec!["targets".into()]),
+                },
+            ));
+        }
+        if e.confirm_env {
+            return Err(doc.invalid(
+                &["environments", name, "tier"],
+                FieldRule::ConflictsWith {
+                    field: DottedPath(vec!["confirm_env".into()]),
+                },
+            ));
+        }
+    }
     let mut boundaries = BTreeMap::new();
     for (b, raw) in e.boundaries {
         let path = ["environments", name, "boundaries", b.as_str()];
@@ -1016,6 +1042,7 @@ fn environment(
     }
     Ok(Environment {
         name: name.to_string(),
+        tier,
         boundaries,
         targets,
         modes: e.modes,

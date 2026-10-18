@@ -316,12 +316,27 @@ impl Clone for Target {
     }
 }
 
+/// An environment's tier (FR-59): how far its values may travel and who may write them.
+/// `local` never deploys and never confirms. A configuration without `tier` gets
+/// [`crate::domain::health::default_tier`]; `Default` (shared) is only for literals.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tier {
+    Local,
+    #[default]
+    Shared,
+    Production,
+}
+
 /// One deployment environment: its access boundaries (FR-57) and its named targets
 /// (FR-56). An environment with no target is run-only.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Environment {
     /// The environment's name in the configuration (for messages: `opv login <name>`).
     pub name: String,
+    /// How far this environment's values may travel (FR-59). Absent: `production` when
+    /// the name or title reads as production, else `shared`.
+    pub tier: Tier,
     /// boundary name → recorded vault and item (FR-57); see [`Fleet::boundary`].
     pub boundaries: BTreeMap<String, Boundary>,
     /// target name → target (FR-56), in name order.
