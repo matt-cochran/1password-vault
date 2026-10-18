@@ -8,6 +8,7 @@
 use std::fs;
 
 use super::*;
+use crate::config::bindings::Bindings;
 use crate::domain::intent;
 use crate::domain::relaxation::RelaxationKind;
 
@@ -41,7 +42,7 @@ fn added(diff: &str) -> Vec<&str> {
 fn a_key_proposal_diff_adds_the_key() {
     let intent =
         key_intent(r#"{"kind":"key","key":"NEW_KEY","product":"app","field_kind":"secret"}"#);
-    let proposal = propose(DEV, None, &intent).unwrap();
+    let proposal = propose(DEV, &Bindings::default(), None, &intent).unwrap();
     assert!(proposal.diff.contains("+[products.app.keys.NEW_KEY]"));
 }
 
@@ -49,7 +50,7 @@ fn a_key_proposal_diff_adds_the_key() {
 fn a_new_key_without_environments_writes_no_environments_line() {
     let intent =
         key_intent(r#"{"kind":"key","key":"NEW_KEY","product":"app","field_kind":"secret"}"#);
-    let proposal = propose(DEV, None, &intent).unwrap();
+    let proposal = propose(DEV, &Bindings::default(), None, &intent).unwrap();
     assert!(!proposal.diff.contains("+environments"));
 }
 
@@ -57,7 +58,7 @@ fn a_new_key_without_environments_writes_no_environments_line() {
 fn a_production_tier_environment_yields_the_question() {
     let intent =
         key_intent(r#"{"kind":"key","key":"NEW_KEY","product":"app","field_kind":"secret"}"#);
-    let proposal = propose(DEV_PROD, None, &intent).unwrap();
+    let proposal = propose(DEV_PROD, &Bindings::default(), None, &intent).unwrap();
     assert_eq!(
         proposal.questions,
         vec![Question {
@@ -72,7 +73,7 @@ fn a_key_excepted_from_a_production_environment_asks_nothing() {
     let intent = key_intent(
         r#"{"kind":"key","key":"NEW_KEY","product":"app","field_kind":"secret","except":{"prod":"no prod account"}}"#,
     );
-    let proposal = propose(DEV_PROD, None, &intent).unwrap();
+    let proposal = propose(DEV_PROD, &Bindings::default(), None, &intent).unwrap();
     assert!(proposal.questions.is_empty());
 }
 
@@ -85,7 +86,7 @@ fn an_allow_same_value_change_lists_it_first() {
     let intent = key_intent(
         r#"{"kind":"key","key":"EXISTING_KEY","product":"app","field_kind":"secret","allow_same_value":true}"#,
     );
-    let proposal = propose(working, Some(&base), &intent).unwrap();
+    let proposal = propose(working, &Bindings::default(), Some(&base), &intent).unwrap();
     assert_eq!(
         proposal.relaxations[0].kind,
         RelaxationKind::AllowSameValueAdded
@@ -96,7 +97,7 @@ fn an_allow_same_value_change_lists_it_first() {
 fn a_shape_writes_the_catalogs_rules() {
     let intent =
         key_intent(r#"{"kind":"key","key":"NEW_KEY","product":"app","shape":"base64_bytes_32"}"#);
-    let proposal = propose(DEV, None, &intent).unwrap();
+    let proposal = propose(DEV, &Bindings::default(), None, &intent).unwrap();
     assert!(
         added(&proposal.diff)
             .iter()
@@ -107,7 +108,7 @@ fn a_shape_writes_the_catalogs_rules() {
 #[test]
 fn an_env_proposal_adds_the_environment_with_its_tier() {
     let intent = key_intent(r#"{"kind":"env","env":"staging","tier":"production"}"#);
-    let proposal = propose(DEV, None, &intent).unwrap();
+    let proposal = propose(DEV, &Bindings::default(), None, &intent).unwrap();
     assert_eq!(
         added(&proposal.diff),
         vec!["[environments.staging]", "tier = \"production\""]
@@ -117,7 +118,7 @@ fn an_env_proposal_adds_the_environment_with_its_tier() {
 #[test]
 fn a_retire_proposal_marks_the_key_retiring() {
     let intent = key_intent(r#"{"kind":"retire","key":"EXISTING_KEY","product":"app"}"#);
-    let proposal = propose(DEV, None, &intent).unwrap();
+    let proposal = propose(DEV, &Bindings::default(), None, &intent).unwrap();
     assert!(
         added(&proposal.diff)
             .iter()
@@ -129,8 +130,8 @@ fn a_retire_proposal_marks_the_key_retiring() {
 fn the_same_intent_twice_gives_the_same_plan_id() {
     let intent =
         key_intent(r#"{"kind":"key","key":"NEW_KEY","product":"app","field_kind":"secret"}"#);
-    let first = propose(DEV, None, &intent).unwrap();
-    let second = propose(DEV, None, &intent).unwrap();
+    let first = propose(DEV, &Bindings::default(), None, &intent).unwrap();
+    let second = propose(DEV, &Bindings::default(), None, &intent).unwrap();
     assert_eq!(first.plan_id, second.plan_id);
 }
 
@@ -141,7 +142,13 @@ fn propose_leaves_the_contract_on_disk_unchanged() {
     fs::write(&path, DEV).unwrap();
     let intent =
         key_intent(r#"{"kind":"key","key":"NEW_KEY","product":"app","field_kind":"secret"}"#);
-    propose(&fs::read_to_string(&path).unwrap(), None, &intent).unwrap();
+    propose(
+        &fs::read_to_string(&path).unwrap(),
+        &Bindings::default(),
+        None,
+        &intent,
+    )
+    .unwrap();
     assert_eq!(fs::read_to_string(&path).unwrap(), DEV);
 }
 
@@ -164,4 +171,11 @@ fn write_leaves_every_other_file_untouched() {
     fs::write(&other, "notes").unwrap();
     write(&path, &format!("{DEV}\n")).unwrap();
     assert_eq!(fs::read_to_string(&other).unwrap(), "notes");
+}
+
+#[test]
+fn a_contract_without_ids_is_validated_with_its_bindings() {
+    let (contract, bindings) = crate::config::bindings::split(DEV);
+    let intent = key_intent(r#"{"kind":"key","key":"NEW_KEY","product":"app"}"#);
+    assert!(propose(&contract, &bindings, None, &intent).is_ok());
 }

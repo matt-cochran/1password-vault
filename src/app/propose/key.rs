@@ -15,6 +15,7 @@ use toml_edit::Value;
 use super::{Proposal, Question};
 use crate::cause::{Cause, GivenBy, NameKind, UsageProblem};
 use crate::config;
+use crate::config::bindings::Bindings;
 use crate::config_edit::{ConfigDoc, NewKey};
 use crate::domain::catalog;
 use crate::domain::intent::{self, FieldKind, Intent, ProductName, SourceKind};
@@ -27,13 +28,16 @@ fn usage(problem: UsageProblem) -> Error {
 }
 
 /// The proposal a categorical intent implies for `contract_text`, against the
-/// default-branch contract `base` (whose relaxations the proposal lists first).
+/// default-branch contract `base` (whose relaxations the proposal lists first). `bindings`
+/// are the ids of `secrets.bindings.toml`, used only to validate; the diff never holds an id.
 pub fn propose(
     contract_text: &str,
+    bindings: &Bindings,
     base: Option<&Fleet>,
     intent: &Intent,
 ) -> Result<Proposal, Error> {
-    let fleet = config::parse(contract_text)?;
+    // The contract carries no ids (D-G): validate it with its bindings filled in.
+    let fleet = config::parse(&config::bindings::merge(contract_text, bindings))?;
     let mut doc = ConfigDoc::parse(contract_text)?;
     let mut questions = Vec::new();
     let kind = match intent {
@@ -106,7 +110,7 @@ pub fn propose(
     let proposed = doc.to_string();
     // The same validation as a hand-written file: a proposal that would not load is refused
     // before anything is written.
-    let proposed_fleet = config::parse(&proposed)?;
+    let proposed_fleet = config::parse(&config::bindings::merge(&proposed, bindings))?;
     let diff = crate::app::config_cmd::diff(contract_text, &proposed);
     let relaxations = base
         .map(|base| relaxation::relaxations(base, &proposed_fleet))
