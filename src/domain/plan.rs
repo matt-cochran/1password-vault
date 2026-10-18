@@ -1588,6 +1588,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
                     keys: BTreeMap::from([("TOKEN".to_string(), key())]),
                     local: None,
                     remotes: Default::default(),
+                    ignore: Default::default(),
                 },
             ),
             (
@@ -1598,6 +1599,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
                     keys: BTreeMap::from([("TOKEN".to_string(), key())]),
                     local: None,
                     remotes: Default::default(),
+                    ignore: Default::default(),
                 },
             ),
             (
@@ -1608,6 +1610,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
                     keys: BTreeMap::from([("TOKEN".to_string(), key())]),
                     local: None,
                     remotes: Default::default(),
+                    ignore: Default::default(),
                 },
             ),
         ]);

@@ -308,6 +308,37 @@ pub struct Product {
     /// there. Empty: the product has no remote delivery.
     #[serde(default)]
     pub remotes: BTreeMap<String, Remote>,
+    /// Ignore annotations (Part V, `annotations`): a scanner-observed name the person
+    /// judged a false positive, with the reason and the evidence span it was made against.
+    /// The annotation is re-checked (shown again as unannotated) when the span changes; see
+    /// [`span_of`]. Absent: no name is ignored.
+    #[serde(default)]
+    pub ignore: BTreeMap<String, Ignore>,
+}
+
+/// One ignore annotation (Part V, row `annotations`): the person's reason and the evidence
+/// span of the line the name was observed on. The span is a stable hash of that line
+/// ([`span_of`]), so changing the line invalidates the annotation. Never a value: the
+/// evidence line holds code, not a secret, and nothing here reaches a secret's value.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Ignore {
+    /// Why the observed name is a false positive. Must say something.
+    pub reason: String,
+    /// The evidence span the annotation was made against ([`span_of`]).
+    pub span: String,
+}
+
+/// The evidence span of an annotation (Part V, row `annotations`): a stable hash of the
+/// file path plus the evidence line trimmed of surrounding whitespace, as 16 lower-case hex
+/// characters of SHA-256. The same line in the same file gives the same span; any change to
+/// the line (other than surrounding whitespace) gives a different one. The evidence line
+/// holds code, never a secret value, so the input is safe to hash and the output carries no
+/// part of a value.
+pub fn span_of(file: &str, line: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("{file}\n{}", line.trim()).as_bytes());
+    hex::encode(digest)[..16].to_string()
 }
 
 /// `[products.<p>.remotes.<name>]`: one reviewed remote execution profile (#139). Every
