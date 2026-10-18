@@ -68,7 +68,7 @@ A typical session:
 ```sh
 opv login dev                         # sign in to dev's 1Password account; type exit to leave
 opv doctor --env dev                  # what dev needs, plus one read of its item
-opv inventory --env dev --product api # api's keys saved and valid? no target touched
+opv inventory --env dev --product api # api's keys: value state and access, no target touched
 opv run dev --product api -- npm run dev
 opv status                            # one line per environment
 opv status staging                    # one row per key, problems first
@@ -95,13 +95,13 @@ Do: fix the keys above in 1Password (click Edit on the item: it hides empty fiel
 Next: opv open api/LOG_LEVEL --env prod
 ```
 
-The count lines count the rows per target. `status`, `plan` and `inventory` exit 8 when a key is missing or failing a rule. On Azure and Kubernetes, `status` also prints when opv last changed the target (`Azure: last changed by opv 0.5.0 at 2026-10-08T14:02:11Z (plan 7f3c9a1e)`) and reports drift.
+The count lines count the rows per target. `status` and `plan` exit 8 when a key is missing or failing a rule (`inventory` reports and exits 0). On Azure and Kubernetes, `status` also prints when opv last changed the target (`Azure: last changed by opv 0.5.0 at 2026-10-08T14:02:11Z (plan 7f3c9a1e)`) and reports drift.
 
 `sync` refuses (exit 6) and writes nothing while any key is missing or failing a rule, naming every blocking key and the `opv explain` command for them, and it checks the target read-only before its first write ([checks before the first write](how-opv-handles-failures.md#checks-before-the-first-write)). Nothing is deployed without `--deploy` and nothing removed without `--prune`. `--rotate <product/KEY>` (repeatable) writes an immutable key that is already on the target; `--prune-immutable <product/KEY>` (repeatable) lets `--prune` remove one. On Fly, values are staged with `flyctl secrets import --stage`, values on stdin.
 
 ### States
 
-`status`, `plan` and `inventory` use one small set of words, the same on every provider. `opv help states` prints them. Each row's `STATE` column is the key in 1Password (JSON `state`); its `ON TARGET` column is the key on its deployment target (JSON `target_state`); the `TARGET` column names that target (JSON `target`).
+`status` and `plan` use one small set of words (`inventory` uses the value states), the same on every provider. `opv help states` prints them. Each row's `STATE` column is the key in 1Password (JSON `state`); its `ON TARGET` column is the key on its deployment target (JSON `target_state`); the `TARGET` column names that target (JSON `target`).
 
 | Column | Word | Meaning |
 |---|---|---|
@@ -128,7 +128,7 @@ The count lines count the rows per target. `status`, `plan` and `inventory` exit
 opv open <[product/]KEY> [--env <environment>] [--print] [--json]
 ```
 
-`status`, `plan` and `inventory` end their findings with `Next: opv open <KEY> --env <env>` for the first key to fix; `--json` rows carry the item link as `open_url`.
+`status` and `plan` end their findings with `Next: opv open <KEY> --env <env>` for the first key to fix; `--json` rows carry the item link as `open_url`.
 
 The link is 1Password's private item link, the form "Copy Private Link" produces: account, vault and item IDs and the sign-in host, never a value. 1Password links to items, not single fields, so the section and field are named next to it. opv takes the account from one free `op whoami` call; when that call fails the link has the vault and item only.
 
@@ -362,7 +362,7 @@ Known limitation: Fly hides an unset name as soon as `flyctl secrets unset --sta
 
 ### Shared keys
 
-A key declared with `from = "<product>/<KEY>"` ([configuration](configuration.md#shared-keys-from)) has a row of its own in `status`, `plan` and `inventory`, with the source under it:
+A key declared with `from = "<product>/<KEY>"` ([configuration](configuration.md#shared-keys-from)) has a row of its own in `status` and `plan` (and in `inventory`), with the source under it:
 
 ```text
 TARGET  PRODUCT  KEY           KIND    STATE              ON TARGET
@@ -401,13 +401,15 @@ It reads only the configuration (when that is a manifest, the manifest itself): 
 
 ## Local development: `opv run`
 
-`opv inventory --env <env> [--product <p>]` reads the environment's item once and reports each key as saved, missing or failing a rule, by name; it never contacts a deployment target and exits 8 when a key needs fixing. A failing key's guidance is printed under it as `  guidance: <text>`. `--json` prints the [shared row shape](#machine-readable-status-and-plan) with `target_checked: false`.
+Before a local run, `opv inventory --env <env> [--product <p>]` shows each key's value state in that environment, by name, without contacting a deployment target ([the inventory](#the-inventory-opv-inventory)); its last line is the `opv set` command for the first key with no value.
 
 ```text
 $ opv inventory --env dev --product api
-api/LOG_LEVEL: saved
-api/OPENAI_API_KEY: saved
-no findings; no deployment target checked
+key                 dev[local]
+api/LOG_LEVEL       set/W
+api/OPENAI_API_KEY  absent/W
+dev[local]: core=vDEV.../iDEV...
+next: opv set api/OPENAI_API_KEY --env dev
 ```
 
 `run <env> [--product <p>] [--role <r>] -- <cmd>` starts a command with the keys as environment variables under their plain names, through `op run`, with no `.env` file. It first removes every key name declared in the configuration from the inherited environment, so another product's keys never leak in. opv's options go before `--`; `run` exits with the command's own exit code. The local guide, with Docker Compose, editors, product switching and WSL, is [local-development.md](local-development.md).
@@ -547,7 +549,7 @@ Each target in `targets` is `ready` (every vault and item it needs could be open
 
 ## The inventory: `opv inventory`
 
-`opv inventory [--env <e>] [--product <p>]` is the matrix: every declared key against every environment. Each cell is a value state ([States](#states)) and the capability this session has on the key's vault (`write`, `read`, `none` or `unknown`), with the ids, source, presence, tier and delivery state per target. A deployed tier this session cannot read comes from the newest CI receipt, shown with its age; a cell with no receipt is `unknown`, never `absent`. It reads each item once, by IDs, and prints names, states and capability words only, never a value. `--env` narrows the rows and `--product` the columns. `--json` prints one document ([shared row shape](#machine-readable-status-and-plan)).
+`opv inventory [--env <e>] [--product <p>] [--json]` is the matrix: every declared key against every environment. Each cell is `<state>/<access>`: the value state ([States](#states): `set`, `absent`, `empty`, `placeholder`, `malformed(<rule>)`, `unreadable(<cause>)`, `not_wanted`) and this session's access to the key's vault (`W` write, `R` read, `-` none, `?` unknown). Each column is headed `<env>[<tier>]`. Below the matrix, one line per environment names its boundaries' vault and item ids (or `unbound`), one `delivery <env>/<target>/<product>: <state>` line per recorded delivery item (`delivered`, `not_delivered`, `not_recorded`, `unreadable`), and `next: opv set <product>/<KEY> --env <env>` for the first wanted key with no value. It reads each item once, by IDs, and only from vaults this session is a member of; it never prints a value, a length or a digest, and exits 0. `--env` and `--product` narrow the document. `--json` prints one schema-3 document with `environments` (`env`, `tier`, `boundaries`), `keys` (`product`, `key`, `kind`, `source`, `presence` per environment, `lifecycle`, `expires`), `cells` (`product`, `key`, `env`, `boundary`, `state`, `capability`, `from_receipt`), `deliveries` and a typed `next`. The CLI takes no receipt file: a cell of a vault this session cannot read is not filled from a CI receipt.
 
 ## Code and contract: `opv needs` and `opv contract`
 
@@ -557,7 +559,7 @@ Each target in `targets` is `ready` (every vault and item it needs could be open
 
 ## One action: `opv next`
 
-`opv next` prints one action this session can take, then the queue, then what waits on others, grouped by vault. It is read-only and uses the same state as `opv inventory`; the same state gives the same bytes. An assistant calls this instead of parsing prose.
+`opv next [--json]` reads what `opv inventory` reads (every environment) and prints one action this session can take, chosen by a fixed priority: bind an unbound boundary (`opv apply`); then fill a key that is `absent`, `empty`, `placeholder` or `malformed`, in that order (`opv set <product>/<KEY> --env <env>`); then sync a `set` key whose delivery is not current (`opv sync <env>`, for CI on a shared or production tier, else for you). A key that no target of its environment delivers has nothing to sync, so it never asks for `opv sync`. The text is `next: <command>` (or `next: none`), then `then:` with the rest of this session's queue, then `waiting on others:` with the actions on vaults this session cannot write, grouped by vault id, then `findings:` (`single_writer`: a deployed vault with one writer). `--json` carries the same as `next` (`{kind, actor, command}`), `queue`, `waits_on` (`vault`, `actions`) and `findings`; each action names its `product`, `key`, `env` and `vault`. Read-only, names and commands only; the same state gives the same bytes.
 
 ## Changing the configuration: `opv propose` and `opv apply`
 
@@ -673,7 +675,7 @@ opv completions powershell | Out-String | Invoke-Expression   # add this line to
 
 ## Colour
 
-On a terminal, opv colours state words only: `ok`, `warn`, `FAIL` and `skip` in `doctor`, and the row state (`saved`, `missing`, `failed`, `skipped`) in `status`, `plan` and `inventory`. Nothing derived from a value is coloured, and JSON never is. `--color auto` (the default) colours only when stdout is a terminal and `NO_COLOR` is unset or empty; `--color never` turns it off and `--color always` forces it, even when piped. Piped output under `auto` is byte-for-byte the same as before colour existed.
+On a terminal, opv colours state words only: `ok`, `warn`, `FAIL` and `skip` in `doctor`, and the row state (`saved`, `missing`, `failed`, `skipped`) in `status` and `plan`. Nothing derived from a value is coloured, and JSON never is. `--color auto` (the default) colours only when stdout is a terminal and `NO_COLOR` is unset or empty; `--color never` turns it off and `--color always` forces it, even when piped. Piped output under `auto` is byte-for-byte the same as before colour existed.
 
 ## JSON contract
 
@@ -875,7 +877,7 @@ target for every provider; `target_state` is `present`, `absent` or `would_chang
 for a key the target does not deliver (a source-only value, or a product left out of
 the target's `products`), and `null` for a config key (or `present`/`absent`/`would_change` where
 the target takes config as variables), exactly the row's ON TARGET column; `action` is `would_stage`, `would_prune`, `held` or `null`. The same row shape,
-in the same key order, is used by `status`, `plan` and `inventory`. With `--product`,
+in the same key order, is used by `status` and `plan`. With `--product`,
 the document carries `"product": "<p>"` (otherwise `null`) and only that product's rows and
 totals. `next` is the typed object everywhere: its `command` is the sync command for `plan`, and `null` for `status`. `plan --json` adds
 `"plan_id"` when nothing blocks ([`--expect-plan`](#review-then-apply-exactly-that-plan---expect-plan)),
@@ -890,11 +892,11 @@ Two fields arrived in 0.5.0. `changes` is `some` when a sync would certainly cha
 target (a new or changed key, a prune, a pending binding), `unknown` when only keys whose
 values the target hides (Fly) would be staged, and `none` otherwise; a nightly drift job
 can alert on `some`. A missing or failing row also carries `open_url`, the 1Password item
-link to fix it in (IDs only); `inventory --json` rows carry it too.
+link to fix it in (IDs only).
 
 A shared key's row carries `shared_from` (`api/DATABASE_URL`) and, while its source has a
 finding, the state `source_blocked`. When a person's run tidied the item (FR-43),
-`status`, `plan` and `inventory` documents carry `tidy`, a list of `{action, name}` (names
+`status` and `plan` documents carry `tidy`, a list of `{action, name}` (names
 only; omitted when nothing was tidied). A tidy that was tried and did not complete puts
 its error code in `tidy_error` (`tidy_conflict` when the item changed twice meanwhile or
 another edit landed together with opv's, `tidy_unverified` when the item read back lacks
@@ -913,7 +915,7 @@ SSH key or any other field type it does not rewrite exactly; it says so in one n
 | 5 | target (Fly, Azure, Kubernetes, GitHub, a remote host): refused or failed, including an unhealthy revision or rollout (the previous one keeps serving) and an update refused with nothing applied (`update_refused`) |
 | 6 | refused by policy: blocking keys, a missing or wrong `--confirm`, a stale plan (`stale_plan`), a person-only command (`person_only`), a command that needs your own terminal (`terminal_required`) |
 | 7 | authentication: not signed in to 1Password or the target CLI, or `deploy_credentials` rejected |
-| 8 | findings: `status`, `plan`, `inventory` (or `doctor --env`) found keys missing or failing a rule |
+| 8 | findings: `status`, `plan` (or `doctor --env`) found keys missing or failing a rule |
 | 9 | outcome unknown, or a provider did not answer: nothing is known to be broken; re-run the same command ([exit 9](how-opv-handles-failures.md#exit-9-re-run-the-same-command)) |
 | 10 | `opv changed` found a source item changed since the last sync (`source_changed`): a result, not a failure (`ok` is true), and the next step is the sync |
 | 70 | internal error: an opv bug; nothing to fix on your side. `Next: opv version`; report it with that output |

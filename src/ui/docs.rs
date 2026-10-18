@@ -182,6 +182,23 @@ pub struct RowDoc {
     pub target_state: Option<String>,
 }
 
+/// `opv inventory --env <env> --json` (design §25.1): the environment's per-key cells, each
+/// with the domain's own value state. A run-only environment's rows come from here: it has
+/// no target for `opv status` to read.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InventoryDoc {
+    pub cells: Vec<InventoryCell>,
+}
+
+/// One cell of the inventory: a key in an environment and its value state (never a value).
+#[derive(Debug, Clone, Deserialize)]
+pub struct InventoryCell {
+    pub product: String,
+    pub key: String,
+    pub env: String,
+    pub state: crate::domain::value_state::ValueState,
+}
+
 /// `opv history <env> --json` (#95): one target's rows, or one block per target when the
 /// environment has several (FR-56).
 #[derive(Debug, Clone, Deserialize)]
