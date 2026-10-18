@@ -74,7 +74,6 @@ pub fn from_names(
         path: path.to_path_buf(),
         config: config_keys.to_vec(),
         secret: secret_keys.to_vec(),
-        apply: false,
     })?;
     let contract = names_contract(env, &imported)?;
     build(contract, names_steps(&imported), None)

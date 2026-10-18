@@ -310,18 +310,6 @@ pub(crate) fn read(fleet: &Fleet, env_name: &str, r: &dyn CommandRunner) -> Resu
     read_as(fleet, env_name, r, Mode::Tidy)
 }
 
-/// [`read`] of only the boundary items `scope`'s products need (FR-57: a product-scoped
-/// command never reads another product's boundary), each tidied against `full`, the whole
-/// configuration, so fields of products outside `scope` are never mistaken for strays.
-pub(crate) fn read_for(
-    scope: &Fleet,
-    full: &Fleet,
-    env_name: &str,
-    r: &dyn CommandRunner,
-) -> Result<Read, Error> {
-    read_in(scope, full, env_name, r, Mode::Tidy)
-}
-
 /// The environment's item, read tolerantly and never written, whoever runs opv (#113):
 /// `doctor`'s read, so a machine caller holding a person's session can rely on its
 /// `reads` effect. No `op whoami`; a layout a person's run would tidy gets one note per

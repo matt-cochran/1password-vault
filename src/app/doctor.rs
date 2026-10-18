@@ -478,7 +478,7 @@ fn run_on_with(
                     report.skip(
                         section,
                         format!(
-                            "no {section} section in {} {} (run, config export and item skeleton only)",
+                            "no {section} section in {} {} (run and config export only)",
                             if without.len() == 1 {
                                 "environment"
                             } else {

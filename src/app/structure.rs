@@ -82,26 +82,6 @@ impl Plan {
                         .all(|s| matches!(s.step, StateStep::Ok { .. }))
             })
     }
-
-    /// Counts for a one-line summary: vaults, items, fields.
-    pub fn counts(&self) -> (usize, usize, usize) {
-        let mut vaults = 0;
-        let mut items = self.delivery_items.len();
-        for e in &self.environments {
-            for b in &e.boundaries {
-                if matches!(b.step, BoundaryStep::Create { .. }) {
-                    vaults += 1;
-                    items += 1;
-                }
-            }
-            vaults += e
-                .state_vaults
-                .iter()
-                .filter(|s| matches!(s.step, StateStep::Create { .. }))
-                .count();
-        }
-        (vaults, items, self.fields.len())
-    }
 }
 
 /// True for a well-formed structural plan id (`sp-` and 16 lowercase hex digits).
@@ -568,44 +548,6 @@ fn manifest_scope(start: &Path, r: &dyn CommandRunner, command: &str) -> Result<
         project,
         account,
     })
-}
-
-/// One line per step of `p`, names and titles only, for a person to review.
-pub fn describe(p: &Plan) -> Vec<String> {
-    let mut out = Vec::new();
-    for e in &p.environments {
-        for b in &e.boundaries {
-            if let BoundaryStep::Create { vault, item } = &b.step {
-                out.push(format!(
-                    "{}: create vault {vault:?} and item {item:?} for {} ({})",
-                    e.environment,
-                    b.boundary,
-                    b.products.join(", ")
-                ));
-            }
-        }
-        for s in &e.state_vaults {
-            if let StateStep::Create { vault } = &s.step {
-                out.push(format!(
-                    "{}: create state vault {vault:?} for target {}",
-                    e.environment, s.target
-                ));
-            }
-        }
-    }
-    for d in &p.delivery_items {
-        out.push(format!(
-            "{}: create delivery item {:?} for {} on target {}",
-            d.environment, d.item, d.product, d.target
-        ));
-    }
-    for f in &p.fields {
-        out.push(format!(
-            "{}: add empty {} field {}/{} to the {} item",
-            f.environment, f.kind, f.product, f.key, f.boundary
-        ));
-    }
-    out
 }
 
 /// One object apply created, by public ID, with the link a person opens to enter values.

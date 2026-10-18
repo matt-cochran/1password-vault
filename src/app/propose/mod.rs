@@ -5,7 +5,6 @@
 //! Pure: a proposal reads no file and runs no command. Only [`key::write`] touches the
 //! contract file, and only when a caller asks it to.
 
-pub mod declare;
 pub mod key;
 pub mod setup;
 pub mod structure;

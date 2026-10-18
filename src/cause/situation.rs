@@ -180,7 +180,7 @@ fn is_remote_child(cmd: &Cmd) -> bool {
 fn is_interactive_only(cmd: &Cmd) -> bool {
     matches!(
         cmd.command.first().map(String::as_str),
-        Some("login" | "approve" | "setup")
+        Some("login" | "apply" | "setup")
     )
 }
 

@@ -592,7 +592,7 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
             seen: person(),
         },
         NeedsOwnSession {
-            command: CommandId("approve".into()),
+            command: CommandId("apply".into()),
             identity: Principal::ShellToken {
                 var: VarName::new("OP_SERVICE_ACCOUNT_TOKEN"),
             },

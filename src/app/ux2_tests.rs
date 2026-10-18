@@ -107,14 +107,6 @@ fn status_json_never_carries_a_value() {
 }
 
 #[test]
-fn check_prints_no_item_link_under_a_finding() {
-    let r = FakeRunner::new([item_without("allumata", "OPENAI_API_KEY"), whoami()]);
-    let mut out = Vec::new();
-    let _ = super::local::check(&fleet(), "prod", Some("allumata"), &r, &mut out, false);
-    assert!(!text_of(&out).contains(LINK), "{}", text_of(&out));
-}
-
-#[test]
 fn plan_prints_no_item_link_under_a_finding() {
     let out = plan_text(&missing_openai());
     assert!(!out.contains(LINK), "{out}");

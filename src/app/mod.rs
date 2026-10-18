@@ -12,7 +12,6 @@
 pub mod access;
 pub mod access_create;
 pub mod account;
-pub mod add;
 pub mod agent_view;
 pub mod apply;
 #[cfg(test)]
@@ -74,7 +73,6 @@ pub mod ready;
 pub mod receipt_age;
 pub mod remote_delivery;
 pub mod remote_diagnose;
-pub mod repair;
 pub mod retire;
 pub mod rule_source;
 pub mod run;
@@ -272,25 +270,6 @@ pub(crate) fn plan_id_of(
         },
         plan,
     )
-}
-
-/// [`read_and_plan`] for a local check of the products in `fleet` only, with no target.
-/// The item is read (and tidied) against `full`, the whole configuration, so fields of
-/// products outside `fleet` are never mistaken for strays; they cannot block the check,
-/// because the plan covers `fleet` only.
-pub(crate) fn read_and_plan_products(
-    fleet: &Fleet,
-    full: &Fleet,
-    env_name: &str,
-    r: &dyn CommandRunner,
-) -> Result<SyncPlan, Error> {
-    fleet.environment(env_name)?;
-    let read = tidy::read_for(fleet, full, env_name, r)?;
-    let none = BTreeSet::new();
-    let mut plan = plan_item(fleet, env_name, None, read.fields, None, &none, &none)?.0;
-    plan.tidy = read.changes;
-    plan.tidy_error = read.tidy_error;
-    Ok(plan)
 }
 
 /// The plan of `fields` for target `target` of `env_name` (`None`: no target).
@@ -1230,16 +1209,6 @@ pub(crate) fn is_blocking(r: &Row) -> bool {
         r.state,
         KeyState::Missing | KeyState::WrongKind | KeyState::RuleFailed(..)
     )
-}
-
-/// A shared key's provenance (FR-45), for a row's own line: ` (shared from api/KEY)` on a
-/// key that shares another's value, ` (affects worker/KEY, ...)` on a source with a
-/// finding, so the finding is reported once with every key it holds up. Names only.
-pub(crate) fn shared_note(r: &Row) -> String {
-    match shared_text(r) {
-        Some(t) => format!(" ({t})"),
-        None => String::new(),
-    }
 }
 
 /// [`shared_note`] without the parentheses: `shared from api/KEY` or `affects worker/KEY`.

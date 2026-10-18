@@ -295,7 +295,7 @@ impl App {
             Key::Char('i') => {
                 if let Some(env) = self.current_env() {
                     self.modal = Some(Modal::Input {
-                        prompt: format!("Adopt existing values into {env} from which file?"),
+                        prompt: format!("Import existing values into {env} from which file?"),
                         value: String::new(),
                         env,
                     });
@@ -417,7 +417,7 @@ impl App {
                 let args = command(&env, &from, &self.adopt);
                 let guarded = self.snap.env(&env).is_some_and(|e| e.guarded);
                 self.modal = Some(Modal::Confirm {
-                    title: format!("Adopt into {env}"),
+                    title: format!("Import into {env}"),
                     lines: vec![
                         format!(
                             "writes {n} field(s) in 1Password, read back and verified; a replaced value is kept in opv · kept"
