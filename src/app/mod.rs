@@ -2335,12 +2335,6 @@ pub(crate) mod testutil {
         out
     }
 
-    /// The fixture with every deployment target removed (see [`without_targets`]).
-    pub fn fleet_without_targets(extra: &str) -> Fleet {
-        let text = crate::config::merged_text("tests/fixtures/secrets.toml");
-        config::parse(&format!("{}\n{extra}", without_targets(&text))).unwrap()
-    }
-
     /// Two prod keys scoped to the process roles `serve` and `migrate` (#136).
     pub const ROLE_KEYS: &str = "\
 [products.allumata.keys.SERVE_TOKEN]

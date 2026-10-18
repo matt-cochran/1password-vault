@@ -14,13 +14,18 @@ use crate::json::SCHEMA_VERSION;
 /// missing here; the test below fails when a mapped command has no [`EFFECTS`] entry.
 /// `opv schema` exposes this as `mcp_tools`.
 pub const MCP_TOOLS: &[(&str, &str)] = &[
-    ("opv_ready", "ready"),
-    ("opv_configuration", "contract"),
-    ("opv_access", "access"),
-    ("opv_deployment_plan", "plan"),
-    ("opv_changed", "changed"),
-    ("opv_structure_plan", "propose structure"),
-    ("opv_delivery_preview", "run --preview"),
+    // `opv_state`: one entry per section, each the command whose `--json` document the
+    // section answers (design §25.2). Its `inventory` section answers `opv inventory`, listed
+    // here once that command has its EFFECTS entry.
+    ("opv_state", "needs"),
+    ("opv_state", "contract"),
+    ("opv_state", "ready"),
+    ("opv_state", "plan"),
+    ("opv_state", "changed"),
+    ("opv_state", "access"),
+    ("opv_state", "run --preview"),
+    ("opv_state", "history"),
+    ("opv_state", "status"),
     ("opv_propose", "propose"),
     ("opv_import_local", "import"),
     ("opv_explain", "explain"),

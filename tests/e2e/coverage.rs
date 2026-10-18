@@ -560,7 +560,8 @@ mod cases {
     // §4.1 configuration
 
     pub fn config_not_found() -> Case {
-        case(Scenario::new().without_config(), &["contract"]).mcp("opv_configuration", json!({}))
+        case(Scenario::new().without_config(), &["contract"])
+            .mcp("opv_state", json!({"section": "contract"}))
     }
 
     pub fn config_unreadable() -> Case {
@@ -573,7 +574,7 @@ mod cases {
             Scenario::new().config(|c| c.replacen("[environments.dev]", "[environments.dev\n", 1)),
             &["contract"],
         )
-        .mcp("opv_configuration", json!({}))
+        .mcp("opv_state", json!({"section": "contract"}))
     }
 
     pub fn boundary_missing() -> Case {
@@ -586,7 +587,7 @@ mod cases {
             }),
             &["contract"],
         )
-        .mcp("opv_configuration", json!({}))
+        .mcp("opv_state", json!({"section": "contract"}))
     }
 
     /// A target whose state vault is not bound yet (D-G, before the first `opv apply`): the
@@ -598,7 +599,7 @@ mod cases {
                 .config(|c| without_line(c, r#"state_vault_id = "vE2ESTATEFLY00000000000001""#)),
             &["changed", "prod"],
         )
-        .mcp("opv_changed", json!({"environment": "prod"}))
+        .mcp("opv_state", json!({"section": "changed", "env": "prod"}))
     }
 
     pub fn state_vault_too_wide() -> Case {
@@ -621,7 +622,7 @@ mod cases {
             }),
             &["contract"],
         )
-        .mcp("opv_configuration", json!({}))
+        .mcp("opv_state", json!({"section": "contract"}))
     }
 
     pub fn config_not_editable() -> Case {
@@ -639,7 +640,7 @@ mod cases {
             &["contract"],
         )
         // L7: MCP honours OPV_PROJECT as the CLI does.
-        .mcp("opv_configuration", json!({}))
+        .mcp("opv_state", json!({"section": "contract"}))
     }
 
     pub fn manifest_ambiguous() -> Case {
@@ -675,13 +676,14 @@ mod cases {
                 }),
             &["contract"],
         )
-        .mcp("opv_configuration", json!({}))
+        .mcp("opv_state", json!({"section": "contract"}))
     }
 
     // §4.2 names and usage
 
     pub fn not_declared() -> Case {
-        case(Scenario::new(), &["ready", "nope"]).mcp("opv_ready", json!({"environment": "nope"}))
+        case(Scenario::new(), &["ready", "nope"])
+            .mcp("opv_state", json!({"section": "ready", "env": "nope"}))
     }
 
     pub fn key_not_declared() -> Case {
@@ -710,14 +712,14 @@ mod cases {
             &["run", "dev", "--preview", "--product", "web"],
         )
         .mcp(
-            "opv_delivery_preview",
-            json!({"environment": "dev", "product": "web"}),
+            "opv_state",
+            json!({"section": "delivery_preview", "env": "dev", "product": "web"}),
         )
     }
 
     pub fn nothing_in_scope() -> Case {
         case(Scenario::new(), &["plan", "dev"])
-            .mcp("opv_deployment_plan", json!({"environment": "dev"}))
+            .mcp("opv_state", json!({"section": "plan", "env": "dev"}))
     }
 
     pub fn usage() -> Case {
@@ -752,8 +754,8 @@ mod cases {
             &["run", "dev", "--preview", "--product", "shared"],
         )
         .mcp(
-            "opv_delivery_preview",
-            json!({"environment": "dev", "product": "shared"}),
+            "opv_state",
+            json!({"section": "delivery_preview", "env": "dev", "product": "shared"}),
         )
     }
 
@@ -765,7 +767,7 @@ mod cases {
             Scenario::new().dot_opv(Some("account = \"e2e.1password.com\"\n")),
             &["access"],
         )
-        .mcp("opv_access", json!({}))
+        .mcp("opv_state", json!({"section": "access"}))
     }
 
     /// I8: two accounts on the machine and no `.opv`: a person picks (pick_account_at).
@@ -777,7 +779,7 @@ mod cases {
                 .git_checkout(),
             &["contract"],
         )
-        .mcp("opv_configuration", json!({}))
+        .mcp("opv_state", json!({"section": "contract"}))
     }
 
     // §4.5 guards, §4.8 person-only steps, §4.9 plans
@@ -798,10 +800,8 @@ mod cases {
                 "builder",
             ],
         )
-        .mcp(
-            "opv_delivery_preview",
-            json!({"environment": "prod", "product": "web", "role": "serve", "remote": "builder"}),
-        )
+        // No MCP half: `opv_state` section `delivery_preview` takes env and product only
+        // (design §25.2); a remote profile's preview is the person's `opv run --preview`.
     }
 
     pub fn needs_terminal() -> Case {
@@ -941,7 +941,7 @@ mod cases {
             Scenario::new().faults("[[fault]]\nprogram = \"op\"\nkind = \"tool_missing\"\n"),
             &["ready", "dev"],
         )
-        .mcp("opv_ready", json!({"environment": "dev"}))
+        .mcp("opv_state", json!({"section": "ready", "env": "dev"}))
     }
 
     pub fn tool_unusable() -> Case {
@@ -957,8 +957,8 @@ mod cases {
             &["plan", "prod", "--target", "fly"],
         )
         .mcp(
-            "opv_deployment_plan",
-            json!({"environment": "prod", "targets": ["fly"]}),
+            "opv_state",
+            json!({"section": "plan", "env": "prod", "target": "fly"}),
         )
     }
 
@@ -974,8 +974,8 @@ mod cases {
             &["plan", "prod", "--target", "gh"],
         )
         .mcp(
-            "opv_deployment_plan",
-            json!({"environment": "prod", "targets": ["gh"]}),
+            "opv_state",
+            json!({"section": "plan", "env": "prod", "target": "gh"}),
         )
     }
 
@@ -1212,16 +1212,16 @@ mod cases {
             Scenario::new().faults(&fault("op", "whoami", "signed_out")),
             &["access"],
         )
-        .mcp("opv_access", json!({}))
+        .mcp("opv_state", json!({"section": "access"}))
     }
 
-    // 0.11.0 MCP parity: `opv_changed`; the target options of `opv target add` (its MCP tool,
+    // MCP parity: `opv_state` section `changed`; the target options of `opv target add` (its MCP tool,
     // `opv_declare_target`, was removed in 0.12.0: a target is proposed with `opv_propose`).
 
     /// `opv changed` of an undeclared environment: the same refusal over MCP.
     pub fn changed_not_declared() -> Case {
         case(Scenario::new(), &["changed", "nope"])
-            .mcp("opv_changed", json!({"environment": "nope"}))
+            .mcp("opv_state", json!({"section": "changed", "env": "nope"}))
     }
 
     /// `op item list` answered as signed out (recording 07): the same sign-in refusal over
@@ -1231,7 +1231,7 @@ mod cases {
             Scenario::new().faults(&fault("op", "item list", "signed_out")),
             &["changed", "prod"],
         )
-        .mcp("opv_changed", json!({"environment": "prod"}))
+        .mcp("opv_state", json!({"section": "changed", "env": "prod"}))
     }
 
     /// A relative `kubernetes.secrets_dir`: refused by the loader before anything is written.
@@ -1739,7 +1739,6 @@ scenarios! {
         source_only,
         account_ambiguous,
         account_required,
-        guard,
         tool_missing,
         tool_unusable,
         owner_setup_required,
