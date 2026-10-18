@@ -1136,6 +1136,56 @@ fn a_vendor_step_is_a_run_for_the_person() {
     );
 }
 
+/// Row `import-next`: an import failure's next is the person's own action.
+#[test]
+fn an_import_read_back_failure_names_the_person() {
+    let c = Cause::ReadBackMissing {
+        vault: VaultId::new("vlt-atqr"),
+        item: ItemId::new("itm-1"),
+        fields: vec![FieldName::new("web/KEY")],
+        by: Cmd {
+            command: vec!["import".into()],
+            args: vec!["dev".into(), "--from".into(), ".env.dev".into()],
+        },
+    };
+    let (_, next) = c.step_in(&inv(), &person_at_terminal());
+    assert_eq!(next_kind_actor(&next).1, NextActor::Person);
+}
+
+/// Row `import-next`: that person action is an `apply`.
+#[test]
+fn an_import_read_back_failure_nexts_an_apply() {
+    let c = Cause::ReadBackMissing {
+        vault: VaultId::new("vlt-atqr"),
+        item: ItemId::new("itm-1"),
+        fields: vec![FieldName::new("web/KEY")],
+        by: Cmd {
+            command: vec!["import".into()],
+            args: vec!["dev".into(), "--from".into(), ".env.dev".into()],
+        },
+    };
+    let (_, next) = c.step_in(&inv(), &person_at_terminal());
+    assert_eq!(next_kind_actor(&next).0, NextKind::Apply);
+}
+
+/// Row `import-next`: re-running an import is the person's own action.
+#[test]
+fn an_import_rerun_names_the_person() {
+    let import = Invocation {
+        origin: Origin::Cli,
+        command: vec!["import".into()],
+        args: vec!["dev".into(), "--from".into(), ".env.dev".into()],
+        has_child: false,
+    };
+    assert_eq!(next_value(&Next::Rerun, &import)["actor"], "person");
+}
+
+/// Row `import-next`: a re-run of a command no person owns stays the assistant's.
+#[test]
+fn a_non_person_rerun_stays_the_assistants() {
+    assert_eq!(next_value(&Next::Rerun, &inv())["actor"], "assistant");
+}
+
 #[test]
 fn every_variant_has_a_fixture() {
     let mut seen: Vec<usize> = causes().iter().map(ordinal).collect();
