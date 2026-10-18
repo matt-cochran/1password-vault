@@ -97,6 +97,15 @@ pub fn inline_ids(text: &str) -> Result<Bindings, Error> {
 /// `Err` naming an inline id when `text` still writes one: ids are one-way out of the
 /// contract, and the fix names the move that puts them in the sibling file.
 pub fn refuse_inline(text: &str) -> Result<(), Error> {
+    refuse_inline_into(
+        text,
+        "secrets.bindings.toml (run opv propose structure, then opv apply)",
+    )
+}
+
+/// [`refuse_inline`] for a contract whose ids belong in `home` (a manifest's
+/// `opv-bindings` block, [`MANIFEST_HOME`]).
+pub fn refuse_inline_into(text: &str, home: &str) -> Result<(), Error> {
     let doc = Doc::parse(text).map_err(|e| toml_invalid(text, &e))?;
     let Some((path, _)) = inline_values(doc.root.get_ref())
         .into_iter()
@@ -109,10 +118,36 @@ pub fn refuse_inline(text: &str) -> Result<(), Error> {
         &refs,
         FieldRule::RemovedForm {
             form: "an inline 1Password id",
-            replacement: "secrets.bindings.toml (run opv propose structure, then opv apply)"
-                .to_string(),
+            replacement: home.to_string(),
         },
     ))
+}
+
+/// Where a manifest project's ids live (D-G): the second fenced block of the manifest's
+/// notes, tagged `toml opv-bindings`, in [`Bindings::render`]'s format.
+pub const MANIFEST_HOME: &str =
+    "the manifest's opv-bindings block (run opv propose structure, then opv apply)";
+
+/// A manifest's contract block (`contract`) with the ids of its `opv-bindings` block
+/// (`block`, absent before the first `opv apply`) filled in, errors naming `source` (D-G):
+/// the manifest's equivalent of a file's contract and sibling. An inline id in the contract
+/// is refused naming the field, as for `secrets.toml`.
+pub fn merge_manifest(
+    contract: &str,
+    block: Option<&str>,
+    source: &ConfigSource,
+) -> Result<String, Error> {
+    refuse_inline_into(contract, MANIFEST_HOME)
+        .map_err(|e| super::locate::relocate_at(e, contract, source.clone()))?;
+    let ids = parse_block(block, source)?;
+    Ok(merge(contract, &ids))
+}
+
+/// The ids of a manifest's `opv-bindings` block (`None`: no block, so no ids), errors naming
+/// `source`.
+pub fn parse_block(block: Option<&str>, source: &ConfigSource) -> Result<Bindings, Error> {
+    let text = block.unwrap_or_default();
+    Bindings::parse(text).map_err(|e| super::locate::relocate_at(e, text, source.clone()))
 }
 
 /// Read the bindings file at `path`. An absent file records no ids.

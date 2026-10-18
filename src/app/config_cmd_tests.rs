@@ -345,9 +345,43 @@ fn edit_saves_the_new_text_to_the_manifest() {
         .as_str()
         .unwrap()
         .to_string();
+    // D-G: the contract block holds the edit with its ids taken out.
     assert_eq!(
         crate::adapters::onepassword_manifest::config_text(&notes),
-        edited()
+        crate::config::bindings::split(&edited()).0
+    );
+}
+
+/// D-G: `config import` keeps the file's ids out of the manifest's contract block.
+#[test]
+fn import_keeps_the_ids_out_of_the_manifests_contract_block() {
+    let (dir, op) = checkout();
+    import(&import_args(dir.path()), dir.path(), &op, &mut Vec::new()).unwrap();
+    let Found::Manifest(m) = manifest_of(dir.path(), &op) else {
+        unreachable!("a manifest-only lookup")
+    };
+    let notes = op.item(&m.item_id)["fields"][0]["value"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        !crate::adapters::onepassword_manifest::config_text(&notes).contains("vault_id"),
+        "{notes}"
+    );
+}
+
+/// D-G: `config import` carries the file's `secrets.bindings.toml` into the manifest's
+/// `opv-bindings` block, so the manifest loads with the same ids.
+#[test]
+fn import_carries_the_files_bindings_into_the_manifests_bindings_block() {
+    let (dir, op) = checkout();
+    import(&import_args(dir.path()), dir.path(), &op, &mut Vec::new()).unwrap();
+    let Found::Manifest(m) = manifest_of(dir.path(), &op) else {
+        unreachable!("a manifest-only lookup")
+    };
+    assert_eq!(
+        m.read_bindings(&op).unwrap(),
+        crate::config::bindings::read_sibling(&dir.path().join("secrets.toml")).unwrap()
     );
 }
 
