@@ -75,8 +75,7 @@ fn a_create_opv_finds_again_by_title_is_safe_to_rerun() {
 fn a_partial_failure_keeps_the_inner_code() {
     let c = Cause::Partial {
         done: vec!["vault shop-prod".into()],
-        approval_used: None,
-        approval_scope: None,
+        scope: None,
         then: Box::new(Cause::BudgetSpent {
             budget_seconds: 60,
             writes_started: true,
@@ -89,8 +88,7 @@ fn a_partial_failure_keeps_the_inner_code() {
 fn a_partial_failure_is_check_first() {
     let c = Cause::Partial {
         done: vec![],
-        approval_used: None,
-        approval_scope: None,
+        scope: None,
         then: Box::new(Cause::Interrupted {
             signal: 2,
             writes_started: true,

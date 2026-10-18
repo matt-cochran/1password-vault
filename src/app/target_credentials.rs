@@ -237,8 +237,7 @@ pub(crate) fn after_mint(e: Error, done: Vec<String>) -> Error {
     Error::Catalog(
         Box::new(Cause::Partial {
             done,
-            approval_used: None,
-            approval_scope: None,
+            scope: None,
             then,
         }),
         upstream,
