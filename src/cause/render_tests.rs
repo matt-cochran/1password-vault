@@ -1055,8 +1055,35 @@ fn a_source_changed_sync_is_a_run() {
         no_record: false,
     };
     assert_eq!(
-        crate::cause::render::next_kind(&cause.step(&inv()).1),
-        "run"
+        crate::cause::render::next_kind_actor(&cause.step(&inv()).1).0,
+        crate::json::NextKind::Run
+    );
+}
+
+#[test]
+fn a_login_handoff_is_an_authorize_for_the_person() {
+    let n = Next::Handoff(Cmd {
+        command: vec!["login".into()],
+        args: Vec::new(),
+    });
+    assert_eq!(
+        next_kind_actor(&n),
+        (
+            crate::json::NextKind::Authorize,
+            crate::json::NextActor::Person
+        )
+    );
+}
+
+#[test]
+fn a_vendor_step_is_a_run_for_the_person() {
+    let n = Next::Vendor(VendorCmd {
+        program: "op".into(),
+        args: vec!["signin".into()],
+    });
+    assert_eq!(
+        next_kind_actor(&n),
+        (crate::json::NextKind::Run, crate::json::NextActor::Person)
     );
 }
 
@@ -1578,14 +1605,13 @@ fn the_document_kinds_a_handoff() {
     };
     let d = document(&c, None, &inv(), false);
     assert_eq!(
+        (d["next"].clone(), d["human_required"].clone()),
         (
-            d["next_kind"].clone(),
-            d["next"].clone(),
-            d["human_required"].clone()
-        ),
-        (
-            serde_json::json!("handoff"),
-            serde_json::json!("opv approve sp-9f3"),
+            serde_json::json!({
+                "kind": "apply",
+                "actor": "person",
+                "command": "opv approve sp-9f3"
+            }),
             serde_json::json!(true)
         )
     );
@@ -3469,8 +3495,8 @@ fn f4_setups_near_product_is_a_handoff() {
     };
     let inv = cli(&["opv", "setup", "--product", "apu"]);
     assert_eq!(
-        next_kind(&c.step_in(&inv, &person_at_terminal()).1),
-        "handoff"
+        next_kind_actor(&c.step_in(&inv, &person_at_terminal()).1).0,
+        crate::json::NextKind::Apply
     );
 }
 

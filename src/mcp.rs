@@ -12,7 +12,8 @@
 //! identifiers; never a value. A failure answer is `{ok: false, error}`, where `error` is
 //! exactly the `--json` document's error object (design `docs/design/error-catalog.md`
 //! §7.2): code, category, message, subject, evidence (the upstream reply marked
-//! `untrusted: true`), retry, human_required, do, next and next_kind, rendered from the
+//! `untrusted: true`), retry, human_required, do, and the typed next `{kind, actor, command}`,
+//! rendered from the
 //! cause against the tool's own invocation ([`ToolCall`]). Every tool takes `verbose`, as
 //! the CLI's `--verbose`: the upstream reply in full rather than its last lines.
 use crate::{
@@ -1246,18 +1247,17 @@ fn changed_receipt(doc: &Value) -> Option<Value> {
         .iter()
         .filter_map(changed_placement)
         .collect();
-    // opv's own step, rendered from checked names: one line.
-    let step = |k: &str| {
-        doc[k]
-            .as_str()
-            .filter(|s| s.len() <= 300 && !s.chars().any(char::is_control))
-    };
+    // opv's own step, rendered from checked names: one line. The CLI frames `next` (§4.1)
+    // as the schema-3 object, so read its command.
+    let one_line = |s: &str| s.len() <= 300 && !s.chars().any(char::is_control);
+    let step = |k: &str| doc[k].as_str().filter(|s| one_line(s));
+    let next = crate::json::command_of(&doc["next"]).filter(|s| one_line(s));
     Some(json!({
         "ok": true,
         "environment": environment,
         "changed": changed,
         "placements": placements,
-        "next": step("next"),
+        "next": next,
         "do": step("do"),
         "human_action": "Item ids and version numbers only. A sync needs a person's approval: call opv_deployment_plan, and the person runs its approve_command in their own terminal.",
     }))
@@ -2092,7 +2092,7 @@ mod tests {
     }
     #[test]
     fn readiness_drops_value_bearing_and_untrusted_fields() {
-        let doc = json!({"schema_version": 2, "findings": [{"blocking": true, "message": "SECRET_MARKER", "prerequisite": "SECRET_MARKER"}], "value": "SECRET_MARKER"});
+        let doc = json!({"schema_version": 3, "findings": [{"blocking": true, "message": "SECRET_MARKER", "prerequisite": "SECRET_MARKER"}], "value": "SECRET_MARKER"});
         assert!(
             !ready_receipt(&doc)
                 .unwrap_or_default()
@@ -2102,7 +2102,7 @@ mod tests {
     }
     #[test]
     fn plan_drops_values_even_when_the_source_contains_them() {
-        let doc = json!({"schema_version": 2, "rows": [{"product": "api", "key": "API_KEY", "action": "stage", "value": "SECRET_MARKER", "reason": "SECRET_MARKER"}], "plan_id": "123abc"});
+        let doc = json!({"schema_version": 3, "rows": [{"product": "api", "key": "API_KEY", "action": "stage", "value": "SECRET_MARKER", "reason": "SECRET_MARKER"}], "plan_id": "123abc"});
         assert!(
             !plan_receipt(&doc, &plan_scope(&[], None, &[]))
                 .unwrap_or_default()
@@ -2240,7 +2240,7 @@ mod tests {
 
     #[test]
     fn successful_receipt_can_still_have_blocking_findings() {
-        let doc = json!({"schema_version": 2, "findings": [{"blocking": true}]});
+        let doc = json!({"schema_version": 3, "findings": [{"blocking": true}]});
         assert_eq!(
             ready_receipt(&doc).unwrap_or_default()["blocking_findings"],
             1
@@ -2248,7 +2248,7 @@ mod tests {
     }
 
     fn ready_doc(findings: Value, targets: Value) -> Value {
-        json!({"schema_version": 2, "findings": findings, "targets": targets})
+        json!({"schema_version": 3, "findings": findings, "targets": targets})
     }
 
     #[test]
@@ -2809,7 +2809,7 @@ rules = { prefix = "sk_" }
     #[test]
     fn a_scoped_deployment_plan_approves_the_same_targets_product_and_rotation() {
         let doc =
-            json!({"schema_version": 2, "environment": "prod", "rows": [], "plan_id": "0123abcd"});
+            json!({"schema_version": 3, "environment": "prod", "rows": [], "plan_id": "0123abcd"});
         let v = plan_receipt(&doc, &plan_scope(&["fleet"], Some("api"), &["api/KEY"])).unwrap();
         assert_eq!(
             v["approve_command"],
@@ -2854,7 +2854,7 @@ rules = { prefix = "sk_" }
 
     #[test]
     fn the_deployment_plan_never_says_sync_is_unavailable_through_mcp() {
-        let doc = json!({"schema_version": 2, "rows": [], "plan_id": "0123abcd"});
+        let doc = json!({"schema_version": 3, "rows": [], "plan_id": "0123abcd"});
         let v = plan_receipt(&doc, &plan_scope(&[], None, &[])).unwrap();
         assert!(
             v["human_action"]
@@ -3021,7 +3021,7 @@ rules = { prefix = "sk_" }
         }
         .into();
         assert_eq!(
-            tool(&["sync"], &[]).failed(&e)["error"]["next"],
+            tool(&["sync"], &[]).failed(&e)["error"]["next"]["command"],
             "opv sync --json"
         );
     }
@@ -3078,13 +3078,13 @@ rules = { prefix = "sk_" }
     #[test]
     fn a_stale_plan_hands_off_its_approve_step() {
         let v = tool(&["sync"], &[]).failed(&stale(ROTATING_APPROVE));
-        assert_eq!(v["error"]["next_kind"], "handoff");
+        assert_eq!(v["error"]["next"]["kind"], "apply");
     }
 
     #[test]
     fn a_rotating_approve_step_keeps_its_rotation() {
         let v = tool(&["sync"], &[]).failed(&stale(ROTATING_APPROVE));
-        assert_eq!(v["error"]["next"], ROTATING_APPROVE);
+        assert_eq!(v["error"]["next"]["command"], ROTATING_APPROVE);
     }
 
     fn sync_args() -> SyncScopeArgs {
@@ -3114,7 +3114,7 @@ rules = { prefix = "sk_" }
         let args = sync_args();
         let e = after_used_approval(interrupted(), &args);
         assert_eq!(
-            sync_call(&args).failed(&e)["error"]["next"],
+            sync_call(&args).failed(&e)["error"]["next"]["command"],
             "opv plan prod --target fleet"
         );
     }
@@ -3225,7 +3225,7 @@ rules = { prefix = "sk_" }
             "OP_SESSION_my".into(),
         ));
         assert_eq!(
-            v["error"]["next"],
+            v["error"]["next"]["command"],
             "opv structure apply sp-0123456789abcdef --json"
         );
     }
@@ -3248,7 +3248,7 @@ rules = { prefix = "sk_" }
             inner: FakeRunner::new([]),
             refused: AtomicBool::new(false),
         };
-        let doc = json!({"schema_version": 2, "rows": [], "plan_id": null}).to_string();
+        let doc = json!({"schema_version": 3, "rows": [], "plan_id": null}).to_string();
         let v = receipt_answer(
             &tool(&["plan"], &["prod"]),
             &r,
@@ -3270,7 +3270,7 @@ rules = { prefix = "sk_" }
     }
 
     fn changed_doc() -> Value {
-        json!({"schema_version": 2, "ok": true, "environment": "prod", "changed": true,
+        json!({"schema_version": 3, "ok": true, "environment": "prod", "changed": true,
             "placements": [{"product": "web", "target": "fly", "state": "changed",
                 "items": [{"item_id": "iabc123", "recorded": 3, "current": 4, "value": "SECRET_MARKER"}]},
                 {"product": "web", "target": "gh", "state": "no_record"}],

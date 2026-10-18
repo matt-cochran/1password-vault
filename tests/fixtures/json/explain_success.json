@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "ok": true,
   "environment": "prod",
   "product": "allumata",
@@ -43,6 +43,10 @@
     ],
     "ci": "myapp-prod-ci"
   },
-  "next": null,
+  "next": {
+    "kind": "none",
+    "actor": "person",
+    "command": null
+  },
   "do": null
 }

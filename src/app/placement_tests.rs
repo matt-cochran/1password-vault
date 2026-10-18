@@ -1159,7 +1159,7 @@ fn opv_sync_without_an_approval_returns_the_approve_command() {
     let fleet = both(&w);
     let id = plan_id(&w, &fleet, &["east"]);
     assert_eq!(
-        mcp_sync(&w, &fleet, dir.path(), &id)["error"]["next"],
+        mcp_sync(&w, &fleet, dir.path(), &id)["error"]["next"]["command"],
         json!(format!("opv approve {id} --sync prod --target east"))
     );
 }

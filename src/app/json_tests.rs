@@ -248,8 +248,8 @@ fn sync_confirm_required() {
     // does not have: the golden keeps the shape and leaves the command out.
     let mut doc: serde_json::Value =
         serde_json::from_str(&framed(&out, &res, "opv sync prod --deploy --json")).unwrap();
-    doc["next"] = "<the command as typed> --confirm prod".into();
-    doc["error"]["next"] = "<the command as typed> --confirm prod".into();
+    doc["next"]["command"] = "<the command as typed> --confirm prod".into();
+    doc["error"]["next"]["command"] = "<the command as typed> --confirm prod".into();
     golden("sync_confirm_required", &doc.to_string());
 }
 
