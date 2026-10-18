@@ -1404,14 +1404,18 @@ fn structure_plan(project: &std::path::Path, verbose: bool) -> Value {
     let planned =
         crate::app::structure::scope_as(project, &r, "structure plan").and_then(|scope| {
             r.inner.use_account(Some(scope.account.clone()));
-            let text = std::fs::read_to_string(&scope.path).map_err(|e| -> Error {
-                Cause::ConfigUnreadable {
-                    path: scope.path.clone(),
-                    io: e.kind().into(),
-                    given_by: crate::cause::GivenBy::Discovered,
-                }
-                .into()
-            })?;
+            let text = match &scope.config {
+                crate::app::structure::ConfigAt::File(path) => std::fs::read_to_string(path)
+                    .map_err(|e| -> Error {
+                        Cause::ConfigUnreadable {
+                            path: path.clone(),
+                            io: e.kind().into(),
+                            given_by: crate::cause::GivenBy::Discovered,
+                        }
+                        .into()
+                    })?,
+                manifest => manifest.read_merged(&r)?,
+            };
             crate::app::structure::plan(&r, &text, &scope.project, &scope.account)
         });
     if r.refused.load(Ordering::Relaxed) {

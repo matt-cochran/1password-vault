@@ -556,8 +556,7 @@ mod cases {
     }
 
     pub fn config_source_mismatch() -> Case {
-        case(Scenario::new().manifest_route(), &["structure", "plan"])
-            .mcp("opv_structure_plan", json!({}))
+        case(Scenario::new().manifest_route(), &["bootstrap"])
     }
 
     pub fn config_unreadable() -> Case {
@@ -1711,7 +1710,6 @@ scenarios! {
     ],
     mcp: [
         config_not_found,
-        config_source_mismatch,
         config_invalid,
         boundary_missing,
         state_vault_missing,

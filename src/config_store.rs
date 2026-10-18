@@ -354,6 +354,20 @@ impl ManifestStore {
         Ok((fleet, ids))
     }
 
+    /// The contract block as written (any inline id left in) and the ids of the
+    /// `opv-bindings` block: the two texts `opv propose structure` splits for the one-time
+    /// move (D-G). Read past `op`'s cache (C1): `opv apply` writes the move from it.
+    /// Nothing is refused here; the move itself is confirmed by
+    /// [`read_for_move`](Self::read_for_move).
+    pub fn read_for_proposal(
+        &self,
+        r: &dyn CommandRunner,
+    ) -> Result<(String, config::bindings::Bindings), Error> {
+        let m = self.read_item(r, true)?;
+        let ids = config::bindings::parse_block(m.bindings.as_deref(), &self.cause_source())?;
+        Ok((m.text, ids))
+    }
+
     /// I5: after the edit, the manifest must be exactly one version past the read it was
     /// built from and hold `text` and `ids`; otherwise another edit landed in between (one
     /// of the two was lost). Reported, never retried.
