@@ -1,11 +1,13 @@
-//! MCP tools (design §25.2). Five tools: `opv_state` reads, `opv_propose` and `opv_explain`
-//! prepare and explain, and `opv_import_local` writes the local vault only. The reading
+//! MCP tools (design §25.2). Five tools: `opv_state` and `opv_next` read, `opv_propose` and
+//! `opv_explain` prepare and explain, and `opv_import_local` writes the local vault only. The reading
 //! tools run on a runner that refuses every write beneath the application code.
 //!
 //! Every answer is the `--json` document of the CLI command the call is (D-G: one
 //! interface): `opv_state` with `section` `ready` answers exactly what `opv ready --json`
-//! prints, and so on for each section ([`state_doc`]). A failure is that document's frame,
-//! `{ok: false, error}`, where `error` is the catalog's error object (design
+//! prints, and so on for each section ([`state_doc`]). A failure, for every tool, is that
+//! document's whole frame (`schema_version`, `ok: false`, `exit_code`, `next`, `do`,
+//! `error`), exactly as `opv <command> --json` prints it, where `error` is the catalog's error
+//! object (design
 //! `docs/design/error-catalog.md` §7.2): code, category, message, subject, evidence (the
 //! upstream reply marked `untrusted: true`), retry, human_required, do, and the typed next
 //! `{kind, actor, command}`, rendered against the tool's own invocation ([`ToolCall`]). The
@@ -62,6 +64,15 @@ pub struct ExplainScope {
     env: Option<String>,
 }
 
+/// `opv_next`'s input (design §25.2): the environment to scope to, as `opv next --env`.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct NextScope {
+    /// A declared environment.
+    #[serde(default)]
+    env: Option<String>,
+}
+
 /// `opv_state`'s input (design §25.2): a section and its optional scope. `section` is read
 /// as text so an unknown one is refused in the answer, naming the sections.
 #[derive(Deserialize, Default)]
@@ -113,8 +124,9 @@ fn import_local_schema() -> Arc<rmcp::model::JsonObject> {
     }))
 }
 
-/// `opv_explain`'s input schema: the §25 surface golden's, plus the optional `env` the
-/// CLI's `--env` is (a key declared in several environments, and every plan id, need it).
+/// `opv_explain`'s input schema (the §25 surface golden): a key or a plan id, and the
+/// optional `env` the CLI's `--env` is (a key declared in several environments, and every
+/// plan id, need it).
 fn explain_schema() -> Arc<rmcp::model::JsonObject> {
     schema_object(json!({
         "type": "object",
@@ -124,6 +136,18 @@ fn explain_schema() -> Arc<rmcp::model::JsonObject> {
             "env": { "type": "string", "pattern": ENV_PATTERN }
         },
         "oneOf": [{ "required": ["key"] }, { "required": ["plan_id"] }],
+        "additionalProperties": false
+    }))
+}
+
+/// `opv_next`'s input schema (the §25 surface golden).
+fn next_schema() -> Arc<rmcp::model::JsonObject> {
+    schema_object(json!({
+        "type": "object",
+        "properties": {
+            "env": { "type": "string", "pattern": ENV_PATTERN }
+        },
+        "required": [],
         "additionalProperties": false
     }))
 }
@@ -171,9 +195,13 @@ impl ToolCall {
         }
     }
 
-    /// The failure answer for `e`: `{ok: false, error}`.
+    /// The failure answer for `e`: the whole `--json` frame the CLI prints for it
+    /// (`schema_version`, `ok: false`, `exit_code`, `next`, `do`, `error`).
     fn failed(&self, e: &Error) -> Value {
-        json!({"ok": false, "error": error_document(e, &self.inv, self.verbose)})
+        let framed = crate::json::finish_with(&[], Err(e), false, &self.inv, self.verbose);
+        serde_json::from_slice(&framed).unwrap_or_else(
+            |_| json!({"ok": false, "error": error_document(e, &self.inv, self.verbose)}),
+        )
     }
 
     /// The failure answer for a cause the tool itself found.
@@ -300,6 +328,24 @@ impl Server {
     }
 
     #[tool(
+        name = "opv_next",
+        description = "The one action this session can take next, then the queue, then what waits on others, by vault: the same document as `opv next [--env <env>] --json`. env scopes it to one declared environment. Names, states and commands only, never a value. Changes nothing.",
+        input_schema = next_schema(),
+        annotations(read_only_hint = true, destructive_hint = false)
+    )]
+    async fn next(&self, Parameters(args): Parameters<NextScope>) -> String {
+        self.serialized("opv_next", false, false, move |project| {
+            let r = read_only(PROPOSE_BUDGET);
+            let answer = next_doc(project, &r, &args);
+            if r.refused.load(Ordering::Relaxed) {
+                return next_call(&args).refused(write_refused());
+            }
+            answer
+        })
+        .await
+    }
+
+    #[tool(
         name = "opv_propose",
         description = "Propose a change to this project's contract from one intent document (kind key, env, target, retire, setup, structure or generate; tidy is not available here): names, enumerated attributes and catalog shape names only, never a rule parameter (regex, prefix, enum) or a value. Returns the same document as `opv propose <kind> --json`: the relaxations it makes (listed first), the contract diff or the structure steps, the questions it asks, and a plan_id that only a person's `opv apply <plan_id>` runs. Pure: writes neither the contract nor 1Password.",
         input_schema = propose_schema(),
@@ -310,7 +356,8 @@ impl Server {
             let r = read_only(PROPOSE_BUDGET);
             let answer = propose_doc(project, &r, &args);
             if r.refused.load(Ordering::Relaxed) {
-                return propose_call(&args).refused(write_refused());
+                let parsed = crate::domain::intent::parse(&Value::Object(args.clone()).to_string());
+                return propose_call(&args, parsed.is_ok()).refused(write_refused());
             }
             answer
         })
@@ -513,16 +560,183 @@ const PROPOSE_KINDS: [&str; 7] = [
 
 /// What `kind` must be: `tidy` has no proposal yet (its schema arm stays, as the intent
 /// document's), so it is refused naming itself.
-const PROPOSE_KIND_FORMAT: &str = "one of key, env, target, retire, setup, structure or generate (kind tidy is not available: it has no proposal yet; a person runs opv tidy <env>)";
+const PROPOSE_KIND_FORMAT: &str = "one of key, env, target, retire, setup, structure or generate (kind tidy is not available yet: it has no proposal)";
 
-/// `opv_propose`'s call: `opv propose <kind> --json`, with the kind when it is one.
-fn propose_call(args: &rmcp::model::JsonObject) -> ToolCall {
+/// How one intent field is written on `opv propose <kind>`'s command line.
+#[derive(Clone, Copy)]
+enum Word {
+    /// `--flag <text>`.
+    Text,
+    /// `--flag <item>` once per item.
+    List,
+    /// `--flag <name>=<text>` once per entry (`--except ENV=REASON`).
+    Pairs,
+    /// `--flag` when true.
+    Switch,
+    /// `--<name> <text>` once per entry (a target's provider options).
+    Options,
+}
+
+/// One kind's command line: its positional fields, then its flags by intent field.
+type ProposeFlags = (
+    &'static [&'static str],
+    &'static [(&'static str, &'static str, Word)],
+);
+
+/// The positional words and the flags of `opv propose <kind>` (`src/main.rs` `ProposeCmd`),
+/// by intent field. A field of the intent missing here has no CLI flag.
+fn propose_flags(kind: &str) -> ProposeFlags {
+    use Word::{List, Options, Pairs, Switch, Text};
+    match kind {
+        "key" => (
+            &["key"],
+            &[
+                ("field_kind", "--kind", Text),
+                ("environments", "--env", List),
+                ("except", "--except", Pairs),
+                ("source", "--source", Text),
+                ("shape", "--shape", Text),
+                ("personal", "--personal", Switch),
+                ("from", "--from", Text),
+                ("guidance", "--guidance", Text),
+                ("allow_same_value", "--allow-same-value", Switch),
+                ("immutable", "--immutable", Switch),
+                ("expires", "--expires", Text),
+            ],
+        ),
+        "env" => (&["env"], &[("tier", "--tier", Text)]),
+        "target" => (
+            &["env", "name"],
+            &[
+                ("provider", "--provider", Text),
+                ("products", "--products", List),
+                ("role", "--role", Text),
+                ("deploy_credentials", "--deploy-credentials", Text),
+                ("options", "", Options),
+            ],
+        ),
+        "retire" => (&["key"], &[]),
+        "setup" => (
+            &[],
+            &[
+                ("from_item", "--from-item", Text),
+                ("vault", "--vault", Text),
+                ("item", "--item", Text),
+                ("names_from", "--names-from", Text),
+                ("config_key", "--config-key", List),
+                ("secret_key", "--secret-key", List),
+                ("file", "--file", Switch),
+                ("project", "--project", Text),
+                ("account", "--account", Text),
+            ],
+        ),
+        "structure" => (&[], &[("rebind", "--rebind", List)]),
+        "generate" => (&["env", "keys"], &[]),
+        _ => (&[], &[]),
+    }
+}
+
+/// The kind and the words after `opv propose <kind>` of the CLI command that takes the same
+/// intent document (positionals, then flags in the command's order). `None` when the
+/// document is not one the CLI can say: an unknown kind, a field with no flag (a key's
+/// `lifecycle`, a `guidance` outside kind key), or a text that is not one line.
+fn propose_words(args: &rmcp::model::JsonObject) -> Option<(&'static str, Vec<String>)> {
+    let kind = args.get("kind").and_then(Value::as_str)?;
+    let kind = *PROPOSE_KINDS.iter().find(|k| **k == kind)?;
+    let (positional, flags) = propose_flags(kind);
+    let known = |field: &str| {
+        field == "kind"
+            || positional.contains(&field)
+            || (field == "product" && positional.contains(&"key"))
+            || flags.iter().any(|(f, _, _)| *f == field)
+    };
+    if !args.keys().all(|field| known(field)) {
+        return None;
+    }
+    let text = |v: &Value| v.as_str().filter(|s| one_line(s)).map(str::to_string);
+    let texts = |v: &Value| -> Option<Vec<String>> { v.as_array()?.iter().map(text).collect() };
+    let mut words = Vec::new();
+    for field in positional {
+        let Some(v) = args.get(*field) else { continue };
+        match *field {
+            "key" => {
+                let key = text(v)?;
+                words.push(match args.get("product") {
+                    Some(p) => format!("{}/{key}", text(p)?),
+                    None => key,
+                });
+            }
+            "keys" => words.extend(texts(v)?),
+            _ => words.push(text(v)?),
+        }
+    }
+    for (field, flag, word) in flags {
+        let Some(v) = args.get(*field) else { continue };
+        match word {
+            Word::Text => words.extend([flag.to_string(), text(v)?]),
+            Word::List => {
+                for item in texts(v)? {
+                    words.extend([flag.to_string(), item]);
+                }
+            }
+            Word::Pairs | Word::Options => {
+                for (name, item) in v.as_object()? {
+                    let item = text(item)?;
+                    if !one_line(name) {
+                        return None;
+                    }
+                    match word {
+                        Word::Pairs => words.extend([flag.to_string(), format!("{name}={item}")]),
+                        _ => words.extend([format!("--{name}"), item]),
+                    }
+                }
+            }
+            Word::Switch => {
+                if v.as_bool()? {
+                    words.push(flag.to_string());
+                }
+            }
+        }
+    }
+    Some((kind, words))
+}
+
+/// `opv_propose`'s call: `opv propose <kind> <words> --json`, the CLI command that takes
+/// the same intent (`parsed`: the document parsed); with the kind alone when it is not one
+/// the CLI can say ([`propose_words`]).
+fn propose_call(args: &rmcp::model::JsonObject, parsed: bool) -> ToolCall {
+    if let Some((kind, words)) = propose_words(args).filter(|_| parsed) {
+        return ToolCall::new("opv_propose", &["propose", kind], words, false);
+    }
     let kind = args
         .get("kind")
         .and_then(Value::as_str)
         .filter(|k| PROPOSE_KINDS.contains(k) || *k == "tidy");
     let command: Vec<&str> = std::iter::once("propose").chain(kind).collect();
     ToolCall::new("opv_propose", &command, Vec::new(), false)
+}
+
+/// The person's step after a contract or setup proposal (kinds key, env, target, retire,
+/// setup): the same `opv propose <kind> … --write`, which writes the contract diff into the
+/// repository's contract file, reviewed and committed in a pull request. A tool never writes
+/// the contract, so it is the person's, as an `apply`. When the CLI cannot say the document
+/// ([`propose_words`]), the step is the intent document itself, `opv propose --intent`.
+fn write_next(args: &rmcp::model::JsonObject) -> Option<Value> {
+    let kind = args.get("kind").and_then(Value::as_str)?;
+    if !["key", "env", "target", "retire", "setup"].contains(&kind) {
+        return None;
+    }
+    let command = match propose_words(args) {
+        Some((kind, mut words)) => {
+            words.push("--write".into());
+            render::cmd_text(&Cmd {
+                command: vec!["propose".into(), kind.into()],
+                args: words,
+            })
+        }
+        None => "opv propose --intent <intent.json> --write".to_string(),
+    };
+    Some(json!({"kind": "apply", "actor": "person", "command": command}))
 }
 
 /// `opv_propose`: the intent document parsed (an unknown field, such as a rule parameter,
@@ -533,11 +747,16 @@ fn propose_doc<R: Accounted>(
     r: &R,
     args: &rmcp::model::JsonObject,
 ) -> Value {
-    let call = propose_call(args);
-    let res = crate::domain::intent::parse(&Value::Object(args.clone()).to_string())
-        .and_then(|intent| proposal(project, r, &intent));
+    let parsed = crate::domain::intent::parse(&Value::Object(args.clone()).to_string());
+    let call = propose_call(args, parsed.is_ok());
+    let res = parsed.and_then(|intent| proposal(project, r, &intent));
     match res {
-        Ok(doc) => call.document(doc.to_string().as_bytes(), Ok(())),
+        Ok(mut doc) => {
+            if let Some(next) = write_next(args) {
+                doc["next"] = next;
+            }
+            call.document(doc.to_string().as_bytes(), Ok(()))
+        }
         Err(e) => call.document(&[], Err(e)),
     }
 }
@@ -550,8 +769,8 @@ fn to_doc<T: serde::Serialize>(doc: &T) -> Result<Value, Error> {
 /// The proposal `intent` implies, by kind, from the library `opv propose` runs
 /// ([`crate::app::propose`]), as the `opv propose <kind> --json` document: the library's
 /// proposal, `written: null` (a tool never writes), and for a structural proposal the
-/// person's `opv apply` as `next`. A contract proposal has no `next` here: the CLI's is its
-/// own command line with `--write`, which a person runs.
+/// person's `opv apply` as `next`. A contract or setup proposal's `next` is set by
+/// [`propose_doc`] ([`write_next`]).
 fn proposal<R: Accounted>(
     project: &std::path::Path,
     r: &R,
@@ -876,6 +1095,39 @@ fn explain_doc<R: Accounted>(project: &std::path::Path, r: &R, args: &ExplainSco
         true,
     );
     call.document(&out, res)
+}
+
+/// `opv_next`'s call: `opv next [--env <env>] --json`, with the environment when it is a
+/// name.
+fn next_call(args: &NextScope) -> ToolCall {
+    let words = match args.env.as_deref().filter(|e| scope_name(e)) {
+        Some(env) => vec!["--env".to_string(), env.to_string()],
+        None => Vec::new(),
+    };
+    ToolCall::new("opv_next", &["next"], words, false)
+}
+
+/// `opv_next`: `opv next [--env <env>] --json` from the same library calls on the read-only
+/// runner `r`: the inventory and its signals ([`crate::app::inventory::gather_for_next`])
+/// ranked into one action, the queue and what waits on others ([`crate::app::next::next`]).
+fn next_doc<R: Accounted>(project: &std::path::Path, r: &R, args: &NextScope) -> Value {
+    let call = next_call(args);
+    if args.env.as_deref().is_some_and(|e| !scope_name(e)) {
+        return call.refused(usage(
+            "env",
+            "a declared name: lowercase letters, digits and '-', starting with a letter",
+        ));
+    }
+    let fleet = match load_fleet(project, r) {
+        Ok(fleet) => fleet,
+        Err(e) => return call.failed(&e),
+    };
+    let res = crate::app::inventory::gather_for_next(&fleet, args.env.as_deref(), None, r, None)
+        .map(|(document, signals)| crate::app::next::next(&document, &signals).document());
+    match res {
+        Ok(doc) => call.document(doc.to_string().as_bytes(), Ok(())),
+        Err(e) => call.failed(&e),
+    }
 }
 
 /// The sections of `opv_state` (design §25.2), in the golden's order.
@@ -1406,3 +1658,7 @@ mod propose_tests;
 #[cfg(test)]
 #[path = "mcp_state_tests.rs"]
 mod state_tests;
+
+#[cfg(test)]
+#[path = "mcp_next_tests.rs"]
+mod next_tests;

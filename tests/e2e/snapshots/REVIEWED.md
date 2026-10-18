@@ -218,3 +218,9 @@ Fixed on `v0120/core-fixes` (2026-10-18), core snapshots regenerated and reviewe
 `guard.snap` lost its MCP half: `opv_state` section `delivery_preview` takes `env` and `product` only (§25.2), so a remote profile's preview (`--role`, `--remote`) has no MCP form. The `policy_refused`/`remote_profile_refuses` cause is still reached by the CLI `--json` run of the same snapshot.
 
 - [ ] Owner sign-off of the opv_state snapshots.
+
+## 0.12.0: opv_next and opv_propose's next (mcp-propose, 2026-10-18)
+
+7 scenario snapshots changed, no new one. `core_next` gained its MCP half, `opv_next {}`: the CLI's whole `opv next --json` document (checked equal as JSON; a new gate, `core_next_mcp_is_the_clis_whole_json_document`, asserts it). The MCP halves of `flow_propose_key`, `_env`, `_intent`, `_target`, `_retire` and `_setup` changed in `next` only: from `{kind: none, actor: person, command: null}` to the person's step `{kind: apply, actor: person, command: "opv propose <kind> … --write"}` (the contract change, reviewed and committed). The CLI `--json` halves are unchanged (their `next` is the same `--write` command as `run`/`assistant`, the CLI's own invocation). Gate 3 now compares every MCP scenario's whole answer, failure included, with the CLI's whole `--json` document, not only `error`. No value anywhere (canary gate).
+
+- [ ] Owner sign-off of the opv_next and opv_propose snapshots.

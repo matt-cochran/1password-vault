@@ -47,12 +47,16 @@ with tempfile.TemporaryDirectory() as directory:
         assert 'result' in initialized, initialized
         send('notifications/initialized', {})
         tools = send('tools/list', {}, 2)['result']['tools']
+        # Exactly the five tools of design §25.2.
         assert {tool['name'] for tool in tools} == {
-            'opv_state', 'opv_propose', 'opv_import_local', 'opv_explain'}
+            'opv_state', 'opv_next', 'opv_propose', 'opv_import_local', 'opv_explain'}, tools
+        assert len(tools) == 5, tools
         # The state sections, the proposals and the explanation are read-only;
         # only opv_import_local writes (a local-tier environment's 1Password items). No tool
         # applies structure or syncs: a person runs opv apply or opv sync (design §25.3).
         writers = {'opv_import_local'}
+        assert {tool['name'] for tool in tools
+                if not tool['annotations'].get('readOnlyHint')} == writers, tools
         assert all(tool['annotations']['readOnlyHint'] for tool in tools
                    if tool['name'] not in writers)
         assert not any(tool['annotations'].get('readOnlyHint') for tool in tools
@@ -105,6 +109,20 @@ with tempfile.TemporaryDirectory() as directory:
             'section': 'configuration'}}, 16)
         answer = json.loads(unknown['result']['content'][0]['text'])
         assert answer['ok'] is False and answer['error']['code'] == 'usage', answer
+        # opv_next takes only an optional env, and answers a refusal with the CLI's whole
+        # --json frame (opv next --env <env> --json), before any read.
+        next_tool = next(t for t in tools if t['name'] == 'opv_next')
+        assert set(next_tool['inputSchema']['properties']) == {'env'}, next_tool
+        assert next_tool['inputSchema'].get('required', []) == [], next_tool
+        refused_next = send('tools/call', {'name': 'opv_next', 'arguments': {
+            'env': 'not a name'}}, 24)
+        answer = json.loads(refused_next['result']['content'][0]['text'])
+        assert answer['ok'] is False and answer['error']['code'] == 'usage', answer
+        assert answer['schema_version'] == 3 and answer['exit_code'] == 2, answer
+        assert set(answer['next']) == {'kind', 'actor', 'command'}, answer
+        # opv_explain takes a key or a plan_id, and the environment.
+        explain_tool = next(t for t in tools if t['name'] == 'opv_explain')
+        assert set(explain_tool['inputSchema']['properties']) == {'key', 'plan_id', 'env'}, explain_tool
         # opv_propose advertises the intent document: one arm per kind, no rule parameter.
         propose_tool = next(t for t in tools if t['name'] == 'opv_propose')
         assert len(propose_tool['inputSchema']['oneOf']) == 8, propose_tool
@@ -142,7 +160,7 @@ with tempfile.TemporaryDirectory() as directory:
         explained = send('tools/call', {'name': 'opv_explain', 'arguments': {'key': 'NOT_A_KEY'}}, 15)
         answer = json.loads(explained['result']['content'][0]['text'])
         assert answer['ok'] is False and answer['error']['code'], answer
-        print('PASS: initialize, tools/list, opv_state sections, proposal purity, value and rule refusal, removed tools, and structural apply refusal')
+        print('PASS: initialize, tools/list (the five tools), opv_state sections, opv_next, proposal purity, value and rule refusal, removed tools, and structural apply refusal')
     finally:
         process.stdin.close()
         try:

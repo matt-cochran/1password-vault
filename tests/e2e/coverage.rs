@@ -8,15 +8,14 @@
 //!   reached end to end are in [`UNREACHABLE`], each with its reason.
 //! - **Every call the matrix discovers is faulted** with every fault kind, or listed in
 //!   `snapshots/SKIPPED.md` with its reason.
-//! - **MCP equals the CLI**: for each scenario an MCP tool reaches, the tool's `error` object
-//!   is the CLI's `--json` `error` object, byte for byte (owner decision); an `opv_state`
-//!   answer is the CLI's whole `--json` document (design §25.2).
+//! - **MCP equals the CLI**: for each scenario an MCP tool reaches, the tool's whole answer,
+//!   a failure included, is the CLI's whole `--json` document (owner decision, design §25.2).
 //! - **Every flow document of §25.1/§25.2 is pinned** (`flows`): a text, `--json` and, where a
 //!   tool exists, MCP run of each `propose` kind, `import`, `needs`, `contract` and `explain`,
 //!   on a world whose every value is an `S7MARKER` marker; no scenario snapshot may hold one.
 //! - **Every core document of §25.1 is pinned** (`core`): a text and `--json` run of
 //!   `inventory`, `next`, `ready --gate`, `doctor --env prod` (R9) and `access`, on a marked
-//!   world with vault members (no MCP half until `opv_state`, row mcp-state, merges).
+//!   world with vault members; `next`'s MCP half is `opv_next`.
 //!
 //! Each scenario runs the real `opv` against `opv-sim` on the test application
 //! (`tests/e2e/app`): a scratch `HOME`, `OPV_NO_SKILL=1`, no real credential, only recorded
@@ -1800,7 +1799,7 @@ mod flow_cases {
 ///   source `shared/DATABASE_URL`; `web/PERSONAL_LLM_KEY` is read from the personal item;
 ///   a key an explicit `environments` list leaves out has no cell there.
 ///
-/// No MCP half yet: `opv_state` (row mcp-state) is not on this tree.
+/// `next`'s MCP half is `opv_next` (row mcp-propose).
 mod core_cases {
     use super::*;
 
@@ -1844,8 +1843,9 @@ mod core_cases {
         case(core(), &["inventory"])
     }
 
+    /// The MCP half is `opv_next`, the same document as `opv next --json`.
     pub fn core_next() -> Case {
-        case(core(), &["next"])
+        case(core(), &["next"]).mcp("opv_next", json!({}))
     }
 
     /// The gate fails on dev's empty and placeholder values (`gate_failed`).
@@ -1982,22 +1982,12 @@ fn variant_test(name: &str, want: &str) {
     assert_eq!(got.as_deref(), Some(want), "{name}");
 }
 
-/// Gate 3: the MCP tool's `error` is the CLI's `--json` `error`; `opv_state`'s whole answer
-/// is the CLI's whole `--json` document (design §25.2: the same document as the command).
+/// Gate 3: every MCP tool's whole answer, a failure included, is the CLI's whole `--json`
+/// document (design §25.2: the same document as the command).
 fn mcp_equals_cli_test(name: &str) {
     let snap = committed(name);
-    let whole = sections(&snap)
-        .iter()
-        .any(|(h, _)| h.starts_with("mcp opv_state "));
-    let pick = |d: Value| {
-        if whole {
-            Some(d)
-        } else {
-            d.get("error").cloned()
-        }
-    };
-    let cli = json_document(&snap).and_then(pick);
-    let mcp = mcp_answer(&snap).and_then(pick);
+    let cli = json_document(&snap);
+    let mcp = mcp_answer(&snap);
     assert_eq!(
         mcp, cli,
         "{name}: the MCP answer is not the CLI's --json document"
@@ -2228,6 +2218,13 @@ fn core_inventory_shows_set_absent_placeholder_and_unreadable_cells() {
         .map(str::to_string)
         .collect();
     assert!(want.is_subset(&states), "{states:?}");
+}
+
+/// `opv_next`'s answer is the whole `opv next --json` document (design §25.2).
+#[test]
+fn core_next_mcp_is_the_clis_whole_json_document() {
+    let snap = committed("core_next");
+    assert_eq!(mcp_answer(&snap), json_document(&snap));
 }
 
 #[test]
