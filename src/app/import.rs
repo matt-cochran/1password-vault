@@ -194,6 +194,20 @@ pub fn run(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
+    run_tagged(fleet, env_name, opts, None, r, out)
+}
+
+/// [`run`] with `tag` added to every written item's 1Password tags (design row
+/// `import-local`). The tag rides the same verified `op item edit` as the values and is
+/// never a value; `None` is plain `opv import`.
+pub fn run_tagged(
+    fleet: &Fleet,
+    env_name: &str,
+    opts: &Opts,
+    tag: Option<&str>,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
     let replace = pairs(fleet, &opts.replace, "--replace")?;
     let rotate = pairs(fleet, &opts.rotate, "--rotate")?;
     let skip = pairs(fleet, &opts.skip, "--skip")?;
@@ -203,6 +217,7 @@ pub fn run(
         &opts.source,
         (&replace, &rotate, &skip),
         !opts.dry_run,
+        tag,
         &apply_command(env_name, opts),
         r,
     )?;
@@ -218,12 +233,14 @@ type KeySets<'a> = (
 
 /// [`plan_and_write`] with `--skip`: an import of a key it names becomes `Skipped` and is
 /// not written (#94). Only imports are skipped; a replace is already opt-in.
+#[allow(clippy::too_many_arguments)]
 fn plan_skipping(
     fleet: &Fleet,
     env_name: &str,
     source: &Source,
     (replace, rotate, skip): KeySets<'_>,
     apply: bool,
+    tag: Option<&str>,
     by: &Cmd,
     r: &dyn CommandRunner,
 ) -> Result<AdoptPlan, Error> {
@@ -242,7 +259,7 @@ fn plan_skipping(
     if apply {
         super::tidy::require_person(r, "opv import")?;
         if !plan.writes.is_empty() {
-            write(fleet, fleet.environment(env_name)?, by, &plan, r)?;
+            write(fleet, fleet.environment(env_name)?, by, &plan, tag, r)?;
         }
     }
     Ok(plan)
@@ -268,7 +285,7 @@ pub fn plan_and_write(
     let read = super::tidy::read(fleet, env_name, r)?;
     let plan = crate::domain::import::plan(fleet, env_name, &read.fields, &found, replace, rotate);
     if apply && !plan.writes.is_empty() {
-        write(fleet, env, &plan_command(&env.name, source), &plan, r)?;
+        write(fleet, env, &plan_command(&env.name, source), &plan, None, r)?;
     }
     Ok(plan)
 }
@@ -282,9 +299,10 @@ fn write(
     env: &crate::domain::Environment,
     by: &Cmd,
     plan: &AdoptPlan,
+    tag: Option<&str>,
     r: &dyn CommandRunner,
 ) -> Result<(), Error> {
-    write_values(fleet, env, &plan.writes, by, r)
+    write_values_tagged(fleet, env, &plan.writes, tag, by, r)
 }
 
 /// The adoption plan's own read, `import <env> --from <source>`: after a write it shows
@@ -310,6 +328,19 @@ pub fn write_values(
     by: &Cmd,
     r: &dyn CommandRunner,
 ) -> Result<(), Error> {
+    write_values_tagged(fleet, env, writes, None, by, r)
+}
+
+/// [`write_values`] with `tag` added to each written item's 1Password tags on the same
+/// verified edit (design row `import-local`).
+pub fn write_values_tagged(
+    fleet: &Fleet,
+    env: &crate::domain::Environment,
+    writes: &[(String, String, SecretValue)],
+    tag: Option<&str>,
+    by: &Cmd,
+    r: &dyn CommandRunner,
+) -> Result<(), Error> {
     let mut by_boundary: BTreeMap<&str, Vec<&(String, String, SecretValue)>> = BTreeMap::new();
     for w in writes {
         by_boundary
@@ -320,9 +351,36 @@ pub fn write_values(
     for (name, writes) in by_boundary {
         let b = fleet.boundary(&env.name, &writes[0].0)?;
         let part = super::tidy::in_boundary(fleet, name);
-        write_item(&part, env, b, &writes, by, r)?;
+        write_item(&part, env, b, &writes, tag, by, r)?;
     }
     Ok(())
+}
+
+/// Add `tag` to the whole-item `template`'s `tags` array, keeping any it already carries.
+/// Value-free metadata; the same JSON that holds the values on the one `op item edit`.
+fn tag_template(
+    mut template: zeroize::Zeroizing<Vec<u8>>,
+    tag: &str,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, Error> {
+    let mut doc: serde_json::Value = serde_json::from_slice(&template).map_err(|_| Cause::Bug {
+        site: "import tag template",
+    })?;
+    if let Some(obj) = doc.as_object_mut() {
+        let tags = obj
+            .entry("tags")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        if let Some(arr) = tags.as_array_mut()
+            && !arr.iter().any(|t| t.as_str() == Some(tag))
+        {
+            arr.push(serde_json::Value::String(tag.to_string()));
+        }
+    }
+    let bytes = serde_json::to_vec(&doc).map_err(|_| Cause::Bug {
+        site: "import tag template",
+    })?;
+    template.clear();
+    template.extend_from_slice(&bytes);
+    Ok(template)
 }
 
 /// [`write`] into one boundary item `b`, holding `fleet`'s products.
@@ -331,6 +389,7 @@ fn write_item(
     env: &crate::domain::Environment,
     b: &Boundary,
     writes: &[&(String, String, SecretValue)],
+    tag: Option<&str>,
     by: &Cmd,
     r: &dyn CommandRunner,
 ) -> Result<(), Error> {
@@ -377,6 +436,10 @@ fn write_item(
         kept,
     };
     let template = onepassword_tidy::apply(item.raw(), &tidy)?;
+    let template = match tag {
+        Some(tag) => tag_template(template, tag)?,
+        None => template,
+    };
     onepassword_tidy::write(r, env, b, &template)?;
     // Verify by reading back: every written field holds exactly what was written.
     let after = onepassword::read_whole_fresh(r, env, b)?;
