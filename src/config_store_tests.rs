@@ -1243,8 +1243,10 @@ fn a_manifest_with_a_bindings_block_loads_with_its_ids() {
     let (_, found) = myapp_notes(&op, &notes_around(&contract, &ids));
     let fleet = found.load(&op).unwrap();
     assert_eq!(
-        fleet.environments["dev"].boundaries["app"].vault_id,
-        "vdev0000000000000000000001"
+        fleet.environments["dev"].boundaries["app"]
+            .as_ref()
+            .map(|b| b.vault_id.as_str()),
+        Some("vdev0000000000000000000001")
     );
 }
 
