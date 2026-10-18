@@ -179,6 +179,11 @@ pub fn build(fleet: &Fleet, cells: &CellInputs, receipt: Option<&ReceiptView>) -
                         .cloned()
                         .unwrap_or(ValueState::Absent)
                 };
+                // A vault this session cannot read, with no receipt state: unreadable, never
+                // absent (a failed read is never absence).
+                let unread = || ValueState::Unreadable {
+                    cause: crate::domain::value_state::UnreadableCause::NoAccess,
+                };
                 let (state, from_receipt) = match here {
                     Presence::NotWanted { reason } => (ValueState::NotWanted { reason }, None),
                     _ if capability == Capability::None => match receipt {
@@ -190,9 +195,9 @@ pub fn build(fleet: &Fleet, cells: &CellInputs, receipt: Option<&ReceiptView>) -
                                     age_seconds: r.age_seconds,
                                 }),
                             ),
-                            None => (live(), None),
+                            None => (unread(), None),
                         },
-                        None => (live(), None),
+                        None => (unread(), None),
                     },
                     _ => (live(), None),
                 };

@@ -266,3 +266,22 @@ except = { dev = "no dev account" }
         }
     );
 }
+
+#[test]
+fn a_none_capability_vault_without_a_receipt_is_unreadable_never_absent() {
+    let fleet = fleet();
+    let env = fleet.environments.keys().next().unwrap().clone();
+    let vault = fleet.environments[&env]
+        .boundaries
+        .values()
+        .flatten()
+        .next()
+        .unwrap()
+        .vault_id
+        .clone();
+    let mut cells = CellInputs::default();
+    cells.capabilities.insert(vault, Capability::None);
+    let inv = build(&fleet, &cells, None);
+    let cell = inv.cells.iter().find(|c| c.env == env).unwrap();
+    assert!(matches!(cell.state, ValueState::Unreadable { .. }));
+}
