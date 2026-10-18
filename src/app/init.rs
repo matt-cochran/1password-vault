@@ -409,7 +409,7 @@ fn import_values(
     p: &Prepared,
     place: &Place,
     r: &dyn CommandRunner,
-) -> Result<Option<crate::domain::adopt::AdoptPlan>, Error> {
+) -> Result<Option<crate::domain::import::AdoptPlan>, Error> {
     let Some(from) = args.from.as_ref().filter(|f| f.apply) else {
         return Ok(None);
     };
@@ -449,7 +449,7 @@ fn import_values(
 /// why. Names only.
 fn print_adopted(
     out: &mut dyn Write,
-    plan: Option<&crate::domain::adopt::AdoptPlan>,
+    plan: Option<&crate::domain::import::AdoptPlan>,
 ) -> Result<(), Error> {
     let Some(plan) = plan else { return Ok(()) };
     writeln!(
@@ -461,7 +461,7 @@ fn print_adopted(
     for row in plan
         .rows
         .iter()
-        .filter(|r| !matches!(r.action, crate::domain::adopt::Action::Import))
+        .filter(|r| !matches!(r.action, crate::domain::import::Action::Imported))
     {
         if let Some(key) = &row.key {
             writeln!(out, "  {key}: {}", row.action.word()).map_err(write_err)?;
@@ -648,7 +648,7 @@ fn write_json(
     args: &InitArgs,
     p: &Prepared,
     place: &Place,
-    adopted: Option<&crate::domain::adopt::AdoptPlan>,
+    adopted: Option<&crate::domain::import::AdoptPlan>,
 ) -> Result<(), Error> {
     let decl = &p.decl;
     let keys: Vec<serde_json::Value> = decl
@@ -686,7 +686,7 @@ fn write_json(
         let not_imported: Vec<serde_json::Value> = a
             .rows
             .iter()
-            .filter(|r| !matches!(r.action, crate::domain::adopt::Action::Import))
+            .filter(|r| !matches!(r.action, crate::domain::import::Action::Imported))
             .filter_map(|r| {
                 r.key
                     .as_ref()

@@ -1,6 +1,6 @@
 //! `opv adopt <env> --from <dotenv>|target:<name> [--replace <product/KEY>]... [--apply]
 //! [--json]` (FR-53, #78): bring values that already exist elsewhere into the environment's
-//! 1Password item, after a review. The plan is [`crate::domain::adopt::plan`]; this module
+//! 1Password item, after a review. The plan is [`crate::domain::import::plan`]; this module
 //! reads the source, prints the plan (names, actions and findings only) and, with `--apply`,
 //! writes it into each key's boundary item, one verified edit per item. It never syncs,
 //! deploys, prunes, revokes or deletes the source. The bare `--from target` form was
@@ -13,8 +13,8 @@ use std::path::PathBuf;
 use super::write_err;
 use crate::adapters::{onepassword, onepassword_tidy};
 use crate::cause::{Cause, Cmd, FieldName, Guard, ItemId, NameKind, UsageProblem, VaultId};
-use crate::domain::adopt::{Action, AdoptPlan};
 use crate::domain::convention::{self, KEPT_SECTION, Op, TidyPlan};
+use crate::domain::import::{Action, AdoptPlan};
 use crate::domain::{Boundary, Fleet, Kind, SecretValue, key_label};
 use crate::error::Error;
 use crate::ports::Ports;
@@ -230,7 +230,7 @@ fn plan_skipping(
         _ => false,
     };
     for row in &mut plan.rows {
-        if row.action == Action::Import && named(&row.product, &row.key) {
+        if row.action == Action::Imported && named(&row.product, &row.key) {
             row.action = Action::Skipped;
         }
     }
@@ -263,7 +263,7 @@ pub fn plan_and_write(
     let found = read_source(fleet, env_name, source, r)?;
     // The item as the commands read it (tidied first when a person runs opv).
     let read = super::tidy::read(fleet, env_name, r)?;
-    let plan = crate::domain::adopt::plan(fleet, env_name, &read.fields, &found, replace, rotate);
+    let plan = crate::domain::import::plan(fleet, env_name, &read.fields, &found, replace, rotate);
     if apply && !plan.writes.is_empty() {
         write(fleet, env, &plan_command(&env.name, source), &plan, r)?;
     }
@@ -447,7 +447,12 @@ fn print(out: &mut dyn Write, env_name: &str, opts: &Opts, plan: &AdoptPlan) -> 
     };
     let count = |a: fn(&Action) -> bool| plan.rows.iter().filter(|r| a(&r.action)).count();
     let writes = plan.writes.len();
-    let decide = count(|a| matches!(a, Action::Differs | Action::Conflict | Action::Ambiguous));
+    let decide = count(|a| {
+        matches!(
+            a,
+            Action::SkippedAlreadySet | Action::Conflict | Action::Ambiguous
+        )
+    });
     let next = crate::cause::render::cmd_text(&next_step(env_name, opts, writes));
     if opts.json {
         let rows: Vec<serde_json::Value> = plan
@@ -483,14 +488,15 @@ fn print(out: &mut dyn Write, env_name: &str, opts: &Opts, plan: &AdoptPlan) -> 
     .map_err(write_err)?;
     for r in &plan.rows {
         let what = match r.action {
-            Action::Match => "same value; nothing to do".to_string(),
-            Action::FormatOnly => "same value after the key's rules; nothing to do".to_string(),
-            Action::Import => format!("import ({verb})"),
-            Action::Replace => format!("replace; the old value is kept in {KEPT_SECTION} ({verb})"),
-            Action::Differs => format!(
-                "differs: 1Password is kept (--replace {} to take the found value)",
+            Action::Imported => format!("import ({verb})"),
+            Action::Replaced => {
+                format!("replace; the old value is kept in {KEPT_SECTION} ({verb})")
+            }
+            Action::SkippedAlreadySet => format!(
+                "skipped: already set (--replace {} to take the found value)",
                 label(&r.product, &r.key)
             ),
+            Action::SkippedEmpty => "skipped: empty; nothing to write".to_string(),
             Action::HeldImmutable => "immutable: also needs --rotate to replace".to_string(),
             Action::FailsRule(rule) => format!("fails rule {rule}: not imported"),
             Action::Conflict => {

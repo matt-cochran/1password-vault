@@ -1,9 +1,10 @@
 //! FR-53 adoption planner. Pure: no `op`, no target calls, no I/O.
 //!
 //! Callers pass the item's current fields and the values found elsewhere (a dotenv file or a
-//! readable target). The planner maps each found name to a declared key, normalises both
-//! sides with the key's rules and reports one action per destination field. Values appear
-//! only in `writes`, wrapped in `SecretValue`; `Debug` prints names only.
+//! readable target). The planner maps each found name to a declared key, normalises the
+//! found side with the key's rules and reports one write-only action per destination field
+//! (R3, H2): it looks at whether the current field is set, never at what it holds. Values
+//! appear only in `writes`, wrapped in `SecretValue`; `Debug` prints names only.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -13,19 +14,20 @@ use crate::domain::plan::ItemField;
 use crate::domain::rules;
 use crate::domain::secret::SecretValue;
 
-/// What `adopt` decided for one destination field (FR-53).
+/// What `import` decided for one destination field (FR-53, R3).
+///
+/// Write-only: the plan never compares a found value with the current one (R3, H2), so a
+/// set field is `SkippedAlreadySet` whatever the found value is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
-    /// Found and current agree byte for byte.
-    Match,
-    /// Equal after normalisation; nothing to write.
-    FormatOnly,
     /// The current field is missing or empty: write the normalised found value.
-    Import,
-    /// Different values; 1Password is kept unless `--replace` names the key.
-    Differs,
+    Imported,
+    /// The current field is set: 1Password is kept, whatever the found value.
+    SkippedAlreadySet,
+    /// The found value is empty: nothing to write.
+    SkippedEmpty,
     /// `--replace` names the key: write the normalised found value.
-    Replace,
+    Replaced,
     /// Immutable key named by `--replace` but not `--rotate`: held, nothing written.
     HeldImmutable,
     /// The found value fails a rule; the rule name is stable.
@@ -46,11 +48,10 @@ impl Action {
     /// The stable word printed for this action.
     pub fn word(&self) -> &'static str {
         match self {
-            Action::Match => "match",
-            Action::FormatOnly => "format_only",
-            Action::Import => "import",
-            Action::Differs => "differs",
-            Action::Replace => "replace",
+            Action::Imported => "imported",
+            Action::SkippedAlreadySet => "skipped_already_set",
+            Action::SkippedEmpty => "skipped_empty",
+            Action::Replaced => "replaced",
             Action::HeldImmutable => "held_immutable",
             Action::FailsRule(_) => "fails_rule",
             Action::Conflict => "conflict",
@@ -195,7 +196,8 @@ pub fn plan(
     for ((product, key), entries) in &groups {
         let spec = &fleet.products[product].keys[key];
 
-        // Normalise every found value with the destination key's rules (FR-53).
+        // Normalise every found value with the destination key's rules (FR-53). An empty
+        // found value is skipped, never compared with the current one nor written (R3).
         let mut normalised: Vec<SecretValue> = Vec::new();
         let mut failed: Option<&'static str> = None;
         let mut not_applicable = false;
@@ -203,47 +205,42 @@ pub fn plan(
             match rules::check(product, key, spec, env_name, env, value) {
                 Ok(Some(v)) => normalised.push(v),
                 Ok(None) => not_applicable = true,
+                // `check` refuses an empty applicable value as `nonempty`; the write-only
+                // plan reports it as skipped, not as a rule failure.
+                Err(_) if value.expose().is_empty() => {}
                 Err(f) => failed = failed.or(Some(f.rule)),
             }
         }
 
         let (action, write) = if let Some(rule) = failed {
             (Action::FailsRule(rule), false)
-        } else if not_applicable || normalised.is_empty() {
+        } else if not_applicable {
             (Action::NotApplicable, false)
+        } else if normalised.is_empty() {
+            (Action::SkippedEmpty, false)
         } else if normalised
             .iter()
             .any(|v| v.expose() != normalised[0].expose())
         {
             (Action::Conflict, false)
         } else {
-            let raw_all_equal = entries
-                .iter()
-                .all(|(_, v)| v.expose() == entries[0].1.expose());
-            let found_raw = entries[0].1.expose();
+            // Write-only (R3, H2): the decision looks at presence only, never at the
+            // current value, so equal and unequal found values plan identically.
             let current = item
                 .iter()
                 .find(|f| f.section == *product && f.label == *key);
             match current {
-                None => (Action::Import, true),
-                Some(c) if c.value.expose().is_empty() => (Action::Import, true),
-                Some(c) if raw_all_equal && found_raw == c.value.expose() => (Action::Match, false),
-                Some(c) => {
-                    let current_norm = rules::check(product, key, spec, env_name, env, &c.value);
-                    let format_only = matches!(
-                        current_norm,
-                        Ok(Some(ref cv)) if cv.expose() == normalised[0].expose()
-                    );
-                    if format_only {
-                        (Action::FormatOnly, false)
-                    } else if replace.contains(&(product.clone(), key.clone())) {
+                None => (Action::Imported, true),
+                Some(c) if c.value.expose().is_empty() => (Action::Imported, true),
+                Some(_) => {
+                    if replace.contains(&(product.clone(), key.clone())) {
                         if spec.immutable && !rotate.contains(&(product.clone(), key.clone())) {
                             (Action::HeldImmutable, false)
                         } else {
-                            (Action::Replace, true)
+                            (Action::Replaced, true)
                         }
                     } else {
-                        (Action::Differs, false)
+                        (Action::SkippedAlreadySet, false)
                     }
                 }
             }
@@ -270,5 +267,5 @@ pub fn plan(
 }
 
 #[cfg(test)]
-#[path = "adopt_tests.rs"]
+#[path = "import_tests.rs"]
 mod tests;

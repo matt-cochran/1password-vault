@@ -145,7 +145,7 @@ fn pem() -> (String, String) {
 }
 
 #[test]
-fn an_empty_current_field_is_imported() {
+fn a_missing_field_is_imported() {
     let p = plan(
         &fleet(),
         "dev",
@@ -157,54 +157,82 @@ fn an_empty_current_field_is_imported() {
     assert_eq!(writes(&p), vec![("api", "DATABASE_URL", "postgres://db")]);
 }
 
+#[test]
+fn an_empty_current_field_is_imported() {
+    let p = plan(
+        &fleet(),
+        "dev",
+        &[field("api", "DATABASE_URL", "")],
+        &found(&[("FLEET__API__DATABASE_URL", "postgres://db")]),
+        &none(),
+        &none(),
+    );
+    assert_eq!(writes(&p), vec![("api", "DATABASE_URL", "postgres://db")]);
+}
+
+#[test]
+fn an_empty_found_value_is_skipped_empty() {
+    let p = plan(
+        &fleet(),
+        "dev",
+        &[],
+        &found(&[("FLEET__API__DATABASE_URL", "")]),
+        &none(),
+        &none(),
+    );
+    assert_eq!(action_of(&p, "api", "DATABASE_URL"), Action::SkippedEmpty);
+}
+
+#[test]
+fn a_set_field_is_skipped_already_set() {
+    let p = plan(
+        &fleet(),
+        "dev",
+        &[field("api", "DATABASE_URL", "postgres://current")],
+        &found(&[("FLEET__API__DATABASE_URL", "postgres://found")]),
+        &none(),
+        &none(),
+    );
+    assert_eq!(
+        action_of(&p, "api", "DATABASE_URL"),
+        Action::SkippedAlreadySet
+    );
+}
+
+/// H2: the plan must not depend on the found value, so equal and unequal file values plan
+/// identically (found-vs-current comparison removed, R3).
+#[test]
+fn equal_and_differing_file_values_plan_identically() {
+    let fleet = fleet();
+    let current = [field("api", "DATABASE_URL", "postgres://current")];
+    let equal = plan(
+        &fleet,
+        "dev",
+        &current,
+        &found(&[("FLEET__API__DATABASE_URL", "postgres://current")]),
+        &none(),
+        &none(),
+    );
+    let differing = plan(
+        &fleet,
+        "dev",
+        &current,
+        &found(&[("FLEET__API__DATABASE_URL", "postgres://other")]),
+        &none(),
+        &none(),
+    );
+    assert_eq!(
+        (equal.rows.clone(), writes(&equal)),
+        (differing.rows.clone(), writes(&differing))
+    );
+}
+
 fn action_of(p: &AdoptPlan, product: &str, key: &str) -> Action {
     p.rows
         .iter()
         .find(|r| r.product.as_deref() == Some(product) && r.key.as_deref() == Some(key))
         .expect("a row for the key")
         .action
-}
-
-#[test]
-fn a_matching_value_is_a_match() {
-    let p = plan(
-        &fleet(),
-        "dev",
-        &[field("api", "DATABASE_URL", "postgres://db")],
-        &found(&[("FLEET__API__DATABASE_URL", "postgres://db")]),
-        &none(),
-        &none(),
-    );
-    assert_eq!(action_of(&p, "api", "DATABASE_URL"), Action::Match);
-}
-
-#[test]
-fn a_pem_with_a_trailing_newline_is_format_only() {
-    let (_, single) = pem();
-    let with_newline = format!("{single}\n");
-    let p = plan(
-        &fleet(),
-        "dev",
-        &[field("api", "PRIVATE_KEY_PEM", &single)],
-        &found(&[("FLEET__API__PRIVATE_KEY_PEM", with_newline.as_str())]),
-        &none(),
-        &none(),
-    );
-    assert_eq!(action_of(&p, "api", "PRIVATE_KEY_PEM"), Action::FormatOnly);
-}
-
-#[test]
-fn a_multiline_pem_against_a_one_line_current_is_format_only() {
-    let (multi, single) = pem();
-    let p = plan(
-        &fleet(),
-        "dev",
-        &[field("api", "PRIVATE_KEY_PEM", &single)],
-        &found(&[("FLEET__API__PRIVATE_KEY_PEM", multi.as_str())]),
-        &none(),
-        &none(),
-    );
-    assert_eq!(action_of(&p, "api", "PRIVATE_KEY_PEM"), Action::FormatOnly);
 }
 
 #[test]
@@ -225,29 +253,16 @@ fn a_multiline_pem_is_staged_as_one_line() {
 }
 
 #[test]
-fn a_found_value_missing_the_ensure_prefix_is_format_only() {
-    let p = plan(
-        &fleet(),
-        "dev",
-        &[field("api", "ENSURED", "sk-abc")],
-        &found(&[("FLEET__API__ENSURED", "abc")]),
-        &none(),
-        &none(),
-    );
-    assert_eq!(action_of(&p, "api", "ENSURED"), Action::FormatOnly);
-}
-
-#[test]
-fn a_differing_value_is_kept_by_default() {
+fn a_named_replace_is_replaced() {
     let p = plan(
         &fleet(),
         "dev",
         &[field("api", "DATABASE_URL", "postgres://old")],
         &found(&[("FLEET__API__DATABASE_URL", "postgres://new")]),
-        &none(),
+        &pairs(&[("api", "DATABASE_URL")]),
         &none(),
     );
-    assert_eq!(action_of(&p, "api", "DATABASE_URL"), Action::Differs);
+    assert_eq!(action_of(&p, "api", "DATABASE_URL"), Action::Replaced);
 }
 
 #[test]
@@ -427,32 +442,32 @@ fn debug_never_prints_a_value() {
 #[test]
 fn action_words_are_stable() {
     let words = [
-        Action::Match.word(),
-        Action::FormatOnly.word(),
-        Action::Import.word(),
-        Action::Differs.word(),
-        Action::Replace.word(),
+        Action::Imported.word(),
+        Action::SkippedAlreadySet.word(),
+        Action::SkippedEmpty.word(),
+        Action::Replaced.word(),
         Action::HeldImmutable.word(),
         Action::FailsRule("prefix").word(),
         Action::Conflict.word(),
         Action::Ambiguous.word(),
         Action::NotDeclared.word(),
         Action::NotApplicable.word(),
+        Action::Skipped.word(),
     ];
     assert_eq!(
         words,
         [
-            "match",
-            "format_only",
-            "import",
-            "differs",
-            "replace",
+            "imported",
+            "skipped_already_set",
+            "skipped_empty",
+            "replaced",
             "held_immutable",
             "fails_rule",
             "conflict",
             "ambiguous",
             "not_declared",
             "not_applicable",
+            "skipped",
         ]
     );
 }
