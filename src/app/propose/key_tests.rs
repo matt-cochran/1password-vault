@@ -176,6 +176,7 @@ fn write_leaves_every_other_file_untouched() {
 #[test]
 fn a_contract_without_ids_is_validated_with_its_bindings() {
     let (contract, bindings) = crate::config::bindings::split(DEV);
-    let intent = key_intent(r#"{"kind":"key","key":"NEW_KEY","product":"app"}"#);
+    let intent =
+        key_intent(r#"{"kind":"key","key":"NEW_KEY","product":"app","field_kind":"secret"}"#);
     assert!(propose(&contract, &bindings, None, &intent).is_ok());
 }
