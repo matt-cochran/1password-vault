@@ -19,12 +19,11 @@ pub const MCP_TOOLS: &[(&str, &str)] = &[
     ("opv_access", "access"),
     ("opv_deployment_plan", "plan"),
     ("opv_changed", "changed"),
-    ("opv_declare_key", "add"),
-    ("opv_declare_environment", "env add"),
-    ("opv_declare_target", "target add"),
     ("opv_structure_plan", "structure plan"),
-    ("opv_generate", "generate"),
     ("opv_delivery_preview", "run --preview"),
+    ("opv_propose", "propose"),
+    ("opv_import_local", "import"),
+    ("opv_explain", "explain"),
 ];
 
 /// What running a command can change.
@@ -385,6 +384,22 @@ pub const EFFECTS: &[Effect] = &[
         needs_terminal: false,
         handles_values: false,
         ask_user_first: false,
+    },
+    // `opv propose`: a proposal reads the contract and 1Password and writes nothing.
+    Effect {
+        command: "propose",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    // `opv import <env> --from <file>`: values from a file into 1Password items.
+    Effect {
+        command: "import",
+        effect: "writes_1password",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: true,
     },
 ];
 
