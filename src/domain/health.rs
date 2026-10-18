@@ -288,7 +288,7 @@ fn per_value(env: &EnvValues<'_>, f: &ItemField, spec: &KeySpec, out: &mut Vec<H
 }
 
 /// A known placeholder: a stock word, a run of x, `<…>`, or `your…here`.
-fn is_placeholder(value: &str) -> bool {
+pub(crate) fn is_placeholder(value: &str) -> bool {
     const WORDS: [&str; 16] = [
         "changeme",
         "change-me",

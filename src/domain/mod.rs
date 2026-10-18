@@ -15,6 +15,7 @@ pub mod naming;
 pub mod placement;
 pub mod presence;
 pub mod secret;
+pub mod value_state;
 
 pub use model::{
     Boundary, Environment, Fleet, ItemRef, KeySpec, Kind, OneOrMany, Origin, PrefixByMode, Product,
