@@ -1,7 +1,8 @@
 //! The configuration forms of `opv ui` (#97): declare a key, add an environment. A form only
-//! collects names and choices; on submit it is validated and becomes the exact `opv add` /
-//! `opv init --add-env` command ([`super::config_forms`]), which the UI shows and runs after
-//! a confirmation like every other write. A form never holds a value.
+//! collects names and choices; on submit it is validated and becomes the exact
+//! `opv propose key --write` / `opv init --add-env` command ([`super::config_forms`]), which
+//! the UI shows and runs after a confirmation like every other write. A form never holds a
+//! value.
 
 use super::app::Key;
 use super::config_forms::{AddEnvForm, AddKeyForm, KindChoice, add_env_command, add_key_command};
@@ -160,7 +161,7 @@ impl FormState {
                 if f.product.as_deref().is_some_and(str::is_empty) {
                     f.product = None;
                 }
-                add_key_command(&f)
+                add_key_command(&f).map(propose_key)
             }
             Form::AddEnv(f) => add_env_command(f, &self.envs),
         }
@@ -264,6 +265,17 @@ impl FormState {
             Form::AddEnv(_) => "Add an environment",
         }
     }
+}
+
+/// The `opv propose key <[p/]KEY> … --write` command the add-key form runs: the same flags
+/// as `opv add`, under the one 0.12.0 interface (Part V, `ui-remap`). `--write` commits the
+/// contract diff; the UI then runs `opv apply` (see [`super::run`]).
+fn propose_key(add: Vec<String>) -> Vec<String> {
+    // `add_key_command` returns ["add", label, flags…]; keep everything after `add`.
+    let mut out = vec!["propose".to_string(), "key".to_string()];
+    out.extend(add.into_iter().skip(1));
+    out.push("--write".to_string());
+    out
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
-//! The review step of `opv ui`'s adoption flow (#94): turns the rows of
-//! `opv adopt <env> --from <src> --json` and a person's per-key decisions into the exact
-//! `opv adopt ... --apply` argument list. Names, actions and decisions only; a secret value
-//! is never read or kept here.
+//! The review step of `opv ui`'s import flow (#94): turns the rows of
+//! `opv import <env> --from <src> --dry-run --json` and a person's per-key decisions into
+//! the exact `opv import ...` argument list (which writes by default). Names, actions and
+//! decisions only; a secret value is never read or kept here.
 
 use super::docs::AdoptDoc;
 
@@ -65,25 +65,25 @@ pub fn rows_from(
         .collect()
 }
 
-/// `import` -> `Some(Take)`; `differs` -> `Some(Keep)`; every other action -> `None` (not
-/// the person's to decide here).
+/// `imported` -> `Some(Take)`; `skipped_already_set` -> `Some(Keep)`; every other action ->
+/// `None` (not the person's to decide here). The words are the import document's own.
 pub fn default_decision(action: &str) -> Option<Decision> {
     match action {
-        "import" => Some(Decision::Take),
-        "differs" => Some(Decision::Keep),
+        "imported" => Some(Decision::Take),
+        "skipped_already_set" => Some(Decision::Keep),
         _ => None,
     }
 }
 
-/// The next decision on a key press: `import` cycles Take -> Skip -> Take; `differs` cycles
-/// Keep -> Take -> Skip -> Keep; `None` stays `None`.
+/// The next decision on a key press: `imported` cycles Take -> Skip -> Take;
+/// `skipped_already_set` cycles Keep -> Take -> Skip -> Keep; `None` stays `None`.
 pub fn toggle(row: &ReviewRow) -> Option<Decision> {
     match (row.action.as_str(), row.decision) {
-        ("import", Some(Decision::Take)) => Some(Decision::Skip),
-        ("import", Some(Decision::Skip)) => Some(Decision::Take),
-        ("differs", Some(Decision::Keep)) => Some(Decision::Take),
-        ("differs", Some(Decision::Take)) => Some(Decision::Skip),
-        ("differs", Some(Decision::Skip)) => Some(Decision::Keep),
+        ("imported", Some(Decision::Take)) => Some(Decision::Skip),
+        ("imported", Some(Decision::Skip)) => Some(Decision::Take),
+        ("skipped_already_set", Some(Decision::Keep)) => Some(Decision::Take),
+        ("skipped_already_set", Some(Decision::Take)) => Some(Decision::Skip),
+        ("skipped_already_set", Some(Decision::Skip)) => Some(Decision::Keep),
         _ => None,
     }
 }
@@ -95,24 +95,25 @@ pub fn writes(rows: &[ReviewRow]) -> usize {
         .count()
 }
 
-/// `["adopt", env, "--from", from]` then, in row order, `--skip` label for every import row
-/// decided Skip, `--replace` label for every differs row decided Take, and additionally
-/// `--rotate` label right after that `--replace` when the row is immutable; then `--apply`.
-/// Rows with decision None add nothing.
+/// `["import", env, "--from", from]` then, in row order, `--skip` label for every
+/// `imported` row decided Skip, `--replace` label for every `skipped_already_set` row
+/// decided Take, and additionally `--rotate` label right after that `--replace` when the row
+/// is immutable. There is no `--apply`: import writes by default. Rows with decision None
+/// add nothing.
 pub fn command(env: &str, from: &str, rows: &[ReviewRow]) -> Vec<String> {
     let mut out = vec![
-        "adopt".to_string(),
+        "import".to_string(),
         env.to_string(),
         "--from".to_string(),
         from.to_string(),
     ];
     for row in rows {
         match (row.action.as_str(), row.decision) {
-            ("import", Some(Decision::Skip)) => {
+            ("imported", Some(Decision::Skip)) => {
                 out.push("--skip".to_string());
                 out.push(row.label.clone());
             }
-            ("differs", Some(Decision::Take)) => {
+            ("skipped_already_set", Some(Decision::Take)) => {
                 out.push("--replace".to_string());
                 out.push(row.label.clone());
                 if row.immutable {
@@ -123,7 +124,6 @@ pub fn command(env: &str, from: &str, rows: &[ReviewRow]) -> Vec<String> {
             _ => {}
         }
     }
-    out.push("--apply".to_string());
     out
 }
 
