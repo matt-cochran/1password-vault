@@ -129,8 +129,8 @@ fn enter_on_a_key_row_opens_its_detail() {
 
 fn adopt_doc() -> crate::ui::docs::AdoptDoc {
     serde_json::from_value(serde_json::json!({"rows": [
-        {"found": ["API_TOKEN"], "product": "api", "key": "API_TOKEN", "action": "import"},
-        {"found": ["APP_NAME"], "product": "api", "key": "APP_NAME", "action": "differs"},
+        {"found": ["API_TOKEN"], "product": "api", "key": "API_TOKEN", "action": "imported"},
+        {"found": ["APP_NAME"], "product": "api", "key": "APP_NAME", "action": "skipped_already_set"},
         {"found": ["STRAY"], "product": null, "key": null, "action": "not_declared"}
     ]}))
     .unwrap()
@@ -201,13 +201,12 @@ fn apply_shows_the_exact_command_before_it_runs() {
     assert_eq!(
         command,
         &[
-            "adopt",
+            "import",
             "local",
             "--from",
             "dev.env",
             "--replace",
-            "api/APP_NAME",
-            "--apply"
+            "api/APP_NAME"
         ]
     );
 }
@@ -219,7 +218,7 @@ fn confirming_runs_the_shown_command() {
     assert_eq!(
         a.handle(Key::Enter),
         Effect::Run(
-            ["adopt", "local", "--from", "dev.env", "--apply"]
+            ["import", "local", "--from", "dev.env"]
                 .map(String::from)
                 .to_vec()
         )
@@ -267,7 +266,10 @@ fn a_submitted_form_shows_its_command_before_it_runs() {
     let Some(Modal::Confirm { command, .. }) = &a.modal else {
         panic!("no confirmation")
     };
-    assert_eq!(command, &["add", "api/NEW", "--kind", "secret"]);
+    assert_eq!(
+        command,
+        &["propose", "key", "api/NEW", "--kind", "secret", "--write"]
+    );
 }
 
 #[test]

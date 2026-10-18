@@ -183,7 +183,7 @@ fn the_adoption_review_shows_each_key_and_decision() {
         "local",
         "dev.env",
         &typed(serde_json::json!({"rows": [
-            {"found": ["API_TOKEN"], "product": "api", "key": "API_TOKEN", "action": "differs"}
+            {"found": ["API_TOKEN"], "product": "api", "key": "API_TOKEN", "action": "skipped_already_set"}
         ]})),
     );
     assert!(frame(&a, 140, 30).contains("keep 1Password"));

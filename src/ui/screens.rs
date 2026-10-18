@@ -212,16 +212,21 @@ pub fn adopt(f: &mut Frame, area: Rect, app: &App, env: &str, from: &str) {
     ];
     for (i, r) in app.adopt.iter().enumerate() {
         let decision = match r.decision {
-            Some(Decision::Take) if r.action == "differs" => "replace (take the found value)",
+            Some(Decision::Take) if r.action == "skipped_already_set" => {
+                "replace (take the found value)"
+            }
             Some(Decision::Take) => "import",
             Some(Decision::Keep) => "keep 1Password",
             Some(Decision::Skip) => "skip",
             None => "",
         };
         let what = match r.action.as_str() {
-            "import" => "new in 1Password".to_string(),
-            "differs" => "differs from 1Password".to_string(),
-            "match" | "format_only" => "same value".to_string(),
+            "imported" => "new in 1Password".to_string(),
+            "skipped_already_set" => "already set in 1Password".to_string(),
+            "skipped_empty" => "empty in the source: nothing to write".to_string(),
+            "replaced" => "replace (take the found value)".to_string(),
+            "held_immutable" => "immutable: also needs --rotate".to_string(),
+            "skipped" => "skipped".to_string(),
             "fails_rule" => "fails a rule: not imported".to_string(),
             "conflict" => "found copies differ: decide in 1Password".to_string(),
             "ambiguous" => "matches several keys: not imported".to_string(),
