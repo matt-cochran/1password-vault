@@ -54,6 +54,7 @@ pub mod login;
 pub mod masked;
 pub mod mcp_install;
 pub mod needs;
+pub mod next;
 pub mod open;
 pub mod personal;
 #[cfg(test)]
