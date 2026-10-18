@@ -427,7 +427,7 @@ The deliverables of the 0.12.0 scope (D-G), in the style of `delivery-transports
 | tier | Environment tier attribute (local | shared | production) | `src/domain/model.rs` (`Environment` :285) [append]; `src/config.rs` (`validate` :1140) [append]; `src/domain/health.rs` (`is_production` :348) [append]; `src/domain/tier_tests.rs` (new) | — | 4 | `tier` parses; an absent tier loads as `production` where `is_production` holds today, else `shared`; `local` with a target or `confirm_env` is refused `config_invalid` naming the environment; `is_production` reads the tier. One test per rule; existing tests pass. | junior |
 | key-attrs | Key attributes source, expires and lifecycle | `src/domain/model.rs` (`KeySpec` :85) [append]; `src/config.rs` (`validate_key` :1854) [append]; `src/domain/key_attrs_tests.rs` (new) | — | 4 | `source = person|generated|derived` (derived iff `from`; generated iff a `generate.rs:60` recipe), `expires = <date>`, `lifecycle = active|retiring|retired` parse; each inconsistency is refused with the key named. One test per refusal. | junior |
 | presence | Presence all plus except, and the not_wanted resolution | `src/domain/presence.rs` (new: `present_in(key, env)`); `src/domain/model.rs` (`KeySpec` :85) [append]; `src/config.rs` (`validate_key` :1854) [append]; `src/domain/plan.rs` (row selection in `build_with` :267-321) [append] | — | 6 | A key without `environments` is present in every environment; `except = {env = "reason"}` makes it `not_wanted` there with the reason; an explicit list leaving an environment out without `except` loads with warning `environment_gap`; an empty reason is refused. Plans skip `not_wanted` rows. One test per rule. | junior |
-| bindings-load | Bindings file: ids out of the contract, plus the apply-record format *(contract)* | `src/config/bindings.rs` (new); `src/config.rs` (`parse` :182, `load` :42) [append]; `src/config/bindings_tests.rs` (new) | — | 5/6/9 | `secrets.bindings.toml` (one sorted line per id, union-mergeable) supplies boundary, item, state-vault and personal ids; inline ids still load with finding `ids_inline` whose `next` is `opv propose structure`; the apply record (`.opv/applied.json`: plan id, contract digest, bindings digest) has a typed reader and writer. Tests: merge, inline finding, record round-trip. | junior |
+| bindings-load | Bindings file: ids out of the contract, plus the apply-record format *(contract)* | `src/config/bindings.rs` (new); `src/config.rs` (`parse` :182, `load` :42) [append]; `src/config/bindings_tests.rs` (new) | — | 5/6/9 | `secrets.bindings.toml` (one sorted line per id, union-mergeable) supplies boundary, item, state-vault and personal ids. **One-way (D-G):** inline ids in `secrets.toml` are refused at load for every command with `config_invalid` naming the field, and the `next` is the one-time move `opv propose structure`, then `opv apply`; only that proposal (and the `apply` that runs it) may read inline ids, solely to move them into `secrets.bindings.toml` (a dedicated loader entry, not a mode of `load`). The apply record (`.opv/applied.json`: plan id, contract digest, bindings digest) has a typed reader and writer. Tests: merge, inline refusal (naming the field), the move-only reader, record round-trip. | junior |
 | bindings-check | config check compares the bindings file with the apply record | `src/app/config_cmd.rs` (`check`); `src/cause/mod.rs` (`ConfigCheck`) [append] | bindings-load (apply-record reader) | 4 | `opv config check` fails `bindings_unapplied` when the committed bindings digest differs from the apply record, naming the environment; passes when equal. Two tests, one assertion each. | junior |
 | agent-mode | Agent mode as presentation and the person-only refusal | `src/host.rs` (`agent_mode()` beside `interactive()` :87); `src/cause/mod.rs` (`Refusal` :1117) [append]; `src/cause/render.rs` (`document` :4305-4330) [append] | — | 3 | MCP, `OPV_AGENT=1` and the documented harness markers set agent mode; a person-only command in agent mode refuses at once with `next.actor = person` and the exact command; the refusal names the marker. One test per marker; no prompt opens (FakeRunner shows no read of stdin). | junior |
 | next-envelope | Typed next (kind, actor) in the JSON envelope, schema 3 *(contract)* | `src/json.rs` (`SCHEMA_VERSION` :19, `frame` :61-84); `src/cause/render.rs` (`document` :4305-4330) [append]; `src/app/ready.rs` (`Next` :165) [append] | — | 5 | Every `--json` document's `next` carries `kind` (`run`, `apply`, `enter_value`, `authorize`, `wait_ci`, `none`) and `actor` (`assistant`, `person`, `ci`); `schema_version` is 3; no free-text field decides an action. Golden tests of three documents; the e2e snapshots are regenerated in `e2e-coverage`. | junior |
@@ -676,7 +676,7 @@ What it removes: the review's M1 (a sealed trait seals nothing inside one crate)
 - `opv_import_local`: a file reference in; write-only, local tier only;
 - `opv_explain`: why a key or plan is the way it is.
 
-That is 5 tools, down from the **13** registered today (`src/mcp.rs`; correction 3). None of them writes anything except `opv_import_local`, and that only into an environment of tier `local`. The old tools become aliases for one minor release, each returning a typed `next` that names its replacement, and are then removed.
+That is 5 tools, down from the **13** registered today (`src/mcp.rs`; correction 3). None of them writes anything except `opv_import_local`, and that only into an environment of tier `local`. The old tools are removed in the same release, with no aliases (D-G, §25).
 
 **The person's whole surface:** `opv apply`, `opv set` (masked entry), `opv import`, the 1Password app and the links opv gives, and reading the plan.
 
@@ -697,7 +697,7 @@ That is 5 tools, down from the **13** registered today (`src/mcp.rs`; correction
 | M9: scanner junk keys | an ignore list | **reduced** (R5: `ignore` is an annotation, re-checked when its evidence changes; an assistant can still mis-annotate a false positive) |
 | M10: the `all` default and production | ask per production environment | **eliminated** (R6: a categorical question in the plan) |
 | M13: free-text screening, rule parameters | screening | **reduced to guidance only** (R2) |
-| M14: a parallel command surface | a migration plan | **reduced:** 5 assistant tools replace 13; the old ones are aliases with a typed `next` for one minor release |
+| M14: a parallel command surface | a migration plan | **reduced:** 5 assistant tools replace 13; the old ones are removed with no aliases (D-G, §25) |
 | P-20: assistant hangs on a prompt | agent mode | **eliminated** (R1: the assistant runs nothing that prompts) |
 
 ### 22.2 What it does to the experience
@@ -883,6 +883,8 @@ Every command that prints takes `--json` and returns the envelope of §4.2, with
 
 Hidden internal commands (`remote-send`, `remote-receive`, `local-delivery`) are unchanged.
 
+**Ids (D-G, one way).** 1Password ids live only in `secrets.bindings.toml`. A `secrets.toml` that still carries inline ids is refused at load by every command with `config_invalid` naming the field; the one-time move is `opv propose structure`, then `opv apply`, which alone may read the inline ids, only to move them.
+
 ### 25.2 The MCP tools after 0.12.0
 
 | Tool | Writes | Input | Returns |
@@ -926,6 +928,7 @@ Hidden internal commands (`remote-send`, `remote-receive`, `local-delivery`) are
 | `opv config describe` | `opv inventory` (structure) and `opv contract` (the contract as data) |
 | `opv ready [<env>] [--save]` | unchanged, plus `--gate` |
 | everything else in `docs/usage.md:7-59` (`setup`, `login`, `account`, `doctor`, `status`, `plan`, `sync`, `run`, `explain`, `open`, `history`, `access`, `delivery verify`, `changed`, `ci workflow`, `target list`, `target credentials`, `vault locate`, `projects`, `config export\|import\|edit\|check`, `mcp`, `skill`, `guide`, `schema`, `version`, `completions`, `help`, `ui`) | unchanged, with `explain` extended (leak response) and `doctor` and `access` extended (R8, R9) |
+| ids inline in `secrets.toml` (`vault`, `item`, state-vault and personal ids) | refused at load by every command (`config_invalid`, naming the field); moved once into `secrets.bindings.toml` by `opv propose structure`, then `opv apply`, the only path that reads them |
 | (new) | `opv inventory`, `opv needs`, `opv contract`, `opv next`, `opv propose`, `opv apply`, `opv set`, `opv import` |
 
 **MCP**
@@ -970,6 +973,8 @@ interface. There are no aliases: update scripts and assistant settings when you 
   reports imported / skipped per key; it no longer says whether a value differs.
 - `opv check` is `opv inventory --env <env>`; `opv config describe` is `opv inventory`
   and `opv contract`.
+- 1Password ids move out of `secrets.toml` into `secrets.bindings.toml`. A `secrets.toml`
+  with inline ids is refused until you run `opv propose structure`, then `opv apply`, once.
 - Assistant-approved syncs are gone (`opv approve --sync`, `opv sync --approved`). Run
   `opv sync` yourself, or let CI run it.
 - MCP: 13 tools become 5 (`opv_state`, `opv_next`, `opv_propose`, `opv_import_local`,
