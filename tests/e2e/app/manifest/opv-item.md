@@ -2,8 +2,8 @@
 
 opv reads this note to know which keys the project **e2e-app** needs and where each environment keeps them. **No secret values are stored here.**
 
-- Values: in each environment's own item (its `vault_id` and `item_id` below). Open one with `opv open KEY --env ENV`.
-- Change keys with `opv add KEY` or `opv config edit`. Hand edits are fine inside the code block while it stays valid TOML; opv reads only the code block.
+- Values: in each environment's own item, whose ids are in the `opv-bindings` block below. Open one with `opv open KEY --env ENV`.
+- Change keys with `opv add KEY` or `opv config edit`. Hand edits are fine inside the first code block while it stays valid TOML; opv reads only the code blocks. The `opv-bindings` block is written by `opv apply`; leave it as it is.
 - About opv: https://github.com/matt-cochran/1password-vault
 
 ```toml
@@ -20,8 +20,8 @@ opv reads this note to know which keys the project **e2e-app** needs and where e
 [environments.dev]
 title = "Local development"
 order = 1
-boundaries.shared = { vault_id = "vE2ESHAREDDEV00000000000001", item_id = "iE2ESHAREDDEV00000000000001" }
-boundaries.web    = { vault_id = "vE2EWEBDEV0000000000000001", item_id = "iE2EWEBDEV0000000000000001" }
+boundaries.shared = {}
+boundaries.web    = {}
 personal_vault = "e2e-dev-private"
 personal_item  = "e2e-app · dev (personal)"
 
@@ -30,14 +30,13 @@ personal_item  = "e2e-app · dev (personal)"
 title = "Production"
 order = 2
 confirm_env = true
-boundaries.shared = { vault_id = "vE2ESHAREDPROD0000000000001", item_id = "iE2ESHAREDPROD0000000000001" }
-boundaries.web    = { vault_id = "vE2EWEBPROD000000000000001", item_id = "iE2EWEBPROD000000000000001" }
+boundaries.shared = {}
+boundaries.web    = {}
 
 # The Fly target: one secret per rendered name.
 [environments.prod.targets.fly]
 fly.app = "e2e-app-prod"
 fly.secret_name = "E2E__{PRODUCT}__{KEY}"
-state_vault_id = "vE2ESTATEFLY00000000000001"
 roles = ["serve"]
 
 # The Kubernetes target: the Deployment reads names from the e2e-prod namespace. Config
@@ -51,7 +50,6 @@ kubernetes.container = "e2e-app"
 kubernetes.env_name = "E2E__{PRODUCT}__{KEY}"
 kubernetes.config = "configmap"
 kubernetes.secrets_dir = "/run/secrets/{product}"
-state_vault_id = "vE2ESTATEK8S00000000000001"
 roles = ["serve"]
 
 # The GitHub target: repository secrets and variables, plus the production environment.
@@ -59,7 +57,6 @@ roles = ["serve"]
 github.repo = "e2e-org/e2e-app"
 github.environment = "production"
 github.secret_name = "E2E__{PRODUCT}__{KEY}"
-state_vault_id = "vE2ESTATEGH000000000000001"
 roles = ["serve"]
 
 # A source-only home for a value more than one product reads. It is never delivered.
@@ -149,4 +146,18 @@ roles = ["serve", "migrate"]
 opv = "/usr/local/bin/opv"
 workdir = "/srv/e2e-app"
 command = ["/usr/local/bin/opv", "run", "--env", "dev", "--product", "web"]
+```
+
+```toml opv-bindings
+environments.dev.boundaries.shared.item_id = "iE2ESHAREDDEV00000000000001"
+environments.dev.boundaries.shared.vault_id = "vE2ESHAREDDEV00000000000001"
+environments.dev.boundaries.web.item_id = "iE2EWEBDEV0000000000000001"
+environments.dev.boundaries.web.vault_id = "vE2EWEBDEV0000000000000001"
+environments.prod.boundaries.shared.item_id = "iE2ESHAREDPROD0000000000001"
+environments.prod.boundaries.shared.vault_id = "vE2ESHAREDPROD0000000000001"
+environments.prod.boundaries.web.item_id = "iE2EWEBPROD000000000000001"
+environments.prod.boundaries.web.vault_id = "vE2EWEBPROD000000000000001"
+environments.prod.targets.fly.state_vault_id = "vE2ESTATEFLY00000000000001"
+environments.prod.targets.gh.state_vault_id = "vE2ESTATEGH000000000000001"
+environments.prod.targets.k8s.state_vault_id = "vE2ESTATEK8S00000000000001"
 ```

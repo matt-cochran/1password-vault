@@ -13,7 +13,10 @@
 //!
 //! Steps 2, 4 and 5 make one `op item list --tags opv-manifest` call (metadata only);
 //! loading a manifest is one more `op item get` by IDs, before the environment's item read.
-//! The manifest holds names, IDs and rules, never a value.
+//! The manifest holds names, IDs and rules, never a value. D-G: its contract block holds no
+//! id; the ids live in a second block tagged `toml opv-bindings`, which the store reads and
+//! fills in like a file project's `secrets.bindings.toml`, and which `opv apply` writes
+//! ([`ManifestStore::write_bindings`]).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -276,28 +279,106 @@ impl ManifestStore {
         )
     }
 
+    /// The text the commands edit and load: the contract block with the `opv-bindings`
+    /// block's ids filled in (D-G), as a file project's contract and sibling. An inline id in
+    /// the contract block is refused naming the field.
+    fn snapshot(&self, m: &manifest::Manifest) -> Result<Snapshot, Error> {
+        Ok(Snapshot {
+            text: config::bindings::merge_manifest(
+                &m.text,
+                m.bindings.as_deref(),
+                &self.cause_source(),
+            )?,
+            version: Some(m.version),
+        })
+    }
+
+    /// The ids of the manifest's `opv-bindings` block (D-G); none before the first
+    /// `opv apply`.
+    pub fn read_bindings(
+        &self,
+        r: &dyn CommandRunner,
+    ) -> Result<config::bindings::Bindings, Error> {
+        let m = self.read_item(r, false)?;
+        config::bindings::parse_block(m.bindings.as_deref(), &self.cause_source())
+    }
+
+    /// `opv apply`'s writer (D-G): replace the `opv-bindings` block with `ids` and, for the
+    /// one-time move, the contract block with `contract` (which must hold no id). Text a
+    /// person wrote around the blocks is kept. Refused unless a person runs opv (I3); built
+    /// on a read past `op`'s cache (C1) and checked afterwards (I5).
+    pub fn write_bindings(
+        &self,
+        r: &dyn CommandRunner,
+        contract: Option<&str>,
+        ids: &config::bindings::Bindings,
+    ) -> Result<(), Error> {
+        crate::app::tidy::require_person(r, "this command")?;
+        let now = self.read_item(r, true)?;
+        let contract = match contract {
+            Some(text) => {
+                config::bindings::merge_manifest(text, None, &self.cause_source())?;
+                text.to_string()
+            }
+            None => now.text.clone(),
+        };
+        let written = manifest::edit(
+            r,
+            &self.vault_id,
+            &self.item_id,
+            &now.raw,
+            &contract,
+            Some(&ids.render()),
+            self.account.as_deref(),
+            &Host::detect,
+        )?;
+        self.confirm(r, now.version, written, &contract, ids)
+    }
+
+    /// The manifest read with its ids left inline in the contract block, returning the fleet
+    /// and the ids to move into the `opv-bindings` block (D-G; `opv propose structure`): the
+    /// manifest's [`config::load_for_move`], and the only manifest reader that accepts
+    /// inline ids.
+    pub fn read_for_move(
+        &self,
+        r: &dyn CommandRunner,
+    ) -> Result<(Fleet, config::bindings::Bindings), Error> {
+        let m = self.read_item(r, false)?;
+        let mut fleet = config::parse_at(&m.text, self.source())?;
+        fleet.origin = crate::domain::Origin::Manifest;
+        let ids = config::bindings::inline_ids(&m.text).map_err(|_| {
+            Error::from(Cause::Bug {
+                site: "config_store: a parsed manifest contract whose ids do not read",
+            })
+        })?;
+        Ok((fleet, ids))
+    }
+
     /// I5: after the edit, the manifest must be exactly one version past the read it was
-    /// built from and hold `text`; otherwise another edit landed in between (one of the
-    /// two was lost). Reported, never retried.
+    /// built from and hold `text` and `ids`; otherwise another edit landed in between (one
+    /// of the two was lost). Reported, never retried.
     fn confirm(
         &self,
         r: &dyn CommandRunner,
         built_on: u64,
         written: manifest::Written,
         text: &str,
+        ids: &config::bindings::Bindings,
     ) -> Result<(), Error> {
-        let (version, now) = match written {
+        let (version, now, block) = match written {
             manifest::Written {
                 version: Some(v),
                 text: Some(t),
-            } => (v, t),
+                bindings: Some(b),
+            } => (v, t, b),
             _ => {
                 let m = self.read_item(r, true)?;
-                (m.version, m.text)
+                (m.version, m.text, m.bindings)
             }
         };
+        let ids_now = config::bindings::parse_block(block.as_deref(), &self.cause_source()).ok();
         let expected = built_on + 1;
-        if version == expected && now == text {
+        if version == expected && now == text && ids_now.as_ref() == Some(ids) {
             return Ok(());
         }
         // Another edit landed with opv's (a version other than `expected`); opv did not
@@ -325,28 +406,27 @@ impl ConfigStore for ManifestStore {
         format!("manifest {:?} in vault {vault}{how}", self.title)
     }
 
+    /// The contract block with the `opv-bindings` block's ids filled in (D-G): an edit sees
+    /// the ids as a file project's does, and [`replace`](Self::replace) moves them back. An
+    /// inline id in the contract block is refused, as at load.
     fn read(&self, r: &dyn CommandRunner) -> Result<Snapshot, Error> {
         let m = self.read_item(r, false)?;
-        Ok(Snapshot {
-            text: m.text,
-            version: Some(m.version),
-        })
+        self.snapshot(&m)
     }
 
     fn read_for_write(&self, r: &dyn CommandRunner) -> Result<Snapshot, Error> {
         crate::app::tidy::require_person(r, "this command")?;
         let m = self.read_item(r, true)?;
-        Ok(Snapshot {
-            text: m.text,
-            version: Some(m.version),
-        })
+        self.snapshot(&m)
     }
 
     /// Refused unless a person runs opv (I3). Re-reads the item past `op`'s cache (C1) and
     /// refuses when its version moved since `base`; otherwise sends the item just read back
     /// with the new notes, then checks that the edit is exactly one version later and holds
     /// `text` (I5: op has no conditional write, so a change in the moment between the
-    /// re-read and the write is detected afterwards and reported, not prevented).
+    /// re-read and the write is detected afterwards and reported, not prevented). D-G: the
+    /// ids in `text` go to the `opv-bindings` block, the rest to the contract block; the
+    /// bindings block is rewritten only when its ids changed.
     fn replace(
         &self,
         r: &dyn CommandRunner,
@@ -356,21 +436,22 @@ impl ConfigStore for ManifestStore {
         crate::app::tidy::require_person(r, "this command")?;
         let now = self.read_item(r, true)?;
         if Some(now.version) != base.version {
-            return Ok(Replaced::Changed(Snapshot {
-                text: now.text,
-                version: Some(now.version),
-            }));
+            return Ok(Replaced::Changed(self.snapshot(&now)?));
         }
+        let (contract, ids) = config::bindings::split(text);
+        let had = config::bindings::parse_block(now.bindings.as_deref(), &self.cause_source());
+        let block = (had.as_ref().ok() != Some(&ids)).then(|| ids.render());
         let written = manifest::edit(
             r,
             &self.vault_id,
             &self.item_id,
             &now.raw,
-            text,
+            &contract,
+            block.as_deref(),
             self.account.as_deref(),
             &Host::detect,
         )?;
-        self.confirm(r, now.version, written, text)?;
+        self.confirm(r, now.version, written, &contract, &ids)?;
         Ok(Replaced::Saved)
     }
     // C12: the manifest by title and vault, so its errors name the vault it lives in.
@@ -1272,9 +1353,9 @@ pub fn manifest_tags(repo: Option<&str>, paths: &[String]) -> Vec<String> {
     tags
 }
 
-/// Create a manifest for `project` in `vault` holding `text` (validated by the caller),
-/// refusing when a manifest for the project or repo already exists (one list call, then
-/// one create). Returns the new store.
+/// Create a manifest for `project` in `vault` holding `text` (validated by the caller; its
+/// ids go to the `opv-bindings` block, D-G), refusing when a manifest for the project or
+/// repo already exists (one list call, then one create). Returns the new store.
 pub fn create_manifest(
     r: &dyn CommandRunner,
     vault: &str,

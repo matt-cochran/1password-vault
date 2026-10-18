@@ -107,7 +107,8 @@ pub enum Format {
 }
 
 /// `config export [--toml|--json]`: the configuration itself (no secrets), validated. TOML
-/// is printed byte for byte as stored.
+/// is the contract as stored with its ids filled in (D-G: from `secrets.bindings.toml` or
+/// the manifest's `opv-bindings` block), the text `opv ui` and `config edit` work on.
 pub fn export(
     found: &Found,
     format: Format,
@@ -148,7 +149,8 @@ pub fn import(
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     let text = fs::read_to_string(&args.file).map_err(|e| unreadable_file(&args.file, &e))?;
-    // D-G: the file's ids live beside it; the manifest keeps them inline.
+    // D-G: the file's ids live beside it; the manifest keeps them in its `opv-bindings`
+    // block, which `create_manifest` splits them into.
     let text = config::with_bindings(&text, &args.file)?;
     config::parse_at(&text, config::Source::File(&args.file))?;
     let paths = normalize_paths(&args.paths)?;
@@ -266,8 +268,8 @@ pub fn check(
         config::Source::File(file),
     )?;
     let current = found.store().read(r)?;
-    // The manifest keeps its ids inline: it is compared the way the file keeps it, the
-    // contract first, then (when that matches) the ids.
+    // The manifest's read fills its `opv-bindings` ids in: it is compared the way the file
+    // keeps it, the contract first, then (when that matches) the ids.
     let (contract, ids) = config::bindings::split(&current.text);
     let (contract, committed) = (
         contract.replace("\r\n", "\n"),
