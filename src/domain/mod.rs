@@ -10,6 +10,7 @@ pub mod health;
 pub mod history;
 pub mod import;
 pub mod intent;
+pub mod inventory;
 pub mod kind_guess;
 pub mod ledger;
 pub mod model;
