@@ -1,10 +1,9 @@
 //! `explain <product>/<key> [--env <env>]` (key form, FR-22; a bare `<KEY>` that one product
 //! declares also works) and `explain --target <name> --env <env>` (target form, FR-56).
 //!
-//! Reads only the configuration: it never reads a value, so it cannot emit one or a value
-//! fragment (SR-1, §5). It is not a `secret get`. The target form and the key form's
-//! account names resolve the project (`--project`, else the repository's name) before this
-//! module runs; no runner is used here.
+//! Reads only names: it never reads a value, so it cannot emit one or a value fragment
+//! (SR-1, §5). It is not a `secret get`. The target form and the key form's account names
+//! resolve the project (`--project`, else the repository's name) before this module runs.
 //!
 //! The key form names, for the environment `--env` selects (or the only one declared):
 //! the value's source (its own field, or `from <product>/<KEY>`), the access boundary and
@@ -16,6 +15,15 @@
 //! command a person can run to inspect the field in their own terminal. That command never
 //! contains `--reveal`.
 //!
+//! The key form also names every place the key is delivered (FR-22, G31): every environment
+//! it is desired in, every target of those environments that delivers its product, and the
+//! delivery item that records it, read fresh by its recorded ID for its evidence names only
+//! ([`delivered_to`]). Names only, never a value.
+//!
+//! A bare argument that is a run plan id (the lowercase hex `opv plan --json` prints as
+//! `plan_id`, FR-41) is the plan form: with `--env`, the environment's plan is recomputed
+//! the way `plan` computes it and each step is explained; a different id is `stale_plan`.
+//!
 //! The target form names the target's provider and locator, its products, its deploy
 //! credentials (or `none`), its state vault ID and its deploy service account.
 //!
@@ -25,12 +33,16 @@
 
 use std::io::Write;
 
-use super::{kind_label, suggest, write_err};
-use crate::cause::{Cause, Closest, NameKind};
+use super::{kind_label, suggest, sync, write_err};
+use crate::adapters::onepassword;
+use crate::cause::{Cause, Closest, EnvName, NameKind, PlanId, PlanScope};
 use crate::domain::access_plan::{ci_account, deploy_account};
+use crate::domain::delivery::decode_evidence;
 use crate::domain::model::{KeySpec, Kind, OneOrMany, Rules, key_label};
-use crate::domain::{Fleet, rules};
+use crate::domain::provenance::PLAN_ID_LEN;
+use crate::domain::{Fleet, naming, rules};
 use crate::error::Error;
+use crate::runner::{Budget, CommandRunner, ProcessRunner};
 
 /// The key `explain` was asked about, resolved against the configuration.
 ///
@@ -62,17 +74,118 @@ pub fn run_request(
     out: &mut dyn Write,
     json: bool,
 ) -> Result<(), Error> {
+    let r = ProcessRunner::new(Budget::default(), false);
+    run_request_with(&r, fleet, asked, env, project, out, json)
+}
+
+/// [`run_request`] with a runner for the delivery-evidence read: the CLI's real one, a
+/// `FakeRunner` in tests. Still names only: the key form lists every delivery and reads each
+/// recorded delivery item for its evidence names, never its values.
+pub fn run_request_with(
+    r: &dyn CommandRunner,
+    fleet: &Fleet,
+    asked: &Asked<'_>,
+    env: Option<&str>,
+    project: &str,
+    out: &mut dyn Write,
+    json: bool,
+) -> Result<(), Error> {
     match asked {
+        Asked::Key(key) if is_run_plan_id(key) => explain_plan(r, fleet, key, env, out, json),
         Asked::Key(key) => {
             let t = resolve(fleet, key)?;
             let env_name = environment(fleet, &t, env)?;
-            explain_in(fleet, &t, env_name, project, out, json)
+            explain_in(r, fleet, &t, env_name, project, out, json)
         }
         Asked::Target(name) => {
             let env_name = target_environment(fleet, name, env)?;
             explain_target_in(fleet, name, env_name, project, out, json)
         }
     }
+}
+
+/// Whether `asked` is a run plan id: the lowercase hex [`PLAN_ID_LEN`] digits `opv plan
+/// --json` prints as `plan_id` (FR-41). A key name starts with an uppercase letter, so a
+/// plan id can never be one.
+fn is_run_plan_id(asked: &str) -> bool {
+    asked.len() == PLAN_ID_LEN
+        && asked
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// `explain <plan_id> --env <env>` (FR-41, FR-56): recompute the environment's run plan
+/// exactly as `plan` does and, when the recomputed id is the asked one, explain each step
+/// (target, product, key, action; names only). A different id is the existing `stale_plan`
+/// Cause naming the recomputed one; without `--env` the choice is refused. Never a value.
+fn explain_plan(
+    r: &dyn CommandRunner,
+    fleet: &Fleet,
+    asked: &str,
+    env: Option<&str>,
+    out: &mut dyn Write,
+    json: bool,
+) -> Result<(), Error> {
+    let Some(env_name) = env else {
+        return Err(Cause::ChoiceRequired {
+            flag: "--env".into(),
+            candidates: fleet.environments.keys().cloned().collect(),
+        }
+        .into());
+    };
+    // Recompute the whole environment's plan, the same code path `plan` uses. Its JSON is
+    // the structured form of the plan's rows (names only), whatever we print.
+    let mut buf = Vec::new();
+    let res = sync::plan_rotating(fleet, env_name, &[], None, &[], r, &mut buf, true);
+    let doc: serde_json::Value = match serde_json::from_slice(&buf) {
+        Ok(doc) => doc,
+        Err(_) => match res {
+            Err(e) => return Err(e),
+            Ok(()) => {
+                return Err(Cause::Bug {
+                    site: "the recomputed plan wrote no JSON document",
+                }
+                .into());
+            }
+        },
+    };
+    let Some(id) = doc["plan_id"].as_str() else {
+        // The plan has findings, so it has no id to match: show them.
+        return res;
+    };
+    if id != asked {
+        return Err(Cause::PlanChanged {
+            old: PlanId::new(asked),
+            new: PlanId::new(id),
+            scope: PlanScope::Sync {
+                env: EnvName::new(env_name),
+                targets: Vec::new(),
+                product: None,
+                deploy: false,
+                prune: false,
+                rotate: Vec::new(),
+            },
+        }
+        .into());
+    }
+    if json {
+        return out.write_all(&buf).map_err(write_err);
+    }
+    writeln!(out, "  plan {id}:").map_err(write_err)?;
+    for row in doc["rows"].as_array().into_iter().flatten() {
+        let Some(action) = row["action"].as_str() else {
+            continue;
+        };
+        let (Some(target), Some(product), Some(key)) = (
+            row["target"].as_str(),
+            row["product"].as_str(),
+            row["key"].as_str(),
+        ) else {
+            continue;
+        };
+        writeln!(out, "    {target} {product}/{key} {action}").map_err(write_err)?;
+    }
+    Ok(())
 }
 
 /// The declared key and environment `opv open` names (H1), resolved exactly as `explain`
@@ -236,6 +349,7 @@ fn environment<'a>(
 }
 
 fn explain_in(
+    r: &dyn CommandRunner,
     fleet: &Fleet,
     t: &Target<'_>,
     env_name: &str,
@@ -319,6 +433,9 @@ fn explain_in(
     // FR-59: the CI reader reads every boundary the environment records; a personal key
     // lives outside them.
     let ci = (!spec.personal).then(|| ci_account(project, env_name));
+    // FR-22, G31: every environment the key is desired in, every target that delivers its
+    // product, and the delivery item recording it. Names only.
+    let deliveries = delivered_to(fleet, product, key, spec, r);
     if json {
         let mut doc = serde_json::json!({
             "schema_version": crate::json::SCHEMA_VERSION,
@@ -335,6 +452,17 @@ fn explain_in(
                 "item_id": &b.item_id,
             })),
             "targets": targets,
+            "delivered_to": deliveries
+                .iter()
+                .map(|d| serde_json::json!({
+                    "environment": d.environment,
+                    "target": d.target,
+                    "product": d.product,
+                    "item": naming::delivery_item(d.product, d.target),
+                    "item_id": d.item,
+                    "records": d.records,
+                }))
+                .collect::<Vec<_>>(),
             "rules": rules,
             "immutable": spec.immutable,
             "guidance": (!spec.guidance.is_empty()).then_some(spec.guidance.as_str()),
@@ -447,10 +575,119 @@ fn explain_in(
         rows.iter()
             .map(|(l, v)| format!("  {:<width$} {v}", format!("{l}:"))),
     );
+    // FR-22, G31: the leak response. One line per place the key is delivered, names only.
+    if !deliveries.is_empty() {
+        lines.push("  delivered to:".to_string());
+        for d in &deliveries {
+            let title = naming::delivery_item(d.product, d.target);
+            let place = format!("{}/{}", d.environment, d.target);
+            match d.item {
+                Some(id) => lines.push(format!("    {place} {title} (item {id})")),
+                None => lines.push(format!("    {place} {title} (no item recorded)")),
+            }
+        }
+    }
     for l in lines {
         writeln!(out, "{l}").map_err(write_err)?;
     }
     Ok(())
+}
+
+/// One place a key is delivered (FR-22, G31): the environment it is desired in, the target
+/// of that environment that delivers its product, and the delivery item recording it. Names
+/// only: environment, target, product, item title and ID, never a value.
+struct Delivery<'a> {
+    environment: &'a str,
+    target: &'a str,
+    product: &'a str,
+    /// The recorded delivery item ID, from which its title is named.
+    item: Option<&'a str>,
+    /// Whether that item's evidence names the key (read fresh, names only).
+    records: bool,
+}
+
+/// Every delivery of `product`/`key`, in environment then target name order: the
+/// environments the key is desired in, and each target of those environments that delivers
+/// its product (FR-22, G31). Configuration and evidence names only, never a value.
+fn delivered_to<'a>(
+    fleet: &'a Fleet,
+    product: &'a str,
+    key: &'a str,
+    spec: &KeySpec,
+    r: &dyn CommandRunner,
+) -> Vec<Delivery<'a>> {
+    let mut out = Vec::new();
+    for (env_name, env) in &fleet.environments {
+        if !spec.is_desired_in(env_name) {
+            continue;
+        }
+        for target in env.targets.keys() {
+            if !fleet.delivers(env_name, target, product) {
+                continue;
+            }
+            let item = env.targets[target]
+                .delivery_items
+                .get(product)
+                .map(String::as_str);
+            let rendered = fleet.target_name(env_name, target, product, key);
+            let records =
+                item.is_some_and(|id| delivery_records(fleet, env_name, target, id, &rendered, r));
+            out.push(Delivery {
+                environment: env_name.as_str(),
+                target: target.as_str(),
+                product,
+                item,
+                records,
+            });
+        }
+    }
+    out
+}
+
+/// Whether the delivery item `item_id` of `product` on `env_name`/`target` records
+/// `rendered`: its evidence field labels are the names opv wrote (the same read as
+/// `delivery::read_state`, names only, never a value). A read that fails is noted and reads
+/// as not recording, so the leak list still names the item (SR-1).
+fn delivery_records(
+    fleet: &Fleet,
+    env_name: &str,
+    target: &str,
+    item_id: &str,
+    rendered: &str,
+    r: &dyn CommandRunner,
+) -> bool {
+    let Some(env) = fleet.environments.get(env_name) else {
+        return false;
+    };
+    let Some(vault_id) = env.targets.get(target).map(|t| t.state_vault_id.clone()) else {
+        return false;
+    };
+    // The item's vault and ID, read fresh and by ID (FR-13: never a title lookup).
+    let at = crate::domain::Boundary {
+        vault_id,
+        item_id: item_id.to_string(),
+    };
+    let read = match onepassword::read_whole_fresh(r, env, &at) {
+        Ok(read) => read,
+        Err(e) => {
+            let why = e.to_string();
+            let why = why.lines().next().unwrap_or_default();
+            r.note(&format!(
+                "the delivery item of {item_id} on {env_name}/{target} could not be read: \
+                 {why}; its evidence shows as unknown"
+            ));
+            return false;
+        }
+    };
+    let Ok(doc) = serde_json::from_slice::<serde_json::Value>(read.raw()) else {
+        return false;
+    };
+    doc["fields"].as_array().into_iter().flatten().any(|f| {
+        let (Some(label), Some(value)) = (f["label"].as_str(), f["value"].as_str()) else {
+            return false;
+        };
+        decode_evidence(label, value).is_some_and(|e| e.name == rendered)
+    })
 }
 
 /// The environment of target `name` (FR-56): `--env` when given, otherwise the only
