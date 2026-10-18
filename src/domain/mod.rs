@@ -2,12 +2,12 @@
 
 pub mod access;
 pub mod access_plan;
-pub mod adopt;
 pub mod catalog;
 pub mod convention;
 pub mod delivery;
 pub mod health;
 pub mod history;
+pub mod import;
 pub mod intent;
 pub mod kind_guess;
 pub mod ledger;
