@@ -1,0 +1,15 @@
+services:
+  web:
+    image: opv/web
+    environment:
+      - DATABASE_URL=postgres://user:changeme@db:5432/app
+      - REDIS_URL
+      - FEATURE_DEBUG
+    env_file:
+      - .env
+  worker:
+    image: opv/worker
+    environment:
+      API_TOKEN: changeme
+      QUEUE_TOKEN: ${EXTERNAL_TOKEN}
+      LOG_LEVEL: info
