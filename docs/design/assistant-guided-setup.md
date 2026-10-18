@@ -1,6 +1,8 @@
 # Assistant-guided configuration: the North Star, and the gap from opv 0.11.0
 
-Status: **design for review** (2026-10-18). Tracks #173 and its parts #174 to #179. This document first describes the North Star: the ideal system from first principles, without reference to what opv does today (Part I). Most of opv's existing decisions turn out to sit on the path to it, so the gap is mostly an added layer, not a redesign. It then measures opv 0.11.0 against it (Part II), resolves the design's contradictions with TRIZ (Part III), makes confusion and failure structurally impossible where it can (Part IV, poka-yoke), and proposes an order of delivery (Part V), reframes the problem so whole classes of risk cannot be expressed (Part VI), and lists the decisions that are the owner's (Part VII).
+Status: **direction locked by the owner (2026-10-18): R1–R11 (Part VI, including §24)**, with the 18 corrections of [the FMECA comparison §8](assistant-guided-setup-comparison.md) applied. Tracks #173 and its parts #174 to #179. This document first describes the North Star: the ideal system from first principles, without reference to what opv does today (Part I). Most of opv's existing decisions turn out to sit on the path to it, so the gap is mostly an added layer, not a redesign. It then measures opv 0.11.0 against it (Part II), resolves the design's contradictions with TRIZ (Part III), makes confusion and failure structurally impossible where it can (Part IV, poka-yoke), sets out the phases of delivery (Part V), reframes the problem so whole classes of risk cannot be expressed (Part VI), and records the owner's decisions (Part VII).
+
+**Precedence.** Part VI and §24 win over Parts I–IV wherever they conflict. The superseded passages (§4.1, §4.4, §5, §6.1) are restated in place below, marked "restated under Part VI".
 
 ## 0. The objective (owner, 2026-10-18)
 
@@ -23,18 +25,25 @@ Two questions frame every decision here:
 | **Assistant** (an LLM in a harness, through MCP or a shell) | yes, all of it | **never** | never | never |
 | **opv** (deterministic engine) | yes | in process memory only, zeroized | no: it carries out what a person approved | no |
 | **Store** (1Password) | n/a | holds them | n/a | n/a |
-| **CI** (a service account) | the parts it needs | in process, to deliver them | no: it runs approved, scheduled syncs | no |
+| **CI** (a service account) | the parts it needs | in opv's process memory only, to carry them to a platform over stdin or a pipe (R8) | no: it runs syncs on change and on a schedule | no; its only 1Password write is value-free delivery evidence |
 | **Platforms** (Fly, Kubernetes, Azure, GitHub, …) | n/a | hold the delivered copies | n/a | n/a |
 
 **Invariant V (the value boundary).** A value, or anything from which part of a value can be recovered, never appears on a surface an assistant can read. That covers stdout, stderr, a JSON document, an MCP response, a log, an error, a file opv writes outside a platform channel or the application's runtime directory, and a command line. "Anything from which part of a value can be recovered" includes its length, a prefix or suffix, a digest, an encoding, an entropy figure and a comparison with a guess.
 
 What may cross the boundary is a **value state**: a closed set of words computed inside opv, where each word describes a value without carrying any of it (§3.3).
 
-**The honest limit.** opv can make its own surfaces incapable of emitting a value. It cannot stop an assistant that also has an unrestricted shell, as the same OS user, from running `op read` itself. The ideal system therefore has two layers:
-- opv's surfaces are value-free by construction (Part IV);
-- opv installs deterministic guard rules into each assistant harness, and the store's own authorization prompt protects every read that bypasses opv (§9.4).
+**The honest limit.** opv can make its own surfaces incapable of emitting a value. It cannot stop an assistant that also has an unrestricted shell, as the same OS user, from reaching whatever that user's sessions can reach:
+- `op read` and `op item get` through the person's 1Password session;
+- platform CLIs already logged in on the machine (`kubectl`, `az`, `flyctl`, `gh`);
+- the running application and its logs, and deployed logs the person can read;
+- a pull request that changes a CI workflow.
 
-Neither layer is a sandbox, and the documentation says so.
+The system therefore has three layers, none of which is a sandbox, and the documentation says so:
+- opv's surfaces are value-free by construction (Part IV);
+- **1Password vault permissions are the tier boundary** (R9): a developer's session reaches only local and dev vaults **where the team's vault groups are tight**, and opv reports when they are not (`opv doctor`, `opv access`), together with production platform logins on the machine;
+- guard rules installed into each assistant harness, and 1Password's own authorization prompt, are defence in depth.
+
+**Accepted residual (owner, D-A).** A DevOps machine that can read production by design can be reached by an assistant running in its shell. The hardened option, described in the docs, is a separate 1Password admin account used only for production work. opv reports when the current session can read a production-tier vault or holds a production platform login.
 
 ## 2. The model: an application moving through environments
 
@@ -133,30 +142,36 @@ A closed enumeration, computed in memory from the value and the key's contract:
 |---|---|
 | `absent` | no field |
 | `empty` | the field exists and is empty |
-| `placeholder` | a known placeholder (`changeme`, `<your key>`, `xxx`, `your…here`, `todo`, …), or equal to the value in `.env.example` |
-| `malformed` | fails its declared shape or rules (the rule's name is reported, never the part that failed) |
-| `suspect` | passes its shape but trips a warning: low entropy, a test key in production, a live key outside production, the same value as a lower tier, `localhost` in a deployed tier |
+| `placeholder` | a known placeholder from a fixed list (`changeme`, `<your key>`, `xxx`, `your…here`, `todo`, …). There is **no** comparison with `.env.example`: that check is dropped, because a file the assistant can write and commit would turn it into an equality oracle (correction 2) |
+| `malformed` | fails its declared shape or rules (the rule's name is reported, never the part that failed). Only rules from the contract as committed on the default branch count (R3, H1); any other rule shows `rules_pending_review` instead of a result |
+| `suspect` | passes its shape but trips a warning: low entropy, a test key in production, a live key outside production, `localhost` in a deployed tier. **The same value as a lower tier is never reported on an assistant surface** (MCP, agent mode); it is reported only to a person at a terminal and to CI, because under R9 dev is readable by design and the bit would disclose an equal production value (correction 6) |
 | `set` | present and passes everything |
 | `unreadable` | opv could not read it. The cause is reported, and it is **never** reported as absent or empty |
 | `not_wanted` | the key's presence excludes this environment |
 
 There is deliberately no numeric field. A score would leak information about the value.
 
+All eight states ship in 0.12.0, in two steps inside the release: the **core four** (`absent`, `empty`, `set`, `unreadable`) plus `not_wanted`, which is computed from the contract and never from a value, land first and carry the inventory; `placeholder`, `malformed` and `suspect` follow once the default-branch rule source (H1) and the assistant-surface filter for cross-tier comparisons are in.
+
+**Capability is not a value state.** Next to each cell the inventory shows what the current session can do with the vault that holds it: `write`, `read`, `none` or `unknown`. `unknown` carries its source (for example "1Password did not report effective permissions"), and a 1Password refusal is a typed finding, never a guess (correction 14).
+
 ## 4. The contract between opv and every client
 
 One contract serves the person at a terminal, the assistant over MCP and the assistant in a shell. The same document is rendered as text, as JSON or as an MCP result.
 
-### 4.1 Five verbs
+### 4.1 Five verbs (restated under Part VI)
 
-Every capability is one of five verbs, and each verb has one shape:
+Every capability is one of five verbs, and each verb has one shape. Under R1 the assistant plans and never actuates; the only actuators are a person's terminal and CI.
 
 | Verb | Writes? | Who calls it | Returns |
 |---|---|---|---|
 | **inspect** | no | anyone | state documents (inventory, needs, readiness, access, delivery, history) |
-| **propose** | local files only (the contract), or nothing | assistant or person | a **plan**: every step by name, its actor, and a content-addressed `plan_id` |
-| **approve** | marks one plan approved; runs that plan's **person-only steps** in the person's terminal | **person only**, in a terminal | what ran, what remains |
-| **apply** | carries out the approved steps that need no person | assistant or CI | what ran, with evidence |
+| **propose** | **nothing** (correction 10: `opv_propose` is pure) | assistant or person | the contract diff and a **plan**: every step by name, its actor, and a content-addressed `plan_id` |
+| **apply** | the plan's steps, in one process: structure, generation, value entry, imports | **a person, in a terminal** (shows the plan, confirms, runs) | what ran, what remains |
+| **deliver** | platforms, plus value-free delivery evidence in 1Password | **CI** (`opv changed`, `opv sync`), or a person | what was delivered, with evidence |
 | **next** | no | anyone | exactly one recommended action, plus the queue |
+
+There is no separate `approve`: R1 removes the approval file, its window and the approve/apply race. The one exception to "the assistant writes nothing" is R3's write-only import into an environment of tier `local` (§21 R3, decision default 5).
 
 Fewer verbs make a smaller surface for an assistant to learn, and the same shape every time lets one prompt pattern work across Claude Code, Cursor and Codex.
 
@@ -174,60 +189,59 @@ No field ever holds free text that a client must parse to decide what to do.
 
 The same inputs give the same bytes: stable sort orders, no timestamps in plans, stable IDs. Plans are content-addressed over the project, the account, the contract text and every step, so any change makes an approval stale rather than silently different.
 
-### 4.4 Agent mode
+### 4.4 Agent mode (restated under Part VI: presentation only)
 
-opv knows when its caller is an assistant: always over MCP, and in a shell when a harness marker or `OPV_AGENT=1` is present (§9.4 installs the marker). In agent mode:
+opv knows when its caller is probably an assistant: always over MCP, and in a shell when a harness marker or `OPV_AGENT=1` is present. Markers are under the caller's control, so **agent mode is presentation, never a security control** (R1, review M2). In agent mode:
 - **No prompt ever opens.** A person-only step returns `next.actor = person` with the exact command, instead of hanging on a prompt the assistant cannot answer and must not see.
-- **`run` redacts.** Output of a child started by `opv run` has every value opv injected masked, including their common encodings (§9.3).
-- **Value-entry commands refuse.**
+- **Value-entry commands refuse** with that typed `next`.
+- **Cross-tier comparison results are left out** (correction 6).
 
-## 5. The surface (ideal)
+**Redaction does not depend on agent mode.** The rule is one sentence, used everywhere in this document: *redaction is always on, for secret-kind values of 8 bytes or more, in local delivery.* `op run` already masks exact values in the child's output (`src/app/run.rs:6-7`), so the gap is encodings (base64, hex, URL) and chunk boundaries, which `opv run` redaction hardening closes (P-5, correction 4).
 
-Each row exists in both the CLI and MCP.
+## 5. The surface (restated under Part VI)
+
+Each row exists in both the CLI and MCP unless it says "never". The assistant's MCP surface is the five tools of §22; each CLI inspection command is a section of `opv_state`, and each plan kind is an intent kind of `opv_propose`.
 
 | Verb | CLI | MCP | Purpose |
 |---|---|---|---|
-| inspect | `opv inventory [--env …] [--json]` | `opv_inventory` | the application matrix: keys × environments, each cell a value state; attributes; delivery state per target |
-| inspect | `opv needs [--scan …] [--names …]` | `opv_needs` | code ↔ contract comparison, with scanner coverage |
-| inspect | `opv detect` | `opv_detect` | candidate components, environments and targets from the repository, with evidence |
-| inspect | `opv ready [--env] [--gate]` | `opv_ready` | findings and gates (promotion, CI) |
-| inspect | `opv exposure <KEY>` | `opv_exposure` | everywhere a key's value lives and is delivered (leak response) |
-| inspect | `opv people` | `opv_people` | who and what can read each boundary (offboarding); names of people only where 1Password reports them |
-| propose | `opv setup plan` | `opv_setup_plan` | first setup: contract, structure, imports, generation, targets, as **one** plan |
-| propose | `opv change plan` | `opv_change_plan` | add, alter or retire keys; add environments |
-| propose | `opv rotate plan <KEY>…` | `opv_rotation_plan` | rotation across environments, in order |
-| propose | `opv deploy plan <env>` | `opv_deployment_plan` | delivery to targets |
-| approve | `opv approve <plan_id>` | — (never) | the person reviews, approves, and runs the person-only steps (imports, masked entry) |
-| apply | `opv apply <plan_id>` | `opv_apply` | runs the approved non-person steps |
-| next | `opv next` | `opv_next` | one action, plus the queue |
-| person | `opv set <KEY> --env <env>` | — (never) | masked entry in the person's terminal; refuses agent mode and non-TTY |
-| guard | `opv assistant guard install` | — | writes the harness rules (§9.4) |
+| inspect | `opv inventory [--env …] [--json]` | `opv_state` (section `inventory`) | the application matrix: keys × environments, each cell a value state and the session's capability on its vault; attributes; delivery state per target |
+| inspect | `opv needs [--gate]` | `opv_state` (section `needs`) | code ↔ contract comparison, with scanner coverage |
+| inspect | `opv detect` | `opv_state` (section `detect`) | candidate components, environments and targets from the repository, with evidence |
+| inspect | `opv ready [<env>] [--gate]` | `opv_state` (section `ready`) | findings and gates; the gate requires `set` **and** delivery evidence at the current item version (R8, correction 13) |
+| inspect | `opv exposure <KEY>` | `opv_state` (section `exposure`) | everywhere a key's value lives and is delivered (leak response) |
+| inspect | `opv people` | `opv_state` (section `people`) | who and what can read and write each boundary (offboarding, second writers); names of people only where 1Password reports them |
+| explain | `opv explain <KEY or plan_id>` | `opv_explain` | why a key or plan is the way it is |
+| propose | `opv propose <intent.json>` (setup, change, retire, rotate, deploy) | `opv_propose` | pure: the contract diff and the plan it implies; writes nothing |
+| next | `opv next` | `opv_next` | one action this session can take, then what waits on others, by vault |
+| import | `opv import <file> --env <env>` | `opv_import_local` (tier `local` only) | write-only import; reports `imported`, `skipped: already set` or `skipped: empty` per key |
+| apply | `opv apply <plan_id>` | never | the person reviews the plan and it runs in one process |
+| person | `opv set <KEY> --env <env>` | never | masked entry in the person's terminal; refuses non-TTY and agent mode with a typed `next` |
+| deliver | `opv changed`, `opv sync` | never (CI and person) | delivery, with opv as the courier (R8) |
+| codegen | `opv codegen [--check]` | never | the generated configuration module (R10) and its freshness check |
+| guard | `opv assistant guard install` | never | writes the harness rules (defence in depth) |
+
+The 13 tools registered today (`src/mcp.rs`) become aliases for one release: each returns a typed `next` naming its replacement, then they are removed (correction 3).
 
 ## 6. The journeys
 
 Each journey step is marked **D** (deterministic, opv), **G** (generative, assistant) or **P** (person).
 
-### 6.1 First setup: "put this app's configuration into 1Password"
+### 6.1 First setup: "put this app's configuration into 1Password" (restated under Part VI)
 
-1. **D** `opv_detect` and `opv_needs` read the repository: components, environments, targets and every name the code reads, with coverage.
-2. **G** The assistant resolves ambiguities from opv's candidates and writes guidance for unknown keys.
-3. **D** `opv_setup_plan` returns one plan:
-   - the contract file;
+1. **D** `opv_state` (sections `detect` and `needs`) reads the repository: components, environments, targets and every name the code reads, with coverage.
+2. **D** If the project has an environment of tier `local`, the assistant may call `opv_import_local` with the path of the local `.env`. It is write-only: values go straight from the file to the local vault, the reply is presence per key, and what it writes is tagged `assistant_imported` (default 5). For any other tier the import is the person's `opv import`.
+3. **G** The assistant resolves ambiguities from opv's candidates, annotates the observed names categorically, and writes guidance for unknown keys (screened, stored as `assistant_written`).
+4. **D** `opv_propose` returns the contract diff and one plan, and writes nothing:
+   - the contract file (the assistant may write the diff into the repository; it is reviewed in the pull request);
    - boundaries (vaults and items) per environment under the project's conventions;
-   - fields for every key in every environment where it is present;
+   - fields for every key in every environment where it is present, with "a value, or `except`?" asked for each production-tier environment;
    - generated values for `generated` keys;
-   - the `.env` import for the local environment;
    - targets and identities.
-4. **P** `opv approve <id>` in the person's terminal shows the whole plan once. On approval it runs the person-only steps right there:
-   - the `.env` import, with values going straight from the file to 1Password;
-   - masked entry for any value the person chooses to type now.
-   
-   1Password asks for authorization once.
-5. **D** `opv_apply` runs everything else: structure, generation, contract file and IDs.
-6. **D** `opv_next` → "3 values only you can provide", each with its link, its shape and its guidance.
-7. **P** The person enters them. **D** The value states turn `set`. **G** The assistant confirms in conversation.
+5. **P** `opv apply <plan_id>` in the person's terminal shows the whole plan once and runs it in one process: structure, generation, bindings, and masked entry for any value the person chooses to type now. 1Password asks for authorization once.
+6. **D** `opv_next` → "3 values only you can provide", each with its vault, its link, its shape and its guidance, listed only to sessions with write access to that vault (R8).
+7. **P** The person enters them, in the 1Password app or with `opv set`. **D** The value states turn `set`. **G** The assistant confirms in conversation.
 
-The person's whole effort is one approval, one authorization, and the values only they can fetch.
+The person's whole effort is one `opv apply`, one authorization, and the values only they can fetch.
 
 ### 6.2 A new engineer joins
 
@@ -281,7 +295,7 @@ Legend:
 | # | Ideal capability (Part I) | opv 0.11.0 | Status | Issue |
 |---|---|---|---|---|
 | G1 | Value boundary on every surface | `SecretValue` (`Debug` and `Display` print `<REDACTED>`; no `Serialize`), the S7MARKER canary scan over CLI, `--json` and MCP, layered scrubbing, value-free MCP tools | **Have** (enforced by tests, not by types; see P-1) | — |
-| G2 | Agent cannot reach values through a shell | 1Password's authorization prompt on writes; `opv_structure_apply` refuses an inherited session | **Part:** no harness guard rules; `opv run` passes child output unredacted | new |
+| G2 | Agent cannot reach values through a shell | 1Password's authorization prompt on writes; `opv_structure_apply` refuses an inherited session | **Part:** no harness guard rules; `op run` masks exact values in the child's output (`src/app/run.rs:6-7`), so the gap is encodings only | new |
 | G3 | One application contract, versioned with the code | `secrets.toml` in the repository **or** a manifest in 1Password, with the same schema | **Part:** both are allowed; nothing ties the contract to the code that needs it | #175 |
 | G4 | Components | `products` (name, role, keys) | **Have** (name differs: "product") | — |
 | G5 | Key: kind | `secret` / `config`; `file` destinations | **Have** | — |
@@ -306,7 +320,7 @@ Legend:
 | G24 | Person-only steps run inside `approve` | `approve` only approves | **Gap** | new |
 | G25 | Masked value entry in the terminal | `opv setup` has a masked prompt for its own credentials | **Part:** no `opv set` for keys | new |
 | G26 | Agent mode (no prompts; refusals naming the person's step) | MCP never prompts; the CLI does not detect an agent | **Part** | new |
-| G27 | `opv run` redaction of injected values | every value opv reads is registered with a scrubber that masks it in tool output opv shows (NR-31, `SecretValue::new`) | **Part:** the child of `opv run` writes straight to the terminal, unscrubbed | new |
+| G27 | `opv run` redaction of injected values | every value opv reads is registered with a scrubber that masks it in tool output opv shows (NR-31, `SecretValue::new`) | **Part:** `op run` masks exact values in the child's output (`src/app/run.rs:6-7`); encodings (base64, hex, URL) and chunk boundaries are not masked | new |
 | G28 | Change plan (add, alter, retire, extend) | `opv add`, `env add`, `target add`, `init --add-env` | **Part:** no retirement, no bulk extend | #176, #179 |
 | G29 | Promotion gate | `opv ready` exit codes; `status --fail-on-drift` | **Part:** no per-environment completeness gate | #179 |
 | G30 | Rotation plan across environments | `sync --rotate` per environment | **Part** | new |
@@ -358,7 +372,7 @@ The principle choices in the table below are therefore this design's, made from 
 | C1 | The assistant must know about every value, to guide the person, and must know nothing of any value | physical: information about the value must be both present and absent | **Separate by abstraction level.** Expose a closed value state (§3.3), computed in opv's process; the value itself never leaves. No numeric field, because a number is a partial leak | 2 extraction; 26 copying (a simplified copy stands in for the original) |
 | C2 | Setup should take one approval, for ergonomics, but every write must be approved, for safety | technical | **Consolidate the approval and keep it exact.** One content-addressed plan lists every step by name. Approving it approves exactly those steps; any change makes it stale and needs a new approval | 5 consolidation; 10 preliminary action |
 | C3 | Value-bearing steps (imports, typed values) need a person present, but the assistant should drive the whole setup | physical: the step must be both in the assistant's flow and outside it | **Separate in space.** The plan holds both kinds of step. The assistant's `apply` runs the steps that need no person; the person's `approve`, in their own terminal, runs the person-only steps. The plan is shared; where each step runs is not | separation in space; 1 segmentation |
-| C4 | The assistant should be able to run the application to debug it, but the application's output can contain the values opv injected | technical | **opv as intermediary.** `opv run` in agent mode masks every injected value, and its common encodings, in the child's output before the assistant sees it. opv holds the values, so it can match them exactly | 24 intermediary; 9 prior counteraction |
+| C4 | The assistant should be able to run the application to debug it, but the application's output can contain the values opv injected | technical | **opv as intermediary.** `opv run` masks every injected secret-kind value of 8 bytes or more, and its common encodings, in the child's output, always (not only in agent mode). `op run` already masks exact values; opv adds the encodings | 24 intermediary; 9 prior counteraction |
 | C5 | Keys must be consistent across environments, but environments legitimately differ | technical | **Consistent by default, different by declaration.** Presence `all` plus an explicit `except` with a reason, and tier policy for what must differ (production distinct from lower tiers) | 3 local quality; 4 asymmetry |
 | C6 | Scanning must find every name the code reads, but no deterministic scanner covers every language and dynamic name | technical | **Deterministic core with a validated generative supplement.** The scanner reports its coverage; the assistant supplies what it can see that the scanner can't, through a grammar-checked list tagged `assistant_supplied`. The comparison is still deterministic | 1 segmentation; 23 feedback |
 | C7 | Free-text inputs (guidance, reasons) are needed, but a value could be pasted into one | technical | **Screen before accepting.** Every free-text field passes through the same detectors as the value states (secret shapes, high entropy, known prefixes). A hit is refused with `value_in_text_field`, before anything is written | 9 prior counteraction; 11 cushion in advance |
@@ -380,7 +394,7 @@ Each row names a failure or a confusion, and the structure that prevents it. **P
 | P-2 | A value is pasted into a free-text input (guidance, reason, name) | Every string input has a grammar (names: `^[A-Z][A-Z0-9_]*$`; guidance: one line, at most 200 characters). Free text passes the secret detectors, and a hit is refused (`value_in_text_field`) before any write | prevents (names), detects (free text) |
 | P-3 | A tool input accepts a value | No MCP schema has a field that carries a value. A schema test fails if any input property is not a closed enum, a grammar-checked string or an id | prevents |
 | P-4 | An assistant's shell reads a value through `op` | Harness guard rules (§9.4) deny `op read`, `op item get --reveal`, `op inject` and `opv run -- <shell>` for the assistant, and 1Password's authorization prompt protects the rest. This is not a sandbox, and the docs say so | detects |
-| P-5 | Child process output leaks an injected value | `opv run` in agent mode masks exact values and their base64, hex and URL encodings in the child's output, streaming across chunk boundaries. The mask replaces the whole match with a fixed marker, never by bytes, which keeps JSON well-formed (the 0.10.0 lesson) | detects |
+| P-5 | Child process output leaks an injected value | Always on, for secret-kind values of 8 bytes or more, in local delivery: `op run` already masks exact values; `opv run` adds their base64, hex and URL encodings in the child's output, streaming across chunk boundaries. The mask replaces the whole match with a fixed marker, never by bytes, which keeps JSON well-formed (the 0.10.0 lesson) | detects |
 | P-6 | A person pastes a value into the chat | Outside opv's control. The skill and the MCP instructions tell the assistant to stop, never repeat it, point to `opv set`, and treat the value as exposed, which makes the rotation plan the `next` action | warns |
 
 ## 12. Model and state
@@ -391,7 +405,7 @@ Each row names a failure or a confusion, and the structure that prevents it. **P
 | P-8 | A key is missing from an environment by accident | Presence `all` by default. An explicit list that leaves out an environment needs an `except` with a reason, otherwise load warns with `environment_gap` | prevents (new keys), warns (old ones) |
 | P-9 | A new environment lacks existing keys | Presence `all` is inherited on creation; the structure plan adds its fields | prevents |
 | P-10 | A removed key leaves orphans | Lifecycle states: `retire` moves through `retiring` → `retired` in a fixed order, and archives fields instead of deleting | prevents |
-| P-11 | A dev value is copied into production | Tier policy: a production value equal to a lower tier's is `suspect` and fails the production gate unless the key says `allow_same_value`. An import into a production-tier environment needs `--confirm <env>` | detects |
+| P-11 | A dev value is copied into production | Tier policy: a production value equal to a lower tier's fails the production gate unless the key says `allow_same_value`. The comparison is computed only for a person at a terminal and for CI, never on an assistant surface (correction 6). An import into a production-tier environment is the person's `opv import` with `--confirm <env>` | detects |
 | P-12 | The code reads a key the contract doesn't declare | The `needs` gate in CI | detects |
 | P-13 | A personal key is stored as shared | The catalog marks known per-developer keys (`OPENAI_API_KEY` in a local tier) as suggested `personal`, and the plan shows the suggestion | warns |
 | P-14 | A generated contract is edited by hand | Declarations to a generated contract return fragments for the generator (#178), and an edit is refused | prevents |
@@ -415,20 +429,23 @@ Each row names a failure or a confusion, and the structure that prevents it. **P
 
 # Part V: delivery
 
+**Status (2026-10-18):** these phases are the shape of the work, restated under Part VI. The 0.12.0 scope is being set by the owner (several items are under review, and the new endpoints may move out), so the concrete deliverable rows, in the style of `delivery-transports.md` §11.1, are written once the scope is final.
+
 The order puts the assistant contract and the application model first, because every later journey depends on them.
 
 | Phase | Contents | Gaps closed | Issues |
 |---|---|---|---|
-| **A. Contract hardening** | `ValueFree` output types (P-1) and the MCP input schema test (P-3); typed `next` with kind and actor; agent mode (P-20, C10); free-text screening (P-2) | G1 (by types), G21, G26, G37 | new |
+| **A. Contract hardening** | R7 purpose tokens in place of the `ValueFree` sealed trait (M1); the MCP input schema test (P-3); typed `next` with kind and actor; agent mode as presentation (C10); guidance screening (P-2); H1's fix (rules count only as committed on the default branch) | G1 (by types), G21, G26, G37 | new |
 | **B. State you can see** | value states (§3.3); `opv inventory` matrix; `opv next`; scope, source and presence attributes | G6, G15, G16, G22, G38 | #174 |
 | **C. The application model** | presence `all`/`except`; ordered lanes and tiers; tier policy; the gap finding; lifecycle and `retire`; bulk extend; the promotion gate | G8, G10, G12, G14, G28, G29 | #179, #177 |
 | **D. Code ↔ contract** | the scanner with coverage; `opv needs` and its gate; name-only declaration from a `.env`; the name catalog | G3, G17, G19, G35 | #175, #176 |
-| **E. One-plan setup** | `opv detect`; `setup plan`; person-only steps inside `approve`; `opv set` (masked) | G18, G23, G24, G25 | new |
-| **F. Assistant safety in a shell** | `opv run` redaction (P-5); harness guard rules (P-4) | G2, G27, G36 | new |
+| **E. One-plan setup** (restated under Part VI) | `opv detect`; the pure `opv_propose` (setup intent) returning the contract diff and one plan; the person's one-process `opv apply` (no separate `approve`, no approval file); `opv set` (masked); `opv import` and the tier-`local` `opv_import_local` | G18, G23, G24, G25 | new |
+| **F. Assistant safety in a shell** | `opv run` redaction hardening: always on, secret-kind values of 8 bytes or more, encodings on top of `op run`'s exact masking (P-5); `doctor` findings for production-tier vault reads and production platform logins (R9); harness guard rules as defence in depth (P-4) | G2, G27, G36 | new |
 | **G. Life after setup** | rotation plan; expiry; exposure; people and offboarding | G11, G30, G31, G32 | new |
+| **S. Surface consolidation** | the five assistant tools of §22; the 13 tools registered today become aliases for one minor release, each returning a typed `next` that names its replacement, then are removed (correction 3) | G20 | new |
 | **H. Later** | provisioners; ephemeral environments; generated-contract fragments | G13, G33, G34 | #178 |
 
-Phases A and B are prerequisites for the rest. C and D can run in parallel after B. E needs B, C and D. F is independent and could ship first. G needs C. Swarm, GCP and VMs are already planned for 0.12.0 (delivery-transports §8–9), so Part VI asks the owner how to split this work between 0.12.0 and 0.13.0.
+Phases A and B are prerequisites for the rest. C and D can run in parallel after B. E needs B, C and D. F is independent and could ship first. G needs C. The split between releases, and whether Swarm, GCP and VMs (delivery-transports §8–9) stay in 0.12.0, is the owner's open scope decision (Part VII).
 
 Each phase lands with:
 - CLI and MCP parity gate scenarios;
@@ -465,7 +482,7 @@ Every input or decision in the system is one of three kinds:
 - **The reframe:** only two actuators exist.
   - **The person's terminal:** `opv apply` shows the plan, the person confirms, and it runs in one process. Value entry and imports happen there too.
   - **CI:** scheduled, approved syncs with the target's own identity.
-- **The assistant's role:** it reads state and proposes. It never writes to 1Password or to a target.
+- **The assistant's role:** it reads state and proposes. It never writes to a target, and never to 1Password except R3's write-only import into an environment of tier `local` (default 5).
 
 What it removes:
 - the approval file, its window and the race between `approve` and `apply` (review M3);
@@ -507,15 +524,20 @@ What it simplifies: the assistant fills one form, the same way across Claude Cod
   - **onward:** the store, into the platforms, into the application.
 - **What may flow back to the control plane,** where the assistant lives, is fixed in advance:
   - **presence:** absent, empty or set;
-  - **results of predicates fixed before the question is asked:** catalog shapes, and rules a person approved;
-  - **comparisons between stored values that the contract fixes,** such as the same value across tiers.
+  - **results of predicates fixed before the question is asked:** catalog shapes, and rules **as committed on the repository's default branch** (default 2). A rule that exists only in the working tree or on a branch, including one hand-edited into `secrets.toml` through a shell, shows `rules_pending_review` and is not evaluated for MCP or agent-mode callers. This closes H1 on both routes, MCP and the shell; a gate test covers an MCP-declared rule and a hand-edited one (correction 1);
+  - **comparisons between stored values that the contract fixes,** such as the same value across tiers, reported **only to a person at a terminal and to CI**, never to an assistant surface (correction 6).
 
   Nothing the caller supplies at question time ever meets a value. A non-adaptive predicate set bounds what can leak to a few fixed bits per key, and the caller cannot choose which bits.
-- **Imports become write-only.** `import <file>` reports per key `imported`, `skipped: already set` or `skipped: empty`. It never reports "differs", and it never overwrites a value without a person's `opv apply`.
+- **Imports become write-only.** `import <file>` reports per key `imported`, `skipped: already set` or `skipped: empty`. It never reports "differs". Overwriting a set value is the person's `opv import --replace` in their terminal.
 
-What it removes: H2 (caller-steered equality), and the `.env.example` comparison in #177 (conflict 1 in the review). "Equal to the example file" becomes a fixed check against the committed example, and it is only a warning. It also gives one invariant to test, in place of a list of special cases.
+What it reduces: H2 (caller-steered equality), and it removes the `.env.example` comparison in #177 (conflict 1 in the review): the check is **dropped**, not moved, because a local commit would put the assistant's guess in the "committed" file (default 3, correction 2). It also gives one invariant to test, in place of a list of special cases.
 
-What it simplifies: for the **local tier**, importing a `.env` can run straight from the assistant's request, because it is write-only and reports presence only. "Import my `.env`" then needs no person step at all for local development, which is the commonest first experience.
+What it simplifies: for an environment of **tier `local`**, importing a `.env` can run straight from the assistant's request (`opv_import_local`), because it is write-only and reports presence only. This is the one exception to R1 and R8 ("people set up values"), so it is bounded (default 5, correction 7):
+- only into an environment whose tier is explicitly `local` (no targets, no `confirm_env`); deployed tiers are person-only;
+- it acts through the person's own 1Password session, so 1Password's authorization prompt applies;
+- what it writes is tagged `assistant_imported`, and those values are kept out of cross-tier comparisons and out of promotion until a person re-enters or confirms them.
+
+"Import my `.env`" then needs no separate person step for local development, which is the commonest first experience.
 
 **Verdict: keep.** It replaces several point fixes with one rule.
 
@@ -524,11 +546,11 @@ What it simplifies: for the **local tier**, importing a `.env` can run straight 
 - **The problem behind review H3:** an assistant with a shell on the person's laptop can reach whatever the person's sessions can reach: `op read`, `kubectl get secret`, `az keyvault secret show`. No opv design closes that. 1Password's JSON for an item includes concealed values (opv reads items with `op item get --format json`), so there is no read that returns metadata alone.
 - **The reframe:** the laptop never *needs* to read a deployed tier.
   - Production and staging are read by **CI identities only**.
-  - CI publishes a **value-free state receipt** (opv already has `opv ready --save` and delivery receipts), signed by the run.
+  - CI publishes a **value-free state receipt** (opv already has `opv ready --save` and delivery receipts), signed by the run. A receipt carries **its age and the item versions it saw**; `next` shows the age, a receipt older than the newest relevant item version is `stale`, and the promotion gate **recomputes in CI and never trusts a receipt** (correction 9).
   - The assistant and the person see deployed tiers' state through those receipts.
   - The laptop's session needs access to local and dev only. A person enters a production value through a 1Password link, so the CLI never reads it.
 
-What it removes: the worst case of H3. On a laptop that follows the tier policy, an assistant with a shell can at most reach local and dev values. The guard rules (P-4) become defence in depth, not the main control.
+What it reduces: the 1Password half of H3. On a laptop whose vault groups follow the tier policy, an assistant with a shell reaches local and dev values through 1Password. It does **not** reduce H3 "to the local tier": production platform logins on the laptop (`kubectl`, `az`, `flyctl`, `gh`), deployed logs and pull requests that change CI workflows still reach production. The tier policy therefore extends to platform credentials, which `opv doctor` reports (R9), and the honest limit (§1) names them. The guard rules (P-4) are defence in depth, not the main control.
 
 What it costs:
 - deployed-tier state is as fresh as the last CI run. A `refresh` action can trigger one.
@@ -547,17 +569,22 @@ What it removes:
 
 What it simplifies: adding a dependency's key needs no declaration step. The pull request shows "1 new name: annotate it", with the catalog's suggestion pre-filled.
 
+**File ownership (correction 8):**
+- A name leaves the contract **only by retire**. A name the scanner no longer sees is `declared_unobserved`, never dropped silently.
+- `ignore` records the evidence span it was made against, and is re-checked (shown again as unannotated) when that span changes. An assistant can still annotate a false positive as a real key, so M9 is reduced, not eliminated.
+- Annotations live in the repository contract, never inside a generated contract (#178), so regenerating cannot lose them.
+
 **Verdict: keep for the code-facing half.** Keys no code reads, such as CI-only or platform-only keys, are still declared, categorically.
 
 ### R6. The contract changes only through review; relaxations are categorical and loud
 
 - **The reframe:**
   - The contract lives in the repository (decision 1).
-  - **Bindings** (vault and item ids, targets) live in a separate, opv-written file. Neither an assistant nor a pull request edits them; only `opv apply` and `opv target add` do.
-  - **Policy relaxations** are categorical attributes that opv marks as relaxations: `except <production-tier env>`, `allow_same_value`, removing a shape, presence narrowing.
-  - The plan for a change that contains one shows it first, with its reason. It needs the person's `opv apply` (R1) and fails the `needs`/`ready` gate in CI until then.
+  - **Bindings** (vault and item ids, targets) live in a separate, opv-written file. It is **committed and union-mergeable**, and it is checked against the record that `opv apply` writes: "opv-written" alone is not a control, so `opv config check` and the CI gate compare the file with the apply record and fail on a difference (correction 8).
+  - **Policy relaxations** are categorical attributes that opv marks as relaxations: `except <production-tier env>`, `allow_same_value`, removing a shape, presence narrowing, and `secret` → `config` (correction 10).
+  - **One rule for approving them (default 1, correction 11; R8 wins over this section's earlier "person's `opv apply`"):** a relaxation is approved by **pull-request review of the contract**. CI posts it as a **separate required check status** (`opv/relaxations`) that lists each relaxation with its reason and fails until the relaxation is accepted in review. The plan shows relaxations first.
 
-What it removes: review M4, a pull request or assistant quietly weakening policy, and review M10, the `all` default pushing junk into production. A new key's plan asks "a value, or `except`?" for each production-tier environment, as a categorical choice.
+What it reduces: review M4, a pull request or assistant quietly weakening policy (now visible and separately gated, though approved by ordinary review: `fm-consistency-policy-relaxation` stays a medium with a low residual), and it removes review M10, the `all` default pushing junk into production. A new key's plan asks "a value, or `except`?" for each production-tier environment, as a categorical choice.
 
 **Verdict: keep.**
 
@@ -602,28 +629,28 @@ What it removes: the review's M1 (a sealed trait seals nothing inside one crate)
 - `opv_import_local`: a file reference in; write-only, local tier only;
 - `opv_explain`: why a key or plan is the way it is.
 
-That is 5 tools, down from 11, all of them without side effects outside the local contract and the local tier.
+That is 5 tools, down from the **13** registered today (`src/mcp.rs`; correction 3). None of them writes anything except `opv_import_local`, and that only into an environment of tier `local`. The old tools become aliases for one minor release, each returning a typed `next` that names its replacement, and are then removed.
 
-**The person's whole surface:** `opv apply`, `opv set` (masked entry), the 1Password links opv gives, and reading the plan.
+**The person's whole surface:** `opv apply`, `opv set` (masked entry), `opv import`, the 1Password app and the links opv gives, and reading the plan.
 
-**CI's surface:** `opv sync`, `opv changed`, `opv ready --gate`, receipts.
+**CI's surface:** `opv changed`, `opv sync`, `opv ready --gate`, `opv needs --gate`, the relaxations check, receipts. CI's only 1Password write is value-free delivery evidence (D-C).
 
 ### 22.1 What the reframe does to the risks
 
 | Risk | Parts I–IV answer | After the reframe |
 |---|---|---|
-| H1: rule-predicate oracle | approve rules before they count | **eliminated** (R2, R3, R7): no client-supplied predicate exists |
-| H2: equality the caller steers | drop the `.env.example` check; make imports person-only | **eliminated** (R3): write-only imports; fixed comparisons only |
-| H3: an assistant shell reaches values | guard rules; an honest limit | **reduced to the local tier** (R4); the strongest form waits on A-1 |
-| H4: `opv run` output | redaction tied to agent mode | **reduced:** under R4 the local tier holds only local values. Redaction stays (secret values of 8+ bytes, always on), as defence in depth |
-| M1: a trait seals nothing | a sealed trait | **eliminated** by a different mechanism (R7) |
+| H1: rule-predicate oracle | approve rules before they count | **reduced** (R2, R3, R7): no client-supplied predicate is evaluated for an assistant; rules count only as committed on the default branch, otherwise `rules_pending_review` (default 2), which also covers a rule hand-edited through a shell |
+| H2: equality the caller steers | drop the `.env.example` check; make imports person-only | **reduced** (R3): write-only imports; the `.env.example` check is dropped; cross-tier comparisons reach only a person and CI |
+| H3: an assistant shell reaches values | guard rules; an honest limit | **reduced** for 1Password by vault permissions where groups are tight (R4, R9); platform logins, deployed logs and CI-workflow PRs remain, reported by `doctor`; the DevOps machine is an accepted residual (D-A); the strongest form waits on A-1 |
+| H4: `opv run` output | redaction tied to agent mode | **reduced:** under R4 the local tier holds only local values. Redaction is always on, for secret-kind values of 8 bytes or more, in local delivery; `op run` already masks exact values, so the added work is encodings |
+| M1: a trait seals nothing | a sealed trait | **reduced** by a different mechanism (R7): purpose tokens hold only with module-private constructors and no `unsafe` |
 | M2: agent mode can be spoofed | detection | **no longer a security control** (R1) |
 | M3: approve/apply race, window expiry | keep approve approve-only | **eliminated** (R1: one process) |
-| M4: a PR weakens policy | split bindings | **eliminated** (R6) |
-| M9: scanner junk keys | an ignore list | **eliminated** (R5: `ignore` is an annotation) |
+| M4: a PR weakens policy | split bindings | **reduced** (R6, R8): relaxations are a separate required check, approved in PR review; bindings are checked against the apply record |
+| M9: scanner junk keys | an ignore list | **reduced** (R5: `ignore` is an annotation, re-checked when its evidence changes; an assistant can still mis-annotate a false positive) |
 | M10: the `all` default and production | ask per production environment | **eliminated** (R6: a categorical question in the plan) |
 | M13: free-text screening, rule parameters | screening | **reduced to guidance only** (R2) |
-| M14: a parallel command surface | a migration plan | **reduced:** 5 assistant tools replace 11 (still needs a deprecation plan) |
+| M14: a parallel command surface | a migration plan | **reduced:** 5 assistant tools replace 13; the old ones are aliases with a typed `next` for one minor release |
 | P-20: assistant hangs on a prompt | agent mode | **eliminated** (R1: the assistant runs nothing that prompts) |
 
 ### 22.2 What it does to the experience
@@ -635,11 +662,11 @@ That is 5 tools, down from 11, all of them without side effects outside the loca
 | Seeing production's state | a laptop read of the production vault | the latest CI receipt; no production access on the laptop |
 | Person actions for a typical change | 2 to 3 commands, plus a time window | 1 command, no window |
 
-## 23. Open questions the reframe raises
+## 23. Open questions the reframe raised, and their answers
 
-- **A-1 (spike):** can a 1Password person write into a vault without reading it? This decides between R4's strong and weak forms.
-- **Receipt freshness:** how stale may deployed-tier state be before `next` asks for a CI refresh? Proposed: a receipt older than the newest relevant item version is `stale` (opv already compares item versions in `opv changed`).
-- **Merge-time application:** can merging a contract change trigger CI to apply the parts that need no person (deployed-tier structure, generated values) under the CI identity? That would make a person's `opv apply` necessary only for person-sourced values and relaxations. This is a good fit, but it gives CI write access to deployed-tier structure, which needs its own access review.
+- **A-1 (spike, still open; correction 18):** can a 1Password person write into a vault without reading it? It decides only between R4's strong and weak forms. Until it is answered, R9(a)'s separate admin account is the stronger form, and the DevOps-machine residual is accepted by the owner (D-A).
+- **Receipt freshness (answered, correction 9):** a receipt carries its age and the item versions it saw. One older than the newest relevant item version is `stale` (opv already compares item versions in `opv changed`), `next` shows the age, and the promotion gate recomputes in CI and never trusts a receipt.
+- **Merge-time application (declined, correction 12):** R8 answers it. CI does not write to 1Password beyond value-free delivery evidence (D-C), so merging a contract change does not make CI create deployed-tier structure or values. People with write access to each vault do that, in the 1Password app or with `opv apply`.
 
 ---
 
@@ -662,7 +689,7 @@ The owner's direction (2026-10-18): access control is **1Password's job and alre
 - A team may set up a developer's environment entirely for them: grant the developer the vault, and everything works.
 
 **Capability is discovered, not configured:**
-- opv reads what the current 1Password session can do with each vault the contract names: read, write, or no access. This uses 1Password's own vault permissions.
+- opv reads what the current 1Password session can do with each vault the contract names: `write`, `read`, `none`, or **`unknown`** with its source when 1Password does not expose effective permissions to this session. A 1Password refusal is a typed finding. opv never guesses a capability, so `next` never names the wrong actor (correction 14). This uses 1Password's own vault permissions.
 - **Write access to a vault** means this person can set up that environment's structure and values. They can do it in the 1Password app directly, or with opv's help, using the links, empty fields, generation and masked entry opv offers. 1Password authorizes every write. opv reads the result the same way whichever route was used.
 - **Read access only** means this person can run with those values (`opv run`) and see their states, but not change them.
 - **No access** means opv shows the environment's structure from the contract and the latest value-free CI receipt, and names the vault. "Someone with write access to vault X can fill this", with the people and groups `opv access` reports for that vault when 1Password lets the session see them.
@@ -671,8 +698,9 @@ The owner's direction (2026-10-18): access control is **1Password's job and alre
 
 **CI runs opv; opv carries values; nobody in CI sees them.**
 - A CI job runs `opv sync` (or `opv changed`, then `opv sync`) for the configured destinations.
-- Inside that run, opv itself is the courier. Using a service account that can only read the values vault, it reads each value from 1Password into its own process memory and writes it straight to the platform's channel: Fly secrets on stdin, Kubernetes Secrets and ConfigMaps by `kubectl apply` on stdin, Key Vault through the named pipe or stdin, GitHub secrets by `gh secret set` on stdin.
+- Inside that run, opv itself is the courier (D-C). Using a service account that can only read the values vault, it reads each value from 1Password into its own process memory and writes it straight to the platform's channel: Fly secrets on stdin, Kubernetes Secrets and ConfigMaps by `kubectl apply` on stdin, Key Vault through the named pipe or stdin, GitHub secrets by `gh secret set` on stdin.
 - **A value never appears in the CI job's logs, files, environment variables or command arguments**, so no person or tool reading CI sees it. The scrubber (NR-31) masks any value a platform tool echoes.
+- **The courier invariant (correction 16), testable:** every transport hands a value to a platform tool over **stdin or a private pipe only**. A transport test runs each transport with an `S7MARKER` value and fails if the marker appears in any recorded argv, child environment, file opv wrote, or output. The Key Vault path already meets it: `az keyvault secret set --file /dev/stdin` reads the bytes from stdin on Linux, WSL and macOS, and from a user-only named pipe on Windows (`src/adapters/azure/keyvault.rs:269-297`, `src/adapters/azure/handoff.rs:103`); the argument is a path to the stream, never the value. The transport test pins this.
 - Something has to carry the bytes from 1Password to the platform. The only alternative is the platform reading 1Password itself at runtime, which the owner ruled out: production never needs 1Password. So the value's only stop on the CI runner is opv's memory, for the length of the run.
 - **Scope boundary (owner, 2026-10-18).**
   - **opv is responsible** for running every step that touches a value: getting it from 1Password, then executing the platform tool (`flyctl`, `kubectl`, `az`, `gh`) in a way that exposes nothing. That means stdin or a private pipe, never arguments or inherited environment, never files, and output scrubbed before it is shown.
@@ -688,7 +716,7 @@ The owner's direction (2026-10-18): access control is **1Password's job and alre
 2. The check shows its row: dev, staging and prod are each `absent`, with the vault each one lives in.
 3. After merge, each person with write access to one of those vaults sees it in their `opv next` and fills it, in the 1Password app or through opv.
 4. CI delivers on change.
-5. The promotion gate holds a tier until its value is `set`.
+5. The promotion gate holds a tier until its value is `set` **and** delivery evidence records the current item version on every target of that tier (correction 13). A value filled in the 1Password app is delivered by CI's scheduled `opv changed` then `opv sync`, so `set` alone never passes the gate.
 
 **Team-managed developer environments:**
 1. Someone with write access to the dev vault sets the environment up once.
@@ -697,11 +725,13 @@ The owner's direction (2026-10-18): access control is **1Password's job and alre
 
 Personal keys exist only where the team gives developers their own items.
 
-**Emergencies** need no special path: anyone with write access to the vault fixes the value, and CI delivers.
+**Emergencies** need no special path: anyone with write access to the vault fixes the value, and CI delivers. What makes that hold (correction 17):
+- every deployed-tier vault has **a second writer**, which `opv people` reports, and `next` raises a finding when a deployed-tier vault has only one;
+- losing the only writer's access is 1Password's **account recovery**, which the docs name as the break-glass path; opv adds no account of its own.
 
 **What it answers:**
 - who writes each tier: whoever 1Password lets write its vault;
-- loosened policy: relaxations show in the PR diff and the check;
+- loosened policy: relaxations show in the PR diff and fail the separate `opv/relaxations` check until accepted in review (default 1);
 - visibility of tiers a person can't read: the contract plus CI's value-free receipts.
 
 ### R9. Tier separation is 1Password's vault permissions; opv verifies it and never re-implements it
@@ -725,6 +755,12 @@ Personal keys exist only where the team gives developers their own items.
   - **A key can't be retired while it's still read.** Retiring removes the accessor, so a build that still uses it fails before anything is pruned. For deployed tiers, retirement also checks `needs` at the deployed revision.
   - **Misconfiguration fails at startup.** At boot the module checks every required key's presence and shape, so a broken deploy fails its health check and rolls back instead of failing at first use.
 - **What it isn't:** a runtime dependency on opv or 1Password, which the owner decided production must never need. The module reads only the platform's own channels (env, files).
+- **Module rules (correction 15):**
+  - the required set is **per environment** (contract × presence), so a key `except`ed in an environment is never demanded at boot there;
+  - a startup error names only the key and the rule, never the value or any part of it;
+  - the module embeds the contract digest, and CI regenerates and fails when the committed module is stale;
+  - each component states whether it uses the module, so the inventory shows which guarantees hold where.
+- **Under review (owner, 2026-10-18):** whether per-language generated code is worth its cost, against "the contract as data": opv emits a machine-readable contract per component and environment (names, kind, shape names, required) with a JSON Schema, and the docs show startup validation with each ecosystem's own library. The module rules above apply to either form.
 
 ### R11. Rotation overlaps and is observed
 
@@ -740,37 +776,61 @@ Consumers outside opv's view (another host, a partner's webhook) are declared in
 
 | Residual after the first reframe | Claim under R8–R11 |
 |---|---|
-| An assistant shell reaches values (H3) | A developer machine reaches only local/dev vaults by 1Password permission. A DevOps machine stays residual, with the authorization prompt and an optional admin account |
+| An assistant shell reaches values (H3) | A developer machine reaches only local/dev vaults by 1Password permission **where vault groups are tight**; opv reports loose groups (correction 5). A DevOps machine stays residual, accepted by the owner (D-A), with the authorization prompt and a separate admin account as the hardened option |
 | Platform tools reach production | No production platform logins on developer machines; `doctor` detects them |
 | `opv run` encoding leak | Local values are sandbox-grade: recoverable, not a breach |
-| Secret downgraded to config | A flagged change in a reviewed PR; the check fails until it is accepted |
+| Secret downgraded to config | A relaxation: the separate `opv/relaxations` check fails until it is accepted in PR review (default 1) |
 | Rotation revokes while in use | Overlap plus observed rollout; declared outside consumers |
 | Retire while still read | The build fails while still read; `needs` at the deployed revision |
 | Scanner misses a name | Impossible in generated languages; detection elsewhere |
-| Nobody writes deployed tiers | Whoever 1Password lets write that tier's vault, in the 1Password app or with opv's help; CI only runs opv, which carries values from 1Password to the platforms without exposing them (R8) |
+| Nobody writes deployed tiers | Whoever 1Password lets write that tier's vault, in the 1Password app or with opv's help; CI only runs opv, which carries values from 1Password to the platforms without exposing them (R8). A deployed-tier vault with a single writer is a finding (correction 17) |
+| Set but not delivered | The gate requires delivery evidence at the current item version (correction 13) |
 
 ---
 
-# Part VII: decisions for the owner
+# Part VII: decisions
 
-Each one is explained, with a recommendation.
+## Owner decisions (2026-10-18)
+
+The owner locked the direction: R1–R11 (Part VI, including §24), with the corrections of the FMECA comparison §8 applied in this document.
+
+- **D-A. The DevOps machine is an accepted residual.** A machine whose 1Password account can read production lets an assistant in its shell read production too. The documentation describes a separate 1Password admin account, used only for production work, as the **hardened option**. opv reports when the current session can read a production-tier vault or holds a production platform login (`opv doctor`, `opv access`). Recorded in the FMECA as an accepted risk on `fm-asg-honest-limit-understated`.
+- **D-B. Access control is 1Password vault permissions only.** opv defines no roles. It discovers what the current session can do (`write`, `read`, `none`, `unknown`) and helps whoever has access. People fill values at every tier, in the 1Password app or with opv's help.
+- **D-C. CI runs opv, and opv is the courier.** Values go from 1Password into opv's memory, then to the platform tool over stdin or a pipe, never through argv, the environment, files or logs. CI's only 1Password write is value-free delivery evidence.
+- **D-D. Defects inside third-party tools are out of scope.** What `az`, `flyctl`, `kubectl` or `gh` do with a value after opv hands it over correctly is not opv's responsibility. opv's scrubber still masks a value such a tool echoes back to opv, as best-effort defence. The FMECA records such failure modes as out of scope.
+- **D-E. H1, the rule-predicate oracle, is fixed in 0.12.0,** with no 0.11.x patch. The window until 0.12.0 ships is accepted.
+- **D-F. "The assistant" is always an external model** using MCP or the CLI through its harness. opv has no built-in model and calls none.
+
+## Decided by default (the owner may override)
+
+Each default follows D-B and D-C.
+
+1. **Relaxations are approved by PR review of the contract.** A relaxation (`except <production-tier env>`, `allow_same_value`, removing a shape, narrowing presence, `secret` → `config`) is posted by CI as a separate required check status, `opv/relaxations`, which fails until the relaxation is accepted in review. R8 wins over R6's person `opv apply` (correction 11).
+2. **Which rules count.** Rules evaluated on values over MCP, or for an assistant, come only from the contract as committed on the repository's default branch. A rule that is uncommitted or exists only on a branch, including one hand-edited into `secrets.toml`, shows `rules_pending_review` and is not evaluated for those callers. This closes H1 on both routes (correction 1).
+3. **The `.env.example` equality check is dropped** (correction 2).
+4. **Redaction is always on,** for secret-kind values of 8 bytes or more, in local delivery, and does not depend on agent mode. `op run` already masks exact values, so opv adds encodings and chunk boundaries (correction 4). This replaces the earlier recommendation "redact in agent mode".
+5. **R3's assistant-triggered import** is allowed only into an environment of tier `local`. It is write-only and reports presence only. What it writes is tagged `assistant_imported` and kept out of comparisons and promotion. It acts through the person's own 1Password session. Deployed tiers are person-only (correction 7).
+
+## Earlier recommendations
 
 1. **Where the contract lives (C9, G3).**
    - **The question:** today a project's configuration can be a `secrets.toml` in the repository or a manifest in 1Password. The ideal wants the key contract reviewed in the same pull request as the code that needs it, which argues for the repository file as the single writable source, with the 1Password manifest as a read-only mirror.
    - **What changes:** projects that keep their configuration only in 1Password would move it into the repository.
-   - **Recommendation:** make the repository file the source for applications. Keep the manifest as a mirror for portfolio views.
+   - **Recommendation:** make the repository file the source for applications, with the bindings in a separate committed, opv-written file (R6). Keep the manifest as a mirror for portfolio views. Default 2 relies on this: a project whose contract is only in 1Password has no default branch, so MCP declarations there accept catalog shape names only, never rule parameters (R2).
 2. **Presence default (C5, G8).** Covered in #179.
    - **Recommendation:** the new `all` form becomes the default for new keys, and existing explicit lists keep their meaning. Nothing breaks.
 3. **Naming: "product" or "component".**
    - **The question:** "product" in opv means a part of the application (web, api). The ideal calls it a component and calls the whole an application.
    - **Recommendation:** keep `products` in the file format, because renaming breaks every configuration. Use "application" and "component" in documentation and in new commands' text.
-4. **How far agent mode goes (C4, C10).**
-   - **The question:** redacting `opv run` output in agent mode protects values, but changes what an assistant sees while debugging.
-   - **Recommendation:** redact by default in agent mode, with no switch to turn it off from agent mode.
-5. **Release split.**
-   - **The question:** Phases A–F are a large body of work, and 0.12.0 already holds Swarm, GCP Secret Manager and the VM step.
-   - **Recommendation:** 0.12.0 = phases A, B and F plus the planned targets. 0.13.0 = C, D and E. 0.14.0 = G.
-6. **TRIZ analysis.** The contradictions above were resolved with the offline catalog. The paid `triz analyze` (OpenRouter) could cross-check C1–C10 and needs the owner's authorization.
+4. **How far agent mode goes (C4, C10).** Superseded by default 4: agent mode is presentation only, and redaction is always on.
+5. **Release split.** Open. The owner is setting the 0.12.0 scope; Part V's deliverable rows follow it.
+6. **TRIZ analysis.** Done: `triz analyze` cross-checked C1–C10 with the owner's authorization (Part III).
+
+## Still open
+
+- **A-1** (§23): whether a 1Password person can write a vault they cannot read. It needs the owner's 1Password.
+- **R10's form:** generated modules per language, or the contract as data with a JSON Schema (§24 R10).
+- **The 0.12.0 scope** (decision 5 above).
 
 ---
 
