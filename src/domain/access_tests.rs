@@ -27,6 +27,7 @@ fn visible(environment: &str, deployed: bool, readers: Vec<Reader>) -> EnvAccess
         people: 0,
         guests: 0,
         service_accounts: readers,
+        writers: Vec::new(),
     }
 }
 

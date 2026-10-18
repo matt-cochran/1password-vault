@@ -23,6 +23,7 @@ use crate::cause::{
     AccountId, Cause, DiagnoseContext, DottedPath, EnvName, ExitClass, NameKind, NamedBy, Observed,
     ResourceKind, ResourceName, ResourceRef, Scope, System, TargetName, Upstream,
 };
+use crate::domain::Tier;
 use crate::domain::access::{AccessFinding, Reader, VAULT_NOT_IN_ACCOUNT, analyse, findings};
 use crate::domain::access_plan::{
     AccessReport, CiNeeds, Grant, GrantCheck, GrantState, ObservedVault, Permission, Principal,
@@ -93,6 +94,8 @@ struct Needs<'a> {
     fields: BTreeMap<&'a str, DottedPath>,
     targets: Vec<TargetNeeds<'a>>,
     ci: Vec<CiNeeds<'a>>,
+    /// The environment's tier; a `local` tier is not deployed, so it needs no second writer.
+    tier: Tier,
 }
 
 /// One environment's comparison and the owner commands for its missing grants (FR-59).
@@ -101,6 +104,22 @@ struct EnvReport {
     report: AccessReport,
     commands: Vec<String>,
     findings: Vec<AccessFinding>,
+    /// One entry per needed vault that could be read (Part V, row `access-writers`).
+    vaults: Vec<VaultAccess>,
+}
+
+/// One needed vault as `opv access` shows it (Part V, row `access-writers`): its tier
+/// marking, this session's capability, and who can write it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct VaultAccess {
+    vault_id: String,
+    /// `true` when the environment that needs it is production-tier.
+    production: bool,
+    /// What this session can do with the vault (Part V, row `capability`).
+    capability: Capability,
+    /// Who can write it, as `op vault user list` reports them (`allow_editing`), in reply
+    /// order; empty when the list is not visible.
+    writers: Vec<String>,
 }
 
 /// Run `opv access`.
@@ -149,8 +168,15 @@ pub fn run(
         if sessions.insert(need.account_id.clone()) {
             crate::adapters::onepassword::require_session(&er, &Host::detect, "opv access")?;
         }
-        let (observations, readers, unreadable, _capabilities) = observe(&er, need)?;
-        envs.push(build(need, &project, &observations, &readers, &unreadable));
+        let (observations, readers, unreadable, capabilities) = observe(&er, need)?;
+        envs.push(build(
+            need,
+            &project,
+            &observations,
+            &readers,
+            &unreadable,
+            &capabilities,
+        ));
     }
     report(out, &envs, json)
 }
@@ -325,6 +351,7 @@ fn plan_needs<'a>(
             fields,
             targets,
             ci,
+            tier: env.tier,
         });
     }
     Ok(needs)
@@ -504,6 +531,7 @@ fn build(
     observations: &Observations,
     readers: &Readers,
     unreadable: &Unreadable,
+    capabilities: &Capabilities,
 ) -> EnvReport {
     let grants = required(project, &need.targets, &need.ci);
     let boundary: BTreeSet<&str> = need
@@ -533,7 +561,11 @@ fn build(
         }
     }
     let commands = owner_commands(&report.checks);
+    // A deployed-tier vault needs a second writer; a local tier does not (design row
+    // `access-writers`).
+    let deployed = need.tier != Tier::Local;
     let mut env_findings = Vec::new();
+    let mut vaults = Vec::new();
     for vault in &needed {
         // #157: a vault the diagnosis classified carries that cause; no owner command is
         // printed for an identity needing a vault outside this account (#153).
@@ -545,10 +577,27 @@ fn build(
         let access = analyse(
             need.name,
             vault,
-            false,
+            deployed,
             observations.get(*vault).and_then(|o| o.as_ref()),
         );
+        // Part V, row `access-writers`: the tier marking, this session's capability and who
+        // 1Password reports can write the vault. Names stay out of the text output.
+        vaults.push(VaultAccess {
+            vault_id: (*vault).to_string(),
+            production: need.tier == Tier::Production,
+            capability: capabilities
+                .get(*vault)
+                .copied()
+                .unwrap_or(Capability::Unknown {
+                    source: UnknownSource::UserListRefused,
+                }),
+            writers: access.writers.clone(),
+        });
         for finding in findings(&[access]) {
+            // The CI-reader warning is about the CI reader; `--target` leaves it out.
+            if finding.code == "no_ci_reader" && need.ci.is_empty() {
+                continue;
+            }
             // A deploy identity writes its own state vault by design (FR-59); the CI-reader
             // warning is about writing values, so it applies to the boundary vaults only.
             if finding.code == "ci_reader_can_write" && !boundary.contains(*vault) {
@@ -562,6 +611,7 @@ fn build(
         report,
         commands,
         findings: env_findings,
+        vaults,
     }
 }
 
@@ -614,6 +664,7 @@ fn report(out: &mut dyn Write, envs: &[EnvReport], json: bool) -> Result<(), Err
                     "environment": env.name,
                     "report": env.report,
                     "commands": env.commands,
+                    "vaults": env.vaults,
                     "findings": env.findings.iter().map(|f| serde_json::json!({
                         "code": f.code, "message": f.message, "next": f.next,
                     })).collect::<Vec<_>>(),
