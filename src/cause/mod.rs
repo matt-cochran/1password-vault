@@ -246,8 +246,6 @@ pub enum Action {
     AddAccount { account: AccountRef },
     /// Pick between candidates that only a person can tell apart.
     PickBetween,
-    /// Approve a plan in the person's own terminal.
-    Approve { plan: PlanId },
     /// Confirm the environment.
     Confirm { env: EnvName },
     /// Revoke an orphan whose secret was never stored.
@@ -282,7 +280,6 @@ impl Action {
                 | Action::UnlockApp
                 | Action::AddAccount { .. }
                 | Action::PickBetween
-                | Action::Approve { .. }
                 | Action::Confirm { .. }
                 | Action::Revoke { .. }
                 | Action::OwnerSetup { .. }
@@ -751,15 +748,6 @@ pub enum Cause {
     },
 
     // §4.9 approvals and plans
-    ApprovalMissing {
-        plan: PlanId,
-        scope: PlanScope,
-    },
-    ApprovalUsed {
-        plan: PlanId,
-        scope: PlanScope,
-        partial: bool,
-    },
     PlanChanged {
         old: PlanId,
         new: PlanId,
@@ -1561,8 +1549,6 @@ impl Cause {
             KeysBlocking { .. } => "keys_blocking",
             LocalFileTooOpen { .. } => "file_too_open",
             InputInvalid { .. } => "input_invalid",
-            ApprovalMissing { .. } => "approval_required",
-            ApprovalUsed { .. } => "approval_used",
             PlanChanged { .. } => "stale_plan",
             PlanUnknown { .. } => "plan_unknown",
             RamDirUnavailable { .. } => "ram_dir_unavailable",
@@ -1662,8 +1648,6 @@ impl Cause {
             | NeedsConfirm { .. }
             | ConfirmMismatch { .. }
             | LocalFileTooOpen { .. }
-            | ApprovalMissing { .. }
-            | ApprovalUsed { .. }
             | PlanChanged { .. }
             | PlanUnknown { .. }
             | RamDirUnavailable { .. }
@@ -1730,7 +1714,6 @@ impl Cause {
             | PersonOnly { .. }
             | NeedsConfirm { .. }
             | ConfirmMismatch { .. }
-            | ApprovalUsed { .. }
             | PlanChanged { .. }
             | PlanUnknown { .. }
             | UnexpectedOutput { .. }

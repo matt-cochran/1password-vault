@@ -1,6 +1,6 @@
 //! The structural plan and its apply (#133): what `opv bootstrap` and `opv item skeleton`
 //! would create for a project, as one reviewable plan with an id, and the apply of exactly
-//! that plan once a person approved it in their own terminal (`opv approve`, [`crate::approval`]).
+//! that plan once a person confirmed it in their own terminal (`opv apply`).
 //!
 //! Structure only: boundary vaults and items, state vaults, delivery items and empty fields.
 //! The plan holds names, kinds, titles and public IDs, never a value; it is computed with
@@ -11,7 +11,7 @@
 //! recreated around an access failure.
 //!
 //! The plan id is SHA-256 over the project, the 1Password account, the configuration text
-//! and every planned step, so a plan approved for one project, account or configuration
+//! and every planned step, so a plan confirmed for one project, account or configuration
 //! never applies to another, and any change since the review is `stale_plan`. Permission
 //! grants, personal items, credentials, sync, deploy and rotation are not part of it.
 
@@ -204,30 +204,9 @@ fn no_account(command: &str) -> Error {
     }
 }
 
-/// C2 (09.mcp): a structural `PlanChanged` whose old id was never approved on this machine
-/// (`approved` says) names no plan opv knows: `PlanUnknown`, never "changed since it was
-/// approved". Any other error is returned as it is.
-pub fn unknown_unless_approved(e: Error, approved: &dyn Fn(&str) -> bool) -> Error {
-    match e.cause() {
-        Some((
-            Cause::PlanChanged {
-                old,
-                scope: PlanScope::Structural,
-                ..
-            },
-            _,
-        )) if !approved(old.as_str()) => Cause::PlanUnknown {
-            plan: old.as_str().to_string(),
-            scope: Some(PlanScope::Structural),
-        }
-        .into(),
-        _ => e,
-    }
-}
-
 /// The structural plan `old` is now `new` (the configuration, the account or what exists in
-/// 1Password changed): nothing was approved, applied or used, and the step is the read of
-/// the new plan, which a person then approves (05.15).
+/// 1Password changed): nothing was applied, and the step is the read of the new plan,
+/// which a person then applies (05.15).
 pub(crate) fn changed(old: &str, new: &str) -> Error {
     Cause::PlanChanged {
         old: PlanId::new(old),
@@ -428,8 +407,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// Where a structural plan applies: the configuration file, the project and the 1Password
-/// account (an account ID), resolved the same way for `opv approve` and the MCP tools so
-/// an approval made in one always names the scope the other applies to.
+/// account (an account ID), resolved the same way for the CLI and the MCP tools.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scope {
     pub path: std::path::PathBuf,
@@ -467,17 +445,7 @@ pub fn scope_as(start: &Path, r: &dyn CommandRunner, command: &str) -> Result<Sc
     })
 }
 
-/// The project and 1Password account an approval of a sync plan names (0.9.0): resolved
-/// like [`scope`], from the checkout at `start`, but without needing a local
-/// `secrets.toml` (a sync may use a configuration kept in 1Password). `opv approve --sync`
-/// and the agent's approved sync resolve it the same way, so an approval made in one
-/// always names what the other consumes.
-pub fn binding(start: &Path, r: &dyn CommandRunner) -> Result<(String, String), Error> {
-    // G3: the command the person ran (`approve`, `sync`), never `structure`.
-    binding_as(start, r, &invoked("sync"))
-}
-
-/// The opv command this run is (`approve`, `sync`, `structure plan`), for a refusal that
+/// The opv command this run is (`sync`, `structure plan`), for a refusal that
 /// names it (G3); `default` under the MCP server, whose tools name their own.
 fn invoked(default: &str) -> String {
     let command = crate::error::invocation().command.join(" ");
@@ -487,7 +455,9 @@ fn invoked(default: &str) -> String {
     }
 }
 
-/// [`binding`] for the opv command `command` (an MCP tool names its command itself).
+/// The project and 1Password account of the checkout at `start`, resolved like [`scope`]
+/// but without needing a local `secrets.toml` (a configuration may be kept in 1Password),
+/// for the opv command `command` (an MCP tool names its command itself).
 pub fn binding_as(
     start: &Path,
     r: &dyn CommandRunner,
@@ -597,11 +567,11 @@ pub struct Applied {
 }
 
 /// Apply exactly the plan `plan_id` to the configuration file `path` of `project` in
-/// `account`: re-plan, refuse a stale id (`stale_plan`), refuse anyone but a person signed in
-/// (before the single-use approval is spent), then `authorize` (the approval
-/// check; nothing is written unless it passes), then create what the plan lists. IDs are
-/// recorded as each phase completes, so a run that stops part-way keeps what it made, and
-/// a re-run (with a new plan and approval) finds it again by title.
+/// `account`: re-plan, refuse a stale id (`stale_plan`), refuse anyone but a person signed in,
+/// then `authorize` (the caller's check that this is the plan the person confirmed; nothing
+/// is written unless it passes), then create what the plan lists. IDs are recorded as each
+/// phase completes, so a run that stops part-way keeps what it made, and a re-run (with a
+/// new plan) finds it again by title.
 pub fn apply(
     r: &dyn CommandRunner,
     path: &Path,
@@ -623,12 +593,12 @@ pub fn apply(
     if p.plan_id != plan_id {
         return Err(changed(plan_id, &p.plan_id));
     }
-    // A person's own session first (#157): the approval is single-use, so a signed-out or
-    // non-interactive run is refused before it is consumed.
+    // A person's own session first (#157): a signed-out or non-interactive run is refused
+    // before anything is authorized or written.
     super::tidy::require_person(r, "the structural apply")?;
     authorize(&p)?;
-    // The approval is used up from here: any failure says what was created and that the
-    // approval is spent, and its step reads what remains (X4, X20), never this apply again.
+    // Writes may start from here: any failure says what was created, and its step reads
+    // what remains (X4, X20), never this apply again.
     let mut applied = Applied {
         plan_id: p.plan_id.clone(),
         created: Vec::new(),
@@ -637,9 +607,9 @@ pub fn apply(
         generator_ids: Vec::new(),
         concurrent_edits: Vec::new(),
     };
-    match apply_approved(r, path, project, &text, &p, &mut applied) {
+    match apply_confirmed(r, path, project, &text, &p, &mut applied) {
         Ok(()) => Ok(applied),
-        Err(e) => Err(after_approval(e, &applied)),
+        Err(e) => Err(after_authorized(e, &applied)),
     }
 }
 
@@ -668,11 +638,10 @@ fn done(applied: &Applied) -> Vec<String> {
     out
 }
 
-/// A failure after the approval of `applied.plan_id` was used (X4, X20): a cataloged cause
-/// is kept inside `Partial`, with what was created and the used approval; one not yet
-/// cataloged is reported as the used approval, so no step ever repeats it.
-fn after_approval(e: Error, applied: &Applied) -> Error {
-    let plan = PlanId::new(&applied.plan_id);
+/// A failure after `applied.plan_id` was authorized (X4, X20): a cataloged cause is kept
+/// inside `Partial`, with what was created; its step reads what remains in the structural
+/// scope, so no step ever repeats the apply.
+fn after_authorized(e: Error, applied: &Applied) -> Error {
     let mut written = done(applied);
     let Error::Catalog(cause, upstream) = e;
     let cause = match *cause {
@@ -680,14 +649,14 @@ fn after_approval(e: Error, applied: &Applied) -> Error {
             written.extend(done);
             Cause::Partial {
                 done: written,
-                approval_used: Some(plan),
+                approval_used: None,
                 approval_scope: Some(PlanScope::Structural),
                 then,
             }
         }
         then => Cause::Partial {
             done: written,
-            approval_used: Some(plan),
+            approval_used: None,
             approval_scope: Some(PlanScope::Structural),
             then: Box::new(then),
         },
@@ -695,8 +664,8 @@ fn after_approval(e: Error, applied: &Applied) -> Error {
     Error::Catalog(Box::new(cause), upstream)
 }
 
-/// The writes of an approved plan `p`, recorded into `applied` as they complete.
-fn apply_approved(
+/// The writes of a confirmed plan `p`, recorded into `applied` as they complete.
+fn apply_confirmed(
     r: &dyn CommandRunner,
     path: &Path,
     project: &str,
@@ -845,7 +814,7 @@ fn record(
     // Only IDs are added (the plan judged the completed file with placeholders); a part
     // recorded before a failure may not load yet, and is kept so a re-run need not find it.
     // 05.14: the file is not overwritten; what was created stays in 1Password and the
-    // caller reports it with the used approval, whose step is the new structural plan.
+    // caller reports it as partial, whose step is the new structural plan.
     if read(path)? != *written {
         return Err(Cause::ChangedBeforeWrite {
             object: StoreObject::File {

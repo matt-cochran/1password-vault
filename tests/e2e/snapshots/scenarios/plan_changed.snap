@@ -1,7 +1,9 @@
-# plan_changed: opv sync prod --approved deadbeef
+# plan_changed: opv sync prod --expect-plan deadbeef
 
 ## text exit: 6
 ## text stdout
+prod/fly: warning: web/LOG_LEVEL not delivered (no config channel: set fly.config)
+prod/fly: warning: web/OTEL_RESOURCE not delivered (no config channel: set fly.config)
 
 ## text stderr
 using <SCENARIO>/project/secrets.toml
@@ -18,6 +20,3 @@ using <SCENARIO>/project/secrets.toml
 opv: the plan changed since it was made: deadbeef is now 623778c8
 Do: review the new plan 623778c8
 Next: opv plan prod
-
-## mcp opv_sync {"environment":"prod","plan_id":"deadbeef"}
-{"ok":false,"error":{"code":"stale_plan","category":"policy","message":"the plan changed since it was made: deadbeef is now 623778c8","subject":{"scope":{"kind":"sync","env":"prod","targets":[],"product":null,"deploy":false,"prune":false,"rotate":[]},"old":"deadbeef","new":"623778c8"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":"review the new plan 623778c8","next":{"kind":"run","actor":"assistant","command":"opv plan prod"}}}

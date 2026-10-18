@@ -112,58 +112,7 @@ pub(crate) fn plan_projection(p: &crate::app::structure::Plan) -> Value {
         "human_action": if empty {
             "Nothing to create. A person enters any missing values in 1Password; check with opv_ready.".to_string()
         } else {
-            format!("Show this plan to the person. They approve it by running `opv approve {}` in their own terminal; then call opv_structure_apply with this plan_id.", p.plan_id)
-        },
-    })
-}
-
-/// What apply did, field by field: identifiers and 1Password links only
-/// (`opv_structure_apply`, `opv structure apply --json`).
-pub(crate) fn applied_projection(a: &crate::app::structure::Applied) -> Value {
-    let id_ok = |s: &str| crate::config::is_id(s) && s.len() <= 64;
-    let created: Vec<Value> = a.created.iter()
-        .filter(|c| identifier(&c.environment) && identifier(&c.name) && id_ok(&c.vault_id))
-        .map(|c| json!({
-            "kind": c.kind,
-            "environment": c.environment,
-            "name": c.name,
-            "vault_id": c.vault_id,
-            "item_id": c.item_id.as_deref().filter(|i| id_ok(i)),
-            "link": c.link.as_deref().filter(|l| l.starts_with("https://start.1password.com/open/i?") && l.bytes().all(|b| b.is_ascii_alphanumeric() || b"/:?=&.-_".contains(&b))),
-        }))
-        .collect();
-    let fields: Vec<Value> = a.fields_added.iter()
-        .filter(|f| [&f.environment, &f.boundary, &f.product, &f.key].iter().all(|n| identifier(n)))
-        .map(|f| json!({"environment": f.environment, "boundary": f.boundary, "product": f.product, "key": f.key, "kind": f.kind}))
-        .collect();
-    let generator: Vec<&str> = a
-        .generator_ids
-        .iter()
-        .map(String::as_str)
-        .filter(|l| {
-            l.len() <= 256
-                && l.bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b" []{}=\".,_-".contains(&b))
-        })
-        .collect();
-    let concurrent: Vec<&str> = a
-        .concurrent_edits
-        .iter()
-        .map(String::as_str)
-        .filter(|n| identifier(n))
-        .collect();
-    json!({
-        "ok": true,
-        "plan_id": a.plan_id,
-        "created": created,
-        "fields_added": fields,
-        "config_written": a.config_written,
-        "generator_ids": generator,
-        "concurrent_edits": concurrent,
-        "human_action": if generator.is_empty() {
-            "The person enters each value in 1Password at the links above (never in chat or files). Then check readiness with opv_ready."
-        } else {
-            "The configuration is generated: record generator_ids in its generator's input and regenerate it. The person enters each value in 1Password. Then check readiness with opv_ready."
+            "Show this plan to the person. They apply it by running `opv apply` in their own terminal.".to_string()
         },
     })
 }

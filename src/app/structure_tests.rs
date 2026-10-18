@@ -356,11 +356,7 @@ fn a_refused_authorization_creates_nothing() {
     let (_d, path, op) = workspace();
     let id = plan_of(&path, &op).plan_id;
     let mut refuse = |_: &Plan| -> Result<(), Error> {
-        Err(crate::cause::Cause::ApprovalMissing {
-            plan: crate::cause::PlanId::new("p"),
-            scope: crate::cause::PlanScope::Structural,
-        }
-        .into())
+        Err(changed("sp-0000000000000000", "sp-1111111111111111"))
     };
     let _ = apply(&op, &path, "myapp", ACCOUNT, &id, &mut refuse);
     assert_eq!(op.count(&["op", "vault", "create"]), 0);
@@ -544,11 +540,11 @@ fn a_configuration_changed_during_apply_is_never_overwritten() {
 
 // End to end (#133 acceptance) -------------------------------------------------------------
 
-/// An assistant declares a new product key and a new target, plans, a person approves in
-/// their terminal, the assistant applies; what is left is entering values in 1Password.
+/// An assistant declares a new product key and a new target, plans, and a person confirms
+/// and applies it (authorized by a closure, as `opv apply` does); what is left is entering
+/// values in 1Password.
 fn end_to_end() -> (tempfile::TempDir, PathBuf, FakeOp, Result<Applied, Error>) {
     let (d, path, op) = workspace();
-    let approvals = tempfile::tempdir().unwrap();
     let mut key = super::super::declare::Key {
         product: "billing".into(),
         key: "WEBHOOK_SECRET".into(),
@@ -571,28 +567,12 @@ fn end_to_end() -> (tempfile::TempDir, PathBuf, FakeOp, Result<Applied, Error>) 
     };
     super::super::declare::target(&op, &path, &target).unwrap();
     let id = plan_of(&path, &op).plan_id;
-    crate::approval::record_in(
-        &approvals.path().join("approvals"),
-        &id,
-        "myapp",
-        ACCOUNT,
-        100,
-    )
-    .unwrap();
-    let res = apply(&op, &path, "myapp", ACCOUNT, &id, &mut |p| {
-        crate::approval::consume_in(
-            &approvals.path().join("approvals"),
-            &p.plan_id,
-            "myapp",
-            ACCOUNT,
-            200,
-        )
-    });
+    let res = apply(&op, &path, "myapp", ACCOUNT, &id, &mut approve_all);
     (d, path, op, res)
 }
 
 #[test]
-fn end_to_end_the_approved_plan_applies() {
+fn end_to_end_the_confirmed_plan_applies() {
     let (_d, _path, _op, res) = end_to_end();
     assert!(res.is_ok(), "{res:?}");
 }
@@ -642,40 +622,6 @@ fn end_to_end_the_existing_shared_value_is_kept() {
             .unwrap()
             .contains(MARKER)
     );
-}
-
-#[test]
-fn end_to_end_the_approval_cannot_be_replayed() {
-    let (_d, path, op) = workspace();
-    let approvals = tempfile::tempdir().unwrap();
-    let id = plan_of(&path, &op).plan_id;
-    crate::approval::record_in(
-        &approvals.path().join("approvals"),
-        &id,
-        "myapp",
-        ACCOUNT,
-        100,
-    )
-    .unwrap();
-    let mut consume = |p: &Plan| {
-        crate::approval::consume_in(
-            &approvals.path().join("approvals"),
-            &p.plan_id,
-            "myapp",
-            ACCOUNT,
-            200,
-        )
-    };
-    let _ = apply(&op, &path, "myapp", ACCOUNT, &id, &mut consume);
-    let e = crate::approval::consume_in(
-        &approvals.path().join("approvals"),
-        &id,
-        "myapp",
-        ACCOUNT,
-        201,
-    )
-    .unwrap_err();
-    assert_eq!(e.code_str(), "approval_used");
 }
 
 // 0.10.0 error catalog (C2, 05.02, 05.14, 05.15, X4) ----------------------------------------
@@ -767,7 +713,7 @@ fn a_configuration_changed_during_apply_steps_to_the_new_plan() {
 
 /// 05.14, X20: the failure says the approval is used up.
 #[test]
-fn a_configuration_changed_during_apply_says_the_approval_is_used() {
+fn a_configuration_changed_during_apply_never_claims_an_approval() {
     let (_d, path, op) = workspace();
     let id = plan_of(&path, &op).plan_id;
     let p2 = path.clone();
@@ -776,10 +722,10 @@ fn a_configuration_changed_during_apply_says_the_approval_is_used() {
         Ok(())
     };
     let e = apply(&op, &path, "myapp", ACCOUNT, &id, &mut edit_during).unwrap_err();
-    assert!(e.to_string().contains(&format!("approval {id} is used up")));
+    assert!(!e.to_string().contains("approval"), "{e}");
 }
 
-/// X4: a create that fails after the approval was used never steps to the apply again.
+/// X4: a create that fails after the plan was authorized never steps to the apply again.
 #[test]
 fn a_partial_apply_steps_to_the_new_plan() {
     let (_d, path, r) = failing_at(3);
@@ -801,14 +747,4 @@ fn a_checkout_without_a_file_never_steps_to_bootstrap() {
     let dir = tempfile::tempdir().unwrap();
     let e = scope(dir.path(), &FakeOp::default()).unwrap_err();
     assert!(!e.next_text().unwrap_or_default().contains("bootstrap"));
-}
-
-#[test]
-fn a_changed_plan_never_approved_here_is_plan_unknown() {
-    // C2 (09.mcp): never "changed since it was approved" for an id never approved.
-    let e = unknown_unless_approved(
-        changed("sp-0000000000000000", "sp-1111111111111111"),
-        &|_| false,
-    );
-    assert_eq!(e.code_str(), "plan_unknown");
 }

@@ -6,7 +6,6 @@
 
 pub mod adapters;
 pub mod app;
-pub mod approval;
 pub mod cause;
 pub mod config;
 pub mod config_edit;

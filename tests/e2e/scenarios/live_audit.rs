@@ -449,60 +449,6 @@ fn live_09_10_login_prod_without_a_terminal_hands_the_same_command_to_the_person
 }
 
 #[test]
-fn live_09_25_approve_with_rotate_without_a_terminal_keeps_every_flag() {
-    let s = Scenario::new();
-    let args = [
-        "approve",
-        "3f9c0a1b",
-        "--sync",
-        "prod",
-        "--rotate",
-        "web/API_KEY",
-    ];
-    let out = s.opv_config(&args);
-    assert_eq!(
-        out.next().as_deref().map(words),
-        Some(expected(&args, Some(&s.config_arg()))),
-        "{}",
-        out.shown()
-    );
-}
-
-#[test]
-fn live_09_26_structural_approve_without_a_terminal_keeps_config() {
-    let s = Scenario::new();
-    let args = ["approve", "sp-0123456789abcdef"];
-    let out = s.opv_config(&args);
-    assert_eq!(
-        out.next().as_deref().map(words),
-        Some(expected(&args, Some(&s.config_arg()))),
-        "{}",
-        out.shown()
-    );
-}
-
-#[test]
-fn live_09_27_approve_of_a_malformed_plan_id_is_a_usage_error_before_the_terminal_gate() {
-    let out = Scenario::new().opv(&["approve", "nonsense"]);
-    assert_eq!(out.exit(), Some(2), "{}", out.shown());
-}
-
-#[test]
-fn live_09_30_approve_with_deploy_target_prune_without_a_terminal_keeps_every_flag() {
-    let s = Scenario::new();
-    let args = [
-        "approve", "3f9c0a1b", "--sync", "prod", "--deploy", "--target", "fly", "--prune",
-    ];
-    let out = s.opv_config(&args);
-    assert_eq!(
-        out.next().as_deref().map(words),
-        Some(expected(&args, Some(&s.config_arg()))),
-        "{}",
-        out.shown()
-    );
-}
-
-#[test]
 fn live_09_42_run_with_an_undeclared_remote_profile_is_refused_before_the_terminal_gate() {
     let out = Scenario::new().opv(&["run", "prod", "--product", "web", "--remote", "nosuch"]);
     assert_eq!(out.exit(), Some(2), "{}", out.shown());
@@ -1317,23 +1263,6 @@ fn live_09_mcp_structure_plan_prints_no_value() {
         None,
         "{doc}"
     );
-}
-
-#[test]
-fn live_09_mcp_structure_apply_of_a_plan_never_prepared_is_plan_unknown() {
-    let doc = Scenario::new().account(DEV_ACCOUNT).mcp(
-        "opv_structure_apply",
-        json!({"plan_id": "sp-0000000000000000"}),
-    );
-    assert_eq!(doc["error"]["code"], "plan_unknown", "{doc}");
-}
-
-#[test]
-fn live_09_mcp_structure_apply_of_a_malformed_plan_id_is_usage() {
-    let doc = Scenario::new()
-        .account(DEV_ACCOUNT)
-        .mcp("opv_structure_apply", json!({"plan_id": "garbage"}));
-    assert_eq!(doc["error"]["code"], "usage", "{doc}");
 }
 
 /// The agent's own argument error is for the agent to fix, not a person.

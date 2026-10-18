@@ -12,12 +12,7 @@ use crate::error::shell_word;
 use crate::json::{NextActor, NextKind};
 
 /// Flags only a person may add (§6.2): a command carrying one is always a `Handoff`.
-const PERSON_ONLY_FLAGS: [&str; 4] = [
-    "--confirm",
-    "--approved",
-    "--expect-plan",
-    "--prune-immutable",
-];
+const PERSON_ONLY_FLAGS: [&str; 3] = ["--confirm", "--expect-plan", "--prune-immutable"];
 
 /// ANSI dim and reset, for the upstream box when the terminal takes colour (A8).
 const DIM: &str = "\x1b[2m";
@@ -171,34 +166,6 @@ fn scope_read(scope: &PlanScope) -> Next {
     }
 }
 
-/// `opv approve <id>` with every scope flag (a handoff: only a person approves).
-fn approve_handoff(plan: &PlanId, scope: &PlanScope) -> Next {
-    let mut args = vec![plan.to_string()];
-    if let PlanScope::Sync {
-        env,
-        targets,
-        product,
-        deploy,
-        prune,
-        rotate,
-    } = scope
-    {
-        args.push("--sync".into());
-        args.push(env.to_string());
-        if *deploy {
-            args.push("--deploy".into());
-        }
-        if *prune {
-            args.push("--prune".into());
-        }
-        push_target_product_rotate(&mut args, targets, product, rotate);
-    }
-    Next::Handoff(Cmd {
-        command: vec!["approve".into()],
-        args,
-    })
-}
-
 fn push_target_product_rotate(
     args: &mut Vec<String>,
     targets: &[TargetName],
@@ -298,7 +265,7 @@ fn read_form(c: Cmd) -> Option<Cmd> {
 fn sync_flag_takes_value(flag: &str) -> bool {
     matches!(
         flag,
-        "--confirm" | "--expect-plan" | "--receipt" | "--prune-immutable" | "--approved"
+        "--confirm" | "--expect-plan" | "--receipt" | "--prune-immutable"
     )
 }
 
@@ -2054,20 +2021,6 @@ impl Cause {
                 let (what, _) = rule_words(field, rule);
                 format!("{}{}: {what}", input_words(*kind, path), at_words(at))
             }
-            ApprovalMissing { plan, scope: _ } => format!("plan {plan} is not approved yet"),
-            ApprovalUsed {
-                plan,
-                scope: _,
-                partial,
-            } => {
-                if *partial {
-                    format!(
-                        "approval {plan} is already used, and only part of its plan was applied"
-                    )
-                } else {
-                    format!("approval {plan} is already used")
-                }
-            }
             // F3: the plan id was made by a read; it may never have been approved.
             PlanChanged { old, new, scope: _ } => {
                 format!("the plan changed since it was made: {old} is now {new}")
@@ -2318,7 +2271,6 @@ impl Cause {
                 Cause::NeedsTerminal { .. }
                     | Cause::NeedsOwnSession { .. }
                     | Cause::NeedsConfirm { .. }
-                    | Cause::ApprovalMissing { .. }
                     | Cause::CredentialRejected { .. }
             )
     }
@@ -3857,21 +3809,6 @@ impl Cause {
                     Next::Rerun,
                 )
             }
-            ApprovalMissing { plan: id, scope } => plan(
-                Some((
-                    Action::Approve { plan: id.clone() },
-                    format!("approve plan {id} in your own terminal"),
-                )),
-                approve_handoff(id, scope),
-            ),
-            ApprovalUsed {
-                plan: id, scope, ..
-            } => plan(
-                inspect(format!(
-                    "review what remains after approval {id} and approve its new plan"
-                )),
-                scope_read(scope),
-            ),
             PlanChanged { old: _, new, scope } => plan(
                 inspect(format!("review the new plan {new}")),
                 scope_read(scope),

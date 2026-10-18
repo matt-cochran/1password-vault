@@ -98,7 +98,6 @@ parses!(every_next_parses_vault_locate: "vault", "locate");
 parses!(every_next_parses_mcp_serve: "mcp", "serve");
 parses!(every_next_parses_mcp_install: "mcp", "install");
 parses!(every_next_parses_version: "version");
-parses!(every_next_parses_approve: "approve");
 parses!(every_next_parses_bootstrap: "bootstrap");
 parses!(every_next_parses_account_list: "account", "list");
 parses!(every_next_parses_account_use: "account", "use");
@@ -125,7 +124,6 @@ parses!(every_next_parses_target_list: "target", "list");
 parses!(every_next_parses_target_credentials: "target", "credentials");
 parses!(every_next_parses_env_add: "env", "add");
 parses!(every_next_parses_structure_plan: "structure", "plan");
-parses!(every_next_parses_structure_apply: "structure", "apply");
 parses!(every_next_parses_config_describe: "config", "describe");
 
 #[test]
@@ -171,11 +169,11 @@ fn with_arg_changes_only_that_word() {
 
 #[test]
 fn an_mcp_invocation_remembers_the_tool() {
-    let invocation = Invocation::from_mcp("opv_sync", words("prod"));
+    let invocation = Invocation::from_mcp("opv_generate", words("prod"));
     assert_eq!(
         invocation.origin,
         Origin::Mcp {
-            tool: "opv_sync".into()
+            tool: "opv_generate".into()
         }
     );
 }

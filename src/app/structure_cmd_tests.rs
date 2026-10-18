@@ -1,4 +1,4 @@
-//! `opv env add`, `opv structure plan`, `opv structure apply` and `opv config describe`
+//! `opv env add`, `opv structure plan` and `opv config describe`
 //! (j8): the same work and the same documents as their MCP tools.
 
 use super::*;
@@ -91,137 +91,15 @@ fn structure_plan_json_is_the_shared_projection() {
 }
 
 #[test]
-fn structure_plan_text_points_at_the_approve_command() {
+fn structure_plan_text_points_at_opv_apply() {
     let (_d, path, op) = workspace();
     let mut buf = Vec::new();
     plan_scoped(&op, &scope_of(&path), false, &mut buf).unwrap();
-    let id = plan_id_of(&path, &op);
     assert!(
         String::from_utf8(buf)
             .unwrap()
-            .contains(&format!("opv approve {id}"))
+            .ends_with("Next: opv apply\n")
     );
-}
-
-// structure apply --------------------------------------------------------------------------
-
-fn refuse(name: &str) -> Result<(), Error> {
-    Err(crate::cause::Cause::ApprovalMissing {
-        plan: crate::cause::PlanId::new(name),
-        scope: crate::cause::PlanScope::Structural,
-    }
-    .into())
-}
-
-#[test]
-fn structure_apply_without_approval_is_refused() {
-    let (_d, path, op) = workspace();
-    let id = plan_id_of(&path, &op);
-    let e = apply_authorized(
-        &op,
-        &scope_of(&path),
-        &id,
-        &mut |_| refuse(&id),
-        &|_| true,
-        false,
-        &mut Vec::new(),
-    )
-    .unwrap_err();
-    assert_eq!(e.code_str(), "approval_required");
-}
-
-#[test]
-fn a_refused_apply_creates_no_vault() {
-    let (_d, path, op) = workspace();
-    let id = plan_id_of(&path, &op);
-    let _ = apply_authorized(
-        &op,
-        &scope_of(&path),
-        &id,
-        &mut |_| refuse(&id),
-        &|_| true,
-        false,
-        &mut Vec::new(),
-    );
-    assert_eq!(op.count(&["op", "vault", "create"]), 0);
-}
-
-#[test]
-fn a_stale_plan_is_refused() {
-    let (_d, path, op) = workspace();
-    let id = plan_id_of(&path, &op);
-    std::fs::write(&path, format!("{CONFIG}\n# changed\n")).unwrap();
-    let e = apply_authorized(
-        &op,
-        &scope_of(&path),
-        &id,
-        &mut |_| Ok(()),
-        &|_| true,
-        false,
-        &mut Vec::new(),
-    )
-    .unwrap_err();
-    assert_eq!(e.code_str(), "stale_plan");
-}
-
-/// C2: an id never approved on this machine (the injected approval folder holds none) that
-/// matches no plan is `PlanUnknown`, never a plan that changed since its approval.
-#[test]
-fn an_unapproved_unknown_plan_id_is_plan_unknown() {
-    let (_d, path, op) = workspace();
-    let id = plan_id_of(&path, &op);
-    std::fs::write(&path, format!("{CONFIG}\n# changed\n")).unwrap();
-    let approvals = tempfile::tempdir().unwrap();
-    let e = apply_authorized(
-        &op,
-        &scope_of(&path),
-        &id,
-        &mut |_| Ok(()),
-        &|plan| approvals.path().join(format!("{plan}.json")).exists(),
-        false,
-        &mut Vec::new(),
-    )
-    .unwrap_err();
-    assert_eq!(e.code_str(), "plan_unknown");
-}
-
-/// The new plan id is in the message; the step reads the new plan (05.15).
-#[test]
-fn a_stale_plan_names_the_new_plan_id() {
-    let (_d, path, op) = workspace();
-    let id = plan_id_of(&path, &op);
-    std::fs::write(&path, format!("{CONFIG}\n# changed\n")).unwrap();
-    let new = plan_id_of(&path, &op);
-    let e = apply_authorized(
-        &op,
-        &scope_of(&path),
-        &id,
-        &mut |_| Ok(()),
-        &|_| true,
-        false,
-        &mut Vec::new(),
-    )
-    .unwrap_err();
-    assert!(e.to_string().contains(&new));
-}
-
-/// 05.15: the step after a changed plan is its read, never an approval an agent runs.
-#[test]
-fn a_stale_plan_steps_to_the_new_structural_plan() {
-    let (_d, path, op) = workspace();
-    let id = plan_id_of(&path, &op);
-    std::fs::write(&path, format!("{CONFIG}\n# changed\n")).unwrap();
-    let e = apply_authorized(
-        &op,
-        &scope_of(&path),
-        &id,
-        &mut |_| Ok(()),
-        &|_| true,
-        false,
-        &mut Vec::new(),
-    )
-    .unwrap_err();
-    assert_eq!(e.next_text().unwrap_or_default(), "opv structure plan");
 }
 
 // config describe --------------------------------------------------------------------------
@@ -266,27 +144,17 @@ fn config_describe_text_names_the_environment_and_key() {
 
 // 0.10.0 error catalog (05.12, 05.13, 05.37) -----------------------------------------------
 
-fn applied_text(path: &Path, op: &FakeOp) -> String {
+/// Apply the current plan, authorized by a closure as `opv apply` does (no approval file).
+fn apply_plan(path: &Path, op: &FakeOp) {
     let id = plan_id_of(path, op);
-    let mut buf = Vec::new();
-    apply_authorized(
-        op,
-        &scope_of(path),
-        &id,
-        &mut |_| Ok(()),
-        &|_| true,
-        false,
-        &mut buf,
-    )
-    .unwrap();
-    String::from_utf8(buf).unwrap()
+    structure::apply(op, path, "myapp", ACCOUNT, &id, &mut |_| Ok(())).unwrap();
 }
 
 /// 05.13: a complete structure has nothing to approve.
 #[test]
 fn a_complete_structure_plan_steps_to_ready() {
     let (_d, path, op) = workspace();
-    applied_text(&path, &op);
+    apply_plan(&path, &op);
     let mut buf = Vec::new();
     plan_scoped(&op, &scope_of(&path), false, &mut buf).unwrap();
     assert!(
@@ -294,21 +162,6 @@ fn a_complete_structure_plan_steps_to_ready() {
             .unwrap()
             .ends_with("Next: opv ready\n")
     );
-}
-
-/// 05.12: the text form of apply ends with a step.
-#[test]
-fn structure_apply_text_ends_with_ready() {
-    let (_d, path, op) = workspace();
-    assert!(applied_text(&path, &op).ends_with("Next: opv ready\n"));
-}
-
-/// 05.12: a generated configuration's IDs reach the person in the text form too.
-#[test]
-fn a_generated_configuration_apply_text_lists_the_generator_ids() {
-    let (_d, path, op) = workspace();
-    std::fs::write(&path, format!("# generated by infra\n{CONFIG}")).unwrap();
-    assert!(applied_text(&path, &op).contains("record these IDs in its generator's input"));
 }
 
 /// 05.37: the environment being added is named in the step, never a placeholder.

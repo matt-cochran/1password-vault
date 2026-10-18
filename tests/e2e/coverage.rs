@@ -120,6 +120,13 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "BindingsUnapplied",
         "the e2e world has no apply record until opv apply lands (rows apply-core, e2e-coverage)",
     ),
+    // `structure::apply` refuses an id that is not a structural plan id, but its only caller
+    // left after approval-removal is `opv apply` (src/app/apply.rs), which passes the id it
+    // just recomputed; `opv apply` has no CLI surface until the cli-sweep row.
+    (
+        "PlanUnknown",
+        "only opv apply reaches the structural apply, with its own recomputed id (rows apply-core, cli-sweep)",
+    ),
     // `opv contract --check` is a library function in this row; the CLI surface (and a
     // committed copy for it to compare) arrives with the later `ci-workflow` row.
     (
@@ -397,17 +404,6 @@ impl Scenario {
             .success();
         assert!(ok, "kill");
         child.wait_with_output().expect("output")
-    }
-
-    /// The id of the prod plan this world gives (`opv plan prod --json`).
-    fn plan_id(&self) -> String {
-        let out = self
-            .command()
-            .args(["plan", "prod", "--json"])
-            .output()
-            .expect("plan");
-        let doc: Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
-        doc["plan_id"].as_str().expect("plan_id").to_string()
     }
 
     /// One MCP `tools/call` on `opv mcp serve --project <project>`: the tool's answer.
@@ -797,7 +793,7 @@ mod cases {
         case(s.var("OP_SERVICE_ACCOUNT_TOKEN", &token), &["bootstrap"])
     }
 
-    // §4.5 guards, §4.8 person-only steps, §4.9 approvals
+    // §4.5 guards, §4.8 person-only steps, §4.9 plans
 
     pub fn guard() -> Case {
         // The builder profile allows dev only (O9: it may name no deployed environment).
@@ -862,83 +858,31 @@ mod cases {
         )
     }
 
-    fn approved(s: Scenario) -> Case {
-        let id = s.plan_id();
-        Case {
-            args: vec![
-                "sync".into(),
-                "prod".into(),
-                "--approved".into(),
-                id.clone(),
-            ],
-            scenario: s,
-            mcp: Some(("opv_sync", json!({"environment": "prod", "plan_id": id}))),
-        }
-    }
-
-    pub fn approval_missing() -> Case {
-        approved(Scenario::new())
-    }
-
-    pub fn approval_used() -> Case {
-        let s = Scenario::new().dir("home/.local/state/opv/approvals", 0o700);
-        let id = s.plan_id();
-        let s = s.file(&format!("home/.local/state/opv/approvals/{id}.claim"), "");
-        approved(s)
-    }
-
     pub fn plan_changed() -> Case {
-        case(Scenario::new(), &["sync", "prod", "--approved", "deadbeef"]).mcp(
-            "opv_sync",
-            json!({"environment": "prod", "plan_id": "deadbeef"}),
-        )
-    }
-
-    pub fn plan_unknown() -> Case {
         case(
             Scenario::new(),
-            &["structure", "apply", "sp-0000000000000000"],
-        )
-        .mcp(
-            "opv_structure_apply",
-            json!({"plan_id": "sp-0000000000000000"}),
+            &["sync", "prod", "--expect-plan", "deadbeef"],
         )
     }
 
-    /// L8: under a person's op session token in the environment (which the MCP server
-    /// refuses to write with), an id that names no plan is still `plan_unknown` first, over
-    /// MCP as on the command line.
-    pub fn plan_unknown_under_an_op_session() -> Case {
-        case(
-            Scenario::new().var("OP_SESSION_e2e", "e2e-test-marker-not-a-session"),
-            &["structure", "apply", "sp-0000000000000000"],
-        )
-        .mcp(
-            "opv_structure_apply",
-            json!({"plan_id": "sp-0000000000000000"}),
-        )
-    }
-
-    /// L8: under a service-account token, the structure is a person's own: the same refusal,
-    /// naming the same command, over MCP as on the command line.
-    pub fn own_session_under_a_service_account() -> Case {
-        case(
-            Scenario::new().var("OP_SERVICE_ACCOUNT_TOKEN", "e2e-test-marker-not-a-token"),
-            &["structure", "apply", "sp-0000000000000000"],
-        )
-        .mcp(
-            "opv_structure_apply",
-            json!({"plan_id": "sp-0000000000000000"}),
-        )
-    }
-
+    /// A dotenv file others can read is refused before it is read.
     pub fn local_file_too_open() -> Case {
-        approved(Scenario::new().dir("home/.local/state/opv/approvals", 0o755))
+        case(
+            Scenario::new()
+                .file("project/legacy.env", "API_KEY=e2e-test-marker\n")
+                .mode("project/legacy.env", 0o644),
+            &["adopt", "prod", "--from", "legacy.env"],
+        )
     }
 
+    /// The Codex configuration folder cannot be made (its parent is read-only).
     pub fn private_dir_failed() -> Case {
-        // A file where the approvals folder belongs.
-        approved(Scenario::new().file("home/.local/state/opv/approvals", ""))
+        let s = Scenario::new().dir("readonly", 0o500);
+        let codex = s.path("readonly/codex");
+        case(
+            s.var("CODEX_HOME", codex.to_str().expect("utf-8 path")),
+            &["mcp", "install", "--client", "codex"],
+        )
     }
 
     pub fn title_lookup() -> Case {
@@ -1714,12 +1658,7 @@ scenarios! {
         confirm_mismatch => ConfirmMismatch,
         keys_blocking => KeysBlocking,
         values_needed => ValuesNeeded,
-        approval_missing => ApprovalMissing,
-        approval_used => ApprovalUsed,
         plan_changed => PlanChanged,
-        plan_unknown => PlanUnknown,
-        plan_unknown_under_an_op_session => PlanUnknown,
-        own_session_under_a_service_account => NeedsOwnSession,
         local_file_too_open => LocalFileTooOpen,
         private_dir_failed => PrivateDirFailed,
         title_lookup => TitleLookup,
@@ -1778,14 +1717,6 @@ scenarios! {
         account_ambiguous,
         account_required,
         guard,
-        approval_missing,
-        approval_used,
-        plan_changed,
-        plan_unknown,
-        plan_unknown_under_an_op_session,
-        own_session_under_a_service_account,
-        local_file_too_open,
-        private_dir_failed,
         tool_missing,
         tool_unusable,
         owner_setup_required,

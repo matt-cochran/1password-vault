@@ -1,12 +1,9 @@
 //! MCP tools. The inspection tools are read-only: no value-bearing operation or mutation is
 //! exposed, and their runner refuses every write beneath the application code.
 //!
-//! The structural tools (#133) plan and apply structure only (vaults, items, empty fields,
-//! delivery items; never a value). `opv_structure_plan` runs on the same read-only runner.
-//! `opv_structure_apply` writes only a plan a person approved in their own terminal
-//! (`opv approve <plan_id>`, single use, bound to the project and 1Password account), and
-//! only through the 1Password app's own authorization: it refuses to run with a session
-//! token, service account or Connect credential in its environment.
+//! The structural tool (#133) plans structure only (vaults, items, empty fields, delivery
+//! items; never a value) on the same read-only runner. A person applies it with `opv apply`
+//! in their own terminal; no tool applies structure or syncs (design §25.3).
 //!
 //! A success answer is one projection per tool, built field by field from checked
 //! identifiers; never a value. A failure answer is `{ok: false, error}`, where `error` is
@@ -17,10 +14,10 @@
 //! cause against the tool's own invocation ([`ToolCall`]). Every tool takes `verbose`, as
 //! the CLI's `--verbose`: the upstream reply in full rather than its last lines.
 use crate::{
-    app::agent_view::{applied_projection, configuration_projection, identifier, plan_projection},
+    app::agent_view::{configuration_projection, identifier, plan_projection},
     cause::{
-        Cause, Closest, Cmd, CommandId, EnvName, Guard, Invocation, NameKind, Origin, PlanId,
-        PlanScope, Principal, ProductKey, ProductName, TargetName, UsageProblem, VarName, render,
+        Cause, Closest, Cmd, CommandId, Guard, Invocation, NameKind, Origin, Principal,
+        UsageProblem, VarName, render,
     },
     config_store,
     error::Error,
@@ -48,16 +45,6 @@ pub struct AccessScope {
     /// A declared target of that environment: only its deploy identity.
     #[serde(default)]
     target: Option<String>,
-    /// As the CLI's --verbose: an error's upstream reply in full.
-    #[serde(default)]
-    verbose: bool,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ApplyArgs {
-    /// The plan id opv_structure_plan returned and a person approved with opv approve.
-    plan_id: String,
     /// As the CLI's --verbose: an error's upstream reply in full.
     #[serde(default)]
     verbose: bool,
@@ -389,7 +376,7 @@ impl Server {
 
     #[tool(
         name = "opv_deployment_plan",
-        description = "Preview deployment actions without executing them, for the whole environment or only the given targets, product and immutable keys to rotate (`PRODUCT/KEY`): each row's target, product, key and action, the plan_id, and the approve_command (with the same --target, --product and --rotate) a person runs in their own terminal. Sync, deploy, prune and rotation run only through an approved opv_sync (which never prunes an immutable key); secret entry and layout repair stay with the person.",
+        description = "Preview deployment actions without executing them, for the whole environment or only the given targets, product and immutable keys to rotate (`PRODUCT/KEY`): each row's target, product, key and action, the plan_id, and the sync_command (`opv sync <env> --expect-plan <plan_id>` with the same --target, --product and --rotate) a person runs in their own terminal, or CI runs. No tool syncs, deploys, prunes or rotates; secret entry and layout repair stay with the person.",
         annotations(read_only_hint = true, destructive_hint = false)
     )]
     async fn deployment_plan(&self, Parameters(args): Parameters<DeploymentPlanScope>) -> String {
@@ -402,7 +389,7 @@ impl Server {
 
     #[tool(
         name = "opv_changed",
-        description = "Whether a source item in 1Password changed since the last sync, for one declared environment (or only the given targets and product): each placement's product, target and state (unchanged; changed; no_record when no sync recorded its source versions) and, for a changed one, each source item's id with its recorded and current version numbers, plus the next step. Returns item ids and version numbers only, never a value. Changes nothing: a sync still needs a person's approval (opv_deployment_plan, then the person's opv approve in their own terminal).",
+        description = "Whether a source item in 1Password changed since the last sync, for one declared environment (or only the given targets and product): each placement's product, target and state (unchanged; changed; no_record when no sync recorded its source versions) and, for a changed one, each source item's id with its recorded and current version numbers, plus the next step. Returns item ids and version numbers only, never a value. Changes nothing: a sync is a person's (opv_deployment_plan, then the person's opv sync in their own terminal) or CI's.",
         annotations(read_only_hint = true, destructive_hint = false)
     )]
     async fn changed(&self, Parameters(args): Parameters<ChangedScope>) -> String {
@@ -453,30 +440,13 @@ impl Server {
 
     #[tool(
         name = "opv_structure_plan",
-        description = "Plan the 1Password structure this project's configuration declares: the vaults and items that hold each product's values, state vaults, delivery items and empty fields (names, kinds and public IDs only; never a value). Returns a plan_id. Changes nothing. A person reviews and approves it with `opv approve <plan_id>` in their own terminal before opv_structure_apply can create it.",
+        description = "Plan the 1Password structure this project's configuration declares: the vaults and items that hold each product's values, state vaults, delivery items and empty fields (names, kinds and public IDs only; never a value). Returns a plan_id. Changes nothing. A person reviews and applies it with `opv apply` in their own terminal.",
         annotations(read_only_hint = true, destructive_hint = false)
     )]
     async fn structure_plan(&self, Parameters(args): Parameters<Verbose>) -> String {
         let verbose = args.verbose;
         self.serialized("opv_structure_plan", false, verbose, move |project| {
             structure_plan(project, verbose)
-        })
-        .await
-    }
-
-    #[tool(
-        name = "opv_structure_apply",
-        description = "Create exactly the structural plan plan_id, which a person approved with `opv approve <plan_id>` in their own terminal (single use, 15 minutes, this project and account only). Refuses a stale or unapproved plan. Creates vaults, items, delivery items and empty fields only: never reads, writes or returns a value, never deletes, grants access, syncs or deploys. The 1Password app asks the person to authorize the writes. Returns created public IDs and 1Password links where the person enters values.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true
-        )
-    )]
-    async fn structure_apply(&self, Parameters(args): Parameters<ApplyArgs>) -> String {
-        let verbose = args.verbose;
-        self.serialized("opv_structure_apply", true, verbose, move |project| {
-            structure_apply(project, &args.plan_id, verbose)
         })
         .await
     }
@@ -569,81 +539,6 @@ impl Server {
         })
         .await
     }
-
-    #[tool(
-        name = "opv_sync",
-        description = "Run exactly the deployment (sync) plan plan_id once, after a person approved it in their own terminal with `opv approve <plan_id> --sync <env>` (the approve_command opv_deployment_plan returns, with the same --target, --product, --deploy, --prune and --rotate). Refuses a stale or unapproved plan, writing nothing; the approval is single use and lasts 15 minutes. Rotates only the immutable keys the person approved and never prunes an immutable key. Returns the names written, and the target, product, key and name of each one pruned, pending and held, and whether it deployed; never a value.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = true,
-            idempotent_hint = false
-        )
-    )]
-    async fn sync(&self, Parameters(args): Parameters<SyncScopeArgs>) -> String {
-        let verbose = args.verbose;
-        self.serialized("opv_sync", true, verbose, move |project| {
-            let r = ProcessRunner::new(Budget::starting_now(Duration::from_secs(900)), false);
-            let call = sync_call(&args);
-            let fleet = match load_fleet(project, &r) {
-                Ok(fleet) => fleet,
-                Err(e) => return call.failed(&e),
-            };
-            let (name, account) = match crate::app::structure::binding_as(project, &r, "sync") {
-                Ok(b) => b,
-                Err(e) => return call.failed(&e),
-            };
-            r.use_account(Some(account.clone()));
-            sync_approved(
-                &fleet,
-                &args,
-                &name,
-                &account,
-                &r,
-                now(),
-                std::env::vars(),
-                &mut |p, key, project, account, now| {
-                    crate::approval::consume_scoped(p, key, project, account, now)
-                },
-            )
-        })
-        .await
-    }
-}
-
-/// `opv_sync`'s input: exactly the scope a person approved.
-#[derive(Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct SyncScopeArgs {
-    /// The declared environment.
-    pub(crate) environment: String,
-    /// The plan id opv_deployment_plan returned and the person approved.
-    pub(crate) plan_id: String,
-    /// Only these named targets (empty: every target of the environment).
-    #[serde(default)]
-    pub(crate) targets: Vec<String>,
-    /// Only this product.
-    #[serde(default)]
-    pub(crate) product: Option<String>,
-    /// Deploy after writing; only when the person approved with --deploy.
-    #[serde(default)]
-    pub(crate) deploy: bool,
-    /// Unset managed names no longer declared; only when approved with --prune.
-    #[serde(default)]
-    pub(crate) prune: bool,
-    /// `PRODUCT/KEY` immutable keys to replace even though present; only the ones the
-    /// person approved with --rotate.
-    #[serde(default)]
-    pub(crate) rotate: Vec<String>,
-    /// As the CLI's --verbose: an error's upstream reply in full.
-    #[serde(default)]
-    pub(crate) verbose: bool,
-}
-
-/// A sync plan id: eight lowercase hex digits.
-fn sync_plan_id(s: &str) -> bool {
-    s.len() == crate::domain::provenance::PLAN_ID_LEN
-        && s.bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// Each `--rotate` entry is `PRODUCT/KEY`, both declared-name identifiers.
@@ -699,228 +594,6 @@ fn scope_flags(targets: &[String], product: Option<&String>, rotate: &[String]) 
         args.extend(["--rotate".to_string(), k.clone()]);
     }
     args
-}
-
-/// `opv_sync`'s call: `opv sync <env> --approved <plan_id>` and its scope, when every name
-/// is checked; else the bare command.
-fn sync_call(args: &SyncScopeArgs) -> ToolCall {
-    let checked = scope_refusal(
-        &args.environment,
-        &args.targets,
-        args.product.as_ref(),
-        &args.rotate,
-    )
-    .is_none()
-        && sync_plan_id(&args.plan_id);
-    if !checked {
-        return ToolCall::new("opv_sync", &["sync"], Vec::new(), args.verbose);
-    }
-    let mut words = vec![
-        args.environment.clone(),
-        "--approved".to_string(),
-        args.plan_id.clone(),
-    ];
-    words.extend(scope_flags(
-        &args.targets,
-        args.product.as_ref(),
-        &args.rotate,
-    ));
-    if args.deploy {
-        words.push("--deploy".into());
-    }
-    if args.prune {
-        words.push("--prune".into());
-    }
-    ToolCall::new("opv_sync", &["sync"], words, args.verbose)
-}
-
-/// The scope `args` names, as the catalog's plan scope.
-fn plan_scope(args: &SyncScopeArgs) -> PlanScope {
-    PlanScope::Sync {
-        env: EnvName::new(&args.environment),
-        targets: args.targets.iter().map(TargetName::new).collect(),
-        product: args.product.as_ref().map(ProductName::new),
-        deploy: args.deploy,
-        prune: args.prune,
-        rotate: args
-            .rotate
-            .iter()
-            .filter_map(|r| r.split_once('/'))
-            .map(|(p, k)| ProductKey {
-                product: ProductName::new(p),
-                key: crate::cause::KeyName::new(k),
-            })
-            .collect(),
-    }
-}
-
-/// The failure of a sync whose approval was already used up: what was tried may have
-/// partly run, and the approval cannot be used again, so the next step reads what remains
-/// in the same scope (design §6.2). A cataloged cause keeps its own message and evidence
-/// inside `Partial`; one not yet cataloged is reported as the used approval.
-fn after_used_approval(e: Error, args: &SyncScopeArgs) -> Error {
-    let plan = PlanId::new(&args.plan_id);
-    let Error::Catalog(cause, upstream) = e;
-    match *cause {
-        Cause::Partial { .. } | Cause::ApprovalUsed { .. } => Error::Catalog(cause, upstream),
-        then => Error::Catalog(
-            Box::new(Cause::Partial {
-                done: Vec::new(),
-                approval_used: Some(plan),
-                approval_scope: Some(plan_scope(args)),
-                then: Box::new(then),
-            }),
-            upstream,
-        ),
-    }
-}
-
-/// One pruned, pending or held name of the sync document (`KeyNames::json_ref`).
-#[derive(Deserialize)]
-struct NameRef {
-    #[serde(default)]
-    target: Option<String>,
-    #[serde(default)]
-    product: Option<String>,
-    #[serde(default)]
-    key: Option<String>,
-    target_name: String,
-}
-
-/// The parts of `opv sync --json` the tool returns.
-#[derive(Deserialize, Default)]
-struct RunDoc {
-    #[serde(default)]
-    written_names: Vec<String>,
-    #[serde(default)]
-    pruned: Vec<NameRef>,
-    #[serde(default)]
-    pending: Vec<NameRef>,
-    #[serde(default)]
-    held: Vec<NameRef>,
-    #[serde(default)]
-    deployed: bool,
-}
-
-/// A name a target holds (a variable, a secret key): a bounded run of name characters.
-fn target_name_ok(n: &str) -> bool {
-    !n.is_empty()
-        && n.len() <= 256
-        && n.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"_-./".contains(&b))
-}
-
-/// Each checked [`NameRef`] as `{target, product, key, name}`; a field that is not a name
-/// is null, and a ref whose name is not one is dropped.
-fn name_refs(refs: &[NameRef]) -> Vec<Value> {
-    let ident = |v: &Option<String>| v.as_deref().filter(|s| identifier(s)).map(str::to_string);
-    refs.iter()
-        .filter(|r| target_name_ok(&r.target_name))
-        .map(|r| {
-            json!({
-                "target": ident(&r.target),
-                "product": ident(&r.product),
-                "key": ident(&r.key),
-                "name": r.target_name,
-            })
-        })
-        .collect()
-}
-
-/// `opv_sync` as a value: run the approved sync plan, or its failure. `vars` are the
-/// process environment variables checked for an op credential; `consume` uses up the
-/// approval. Built field by field: names only, never a value.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn sync_approved(
-    fleet: &crate::domain::Fleet,
-    args: &SyncScopeArgs,
-    project: &str,
-    account: &str,
-    r: &dyn CommandRunner,
-    now: u64,
-    vars: impl Iterator<Item = (String, String)>,
-    consume: &mut crate::app::approve::Scoped<'_>,
-) -> Value {
-    let call = sync_call(args);
-    if let Some(var) = credential_in_environment(vars) {
-        return call.refused(own_session("sync", var));
-    }
-    if let Some(refused) = scope_refusal(
-        &args.environment,
-        &args.targets,
-        args.product.as_ref(),
-        &args.rotate,
-    ) {
-        return call.refused(refused);
-    }
-    if !sync_plan_id(&args.plan_id) {
-        return call.refused(usage(
-            "plan_id",
-            "the eight-digit plan_id opv_deployment_plan returns",
-        ));
-    }
-    if !fleet.environments.contains_key(&args.environment) {
-        return call.refused(unknown_env(fleet, &args.environment));
-    }
-    let scope = crate::app::approve::SyncScope {
-        env: args.environment.clone(),
-        targets: args.targets.clone(),
-        product: args.product.clone(),
-        deploy: args.deploy,
-        prune: args.prune,
-        rotate: args.rotate.clone(),
-    };
-    let mut report = zeroize::Zeroizing::new(Vec::new());
-    let mut used = false;
-    let ran = {
-        let mut tracked = |p: &str, key: &str, project: &str, account: &str, now: u64| {
-            let consumed = consume(p, key, project, account, now);
-            used |= consumed.is_ok();
-            consumed
-        };
-        crate::app::approve::run_approved_sync(
-            fleet,
-            &scope,
-            &args.plan_id,
-            project,
-            account,
-            now,
-            r,
-            &mut *report,
-            true,
-            None,
-            &mut tracked,
-        )
-    };
-    if let Err(e) = ran {
-        let e = if used {
-            after_used_approval(e, args)
-        } else {
-            e
-        };
-        return call.failed(&e);
-    }
-    let doc: RunDoc = serde_json::from_slice(&report).unwrap_or_default();
-    let check = render::cmd_text(&Cmd {
-        command: vec!["delivery".into(), "verify".into()],
-        args: vec![args.environment.clone()],
-    });
-    json!({
-        "ok": true,
-        "plan_id": args.plan_id,
-        "written": doc
-            .written_names
-            .iter()
-            .filter(|n| target_name_ok(n))
-            .collect::<Vec<_>>(),
-        "pruned": name_refs(&doc.pruned),
-        "pending": name_refs(&doc.pending),
-        "held": name_refs(&doc.held),
-        "deployed": doc.deployed,
-        "human_action": format!(
-            "Done once; the approval is used up. pending: names written but not deployed (a later approved sync with --deploy delivers them); held: immutable keys left as they are. Check delivery with opv_ready or {check}."
-        ),
-    })
 }
 
 #[derive(Clone, Copy)]
@@ -1108,7 +781,7 @@ fn receipt_answer<R: CommandRunner>(
 
 /// `opv_deployment_plan`: the plan `opv plan <env> [--target t]… [--product p] [--rotate
 /// P/K]… --json` prints ([`crate::app::sync::plan_rotating`]), projected, with the
-/// `approve_command` for exactly that scope.
+/// `sync_command` for exactly that scope.
 fn deployment_plan(project: &std::path::Path, args: &DeploymentPlanScope) -> Value {
     if let Some(refused) = scope_refusal(
         &args.environment,
@@ -1148,20 +821,19 @@ fn deployment_plan_from_fleet<R: CommandRunner>(
     if !fleet.environments.contains_key(&args.environment) {
         return call.refused(unknown_env(fleet, &args.environment));
     }
-    let scope = plan_sync_scope(args);
     let mut bytes = zeroize::Zeroizing::new(Vec::new());
     let result = crate::app::sync::plan_rotating(
         fleet,
-        &scope.env,
-        &scope.targets,
-        scope.product.as_deref(),
-        &scope.rotate,
+        &args.environment,
+        &args.targets,
+        args.product.as_deref(),
+        &args.rotate,
         r,
         &mut *bytes,
         true,
     )
-    .map_err(|e| e.in_env(&scope.env));
-    receipt_answer(&call, r, &bytes, result, |doc| plan_receipt(doc, &scope))
+    .map_err(|e| e.in_env(&args.environment));
+    receipt_answer(&call, r, &bytes, result, |doc| plan_receipt(doc, args))
 }
 
 /// `opv_changed`'s call: `opv changed <env>` with its targets and product (names already
@@ -1259,21 +931,8 @@ fn changed_receipt(doc: &Value) -> Option<Value> {
         "placements": placements,
         "next": next,
         "do": step("do"),
-        "human_action": "Item ids and version numbers only. A sync needs a person's approval: call opv_deployment_plan, and the person runs its approve_command in their own terminal.",
+        "human_action": "Item ids and version numbers only. A sync is a person's or CI's: call opv_deployment_plan, and the person runs its sync_command in their own terminal.",
     }))
-}
-
-/// The sync scope a deployment plan's `approve_command` names: its targets, product and
-/// rotate entries; `--deploy` and `--prune` are the person's to add.
-fn plan_sync_scope(args: &DeploymentPlanScope) -> crate::app::approve::SyncScope {
-    crate::app::approve::SyncScope {
-        env: args.environment.clone(),
-        targets: args.targets.clone(),
-        product: args.product.clone(),
-        deploy: false,
-        prune: false,
-        rotate: args.rotate.clone(),
-    }
 }
 
 /// Credentials that would let this process write 1Password without the person's own
@@ -1382,13 +1041,6 @@ fn delivery_preview_from_fleet(
     }
 }
 
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default()
-}
-
 /// Run a declaration on the project's `secrets.toml` on the read-only runner: its answer
 /// is whether the file changed, never its text. Without a local `secrets.toml`, a
 /// configuration kept in 1Password is declared with the CLI command instead; with neither,
@@ -1418,7 +1070,7 @@ fn declared(
         Ok(changed) => json!({
             "ok": true,
             "changed": changed,
-            "human_action": "Call opv_structure_plan to see what this needs in 1Password; a person approves it with opv approve.",
+            "human_action": "Call opv_structure_plan to see what this needs in 1Password; a person applies it with opv apply.",
         }),
         Err(e) => call.failed(&e),
     }
@@ -1771,59 +1423,6 @@ fn structure_plan(project: &std::path::Path, verbose: bool) -> Value {
     }
 }
 
-fn structure_apply(project: &std::path::Path, plan_id: &str, verbose: bool) -> Value {
-    if !crate::app::structure::is_plan_id(plan_id) {
-        return ToolCall::new(
-            "opv_structure_apply",
-            &["structure", "apply"],
-            Vec::new(),
-            verbose,
-        )
-        .refused(usage(
-            "plan_id",
-            "the plan_id opv_structure_plan returns (sp- and 16 hex digits)",
-        ));
-    }
-    let call = ToolCall::new(
-        "opv_structure_apply",
-        &["structure", "apply"],
-        vec![plan_id.to_string()],
-        verbose,
-    );
-    let r = ProcessRunner::new(Budget::starting_now(Duration::from_secs(300)), false);
-    let applied =
-        crate::app::structure::scope_as(project, &r, "structure apply").and_then(|scope| {
-            r.use_account(Some(scope.account.clone()));
-            crate::app::structure::apply(
-                &r,
-                &scope.path,
-                &scope.project,
-                &scope.account,
-                plan_id,
-                // L8: the CLI's order. A plan id that names no plan is refused first; a
-                // credential in the server's environment or CI then refuses the write before
-                // the single-use approval is spent, where the CLI checks for a person.
-                &mut |p| {
-                    if let Some(var) = credential_in_environment(std::env::vars()) {
-                        return Err(own_session("structure apply", var).into());
-                    }
-                    if let Some(refused) = ci_refusal() {
-                        return Err(refused.into());
-                    }
-                    crate::approval::consume(&p.plan_id, &scope.project, &scope.account, now())
-                },
-            )
-            // C2 (09.mcp): an id never approved here is unknown, not changed since approval.
-            .map_err(|e| {
-                crate::app::structure::unknown_unless_approved(e, &crate::approval::ever_approved)
-            })
-        });
-    match applied {
-        Ok(a) => applied_projection(&a),
-        Err(e) => call.failed(&e),
-    }
-}
-
 /// `opv_generate`'s call: `opv generate <env> <product/KEY>…` when every name is checked.
 fn generate_call(env_name: &str, keys: &[String], verbose: bool) -> ToolCall {
     let checked = identifier(env_name)
@@ -2007,30 +1606,28 @@ fn ready_receipt(doc: &Value) -> Option<Value> {
     }))
 }
 
-/// The `opv approve <plan_id> --sync <env>` command for exactly `scope`.
-fn approve_command(plan_id: &str, scope: &crate::app::approve::SyncScope) -> String {
-    let mut args = vec![plan_id.to_string(), "--sync".into(), scope.env.clone()];
-    if scope.deploy {
-        args.push("--deploy".into());
-    }
-    if scope.prune {
-        args.push("--prune".into());
-    }
+/// The `opv sync <env> --expect-plan <plan_id>` command for exactly `scope` (design §25.3:
+/// a person runs it in their own terminal, or CI syncs; no tool syncs).
+fn sync_command(plan_id: &str, scope: &DeploymentPlanScope) -> String {
+    let mut args = vec![
+        scope.environment.clone(),
+        "--expect-plan".into(),
+        plan_id.to_string(),
+    ];
     args.extend(scope_flags(
         &scope.targets,
         scope.product.as_ref(),
         &scope.rotate,
     ));
     render::cmd_text(&Cmd {
-        command: vec!["approve".into()],
+        command: vec!["sync".into()],
         args,
     })
 }
 
 /// The `opv plan --json` document as the MCP answer, field by field, with the
-/// `approve_command` for exactly `scope` (its targets, product and rotate entries), so the
-/// approval a person records covers the `opv_sync` that names the same scope.
-fn plan_receipt(doc: &Value, scope: &crate::app::approve::SyncScope) -> Option<Value> {
+/// `sync_command` for exactly `scope` (its targets, product and rotate entries).
+fn plan_receipt(doc: &Value, scope: &DeploymentPlanScope) -> Option<Value> {
     if doc.get("schema_version").and_then(Value::as_u64)
         != Some(u64::from(crate::json::SCHEMA_VERSION))
     {
@@ -2069,9 +1666,9 @@ fn plan_receipt(doc: &Value, scope: &crate::app::approve::SyncScope) -> Option<V
             .filter(|name| identifier(name))
             .collect()
     };
-    let approve = plan_id.map(|id| approve_command(id, scope));
+    let sync = plan_id.map(|id| sync_command(id, scope));
     Some(
-        json!({"ok": true, "rows": rows, "stage": names("stage"), "prune": names("prune"), "plan_id": plan_id, "approve_command": approve, "human_action": "A person reviews and approves this plan with approve_command in their own terminal (adding --deploy or --prune there to allow those); opv_sync with the same plan_id, targets, product, rotate and flags then runs exactly it once. Sync, deploy, prune and rotation happen only through that approved opv_sync, which never prunes an immutable key."}),
+        json!({"ok": true, "rows": rows, "stage": names("stage"), "prune": names("prune"), "plan_id": plan_id, "sync_command": sync, "human_action": "A person runs sync_command in their own terminal (adding --deploy or --prune there to allow those), or CI syncs; it runs exactly this plan and refuses one that changed. No tool syncs, deploys, prunes or rotates."}),
     )
 }
 
@@ -2146,42 +1743,6 @@ mod tests {
     fn an_environment_without_op_credentials_may_apply() {
         let found = credential_in_environment(vars(&[("OP_ACCOUNT", "A"), ("HOME", "/h")]));
         assert_eq!(found, None);
-    }
-
-    fn hostile_applied() -> crate::app::structure::Applied {
-        crate::app::structure::Applied {
-            plan_id: "sp-0123456789abcdef".into(),
-            created: vec![crate::app::structure::Created {
-                kind: "boundary",
-                environment: "prod".into(),
-                name: "core".into(),
-                vault_id: "vault0001".into(),
-                item_id: Some("SECRET_MARKER value with spaces".into()),
-                link: Some("https://evil.example/?SECRET_MARKER".into()),
-            }],
-            fields_added: vec![],
-            config_written: true,
-            generator_ids: vec!["x = \"SECRET_MARKER\" \n injected".into()],
-            concurrent_edits: vec![],
-        }
-    }
-
-    #[test]
-    fn the_apply_answer_drops_an_item_id_that_is_not_an_id() {
-        let v = applied_projection(&hostile_applied());
-        assert!(v["created"][0]["item_id"].is_null());
-    }
-
-    #[test]
-    fn the_apply_answer_drops_a_link_outside_1password() {
-        let v = applied_projection(&hostile_applied());
-        assert!(v["created"][0]["link"].is_null());
-    }
-
-    #[test]
-    fn the_apply_answer_drops_a_generator_line_with_a_newline() {
-        let v = applied_projection(&hostile_applied());
-        assert!(!v.to_string().contains("injected"));
     }
 
     fn access_doc(state: &str, value_in_message: &str) -> Value {
@@ -2792,28 +2353,24 @@ rules = { prefix = "sk_" }
         assert!(v["error"]["message"].as_str().unwrap().contains("allumata"));
     }
 
-    fn plan_scope(
-        targets: &[&str],
-        product: Option<&str>,
-        rotate: &[&str],
-    ) -> crate::app::approve::SyncScope {
-        plan_sync_scope(&DeploymentPlanScope {
+    fn plan_scope(targets: &[&str], product: Option<&str>, rotate: &[&str]) -> DeploymentPlanScope {
+        DeploymentPlanScope {
             environment: "prod".into(),
             targets: targets.iter().map(|t| t.to_string()).collect(),
             product: product.map(str::to_string),
             rotate: rotate.iter().map(|r| r.to_string()).collect(),
             verbose: false,
-        })
+        }
     }
 
     #[test]
-    fn a_scoped_deployment_plan_approves_the_same_targets_product_and_rotation() {
+    fn a_scoped_deployment_plan_syncs_the_same_targets_product_and_rotation() {
         let doc =
             json!({"schema_version": 3, "environment": "prod", "rows": [], "plan_id": "0123abcd"});
         let v = plan_receipt(&doc, &plan_scope(&["fleet"], Some("api"), &["api/KEY"])).unwrap();
         assert_eq!(
-            v["approve_command"],
-            "opv approve 0123abcd --sync prod --target fleet --product api --rotate api/KEY"
+            v["sync_command"],
+            "opv sync prod --expect-plan 0123abcd --target fleet --product api --rotate api/KEY"
         );
     }
 
@@ -2853,14 +2410,14 @@ rules = { prefix = "sk_" }
     }
 
     #[test]
-    fn the_deployment_plan_never_says_sync_is_unavailable_through_mcp() {
+    fn the_deployment_plan_hands_its_sync_command_to_a_person() {
         let doc = json!({"schema_version": 3, "rows": [], "plan_id": "0123abcd"});
         let v = plan_receipt(&doc, &plan_scope(&[], None, &[])).unwrap();
         assert!(
             v["human_action"]
                 .as_str()
                 .unwrap()
-                .contains("only through that approved opv_sync")
+                .contains("A person runs sync_command")
         );
     }
 
@@ -2904,7 +2461,7 @@ rules = { prefix = "sk_" }
     }
 
     #[test]
-    fn the_structural_apply_is_refused_under_ci() {
+    fn a_write_tool_is_refused_under_ci() {
         assert!(under_ci(ci_refusal).is_some());
     }
 
@@ -2923,7 +2480,7 @@ rules = { prefix = "sk_" }
 
     fn tool(command: &[&str], args: &[&str]) -> ToolCall {
         ToolCall::new(
-            "opv_sync",
+            "opv_deployment_plan",
             command,
             args.iter().map(|a| a.to_string()).collect(),
             false,
@@ -2932,7 +2489,7 @@ rules = { prefix = "sk_" }
 
     fn own_session() -> crate::error::Error {
         crate::cause::Cause::NeedsOwnSession {
-            command: crate::cause::CommandId("approve".into()),
+            command: crate::cause::CommandId("generate".into()),
             identity: crate::cause::Principal::ServiceAccount {
                 name: "sa-ci".into(),
             },
@@ -2942,10 +2499,10 @@ rules = { prefix = "sk_" }
 
     #[test]
     fn a_catalog_failure_is_exactly_the_documents_error_object() {
-        let call = tool(&["sync"], &["prod", "--approved", "0123abcd"]);
+        let call = tool(&["plan"], &["prod"]);
         let want = render::document(
             &crate::cause::Cause::NeedsOwnSession {
-                command: crate::cause::CommandId("approve".into()),
+                command: crate::cause::CommandId("generate".into()),
                 identity: crate::cause::Principal::ServiceAccount {
                     name: "sa-ci".into(),
                 },
@@ -2990,7 +2547,7 @@ rules = { prefix = "sk_" }
 
     #[test]
     fn verbose_returns_the_whole_upstream_reply() {
-        let call = ToolCall::new("opv_sync", &["sync"], Vec::new(), true);
+        let call = ToolCall::new("opv_deployment_plan", &["plan"], Vec::new(), true);
         let v = call.failed(&with_upstream(12));
         assert_eq!(
             v["error"]["evidence"]["upstream"]["said"]
@@ -3048,125 +2605,6 @@ rules = { prefix = "sk_" }
         assert!(!v.to_string().contains("1Password"));
     }
 
-    // 08.05: an unapproved plan's approve step is a person's handoff, every scope flag kept.
-    fn stale(_next: &str) -> crate::error::Error {
-        crate::cause::Cause::ApprovalMissing {
-            plan: crate::cause::PlanId::new("0123abcd"),
-            scope: crate::cause::PlanScope::Sync {
-                env: crate::cause::EnvName::new("prod"),
-                targets: Vec::new(),
-                product: None,
-                deploy: false,
-                prune: false,
-                rotate: vec![crate::cause::ProductKey {
-                    product: crate::cause::ProductName::new("api"),
-                    key: crate::cause::KeyName::new("ENC_KEY"),
-                }],
-            },
-        }
-        .into()
-    }
-
-    const ROTATING_APPROVE: &str = "opv approve 0123abcd --sync prod --rotate api/ENC_KEY";
-
-    #[test]
-    fn a_stale_plan_needs_a_person() {
-        let v = tool(&["sync"], &[]).failed(&stale(ROTATING_APPROVE));
-        assert_eq!(v["error"]["human_required"], true);
-    }
-
-    #[test]
-    fn a_stale_plan_hands_off_its_approve_step() {
-        let v = tool(&["sync"], &[]).failed(&stale(ROTATING_APPROVE));
-        assert_eq!(v["error"]["next"]["kind"], "apply");
-    }
-
-    #[test]
-    fn a_rotating_approve_step_keeps_its_rotation() {
-        let v = tool(&["sync"], &[]).failed(&stale(ROTATING_APPROVE));
-        assert_eq!(v["error"]["next"]["command"], ROTATING_APPROVE);
-    }
-
-    fn sync_args() -> SyncScopeArgs {
-        SyncScopeArgs {
-            environment: "prod".into(),
-            plan_id: "0123abcd".into(),
-            targets: vec!["fleet".into()],
-            product: None,
-            deploy: true,
-            prune: false,
-            rotate: vec![],
-            verbose: false,
-        }
-    }
-
-    // 08.04: once the approval is used, the answer reads what remains, never "call again".
-    fn interrupted() -> crate::error::Error {
-        crate::cause::Cause::Interrupted {
-            signal: 15,
-            writes_started: true,
-        }
-        .into()
-    }
-
-    #[test]
-    fn a_failure_after_the_approval_was_used_reads_what_remains() {
-        let args = sync_args();
-        let e = after_used_approval(interrupted(), &args);
-        assert_eq!(
-            sync_call(&args).failed(&e)["error"]["next"]["command"],
-            "opv plan prod --target fleet"
-        );
-    }
-
-    #[test]
-    fn a_failure_after_the_approval_was_used_says_it_is_used_up() {
-        let args = sync_args();
-        let e = after_used_approval(interrupted(), &args);
-        assert!(
-            sync_call(&args).failed(&e)["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("approval 0123abcd is used up")
-        );
-    }
-
-    // 08.01: pruned, pending and held are objects in the sync document, not strings.
-    fn run_doc() -> RunDoc {
-        serde_json::from_value(json!({
-            "written_names": ["API_KEY"],
-            "pending": [{"target": "fleet", "product": "api", "key": "API_KEY", "target_name": "API_KEY"}],
-            "held": [{"target": "fleet", "product": "api", "key": "ENC_KEY", "target_name": "ENC_KEY"}],
-            "pruned": [{"target": "fleet", "product": null, "key": "OLD", "target_name": "OLD"}],
-            "deployed": false,
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn a_sync_answer_lists_its_pending_names() {
-        assert_eq!(name_refs(&run_doc().pending)[0]["key"], "API_KEY");
-    }
-
-    #[test]
-    fn a_sync_answer_lists_its_held_names() {
-        assert_eq!(name_refs(&run_doc().held)[0]["name"], "ENC_KEY");
-    }
-
-    #[test]
-    fn a_sync_answer_lists_its_pruned_names() {
-        assert_eq!(name_refs(&run_doc().pruned)[0]["target"], "fleet");
-    }
-
-    #[test]
-    fn a_sync_answer_drops_a_name_that_is_not_one() {
-        let doc: RunDoc = serde_json::from_value(json!({
-            "held": [{"target": "fleet", "target_name": "A B; rm"}],
-        }))
-        .unwrap();
-        assert!(name_refs(&doc.held).is_empty());
-    }
-
     // 08 (S1): a declaration refused for a credential option says so.
     #[test]
     fn a_declared_credential_option_is_refused_as_policy() {
@@ -3212,38 +2650,20 @@ rules = { prefix = "sk_" }
         assert_eq!(answer["error"]["human_required"], true);
     }
 
-    #[test]
-    fn a_credential_in_the_environment_hands_off_the_cli_command() {
-        let call = ToolCall::new(
-            "opv_structure_apply",
-            &["structure", "apply"],
-            vec!["sp-0123456789abcdef".into()],
-            false,
-        );
-        let v = call.refused(super::own_session(
-            "structure apply",
-            "OP_SESSION_my".into(),
-        ));
-        assert_eq!(
-            v["error"]["next"]["command"],
-            "opv structure apply sp-0123456789abcdef --json"
-        );
-    }
-
     // 08 (S2): a write tool that stopped says its write may have started.
     #[test]
     fn a_write_tool_that_stopped_says_its_write_may_have_started() {
         assert!(
-            stopped("opv_sync", true, false)["error"]["message"]
+            stopped("opv_generate", true, false)["error"]["message"]
                 .as_str()
                 .unwrap()
                 .contains("write may have started")
         );
     }
 
-    // 08 (S2): a plan with blocking keys drops the success hint to approve a plan.
+    // 08 (S2): a plan with blocking keys drops the success hint to sync a plan.
     #[test]
-    fn a_failed_plan_drops_the_approve_hint() {
+    fn a_failed_plan_drops_the_sync_hint() {
         let r = ReadOnly {
             inner: FakeRunner::new([]),
             refused: AtomicBool::new(false),

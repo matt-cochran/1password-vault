@@ -3,7 +3,7 @@
 //! the local `secrets.toml` only. Nothing here reads or writes 1Password, and no value is
 //! accepted: what a declaration needs in 1Password (a boundary vault and item, a target's
 //! state vault and delivery items, empty fields) is created by the structural plan a person
-//! approves ([`super::structure`], `opv approve`).
+//! applies ([`super::structure`], `opv apply`).
 //!
 //! A declaration works on a configuration that is not bootstrapped yet: it is validated as
 //! the file will load once the structural plan records the missing IDs (placeholders, as

@@ -631,21 +631,6 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             ],
         ),
         (
-            ApprovalMissing {
-                plan: PlanId::new("sp-9f3"),
-                scope: sync_scope(),
-            },
-            vec!["sp-9f3"],
-        ),
-        (
-            ApprovalUsed {
-                plan: PlanId::new("sp-9f3"),
-                scope: sync_scope(),
-                partial: true,
-            },
-            vec!["sp-9f3"],
-        ),
-        (
             PlanChanged {
                 old: PlanId::new("sp-old"),
                 new: PlanId::new("sp-new"),
@@ -923,13 +908,13 @@ fn ordinal(c: &Cause) -> usize {
         ConfigSourceMismatch { .. } => 1,
         ConfigUnreadable { .. } => 2,
         ConfigInvalid { .. } => 3,
-        ContractStale { .. } => 82,
+        ContractStale { .. } => 50,
         BoundaryMissing { .. } => 4,
         StateVaultMissing { .. } => 5,
         StateVaultTooWide { .. } => 6,
         ConfigNotEditable { .. } => 7,
         CopiesDiffer { .. } => 8,
-        BindingsUnapplied { .. } => 81,
+        BindingsUnapplied { .. } => 49,
         ManifestNotFound { .. } => 9,
         ManifestAmbiguous { .. } => 10,
         ManifestExists { .. } => 11,
@@ -974,8 +959,6 @@ fn ordinal(c: &Cause) -> usize {
         ValuesNeeded { .. } => 46,
         LocalFileTooOpen { .. } => 47,
         InputInvalid { .. } => 48,
-        ApprovalMissing { .. } => 49,
-        ApprovalUsed { .. } => 50,
         PlanChanged { .. } => 51,
         PlanUnknown { .. } => 52,
         RamDirUnavailable { .. } => 53,
@@ -1005,12 +988,12 @@ fn ordinal(c: &Cause) -> usize {
         ValueInTextField { .. } => 78,
         GateFailed { .. } => 79,
         NeedsUndeclared { .. } => 80,
-        ImportTierRefused { .. } => 83,
-        RetireStillRead { .. } => 84,
+        ImportTierRefused { .. } => 81,
+        RetireStillRead { .. } => 82,
     }
 }
 
-const VARIANTS: usize = 85;
+const VARIANTS: usize = 83;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
@@ -1253,7 +1236,6 @@ fn human_required_matches_step() {
                     Cause::NeedsTerminal { .. }
                         | Cause::NeedsOwnSession { .. }
                         | Cause::NeedsConfirm { .. }
-                        | Cause::ApprovalMissing { .. }
                         | Cause::CredentialRejected { .. }
                 );
             derived != c.human_required(&inv())
@@ -1300,10 +1282,10 @@ fn create_unknown_never_reruns() {
 }
 
 #[test]
-fn partial_and_used_approvals_only_read() {
+fn partial_runs_only_read() {
     let bad: Vec<&str> = causes()
         .iter()
-        .filter(|c| matches!(c, Cause::Partial { .. } | Cause::ApprovalUsed { .. }))
+        .filter(|c| matches!(c, Cause::Partial { .. }))
         .filter(|c| !matches!(c.step(&inv()).1, Next::Check(_) | Next::Run(_)))
         .map(Cause::code)
         .collect();
@@ -1379,7 +1361,10 @@ fn a_misspelt_sync_becomes_its_plan_with_the_scope_flags() {
 
 #[test]
 fn a_misspelt_sync_never_carries_its_confirmation_into_the_plan() {
-    let i = invoked(&["sync"], &["prdo", "--confirm", "prdo", "--approved=sp-1"]);
+    let i = invoked(
+        &["sync"],
+        &["prdo", "--confirm", "prdo", "--expect-plan=sp-1"],
+    );
     assert_eq!(
         next_line(&misspelt_env(), &i).as_deref(),
         Some("opv plan prod")
@@ -1664,26 +1649,6 @@ fn the_document_names_the_checked_account() {
 }
 
 #[test]
-fn the_document_kinds_a_handoff() {
-    let c = Cause::ApprovalMissing {
-        plan: PlanId::new("sp-9f3"),
-        scope: PlanScope::Structural,
-    };
-    let d = document(&c, None, &inv(), false);
-    assert_eq!(
-        (d["next"].clone(), d["human_required"].clone()),
-        (
-            serde_json::json!({
-                "kind": "apply",
-                "actor": "person",
-                "command": "opv approve sp-9f3"
-            }),
-            serde_json::json!(true)
-        )
-    );
-}
-
-#[test]
 fn the_document_category_follows_the_exit_code() {
     let d = document(&in_other_account(), None, &inv(), false);
     assert_eq!(d["category"], serde_json::json!("auth"));
@@ -1703,11 +1668,11 @@ fn every_variant_documents_its_code() {
 fn an_mcp_rerun_names_the_tool() {
     let i = Invocation {
         origin: Origin::Mcp {
-            tool: "opv_sync".into(),
+            tool: "opv_generate".into(),
         },
         ..inv()
     };
-    assert_eq!(rerun_text(&i), "call opv_sync again");
+    assert_eq!(rerun_text(&i), "call opv_generate again");
 }
 
 #[test]
@@ -1759,36 +1724,8 @@ fn an_unrecognized_failure_checks_the_environment_it_knows() {
     );
 }
 
-#[test]
-fn a_missing_approval_hands_off_every_scope_flag() {
-    let c = Cause::ApprovalMissing {
-        plan: PlanId::new("sp-9f3"),
-        scope: sync_scope(),
-    };
-    assert_eq!(
-        next_of(&c).as_deref(),
-        Some(
-            "opv approve sp-9f3 --sync prod --deploy --prune --target web --target worker --product api --rotate api/SIGNING_KEY"
-        )
-    );
-}
-
-#[test]
-fn a_structural_approval_hands_off_the_plan_id_alone() {
-    let c = Cause::ApprovalMissing {
-        plan: PlanId::new("sp-9f3"),
-        scope: PlanScope::Structural,
-    };
-    assert_eq!(next_of(&c).as_deref(), Some("opv approve sp-9f3"));
-}
-
 const SCOPED_PLAN: &str =
     "opv plan prod --target web --target worker --product api --rotate api/SIGNING_KEY";
-
-#[test]
-fn a_used_approval_reads_the_plan_of_the_same_scope() {
-    assert_eq!(next_of(&fixture(50)).as_deref(), Some(SCOPED_PLAN));
-}
 
 #[test]
 fn a_changed_plan_reads_the_plan_of_the_same_scope() {
@@ -1813,7 +1750,7 @@ fn an_unknown_plan_of_a_known_scope_reads_that_scope() {
 }
 
 #[test]
-fn a_partial_run_on_an_approval_reads_what_remains_in_its_scope() {
+fn a_partial_run_reads_what_remains_in_its_scope() {
     assert_eq!(next_of(&fixture(34)).as_deref(), Some(SCOPED_PLAN));
 }
 
@@ -2602,15 +2539,15 @@ fn a8_colour_dims_the_upstream_box() {
     assert!(text.contains("\x1b[2m"), "{text}");
 }
 
-/// A9 (X4): a re-run never repeats a used approval; it is the read.
+/// A9 (X4): a re-run never repeats an expected plan; it is the read.
 #[test]
-fn a9_a_rerun_never_repeats_the_approval() {
+fn a9_a_rerun_never_repeats_the_expected_plan() {
     let c = Cause::WriteOutcomeUnknown {
         system: System::Fly,
         subject: res(ResourceKind::FlyApp, "app-web"),
         seen: fly_seen(),
     };
-    let inv = cli(&["opv", "sync", "prod", "--approved", "ab12cd34"]);
+    let inv = cli(&["opv", "sync", "prod", "--expect-plan", "ab12cd34"]);
     assert_eq!(next_in(&c, &inv), "opv plan prod");
 }
 
