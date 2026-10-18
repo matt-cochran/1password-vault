@@ -198,7 +198,7 @@ pub fn receipt(inputs: &Inputs<'_>, opv_version: &str) -> Receipt {
     });
     let matrix = build_matrix(inputs);
     let targets = build_targets(inputs);
-    let findings = build_findings(inputs);
+    let findings = build_findings(inputs, crate::host::Host::detect().agent_mode().is_some());
     let next = findings
         .iter()
         .find(|f| f.blocking)
@@ -508,7 +508,9 @@ fn row_findings(
 
 /// The findings, in order (FR-51): every account finding, then each environment's error,
 /// then each row's own finding. A `SourceBlocked` row produces none (its source's does).
-fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
+/// `agent` is true on assistant surfaces (MCP or a marker): cross-tier health warnings are
+/// hidden there, while a person at a terminal and CI still see them.
+fn build_findings(inputs: &Inputs<'_>, agent: bool) -> Vec<Finding> {
     let mut out = Vec::new();
     let selected = inputs
         .account
@@ -627,12 +629,18 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
     }
     // Settings health (#92): likely-wrong values, never blocking. The scope is the first
     // environment named (in configured order), where `opv open` takes the person to fix it.
+    // Cross-tier warnings (the same value across environments, or under two keys) are for a
+    // person at a terminal and CI; they are hidden from assistant surfaces (agent mode).
+    // Health stays advisory everywhere: a health finding is never blocking.
     for h in &inputs.health {
+        if agent && crate::domain::health::is_cross_tier(h.code) {
+            continue;
+        }
         let Some(env) = h.environments.first() else {
             continue;
         };
         let (product, label) = (Some(h.product.clone()), key_label(&h.product, &h.key));
-        out.push(Finding {
+        let finding = Finding {
             code: h.code.into(),
             scope: Scope {
                 environment: Some(env.clone()),
@@ -641,6 +649,8 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
                 key: Some(h.key.clone()),
                 account: None,
             },
+            // Advisory (#92): a person judges a likely-wrong value; readiness never fails
+            // on one, so `opv ready`'s exit code never changes.
             blocking: false,
             actor: "owner".into(),
             effect: "writes_1password".into(),
@@ -648,7 +658,9 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
             verify: "opv ready --json".into(),
             message: Some(h.message.clone()),
             act: None,
-        });
+        };
+        debug_assert!(!finding.blocking, "a health finding never blocks");
+        out.push(finding);
     }
     out
 }

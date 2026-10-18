@@ -206,6 +206,14 @@ fn same_under_two(
     }
 }
 
+/// A cross-tier warning: the same value across environments ([`SAME_ACROSS`]) or under two
+/// keys ([`SAME_UNDER_TWO`]). A person at a terminal and CI see these; assistant surfaces
+/// (agent mode) do not (`opv ready`, deliverable `health-filter`). Health is advisory
+/// everywhere: no health finding ever blocks.
+pub fn is_cross_tier(code: &str) -> bool {
+    code == SAME_ACROSS || code == SAME_UNDER_TWO
+}
+
 /// The checks of one value on its own.
 fn per_value(env: &EnvValues<'_>, f: &ItemField, spec: &KeySpec, out: &mut Vec<HealthFinding>) {
     let value = f.value.expose();
