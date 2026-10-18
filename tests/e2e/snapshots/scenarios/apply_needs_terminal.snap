@@ -1,0 +1,18 @@
+# apply_needs_terminal: opv apply
+
+## text exit: 6
+## text stdout
+
+## text stderr
+opv: this step needs a person at a terminal, and there is none
+Do: run it in your own terminal
+Next: opv apply
+
+## json exit: 6
+## json stdout
+{"schema_version":3,"ok":false,"exit_code":6,"next":{"kind":"apply","actor":"person","command":"opv apply --json"},"do":"run it in your own terminal","error":{"code":"terminal_required","category":"policy","message":"this step needs a person at a terminal, and there is none","subject":{"why":"no_tty"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":true,"do":"run it in your own terminal","next":{"kind":"apply","actor":"person","command":"opv apply --json"}}}
+
+## json stderr
+opv: this step needs a person at a terminal, and there is none
+Do: run it in your own terminal
+Next: opv apply --json

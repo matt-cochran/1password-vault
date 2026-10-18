@@ -165,3 +165,22 @@ Signed: Matthew Cochran (by decision, recorded by Claude) Date: 2026-10-16
 ## 0.12.0 interim: access writers (2026-10-18)
 
 Ten `access__…` matrix cells changed after `capability`/`access-writers`: the JSON gains the per-vault `vaults` list (tier marking, capability, writers), and the `op whoami` fault cells show its retries because access now reads `op whoami` for the capability. A first regeneration also showed a dormant `no_ci_reader` finding repeated per vault; that was a regression (the `deployed` flag was reused for the second-writer check) and is fixed with a separate `deployed_tier` flag before these snapshots were taken.
+
+## 0.12.0: flow documents (e2e-coverage-flows, 2026-10-18)
+
+21 new scenario snapshots, no existing snapshot changed. Flows (text, `--json` and, where a tool exists, MCP): `flow_propose_key|env|target|retire|setup|structure|generate|intent` (each with `opv_propose`), `flow_import` (`opv_import_local` refused: dev is `shared`), `flow_import_local` (dev made `local`; the tool writes), `flow_needs`, `flow_contract`, `flow_explain` (with `opv_explain`). Error scenarios: `apply_needs_terminal`, `apply_person_only`, `set_needs_terminal`, `set_person_only`, `needs_undeclared`, `contract_stale`, `value_in_text_field` (with `opv_propose`), and the text-only `bindings_unapplied`. Every value in these worlds and dotenv files is an `S7MARKER` marker, and the gate `no_scenario_snapshot_holds_a_value` fails on any scenario snapshot holding one (or a `test-marker-e2e-` value).
+
+Checked by the implementing agent on every new snapshot: no value anywhere; `schema_version` 3; `next` always the typed `{kind, actor, command}`; the actor is right (a contract proposal's `--write` is the assistant's, a structural proposal's `opv apply` and every terminal/person-only refusal are the person's, an MCP proposal has none); the CLI and the MCP proposal carry the same `plan_id`.
+
+Findings for the owner (not fixed here; the row touches tests only):
+
+1. `needs_undeclared`: "the code reads 1 a name the contract declares nowhere" — the count and article are both rendered (`src/cause/render.rs`). Its `Next:` is the failing `opv needs --gate` again, where `Do:` names `opv propose key`.
+2. `value_in_text_field` over MCP: `next.command` is `opv propose key --json`, an incomplete command (so the MCP and CLI errors differ, and the scenario is not in the MCP-equals-CLI gate).
+3. `import_tier_refused` (`flow_import` MCP): `next.command` is `opv import dev --from '<file>'` with a placeholder although the tool was given `local.env`; `human_required` is false while `next.actor` is `person`.
+4. `set_needs_terminal`/`set_person_only`: `next.kind` is `apply` for `opv set`; the terminal refusals' `--json` next keeps `--json` (`opv apply --json`) for a person.
+5. `opv explain <key>` for a key declared in several environments without `--env` is `choice_required` with `Next: opv contract` (§25.1 says a key's explain covers every environment). `opv_explain`'s schema in `surface.json` has no `env`, so over MCP such a key cannot be explained within the surface; `flow_explain` uses a one-environment key.
+6. `flow_propose_structure`/`flow_propose_generate`: the document carries two plan ids (the top-level `plan_id` that `opv apply` takes, and `structure.plan_id`).
+7. `flow_contract`: `contract --env dev` lists `OTEL_RESOURCE` (declared for prod only) under dev with `required: false`.
+8. `bindings_unapplied`: the apply record lives at `.opv/applied.json`, which cannot exist beside the `.opv` account pointer file; the scenario selects the account with `OP_ACCOUNT` instead.
+
+- [ ] Owner sign-off of the flow snapshots.

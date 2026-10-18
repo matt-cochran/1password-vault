@@ -1,0 +1,83 @@
+# flow_contract: opv contract --env dev --component web
+
+## text exit: 0
+## text stdout
+{
+  "components": [
+    {
+      "name": "web",
+      "environments": [
+        {
+          "name": "dev",
+          "keys": [
+            {
+              "name": "API_KEY",
+              "kind": "secret",
+              "shape": null,
+              "required": true
+            },
+            {
+              "name": "DATABASE_URL",
+              "kind": "secret",
+              "shape": null,
+              "required": true
+            },
+            {
+              "name": "LOG_LEVEL",
+              "kind": "config",
+              "shape": null,
+              "required": true
+            },
+            {
+              "name": "MIGRATION_TOKEN",
+              "kind": "secret",
+              "shape": null,
+              "required": true
+            },
+            {
+              "name": "OTEL_RESOURCE",
+              "kind": "config",
+              "shape": null,
+              "required": false
+            },
+            {
+              "name": "PERSONAL_LLM_KEY",
+              "kind": "secret",
+              "shape": null,
+              "required": true
+            },
+            {
+              "name": "SESSION_SECRET",
+              "kind": "secret",
+              "shape": null,
+              "required": true
+            },
+            {
+              "name": "TLS_CERTIFICATE",
+              "kind": "secret",
+              "shape": null,
+              "required": true
+            },
+            {
+              "name": "TLS_PRIVATE_KEY",
+              "kind": "secret",
+              "shape": null,
+              "required": true
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "contract_digest": "c626c18baf6b7494c6cd34fc2e91e495113d932943661e1c57bb87546c394f28"
+}
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+
+## json exit: 0
+## json stdout
+{"schema_version":3,"ok":true,"components":[{"name":"web","environments":[{"name":"dev","keys":[{"name":"API_KEY","kind":"secret","shape":null,"required":true},{"name":"DATABASE_URL","kind":"secret","shape":null,"required":true},{"name":"LOG_LEVEL","kind":"config","shape":null,"required":true},{"name":"MIGRATION_TOKEN","kind":"secret","shape":null,"required":true},{"name":"OTEL_RESOURCE","kind":"config","shape":null,"required":false},{"name":"PERSONAL_LLM_KEY","kind":"secret","shape":null,"required":true},{"name":"SESSION_SECRET","kind":"secret","shape":null,"required":true},{"name":"TLS_CERTIFICATE","kind":"secret","shape":null,"required":true},{"name":"TLS_PRIVATE_KEY","kind":"secret","shape":null,"required":true}]}]}],"contract_digest":"c626c18baf6b7494c6cd34fc2e91e495113d932943661e1c57bb87546c394f28","next":{"kind":"none","actor":"person","command":null},"do":null}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml

@@ -1,0 +1,20 @@
+# contract_stale: opv contract --check contract.json
+
+## text exit: 2
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: the committed contract copy contract.json is stale; regenerate it with opv contract
+Do: regenerate the committed copy contract.json
+Next: opv contract
+
+## json exit: 2
+## json stdout
+{"schema_version":3,"ok":false,"exit_code":2,"next":{"kind":"run","actor":"assistant","command":"opv contract"},"do":"regenerate the committed copy contract.json","error":{"code":"contract_stale","category":"config","message":"the committed contract copy contract.json is stale; regenerate it with opv contract","subject":{"path":"contract.json"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"regenerate the committed copy contract.json","next":{"kind":"run","actor":"assistant","command":"opv contract"}}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: the committed contract copy contract.json is stale; regenerate it with opv contract
+Do: regenerate the committed copy contract.json
+Next: opv contract
