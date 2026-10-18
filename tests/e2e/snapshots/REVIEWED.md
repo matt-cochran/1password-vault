@@ -184,3 +184,20 @@ Findings for the owner (not fixed here; the row touches tests only):
 8. `bindings_unapplied`: the apply record lives at `.opv/applied.json`, which cannot exist beside the `.opv` account pointer file; the scenario selects the account with `OP_ACCOUNT` instead.
 
 - [ ] Owner sign-off of the flow snapshots.
+
+## 0.12.0: core documents (e2e-coverage, 2026-10-18)
+
+5 new scenario snapshots, no existing snapshot changed (a full `UPDATE_SNAPSHOTS=1` run of `e2e` and `e2e_matrix` left every committed snapshot as it was). Core (text and `--json`; no MCP half: `opv_state`, row mcp-state, is not on this branch): `core_inventory`, `core_next`, `core_ready_gate` (`gate_failed`, so `GateFailed` left `UNREACHABLE`), `core_doctor` (`doctor --env prod`, R9), `core_access`. The world (`core_cases`) is marked, and the session's user is a member of the vaults it reads, so opv-sim answers `op vault user list` with the owner's writer recording s23 (the s20 `whoami` user): web prod has the session as its one writer (capability `write`, doctor's production-vault warning, `single_writer`), shared prod has only the ops user (capability `none`, its cells `unreadable(no_access)`), the dev vaults have two writers; web dev's `SESSION_SECRET` is empty and `LOG_LEVEL` is `changeme`. Every snapshot in the tree is `schema_version` 3 (grep; `tests/fixtures/ui/*.json` are UI fixtures, not snapshots).
+
+Checked by the implementing agent: no value anywhere (the canary gate passes; `changeme` never printed); `schema_version` 3; `next` the typed `{kind, actor, command}`: inventory and next `enter_value`/person `opv set …`, queue's CI rows `run`/ci `opv sync prod`, doctor and access `none`/person.
+
+Findings for the owner (not fixed here; the row touches tests only):
+
+1. inventory/next: `web/DATABASE_URL` (`from = "shared/DATABASE_URL"`) reads as `absent` in both web boundaries and is the top `next` (`opv set web/DATABASE_URL --env dev`), though its value lives in the shared source.
+2. inventory/next: a key not wanted in an environment shows a cell state `absent` (`web/OTEL_RESOURCE` in dev, `web/PERSONAL_LLM_KEY` in prod, whose `presence` is `absent`), and `next` queues `opv set` for them; the personal key's dev cell is read from the web boundary, not the personal item.
+3. ready `--gate`: `LOG_LEVEL = changeme` is `placeholder` in inventory but `malformed` in the gate; the gate's `next` (`opv open web/LOG_LEVEL --env dev`) has actor `assistant` while `human_required` is true and `do` is the person's fill.
+4. next text: `opv sync prod` repeated once per key (seven identical lines in `then:`).
+5. `single_writer` is worded differently by `next` and `access`; a production state vault with no writer (`writers: []`) raises nothing.
+6. access text prints neither the per-vault production marking, capability nor writers (JSON only); access `next` is `none` while it prints owner `op service-account create` commands.
+
+- [ ] Owner sign-off of the core snapshots.

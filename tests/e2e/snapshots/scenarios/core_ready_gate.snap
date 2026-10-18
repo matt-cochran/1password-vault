@@ -1,0 +1,20 @@
+# core_ready_gate: opv ready --gate
+
+## text exit: 8
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: environment dev is not ready to promote: 2 keys: web/LOG_LEVEL (malformed), web/SESSION_SECRET (empty)
+Do: fill web/LOG_LEVEL in 1Password for environment dev
+Next: opv open web/LOG_LEVEL --env dev
+
+## json exit: 8
+## json stdout
+{"schema_version":3,"ok":false,"exit_code":8,"next":{"kind":"run","actor":"assistant","command":"opv open web/LOG_LEVEL --env dev"},"do":"fill web/LOG_LEVEL in 1Password for environment dev","error":{"code":"gate_failed","category":"findings","message":"environment dev is not ready to promote: 2 keys: web/LOG_LEVEL (malformed), web/SESSION_SECRET (empty)","subject":{"keys":[["web","LOG_LEVEL","malformed"],["web","SESSION_SECRET","empty"]],"env":"dev"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":true,"do":"fill web/LOG_LEVEL in 1Password for environment dev","next":{"kind":"run","actor":"assistant","command":"opv open web/LOG_LEVEL --env dev"}}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: environment dev is not ready to promote: 2 keys: web/LOG_LEVEL (malformed), web/SESSION_SECRET (empty)
+Do: fill web/LOG_LEVEL in 1Password for environment dev
+Next: opv open web/LOG_LEVEL --env dev

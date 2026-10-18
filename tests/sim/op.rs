@@ -4,7 +4,8 @@
 //! world's stored item, a document of the recorded shape of `tests/fixtures/op_item.json`.
 //!
 //! **Success replies from the owner's recordings** (`tests/fixtures/op/success/`, op 2.40.0):
-//! `account list` (s01), `vault list` (s02), `vault get` (s03), `vault user list` (s04),
+//! `account list` (s01), `vault list` (s02), `vault get` (s03), `vault user list` (s04; s23
+//! when the session's own user is a member: the writer's listing),
 //! `item list` (s05) and `whoami` (s06 with `--account` or `OP_ACCOUNT`, s07 without). Each
 //! reply is the recording with its marker values (`<ACCOUNT_2>`, `<ID_n>`, `<NAME_n>`,
 //! `<TITLE_n>`, …) and op's fixed values (`MEMBER`, `SECURE_NOTE`, …) replaced by the world's,
@@ -236,7 +237,14 @@ pub fn run(world: &mut World, args: &[String]) -> Reply {
         ["vault", "user", "list", v] => match vault(world, &acct, v) {
             Ok(v) => {
                 let users = v["users"].as_array().cloned().unwrap_or_default();
-                from_recording("s04-vault-user-list", |doc| per_entry(&doc, &users))
+                // The session's own user among the members: the owner's writer recording
+                // (s23, the listing whose member is the `whoami` user of s20).
+                let case = if users.iter().any(|u| u["id"] == account["user"]) {
+                    "s23-writer-vault-user-list"
+                } else {
+                    "s04-vault-user-list"
+                };
+                from_recording(case, |doc| per_entry(&doc, &users))
             }
             // A vault of another account: recording 15 has 14's text.
             Err(r) => r,
