@@ -44,6 +44,7 @@ pub mod history;
 pub mod import;
 pub mod import_local;
 pub mod init;
+pub mod inventory;
 #[cfg(test)]
 pub(crate) mod json_tests;
 #[cfg(test)]
