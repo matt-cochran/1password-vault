@@ -896,6 +896,14 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             },
             vec!["API_KEY", "DB_URL"],
         ),
+        (
+            RetireStillRead {
+                key: KeyName::new("OPENAI_API_KEY"),
+                env: EnvName::new("env-prod"),
+                files: vec!["src/lib.rs:12".into()],
+            },
+            vec!["OPENAI_API_KEY", "env-prod", "src/lib.rs:12"],
+        ),
     ]
 }
 
@@ -990,10 +998,11 @@ fn ordinal(c: &Cause) -> usize {
         ValueInTextField { .. } => 78,
         GateFailed { .. } => 79,
         NeedsUndeclared { .. } => 80,
+        RetireStillRead { .. } => 83,
     }
 }
 
-const VARIANTS: usize = 83;
+const VARIANTS: usize = 84;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()

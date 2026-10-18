@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use crate::domain::model::{Fleet, KeySpec, Kind};
+use crate::domain::model::{Fleet, KeySpec, Kind, Lifecycle};
 use crate::domain::rules::{self, Reason};
 use crate::domain::secret::SecretValue;
 use crate::provider::{Channel, FileCapability};
@@ -504,6 +504,15 @@ pub fn build_with_gate(
                     }
                 }
                 (o, _, _) => o,
+            };
+            // Lifecycle (design Part V, row `retire`): a key on its way out (`retiring`) is
+            // delivered nowhere, exactly like an undeclared key, so a target that still
+            // holds it prunes it; `retired` is likewise never delivered. Additive: only
+            // keys that are no longer `active` are affected.
+            let outcome = if spec.lifecycle == Lifecycle::Active {
+                outcome
+            } else {
+                Ok(None)
             };
 
             let mut row = Row {
@@ -1343,6 +1352,36 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
         // in staging the same name is desired, not pruned
         let p = build(&fleet, "staging", vec![], &fly, &no_rotate(), &none);
         assert!(p.prune.is_empty());
+    }
+
+    #[test]
+    fn a_retiring_key_present_on_a_target_is_pruned() {
+        let leaving = TWO_KEYS.replace(
+            "[products.p.keys.BOTH]\nkind = \"secret\"",
+            "[products.p.keys.BOTH]\nkind = \"secret\"\nlifecycle = \"retiring\"",
+        );
+        let fleet = config::parse(&leaving).unwrap();
+        let fly = [fly_secret("FLEET__P__BOTH", None)];
+        let p = build(&fleet, "prod", vec![], &fly, &no_rotate(), &none);
+        assert_eq!(p.prune, vec!["FLEET__P__BOTH".to_string()]);
+    }
+
+    #[test]
+    fn a_retired_key_is_never_staged() {
+        let gone = TWO_KEYS.replace(
+            "[products.p.keys.BOTH]\nkind = \"secret\"",
+            "[products.p.keys.BOTH]\nkind = \"secret\"\nlifecycle = \"retired\"",
+        );
+        let fleet = config::parse(&gone).unwrap();
+        let p = build(
+            &fleet,
+            "prod",
+            vec![secret("p", "BOTH", "v")],
+            &[],
+            &no_rotate(),
+            &none,
+        );
+        assert!(p.stage.is_empty());
     }
 
     #[test]

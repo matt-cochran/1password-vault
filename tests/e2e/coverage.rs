@@ -113,6 +113,10 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "opv needs has no CLI surface yet (rows cli-sweep, e2e-coverage)",
     ),
     (
+        "RetireStillRead",
+        "retirement is a library function in this row; its CLI surface arrives later (row cli-sweep)",
+    ),
+    (
         "BindingsUnapplied",
         "the e2e world has no apply record until opv apply lands (rows apply-core, e2e-coverage)",
     ),
