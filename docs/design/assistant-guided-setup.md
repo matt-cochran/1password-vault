@@ -643,7 +643,7 @@ That is 5 tools, down from 11, all of them without side effects outside the loca
 
 ---
 
-## 24. Second reframe: lean on 1Password, actuate deployed tiers through pull requests, and know what the code reads (R8–R11)
+## 24. Second reframe: lean on 1Password, roles per tier, CI only delivers, and know what the code reads (R8–R11)
 
 The before/after comparison (`assistant-guided-setup-comparison.md`) showed the first reframe removed the oracles but left the same seven medium residuals. Those residuals have two roots:
 - capability over deployed tiers on a developer's machine;
@@ -653,20 +653,37 @@ The owner's direction (2026-10-18): access control is **1Password's job and alre
 
 **Definition.** "The assistant" in this document is always an external generative model (Claude Code, Cursor, Codex, any MCP client) using opv's MCP tools or CLI through its harness. opv has no built-in model and calls none. opv is the deterministic bridge between 1Password, the repository, CI and the platforms.
 
-### R8. Pull requests are the plan; review is the approval; CI writes deployed tiers
+### R8. People with the right role set up each tier; CI only delivers
 
-- **The flow:**
-  1. The assistant edits the contract and opens a pull request.
-  2. opv in CI posts the plan and the value-free key × environment matrix as a check on the PR.
-  3. A reviewer (DevOps for deployed tiers) merges.
-  4. CI, with each target's own service account, creates deployed-tier structure, generates values and syncs.
-- **Person-sourced deployed values:** a DevOps person enters them through the 1Password link opv puts in the check. CI picks them up (`opv changed`).
-- **Local tier:** stays on `opv apply` in the developer's own terminal.
-- **Emergencies:** a logged break-glass path (`opv apply --break-glass`, DevOps only) covers them.
-- **What it answers:**
-  - who writes deployed tiers (the gap the comparison found);
-  - loosened policy (relaxations appear in the review diff and fail the check until accepted);
-  - the assistant's visibility of deployed tiers, through PR checks rather than vault reads.
+**Owner correction (2026-10-18):** CI does not write to 1Password. CI takes the values in 1Password and applies them to the environments they go to. People set up values at every tier. The only question is which people, in which roles, may set up and manage which environments. A team may also choose that developers do not set up their own environment at all: the team configures it, grants the developer the vault they need, and everything works.
+
+Roles. Each role is a 1Password group with vault permissions; opv checks them and never re-implements them (R9).
+
+| Role | Can | Does it through |
+|---|---|---|
+| **Environment manager** for a tier (for example, platform for dev; DevOps for staging and production) | create that tier's structure, enter and generate its values, approve its plans, grant people access to its vaults | `opv apply --env <tier env>` in their own terminal, and the 1Password links opv gives. 1Password authorizes every write |
+| **Developer** | read the vaults a manager granted; run the application | `opv run`. Nothing to set up. Personal keys only when the team allows them (`personal_keys = "allowed"`, default `"disallowed"` for team-managed environments) |
+| **Contract author** (a developer, or the assistant on their behalf) | propose changes to the contract | a pull request; reviewers approve the contract change |
+| **CI** | read values (a read-only service account per values vault) and deliver them to the platforms; post the value-free plan and key × environment matrix as a PR check | `opv sync`, `opv changed`, `opv ready --gate`. Its only 1Password write is delivery evidence (no values) in the target's state vault, as since 0.7.0 |
+
+**A new key, end to end:**
+1. A contract author's PR adds the key.
+2. The PR check shows its row: dev `absent`, staging `absent`, prod `absent`, and **who can fill each** (that tier's managers).
+3. After merge, each tier's managers see it in `opv next`, filtered to the tiers they manage. They fill or generate it with `opv apply --env <env>`, or through the 1Password link.
+4. CI delivers on change.
+5. The promotion gate blocks a tier until its value is `set`.
+
+**Team-managed developer environments:**
+1. A dev-tier manager sets up the environment once: structure, shared dev values, generated values.
+2. They grant a developer or a group access to the dev vault. opv prints the exact 1Password grant (a link or the `op` command) for the manager to run; opv never runs a grant itself.
+3. The developer clones the repository and runs `opv run -- <app>`. `opv doctor` tells them, if anything is missing, which manager role to ask. It doesn't ask them to set anything up.
+
+**Emergencies:** a manager of the tier uses the same `opv apply`. No separate break-glass path is needed, because there is no automated writer to bypass.
+
+**What it answers:**
+- who writes each tier: that tier's managers;
+- loosened policy: relaxations appear in the PR diff and fail the check until a manager of the affected tier accepts them;
+- the assistant's visibility of deployed tiers: PR checks and CI receipts, not vault reads.
 
 ### R9. Tier separation is 1Password's vault permissions; opv verifies it and never re-implements it
 
@@ -707,11 +724,11 @@ Consumers outside opv's view (another host, a partner's webhook) are declared in
 | An assistant shell reaches values (H3) | A developer machine reaches only local/dev vaults by 1Password permission. A DevOps machine stays residual, with the authorization prompt and an optional admin account |
 | Platform tools reach production | No production platform logins on developer machines; `doctor` detects them |
 | `opv run` encoding leak | Local values are sandbox-grade: recoverable, not a breach |
-| Secret downgraded to config | A flagged change in a reviewed PR; the check fails until it's accepted |
+| Secret downgraded to config | A flagged change in a reviewed PR; the check fails until a manager of the affected tier accepts it |
 | Rotation revokes while in use | Overlap plus observed rollout; declared outside consumers |
 | Retire while still read | The build fails while still read; `needs` at the deployed revision |
 | Scanner misses a name | Impossible in generated languages; detection elsewhere |
-| Nobody writes deployed tiers | CI after merge (R8) |
+| Nobody writes deployed tiers | That tier's environment managers, in their own terminal or the 1Password app; CI only reads and delivers (R8) |
 
 ---
 
