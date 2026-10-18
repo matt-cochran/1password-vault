@@ -2028,6 +2028,9 @@ impl Cause {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
+            ImportTierRefused { env, tier } => format!(
+                "environment {env} has tier {tier}, not local: opv_import_local writes only into a local environment"
+            ),
             LocalFileTooOpen { path, mode, want } => format!(
                 "{} has mode {mode:04o}; opv needs {want:04o} or stricter",
                 path.display()
@@ -3768,6 +3771,12 @@ impl Cause {
                 ),
                 None => plan(None, Next::Check(cmd(&["status"], &[env.as_str()]))),
             },
+            ImportTierRefused { env, .. } => plan(
+                inspect(format!(
+                    "run the import yourself in your own terminal: opv import {env} --from <file>"
+                )),
+                Next::Run(cmd(&["import"], &[env.as_str(), "--from", "<file>"])),
+            ),
             LocalFileTooOpen {
                 path,
                 mode: _,

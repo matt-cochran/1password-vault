@@ -914,6 +914,14 @@ pub enum Cause {
         env: EnvName,
         keys: Vec<(ProductName, KeyName, &'static str)>,
     },
+    /// `opv_import_local` was pointed at an environment whose tier is not `local` (design
+    /// row `import-local`): only a `local` environment may take an assistant's import. The
+    /// environment and its tier are named; the next step is the person's own
+    /// `opv import <env> --from <file>`. Never a value.
+    ImportTierRefused {
+        env: EnvName,
+        tier: &'static str,
+    },
     Bug {
         site: &'static str,
     },
@@ -1538,6 +1546,7 @@ impl Cause {
             ConfirmMismatch { .. } => "confirm_mismatch",
             ValuesNeeded { .. } => "findings",
             GateFailed { .. } => "gate_failed",
+            ImportTierRefused { .. } => "import_tier_refused",
             KeysBlocking { .. } => "keys_blocking",
             LocalFileTooOpen { .. } => "file_too_open",
             InputInvalid { .. } => "input_invalid",
@@ -1649,6 +1658,7 @@ impl Cause {
             | PrivateDirFailed { .. }
             | LocalIo { .. }
             | KeysBlocking { .. }
+            | ImportTierRefused { .. }
             | HandoffPipeContested { .. } => 6,
             NotSignedIn { .. }
             | AccountNotOnMachine { .. }

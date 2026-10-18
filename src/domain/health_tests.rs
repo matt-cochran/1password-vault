@@ -75,6 +75,7 @@ fn run(envs: &[(&str, bool, Vec<ItemField>)]) -> Vec<HealthFinding> {
             deployed: *deployed,
             fields,
             tier: crate::domain::health::default_tier(name, None),
+            assistant_imported: false,
         })
         .collect();
     check(&fleet, &values)
@@ -403,6 +404,7 @@ fn a_production_title_counts_as_production() {
             deployed: true,
             fields: &fields,
             tier: crate::domain::health::default_tier("staging", Some("Production (EU)")),
+            assistant_imported: false,
         }],
     );
     assert_eq!(found[0].code, TEST_KEY);
@@ -420,6 +422,7 @@ fn preprod_is_not_production() {
             deployed: true,
             fields: &fields,
             tier: crate::domain::health::default_tier("staging", Some("Preprod")),
+            assistant_imported: false,
         }],
     );
     assert_eq!(found[0].code, LIVE_KEY);

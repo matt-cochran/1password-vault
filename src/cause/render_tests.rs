@@ -896,6 +896,13 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             },
             vec!["API_KEY", "DB_URL"],
         ),
+        (
+            ImportTierRefused {
+                env: EnvName::new("env-stage"),
+                tier: "shared",
+            },
+            vec!["env-stage", "shared"],
+        ),
     ]
 }
 
@@ -990,10 +997,11 @@ fn ordinal(c: &Cause) -> usize {
         ValueInTextField { .. } => 78,
         GateFailed { .. } => 79,
         NeedsUndeclared { .. } => 80,
+        ImportTierRefused { .. } => 83,
     }
 }
 
-const VARIANTS: usize = 83;
+const VARIANTS: usize = 84;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()

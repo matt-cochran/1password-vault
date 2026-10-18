@@ -226,6 +226,9 @@ pub fn meaning(code: &str) -> &'static str {
         "gate_failed" => {
             "ready --gate found present keys that are not in value state set or whose delivery evidence is older than the item; a person fills or re-delivers them"
         }
+        "import_tier_refused" => {
+            "opv_import_local was pointed at an environment whose tier is not local; the person runs opv import instead"
+        }
         "keys_blocking" => {
             "a write refused: keys are missing or failing a rule; nothing was written"
         }
@@ -944,6 +947,10 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
                 KeyName::new("OPENAI_API_KEY"),
                 "absent",
             )],
+        },
+        ImportTierRefused {
+            env: EnvName::new("env-prod"),
+            tier: "shared",
         },
         Bug { site: "site-xyz" },
     ]

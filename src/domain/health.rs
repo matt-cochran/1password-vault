@@ -27,6 +27,9 @@ pub struct EnvValues<'a> {
     pub fields: &'a [ItemField],
     /// The environment's tier (FR-59).
     pub tier: Tier,
+    /// The environment's team item carries the `assistant_imported` tag (design row
+    /// `import-local`): its values are left out of the cross-tier comparisons.
+    pub assistant_imported: bool,
 }
 
 /// One likely-wrong setting. Names only.
@@ -137,6 +140,9 @@ fn same_across(fleet: &Fleet, envs: &[EnvValues<'_>], out: &mut Vec<HealthFindin
     // (product, key) -> [(environment, field)], in environment order.
     let mut by_key: BTreeMap<(&str, &str), Vec<(&str, &ItemField)>> = BTreeMap::new();
     for env in envs {
+        if env.assistant_imported {
+            continue;
+        }
         for (f, spec) in in_scope(fleet, env) {
             if spec.kind == Kind::Secret && !spec.allow_same_value {
                 by_key
@@ -179,6 +185,9 @@ fn same_under_two(
     fields: &[(&ItemField, &KeySpec)],
     out: &mut Vec<HealthFinding>,
 ) {
+    if env.assistant_imported {
+        return;
+    }
     let mut secrets: Vec<&ItemField> = fields
         .iter()
         .filter(|(_, spec)| spec.kind == Kind::Secret)

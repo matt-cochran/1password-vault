@@ -1096,6 +1096,7 @@ pub fn run_at(
                 deployed: *deployed,
                 fields,
                 tier: fleet.environments[name].tier,
+                assistant_imported: false,
             },
         )
         .collect();
@@ -1118,15 +1119,18 @@ pub fn run_at(
     // The saved receipt records what this run saw: the item versions of each boundary
     // (`op item list`, as `changed` reads them) and the git revision. A `--gate` run needs
     // the versions to judge delivery evidence too; the plain report needs neither.
-    let versions = if save.is_some() || gate {
-        read_item_versions(fleet, only, r)?
-    } else {
-        BTreeMap::new()
-    };
+    let (versions, assistant_imported): (BTreeMap<String, u64>, BTreeSet<String>) =
+        if save.is_some() || gate {
+            read_item_versions(fleet, only, r)?
+        } else {
+            (BTreeMap::new(), BTreeSet::new())
+        };
     // `--gate` fails the command (`gate_failed`, exit 8) on present keys that are not in
     // value state `set` or whose delivery evidence is older than the source item now. The
     // receipt is not written when the gate fails: the error names the keys.
-    if gate && let Some(cause) = gate_failure(fleet, &envs, &health, &versions, r) {
+    if gate
+        && let Some(cause) = gate_failure(fleet, &envs, &health, &versions, &assistant_imported, r)
+    {
         return Err(cause.into());
     }
     let revision = if save.is_some() {
@@ -1198,16 +1202,21 @@ struct ListRow {
     id: String,
     #[serde(default)]
     version: u64,
+    #[serde(default)]
+    tags: Vec<String>,
 }
 
 /// Item id → the `op item list` `version` of each boundary item in scope (design row
 /// `receipts`, the versions `changed` reads). One listing per vault, as `changed` does.
+/// Also the item ids whose `op item list` tags include `assistant_imported` (design row
+/// `import-local`): their values never count as set for the gate.
 fn read_item_versions(
     fleet: &crate::domain::Fleet,
     only: Option<&str>,
     r: &dyn crate::runner::CommandRunner,
-) -> Result<BTreeMap<String, u64>, Error> {
+) -> Result<(BTreeMap<String, u64>, BTreeSet<String>), Error> {
     let mut versions = BTreeMap::new();
+    let mut assistant_imported = BTreeSet::new();
     for (name, env) in &fleet.environments {
         if only.is_some_and(|o| o != name.as_str()) {
             continue;
@@ -1227,12 +1236,19 @@ fn read_item_versions(
             }
             if let Ok(rows) = serde_json::from_slice::<Vec<ListRow>>(&out.stdout) {
                 for row in rows {
+                    if row
+                        .tags
+                        .iter()
+                        .any(|t| t == crate::app::import_local::ASSISTANT_IMPORTED)
+                    {
+                        assistant_imported.insert(row.id.clone());
+                    }
                     versions.insert(row.id, row.version);
                 }
             }
         }
     }
-    Ok(versions)
+    Ok((versions, assistant_imported))
 }
 
 /// One line of the `source versions` field a sync writes (`delivery` row): `v1|<item
@@ -1302,6 +1318,7 @@ fn recorded_versions(
 /// `delivered` is the products this target delivers; `recorded` is the version each source
 /// item had at the last sync; `current` is each boundary item's `op item list` version now.
 /// Names, states and integers only (SR-1).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn gate_keys(
     fleet: &crate::domain::Fleet,
     env: &str,
@@ -1310,6 +1327,7 @@ pub(crate) fn gate_keys(
     delivered: &BTreeSet<String>,
     recorded: &BTreeMap<String, u64>,
     current: &BTreeMap<String, u64>,
+    assistant_imported: &BTreeSet<String>,
 ) -> Vec<(String, String, &'static str)> {
     let mut out = Vec::new();
     for row in rows {
@@ -1329,9 +1347,6 @@ pub(crate) fn gate_keys(
             out.push((row.product.clone(), row.key.clone(), reason));
             continue;
         }
-        if !delivered.contains(&row.product) {
-            continue;
-        }
         let source = fleet
             .products
             .get(&row.product)
@@ -1340,6 +1355,18 @@ pub(crate) fn gate_keys(
             .map(|(p, _)| p.to_string())
             .unwrap_or_else(|| row.product.clone());
         let item = fleet.boundary(env, &source).ok().map(|b| b.item_id.clone());
+        // An assistant-imported item's values never count as set (design row
+        // `import-local`), whatever the target says.
+        if item
+            .as_ref()
+            .is_some_and(|id| assistant_imported.contains(id))
+        {
+            out.push((row.product.clone(), row.key.clone(), "assistant_imported"));
+            continue;
+        }
+        if !delivered.contains(&row.product) {
+            continue;
+        }
         let fresh = match item {
             Some(id) => matches!(
                 (recorded.get(&id), current.get(&id)),
@@ -1360,6 +1387,7 @@ fn gate_failure(
     envs: &[EnvInput],
     health: &[crate::domain::health::HealthFinding],
     current: &BTreeMap<String, u64>,
+    assistant_imported: &BTreeSet<String>,
     r: &dyn crate::runner::CommandRunner,
 ) -> Option<Cause> {
     for env in envs {
@@ -1399,6 +1427,7 @@ fn gate_failure(
                         &delivered,
                         &recorded,
                         current,
+                        assistant_imported,
                     ));
                 }
             }
@@ -1412,6 +1441,7 @@ fn gate_failure(
                         &BTreeSet::new(),
                         &BTreeMap::new(),
                         current,
+                        assistant_imported,
                     )),
                     // A gate never passes what it could not read.
                     Err(_) => keys.extend(unreadable_keys(fleet, &env.name)),

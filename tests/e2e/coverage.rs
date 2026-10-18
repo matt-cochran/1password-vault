@@ -122,6 +122,12 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "ContractStale",
         "opv contract --check has no CLI surface yet (row contract-data is library only)",
     ),
+    // `opv_import_local` reaches this when pointed at a non-local tier; its CLI or MCP
+    // surface lands with the later `mcp-propose` row.
+    (
+        "ImportTierRefused",
+        "opv_import_local has no CLI or MCP surface yet (row import-local)",
+    ),
 ];
 
 fn snapshots() -> PathBuf {

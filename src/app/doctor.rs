@@ -714,6 +714,7 @@ fn settings_check(fleet: &Fleet, only: Option<&str>, r: &dyn CommandRunner, repo
             deployed: !env.targets.is_empty(),
             fields,
             tier: env.tier,
+            assistant_imported: false,
         })
         .collect();
     let findings: Vec<_> = check(fleet, &values)

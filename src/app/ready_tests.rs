@@ -1628,6 +1628,7 @@ fn gate_fails_a_set_key_whose_delivery_evidence_is_older() {
         &BTreeSet::from(["app".to_string()]),
         &BTreeMap::from([("src1".to_string(), 3)]),
         &BTreeMap::from([("src1".to_string(), 5)]),
+        &BTreeSet::new(),
     );
     assert_eq!(
         keys,

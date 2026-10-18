@@ -40,6 +40,7 @@ mod guidance_tests;
 pub mod guide;
 pub mod history;
 pub mod import;
+pub mod import_local;
 pub mod init;
 #[cfg(test)]
 pub(crate) mod json_tests;

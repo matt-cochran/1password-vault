@@ -58,6 +58,7 @@ fn is_production_follows_the_tier() {
         deployed: false,
         fields: &[],
         tier: Tier::Production,
+        assistant_imported: false,
     };
     assert!(is_production(&values));
 }
