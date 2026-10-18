@@ -12,7 +12,7 @@ using <SCENARIO>/project/secrets.toml
 
 ## json exit: 10
 ## json stdout
-{"schema_version":2,"ok":true,"environment":"prod","changed":true,"placements":[{"product":"web","target":"fly","state":"no_record"},{"product":"web","target":"gh","state":"no_record"},{"product":"web","target":"k8s","state":"no_record"}],"next":"opv bootstrap","do":"run opv bootstrap to record delivery items"}
+{"schema_version":3,"ok":true,"environment":"prod","changed":true,"placements":[{"product":"web","target":"fly","state":"no_record"},{"product":"web","target":"gh","state":"no_record"},{"product":"web","target":"k8s","state":"no_record"}],"next":{"kind":"run","actor":"assistant","command":"opv bootstrap"},"do":"run opv bootstrap to record delivery items"}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml

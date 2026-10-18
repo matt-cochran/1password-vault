@@ -11,7 +11,7 @@ Next: opv plan prod
 
 ## json exit: 6
 ## json stdout
-{"schema_version":2,"ok":false,"exit_code":6,"next":"opv plan prod --json","do":"check free space and permissions in <SCENARIO>/home/.local/state/opv/approvals","error":{"code":"private_dir_failed","category":"policy","message":"cannot make a private folder in <SCENARIO>/home/.local/state/opv/approvals: an input or output error","subject":{"io":"other","dir":"<SCENARIO>/home/.local/state/opv/approvals"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"check free space and permissions in <SCENARIO>/home/.local/state/opv/approvals","next":"opv plan prod --json","next_kind":"check"}}
+{"schema_version":3,"ok":false,"exit_code":6,"next":{"kind":"run","actor":"assistant","command":"opv plan prod --json"},"do":"check free space and permissions in <SCENARIO>/home/.local/state/opv/approvals","error":{"code":"private_dir_failed","category":"policy","message":"cannot make a private folder in <SCENARIO>/home/.local/state/opv/approvals: an input or output error","subject":{"io":"other","dir":"<SCENARIO>/home/.local/state/opv/approvals"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"check free space and permissions in <SCENARIO>/home/.local/state/opv/approvals","next":{"kind":"run","actor":"assistant","command":"opv plan prod --json"}}}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml
@@ -20,4 +20,4 @@ Do: check free space and permissions in <SCENARIO>/home/.local/state/opv/approva
 Next: opv plan prod --json
 
 ## mcp opv_sync {"environment":"prod","plan_id":"623778c8"}
-{"ok":false,"error":{"code":"private_dir_failed","category":"policy","message":"cannot make a private folder in <SCENARIO>/home/.local/state/opv/approvals: an input or output error","subject":{"io":"other","dir":"<SCENARIO>/home/.local/state/opv/approvals"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"check free space and permissions in <SCENARIO>/home/.local/state/opv/approvals","next":"opv plan prod --json","next_kind":"check"}}
+{"ok":false,"error":{"code":"private_dir_failed","category":"policy","message":"cannot make a private folder in <SCENARIO>/home/.local/state/opv/approvals: an input or output error","subject":{"io":"other","dir":"<SCENARIO>/home/.local/state/opv/approvals"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"check free space and permissions in <SCENARIO>/home/.local/state/opv/approvals","next":{"kind":"run","actor":"assistant","command":"opv plan prod --json"}}}

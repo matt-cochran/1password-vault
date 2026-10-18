@@ -162,3 +162,7 @@ Left for later, needing owner recordings: `op vault user list` without Manage, a
 - [x] The owner accepted Junior's review, verified by the manager, with its findings fixed, as the snapshot sign-off for 0.10.0 (decision of 2026-10-16).
 
 Signed: Matthew Cochran (by decision, recorded by Claude) Date: 2026-10-16
+
+## 0.12.0 interim: schema 3 (v0120/integrate, 2026-10-18)
+
+530 snapshots were regenerated after `next-envelope` (schema 3) and `bindings-load` merged. The manager checked the whole diff mechanically: with the `next` field, `next_kind` and `schema_version` removed from both sides, every changed line pairs with an unchanged one, except two added error-code lines (`person_only`, `value_in_text_field`) from new catalog causes. So the only changes are `schema_version` 2 → 3, `next` becoming the typed `{kind, actor, command}` object, and `next_kind` leaving the error document. The full e2e review of the new 0.12.0 documents belongs to `e2e-coverage`.

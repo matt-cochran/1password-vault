@@ -12,7 +12,7 @@ Next: opv doctor
 
 ## json exit: 4
 ## json stdout
-{"schema_version":2,"ok":false,"exit_code":4,"next":"opv doctor","do":"update op (opv doctor checks its version)","error":{"code":"unexpected_output","category":"source","message":"opv could not read the reply of op from 1Password at line 1, column 1","subject":{"during":"read","system":"one_password","at":{"line":1,"col":1},"problem":{"problem":"unparseable"}},"evidence":{"checked":"op vault user list vE2EWEBPROD000000000000001 --format json","account":null,"upstream":null},"retry":"never","human_required":false,"do":"update op (opv doctor checks its version)","next":"opv doctor","next_kind":"run"}}
+{"schema_version":3,"ok":false,"exit_code":4,"next":{"kind":"run","actor":"assistant","command":"opv doctor"},"do":"update op (opv doctor checks its version)","error":{"code":"unexpected_output","category":"source","message":"opv could not read the reply of op from 1Password at line 1, column 1","subject":{"during":"read","system":"one_password","at":{"line":1,"col":1},"problem":{"problem":"unparseable"}},"evidence":{"checked":"op vault user list vE2EWEBPROD000000000000001 --format json","account":null,"upstream":null},"retry":"never","human_required":false,"do":"update op (opv doctor checks its version)","next":{"kind":"run","actor":"assistant","command":"opv doctor"}}}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml
