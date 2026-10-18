@@ -9,7 +9,8 @@ use crate::domain::KeySpec;
 fn spec(rules: Rules) -> KeySpec {
     KeySpec {
         kind: Kind::Secret,
-        environments: Vec::new(),
+        environments: Some(Vec::new()),
+        except: Default::default(),
         rules,
         immutable: false,
         guidance: String::new(),
