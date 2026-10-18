@@ -127,6 +127,27 @@ pub fn vault_users(
     }
 }
 
+/// The session's own `user_uuid` from `op whoami --format json` (#96): the identifier used
+/// only to find this session's entry in a vault's user list ([`vault_users`]), never an
+/// email, name or any other identity detail. `None` when whoami answers without one (for
+/// example a service-account credential) or could not be read: the caller then reports the
+/// capability as unknown rather than guessing, and never fails the read on this probe
+/// alone (`require_session` already decided the session).
+pub fn session_user(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Who {
+        #[serde(default)]
+        user_uuid: Option<String>,
+    }
+    let args = ["whoami", "--format", "json"];
+    let out = read_op(r, &args, host).ok()?;
+    if out.status != 0 {
+        return None;
+    }
+    let who: Who = serde_json::from_slice(&out.stdout).ok()?;
+    who.user_uuid.filter(|id| !id.is_empty())
+}
+
 /// The item in `vault_id` whose title is exactly `title` (case-sensitive). One `op item
 /// list --vault <vault_id>` call (item metadata only; it carries no field values).
 #[cfg(test)]

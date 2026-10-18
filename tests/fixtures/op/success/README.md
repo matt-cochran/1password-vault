@@ -49,3 +49,5 @@ non-member cases (`cases.tsv` lists them as skipped); the non-member refusal is 
 | `s21-vault-list` | `op vault list --account <ACCOUNT_A> --format json` | 0 |
 | `s22-writer-vault-get` | `op vault get <VAULT_WRITER> --account <ACCOUNT_A> --format json` | 0 |
 | `s23-writer-vault-user-list` | `op vault user list <VAULT_WRITER> --account <ACCOUNT_A> --format json` | 0 |
+
+read-only member: no recording; owner-accepted assumption, 2026-10-18.
