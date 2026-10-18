@@ -31,6 +31,9 @@ pub mod delivery;
 pub mod delivery_preview;
 pub mod doctor;
 pub mod explain;
+#[cfg(test)]
+#[path = "flows_acceptance_tests.rs"]
+mod flows_acceptance_tests;
 pub mod generate;
 #[cfg(test)]
 mod github_tests;
