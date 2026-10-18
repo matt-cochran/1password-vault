@@ -102,6 +102,12 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "ValueInTextField",
         "the intent document has no CLI or MCP surface yet (row intent)",
     ),
+    // `ready --gate` exists, but the e2e world has no scenario that runs it until the
+    // e2e-coverage row adds one.
+    (
+        "GateFailed",
+        "ready --gate has no e2e scenario yet (row e2e-coverage)",
+    ),
 ];
 
 fn snapshots() -> PathBuf {
