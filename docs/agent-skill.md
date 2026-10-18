@@ -21,7 +21,8 @@ opv ready --json           # what is ready, what is not, who acts next (read-onl
 `opv ready --json` and `opv doctor --env <env> --json` never write 1Password, whoever is
 signed in: they are the safe readiness checks. Other commands that read an item may tidy its
 layout when run in the user's own session (the schema's `tidies_1password`); when a layout
-needs tidying, the explicit repair is `opv tidy <env>` (writes 1Password: ask first).
+needs tidying, the explicit repair is `opv propose tidy <env>` then a person's `opv apply`
+(writes 1Password: ask first).
 
 Read the rules in `opv guide agent` before anything else. In short: you never see, ask for,
 type or store a secret value; the user signs in and types values only at 1Password's own
@@ -29,42 +30,43 @@ prompts or in the 1Password app; ask before anything that writes (the schema's
 `ask_user_first`); prefer `--json` and act on `error.code`, `next` and `human_required`, not
 on message text.
 
-## Agents own structure; people own sign-in, approval and values
+If the user pastes a value into the chat, stop, do not repeat it, treat it as exposed, and
+tell them to run `opv set <KEY> --env <env>` instead. Never accept a value in text.
+
+## The assistant proposes; a person applies; CI delivers
 
 With the opv MCP server (`opv mcp serve`; `opv mcp install` registers it for the project after
-the user agrees), declare products, keys, environments and targets with
-`opv_declare_key`, `opv_declare_environment` and `opv_declare_target` (local `secrets.toml`
-only; never a value), then `opv_structure_plan`. Ask the user to run `opv approve <plan_id>`
-in their own terminal (never run it yourself), then `opv_structure_apply` with that id. Hand
-the user the returned 1Password links to enter values there, and finish with `opv_ready`.
-`stale_plan`: plan and ask again. `approval_required`: wait for the user's approval.
-`own_session_required`: the user restarts the server without `op` session, service
-account or Connect credentials. If a tool is missing in this version, say so; use
-`opv bootstrap` in the user's terminal instead and never work around it. Details:
-`opv guide agent`, section "Optional MCP server".
+the user agrees) you have five tools. `opv_state` reads a document, `opv_next` gives one
+action, `opv_explain` explains a key or plan, and `opv_propose` prepares a change: it returns
+the contract diff and a plan whose every step names its actor and a `plan_id`, and writes
+nothing. `opv_import_local` is the only writer, and only into an environment of tier `local`.
+A person runs `opv apply <plan_id>` in their own terminal (never run it yourself) to run the
+plan; `opv set <KEY> --env <env>` enters one value and `opv import <env> --from
+<file|target:NAME>` imports a file or a target. CI runs `opv sync`. Every document carries a
+typed `next` {kind, actor, command}: act only when `actor` is `assistant`, and hand an
+`actor: person` command to the user verbatim and wait. `stale_plan`: propose again.
+`own_session_required`: the user restarts the server without `op` session, service account or
+Connect credentials. If a tool is missing in this version, say so; use `opv propose` and a
+person's `opv apply` on the CLI instead and never work around it. Details: `opv guide agent`,
+section "Optional MCP server".
 
 ## CLI or MCP
 
-Every MCP tool has the same command on the CLI: `opv schema` lists each tool with its
-command under `mcp_tools`. Without an MCP client, run the structure flow yourself in the
-same order: declare with `opv env add`/`opv add`/`opv target add` (local `secrets.toml`
-only), then `opv structure plan --json` for the plan and its `plan_id`, ask the user to run
-`opv approve <plan_id>` in their own terminal, then `opv structure apply <plan_id> --json`.
-That document is exactly what `opv_structure_plan` / `opv_structure_apply` return, and
-`opv structure apply` refuses an unapproved or stale plan just the same. `opv config
-describe --json` reproduces the `opv_configuration` document. `opv ready --json`,
-`opv access --json` and `opv plan --json` carry the full documents that `opv_ready`,
-`opv_access` and `opv_deployment_plan` project (names, codes, states and counts only). An
-MCP error is `{ok: false, error}`, and `error` is exactly the CLI's `--json` error object.
+Every MCP tool has the same command on the CLI. Without an MCP client, run the same flow:
+`opv inventory`, `opv needs` and `opv contract` read the state, `opv next` gives one action,
+and `opv propose` prepares the contract diff and plan (local `secrets.toml` and the contract
+file only; never a value). Ask the user to run `opv apply <plan_id>` in their own terminal.
+`opv explain` reproduces `opv_explain`. An MCP error is `{ok: false, error}`, and `error` is
+exactly the CLI's `--json` error object.
 
 ## When a command fails
 
 Every failure has one `error.code` from a closed list (`opv schema` lists them), the same
 in the CLI's `--json` document and in an MCP answer:
 
-- `next` is one command that runs as typed. Run it yourself only when `human_required`
-  is false and `next_kind` is `run`, `check` or `rerun`; otherwise hand `do` and `next` to
-  the user and wait.
+- `next` is `{kind, actor, command}`. Run `next.command` yourself only when `next.actor`
+  is `assistant` and `human_required` is false; otherwise hand `do` and the command to the
+  user and wait (a `ci` action is left to CI).
 - `retry`: `safe` re-run as is; `after_fix` once `do` is done; `check_first` run `next` (a
   read) before acting again, because something may already exist; `never` the command
   must change.
@@ -77,22 +79,21 @@ in the CLI's `--json` document and in an MCP answer:
 - `--verbose` (MCP: `verbose`) also prints each external call with its scrubbed stderr.
   Values are always masked as `********`.
 
-## Deploys: the user approves, you run exactly that once
+## Deploys: CI or the person runs the sync
 
-Never run `opv sync` on your own. Show the plan (`opv plan <env> --json`, or
-`opv_deployment_plan` with the same targets, product and rotate), then hand the user its `approve_command`:
-`opv approve <plan_id> --sync <env>` (with the same `--target`, `--product`, `--deploy`,
-`--prune` and `--rotate` you will use). They run it in their own terminal. Then run
-`opv sync <env> --approved <plan_id>` with the same flags (MCP: `opv_sync`). It runs that
-plan once, within 15 minutes. `stale_plan`: the item, target or configuration changed;
-show the new plan and ask again. `approval_required`: wait for the user.
+Never run `opv sync` on your own. Show the plan (`opv plan <env> --json`, or `opv_state`
+with `section: plan` and the same targets, product and rotate). CI runs `opv sync <env>
+--expect-plan <id>` with the same flags, and `opv changed` says whether a source item moved
+(exit 10). A person runs the same command in their own terminal, or lets CI do it on change
+and on a schedule. `stale_plan`: the item, target or configuration changed; show the new
+plan and ask again.
 
 ## Self-made secrets
 
 For a key with `base64_bytes` or `hex_bytes` (encryption, session, signing keys), ask the user,
-then run `opv generate <env> <product/KEY>` (with the MCP server, the tool is `opv_generate`):
-the value goes straight into 1Password and is never shown. Never suggest `openssl rand` or
-pasting generated values.
+then propose it with `opv_propose` `kind: generate` (CLI: `opv propose generate <env>
+<product/KEY>`), and have the person run `opv apply <plan_id>`: the value goes straight into
+1Password and is never shown. Never suggest `openssl rand` or pasting generated values.
 
 ## Local secret files and Workers
 
@@ -107,7 +108,7 @@ exports values. For a secret-store app or a Cloudflare Worker, declare
 Never build `op service-account create` commands by hand. Ask the user for the GitHub
 repository and environment their CI job uses, then hand them
 `opv access <env> --target <name> --create --github <owner/repo> --github-env <env>`
-(from `opv_access` or `opv access --json`): it creates the identity and stores its token as
+(from `opv_state` with `section: access`, or `opv access --json`): it creates the identity and stores its token as
 a GitHub secret without showing it.
 
 A validation job (`check`, `plan`, `ready`) uses the environment's read-only reader
@@ -123,26 +124,27 @@ A `pending_revoke` finding means an old identity still reads the vault: once
 ## Pick the flow from `opv ready --json`
 
 - **No configuration yet** (`config_not_found`): there is one form (FR-60). Let
-  `opv init`/`opv add` write `[products.<name>.keys.<KEY>]` (one product for one app, more
-  for a fleet) and a boundary per environment; `opv init` writes no target. Then the user
-  runs `opv bootstrap`, which creates each boundary's vault and item in the selected account
-  and records their IDs, and adds each deploying environment's target with
-  `opv target add <env> <name> --<provider options>`, the one way to add a target (it
-  validates it, creates its state vault and records its placements). Never create a second configuration beside
-  one that exists, and never edit a file whose first line says it is generated: hand the
-  printed IDs to its generator.
+  `opv propose setup` / `opv propose key` write `[products.<name>.keys.<KEY>]` (one product
+  for one app, more for a fleet) and a boundary per environment; a proposal writes no target.
+  Then a person runs `opv apply <plan_id>`, which creates each boundary's vault and item in
+  the selected account and records their IDs, and `opv propose target <env> <name>
+  --<provider options>` declares each deploying environment's target, the one way to add one
+  (it validates the target and its state vault and records its placements). Never create a
+  second configuration beside one that exists, and never edit a file whose first line says
+  it is generated: hand the printed IDs to its generator.
 - **Finding existing projects**: `opv projects --json` lists manifests per 1Password account.
   Use `--account <email or account ID>` (or run it as `opv login --account <a> -- opv projects
   --account <a> --json`) to ask one account. Trust a missing project only when `complete` is
   `true`. An `inventory_incomplete` error (exit 4) or an `accounts[]` entry with `status:
   "failed"` means that account was not read: hand its `next` to the user and wait. Never
   treat an incomplete inventory as permission to create a replacement vault or manifest.
-- **Adding a placement** (a product on another target): `opv ready --json` names a target as
-  `grants_missing` until its deploy credentials, state vault and every boundary it reads can
-  be opened. Declare one with `opv target add <env> <name> --<provider options>` (it asks
-  first and creates the target's state vault). A `state_vault_wider_than_values` load error
-  means a target shares a state vault it cannot read; give it its own by deleting its
-  `state_vault_id` and running `opv bootstrap`.
+- **Adding a placement** (a product on another target): `opv_state` with `section: ready`
+  names a target as `grants_missing` until its deploy credentials, state vault and every
+  boundary it reads can be opened. Declare one with `opv propose target <env> <name>
+  --<provider options>`, then a person's `opv apply` creates the target's state vault. A
+  `state_vault_wider_than_values` load error means a target shares a state vault it cannot
+  read; give it its own by deleting its `state_vault_id` and proposing `opv propose
+  structure`.
 - **A target's deploy credential**: never mint, read, copy or paste one. Have the user run
   `opv target credentials <env> --target <name> --create` in their own terminal; it mints
   the least-privilege credential at the provider, stores it in a new 1Password item and
@@ -153,16 +155,19 @@ A `pending_revoke` finding means an old identity still reads the vault: once
   with `opv account use <ID>`; hand `opv login --add --account <email>` or
   `opv login --account <ID>` to the user, wait, then re-run `opv ready --json`.
 - **`ids_not_in_account`**: the recorded vault is in another account. Ask the user: select
-  that account (`opv account use <ID>`) or rebind (`opv bootstrap --rebind <env>`).
+  that account (`opv account use <ID>`) or rebind (`opv propose structure --rebind <env>`),
+  then `opv apply`.
 - **`key_missing`, `key_empty`, `key_failed_rule`**: the user fills or fixes the value in
-  1Password; give them the finding's `prerequisite` (`opv open <key> --env <env>`). Values that
-  already exist elsewhere: `opv adopt <env> --from <file.env>` shows what would come in;
-  `--apply` (asked first) writes it; `--replace` is the user's decision.
+  1Password; give them the finding's `prerequisite` (`opv open <key> --env <env>`), or they
+  run `opv set <KEY> --env <env>` at a masked prompt. Values that already exist elsewhere:
+  the user runs `opv import <env> --from <file.env>`; `--dry-run` shows what would come in;
+  `--replace` is the user's decision.
 - **Everything saved**: local runs use `opv run <env> --product <p> -- <command>`; deploys go
   `opv plan <env>` then `opv sync <env> --expect-plan <id>` (add `--deploy` only when the user
   wants to deploy). CI secrets in GitHub Actions use a `github` environment and the same sync.
 - **Which keys a local run would deliver, and their roles**: `opv run <env> --preview --json`
-  (or MCP `opv_delivery_preview`) reports each key's source, destination and roles, the keys a
+  (or MCP `opv_state` with `section: delivery_preview`) reports each key's source, destination
+  and roles, the keys a
   role withholds, the environment mode, the secrets-directory variable, file-delivery support
   and the `op`/signed-in prerequisites, without reading a value. Use it to check delivery
   (including `--role`) before the user runs the command.
