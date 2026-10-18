@@ -477,29 +477,42 @@ fn body(document: &Inventory, deliveries: &[DeliveryRow]) -> Result<Value, Error
     Ok(Value::Object(fields))
 }
 
-/// The first wanted key with no value, as the person's `opv set` command: a shared key's
-/// value is entered at its source (FR-45). A personal key is skipped: its value lives in the
-/// person's own item, which `opv set` does not write (FR-55).
+/// The first wanted key without a usable value, as the person's `opv set` command, in the
+/// priority `opv next` ranks them (2-4): an `absent` cell first, then an `empty` one, then a
+/// `placeholder`. An `empty` or `placeholder` cell counts only in a vault this session can
+/// write (walkthrough finding 2), as `opv next` queues it; an `absent` cell counts as
+/// before. A shared key's value is entered at its source (FR-45). A personal key is
+/// skipped: its value lives in the person's own item, which `opv set` does not write
+/// (FR-55).
 fn next_command(document: &Inventory) -> Option<String> {
-    for cell in &document.cells {
-        if cell.state != ValueState::Absent || cell.personal {
-            continue;
-        }
-        let wanted = document
-            .keys
-            .iter()
-            .find(|k| k.product == cell.product && k.key == cell.key)
-            .and_then(|k| k.presence.get(&cell.env))
-            .is_some_and(|p| *p == PresenceView::Present);
-        if wanted {
+    let rank = |cell: &inventory::Cell| match cell.state {
+        ValueState::Absent => Some(2),
+        ValueState::Empty if cell.capability == Capability::Write => Some(3),
+        ValueState::Placeholder if cell.capability == Capability::Write => Some(4),
+        _ => None,
+    };
+    document
+        .cells
+        .iter()
+        .filter(|cell| !cell.personal)
+        .filter(|cell| {
+            document
+                .keys
+                .iter()
+                .find(|k| k.product == cell.product && k.key == cell.key)
+                .and_then(|k| k.presence.get(&cell.env))
+                .is_some_and(|p| *p == PresenceView::Present)
+        })
+        .filter_map(|cell| rank(cell).map(|r| (r, cell)))
+        // `min_by_key` keeps the first of equal ranks: the inventory's stable order.
+        .min_by_key(|(r, _)| *r)
+        .map(|(_, cell)| {
             let label = cell
                 .from
                 .clone()
                 .unwrap_or_else(|| format!("{}/{}", cell.product, cell.key));
-            return Some(format!("opv set {label} --env {}", cell.env));
-        }
-    }
-    None
+            format!("opv set {label} --env {}", cell.env)
+        })
 }
 
 fn state_word(state: &ValueState) -> String {

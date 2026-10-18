@@ -387,6 +387,62 @@ fn an_agent_holds_a_pending_rule_back_from_the_receipt() {
     assert_eq!(r.findings[0].code, "rules_pending_review");
 }
 
+/// Two keys with no rule in `staging`, as a names-only setup declares them.
+fn no_rule_fleet() -> crate::domain::Fleet {
+    crate::config::parse(
+        "[environments.staging]\n\
+         boundaries.app = { vault_id = \"vstg0000000000000000000001\", item_id = \"app\" }\n\
+         [products.app.keys.API_KEY]\n\
+         kind = \"secret\"\n\
+         environments = [\"staging\"]\n\
+         [products.app.keys.SESSION_SECRET]\n\
+         kind = \"secret\"\n\
+         environments = [\"staging\"]\n",
+    )
+    .unwrap()
+}
+
+/// Walkthrough finding 1: an assistant's receipt for keys with no rule, in a checkout with
+/// no committed contract: `API_KEY` is set and `SESSION_SECRET` is empty.
+fn no_rule_receipt_for_an_agent() -> Receipt {
+    let report = account_report();
+    let fleet = no_rule_fleet();
+    let mut envs = vec![env(
+        "staging",
+        None,
+        vec![
+            row("app", "API_KEY", KeyState::Ready, TargetState::Absent),
+            row(
+                "app",
+                "SESSION_SECRET",
+                KeyState::RuleFailed("nonempty", Reason::Fixed("empty")),
+                TargetState::Absent,
+            ),
+        ],
+    )];
+    let gate = RuleGate {
+        agent: true,
+        pending: &|p, k| pending_for_agent(None, &fleet, p, k),
+    };
+    gate_rows(&mut envs, &gate);
+    receipt(&inputs(&report, envs), "0.6.0")
+}
+
+#[test]
+fn an_agent_sees_a_key_with_no_rule_in_its_value_state() {
+    let r = no_rule_receipt_for_an_agent();
+    assert!(r.findings.iter().all(|f| f.code != "rules_pending_review"));
+}
+
+#[test]
+fn an_agents_next_names_the_empty_key_with_no_rule() {
+    let r = no_rule_receipt_for_an_agent();
+    assert_eq!(
+        r.next.map(|n| n.command),
+        Some("opv open app/SESSION_SECRET --env staging".to_string())
+    );
+}
+
 #[test]
 fn source_blocked_row_produces_no_finding() {
     let report = account_report();

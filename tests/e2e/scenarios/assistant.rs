@@ -18,7 +18,7 @@
 //! 5. person `opv apply <plan_id>`: vaults, items, the state vault, the delivery item, the
 //!    empty fields, the bindings and the apply record;
 //! 6. assistant `opv_import_local local .env`;
-//! 7. person `opv import prod --from prod.env` (two of the three production values);
+//! 7. person `opv import prod --from prod.env --confirm prod` (two of the three production values);
 //! 8. assistant `opv_state inventory` (prod): the one value only the person can provide
 //!    (`empty`, capability `write`);
 //! 9. person `opv set app/SESSION_SECRET --env prod`;
@@ -386,7 +386,10 @@ fn walk() -> Walk {
     let import_local = t.mcp("opv_import_local", json!({"env": "local", "file": ".env"}));
 
     // 7. The person imports the production values they have in a file.
-    t.opv(Actor::Person, &["import", "prod", "--from", "prod.env"]);
+    t.opv(
+        Actor::Person,
+        &["import", "prod", "--from", "prod.env", "--confirm", "prod"],
+    );
 
     // 8. What is left: one value only the person can provide.
     t.mcp("opv_state", json!({"section": "inventory", "env": "prod"}));

@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::app::account::Report;
-use crate::app::rule_source::{RuleStatus, rule_source};
+use crate::app::rule_source::{RuleSource, RuleStatus, rule_source};
 use crate::cause::{Cause, EnvName, KeyName, ProductName};
 use crate::domain::plan::RuleGate;
 use crate::domain::{KeyState, Row, TargetState, key_label};
@@ -391,6 +391,23 @@ fn is_finding_state(state: &KeyState) -> bool {
             | KeyState::SourceBlocked
             | KeyState::RulesPendingReview
     )
+}
+
+/// Whether an assistant holds `(product, key)`'s rules back (H1, default 2): only when the
+/// key declares a rule that is not committed on the default branch. Without a readable
+/// committed contract (`source` is `None`) no rule is committed, so every key that declares
+/// one is held. A key with no rule is never pending (walkthrough finding 1): it is
+/// evaluated normally and shows `empty`, `absent` or `set`.
+fn pending_for_agent(
+    source: Option<&RuleSource>,
+    fleet: &crate::domain::Fleet,
+    product: &str,
+    key: &str,
+) -> bool {
+    match source {
+        Some(source) => source.status(fleet, product, key) == RuleStatus::PendingReview,
+        None => crate::app::rule_source::declares_rules(fleet, product, key),
+    }
 }
 
 /// Hold back every uncommitted rule for an assistant (H1, design row `rule-gate`): the
@@ -1065,23 +1082,12 @@ pub fn run_at(
     if crate::host::Host::detect().agent_mode.is_some() {
         let repo = crate::config_store::git_toplevel(r);
         let root = repo.as_deref().unwrap_or(std::path::Path::new("."));
-        match rule_source(r, root, fleet) {
-            Ok(source) => {
-                let gate = RuleGate {
-                    agent: true,
-                    pending: &|p, k| source.status(fleet, p, k) == RuleStatus::PendingReview,
-                };
-                gate_rows(&mut envs, &gate);
-            }
-            // Without a readable committed contract no rule is committed: hold them all.
-            Err(_) => {
-                let gate = RuleGate {
-                    agent: true,
-                    pending: &|_, _| true,
-                };
-                gate_rows(&mut envs, &gate);
-            }
-        }
+        let source = rule_source(r, root, fleet).ok();
+        let gate = RuleGate {
+            agent: true,
+            pending: &|p, k| pending_for_agent(source.as_ref(), fleet, p, k),
+        };
+        gate_rows(&mut envs, &gate);
     }
     let values: Vec<crate::domain::health::EnvValues<'_>> = kept
         .iter()

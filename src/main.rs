@@ -844,6 +844,10 @@ enum Cmd {
         /// Show what would be imported; write nothing.
         #[arg(long)]
         dry_run: bool,
+        /// The environment's name again; required when it sets confirm_env = true or is
+        /// production-tier.
+        #[arg(long, value_name = "ENV", hide_short_help = true)]
+        confirm: Option<String>,
         /// Print one JSON document instead of lines.
         #[arg(long)]
         json: bool,
@@ -4133,6 +4137,7 @@ fn run_other(
             rotate,
             skip,
             dry_run,
+            confirm,
             json,
         } => {
             let fleet = loaded?;
@@ -4143,6 +4148,7 @@ fn run_other(
                 rotate,
                 skip,
                 dry_run,
+                confirm,
                 json,
             };
             opv::app::import::run(&fleet, &env, &opts, r, out)

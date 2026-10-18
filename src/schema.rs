@@ -443,7 +443,7 @@ pub const ALSO_WRITES_1PASSWORD: [&str; 0] = [];
 
 /// What a flag adds to its command's effect: (command, long flag, effect). Every one of
 /// these needs the user's yes for the run.
-pub const FLAG_EFFECTS: [(&str, &str, &str); 14] = [
+pub const FLAG_EFFECTS: [(&str, &str, &str); 15] = [
     ("sync", "deploy", "deploys"),
     ("sync", "prune", "deletes"),
     ("sync", "rotate", "replaces_immutable"),
@@ -458,6 +458,8 @@ pub const FLAG_EFFECTS: [(&str, &str, &str); 14] = [
     ("propose setup", "write", "writes_config"),
     ("import", "replace", "replaces_value"),
     ("import", "rotate", "replaces_immutable"),
+    // §21 P-11: an import into a guarded or production-tier environment, confirmed.
+    ("import", "confirm", "confirms_guarded_environment"),
     // 0.9.0: creates a service account and stores its token as a GitHub secret (the owner,
     // in their own terminal; the token is never shown).
     ("access", "create", "creates_credential"),

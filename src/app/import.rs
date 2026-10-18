@@ -14,7 +14,9 @@ use std::path::PathBuf;
 
 use super::write_err;
 use crate::adapters::{onepassword, onepassword_tidy};
-use crate::cause::{Cause, Cmd, FieldName, Guard, ItemId, NameKind, UsageProblem, VaultId};
+use crate::cause::{
+    Cause, Cmd, EnvName, FieldName, Guard, ItemId, NameKind, UsageProblem, VaultId,
+};
 use crate::domain::convention::{self, KEPT_SECTION, Op, TidyPlan};
 use crate::domain::import::{Action, AdoptPlan};
 use crate::domain::{Boundary, Fleet, Kind, SecretValue, key_label};
@@ -102,6 +104,9 @@ pub struct Opts {
     pub skip: Vec<String>,
     /// Show the plan and write nothing; the default writes (inverted `apply`).
     pub dry_run: bool,
+    /// `--confirm <env>`: the environment's name again, required to write into one with
+    /// `confirm_env = true` or `tier = "production"` (§21 P-11).
+    pub confirm: Option<String>,
     pub json: bool,
 }
 
@@ -194,7 +199,30 @@ pub fn run(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
+    require_confirm(fleet, env_name, opts)?;
     run_tagged(fleet, env_name, opts, None, r, out)
+}
+
+/// §21 P-11 (as `opv sync`'s NR-20 guard): a person's `opv import` into an environment with
+/// `confirm_env = true` or `tier = "production"` writes only with `--confirm <env>`. A
+/// `--confirm` naming another environment is refused whatever the environment (a
+/// wrong-window typo); both refusals come before any call. `--dry-run` writes nothing and
+/// needs no confirmation.
+fn require_confirm(fleet: &Fleet, env_name: &str, opts: &Opts) -> Result<(), Error> {
+    let env = fleet.environment(env_name)?;
+    let guarded = env.confirm_env || env.tier == crate::domain::Tier::Production;
+    match opts.confirm.as_deref() {
+        Some(c) if c != env_name => Err(Cause::ConfirmMismatch {
+            given: c.to_string(),
+            env: EnvName::new(env_name),
+        }
+        .into()),
+        None if guarded && !opts.dry_run => Err(Cause::NeedsConfirm {
+            env: EnvName::new(env_name),
+        }
+        .into()),
+        _ => Ok(()),
+    }
 }
 
 /// [`run`] with `tag` added to every written item's 1Password tags (design row
@@ -496,6 +524,9 @@ fn apply_command(env_name: &str, opts: &Opts) -> Cmd {
         for e in entries {
             args.extend([flag.to_string(), e.clone()]);
         }
+    }
+    if let Some(c) = &opts.confirm {
+        args.extend(["--confirm".to_string(), c.clone()]);
     }
     Cmd {
         command: vec!["import".into()],
