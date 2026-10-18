@@ -3727,7 +3727,7 @@ impl Cause {
                         "run the import yourself in your own terminal: {}",
                         cmd_text(&import)
                     )),
-                    Next::Run(import),
+                    Next::Handoff(import),
                 )
             }
             LocalFileTooOpen {
