@@ -3721,7 +3721,8 @@ impl Cause {
                         },
                         format!("fill {product}/{key} in 1Password for environment {env}"),
                     )),
-                    Next::Run(cmd(
+                    // Only a person fills a value: the item's page is theirs to open.
+                    Next::Handoff(cmd(
                         &["open"],
                         &[&format!("{product}/{key}"), "--env", env.as_str()],
                     )),

@@ -12,7 +12,9 @@
 //! `enter_value`); (3) `empty`, (4) `placeholder` and (5) `malformed` do the same; (6) a
 //! `set` key whose delivery is stale asks for `opv sync` (`run`, CI when the environment is
 //! deployed, else the person); (7) nothing, `none`. An action on a vault whose capability
-//! is `read`, `none` or `unknown` waits on others, with the vault named.
+//! is `read`, `none` or `unknown` waits on others, with the vault named. One command asked
+//! for by several cells is one action naming its keys. A shared key's value is entered at
+//! its source; a personal key's own item is never queued (`opv set` writes the team item).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -52,6 +54,10 @@ pub struct Action {
     pub env: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vault: Option<String>,
+    /// When several cells ask for this same command (`opv sync prod` for seven keys), the
+    /// one action names them all here (`product/KEY`), and `product` and `key` are unset.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<String>,
 }
 
 /// Actions that wait on another session's capability, for one vault.
@@ -141,6 +147,7 @@ pub fn next(inv: &Inventory, signals: &Signals) -> NextDoc {
                         key: None,
                         env: Some(env.env.clone()),
                         vault: None,
+                        keys: Vec::new(),
                     },
                 ));
             }
@@ -165,6 +172,11 @@ pub fn next(inv: &Inventory, signals: &Signals) -> NextDoc {
             }
             _ => continue,
         };
+        // A personal key's value lives in the person's own item (FR-55), which `opv set`
+        // does not write: there is no opv command to queue for it.
+        if rank < 6 && cell.personal {
+            continue;
+        }
         let vault = vault_of(inv, &cell.env, &cell.boundary);
         let action = match rank {
             6 => Action {
@@ -179,16 +191,26 @@ pub fn next(inv: &Inventory, signals: &Signals) -> NextDoc {
                 key: Some(cell.key.clone()),
                 env: Some(cell.env.clone()),
                 vault: vault.clone(),
+                keys: Vec::new(),
             },
-            _ => Action {
-                kind: NextKind::EnterValue,
-                actor: NextActor::Person,
-                command: format!("opv set {}/{} --env {}", cell.product, cell.key, cell.env),
-                product: Some(cell.product.clone()),
-                key: Some(cell.key.clone()),
-                env: Some(cell.env.clone()),
-                vault,
-            },
+            _ => {
+                // A shared key (FR-45) is entered at its source: the field that holds it.
+                let (product, key) = cell
+                    .from
+                    .as_deref()
+                    .and_then(|f| f.split_once('/'))
+                    .unwrap_or((&cell.product, &cell.key));
+                Action {
+                    kind: NextKind::EnterValue,
+                    actor: NextActor::Person,
+                    command: format!("opv set {product}/{key} --env {}", cell.env),
+                    product: Some(product.to_string()),
+                    key: Some(key.to_string()),
+                    env: Some(cell.env.clone()),
+                    vault,
+                    keys: Vec::new(),
+                }
+            }
         };
         if cell.capability == Capability::Write {
             mine.push((rank, action));
@@ -201,11 +223,12 @@ pub fn next(inv: &Inventory, signals: &Signals) -> NextDoc {
     mine.sort_by_key(|(rank, _)| *rank);
     waiting.sort_by_key(|(rank, _)| *rank);
 
-    let next = mine.first().map(|(_, a)| a.clone());
-    let queue = mine.into_iter().skip(1).map(|(_, a)| a).collect();
+    let mine = grouped(mine.into_iter().map(|(_, a)| a));
+    let next = mine.first().cloned();
+    let queue = mine.into_iter().skip(1).collect();
 
     let mut groups: BTreeMap<String, Vec<Action>> = BTreeMap::new();
-    for (_, action) in waiting {
+    for action in grouped(waiting.into_iter().map(|(_, a)| a)) {
         let vault = action
             .vault
             .clone()
@@ -223,6 +246,51 @@ pub fn next(inv: &Inventory, signals: &Signals) -> NextDoc {
         waits_on,
         findings: single_writer(inv, signals),
     }
+}
+
+/// `actions` with each repeated `(kind, actor, command)` folded into its first occurrence:
+/// one entry per command, in first-seen order. A command several cells ask for names each
+/// distinct `product/KEY` in `keys` and no single product or key; a command asked for once
+/// (or by one key twice, a shared key and its source) keeps its own product and key.
+fn grouped(actions: impl Iterator<Item = Action>) -> Vec<Action> {
+    let mut out: Vec<Action> = Vec::new();
+    for action in actions {
+        let label = action
+            .product
+            .as_ref()
+            .zip(action.key.as_ref())
+            .map(|(p, k)| format!("{p}/{k}"));
+        let Some(first) = out.iter_mut().find(|a| {
+            a.kind == action.kind && a.actor == action.actor && a.command == action.command
+        }) else {
+            out.push(action);
+            continue;
+        };
+        if first.keys.is_empty()
+            && let Some(own) = first
+                .product
+                .as_ref()
+                .zip(first.key.as_ref())
+                .map(|(p, k)| format!("{p}/{k}"))
+        {
+            first.keys.push(own);
+        }
+        if let Some(label) = label
+            && !first.keys.contains(&label)
+        {
+            first.keys.push(label);
+        }
+        if first.keys.len() > 1 {
+            first.product = None;
+            first.key = None;
+        } else {
+            first.keys.clear();
+        }
+        if first.vault != action.vault {
+            first.vault = None;
+        }
+    }
+    out
 }
 
 /// The vault id a cell's environment binds its boundary to; `None` while it is unbound.
@@ -271,11 +339,7 @@ fn single_writer(inv: &Inventory, signals: &Signals) -> Vec<Finding> {
                     code: "single_writer",
                     env: env.env.clone(),
                     vault: ids.vault_id.clone(),
-                    message: format!(
-                        "vault {} (environment {}) is deployed and has one writer; a second \
-                         writer is needed for emergencies",
-                        ids.vault_id, env.env
-                    ),
+                    message: crate::domain::access::single_writer_message(&ids.vault_id, &env.env),
                 });
             }
         }
@@ -291,6 +355,7 @@ pub fn render_text(doc: &NextDoc) -> String {
         Some(a) => {
             out.push_str("next: ");
             out.push_str(&a.command);
+            out.push_str(&keys_note(a));
             out.push('\n');
         }
         None => out.push_str("next: none\n"),
@@ -300,6 +365,7 @@ pub fn render_text(doc: &NextDoc) -> String {
         for a in &doc.queue {
             out.push_str("  ");
             out.push_str(&a.command);
+            out.push_str(&keys_note(a));
             out.push('\n');
         }
     }
@@ -312,6 +378,7 @@ pub fn render_text(doc: &NextDoc) -> String {
             for a in &w.actions {
                 out.push_str("    ");
                 out.push_str(&a.command);
+                out.push_str(&keys_note(a));
                 out.push('\n');
             }
         }
@@ -327,6 +394,14 @@ pub fn render_text(doc: &NextDoc) -> String {
         }
     }
     out
+}
+
+/// The keys a grouped action stands for, after its command: `  (7 keys: web/API_KEY, …)`.
+fn keys_note(a: &Action) -> String {
+    if a.keys.is_empty() {
+        return String::new();
+    }
+    format!("  ({} keys: {})", a.keys.len(), a.keys.join(", "))
 }
 
 #[cfg(test)]

@@ -155,6 +155,7 @@ fn a_two_environment_inventory_renders_the_golden_document() {
             ("vdev".to_string(), Capability::Write),
             ("vprod".to_string(), Capability::Read),
         ]),
+        ..CellInputs::default()
     };
     let json = serde_json::to_string_pretty(&build(&fleet(), &cells, None)).expect("serializes");
     assert_eq!(json, GOLDEN);
@@ -170,6 +171,7 @@ fn a_none_capability_vault_takes_the_receipts_state() {
             },
         )]),
         capabilities: BTreeMap::from([("vprod".to_string(), Capability::None)]),
+        ..CellInputs::default()
     };
     let receipt = ReceiptView {
         states: BTreeMap::from([(at("api", "DATABASE_URL", "prod"), ValueState::Set)]),
@@ -190,6 +192,7 @@ fn a_substituted_cell_carries_the_receipts_age() {
     let cells = CellInputs {
         states: BTreeMap::new(),
         capabilities: BTreeMap::from([("vprod".to_string(), Capability::None)]),
+        ..CellInputs::default()
     };
     let receipt = ReceiptView {
         states: BTreeMap::from([(at("api", "STRIPE_KEY", "prod"), ValueState::Empty)]),
@@ -252,6 +255,7 @@ except = { dev = "no dev account" }
     let cells = CellInputs {
         states: BTreeMap::from([(at("api", "SECRET", "dev"), ValueState::Set)]),
         capabilities: BTreeMap::from([("vdev".to_string(), Capability::Write)]),
+        ..CellInputs::default()
     };
     let inventory = build(&fleet, &cells, None);
     let cell = inventory
@@ -284,4 +288,36 @@ fn a_none_capability_vault_without_a_receipt_is_unreadable_never_absent() {
     let inv = build(&fleet, &cells, None);
     let cell = inv.cells.iter().find(|c| c.env == env).unwrap();
     assert!(matches!(cell.state, ValueState::Unreadable { .. }));
+}
+
+/// A key whose explicit `environments` list leaves an environment out (no `except`) is not
+/// declared there: it has no cell to read, rank or fill.
+#[test]
+fn a_key_left_out_of_an_environment_has_no_cell() {
+    let fleet = config::parse(
+        r#"[environments.dev]
+boundaries.core = { vault_id = "vdev", item_id = "idev" }
+
+[environments.prod]
+boundaries.core = { vault_id = "vprod", item_id = "iprod" }
+
+[products.api]
+boundary = "core"
+
+[products.api.keys.OTEL]
+kind = "config"
+environments = ["prod"]
+
+[products.api.keys.KEEP]
+kind = "secret"
+"#,
+    )
+    .expect("the fleet loads");
+    let inventory = build(&fleet, &CellInputs::default(), None);
+    assert!(
+        !inventory
+            .cells
+            .iter()
+            .any(|c| c.key == "OTEL" && c.env == "dev")
+    );
 }

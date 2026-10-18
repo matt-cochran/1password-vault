@@ -67,6 +67,32 @@ pub const PENDING_REVOKE: &str = "pending_revoke";
 /// that one writer's access leaves nobody to fix the tier's values.
 pub const SINGLE_WRITER: &str = "single_writer";
 
+/// Part V, row `access-writers`: a production vault whose readable user list names no
+/// writer at all, so nobody can fix a value (or a delivery receipt) there.
+pub const NO_WRITER: &str = "no_writer";
+
+/// The one wording of a `single_writer` finding, shared by `opv access` and `opv next`.
+pub fn single_writer_message(vault_id: &str, env: &str) -> String {
+    format!(
+        "vault {vault_id} (environment {env}) has only one writer; a deployed tier needs a \
+         second writer to fix a value when the first is unavailable"
+    )
+}
+
+/// The `no_writer` finding for a production vault `vault_id` of `env` whose readable user
+/// list names no writer. `next` is none: only 1Password can add a writer.
+pub fn no_writer(vault_id: &str, env: &str) -> AccessFinding {
+    AccessFinding {
+        code: NO_WRITER,
+        environment: env.to_string(),
+        message: format!(
+            "vault {vault_id} (environment {env}) is a production vault with no writer; \
+             nobody can fix a value there until 1Password gives someone write access"
+        ),
+        next: None,
+    }
+}
+
 /// `users`: Some(parsed JSON array) when the list could be read, None when it could not (not
 /// visible to this person).
 pub fn analyse(
@@ -174,10 +200,7 @@ pub fn findings(envs: &[EnvAccess]) -> Vec<AccessFinding> {
             out.push(AccessFinding {
                 code: SINGLE_WRITER,
                 environment: env.to_string(),
-                message: format!(
-                    "{vault} has only one writer; a deployed tier needs a second writer to fix \
-                     a value when the first is unavailable"
-                ),
+                message: single_writer_message(&access.vault_id, env),
                 next: None,
             });
         }

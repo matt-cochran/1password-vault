@@ -4234,3 +4234,21 @@ fn a_value_missing_after_tidy_is_restored_from_history() {
             .starts_with("restore ")
     );
 }
+
+/// A failed gate asks a person to fill a value (`human_required`): its `next` is the
+/// person's, never the assistant's.
+#[test]
+fn a_gate_failure_fill_is_the_persons_next() {
+    let c = Cause::GateFailed {
+        env: EnvName::new("env-dev"),
+        keys: vec![(
+            ProductName::new("prod-api"),
+            KeyName::new("MY_TOKEN"),
+            "placeholder",
+        )],
+    };
+    assert_eq!(
+        next_kind_actor(&c.step(&inv()).1).1,
+        crate::json::NextActor::Person
+    );
+}

@@ -244,3 +244,100 @@ fn a_set_key_without_a_target_asks_for_no_sync() {
     let doc = crate::app::next::next(&document, &signals);
     assert!(!crate::app::next::render_text(&doc).contains("opv sync"));
 }
+
+/// The state of the `product`/`key` cell in `env` of a gathered inventory.
+fn state_of(
+    document: &crate::domain::inventory::Inventory,
+    product: &str,
+    key: &str,
+    env: &str,
+) -> Option<crate::domain::value_state::ValueState> {
+    document
+        .cells
+        .iter()
+        .find(|c| c.product == product && c.key == key && c.env == env)
+        .map(|c| c.state.clone())
+}
+
+/// A shared key (`from`) has no field of its own: it reads its source's field in the source
+/// product's boundary item, so a set source is a set shared key, never `absent`.
+#[test]
+fn a_shared_key_takes_its_sources_state() {
+    let op = FakeOp::default();
+    let item = op.insert(
+        VAULT,
+        json!({"title": "shared", "fields": [{
+            "id": "f-db", "section": {"id": "s-shared", "label": "shared"},
+            "label": "DATABASE_URL", "type": "CONCEALED", "value": MARK
+        }]}),
+    );
+    let web = op.insert(VAULT, json!({"title": "web", "fields": []}));
+    op.vault_users.borrow_mut().insert(VAULT.into(), json!([]));
+    let fleet = crate::config::parse(&format!(
+        r#"
+[environments.dev]
+boundaries.shared = {{ vault_id = "{VAULT}", item_id = "{item}" }}
+boundaries.web = {{ vault_id = "{VAULT}", item_id = "{web}" }}
+
+[products.shared]
+source_only = true
+boundary = "shared"
+
+[products.shared.keys.DATABASE_URL]
+kind = "secret"
+
+[products.web]
+boundary = "web"
+
+[products.web.keys.DATABASE_URL]
+kind = "secret"
+from = "shared/DATABASE_URL"
+"#
+    ))
+    .unwrap();
+    let document = super::gather(&fleet, None, None, &op, None).unwrap();
+    assert_eq!(
+        state_of(&document, "web", "DATABASE_URL", "dev"),
+        Some(crate::domain::value_state::ValueState::Set)
+    );
+}
+
+/// A personal key is read from the person's own item (FR-55), not the team boundary item
+/// that never holds it: set there, it is `set`.
+#[test]
+fn a_personal_key_is_read_from_the_persons_own_item() {
+    let (op, _, id) = world();
+    op.vaults
+        .borrow_mut()
+        .push(("vpriv0000000000000000000001".into(), "Private".into()));
+    op.insert(
+        "Private",
+        json!({"title": "mine", "category": "SECURE_NOTE", "fields": [{
+            "id": "f-llm", "section": {"id": "s-api", "label": "api"},
+            "label": "LLM_KEY", "type": "CONCEALED", "value": MARK
+        }]}),
+    );
+    let fleet = crate::config::parse(&format!(
+        r#"
+[environments.dev]
+boundaries.core = {{ vault_id = "{VAULT}", item_id = "{id}" }}
+personal_item = "mine"
+
+[products.api]
+boundary = "core"
+
+[products.api.keys.OPENAI_API_KEY]
+kind = "secret"
+
+[products.api.keys.LLM_KEY]
+kind = "secret"
+personal = true
+"#
+    ))
+    .unwrap();
+    let document = super::gather(&fleet, None, None, &op, None).unwrap();
+    assert_eq!(
+        state_of(&document, "api", "LLM_KEY", "dev"),
+        Some(crate::domain::value_state::ValueState::Set)
+    );
+}

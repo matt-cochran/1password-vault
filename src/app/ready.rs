@@ -1127,8 +1127,27 @@ pub fn run_at(
     // `--gate` fails the command (`gate_failed`, exit 8) on present keys that are not in
     // value state `set` or whose delivery evidence is older than the source item now. The
     // receipt is not written when the gate fails: the error names the keys.
+    // Every placeholder value by (env, product, key), of any kind, as `classify` judges it:
+    // the settings health flags secrets only, and a config `changeme` is a placeholder too.
+    let placeholder_values: BTreeSet<(String, String, String)> = kept
+        .iter()
+        .flat_map(|(name, _, fields)| {
+            fields
+                .iter()
+                .filter(|f| crate::domain::health::is_placeholder(f.value.expose()))
+                .map(move |f| (name.clone(), f.section.clone(), f.label.clone()))
+        })
+        .collect();
     if gate
-        && let Some(cause) = gate_failure(fleet, &envs, &health, &versions, &assistant_imported, r)
+        && let Some(cause) = gate_failure(
+            fleet,
+            &envs,
+            &health,
+            &placeholder_values,
+            &versions,
+            &assistant_imported,
+            r,
+        )
     {
         return Err(cause.into());
     }
@@ -1330,8 +1349,14 @@ pub(crate) fn gate_keys(
 ) -> Vec<(String, String, &'static str)> {
     let mut out = Vec::new();
     for row in rows {
+        let placeholder = placeholders.contains(&(row.product.clone(), row.key.clone()));
         let reason = match &row.state {
-            KeyState::Ready if placeholders.contains(&(row.product.clone(), row.key.clone())) => {
+            // A placeholder is `placeholder` whatever rule it also fails, as `classify` (and
+            // so `opv inventory`) reports it: empty, then placeholder, then malformed.
+            KeyState::Ready | KeyState::RulesPendingReview | KeyState::WrongKind if placeholder => {
+                Some("placeholder")
+            }
+            KeyState::RuleFailed(rule, _) if placeholder && *rule != "nonempty" => {
                 Some("placeholder")
             }
             // Rules not committed are not evaluated: the value state is `set` (design row
@@ -1385,12 +1410,13 @@ fn gate_failure(
     fleet: &crate::domain::Fleet,
     envs: &[EnvInput],
     health: &[crate::domain::health::HealthFinding],
+    placeholder_values: &BTreeSet<(String, String, String)>,
     current: &BTreeMap<String, u64>,
     assistant_imported: &BTreeSet<String>,
     r: &dyn crate::runner::CommandRunner,
 ) -> Option<Cause> {
     for env in envs {
-        let placeholders: BTreeSet<(String, String)> = health
+        let mut placeholders: BTreeSet<(String, String)> = health
             .iter()
             .filter(|h| {
                 h.code == crate::domain::health::PLACEHOLDER
@@ -1398,6 +1424,12 @@ fn gate_failure(
             })
             .map(|h| (h.product.clone(), h.key.clone()))
             .collect();
+        placeholders.extend(
+            placeholder_values
+                .iter()
+                .filter(|(e, _, _)| e == &env.name)
+                .map(|(_, p, k)| (p.clone(), k.clone())),
+        );
         let mut keys: Vec<(String, String, &'static str)> = Vec::new();
         match &env.target {
             Some(targets) => {
