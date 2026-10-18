@@ -379,6 +379,29 @@ const CONTRACT_MORE: &str = "\
 Names, kinds, catalog shapes and presence only: never a value, never a 1Password id. Makes
 no 1Password or target call.";
 
+const INVENTORY_QUICK: &str = "\
+Examples:
+  opv inventory                        # every key x environment: state/access
+  opv inventory --env prod --product api
+  opv inventory --json                 # the same as one document";
+
+const INVENTORY_MORE: &str = "\
+Each cell is a value state (set, absent, empty, placeholder, malformed, unreadable,
+not_wanted) and this session's access to the vault: W write, R read, - none, ? unknown.
+Below the matrix: each environment's boundary ids and each placement's delivery state.
+Reads each 1Password item once; never prints a value, a length or a digest.";
+
+const NEXT_QUICK: &str = "\
+Examples:
+  opv next                             # the one action to take now, then the queue
+  opv next --json                      # the same as one document";
+
+const NEXT_MORE: &str = "\
+Priority: bind an unbound boundary (opv apply); then fill an absent, empty, placeholder or
+malformed key (opv set); then sync a set key whose delivery is not current (opv sync). An
+action on a vault this session cannot write is listed under the vault it waits on. A
+deployed vault with one writer is a single_writer finding. Reads like opv inventory.";
+
 const PROPOSE_QUICK: &str = "\
 Examples:
   opv propose key api/STRIPE_KEY --kind secret --env dev,prod
@@ -654,6 +677,28 @@ enum Cmd {
         #[arg(long, value_name = "REF", requires = "relaxations")]
         base: Option<String>,
         /// Print one JSON document (framed) instead of the plain document.
+        #[arg(long)]
+        json: bool,
+    },
+    /// The matrix: every key in every environment, its value state and this session's
+    /// access to its vault, with the 1Password ids and delivery state (never a value).
+    #[command(before_help = INVENTORY_QUICK, after_help = INVENTORY_MORE)]
+    Inventory {
+        /// Only this environment.
+        #[arg(long)]
+        env: Option<String>,
+        /// Only this product.
+        #[arg(long)]
+        product: Option<String>,
+        /// Print one JSON document instead of the matrix.
+        #[arg(long)]
+        json: bool,
+    },
+    /// The one action this session can take next, then the queue, then what waits on
+    /// others, by vault (names and commands only).
+    #[command(before_help = NEXT_QUICK, after_help = NEXT_MORE)]
+    Next {
+        /// Print one JSON document instead of lines.
         #[arg(long)]
         json: bool,
     },
@@ -2311,6 +2356,8 @@ impl Cmd {
             | Cmd::Access { json, .. }
             | Cmd::Needs { json, .. }
             | Cmd::Contract { json, .. }
+            | Cmd::Inventory { json, .. }
+            | Cmd::Next { json }
             | Cmd::Apply { json, .. }
             | Cmd::Set { json, .. }
             | Cmd::Import { json, .. }
@@ -4159,6 +4206,28 @@ fn run_other(
             writeln!(out, "{doc}").map_err(write_err)
         }
         Cmd::Needs { gate, json } => run_needs(&loaded?, gate, json, r, out),
+        // No --receipt (the surface golden has none): cells of vaults this session is not
+        // a member of stay live-absent rather than read from a guessed file.
+        Cmd::Inventory { env, product, json } => opv::app::inventory::run(
+            &loaded?,
+            env.as_deref(),
+            product.as_deref(),
+            r,
+            None,
+            json,
+            out,
+        ),
+        Cmd::Next { json } => {
+            let (document, signals) =
+                opv::app::inventory::gather_for_next(&loaded?, None, None, r, None)?;
+            let doc = opv::app::next::next(&document, &signals);
+            if json {
+                writeln!(out, "{}", doc.document()).map_err(write_err)
+            } else {
+                out.write_all(opv::app::next::render_text(&doc).as_bytes())
+                    .map_err(write_err)
+            }
+        }
         Cmd::Contract {
             env,
             component,
@@ -5269,10 +5338,9 @@ mod tests {
     removed!(check_is_an_unknown_subcommand: "check", "dev");
     removed!(config_describe_is_an_unknown_subcommand: "config", "describe");
 
-    /// The commands of the §25 surface golden this row leaves to later rows: `inventory`
-    /// and `next` (row cli-sweep-b, which needs core-accepted) and `propose tidy` (no tidy
-    /// planner exists yet).
-    const NOT_YET_WIRED: [&str; 3] = ["inventory", "next", "propose tidy"];
+    /// The command of the §25 surface golden no row wires yet: `propose tidy` (no tidy
+    /// planner exists).
+    const NOT_YET_WIRED: [&str; 1] = ["propose tidy"];
 
     /// Design §25.1 (row cli-sweep-a): `opv schema` lists exactly the surface golden's
     /// commands but [`NOT_YET_WIRED`], each with the golden's flags (sorted).
@@ -5513,6 +5581,8 @@ mod tests {
             &["opv", "import", "dev", "--from", ".env", "--json"],
             &["opv", "needs", "--json"],
             &["opv", "contract", "--json"],
+            &["opv", "inventory", "--json"],
+            &["opv", "next", "--json"],
             &["opv", "config", "export", "prod"],
             &["opv", "schema"],
             &["opv", "projects", "--json"],

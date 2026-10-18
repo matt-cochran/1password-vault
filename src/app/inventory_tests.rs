@@ -234,3 +234,13 @@ fn gather_returns_the_read_document() {
         .map(|c| c.state.clone());
     assert_eq!(state, Some(crate::domain::value_state::ValueState::Set));
 }
+
+/// An environment with no target has nothing to sync to, so its `set` key is delivered and
+/// `opv next` never asks for `opv sync` there (rank 6).
+#[test]
+fn a_set_key_without_a_target_asks_for_no_sync() {
+    let (op, fleet, _) = world();
+    let (document, signals) = super::gather_for_next(&fleet, None, None, &op, None).unwrap();
+    let doc = crate::app::next::next(&document, &signals);
+    assert!(!crate::app::next::render_text(&doc).contains("opv sync"));
+}

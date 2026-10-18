@@ -1,0 +1,137 @@
+{
+  "schema_version": 3,
+  "ok": true,
+  "environments": [
+    {
+      "env": "local",
+      "tier": "local",
+      "boundaries": {
+        "core": {
+          "vault_id": "vsmoke",
+          "item_id": "ismoke"
+        }
+      }
+    }
+  ],
+  "keys": [
+    {
+      "product": "api",
+      "key": "API_TOKEN",
+      "kind": "secret",
+      "source": null,
+      "presence": {
+        "local": "present"
+      },
+      "lifecycle": "active",
+      "expires": null
+    },
+    {
+      "product": "api",
+      "key": "APP_NAME",
+      "kind": "config",
+      "source": null,
+      "presence": {
+        "local": "present"
+      },
+      "lifecycle": "active",
+      "expires": null
+    },
+    {
+      "product": "api",
+      "key": "DEPLOY_TOKEN",
+      "kind": "secret",
+      "source": "shared/DEPLOY_TOKEN",
+      "presence": {
+        "local": "present"
+      },
+      "lifecycle": "active",
+      "expires": null
+    },
+    {
+      "product": "api",
+      "key": "OPENAI_API_KEY",
+      "kind": "secret",
+      "source": null,
+      "presence": {
+        "local": "present"
+      },
+      "lifecycle": "active",
+      "expires": null
+    },
+    {
+      "product": "shared",
+      "key": "DEPLOY_TOKEN",
+      "kind": "secret",
+      "source": null,
+      "presence": {
+        "local": "present"
+      },
+      "lifecycle": "active",
+      "expires": null
+    }
+  ],
+  "cells": [
+    {
+      "product": "api",
+      "key": "API_TOKEN",
+      "env": "local",
+      "boundary": "core",
+      "state": {
+        "state": "set"
+      },
+      "capability": "write",
+      "from_receipt": null
+    },
+    {
+      "product": "api",
+      "key": "APP_NAME",
+      "env": "local",
+      "boundary": "core",
+      "state": {
+        "state": "set"
+      },
+      "capability": "write",
+      "from_receipt": null
+    },
+    {
+      "product": "api",
+      "key": "DEPLOY_TOKEN",
+      "env": "local",
+      "boundary": "core",
+      "state": {
+        "state": "set"
+      },
+      "capability": "write",
+      "from_receipt": null
+    },
+    {
+      "product": "api",
+      "key": "OPENAI_API_KEY",
+      "env": "local",
+      "boundary": "core",
+      "state": {
+        "state": "absent"
+      },
+      "capability": "write",
+      "from_receipt": null
+    },
+    {
+      "product": "shared",
+      "key": "DEPLOY_TOKEN",
+      "env": "local",
+      "boundary": "core",
+      "state": {
+        "state": "set"
+      },
+      "capability": "write",
+      "from_receipt": null
+    }
+  ],
+  "deliveries": [],
+  "next": {
+    "kind": "enter_value",
+    "actor": "person",
+    "command": "opv set api/OPENAI_API_KEY --env local"
+  },
+  "do": null
+}

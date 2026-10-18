@@ -6,13 +6,14 @@
 //! leaves the read. Text and JSON render the same document; the JSON is the schema-3
 //! envelope (`json::finish`) with a typed `next`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::Path;
 
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use super::next::Signals;
 use crate::adapters::{onepassword, onepassword_init, onepassword_tidy};
 use crate::cause::{Cause, FieldRule, InputKind, LocalOp, Location};
 use crate::domain::Fleet;
@@ -88,6 +89,81 @@ pub fn gather(
     r: &dyn CommandRunner,
     receipt: Option<&Path>,
 ) -> Result<Inventory, Error> {
+    read(fleet, env, product, r, receipt).map(|(document, _)| document)
+}
+
+/// [`gather`] and the [`Signals`] `opv next` ranks with: the cells whose delivery evidence
+/// is current and each vault's writer count, from the same reads (each vault's user list
+/// once). A cell no target of its environment delivers counts as delivered: there is
+/// nothing to `opv sync` it to, so a `set` key there is done (rank 6 never asks for it).
+pub fn gather_for_next(
+    fleet: &Fleet,
+    env: Option<&str>,
+    product: Option<&str>,
+    r: &dyn CommandRunner,
+    receipt: Option<&Path>,
+) -> Result<(Inventory, Signals), Error> {
+    let (document, writers) = read(fleet, env, product, r, receipt)?;
+    let deliveries = delivery_rows(&scoped(fleet, env), product, r);
+    let delivered = delivered_cells(fleet, &document, &deliveries);
+    Ok((document, Signals { delivered, writers }))
+}
+
+/// The cells whose every delivering target holds a receipt for the cell's product; a cell
+/// that no target of its environment delivers is delivered (vacuously: nothing to sync).
+fn delivered_cells(
+    fleet: &Fleet,
+    document: &Inventory,
+    deliveries: &[DeliveryRow],
+) -> BTreeSet<(String, String, String)> {
+    document
+        .cells
+        .iter()
+        .filter(|cell| {
+            let Some(environment) = fleet.environments.get(&cell.env) else {
+                return false;
+            };
+            environment
+                .targets
+                .keys()
+                .filter(|target| fleet.delivers(&cell.env, target, &cell.product))
+                .all(|target| {
+                    deliveries.iter().any(|d| {
+                        d.environment == cell.env
+                            && &d.target == target
+                            && d.product == cell.product
+                            && d.state == "delivered"
+                    })
+                })
+        })
+        .map(|cell| (cell.product.clone(), cell.key.clone(), cell.env.clone()))
+        .collect()
+}
+
+/// The number of writers (`allow_editing`) a vault's user list names; `None` when the list
+/// was refused or is not an array (the vault is then not judged).
+fn writer_count(users: Option<&Value>) -> Option<usize> {
+    let entries = users?.as_array()?;
+    Some(
+        entries
+            .iter()
+            .filter(|user| {
+                user.get("permissions")
+                    .and_then(Value::as_array)
+                    .is_some_and(|p| p.iter().any(|p| p.as_str() == Some("allow_editing")))
+            })
+            .count(),
+    )
+}
+
+/// The reads behind [`gather`]: the document, and each read vault's writer count.
+fn read(
+    fleet: &Fleet,
+    env: Option<&str>,
+    product: Option<&str>,
+    r: &dyn CommandRunner,
+    receipt: Option<&Path>,
+) -> Result<(Inventory, BTreeMap<String, usize>), Error> {
     if let Some(name) = env {
         fleet.environment(name)?;
     }
@@ -107,8 +183,12 @@ pub fn gather(
         }
     }
     let me = onepassword_init::session_user(r, &Host::detect);
+    let mut writers = BTreeMap::new();
     for vault_id in vaults {
         let users = onepassword_init::vault_users(r, &vault_id, &Host::detect)?;
+        if let Some(count) = writer_count(users.as_ref()) {
+            writers.insert(vault_id.clone(), count);
+        }
         let capability = match me.as_deref() {
             Some(user) => capability::classify(users.as_ref(), user),
             None => Capability::Unknown {
@@ -128,7 +208,7 @@ pub fn gather(
         document.keys.retain(|k| k.product == name);
         document.cells.retain(|c| c.product == name);
     }
-    Ok(document)
+    Ok((document, writers))
 }
 
 /// The committed-rule source, as `ready` reads it: `Manifest` when the contract is in

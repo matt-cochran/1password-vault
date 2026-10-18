@@ -1234,6 +1234,22 @@ mod cases {
         .mcp("opv_changed", json!({"environment": "prod"}))
     }
 
+    // 0.12.0 inspect commands (row cli-sweep-b); no MCP tool of theirs exists yet.
+
+    /// `opv inventory` of an undeclared environment: refused before any item is read.
+    pub fn inventory_not_declared() -> Case {
+        case(Scenario::new(), &["inventory", "--env", "nope"])
+    }
+
+    /// `opv next` when 1Password refuses the vault user list as signed out: the read stops
+    /// with the sign-in error, never a guessed capability.
+    pub fn next_signed_out() -> Case {
+        case(
+            Scenario::new().faults(&fault("op", "vault user list", "signed_out")),
+            &["next"],
+        )
+    }
+
     /// A relative `kubernetes.secrets_dir`: refused by the loader before anything is written.
     pub fn declare_target_secrets_dir_invalid() -> Case {
         case(
@@ -1708,6 +1724,8 @@ scenarios! {
         signed_out_access => NotSignedIn,
         changed_not_declared => NotDeclared,
         changed_signed_out => NotSignedIn,
+        inventory_not_declared => NotDeclared,
+        next_signed_out => NotSignedIn,
         declare_target_secrets_dir_invalid => ConfigProposalInvalid,
         k8s_mount_unreadable => MountUnreadable,
         k8s_mount_path_in_use => Guard,
