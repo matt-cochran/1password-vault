@@ -708,13 +708,13 @@ Every command that takes `--json` — `inventory`, `needs`, `contract`, `ready`,
 }
 ```
 
-`schema_version` is `3` since 0.12.0. `next` is a typed object `{kind, actor, command}` everywhere, so no client reads free text to decide an action. `kind` is a closed set: `run`, `apply`, `enter_value`, `authorize`, `wait_ci`, `none`. `actor` is a closed set: `assistant`, `person`, `ci`. `command` is the exact command to run, or `null`. An assistant may run a `next` whose `actor` is `assistant` or `ci` itself; a `person` action is handed to the user, and `none` is nothing to run. A command that runs as typed is `kind: run` and `actor: assistant`; a change a person applies is `kind: apply`; typing a value is `enter_value`; a sign-in is `authorize`; waiting for CI is `wait_ci`.
+`schema_version` is `3` since 0.12.0. `next` is a typed object `{kind, actor, command}` everywhere, so no client reads free text to decide an action. `kind` is a closed set: `run`, `apply`, `enter_value`, `authorize`, `wait_ci`, `none`. `actor` is a closed set: `assistant`, `person`, `ci`. `command` is the exact command to run, or `null`. An assistant runs a `next` itself only when its `actor` is `assistant`; a `person` action is handed to the user and a `ci` action is left to CI, and `none` is nothing to run. A command that runs as typed is `kind: run` and `actor: assistant`; a change a person applies is `kind: apply`; typing a value is `enter_value`; a sign-in is `authorize`; waiting for CI is `wait_ci`.
 
 A failure after the command produced its document (findings, exit 8) keeps that document's fields between `exit_code` and `next`. `config export <ENV>` (and `config export --json`) prints the bare document on success and the failure document on failure. Usage errors (`--json` with an unknown flag) print the failure document with code `usage`.
 
 The `error` object is the same for every failure: `code`, `category`, `message`, `subject` (the typed names and IDs the message was filled from), `evidence` (`checked`: the call opv made; `account`: the 1Password account it ran in; `upstream`: the tool's scrubbed reply, always marked `"untrusted": true`), `retry`, `human_required`, `do` and `next` (the same typed object). Each field is described in [the failure document](how-opv-handles-failures.md#the-failure-document). The MCP server returns exactly this object as `{"ok": false, "error": {…}}`; only a re-run is worded differently there (`call <tool> again`).
 
-`retry` says whether to run the same command again: `safe` (now; nothing is known to be broken), `after_fix` (once `do` is done), `check_first` (something may already exist: run `next`, a read, before acting again) or `never` (the command itself must change: run `next`). `human_required` is `true` when only a person can take the next step; an assistant then hands `do` and `next` to the user instead of acting. `next.kind` says what the next step is and `next.actor` who may run it: an assistant may run an `assistant` or `ci` action itself and hands a `person` action to the user; `none` means there is nothing to run. A client reads the pair, never `command`, to decide who acts.
+`retry` says whether to run the same command again: `safe` (now; nothing is known to be broken), `after_fix` (once `do` is done), `check_first` (something may already exist: run `next`, a read, before acting again) or `never` (the command itself must change: run `next`). `human_required` is `true` when only a person can take the next step; an assistant then hands `do` and `next` to the user instead of acting. `next.kind` says what the next step is and `next.actor` who may run it: an assistant runs an `assistant` action itself, hands a `person` action to the user and leaves a `ci` action to CI; `none` means there is nothing to run. A client reads the pair, never `command`, to decide who acts.
 
 `code` is one of a closed list. Every failure has exactly one; an external failure opv cannot diagnose is `unrecognized_failure`, never a guess. A row with two values (`4/5`, `after_fix/never`) is a code whose causes differ in that column; the document always carries the one that applies:
 
@@ -725,6 +725,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `account_required` | 2 | after_fix | yes | several 1Password accounts are on this machine and none is chosen for this project; a person picks one with opv login --account |
 | `already_declared` | 2 | never | no | the name is already declared |
 | `ambiguous_name` | 2 | never | no | the name matches more than one declared name |
+| `bindings_unapplied` | 2 | after_fix | yes | the committed secrets.bindings.toml is not the one the last opv apply wrote; a person runs opv apply |
 | `boundary_missing` | 2 | after_fix | no | a product has a key desired in an environment whose boundary (vault and item) is not recorded |
 | `choice_required` | 2 | never | yes | the command needs a flag to choose between several candidates |
 | `config_changed` | 2 | safe | no | the configuration changed while opv was editing it; nothing was written and re-running is safe |
@@ -802,6 +803,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `target_not_signed_in` | 7 | after_fix | yes | not signed in to the target CLI |
 | `delivery_unverified` | 8 | after_fix | yes | a placement no longer holds what opv delivered, or could not be checked |
 | `findings` | 8 | after_fix | yes | keys are missing or failing a rule (values are filled in 1Password by a person) |
+| `gate_failed` | 8 | after_fix | yes | ready --gate found present keys that are not in value state set or whose delivery evidence is older than the item; a person fills or re-delivers them |
 | `target_drift` | 8 | after_fix | no | a pinned target no longer holds the version 1Password records (drift); opv sync restores it |
 | `budget_spent` | 9 | after_fix/check_first | no | the run's --timeout budget was spent |
 | `create_outcome_unknown` | 9 | check_first/safe | no/yes | a create may or may not have happened; find it before creating again |
