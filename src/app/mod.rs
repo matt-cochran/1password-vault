@@ -59,6 +59,7 @@ pub(crate) mod preflight;
 #[cfg(test)]
 #[path = "product_flag_tests.rs"]
 mod product_flag_tests;
+pub mod propose;
 pub mod ready;
 pub mod receipt_age;
 pub mod remote_delivery;

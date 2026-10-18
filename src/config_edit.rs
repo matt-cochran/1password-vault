@@ -31,6 +31,17 @@ pub struct NewKey<'a> {
     pub personal: bool,
     /// `allow_same_value = true` (#92).
     pub allow_same_value: bool,
+    /// `except = { <env> = "<reason>" }`: environments the key is present in but needs no
+    /// value in (Part V, `presence`), in the order given.
+    pub except: &'a [(String, String)],
+    /// `source = "person" | "generated" | "derived"`.
+    pub source: Option<&'a str>,
+    /// A catalog shape name: its `Rules` are written as `rules = { … }`.
+    pub shape: Option<&'a str>,
+    /// `expires = "<date>"`.
+    pub expires: Option<&'a str>,
+    /// `lifecycle = "active" | "retiring" | "retired"`.
+    pub lifecycle: Option<&'a str>,
 }
 
 /// A parsed `secrets.toml` that keeps its formatting.
@@ -168,18 +179,37 @@ impl ConfigDoc {
                 .ok_or_else(|| layout_error(source.clone(), &path.join(".")))?;
         }
         let inline = t.iter().any(|(_, v)| v.is_inline_table());
-        let mut fields: Vec<(&str, Value)> = vec![
-            ("kind", Value::from(k.kind)),
-            ("environments", env_array(k.environments)),
-        ];
-        if !k.rules.is_empty() {
-            let mut rules: InlineTable = k
-                .rules
+        let mut fields: Vec<(&str, Value)> = vec![("kind", Value::from(k.kind))];
+        // An empty list means every environment: write no `environments` line at all.
+        if !k.environments.is_empty() {
+            fields.push(("environments", env_array(k.environments)));
+        }
+        if !k.except.is_empty() {
+            let mut except: InlineTable = k
+                .except
                 .iter()
-                .map(|(n, v)| (n.as_str(), v.clone()))
+                .map(|(env, reason)| (env.as_str(), reason.as_str()))
                 .collect();
-            rules.fmt();
-            fields.push(("rules", Value::InlineTable(rules)));
+            except.fmt();
+            fields.push(("except", Value::InlineTable(except)));
+        }
+        // A shape's catalog rules, then any explicit `--rule` (which wins on a clash).
+        let mut rules: Vec<(String, Value)> = k.shape.map(shape_rules).unwrap_or_default();
+        rules.extend(k.rules.iter().cloned());
+        if !rules.is_empty() {
+            let mut table: InlineTable =
+                rules.iter().map(|(n, v)| (n.as_str(), v.clone())).collect();
+            table.fmt();
+            fields.push(("rules", Value::InlineTable(table)));
+        }
+        if let Some(source) = k.source {
+            fields.push(("source", Value::from(source)));
+        }
+        if let Some(expires) = k.expires {
+            fields.push(("expires", Value::from(expires)));
+        }
+        if let Some(lifecycle) = k.lifecycle {
+            fields.push(("lifecycle", Value::from(lifecycle)));
         }
         if k.immutable {
             fields.push(("immutable", Value::from(true)));
@@ -213,6 +243,23 @@ impl ConfigDoc {
         } else {
             Err(layout_error(source, &path.join(".")))
         }
+    }
+
+    /// Set `lifecycle` on the declared key (the retirement proposal's only edit).
+    pub fn set_key_lifecycle(
+        &mut self,
+        product: &str,
+        key: &str,
+        lifecycle: &str,
+    ) -> Result<(), Error> {
+        let source = self.source();
+        let mut path = keys_path(product);
+        path.push(key);
+        let t = self
+            .table_at_mut(&path)
+            .ok_or_else(|| layout_error(source, &path.join(".")))?;
+        t.insert("lifecycle", Item::Value(Value::from(lifecycle)));
+        Ok(())
     }
 
     /// Append `env` to the declared key's `environments`, keeping the array's style.
@@ -309,6 +356,34 @@ fn env_array(envs: &[String]) -> Value {
     let mut a: Array = envs.iter().map(String::as_str).collect();
     a.fmt();
     Value::Array(a)
+}
+
+/// The `rules` entries a catalog shape names: its [`crate::domain::Rules`] with the fields
+/// left at their default omitted. An unknown shape has no rules (the caller reports it).
+fn shape_rules(name: &str) -> Vec<(String, Value)> {
+    let Some(shape) = crate::domain::catalog::lookup(name) else {
+        return Vec::new();
+    };
+    let Ok(default) = toml::Value::try_from(crate::domain::Rules::default()) else {
+        return Vec::new();
+    };
+    let Ok(value) = toml::Value::try_from(&shape.rules) else {
+        return Vec::new();
+    };
+    let (toml::Value::Table(default), toml::Value::Table(mut value)) = (default, value) else {
+        return Vec::new();
+    };
+    value.retain(|k, v| default.get(k) != Some(v));
+    let Ok(text) = toml::to_string(&toml::Value::Table(value)) else {
+        return Vec::new();
+    };
+    let Ok(frag) = text.parse::<DocumentMut>() else {
+        return Vec::new();
+    };
+    frag.as_table()
+        .iter()
+        .filter_map(|(k, v)| v.clone().into_value().ok().map(|v| (k.to_string(), v)))
+        .collect()
 }
 
 /// A table moved from another document takes its place from where it is inserted.
@@ -420,6 +495,11 @@ mod tests {
             from: None,
             personal: false,
             allow_same_value: false,
+            except: &[],
+            source: None,
+            shape: None,
+            expires: None,
+            lifecycle: None,
         }
     }
 
