@@ -112,6 +112,10 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "NeedsUndeclared",
         "opv needs has no CLI surface yet (rows cli-sweep, e2e-coverage)",
     ),
+    (
+        "BindingsUnapplied",
+        "the e2e world has no apply record until opv apply lands (rows apply-core, e2e-coverage)",
+    ),
 ];
 
 fn snapshots() -> PathBuf {
