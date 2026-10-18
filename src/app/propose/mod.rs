@@ -6,6 +6,7 @@
 //! contract file, and only when a caller asks it to.
 
 pub mod key;
+pub mod setup;
 pub mod structure;
 pub mod target;
 
