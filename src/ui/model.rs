@@ -274,7 +274,10 @@ impl Snapshot {
                 message: f.message,
             })
             .collect();
-        self.next = ready.next.map(|n| (n.actor, n.command));
+        // A personal key's step has no command (FR-55): nothing for `n` to run.
+        self.next = ready
+            .next
+            .and_then(|n| n.command.map(|command| (n.actor, command)));
     }
 
     /// One environment's rows. With several targets a key has one row per target; its cell

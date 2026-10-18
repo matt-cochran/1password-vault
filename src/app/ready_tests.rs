@@ -442,7 +442,7 @@ fn an_agent_sees_a_key_with_no_rule_in_its_value_state() {
 fn an_agents_next_names_the_empty_key_with_no_rule() {
     let r = no_rule_receipt_for_an_agent();
     assert_eq!(
-        r.next.map(|n| n.command),
+        r.next.and_then(|n| n.command),
         Some("opv open app/SESSION_SECRET --env staging".to_string())
     );
 }
@@ -622,7 +622,7 @@ fn next_prefers_the_first_blocking_finding() {
     )];
     let r = receipt(&inputs(&report, envs), "0.6.0");
     assert_eq!(
-        r.next.as_ref().map(|n| n.command.as_str()),
+        r.next.as_ref().and_then(|n| n.command.as_deref()),
         Some("opv open api/STRIPE_KEY --env staging")
     );
 }
@@ -970,15 +970,28 @@ fn an_empty_personal_keys_step_names_the_field_to_fill_in_the_persons_own_item()
     );
 }
 
+/// Schema 3: a personal key's step is no command, so its typed `next` is `enter_value`
+/// for the person with a null `command` (never `apply`, which means `opv apply`).
 #[test]
-fn a_personal_keys_next_step_is_its_own_item_never_opv_open() {
+fn a_personal_key_missing_documents_next_is_enter_value_with_a_null_command() {
+    let r = personal_receipt(KeyState::Missing);
+    let body = serde_json::to_vec(&r).unwrap();
+    let doc: serde_json::Value =
+        serde_json::from_slice(&crate::json::finish(&body, Ok(()), false)).unwrap();
+    assert_eq!(
+        doc["next"],
+        serde_json::json!({"kind": "enter_value", "actor": "person", "command": null})
+    );
+}
+
+#[test]
+fn the_text_next_line_shows_a_personal_keys_step() {
     let r = personal_receipt(KeyState::Missing);
     assert!(
-        r.next
-            .as_ref()
-            .is_some_and(|n| !n.command.contains("opv open")),
-        "{:?}",
-        r.next
+        text(&r)
+            .contains("Next (owner): in your own 1Password vault (Private, Employee or Personal)"),
+        "{}",
+        text(&r)
     );
 }
 
@@ -1296,7 +1309,7 @@ fn a_state_vault_grants_missing_next_is_access_with_the_target() {
         "0.6.0",
     );
     assert_eq!(
-        r.next.as_ref().map(|n| n.command.as_str()),
+        r.next.as_ref().and_then(|n| n.command.as_deref()),
         Some("opv access staging --target web")
     );
 }

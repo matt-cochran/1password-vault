@@ -213,11 +213,26 @@ pub struct Finding {
 }
 
 /// The first step: the actor and the command of the first blocking finding, else of the
-/// first finding.
+/// first finding. A personal key's step (FR-55) is no command: it is `enter_value` with a
+/// null `command`, and the person reads the step in the finding's `prerequisite`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Next {
+    /// The schema-3 kind when the actor alone does not give it (`enter_value` for a
+    /// personal key); omitted otherwise, so the typed `next` derives it from the actor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<crate::json::NextKind>,
     pub actor: String,
-    pub command: String,
+    /// The command to run; `None` for a personal key's step, which is no command.
+    pub command: Option<String>,
+    /// The finding's step as the text output shows it; never serialized.
+    #[serde(skip)]
+    pub step: String,
+}
+
+/// Whether `code` is a personal key's finding (FR-55): its step is in the person's own
+/// item, never a command.
+fn is_personal_step(code: &str) -> bool {
+    matches!(code, "personal_key_missing" | "personal_key_empty")
 }
 
 /// The FR-51 document.
@@ -283,9 +298,14 @@ fn receipt_with(
         .iter()
         .find(|f| f.blocking)
         .or_else(|| findings.first())
-        .map(|f| Next {
-            actor: f.actor.clone(),
-            command: f.prerequisite.clone(),
+        .map(|f| {
+            let personal = is_personal_step(&f.code);
+            Next {
+                kind: personal.then_some(crate::json::NextKind::EnterValue),
+                actor: f.actor.clone(),
+                command: (!personal).then(|| f.prerequisite.clone()),
+                step: f.prerequisite.clone(),
+            }
         });
     let receipt_id = receipt_id(&config, &account, &matrix, &findings);
     let environments = inputs
@@ -887,7 +907,8 @@ pub fn render_text(r: &Receipt, out: &mut dyn Write) -> Result<(), Error> {
         }
     }
     if let Some(n) = &r.next {
-        writeln!(out, "Next ({}): {}", n.actor, n.command).map_err(super::write_err)?;
+        let step = n.command.as_deref().unwrap_or(&n.step);
+        writeln!(out, "Next ({}): {step}", n.actor).map_err(super::write_err)?;
     }
     Ok(())
 }
