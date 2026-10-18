@@ -2,6 +2,7 @@
 //! the public interface: one fleet fixture with a `shared` source-only product whose
 //! `FLY_API_TOKEN` feeds `api` and `web` with `from`, on a Fly fleet environment.
 //! Synthetic values only; every value carries `FIXTUREVALUE`.
+#![cfg(feature = "fake")]
 
 use std::collections::BTreeSet;
 
