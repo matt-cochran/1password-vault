@@ -574,12 +574,13 @@ fn build(
             continue;
         }
         // 07.10: the environment is the environment, and the vault is named on its own.
-        let access = analyse(
+        let mut access = analyse(
             need.name,
             vault,
-            deployed,
+            false,
             observations.get(*vault).and_then(|o| o.as_ref()),
         );
+        access.deployed_tier = deployed;
         // Part V, row `access-writers`: the tier marking, this session's capability and who
         // 1Password reports can write the vault. Names stay out of the text output.
         vaults.push(VaultAccess {

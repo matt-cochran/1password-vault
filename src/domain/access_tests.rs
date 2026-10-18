@@ -23,6 +23,7 @@ fn visible(environment: &str, deployed: bool, readers: Vec<Reader>) -> EnvAccess
         environment: environment.into(),
         vault_id: "v1".into(),
         deployed,
+        deployed_tier: false,
         visible: true,
         people: 0,
         guests: 0,

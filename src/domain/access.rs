@@ -33,6 +33,10 @@ pub struct EnvAccess {
     pub environment: String,
     pub vault_id: String,
     pub deployed: bool,
+    /// The environment is a deployed tier (shared or production), so the vault needs a
+    /// second writer (row `access-writers`). Separate from `deployed`, which gates the CI
+    /// reader finding.
+    pub deployed_tier: bool,
     pub visible: bool,
     pub people: usize,
     pub guests: usize,
@@ -75,6 +79,7 @@ pub fn analyse(
         environment: environment.to_string(),
         vault_id: vault_id.to_string(),
         deployed,
+        deployed_tier: false,
         visible: false,
         people: 0,
         guests: 0,
@@ -165,7 +170,7 @@ pub fn findings(envs: &[EnvAccess]) -> Vec<AccessFinding> {
         }
         // Correction 17: a deployed-tier vault needs a second writer to fix a value when
         // the first is unavailable. `next` is none: only 1Password can add a writer.
-        if access.deployed && access.writers.len() == 1 {
+        if access.deployed_tier && access.writers.len() == 1 {
             out.push(AccessFinding {
                 code: SINGLE_WRITER,
                 environment: env.to_string(),

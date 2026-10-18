@@ -161,3 +161,7 @@ Signed: Matthew Cochran (by decision, recorded by Claude) Date: 2026-10-16
 ## 0.12.0 interim: schema 3 (v0120/integrate, 2026-10-18)
 
 530 snapshots were regenerated after `next-envelope` (schema 3) and `bindings-load` merged. The manager checked the whole diff mechanically: with the `next` field, `next_kind` and `schema_version` removed from both sides, every changed line pairs with an unchanged one, except two added error-code lines (`person_only`, `value_in_text_field`) from new catalog causes. So the only changes are `schema_version` 2 → 3, `next` becoming the typed `{kind, actor, command}` object, and `next_kind` leaving the error document. The full e2e review of the new 0.12.0 documents belongs to `e2e-coverage`.
+
+## 0.12.0 interim: access writers (2026-10-18)
+
+Ten `access__…` matrix cells changed after `capability`/`access-writers`: the JSON gains the per-vault `vaults` list (tier marking, capability, writers), and the `op whoami` fault cells show its retries because access now reads `op whoami` for the capability. A first regeneration also showed a dormant `no_ci_reader` finding repeated per vault; that was a regression (the `deployed` flag was reused for the second-writer check) and is fixed with a separate `deployed_tier` flag before these snapshots were taken.
