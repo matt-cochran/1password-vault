@@ -744,6 +744,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `needs_undeclared` | 2 | after_fix | no | the code reads names the contract declares nowhere and the default branch does not declare either |
 | `no_target` | 2 | never | no | the environment has no deployment target (run-only) |
 | `nothing_in_scope` | 2 | never | no | nothing in the environment matches the scope the command was given |
+| `retire_still_read` | 2 | after_fix | no | the deployed code still reads a key a person asked to retire, or no receipt records the deployed revision |
 | `source_only` | 2 | never | no | the product is source-only: it holds shared values for other products' keys and is never run, checked or planned on its own |
 | `state_vault_missing` | 2 | after_fix | no | a target has no state vault recorded for its delivery evidence |
 | `state_vault_wider_than_values` | 2 | after_fix | no | a state vault shared by targets could be readable more widely than the values its evidence describes; a person gives one target its own |
