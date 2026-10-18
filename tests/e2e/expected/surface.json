@@ -760,6 +760,16 @@
                 "pattern": "^[a-z][a-z0-9-]*$",
                 "type": "string"
               },
+              "options": {
+                "additionalProperties": {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                "propertyNames": {
+                  "pattern": "^[a-z][a-z0-9-]*$"
+                },
+                "type": "object"
+              },
               "products": {
                 "items": {
                   "pattern": "^[a-z][a-z0-9-]*$",

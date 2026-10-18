@@ -201,9 +201,10 @@ pub struct Target {
 
 /// Declare a new target in the configuration at `path`, without its state vault: the
 /// approved structural plan creates the state vault and delivery items and records their
-/// IDs. An existing target is never changed. True when the file changed.
+/// IDs. An existing target is never changed. True when the file changed. The edit itself
+/// is [`super::propose::target`]'s, so one builder serves `opv propose target` and this
+/// declaration.
 pub fn target(r: &dyn CommandRunner, path: &Path, t: &Target) -> Result<bool, Error> {
-    use super::target_cmd;
     if !crate::config::is_target_name(&t.name) {
         return Err(format_error("the target name", NAME_FORMAT));
     }
@@ -218,35 +219,16 @@ pub fn target(r: &dyn CommandRunner, path: &Path, t: &Target) -> Result<bool, Er
     if env.targets.contains_key(&t.name) {
         return Ok(false);
     }
-    let args = target_cmd::AddArgs {
+    let spec = super::propose::target::TargetSpec {
         env: t.environment.clone(),
         name: t.name.clone(),
         provider: t.provider.clone(),
         fields: t.fields.clone(),
         products: t.products.clone(),
         roles: t.roles.clone(),
-        ..Default::default()
+        deploy_credentials: None,
     };
-    let (provider, values) = target_cmd::provider_and_values(&args)?;
-    let section = provider
-        .init_section(&values)
-        .ok_or_else(|| target_add(&t.environment, &t.name))?;
-    let products = target_cmd::checked_products(&fleet, &t.products)?;
-    let body = target_cmd::target_table(
-        &t.environment,
-        &t.name,
-        &section,
-        &products,
-        &t.roles,
-        None,
-        None,
-        &[],
-    );
-    let comment = format!(
-        "# deploy target {} in {}; declared through opv's MCP tools (its state vault comes from the approved structural plan)",
-        t.name, t.environment
-    );
-    let text = target_cmd::insert_target(&base.text, &t.environment, &t.name, &body, &comment)?;
+    let text = super::propose::target::target_text(&base.text, &fleet, &spec)?;
     store.parse(&text)?;
     crate::config_store::save(&store, r, &base, &text)?;
     Ok(true)

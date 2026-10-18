@@ -189,6 +189,10 @@ pub enum Intent {
         role: Option<String>,
         #[serde(default)]
         deploy_credentials: Option<String>,
+        /// The provider's options by flag name, as `opv target add` takes them (`fly-app`):
+        /// public names and identifiers, checked against the provider's option table.
+        #[serde(default)]
+        options: BTreeMap<String, String>,
         #[serde(default)]
         guidance: Option<Guidance>,
     },
@@ -286,6 +290,7 @@ fn allowed_fields(kind: &str) -> Option<&'static [&'static str]> {
             "products",
             "role",
             "deploy_credentials",
+            "options",
             "guidance",
         ],
         "retire" => &["kind", "key", "product", "guidance"],
@@ -372,6 +377,7 @@ fn validate(intent: &Intent) -> Result<(), Error> {
             products,
             role,
             deploy_credentials,
+            options,
             guidance,
         } => {
             check_env("env", env)?;
@@ -387,6 +393,10 @@ fn validate(intent: &Intent) -> Result<(), Error> {
             }
             for (i, p) in products.iter().enumerate() {
                 check_product(&format!("products[{i}]"), p)?;
+            }
+            for (flag, value) in options {
+                check_word(&format!("options.{flag}"), flag)?;
+                screen(&format!("options.{flag}"), value)?;
             }
             if let Some(g) = guidance {
                 screen("guidance", &g.text)?;
@@ -744,6 +754,7 @@ pub fn json_schema() -> serde_json::Value {
             "products": products(),
             "role": { "type": "string" },
             "deploy_credentials": { "type": "string" },
+            "options": { "type": "object", "propertyNames": { "pattern": "^[a-z][a-z0-9-]*$" }, "additionalProperties": { "type": "string", "maxLength": 200 } },
             "guidance": guidance()
         }),
         serde_json::json!(["kind", "env", "name"]),
