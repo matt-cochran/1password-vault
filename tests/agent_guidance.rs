@@ -169,3 +169,25 @@ fn the_schema_is_current_for_named_targets_and_boundaries() {
         assert!(slugs.contains(&slug), "error_codes is missing {slug}");
     }
 }
+
+/// Every command line in docs/rotation.md names a command the installed binary has, so the
+/// documented rotation procedure cannot drift behind the CLI (`opv schema`).
+#[test]
+fn the_rotation_doc_names_only_commands_the_binary_has() {
+    let doc = read("docs/rotation.md");
+    let known = schema_commands();
+    let unknown: Vec<&str> = doc
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("opv "))
+        .filter(|rest| {
+            !known.iter().any(|name| {
+                let words: Vec<&str> = name.split_whitespace().collect();
+                !words.is_empty() && rest.split_whitespace().take(words.len()).eq(words)
+            })
+        })
+        .collect();
+    assert!(
+        unknown.is_empty(),
+        "docs/rotation.md names commands the binary does not have: {unknown:?}"
+    );
+}
