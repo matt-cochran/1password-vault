@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use super::super::evidence::{BOX_LINES, upstream_box};
 use super::*;
-use crate::host::{Platform, Shell};
+use crate::host::{AgentMarker, Platform, Shell};
 
 fn seen(principal: Principal) -> Observed {
     Observed::from_failed_call(
@@ -555,6 +555,13 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             vec!["CI"],
         ),
         (
+            PersonOnly {
+                command: check_cmd(),
+                marker: AgentMarker::ClaudeCode,
+            },
+            vec!["opv access prod", "CLAUDECODE"],
+        ),
+        (
             NeedsConfirm {
                 env: EnvName::new("env-prod"),
             },
@@ -908,6 +915,7 @@ fn ordinal(c: &Cause) -> usize {
         UnexpectedOutput { .. } => 41,
         Unrecognized { .. } => 42,
         NeedsTerminal { .. } => 43,
+        PersonOnly { .. } => 77,
         NeedsConfirm { .. } => 44,
         ConfirmMismatch { .. } => 45,
         ValuesNeeded { .. } => 46,
@@ -944,7 +952,7 @@ fn ordinal(c: &Cause) -> usize {
     }
 }
 
-const VARIANTS: usize = 77;
+const VARIANTS: usize = 78;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()

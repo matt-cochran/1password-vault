@@ -1982,6 +1982,11 @@ impl Cause {
                     "this step needs a person at a terminal, and this is a CI run".into()
                 }
             },
+            PersonOnly { command, marker } => format!(
+                "{} runs only in a person's terminal; this shell looks like an assistant ({})",
+                cmd_text(command),
+                marker.label()
+            ),
             NeedsConfirm { env } => {
                 format!("changing environment {env} needs a person's confirmation")
             }
@@ -3632,6 +3637,10 @@ impl Cause {
             NeedsTerminal { why: _ } => plan(
                 inspect("run it in your own terminal"),
                 Next::Handoff(inv_cmd(inv)),
+            ),
+            PersonOnly { command, .. } => plan(
+                inspect("run it in your own terminal"),
+                Next::Handoff(command.clone()),
             ),
             NeedsConfirm { env } => {
                 let mut c = inv_cmd(inv);
