@@ -13,6 +13,9 @@
 //! - **Every flow document of §25.1/§25.2 is pinned** (`flows`): a text, `--json` and, where a
 //!   tool exists, MCP run of each `propose` kind, `import`, `needs`, `contract` and `explain`,
 //!   on a world whose every value is an `S7MARKER` marker; no scenario snapshot may hold one.
+//! - **Every core document of §25.1 is pinned** (`core`): a text and `--json` run of
+//!   `inventory`, `next`, `ready --gate`, `doctor --env prod` (R9) and `access`, on a marked
+//!   world with vault members (no MCP half until `opv_state`, row mcp-state, merges).
 //!
 //! Each scenario runs the real `opv` against `opv-sim` on the test application
 //! (`tests/e2e/app`): a scratch `HOME`, `OPV_NO_SKILL=1`, no real credential, only recorded
@@ -101,12 +104,6 @@ const UNREACHABLE: &[(&str, &str)] = &[
     (
         "SourceChanged",
         "a successful result (exit 10), never an error document",
-    ),
-    // `ready --gate` exists, but the e2e world has no scenario that runs it until the
-    // e2e-coverage row adds one.
-    (
-        "GateFailed",
-        "ready --gate has no e2e scenario yet (row e2e-coverage)",
     ),
     // `app::retire::retire` (the ordered retirement that refuses while deployed code still
     // reads the key) has no caller outside its tests: `opv propose retire` only marks the key
@@ -1786,6 +1783,82 @@ mod flow_cases {
     }
 }
 
+/// The core documents of §25.1 (`inventory`, `next`, `ready --gate`, `doctor`'s R9 rows,
+/// `access`), each over one world where this session's own user (`UE2EDEVUSER…`, the
+/// `whoami` user) is a member of the vaults it reads, so op answers `vault user list` with the
+/// owner's writer recording (s23):
+///
+/// - web prod: the session is the only writer (one writer: `single_writer`; a production
+///   vault this session can write: doctor's R9 warning);
+/// - shared prod: the session is not a member (capability `none`: its cells are
+///   `unreadable`);
+/// - shared dev and web dev: the session and the ops user write;
+/// - web dev's `SESSION_SECRET` is empty (`empty`) and its `LOG_LEVEL` is `changeme`
+///   (`placeholder`); every other value is an `S7MARKER` marker (`set`), and a key with no
+///   field in its item (`web/DATABASE_URL`) is `absent`.
+///
+/// No MCP half yet: `opv_state` (row mcp-state) is not on this tree.
+mod core_cases {
+    use super::*;
+
+    const ME: &str = "UE2EDEVUSER000000000000001";
+    const OPS: &str = "UE2EOPSUSER000000000000002";
+
+    fn member(id: &str, name: &str, email: &str) -> Value {
+        json!({"id": id, "name": name, "email": email})
+    }
+
+    fn core() -> Scenario {
+        Scenario::new().marked().world(|w| {
+            let me = member(ME, "E2E Dev", "dev@example.com");
+            let ops = member(OPS, "E2E Ops", "ops@example.test");
+            for v in w["op"]["vaults"].as_array_mut().expect("vaults") {
+                let users = match v["id"].as_str().unwrap_or_default() {
+                    "vE2EWEBPROD000000000000001" => json!([me]),
+                    "vE2ESHAREDPROD0000000000001" => json!([ops]),
+                    "vE2ESHAREDDEV00000000000001"
+                    | "vE2EWEBDEV0000000000000001"
+                    | "vE2EPRIVATE000000000000001" => json!([me, ops]),
+                    _ => continue,
+                };
+                v["users"] = users;
+            }
+            item(w, WEB_DEV_ITEM, |i| {
+                for f in i["fields"].as_array_mut().expect("fields") {
+                    match f["label"].as_str() {
+                        Some("SESSION_SECRET") => f["value"] = json!(""),
+                        Some("LOG_LEVEL") => f["value"] = json!("changeme"),
+                        _ => {}
+                    }
+                }
+            })
+        })
+    }
+
+    pub fn core_inventory() -> Case {
+        case(core(), &["inventory"])
+    }
+
+    pub fn core_next() -> Case {
+        case(core(), &["next"])
+    }
+
+    /// The gate fails on dev's empty and placeholder values (`gate_failed`).
+    pub fn core_ready_gate() -> Case {
+        case(core(), &["ready", "--gate"])
+    }
+
+    /// R9: this session can write the production vault web prod, and the shell is signed in
+    /// to the production targets' platforms.
+    pub fn core_doctor() -> Case {
+        case(core(), &["doctor", "--env", "prod"])
+    }
+
+    pub fn core_access() -> Case {
+        case(core(), &["access"])
+    }
+}
+
 // --- one scenario's snapshot ----------------------------------------------------------------
 
 /// The scenario's runs, as its snapshot: text, `--json` (unless `text_only`), MCP.
@@ -1920,7 +1993,8 @@ macro_rules! scenarios {
         json: [$($j:ident => $jv:ident),* $(,)?],
         text: [$($t:ident => $tv:ident),* $(,)?],
         mcp: [$($m:ident),* $(,)?],
-        flows: [$($f:ident),* $(,)?] $(,)?
+        flows: [$($f:ident),* $(,)?],
+        core: [$($c:ident),* $(,)?] $(,)?
     ) => {
         /// Every scenario: its name, the variant it reaches, whether it has `--json`.
         const SCENARIOS: &[(&str, &str, bool)] = &[
@@ -1936,6 +2010,16 @@ macro_rules! scenarios {
                 #[test]
                 fn $f() {
                     super::snapshot_test(stringify!($f), super::flow_cases::$f, false);
+                }
+            )*
+        }
+        /// The core documents (§25.1): a text and `--json` run each.
+        const CORE: &[&str] = &[$(stringify!($c)),*];
+        mod core {
+            $(
+                #[test]
+                fn $c() {
+                    super::snapshot_test(stringify!($c), super::core_cases::$c, false);
                 }
             )*
         }
@@ -2100,6 +2184,97 @@ scenarios! {
         flow_contract,
         flow_explain,
     ],
+    core: [
+        core_inventory,
+        core_next,
+        core_ready_gate,
+        core_doctor,
+        core_access,
+    ],
+}
+
+// --- the core documents: what each committed snapshot shows -----------------------------------
+
+/// The `--json` document of a committed core scenario.
+fn core_document(name: &str) -> Value {
+    json_document(&committed(name)).unwrap_or(Value::Null)
+}
+
+#[test]
+fn core_inventory_shows_set_absent_placeholder_and_unreadable_cells() {
+    let states: BTreeSet<String> = core_document("core_inventory")["cells"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c["state"]["state"].as_str().map(str::to_string))
+        .collect();
+    let want: BTreeSet<String> = ["set", "absent", "placeholder", "unreadable"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    assert!(want.is_subset(&states), "{states:?}");
+}
+
+#[test]
+fn core_ready_gate_reaches_gate_failed() {
+    variant_test("core_ready_gate", "GateFailed");
+}
+
+/// The warnings `opv doctor --env prod --json` raises under one check name.
+fn doctor_warnings(name: &str) -> usize {
+    core_document("core_doctor")["checks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| c["name"] == name && c["status"] == "warn")
+        .count()
+}
+
+#[test]
+fn core_doctor_warns_that_this_session_reads_the_production_vault() {
+    assert_eq!(doctor_warnings("production vault"), 1);
+}
+
+#[test]
+fn core_doctor_warns_of_each_production_login() {
+    assert_eq!(doctor_warnings("production login"), 3);
+}
+
+/// The vault `id` of environment `env` in `opv access --json`.
+fn access_vault(env: &str, id: &str) -> Value {
+    core_document("core_access")["environments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|e| e["environment"] == env)
+        .flat_map(|e| e["vaults"].as_array().cloned().unwrap_or_default())
+        .find(|v| v["vault_id"] == id)
+        .unwrap_or(Value::Null)
+}
+
+#[test]
+fn core_access_marks_the_production_vault_this_session_writes() {
+    let v = access_vault("prod", "vE2EWEBPROD000000000000001");
+    assert_eq!(
+        (v["production"].clone(), v["capability"].clone()),
+        (json!(true), json!("write"))
+    );
+}
+
+#[test]
+fn core_access_raises_single_writer_for_the_vault_with_one_writer() {
+    let raised = core_document("core_access")["environments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|e| e["findings"].as_array().cloned().unwrap_or_default())
+        .any(|f| {
+            f["code"] == "single_writer"
+                && f["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("vE2EWEBPROD000000000000001"))
+        });
+    assert!(raised);
 }
 
 // --- the catalog, read from its source ------------------------------------------------------
@@ -2337,6 +2512,7 @@ fn every_scenario_snapshot_belongs_to_a_scenario() {
         .iter()
         .map(|(n, _, _)| *n)
         .chain(FLOWS.iter().copied())
+        .chain(CORE.iter().copied())
         .collect();
     let orphans: Vec<String> = std::fs::read_dir(scenario_snapshots())
         .map(|d| {
