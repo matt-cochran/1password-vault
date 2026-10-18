@@ -650,9 +650,10 @@ pub enum Cause {
     },
     Partial {
         done: Vec<String>,
-        approval_used: Option<PlanId>,
-        /// What the used approval covered: Next reads what remains in that same scope.
-        approval_scope: Option<PlanScope>,
+        /// What the run covered: Next reads what remains in that same scope. Internal;
+        /// never part of the JSON subject.
+        #[serde(skip)]
+        scope: Option<PlanScope>,
         then: Box<Cause>,
     },
     Interrupted {

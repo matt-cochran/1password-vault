@@ -840,7 +840,9 @@ fn target_checks(
             let check =
                 match super::signin::open_on(fleet, env_name, r, super::signin::Reach::Store, host)
                 {
-                    Ok(account) => state_vault(&account, env_name, &name, &target.state_vault_id),
+                    Ok(account) => fleet
+                        .state_vault(env_name, target)
+                        .and_then(|vault| state_vault(&account, env_name, &name, vault)),
                     Err(e) => Err(e),
                 };
             report.push(STATE_VAULT_CHECK, check);

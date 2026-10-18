@@ -589,13 +589,16 @@ mod cases {
         .mcp("opv_configuration", json!({}))
     }
 
+    /// A target whose state vault is not bound yet (D-G, before the first `opv apply`): the
+    /// contract loads, and a command that reads the target's delivery evidence names
+    /// `opv apply`.
     pub fn state_vault_missing() -> Case {
         case(
             Scenario::new()
                 .config(|c| without_line(c, r#"state_vault_id = "vE2ESTATEFLY00000000000001""#)),
-            &["contract"],
+            &["changed", "prod"],
         )
-        .mcp("opv_configuration", json!({}))
+        .mcp("opv_changed", json!({"environment": "prod"}))
     }
 
     pub fn state_vault_too_wide() -> Case {
@@ -1515,6 +1518,12 @@ fn snapshot_test(name: &str, build: fn() -> Case, text_only: bool) {
     if !cfg!(target_os = "linux") && LINUX_WORDED.contains(&name) {
         return;
     }
+    if name == "private_dir_failed" && skip_under_root(effective_uid()) {
+        eprintln!(
+            "skipped: private_dir_failed needs a non-root user: root ignores directory modes"
+        );
+        return;
+    }
     let got = record(name, build, text_only);
     let path = snapshot_path(name);
     if updating() {
@@ -1763,10 +1772,24 @@ fn variants() -> &'static BTreeMap<String, BTreeSet<String>> {
         let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut current = String::new();
         let mut depth = 0i32;
+        let mut skip_field = false;
         for line in src[start..].lines() {
             let l = line.trim();
-            if l.starts_with("//") || l.starts_with('#') || l.is_empty() {
+            if l.is_empty() || l.starts_with("//") {
                 continue;
+            }
+            if l.starts_with('#') {
+                // A field serde does not serialize is not part of the subject.
+                if l.starts_with("#[serde(skip") {
+                    skip_field = true;
+                }
+                continue;
+            }
+            if skip_field {
+                skip_field = false;
+                if field.is_match(l) {
+                    continue;
+                }
             }
             if depth == 0 {
                 if l.starts_with('}') {
@@ -2141,4 +2164,26 @@ fn i8_mcp_with_two_accounts_and_no_dot_opv_is_account_required() {
     let (tool, args) = c.mcp.clone().expect("an MCP call");
     let answer = c.scenario.mcp(tool, &args);
     assert_eq!(answer["error"]["code"], "account_required", "{answer}");
+}
+
+/// The effective uid of this test process (never root off Unix).
+#[cfg(unix)]
+fn effective_uid() -> u32 {
+    // SAFETY: `geteuid` only reads the process's effective user id.
+    unsafe { libc::geteuid() as u32 }
+}
+
+#[cfg(not(unix))]
+fn effective_uid() -> u32 {
+    1
+}
+
+/// `private_dir_failed` needs a real directory mode, which root ignores: skip it as root.
+fn skip_under_root(euid: u32) -> bool {
+    euid == 0
+}
+
+#[test]
+fn non_root_does_not_skip_private_dir() {
+    assert!(!skip_under_root(1000));
 }

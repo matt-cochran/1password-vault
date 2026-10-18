@@ -28,6 +28,7 @@ use crate::domain::access_plan::{
     AccessReport, CiNeeds, Grant, GrantCheck, GrantState, ObservedVault, Permission, Principal,
     TargetNeeds, compare, create_command, required,
 };
+use crate::domain::capability::{self, Capability, UnknownSource};
 use crate::error::Error;
 use crate::host::Host;
 use crate::runner::CommandRunner;
@@ -38,6 +39,8 @@ type Observations = BTreeMap<String, Option<serde_json::Value>>;
 type Readers = BTreeMap<String, Option<Vec<Reader>>>;
 /// The diagnosed cause per vault whose user list could not be read (#153, #157).
 type Unreadable = BTreeMap<String, VaultCause>;
+/// What the session can do with each needed vault (design Part V, row `capability`).
+type Capabilities = BTreeMap<String, Capability>;
 
 /// Why one needed vault's user list could not be read, as the 1Password diagnosis
 /// classified the failed calls in the environment's own account (#157, design §5).
@@ -146,7 +149,7 @@ pub fn run(
         if sessions.insert(need.account_id.clone()) {
             crate::adapters::onepassword::require_session(&er, &Host::detect, "opv access")?;
         }
-        let (observations, readers, unreadable) = observe(&er, need)?;
+        let (observations, readers, unreadable, _capabilities) = observe(&er, need)?;
         envs.push(build(need, &project, &observations, &readers, &unreadable));
     }
     report(out, &envs, json)
@@ -219,7 +222,7 @@ pub fn identity(
     let service_account = first.service_account.clone();
     let er = crate::app::signin::EnvRunner::with_account(r, need.account_id.clone());
     crate::adapters::onepassword::require_session(&er, &Host::detect, "opv access")?;
-    let (_, readers, unreadable) = observe(&er, need)?;
+    let (_, readers, unreadable, _capabilities) = observe(&er, need)?;
     let observed: Vec<ObservedVault> = grants
         .iter()
         .map(|g| ObservedVault {
@@ -272,15 +275,17 @@ fn plan_needs<'a>(
         let env_name = name.as_str();
         let mut targets = Vec::new();
         let mut fields: BTreeMap<&str, DottedPath> = BTreeMap::new();
-        for (boundary, b) in &env.boundaries {
+        for (boundary, b) in env.bound_boundaries() {
             fields
                 .entry(b.vault_id.as_str())
                 .or_insert_with(|| field(&[env_name, "boundaries", boundary, "vault_id"]));
         }
         for (target_name, spec) in &env.targets {
-            fields
-                .entry(spec.state_vault_id.as_str())
-                .or_insert_with(|| field(&[env_name, "targets", target_name, "state_vault_id"]));
+            if let Some(vault) = &spec.state_vault_id {
+                fields.entry(vault.as_str()).or_insert_with(|| {
+                    field(&[env_name, "targets", target_name, "state_vault_id"])
+                });
+            }
             if target.is_some_and(|only| only != target_name) {
                 continue;
             }
@@ -299,7 +304,7 @@ fn plan_needs<'a>(
                 environment: env_name,
                 target: target_name.as_str(),
                 boundary_vaults,
-                state_vault: spec.state_vault_id.as_str(),
+                state_vault: fleet.state_vault(env_name, spec)?,
             });
         }
         let ci = if target.is_some() {
@@ -307,10 +312,10 @@ fn plan_needs<'a>(
         } else {
             vec![CiNeeds {
                 environment: env_name,
-                boundary_vaults: env
-                    .boundaries
-                    .values()
-                    .map(|b| b.vault_id.as_str())
+                boundary_vaults: fleet
+                    .bound_boundaries(env_name)?
+                    .into_iter()
+                    .map(|(_, b)| b.vault_id.as_str())
                     .collect(),
             }]
         };
@@ -343,7 +348,7 @@ fn field(path: &[&str]) -> DottedPath {
 fn observe(
     r: &dyn CommandRunner,
     need: &Needs<'_>,
-) -> Result<(Observations, Readers, Unreadable), Error> {
+) -> Result<(Observations, Readers, Unreadable, Capabilities), Error> {
     let mut wanted: BTreeSet<&str> = BTreeSet::new();
     for target in &need.targets {
         wanted.extend(target.boundary_vaults.iter().copied());
@@ -352,27 +357,50 @@ fn observe(
     for ci in &need.ci {
         wanted.extend(ci.boundary_vaults.iter().copied());
     }
+    let me = onepassword_init::session_user(r, &Host::detect);
     let mut observations = BTreeMap::new();
     let mut readers = BTreeMap::new();
     let mut unreadable = BTreeMap::new();
+    let mut capabilities = BTreeMap::new();
     for vault in wanted {
         let users = onepassword_init::vault_users(r, vault, &Host::detect)?;
         let access = analyse(need.name, vault, false, users.as_ref());
+        let mut diagnosed = None;
         if !access.visible
-            && let Some(diagnosed) = diagnose_vault(r, need, vault)
+            && let Some(found) = diagnose_vault(r, need, vault)
         {
-            if is_session(&diagnosed.cause) {
-                return Err(diagnosed.error());
+            if is_session(&found.cause) {
+                return Err(found.error());
             }
-            unreadable.insert(vault.to_string(), diagnosed);
+            diagnosed = Some(found);
+        }
+        // The capability comes from this session's own entry in the user list; a refused
+        // listing is only `none` when the diagnosis says the vault is not in this account.
+        let capability = match users.as_ref() {
+            Some(list) => match me.as_deref() {
+                Some(me) => capability::classify(Some(list), me),
+                None => Capability::Unknown {
+                    source: UnknownSource::NoSessionUser,
+                },
+            },
+            None => diagnosed
+                .as_ref()
+                .and_then(|found| capability::from_refusal(&found.cause))
+                .unwrap_or(Capability::Unknown {
+                    source: UnknownSource::UserListRefused,
+                }),
+        };
+        if let Some(found) = diagnosed {
+            unreadable.insert(vault.to_string(), found);
         }
         readers.insert(
             vault.to_string(),
             access.visible.then_some(access.service_accounts),
         );
         observations.insert(vault.to_string(), users);
+        capabilities.insert(vault.to_string(), capability);
     }
-    Ok((observations, readers, unreadable))
+    Ok((observations, readers, unreadable, capabilities))
 }
 
 /// The failed call the runner observed last, with its scrubbed reply and whether that was

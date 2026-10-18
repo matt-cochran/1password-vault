@@ -243,6 +243,13 @@ impl Date {
     }
 }
 
+impl std::fmt::Display for Date {
+    /// The `YYYY-MM-DD` form the contract writes, zero-padded.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:04}-{:02}-{:02}", self.year, self.month, self.day)
+    }
+}
+
 /// A Gregorian leap year.
 fn is_leap(year: u16) -> bool {
     year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
@@ -400,8 +407,10 @@ pub enum LocalEnvironment {
     DeclaredOnly,
 }
 
-/// One recorded access boundary of an environment (FR-57): the vault holding exactly one
-/// opv values item, and that item, by IDs (FR-13). Written by `opv bootstrap`.
+/// One bound access boundary of an environment (FR-57): the vault holding exactly one
+/// opv values item, and that item, by IDs (FR-13). Recorded in `secrets.bindings.toml` by
+/// `opv apply` (D-G); before then the boundary is declared and unbound
+/// ([`Environment::boundaries`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Boundary {
     pub vault_id: String,
@@ -428,8 +437,9 @@ pub struct Target {
     /// `status`, `plan` and `sync` to sign the target CLI in for the run only.
     pub deploy_credentials: Option<ItemRef>,
     /// The vault holding this target's delivery evidence (FR-58, D12): one item per
-    /// placement, written by the deploy identity after a confirmed sync. Required.
-    pub state_vault_id: String,
+    /// placement, written by the deploy identity after a confirmed sync. `None`: declared
+    /// and not bound yet (D-G, before the first `opv apply`); see [`Fleet::state_vault`].
+    pub state_vault_id: Option<String>,
     /// product → the ID of its placement's delivery item in the state vault
     /// (`delivery_items`, FR-58), recorded by `opv bootstrap` when it creates the item, so
     /// nothing looks a state item up by title (FR-13). A product with none has no evidence.
@@ -487,8 +497,9 @@ pub struct Environment {
     /// How far this environment's values may travel (FR-59). Absent: `production` when
     /// the name or title reads as production, else `shared`.
     pub tier: Tier,
-    /// boundary name → recorded vault and item (FR-57); see [`Fleet::boundary`].
-    pub boundaries: BTreeMap<String, Boundary>,
+    /// boundary name → its vault and item (FR-57); `None`: declared and not bound yet (D-G,
+    /// before the first `opv apply`). See [`Fleet::boundary`].
+    pub boundaries: BTreeMap<String, Option<Boundary>>,
     /// target name → target (FR-56), in name order.
     pub targets: BTreeMap<String, Target>,
     /// product → mode name → mode value, e.g. `allumata.payments = "off"`.
@@ -521,6 +532,13 @@ impl Environment {
     /// The display name: [`Environment::title`], else the key.
     pub fn display(&self) -> &str {
         self.title.as_deref().unwrap_or(&self.name)
+    }
+
+    /// Each bound boundary by name, skipping the ones declared and not bound yet (D-G).
+    pub fn bound_boundaries(&self) -> impl Iterator<Item = (&String, &Boundary)> {
+        self.boundaries
+            .iter()
+            .filter_map(|(name, b)| Some((name, b.as_ref()?)))
     }
 }
 
@@ -722,16 +740,49 @@ impl Fleet {
         out
     }
 
-    /// The recorded boundary of `product` in `env` (FR-57): the vault and item its values
+    /// The bound boundary of `product` in `env` (FR-57): the vault and item its values
     /// live in. An undefined environment is [`Fleet::environment`]'s error; a boundary not
-    /// recorded is `boundary_missing` (load refuses that for every product with a key
-    /// desired in the environment, so only an undesired product reaches it).
+    /// declared (load refuses that for every product with a key desired in the environment)
+    /// or declared and not bound yet (D-G, before the first `opv apply`) is
+    /// `boundary_missing`, whose step is `opv apply`.
     pub fn boundary(&self, env: &str, product: &str) -> Result<&Boundary, Error> {
         let name = self.boundary_of(product);
         self.environment(env)?
             .boundaries
             .get(name)
+            .and_then(Option::as_ref)
             .ok_or_else(|| boundary_missing(env, product, self.read_from.0.clone()).into())
+    }
+
+    /// Every boundary of `env` with its ids, by name; `boundary_missing` naming a product
+    /// that needs it for the first one declared and not bound yet (D-G). For a command that
+    /// reaches every boundary of the environment.
+    pub fn bound_boundaries(&self, env: &str) -> Result<Vec<(&str, &Boundary)>, Error> {
+        let needed = self.needed_boundaries(env);
+        self.environment(env)?
+            .boundaries
+            .iter()
+            .map(|(name, b)| match b {
+                Some(b) => Ok((name.as_str(), b)),
+                None => {
+                    let needer = needed.get(name.as_str()).copied().unwrap_or(name);
+                    Err(boundary_missing(env, needer, self.read_from.0.clone()).into())
+                }
+            })
+            .collect()
+    }
+
+    /// The state vault of `target` in `env` (FR-58): `state_vault_missing` while it is not
+    /// bound (D-G, before the first `opv apply`), whose step is `opv apply`.
+    pub fn state_vault<'t>(&self, env: &str, target: &'t Target) -> Result<&'t str, Error> {
+        target.state_vault_id.as_deref().ok_or_else(|| {
+            crate::cause::Cause::StateVaultMissing {
+                env: crate::cause::EnvName::new(env),
+                target: crate::cause::TargetName::new(target.name.as_str()),
+                source: self.read_from.0.clone(),
+            }
+            .into()
+        })
     }
 
     /// Target name (runtime env var name) for `product`/`key` on target `target` of `env`.

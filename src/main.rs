@@ -208,7 +208,8 @@ Examples:
   opv config export staging --json # staging's config-kind values (reads 1Password)";
 
 const EXPORT_MORE: &str = "\
-Without <ENV>, prints the configuration itself: IDs, names, kinds and rules, never a value.
+Without <ENV>, prints the contract itself: names, kinds and rules, never a value. Its 1Password
+ids are not printed; --with-ids fills them in and is for debugging only.
 With <ENV>, prints the values of config-kind keys by design, never secrets. A config key
 stored in a concealed field is accepted and delivered as a plain value, but opv never prints
 its value (opv status warns about it once).";
@@ -1587,6 +1588,9 @@ enum ConfigCmd {
         /// Output the configuration as TOML (the default without <ENV>).
         #[arg(long, conflicts_with = "env")]
         toml: bool,
+        /// Print the configuration with its 1Password ids filled in (debugging only).
+        #[arg(long, conflicts_with = "env")]
+        with_ids: bool,
     },
     /// Save a secrets.toml as this project's manifest in 1Password (never deletes the file).
     #[command(before_help = IMPORT_QUICK, after_help = IMPORT_MORE)]
@@ -2745,7 +2749,10 @@ fn run(
     }
     if let (
         Cmd::Config(ConfigCmd::Export {
-            env: None, json, ..
+            env: None,
+            json,
+            with_ids,
+            ..
         }),
         Ok(f),
     ) = (&cli.cmd, &found)
@@ -2755,7 +2762,13 @@ fn run(
         } else {
             config_cmd::Format::Toml
         };
-        return config_cmd::export(f, format, &r, out).map(|()| 0);
+        // D-G: the plain export is the contract with no id; --with-ids is debugging only.
+        return if *with_ids {
+            config_cmd::export(f, format, &r, out)
+        } else {
+            config_cmd::export_contract(f, format, &r, out)
+        }
+        .map(|()| 0);
     }
     // `propose key|env|target|retire` read the contract where it lives, file or manifest
     // (FR-44); with --write they edit it with the same validation and concurrency refusal.
@@ -4569,8 +4582,7 @@ fn mcp_install(
                 return Err(Error::Catalog(
                     Box::new(opv::cause::Cause::Partial {
                         done: done.iter().map(|d| d.client.to_string()).collect(),
-                        approval_used: None,
-                        approval_scope: None,
+                        scope: None,
                         then,
                     }),
                     upstream,

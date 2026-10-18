@@ -22,12 +22,12 @@ First match wins:
 
 ### Configuration in 1Password
 
-The configuration can live in 1Password as a **project manifest**: one Secure Note per project, titled `opv · <project>` and tagged `opv-manifest`, whose notes start with an "opv managed configuration" heading and a short explanation, then hold exactly the TOML of a `secrets.toml` (same schema, same validation) in one `toml` code block. opv reads only the code block, and text you add around it is kept. It also has a text field `project`, a field `convention` = `1`, and tags that tie it to a repository. It holds IDs, names and rules, never a value. Every command treats it exactly like a file, and `config edit` edits it in place.
+The configuration can live in 1Password as a **project manifest**: one Secure Note per project, titled `opv · <project>` and tagged `opv-manifest`, whose notes start with an "opv managed configuration" heading and a short explanation, then hold two fenced code blocks. The first, tagged `toml`, is the contract: exactly the TOML of a `secrets.toml` (same schema, same validation), with no 1Password ids. The second, tagged `toml opv-bindings`, holds the ids, in the format of [`secrets.bindings.toml`](#where-the-ids-live-secretsbindingstoml) (one sorted dotted line per id); `opv apply` writes it, and nobody else needs to. An id written inline in the contract block is refused at load by every command (`config_invalid`, naming the field), as in a `secrets.toml`; the one-time move is `opv propose structure`, then `opv apply`. A manifest without a bindings block (before the first `opv apply`) loads as a file without `secrets.bindings.toml` does. opv reads only the two code blocks, and text you add around them is kept. It also has a text field `project`, a field `convention` = `1`, and tags that tie it to a repository. It holds IDs, names and rules, never a value. Every command treats it exactly like a file, and `config edit` edits it in place, with the ids filled in as for a file and saved back to the bindings block.
 
 #### Moving a file into 1Password
 
 ```sh
-opv config import --vault myapp-dev                     # validates ./secrets.toml, creates the manifest
+opv config import --vault myapp-dev                     # validates ./secrets.toml, creates the manifest (ids from secrets.bindings.toml in its opv-bindings block)
 OPV_PROJECT=myapp opv config check --file secrets.toml  # identical? exit 0; else exit 2 with a diff
 git rm secrets.toml                                     # opv never deletes it for you
 ```
@@ -36,9 +36,9 @@ git rm secrets.toml                                     # opv never deletes it f
 
 #### Reading and changing it
 
-- `opv config export` prints the configuration as TOML (byte for byte as stored); `--json` as JSON. `opv config export <env> --json` still prints that environment's config-kind values.
+- `opv config export` prints the configuration as TOML, the contract with its ids filled in (from `secrets.bindings.toml` or the manifest's `opv-bindings` block); `--json` as JSON. `opv config export <env> --json` still prints that environment's config-kind values.
 - `opv config edit` opens `$VISUAL` or `$EDITOR` (default `vi`) on a temporary copy (mode 0600, removed afterwards), validates it, shows the diff and asks once. It saves only when nobody changed the configuration since it was opened; otherwise it refuses and re-opens on the new version. It works on a `secrets.toml` too.
-- `opv config check --file <path>` compares a committed copy with the manifest: exit 2 with a diff when they differ. Teams that want pull-request review keep a copy and run it in CI; 1Password's item history records every change either way.
+- `opv config check --file <path>` compares a committed copy with the manifest: the contract block with the file, then the `opv-bindings` block with the file's `secrets.bindings.toml`; exit 2 with a diff when they differ. Teams that want pull-request review keep a copy and run it in CI; 1Password's item history records every change either way.
 
 ## The `secrets.toml` schema
 
@@ -83,7 +83,9 @@ The group's vault is `<project>-core-<env>` and its item `<project> · core · <
 
 Two load errors protect the boundaries:
 
-- `boundary_missing`: a product has a team key desired in an environment whose boundary is not recorded. Its next step is `opv propose structure`, then `opv apply`.
+- `boundary_missing`: a product has a team key desired in an environment whose boundary is not declared. Its next step is `opv apply`, which a person runs in their own terminal.
+
+A boundary that is declared but not bound yet (`boundaries.web = {}`, as `opv propose setup --write` leaves it, before the first `opv apply`) is not an error: the contract loads, and commands that only read the contract (`opv contract`, `opv needs`, `opv explain`, `opv propose …`) work. A command that has to reach the boundary in 1Password stops with `boundary_missing` and names `opv apply`.
 - A recorded boundary that no product with a key in that environment lives in is refused; remove it, or declare that product's keys for the environment. The configuration never names a vault nothing reads.
 
 ### Where the ids live: `secrets.bindings.toml`
@@ -319,7 +321,7 @@ Every value has exactly one source: a key's own field, or the field named by `fr
 
 ### Delivery evidence: `state_vault_id`
 
-Every target needs a state vault for its delivery evidence. `state_vault_id` records it; `opv propose target` and `opv apply` create it, and `opv propose structure` creates and records any that is missing. A target without one fails at load with `state_vault_missing`.
+Every target needs a state vault for its delivery evidence. `state_vault_id` records it; `opv propose target` and `opv apply` create it, and `opv propose structure` creates and records any that is missing. A target without one loads (it is not bound yet, before the first `opv apply`); a command that needs the state vault stops with `state_vault_missing` and names `opv apply`.
 
 Each placement (a product the target delivers) keeps its evidence in one item of that vault, `opv · delivery · <product> · <target>`. `opv apply` creates it and records its id in `secrets.bindings.toml` under the target, so no command ever looks a state item up by title:
 

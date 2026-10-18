@@ -2,6 +2,7 @@
 
 pub mod access;
 pub mod access_plan;
+pub mod capability;
 pub mod catalog;
 pub mod convention;
 pub mod delivery;
@@ -9,6 +10,7 @@ pub mod health;
 pub mod history;
 pub mod import;
 pub mod intent;
+pub mod inventory;
 pub mod kind_guess;
 pub mod ledger;
 pub mod model;
@@ -38,6 +40,10 @@ pub use provenance::Stamp;
 pub use runtime::{
     AccessFinding, Binding, Health, RawSpec, Revision, RuntimeChange, RuntimeSnapshot,
 };
+
+#[cfg(test)]
+#[path = "capability_tests.rs"]
+mod capability_tests;
 
 #[cfg(test)]
 #[path = "key_attrs_tests.rs"]

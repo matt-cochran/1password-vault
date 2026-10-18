@@ -28,6 +28,15 @@ fn import_args(dir: &Path) -> ImportArgs {
     }
 }
 
+/// The file project found at the checkout (no manifest): the `secrets.toml` walk-up.
+fn file_of(dir: &Path, op: &FakeOp) -> Found {
+    let req = Request {
+        start: dir.to_path_buf(),
+        ..Request::default()
+    };
+    locate(&req, op).unwrap()
+}
+
 /// The manifest found for the checkout's remote, skipping its secrets.toml.
 fn manifest_of(dir: &Path, op: &FakeOp) -> Found {
     let req = Request {
@@ -148,6 +157,51 @@ fn export_json_holds_the_environments() {
     assert_eq!(
         v["environments"]["dev"]["boundaries"]["app"]["item_id"],
         "app"
+    );
+}
+
+/// D-G: a file project's plain export is the contract, its ids left in the bindings file.
+#[test]
+fn plain_export_of_a_file_project_holds_no_vault_id() {
+    let (dir, op) = checkout();
+    let mut out = Vec::new();
+    export_contract(&file_of(dir.path(), &op), Format::Toml, &op, &mut out).unwrap();
+    assert!(!text(&out).contains("vault_id"), "{}", text(&out));
+}
+
+/// D-G: splitting the ids out keeps the contract's declared keys.
+#[test]
+fn plain_export_holds_the_declared_keys() {
+    let (dir, op) = checkout();
+    let mut out = Vec::new();
+    export_contract(&file_of(dir.path(), &op), Format::Toml, &op, &mut out).unwrap();
+    assert!(text(&out).contains("API_KEY"), "{}", text(&out));
+}
+
+/// D-G: `--with-ids` (debugging only) fills the boundary's vault id back in.
+#[test]
+fn with_ids_export_holds_the_boundarys_vault_id() {
+    let (dir, op) = checkout();
+    let mut out = Vec::new();
+    export(&file_of(dir.path(), &op), Format::Toml, &op, &mut out).unwrap();
+    assert!(
+        text(&out).contains("vdev0000000000000000000001"),
+        "{}",
+        text(&out)
+    );
+}
+
+/// D-G: a manifest project's plain export also holds no id.
+#[test]
+fn a_manifest_projects_plain_export_holds_no_id() {
+    let (dir, op) = checkout();
+    import(&import_args(dir.path()), dir.path(), &op, &mut Vec::new()).unwrap();
+    let mut out = Vec::new();
+    export_contract(&manifest_of(dir.path(), &op), Format::Toml, &op, &mut out).unwrap();
+    assert!(
+        !text(&out).contains("vdev0000000000000000000001"),
+        "{}",
+        text(&out)
     );
 }
 
@@ -345,9 +399,43 @@ fn edit_saves_the_new_text_to_the_manifest() {
         .as_str()
         .unwrap()
         .to_string();
+    // D-G: the contract block holds the edit with its ids taken out.
     assert_eq!(
         crate::adapters::onepassword_manifest::config_text(&notes),
-        edited()
+        crate::config::bindings::split(&edited()).0
+    );
+}
+
+/// D-G: `config import` keeps the file's ids out of the manifest's contract block.
+#[test]
+fn import_keeps_the_ids_out_of_the_manifests_contract_block() {
+    let (dir, op) = checkout();
+    import(&import_args(dir.path()), dir.path(), &op, &mut Vec::new()).unwrap();
+    let Found::Manifest(m) = manifest_of(dir.path(), &op) else {
+        unreachable!("a manifest-only lookup")
+    };
+    let notes = op.item(&m.item_id)["fields"][0]["value"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        !crate::adapters::onepassword_manifest::config_text(&notes).contains("vault_id"),
+        "{notes}"
+    );
+}
+
+/// D-G: `config import` carries the file's `secrets.bindings.toml` into the manifest's
+/// `opv-bindings` block, so the manifest loads with the same ids.
+#[test]
+fn import_carries_the_files_bindings_into_the_manifests_bindings_block() {
+    let (dir, op) = checkout();
+    import(&import_args(dir.path()), dir.path(), &op, &mut Vec::new()).unwrap();
+    let Found::Manifest(m) = manifest_of(dir.path(), &op) else {
+        unreachable!("a manifest-only lookup")
+    };
+    assert_eq!(
+        m.read_bindings(&op).unwrap(),
+        crate::config::bindings::read_sibling(&dir.path().join("secrets.toml")).unwrap()
     );
 }
 

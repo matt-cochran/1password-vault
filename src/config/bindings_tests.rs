@@ -123,7 +123,10 @@ fn load_with_a_bindings_file_gives_the_boundary_ids() {
     std::fs::write(path.with_file_name("secrets.bindings.toml"), BINDINGS).unwrap();
     let fleet = crate::config::load(&path).unwrap();
     assert_eq!(
-        fleet.environments["prod"].boundaries["web"].vault_id,
+        fleet.environments["prod"].boundaries["web"]
+            .as_ref()
+            .unwrap()
+            .vault_id,
         "vweb"
     );
 }
@@ -178,7 +181,10 @@ fn a_written_configuration_loads_again() {
     let path = dir.path().join("secrets.toml");
     write_split(&path, INLINE_CONTRACT).unwrap();
     assert_eq!(
-        crate::config::load(&path).unwrap().environments["prod"].boundaries["web"].item_id,
+        crate::config::load(&path).unwrap().environments["prod"].boundaries["web"]
+            .as_ref()
+            .unwrap()
+            .item_id,
         "iweb"
     );
 }

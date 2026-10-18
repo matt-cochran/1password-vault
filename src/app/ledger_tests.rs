@@ -53,7 +53,11 @@ fn listed(version: &str) -> Vec<StoreEntry> {
 /// A sync wrote NAME, and the store now lists it at `version`.
 fn record(op: &FakeOp, fleet: &Fleet, version: &str) {
     let written = BTreeSet::from([NAME.to_string()]);
-    let item = fleet.environments["dev"].boundaries["api"].item_id.clone();
+    let item = fleet.environments["dev"].boundaries["api"]
+        .as_ref()
+        .unwrap()
+        .item_id
+        .clone();
     let source_versions = BTreeMap::from([(
         item.clone(),
         op.item(&item)["version"].as_u64().unwrap_or(0),
@@ -100,6 +104,7 @@ fn planned_target(op: &FakeOp, fleet: &Fleet, version: &str) -> TargetState {
             current: Some(&|n: &str, v: &SecretValue| {
                 ledgers.iter().find_map(|l| l.check(n, version, v))
             }),
+            retiring_prune: false,
         },
     );
     p.rows[0].target

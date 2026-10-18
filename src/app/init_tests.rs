@@ -168,7 +168,9 @@ fn a_one_section_item_records_its_products_boundary() {
 fn the_boundary_records_the_items_ids() {
     let (dir, _run) = init_with(&api_fields(), &args());
     let fleet = loaded(dir.path());
-    let b = &fleet.environments["staging"].boundaries["api"];
+    let b = fleet.environments["staging"].boundaries["api"]
+        .as_ref()
+        .unwrap();
     assert_eq!(
         (b.vault_id.as_str(), b.item_id.as_str()),
         (VAULT_ID, ITEM_ID)
@@ -1006,7 +1008,9 @@ fn add_env_records_the_products_boundary() {
 fn add_env_records_the_items_ids() {
     let run = add_env_with(EXISTING, &args(), &two_products());
     let fleet = run.fleet();
-    let b = &fleet.environments["staging"].boundaries["api"];
+    let b = fleet.environments["staging"].boundaries["api"]
+        .as_ref()
+        .unwrap();
     assert_eq!(
         (b.vault_id.as_str(), b.item_id.as_str()),
         (VAULT_ID, ITEM_ID)

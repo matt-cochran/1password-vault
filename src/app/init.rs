@@ -434,8 +434,7 @@ fn import_values(
         done.push(place.describe().to_string());
         let partial = Cause::Partial {
             done,
-            approval_used: None,
-            approval_scope: None,
+            scope: None,
             then: Box::new(cause.clone()),
         };
         match upstream {

@@ -154,6 +154,7 @@ fn gated_state(source: &RuleSource, working: &Fleet) -> KeyState {
         digest: &|_| None,
         target_check: &|_, _| None,
         current: None,
+        retiring_prune: false,
     };
     let gate = RuleGate {
         agent: true,
@@ -257,7 +258,11 @@ fn a_committed_contract_parses_with_its_committed_bindings() {
     assert_eq!(
         source
             .contract()
-            .map(|f| f.environments["dev"].boundaries["app"].item_id.clone()),
+            .map(|f| f.environments["dev"].boundaries["app"]
+                .as_ref()
+                .unwrap()
+                .item_id
+                .clone()),
         Some("app".to_string())
     );
 }

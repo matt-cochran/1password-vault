@@ -53,7 +53,7 @@ fn env() -> Environment {
 
 /// The prod boundary item the reads address.
 fn at() -> crate::domain::Boundary {
-    env().boundaries.values().next().unwrap().clone()
+    env().bound_boundaries().next().unwrap().1.clone()
 }
 
 /// Situations: what the fake `op` answers after the failed item read.

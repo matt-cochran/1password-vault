@@ -93,7 +93,7 @@ fn manifest_as_boundary(
     let name = env
         .boundaries
         .iter()
-        .find(|(_, x)| x.vault_id == b.vault_id && x.item_id == b.item_id)
+        .find(|(_, x)| x.as_ref() == Some(b))
         .map_or_else(String::new, |(n, _)| format!("boundaries.{n} "));
     crate::cause::Cause::ConfigNotEditable {
         source: crate::cause::ConfigSource::Manifest {
@@ -231,7 +231,7 @@ mod tests {
     fn a_manifest_boundary_refusal_names_the_boundary() {
         let f = fleet();
         let env = &f.environments["prod"];
-        let (name, b) = env.boundaries.iter().next().unwrap();
+        let (name, b) = env.bound_boundaries().next().unwrap();
         let e = manifest_as_boundary(env, b, "prod", r#"{"title":"opv · app"}"#.as_bytes());
         assert!(
             e.to_string().contains(&format!("boundaries.{name} ")),

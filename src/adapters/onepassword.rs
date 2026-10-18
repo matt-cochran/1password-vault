@@ -488,7 +488,7 @@ fn item_context(env: &Environment, b: &Boundary, write: bool) -> DiagnoseContext
     let env_name = (!env.name.is_empty()).then(|| EnvName::new(env.name.as_str()));
     let named_by = env_name.as_ref().map(|e| {
         let mut path = vec!["environments".to_string(), e.to_string()];
-        match env.boundaries.iter().find(|(_, x)| *x == b) {
+        match env.boundaries.iter().find(|(_, x)| x.as_ref() == Some(b)) {
             Some((name, _)) => path.extend(["boundaries".into(), name.clone(), "item_id".into()]),
             None => path.push("boundaries".into()),
         }

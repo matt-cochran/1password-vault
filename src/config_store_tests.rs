@@ -607,6 +607,12 @@ fn edited() -> String {
     format!("{TOML}\n[products.app.keys.ROTATED]\nkind = \"secret\"\nenvironments = [\"dev\"]\n")
 }
 
+/// The manifest notes holding [`edited`], as opv writes them: ids in their own block.
+fn edited_notes() -> String {
+    let (contract, ids) = crate::config::bindings::split(&edited());
+    crate::adapters::onepassword_manifest::note_with(&contract, Some(&ids.render()), None, "myapp")
+}
+
 fn under<T>(env: crate::host::FakeEnv, f: impl FnOnce() -> T) -> T {
     crate::host::with_test_host(Host::from_env(&env.shell("/bin/bash")), f)
 }
@@ -616,9 +622,9 @@ fn the_read_an_edit_starts_from_sees_past_ops_cache() {
     let op = FakeOp::default();
     let (id, found) = myapp(&op);
     found.store().read(&op).unwrap();
-    op.edit_elsewhere(&id, &edited());
+    op.edit_elsewhere(&id, &edited_notes());
     let base = found.store().read_for_write(&op).unwrap();
-    assert_eq!(base.text, edited());
+    assert!(base.text.contains("ROTATED"), "{}", base.text);
 }
 
 #[test]
@@ -626,7 +632,7 @@ fn a_base_read_from_ops_cache_never_overwrites_a_newer_edit() {
     let op = FakeOp::default();
     let (id, found) = myapp(&op);
     found.store().read(&op).unwrap();
-    op.edit_elsewhere(&id, &edited());
+    op.edit_elsewhere(&id, &edited_notes());
     let stale = found.store().read(&op).unwrap();
     let res = found.store().replace(&op, &stale, TOML).unwrap();
     assert!(matches!(res, Replaced::Changed(_)));
@@ -1153,4 +1159,232 @@ fn a_shared_sign_in_address_in_dot_opv_is_refused_as_ambiguous() {
     let e = selected_account_id(&r, dir.path()).unwrap_err();
     // 04.09: an address several accounts share is ambiguous, never "none chosen".
     assert_eq!(e.code_str(), "account_ambiguous");
+}
+
+// --- D-G: a manifest's ids live in its `toml opv-bindings` block ---
+
+/// TOML's contract (its ids taken out) and its ids, as the manifest's two blocks hold them.
+fn two_blocks() -> (String, String) {
+    let (contract, ids) = crate::config::bindings::split(TOML);
+    (contract, ids.render())
+}
+
+/// Notes with a person's text before, between and after the two blocks.
+fn notes_around(contract: &str, ids: &str) -> String {
+    format!("Ours\n```toml\n{contract}```\nBetween\n```toml opv-bindings\n{ids}```\nTheirs\n")
+}
+
+/// The manifest `opv · myapp` holding exactly `notes`, found by `OPV_PROJECT`.
+fn myapp_notes(op: &FakeOp, notes: &str) -> (String, Found) {
+    let mut item = template(
+        &manifest_title("myapp"),
+        "myapp",
+        &manifest_tags(None, &[]),
+        "",
+    );
+    item["fields"][0]["value"] = serde_json::json!(notes);
+    let id = op.insert("myapp-dev", item);
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = req(dir.path());
+    r.project = Some("myapp".into());
+    (id, locate(&r, op).unwrap())
+}
+
+/// The notes of the manifest item `id`.
+fn notes_of(op: &FakeOp, id: &str) -> String {
+    op.item(id)["fields"][0]["value"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// Notes whose contract block still writes the boundary's vault id inline.
+fn inline_vault_id() -> String {
+    let (contract, _) = two_blocks();
+    let inline = contract.replace(
+        "boundaries.app = {}",
+        "boundaries.app = { vault_id = \"vdev0000000000000000000001\" }",
+    );
+    assert_ne!(inline, contract, "the fixture writes boundaries.app = {{}}");
+    format!("```toml\n{inline}```\n")
+}
+
+#[test]
+fn an_inline_id_in_the_manifests_contract_block_is_refused_naming_the_field() {
+    let op = FakeOp::default();
+    let (_, found) = myapp_notes(&op, &inline_vault_id());
+    let e = found.load(&op).unwrap_err();
+    assert!(
+        matches!(
+            cause_of(&e),
+            Cause::ConfigInvalid { field, .. }
+                if field.to_string() == "environments.dev.boundaries.app.vault_id"
+        ),
+        "{e:?}"
+    );
+}
+
+#[test]
+fn an_inline_id_in_a_manifest_names_its_bindings_block_as_the_fix() {
+    let op = FakeOp::default();
+    let (_, found) = myapp_notes(&op, &inline_vault_id());
+    let e = found.load(&op).unwrap_err();
+    assert!(
+        matches!(
+            cause_of(&e),
+            Cause::ConfigInvalid { rule: FieldRule::RemovedForm { replacement, .. }, .. }
+                if replacement.contains("opv-bindings block")
+        ),
+        "{e:?}"
+    );
+}
+
+#[test]
+fn a_manifest_with_a_bindings_block_loads_with_its_ids() {
+    let op = FakeOp::default();
+    let (contract, ids) = two_blocks();
+    let (_, found) = myapp_notes(&op, &notes_around(&contract, &ids));
+    let fleet = found.load(&op).unwrap();
+    assert_eq!(
+        fleet.environments["dev"].boundaries["app"]
+            .as_ref()
+            .map(|b| b.vault_id.as_str()),
+        Some("vdev0000000000000000000001")
+    );
+}
+
+/// Before the first `opv apply` a manifest has no bindings block: it loads, or fails, as a
+/// file project's contract with no `secrets.bindings.toml` does.
+#[test]
+fn a_manifest_without_a_bindings_block_loads_as_a_file_without_bindings_does() {
+    let op = FakeOp::default();
+    let (contract, _) = two_blocks();
+    let (_, found) = myapp_notes(&op, &format!("```toml\n{contract}```\n"));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(FILE_NAME);
+    std::fs::write(&path, &contract).unwrap();
+    let outcome = |res: Result<Fleet, Error>| res.map(|_| ()).map_err(|e| e.code_str().to_string());
+    assert_eq!(
+        outcome(found.load(&op)),
+        outcome(crate::config::load(&path))
+    );
+}
+
+#[test]
+fn a_bindings_block_with_an_unknown_key_is_refused_naming_it() {
+    let op = FakeOp::default();
+    let (contract, _) = two_blocks();
+    let (_, found) = myapp_notes(&op, &notes_around(&contract, "nope = \"x\"\n"));
+    let e = found.load(&op).unwrap_err();
+    assert!(
+        matches!(cause_of(&e), Cause::ConfigInvalid { field, .. } if field.to_string() == "nope"),
+        "{e:?}"
+    );
+}
+
+/// The edit a person saves (`opv config edit`, `opv add`): the merged text, one id changed.
+fn save_changed_id(op: &FakeOp, found: &Found) {
+    let base = found.store().read_for_write(op).unwrap();
+    let text = base
+        .text
+        .replace("item_id = \"app\"", "item_id = \"other\"");
+    save(found.store(), op, &base, &text).unwrap();
+}
+
+#[test]
+fn a_manifest_contract_write_keeps_ids_out_of_the_contract_block() {
+    let op = FakeOp::default();
+    let (contract, ids) = two_blocks();
+    let (id, found) = myapp_notes(&op, &notes_around(&contract, &ids));
+    save_changed_id(&op, &found);
+    let block = crate::adapters::onepassword_manifest::config_text(&notes_of(&op, &id));
+    assert!(!block.contains("item_id"), "{block}");
+}
+
+#[test]
+fn a_manifest_contract_write_records_a_changed_id_in_the_bindings_block() {
+    let op = FakeOp::default();
+    let (contract, ids) = two_blocks();
+    let (id, found) = myapp_notes(&op, &notes_around(&contract, &ids));
+    save_changed_id(&op, &found);
+    let block = crate::adapters::onepassword_manifest::bindings_text(&notes_of(&op, &id));
+    assert!(
+        block
+            .unwrap_or_default()
+            .contains("environments.dev.boundaries.app.item_id = \"other\""),
+        "{}",
+        notes_of(&op, &id)
+    );
+}
+
+#[test]
+fn a_manifest_contract_write_keeps_the_text_around_the_blocks() {
+    let op = FakeOp::default();
+    let (contract, ids) = two_blocks();
+    let (id, found) = myapp_notes(&op, &notes_around(&contract, &ids));
+    save_changed_id(&op, &found);
+    let ids = ids.replace("item_id = \"app\"", "item_id = \"other\"");
+    assert_eq!(notes_of(&op, &id), notes_around(&contract, &ids));
+}
+
+#[test]
+fn a_manifest_contract_write_leaves_unchanged_ids_as_they_were_written() {
+    let op = FakeOp::default();
+    let (contract, _) = two_blocks();
+    // Hand-ordered ids: not the canonical sorted form a rewrite would give.
+    let ids = "environments.dev.boundaries.app.vault_id = \"vdev0000000000000000000001\"\n\
+               environments.dev.boundaries.app.item_id = \"app\"\n";
+    let (id, found) = myapp_notes(&op, &notes_around(&contract, ids));
+    let base = found.store().read_for_write(&op).unwrap();
+    save(found.store(), &op, &base, &edited_text(&base.text)).unwrap();
+    assert_eq!(
+        crate::adapters::onepassword_manifest::bindings_text(&notes_of(&op, &id)).as_deref(),
+        Some(ids)
+    );
+}
+
+/// `text` with one more key, its ids untouched.
+fn edited_text(text: &str) -> String {
+    format!("{text}\n[products.app.keys.ROTATED]\nkind = \"secret\"\nenvironments = [\"dev\"]\n")
+}
+
+#[test]
+fn apply_records_ids_in_the_manifests_bindings_block() {
+    let op = FakeOp::default();
+    let (contract, _) = two_blocks();
+    let (_, found) = myapp_notes(&op, &format!("```toml\n{contract}```\n"));
+    let Found::Manifest(m) = &found else {
+        unreachable!("found by OPV_PROJECT")
+    };
+    let (_, ids) = crate::config::bindings::split(TOML);
+    m.write_bindings(&op, None, &ids).unwrap();
+    assert_eq!(m.read_bindings(&op).unwrap(), ids);
+}
+
+#[test]
+fn apply_refuses_a_moved_contract_that_still_holds_an_id() {
+    let op = FakeOp::default();
+    let (contract, _) = two_blocks();
+    let (_, found) = myapp_notes(&op, &format!("```toml\n{contract}```\n"));
+    let Found::Manifest(m) = &found else {
+        unreachable!("found by OPV_PROJECT")
+    };
+    let e = m
+        .write_bindings(&op, Some(TOML), &Default::default())
+        .unwrap_err();
+    assert_eq!(e.code_str(), "config_invalid");
+}
+
+#[test]
+fn the_move_reader_returns_a_manifests_inline_ids() {
+    let op = FakeOp::default();
+    let (_, found) = myapp_notes(&op, &format!("```toml\n{TOML}```\n"));
+    let Found::Manifest(m) = &found else {
+        unreachable!("found by OPV_PROJECT")
+    };
+    let (_, moved) = m.read_for_move(&op).unwrap();
+    assert_eq!(
+        moved.get("environments.dev.boundaries.app.item_id"),
+        Some("app")
+    );
 }

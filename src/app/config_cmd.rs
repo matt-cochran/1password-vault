@@ -107,7 +107,8 @@ pub enum Format {
 }
 
 /// `config export [--toml|--json]`: the configuration itself (no secrets), validated. TOML
-/// is printed byte for byte as stored.
+/// is the contract as stored with its ids filled in (D-G: from `secrets.bindings.toml` or
+/// the manifest's `opv-bindings` block), the text `opv ui` and `config edit` work on.
 pub fn export(
     found: &Found,
     format: Format,
@@ -122,6 +123,35 @@ pub fn export(
             // The text was just validated as TOML: a failure here is opv's bug.
             let v: toml::Value =
                 toml::from_str(&snap.text).map_err(|_| bug("config export: parse"))?;
+            let s =
+                serde_json::to_string_pretty(&v).map_err(|_| bug("config export: serialize"))?;
+            line(out, s)
+        }
+    }
+}
+
+/// `config export [--toml|--json]` without ids (D-G, the default): the contract itself,
+/// validated, with every 1Password id left where it lives (a file project's
+/// `secrets.bindings.toml`, a manifest's `opv-bindings` block). `--with-ids` (debugging
+/// only) prints the merged form through [`export`].
+pub fn export_contract(
+    found: &Found,
+    format: Format,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let snap = found.store().read(r)?;
+    store::parse_from(found, &snap.text)?;
+    let (contract, _) = config::bindings::split(&snap.text);
+    write_text(&contract, format, out)
+}
+
+/// Write an already-validated configuration `text` in `format` (shared by the export forms).
+fn write_text(text: &str, format: Format, out: &mut dyn Write) -> Result<(), Error> {
+    match format {
+        Format::Toml => out.write_all(text.as_bytes()).map_err(write_err),
+        Format::Json => {
+            let v: toml::Value = toml::from_str(text).map_err(|_| bug("config export: parse"))?;
             let s =
                 serde_json::to_string_pretty(&v).map_err(|_| bug("config export: serialize"))?;
             line(out, s)
@@ -148,7 +178,8 @@ pub fn import(
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     let text = fs::read_to_string(&args.file).map_err(|e| unreadable_file(&args.file, &e))?;
-    // D-G: the file's ids live beside it; the manifest keeps them inline.
+    // D-G: the file's ids live beside it; the manifest keeps them in its `opv-bindings`
+    // block, which `create_manifest` splits them into.
     let text = config::with_bindings(&text, &args.file)?;
     config::parse_at(&text, config::Source::File(&args.file))?;
     let paths = normalize_paths(&args.paths)?;
@@ -266,8 +297,8 @@ pub fn check(
         config::Source::File(file),
     )?;
     let current = found.store().read(r)?;
-    // The manifest keeps its ids inline: it is compared the way the file keeps it, the
-    // contract first, then (when that matches) the ids.
+    // The manifest's read fills its `opv-bindings` ids in: it is compared the way the file
+    // keeps it, the contract first, then (when that matches) the ids.
     let (contract, ids) = config::bindings::split(&current.text);
     let (contract, committed) = (
         contract.replace("\r\n", "\n"),

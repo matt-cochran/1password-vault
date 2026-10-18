@@ -207,3 +207,13 @@ fn a_re_run_after_a_partial_run_prunes_only_the_rest() {
     let (second, _) = run(&fleet(TWO_ENVS), dir.path(), &rest);
     assert_eq!(second.unwrap().pruned, vec!["prod".to_string()]);
 }
+
+// --- the retiring prune guard ---------------------------------------------------------------
+
+#[test]
+fn the_prune_step_releases_a_retiring_key() {
+    let step = RetireStep::Prune {
+        env: "dev".to_string(),
+    };
+    assert!(step.retiring_prune());
+}

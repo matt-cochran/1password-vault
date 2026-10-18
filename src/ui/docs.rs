@@ -120,7 +120,7 @@ pub fn fetch<T: DeserializeOwned>(source: &dyn Source, args: &[&str]) -> Result<
 /// (07.01).
 pub fn fetch_config(source: &dyn Source) -> Result<crate::domain::Fleet, Failure> {
     let stdout = source
-        .stdout(&["config", "export", "--json"])
+        .stdout(&["config", "export", "--json", "--with-ids"])
         .map_err(Failure::NoDocument)?;
     parse_config(&stdout)
 }

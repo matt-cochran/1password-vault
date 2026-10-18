@@ -69,6 +69,15 @@ fn a_production_tier_environment_yields_the_question() {
 }
 
 #[test]
+fn an_expiry_date_reaches_the_proposed_contract() {
+    let intent = key_intent(
+        r#"{"kind":"key","key":"NEW_KEY","product":"app","field_kind":"secret","expires":"2027-01-31"}"#,
+    );
+    let proposal = propose(DEV, &Bindings::default(), None, &intent).unwrap();
+    assert!(added(&proposal.diff).contains(&"expires = \"2027-01-31\""));
+}
+
+#[test]
 fn a_key_excepted_from_a_production_environment_asks_nothing() {
     let intent = key_intent(
         r#"{"kind":"key","key":"NEW_KEY","product":"app","field_kind":"secret","except":{"prod":"no prod account"}}"#,

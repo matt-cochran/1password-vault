@@ -272,6 +272,12 @@ pub struct PlanOptions<'a> {
     /// For a store that can read its values back (pinned flow, FR-31): each ready secret
     /// the store lists is compared exactly. `None` keeps the digest compare alone (Fly).
     pub current: Option<&'a CurrentCheck<'a>>,
+    /// Prune a `retiring` key (design Part V, row `retire-guard`). `false` (every plain
+    /// sync): a `retiring` key is staged and kept exactly like an `active` one. `true`:
+    /// only retire's [`RetireStep::Prune`](crate::app::retire::RetireStep::Prune) step, run
+    /// through this sync path, releases it to the prune list. `retired` is never delivered
+    /// either way.
+    pub retiring_prune: bool,
 }
 
 /// Plan a sync of `item` into the first target of `env_name` (by name), with no prune
@@ -305,6 +311,7 @@ pub fn build(
             digest,
             target_check: &|_, _| None,
             current: None,
+            retiring_prune: false,
         },
     )
 }
@@ -505,14 +512,15 @@ pub fn build_with_gate(
                 }
                 (o, _, _) => o,
             };
-            // Lifecycle (design Part V, row `retire`): a key on its way out (`retiring`) is
+            // Lifecycle (design Part V, rows `retire` and `retire-guard`): `retired` is
             // delivered nowhere, exactly like an undeclared key, so a target that still
-            // holds it prunes it; `retired` is likewise never delivered. Additive: only
-            // keys that are no longer `active` are affected.
-            let outcome = if spec.lifecycle == Lifecycle::Active {
-                outcome
-            } else {
-                Ok(None)
+            // holds it prunes it. A `retiring` key is delivered (staged and kept) like an
+            // `active` one, so a plain `--prune` never removes it; only retire's prune step
+            // sets `retiring_prune`, which releases it to the prune list. Additive: nothing
+            // active is affected.
+            let outcome = match (spec.lifecycle, opts.retiring_prune) {
+                (Lifecycle::Active, _) | (Lifecycle::Retiring, false) => outcome,
+                (Lifecycle::Retiring, true) | (Lifecycle::Retired, _) => Ok(None),
             };
 
             let mut row = Row {
@@ -964,6 +972,7 @@ mod tests {
                 digest: &|_| None,
                 target_check: &|_, _| None,
                 current: None,
+                retiring_prune: false,
             },
         )
     }
@@ -1355,7 +1364,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
     }
 
     #[test]
-    fn a_retiring_key_present_on_a_target_is_pruned() {
+    fn a_plain_prune_keeps_a_retiring_key() {
         let leaving = TWO_KEYS.replace(
             "[products.p.keys.BOTH]\nkind = \"secret\"",
             "[products.p.keys.BOTH]\nkind = \"secret\"\nlifecycle = \"retiring\"",
@@ -1363,6 +1372,51 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
         let fleet = config::parse(&leaving).unwrap();
         let fly = [fly_secret("FLEET__P__BOTH", None)];
         let p = build(&fleet, "prod", vec![], &fly, &no_rotate(), &none);
+        assert!(p.prune.is_empty());
+    }
+
+    #[test]
+    fn a_retiring_key_is_staged_like_an_active_key() {
+        let leaving = TWO_KEYS.replace(
+            "[products.p.keys.BOTH]\nkind = \"secret\"",
+            "[products.p.keys.BOTH]\nkind = \"secret\"\nlifecycle = \"retiring\"",
+        );
+        let fleet = config::parse(&leaving).unwrap();
+        let p = build(
+            &fleet,
+            "prod",
+            vec![secret("p", "BOTH", "v")],
+            &[],
+            &no_rotate(),
+            &none,
+        );
+        assert_eq!(p.stage.len(), 1);
+    }
+
+    #[test]
+    fn a_retiring_key_present_on_a_target_is_pruned() {
+        let leaving = TWO_KEYS.replace(
+            "[products.p.keys.BOTH]\nkind = \"secret\"",
+            "[products.p.keys.BOTH]\nkind = \"secret\"\nlifecycle = \"retiring\"",
+        );
+        let fleet = config::parse(&leaving).unwrap();
+        let fly = [fly_secret("FLEET__P__BOTH", None)];
+        let empty = BTreeSet::new();
+        let p = build_with(
+            &fleet,
+            "prod",
+            vec![],
+            &fly,
+            &PlanOptions {
+                target: Some("portfolio"),
+                rotate: &empty,
+                prune_immutable: &empty,
+                digest: &none,
+                target_check: &|_, _| None,
+                current: None,
+                retiring_prune: true,
+            },
+        );
         assert_eq!(p.prune, vec!["FLEET__P__BOTH".to_string()]);
     }
 
@@ -1449,6 +1503,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
             digest: &none,
             target_check,
             current: None,
+            retiring_prune: false,
         }
     }
 
@@ -1674,7 +1729,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
         let env = Environment {
             name: "ci".to_string(),
             boundaries: ["api", "web", "shared"]
-                .map(|b| (b.to_string(), at.clone()))
+                .map(|b| (b.to_string(), Some(at.clone())))
                 .into_iter()
                 .collect(),
             targets: BTreeMap::from([(
@@ -1685,7 +1740,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
                     products: Some(vec!["api".to_string()]),
                     roles: None,
                     deploy_credentials: None,
-                    state_vault_id: "sci".to_string(),
+                    state_vault_id: Some("sci".to_string()),
                     delivery_items: BTreeMap::new(),
                 },
             )]),
@@ -1824,6 +1879,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
             digest: &none,
             target_check: &|_, _| None,
             current: None,
+            retiring_prune: false,
         };
         let plan = build_with_gate(
             &gate_fleet(),

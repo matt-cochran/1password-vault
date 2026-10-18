@@ -1,0 +1,8 @@
+{
+ "url": "<ADDRESS_A>",
+ "email": "<EMAIL_A>",
+ "user_uuid": "<USER_A>",
+ "account_uuid": "<ACCOUNT_A>",
+ "shorthand": "<SHORTHAND_1>",
+ "user_type": "HUMAN"
+}

@@ -274,7 +274,7 @@ struct StateItem {
 fn item_at(fleet: &Fleet, env_name: &str, target: &str, product: &str) -> Option<Boundary> {
     let t = fleet.environments.get(env_name)?.targets.get(target)?;
     Some(Boundary {
-        vault_id: t.state_vault_id.clone(),
+        vault_id: t.state_vault_id.clone()?,
         item_id: t.delivery_items.get(product)?.clone(),
     })
 }
@@ -363,7 +363,7 @@ pub(crate) fn ledgers(
                     "the delivery evidence of {product} on {} (state vault {}) could not be \
                      read: {why}; its names show as unknown",
                     super::placement(env_name, target),
-                    t.state_vault_id
+                    t.state_vault_id.as_deref().unwrap_or("not bound")
                 ))
             }
         }

@@ -1032,13 +1032,12 @@ pub fn run_at(
             if readable {
                 reading = false;
             }
-            let grants_missing = if readable {
-                vault_checks
-                    .entry(t.state_vault_id.clone())
-                    .or_insert_with(|| state_vault_grants(&env_runner, &t.state_vault_id))
-                    .clone()
-            } else {
-                None
+            let grants_missing = match &t.state_vault_id {
+                Some(vault) if readable => vault_checks
+                    .entry(vault.clone())
+                    .or_insert_with(|| state_vault_grants(&env_runner, vault))
+                    .clone(),
+                _ => None,
             };
             targets.push(TargetInput {
                 name: tname.clone(),
@@ -1217,11 +1216,11 @@ fn read_item_versions(
 ) -> Result<(BTreeMap<String, u64>, BTreeSet<String>), Error> {
     let mut versions = BTreeMap::new();
     let mut assistant_imported = BTreeSet::new();
-    for (name, env) in &fleet.environments {
+    for name in fleet.environments.keys() {
         if only.is_some_and(|o| o != name.as_str()) {
             continue;
         }
-        for b in env.boundaries.values() {
+        for (_, b) in fleet.bound_boundaries(name)? {
             let args = [
                 "item",
                 "list",
@@ -1271,11 +1270,11 @@ fn recorded_versions(
     else {
         return BTreeMap::new();
     };
-    let Some(item_id) = t.delivery_items.get(product) else {
+    let (Some(item_id), Some(vault_id)) = (t.delivery_items.get(product), &t.state_vault_id) else {
         return BTreeMap::new();
     };
     let boundary = crate::domain::Boundary {
-        vault_id: t.state_vault_id.clone(),
+        vault_id: vault_id.clone(),
         item_id: item_id.clone(),
     };
     let Ok(env) = fleet.environment(env_name) else {

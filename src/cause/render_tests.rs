@@ -483,14 +483,13 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
         (
             Partial {
                 done: vec!["vault shop-prod".into()],
-                approval_used: Some(PlanId::new("sp-used")),
-                approval_scope: Some(sync_scope()),
+                scope: Some(sync_scope()),
                 then: Box::new(BudgetSpent {
                     budget_seconds: 77,
                     writes_started: true,
                 }),
             },
-            vec!["vault shop-prod", "sp-used", "77"],
+            vec!["vault shop-prod", "77"],
         ),
         (
             Interrupted {
@@ -1136,6 +1135,56 @@ fn a_vendor_step_is_a_run_for_the_person() {
     );
 }
 
+/// Row `import-next`: an import failure's next is the person's own action.
+#[test]
+fn an_import_read_back_failure_names_the_person() {
+    let c = Cause::ReadBackMissing {
+        vault: VaultId::new("vlt-atqr"),
+        item: ItemId::new("itm-1"),
+        fields: vec![FieldName::new("web/KEY")],
+        by: Cmd {
+            command: vec!["import".into()],
+            args: vec!["dev".into(), "--from".into(), ".env.dev".into()],
+        },
+    };
+    let (_, next) = c.step_in(&inv(), &person_at_terminal());
+    assert_eq!(next_kind_actor(&next).1, NextActor::Person);
+}
+
+/// Row `import-next`: that person action is an `apply`.
+#[test]
+fn an_import_read_back_failure_nexts_an_apply() {
+    let c = Cause::ReadBackMissing {
+        vault: VaultId::new("vlt-atqr"),
+        item: ItemId::new("itm-1"),
+        fields: vec![FieldName::new("web/KEY")],
+        by: Cmd {
+            command: vec!["import".into()],
+            args: vec!["dev".into(), "--from".into(), ".env.dev".into()],
+        },
+    };
+    let (_, next) = c.step_in(&inv(), &person_at_terminal());
+    assert_eq!(next_kind_actor(&next).0, NextKind::Apply);
+}
+
+/// Row `import-next`: re-running an import is the person's own action.
+#[test]
+fn an_import_rerun_names_the_person() {
+    let import = Invocation {
+        origin: Origin::Cli,
+        command: vec!["import".into()],
+        args: vec!["dev".into(), "--from".into(), ".env.dev".into()],
+        has_child: false,
+    };
+    assert_eq!(next_value(&Next::Rerun, &import)["actor"], "person");
+}
+
+/// Row `import-next`: a re-run of a command no person owns stays the assistant's.
+#[test]
+fn a_non_person_rerun_stays_the_assistants() {
+    assert_eq!(next_value(&Next::Rerun, &inv())["actor"], "assistant");
+}
+
 #[test]
 fn every_variant_has_a_fixture() {
     let mut seen: Vec<usize> = causes().iter().map(ordinal).collect();
@@ -1649,6 +1698,13 @@ fn the_document_subject_leaves_out_the_observed_call() {
 fn the_document_names_the_checked_account() {
     let d = document(&in_other_account(), None, &inv(), false);
     assert_eq!(d["evidence"]["account"], serde_json::json!("6AINMAIK"));
+}
+
+#[test]
+fn a_partials_json_subject_has_no_approval_key() {
+    let d = document(&fixture(34), None, &inv(), false);
+    let keys: Vec<&String> = d["subject"].as_object().unwrap().keys().collect();
+    assert!(!keys.iter().any(|k| k.starts_with("approval")), "{d}");
 }
 
 #[test]
@@ -2761,6 +2817,17 @@ fn a14_differing_copies_are_not_human_required() {
     assert!(!c.human_required(&inv()));
 }
 
+/// D-G: the differing-copies advice names the plain `config export` (no `--with-ids`).
+#[test]
+fn copies_differ_advice_names_the_plain_export() {
+    let c = Cause::CopiesDiffer {
+        file: PathBuf::from("secrets.toml"),
+        manifest: "opv shop".into(),
+    };
+    let d = c.do_text(&inv()).unwrap_or_default();
+    assert!(d.contains("opv config export --toml >"), "{d}");
+}
+
 /// A14: one ambiguous manifest is singular.
 #[test]
 fn a14_one_manifest_matches_in_the_singular() {
@@ -2792,8 +2859,7 @@ fn a14_a_missing_config_file_steps_to_doctor() {
 fn a15_nothing_written_is_never_listed() {
     let c = Cause::Partial {
         done: vec![],
-        approval_used: None,
-        approval_scope: None,
+        scope: None,
         then: Box::new(Cause::Interrupted {
             signal: 2,
             writes_started: true,
@@ -3205,10 +3271,7 @@ fn a20_a_built_step_keeps_the_config_flag() {
         source: file_source(),
     };
     let inv = cli(&["opv", "sync", "prod", "--config", "cfg/secrets.toml"]);
-    assert_eq!(
-        next_in(&c, &inv),
-        "opv propose structure --config cfg/secrets.toml"
-    );
+    assert_eq!(next_in(&c, &inv), "opv apply --config cfg/secrets.toml");
 }
 
 /// A21: a rejected credential needs a person to replace it.
@@ -3312,8 +3375,7 @@ fn generate_refused(reason: GenerateRefusal) -> Cause {
 fn partial(then: Cause, done: &[&str]) -> Cause {
     Cause::Partial {
         done: done.iter().map(|d| d.to_string()).collect(),
-        approval_used: None,
-        approval_scope: None,
+        scope: None,
         then: Box::new(then),
     }
 }
@@ -4080,8 +4142,7 @@ fn l10_in_env_keeps_an_environment_already_set() {
 fn l10_in_env_reaches_a_partial_then() {
     let c = Cause::Partial {
         done: Vec::new(),
-        approval_used: None,
-        approval_scope: None,
+        scope: None,
         then: Box::new(unrecognized_without_env()),
     }
     .in_env("prod");

@@ -75,6 +75,7 @@ fn planned(field: Option<ItemField>, vars: &FakeVars) -> (SyncPlan, VarPlan) {
             digest: &|_| None,
             target_check: &|_, _| None,
             current: None,
+            retiring_prune: false,
         },
     );
     let (name, t) = f.environments["staging"]
@@ -194,6 +195,7 @@ fn a_store_refusal_fails_the_row() {
             digest: &|_| None,
             target_check: &|_, _| None,
             current: None,
+            retiring_prune: false,
         },
     );
     let (name, t) = f.environments["staging"]

@@ -1846,12 +1846,7 @@ impl Cause {
                 then.message(),
                 list_of(keys)
             ),
-            Partial {
-                done,
-                approval_used,
-                approval_scope: _,
-                then,
-            } => {
+            Partial { done, then, .. } => {
                 let mut s = match then.as_ref() {
                     // F3: next to what was already written, "opv wrote nothing" is false.
                     ChangedBeforeWrite { object } if !done.is_empty() => format!(
@@ -1862,9 +1857,6 @@ impl Cause {
                 };
                 if !done.is_empty() {
                     s.push_str(&format!("; already written: {}", list(done)));
-                }
-                if let Some(p) = approval_used {
-                    s.push_str(&format!("; approval {p} is used up"));
                 }
                 s
             }
@@ -2515,15 +2507,11 @@ impl Cause {
                 )),
                 Next::Rerun,
             ),
-            BoundaryMissing { source, .. } | StateVaultMissing { source, .. } => plan(
-                None,
-                match source {
-                    ConfigSource::File { .. } => Next::Run(cmd(&["propose", "structure"], &[])),
-                    ConfigSource::Manifest { .. } => {
-                        Next::Check(cmd(&["propose", "structure"], &[]))
-                    }
-                },
-            ),
+            // D-G: ids are bound only by `opv apply`, which a person runs in their own
+            // terminal; it makes and binds every boundary and state vault the contract needs.
+            BoundaryMissing { .. } | StateVaultMissing { .. } => {
+                plan(None, Next::Handoff(cmd(&["apply"], &[])))
+            }
             StateVaultTooWide {
                 env,
                 target,
@@ -3497,12 +3485,7 @@ impl Cause {
                 c.args = args;
                 plan(None, run_or_handoff(c))
             }
-            Partial {
-                done,
-                approval_used: _,
-                approval_scope,
-                then,
-            } => {
+            Partial { done, scope, then } => {
                 let inner = then.plan_raw(inv);
                 // A15: an empty `done` names nothing as written.
                 let action = match (inner.action, inner.do_text, done.is_empty()) {
@@ -3517,7 +3500,7 @@ impl Cause {
                     )),
                 };
                 let path: Vec<&str> = inv.command.iter().map(String::as_str).collect();
-                let next = match (approval_scope, path.as_slice()) {
+                let next = match (scope, path.as_slice()) {
                     (Some(scope), _) => scope_read(scope),
                     // A22: what `target credentials` made is read back with its show form.
                     (None, ["target", "credentials"]) => {
@@ -4243,8 +4226,23 @@ impl Cause {
 
 // --- output ----------------------------------------------------------------------------------
 
+/// A command only a person runs (`opv apply`, `opv set`, `opv import`): its step is that
+/// person's own action (design §6.2, row `import-next`).
+fn person_command(c: &Cmd) -> bool {
+    matches!(
+        c.command.first().map(String::as_str),
+        Some("apply" | "set" | "import")
+    )
+}
+
 /// The [`NextKind`] and [`NextActor`] a catalog step maps to (schema 3).
 pub fn next_kind_actor(n: &Next) -> (NextKind, NextActor) {
+    // A person-only command is the person's own action however it is framed.
+    if let Next::Run(c) | Next::Check(c) = n
+        && person_command(c)
+    {
+        return (NextKind::Apply, NextActor::Person);
+    }
     match n {
         Next::Rerun | Next::Run(_) | Next::Check(_) => (NextKind::Run, NextActor::Assistant),
         // A person's own terminal: a sign-in is an `authorize`, every other handoff the
@@ -4265,7 +4263,12 @@ fn is_sign_in(c: &Cmd) -> bool {
 /// The typed `next` object of the error document (schema 3): `kind`, `actor` and the exact
 /// command (or `null`).
 pub fn next_value(n: &Next, inv: &Invocation) -> serde_json::Value {
-    let (kind, actor) = next_kind_actor(n);
+    // A re-run of a command only a person runs is that person's own `apply` (row
+    // `import-next`); `next_kind_actor` already covers a built `Run` or `Check`.
+    let (kind, actor) = match n {
+        Next::Rerun if person_command(&inv_cmd(inv)) => (NextKind::Apply, NextActor::Person),
+        _ => next_kind_actor(n),
+    };
     serde_json::json!({
         "kind": kind,
         "actor": actor,

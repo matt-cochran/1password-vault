@@ -39,6 +39,15 @@ pub enum RetireStep {
     MarkRetired,
 }
 
+impl RetireStep {
+    /// The `PlanOptions::retiring_prune` value this step's sync runs with: only a
+    /// [`RetireStep::Prune`] step may prune a `retiring` key (design Part V, row
+    /// `retire-guard`); every other step, and a plain sync, keeps it.
+    pub fn retiring_prune(&self) -> bool {
+        matches!(self, RetireStep::Prune { .. })
+    }
+}
+
 /// What a `retire` run handed the caller. Names only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RetireReport {

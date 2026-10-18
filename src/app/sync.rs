@@ -221,8 +221,7 @@ fn partial(e: Error, done: &[String], scope: PlanScope) -> Error {
     Error::Catalog(
         Box::new(Cause::Partial {
             done: written,
-            approval_used: None,
-            approval_scope: Some(scope),
+            scope: Some(scope),
             then,
         }),
         up,

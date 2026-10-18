@@ -52,7 +52,7 @@ pub(crate) fn configuration_projection(fleet: &crate::domain::Fleet) -> Value {
                         "name": name,
                         "provider": t.config.provider().section(),
                         "products": products,
-                        "state_vault_recorded": !t.state_vault_id.is_empty(),
+                        "state_vault_recorded": t.state_vault_id.is_some(),
                         "deploy_credentials_declared": t.deploy_credentials.is_some(),
                     })
                 })

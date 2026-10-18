@@ -27,15 +27,14 @@ fn usage(problem: UsageProblem) -> Error {
     Cause::Usage { problem }.into()
 }
 
-/// What a person's command line adds to a key intent beyond the categorical document:
-/// rule parameters (`--rule`, reviewed in the pull request and counted only once committed
-/// on the default branch) and an expiry date (`--expires`). An assistant's intent carries
-/// neither.
+/// What a person's command line adds to a key intent beyond the categorical document: rule
+/// parameters (`--rule`, reviewed in the pull request and counted only once committed on the
+/// default branch). An assistant's intent never carries one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Extras {
     /// `name=value` or `name` (a flag rule), as [`rule`] reads them.
     pub rules: Vec<String>,
-    /// `YYYY-MM-DD`.
+    /// `YYYY-MM-DD` (the intent's own `expires` is used; kept for the CLI until it moves).
     pub expires: Option<String>,
 }
 
@@ -82,6 +81,7 @@ pub fn propose_with(
             personal,
             allow_same_value,
             immutable,
+            expires,
             lifecycle,
             guidance,
         } => {
@@ -98,6 +98,7 @@ pub fn propose_with(
                 .map(|(env, reason)| (env.to_string(), reason.0.clone()))
                 .collect();
             let excluded: Vec<String> = except.iter().map(|(env, _)| env.clone()).collect();
+            let expires_text = expires.map(|d| d.to_string());
             doc.add_key(
                 &product,
                 key.as_str(),
@@ -113,7 +114,7 @@ pub fn propose_with(
                     except: &except,
                     source: source.map(source_word),
                     shape: shape_name,
-                    expires: extras.expires.as_deref(),
+                    expires: expires_text.as_deref(),
                     lifecycle: lifecycle.map(lifecycle_word),
                 },
             )?;
