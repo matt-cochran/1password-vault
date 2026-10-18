@@ -341,3 +341,28 @@ personal = true
         Some(crate::domain::value_state::ValueState::Set)
     );
 }
+
+/// Walkthrough finding 2: with every key's field in place, an `empty` cell in a vault this
+/// session can write is the person's `opv set`, as `opv next` ranks it (3).
+#[test]
+fn an_empty_cell_in_a_writable_vault_is_the_persons_set_command() {
+    use crate::domain::inventory::{CellInputs, build};
+    use crate::domain::value_state::ValueState;
+    let (_, fleet, _) = world();
+    let at = |key: &str| ("api".to_string(), key.to_string(), "dev".to_string());
+    let cells = CellInputs {
+        states: std::collections::BTreeMap::from([
+            (at("DATABASE_URL"), ValueState::Set),
+            (at("OPENAI_API_KEY"), ValueState::Empty),
+        ]),
+        capabilities: std::collections::BTreeMap::from([(
+            VAULT.to_string(),
+            crate::domain::capability::Capability::Write,
+        )]),
+        ..CellInputs::default()
+    };
+    assert_eq!(
+        super::next_command(&build(&fleet, &cells, None)),
+        Some("opv set api/OPENAI_API_KEY --env dev".to_string())
+    );
+}

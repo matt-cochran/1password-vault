@@ -78,7 +78,7 @@ environments.prod.targets.gh.state_vault_id = "vsim0000000000000000000005"
 ## 12. assistant: opv_import_local {"env":"local","file":".env"}
 {"schema_version":3,"ok":true,"environment":"local","applied":true,"rows":[{"found":["API_KEY"],"product":"app","key":"API_KEY","action":"imported","rule":null},{"found":["LOG_LEVEL"],"product":"app","key":"LOG_LEVEL","action":"imported","rule":null},{"found":["SESSION_SECRET"],"product":"app","key":"SESSION_SECRET","action":"imported","rule":null}],"writes":3,"decisions_needed":0,"next":{"kind":"run","actor":"assistant","command":"opv ready local"},"do":null}
 
-## 13. person: opv import prod --from prod.env
+## 13. person: opv import prod --from prod.env --confirm prod
 exit: 0
 stdout:
 prod: 2 found · 2 written · 0 need a decision
@@ -89,7 +89,7 @@ stderr:
 using <SCENARIO>/project/secrets.toml
 
 ## 14. assistant: opv_state {"section":"inventory","env":"prod"}
-{"schema_version":3,"ok":true,"environments":[{"env":"prod","tier":"production","boundaries":{"app":{"vault_id":"vsim0000000000000000000003","item_id":"isim0000000000000000000004"}}}],"keys":[{"product":"app","key":"API_KEY","kind":"secret","source":null,"presence":{"prod":"present"},"lifecycle":"active","expires":null},{"product":"app","key":"LOG_LEVEL","kind":"config","source":null,"presence":{"prod":"present"},"lifecycle":"active","expires":null},{"product":"app","key":"SESSION_SECRET","kind":"secret","source":null,"presence":{"prod":"present"},"lifecycle":"active","expires":null}],"cells":[{"product":"app","key":"API_KEY","env":"prod","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"LOG_LEVEL","env":"prod","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"SESSION_SECRET","env":"prod","boundary":"app","state":{"state":"empty"},"capability":"write","from_receipt":null}],"deliveries":[{"environment":"prod","target":"gh","product":"app","state":"not_delivered"}],"next":{"kind":"none","actor":"person","command":null},"do":null}
+{"schema_version":3,"ok":true,"environments":[{"env":"prod","tier":"production","boundaries":{"app":{"vault_id":"vsim0000000000000000000003","item_id":"isim0000000000000000000004"}}}],"keys":[{"product":"app","key":"API_KEY","kind":"secret","source":null,"presence":{"prod":"present"},"lifecycle":"active","expires":null},{"product":"app","key":"LOG_LEVEL","kind":"config","source":null,"presence":{"prod":"present"},"lifecycle":"active","expires":null},{"product":"app","key":"SESSION_SECRET","kind":"secret","source":null,"presence":{"prod":"present"},"lifecycle":"active","expires":null}],"cells":[{"product":"app","key":"API_KEY","env":"prod","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"LOG_LEVEL","env":"prod","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"SESSION_SECRET","env":"prod","boundary":"app","state":{"state":"empty"},"capability":"write","from_receipt":null}],"deliveries":[{"environment":"prod","target":"gh","product":"app","state":"not_delivered"}],"next":{"kind":"enter_value","actor":"person","command":"opv set app/SESSION_SECRET --env prod"},"do":null}
 
 ## 15. person: opv set app/SESSION_SECRET --env prod
 app/SESSION_SECRET (masked; Enter to skip): ********

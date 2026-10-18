@@ -21,7 +21,8 @@ use crate::runner::{Call, CommandRunner, PROBE_TIMEOUT};
 pub enum RuleStatus {
     /// The working tree's rules for the key equal the default-branch contract's.
     Committed,
-    /// The key, or its rules, exist only outside the default-branch contract.
+    /// The key's rules exist only outside the default-branch contract. A key that declares
+    /// no rule at all is never pending: there is nothing to review (walkthrough finding 1).
     PendingReview,
 }
 
@@ -41,9 +42,13 @@ pub enum RuleSource {
 }
 
 impl RuleSource {
-    /// The status of `key`'s rules in `working`: [`RuleStatus::Committed`] only when the
-    /// working tree's rules for `(product, key)` equal the default-branch contract's.
+    /// The status of `key`'s rules in `working`: [`RuleStatus::Committed`] when the key
+    /// declares no rule (nothing is pending), or when the working tree's rules for
+    /// `(product, key)` equal the default-branch contract's.
     pub fn status(&self, working: &Fleet, product: &str, key: &str) -> RuleStatus {
+        if !declares_rules(working, product, key) {
+            return RuleStatus::Committed;
+        }
         let Self::DefaultBranch {
             contract: Some(contract),
             ..
@@ -67,6 +72,13 @@ impl RuleSource {
             Self::Manifest => None,
         }
     }
+}
+
+/// True when `(product, key)` declares at least one rule in `fleet`. A key with no rule is
+/// evaluated normally for every caller: nothing about it awaits review (default 2,
+/// walkthrough finding 1).
+pub fn declares_rules(fleet: &Fleet, product: &str, key: &str) -> bool {
+    rule_of(fleet, product, key).is_some_and(|r| *r != crate::domain::Rules::default())
 }
 
 /// The rules declared for `(product, key)`, or `None` when the key is undeclared there.

@@ -220,9 +220,12 @@ fn a_repository_without_origin_head_uses_main() {
 }
 
 #[test]
-fn a_manifest_key_is_pending_review() {
-    let fleet =
-        crate::config::parse_at(BASE, crate::config::Source::Manifest("opv · app")).unwrap();
+fn a_manifest_key_with_a_rule_is_pending_review() {
+    let fleet = crate::config::parse_at(
+        &with_rule("sk-"),
+        crate::config::Source::Manifest("opv · app"),
+    )
+    .unwrap();
     let dir = tempfile::tempdir().unwrap();
     let source = rule_source(&runner(), dir.path(), &fleet).unwrap();
     assert_eq!(
@@ -264,5 +267,20 @@ fn a_committed_contract_parses_with_its_committed_bindings() {
                 .item_id
                 .clone()),
         Some("app".to_string())
+    );
+}
+
+// --- a key with no rule (walkthrough finding 1) ----------------------------------------------
+
+#[test]
+fn a_key_with_no_rule_is_never_pending_review() {
+    let source = RuleSource::DefaultBranch {
+        branch: "main".into(),
+        contract: None,
+    };
+    let working = crate::config::parse(BASE).unwrap();
+    assert_eq!(
+        source.status(&working, "app", "API_KEY"),
+        RuleStatus::Committed
     );
 }

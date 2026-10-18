@@ -185,6 +185,7 @@
         "env"
       ],
       "flags": [
+        "confirm",
         "dry-run",
         "from",
         "json",

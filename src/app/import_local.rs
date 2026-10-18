@@ -66,6 +66,8 @@ fn import_local_as(
         rotate: Vec::new(),
         skip: Vec::new(),
         dry_run: false,
+        // The local tier is never guarded by tier; `opv_import_local` is unaffected (P-11).
+        confirm: None,
         json,
     };
     import::run_tagged(fleet, env, &opts, Some(ASSISTANT_IMPORTED), r, out)

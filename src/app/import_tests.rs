@@ -291,6 +291,7 @@ fn opts(dir: &tempfile::TempDir, dry_run: bool, replace: &[&str]) -> Opts {
         rotate: Vec::new(),
         skip: Vec::new(),
         dry_run,
+        confirm: None,
         json: false,
     }
 }
@@ -502,6 +503,7 @@ fn narrowed() -> Opts {
         rotate: vec!["api/X".into()],
         skip: vec!["api/LEGACY_TOKEN".into()],
         dry_run: true,
+        confirm: None,
         json: false,
     }
 }
@@ -540,10 +542,71 @@ fn a_read_back_failure_names_the_import_command() {
         rotate: Vec::new(),
         skip: Vec::new(),
         dry_run: false,
+        confirm: None,
         json: false,
     };
     assert_eq!(
         crate::cause::render::cmd_text(&apply_command("dev", &opts)),
         "opv import dev --from target:web"
     );
+}
+
+// §21 P-11: an import into a guarded or production-tier environment is confirmed --------
+
+/// [`world`] with `dev` made production-tier (`confirm_env` left off).
+fn production_world() -> (FakeOp, Fleet, tempfile::TempDir) {
+    let (op, mut fleet, dir) = world(true);
+    fleet.environments.get_mut("dev").unwrap().tier = crate::domain::Tier::Production;
+    (op, fleet, dir)
+}
+
+/// `opts` writing, with `--confirm <confirm>` when given.
+fn confirmed(dir: &tempfile::TempDir, confirm: Option<&str>) -> Opts {
+    Opts {
+        confirm: confirm.map(str::to_string),
+        ..opts(dir, false, &[])
+    }
+}
+
+#[test]
+fn an_import_into_a_production_tier_environment_needs_confirm() {
+    let (op, fleet, dir) = production_world();
+    let e = run(&fleet, "dev", &confirmed(&dir, None), &op, &mut Vec::new()).unwrap_err();
+    assert_eq!(e.code_str(), "confirm_required");
+}
+
+#[test]
+fn an_import_into_a_confirm_env_environment_needs_confirm() {
+    let (op, mut fleet, dir) = world(true);
+    fleet.environments.get_mut("dev").unwrap().confirm_env = true;
+    let e = run(&fleet, "dev", &confirmed(&dir, None), &op, &mut Vec::new()).unwrap_err();
+    assert_eq!(e.code_str(), "confirm_required");
+}
+
+#[test]
+fn an_import_confirmed_for_another_environment_is_refused() {
+    let (op, fleet, dir) = production_world();
+    let e = run(
+        &fleet,
+        "dev",
+        &confirmed(&dir, Some("prod")),
+        &op,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(e.code_str(), "confirm_mismatch");
+}
+
+#[test]
+fn an_import_confirmed_for_its_environment_writes() {
+    let (op, fleet, dir) = production_world();
+    run(
+        &fleet,
+        "dev",
+        &confirmed(&dir, Some("dev")),
+        &op,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(value_of(&op, &fleet, "OPENAI_API_KEY"), MARK_NEW);
 }
