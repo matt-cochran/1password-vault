@@ -8,6 +8,7 @@
 //! [`render_text`] prints the same receipt for a person: a counts line, a
 //! product × environment grid and the findings with one runnable prerequisite each.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 
 use serde::{Deserialize, Serialize};
@@ -73,7 +74,7 @@ pub struct Inputs<'a> {
 }
 
 /// `config` of the receipt: where the configuration was read from.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigRef {
     pub source: Option<String>,
 }
@@ -170,7 +171,7 @@ pub struct Next {
 }
 
 /// The FR-51 document.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Receipt {
     pub receipt_id: String,
     pub opv_version: String,
@@ -181,6 +182,19 @@ pub struct Receipt {
     pub targets: Vec<TargetReport>,
     pub findings: Vec<Finding>,
     pub next: Option<Next>,
+    /// RFC 3339 UTC the receipt was generated (design row `receipts`). The `--save` receipt
+    /// always carries it; omitted when a caller built the receipt without a clock. A time,
+    /// never a value (SR-1).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub generated_at: String,
+    /// Item id → the `op item list` `version` this receipt saw (C2, as `changed` reads it).
+    /// An integer, never a value or a digest of one (SR-1); omitted when none were read.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub item_versions: BTreeMap<String, u64>,
+    /// The git commit (`git rev-parse HEAD`) this receipt was generated at; `None` outside a
+    /// repository. Hex only, never a value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
     /// The environments in input order, with their display names, for [`render_text`]'s
     /// columns; never serialized.
     #[serde(skip)]
@@ -191,6 +205,20 @@ pub struct Receipt {
 /// `receipt_id`, which binds the receipt to `(config.source, account, matrix, findings)`
 /// and holds no value.
 pub fn receipt(inputs: &Inputs<'_>, opv_version: &str) -> Receipt {
+    receipt_with(inputs, opv_version, "", BTreeMap::new(), None)
+}
+
+/// [`receipt`] with the clock, item versions and git revision the `--save` receipt records
+/// (design row `receipts`). `generated_at` is RFC 3339 UTC, `item_versions` is item id →
+/// the `op item list` version, and `revision` is `git rev-parse HEAD` (`None` outside a
+/// repository). All three are times, integers and hex only: never a value (SR-1).
+fn receipt_with(
+    inputs: &Inputs<'_>,
+    opv_version: &str,
+    generated_at: &str,
+    item_versions: BTreeMap<String, u64>,
+    revision: Option<String>,
+) -> Receipt {
     let config = ConfigRef {
         source: inputs.config_source.clone(),
     };
@@ -229,6 +257,9 @@ pub fn receipt(inputs: &Inputs<'_>, opv_version: &str) -> Receipt {
         targets,
         findings,
         next,
+        generated_at: generated_at.to_string(),
+        item_versions,
+        revision,
         environments,
     }
 }
@@ -899,6 +930,31 @@ pub fn run(
     save: Option<&std::path::Path>,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
+    run_at(
+        fleet,
+        config_source,
+        only,
+        r,
+        json,
+        save,
+        &crate::domain::provenance::utc_now(),
+        out,
+    )
+}
+
+/// [`run`] with the clock the `--save` receipt records, injected so a test is deterministic
+/// (design row `receipts`).
+#[allow(clippy::too_many_arguments)]
+pub fn run_at(
+    fleet: &crate::domain::Fleet,
+    config_source: Option<&str>,
+    only: Option<&str>,
+    r: &dyn crate::runner::CommandRunner,
+    json: bool,
+    save: Option<&std::path::Path>,
+    generated_at: &str,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
     if let Some(e) = only {
         super::environment(fleet, e)?;
     }
@@ -1048,7 +1104,15 @@ pub fn run(
                 .map(move |(k, _)| (p.clone(), k.clone()))
         })
         .collect();
-    let doc = receipt(
+    // The saved receipt records what this run saw: the item versions of each boundary
+    // (`op item list`, as `changed` reads them) and the git revision. Read only when a
+    // receipt is saved; the plain report needs neither.
+    let (item_versions, revision) = if save.is_some() {
+        (read_item_versions(fleet, only, r)?, git_revision(r))
+    } else {
+        (BTreeMap::new(), None)
+    };
+    let doc = receipt_with(
         &Inputs {
             config_source: config_source.map(str::to_string),
             account: &account,
@@ -1057,6 +1121,9 @@ pub fn run(
             health,
         },
         env!("CARGO_PKG_VERSION"),
+        if save.is_some() { generated_at } else { "" },
+        item_versions,
+        revision,
     );
     // The receipt is plain data: failing to serialize it is opv's own bug.
     let bug = |_| {
@@ -1078,4 +1145,66 @@ pub fn run(
         writeln!(out, "saved: {}", path.display()).map_err(super::write_err)?;
     }
     Ok(())
+}
+
+/// The git commit of the repository, `git rev-parse HEAD` through the runner; `None`
+/// outside a repository (design row `receipts`). Hex only, never a value.
+fn git_revision(r: &dyn crate::runner::CommandRunner) -> Option<String> {
+    match r.probe(
+        &crate::runner::Call::new("git", &["rev-parse", "HEAD"]),
+        crate::runner::PROBE_TIMEOUT,
+    ) {
+        Ok(o) if o.status == 0 => {
+            let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            (!text.is_empty()).then_some(text)
+        }
+        _ => {
+            // Not a repository, no git, or no commit yet: its stderr explains nothing later.
+            let _ = crate::runner::take_failure_excerpt();
+            None
+        }
+    }
+}
+
+/// One row of `op item list --vault <vault> --format json` (as `changed` reads them).
+#[derive(serde::Deserialize)]
+struct ListRow {
+    id: String,
+    #[serde(default)]
+    version: u64,
+}
+
+/// Item id → the `op item list` `version` of each boundary item in scope (design row
+/// `receipts`, the versions `changed` reads). One listing per vault, as `changed` does.
+fn read_item_versions(
+    fleet: &crate::domain::Fleet,
+    only: Option<&str>,
+    r: &dyn crate::runner::CommandRunner,
+) -> Result<BTreeMap<String, u64>, Error> {
+    let mut versions = BTreeMap::new();
+    for (name, env) in &fleet.environments {
+        if only.is_some_and(|o| o != name.as_str()) {
+            continue;
+        }
+        for b in env.boundaries.values() {
+            let args = [
+                "item",
+                "list",
+                "--vault",
+                b.vault_id.as_str(),
+                "--format",
+                "json",
+            ];
+            let out = crate::adapters::onepassword::read_op(r, &args, &crate::host::Host::detect)?;
+            if out.status != 0 || out.stdout.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            if let Ok(rows) = serde_json::from_slice::<Vec<ListRow>>(&out.stdout) {
+                for row in rows {
+                    versions.insert(row.id, row.version);
+                }
+            }
+        }
+    }
+    Ok(versions)
 }
