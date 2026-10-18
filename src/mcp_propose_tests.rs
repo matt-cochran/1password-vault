@@ -427,7 +427,8 @@ fn opv_import_local_into_a_shared_environment_is_the_clis_own_failure() {
     let err = crate::app::import_local::import_local_json(
         &cli.fleet(),
         "prod",
-        &cli.project().join("dev.env"),
+        // The file as the caller names it: the refusal repeats it before reading it.
+        std::path::Path::new("dev.env"),
         &cli.r,
         &mut Vec::new(),
     )

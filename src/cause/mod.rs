@@ -483,6 +483,9 @@ pub enum Cause {
     /// never a value.
     NeedsUndeclared {
         names: Vec<String>,
+        /// The product the names would be declared in: the only delivered product, when
+        /// the contract has exactly one.
+        product: Option<String>,
     },
     /// The deployed code still reads a key a person asked to retire (design Part V, row
     /// `retire`): retirement prunes a key from a target only once the deployed revision no
@@ -920,6 +923,8 @@ pub enum Cause {
     ImportTierRefused {
         env: EnvName,
         tier: &'static str,
+        /// The file the caller named, as given: the person's own import reads it.
+        file: PathBuf,
     },
     Bug {
         site: &'static str,

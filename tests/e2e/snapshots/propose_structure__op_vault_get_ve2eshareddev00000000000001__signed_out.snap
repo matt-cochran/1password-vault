@@ -13,7 +13,7 @@ Next: opv login --account AE2EDEVACCOUNT000000000001 -- opv propose structure
 
 ## json exit: 7
 ## json stdout
-{"schema_version":3,"ok":false,"exit_code":7,"next":{"kind":"authorize","actor":"person","command":"opv login --account AE2EDEVACCOUNT000000000001 -- opv propose structure --json"},"do":"sign in to 1Password account AE2EDEVACCOUNT000000000001","error":{"code":"op_not_signed_in","category":"auth","message":"you are not signed in to 1Password account AE2EDEVACCOUNT000000000001","subject":{"state":{"state":"signed_out"},"system":"one_password","account":"AE2EDEVACCOUNT000000000001"},"evidence":{"checked":null,"account":null,"upstream":{"source":"one_password","tool":"1Password CLI","version":null,"exit":{"kind":"code","code":1},"said":["[ERROR] 2026/10/16 00:04:44 You are not currently signed in"],"truncated":false,"removed_advice":false,"untrusted":true,"omitted":0}},"retry":"after_fix","human_required":true,"do":"sign in to 1Password account AE2EDEVACCOUNT000000000001","next":{"kind":"authorize","actor":"person","command":"opv login --account AE2EDEVACCOUNT000000000001 -- opv propose structure --json"}}}
+{"schema_version":3,"ok":false,"exit_code":7,"next":{"kind":"authorize","actor":"person","command":"opv login --account AE2EDEVACCOUNT000000000001 -- opv propose structure"},"do":"sign in to 1Password account AE2EDEVACCOUNT000000000001","error":{"code":"op_not_signed_in","category":"auth","message":"you are not signed in to 1Password account AE2EDEVACCOUNT000000000001","subject":{"state":{"state":"signed_out"},"system":"one_password","account":"AE2EDEVACCOUNT000000000001"},"evidence":{"checked":null,"account":null,"upstream":{"source":"one_password","tool":"1Password CLI","version":null,"exit":{"kind":"code","code":1},"said":["[ERROR] 2026/10/16 00:04:44 You are not currently signed in"],"truncated":false,"removed_advice":false,"untrusted":true,"omitted":0}},"retry":"after_fix","human_required":true,"do":"sign in to 1Password account AE2EDEVACCOUNT000000000001","next":{"kind":"authorize","actor":"person","command":"opv login --account AE2EDEVACCOUNT000000000001 -- opv propose structure"}}}
 
 ## json stderr
 opv: you are not signed in to 1Password account AE2EDEVACCOUNT000000000001
@@ -21,4 +21,4 @@ opv: you are not signed in to 1Password account AE2EDEVACCOUNT000000000001
 | [ERROR] 2026/10/16 00:04:44 You are not currently signed in
 --- (scrubbed) ---
 Do: sign in to 1Password account AE2EDEVACCOUNT000000000001
-Next: opv login --account AE2EDEVACCOUNT000000000001 -- opv propose structure --json
+Next: opv login --account AE2EDEVACCOUNT000000000001 -- opv propose structure

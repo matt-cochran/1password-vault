@@ -18,16 +18,16 @@ coverage: 1 files · rust · 0 skipped patterns
 
 ## text stderr
 using <SCENARIO>/project/secrets.toml
-opv: the code reads 1 a name the contract declares nowhere: NEW_THING
-Do: declare NEW_THING with opv propose key, or stop reading them
-Next: opv needs --gate
+opv: the code reads 1 name the contract declares nowhere: NEW_THING
+Do: declare NEW_THING with opv propose key (secret or config), or stop reading it
+Next: opv propose key web/NEW_THING --kind secret
 
 ## json exit: 2
 ## json stdout
-{"schema_version":3,"ok":false,"exit_code":2,"rows":[{"name":"NEW_THING","state":"undeclared","files":["src/main.rs:3"],"product":null,"annotation_stale":false},{"name":"DATABASE_URL","state":"declared_unobserved","files":[],"product":"shared","annotation_stale":false},{"name":"FEATURE_FLAGS","state":"declared_unobserved","files":[],"product":"shared","annotation_stale":false},{"name":"LOG_LEVEL","state":"declared_unobserved","files":[],"product":"web","annotation_stale":false},{"name":"MIGRATION_TOKEN","state":"declared_unobserved","files":[],"product":"web","annotation_stale":false},{"name":"OTEL_RESOURCE","state":"declared_unobserved","files":[],"product":"web","annotation_stale":false},{"name":"PERSONAL_LLM_KEY","state":"declared_unobserved","files":[],"product":"web","annotation_stale":false},{"name":"SESSION_SECRET","state":"declared_unobserved","files":[],"product":"web","annotation_stale":false},{"name":"TLS_CERTIFICATE","state":"declared_unobserved","files":[],"product":"web","annotation_stale":false},{"name":"TLS_PRIVATE_KEY","state":"declared_unobserved","files":[],"product":"web","annotation_stale":false},{"name":"API_KEY","state":"declared","files":["src/main.rs:2"],"product":"web","annotation_stale":false}],"coverage":{"files":1,"languages":["rust"],"skipped_patterns":0},"next":{"kind":"run","actor":"assistant","command":"opv needs --gate --json"},"do":"declare NEW_THING with opv propose key, or stop reading them","error":{"code":"needs_undeclared","category":"config","message":"the code reads 1 a name the contract declares nowhere: NEW_THING","subject":{"names":["NEW_THING"]},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"declare NEW_THING with opv propose key, or stop reading them","next":{"kind":"run","actor":"assistant","command":"opv needs --gate --json"}}}
+{"schema_version":3,"ok":false,"exit_code":2,"rows":[{"name":"NEW_THING","state":"undeclared","files":["src/main.rs:3"],"product":null,"annotation_stale":false},{"name":"DATABASE_URL","state":"declared_unobserved","files":[],"product":"shared","annotation_stale":false},{"name":"FEATURE_FLAGS","state":"declared_unobserved","files":[],"product":"shared","annotation_stale":false},{"name":"LOG_LEVEL","state":"declared_unobserved","files":[],"product":"web","annotation_stale":false},{"name":"MIGRATION_TOKEN","state":"declared_unobserved","files":[],"product":"web","annotation_stale":false},{"name":"OTEL_RESOURCE","state":"declared_unobserved","files":[],"product":"web","annotation_stale":false},{"name":"PERSONAL_LLM_KEY","state":"declared_unobserved","files":[],"product":"web","annotation_stale":false},{"name":"SESSION_SECRET","state":"declared_unobserved","files":[],"product":"web","annotation_stale":false},{"name":"TLS_CERTIFICATE","state":"declared_unobserved","files":[],"product":"web","annotation_stale":false},{"name":"TLS_PRIVATE_KEY","state":"declared_unobserved","files":[],"product":"web","annotation_stale":false},{"name":"API_KEY","state":"declared","files":["src/main.rs:2"],"product":"web","annotation_stale":false}],"coverage":{"files":1,"languages":["rust"],"skipped_patterns":0},"next":{"kind":"run","actor":"assistant","command":"opv propose key web/NEW_THING --kind secret"},"do":"declare NEW_THING with opv propose key (secret or config), or stop reading it","error":{"code":"needs_undeclared","category":"config","message":"the code reads 1 name the contract declares nowhere: NEW_THING","subject":{"product":"web","names":["NEW_THING"]},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"declare NEW_THING with opv propose key (secret or config), or stop reading it","next":{"kind":"run","actor":"assistant","command":"opv propose key web/NEW_THING --kind secret"}}}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml
-opv: the code reads 1 a name the contract declares nowhere: NEW_THING
-Do: declare NEW_THING with opv propose key, or stop reading them
-Next: opv needs --gate --json
+opv: the code reads 1 name the contract declares nowhere: NEW_THING
+Do: declare NEW_THING with opv propose key (secret or config), or stop reading it
+Next: opv propose key web/NEW_THING --kind secret

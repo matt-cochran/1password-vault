@@ -206,6 +206,41 @@ fn a_different_plan_id_is_refused_stale() {
     assert_eq!(e.code_str(), "stale_plan");
 }
 
+/// Every `plan_id` value anywhere in a JSON document, in document order.
+fn plan_ids(v: &serde_json::Value) -> Vec<String> {
+    match v {
+        serde_json::Value::Object(o) => o
+            .iter()
+            .flat_map(|(k, v)| match (k.as_str(), v.as_str()) {
+                ("plan_id", Some(id)) => vec![id.to_string()],
+                _ => plan_ids(v),
+            })
+            .collect(),
+        serde_json::Value::Array(a) => a.iter().flat_map(plan_ids).collect(),
+        _ => Vec::new(),
+    }
+}
+
+#[test]
+fn the_proposals_only_plan_id_is_the_one_apply_accepts() {
+    let (_d, path, op) = fleet_world();
+    let proposal =
+        crate::app::propose::structure::propose_structure(&op, &path, "myapp", ACCOUNT, &[], &[])
+            .unwrap();
+    let ids = plan_ids(&serde_json::to_value(&proposal).unwrap());
+    let applied = run_apply(
+        &op,
+        &tty(),
+        &path,
+        ids.first().map(String::as_str),
+        ApplyOpts::default(),
+        &mut |_| false,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(ids, vec![applied.plan_id]);
+}
+
 // Confirm -----------------------------------------------------------------------------------
 
 #[test]

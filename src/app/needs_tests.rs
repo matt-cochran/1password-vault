@@ -163,7 +163,7 @@ fn the_gate_fails_on_an_undeclared_name_the_default_branch_lacks() {
     let dir = repo();
     write(dir.path(), ".env.example", "UNDECLARED_TOKEN=whatever\n");
     let report = report(dir.path(), DECLARED);
-    assert!(gate(&report, None).is_err());
+    assert!(gate(&report, None, &fleet(DECLARED)).is_err());
 }
 
 #[test]
@@ -174,7 +174,7 @@ fn the_gate_passes_when_the_default_branch_declares_the_name() {
     let base = fleet(&format!(
         "{DECLARED}[products.app.keys.UNDECLARED_TOKEN]\nkind = \"secret\"\nenvironments = [\"dev\"]\n"
     ));
-    assert!(gate(&report, Some(&base)).is_ok());
+    assert!(gate(&report, Some(&base), &base).is_ok());
 }
 
 // --- value boundary canary -----------------------------------------------------------------

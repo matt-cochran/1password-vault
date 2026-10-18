@@ -528,6 +528,7 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
         },
         NeedsUndeclared {
             names: vec!["API_KEY".into(), "DB_URL".into()],
+            product: Some("web".into()),
         },
         RetireStillRead {
             key: KeyName::new("OPENAI_API_KEY"),
@@ -947,6 +948,7 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
         ImportTierRefused {
             env: EnvName::new("env-prod"),
             tier: "shared",
+            file: PathBuf::from("local.env"),
         },
         Bug { site: "site-xyz" },
     ]

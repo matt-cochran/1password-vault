@@ -58,7 +58,8 @@ pub struct KeyContract {
 pub struct EnvironmentContract {
     /// The environment's name.
     pub name: String,
-    /// The component's keys in this environment, in name order.
+    /// The component's keys declared for this environment, in name order: a key an
+    /// explicit `environments` list leaves out is not listed.
     pub keys: Vec<KeyContract>,
 }
 
@@ -140,6 +141,7 @@ pub fn document(fleet: &Fleet, env: Option<&str>, component: Option<&str>) -> Co
                     keys: product
                         .keys
                         .iter()
+                        .filter(|(_, spec)| in_environment(spec, env_name))
                         .map(|(key, spec)| key_contract(key, spec, env_name))
                         .collect(),
                 })
@@ -151,6 +153,14 @@ pub fn document(fleet: &Fleet, env: Option<&str>, component: Option<&str>) -> Co
         contract_digest: String::new(),
     }
     .seal()
+}
+
+/// Whether `spec` belongs in `env`'s contract at all. A key an explicit `environments` list
+/// leaves out ([`Presence::Absent`]) is not part of that environment, as in the inventory,
+/// where it has no cell; an `except`ed key is still declared there, with no value needed,
+/// so it stays with `required: false`.
+fn in_environment(spec: &KeySpec, env: &str) -> bool {
+    presence::present_in(spec, env) != Presence::Absent
 }
 
 /// One key's contract in one environment.
