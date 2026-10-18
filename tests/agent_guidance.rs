@@ -170,12 +170,12 @@ fn the_schema_is_current_for_named_targets_and_boundaries() {
     }
 }
 
-/// Every command line in docs/rotation.md names a command the installed binary has, so the
-/// documented rotation procedure cannot drift behind the CLI (`opv schema`).
+/// Every command line in docs/rotation.md names a command of the surface golden, so the
+/// documented rotation procedure cannot drift from the 0.12.0 surface (the golden).
 #[test]
-fn the_rotation_doc_names_only_commands_the_binary_has() {
+fn the_rotation_doc_names_only_commands_of_the_surface() {
     let doc = read("docs/rotation.md");
-    let known = schema_commands();
+    let known = golden_cli_names();
     let unknown: Vec<&str> = doc
         .lines()
         .filter_map(|line| line.trim().strip_prefix("opv "))
@@ -188,6 +188,6 @@ fn the_rotation_doc_names_only_commands_the_binary_has() {
         .collect();
     assert!(
         unknown.is_empty(),
-        "docs/rotation.md names commands the binary does not have: {unknown:?}"
+        "docs/rotation.md names commands outside the surface: {unknown:?}"
     );
 }
