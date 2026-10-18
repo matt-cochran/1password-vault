@@ -778,8 +778,6 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `target_changed` | 5 | safe | no | the target's object changed while opv was writing it; nothing was written and re-running is safe |
 | `target_unhealthy` | 5 | after_fix | no | the new revision did not become healthy; the previous one keeps serving |
 | `update_refused` | 5 | after_fix | no | the target refused the update and applied nothing; re-running repeats the refusal |
-| `approval_required` | 6 | after_fix | yes | the plan has no unused, unexpired approval; a person runs opv approve <plan_id> in their own terminal |
-| `approval_used` | 6 | never | no | the approval was already used; read what remains, never re-run with it |
 | `confirm_mismatch` | 6 | never | yes | --confirm names another environment |
 | `confirm_required` | 6 | never | yes | the environment sets confirm_env; a person passes --confirm <env> |
 | `file_too_open` | 6 | after_fix | no | a local file opv reads is readable by others |

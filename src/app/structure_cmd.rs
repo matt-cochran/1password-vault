@@ -1,5 +1,5 @@
-//! CLI parity with the MCP tools (j8): `opv env add`, `opv structure plan`,
-//! `opv structure apply` and `opv config describe`.
+//! CLI parity with the MCP tools (j8): `opv env add`, `opv structure plan` and
+//! `opv config describe`.
 //!
 //! Each command does the same work as its MCP tool and prints the same document with
 //! `--json`, built by the shared builders in [`crate::app::agent_view`]: a person can run
@@ -38,13 +38,6 @@ fn line(out: &mut dyn Write, text: &str) -> Result<(), Error> {
     writeln!(out, "{text}").map_err(crate::app::write_err)
 }
 
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default()
-}
-
 /// `opv env add <ENV>`: declare an environment in the project's `secrets.toml`, like the
 /// MCP `opv_declare_environment` tool. A generated configuration is refused; nothing else
 /// is written.
@@ -71,7 +64,7 @@ pub fn env_add(
             &json!({
                 "ok": true,
                 "changed": changed,
-                "human_action": "Call `opv structure plan` to see what this needs in 1Password; a person approves it with `opv approve`.",
+                "human_action": "Call `opv structure plan` to see what this needs in 1Password; a person applies it with `opv apply`.",
             }),
         );
     }
@@ -121,119 +114,8 @@ pub(crate) fn plan_scoped(
     for l in &lines {
         line(out, l)?;
     }
-    next(out, &["approve"], &[&p.plan_id])?;
-    line(
-        out,
-        &format!(
-            "(in your own terminal; then {})",
-            cmd_text(&Cmd {
-                command: vec!["structure".into(), "apply".into()],
-                args: vec![p.plan_id.clone()],
-            })
-        ),
-    )
-}
-
-/// `opv structure apply <PLAN_ID>`: apply exactly the plan a person approved with
-/// `opv approve`, consuming the single-use approval like the MCP `opv_structure_apply`
-/// tool.
-pub fn apply(
-    r: &dyn CommandRunner,
-    start: &Path,
-    plan_id: &str,
-    json: bool,
-    out: &mut dyn Write,
-) -> Result<(), Error> {
-    let scope = structure::scope(start, r)?;
-    let project = scope.project.clone();
-    let account = scope.account.clone();
-    apply_authorized(
-        r,
-        &scope,
-        plan_id,
-        &mut |p| crate::approval::consume(&p.plan_id, &project, &account, now()),
-        &crate::approval::ever_approved,
-        json,
-        out,
-    )
-}
-
-/// [`apply`] with an injected authorization check and approval record (the real ones are
-/// [`crate::approval::consume`] and [`crate::approval::ever_approved`] on this machine's
-/// approval folder; tests use a temp dir and never read the real one). A plan id that was
-/// never approved here and no longer matches is `PlanUnknown`, not a plan that changed
-/// since its approval (C2, as over MCP).
-pub(crate) fn apply_authorized(
-    r: &dyn CommandRunner,
-    scope: &Scope,
-    plan_id: &str,
-    authorize: &mut dyn FnMut(&structure::Plan) -> Result<(), Error>,
-    approved: &dyn Fn(&str) -> bool,
-    json: bool,
-    out: &mut dyn Write,
-) -> Result<(), Error> {
-    let applied = structure::apply(
-        r,
-        &scope.path,
-        &scope.project,
-        &scope.account,
-        plan_id,
-        authorize,
-    )
-    .map_err(|e| structure::unknown_unless_approved(e, approved))?;
-    if json {
-        return write_json(out, &agent_view::applied_projection(&applied));
-    }
-    for c in &applied.created {
-        let ids = match &c.item_id {
-            Some(item) => format!("vault {}, item {}", c.vault_id, item),
-            None => format!("vault {}", c.vault_id),
-        };
-        line(
-            out,
-            &format!("created {} {} in {} ({ids})", c.kind, c.name, c.environment),
-        )?;
-        if let Some(link) = &c.link {
-            line(out, link)?;
-        }
-    }
-    for f in &applied.fields_added {
-        line(
-            out,
-            &format!(
-                "added empty {} field {}/{} to the {} item in {}",
-                f.kind, f.product, f.key, f.boundary, f.environment
-            ),
-        )?;
-    }
-    // 05.12: what the JSON form carries, the text form says too.
-    if applied.config_written {
-        line(
-            out,
-            &format!("recorded the new IDs in {}", scope.path.display()),
-        )?;
-    }
-    if !applied.generator_ids.is_empty() {
-        line(
-            out,
-            &format!(
-                "{} is generated, so opv did not change it; record these IDs in its generator's input:",
-                scope.path.display()
-            ),
-        )?;
-        for id in &applied.generator_ids {
-            line(out, &format!("  {id}"))?;
-        }
-    }
-    for item in &applied.concurrent_edits {
-        line(
-            out,
-            &format!(
-                "another edit landed on the {item} item while fields were added: check its history in 1Password"
-            ),
-        )?;
-    }
-    next(out, &["ready"], &[])
+    // Design §25.3: a person applies the structure with `opv apply` in their own terminal.
+    next(out, &["apply"], &[])
 }
 
 /// `opv config describe`: the same metadata document as the MCP `opv_configuration` tool.

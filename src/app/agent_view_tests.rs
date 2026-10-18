@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::app::bootstrap::{BoundaryPlan, BoundaryStep, EnvPlan, StatePlan, StateStep};
-use crate::app::structure::{Applied, Created, DeliveryStep, FieldStep, Plan};
+use crate::app::structure::{DeliveryStep, FieldStep, Plan};
 
 const ACCOUNT: &str = "ACCOUNTAAA000000000000AAAA";
 const VAULT_ID: &str = "vdev0000000000000000000001";
@@ -126,50 +126,5 @@ fn configuration_projection_names_the_target_and_its_product() {
     assert_eq!(
         (target["name"].clone(), target["products"].clone()),
         (serde_json::json!("web"), serde_json::json!(["web"]))
-    );
-}
-
-fn applied() -> Applied {
-    Applied {
-        plan_id: "sp-0123456789abcdef".into(),
-        created: vec![
-            Created {
-                kind: "boundary",
-                environment: "dev".into(),
-                name: "core".into(),
-                vault_id: VAULT_ID.into(),
-                item_id: Some(ITEM_ID.into()),
-                link: Some("https://start.1password.com/open/i?a=b".into()),
-            },
-            Created {
-                kind: "boundary",
-                environment: "dev".into(),
-                name: "bad".into(),
-                vault_id: VAULT_ID.into(),
-                item_id: None,
-                link: Some("https://evil.example/steal".into()),
-            },
-        ],
-        fields_added: vec![],
-        config_written: false,
-        generator_ids: vec![],
-        concurrent_edits: vec![],
-    }
-}
-
-#[test]
-fn applied_projection_keeps_a_1password_link_only() {
-    let links: Vec<Value> = applied_projection(&applied())["created"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|c| c["link"].clone())
-        .collect();
-    assert_eq!(
-        links,
-        [
-            serde_json::json!("https://start.1password.com/open/i?a=b"),
-            Value::Null
-        ]
     );
 }

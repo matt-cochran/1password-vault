@@ -1,23 +1,18 @@
-# private_dir_failed: opv sync prod --approved 623778c8
+# private_dir_failed: opv mcp install --client codex
 
 ## text exit: 6
 ## text stdout
 
 ## text stderr
-using <SCENARIO>/project/secrets.toml
-opv: cannot make a private folder in <SCENARIO>/home/.local/state/opv/approvals: an input or output error
-Do: check free space and permissions in <SCENARIO>/home/.local/state/opv/approvals
-Next: opv plan prod
+opv: cannot make a private folder in <SCENARIO>/readonly/codex: permission denied
+Do: check free space and permissions in <SCENARIO>/readonly/codex
+Next: opv mcp install --client codex
 
 ## json exit: 6
 ## json stdout
-{"schema_version":3,"ok":false,"exit_code":6,"next":{"kind":"run","actor":"assistant","command":"opv plan prod --json"},"do":"check free space and permissions in <SCENARIO>/home/.local/state/opv/approvals","error":{"code":"private_dir_failed","category":"policy","message":"cannot make a private folder in <SCENARIO>/home/.local/state/opv/approvals: an input or output error","subject":{"io":"other","dir":"<SCENARIO>/home/.local/state/opv/approvals"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"check free space and permissions in <SCENARIO>/home/.local/state/opv/approvals","next":{"kind":"run","actor":"assistant","command":"opv plan prod --json"}}}
+{"schema_version":3,"ok":false,"exit_code":6,"next":{"kind":"run","actor":"assistant","command":"opv mcp install --client codex --json"},"do":"check free space and permissions in <SCENARIO>/readonly/codex","error":{"code":"private_dir_failed","category":"policy","message":"cannot make a private folder in <SCENARIO>/readonly/codex: permission denied","subject":{"io":"permission_denied","dir":"<SCENARIO>/readonly/codex"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"check free space and permissions in <SCENARIO>/readonly/codex","next":{"kind":"run","actor":"assistant","command":"opv mcp install --client codex --json"}}}
 
 ## json stderr
-using <SCENARIO>/project/secrets.toml
-opv: cannot make a private folder in <SCENARIO>/home/.local/state/opv/approvals: an input or output error
-Do: check free space and permissions in <SCENARIO>/home/.local/state/opv/approvals
-Next: opv plan prod --json
-
-## mcp opv_sync {"environment":"prod","plan_id":"623778c8"}
-{"ok":false,"error":{"code":"private_dir_failed","category":"policy","message":"cannot make a private folder in <SCENARIO>/home/.local/state/opv/approvals: an input or output error","subject":{"io":"other","dir":"<SCENARIO>/home/.local/state/opv/approvals"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"check free space and permissions in <SCENARIO>/home/.local/state/opv/approvals","next":{"kind":"run","actor":"assistant","command":"opv plan prod --json"}}}
+opv: cannot make a private folder in <SCENARIO>/readonly/codex: permission denied
+Do: check free space and permissions in <SCENARIO>/readonly/codex
+Next: opv mcp install --client codex --json

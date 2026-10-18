@@ -231,10 +231,6 @@ pub fn meaning(code: &str) -> &'static str {
         }
         "file_too_open" => "a local file opv reads is readable by others",
         "input_invalid" => "an input file (a dotenv file, a setup recipe, a receipt) breaks a rule",
-        "approval_required" => {
-            "the plan has no unused, unexpired approval; a person runs opv approve <plan_id> in their own terminal"
-        }
-        "approval_used" => "the approval was already used; read what remains, never re-run with it",
         "stale_plan" => {
             "the plan changed since it was reviewed (the item, the target or the configuration); nothing was changed"
         }
@@ -777,15 +773,6 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
             rule: FieldRule::Pattern {
                 id: PatternId::KeyName,
             },
-        },
-        ApprovalMissing {
-            plan: PlanId::new("sp-9f3"),
-            scope: sync_scope(),
-        },
-        ApprovalUsed {
-            plan: PlanId::new("sp-9f3"),
-            scope: sync_scope(),
-            partial: true,
         },
         PlanChanged {
             old: PlanId::new("sp-old"),

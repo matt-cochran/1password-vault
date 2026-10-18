@@ -23,9 +23,7 @@ pub const MCP_TOOLS: &[(&str, &str)] = &[
     ("opv_declare_environment", "env add"),
     ("opv_declare_target", "target add"),
     ("opv_structure_plan", "structure plan"),
-    ("opv_structure_apply", "structure apply"),
     ("opv_generate", "generate"),
-    ("opv_sync", "sync"),
     ("opv_delivery_preview", "run --preview"),
 ];
 
@@ -185,13 +183,6 @@ pub const EFFECTS: &[Effect] = &[
         command: "version",
         effect: "reads",
         needs_terminal: false,
-        handles_values: false,
-        ask_user_first: false,
-    },
-    Effect {
-        command: "approve",
-        effect: "interactive",
-        needs_terminal: true,
         handles_values: false,
         ask_user_first: false,
     },
@@ -387,15 +378,6 @@ pub const EFFECTS: &[Effect] = &[
         needs_terminal: false,
         handles_values: false,
         ask_user_first: false,
-    },
-    // The person approves with `opv approve <plan_id>`; the apply itself writes 1Password
-    // through the app's own authorization and, like the MCP tool, asks first (#133).
-    Effect {
-        command: "structure apply",
-        effect: "writes_1password",
-        needs_terminal: false,
-        handles_values: false,
-        ask_user_first: true,
     },
     Effect {
         command: "config describe",

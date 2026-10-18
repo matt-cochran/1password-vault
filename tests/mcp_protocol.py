@@ -45,31 +45,25 @@ with tempfile.TemporaryDirectory() as directory:
         tools = send('tools/list', {}, 2)['result']['tools']
         assert {tool['name'] for tool in tools} == {
             'opv_ready', 'opv_configuration', 'opv_deployment_plan', 'opv_access',
-            'opv_structure_plan', 'opv_structure_apply', 'opv_declare_key',
-            'opv_declare_environment', 'opv_declare_target', 'opv_generate', 'opv_sync',
+            'opv_structure_plan', 'opv_declare_key',
+            'opv_declare_environment', 'opv_declare_target', 'opv_generate',
             'opv_delivery_preview', 'opv_changed'}
         # The inspection tools, the plans and the delivery preview are read-only;
-        # declarations edit the local file, generate fills empty 1Password fields, and
-        # structure apply and sync need a person's terminal approval.
-        writers = {'opv_structure_apply', 'opv_declare_key', 'opv_declare_environment',
-                   'opv_declare_target', 'opv_generate', 'opv_sync'}
+        # declarations edit the local file and generate fills empty 1Password fields. No tool
+        # applies structure or syncs: a person runs opv apply or opv sync (design §25.3).
+        writers = {'opv_declare_key', 'opv_declare_environment',
+                   'opv_declare_target', 'opv_generate'}
         assert all(tool['annotations']['readOnlyHint'] for tool in tools
                    if tool['name'] not in writers)
         assert not any(tool['annotations'].get('readOnlyHint') for tool in tools
                        if tool['name'] in writers)
-        # Only an approved sync can remove anything (an approved --prune), and says so.
-        assert {tool['name'] for tool in tools
-                if tool['annotations'].get('destructiveHint')} == {'opv_sync'}
+        # No tool can remove anything.
+        assert not {tool['name'] for tool in tools
+                    if tool['annotations'].get('destructiveHint')}
         for tool in tools:
             props = set(tool.get('inputSchema', {}).get('properties', {}) or {})
             assert not props & {'value', 'secret', 'password', 'token', 'approved'}, tool
-        apply_tool = next(t for t in tools if t['name'] == 'opv_structure_apply')
-        assert set(apply_tool['inputSchema']['properties']) == {'plan_id', 'verbose'}, apply_tool
-        sync_tool = next(t for t in tools if t['name'] == 'opv_sync')
-        assert set(sync_tool['inputSchema']['properties']) == {
-            'environment', 'plan_id', 'targets', 'product', 'deploy', 'prune', 'rotate',
-            'verbose'}, sync_tool
-        # The deployment plan takes the scope opv_sync approves, so a scoped sync is not stale.
+        # The deployment plan takes the scope a person's opv sync --expect-plan runs.
         plan_tool = next(t for t in tools if t['name'] == 'opv_deployment_plan')
         assert set(plan_tool['inputSchema']['properties']) == {
             'environment', 'targets', 'product', 'rotate', 'verbose'}, plan_tool
@@ -83,23 +77,22 @@ with tempfile.TemporaryDirectory() as directory:
                               'state_vault_recorded', 'deploy_credentials_declared'}
                    for t in config['targets']), config['targets']
         assert 'vault_id' not in text and 'item_id' not in text and 'rules' not in text
-        # An agent cannot approve its own sync: no approval argument exists, and a plan id
-        # nobody approved is refused before any target is touched.
+        # An agent cannot sync: there is no sync tool.
         refused = send('tools/call', {'name': 'opv_sync', 'arguments': {
-            'environment': 'prod', 'plan_id': '00000000', 'approved': True}}, 4)
+            'environment': 'prod', 'plan_id': '00000000'}}, 4)
         assert 'error' in refused or refused['result'].get('isError'), refused
         extra = send('tools/call', {'name': 'opv_ready', 'arguments': {
             'environment': 'prod', 'approved': True, 'value': 'SECRET_MARKER'}}, 5)
         assert 'error' in extra or extra['result'].get('isError'), extra
         assert 'SECRET_MARKER' not in json.dumps(extra), extra
-        # An agent cannot authorize itself: no approval argument exists, and an unapproved
-        # plan id is refused without any write.
-        self_approved = send('tools/call', {'name': 'opv_structure_apply', 'arguments': {
-            'plan_id': 'sp-0000000000000000', 'approved': True}}, 6)
-        assert 'error' in self_approved or self_approved['result'].get('isError'), self_approved
-        unapproved = send('tools/call', {'name': 'opv_structure_apply', 'arguments': {
-            'plan_id': 'sp-0000000000000000'}}, 7)
-        result = json.loads(unapproved['result']['content'][0]['text'])
+        # An agent cannot apply structure: there is no apply tool.
+        self_applied = send('tools/call', {'name': 'opv_structure_apply', 'arguments': {
+            'plan_id': 'sp-0000000000000000'}}, 6)
+        assert 'error' in self_applied or self_applied['result'].get('isError'), self_applied
+        # A name that is not one is refused before any read.
+        refused_plan = send('tools/call', {'name': 'opv_deployment_plan', 'arguments': {
+            'environment': 'not a name'}}, 7)
+        result = json.loads(refused_plan['result']['content'][0]['text'])
         assert result['ok'] is False, result
         # A failure is the --json document's error object: cause, steps and who acts.
         error = result['error']
