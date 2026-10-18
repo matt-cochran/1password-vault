@@ -138,7 +138,7 @@ pub fn run(
             .chain(keys.iter().cloned())
             .collect(),
     };
-    super::adopt::write_values(fleet, env, &writes, &by, r)?;
+    super::import::write_values(fleet, env, &writes, &by, r)?;
     for (p, k, rcp) in &chosen {
         writeln!(
             out,

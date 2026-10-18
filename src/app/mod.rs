@@ -13,7 +13,6 @@ pub mod access;
 pub mod access_create;
 pub mod account;
 pub mod add;
-pub mod adopt;
 pub mod agent_view;
 pub mod approve;
 #[cfg(test)]
@@ -38,6 +37,7 @@ mod github_tests;
 mod guidance_tests;
 pub mod guide;
 pub mod history;
+pub mod import;
 pub mod init;
 #[cfg(test)]
 pub(crate) mod json_tests;

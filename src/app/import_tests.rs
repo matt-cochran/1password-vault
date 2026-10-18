@@ -35,7 +35,7 @@ fn a_fleet_replace_needs_a_product() {
     assert_eq!(e.code_str(), "usage");
 }
 
-/// Fly cannot show a secret's value: adopting from it is the provider-hides-values guard.
+/// Fly cannot show a secret's value: importing from it is the provider-hides-values guard.
 #[test]
 fn a_target_that_hides_values_is_refused_by_its_guard() {
     let r = FakeRunner::default();
@@ -53,13 +53,13 @@ fn a_target_that_hides_values_is_refused_by_its_guard() {
     ));
 }
 
-/// 05.03 (S1): the refusal's Next never sends the person back to the adopt that refused.
+/// 05.03 (S1): the refusal's Next never sends the person back to the import that refused.
 #[test]
-fn a_target_that_hides_values_never_names_the_same_adopt() {
+fn a_target_that_hides_values_never_names_the_same_import() {
     let r = FakeRunner::default();
     let e = read_source(&fleet(), "staging", &Source::Target("portfolio".into()), &r).unwrap_err();
-    let inv = cli(&["adopt", "staging", "--from", "target:portfolio"]);
-    // F2 (R46): its help, never the adopt itself.
+    let inv = cli(&["import", "staging", "--from", "target:portfolio"]);
+    // F2 (R46): its help, never the import itself.
     assert!(!next_of(&e, &inv).is_some_and(|n| n.contains("--from")));
 }
 
@@ -83,7 +83,7 @@ fn the_bare_target_form_is_a_usage_error() {
 #[test]
 fn the_bare_target_error_names_the_named_form() {
     let e = source_from(&fleet(), "staging", "target").unwrap_err();
-    let inv = cli(&["adopt", "staging", "--from", "target"]);
+    let inv = cli(&["import", "staging", "--from", "target"]);
     assert!(next_of(&e, &inv).is_some_and(|n| n.contains("--from target:portfolio")));
 }
 
@@ -106,7 +106,7 @@ fn a_file_path_is_a_dotenv_source() {
     assert_eq!(source, Source::Dotenv(PathBuf::from(".env.staging")));
 }
 
-/// A GitHub target reads back its config variables, so adopting from it lists that
+/// A GitHub target reads back its config variables, so importing from it lists that
 /// target's store (FR-53, FR-46).
 #[test]
 fn a_named_target_reads_that_targets_store() {
@@ -128,8 +128,8 @@ fn a_named_target_reads_that_targets_store() {
 
 use crate::adapters::fake_op::FakeOp;
 
-const MARK_NEW: &str = "sk-proj-ADOPTMARKER-new";
-const MARK_OLD: &str = "sk-proj-ADOPTMARKER-old";
+const MARK_NEW: &str = "sk-proj-IMPORTMARKER-new";
+const MARK_OLD: &str = "sk-proj-IMPORTMARKER-old";
 
 /// A dev environment on the fake's `myapp-dev` vault: api/OPENAI_API_KEY (secret, filled
 /// with MARK_OLD unless `empty`) and api/LOG_LEVEL (config, empty).
@@ -169,9 +169,40 @@ fn world(empty: bool) -> (FakeOp, Fleet, tempfile::TempDir) {
     (op, fleet, dir)
 }
 
+/// The same world with api/OPENAI_API_KEY declared immutable, so `--replace` needs
+/// `--rotate` (FR-16).
+fn immutable_world() -> (FakeOp, Fleet, tempfile::TempDir) {
+    let op = FakeOp::default();
+    let id = op.insert(
+        "vdev0000000000000000000001",
+        serde_json::json!({
+            "title": "myapp · dev values", "category": "SECURE_NOTE",
+            "sections": [{"id": "api", "label": "api"}],
+            "fields": [
+                {"id": "f1", "section": {"id": "api", "label": "api"}, "type": "CONCEALED", "label": "OPENAI_API_KEY", "value": MARK_OLD}
+            ]
+        }),
+    );
+    let fleet = crate::config::parse(&format!(
+        "[environments.dev]\nboundaries.api = {{ vault_id = \"vdev0000000000000000000001\", \
+         item_id = \"{id}\" }}\n[products.api.keys.OPENAI_API_KEY]\nkind = \"secret\"\n\
+         environments = [\"dev\"]\nimmutable = true\nrules = {{ prefix = \"sk-\" }}\n"
+    ))
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let env_file = dir.path().join("dev.env");
+    std::fs::write(&env_file, format!("OPENAI_API_KEY={MARK_NEW}\n")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&env_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    (op, fleet, dir)
+}
+
 /// Two products, each in its own boundary item, on the fake's two vaults.
-const MARK_API: &str = "sk-proj-ADOPTMARKER-api";
-const MARK_WEB: &str = "sk-proj-ADOPTMARKER-web";
+const MARK_API: &str = "sk-proj-IMPORTMARKER-api";
+const MARK_WEB: &str = "sk-proj-IMPORTMARKER-web";
 
 fn two_boundary_world() -> (FakeOp, Fleet, tempfile::TempDir) {
     let op = FakeOp::default();
@@ -234,28 +265,28 @@ fn field_in(op: &FakeOp, id: &str, label: &str) -> String {
 }
 
 #[test]
-fn apply_writes_a_value_to_its_own_boundary_item() {
+fn import_writes_a_value_to_its_own_boundary_item() {
     let (op, fleet, dir) = two_boundary_world();
-    run(&fleet, "dev", &opts(&dir, true, &[]), &op, &mut Vec::new()).unwrap();
+    run(&fleet, "dev", &opts(&dir, false, &[]), &op, &mut Vec::new()).unwrap();
     let id = boundary_item(&fleet, "api");
     assert_eq!(field_in(&op, &id, "API_TOKEN"), MARK_API);
 }
 
 #[test]
-fn apply_leaves_the_other_boundary_item_alone() {
+fn import_leaves_the_other_boundary_item_alone() {
     let (op, fleet, dir) = two_boundary_world();
-    run(&fleet, "dev", &opts(&dir, true, &[]), &op, &mut Vec::new()).unwrap();
+    run(&fleet, "dev", &opts(&dir, false, &[]), &op, &mut Vec::new()).unwrap();
     let id = boundary_item(&fleet, "web");
     assert_eq!(field_in(&op, &id, "API_TOKEN"), "");
 }
 
-fn opts(dir: &tempfile::TempDir, apply: bool, replace: &[&str]) -> Opts {
+fn opts(dir: &tempfile::TempDir, dry_run: bool, replace: &[&str]) -> Opts {
     Opts {
         source: Source::Dotenv(dir.path().join("dev.env")),
         replace: replace.iter().map(|s| s.to_string()).collect(),
         rotate: Vec::new(),
         skip: Vec::new(),
-        apply,
+        dry_run,
         json: false,
     }
 }
@@ -280,30 +311,39 @@ fn value_of(op: &FakeOp, fleet: &Fleet, label: &str) -> String {
 }
 
 #[test]
-fn without_apply_nothing_is_written() {
-    let (op, fleet, dir) = world(true);
-    run(&fleet, "dev", &opts(&dir, false, &[]), &op, &mut Vec::new()).unwrap();
-    assert_eq!(value_of(&op, &fleet, "OPENAI_API_KEY"), "");
-}
-
-#[test]
-fn apply_imports_into_an_empty_field() {
+fn dry_run_writes_nothing() {
     let (op, fleet, dir) = world(true);
     run(&fleet, "dev", &opts(&dir, true, &[]), &op, &mut Vec::new()).unwrap();
+    assert!(
+        op.calls
+            .borrow()
+            .iter()
+            .all(|c| !c.args.iter().any(|a| a == "edit"))
+    );
+}
+
+// --from a file imports a missing key ------------------------------------------------------
+
+#[test]
+fn from_a_file_imports_a_missing_key() {
+    let (op, fleet, dir) = world(true);
+    run(&fleet, "dev", &opts(&dir, false, &[]), &op, &mut Vec::new()).unwrap();
     assert_eq!(value_of(&op, &fleet, "OPENAI_API_KEY"), MARK_NEW);
 }
 
 #[test]
-fn apply_imports_config_too() {
+fn a_file_source_imports_config_too() {
     let (op, fleet, dir) = world(true);
-    run(&fleet, "dev", &opts(&dir, true, &[]), &op, &mut Vec::new()).unwrap();
+    run(&fleet, "dev", &opts(&dir, false, &[]), &op, &mut Vec::new()).unwrap();
     assert_eq!(value_of(&op, &fleet, "LOG_LEVEL"), "info");
 }
+
+// --replace --------------------------------------------------------------------------------
 
 #[test]
 fn a_filled_field_that_differs_is_kept_by_default() {
     let (op, fleet, dir) = world(false);
-    run(&fleet, "dev", &opts(&dir, true, &[]), &op, &mut Vec::new()).unwrap();
+    run(&fleet, "dev", &opts(&dir, false, &[]), &op, &mut Vec::new()).unwrap();
     assert_eq!(value_of(&op, &fleet, "OPENAI_API_KEY"), MARK_OLD);
 }
 
@@ -313,7 +353,7 @@ fn replace_takes_the_found_value() {
     run(
         &fleet,
         "dev",
-        &opts(&dir, true, &["api/OPENAI_API_KEY"]),
+        &opts(&dir, false, &["api/OPENAI_API_KEY"]),
         &op,
         &mut Vec::new(),
     )
@@ -327,7 +367,7 @@ fn replace_keeps_the_old_value_in_the_kept_section() {
     run(
         &fleet,
         "dev",
-        &opts(&dir, true, &["api/OPENAI_API_KEY"]),
+        &opts(&dir, false, &["api/OPENAI_API_KEY"]),
         &op,
         &mut Vec::new(),
     )
@@ -349,48 +389,23 @@ fn replace_keeps_the_old_value_in_the_kept_section() {
     );
 }
 
-#[test]
-fn the_output_never_holds_a_value() {
-    let (op, fleet, dir) = world(false);
-    let mut out = Vec::new();
-    run(&fleet, "dev", &opts(&dir, false, &[]), &op, &mut out).unwrap();
-    let text = String::from_utf8(out).unwrap();
-    assert!(
-        !text.contains("ADOPTMARKER") && !text.contains("info"),
-        "{text}"
-    );
-}
+// --rotate ---------------------------------------------------------------------------------
 
 #[test]
-fn a_differing_value_is_reported_with_the_replace_step() {
-    let (op, fleet, dir) = world(false);
-    let mut out = Vec::new();
-    run(&fleet, "dev", &opts(&dir, false, &[]), &op, &mut out).unwrap();
-    assert!(
-        String::from_utf8(out)
-            .unwrap()
-            .contains("--replace api/OPENAI_API_KEY")
-    );
+fn rotate_with_replace_replaces_an_immutable_key() {
+    let (op, fleet, dir) = immutable_world();
+    let mut o = opts(&dir, false, &["api/OPENAI_API_KEY"]);
+    o.rotate = vec!["api/OPENAI_API_KEY".into()];
+    run(&fleet, "dev", &o, &op, &mut Vec::new()).unwrap();
+    assert_eq!(value_of(&op, &fleet, "OPENAI_API_KEY"), MARK_NEW);
 }
 
-#[test]
-fn a_service_account_cannot_apply() {
-    let (op, fleet, dir) = world(true);
-    let e = crate::host::with_test_host(
-        crate::host::Host::from_env(
-            &crate::host::FakeEnv::new("linux").var("OP_SERVICE_ACCOUNT_TOKEN"),
-        ),
-        || run(&fleet, "dev", &opts(&dir, true, &[]), &op, &mut Vec::new()).unwrap_err(),
-    );
-    assert_eq!(e.code_str(), "own_session_required");
-}
-
-// #94: --skip ---------------------------------------------------------------------------
+// --skip (#94) -----------------------------------------------------------------------------
 
 #[test]
 fn skip_leaves_an_import_unwritten() {
     let (op, fleet, dir) = world(true);
-    let mut o = opts(&dir, true, &[]);
+    let mut o = opts(&dir, false, &[]);
     o.skip = vec!["api/OPENAI_API_KEY".into()];
     run(&fleet, "dev", &o, &op, &mut Vec::new()).unwrap();
     assert_eq!(value_of(&op, &fleet, "OPENAI_API_KEY"), "");
@@ -399,7 +414,7 @@ fn skip_leaves_an_import_unwritten() {
 #[test]
 fn skip_still_imports_the_other_keys() {
     let (op, fleet, dir) = world(true);
-    let mut o = opts(&dir, true, &[]);
+    let mut o = opts(&dir, false, &[]);
     o.skip = vec!["api/OPENAI_API_KEY".into()];
     run(&fleet, "dev", &o, &op, &mut Vec::new()).unwrap();
     assert_eq!(value_of(&op, &fleet, "LOG_LEVEL"), "info");
@@ -408,7 +423,7 @@ fn skip_still_imports_the_other_keys() {
 #[test]
 fn a_skipped_key_is_reported_as_skipped() {
     let (op, fleet, dir) = world(true);
-    let mut o = opts(&dir, false, &[]);
+    let mut o = opts(&dir, true, &[]);
     o.skip = vec!["api/OPENAI_API_KEY".into()];
     o.json = true;
     let mut out = Vec::new();
@@ -419,9 +434,59 @@ fn a_skipped_key_is_reported_as_skipped() {
 #[test]
 fn skip_names_must_be_declared() {
     let (op, fleet, dir) = world(true);
-    let mut o = opts(&dir, false, &[]);
+    let mut o = opts(&dir, true, &[]);
     o.skip = vec!["api/NOPE".into()];
     assert!(run(&fleet, "dev", &o, &op, &mut Vec::new()).is_err());
+}
+
+// The value boundary: a value never reaches argv -------------------------------------------
+
+#[test]
+fn no_value_appears_in_any_argv() {
+    let (op, fleet, dir) = world(true);
+    run(&fleet, "dev", &opts(&dir, false, &[]), &op, &mut Vec::new()).unwrap();
+    assert!(
+        op.calls
+            .borrow()
+            .iter()
+            .all(|c| !c.args.iter().any(|a| a.contains("IMPORTMARKER")))
+    );
+}
+
+#[test]
+fn the_output_never_holds_a_value() {
+    let (op, fleet, dir) = world(false);
+    let mut out = Vec::new();
+    run(&fleet, "dev", &opts(&dir, true, &[]), &op, &mut out).unwrap();
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        !text.contains("IMPORTMARKER") && !text.contains("info"),
+        "{text}"
+    );
+}
+
+#[test]
+fn an_already_set_key_is_reported_with_the_replace_step() {
+    let (op, fleet, dir) = world(false);
+    let mut out = Vec::new();
+    run(&fleet, "dev", &opts(&dir, true, &[]), &op, &mut out).unwrap();
+    assert!(
+        String::from_utf8(out)
+            .unwrap()
+            .contains("--replace api/OPENAI_API_KEY")
+    );
+}
+
+#[test]
+fn a_service_account_cannot_write() {
+    let (op, fleet, dir) = world(true);
+    let e = crate::host::with_test_host(
+        crate::host::Host::from_env(
+            &crate::host::FakeEnv::new("linux").var("OP_SERVICE_ACCOUNT_TOKEN"),
+        ),
+        || run(&fleet, "dev", &opts(&dir, false, &[]), &op, &mut Vec::new()).unwrap_err(),
+    );
+    assert_eq!(e.code_str(), "own_session_required");
 }
 
 // 05.04 (S1): the plan's Next applies exactly what was reviewed --------------------------
@@ -432,7 +497,7 @@ fn narrowed() -> Opts {
         replace: vec!["api/X".into()],
         rotate: vec!["api/X".into()],
         skip: vec!["api/LEGACY_TOKEN".into()],
-        apply: false,
+        dry_run: true,
         json: false,
     }
 }
@@ -464,17 +529,17 @@ fn the_plans_next_quotes_a_path_with_a_space() {
 // 05.10 (S2): a read-back failure names the command that wrote ---------------------------
 
 #[test]
-fn a_read_back_failure_of_adopt_names_the_apply_command() {
+fn a_read_back_failure_names_the_import_command() {
     let opts = Opts {
         source: Source::Target("web".into()),
         replace: Vec::new(),
         rotate: Vec::new(),
         skip: Vec::new(),
-        apply: false,
+        dry_run: false,
         json: false,
     };
     assert_eq!(
         crate::cause::render::cmd_text(&apply_command("dev", &opts)),
-        "opv adopt dev --from target:web --apply"
+        "opv import dev --from target:web"
     );
 }
