@@ -885,6 +885,125 @@ fn a_health_finding_opens_the_key_in_its_first_environment() {
     );
 }
 
+/// A `same_value_under_two_keys` warning for the health surface tests.
+fn health_finding_under_two() -> crate::domain::health::HealthFinding {
+    crate::domain::health::HealthFinding {
+        code: crate::domain::health::SAME_UNDER_TWO,
+        environments: vec!["dev".into()],
+        product: "api".into(),
+        key: "DATABASE_URL".into(),
+        other: Some(("api".into(), "DATABASE_URL_RO".into())),
+        message: "api/DATABASE_URL and api/DATABASE_URL_RO hold the same value in dev".into(),
+    }
+}
+
+/// The receipt for one health finding, read under `host` as the CLI reads it.
+fn health_receipt_on(host: crate::host::Host, h: crate::domain::health::HealthFinding) -> Receipt {
+    let report = account_report();
+    let mut i = inputs(&report, Vec::new());
+    i.health = vec![h];
+    crate::host::with_test_host(host, || receipt(&i, "test"))
+}
+
+fn agent_host() -> crate::host::Host {
+    crate::host::Host::from_env(&crate::host::FakeEnv::new("linux").var_val("OPV_AGENT", "1"))
+}
+
+fn person_host() -> crate::host::Host {
+    crate::host::Host::from_env(&crate::host::FakeEnv::new("linux").shell("/bin/bash").tty())
+}
+
+fn ci_host() -> crate::host::Host {
+    crate::host::Host::from_env(
+        &crate::host::FakeEnv::new("linux")
+            .shell("/bin/bash")
+            .var("CI"),
+    )
+}
+
+fn mcp_host() -> crate::host::Host {
+    crate::host::Host::from_env(&crate::host::FakeEnv::new("linux").shell("/bin/bash").mcp())
+}
+
+#[test]
+fn an_mcp_caller_sees_no_cross_tier_health_warning() {
+    let r = health_receipt_on(mcp_host(), health_finding());
+    assert!(
+        r.findings
+            .iter()
+            .all(|f| f.code != "same_value_across_environments")
+    );
+}
+
+#[test]
+fn agent_mode_hides_same_value_across_environments() {
+    let r = health_receipt_on(agent_host(), health_finding());
+    assert!(
+        r.findings
+            .iter()
+            .all(|f| f.code != "same_value_across_environments")
+    );
+}
+
+#[test]
+fn agent_mode_hides_same_value_under_two_keys() {
+    let r = health_receipt_on(agent_host(), health_finding_under_two());
+    assert!(
+        r.findings
+            .iter()
+            .all(|f| f.code != "same_value_under_two_keys")
+    );
+}
+
+#[test]
+fn a_person_at_a_terminal_sees_same_value_across_environments() {
+    let r = health_receipt_on(person_host(), health_finding());
+    assert!(
+        r.findings
+            .iter()
+            .any(|f| f.code == "same_value_across_environments")
+    );
+}
+
+#[test]
+fn a_person_at_a_terminal_sees_same_value_under_two_keys() {
+    let r = health_receipt_on(person_host(), health_finding_under_two());
+    assert!(
+        r.findings
+            .iter()
+            .any(|f| f.code == "same_value_under_two_keys")
+    );
+}
+
+#[test]
+fn ci_sees_same_value_across_environments() {
+    let r = health_receipt_on(ci_host(), health_finding());
+    assert!(
+        r.findings
+            .iter()
+            .any(|f| f.code == "same_value_across_environments")
+    );
+}
+
+#[test]
+fn ci_sees_same_value_under_two_keys() {
+    let r = health_receipt_on(ci_host(), health_finding_under_two());
+    assert!(
+        r.findings
+            .iter()
+            .any(|f| f.code == "same_value_under_two_keys")
+    );
+}
+
+#[test]
+fn no_health_finding_blocks_readiness() {
+    let report = account_report();
+    let mut i = inputs(&report, Vec::new());
+    i.health = vec![health_finding(), health_finding_under_two()];
+    let r = receipt(&i, "test");
+    assert!(r.findings.iter().all(|f| !f.blocking));
+}
+
 #[test]
 fn a_readiness_finding_has_no_message_in_its_json() {
     let report = account_report();
