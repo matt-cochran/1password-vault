@@ -107,12 +107,12 @@ An id is one of four families: a boundary's `vault_id` and `item_id`, a target's
 
 ```sh
 opv propose structure          # plan the vaults and items, and collect any inline ids
-opv apply                      # write secrets.bindings.toml and .opv/applied.json
+opv apply                      # write secrets.bindings.toml and secrets.applied.json
 ```
 
 `opv propose structure --rebind <env>` records fresh ids for an environment (a new 1Password account, say); ids not being rebound are kept.
 
-The **apply record** `.opv/applied.json` remembers the plan last applied and the sha256 of the contract and bindings files it wrote:
+The **apply record** `secrets.applied.json` remembers the plan last applied and the sha256 of the contract and bindings files it wrote:
 
 ```json
 {
@@ -704,7 +704,7 @@ tier = "production"           # real users
 
 ## Writing the configuration with commands
 
-Configuration changes are **proposed**, then **applied**. `opv propose …` writes the contract diff and the 1Password plan and nothing else; `opv apply` runs the plan you reviewed, writes the configuration where it lives (manifest or file) and records `.opv/applied.json`. Comments and order are kept, the result is validated like a hand-written file, and a concurrent change is refused. `opv config edit` covers everything else.
+Configuration changes are **proposed**, then **applied**. `opv propose …` writes the contract diff and the 1Password plan and nothing else; `opv apply` runs the plan you reviewed, writes the configuration where it lives (manifest or file) and records `secrets.applied.json`. Comments and order are kept, the result is validated like a hand-written file, and a concurrent change is refused. `opv config edit` covers everything else.
 
 The 0.11 commands (`opv init`, `opv add`, `opv bootstrap`, `opv target add`, `opv check`, `opv adopt`) are gone; [Migrating from 0.11](usage.md#migrating-from-011) maps each one to the command that replaces it.
 
@@ -796,7 +796,7 @@ opv apply
 `opv propose …` and `opv apply` are two halves of one edit:
 
 - **`opv propose …` writes nothing.** It prints the contract diff (added, removed, changed keys) and the plan of 1Password changes, and exits; a plan is a review artefact, not a change.
-- **`opv apply` runs the plan you reviewed.** It writes the contract where it lives and the ids to `secrets.bindings.toml`, creates the vaults, items and state vaults, and records `.opv/applied.json` ([the apply record](#where-the-ids-live-secretsbindingstoml)). A concurrent change to either file is refused; re-run the propose and review the new plan.
+- **`opv apply` runs the plan you reviewed.** It writes the contract where it lives and the ids to `secrets.bindings.toml`, creates the vaults, items and state vaults, and records `secrets.applied.json` ([the apply record](#where-the-ids-live-secretsbindingstoml)). A concurrent change to either file is refused; re-run the propose and review the new plan.
 - **Rules are evaluated as committed.** A rule that exists only in an uncommitted or branch edit shows `rules_pending_review` and is not evaluated for MCP or agent-mode callers; commit it on the default branch to make it count.
 
 ## Rules reference

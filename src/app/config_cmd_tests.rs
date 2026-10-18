@@ -295,7 +295,7 @@ fn check_of_a_different_copy_prints_the_diff() {
     );
 }
 
-/// Write the apply record at `<dir>/.opv/applied.json` with `bindings_digest`.
+/// Write the apply record at `<dir>/secrets.applied.json` with `bindings_digest`.
 fn put_record(dir: &Path, bindings_digest: String) {
     let record = crate::config::bindings::ApplyRecord {
         plan_id: "01JPLAN".into(),

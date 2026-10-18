@@ -1574,8 +1574,8 @@ mod text_cases {
     }
 
     /// The committed bindings are not the ones the last `opv apply` recorded (D-G): the
-    /// apply record's digest differs. The record lives under `.opv/`, so the account comes
-    /// from `OP_ACCOUNT` instead of a `.opv` file.
+    /// apply record's digest differs (the record is `secrets.applied.json`, beside the
+    /// bindings).
     pub fn bindings_unapplied() -> Case {
         case(
             Scenario::new()
@@ -1584,7 +1584,7 @@ mod text_cases {
                 .var("OPV_PROJECT", "e2e-app")
                 .var("OP_ACCOUNT", DEV_ACCOUNT)
                 .file(
-                    "project/.opv/applied.json",
+                    "project/secrets.applied.json",
                     "{\"plan_id\":\"sp-0000000000000000\",\"contract_digest\":\"00\",\
                      \"bindings_digest\":\"00\"}\n",
                 ),

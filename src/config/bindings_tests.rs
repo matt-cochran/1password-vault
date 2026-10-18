@@ -273,3 +273,15 @@ fn merge_skips_an_id_of_an_undeclared_boundary() {
         super::merge(CONTRACT_WITHOUT_IDS, &Bindings::parse(BINDINGS).unwrap())
     );
 }
+
+#[test]
+fn the_apply_record_is_written_beside_a_dot_opv_account_pointer() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".opv"), "account = \"A1\"\n").unwrap();
+    let record = ApplyRecord {
+        plan_id: "sp-0000000000000000".into(),
+        contract_digest: digest(b"c"),
+        bindings_digest: digest(b"b"),
+    };
+    assert!(write_record(&dir.path().join(APPLIED), &record).is_ok());
+}
