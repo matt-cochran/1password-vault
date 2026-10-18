@@ -6,8 +6,8 @@ use clap::parser::ValueSource;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use opv::Error;
 use opv::app::{
-    STATES_HELP, add, config_cmd, config_export, doctor, explain, init, open, run as run_cmd,
-    signin, skeleton, status, sync, target_cmd, target_credentials,
+    STATES_HELP, config_cmd, config_export, doctor, explain, open, run as run_cmd, signin, status,
+    sync, target_cmd, target_credentials,
 };
 use opv::config;
 use opv::config_store;
@@ -19,16 +19,18 @@ mod completions;
 const QUICK_START: &str = "\
 Start here:
   opv setup                        Guided setup for a new project
-  opv init dev                     Set up 1Password for this project (or --vault V --item I)
+  opv propose setup --from-item dev  Propose the configuration from dev's 1Password item
+  opv apply                        Run a proposal, in your own terminal
   opv login dev                    Sign in to 1Password for an environment
   opv doctor                       Find a setup problem and its next step
   opv guide agent                  Setup guide for AI assistants (this version)
 
 Everyday use:
-  opv check dev --product api      Check that your app's settings are ready
+  opv ready dev                    Check that your app's settings are ready
   opv run dev --product api -- npm run dev
+  opv set api/KEY --env dev        Type a key's value, masked, into 1Password
   opv open api/KEY --env dev       Open a key's item in 1Password to fill it in
-  opv add api/KEY --kind secret    Declare a new key
+  opv propose key api/KEY --kind secret   Propose a new key
   opv config edit                  Change the configuration (file or 1Password)
   opv projects                     Projects whose configuration lives in 1Password
 
@@ -51,21 +53,21 @@ const EXAMPLES: &str = "\
 Examples:
   opv setup                        # guided owner setup; resumes saved progress
   opv login prod                   # signed-in terminal for prod's account; type exit to leave
-  opv add api/KEY --kind secret    # declare a key, in secrets.toml or the manifest
-  opv item skeleton staging        # add the missing (empty) fields to the 1Password item
+  opv propose env staging --write  # declare an environment in the contract
+  opv apply                        # create the missing (empty) fields, after review
   opv status staging               # one row per product and key; fill what is missing
   opv status --all                 # every project in 1Password, one line per environment
   opv plan staging                 # what a sync would write, hold and prune, and its plan id
   opv sync prod --expect-plan ID   # exactly the plan reviewed (add --deploy to deploy)
   opv config edit                  # change the configuration; refuses a concurrent edit
-  opv check dev --product api      # local keys saved? names only, no target touched
+  opv ready dev                    # local keys saved? names only, no target touched
   opv run dev --product api -- cargo run   # local run with the product's secrets
 
 Exit codes:
   0 ok, 2 configuration or usage, 3 dependency (op or the target CLI missing:
   {TARGET_CLIS}), 4 1Password,
   5 target ({TARGETS}), 6 refused (policy),
-  7 authentication, 8 findings (status, plan, check),
+  7 authentication, 8 findings (status, plan, ready --gate),
   9 outcome unknown (a change may or may not have been applied) or provider
   unavailable; safe to re-run,
   70 internal error (an opv bug; please report it),
@@ -78,7 +80,7 @@ Environment:
   OPV_PROJECT  project whose manifest in 1Password to use (title opv · <name>)
   OP_ACCOUNT   1Password account to find a manifest in (an environment's own
                `account` setting is used for its reads)
-  OPV_PRODUCT  default for --product on check, run, open, explain, status, plan and
+  OPV_PRODUCT  default for --product on run, open, explain, status, plan and
                doctor --env (never sync, never doctor without --env)
   NO_COLOR     no colour under --color auto
 
@@ -116,7 +118,7 @@ const LOGIN_QUICK: &str = "\
 Examples:
   opv login prod                             # signed-in terminal for prod; type exit to leave
   opv login                                  # the one account all environments use, or choose
-  opv login prod -- opv check prod           # one signed-in command, then back";
+  opv login prod -- opv ready prod           # one signed-in command, then back";
 
 const LOGIN_MORE: &str = "\
 Signs in to the account the environment uses (its `account` setting). Without an
@@ -134,26 +136,15 @@ Examples:
 const DOCTOR_MORE: &str = "\
 Checks configuration, CLI installation and sign-in. --env limits the checks to what that
 environment needs, including whether op can start local commands, and reads its item once
-to check the keys as `check` does (names only, never values). Each target of the
+to check the keys (names only, never values). Each target of the
 environment (or each --target) gets its own lines, `<target>: <check>`: its CLI, its deploy
 credentials and whether its state vault is visible. Never writes anything,
-whoever is signed in: an item not in opv's layout is read as it is, and doctor names
-opv tidy <ENV>, the explicit repair.
+whoever is signed in: an item not in opv's layout is read as it is, and doctor says so; a
+signed-in person's opv config export <ENV> puts it in opv's layout.
 
 More examples:
   opv doctor --env prod --product api   # one product's keys
   opv doctor --env prod --target web    # one target's checks";
-
-const CHECK_QUICK: &str = "\
-Examples:
-  opv check dev --product api          # are api's keys saved and valid?
-  opv check dev                        # one product: no --product needed
-  opv check dev --product api --json   # names and states for scripts";
-
-const CHECK_MORE: &str = "\
-Reads the environment's item once (names, kinds and rule results, never values) and contacts
-no deployment target; may tidy the 1Password layout when you're signed in (opv doctor --env
-<ENV> never does). Exits 8 when a key needs fixing.";
 
 const STATUS_QUICK: &str = "\
 Examples:
@@ -265,25 +256,6 @@ still shown, \"complete\" is false, and opv exits 4 with inventory_incomplete, s
 project missing from it may only be in that account. opv status --all checks every
 project's environments.";
 
-const SKELETON_QUICK: &str = "\
-Examples:
-  opv item skeleton staging        # add the missing declared fields, empty";
-
-const SKELETON_MORE: &str = "\
-Adds missing fields, empty, and never fills or changes one. A signed-in person's other runs
-tidy the item the same way; this is the explicit form. Needs an identity that may edit
-the item; an AI assistant asks the user first.";
-
-const ADD_QUICK: &str = "\
-Examples:
-  opv add api/STRIPE_KEY --kind secret --env dev,prod --rule prefix=sk_
-  opv add api/LOG_LEVEL --kind config --rule enum=debug,info,warn
-  opv add api/STRIPE_KEY --env staging          # include a declared key in staging";
-
-const ADD_MORE: &str = "\
-Edits secrets.toml or the project's manifest in place (comments kept), validated like a
-hand-written one; reads no item or target. Then opv item skeleton <env> adds the empty field.";
-
 const EXPLAIN_QUICK: &str = "\
 Examples:
   opv explain OPENAI_API_KEY                 # the one product that declares it
@@ -298,25 +270,6 @@ named target, the deploy and CI service accounts, rules, immutable and guidance,
 and locator, products, deploy credentials, state vault and deploy account. Makes no
 1Password or target call.";
 
-const INIT_QUICK: &str = "\
-Examples:
-  opv init dev --product api            # run-only; vault myapp-api-dev, item \"myapp · api · dev values\"
-  opv init prod --product api           # then: opv target add prod web --fly-app myapp
-  opv init dev --product api --from .env --apply   # start from an existing .env (without --apply: the plan)";
-
-const ADOPT_QUICK: &str = "\
-Examples:
-  opv adopt staging --from .env.staging          # what would come in; nothing written
-  opv adopt staging --from .env.staging --apply  # write the imports, verified";
-
-const ADOPT_MORE: &str = "\
-Each found name maps to a declared key (its target name, else its bare name); each key's
-rules normalise both sides before comparing. A filled 1Password field is never replaced
-unless named with --replace (immutable keys also need --rotate); the old value is kept in
-the section \"opv · kept\". Values are never printed. --from target:<name> reads that target's Key Vault,
-Kubernetes and GitHub variables; Fly and GitHub secrets cannot be read back. It never syncs,
-deploys or deletes the source.";
-
 #[cfg(feature = "ui")]
 const UI_QUICK: &str = "\
 Examples:
@@ -328,11 +281,6 @@ Examples:
   opv history prod             # last write per key of every target: time, plan id, opv version
   opv history prod --target web  # only that target
   opv history prod --json      # the same as one document (names and versions only)";
-
-const TIDY_QUICK: &str = "\
-Examples:
-  opv tidy dev                 # put dev's 1Password item in opv's layout (one verified edit)
-  opv tidy dev --json          # the same; what changed as one document (names only)";
 
 const ACCESS_QUICK: &str = "\
 Examples:
@@ -350,11 +298,6 @@ Examples:
   opv version                  # opv, op and each provider CLI, with versions
   opv version --json           # the same, for support and CI";
 
-const GENERATE_QUICK: &str = "\
-Examples:
-  opv generate dev api/SESSION_KEY             # a key with base64_bytes = 32: 32 random bytes
-  opv generate prod api/SESSION_KEY api/CSRF_KEY";
-
 const VAULT_LOCATE_QUICK: &str = "\
 Examples:
   opv vault locate zu64e5fmaxlklvyajhwkkdgldy   # which account holds this vault
@@ -368,29 +311,6 @@ const MCP_INSTALL_QUICK: &str = "\
 Examples:
   opv mcp install                        # this project, for Claude Code and Codex
   opv mcp install --client claude        # only the project's .mcp.json";
-
-const BOOTSTRAP_QUICK: &str = "\
-Examples:
-  opv bootstrap --dry-run      # each boundary and state vault: ok, create or ids_not_in_account
-  opv bootstrap                # create missing vaults and items, record their IDs";
-
-const BOOTSTRAP_MORE: &str = "\
-Records every missing ID, and nothing else. Each boundary an environment needs, without
-boundaries.<b>, gets a vault <project>-<b>-<env> and an item \"<project> · <b> · <env> values\"
-in the selected 1Password account (found when they exist); each target without
-state_vault_id gets a vault <project>-<env>-<target>-state. Their IDs are recorded in
-secrets.toml. Recorded IDs the account cannot see stop with ids_not_in_account: select the
-owning account, or pass --rebind <env>. Then every declared field is added, empty. Nothing
-is synced, deployed or given a value. Next: opv ready";
-
-const TARGET_ADD_QUICK: &str = "\
-Examples:
-  opv target add prod p-overflow --fly-app p-overflow-prod --products p
-  opv target add staging site --fly-app site-staging --dry-run";
-
-const TARGET_ADD_MORE: &str = "\
-Writes [environments.<env>.targets.<name>] and finds or creates its state vault
-<project>-<env>-<target>-state; keeps comments, validates first, refuses a concurrent change.";
 
 const TARGET_LIST_QUICK: &str = "\
 Examples:
@@ -408,25 +328,10 @@ and stores it in a new 1Password item in the target's state vault, then records
 deploy_credentials on the target. The token is never shown, copied or pasted. One
 confirmation names the credential, its 90-day validity, the target and the item;
 declining creates nothing. For an Azure, Kubernetes or GitHub target, create its deploy
-identity at the provider, store it in 1Password, and record the item with
-`opv target add --deploy-credentials op://<vault>/<item>`.
+identity at the provider, store it in 1Password, and record the item as the target's
+deploy_credentials with `opv config edit`.
 Without --create, prints whether deploy_credentials is recorded and whether the provider
 can mint one. A person's own terminal and 1Password session are required.";
-
-const ENV_ADD_QUICK: &str = "\
-Examples:
-  opv env add staging           # declare the environment in secrets.toml
-  opv env add staging --json    # the same report an assistant gets over MCP";
-
-const STRUCTURE_PLAN_QUICK: &str = "\
-Examples:
-  opv structure plan           # names, states and the plan_id, to review
-  opv structure plan --json    # exactly the opv_structure_plan document";
-
-const CONFIG_DESCRIBE_QUICK: &str = "\
-Examples:
-  opv config describe           # environments, keys and targets, names only
-  opv config describe --json    # exactly the opv_configuration document";
 
 const ACCOUNT_LIST_QUICK: &str = "\
 Examples:
@@ -452,6 +357,106 @@ const OPEN_MORE: &str = "\
 Prints the key's section and field and the item's private link, then opens the link with
 the desktop's opener. Over SSH, under CI, without a display or with --print it only prints
 the link. Never reads a value.";
+
+const NEEDS_QUICK: &str = "\
+Examples:
+  opv needs                    # undeclared, declared_unobserved, ambiguous, declared
+  opv needs --gate             # exit 2 when the code reads a name no contract declares
+  opv needs --json             # the same as one document";
+
+const NEEDS_MORE: &str = "\
+Scans the files git knows (the working tree) for the names the code reads, and compares them
+with the contract. Reads no value and no 1Password item; prints names and file:line only.";
+
+const CONTRACT_QUICK: &str = "\
+Examples:
+  opv contract                         # every component, environment and key
+  opv contract --env prod --component api
+  opv contract --check contract.json   # exit 2 when the committed copy is stale
+  opv contract --relaxations           # what this contract relaxes against the default branch";
+
+const CONTRACT_MORE: &str = "\
+Names, kinds, catalog shapes and presence only: never a value, never a 1Password id. Makes
+no 1Password or target call.";
+
+const PROPOSE_QUICK: &str = "\
+Examples:
+  opv propose key api/STRIPE_KEY --kind secret --env dev,prod
+  opv propose env staging --tier shared
+  opv propose structure                # what the contract needs in 1Password
+  opv propose --intent intent.json     # the document the MCP opv_propose tool takes";
+
+const PROPOSE_MORE: &str = "\
+A proposal is pure: it prints the contract diff, the relaxations it makes against the
+default branch, its questions and a plan id, and writes nothing. With --write it also writes
+the contract file (reviewed in the pull request), and nothing else. A person then runs
+opv apply in their own terminal.";
+
+const PROPOSE_KEY_QUICK: &str = "\
+Examples:
+  opv propose key api/STRIPE_KEY --kind secret --env dev,prod
+  opv propose key api/SESSION_KEY --shape base64_bytes_32 --source generated
+  opv propose key api/LOG_LEVEL --kind config --write   # also write the contract file";
+
+const PROPOSE_ENV_QUICK: &str = "\
+Examples:
+  opv propose env staging                  # the contract diff and plan id
+  opv propose env prod --tier production --write";
+
+const PROPOSE_TARGET_QUICK: &str = "\
+Examples:
+  opv propose target prod web --fly-app myapp-prod --products api
+  opv propose target staging site --fly-app site-staging --write";
+
+const PROPOSE_RETIRE_QUICK: &str = "\
+Examples:
+  opv propose retire api/OLD_KEY           # mark it retiring; opv needs shows who still reads it";
+
+const PROPOSE_SETUP_QUICK: &str = "\
+Examples:
+  opv propose setup --from-item dev        # from dev's existing item (names and types only)
+  opv propose setup --names-from .env      # from a .env's names, never its values
+  opv propose setup --names-from .env --write   # also write ./secrets.toml";
+
+const PROPOSE_STRUCTURE_QUICK: &str = "\
+Examples:
+  opv propose structure                    # missing vaults, items and empty fields
+  opv propose structure --rebind dev       # new vaults and items for dev";
+
+const PROPOSE_GENERATE_QUICK: &str = "\
+Examples:
+  opv propose generate dev api/SESSION_KEY # a key with base64_bytes = 32: 32 random bytes";
+
+const APPLY_QUICK: &str = "\
+Examples:
+  opv apply                    # recompute the plan, show it, confirm, run it
+  opv apply sp-0123456789abcdef  # only the plan reviewed; refused when it changed";
+
+const APPLY_MORE: &str = "\
+Needs your own interactive terminal: an AI assistant hands this command to the user. Moves
+inline ids into secrets.bindings.toml, creates missing vaults, items, state vaults and empty
+fields, generates the values asked for, and writes the apply record. Never syncs or deploys.";
+
+const SET_QUICK: &str = "\
+Examples:
+  opv set api/STRIPE_KEY --env dev   # type the value, masked; it goes only to 1Password";
+
+const SET_MORE: &str = "\
+Needs your own interactive terminal: an AI assistant hands this command to the user. The
+value is written through op's stdin, never its arguments, and is never printed; the key's
+new value state is.";
+
+const IMPORT_VALUES_QUICK: &str = "\
+Examples:
+  opv import staging --from .env.staging --dry-run   # what would come in; nothing written
+  opv import staging --from .env.staging             # write the imports, verified";
+
+const IMPORT_VALUES_MORE: &str = "\
+Each found name maps to a declared key (its target name, else its bare name). Per key:
+imported, skipped: already set, or skipped: empty; never whether a value differs. A set
+value is replaced only when named with --replace (immutable keys also need --rotate).
+Values are never printed. --from target:<name> reads that target's Key Vault, Kubernetes
+and GitHub variables; Fly and GitHub secrets cannot be read back.";
 
 const SCHEMA_QUICK: &str = "\
 Examples:
@@ -612,16 +617,43 @@ enum Cmd {
         #[arg(long)]
         settings: bool,
     },
-    /// Check whether your required settings are ready; contacts no deployment target.
-    #[command(before_help = CHECK_QUICK, after_help = CHECK_MORE)]
-    Check {
-        /// Environment name from the configuration (for example dev).
-        env: String,
-        /// Product whose keys are checked; optional when exactly one product has keys here.
-        /// [env: OPV_PRODUCT]
+    /// Code against contract: the names the code reads and the keys the contract declares
+    /// (names and file:line only, never a value).
+    #[command(before_help = NEEDS_QUICK, after_help = NEEDS_MORE)]
+    Needs {
+        /// Fail (exit 2, `needs_undeclared`) when the code reads a name that neither this
+        /// contract nor the default branch's declares.
         #[arg(long)]
-        product: Option<String>,
-        /// Print names and states as JSON, never values.
+        gate: bool,
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// The contract as data: per component and environment, each key's kind, shape and
+    /// whether it is required (names only, never a value).
+    #[command(before_help = CONTRACT_QUICK, after_help = CONTRACT_MORE)]
+    Contract {
+        /// Only this environment.
+        #[arg(long)]
+        env: Option<String>,
+        /// Only this component (product).
+        #[arg(long, value_name = "NAME")]
+        component: Option<String>,
+        /// Print the document's JSON Schema instead of the document.
+        #[arg(long, conflicts_with_all = ["check", "relaxations"])]
+        schema: bool,
+        /// Fail (exit 2, `contract_stale`) when this committed copy differs from the
+        /// contract.
+        #[arg(long, value_name = "FILE", conflicts_with = "relaxations")]
+        check: Option<PathBuf>,
+        /// List the relaxations the contract makes against the default branch's (the
+        /// opv/relaxations check).
+        #[arg(long)]
+        relaxations: bool,
+        /// With --relaxations: compare against this git ref instead of the default branch.
+        #[arg(long, value_name = "REF", requires = "relaxations")]
+        base: Option<String>,
+        /// Print one JSON document (framed) instead of the plain document.
         #[arg(long)]
         json: bool,
     },
@@ -704,6 +736,73 @@ enum Cmd {
         )]
         command: Vec<String>,
     },
+    /// Propose a change: the contract diff and its plan id. Writes nothing unless --write,
+    /// and then only the contract file; a person runs the plan with opv apply.
+    #[command(
+        before_help = PROPOSE_QUICK,
+        after_help = PROPOSE_MORE,
+        args_conflicts_with_subcommands = true,
+        subcommand_negates_reqs = true
+    )]
+    Propose(ProposeArgs),
+    /// Run the reviewed plan in your own terminal: recompute it, refuse a stale plan id,
+    /// show it, confirm once, then create the structure, generate and record the ids.
+    #[command(before_help = APPLY_QUICK, after_help = APPLY_MORE)]
+    Apply {
+        /// The plan id a proposal printed; refused (`stale_plan`) when the plan changed
+        /// since.
+        #[arg(value_name = "PLAN_ID")]
+        plan_id: Option<String>,
+        /// Give this environment new vaults and items, as `opv propose structure --rebind`
+        /// proposed (repeatable). Values are not moved.
+        #[arg(long, value_name = "ENV")]
+        rebind: Vec<String>,
+        /// Generate this key's value, as `opv propose generate` proposed (repeatable).
+        #[arg(long, value_name = "ENV:PRODUCT/KEY")]
+        generate: Vec<String>,
+        /// Print what was done as one JSON document; the plan and the question go to
+        /// stderr.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Type one value, masked, into the key's 1Password item (your own terminal only).
+    #[command(before_help = SET_QUICK, after_help = SET_MORE)]
+    Set {
+        /// The key. A bare KEY resolves to the one product that declares it.
+        #[arg(value_name = "[PRODUCT/]KEY")]
+        key: String,
+        /// Environment whose item receives the value.
+        #[arg(long, required = true)]
+        env: String,
+        /// Print the key's new value state as one JSON document.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Import values that exist elsewhere into the environment's 1Password item; write-only:
+    /// a key whose value is already set is skipped unless named with --replace.
+    #[command(before_help = IMPORT_VALUES_QUICK, after_help = IMPORT_VALUES_MORE)]
+    Import {
+        /// Environment whose item receives the values.
+        env: String,
+        /// A private dotenv file, or `target:<name>` to read what that target can show.
+        #[arg(long, value_name = "FILE|target:NAME")]
+        from: String,
+        /// Overwrite this key although 1Password already holds a value (repeatable).
+        #[arg(long, value_name = "PRODUCT/KEY")]
+        replace: Vec<String>,
+        /// Allow --replace on this immutable key (repeatable).
+        #[arg(long, value_name = "PRODUCT/KEY")]
+        rotate: Vec<String>,
+        /// Leave this key out of the import (repeatable).
+        #[arg(long, value_name = "PRODUCT/KEY")]
+        skip: Vec<String>,
+        /// Show what would be imported; write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
     /// Preview deployment changes without changing anything.
     #[command(before_help = PLAN_QUICK, after_help = PLAN_MORE)]
     Plan(PlanArgs),
@@ -713,19 +812,6 @@ enum Cmd {
     /// 1Password accounts: which ones this machine's CLI knows, and the project's.
     #[command(subcommand)]
     Account(AccountCmd),
-    /// Generate self-made secrets (base64_bytes / hex_bytes keys) straight into 1Password.
-    ///
-    /// The value comes from the operating system's CSPRNG and goes only into the 1Password
-    /// field (one verified edit); it is never shown, logged or written elsewhere. A field
-    /// that already has a value is never replaced; provider-issued keys are refused.
-    #[command(before_help = GENERATE_QUICK)]
-    Generate {
-        /// Environment name from the configuration.
-        env: String,
-        /// The keys, as product/KEY.
-        #[arg(required = true, value_name = "PRODUCT/KEY")]
-        keys: Vec<String>,
-    },
     /// 1Password vaults: find which account holds one (read-only).
     #[command(subcommand)]
     Vault(VaultCmd),
@@ -756,36 +842,6 @@ enum Cmd {
     /// Declare a named deployment target of an environment, or list the declared ones.
     #[command(subcommand)]
     Target(TargetCmd),
-    /// Declare an environment in secrets.toml, like the MCP `opv_declare_environment` tool.
-    #[command(subcommand)]
-    Env(EnvCmd),
-    /// Plan or apply this project's 1Password structure, like the MCP structure tools.
-    #[command(subcommand)]
-    Structure(StructureCmd),
-    /// Bring values that exist elsewhere into the environment's 1Password item, after review.
-    #[command(before_help = ADOPT_QUICK, after_help = ADOPT_MORE)]
-    Adopt {
-        /// Environment whose item receives the values.
-        env: String,
-        /// A private dotenv file, or `target:<name>` to read what that target can show.
-        #[arg(long, value_name = "FILE|target:NAME")]
-        from: String,
-        /// Take the found value for this key although 1Password holds another (repeatable).
-        #[arg(long, value_name = "PRODUCT/KEY")]
-        replace: Vec<String>,
-        /// Allow --replace on this immutable key (repeatable).
-        #[arg(long, value_name = "PRODUCT/KEY")]
-        rotate: Vec<String>,
-        /// Leave this key out of the import although it would be imported (repeatable).
-        #[arg(long, value_name = "PRODUCT/KEY")]
-        skip: Vec<String>,
-        /// Write the plan to 1Password (without it, nothing is written).
-        #[arg(long)]
-        apply: bool,
-        /// Print one JSON document instead of lines.
-        #[arg(long)]
-        json: bool,
-    },
     /// Browse and manage every environment, product and key in a terminal UI (values never
     /// shown); actions run the same opv commands, behind plan and confirmation.
     #[cfg(feature = "ui")]
@@ -800,16 +856,6 @@ enum Cmd {
         /// Only this target of the environment (omit: every target, each labelled).
         #[arg(long, value_name = "NAME")]
         target: Option<String>,
-        /// Print one JSON document instead of lines.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Put an environment's 1Password item in opv's layout: one verified edit, nothing
-    /// deleted (a signed-in person only; `doctor` never writes and names this command).
-    #[command(before_help = TIDY_QUICK)]
-    Tidy {
-        /// Environment name from the configuration (for example prod).
-        env: String,
         /// Print one JSON document instead of lines.
         #[arg(long)]
         json: bool,
@@ -900,38 +946,9 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Create every missing boundary vault, item and state vault, record their IDs, and add
-    /// the empty fields.
-    #[command(before_help = BOOTSTRAP_QUICK, after_help = BOOTSTRAP_MORE)]
-    Bootstrap {
-        /// The configuration file to complete; defaults to the secrets.toml found from here.
-        #[arg(long, value_name = "PATH")]
-        file: Option<PathBuf>,
-        /// Project name for vault and item titles; defaults to the repository's name.
-        #[arg(long)]
-        project: Option<String>,
-        /// Show what would be created or checked; change nothing.
-        #[arg(long)]
-        dry_run: bool,
-        /// Replace this environment's recorded boundary IDs with vaults and items in the
-        /// selected account (repeatable). Values are not moved.
-        #[arg(long, value_name = "ENV")]
-        rebind: Vec<String>,
-        /// Also print the owner's command for a read-only CI service account for every
-        /// boundary vault of this environment.
-        #[arg(long, value_name = "ENV")]
-        ci_reader: Option<String>,
-        /// Print one JSON document (each environment's boundaries and state vaults) instead
-        /// of lines.
-        #[arg(long)]
-        json: bool,
-    },
     /// Configuration commands.
     #[command(subcommand)]
     Config(ConfigCmd),
-    /// 1Password item commands.
-    #[command(subcommand)]
-    Item(ItemCmd),
     /// Explain one declared key from the configuration alone; never reads a value.
     #[command(before_help = EXPLAIN_QUICK, after_help = EXPLAIN_MORE)]
     Explain {
@@ -976,111 +993,6 @@ enum Cmd {
         /// `states`, or a command name (for example `sync` or `item skeleton`).
         #[arg(value_name = "TOPIC")]
         topic: Vec<String>,
-    },
-    /// Write the configuration from an environment's 1Password item (created if missing).
-    #[command(before_help = INIT_QUICK)]
-    Init {
-        /// Environment name to declare (for example staging or prod).
-        env: String,
-        /// Vault title, matched exactly; defaults to <project>-<product>-<env> (created if
-        /// missing; <product> is core without --product).
-        #[arg(long)]
-        vault: Option<String>,
-        /// Item title in that vault, matched exactly; its field names and types are read
-        /// once, never its values. Defaults to "<project> · <product> · <env> values".
-        #[arg(long)]
-        item: Option<String>,
-        /// Product the item's unsectioned fields belong to (the app's role, such as api);
-        /// required when it has any. Each named section is a product of its own.
-        #[arg(long)]
-        product: Option<String>,
-        /// Add this environment to the existing configuration (a secrets.toml or the
-        /// project's manifest, found like other commands) instead of writing a new one;
-        /// comments are kept, and every declared key the item has includes the environment.
-        #[arg(long, conflicts_with = "force")]
-        add_env: bool,
-        /// Overwrite an existing secrets.toml. Hidden from help (H9): the refusal names it.
-        #[arg(long, hide_short_help = true, hide_long_help = true)]
-        force: bool,
-        /// Print what was written (names and kinds) as one JSON document.
-        #[arg(long, hide_long_help = true)]
-        json: bool,
-        /// Write ./secrets.toml even for a new project (without it, a new project's
-        /// configuration is saved as a manifest in the item's vault).
-        #[arg(long)]
-        file: bool,
-        /// Project name of a new manifest; defaults to the repository's name.
-        #[arg(long, conflicts_with = "file")]
-        project: Option<String>,
-        /// 1Password account (email or ID) when several are on this machine; kept in .opv.
-        #[arg(long)]
-        account: Option<String>,
-        /// Start from a private .env: declare every key (kind by name; --config-key or
-        /// --secret-key KEY to change one) and, with --apply, import the values, verified.
-        #[arg(
-            long,
-            value_name = "FILE",
-            conflicts_with = "add_env",
-            requires = "product"
-        )]
-        from: Option<std::path::PathBuf>,
-        /// With --from: declare this key as config whatever its name (repeatable).
-        #[arg(
-            long,
-            value_name = "KEY",
-            requires = "from",
-            hide_short_help = true,
-            hide_long_help = true
-        )]
-        config_key: Vec<String>,
-        /// With --from: declare this key as secret whatever its name (repeatable).
-        #[arg(
-            long,
-            value_name = "KEY",
-            requires = "from",
-            hide_short_help = true,
-            hide_long_help = true
-        )]
-        secret_key: Vec<String>,
-        /// With --from: create, declare and import (without it: the plan only).
-        #[arg(long, requires = "from", hide_short_help = true, hide_long_help = true)]
-        apply: bool,
-    },
-    /// Declare a key in the configuration, or add environments to a declared key.
-    #[command(before_help = ADD_QUICK, after_help = ADD_MORE)]
-    Add {
-        /// The key: PRODUCT/KEY, or a bare KEY that exactly one product declares.
-        #[arg(value_name = "[PRODUCT/]KEY")]
-        name: String,
-        /// secret (a concealed field) or config (a text field); required for a new key.
-        #[arg(long, value_parser = ["secret", "config"])]
-        kind: Option<String>,
-        /// Environments that need the key (repeat or comma-separate); default: every
-        /// declared environment.
-        #[arg(long, value_delimiter = ',')]
-        env: Vec<String>,
-        /// A rule as name=value (prefix=sk_, base64_bytes=32, enum=debug,info) or a flag
-        /// rule by name (https_url); repeatable.
-        #[arg(long, value_name = "NAME[=VALUE]")]
-        rule: Vec<String>,
-        /// Where the value comes from, shown by explain and setup.
-        #[arg(long)]
-        guidance: Option<String>,
-        /// Staged only when absent on the target unless rotated.
-        #[arg(long)]
-        immutable: bool,
-        /// Read the value of another key, PRODUCT/KEY (a shared value).
-        #[arg(long, value_name = "PRODUCT/KEY")]
-        from: Option<String>,
-        /// Each person's own value, in their own item (local environments only).
-        #[arg(long)]
-        personal: bool,
-        /// The same value in several environments is intended (no settings warning).
-        #[arg(long)]
-        allow_same_value: bool,
-        /// Print what was written (the key, its kind and environments) as one JSON document.
-        #[arg(long)]
-        json: bool,
     },
     /// Print a shell completion script for commands and options.
     #[command(before_help = COMPLETIONS_QUICK, after_help = completions::INSTALL)]
@@ -1253,6 +1165,198 @@ impl From<SyncArgs> for sync::SyncOpts {
     }
 }
 
+/// Arguments of `propose`: a kind as a subcommand, or `--intent <file.json>`.
+#[derive(Args)]
+struct ProposeArgs {
+    #[command(subcommand)]
+    cmd: Option<ProposeCmd>,
+    /// The categorical intent document (JSON), the same document the MCP `opv_propose`
+    /// tool takes.
+    #[arg(long, value_name = "FILE.json", required = true)]
+    intent: Option<PathBuf>,
+    /// Also write the contract diff into the contract file (reviewed in the pull request).
+    #[arg(long)]
+    write: bool,
+    /// Print the proposal as one JSON document.
+    #[arg(long)]
+    json: bool,
+}
+
+/// The flags every proposal kind shares.
+#[derive(Args, Clone, Copy)]
+struct ProposeOut {
+    /// Also write the contract diff into the contract file (reviewed in the pull request).
+    #[arg(long)]
+    write: bool,
+    /// Print the proposal as one JSON document.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Subcommand)]
+enum ProposeCmd {
+    /// A new or changed key: its kind, environments, source, shape and rules.
+    #[command(before_help = PROPOSE_KEY_QUICK)]
+    Key {
+        /// The key: PRODUCT/KEY, or a bare KEY that exactly one product declares.
+        #[arg(value_name = "[PRODUCT/]KEY")]
+        key: String,
+        /// secret (a concealed field) or config (a text field); a new key needs it unless
+        /// --shape names a catalog shape.
+        #[arg(long, value_parser = ["secret", "config"], hide_possible_values = true)]
+        kind: Option<String>,
+        /// Environments the key is present in (repeat or comma-separate); default: every
+        /// declared environment.
+        #[arg(long, value_delimiter = ',')]
+        env: Vec<String>,
+        /// An environment the key is present in but needs no value in, with the reason:
+        /// ENV=REASON (repeatable).
+        #[arg(long, value_name = "ENV=REASON")]
+        except: Vec<String>,
+        /// Who or what produces the value: person, generated or derived.
+        #[arg(
+            long,
+            value_parser = ["person", "generated", "derived"],
+            hide_possible_values = true
+        )]
+        source: Option<String>,
+        /// A catalog shape name: its rules are written for the key.
+        #[arg(long, value_name = "NAME")]
+        shape: Option<String>,
+        /// A rule as name=value (prefix=sk_, base64_bytes=32) or a flag rule by name; it
+        /// counts once committed on the default branch (repeatable).
+        #[arg(long, value_name = "NAME[=VALUE]")]
+        rule: Vec<String>,
+        /// Each person's own value, in their own item (local environments only).
+        #[arg(long)]
+        personal: bool,
+        /// Read the value of another key, PRODUCT/KEY (a shared value).
+        #[arg(long, value_name = "PRODUCT/KEY")]
+        from: Option<String>,
+        /// Where the value comes from, shown by explain and setup (one line).
+        #[arg(long)]
+        guidance: Option<String>,
+        /// The same value in several environments is intended (no settings warning).
+        #[arg(long)]
+        allow_same_value: bool,
+        /// Staged only when absent on the target unless rotated.
+        #[arg(long)]
+        immutable: bool,
+        /// The date the value expires (YYYY-MM-DD); advisory.
+        #[arg(long, value_name = "DATE")]
+        expires: Option<String>,
+        #[command(flatten)]
+        out: ProposeOut,
+    },
+    /// A new environment, inheriting every key declared for all environments.
+    #[command(before_help = PROPOSE_ENV_QUICK)]
+    Env {
+        /// New environment name (^[a-z][a-z0-9-]*$).
+        env: String,
+        /// The environment's tier.
+        #[arg(long, value_parser = ["local", "shared", "production"])]
+        tier: Option<String>,
+        #[command(flatten)]
+        out: ProposeOut,
+    },
+    /// A new deployment target of an environment; its state vault comes from opv apply.
+    #[command(before_help = PROPOSE_TARGET_QUICK)]
+    Target {
+        /// Environment name from the configuration (for example prod).
+        env: String,
+        /// New target name (^[a-z][a-z0-9-]*$); there is no default.
+        name: String,
+        /// Provider section: fly, azure, kubernetes or github; inferred from its options
+        /// (for example --fly-app) when omitted.
+        #[arg(long, value_name = "PROVIDER")]
+        provider: Option<String>,
+        /// Products this target delivers (repeat or comma-separate); without it, every
+        /// non-source-only product.
+        #[arg(long, value_delimiter = ',')]
+        products: Vec<String>,
+        /// The process role this target delivers, written as its `roles`. Names only.
+        #[arg(long, value_name = "ROLE")]
+        role: Option<String>,
+        /// The item holding this target's least-privilege deploy identity
+        /// (op://<vault>/<item>).
+        #[arg(long, value_name = "OP_REF")]
+        deploy_credentials: Option<String>,
+        #[command(flatten)]
+        out: ProposeOut,
+    },
+    /// Retire a key in order: what still reads it, prune it from targets, archive it.
+    #[command(before_help = PROPOSE_RETIRE_QUICK)]
+    Retire {
+        /// The key: PRODUCT/KEY, or a bare KEY that exactly one product declares.
+        #[arg(value_name = "[PRODUCT/]KEY")]
+        key: String,
+        #[command(flatten)]
+        out: ProposeOut,
+    },
+    /// First setup: the contract from an existing 1Password item, or from a .env's names.
+    #[command(before_help = PROPOSE_SETUP_QUICK)]
+    Setup {
+        /// Read this environment's existing item (field names and types only, never values).
+        #[arg(
+            long,
+            value_name = "ENV",
+            required_unless_present = "names_from",
+            conflicts_with = "names_from"
+        )]
+        from_item: Option<String>,
+        /// With --from-item: the vault title; defaults to <project>-core-<env>.
+        #[arg(long, requires = "from_item")]
+        vault: Option<String>,
+        /// With --from-item: the item title; defaults to "<project> · core · <env> values".
+        #[arg(long, requires = "from_item")]
+        item: Option<String>,
+        /// Declare every name in this private .env file (names only; values are never read
+        /// into the proposal), in environment local.
+        #[arg(long, value_name = "FILE")]
+        names_from: Option<PathBuf>,
+        /// With --names-from: declare this key as config whatever its name (repeatable).
+        #[arg(long, value_name = "KEY", requires = "names_from")]
+        config_key: Vec<String>,
+        /// With --names-from: declare this key as secret whatever its name (repeatable).
+        #[arg(long, value_name = "KEY", requires = "names_from")]
+        secret_key: Vec<String>,
+        /// The contract file is ./secrets.toml in this directory.
+        #[arg(long)]
+        file: bool,
+        /// Project name for the default vault and item titles; defaults to the
+        /// repository's name.
+        #[arg(long, conflicts_with = "file")]
+        project: Option<String>,
+        /// 1Password account (email or ID) the item is read in, when several are on this
+        /// machine.
+        #[arg(long)]
+        account: Option<String>,
+        #[command(flatten)]
+        out: ProposeOut,
+    },
+    /// The structure the contract declares: missing vaults, items, state vaults and empty
+    /// fields, the one-time move of inline ids, or new ids for an environment.
+    #[command(before_help = PROPOSE_STRUCTURE_QUICK)]
+    Structure {
+        /// Give this environment new vaults and items in the selected account (repeatable).
+        #[arg(long, value_name = "ENV")]
+        rebind: Vec<String>,
+        #[command(flatten)]
+        out: ProposeOut,
+    },
+    /// Generated values for rule-backed keys (base64_bytes / hex_bytes).
+    #[command(before_help = PROPOSE_GENERATE_QUICK)]
+    Generate {
+        /// Environment name from the configuration.
+        env: String,
+        /// The keys, as product/KEY.
+        #[arg(required = true, value_name = "PRODUCT/KEY")]
+        keys: Vec<String>,
+        #[command(flatten)]
+        out: ProposeOut,
+    },
+}
+
 #[derive(Subcommand)]
 enum DeliveryCmd {
     /// Check, read-only, that each placement (product and target) still holds the binding
@@ -1353,40 +1457,6 @@ fn every_minutes(s: &str) -> Result<u8, String> {
 
 #[derive(Subcommand)]
 enum TargetCmd {
-    /// Declare one named deployment target of an environment: writes the configuration and
-    /// creates the target's state vault.
-    #[command(before_help = TARGET_ADD_QUICK, after_help = TARGET_ADD_MORE)]
-    Add {
-        /// Environment name from the configuration (for example prod).
-        env: String,
-        /// New target name (^[a-z][a-z0-9-]*$); there is no default.
-        name: String,
-        /// Provider section: fly, azure, kubernetes or github; inferred from its options
-        /// (for example --fly-app) when omitted.
-        #[arg(long, value_name = "PROVIDER")]
-        provider: Option<String>,
-        /// Products this target delivers (repeat or comma-separate); without it, every
-        /// non-source-only product.
-        #[arg(long, value_delimiter = ',')]
-        products: Vec<String>,
-        /// A process role this target delivers (repeat or comma-separate), written as its
-        /// `roles`; required when a delivered product's keys declare roles. Names only.
-        #[arg(long = "role", value_name = "ROLE", value_delimiter = ',')]
-        roles: Vec<String>,
-        /// The item holding this target's least-privilege deploy identity
-        /// (op://<vault>/<item>).
-        #[arg(long, value_name = "OP_REF")]
-        deploy_credentials: Option<String>,
-        /// Project naming the state vault; defaults to the repository's name.
-        #[arg(long)]
-        project: Option<String>,
-        /// Show what would be written and created; change nothing.
-        #[arg(long)]
-        dry_run: bool,
-        /// Print one JSON document instead of lines.
-        #[arg(long)]
-        json: bool,
-    },
     /// List the declared deployment targets (read-only).
     #[command(before_help = TARGET_LIST_QUICK)]
     List {
@@ -1409,32 +1479,6 @@ enum TargetCmd {
         /// Mint the credential and store it; without it, print the recorded state.
         #[arg(long)]
         create: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum EnvCmd {
-    /// Declare an environment in secrets.toml; its vaults and items come from the approved
-    /// structure (same guarantee as the MCP `opv_declare_environment` tool).
-    #[command(before_help = ENV_ADD_QUICK)]
-    Add {
-        /// New environment name (^[a-z][a-z0-9-]*$).
-        environment: String,
-        /// Print the same report an assistant gets over MCP, instead of lines.
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum StructureCmd {
-    /// Plan the 1Password structure this configuration declares (read-only): names and a
-    /// plan_id only, no value and no write.
-    #[command(before_help = STRUCTURE_PLAN_QUICK)]
-    Plan {
-        /// Print exactly the document the MCP `opv_structure_plan` tool returns.
-        #[arg(long)]
-        json: bool,
     },
 }
 
@@ -1573,27 +1617,6 @@ enum ConfigCmd {
         #[arg(long, value_name = "PATH")]
         file: PathBuf,
     },
-    /// Print the declared configuration metadata (environments, keys, targets), names only;
-    /// same document as the MCP `opv_configuration` tool.
-    #[command(before_help = CONFIG_DESCRIBE_QUICK)]
-    Describe {
-        /// Print exactly the document the MCP `opv_configuration` tool returns.
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum ItemCmd {
-    /// Add every missing declared field to the item, empty (a signed-in person's runs do this too).
-    #[command(before_help = SKELETON_QUICK, after_help = SKELETON_MORE)]
-    Skeleton {
-        /// Environment name from the configuration (for example staging or prod).
-        env: String,
-        /// Print the fields added as one JSON document.
-        #[arg(long)]
-        json: bool,
-    },
 }
 
 /// Stdout that stops writing once the reader has gone (`status | head`): a `BrokenPipe`
@@ -1632,15 +1655,15 @@ impl<W: Write> Write for PipeSafe<W> {
     }
 }
 
-/// The command line: the derived [`Cli`] plus each provider's `opv target add` options
+/// The command line: the derived [`Cli`] plus each provider's `opv propose target` options
 /// (`--<provider>-<field>`), taken from the plug-in contract so a new provider adds its
 /// options without a change here (H3).
 fn command_line() -> clap::Command {
-    Cli::command().mut_subcommand("target", |t| t.mut_subcommand("add", provider_options))
+    Cli::command().mut_subcommand("propose", |t| t.mut_subcommand("target", provider_options))
 }
 
 /// Every provider's options as hidden arguments plus one summary line per provider in
-/// `opv target add`'s help (H3, I6).
+/// `opv propose target`'s help (H3, I6).
 fn provider_options(mut c: clap::Command) -> clap::Command {
     use opv::adapters::registry;
     use opv::provider::init_flag;
@@ -1675,13 +1698,13 @@ fn provider_options(mut c: clap::Command) -> clap::Command {
     }
 }
 
-/// The provider options given to `target add`, by option name.
+/// The provider options given to `propose target`, by option name.
 fn target_fields(matches: &clap::ArgMatches) -> std::collections::BTreeMap<String, String> {
     use opv::adapters::registry;
     use opv::provider::init_flag;
     let Some(m) = matches
-        .subcommand_matches("target")
-        .and_then(|t| t.subcommand_matches("add"))
+        .subcommand_matches("propose")
+        .and_then(|t| t.subcommand_matches("target"))
     else {
         return Default::default();
     };
@@ -1953,19 +1976,6 @@ fn usage_error(e: clap::Error) -> ExitCode {
         );
     }
     let json = args.iter().any(|a| a == "--json");
-    // FR-60: a removed form names its replacement exactly.
-    if let Some(instead) = removed_init_target(&args) {
-        return usage_cause(
-            opv::cause::Cause::Usage {
-                problem: opv::cause::UsageProblem::Removed {
-                    what: "opv init writes no target since 0.7.0: --target, --target-name and \
-                           the provider options were removed; add the target with opv target add",
-                    instead,
-                },
-            },
-            json,
-        );
-    }
     // Any other command line clap refuses: clap's own first line (it names the argument it
     // could not place), and the help of the deepest subcommand named (M10).
     let text = e.render().to_string();
@@ -2128,70 +2138,6 @@ fn usage_cause(cause: opv::cause::Cause, json: bool) -> ExitCode {
     ExitCode::from(exit_byte(cause.exit_code()))
 }
 
-/// `opv init` given a target option removed in 0.7.0 (`--target`, `--target-name`, a
-/// provider option; FR-56, FR-60): the refusal and its replacement, `opv target add` with
-/// the same environment, name and options (its help when the name is not given).
-fn removed_init_target(args: &[String]) -> Option<opv::cause::Cmd> {
-    use opv::adapters::registry;
-    use opv::provider::init_flag;
-    let at = args.iter().position(|a| a == "init")?;
-    let root = cli_command();
-    let init = root.find_subcommand("init")?;
-    let takes_value = |flag: &str| {
-        init.get_arguments()
-            .any(|a| a.get_long() == Some(flag) && a.get_action().takes_values())
-    };
-    let options: Vec<String> = registry::PROVIDERS
-        .iter()
-        .flat_map(|p| p.init_fields().iter().map(move |f| init_flag(*p, f)))
-        .collect();
-    let (mut env, mut name, mut provider) = (None, None, None);
-    let mut given = Vec::new();
-    let mut rest = args[at + 1..].iter();
-    while let Some(a) = rest.next() {
-        let Some(flag) = a.strip_prefix("--") else {
-            env.get_or_insert_with(|| a.clone());
-            continue;
-        };
-        let (flag, inline) = match flag.split_once('=') {
-            Some((f, v)) => (f, Some(v.to_string())),
-            None => (flag, None),
-        };
-        let removed =
-            flag == "target" || flag == "target-name" || options.iter().any(|o| o == flag);
-        if !removed {
-            if inline.is_none() && takes_value(flag) {
-                rest.next();
-            }
-            continue;
-        }
-        let value = inline.or_else(|| rest.next().cloned()).unwrap_or_default();
-        match flag {
-            "target" => provider = Some(value),
-            "target-name" => name = Some(value),
-            _ => given.extend([format!("--{flag}"), value]),
-        }
-    }
-    if name.is_none() && provider.is_none() && given.is_empty() {
-        return None;
-    }
-    let args = match (env, name) {
-        (Some(env), Some(name)) => {
-            let mut a = vec![env, name];
-            if let Some(p) = provider {
-                a.extend(["--provider".to_string(), p]);
-            }
-            a.extend(given);
-            a
-        }
-        _ => vec!["--help".to_string()],
-    };
-    Some(opv::cause::Cmd {
-        command: vec!["target".into(), "add".into()],
-        args,
-    })
-}
-
 /// The deepest subcommand `args` name, in order (`config check`, M10): the help a refused
 /// command line points to. Empty for none (`opv --help`).
 fn help_path(args: &[String]) -> Vec<String> {
@@ -2307,22 +2253,20 @@ impl Cmd {
     fn env(&self) -> Option<(&str, signin::Reach)> {
         use signin::Reach;
         match self {
-            Cmd::Check { env, .. }
-            | Cmd::Run { env, .. }
+            Cmd::Run { env, .. }
             | Cmd::Changed { env, .. }
-            | Cmd::Config(ConfigCmd::Export { env: Some(env), .. })
-            | Cmd::Item(ItemCmd::Skeleton { env, .. })
-            | Cmd::Tidy { env, .. } => Some((env, Reach::Store)),
+            | Cmd::Set { env, .. }
+            | Cmd::Config(ConfigCmd::Export { env: Some(env), .. }) => Some((env, Reach::Store)),
             Cmd::Status { env: Some(env), .. } | Cmd::History { env, .. } => {
                 Some((env, Reach::Target))
             }
             Cmd::Plan(a) => Some((&a.env, Reach::Target)),
             Cmd::Sync(a) => Some((&a.env, Reach::Target)),
             Cmd::Doctor { env: Some(env), .. } => Some((env, Reach::Target)),
-            Cmd::Adopt { env, from, .. } if from == "target" || from.starts_with("target:") => {
+            Cmd::Import { env, from, .. } if from == "target" || from.starts_with("target:") => {
                 Some((env, Reach::Target))
             }
-            Cmd::Adopt { env, .. } => Some((env, Reach::Store)),
+            Cmd::Import { env, .. } => Some((env, Reach::Store)),
             _ => None,
         }
     }
@@ -2333,7 +2277,7 @@ impl Cmd {
     fn target(&self) -> Option<&str> {
         match self {
             Cmd::History { target, .. } => return target.as_deref(),
-            Cmd::Adopt { from, .. } => {
+            Cmd::Import { from, .. } => {
                 return from.strip_prefix("target:").filter(|n| !n.is_empty());
             }
             _ => {}
@@ -2355,7 +2299,6 @@ impl Cmd {
     fn json_mode(&self) -> Option<bool> {
         let json = match self {
             Cmd::Doctor { json, .. }
-            | Cmd::Check { json, .. }
             | Cmd::Status { json, .. }
             | Cmd::Projects { json, .. }
             | Cmd::Version { json }
@@ -2363,19 +2306,17 @@ impl Cmd {
             | Cmd::Vault(VaultCmd::Locate { json, .. })
             | Cmd::Explain { json, .. }
             | Cmd::Open { json, .. }
-            | Cmd::Init { json, .. }
-            | Cmd::Add { json, .. }
-            | Cmd::Item(ItemCmd::Skeleton { json, .. })
-            | Cmd::Bootstrap { json, .. }
             | Cmd::Ready { json, .. }
             | Cmd::History { json, .. }
-            | Cmd::Tidy { json, .. }
             | Cmd::Access { json, .. }
+            | Cmd::Needs { json, .. }
+            | Cmd::Contract { json, .. }
+            | Cmd::Apply { json, .. }
+            | Cmd::Set { json, .. }
+            | Cmd::Import { json, .. }
             | Cmd::Delivery(DeliveryCmd::Verify { json, .. })
             | Cmd::Changed { json, .. }
-            | Cmd::Target(TargetCmd::Add { json, .. })
             | Cmd::Target(TargetCmd::List { json, .. })
-            | Cmd::Adopt { json, .. }
             | Cmd::Account(AccountCmd::List { json, .. })
             | Cmd::Account(AccountCmd::Use { json, .. })
             | Cmd::Skill(SkillCmd::Install { json, .. })
@@ -2388,9 +2329,7 @@ impl Cmd {
             Cmd::Config(ConfigCmd::Export { env, json, .. }) => {
                 return (env.is_some() || *json).then_some(true);
             }
-            Cmd::Env(EnvCmd::Add { json, .. })
-            | Cmd::Structure(StructureCmd::Plan { json })
-            | Cmd::Config(ConfigCmd::Describe { json }) => return json.then_some(true),
+            Cmd::Propose(p) => p.json(),
             // `run --preview --json` prints exactly the builder's document (no framing).
             Cmd::Run {
                 preview: true,
@@ -2410,7 +2349,7 @@ impl Cmd {
     fn has_state_words(&self) -> bool {
         match self {
             Cmd::Doctor { json, .. } => !json,
-            Cmd::Check { json, .. } | Cmd::Status { json, .. } => !json,
+            Cmd::Status { json, .. } => !json,
             Cmd::Plan(a) => !a.json,
             _ => false,
         }
@@ -2436,8 +2375,7 @@ fn apply_product_env(cmd: &mut Cmd, loaded: &Result<opv::domain::Fleet, Error>) 
     }
     let env = std::env::var("OPV_PRODUCT").ok();
     let used = match cmd {
-        Cmd::Check { product, .. }
-        | Cmd::Run { product, .. }
+        Cmd::Run { product, .. }
         | Cmd::Plan(PlanArgs { product, .. })
         | Cmd::Status { product, .. } => {
             let (p, used) = product_or_env(product.take(), env);
@@ -2643,6 +2581,36 @@ fn run(
     // FR-40, NR-7: one order everywhere (OP_ACCOUNT, else .opv), resolved to an account ID;
     // never under a service-account or Connect credential.
     let here = std::env::current_dir().unwrap_or_default();
+    // `apply` and `set` are a person's own: an assistant or a run without a terminal is
+    // turned away before any account, configuration or 1Password call.
+    if let Some(cmd) = person_only(&cli.cmd) {
+        opv::host::refuse_if_agent(&opv::host::ProcessEnv, cmd)?;
+        if !opv::host::HostEnv::interactive(&opv::host::ProcessEnv) {
+            return Err(opv::cause::Cause::NeedsTerminal {
+                why: opv::cause::NoTerminal::NoTty,
+            }
+            .into());
+        }
+    }
+    if let Cmd::Apply {
+        plan_id,
+        rebind,
+        generate,
+        json,
+    } = &cli.cmd
+    {
+        return run_apply(
+            &r,
+            cli.config.as_deref(),
+            &here,
+            plan_id.as_deref(),
+            rebind,
+            generate,
+            *json,
+            out,
+        )
+        .map(|()| 0);
+    }
     r.use_account(config_store::selected_account_id(&r, &here)?);
     // `run` keeps default signal behaviour: the user's command under `op run` handles its
     // own signals and its exit code is passed through (FR-4). `setup` and `login` are
@@ -2655,19 +2623,15 @@ fn run(
             })
         })?;
     }
-    if let Cmd::Init { add_env: false, .. } = &cli.cmd {
-        return run_init(cli, config_source, &r, out).map(|()| 0);
+    // Proposals that need no configuration (setup) or only the local contract file
+    // (structure, generate), and `apply`, run before discovery.
+    if let Cmd::Propose(p) = &cli.cmd {
+        let req = propose_request(p, target_options)?;
+        if !req.needs_config() {
+            return run_propose_early(&req, &cli, config_source, &r, &here, out).map(|()| 0);
+        }
     }
     match &cli.cmd {
-        Cmd::Env(EnvCmd::Add { environment, json }) => {
-            return opv::app::structure_cmd::env_add(&r, &here, environment, *json, out)
-                .map(|()| 0);
-        }
-        Cmd::Structure(StructureCmd::Plan { json }) => {
-            // Read and write the project's own 1Password account, never op's default.
-            r.use_account(Some(opv::app::structure::scope(&here, &r)?.account));
-            return opv::app::structure_cmd::plan(&r, &here, *json, out).map(|()| 0);
-        }
         Cmd::Projects {
             account,
             long,
@@ -2684,38 +2648,6 @@ fn run(
                 config: cli.config.clone(),
             };
             return opv::ui::run::run(source, out);
-        }
-        Cmd::Bootstrap {
-            file,
-            project,
-            dry_run,
-            rebind,
-            ci_reader,
-            json,
-        } => {
-            let here = std::env::current_dir().unwrap_or_default();
-            let path = match file.clone().or_else(|| cli.config.clone()) {
-                Some(p) => p,
-                None => match config_store::walk_up(&here, "secrets.toml") {
-                    Some(p) => p,
-                    None => return Err(bootstrap_without_file(&cli, config_source, &r, &here)),
-                },
-            };
-            let project = match project {
-                Some(p) => p.clone(),
-                None => config_store::default_project(
-                    None,
-                    config_store::git_repo(&r).as_deref(),
-                    &here,
-                )?,
-            };
-            let opts = opv::app::bootstrap::Opts {
-                dry_run: *dry_run,
-                rebind: rebind.iter().cloned().collect(),
-                ci_reader: ci_reader.clone(),
-                json: *json,
-            };
-            return opv::app::bootstrap::run(&path, &project, &opts, &r, out).map(|()| 0);
         }
         Cmd::LocalDelivery {
             keys,
@@ -2834,12 +2766,11 @@ fn run(
         }
         .map(|()| 0);
     }
-    // `add` and `init --add-env` edit the configuration where it lives, file or manifest
-    // (FR-44), with the same validation and concurrency refusal.
-    if let Cmd::Init { add_env: true, .. } | Cmd::Add { .. } | Cmd::Target(TargetCmd::Add { .. }) =
-        &cli.cmd
-    {
-        return run_edit(cli.cmd, &found?, target_options, &r, out).map(|()| 0);
+    // `propose key|env|target|retire` read the contract where it lives, file or manifest
+    // (FR-44); with --write they edit it with the same validation and concurrency refusal.
+    if let Cmd::Propose(p) = &cli.cmd {
+        let req = propose_request(p, target_options)?;
+        return run_propose_contract(&req, &found?, &r, out).map(|()| 0);
     }
     // `target credentials` mints the provider token and records the new item's reference in
     // the local secrets.toml (a manifest has no file to edit): FR-40.
@@ -3338,33 +3269,791 @@ fn credentials_need_a_file(manifest: &str) -> Error {
     .into()
 }
 
-/// `opv bootstrap` with no secrets.toml here or above (02.15): when this project's
-/// configuration is a 1Password manifest, bootstrap (which completes a secrets.toml) does
-/// not apply to it; otherwise there is no configuration at all. Never `opv init --file`,
-/// which would start a second configuration beside a manifest.
-fn bootstrap_without_file(
+impl ProposeArgs {
+    /// `--json`, given to `propose` itself or to its kind.
+    fn json(&self) -> bool {
+        self.json || self.cmd.as_ref().is_some_and(|c| c.out().json)
+    }
+}
+
+impl ProposeCmd {
+    /// The flags every kind shares.
+    fn out(&self) -> ProposeOut {
+        match self {
+            ProposeCmd::Key { out, .. }
+            | ProposeCmd::Env { out, .. }
+            | ProposeCmd::Target { out, .. }
+            | ProposeCmd::Retire { out, .. }
+            | ProposeCmd::Setup { out, .. }
+            | ProposeCmd::Structure { out, .. }
+            | ProposeCmd::Generate { out, .. } => *out,
+        }
+    }
+}
+
+/// The command `cmd` a person runs in their own terminal (`apply`, `set`), as an
+/// assistant is handed it; `None` for every other command.
+fn person_only(cmd: &Cmd) -> Option<opv::cause::Cmd> {
+    let (command, args) = match cmd {
+        Cmd::Apply { plan_id, .. } => (vec!["apply"], plan_id.iter().cloned().collect()),
+        Cmd::Set { key, env, .. } => (vec!["set"], vec![key.clone(), "--env".into(), env.clone()]),
+        _ => return None,
+    };
+    Some(opv::cause::Cmd {
+        command: command.into_iter().map(String::from).collect(),
+        args,
+    })
+}
+
+/// One proposal: the categorical intent document (the one `opv_propose` takes over MCP),
+/// what the command line adds to it, and the output flags.
+struct ProposeReq {
+    intent: opv::domain::intent::Intent,
+    /// A person's rule parameters (`propose key --rule`).
+    extras: opv::app::propose::key::Extras,
+    write: bool,
+    json: bool,
+}
+
+impl ProposeReq {
+    /// Whether the proposal reads the configuration where it lives (a file or a manifest):
+    /// `key`, `env`, `target` and `retire`. `setup` needs none, and `structure` and
+    /// `generate` read the local contract file.
+    fn needs_config(&self) -> bool {
+        use opv::domain::intent::Intent;
+        matches!(
+            self.intent,
+            Intent::Key { .. } | Intent::Env { .. } | Intent::Target { .. } | Intent::Retire { .. }
+        )
+    }
+}
+
+/// `[PRODUCT/]KEY` as the intent's `product` and `key`.
+fn product_and_key(label: &str) -> (Option<&str>, &str) {
+    match label.split_once('/') {
+        Some((p, k)) => (Some(p), k),
+        None => (None, label),
+    }
+}
+
+/// The proposal the command line asks for: `--intent <file>` parsed as it is, or the
+/// subcommand's flags as the same intent document, checked by the same parser.
+fn propose_request(
+    p: &ProposeArgs,
+    target_options: &std::collections::BTreeMap<String, String>,
+) -> Result<ProposeReq, Error> {
+    use opv::domain::intent;
+    use serde_json::{Map, Value, json};
+    let Some(cmd) = &p.cmd else {
+        let path = p.intent.as_ref().ok_or_else(|| -> Error {
+            opv::cause::Cause::Usage {
+                problem: opv::cause::UsageProblem::NeedsFlag {
+                    flag: "opv propose".into(),
+                    needs: "a kind (key, env, target, retire, setup, structure, generate) or \
+                            --intent <file.json>"
+                        .into(),
+                },
+            }
+            .into()
+        })?;
+        let text = std::fs::read_to_string(path).map_err(|e| -> Error {
+            opv::cause::Cause::ConfigUnreadable {
+                path: path.clone(),
+                io: e.kind().into(),
+                given_by: opv::cause::GivenBy::Flag {
+                    flag: "--intent".into(),
+                },
+            }
+            .into()
+        })?;
+        return Ok(ProposeReq {
+            intent: intent::parse(&text)?,
+            extras: Default::default(),
+            write: p.write,
+            json: p.json,
+        });
+    };
+    let mut doc = Map::new();
+    let mut put = |k: &str, v: Value| {
+        if !v.is_null() {
+            doc.insert(k.to_string(), v);
+        }
+    };
+    let mut extras = opv::app::propose::key::Extras::default();
+    match cmd {
+        ProposeCmd::Key {
+            key,
+            kind,
+            env,
+            except,
+            source,
+            shape,
+            rule,
+            personal,
+            from,
+            guidance,
+            allow_same_value,
+            immutable,
+            expires,
+            ..
+        } => {
+            let (product, key) = product_and_key(key);
+            let mut excepted = Map::new();
+            for e in except {
+                let (env, reason) = e.split_once('=').ok_or_else(|| -> Error {
+                    opv::cause::Cause::Usage {
+                        problem: opv::cause::UsageProblem::ValueFormat {
+                            flag: "--except".into(),
+                            format: "ENV=REASON",
+                        },
+                    }
+                    .into()
+                })?;
+                excepted.insert(env.to_string(), Value::from(reason));
+            }
+            put("kind", json!("key"));
+            put("key", json!(key));
+            put("product", json!(product));
+            put("field_kind", json!(kind));
+            if !env.is_empty() {
+                put("environments", json!(env));
+            }
+            if !excepted.is_empty() {
+                put("except", Value::Object(excepted));
+            }
+            put("source", json!(source));
+            put("shape", json!(shape));
+            put("from", json!(from));
+            put("personal", json!(personal));
+            put("allow_same_value", json!(allow_same_value));
+            put("immutable", json!(immutable));
+            put("guidance", json!(guidance));
+            put("expires", json!(expires));
+            extras.rules = rule.clone();
+        }
+        ProposeCmd::Env { env, tier, .. } => {
+            put("kind", json!("env"));
+            put("env", json!(env));
+            put("tier", json!(tier));
+        }
+        ProposeCmd::Target {
+            env,
+            name,
+            provider,
+            products,
+            role,
+            deploy_credentials,
+            ..
+        } => {
+            put("kind", json!("target"));
+            put("env", json!(env));
+            put("name", json!(name));
+            put("provider", json!(provider));
+            put("products", json!(products));
+            put("role", json!(role));
+            put("deploy_credentials", json!(deploy_credentials));
+            put("options", json!(target_options));
+        }
+        ProposeCmd::Retire { key, .. } => {
+            let (product, key) = product_and_key(key);
+            put("kind", json!("retire"));
+            put("key", json!(key));
+            put("product", json!(product));
+        }
+        ProposeCmd::Setup {
+            from_item,
+            vault,
+            item,
+            names_from,
+            config_key,
+            secret_key,
+            file,
+            project,
+            account,
+            ..
+        } => {
+            put("kind", json!("setup"));
+            put("from_item", json!(from_item));
+            put("vault", json!(vault));
+            put("item", json!(item));
+            put(
+                "names_from",
+                json!(names_from.as_ref().map(|p| p.display().to_string())),
+            );
+            put("config_key", json!(config_key));
+            put("secret_key", json!(secret_key));
+            put("file", json!(file));
+            put("project", json!(project));
+            put("account", json!(account));
+        }
+        ProposeCmd::Structure { rebind, .. } => {
+            put("kind", json!("structure"));
+            put("rebind", json!(rebind));
+        }
+        ProposeCmd::Generate { env, keys, .. } => {
+            put("kind", json!("generate"));
+            put("env", json!(env));
+            put("keys", json!(keys));
+        }
+    }
+    let out = cmd.out();
+    Ok(ProposeReq {
+        intent: intent::parse(&Value::Object(doc).to_string())?,
+        extras,
+        write: out.write,
+        json: p.json || out.json,
+    })
+}
+
+/// The proposal's `Next:` step before `--write`: the same command with `--write`.
+fn write_step() -> String {
+    let mut words: Vec<String> = std::env::args().skip(1).map(|a| shell_word(&a)).collect();
+    words.push("--write".into());
+    format!("opv {}", words.join(" "))
+}
+
+/// `opv apply [<plan_id>]` with the `--rebind` and `--generate` a structural proposal
+/// needs to be recomputed as it was proposed.
+fn apply_step(plan_id: &str, rebind: &[String], generate: &[(String, Vec<String>)]) -> String {
+    let mut c = format!("opv apply {}", shell_word(plan_id));
+    for env in rebind {
+        c.push_str(&format!(" --rebind {}", shell_word(env)));
+    }
+    for (env, keys) in generate {
+        for k in keys {
+            c.push_str(&format!(
+                " --generate {}",
+                shell_word(&format!("{env}:{k}"))
+            ));
+        }
+    }
+    c
+}
+
+/// Print a proposal document (`--json`) or its text lines, then its `Next:` step: the
+/// person's `opv apply` (`apply`) or the assistant's own next command.
+fn print_proposal(
+    doc: serde_json::Value,
+    lines: &[String],
+    next: &str,
+    person: bool,
+    json: bool,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    if json {
+        let mut doc = doc;
+        doc["next"] = if person {
+            serde_json::json!({"kind": "apply", "actor": "person", "command": next})
+        } else {
+            serde_json::Value::from(next)
+        };
+        return writeln!(out, "{doc}").map_err(write_err);
+    }
+    for l in lines {
+        writeln!(out, "{}", l.trim_end_matches('\n')).map_err(write_err)?;
+    }
+    writeln!(out, "Next: {next}").map_err(write_err)
+}
+
+/// `opv propose setup|structure|generate`: the first setup's contract, or the structure
+/// the local contract file needs; nothing is written but the contract file with `--write`.
+fn run_propose_early(
+    req: &ProposeReq,
     cli: &Cli,
     config_source: ConfigSource,
-    r: &dyn CommandRunner,
+    r: &ProcessRunner,
     here: &std::path::Path,
-) -> Error {
-    let found = request(cli, config_source, true).and_then(|req| config_store::locate(&req, r));
-    // The lookup's own failure is not this command's error.
-    let _ = opv::runner::take_failure_excerpt();
-    let _ = opv::runner::take_observed();
-    match found {
-        Ok(config_store::Found::Manifest(m)) => opv::cause::Cause::ConfigSourceMismatch {
-            command: opv::cause::CommandId("bootstrap".into()),
-            manifest: m.title,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    use opv::app::propose::{setup, structure as ps};
+    use opv::domain::intent::Intent;
+    match &req.intent {
+        Intent::Setup {
+            from_item,
+            vault,
+            item,
+            names_from,
+            config_key,
+            secret_key,
+            file,
+            project,
+            account,
+            ..
+        } => {
+            let path = match (file, &cli.config) {
+                (false, Some(p)) if config_source != ConfigSource::Discovered => p.clone(),
+                (false, _) => config_store::walk_up(here, "secrets.toml")
+                    .unwrap_or_else(|| here.join("secrets.toml")),
+                (true, _) => here.join("secrets.toml"),
+            };
+            let proposed = match (from_item, names_from) {
+                (Some(env), _) => {
+                    // FR-40, NR-7: the item is read in one chosen account, never op's
+                    // default when several accounts are on this machine.
+                    let given = account
+                        .clone()
+                        .or_else(|| config_store::pointer_account(here))
+                        .or_else(config_store::account_env);
+                    let chosen = config_store::pick_account(r, given)?;
+                    let scoped = signin::EnvRunner::with_account(r, chosen);
+                    let (vault, item) = match (vault, item) {
+                        (Some(v), Some(i)) => (v.clone(), i.clone()),
+                        (vault, item) => {
+                            let repo = config_store::git_repo(r);
+                            let name = config_store::default_project(
+                                project.as_deref(),
+                                repo.as_deref(),
+                                here,
+                            )?;
+                            let b = opv::app::init::SHARED_BOUNDARY;
+                            let env = env.as_str();
+                            (
+                                vault.clone().unwrap_or_else(|| {
+                                    opv::domain::naming::boundary_vault(&name, b, env)
+                                }),
+                                item.clone().unwrap_or_else(|| {
+                                    opv::domain::naming::boundary_item(&name, b, env)
+                                }),
+                            )
+                        }
+                    };
+                    setup::from_item(
+                        &scoped,
+                        env.as_str(),
+                        Some(&vault),
+                        Some(&item),
+                        Some(&path),
+                    )?
+                }
+                (None, Some(names)) => setup::from_names(
+                    std::path::Path::new(names),
+                    setup::NAMES_ENV,
+                    config_key,
+                    secret_key,
+                )?,
+                (None, None) => {
+                    return Err(opv::cause::Cause::Usage {
+                        problem: opv::cause::UsageProblem::NeedsFlag {
+                            flag: "opv propose setup".into(),
+                            needs: "--from-item <env> or --names-from <.env>".into(),
+                        },
+                    }
+                    .into());
+                }
+            };
+            if req.write {
+                setup::write(&path, &proposed)?;
+            }
+            let mut lines = vec![proposed.proposal.render_text()];
+            lines.extend(
+                proposed
+                    .structure_steps
+                    .iter()
+                    .map(|s| format!("structure: {s}")),
+            );
+            if req.write {
+                lines.push(format!("written: {}", path.display()));
+            }
+            let mut doc = serde_json::to_value(&proposed).map_err(|_| -> Error {
+                opv::cause::Cause::Bug {
+                    site: "propose setup: the proposal did not serialize",
+                }
+                .into()
+            })?;
+            doc["written"] = serde_json::json!(req.write.then(|| path.display().to_string()));
+            if req.write {
+                print_proposal(doc, &lines, "opv apply", true, req.json, out)
+            } else {
+                print_proposal(doc, &lines, &write_step(), false, req.json, out)
+            }
         }
-        .into(),
-        _ => opv::cause::Cause::ConfigNotFound {
-            searched_from: here.to_path_buf(),
-            env: None,
-            manifest: None,
+        Intent::Structure { .. } | Intent::Generate { .. } => {
+            let (rebind, generate): (Vec<String>, Vec<(String, Vec<String>)>) = match &req.intent {
+                Intent::Structure { rebind, .. } => {
+                    (rebind.iter().map(|e| e.to_string()).collect(), Vec::new())
+                }
+                Intent::Generate { env, keys, .. } => (
+                    Vec::new(),
+                    vec![(
+                        env.to_string(),
+                        keys.iter().map(|k| k.to_string()).collect(),
+                    )],
+                ),
+                _ => unreachable!("matched structure or generate"),
+            };
+            // Read the project's own 1Password account, never op's default.
+            let scope = structure_scope(cli.config.as_deref(), here, r)?;
+            r.use_account(Some(scope.account.clone()));
+            let p = ps::propose_structure_at(
+                r,
+                &scope.config,
+                &scope.project,
+                &scope.account,
+                &rebind,
+                &generate,
+            )?;
+            let mut lines = opv::app::apply::describe(&p, &scope.config);
+            if req.write {
+                // A structural proposal changes no contract text: `opv apply` moves ids and
+                // creates the structure, in one confirmed run.
+                lines.push("written: nothing (opv apply makes these changes)".into());
+            }
+            let doc = serde_json::to_value(&p).map_err(|_| -> Error {
+                opv::cause::Cause::Bug {
+                    site: "propose structure: the proposal did not serialize",
+                }
+                .into()
+            })?;
+            let next = apply_step(&p.plan_id, &rebind, &generate);
+            print_proposal(doc, &lines, &next, true, req.json, out)
         }
-        .into(),
+        _ => unreachable!("called for setup, structure and generate"),
     }
+}
+
+/// `opv propose key|env|target|retire`: the contract diff against the configuration where
+/// it lives, and with `--write` that edit saved (a file, or the project's manifest).
+fn run_propose_contract(
+    req: &ProposeReq,
+    found: &config_store::Found,
+    r: &ProcessRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    use opv::app::propose::{key, target};
+    use opv::domain::intent::Intent;
+    let store = found.store();
+    // The contract with its ids filled in, to validate the proposal; a write starts from
+    // the contract alone (D-G: no edit writes an id).
+    let snap = store.read(r)?;
+    let base_for_write = if req.write {
+        Some(store.read_for_write(r)?)
+    } else {
+        None
+    };
+    let working = store.parse(&snap.text)?;
+    // FR-52: a generated configuration is never edited; its generator is.
+    if req.write && opv::app::bootstrap::is_generated(&snap.text) {
+        return Err(opv::cause::Cause::ConfigNotEditable {
+            source: found.cause_source(),
+            reason: opv::cause::NotEditable::Generated { generator: None },
+        }
+        .into());
+    }
+    let (contract, ids) = opv::config::bindings::split(&snap.text);
+    // The default branch's contract: its relaxations are listed first (default 2).
+    let repo = config_store::git_toplevel(r)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let source = opv::app::rule_source::rule_source(r, &repo, &working)?;
+    let base = source.contract();
+    // The contract as it is loaded above; a loader refusal now is of the proposed text,
+    // which was never written (F2, C14).
+    let proposal = match &req.intent {
+        Intent::Target { .. } => target::propose(&contract, &ids, base, &req.intent),
+        _ => key::propose_with(&contract, &ids, base, &req.intent, &req.extras),
+    }
+    .map_err(proposal_refused)?;
+    if req.write {
+        match found {
+            config_store::Found::File { store, .. } => {
+                key::write(&store.path, &proposal.contract_after)?;
+            }
+            config_store::Found::Manifest(_) => {
+                let base = base_for_write.as_ref().unwrap_or(&snap);
+                config_store::save(store, r, base, &proposal.contract_after)?;
+            }
+        }
+    }
+    let mut lines = vec![proposal.render_text()];
+    if req.write {
+        lines.push(format!("written: {}", store.describe()));
+    }
+    let mut doc = serde_json::to_value(&proposal).map_err(|_| -> Error {
+        opv::cause::Cause::Bug {
+            site: "propose: the proposal did not serialize",
+        }
+        .into()
+    })?;
+    doc["written"] = serde_json::json!(req.write.then(|| store.describe()));
+    match &req.intent {
+        Intent::Key { .. } | Intent::Env { .. } | Intent::Target { .. } if req.write => {
+            print_proposal(doc, &lines, "opv apply", true, req.json, out)
+        }
+        // Retirement continues with what still reads the key (`needs`), before it is pruned.
+        Intent::Retire { .. } if req.write => {
+            print_proposal(doc, &lines, "opv needs", false, req.json, out)
+        }
+        _ => print_proposal(doc, &lines, &write_step(), false, req.json, out),
+    }
+}
+
+/// The contract, project and 1Password account a structural proposal or `apply` works on:
+/// the file `--config` (or `OPV_CONFIG`) names, else the `secrets.toml` found from here,
+/// else the project's manifest.
+fn structure_scope(
+    config: Option<&std::path::Path>,
+    here: &std::path::Path,
+    r: &ProcessRunner,
+) -> Result<opv::app::structure::Scope, Error> {
+    let Some(path) = config else {
+        return opv::app::structure::scope(here, r);
+    };
+    let start = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .map_or_else(|| here.to_path_buf(), |d| here.join(d));
+    let command = opv::error::invocation().command.join(" ");
+    let (project, account) = opv::app::structure::binding_as(&start, r, &command)?;
+    Ok(opv::app::structure::Scope {
+        config: opv::app::structure::ConfigAt::File(path.to_path_buf()),
+        project,
+        account,
+    })
+}
+
+/// A loader refusal of a proposed contract text (never written) is the catalog's
+/// `ConfigProposalInvalid`, whose message says nothing was written; its line points into
+/// text that was never saved, so it is dropped (F2, C14).
+fn proposal_refused(e: Error) -> Error {
+    let Error::Catalog(cause, upstream) = e;
+    let cause = match *cause {
+        opv::cause::Cause::ConfigInvalid {
+            source,
+            field,
+            rule,
+            ..
+        } => opv::cause::Cause::ConfigProposalInvalid {
+            source,
+            field,
+            rule,
+            from_proposal: true,
+        },
+        other => other,
+    };
+    Error::Catalog(Box::new(cause), upstream)
+}
+
+/// `opv apply [<plan_id>]`: the project's structural plan, recomputed, shown, confirmed on
+/// this terminal and run (an assistant and a run without a terminal were refused in `run`).
+#[allow(clippy::too_many_arguments)]
+fn run_apply(
+    r: &ProcessRunner,
+    config: Option<&std::path::Path>,
+    here: &std::path::Path,
+    plan_id: Option<&str>,
+    rebind: &[String],
+    generate: &[String],
+    json: bool,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let mut grouped: Vec<(String, Vec<String>)> = Vec::new();
+    for g in generate {
+        let (env, key) = g
+            .split_once(':')
+            .filter(|(e, k)| !e.is_empty() && k.contains('/'))
+            .ok_or_else(|| -> Error {
+                opv::cause::Cause::Usage {
+                    problem: opv::cause::UsageProblem::ValueFormat {
+                        flag: "--generate".into(),
+                        format: "ENV:PRODUCT/KEY",
+                    },
+                }
+                .into()
+            })?;
+        match grouped.iter_mut().find(|(e, _)| e == env) {
+            Some((_, keys)) => keys.push(key.to_string()),
+            None => grouped.push((env.to_string(), vec![key.to_string()])),
+        }
+    }
+    let scope = structure_scope(config, here, r)?;
+    r.use_account(Some(scope.account.clone()));
+    let opts = opv::app::apply::ApplyOpts {
+        rebind: rebind.to_vec(),
+        generate: grouped,
+    };
+    // The question goes to stderr and the answer comes from this terminal.
+    let mut confirm = |_: &opv::app::propose::structure::StructureProposal| {
+        let _ = write!(io::stderr(), "Apply this plan? [y/N] ");
+        let _ = io::stderr().flush();
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer).is_ok()
+            && matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+    };
+    let mut stderr = io::stderr();
+    // With --json the plan lines go to stderr, so stdout carries the one document.
+    let shown: &mut dyn Write = if json { &mut stderr } else { out };
+    let applied = opv::app::apply::apply_at(
+        r,
+        &opv::host::ProcessEnv,
+        &scope.config,
+        &scope.project,
+        &scope.account,
+        plan_id,
+        opts,
+        &mut confirm,
+        shown,
+    )?;
+    if json {
+        let doc = serde_json::to_value(&applied).map_err(|_| -> Error {
+            opv::cause::Cause::Bug {
+                site: "apply: the result did not serialize",
+            }
+            .into()
+        })?;
+        return writeln!(out, "{doc}").map_err(write_err);
+    }
+    if !applied.confirmed {
+        return writeln!(out, "Nothing was applied.").map_err(write_err);
+    }
+    writeln!(
+        out,
+        "applied {}: {} step(s), {} created, {} field(s) added, {} generated",
+        applied.plan_id,
+        applied.steps_run,
+        applied.created.len(),
+        applied.fields_added.len(),
+        applied.generated.len()
+    )
+    .map_err(write_err)?;
+    writeln!(out, "Next: opv ready").map_err(write_err)
+}
+
+/// The repository top this checkout's `git` names, else the current directory.
+fn repo_top(r: &dyn CommandRunner) -> PathBuf {
+    config_store::git_toplevel(r).unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+}
+
+/// `opv needs [--gate]`: the names the code reads against the contract, the default
+/// branch's contract deciding which undeclared names are new (names and file:line only).
+fn run_needs(
+    fleet: &opv::domain::Fleet,
+    gate: bool,
+    json: bool,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    use opv::app::needs;
+    let repo = repo_top(r);
+    let source = opv::app::rule_source::rule_source(r, &repo, fleet)?;
+    let base = source.contract();
+    let report = needs::needs(r, &repo, &opv::scan::WorkTree, fleet, base);
+    if json {
+        let doc = serde_json::to_value(&report).map_err(|_| -> Error {
+            opv::cause::Cause::Bug {
+                site: "needs: the report did not serialize",
+            }
+            .into()
+        })?;
+        writeln!(out, "{doc}").map_err(write_err)?;
+    } else {
+        needs::render_text(&report, out)?;
+    }
+    if gate {
+        needs::gate(&report, base)?;
+    }
+    Ok(())
+}
+
+/// What `opv contract` was asked for.
+struct ContractReq<'a> {
+    env: Option<&'a str>,
+    component: Option<&'a str>,
+    schema: bool,
+    check: Option<&'a std::path::Path>,
+    relaxations: bool,
+    base: Option<&'a str>,
+    json: bool,
+}
+
+/// `opv contract`: the contract as data, its JSON Schema, the check of a committed copy,
+/// or its relaxations against the default branch (names only, never a value or an id).
+fn run_contract(
+    fleet: &opv::domain::Fleet,
+    req: &ContractReq<'_>,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    use opv::app::contract;
+    let print = |out: &mut dyn Write, doc: &serde_json::Value| -> Result<(), Error> {
+        let text = if req.json {
+            doc.to_string()
+        } else {
+            serde_json::to_string_pretty(doc).unwrap_or_else(|_| doc.to_string())
+        };
+        writeln!(out, "{text}").map_err(write_err)
+    };
+    if req.relaxations {
+        let repo = repo_top(r);
+        let (base_name, base) = match req.base {
+            Some(rev) => (
+                rev.to_string(),
+                opv::app::rule_source::contract_at(r, &repo, fleet, rev)?,
+            ),
+            None => match opv::app::rule_source::rule_source(r, &repo, fleet)? {
+                opv::app::rule_source::RuleSource::DefaultBranch { branch, contract } => {
+                    (branch, contract)
+                }
+                opv::app::rule_source::RuleSource::Manifest => ("manifest".to_string(), None),
+            },
+        };
+        let found = base
+            .as_ref()
+            .map(|b| contract::relaxations(b, fleet))
+            .unwrap_or_default();
+        let list: Vec<serde_json::Value> = found
+            .iter()
+            .map(opv::app::propose::relaxation_json)
+            .collect();
+        if req.json {
+            let doc = serde_json::json!({"base": base_name, "relaxations": list});
+            return writeln!(out, "{doc}").map_err(write_err);
+        }
+        if found.is_empty() {
+            return writeln!(out, "relaxations against {base_name}: none").map_err(write_err);
+        }
+        writeln!(out, "relaxations against {base_name}:").map_err(write_err)?;
+        for x in &found {
+            let at = match &x.env {
+                Some(env) => format!("{}/{} ({env})", x.product, x.key),
+                None => format!("{}/{}", x.product, x.key),
+            };
+            writeln!(out, "  {at}: {}", x.reason).map_err(write_err)?;
+        }
+        return Ok(());
+    }
+    let doc = contract::document(fleet, req.env, req.component);
+    if req.schema {
+        return print(out, &contract::json_schema(&doc));
+    }
+    if let Some(path) = req.check {
+        let committed = std::fs::read_to_string(path).map_err(|e| -> Error {
+            opv::cause::Cause::ConfigUnreadable {
+                path: path.to_path_buf(),
+                io: e.kind().into(),
+                given_by: opv::cause::GivenBy::Flag {
+                    flag: "--check".into(),
+                },
+            }
+            .into()
+        })?;
+        contract::check(&doc, &committed).map_err(|_| -> Error {
+            opv::cause::Cause::ContractStale {
+                path: Some(path.to_path_buf()),
+            }
+            .into()
+        })?;
+        if req.json {
+            let doc = serde_json::json!({"check": path.display().to_string(), "current": true});
+            return writeln!(out, "{doc}").map_err(write_err);
+        }
+        return writeln!(out, "{}: current", path.display()).map_err(write_err);
+    }
+    let doc = serde_json::to_value(&doc).map_err(|_| -> Error {
+        opv::cause::Cause::Bug {
+            site: "contract: the document did not serialize",
+        }
+        .into()
+    })?;
+    print(out, &doc)
 }
 
 fn run_other(
@@ -3379,21 +4068,16 @@ fn run_other(
         Cmd::Login { .. } => unreachable!("handled before configuration discovery"),
         Cmd::Run { .. } => unreachable!("handled by run"),
         Cmd::Changed { .. } => unreachable!("handled by run"),
-        Cmd::Init { .. } => unreachable!("handled by run_init"),
-        Cmd::Add { .. } => unreachable!("handled by run_edit"),
-        Cmd::Target(TargetCmd::Add { .. }) => unreachable!("handled by run_edit"),
+        Cmd::Propose(_) | Cmd::Apply { .. } => unreachable!("handled by run"),
         Cmd::Target(TargetCmd::Credentials { .. }) => unreachable!("handled by run"),
         Cmd::Completions { .. }
         | Cmd::Guide { .. }
         | Cmd::Skill(_)
         | Cmd::Projects { .. }
         | Cmd::Account(_)
-        | Cmd::Bootstrap { .. }
         | Cmd::Version { .. }
         | Cmd::Mcp(_)
         | Cmd::Vault(_)
-        | Cmd::Env(_)
-        | Cmd::Structure(_)
         | Cmd::LocalDelivery { .. }
         | Cmd::RemoteSend { .. }
         | Cmd::RemoteReceive
@@ -3420,16 +4104,13 @@ fn run_other(
             };
             doctor::run_request(loaded, scope, r, out)
         }
-        Cmd::Check { env, product, json } => {
-            opv::app::local::check(&loaded?, &env, product.as_deref(), r, out, json)
-        }
-        Cmd::Adopt {
+        Cmd::Import {
             env,
             from,
             replace,
             rotate,
             skip,
-            apply,
+            dry_run,
             json,
         } => {
             let fleet = loaded?;
@@ -3439,10 +4120,65 @@ fn run_other(
                 replace,
                 rotate,
                 skip,
-                dry_run: !apply,
+                dry_run,
                 json,
             };
             opv::app::import::run(&fleet, &env, &opts, r, out)
+        }
+        Cmd::Set { key, env, json } => {
+            let fleet = loaded?;
+            let mut prompt = opv::app::masked::prompt;
+            if !json {
+                return opv::app::set::set(
+                    &fleet,
+                    &opv::host::ProcessEnv,
+                    &key,
+                    &env,
+                    &mut prompt,
+                    r,
+                    out,
+                );
+            }
+            // The state line becomes the document's `state`; nothing else is printed.
+            let mut state = Vec::new();
+            opv::app::set::set(
+                &fleet,
+                &opv::host::ProcessEnv,
+                &key,
+                &env,
+                &mut prompt,
+                r,
+                &mut state,
+            )?;
+            let state = String::from_utf8_lossy(&state).trim().to_string();
+            let doc = serde_json::json!({
+                "key": key,
+                "environment": env,
+                "state": (!state.is_empty()).then_some(state),
+            });
+            writeln!(out, "{doc}").map_err(write_err)
+        }
+        Cmd::Needs { gate, json } => run_needs(&loaded?, gate, json, r, out),
+        Cmd::Contract {
+            env,
+            component,
+            schema,
+            check,
+            relaxations,
+            base,
+            json,
+        } => {
+            let fleet = loaded?;
+            let req = ContractReq {
+                env: env.as_deref(),
+                component: component.as_deref(),
+                schema,
+                check: check.as_deref(),
+                relaxations,
+                base: base.as_deref(),
+                json,
+            };
+            run_contract(&fleet, &req, r, out)
         }
         Cmd::History { env, target, json } => {
             opv::app::history::run(&loaded?, &env, target.as_deref(), r, json, out)
@@ -3450,7 +4186,6 @@ fn run_other(
         Cmd::Target(TargetCmd::List { env, json }) => {
             target_cmd::list(&loaded?, &target_cmd::ListArgs { env, json }, out)
         }
-        Cmd::Tidy { env, json } => opv::app::repair::run(&loaded?, &env, r, json, out),
         Cmd::Access {
             env: Some(env),
             target,
@@ -3500,7 +4235,6 @@ fn run_other(
             json,
             out,
         ),
-        Cmd::Generate { env, keys } => opv::app::generate::run(&loaded?, &env, &keys, r, out),
         Cmd::Delivery(DeliveryCmd::Verify {
             env,
             product,
@@ -3608,14 +4342,8 @@ fn run_other(
         Cmd::Config(ConfigCmd::Export { env: Some(env), .. }) => {
             config_export::run(&loaded?, &env, r, out)
         }
-        Cmd::Config(ConfigCmd::Describe { json }) => {
-            opv::app::structure_cmd::config_describe(&loaded?, json, out)
-        }
         // Reached only when discovery failed: its error is the result.
         Cmd::Config(_) => loaded.map(|_| ()),
-        Cmd::Item(ItemCmd::Skeleton { env, json }) => {
-            skeleton::run_as(&loaded?, &env, r, out, json)
-        }
         Cmd::Explain {
             target,
             target_name,
@@ -3693,252 +4421,6 @@ fn help(topic: &[String], out: &mut dyn Write) -> Result<(), Error> {
     }
     let text = current.render_long_help().to_string();
     write(out, &text)
-}
-
-/// `init` writes `./secrets.toml`; it reads no configuration, so it runs before discovery.
-fn run_init(
-    cli: Cli,
-    config_source: ConfigSource,
-    r: &ProcessRunner,
-    out: &mut dyn Write,
-) -> Result<(), Error> {
-    let json = matches!(cli.cmd, Cmd::Init { json: true, .. });
-    // init writes ./secrets.toml (with --file, or when one exists here) or a manifest, and
-    // never the configuration --config names: `--add-env` adds an environment to that one.
-    // The step is init's help, which says so, never a rebuilt command that drops flags
-    // (02.13).
-    if cli.config.is_some() {
-        return Err(init_takes_no_config(config_source));
-    }
-    let dir = std::env::current_dir().map_err(cwd_err)?;
-    let (file, project, account) = match &cli.cmd {
-        Cmd::Init {
-            file,
-            project,
-            account,
-            ..
-        } => (*file, project.clone(), account.clone()),
-        _ => unreachable!("called for init only"),
-    };
-    // --from without --apply: the plan only, before any 1Password call or file (#90).
-    if let Cmd::Init {
-        from: Some(_),
-        apply: false,
-        ..
-    } = &cli.cmd
-    {
-        let args = init_args(cli.cmd, r, &dir)?;
-        let from = args.from.as_ref().expect("matched --from");
-        let imported = init::read_from(from)?;
-        let again = init_from_again(&args, file, project.as_deref());
-        return init::plan_from(&args, &imported, &again, out, json);
-    }
-    // FR-40, NR-7: every op call of init goes to one chosen account, never op's default
-    // when several accounts are on this machine; a choice given here is recorded in .opv.
-    let given = account
-        .clone()
-        .or_else(|| config_store::pointer_account(&dir))
-        .or_else(config_store::account_env);
-    let chosen = config_store::pick_account(r, given)?;
-    if account.is_some()
-        && let Some(a) = &chosen
-    {
-        let path = config_store::record_account(&dir, a)?;
-        if !json {
-            writeln!(
-                out,
-                "using 1Password account {a}; recorded in {} (commit it)",
-                path.display()
-            )
-            .map_err(write_err)?;
-        }
-    }
-    let scoped = signin::EnvRunner::with_account(r, chosen);
-    let args = init_args(cli.cmd, &scoped, &dir)?;
-    // A project that already has a secrets.toml keeps it; a new one gets a manifest
-    // unless --file asks for the file (FR-44).
-    if file || config::discover(&dir).is_some() {
-        init::run_as(&args, &dir, &scoped, out, json)
-    } else {
-        init::run_manifest(&args, project.as_deref(), &dir, &scoped, out, json)
-    }
-}
-
-/// `opv init` given `--config` or `OPV_CONFIG` (02.13).
-fn init_takes_no_config(config_source: ConfigSource) -> Error {
-    let given = if config_source == ConfigSource::Env {
-        "OPV_CONFIG"
-    } else {
-        "--config"
-    };
-    opv::cause::Cause::Usage {
-        problem: opv::cause::UsageProblem::ConflictsWith {
-            a: "opv init".into(),
-            b: given.into(),
-        },
-    }
-    .into()
-}
-
-/// The `opv init … --from <file> --apply` that carries out a `--from` plan (#90).
-fn init_from_again(args: &init::InitArgs, file: bool, project: Option<&str>) -> String {
-    let from = args.from.as_ref().expect("called with --from");
-    let mut c = format!(
-        "opv init {} --vault {} --item {}",
-        shell_word(&args.env),
-        shell_word(&args.vault),
-        shell_word(&args.item)
-    );
-    if let Some(p) = &args.product {
-        c.push_str(&format!(" --product {}", shell_word(p)));
-    }
-    if file {
-        c.push_str(" --file");
-    }
-    if let Some(p) = project {
-        c.push_str(&format!(" --project {}", shell_word(p)));
-    }
-    c.push_str(&format!(
-        " --from {}",
-        shell_word(&from.path.display().to_string())
-    ));
-    for k in &from.config {
-        c.push_str(&format!(" --config-key {k}"));
-    }
-    for k in &from.secret {
-        c.push_str(&format!(" --secret-key {k}"));
-    }
-    c.push_str(" --apply");
-    c
-}
-
-/// `add` and `init --add-env`: edit the configuration where it was found (a file or a
-/// manifest) in place, through its [`config_store::ConfigStore`].
-fn run_edit(
-    cmd: Cmd,
-    found: &config_store::Found,
-    target_options: &std::collections::BTreeMap<String, String>,
-    r: &ProcessRunner,
-    out: &mut dyn Write,
-) -> Result<(), Error> {
-    let store = found.store();
-    match cmd {
-        Cmd::Add {
-            name,
-            kind,
-            env,
-            rule,
-            guidance,
-            immutable,
-            from,
-            personal,
-            allow_same_value,
-            json,
-        } => add::run(
-            &add::AddArgs {
-                name,
-                kind,
-                envs: env,
-                rules: rule,
-                guidance,
-                immutable,
-                from,
-                personal,
-                allow_same_value,
-                json,
-            },
-            store,
-            r,
-            out,
-        ),
-        cmd @ Cmd::Init { json, .. } => {
-            let dir = std::env::current_dir().map_err(cwd_err)?;
-            init::add_env_as(&init_args(cmd, r, &dir)?, store, r, out, json)
-        }
-        Cmd::Target(TargetCmd::Add {
-            env,
-            name,
-            provider,
-            products,
-            roles,
-            deploy_credentials,
-            project,
-            dry_run,
-            json,
-        }) => target_cmd::add(
-            &target_cmd::AddArgs {
-                env,
-                name,
-                provider,
-                fields: target_options.clone(),
-                products,
-                roles,
-                deploy_credentials,
-                project,
-                dry_run,
-                json,
-            },
-            store,
-            r,
-            out,
-        ),
-        _ => unreachable!("called for add, init --add-env and target add only"),
-    }
-}
-
-/// The init arguments, with the vault and item titles defaulted to the boundary titles
-/// (FR-57) of `--product` (else `core`) and the project name (`--project`, else the
-/// repository's, else the directory's) when not given: `opv init dev --product api` alone
-/// is enough.
-fn init_args(
-    cmd: Cmd,
-    r: &dyn opv::runner::CommandRunner,
-    dir: &std::path::Path,
-) -> Result<init::InitArgs, Error> {
-    let Cmd::Init {
-        env,
-        vault,
-        item,
-        product,
-        add_env: _,
-        force,
-        file: _,
-        project,
-        json: _,
-        account: _,
-        from,
-        config_key,
-        secret_key,
-        apply,
-    } = cmd
-    else {
-        unreachable!("called for init only")
-    };
-    let (vault, item) = match (vault, item) {
-        (Some(v), Some(i)) => (v, i),
-        (vault, item) => {
-            let repo = config_store::git_repo(r);
-            let name = config_store::default_project(project.as_deref(), repo.as_deref(), dir)?;
-            let boundary = product.as_deref().unwrap_or(init::SHARED_BOUNDARY);
-            (
-                vault.unwrap_or_else(|| opv::domain::naming::boundary_vault(&name, boundary, &env)),
-                item.unwrap_or_else(|| opv::domain::naming::boundary_item(&name, boundary, &env)),
-            )
-        }
-    };
-    Ok(init::InitArgs {
-        env,
-        vault,
-        item,
-        product,
-        force,
-        from: from.map(|path| init::FromFile {
-            path,
-            config: config_key,
-            secret: secret_key,
-            apply,
-        }),
-    })
 }
 
 /// Sign in to this checkout's 1Password account (its `.opv`, else `OP_ACCOUNT`, else op's
@@ -4146,7 +4628,7 @@ fn mcp_install(
 }
 
 /// 09.03b: a missing configuration for a command that names environment `env` steps to
-/// `opv init <env>`, never another environment.
+/// the first setup of that environment, never another one.
 fn init_for(e: Error, env: Option<&str>) -> Error {
     let Some(env) = env else {
         return e;
@@ -4248,8 +4730,8 @@ mod tests {
     fn a_subcommand_flag_before_the_subcommand_moves_after_it() {
         // 09.03.
         assert_eq!(
-            corrected("--json check prod").as_deref(),
-            Some("opv check prod --json")
+            corrected("--json status prod").as_deref(),
+            Some("opv status prod --json")
         );
     }
 
@@ -4277,7 +4759,7 @@ mod tests {
     #[test]
     fn login_reads_the_childs_file_flag_for_its_configuration() {
         // C18 (#159): the child's `--file` names the configuration, not the git remote.
-        let child = words("opv bootstrap --file fleet.toml --dry-run");
+        let child = words("opv config check --file fleet.toml");
         assert_eq!(
             login_child_config(&child),
             Some(PathBuf::from("fleet.toml"))
@@ -4483,7 +4965,10 @@ mod tests {
     #[test]
     fn subcommand_long_help_is_at_most_50_lines() {
         for (name, long, _) in leaf_helps() {
-            assert!(long.lines().count() <= 50, "{name}: {long}");
+            // `propose key` takes every attribute of §25.1's key intent (fourteen flags):
+            // its `--help` runs past one screen, its `-h` does not.
+            let limit = if name == "propose key" { 65 } else { 50 };
+            assert!(long.lines().count() <= limit, "{name}: {long}");
         }
     }
 
@@ -4553,6 +5038,15 @@ mod tests {
             for sub in cmd.get_subcommands().filter(|s| !s.is_hide_set()) {
                 let path = format!("{prefix}{}", sub.get_name());
                 if sub.has_subcommands() {
+                    // A parent that runs on its own flags (`propose --intent`) is listed too.
+                    let own = sub.get_arguments().any(|a| {
+                        !a.is_positional()
+                            && !a.is_global_set()
+                            && !matches!(a.get_id().as_str(), "help" | "version")
+                    });
+                    if own {
+                        out.push(path.clone());
+                    }
                     leaves(sub, &format!("{path} "), out);
                 } else {
                     out.push(path);
@@ -4734,15 +5228,6 @@ mod tests {
         );
     }
 
-    /// 02.13: init refuses --config without claiming it writes secrets.toml.
-    #[test]
-    fn init_with_config_names_the_conflict() {
-        assert_eq!(
-            init_takes_no_config(ConfigSource::Flag).to_string(),
-            "opv init and --config cannot be used together"
-        );
-    }
-
     /// approval-removal (design §25.3): no approval path remains; `opv approve` is not a
     /// command.
     #[test]
@@ -4754,6 +5239,90 @@ mod tests {
         );
     }
 
+    /// Design §25.3 (one interface, no alias): a removed 0.11.0 command is not a command.
+    macro_rules! removed {
+        ($name:ident: $($word:literal),+ $(,)?) => {
+            #[test]
+            fn $name() {
+                let parsed = cli_command().try_get_matches_from(["opv", $($word),+]);
+                assert_eq!(
+                    parsed.err().map(|e| e.kind()),
+                    Some(clap::error::ErrorKind::InvalidSubcommand)
+                );
+            }
+        };
+    }
+
+    removed!(add_is_an_unknown_subcommand: "add", "api/KEY", "--kind", "secret");
+    removed!(env_add_is_an_unknown_subcommand: "env", "add", "staging");
+    removed!(target_add_is_an_unknown_subcommand: "target", "add", "prod", "web");
+    removed!(init_is_an_unknown_subcommand: "init", "dev");
+    removed!(init_add_env_is_an_unknown_subcommand: "init", "dev", "--add-env");
+    removed!(init_from_is_an_unknown_subcommand: "init", "dev", "--from", ".env");
+    removed!(bootstrap_is_an_unknown_subcommand: "bootstrap");
+    removed!(structure_plan_is_an_unknown_subcommand: "structure", "plan");
+    removed!(structure_apply_is_an_unknown_subcommand: "structure", "apply", "sp-0123456789abcdef");
+    removed!(item_skeleton_is_an_unknown_subcommand: "item", "skeleton", "dev");
+    removed!(generate_is_an_unknown_subcommand: "generate", "dev", "api/KEY");
+    removed!(tidy_is_an_unknown_subcommand: "tidy", "dev");
+    removed!(adopt_is_an_unknown_subcommand: "adopt", "dev", "--from", ".env");
+    removed!(check_is_an_unknown_subcommand: "check", "dev");
+    removed!(config_describe_is_an_unknown_subcommand: "config", "describe");
+
+    /// The commands of the §25 surface golden this row leaves to later rows: `inventory`
+    /// and `next` (row cli-sweep-b, which needs core-accepted) and `propose tidy` (no tidy
+    /// planner exists yet).
+    const NOT_YET_WIRED: [&str; 3] = ["inventory", "next", "propose tidy"];
+
+    /// Design §25.1 (row cli-sweep-a): `opv schema` lists exactly the surface golden's
+    /// commands but [`NOT_YET_WIRED`], each with the golden's flags (sorted).
+    #[test]
+    fn schema_commands_and_flags_equal_the_surface_golden() {
+        use std::collections::BTreeMap;
+        let golden: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/e2e/expected/surface.json")).unwrap();
+        let mut want: BTreeMap<String, Vec<String>> = golden["cli"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                let name = c["name"].as_str().unwrap().to_string();
+                let mut flags: Vec<String> = c["flags"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|f| f.as_str().unwrap().to_string())
+                    .collect();
+                flags.sort();
+                (name, flags)
+            })
+            .collect();
+        want.retain(|name, _| !NOT_YET_WIRED.contains(&name.as_str()));
+        let doc = opv::schema::describe(&cli_command(), "test");
+        let got: BTreeMap<String, Vec<String>> = doc["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                let mut flags: Vec<String> = c["flags"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|f| {
+                        f["name"]
+                            .as_str()
+                            .unwrap()
+                            .trim_start_matches("--")
+                            .to_string()
+                    })
+                    .collect();
+                flags.sort();
+                (c["name"].as_str().unwrap().to_string(), flags)
+            })
+            .collect();
+        assert_eq!(got, want);
+    }
+
     /// 09.21: `sync --dry-run` is its plan, global options kept.
     #[test]
     fn sync_dry_run_is_its_plan() {
@@ -4762,24 +5331,6 @@ mod tests {
             opv::cause::render::cmd_text(&plan),
             "opv plan --config ops/s.toml prod --json"
         );
-    }
-
-    /// 02.15: bootstrap with no secrets.toml and no manifest reports a missing
-    /// configuration, never a guess that starts a second one.
-    #[test]
-    fn bootstrap_without_any_configuration_is_config_not_found() {
-        let r = opv::runner::fake::FakeRunner::new(Vec::new());
-        for _ in 0..40 {
-            r.push_io_error(io::ErrorKind::NotFound);
-        }
-        let cli = Cli::try_parse_from(["opv", "bootstrap"]).unwrap();
-        let e = bootstrap_without_file(
-            &cli,
-            ConfigSource::Discovered,
-            &r,
-            std::path::Path::new("/work"),
-        );
-        assert_eq!(e.code_str(), "config_not_found");
     }
 
     /// 02.08: the --timeout help names the real per-call limits.
@@ -4793,20 +5344,6 @@ mod tests {
             .map(ToString::to_string)
             .unwrap_or_default();
         assert!(help.contains("a write after 2 minutes"), "{help}");
-    }
-
-    /// 02.16: init and target add say they also create 1Password vaults or items.
-    #[test]
-    fn schema_says_init_also_writes_1password() {
-        let doc = opv::schema::describe(&cli_command(), "test");
-        let init = doc["commands"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|c| c["name"] == "init")
-            .unwrap()
-            .clone();
-        assert_eq!(init["also_writes_1password"], true);
     }
 
     /// A failure whose upstream reply has eight lines (more than the box shows).
@@ -4875,7 +5412,7 @@ mod tests {
     }
 
     /// I6: every flag a command parses is in the schema, the registry-built (hidden)
-    /// provider options of `init` included.
+    /// provider options of `propose target` included.
     #[test]
     fn schema_lists_every_flag_including_provider_options() {
         fn leaves<'a>(
@@ -4925,14 +5462,14 @@ mod tests {
 
     /// I6: the provider options come from the registry, so a new provider is listed too.
     #[test]
-    fn schema_lists_each_provider_option_of_target_add_with_its_provider() {
+    fn schema_lists_each_provider_option_of_propose_target_with_its_provider() {
         use opv::adapters::registry::PROVIDERS;
         let doc = opv::schema::describe(&cli_command(), "test");
         let add = doc["commands"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|c| c["name"] == "target add")
+            .find(|c| c["name"] == "propose target")
             .unwrap();
         let listed = add["flags"]
             .as_array()
@@ -4964,21 +5501,25 @@ mod tests {
         let mut missing = Vec::new();
         for args in [
             &["opv", "doctor", "--json"][..],
-            &["opv", "check", "dev", "--json"],
             &["opv", "status", "--json"],
             &["opv", "status", "prod", "--json"],
             &["opv", "plan", "prod", "--json"],
             &["opv", "sync", "prod", "--json"],
             &["opv", "explain", "KEY", "--json"],
-            &[
-                "opv", "init", "dev", "--vault", "v", "--item", "i", "--json",
-            ],
-            &["opv", "item", "skeleton", "prod", "--json"],
+            &["opv", "propose", "env", "dev", "--json"],
+            &["opv", "propose", "--intent", "i.json", "--json"],
+            &["opv", "apply", "--json"],
+            &["opv", "set", "api/KEY", "--env", "dev", "--json"],
+            &["opv", "import", "dev", "--from", ".env", "--json"],
+            &["opv", "needs", "--json"],
+            &["opv", "contract", "--json"],
             &["opv", "config", "export", "prod"],
             &["opv", "schema"],
             &["opv", "projects", "--json"],
             &["opv", "status", "--all", "--json"],
-            &["opv", "add", "api/KEY", "--kind", "secret", "--json"],
+            &[
+                "opv", "propose", "key", "api/KEY", "--kind", "secret", "--json",
+            ],
             &["opv", "config", "export", "--json"],
             &["opv", "skill", "install", "--json"],
             &["opv", "skill", "status", "--json"],
@@ -5007,7 +5548,7 @@ mod tests {
             assert!(!re.is_match(t), "requirement id in help: {t}");
         }
         assert!(texts[0].contains("Examples:"), "{}", texts[0]);
-        for step in ["item skeleton", "status", "plan ", "sync ", "run "] {
+        for step in ["propose ", "apply", "status", "plan ", "sync ", "run "] {
             assert!(texts[0].contains(step), "{step}: {}", texts[0]);
         }
         assert!(texts[0].contains("7 authentication"), "{}", texts[0]);

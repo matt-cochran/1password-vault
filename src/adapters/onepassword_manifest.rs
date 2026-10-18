@@ -624,7 +624,7 @@ pub fn note_with(
              each environment keeps them. **No secret values are stored here.**\n\n\
              - Values: in each environment's own item, whose ids are in the `opv-bindings` \
              block below. Open one with `opv open KEY --env ENV`.\n\
-             - Change keys with `opv add KEY` or `opv config edit`. Hand edits are fine inside \
+             - Change keys with `opv propose key KEY --write` or `opv config edit`. Hand edits are fine inside \
              the first code block while it stays valid TOML; opv reads only the code blocks. \
              The `opv-bindings` block is written by `opv apply`; leave it as it is.\n\
              - About opv: https://github.com/matt-cochran/1password-vault\n\n\

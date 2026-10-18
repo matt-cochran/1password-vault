@@ -178,9 +178,10 @@ pub fn import(
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     let text = fs::read_to_string(&args.file).map_err(|e| unreadable_file(&args.file, &e))?;
-    // D-G: the file's ids live beside it; the manifest keeps them in its `opv-bindings`
-    // block, which `create_manifest` splits them into.
-    let text = config::with_bindings(&text, &args.file)?;
+    // D-G: the manifest gets the contract only. A file still carrying an inline id is
+    // refused naming the field; the ids beside it are never copied: the manifest's
+    // `opv-bindings` block is written only by `opv apply`.
+    config::bindings::refuse_inline(&text)?;
     config::parse_at(&text, config::Source::File(&args.file))?;
     let paths = normalize_paths(&args.paths)?;
     let repo = store::git_repo(r);

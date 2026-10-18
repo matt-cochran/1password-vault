@@ -1,8 +1,9 @@
-//! The exact JSON documents the MCP tools and their CLI counterparts print (j8).
+//! The exact JSON documents the 0.11.0 MCP tools print (j8), kept until those tools are
+//! removed (row `mcp-propose-a`); 0.12.0's CLI prints `opv contract` and `opv propose
+//! structure` documents of its own.
 //!
 //! These are pure builders: given the same plan, applied report or configuration, the MCP
-//! server (`src/mcp.rs`) and the CLI (`src/app/structure_cmd.rs`) produce the same
-//! document byte for byte. Names, checked identifiers and 1Password links only; never a
+//! server (`src/mcp.rs`) produces the same document byte for byte. Names, checked identifiers and 1Password links only; never a
 //! value, a message or upstream output.
 
 use crate::domain::Kind;
@@ -19,7 +20,7 @@ pub(crate) fn identifier(s: &str) -> bool {
 
 /// The configuration metadata of `fleet`: environment names, key names and kinds, and each
 /// target's provider and delivered products. No values, rules, vault identifiers, locators
-/// or credential references (`opv_configuration`, `opv config describe`).
+/// or credential references (`opv_configuration`).
 pub(crate) fn configuration_projection(fleet: &crate::domain::Fleet) -> Value {
     let environments: Vec<_> = fleet
         .environments
@@ -60,8 +61,7 @@ pub(crate) fn configuration_projection(fleet: &crate::domain::Fleet) -> Value {
     json!({"ok": true, "environments": environments, "keys": keys, "targets": targets, "changes_available": false})
 }
 
-/// The structural plan, field by field: identifiers only (`opv_structure_plan`,
-/// `opv structure plan --json`).
+/// The structural plan, field by field: identifiers only (`opv_structure_plan`).
 pub(crate) fn plan_projection(p: &crate::app::structure::Plan) -> Value {
     use crate::app::bootstrap::{BoundaryStep, StateStep};
     let id_ok = |s: &str| crate::config::is_id(s) && s.len() <= 64;

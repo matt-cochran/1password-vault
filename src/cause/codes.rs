@@ -455,7 +455,7 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
             }),
         },
         ConfigSourceMismatch {
-            command: CommandId("bootstrap".into()),
+            command: CommandId("apply".into()),
             manifest: "man-shop".into(),
         },
         ConfigUnreadable {
@@ -718,7 +718,7 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
             item: ItemId::new("itm-1"),
             fields: vec![FieldName::new("fld-api")],
             by: Cmd {
-                command: vec!["tidy".into()],
+                command: vec!["config".into(), "export".into()],
                 args: vec!["prod".into()],
             },
         },

@@ -2,7 +2,7 @@
 //! categorical [`Intent::Target`] implies, with the relaxations it makes against the
 //! default branch listed first and a content-addressed plan id.
 //!
-//! Folds `opv target add`: the provider options are validated exactly as
+//! Folds 0.11.0's `opv target add`: the provider options are validated exactly as
 //! [`crate::app::target_cmd`] validates them, through that module's own functions, so the
 //! provider tables live in one place. Pure: [`propose`] reads no file and runs no command.
 //!
@@ -72,6 +72,7 @@ pub fn propose(
         diff,
         questions: Vec::new(),
         plan_id: plan_id("target", &proposed),
+        contract_after: proposed,
     })
 }
 
@@ -139,7 +140,7 @@ pub(crate) fn target_text(
     let section = provider.init_section(&values).ok_or_else(|| {
         usage(UsageProblem::ValueFormat {
             flag: "the target".into(),
-            format: "a provider opv can write for (opv target add --help lists them)",
+            format: "a provider opv can write for (opv propose target --help lists them)",
         })
     })?;
     let products = target_cmd::checked_products(fleet, &spec.products)?;

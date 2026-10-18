@@ -705,6 +705,11 @@ fn the_schema_lists_every_field_of_every_golden_document() {
             "skeleton" => "item skeleton",
             other => other,
         };
+        // Documents of 0.11.0 commands removed in 0.12.0 (design §25.3): their builders are
+        // still library code, but `opv schema` no longer describes them.
+        if ["check", "init", "item skeleton"].contains(&name) {
+            continue;
+        }
         let doc: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         for f in undocumented(&doc, name) {

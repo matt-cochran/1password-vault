@@ -2565,14 +2565,14 @@ mod tests {
         assert!(out.contains("\n  upgrade: op update"), "{out}");
     }
 
-    /// P3: with no configuration at all, the step is init (its help: no environment is
-    /// guessed, C16), not "fix it".
+    /// P3: with no configuration at all, the step is the first setup's proposal (its help:
+    /// no environment is guessed, C16), not "fix it".
     #[test]
-    fn next_step_without_any_configuration_is_a_runnable_init() {
+    fn next_step_without_any_configuration_is_the_setup_proposal_help() {
         let r = FakeRunner::new(good());
         let missing = crate::config::not_found(std::path::Path::new("/nowhere"));
         let (_, out) = doctor(Err(missing), &r);
-        assert!(out.ends_with("Next: opv init --help\n"), "{out}");
+        assert!(out.ends_with("Next: opv propose setup --help\n"), "{out}");
     }
     // ---- FR-40, FR-56: every target of the environment, each with its own checks ----
 

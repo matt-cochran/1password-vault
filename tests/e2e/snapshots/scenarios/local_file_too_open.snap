@@ -1,4 +1,4 @@
-# local_file_too_open: opv adopt prod --from legacy.env
+# local_file_too_open: opv import prod --from legacy.env --dry-run
 
 ## text exit: 6
 ## text stdout
@@ -7,14 +7,14 @@
 using <SCENARIO>/project/secrets.toml
 opv: legacy.env has mode 0644; opv needs 0600 or stricter
 Do: chmod 600 legacy.env
-Next: opv adopt prod --from legacy.env
+Next: opv import prod --from legacy.env --dry-run
 
 ## json exit: 6
 ## json stdout
-{"schema_version":3,"ok":false,"exit_code":6,"next":{"kind":"run","actor":"assistant","command":"opv adopt prod --from legacy.env --json"},"do":"chmod 600 legacy.env","error":{"code":"file_too_open","category":"policy","message":"legacy.env has mode 0644; opv needs 0600 or stricter","subject":{"want":384,"path":"legacy.env","mode":420},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"chmod 600 legacy.env","next":{"kind":"run","actor":"assistant","command":"opv adopt prod --from legacy.env --json"}}}
+{"schema_version":3,"ok":false,"exit_code":6,"next":{"kind":"apply","actor":"person","command":"opv import prod --from legacy.env --dry-run --json"},"do":"chmod 600 legacy.env","error":{"code":"file_too_open","category":"policy","message":"legacy.env has mode 0644; opv needs 0600 or stricter","subject":{"want":384,"path":"legacy.env","mode":420},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"chmod 600 legacy.env","next":{"kind":"apply","actor":"person","command":"opv import prod --from legacy.env --dry-run --json"}}}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml
 opv: legacy.env has mode 0644; opv needs 0600 or stricter
 Do: chmod 600 legacy.env
-Next: opv adopt prod --from legacy.env --json
+Next: opv import prod --from legacy.env --dry-run --json

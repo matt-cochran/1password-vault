@@ -67,7 +67,8 @@ fn import_then_export_is_byte_equivalent() {
     import(&import_args(dir.path()), dir.path(), &op, &mut Vec::new()).unwrap();
     let mut out = Vec::new();
     export(&manifest_of(dir.path(), &op), Format::Toml, &op, &mut out).unwrap();
-    assert_eq!(text(&out), TOML);
+    // D-G: import carries the contract only; the ids come from the manifest's first apply.
+    assert_eq!(text(&out), crate::config::bindings::split(TOML).0);
 }
 
 #[test]
@@ -154,9 +155,9 @@ fn export_json_holds_the_environments() {
     let mut out = Vec::new();
     export(&manifest_of(dir.path(), &op), Format::Json, &op, &mut out).unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
-    assert_eq!(
-        v["environments"]["dev"]["boundaries"]["app"]["item_id"],
-        "app"
+    assert!(
+        v["environments"]["dev"]["boundaries"]["app"].is_object(),
+        "{v}"
     );
 }
 
@@ -381,8 +382,11 @@ impl EditUi for Script<'_> {
     }
 }
 
+/// A person's edit of the contract (D-G: the text an edit starts from holds no id).
 fn edited() -> String {
-    TOML.replace("dashboard", "console")
+    crate::config::bindings::split(TOML)
+        .0
+        .replace("dashboard", "console")
 }
 
 #[test]
@@ -427,16 +431,22 @@ fn import_keeps_the_ids_out_of_the_manifests_contract_block() {
 /// D-G: `config import` carries the file's `secrets.bindings.toml` into the manifest's
 /// `opv-bindings` block, so the manifest loads with the same ids.
 #[test]
-fn import_carries_the_files_bindings_into_the_manifests_bindings_block() {
+fn import_writes_no_bindings_into_the_manifest() {
     let (dir, op) = checkout();
     import(&import_args(dir.path()), dir.path(), &op, &mut Vec::new()).unwrap();
     let Found::Manifest(m) = manifest_of(dir.path(), &op) else {
         unreachable!("a manifest-only lookup")
     };
-    assert_eq!(
-        m.read_bindings(&op).unwrap(),
-        crate::config::bindings::read_sibling(&dir.path().join("secrets.toml")).unwrap()
-    );
+    assert!(m.read_bindings(&op).unwrap().is_empty());
+}
+
+/// D-G: a file that still writes an inline id is refused `config_invalid`, naming it.
+#[test]
+fn import_of_a_file_with_an_inline_id_is_config_invalid() {
+    let (dir, op) = checkout();
+    std::fs::write(dir.path().join("secrets.toml"), TOML).unwrap();
+    let e = import(&import_args(dir.path()), dir.path(), &op, &mut Vec::new()).unwrap_err();
+    assert_eq!(e.code_str(), "config_invalid");
 }
 
 #[test]

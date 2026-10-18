@@ -429,10 +429,9 @@ impl ConfigAt {
     /// [`read_merged`](Self::read_merged) past `op`'s cache for a manifest (refused unless
     /// a person runs opv, I3): the read an apply plans and checks its writes against.
     pub fn read_for_write(&self, r: &dyn CommandRunner) -> Result<String, Error> {
-        use crate::config_store::ConfigStore;
         match self {
             ConfigAt::File(path) => crate::config::read_merged(path),
-            ConfigAt::Manifest(m) => Ok(m.read_for_write(r)?.text),
+            ConfigAt::Manifest(m) => m.read_merged_fresh(r),
         }
     }
 
@@ -477,7 +476,7 @@ pub struct Scope {
 /// else the only account op knows; a manifest's, when it was found in one). No account, or
 /// several and none chosen, is `account_required`: opv never uses op's default for a write.
 pub fn scope(start: &Path, r: &dyn CommandRunner) -> Result<Scope, Error> {
-    scope_as(start, r, &invoked("structure"))
+    scope_as(start, r, &invoked("propose structure"))
 }
 
 /// [`scope`] for the opv command `command` (an MCP tool names its command itself, L8:

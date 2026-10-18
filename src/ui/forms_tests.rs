@@ -100,12 +100,16 @@ fn the_add_key_form_always_asks_for_the_product() {
 }
 
 #[test]
-fn a_new_environment_becomes_init_add_env() {
+fn a_new_environment_becomes_its_written_proposal() {
     let mut f = FormState::add_env(envs());
     type_in(&mut f, "staging");
     assert_eq!(
         f.handle(Key::Enter),
-        Outcome::Command(["init", "staging", "--add-env"].map(String::from).to_vec())
+        Outcome::Command(
+            ["propose", "env", "staging", "--write"]
+                .map(String::from)
+                .to_vec()
+        )
     );
 }
 

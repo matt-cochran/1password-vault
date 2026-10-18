@@ -1,0 +1,20 @@
+# propose_structure__op_item_get_ie2esharedprod0000000000001__malformed_output: opv propose structure | fault malformed_output on op item get iE2ESHAREDPROD0000000000001
+
+## text exit: 4
+## text stdout
+
+## text stderr
+opv: opv could not read the reply of op from 1Password at line 1, column 314
+  checked: op item get iE2ESHAREDPROD0000000000001 --vault vE2ESHAREDPROD0000000000001 --format json --cache (exit 0)
+Do: update op (opv doctor checks its version)
+Next: opv doctor
+
+## json exit: 4
+## json stdout
+{"schema_version":3,"ok":false,"exit_code":4,"next":{"kind":"run","actor":"assistant","command":"opv doctor"},"do":"update op (opv doctor checks its version)","error":{"code":"unexpected_output","category":"source","message":"opv could not read the reply of op from 1Password at line 1, column 314","subject":{"during":"read","system":"one_password","at":{"line":1,"col":314},"problem":{"problem":"unparseable"}},"evidence":{"checked":"op item get iE2ESHAREDPROD0000000000001 --vault vE2ESHAREDPROD0000000000001 --format json --cache","account":null,"upstream":null},"retry":"never","human_required":false,"do":"update op (opv doctor checks its version)","next":{"kind":"run","actor":"assistant","command":"opv doctor"}}}
+
+## json stderr
+opv: opv could not read the reply of op from 1Password at line 1, column 314
+  checked: op item get iE2ESHAREDPROD0000000000001 --vault vE2ESHAREDPROD0000000000001 --format json --cache (exit 0)
+Do: update op (opv doctor checks its version)
+Next: opv doctor

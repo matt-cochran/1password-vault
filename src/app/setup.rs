@@ -1052,13 +1052,11 @@ pub fn run(
     // Actual value/rule validation is deliberately explicit: the check, with this run's
     // configuration and product (X1).
     let check = missing.is_empty().then(|| crate::cause::Cmd {
-        command: vec!["check".into()],
+        command: vec!["ready".into()],
         args: vec![
             "--config".into(),
             output.display().to_string(),
             recipe.environment.clone(),
-            "--product".into(),
-            selected.clone(),
         ],
     });
     let finished = finish(

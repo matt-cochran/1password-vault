@@ -227,7 +227,7 @@ fn write_record(contract_path: &Path, plan_id: &str) -> Result<(), Error> {
 }
 
 /// One line per reviewed step, plus the plan id: names, kinds and public ids only.
-fn describe(p: &StructureProposal, at: &ConfigAt) -> Vec<String> {
+pub fn describe(p: &StructureProposal, at: &ConfigAt) -> Vec<String> {
     let home = match at {
         ConfigAt::File(_) => "secrets.bindings.toml",
         ConfigAt::Manifest(_) => "the manifest's opv-bindings block",

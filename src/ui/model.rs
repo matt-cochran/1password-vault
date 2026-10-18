@@ -162,33 +162,13 @@ impl Snapshot {
             Ok(ready) => snap.read_ready(ready),
             Err(failure) => snap.problem("readiness (opv ready)", failure),
         }
+        // A deployed environment's rows come from `opv status`; a run-only one has no
+        // target to read, so its cells come from the readiness findings above.
         let envs = snap.envs.clone();
-        for env in &envs {
-            if env.deployed() {
-                match fetch::<RowsDoc>(source, &["status", &env.key, "--json"]) {
-                    Ok(doc) => snap.read_rows(&env.key, doc),
-                    Err(failure) => snap.problem(&format!("opv status {}", env.key), failure),
-                }
-            } else {
-                for p in snap.products.clone() {
-                    if p.source_only || !p.keys.iter().any(|k| k.environments.contains(&env.key)) {
-                        continue;
-                    }
-                    let args = [
-                        "check",
-                        env.key.as_str(),
-                        "--product",
-                        p.name.as_str(),
-                        "--json",
-                    ];
-                    match fetch::<RowsDoc>(source, &args) {
-                        Ok(doc) => snap.read_rows(&env.key, doc),
-                        Err(failure) => snap.problem(
-                            &format!("opv check {} --product {}", env.key, p.name),
-                            failure,
-                        ),
-                    }
-                }
+        for env in envs.iter().filter(|e| e.deployed()) {
+            match fetch::<RowsDoc>(source, &["status", &env.key, "--json"]) {
+                Ok(doc) => snap.read_rows(&env.key, doc),
+                Err(failure) => snap.problem(&format!("opv status {}", env.key), failure),
             }
         }
         snap

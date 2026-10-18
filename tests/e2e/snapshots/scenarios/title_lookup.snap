@@ -1,4 +1,4 @@
-# title_lookup: opv bootstrap --rebind dev --project e2e-app
+# title_lookup: opv propose setup --from-item dev --vault e2e-app-shared-dev --item e2e-app · shared · dev values
 
 ## text exit: 2
 ## text stdout
@@ -6,13 +6,13 @@
 ## text stderr
 opv: 2 vaults are titled "e2e-app-shared-dev"; candidates: "e2e-app-shared-dev" (vE2EDUPA000000000000000001), "e2e-app-shared-dev" (vE2EDUPB000000000000000002)
 Do: rename all but one vault titled "e2e-app-shared-dev" in 1Password
-Next: opv bootstrap --rebind dev --project e2e-app
+Next: opv propose setup --from-item dev --vault e2e-app-shared-dev --item 'e2e-app · shared · dev values'
 
 ## json exit: 2
 ## json stdout
-{"schema_version":3,"ok":false,"exit_code":2,"next":{"kind":"run","actor":"assistant","command":"opv bootstrap --rebind dev --project e2e-app --json"},"do":"rename all but one vault titled \"e2e-app-shared-dev\" in 1Password","error":{"code":"title_ambiguous","category":"config","message":"2 vaults are titled \"e2e-app-shared-dev\"; candidates: \"e2e-app-shared-dev\" (vE2EDUPA000000000000000001), \"e2e-app-shared-dev\" (vE2EDUPB000000000000000002)","subject":{"candidates":["\"e2e-app-shared-dev\" (vE2EDUPA000000000000000001)","\"e2e-app-shared-dev\" (vE2EDUPB000000000000000002)"],"kind":"vault","title":"e2e-app-shared-dev","vault":null,"matches":2},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"rename all but one vault titled \"e2e-app-shared-dev\" in 1Password","next":{"kind":"run","actor":"assistant","command":"opv bootstrap --rebind dev --project e2e-app --json"}}}
+{"schema_version":3,"ok":false,"exit_code":2,"next":{"kind":"run","actor":"assistant","command":"opv propose setup --from-item dev --vault e2e-app-shared-dev --item 'e2e-app · shared · dev values' --json"},"do":"rename all but one vault titled \"e2e-app-shared-dev\" in 1Password","error":{"code":"title_ambiguous","category":"config","message":"2 vaults are titled \"e2e-app-shared-dev\"; candidates: \"e2e-app-shared-dev\" (vE2EDUPA000000000000000001), \"e2e-app-shared-dev\" (vE2EDUPB000000000000000002)","subject":{"candidates":["\"e2e-app-shared-dev\" (vE2EDUPA000000000000000001)","\"e2e-app-shared-dev\" (vE2EDUPB000000000000000002)"],"kind":"vault","title":"e2e-app-shared-dev","vault":null,"matches":2},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"rename all but one vault titled \"e2e-app-shared-dev\" in 1Password","next":{"kind":"run","actor":"assistant","command":"opv propose setup --from-item dev --vault e2e-app-shared-dev --item 'e2e-app · shared · dev values' --json"}}}
 
 ## json stderr
 opv: 2 vaults are titled "e2e-app-shared-dev"; candidates: "e2e-app-shared-dev" (vE2EDUPA000000000000000001), "e2e-app-shared-dev" (vE2EDUPB000000000000000002)
 Do: rename all but one vault titled "e2e-app-shared-dev" in 1Password
-Next: opv bootstrap --rebind dev --project e2e-app --json
+Next: opv propose setup --from-item dev --vault e2e-app-shared-dev --item 'e2e-app · shared · dev values' --json

@@ -876,26 +876,6 @@ fn run_after_a_persons_tidy_uses_the_convention_reference() {
     )));
 }
 
-/// A service account never writes 1Password (FR-9, SR-5): `opv init` for a missing item
-/// creates nothing under one (a person's session creates it: init_tests).
-#[test]
-fn init_never_creates_an_item_for_a_service_account() {
-    let dir = tempfile::tempdir().unwrap();
-    let op = FakeOp::new(json!({}), "SERVICE_ACCOUNT");
-    let args = crate::app::init::InitArgs {
-        env: "dev".into(),
-        vault: "myapp-dev".into(),
-        item: "app".into(),
-        product: Some("app".into()),
-        force: false,
-        from: None,
-    };
-    let _on = activate();
-    let mut out = Vec::new();
-    let _ = crate::app::init::run(&args, dir.path(), &op, &mut out);
-    assert_eq!(op.count(&["item", "create"]), 0);
-}
-
 // ---- Integration seams: shared keys (FR-45), links (H1), read-only consistency ----------
 
 fn shared_fleet() -> Fleet {
@@ -1121,21 +1101,6 @@ fn a_shared_key_reads_its_misplaced_source_tolerantly() {
 }
 
 #[test]
-fn the_schema_lists_the_tidy_fields_of_a_check_document() {
-    let op = FakeOp::person(item(&[(
-        "api",
-        "OPENAI_API_KEY",
-        "STRING",
-        "sk-TIDYMARKER",
-    )]));
-    let doc: Value = serde_json::from_str(&check_json(&op)).unwrap();
-    assert!(
-        crate::app::json_tests::undocumented(&doc, "check").is_empty(),
-        "{doc}"
-    );
-}
-
-#[test]
 fn a_tidy_conflict_is_in_the_check_document() {
     let op = FakeOp::person(messy_item());
     op.editors.borrow_mut().push((2, someone_edits_session));
@@ -1336,12 +1301,12 @@ fn an_attachment_added_before_the_write_stops_it() {
 }
 
 #[test]
-fn deploy_credentials_note_names_opv_check() {
+fn deploy_credentials_note_names_opv_config_export() {
     let op = FakeOp::person(messy_item());
     let _on = activate();
     let _ = read(&fleet(), "dev", &UnderDeployCredentials(&op));
     assert!(
-        op.notes().contains("opv check dev tidies it"),
+        op.notes().contains("opv config export dev tidies it"),
         "{}",
         op.notes()
     );
@@ -1480,7 +1445,11 @@ fn doctor_leaves_the_item_version_unchanged() {
 fn doctor_names_the_explicit_repair() {
     let op = FakeOp::person(messy_item());
     doctor(&op, false);
-    assert!(op.notes().contains("opv tidy dev"), "{}", op.notes());
+    assert!(
+        op.notes().contains("opv config export dev"),
+        "{}",
+        op.notes()
+    );
 }
 
 #[test]
@@ -1778,14 +1747,19 @@ fn a_field_the_write_dropped_is_named_on_read_back() {
 }
 
 #[test]
-fn a_field_the_write_dropped_steps_to_opv_tidy() {
+fn a_field_the_write_dropped_steps_to_the_tidying_read() {
     let op = FakeOp::person(messy_item());
     op.edit.set(Edit::Lossy);
-    let inv = crate::cause::Invocation::from_cli(&["opv".to_string(), "tidy".to_string()]);
+    let inv = crate::cause::Invocation::from_cli(&[
+        "opv".to_string(),
+        "config".to_string(),
+        "export".to_string(),
+        "dev".to_string(),
+    ]);
     assert_eq!(
         tidy_cause(&op).step(&inv).1,
         crate::cause::Next::Run(crate::cause::Cmd {
-            command: vec!["tidy".into()],
+            command: vec!["config".into(), "export".into()],
             args: vec!["dev".into()],
         })
     );

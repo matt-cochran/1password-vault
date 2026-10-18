@@ -355,12 +355,15 @@ fn opv_project_picks_one_of_several_repo_matches() {
 }
 
 #[test]
-fn no_match_names_init_as_the_next_step() {
+fn no_match_names_the_setup_proposal_as_the_next_step() {
     let op = FakeOp::with_remote("https://github.com/acme/myapp.git");
     let dir = tempfile::tempdir().unwrap();
     let e = locate(&req(dir.path()), &op).unwrap_err();
     assert!(
-        e.next_text().as_deref().unwrap().starts_with("opv init "),
+        e.next_text()
+            .as_deref()
+            .unwrap()
+            .starts_with("opv propose setup "),
         "{e:?}"
     );
 }
@@ -485,24 +488,41 @@ fn manifest_replace_refuses_when_the_version_moved() {
     assert!(matches!(res, Replaced::Changed(_)));
 }
 
-/// D-G: an edit saved to a file keeps its ids in `secrets.bindings.toml`, not the contract.
+/// D-G: an edit saved to a file never moves an id: an inline one is refused naming it.
 #[test]
-fn a_file_save_records_a_changed_id_in_the_bindings_file() {
+fn a_file_save_with_an_inline_id_is_config_invalid() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(FILE_NAME);
     crate::config::bindings::write_split(&path, TOML).unwrap();
     let s = FileStore { path: path.clone() };
-    let base = s.read(&FakeOp::default()).unwrap();
-    let edited = base
-        .text
-        .replace("item_id = \"app\"", "item_id = \"other\"");
-    s.replace(&FakeOp::default(), &base, &edited).unwrap();
-    assert_eq!(
-        crate::config::bindings::read_sibling(&path)
-            .unwrap()
-            .get("environments.dev.boundaries.app.item_id"),
-        Some("other")
-    );
+    let base = s.read_for_write(&FakeOp::default()).unwrap();
+    let e = s.replace(&FakeOp::default(), &base, TOML).unwrap_err();
+    assert_eq!(e.code_str(), "config_invalid");
+}
+
+/// D-G: only `opv apply` writes `secrets.bindings.toml`; an edit leaves it as it was.
+#[test]
+fn a_file_save_never_writes_the_bindings_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(FILE_NAME);
+    crate::config::bindings::write_split(&path, TOML).unwrap();
+    let bindings = path.with_file_name(crate::config::bindings::FILE);
+    let before = std::fs::read_to_string(&bindings).unwrap();
+    let s = FileStore { path: path.clone() };
+    let base = s.read_for_write(&FakeOp::default()).unwrap();
+    s.replace(&FakeOp::default(), &base, &edited()).unwrap();
+    assert_eq!(std::fs::read_to_string(&bindings).unwrap(), before);
+}
+
+/// The text an edit starts from is the contract as written: no id in it.
+#[test]
+fn a_file_edit_starts_from_the_contract_without_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(FILE_NAME);
+    crate::config::bindings::write_split(&path, TOML).unwrap();
+    let s = FileStore { path };
+    let base = s.read_for_write(&FakeOp::default()).unwrap();
+    assert!(!base.text.contains("item_id"), "{}", base.text);
 }
 
 #[test]
@@ -511,9 +531,9 @@ fn file_replace_refuses_when_the_file_changed() {
     let path = dir.path().join(FILE_NAME);
     crate::config::bindings::write_split(&path, TOML).unwrap();
     let s = FileStore { path: path.clone() };
-    let base = s.read(&FakeOp::default()).unwrap();
+    let base = s.read_for_write(&FakeOp::default()).unwrap();
     std::fs::write(&path, "# changed\n").unwrap();
-    let res = s.replace(&FakeOp::default(), &base, TOML).unwrap();
+    let res = s.replace(&FakeOp::default(), &base, &edited()).unwrap();
     assert!(matches!(res, Replaced::Changed(_)));
 }
 
@@ -601,12 +621,16 @@ fn myapp(op: &FakeOp) -> (String, Found) {
 
 /// TOML with one more key: an edit someone made in the 1Password app.
 fn edited() -> String {
-    format!("{TOML}\n[products.app.keys.ROTATED]\nkind = \"secret\"\nenvironments = [\"dev\"]\n")
+    let (contract, _) = crate::config::bindings::split(TOML);
+    format!(
+        "{contract}\n[products.app.keys.ROTATED]\nkind = \"secret\"\nenvironments = [\"dev\"]\n"
+    )
 }
 
-/// The manifest notes holding [`edited`], as opv writes them: ids in their own block.
+/// The manifest notes holding [`edited`] and TOML's ids in their own block.
 fn edited_notes() -> String {
-    let (contract, ids) = crate::config::bindings::split(&edited());
+    let contract = edited();
+    let (_, ids) = crate::config::bindings::split(TOML);
     crate::adapters::onepassword_manifest::note_with(&contract, Some(&ids.render()), None, "myapp")
 }
 
@@ -631,7 +655,7 @@ fn a_base_read_from_ops_cache_never_overwrites_a_newer_edit() {
     found.store().read(&op).unwrap();
     op.edit_elsewhere(&id, &edited_notes());
     let stale = found.store().read(&op).unwrap();
-    let res = found.store().replace(&op, &stale, TOML).unwrap();
+    let res = found.store().replace(&op, &stale, &edited()).unwrap();
     assert!(matches!(res, Replaced::Changed(_)));
 }
 
@@ -1279,13 +1303,10 @@ fn a_bindings_block_with_an_unknown_key_is_refused_naming_it() {
     );
 }
 
-/// The edit a person saves (`opv config edit`, `opv add`): the merged text, one id changed.
-fn save_changed_id(op: &FakeOp, found: &Found) {
+/// The edit a person saves (`opv config edit`): the contract block with one key added.
+fn save_a_key(op: &FakeOp, found: &Found) {
     let base = found.store().read_for_write(op).unwrap();
-    let text = base
-        .text
-        .replace("item_id = \"app\"", "item_id = \"other\"");
-    save(found.store(), op, &base, &text).unwrap();
+    save(found.store(), op, &base, &edited_text(&base.text)).unwrap();
 }
 
 #[test]
@@ -1293,25 +1314,19 @@ fn a_manifest_contract_write_keeps_ids_out_of_the_contract_block() {
     let op = FakeOp::default();
     let (contract, ids) = two_blocks();
     let (id, found) = myapp_notes(&op, &notes_around(&contract, &ids));
-    save_changed_id(&op, &found);
+    save_a_key(&op, &found);
     let block = crate::adapters::onepassword_manifest::config_text(&notes_of(&op, &id));
     assert!(!block.contains("item_id"), "{block}");
 }
 
 #[test]
-fn a_manifest_contract_write_records_a_changed_id_in_the_bindings_block() {
+fn a_manifest_contract_write_with_an_inline_id_is_config_invalid() {
     let op = FakeOp::default();
     let (contract, ids) = two_blocks();
-    let (id, found) = myapp_notes(&op, &notes_around(&contract, &ids));
-    save_changed_id(&op, &found);
-    let block = crate::adapters::onepassword_manifest::bindings_text(&notes_of(&op, &id));
-    assert!(
-        block
-            .unwrap_or_default()
-            .contains("environments.dev.boundaries.app.item_id = \"other\""),
-        "{}",
-        notes_of(&op, &id)
-    );
+    let (_, found) = myapp_notes(&op, &notes_around(&contract, &ids));
+    let base = found.store().read_for_write(&op).unwrap();
+    let e = save(found.store(), &op, &base, TOML).unwrap_err();
+    assert_eq!(e.code_str(), "config_invalid");
 }
 
 #[test]
@@ -1319,9 +1334,11 @@ fn a_manifest_contract_write_keeps_the_text_around_the_blocks() {
     let op = FakeOp::default();
     let (contract, ids) = two_blocks();
     let (id, found) = myapp_notes(&op, &notes_around(&contract, &ids));
-    save_changed_id(&op, &found);
-    let ids = ids.replace("item_id = \"app\"", "item_id = \"other\"");
-    assert_eq!(notes_of(&op, &id), notes_around(&contract, &ids));
+    save_a_key(&op, &found);
+    assert_eq!(
+        notes_of(&op, &id),
+        notes_around(&edited_text(&contract), &ids)
+    );
 }
 
 #[test]

@@ -65,7 +65,7 @@
       {
         "target": "portfolio",
         "product": "allumata",
-        "reason": "no delivery item is recorded for allumata on prod/portfolio; opv bootstrap creates it"
+        "reason": "no delivery item is recorded for allumata on prod/portfolio; opv apply creates it"
       }
     ]
   },

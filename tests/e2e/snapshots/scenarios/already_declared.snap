@@ -1,4 +1,4 @@
-# already_declared: opv target add prod fly --fly-app x
+# already_declared: opv propose target prod fly --fly-app x
 
 ## text exit: 2
 ## text stdout

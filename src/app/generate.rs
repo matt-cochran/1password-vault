@@ -114,7 +114,7 @@ pub fn run(
     let env = fleet.environment(env_name)?;
     // Everything is checked before anything is written.
     let chosen = plan(fleet, env_name, keys)?;
-    super::tidy::require_person(r, "opv generate")?;
+    super::tidy::require_person(r, "opv apply")?;
     // Never over a value: what 1Password holds now, read fresh.
     let read = super::tidy::read(fleet, env_name, r)?;
     for (product, key, _) in &chosen {
@@ -130,12 +130,13 @@ pub fn run(
         .iter()
         .map(|(p, k, rcp)| make(*rcp).map(|v| (p.clone(), k.clone(), v)))
         .collect::<Result<_, _>>()?;
-    // A read-back failure names this command (05.10): run again, a value that landed is
-    // refused as already there, never replaced.
+    // A read-back failure names the apply that generates (05.10): run again, a value that
+    // landed is refused as already there, never replaced.
     let by = crate::cause::Cmd {
-        command: vec!["generate".into()],
-        args: std::iter::once(env_name.to_string())
-            .chain(keys.iter().cloned())
+        command: vec!["apply".into()],
+        args: keys
+            .iter()
+            .flat_map(|k| ["--generate".to_string(), format!("{env_name}:{k}")])
             .collect(),
     };
     super::import::write_values(fleet, env, &writes, &by, r)?;
