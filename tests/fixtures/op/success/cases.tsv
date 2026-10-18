@@ -1,0 +1,9 @@
+case	exit	command
+s20-whoami	0	op whoami --account <ACCOUNT_A> --format json 
+s21-vault-list	0	op vault list --account <ACCOUNT_A> --format json 
+s22-writer-vault-get	0	op vault get <VAULT_WRITER> --account <ACCOUNT_A> --format json 
+s23-writer-vault-user-list	0	op vault user list <VAULT_WRITER> --account <ACCOUNT_A> --format json 
+s24-reader-vault-get	skipped	owner skipped
+s25-reader-vault-user-list	skipped	owner skipped
+s26-nonmember-vault-get	skipped	owner skipped
+s27-nonmember-vault-user-list	skipped	owner skipped

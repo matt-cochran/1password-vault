@@ -1,0 +1,10 @@
+{
+ "id": "<ID_1>",
+ "name": "<VAULT_WRITER>",
+ "content_version": 1,
+ "created_at": "<TIME_18>",
+ "updated_at": "<TIME_18>",
+ "items": 0,
+ "attribute_version": 1,
+ "type": "USER_CREATED"
+}

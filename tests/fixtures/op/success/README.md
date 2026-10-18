@@ -34,3 +34,18 @@ Markers used:
 | `<TIME_n>` | 18 |
 | `<TITLE_n>` | 1 |
 | `<USER_n>` | 6 |
+
+## 0.12.0 capability replies (s20–s23)
+
+Recorded by the owner on 2026-10-18 through `.delivery/v0120/record-capability.sh`, all reads,
+scrubbed by that script (named markers `<ACCOUNT_A>`, `<EMAIL_A>`, `<USER_A>`, `<ADDRESS_A>`,
+`<VAULT_WRITER>`, numbered `<NAME_n>`/`<SHORTHAND_n>`). The owner skipped the read-only-member and
+non-member cases (`cases.tsv` lists them as skipped); the non-member refusal is covered by
+`failures/14-vault-in-other-account` and `failures/15-vault-user-list-in-other-account`.
+
+| File | Command | Exit |
+|---|---|---|
+| `s20-whoami` | `op whoami --account <ACCOUNT_A> --format json` | 0 |
+| `s21-vault-list` | `op vault list --account <ACCOUNT_A> --format json` | 0 |
+| `s22-writer-vault-get` | `op vault get <VAULT_WRITER> --account <ACCOUNT_A> --format json` | 0 |
+| `s23-writer-vault-user-list` | `op vault user list <VAULT_WRITER> --account <ACCOUNT_A> --format json` | 0 |

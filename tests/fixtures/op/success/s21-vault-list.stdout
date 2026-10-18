@@ -1,0 +1,74 @@
+[
+ {
+  "id": "<VAULT_1>",
+  "name": "<VAULT_NAME_1>",
+  "content_version": 11,
+  "created_at": "<TIME_1>",
+  "updated_at": "<TIME_2>",
+  "items": 6
+ },
+ {
+  "id": "<VAULT_2>",
+  "name": "<VAULT_NAME_2>",
+  "content_version": 22,
+  "created_at": "<TIME_3>",
+  "updated_at": "<TIME_4>",
+  "items": 0
+ },
+ {
+  "id": "<VAULT_3>",
+  "name": "<VAULT_NAME_3>",
+  "content_version": 1,
+  "created_at": "<TIME_5>",
+  "updated_at": "<TIME_6>",
+  "items": 0
+ },
+ {
+  "id": "<VAULT_4>",
+  "name": "<VAULT_NAME_4>",
+  "content_version": 8,
+  "created_at": "<TIME_7>",
+  "updated_at": "<TIME_8>",
+  "items": 1
+ },
+ {
+  "id": "<VAULT_5>",
+  "name": "<VAULT_NAME_5>",
+  "content_version": 2,
+  "created_at": "<TIME_9>",
+  "updated_at": "<TIME_10>",
+  "items": 1
+ },
+ {
+  "id": "<VAULT_6>",
+  "name": "<VAULT_NAME_6>",
+  "content_version": 3,
+  "created_at": "<TIME_11>",
+  "updated_at": "<TIME_12>",
+  "items": 2
+ },
+ {
+  "id": "<VAULT_7>",
+  "name": "<VAULT_NAME_7>",
+  "content_version": 9,
+  "created_at": "<TIME_13>",
+  "updated_at": "<TIME_14>",
+  "items": 8
+ },
+ {
+  "id": "<VAULT_8>",
+  "name": "<VAULT_NAME_8>",
+  "content_version": 1,
+  "created_at": "<TIME_15>",
+  "updated_at": "<TIME_1>",
+  "items": 0
+ },
+ {
+  "id": "<VAULT_9>",
+  "name": "<VAULT_NAME_9>",
+  "content_version": 3,
+  "created_at": "<TIME_16>",
+  "updated_at": "<TIME_17>",
+  "items": 1
+ }
+]
