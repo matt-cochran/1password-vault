@@ -8,6 +8,7 @@ pub mod convention;
 pub mod delivery;
 pub mod health;
 pub mod history;
+pub mod intent;
 pub mod kind_guess;
 pub mod ledger;
 pub mod model;

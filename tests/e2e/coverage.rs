@@ -96,6 +96,12 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "PersonOnly",
         "needs an agent-mode marker the e2e harness does not set; no person-only command calls it yet",
     ),
+    // The intent document is screened in-process by `domain::intent::parse`; no 0.12.0 CLI or
+    // MCP surface reaches it yet (the `propose` and `mcp-propose` rows add one).
+    (
+        "ValueInTextField",
+        "the intent document has no CLI or MCP surface yet (row intent)",
+    ),
 ];
 
 fn snapshots() -> PathBuf {

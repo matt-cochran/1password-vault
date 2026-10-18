@@ -424,6 +424,12 @@ pub enum Cause {
         field: DottedPath,
         rule: FieldRule,
     },
+    ValueInTextField {
+        field: DottedPath,
+        /// The stable name of the detector that matched (`known_prefix`, `pem_header`,
+        /// `high_entropy`); never the text it matched in.
+        detector: &'static str,
+    },
     BoundaryMissing {
         env: EnvName,
         product: ProductName,
@@ -1419,6 +1425,7 @@ impl Cause {
             ConfigSourceMismatch { .. } => "config_source_mismatch",
             ConfigUnreadable { .. } => "config_unreadable",
             ConfigInvalid { .. } => "config_invalid",
+            ValueInTextField { .. } => "value_in_text_field",
             BoundaryMissing { .. } => "boundary_missing",
             StateVaultMissing { .. } => "state_vault_missing",
             StateVaultTooWide { .. } => "state_vault_wider_than_values",
@@ -1541,6 +1548,7 @@ impl Cause {
             | ConfigSourceMismatch { .. }
             | ConfigUnreadable { .. }
             | ConfigInvalid { .. }
+            | ValueInTextField { .. }
             | BoundaryMissing { .. }
             | StateVaultMissing { .. }
             | StateVaultTooWide { .. }
