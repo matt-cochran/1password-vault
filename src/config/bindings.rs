@@ -153,6 +153,11 @@ pub fn merge(text: &str, bindings: &Bindings) -> String {
         let Some((last, prefix)) = parts.split_last() else {
             continue;
         };
+        // A stale id, for a boundary or target the contract no longer declares, fills
+        // nothing: it must not make the contract declare it again.
+        if !declared(&doc, &parts[..parts.len().min(4)]) {
+            continue;
+        }
         if let Some(table) = table_at_mut(&mut doc, prefix) {
             table.insert(last, Item::Value(Value::from(id.as_str())));
         }
@@ -370,6 +375,18 @@ fn flatten(
         prefix.pop();
     }
     Ok(())
+}
+
+/// True when `doc` declares a table at `path` (the boundary or target an id belongs to).
+fn declared(doc: &DocumentMut, path: &[&str]) -> bool {
+    let mut t: &dyn TableLike = doc.as_table();
+    for seg in path {
+        match t.get(seg).and_then(Item::as_table_like) {
+            Some(inner) => t = inner,
+            None => return false,
+        }
+    }
+    true
 }
 
 /// A table at `path` in `doc`, creating missing intermediate tables as implicit ones (`ad

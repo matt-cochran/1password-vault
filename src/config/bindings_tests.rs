@@ -253,3 +253,17 @@ fn an_error_on_a_bound_id_names_the_bindings_file() {
         "{e} {shown:?}"
     );
 }
+
+/// A stale id, for a boundary the contract no longer declares, is left out: it does not
+/// declare the boundary again.
+#[test]
+fn merge_skips_an_id_of_an_undeclared_boundary() {
+    let ids = Bindings::parse(&format!(
+        "{BINDINGS}environments.prod.boundaries.gone.vault_id = \"vgone\"\n"
+    ))
+    .unwrap();
+    assert_eq!(
+        super::merge(CONTRACT_WITHOUT_IDS, &ids),
+        super::merge(CONTRACT_WITHOUT_IDS, &Bindings::parse(BINDINGS).unwrap())
+    );
+}
