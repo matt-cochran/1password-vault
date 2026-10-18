@@ -2757,10 +2757,9 @@ fn env_file_given_to_config_import_never_prints_a_value() {
 // --- M5 (delivery-transports §1.6): no value on any machine-readable surface ---
 //
 // ConfigMap rows need a fake `kubectl`; the Kubernetes e2e canary scan covers them in K6.
-// The deployment-plan projection is not one of `agent_view`'s builders: `opv_deployment_plan`
-// returns the reduced `plan_receipt` built in `src/mcp.rs` (rows of names, `plan_id` and an
-// `approve_command`), so no `agent_view` projection forwards `JsonRow`s and `agent_view.rs`
-// is unchanged. `opv_delivery_preview` does share the CLI's `delivery_preview` builder.
+// `opv_state` answers each section with the CLI command's own `--json` document (design
+// §25.2): section `plan` is `plan --json`, section `delivery_preview` is `run --preview
+// --json`, so the canary below covers the MCP form of each.
 
 /// M5: `plan --json` for a Fly target that delivers config as secrets, with a file key row,
 /// holds no value (the new `channel`, `via`, `delivered_as`, `form` and `path` fields name
@@ -2791,37 +2790,37 @@ fn changed_json_never_prints_a_value() {
     assert_no_marker("changed --json", &format!("{}{}", r.stdout, r.stderr));
 }
 
-/// M5: the MCP `opv_deployment_plan` answer (a plan projection) holds no value.
+/// M5: the MCP `opv_state` section `plan` answer (the CLI's `plan --json`) holds no value.
 #[test]
-fn mcp_deployment_plan_never_prints_a_value() {
+fn mcp_state_plan_never_prints_a_value() {
     let mut h = Harness::new(&no_value_item());
     h.use_config(NO_VALUE_CONFIG);
     let project = h.fix.clone();
     let mut mcp = Mcp::start(&h, &project);
-    let text = mcp.tool_text("opv_deployment_plan", &json!({"environment": "prod"}));
-    assert_no_marker("opv_deployment_plan", &text);
+    let text = mcp.tool_text("opv_state", &json!({"section": "plan", "env": "prod"}));
+    assert_no_marker("opv_state plan", &text);
 }
 
-/// M5: the MCP `opv_delivery_preview` answer (the shared CLI document) holds no value.
+/// M5: the MCP `opv_state` section `delivery_preview` answer (the shared CLI document) holds
+/// no value.
 #[test]
-fn mcp_delivery_preview_never_prints_a_value() {
+fn mcp_state_delivery_preview_never_prints_a_value() {
     let mut h = Harness::new(&no_value_item());
     h.use_config(NO_VALUE_CONFIG);
     let project = h.fix.clone();
     let mut mcp = Mcp::start(&h, &project);
     let text = mcp.tool_text(
-        "opv_delivery_preview",
-        &json!({"environment": "prod", "product": "allumata"}),
+        "opv_state",
+        &json!({"section": "delivery_preview", "env": "prod", "product": "allumata"}),
     );
-    assert_no_marker("opv_delivery_preview", &text);
+    assert_no_marker("opv_state delivery_preview", &text);
 }
 
-/// M5 (FM-04): MCP and CLI plan the same thing. `opv_deployment_plan` is a projection of
-/// the CLI's `plan --json` document (`plan_receipt` in `src/mcp.rs`: names, actions and the
-/// plan id, never the whole row), so the documents cannot be equal byte for byte; equal plan
-/// ids prove the same plan, since the id hashes every row's channel and form (M4).
+/// M5 (FM-04): MCP and CLI plan the same thing. `opv_state` section `plan` is the CLI's
+/// `plan --json` document; the MCP server is agent mode and the CLI here is not, so equal
+/// plan ids prove the same plan, since the id hashes every row's channel and form (M4).
 #[test]
-fn mcp_deployment_plan_has_the_cli_plan_id() {
+fn mcp_state_plan_has_the_cli_plan_id() {
     let mut h = Harness::new(&no_value_item());
     h.use_config(NO_VALUE_CONFIG);
     // The fake `flyctl secrets list` answers list A first and list B after; start past A so
@@ -2830,7 +2829,7 @@ fn mcp_deployment_plan_has_the_cli_plan_id() {
     let cli: Value = serde_json::from_str(&h.run(&["plan", "prod", "--json"]).stdout).unwrap();
     let project = h.fix.clone();
     let mut mcp = Mcp::start(&h, &project);
-    let text = mcp.tool_text("opv_deployment_plan", &json!({"environment": "prod"}));
+    let text = mcp.tool_text("opv_state", &json!({"section": "plan", "env": "prod"}));
     let tool: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(tool["plan_id"], cli["plan_id"], "{text}");
 }

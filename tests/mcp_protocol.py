@@ -48,10 +48,8 @@ with tempfile.TemporaryDirectory() as directory:
         send('notifications/initialized', {})
         tools = send('tools/list', {}, 2)['result']['tools']
         assert {tool['name'] for tool in tools} == {
-            'opv_ready', 'opv_configuration', 'opv_deployment_plan', 'opv_access',
-            'opv_structure_plan', 'opv_delivery_preview', 'opv_changed',
-            'opv_propose', 'opv_import_local', 'opv_explain'}
-        # The inspection tools, the plans, the proposals and the explanation are read-only;
+            'opv_state', 'opv_propose', 'opv_import_local', 'opv_explain'}
+        # The state sections, the proposals and the explanation are read-only;
         # only opv_import_local writes (a local-tier environment's 1Password items). No tool
         # applies structure or syncs: a person runs opv apply or opv sync (design §25.3).
         writers = {'opv_import_local'}
@@ -65,26 +63,26 @@ with tempfile.TemporaryDirectory() as directory:
         for tool in tools:
             props = set(tool.get('inputSchema', {}).get('properties', {}) or {})
             assert not props & {'value', 'secret', 'password', 'token', 'approved'}, tool
-        # The deployment plan takes the scope a person's opv sync --expect-plan runs.
-        plan_tool = next(t for t in tools if t['name'] == 'opv_deployment_plan')
-        assert set(plan_tool['inputSchema']['properties']) == {
-            'environment', 'targets', 'product', 'rotate', 'verbose'}, plan_tool
-        reply = send('tools/call', {'name': 'opv_configuration', 'arguments': {}}, 3)
+        # opv_state reads one section, each the document of the CLI command of that name
+        # (design §25.2), scoped by env, product and target.
+        state_tool = next(t for t in tools if t['name'] == 'opv_state')
+        assert set(state_tool['inputSchema']['properties']) == {
+            'section', 'env', 'product', 'target'}, state_tool
+        assert state_tool['inputSchema']['properties']['section']['enum'] == [
+            'inventory', 'needs', 'contract', 'ready', 'plan', 'changed', 'access',
+            'delivery_preview', 'history', 'status'], state_tool
+        reply = send('tools/call', {'name': 'opv_state', 'arguments': {'section': 'contract'}}, 3)
         text = reply['result']['content'][0]['text']
-        config = json.loads(text)
-        assert config['ok'], config
-        assert config['keys'] and config['environments']
-        assert all(set(key) == {'product', 'key', 'kind'} for key in config['keys'])
-        assert all(set(t) == {'environment', 'name', 'provider', 'products',
-                              'state_vault_recorded', 'deploy_credentials_declared'}
-                   for t in config['targets']), config['targets']
+        contract_doc = json.loads(text)
+        assert contract_doc['ok'] and contract_doc['schema_version'] == 3, contract_doc
+        assert contract_doc['components'] and contract_doc['contract_digest'], contract_doc
         assert 'vault_id' not in text and 'item_id' not in text and 'rules' not in text
         # An agent cannot sync: there is no sync tool.
         refused = send('tools/call', {'name': 'opv_sync', 'arguments': {
             'environment': 'prod', 'plan_id': '00000000'}}, 4)
         assert 'error' in refused or refused['result'].get('isError'), refused
-        extra = send('tools/call', {'name': 'opv_ready', 'arguments': {
-            'environment': 'prod', 'approved': True, 'value': 'SECRET_MARKER'}}, 5)
+        extra = send('tools/call', {'name': 'opv_state', 'arguments': {
+            'section': 'ready', 'env': 'prod', 'approved': True, 'value': 'SECRET_MARKER'}}, 5)
         assert 'error' in extra or extra['result'].get('isError'), extra
         assert 'SECRET_MARKER' not in json.dumps(extra), extra
         # An agent cannot apply structure: there is no apply tool.
@@ -92,8 +90,8 @@ with tempfile.TemporaryDirectory() as directory:
             'plan_id': 'sp-0000000000000000'}}, 6)
         assert 'error' in self_applied or self_applied['result'].get('isError'), self_applied
         # A name that is not one is refused before any read.
-        refused_plan = send('tools/call', {'name': 'opv_deployment_plan', 'arguments': {
-            'environment': 'not a name'}}, 7)
+        refused_plan = send('tools/call', {'name': 'opv_state', 'arguments': {
+            'section': 'plan', 'env': 'not a name'}}, 7)
         result = json.loads(refused_plan['result']['content'][0]['text'])
         assert result['ok'] is False, result
         # A failure is the --json document's error object: cause, steps and who acts.
@@ -102,19 +100,23 @@ with tempfile.TemporaryDirectory() as directory:
                 'human_required', 'do', 'next'} <= set(error), error
         assert set(error['next']) == {'kind', 'actor', 'command'}, error
         assert isinstance(error['human_required'], bool), error
-        # Every 0.11.0 read tool takes the CLI's verbose flag; the 0.12.0 tools take the
-        # surface golden's inputs (tests/e2e/expected/surface.json).
-        new_tools = {'opv_propose', 'opv_import_local', 'opv_explain'}
-        assert all('verbose' in (tool.get('inputSchema', {}).get('properties') or {})
-                   for tool in tools if tool['name'] not in new_tools), tools
+        # An unknown section is refused in the answer, as usage.
+        unknown = send('tools/call', {'name': 'opv_state', 'arguments': {
+            'section': 'configuration'}}, 16)
+        answer = json.loads(unknown['result']['content'][0]['text'])
+        assert answer['ok'] is False and answer['error']['code'] == 'usage', answer
         # opv_propose advertises the intent document: one arm per kind, no rule parameter.
         propose_tool = next(t for t in tools if t['name'] == 'opv_propose')
         assert len(propose_tool['inputSchema']['oneOf']) == 8, propose_tool
         for arm in propose_tool['inputSchema']['oneOf']:
             assert not set(arm['properties']) & {'value', 'regex', 'rule', 'rules', 'prefix'}, arm
-        # The removed write tools are gone, with no alias.
+        # The removed 0.11.0 tools are gone, with no alias.
         for removed, request_id in (('opv_declare_key', 8), ('opv_declare_environment', 9),
-                                    ('opv_declare_target', 10), ('opv_generate', 11)):
+                                    ('opv_declare_target', 10), ('opv_generate', 11),
+                                    ('opv_ready', 17), ('opv_configuration', 18),
+                                    ('opv_deployment_plan', 19), ('opv_changed', 20),
+                                    ('opv_access', 21), ('opv_delivery_preview', 22),
+                                    ('opv_structure_plan', 23)):
             reply = send('tools/call', {'name': removed, 'arguments': {}}, request_id)
             assert 'error' in reply or reply['result'].get('isError'), reply
         contract = (project / 'secrets.toml').read_text()
@@ -140,7 +142,7 @@ with tempfile.TemporaryDirectory() as directory:
         explained = send('tools/call', {'name': 'opv_explain', 'arguments': {'key': 'NOT_A_KEY'}}, 15)
         answer = json.loads(explained['result']['content'][0]['text'])
         assert answer['ok'] is False and answer['error']['code'], answer
-        print('PASS: initialize, tools/list, configuration inspection, proposal purity, value and rule refusal, removed tools, and structural apply refusal')
+        print('PASS: initialize, tools/list, opv_state sections, proposal purity, value and rule refusal, removed tools, and structural apply refusal')
     finally:
         process.stdin.close()
         try:

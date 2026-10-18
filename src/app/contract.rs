@@ -71,6 +71,29 @@ pub struct ComponentContract {
     pub environments: Vec<EnvironmentContract>,
 }
 
+/// `opv contract [--env e] [--component p]`'s document, printed compact for `--json` and
+/// indented for a person. The CLI and `opv_state` section `contract` both answer through here.
+pub fn write_document(
+    fleet: &Fleet,
+    env: Option<&str>,
+    component: Option<&str>,
+    json: bool,
+    out: &mut dyn std::io::Write,
+) -> Result<(), Error> {
+    let doc = serde_json::to_value(document(fleet, env, component)).map_err(|_| -> Error {
+        Cause::Bug {
+            site: "contract: the document did not serialize",
+        }
+        .into()
+    })?;
+    let text = if json {
+        doc.to_string()
+    } else {
+        serde_json::to_string_pretty(&doc).unwrap_or_else(|_| doc.to_string())
+    };
+    writeln!(out, "{text}").map_err(super::write_err)
+}
+
 /// The contract as data (R10, D-G): names and categories only, plus the contract digest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContractDoc {

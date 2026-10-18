@@ -201,3 +201,11 @@ Findings for the owner (not fixed here; the row touches tests only):
 6. access text prints neither the per-vault production marking, capability nor writers (JSON only); access `next` is `none` while it prints owner `op service-account create` commands.
 
 - [ ] Owner sign-off of the core snapshots.
+
+## 0.12.0: opv_state (mcp-state, 2026-10-18)
+
+20 scenario snapshots changed, no new one. 19 MCP halves moved from the removed read tools (`opv_ready`, `opv_configuration`, `opv_deployment_plan`, `opv_changed`, `opv_access`, `opv_delivery_preview`) onto `opv_state` sections (`ready`, `contract`, `plan`, `changed`, `access`, `delivery_preview`); each answer is now the CLI's whole `--json` document (`schema_version`, `exit_code`, top-level `next` and `do` included), not the bare `{ok, error}`. Checked by the implementing agent: in all 19 the MCP document equals the snapshot's own `--json` stdout as JSON, and gate 3 now asserts that whole-document equality for every `opv_state` scenario. No value anywhere.
+
+`guard.snap` lost its MCP half: `opv_state` section `delivery_preview` takes `env` and `product` only (§25.2), so a remote profile's preview (`--role`, `--remote`) has no MCP form. The `policy_refused`/`remote_profile_refuses` cause is still reached by the CLI `--json` run of the same snapshot.
+
+- [ ] Owner sign-off of the opv_state snapshots.

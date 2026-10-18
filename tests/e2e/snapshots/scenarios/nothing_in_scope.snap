@@ -19,5 +19,5 @@ opv: environment dev has no target for products web
 Do: declare a target in environment dev for web
 Next: opv propose target --help
 
-## mcp opv_deployment_plan {"environment":"dev"}
-{"ok":false,"error":{"code":"no_target","category":"config","message":"environment dev has no target for products web","subject":{"what":{"what":"no_targets","products":["web"]},"env":"dev"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":"declare a target in environment dev for web","next":{"kind":"run","actor":"assistant","command":"opv propose target --help"}}}
+## mcp opv_state {"section":"plan","env":"dev"}
+{"schema_version":3,"ok":false,"exit_code":2,"next":{"kind":"run","actor":"assistant","command":"opv propose target --help"},"do":"declare a target in environment dev for web","error":{"code":"no_target","category":"config","message":"environment dev has no target for products web","subject":{"what":{"what":"no_targets","products":["web"]},"env":"dev"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":"declare a target in environment dev for web","next":{"kind":"run","actor":"assistant","command":"opv propose target --help"}}}

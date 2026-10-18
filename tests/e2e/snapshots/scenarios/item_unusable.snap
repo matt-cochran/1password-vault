@@ -17,5 +17,5 @@ opv: the item opv · e2e-app in vault vE2EMANIFEST00000000000001 is not a Secure
 Do: rename or move the item opv · e2e-app in 1Password, or name another title
 Next: opv contract --json
 
-## mcp opv_configuration {}
-{"ok":false,"error":{"code":"item_unusable","category":"source","message":"the item opv · e2e-app in vault vE2EMANIFEST00000000000001 is not a Secure Note, so opv leaves it unchanged","subject":{"problem":"wrong_category","vault":"vE2EMANIFEST00000000000001","title":"opv · e2e-app"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"rename or move the item opv · e2e-app in 1Password, or name another title","next":{"kind":"run","actor":"assistant","command":"opv contract --json"}}}
+## mcp opv_state {"section":"contract"}
+{"schema_version":3,"ok":false,"exit_code":4,"next":{"kind":"run","actor":"assistant","command":"opv contract --json"},"do":"rename or move the item opv · e2e-app in 1Password, or name another title","error":{"code":"item_unusable","category":"source","message":"the item opv · e2e-app in vault vE2EMANIFEST00000000000001 is not a Secure Note, so opv leaves it unchanged","subject":{"problem":"wrong_category","vault":"vE2EMANIFEST00000000000001","title":"opv · e2e-app"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"rename or move the item opv · e2e-app in 1Password, or name another title","next":{"kind":"run","actor":"assistant","command":"opv contract --json"}}}

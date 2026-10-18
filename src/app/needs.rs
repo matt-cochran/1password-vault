@@ -274,6 +274,37 @@ fn observation_span(
     span_of(&observation.file, line)
 }
 
+/// `opv needs [--gate]` for the repository top `repo`: the report against the contract, the
+/// default branch's deciding which undeclared names are new, printed as `--json` or text, then
+/// the gate when asked. The CLI and `opv_state` section `needs` both answer through here.
+pub fn run(
+    r: &dyn CommandRunner,
+    repo: &Path,
+    fleet: &Fleet,
+    gate_on: bool,
+    json: bool,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let source = crate::app::rule_source::rule_source(r, repo, fleet)?;
+    let base = source.contract();
+    let report = needs(r, repo, &crate::scan::WorkTree, fleet, base);
+    if json {
+        let doc = serde_json::to_value(&report).map_err(|_| -> Error {
+            Cause::Bug {
+                site: "needs: the report did not serialize",
+            }
+            .into()
+        })?;
+        writeln!(out, "{doc}").map_err(super::write_err)?;
+    } else {
+        render_text(&report, out)?;
+    }
+    if gate_on {
+        gate(&report, base)?;
+    }
+    Ok(())
+}
+
 /// Fail (`needs_undeclared`) when a row is `undeclared` and `base` does not declare it
 /// either. Names only, never a value.
 pub fn gate(report: &NeedsReport, base: Option<&Fleet>) -> Result<(), Error> {

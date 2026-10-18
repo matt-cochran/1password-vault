@@ -17,5 +17,5 @@ using <SCENARIO>/project/secrets.toml
 opv: no boundary vault is recorded for product shared in environment prod in <SCENARIO>/project/secrets.toml
 Next: opv apply
 
-## mcp opv_configuration {}
-{"ok":false,"error":{"code":"boundary_missing","category":"config","message":"no boundary vault is recorded for product shared in environment prod in <SCENARIO>/project/secrets.toml","subject":{"source":{"kind":"file","path":"<SCENARIO>/project/secrets.toml","given_by":{"via":"discovered"}},"env":"prod","product":"shared"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":true,"do":null,"next":{"kind":"apply","actor":"person","command":"opv apply"}}}
+## mcp opv_state {"section":"contract"}
+{"schema_version":3,"ok":false,"exit_code":2,"next":{"kind":"apply","actor":"person","command":"opv apply"},"do":null,"error":{"code":"boundary_missing","category":"config","message":"no boundary vault is recorded for product shared in environment prod in <SCENARIO>/project/secrets.toml","subject":{"source":{"kind":"file","path":"<SCENARIO>/project/secrets.toml","given_by":{"via":"discovered"}},"env":"prod","product":"shared"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":true,"do":null,"next":{"kind":"apply","actor":"person","command":"opv apply"}}}

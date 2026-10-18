@@ -1090,21 +1090,22 @@ fn live_09_88_a_rejected_service_account_token_under_ci_is_credential_rejected()
 
 // --- MCP --------------------------------------------------------------------------------------
 
-/// The step of the finding `code` in an `opv_ready` document.
+/// The step of the finding `code` in an `opv_state` section `ready` document (the
+/// `opv ready --json` finding's `prerequisite`).
 fn ready_step(doc: &Value, code: &str) -> Option<String> {
     doc["findings"]
         .as_array()?
         .iter()
         .find(|f| f["code"] == code)
-        .and_then(|f| f["step"].as_str())
+        .and_then(|f| f["prerequisite"].as_str())
         .map(str::to_string)
 }
 
 #[test]
-fn live_09_mcp_ready_with_an_unknown_selected_account_steps_to_login_add() {
+fn live_09_mcp_state_ready_with_an_unknown_selected_account_steps_to_login_add() {
     let doc = Scenario::new()
         .account(UNKNOWN_ACCOUNT)
-        .mcp("opv_ready", json!({}));
+        .mcp("opv_state", json!({"section": "ready"}));
     // Where the 1Password app holds the accounts (macOS), the account is added there.
     let want = if cfg!(target_os = "macos") {
         "opv login"
@@ -1119,10 +1120,10 @@ fn live_09_mcp_ready_with_an_unknown_selected_account_steps_to_login_add() {
 }
 
 #[test]
-fn live_09_mcp_ready_prod_with_an_unknown_selected_account_steps_to_login_add() {
+fn live_09_mcp_state_ready_prod_with_an_unknown_selected_account_steps_to_login_add() {
     let doc = Scenario::new()
         .account(UNKNOWN_ACCOUNT)
-        .mcp("opv_ready", json!({"environment": "prod"}));
+        .mcp("opv_state", json!({"section": "ready", "env": "prod"}));
     // Where the 1Password app holds the accounts (macOS), the account is added there.
     let want = if cfg!(target_os = "macos") {
         "opv login"
@@ -1137,18 +1138,18 @@ fn live_09_mcp_ready_prod_with_an_unknown_selected_account_steps_to_login_add() 
 }
 
 #[test]
-fn live_09_mcp_ready_with_an_undeclared_environment_is_unknown_env() {
+fn live_09_mcp_state_ready_with_an_undeclared_environment_is_unknown_env() {
     let doc = Scenario::new()
         .account(DEV_ACCOUNT)
-        .mcp("opv_ready", json!({"environment": "prdo"}));
+        .mcp("opv_state", json!({"section": "ready", "env": "prdo"}));
     assert_eq!(doc["error"]["code"], "unknown_env", "{doc}");
 }
 
 #[test]
-fn live_09_mcp_configuration_prints_no_value() {
+fn live_09_mcp_state_contract_prints_no_value() {
     let doc = Scenario::new()
         .account(DEV_ACCOUNT)
-        .mcp("opv_configuration", json!({}));
+        .mcp("opv_state", json!({"section": "contract"}));
     let text = doc.to_string();
     assert_eq!(
         canaries().into_iter().find(|c| text.contains(c.as_str())),
@@ -1158,10 +1159,10 @@ fn live_09_mcp_configuration_prints_no_value() {
 }
 
 #[test]
-fn live_09_mcp_deployment_plan_prints_no_value() {
+fn live_09_mcp_state_plan_prints_no_value() {
     let doc = Scenario::new()
         .account(DEV_ACCOUNT)
-        .mcp("opv_deployment_plan", json!({"environment": "prod"}));
+        .mcp("opv_state", json!({"section": "plan", "env": "prod"}));
     let text = doc.to_string();
     assert_eq!(
         canaries().into_iter().find(|c| text.contains(c.as_str())),
@@ -1171,26 +1172,26 @@ fn live_09_mcp_deployment_plan_prints_no_value() {
 }
 
 #[test]
-fn live_09_mcp_changed_with_no_delivery_item_is_an_ok_answer() {
+fn live_09_mcp_state_changed_with_no_delivery_item_is_an_ok_answer() {
     let doc = Scenario::new()
         .account(DEV_ACCOUNT)
-        .mcp("opv_changed", json!({"environment": "prod"}));
+        .mcp("opv_state", json!({"section": "changed", "env": "prod"}));
     assert_eq!(doc["ok"], true, "{doc}");
 }
 
 #[test]
-fn live_09_mcp_changed_with_no_delivery_item_says_it_changed() {
+fn live_09_mcp_state_changed_with_no_delivery_item_says_it_changed() {
     let doc = Scenario::new()
         .account(DEV_ACCOUNT)
-        .mcp("opv_changed", json!({"environment": "prod"}));
+        .mcp("opv_state", json!({"section": "changed", "env": "prod"}));
     assert_eq!(doc["changed"], true, "{doc}");
 }
 
 #[test]
-fn live_09_mcp_changed_prints_no_value() {
+fn live_09_mcp_state_changed_prints_no_value() {
     let doc = Scenario::new()
         .account(DEV_ACCOUNT)
-        .mcp("opv_changed", json!({"environment": "prod"}));
+        .mcp("opv_state", json!({"section": "changed", "env": "prod"}));
     let text = doc.to_string();
     assert_eq!(
         canaries().into_iter().find(|c| text.contains(c.as_str())),
@@ -1220,44 +1221,36 @@ fn live_09_mcp_propose_target_with_a_secrets_dir_and_a_role_is_proposed() {
 }
 
 #[test]
-fn live_09_mcp_deployment_plan_for_a_path_is_unknown_env() {
+/// A path is not a name in `opv_state`'s grammar: refused before anything is read.
+fn live_09_mcp_state_plan_for_a_path_is_usage() {
     let doc = Scenario::new()
         .account(DEV_ACCOUNT)
-        .mcp("opv_deployment_plan", json!({"environment": "../etc"}));
-    assert_eq!(doc["error"]["code"], "unknown_env", "{doc}");
+        .mcp("opv_state", json!({"section": "plan", "env": "../etc"}));
+    assert_eq!(doc["error"]["code"], "usage", "{doc}");
 }
 
 #[test]
-fn live_09_mcp_deployment_plan_with_a_target_typo_is_unknown_target() {
+fn live_09_mcp_state_plan_with_a_target_typo_is_unknown_target() {
     let doc = Scenario::new().account(DEV_ACCOUNT).mcp(
-        "opv_deployment_plan",
-        json!({"environment": "prod", "targets": ["fl"]}),
+        "opv_state",
+        json!({"section": "plan", "env": "prod", "target": "fl"}),
     );
     assert_eq!(doc["error"]["code"], "unknown_target", "{doc}");
 }
 
 #[test]
-fn live_09_mcp_deployment_plan_rotating_an_undeclared_key_is_undeclared_key() {
-    let doc = Scenario::new().account(DEV_ACCOUNT).mcp(
-        "opv_deployment_plan",
-        json!({"environment": "prod", "rotate": ["web/NOPE"]}),
-    );
-    assert_eq!(doc["error"]["code"], "undeclared_key", "{doc}");
-}
-
-#[test]
-fn live_09_mcp_access_for_an_undeclared_environment_is_unknown_env() {
+fn live_09_mcp_state_access_for_an_undeclared_environment_is_unknown_env() {
     let doc = Scenario::new()
         .account(DEV_ACCOUNT)
-        .mcp("opv_access", json!({"environment": "nope"}));
+        .mcp("opv_state", json!({"section": "access", "env": "nope"}));
     assert_eq!(doc["error"]["code"], "unknown_env", "{doc}");
 }
 
 #[test]
-fn live_09_mcp_structure_plan_prints_no_value() {
+fn live_09_mcp_propose_structure_prints_no_value() {
     let doc = Scenario::new()
         .account(DEV_ACCOUNT)
-        .mcp("opv_structure_plan", json!({}));
+        .mcp("opv_propose", json!({"kind": "structure"}));
     let text = doc.to_string();
     assert_eq!(
         canaries().into_iter().find(|c| text.contains(c.as_str())),
@@ -1341,18 +1334,10 @@ fn live_09_mcp_propose_generate_of_a_provider_issued_key_is_policy_refused() {
 }
 
 #[test]
-fn live_09_mcp_delivery_preview_of_an_undeclared_profile_is_unknown_profile() {
+fn live_09_mcp_state_delivery_preview_of_an_undeclared_environment_is_unknown_env() {
     let doc = Scenario::new().account(DEV_ACCOUNT).mcp(
-        "opv_delivery_preview",
-        json!({"environment": "prod", "product": "web", "role": "serve", "remote": "nosuch"}),
+        "opv_state",
+        json!({"section": "delivery_preview", "env": "prdo"}),
     );
-    assert_eq!(doc["error"]["code"], "unknown_profile", "{doc}");
-}
-
-#[test]
-fn live_09_mcp_delivery_preview_of_an_undeclared_environment_is_unknown_env() {
-    let doc = Scenario::new()
-        .account(DEV_ACCOUNT)
-        .mcp("opv_delivery_preview", json!({"environment": "prdo"}));
     assert_eq!(doc["error"]["code"], "unknown_env", "{doc}");
 }
