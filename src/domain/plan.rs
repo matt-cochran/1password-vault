@@ -392,7 +392,7 @@ pub fn build_with(
                 .as_deref()
                 .and_then(|n| on_target.get(n).copied());
             let field = by_name.get(&(product.as_str(), key.as_str()));
-            let declared_here = spec.environments.iter().any(|e| e == env_name);
+            let declared_here = spec.is_desired_in(env_name);
             if declared_here && !delivered && !p.source_only {
                 plan.undelivered.push((product.clone(), key.clone()));
             }
@@ -572,7 +572,7 @@ pub fn build_with(
             continue;
         }
         for (key, spec) in &p.keys {
-            if spec.environments.iter().any(|e| e == env_name)
+            if spec.is_desired_in(env_name)
                 && !referenced.contains(&(product.as_str(), key.as_str()))
             {
                 plan.unreferenced_sources
@@ -1535,7 +1535,8 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
         fn key() -> KeySpec {
             KeySpec {
                 kind: Kind::Secret,
-                environments: vec!["ci".to_string()],
+                environments: Some(vec!["ci".to_string()]),
+                except: Default::default(),
                 rules: Default::default(),
                 immutable: false,
                 guidance: String::new(),

@@ -141,7 +141,7 @@ pub(crate) fn missing_fields(
                 .filter(|(_, spec)| spec.from.is_none())
                 // FR-55: a personal key's field lives in each person's own item.
                 .filter(|(_, spec)| !spec.personal)
-                .filter(|(_, spec)| spec.environments.iter().any(|e| e == env_name))
+                .filter(|(_, spec)| spec.is_desired_in(env_name))
                 .map(move |(key, spec)| (product.clone(), key.clone(), spec.kind))
         })
         .filter(|(product, key, _)| !found.contains_key(&(product.clone(), key.clone())))
@@ -159,7 +159,7 @@ pub(crate) fn declared_fields(fleet: &Fleet, env_name: &str) -> Vec<(String, Str
             p.keys
                 .iter()
                 .filter(|(_, spec)| spec.from.is_none() && !spec.personal)
-                .filter(|(_, spec)| spec.environments.iter().any(|e| e == env_name))
+                .filter(|(_, spec)| spec.is_desired_in(env_name))
                 .map(move |(key, spec)| (product.clone(), key.clone(), spec.kind))
         })
         .collect()

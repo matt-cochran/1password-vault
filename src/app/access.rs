@@ -289,10 +289,7 @@ fn plan_needs<'a>(
                 if !fleet.delivers(env_name, target_name, product) {
                     continue;
                 }
-                let desired = p
-                    .keys
-                    .values()
-                    .filter(|k| k.environments.iter().any(|e| e == env_name));
+                let desired = p.keys.values().filter(|k| k.is_desired_in(env_name));
                 for key in desired {
                     let needer = key.source().map_or(product.as_str(), |(source, _)| source);
                     boundary_vaults.insert(fleet.boundary(env_name, needer)?.vault_id.as_str());

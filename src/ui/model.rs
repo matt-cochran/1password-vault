@@ -246,7 +246,7 @@ impl Snapshot {
                         immutable: k.immutable,
                         from: k.from.clone(),
                         guidance: k.guidance.clone(),
-                        environments: k.environments.clone(),
+                        environments: k.envs_in(fleet),
                     })
                     .collect(),
             })

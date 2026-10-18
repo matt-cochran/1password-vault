@@ -102,7 +102,7 @@ fn in_scope<'a>(
 ) -> impl Iterator<Item = (&'a ItemField, &'a KeySpec)> + 'a {
     env.fields.iter().filter_map(move |f| {
         let spec = fleet.products.get(&f.section)?.keys.get(&f.label)?;
-        let declared_here = spec.environments.iter().any(|e| e == env.name);
+        let declared_here = spec.is_desired_in(env.name);
         (declared_here && !spec.personal && !f.value.expose().is_empty()).then_some((f, spec))
     })
 }

@@ -33,7 +33,7 @@ pub fn declared(fleet: &Fleet, env_name: &str) -> bool {
     fleet.products.values().any(|p| {
         p.keys
             .values()
-            .any(|spec| spec.personal && spec.environments.iter().any(|e| e == env_name))
+            .any(|spec| spec.personal && spec.is_desired_in(env_name))
     })
 }
 
@@ -291,7 +291,7 @@ fn claimed_fields(fleet: &Fleet, env_name: &str) -> BTreeSet<(String, String)> {
     let mut out = BTreeSet::new();
     for (product, prod) in &fleet.products {
         for (key, spec) in &prod.keys {
-            if !spec.personal || !spec.environments.iter().any(|e| e == env_name) {
+            if !spec.personal || !spec.is_desired_in(env_name) {
                 continue;
             }
             out.insert((product.clone(), key.clone()));
@@ -309,7 +309,7 @@ pub(crate) fn personal_fleet(fleet: &Fleet, env_name: &str) -> Fleet {
     let mut out = fleet.clone();
     for prod in out.products.values_mut() {
         prod.keys
-            .retain(|_, spec| spec.personal && spec.environments.iter().any(|e| e == env_name));
+            .retain(|_, spec| spec.personal && spec.is_desired_in(env_name));
         // In the person's own item these are its ordinary keys: the convention lays them out
         // there like any other (it skips personal keys only in the team item).
         for spec in prod.keys.values_mut() {

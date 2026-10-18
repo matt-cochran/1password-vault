@@ -229,6 +229,8 @@ fn a_managed_variable_no_key_wants_is_pruned() {
         .get_mut("SIGNUP_POLICY")
         .unwrap()
         .environments
+        .as_mut()
+        .unwrap()
         .retain(|e| e != "staging");
     let mut p = plan::build(&f2, "staging", vec![], &[], &BTreeSet::new(), &|_| None);
     let (name, t) = f2.environments["staging"]

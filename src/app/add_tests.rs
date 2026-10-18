@@ -98,7 +98,7 @@ fn without_env_the_key_is_declared_for_every_environment() {
     let a = add_to(COMMENTED, new_key("api/STRIPE_KEY"));
     assert_eq!(
         a.fleet().products["api"].keys["STRIPE_KEY"].environments,
-        vec!["dev", "prod"]
+        Some(vec!["dev".to_string(), "prod".to_string()])
     );
 }
 
@@ -109,7 +109,7 @@ fn env_limits_the_environments() {
     let a = add_to(COMMENTED, args);
     assert_eq!(
         a.fleet().products["api"].keys["STRIPE_KEY"].environments,
-        vec!["prod"]
+        Some(vec!["prod".to_string()])
     );
 }
 

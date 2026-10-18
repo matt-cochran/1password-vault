@@ -200,10 +200,11 @@ fn environment<'a>(
         None => {
             let mut names = fleet.environments.keys();
             // The key is declared for one environment only: that one, no question.
-            let sole: Option<&'a str> = match t.spec.environments.as_slice() {
+            let declared = t.spec.envs_in(fleet);
+            let sole: Option<&'a str> = match declared.as_slice() {
                 [one] => fleet
                     .environments
-                    .get_key_value(one)
+                    .get_key_value(one.as_str())
                     .map(|(k, _)| k.as_str()),
                 _ => None,
             };
@@ -215,14 +216,14 @@ fn environment<'a>(
                 _ => {
                     return Err(Cause::ChoiceRequired {
                         flag: "--env".into(),
-                        candidates: t.spec.environments.clone(),
+                        candidates: t.spec.envs_in(fleet),
                     }
                     .into());
                 }
             }
         }
     };
-    if !t.spec.environments.iter().any(|e| e == name) {
+    if !t.spec.is_desired_in(name) {
         // R21 (A6): declared, but not for this environment.
         return Err(Cause::KeyNotDeclared {
             key: crate::cause::KeyName::new(t.key),

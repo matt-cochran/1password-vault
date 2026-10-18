@@ -178,14 +178,14 @@ pub fn plan(
         // Declared at all, then declared for this environment: each names the keys that
         // are (05.39), so a typo gets the same command with the right name.
         let spec = fleet.products.get(product).and_then(|p| p.keys.get(key));
-        let Some(spec) = spec.filter(|s| s.environments.iter().any(|e| e == env_name)) else {
+        let Some(spec) = spec.filter(|s| s.is_desired_in(env_name)) else {
             let declared: Vec<String> = fleet
                 .products
                 .iter()
                 .flat_map(|(p, prod)| {
                     prod.keys
                         .iter()
-                        .filter(|(_, s)| s.environments.iter().any(|e| e == env_name))
+                        .filter(|(_, s)| s.is_desired_in(env_name))
                         .map(move |(k, _)| key_label(p, k))
                 })
                 .collect();
