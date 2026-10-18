@@ -3,6 +3,7 @@
 pub mod access;
 pub mod access_plan;
 pub mod adopt;
+pub mod catalog;
 pub mod convention;
 pub mod delivery;
 pub mod health;
