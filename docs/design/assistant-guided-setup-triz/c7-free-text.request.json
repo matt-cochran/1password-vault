@@ -1,0 +1,18 @@
+{
+  "evidence": [
+    {
+      "id": "E1",
+      "text": "Declaring a key accepts free text such as one line of guidance and reasons for exclusions, often written by the assistant."
+    },
+    {
+      "id": "E2",
+      "text": "A person or assistant can paste a secret value into a free-text field by mistake, and opv would store it in the configuration, which is not secret."
+    },
+    {
+      "id": "E3",
+      "text": "Names have strict grammars, but guidance must allow arbitrary prose."
+    }
+  ],
+  "desiredImprovement": "Expressive free-text fields for guidance and reasons",
+  "worseningOutcome": "Risk that a secret value is stored in a non-secret field"
+}

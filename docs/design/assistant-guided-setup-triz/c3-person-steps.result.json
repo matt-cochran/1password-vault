@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "inputHash": "sha256:ac60d2d34fb547752ba560f8862e768df25b663213bf697a0003c4597f734ac9",
+  "catalogVersion": "triz-software-2",
+  "requested": {
+    "provider": "openrouter",
+    "model": "~typesafe/jev-latest"
+  },
+  "reported": {
+    "provider": "openrouter",
+    "model": "~typesafe/jev-latest",
+    "available": true
+  },
+  "classification": "physical",
+  "confidence": 0.63,
+  "groundedEvidenceIds": [
+    "E1",
+    "E3"
+  ],
+  "rationale": "",
+  "principles": [
+    {
+      "id": "space-separation",
+      "name": "separation in space",
+      "heuristic": "Let each opposing requirement hold in a different component, node, region, layer, partition, namespace, or architectural location.",
+      "source": "https://matriz.org/wp-content/uploads/2020/04/Selected-Topics-for-Level-1-Training.pdf"
+    },
+    {
+      "id": "time-separation",
+      "name": "separation in time",
+      "heuristic": "Let each opposing requirement hold at a different time, phase, transaction stage, deployment window, operating mode, or lifecycle state.",
+      "source": "https://matriz.org/wp-content/uploads/2020/04/Selected-Topics-for-Level-1-Training.pdf"
+    },
+    {
+      "id": "condition-separation",
+      "name": "separation in relation (condition/context)",
+      "heuristic": "Let the same element satisfy opposite properties for different users, requests, tenants, relationships, contexts, modes, workloads, or other operating conditions.",
+      "source": "https://matriz.org/wp-content/uploads/2020/04/Selected-Topics-for-Level-1-Training.pdf"
+    },
+    {
+      "id": "system-level-separation",
+      "name": "separation in system level",
+      "heuristic": "Place one required property at the whole-system or supersystem level and the opposing property at a subsystem, component, instance, or lower abstraction level.",
+      "source": "https://matriz.org/wp-content/uploads/2020/04/Selected-Topics-for-Level-1-Training.pdf"
+    },
+    {
+      "id": "satisfy-both-demands",
+      "name": "satisfying contradictory demands",
+      "heuristic": "Change state, representation, protocol, parameters, or mechanism so both opposing requirements can hold simultaneously rather than being separated.",
+      "source": "https://matriz.org/wp-content/uploads/2020/04/Selected-Topics-for-Level-1-Training.pdf"
+    },
+    {
+      "id": "bypass-contradiction",
+      "name": "bypassing contradictory demands",
+      "heuristic": "Redesign the workflow, interaction, architecture, or system boundary so the conflicted parameter or requirement becomes irrelevant instead of being optimized.",
+      "source": "https://matriz.org/wp-content/uploads/2020/04/Selected-Topics-for-Level-1-Training.pdf"
+    }
+  ],
+  "usage": {
+    "input": 768,
+    "output": 131,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 899,
+    "available": true,
+    "costUsd": 0.000032256000000000004,
+    "piReported": {
+      "amountUsd": 0.000032256000000000004,
+      "available": true,
+      "source": "pi_reported"
+    }
+  },
+  "billedCostUsd": null,
+  "inferenceDeterministic": false,
+  "catalog": {
+    "version": "triz-software-2",
+    "citations": [
+      "https://triz.org/contradictions/",
+      "https://triz.org/principles/",
+      "https://matriz.org/methodology/",
+      "https://wiki.matriz.org/docs/triz/problem-solving-tools-5890/contradictions/",
+      "https://wiki.matriz.org/docs/triz/problem-solving-tools-5890/contradictions/engineering-contradiction-5995/contradiction-matrix-6026/",
+      "https://matriz.org/wp-content/uploads/2020/04/Selected-Topics-for-Level-1-Training.pdf",
+      "https://doi.org/10.1016/j.proeng.2015.12.413"
+    ],
+    "canonicalMatrixLookup": false,
+    "disclaimer": "Complete software-adapted TRIZ contradiction-resolution heuristic catalog: all 40 main Inventive Principles plus the modern MATRIZ physical-contradiction resolution routes. Heuristic wording is software-adapted rather than canonical TRIZ wording. This object does not embed the classical 39x39 Altshuller contradiction matrix and is not a complete representation of the broader TRIZ body of knowledge, which also includes ARIZ, Substance-Field analysis, Standard Inventive Solutions, trends of engineering-system evolution, scientific effects, function analysis, and related methods."
+  },
+  "notes": [
+    "Provider reported a model alias; the resolved underlying model version is unavailable.",
+    "Classifier output is probabilistic inference; only the catalog mapping is deterministic.",
+    "Billed cost is unknown: no upstream provider billing response is captured. A finite Pi SDK usage cost is labelled as Pi-reported (source: pi_reported) and is an estimate, not a bill; an absent cost is unknown, not free."
+  ]
+}

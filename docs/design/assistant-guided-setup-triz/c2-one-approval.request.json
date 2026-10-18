@@ -1,0 +1,18 @@
+{
+  "evidence": [
+    {
+      "id": "E1",
+      "text": "First-time setup today needs separate commands and approvals: declare keys, plan structure, approve, apply, import values, add targets, grant access."
+    },
+    {
+      "id": "E2",
+      "text": "The owner wants setup to be as ergonomic as possible, ideally one review and one approval."
+    },
+    {
+      "id": "E3",
+      "text": "Every write to 1Password and to deployment targets must be approved by a person; approvals bind a content hash of the exact plan."
+    }
+  ],
+  "desiredImprovement": "Fewer person approvals during setup (ergonomics)",
+  "worseningOutcome": "Safety and precision of consent: one broad approval risks approving writes the person did not examine"
+}

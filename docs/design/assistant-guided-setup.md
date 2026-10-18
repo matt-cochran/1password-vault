@@ -330,7 +330,28 @@ The foundation (value-free surfaces, plans bound to content, reconciliation of d
 
 # Part III: contradictions (TRIZ)
 
-TRIZ is worth using here because the objective contains real contradictions: two requirements that pull against each other, where a compromise would weaken both. The principles below come from the offline catalog (`triz catalog`, triz-software-2). The paid `triz analyze` (Jev through OpenRouter) was not run; it needs the owner's authorization and is offered in §15.
+TRIZ is worth using here because the objective contains real contradictions: two requirements that pull against each other, where a compromise would weaken both. The principles below come from the offline catalog (`triz catalog`, triz-software-2).
+
+**Cross-check with `triz analyze` (Jev through OpenRouter, run 2026-10-18 with the owner's authorization).** Each contradiction was sent as design prose only, with no value, ID or name. Requests and results are in [assistant-guided-setup-triz/](assistant-guided-setup-triz/). The reported cost was about $0.0004 in total, a Pi-reported estimate rather than a bill.
+
+| # | This design says | Jev classified | Confidence | Agrees? |
+|---|---|---|---|---|
+| C1 | physical | `uncertain` when framed with both technical and physical fields; `physical` when reframed as physical only (`c1b`) | 0.35 → 0.63 | yes (after reframing) |
+| C2 | technical | technical | 0.93 | yes |
+| C3 | physical | physical | 0.63 | yes |
+| C4 | technical | technical | 0.91 | yes |
+| C5 | technical | technical | 0.88 | yes |
+| C6 | technical | technical | 0.99 | yes |
+| C7 | technical | technical | 0.99 | yes |
+| C8 | technical | technical | 0.97 | yes |
+| C9 | technical | technical | 0.85 | yes |
+| C10 | physical | technical | 0.60 (at the threshold) | partly: the resolution holds either way (agent mode is principle 3, local quality, as much as separation on condition) |
+
+Two limits of the tool's output:
+- For every technical result, `principles` is the whole catalog of 40, unranked, so Jev's call confirms the *classification* but does not choose principles.
+- For physical results it returns all six separation routes.
+
+The principle choices in the table below are therefore this design's, made from the catalog, and the classifier only corroborates the type of each contradiction.
 
 | # | Contradiction | Type | Resolution | Principle |
 |---|---|---|---|---|
