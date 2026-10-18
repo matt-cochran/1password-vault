@@ -456,6 +456,12 @@ pub enum Cause {
         file: PathBuf,
         manifest: String,
     },
+    /// The committed `secrets.bindings.toml` is not the one the last `opv apply` wrote
+    /// (D-G); the apply record holds only digests, so the environments named here are the
+    /// ones in the bindings file. A person runs `opv apply`.
+    BindingsUnapplied {
+        environments: Vec<EnvName>,
+    },
     ManifestNotFound {
         project: String,
         account: Option<AccountId>,
@@ -1431,6 +1437,7 @@ impl Cause {
             StateVaultTooWide { .. } => "state_vault_wider_than_values",
             ConfigNotEditable { .. } => "config_not_editable",
             CopiesDiffer { .. } => "copies_differ",
+            BindingsUnapplied { .. } => "bindings_unapplied",
             ManifestNotFound { .. } => "manifest_not_found",
             ManifestAmbiguous { .. } => "manifest_ambiguous",
             ManifestExists { .. } => "manifest_exists",
@@ -1554,6 +1561,7 @@ impl Cause {
             | StateVaultTooWide { .. }
             | ConfigNotEditable { .. }
             | CopiesDiffer { .. }
+            | BindingsUnapplied { .. }
             | ManifestNotFound { .. }
             | ManifestAmbiguous { .. }
             | ManifestExists { .. }

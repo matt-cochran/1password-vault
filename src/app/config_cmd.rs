@@ -14,7 +14,7 @@ use serde_json::json;
 
 use super::{status, write_err};
 use crate::adapters::onepassword_manifest::{self as manifest, Row};
-use crate::cause::{AccountId, Cause, Cmd, GivenBy, UsageProblem};
+use crate::cause::{AccountId, Cause, Cmd, EnvName, GivenBy, UsageProblem};
 use crate::config;
 use crate::config_store::{
     self as store, ConfigStore, Found, ManifestStore, Matched, Replaced, Snapshot,
@@ -30,6 +30,52 @@ fn line(out: &mut dyn Write, s: impl AsRef<str>) -> Result<(), Error> {
 /// opv's own failure at `site` (never the person's).
 fn bug(site: &'static str) -> Error {
     Cause::Bug { site }.into()
+}
+
+/// D-G: the committed `secrets.bindings.toml` must be the one the last `opv apply` wrote.
+/// The apply record holds only digests, so a difference is reported with the environments
+/// named in the bindings file (the record names none). No record means nothing was applied
+/// yet, which passes; only names and digests are compared, never a value.
+fn check_bindings(file: &Path) -> Result<(), Error> {
+    let dir = file.parent().unwrap_or_else(|| Path::new("."));
+    let Some(record) = config::bindings::read_record(&dir.join(config::bindings::APPLIED))? else {
+        return Ok(());
+    };
+    let path = dir.join(config::bindings::FILE);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(unreadable_file(&path, &e)),
+    };
+    if config::bindings::digest(&bytes) == record.bindings_digest {
+        return Ok(());
+    }
+    let ids = config::bindings::read_sibling(file)?;
+    Err(Cause::BindingsUnapplied {
+        environments: environments_of(&ids),
+    }
+    .into())
+}
+
+/// The environments a bindings file names, in the file's sorted order: the second dotted key
+/// of every `environments.<env>…` path.
+fn environments_of(ids: &config::bindings::Bindings) -> Vec<EnvName> {
+    let mut envs: Vec<EnvName> = Vec::new();
+    for line in ids.render().lines() {
+        let Some(path) = line.split(" = ").next() else {
+            continue;
+        };
+        let mut parts = path.split('.');
+        if parts.next() != Some("environments") {
+            continue;
+        }
+        let Some(env) = parts.next() else { continue };
+        let env = EnvName::new(env);
+        if !envs.contains(&env) {
+            envs.push(env);
+        }
+    }
+    envs
 }
 
 /// A file named with `--file` that could not be read.
@@ -234,6 +280,7 @@ pub fn check(
         (contract, committed)
     };
     if a.trim_end() == b.trim_end() {
+        check_bindings(file)?;
         return line(
             out,
             format!("{} matches {}", file.display(), found.store().describe()),

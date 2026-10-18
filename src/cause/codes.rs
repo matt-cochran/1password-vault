@@ -102,6 +102,9 @@ pub fn meaning(code: &str) -> &'static str {
         "copies_differ" => {
             "a committed secrets.toml and the manifest differ; a person picks which is right"
         }
+        "bindings_unapplied" => {
+            "the committed secrets.bindings.toml is not the one the last opv apply wrote; a person runs opv apply"
+        }
         "manifest_not_found" => {
             "no 1Password manifest has the project's title (OPV_PROJECT or .opv)"
         }
@@ -488,6 +491,9 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
         CopiesDiffer {
             file: PathBuf::from("cfg/copy.toml"),
             manifest: "man-shop".into(),
+        },
+        BindingsUnapplied {
+            environments: vec![EnvName::new("env-prod")],
         },
         ManifestNotFound {
             project: "proj-shop".into(),

@@ -240,6 +240,70 @@ fn check_of_a_different_copy_prints_the_diff() {
     );
 }
 
+/// Write the apply record at `<dir>/.opv/applied.json` with `bindings_digest`.
+fn put_record(dir: &Path, bindings_digest: String) {
+    let record = crate::config::bindings::ApplyRecord {
+        plan_id: "01JPLAN".into(),
+        contract_digest: crate::config::bindings::digest(b"contract"),
+        bindings_digest,
+    };
+    crate::config::bindings::write_record(&dir.join(crate::config::bindings::APPLIED), &record)
+        .unwrap();
+}
+
+/// The sha256 of the committed bindings file's bytes.
+fn committed_bindings_digest(dir: &Path) -> String {
+    let bytes = std::fs::read(dir.join(crate::config::bindings::FILE)).unwrap();
+    crate::config::bindings::digest(&bytes)
+}
+
+#[test]
+fn check_of_an_unapplied_bindings_digest_is_bindings_unapplied() {
+    let (dir, op) = checkout();
+    put(&op, "myapp", TOML);
+    put_record(dir.path(), crate::config::bindings::digest(b"other"));
+    let found = manifest_of(dir.path(), &op);
+    let e = check(
+        &found,
+        &dir.path().join("secrets.toml"),
+        &op,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(e.code_str(), "bindings_unapplied");
+}
+
+#[test]
+fn check_of_an_unapplied_bindings_digest_names_the_environment() {
+    let (dir, op) = checkout();
+    put(&op, "myapp", TOML);
+    put_record(dir.path(), crate::config::bindings::digest(b"other"));
+    let found = manifest_of(dir.path(), &op);
+    let e = check(
+        &found,
+        &dir.path().join("secrets.toml"),
+        &op,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert!(e.to_string().contains("dev"), "{e}");
+}
+
+#[test]
+fn check_of_a_matching_bindings_digest_passes() {
+    let (dir, op) = checkout();
+    put(&op, "myapp", TOML);
+    put_record(dir.path(), committed_bindings_digest(dir.path()));
+    let found = manifest_of(dir.path(), &op);
+    let res = check(
+        &found,
+        &dir.path().join("secrets.toml"),
+        &op,
+        &mut Vec::new(),
+    );
+    assert!(res.is_ok(), "{res:?}");
+}
+
 // --- edit ---
 
 /// Scripted editor: each `edit` returns the next text (or the input when none is left);

@@ -2236,6 +2236,14 @@ impl Cause {
                     ),
                 }
             }
+            BindingsUnapplied { environments } => format!(
+                "the committed secrets.bindings.toml was not the one the last opv apply wrote ({}); a person runs opv apply",
+                match environments.as_slice() {
+                    [] => "no environment ids".to_string(),
+                    [one] => format!("the ids of environment {one}"),
+                    many => format!("the ids of environments {}", list_of(many)),
+                }
+            ),
             Bug { site } => format!("opv hit an internal error ({site})"),
         }
     }
@@ -2598,6 +2606,8 @@ impl Cause {
                 )),
                 Next::None(NoNext::PersonPicksDirection),
             ),
+            // D-G: only the apply that wrote the record may update it; a person runs it.
+            BindingsUnapplied { .. } => plan(None, Next::Handoff(cmd(&["apply"], &[]))),
             ManifestNotFound { project, account } => plan(
                 inspect(match account {
                     Some(a) => format!(
