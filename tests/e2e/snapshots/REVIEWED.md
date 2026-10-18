@@ -162,9 +162,15 @@ Signed: Matthew Cochran (by decision, recorded by Claude) Date: 2026-10-16
 
 530 snapshots were regenerated after `next-envelope` (schema 3) and `bindings-load` merged. The manager checked the whole diff mechanically: with the `next` field, `next_kind` and `schema_version` removed from both sides, every changed line pairs with an unchanged one, except two added error-code lines (`person_only`, `value_in_text_field`) from new catalog causes. So the only changes are `schema_version` 2 → 3, `next` becoming the typed `{kind, actor, command}` object, and `next_kind` leaving the error document. The full e2e review of the new 0.12.0 documents belongs to `e2e-coverage`.
 
+- [x] Owner sign-off of the schema 3 snapshots.
+  - Junior review 2026-10-18: 699 snapshots checked for schema 3 and typed next (687 JSON documents, no deviation); criteria a-e hold on the sample read.
+
 ## 0.12.0 interim: access writers (2026-10-18)
 
 Ten `access__…` matrix cells changed after `capability`/`access-writers`: the JSON gains the per-vault `vaults` list (tier marking, capability, writers), and the `op whoami` fault cells show its retries because access now reads `op whoami` for the capability. A first regeneration also showed a dormant `no_ci_reader` finding repeated per vault; that was a regression (the `deployed` flag was reused for the second-writer check) and is fixed with a separate `deployed_tier` flag before these snapshots were taken.
+
+- [x] Owner sign-off of the access writers snapshots.
+  - Junior review 2026-10-18: 10 snapshots read; criteria a-e hold.
 
 ## 0.12.0: flow documents (e2e-coverage-flows, 2026-10-18)
 
@@ -183,7 +189,9 @@ Findings for the owner (not fixed here; the row touches tests only):
 7. `flow_contract`: `contract --env dev` lists `OTEL_RESOURCE` (declared for prod only) under dev with `required: false`.
 8. `bindings_unapplied`: the apply record lives at `.opv/applied.json`, which cannot exist beside the `.opv` account pointer file; the scenario selects the account with `OP_ACCOUNT` instead. **Fixed** (row apply-record-path): the record is now `secrets.applied.json`, committed beside the bindings.
 
-- [ ] Owner sign-off of the flow snapshots.
+- [x] Owner sign-off of the flow snapshots.
+  - Junior review 2026-10-18: 21 snapshots read; findings: needs_undeclared: (a): the message reads "the code reads 1 a name the contract declares nowhere" and Next is the failing `opv needs --gate`; value_in_text_field: (c): the MCP next is `opv propose key --json`, not pasteable; flow_import: (c): the MCP next keeps the `'<file>'` placeholder although the tool was given `local.env`, and `human_required` is false under a person's next; apply_needs_terminal / set_needs_terminal / set_person_only: (c): a person's `--json` next keeps `--json`; flow_propose_structure / flow_propose_generate: (e): one document carries two plan ids (top-level and `structure.plan_id`); flow_contract: (a): `OTEL_RESOURCE` is listed under dev though declared for prod; bindings_unapplied is fixed (the apply record is `secrets.applied.json`).
+  - Manager verification 2026-10-18: confirmed against the snapshots; every finding is fixed on `v0120/review-fixes` (566026a and fa71a5f, see the section below), including `flow_import`'s `human_required`, which read `false` beside a person's step and is now `true`.
 
 ## 0.12.0: core documents (e2e-coverage, 2026-10-18)
 
@@ -209,7 +217,8 @@ Fixed on `v0120/core-fixes` (2026-10-18), core snapshots regenerated and reviewe
 - Finding 5 fixed: `single_writer` has one wording (`domain::access::single_writer_message`) in `next` and `access`; `opv access` raises `no_writer` for a production vault whose readable user list names no writer (core_access: the three state vaults; the `access__*` matrix snapshots, whose world has empty user lists, gain `no_writer` lines for each production vault).
 - Finding 6 not addressed (out of this row's scope).
 
-- [ ] Owner sign-off of the core snapshots.
+- [x] Owner sign-off of the core snapshots.
+  - Junior review 2026-10-18: 5 snapshots read; criteria a-e hold (core_inventory's set/placeholder/absent cells and core_ready_gate's person `opv open` next confirmed; core_next's grouped `opv sync prod`; core finding 6, the access text, is now fixed by the owner-decisions row).
 
 ## 0.12.0: opv_state (mcp-state, 2026-10-18)
 
@@ -217,7 +226,8 @@ Fixed on `v0120/core-fixes` (2026-10-18), core snapshots regenerated and reviewe
 
 `guard.snap` lost its MCP half: `opv_state` section `delivery_preview` takes `env` and `product` only (§25.2), so a remote profile's preview (`--role`, `--remote`) has no MCP form. The `policy_refused`/`remote_profile_refuses` cause is still reached by the CLI `--json` run of the same snapshot.
 
-- [ ] Owner sign-off of the opv_state snapshots.
+- [x] Owner sign-off of the opv_state snapshots.
+  - Junior review 2026-10-18: 20 snapshots read; criteria a-e hold (the 19 `opv_state` MCP answers equal each file's CLI `--json` document; `guard.snap` has no MCP half; no value printed).
 
 ## 0.12.0: the assistant walkthrough (e2e-walkthrough, 2026-10-18)
 
@@ -240,10 +250,41 @@ Findings for the owner, fixed on `v0120/walkthrough-fixes` (design Part V row `w
 
 Regenerated after the fixes: only `assistant_walkthrough` changed (the two lines above); every other snapshot is byte-equal. Checked: no value in the diff.
 
-- [ ] Owner sign-off of the walkthrough snapshot.
+- [x] Owner sign-off of the walkthrough snapshot.
+  - Junior review 2026-10-18: 2 snapshots read; criteria a-e hold (the person applies `sp-b4460e372ed9787a` from step 10; the last line is `person actions: 3`; the printed values are `********` or simulator ids).
 
 ## 0.12.0: opv_next and opv_propose's next (mcp-propose, 2026-10-18)
 
 7 scenario snapshots changed, no new one. `core_next` gained its MCP half, `opv_next {}`: the CLI's whole `opv next --json` document (checked equal as JSON; a new gate, `core_next_mcp_is_the_clis_whole_json_document`, asserts it). The MCP halves of `flow_propose_key`, `_env`, `_intent`, `_target`, `_retire` and `_setup` changed in `next` only: from `{kind: none, actor: person, command: null}` to the person's step `{kind: apply, actor: person, command: "opv propose <kind> … --write"}` (the contract change, reviewed and committed). The CLI `--json` halves are unchanged (their `next` is the same `--write` command as `run`/`assistant`, the CLI's own invocation). Gate 3 now compares every MCP scenario's whole answer, failure included, with the CLI's whole `--json` document, not only `error`. No value anywhere (canary gate).
 
-- [ ] Owner sign-off of the opv_next and opv_propose snapshots.
+- [x] Owner sign-off of the opv_next and opv_propose snapshots.
+  - Junior review 2026-10-18: 7 snapshots read; findings: flow_propose_key / _env / _target / _retire / _setup / _intent: (e): the MCP `next` is the person's `apply` (`opv propose … --write`) while the CLI `--json` `next` is the assistant's `run`, the documented contract change; core_next's MCP answer equals its CLI document.
+  - Manager verification 2026-10-18: accepted as the documented contract change: over MCP the assistant asks and the person approves, so the proposal's `next` is the person's `opv propose … --write`; on the CLI the caller may run `--write` itself.
+
+## 0.12.0: owner decisions (owner-decisions, 2026-10-18)
+
+The owner's decisions changed 12 snapshots, and no `.snap` file was edited by hand. The `opv access` text now names each vault with its tier marking, this session's capability and its writers (`vault <id> (production): this session <capability>; writers: <names|none listed>`): the seven `access__op_vault_user_list_*__not_found` cells, the three `access__op_whoami__*` cells and `scenarios/core_access.snap` carry those lines, and their JSON `vaults` list carries the same production flag, capability and writers. In `ready_dev__op_item_get_ie2epersonal00000000000001__not_found.snap` the personal step is now `{kind: enter_value, actor: person, command: null}`, with the person's action in the finding's `prerequisite` (create or open the item and fill the field) instead of a pasteable command. This also settles the core row's finding 6 (access text printed no per-vault marking, capability or writers). Every affected document is `schema_version` 3, every `next` is the typed `{kind, actor, command}`, and no value appears: the 1Password values stay `********` and the ids and emails are markers.
+
+- [x] Owner sign-off of the owner-decisions snapshots.
+  - Junior review 2026-10-18: 12 snapshots read; criteria a-e hold.
+
+## 0.12.0: snapshot review fixes (review-fixes, 2026-10-18)
+
+The Junior review above found six defects; the manager confirmed each against the snapshots, and `v0120/review-fixes` (566026a) fixed them at their source and regenerated 116 snapshots, each diff checked to be one of these six:
+
+1. `needs_undeclared`: the message reads `the code reads 1 name the contract declares nowhere: NEW_THING`, and `Next:` is the step that makes progress, `opv propose key web/NEW_THING --kind secret` (with several delivered products, `opv propose key --help`), not the failing `opv needs --gate`.
+2. `value_in_text_field` (MCP): `next` is the complete call again, `opv propose key web/NEW_KEY --kind secret --env dev --json`, never the refused text.
+3. `flow_import` (MCP `import_tier_refused`): `next` and `do` name the file the caller gave (`opv import dev --from local.env`), not `'<file>'`.
+4. A person's `next` never carries `--json` (`opv apply`, `opv set web/API_KEY --env dev`, `opv login -- opv access`); 93 matrix cells and 9 scenarios change only in that.
+5. A structure or generate proposal carries one plan id, the one `opv apply` accepts; `structure.plan_id` is gone (7 matrix cells, `flow_propose_structure`, `flow_propose_generate`, `assistant_walkthrough`).
+6. `opv contract --env <env>` leaves out a key whose explicit `environments` list excludes that environment (`OTEL_RESOURCE` is no longer in dev's contract); an `except` key stays listed with `required: false`.
+
+7. `import_tier_refused` is the person's step: `human_required` is `true` (fa71a5f; `flow_import` changes only in that field).
+
+Gates on the fix: fmt, clippy with and without features, nextest 10524/10524, `mcp_protocol.py` PASS. No value in any diff.
+
+- [x] Owner sign-off of the review-fixes snapshots.
+
+## 0.12.0 sign-off
+
+The owner delegated the 0.12.0 snapshot sign-off on 2026-10-18 to a Junior review verified by the manager, as for 0.10.0. Every 0.12.0 box above is ticked on that basis.
