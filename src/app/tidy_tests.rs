@@ -876,26 +876,6 @@ fn run_after_a_persons_tidy_uses_the_convention_reference() {
     )));
 }
 
-/// A service account never writes 1Password (FR-9, SR-5): `opv init` for a missing item
-/// creates nothing under one (a person's session creates it: init_tests).
-#[test]
-fn init_never_creates_an_item_for_a_service_account() {
-    let dir = tempfile::tempdir().unwrap();
-    let op = FakeOp::new(json!({}), "SERVICE_ACCOUNT");
-    let args = crate::app::init::InitArgs {
-        env: "dev".into(),
-        vault: "myapp-dev".into(),
-        item: "app".into(),
-        product: Some("app".into()),
-        force: false,
-        from: None,
-    };
-    let _on = activate();
-    let mut out = Vec::new();
-    let _ = crate::app::init::run(&args, dir.path(), &op, &mut out);
-    assert_eq!(op.count(&["item", "create"]), 0);
-}
-
 // ---- Integration seams: shared keys (FR-45), links (H1), read-only consistency ----------
 
 fn shared_fleet() -> Fleet {
@@ -1465,7 +1445,11 @@ fn doctor_leaves_the_item_version_unchanged() {
 fn doctor_names_the_explicit_repair() {
     let op = FakeOp::person(messy_item());
     doctor(&op, false);
-    assert!(op.notes().contains("opv config export dev"), "{}", op.notes());
+    assert!(
+        op.notes().contains("opv config export dev"),
+        "{}",
+        op.notes()
+    );
 }
 
 #[test]

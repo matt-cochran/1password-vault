@@ -1084,8 +1084,13 @@ fn declare_key(project: &std::path::Path, args: DeclareKey) -> Value {
         .chain(args.environments.iter().map(|e| ("environments", e)))
         .find(|(_, n)| !identifier(n));
     if let Some((field, _)) = bad {
-        return ToolCall::new("opv_declare_key", &["propose", "key"], Vec::new(), args.verbose)
-            .refused(not_a_name(field));
+        return ToolCall::new(
+            "opv_declare_key",
+            &["propose", "key"],
+            Vec::new(),
+            args.verbose,
+        )
+        .refused(not_a_name(field));
     }
     let mut words = vec![format!("{}/{}", args.product, args.key)];
     if ["secret", "config"].contains(&args.kind.as_str()) {

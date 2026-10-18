@@ -185,27 +185,35 @@ impl ConfigStore for FileStore {
         })
     }
 
+    /// The contract as written, without its ids (D-G): an edit never sees, moves or writes
+    /// an id; only `opv apply` writes `secrets.bindings.toml`.
+    fn read_for_write(&self, _: &dyn CommandRunner) -> Result<Snapshot, Error> {
+        Ok(Snapshot {
+            text: fs::read_to_string(&self.path)
+                .map_err(|e| unreadable(&self.path, &e, GivenBy::Discovered))?,
+            version: None,
+        })
+    }
+
+    /// Replace the contract with `text` if it is still at `base` (a
+    /// [`read_for_write`](Self::read_for_write) snapshot). D-G: `text` carrying an inline id
+    /// is refused `config_invalid` naming the field, and the bindings file is never written.
+    /// Atomic (temporary file, then rename), symlinks followed, permissions kept, and
+    /// compared once more right before the rename.
     fn replace(
         &self,
         r: &dyn CommandRunner,
         base: &Snapshot,
         text: &str,
     ) -> Result<Replaced, Error> {
-        let now = self.read(r)?;
+        let now = self.read_for_write(r)?;
         if now.text != base.text {
             return Ok(Replaced::Changed(now));
         }
-        // D-G: the ids go to the sibling bindings file, the rest to the contract. Atomic
-        // (temporary file, then rename), symlinks followed, permissions kept, and compared
-        // once more right before the rename.
-        let (contract, ids) = config::bindings::split(text);
-        let raw = fs::read_to_string(&self.path)
-            .map_err(|e| unreadable(&self.path, &e, GivenBy::Discovered))?;
-        let saved = crate::config_edit::replace(&self.path, &raw, &contract)
-            .and_then(|()| config::bindings::write_sibling(&self.path, &ids));
-        match saved {
+        config::bindings::refuse_inline(text)?;
+        match crate::config_edit::replace(&self.path, &now.text, text) {
             Ok(()) => Ok(Replaced::Saved),
-            Err(e) => match self.read(r) {
+            Err(e) => match self.read_for_write(r) {
                 Ok(now) if now.text != base.text => Ok(Replaced::Changed(now)),
                 _ => Err(e),
             },
@@ -414,19 +422,25 @@ impl ConfigStore for ManifestStore {
         self.snapshot(&m)
     }
 
+    /// The contract block alone (D-G): an edit never sees, moves or writes an id; only
+    /// `opv apply` writes the `opv-bindings` block.
     fn read_for_write(&self, r: &dyn CommandRunner) -> Result<Snapshot, Error> {
         crate::app::tidy::require_person(r, "this command")?;
         let m = self.read_item(r, true)?;
-        self.snapshot(&m)
+        Ok(Snapshot {
+            text: m.text,
+            version: Some(m.version),
+        })
     }
 
     /// Refused unless a person runs opv (I3). Re-reads the item past `op`'s cache (C1) and
     /// refuses when its version moved since `base`; otherwise sends the item just read back
     /// with the new notes, then checks that the edit is exactly one version later and holds
     /// `text` (I5: op has no conditional write, so a change in the moment between the
-    /// re-read and the write is detected afterwards and reported, not prevented). D-G: the
-    /// ids in `text` go to the `opv-bindings` block, the rest to the contract block; the
-    /// bindings block is rewritten only when its ids changed.
+    /// re-read and the write is detected afterwards and reported, not prevented). D-G:
+    /// `text` is the contract block; one carrying an inline id is refused `config_invalid`
+    /// naming the field, and the `opv-bindings` block is kept as it is (only `opv apply`
+    /// writes it).
     fn replace(
         &self,
         r: &dyn CommandRunner,
@@ -436,22 +450,24 @@ impl ConfigStore for ManifestStore {
         crate::app::tidy::require_person(r, "this command")?;
         let now = self.read_item(r, true)?;
         if Some(now.version) != base.version {
-            return Ok(Replaced::Changed(self.snapshot(&now)?));
+            return Ok(Replaced::Changed(Snapshot {
+                text: now.text,
+                version: Some(now.version),
+            }));
         }
-        let (contract, ids) = config::bindings::split(text);
-        let had = config::bindings::parse_block(now.bindings.as_deref(), &self.cause_source());
-        let block = (had.as_ref().ok() != Some(&ids)).then(|| ids.render());
+        config::bindings::refuse_inline_into(text, config::bindings::MANIFEST_HOME)?;
+        let ids = config::bindings::parse_block(now.bindings.as_deref(), &self.cause_source())?;
         let written = manifest::edit(
             r,
             &self.vault_id,
             &self.item_id,
             &now.raw,
-            &contract,
-            block.as_deref(),
+            text,
+            None,
             self.account.as_deref(),
             &Host::detect,
         )?;
-        self.confirm(r, now.version, written, &contract, &ids)?;
+        self.confirm(r, now.version, written, text, &ids)?;
         Ok(Replaced::Saved)
     }
     // C12: the manifest by title and vault, so its errors name the vault it lives in.

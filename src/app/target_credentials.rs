@@ -367,8 +367,8 @@ pub fn run(
     drop(fields);
     // Only the item's reference is recorded; the token itself stays in 1Password.
     let reference = format!("op://{}/{}", state_vault, item.id);
-    super::propose::declare::set_target_deploy_credentials(r, config, env, name, &reference).map_err(
-        |e| {
+    super::propose::declare::set_target_deploy_credentials(r, config, env, name, &reference)
+        .map_err(|e| {
             let done = vec![
                 minted.clone(),
                 format!(
@@ -380,8 +380,7 @@ pub fn run(
                 ),
             ];
             after_mint(e, done)
-        },
-    )?;
+        })?;
     writeln!(
         out,
         "minted {credential:?} and stored it as item {} in vault {}; nothing was printed",

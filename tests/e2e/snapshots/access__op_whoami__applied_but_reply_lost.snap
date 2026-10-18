@@ -32,6 +32,10 @@ Owner runs: op service-account create "project-prod-ci" --vault vE2ESHAREDPROD00
 
 ## text stderr
 using <SCENARIO>/project/secrets.toml
+retrying op whoami (2/3) in <delay>
+retrying op whoami (3/3) in <delay>
+retrying op whoami (2/3) in <delay>
+retrying op whoami (3/3) in <delay>
 
 ## json exit: 0
 ## json stdout
@@ -39,3 +43,7 @@ using <SCENARIO>/project/secrets.toml
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml
+retrying op whoami (2/3) in <delay>
+retrying op whoami (3/3) in <delay>
+retrying op whoami (2/3) in <delay>
+retrying op whoami (3/3) in <delay>

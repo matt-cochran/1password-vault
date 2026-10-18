@@ -37,6 +37,9 @@ impl ConfigStore for Declaring {
     fn read(&self, r: &dyn CommandRunner) -> Result<Snapshot, Error> {
         self.0.read(r)
     }
+    fn read_for_write(&self, r: &dyn CommandRunner) -> Result<Snapshot, Error> {
+        self.0.read_for_write(r)
+    }
     fn replace(
         &self,
         r: &dyn CommandRunner,
@@ -166,7 +169,7 @@ pub fn environment(r: &dyn CommandRunner, path: &Path, name: &str) -> Result<boo
         return Err(format_error("the environment name", NAME_FORMAT));
     }
     let store = store(path)?;
-    let base = store.read(r)?;
+    let base = store.read_for_write(r)?;
     if has_env(&base.text, name)? {
         return Ok(false);
     }
@@ -215,7 +218,7 @@ pub fn target(r: &dyn CommandRunner, path: &Path, t: &Target) -> Result<bool, Er
         return Err(target_add(&t.environment, &t.name));
     }
     let store = store(path)?;
-    let base = store.read(r)?;
+    let base = store.read_for_write(r)?;
     let fleet = store.parse(&base.text)?;
     let env = fleet.environment(&t.environment)?;
     if env.targets.contains_key(&t.name) {
@@ -249,7 +252,7 @@ pub fn set_target_deploy_credentials(
     reference: &str,
 ) -> Result<(), Error> {
     let store = store(path)?;
-    let base = store.read(r)?;
+    let base = store.read_for_write(r)?;
     let mut doc = crate::app::bootstrap::parse_doc(&base.text)?;
     let declared: Vec<String> = doc
         .get("environments")

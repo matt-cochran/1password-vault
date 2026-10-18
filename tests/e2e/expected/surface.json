@@ -37,7 +37,9 @@
         "plan_id"
       ],
       "flags": [
-        "json"
+        "generate",
+        "json",
+        "rebind"
       ],
       "name": "apply"
     },
@@ -91,7 +93,8 @@
       ],
       "flags": [
         "json",
-        "toml"
+        "toml",
+        "with-ids"
       ],
       "name": "config export"
     },
@@ -147,7 +150,9 @@
       ],
       "flags": [
         "env",
-        "json"
+        "json",
+        "project",
+        "target"
       ],
       "name": "explain"
     },
@@ -394,7 +399,6 @@
         "kubernetes-namespace",
         "kubernetes-secrets-dir",
         "products",
-        "project",
         "provider",
         "role",
         "write"

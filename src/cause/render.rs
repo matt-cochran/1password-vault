@@ -1217,7 +1217,10 @@ fn generate_refused(
         ),
         GenerateRefusal::Shared { from } => plan(
             inspect(format!("generate {from}, the key {pk} reads from")),
-            Next::Run(cmd(&["propose", "generate"], &[env.as_str(), from.as_str()])),
+            Next::Run(cmd(
+                &["propose", "generate"],
+                &[env.as_str(), from.as_str()],
+            )),
         ),
         GenerateRefusal::ByteCountOutOfRange => plan(
             inspect(format!(

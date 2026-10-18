@@ -123,10 +123,10 @@ fn names_steps(imported: &init::Imported) -> Vec<String> {
 }
 
 /// Write the proposed contract to `path` (`opv propose setup --write`), replacing what the
-/// diff was computed against; the contract only, never a value. The ids an existing item
-/// has are recorded by `opv apply`, which finds the item by its title.
+/// diff was computed against; the contract only, never a value or an id. D-G: the bindings
+/// file is written only by `opv apply`, which finds the item by its title.
 pub fn write(path: &Path, proposal: &SetupProposal) -> Result<(), Error> {
-    init::write_config(path, &proposal.proposal.contract_after, true)
+    init::write_atomic(path, &proposal.proposal.contract_after, true)
 }
 
 /// Assemble the proposal: the diff against `file_target`, the plan id and the structure.

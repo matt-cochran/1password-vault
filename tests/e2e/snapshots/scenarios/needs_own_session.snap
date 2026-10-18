@@ -7,11 +7,3 @@
 opv: opv config import must be used in your own session, not as the token in OP_SERVICE_ACCOUNT_TOKEN
 Do: run it in your own terminal, signed in as yourself, without OP_SERVICE_ACCOUNT_TOKEN
 Next: opv config import --vault e2e-manifest --project e2e-other
-
-## json exit: 2
-## json stdout
-{"schema_version":3,"ok":false,"exit_code":2,"next":{"kind":"run","actor":"assistant","command":"opv config import --help"},"do":null,"error":{"code":"usage","category":"config","message":"unexpected argument '--json' found","subject":{"problem":{"problem":"rejected","message":"unexpected argument '--json' found","help":["config","import"]}},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":null,"next":{"kind":"run","actor":"assistant","command":"opv config import --help"}}}
-
-## json stderr
-opv: unexpected argument '--json' found
-Next: opv config import --help

@@ -1,28 +1,18 @@
-# title_lookup: opv propose structure --rebind dev
+# title_lookup: opv propose setup --from-item dev --vault e2e-app-shared-dev --item e2e-app · shared · dev values
 
-## text exit: 0
+## text exit: 2
 ## text stdout
-1. create vault "e2e-app-shared-dev" and item "e2e-app · shared · dev values" for boundary shared in dev
-2. create vault "e2e-app-web-dev" and item "e2e-app · web · dev values" for boundary web in dev
-3. create delivery item "opv · delivery · web · fly" for web on target fly in prod
-4. create delivery item "opv · delivery · web · gh" for web on target gh in prod
-5. create delivery item "opv · delivery · web · k8s" for web on target k8s in prod
-6. add empty secret field shared/DATABASE_URL to the shared item in dev
-7. add empty config field shared/FEATURE_FLAGS to the shared item in dev
-8. add empty secret field web/API_KEY to the web item in dev
-9. add empty config field web/LOG_LEVEL to the web item in dev
-10. add empty secret field web/MIGRATION_TOKEN to the web item in dev
-11. add empty secret field web/SESSION_SECRET to the web item in dev
-12. add empty secret field web/TLS_CERTIFICATE to the web item in dev
-13. add empty secret field web/TLS_PRIVATE_KEY to the web item in dev
-14. rebound the ids of dev
-plan_id: sp-4241c17881a9a7ce
-Next: opv apply sp-4241c17881a9a7ce --rebind dev
 
 ## text stderr
+opv: 2 vaults are titled "e2e-app-shared-dev"; candidates: "e2e-app-shared-dev" (vE2EDUPA000000000000000001), "e2e-app-shared-dev" (vE2EDUPB000000000000000002)
+Do: rename all but one vault titled "e2e-app-shared-dev" in 1Password
+Next: opv propose setup --from-item dev --vault e2e-app-shared-dev --item 'e2e-app · shared · dev values'
 
-## json exit: 0
+## json exit: 2
 ## json stdout
-{"schema_version":3,"ok":true,"plan_id":"sp-4241c17881a9a7ce","steps":[{"step":"create_boundary","environment":"dev","boundary":"shared","vault":"e2e-app-shared-dev","item":"e2e-app · shared · dev values"},{"step":"create_boundary","environment":"dev","boundary":"web","vault":"e2e-app-web-dev","item":"e2e-app · web · dev values"},{"step":"create_delivery_item","environment":"prod","target":"fly","product":"web","item":"opv · delivery · web · fly"},{"step":"create_delivery_item","environment":"prod","target":"gh","product":"web","item":"opv · delivery · web · gh"},{"step":"create_delivery_item","environment":"prod","target":"k8s","product":"web","item":"opv · delivery · web · k8s"},{"step":"add_field","environment":"dev","boundary":"shared","product":"shared","key":"DATABASE_URL","field_kind":"secret"},{"step":"add_field","environment":"dev","boundary":"shared","product":"shared","key":"FEATURE_FLAGS","field_kind":"config"},{"step":"add_field","environment":"dev","boundary":"web","product":"web","key":"API_KEY","field_kind":"secret"},{"step":"add_field","environment":"dev","boundary":"web","product":"web","key":"LOG_LEVEL","field_kind":"config"},{"step":"add_field","environment":"dev","boundary":"web","product":"web","key":"MIGRATION_TOKEN","field_kind":"secret"},{"step":"add_field","environment":"dev","boundary":"web","product":"web","key":"SESSION_SECRET","field_kind":"secret"},{"step":"add_field","environment":"dev","boundary":"web","product":"web","key":"TLS_CERTIFICATE","field_kind":"secret"},{"step":"add_field","environment":"dev","boundary":"web","product":"web","key":"TLS_PRIVATE_KEY","field_kind":"secret"},{"step":"rebind","env":"dev"}],"structure":{"plan_id":"sp-c8440187092fb4d1","project":"e2e-app","account_id":"AE2EDEVACCOUNT000000000001","environments":[{"environment":"dev","boundaries":[{"boundary":"shared","products":["shared"],"action":"create","vault":"e2e-app-shared-dev","item":"e2e-app · shared · dev values"},{"boundary":"web","products":["web"],"action":"create","vault":"e2e-app-web-dev","item":"e2e-app · web · dev values"}],"state_vaults":[]},{"environment":"prod","boundaries":[{"boundary":"shared","products":["shared"],"action":"ok","vault_id":"vE2ESHAREDPROD0000000000001","item_id":"iE2ESHAREDPROD0000000000001"},{"boundary":"web","products":["web"],"action":"ok","vault_id":"vE2EWEBPROD000000000000001","item_id":"iE2EWEBPROD000000000000001"}],"state_vaults":[{"target":"fly","action":"ok","vault_id":"vE2ESTATEFLY00000000000001"},{"target":"k8s","action":"ok","vault_id":"vE2ESTATEK8S00000000000001"},{"target":"gh","action":"ok","vault_id":"vE2ESTATEGH000000000000001"}]}],"delivery_items":[{"environment":"prod","target":"fly","product":"web","item":"opv · delivery · web · fly"},{"environment":"prod","target":"gh","product":"web","item":"opv · delivery · web · gh"},{"environment":"prod","target":"k8s","product":"web","item":"opv · delivery · web · k8s"}],"fields":[{"environment":"dev","boundary":"shared","product":"shared","key":"DATABASE_URL","kind":"secret"},{"environment":"dev","boundary":"shared","product":"shared","key":"FEATURE_FLAGS","kind":"config"},{"environment":"dev","boundary":"web","product":"web","key":"API_KEY","kind":"secret"},{"environment":"dev","boundary":"web","product":"web","key":"LOG_LEVEL","kind":"config"},{"environment":"dev","boundary":"web","product":"web","key":"MIGRATION_TOKEN","kind":"secret"},{"environment":"dev","boundary":"web","product":"web","key":"SESSION_SECRET","kind":"secret"},{"environment":"dev","boundary":"web","product":"web","key":"TLS_CERTIFICATE","kind":"secret"},{"environment":"dev","boundary":"web","product":"web","key":"TLS_PRIVATE_KEY","kind":"secret"}],"generated":false},"contract_after":null,"bindings_after":"environments.prod.boundaries.shared.item_id = \"iE2ESHAREDPROD0000000000001\"\nenvironments.prod.boundaries.shared.vault_id = \"vE2ESHAREDPROD0000000000001\"\nenvironments.prod.boundaries.web.item_id = \"iE2EWEBPROD000000000000001\"\nenvironments.prod.boundaries.web.vault_id = \"vE2EWEBPROD000000000000001\"\nenvironments.prod.targets.fly.state_vault_id = \"vE2ESTATEFLY00000000000001\"\nenvironments.prod.targets.gh.state_vault_id = \"vE2ESTATEGH000000000000001\"\nenvironments.prod.targets.k8s.state_vault_id = \"vE2ESTATEK8S00000000000001\"\n","next":{"kind":"apply","actor":"person","command":"opv apply sp-4241c17881a9a7ce --rebind dev"},"do":null}
+{"schema_version":3,"ok":false,"exit_code":2,"next":{"kind":"run","actor":"assistant","command":"opv propose setup --from-item dev --vault e2e-app-shared-dev --item 'e2e-app · shared · dev values' --json"},"do":"rename all but one vault titled \"e2e-app-shared-dev\" in 1Password","error":{"code":"title_ambiguous","category":"config","message":"2 vaults are titled \"e2e-app-shared-dev\"; candidates: \"e2e-app-shared-dev\" (vE2EDUPA000000000000000001), \"e2e-app-shared-dev\" (vE2EDUPB000000000000000002)","subject":{"candidates":["\"e2e-app-shared-dev\" (vE2EDUPA000000000000000001)","\"e2e-app-shared-dev\" (vE2EDUPB000000000000000002)"],"kind":"vault","title":"e2e-app-shared-dev","vault":null,"matches":2},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"rename all but one vault titled \"e2e-app-shared-dev\" in 1Password","next":{"kind":"run","actor":"assistant","command":"opv propose setup --from-item dev --vault e2e-app-shared-dev --item 'e2e-app · shared · dev values' --json"}}}
 
 ## json stderr
+opv: 2 vaults are titled "e2e-app-shared-dev"; candidates: "e2e-app-shared-dev" (vE2EDUPA000000000000000001), "e2e-app-shared-dev" (vE2EDUPB000000000000000002)
+Do: rename all but one vault titled "e2e-app-shared-dev" in 1Password
+Next: opv propose setup --from-item dev --vault e2e-app-shared-dev --item 'e2e-app · shared · dev values' --json

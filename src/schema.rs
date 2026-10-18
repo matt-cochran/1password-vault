@@ -570,8 +570,8 @@ fn command_entry(cmd: &clap::Command, path: &str) -> Value {
             f
         })
         .collect();
-    let json = JSON_ONLY.contains(&path)
-        || cmd.get_arguments().any(|a| a.get_long() == Some("json"));
+    let json =
+        JSON_ONLY.contains(&path) || cmd.get_arguments().any(|a| a.get_long() == Some("json"));
     json!({
         "name": path,
         "about": first_line(cmd.get_about()),

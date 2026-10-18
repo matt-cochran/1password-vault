@@ -203,10 +203,12 @@ fn structure_steps(plan: &structure::Plan) -> Vec<Step> {
     out
 }
 
-/// `b` without the ids under `environments.<env>.`: the environment's boundary, state-vault
-/// and delivery-item ids, so apply records new ones.
+/// `b` without the environment's boundary ids (`environments.<env>.boundaries.`), so apply
+/// finds or creates its vaults and items in the selected account and records them, as
+/// 0.11.0's `bootstrap --rebind` did; its targets' state vaults and delivery items keep
+/// their ids (#159: a state vault in the account stays `ok`).
 fn without_env(b: &Bindings, env: &str) -> Result<Bindings, Error> {
-    let prefix = format!("environments.{env}.");
+    let prefix = format!("environments.{env}.boundaries.");
     let kept: String = b
         .render()
         .lines()

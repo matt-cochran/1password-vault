@@ -6,8 +6,8 @@ use clap::parser::ValueSource;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use opv::Error;
 use opv::app::{
-    STATES_HELP, config_cmd, config_export, doctor, explain, open, run as run_cmd, signin,
-    status, sync, target_cmd, target_credentials,
+    STATES_HELP, config_cmd, config_export, doctor, explain, open, run as run_cmd, signin, status,
+    sync, target_cmd, target_credentials,
 };
 use opv::config;
 use opv::config_store;
@@ -1281,10 +1281,6 @@ enum ProposeCmd {
         /// (op://<vault>/<item>).
         #[arg(long, value_name = "OP_REF")]
         deploy_credentials: Option<String>,
-        /// Project naming the state vault opv apply creates; defaults to the repository's
-        /// name.
-        #[arg(long)]
-        project: Option<String>,
         #[command(flatten)]
         out: ProposeOut,
     },
@@ -3313,7 +3309,7 @@ fn person_only(cmd: &Cmd) -> Option<opv::cause::Cmd> {
 /// what the command line adds to it, and the output flags.
 struct ProposeReq {
     intent: opv::domain::intent::Intent,
-    /// A person's rule parameters and expiry date (`propose key --rule`, `--expires`).
+    /// A person's rule parameters (`propose key --rule`).
     extras: opv::app::propose::key::Extras,
     write: bool,
     json: bool,
@@ -3432,8 +3428,8 @@ fn propose_request(
             put("allow_same_value", json!(allow_same_value));
             put("immutable", json!(immutable));
             put("guidance", json!(guidance));
+            put("expires", json!(expires));
             extras.rules = rule.clone();
-            extras.expires = expires.clone();
         }
         ProposeCmd::Env { env, tier, .. } => {
             put("kind", json!("env"));
@@ -3525,7 +3521,10 @@ fn apply_step(plan_id: &str, rebind: &[String], generate: &[(String, Vec<String>
     }
     for (env, keys) in generate {
         for k in keys {
-            c.push_str(&format!(" --generate {}", shell_word(&format!("{env}:{k}"))));
+            c.push_str(&format!(
+                " --generate {}",
+                shell_word(&format!("{env}:{k}"))
+            ));
         }
     }
     c
@@ -3618,7 +3617,13 @@ fn run_propose_early(
                             )
                         }
                     };
-                    setup::from_item(&scoped, env.as_str(), Some(&vault), Some(&item), Some(&path))?
+                    setup::from_item(
+                        &scoped,
+                        env.as_str(),
+                        Some(&vault),
+                        Some(&item),
+                        Some(&path),
+                    )?
                 }
                 (None, Some(names)) => setup::from_names(
                     std::path::Path::new(names),
@@ -3640,7 +3645,12 @@ fn run_propose_early(
                 setup::write(&path, &proposed)?;
             }
             let mut lines = vec![proposed.proposal.render_text()];
-            lines.extend(proposed.structure_steps.iter().map(|s| format!("structure: {s}")));
+            lines.extend(
+                proposed
+                    .structure_steps
+                    .iter()
+                    .map(|s| format!("structure: {s}")),
+            );
             if req.write {
                 lines.push(format!("written: {}", path.display()));
             }
@@ -3658,14 +3668,16 @@ fn run_propose_early(
             }
         }
         Intent::Structure { .. } | Intent::Generate { .. } => {
-            let (rebind, generate): (Vec<String>, Vec<(String, Vec<String>)>) = match &req.intent
-            {
+            let (rebind, generate): (Vec<String>, Vec<(String, Vec<String>)>) = match &req.intent {
                 Intent::Structure { rebind, .. } => {
                     (rebind.iter().map(|e| e.to_string()).collect(), Vec::new())
                 }
                 Intent::Generate { env, keys, .. } => (
                     Vec::new(),
-                    vec![(env.to_string(), keys.iter().map(|k| k.to_string()).collect())],
+                    vec![(
+                        env.to_string(),
+                        keys.iter().map(|k| k.to_string()).collect(),
+                    )],
                 ),
                 _ => unreachable!("matched structure or generate"),
             };
@@ -3710,10 +3722,13 @@ fn run_propose_contract(
     use opv::app::propose::{key, target};
     use opv::domain::intent::Intent;
     let store = found.store();
-    let snap = if req.write {
-        store.read_for_write(r)?
+    // The contract with its ids filled in, to validate the proposal; a write starts from
+    // the contract alone (D-G: no edit writes an id).
+    let snap = store.read(r)?;
+    let base_for_write = if req.write {
+        Some(store.read_for_write(r)?)
     } else {
-        store.read(r)?
+        None
     };
     let working = store.parse(&snap.text)?;
     // FR-52: a generated configuration is never edited; its generator is.
@@ -3743,8 +3758,8 @@ fn run_propose_contract(
                 key::write(&store.path, &proposal.contract_after)?;
             }
             config_store::Found::Manifest(_) => {
-                let text = opv::config::bindings::merge(&proposal.contract_after, &ids);
-                config_store::save(store, r, &snap, &text)?;
+                let base = base_for_write.as_ref().unwrap_or(&snap);
+                config_store::save(store, r, base, &proposal.contract_after)?;
             }
         }
     }
@@ -5258,20 +5273,8 @@ mod tests {
     /// planner exists yet).
     const NOT_YET_WIRED: [&str; 3] = ["inventory", "next", "propose tidy"];
 
-    /// Flags this binary has beyond the golden, each an open decision for the owner:
-    /// `apply --rebind`/`--generate` recompute a `propose structure --rebind` or
-    /// `propose generate` plan (apply cannot know them from the contract alone), and
-    /// `explain --target`/`--project` are 0.11.0's explain, which §25.3 keeps unchanged.
-    const FLAGS_BEYOND_THE_GOLDEN: [(&str, &str); 4] = [
-        ("apply", "generate"),
-        ("apply", "rebind"),
-        ("explain", "project"),
-        ("explain", "target"),
-    ];
-
     /// Design §25.1 (row cli-sweep-a): `opv schema` lists exactly the surface golden's
-    /// commands but [`NOT_YET_WIRED`], each with the golden's flags (sorted) plus
-    /// [`FLAGS_BEYOND_THE_GOLDEN`].
+    /// commands but [`NOT_YET_WIRED`], each with the golden's flags (sorted).
     #[test]
     fn schema_commands_and_flags_equal_the_surface_golden() {
         use std::collections::BTreeMap;
@@ -5289,12 +5292,6 @@ mod tests {
                     .iter()
                     .map(|f| f.as_str().unwrap().to_string())
                     .collect();
-                flags.extend(
-                    FLAGS_BEYOND_THE_GOLDEN
-                        .iter()
-                        .filter(|(c, _)| *c == name)
-                        .map(|(_, f)| f.to_string()),
-                );
                 flags.sort();
                 (name, flags)
             })
@@ -5310,7 +5307,13 @@ mod tests {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .map(|f| f["name"].as_str().unwrap().trim_start_matches("--").to_string())
+                    .map(|f| {
+                        f["name"]
+                            .as_str()
+                            .unwrap()
+                            .trim_start_matches("--")
+                            .to_string()
+                    })
                     .collect();
                 flags.sort();
                 (c["name"].as_str().unwrap().to_string(), flags)
@@ -5513,7 +5516,9 @@ mod tests {
             &["opv", "schema"],
             &["opv", "projects", "--json"],
             &["opv", "status", "--all", "--json"],
-            &["opv", "propose", "key", "api/KEY", "--kind", "secret", "--json"],
+            &[
+                "opv", "propose", "key", "api/KEY", "--kind", "secret", "--json",
+            ],
             &["opv", "config", "export", "--json"],
             &["opv", "skill", "install", "--json"],
             &["opv", "skill", "status", "--json"],

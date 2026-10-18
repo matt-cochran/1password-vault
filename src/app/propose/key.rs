@@ -34,8 +34,6 @@ fn usage(problem: UsageProblem) -> Error {
 pub struct Extras {
     /// `name=value` or `name` (a flag rule), as [`rule`] reads them.
     pub rules: Vec<String>,
-    /// `YYYY-MM-DD` (the intent's own `expires` is used; kept for the CLI until it moves).
-    pub expires: Option<String>,
 }
 
 /// The proposal a categorical intent implies for `contract_text`, against the

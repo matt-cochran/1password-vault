@@ -1,0 +1,50 @@
+# doctor_prod__op_item_get_ie2esharedprod0000000000001__not_found: opv doctor --env prod | fault not_found on op item get iE2ESHAREDPROD0000000000001
+
+## text exit: 4
+## text stdout
+ok    config: valid (1 environment, 2 products); source: <SCENARIO>/project/secrets.toml
+ok    op: version 2.40.0
+ok    op auth: signed in (USER)
+FAIL  item: item iE2ESHAREDPROD0000000000001 in vE2ESHAREDPROD0000000000001 was not found at 1Password
+  do: check environments.prod.boundaries.shared.item_id, which names item iE2ESHAREDPROD0000000000001 in vE2ESHAREDPROD0000000000001 (opv config edit)
+  fix: op item list --vault vE2ESHAREDPROD0000000000001
+warn  fly: flyctl: version v0.4.111; opv is tested with flyctl 0.4.112 or a later 0.4.x patch (its secrets import format may differ)
+  install: curl -L https://fly.io/install.sh | sh
+ok    fly: fly auth: signed in
+ok    fly: state vault: vault vE2ESTATEFLY00000000000001 visible
+ok    gh: gh: version 2.102.0
+ok    gh: gh auth: signed in
+ok    gh: state vault: vault vE2ESTATEGH000000000000001 visible
+ok    k8s: kubectl: version v1.36.1
+ok    k8s: kubernetes context: context e2e-cluster is in your kubeconfig
+ok    k8s: kubernetes cluster: API server for context e2e-cluster answers
+ok    k8s: kubernetes access: has every right sync needs in namespace e2e-prod
+ok    k8s: state vault: vault vE2ESTATEK8S00000000000001 visible
+ok    op local run: native op; opv run can start local commands
+ok    opv: not found on PATH
+ok    agent skill: not installed (optional: opv skill install)
+<host core-dump check>
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: item iE2ESHAREDPROD0000000000001 in vE2ESHAREDPROD0000000000001 was not found at 1Password
+  checked: op item get iE2ESHAREDPROD0000000000001 --vault vE2ESHAREDPROD0000000000001 --format json (exit 1)
+--- 1Password CLI replied, exit 1 ---
+| [ERROR] 2026/10/16 00:05:18 "iE2ESHAREDPROD0000000000001" isn't an item in the "vE2ESHAREDPROD0000000000001" vault. Specify the item with its UUID, name, or domain.
+--- (scrubbed) ---
+Do: check environments.prod.boundaries.shared.item_id, which names item iE2ESHAREDPROD0000000000001 in vE2ESHAREDPROD0000000000001 (opv config edit)
+Next: op item list --vault vE2ESHAREDPROD0000000000001
+
+## json exit: 4
+## json stdout
+{"schema_version":3,"ok":false,"exit_code":4,"config_source":"<SCENARIO>/project/secrets.toml","checks":[{"name":"config","target":null,"status":"ok","detail":"valid (1 environment, 2 products); source: <SCENARIO>/project/secrets.toml","next":null,"do":null},{"name":"op","target":null,"status":"ok","detail":"version 2.40.0","next":null,"do":null},{"name":"op auth","target":null,"status":"ok","detail":"signed in (USER)","next":null,"do":null},{"name":"item","target":null,"status":"fail","detail":"item iE2ESHAREDPROD0000000000001 in vE2ESHAREDPROD0000000000001 was not found at 1Password","next":"op item list --vault vE2ESHAREDPROD0000000000001","do":"check environments.prod.boundaries.shared.item_id, which names item iE2ESHAREDPROD0000000000001 in vE2ESHAREDPROD0000000000001 (opv config edit)"},{"name":"flyctl","target":"fly","status":"warn","detail":"version v0.4.111; opv is tested with flyctl 0.4.112 or a later 0.4.x patch (its secrets import format may differ)","next":null,"do":"install: curl -L https://fly.io/install.sh | sh"},{"name":"fly auth","target":"fly","status":"ok","detail":"signed in","next":null,"do":null},{"name":"state vault","target":"fly","status":"ok","detail":"vault vE2ESTATEFLY00000000000001 visible","next":null,"do":null},{"name":"gh","target":"gh","status":"ok","detail":"version 2.102.0","next":null,"do":null},{"name":"gh auth","target":"gh","status":"ok","detail":"signed in","next":null,"do":null},{"name":"state vault","target":"gh","status":"ok","detail":"vault vE2ESTATEGH000000000000001 visible","next":null,"do":null},{"name":"kubectl","target":"k8s","status":"ok","detail":"version v1.36.1","next":null,"do":null},{"name":"kubernetes context","target":"k8s","status":"ok","detail":"context e2e-cluster is in your kubeconfig","next":null,"do":null},{"name":"kubernetes cluster","target":"k8s","status":"ok","detail":"API server for context e2e-cluster answers","next":null,"do":null},{"name":"kubernetes access","target":"k8s","status":"ok","detail":"has every right sync needs in namespace e2e-prod","next":null,"do":null},{"name":"state vault","target":"k8s","status":"ok","detail":"vault vE2ESTATEK8S00000000000001 visible","next":null,"do":null},{"name":"op local run","target":null,"status":"ok","detail":"native op; opv run can start local commands","next":null,"do":null},{"name":"opv","target":null,"status":"ok","detail":"not found on PATH","next":null,"do":null},{"name":"agent skill","target":null,"status":"ok","detail":"not installed (optional: opv skill install)","next":null,"do":null},{"name":"core dumps","host":true}],"next":{"kind":"run","actor":"person","command":"op item list --vault vE2ESHAREDPROD0000000000001"},"do":"check environments.prod.boundaries.shared.item_id, which names item iE2ESHAREDPROD0000000000001 in vE2ESHAREDPROD0000000000001 (opv config edit)","error":{"code":"item_not_found","category":"source","message":"item iE2ESHAREDPROD0000000000001 in vE2ESHAREDPROD0000000000001 was not found at 1Password","subject":{"state":"missing","system":"one_password","resource":{"kind":"item","name":"iE2ESHAREDPROD0000000000001","scope":"vE2ESHAREDPROD0000000000001"},"named_by":{"by":"config_field","path":["environments","prod","boundaries","shared","item_id"]}},"evidence":{"checked":"op item get iE2ESHAREDPROD0000000000001 --vault vE2ESHAREDPROD0000000000001 --format json","account":null,"upstream":{"source":"one_password","tool":"1Password CLI","version":null,"exit":{"kind":"code","code":1},"said":["[ERROR] 2026/10/16 00:05:18 \"iE2ESHAREDPROD0000000000001\" isn't an item in the \"vE2ESHAREDPROD0000000000001\" vault. Specify the item with its UUID, name, or domain."],"truncated":false,"removed_advice":false,"untrusted":true,"omitted":0}},"retry":"after_fix","human_required":false,"do":"check environments.prod.boundaries.shared.item_id, which names item iE2ESHAREDPROD0000000000001 in vE2ESHAREDPROD0000000000001 (opv config edit)","next":{"kind":"run","actor":"person","command":"op item list --vault vE2ESHAREDPROD0000000000001"}}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: item iE2ESHAREDPROD0000000000001 in vE2ESHAREDPROD0000000000001 was not found at 1Password
+  checked: op item get iE2ESHAREDPROD0000000000001 --vault vE2ESHAREDPROD0000000000001 --format json (exit 1)
+--- 1Password CLI replied, exit 1 ---
+| [ERROR] 2026/10/16 00:05:18 "iE2ESHAREDPROD0000000000001" isn't an item in the "vE2ESHAREDPROD0000000000001" vault. Specify the item with its UUID, name, or domain.
+--- (scrubbed) ---
+Do: check environments.prod.boundaries.shared.item_id, which names item iE2ESHAREDPROD0000000000001 in vE2ESHAREDPROD0000000000001 (opv config edit)
+Next: op item list --vault vE2ESHAREDPROD0000000000001

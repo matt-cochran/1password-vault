@@ -299,12 +299,8 @@ fn env_without_fly_section_exits_2_for_fly_commands() {
         );
     }
     // config export gets past config to the 1Password read (op missing: 3).
-    for cmd in [vec!["config", "export", "dev", "--json"]] {
-        let mut args = vec!["--config", cfg];
-        args.extend(&cmd);
-        let (code, _, err) = opv(&args);
-        assert_eq!(code, 3, "{cmd:?}: {err}");
-    }
+    let (code, _, err) = opv(&["--config", cfg, "config", "export", "dev", "--json"]);
+    assert_eq!(code, 3, "{err}");
 }
 
 /// I7: top-level help has examples and the exit codes; no requirement IDs anywhere.
@@ -737,10 +733,7 @@ fn propose_env_prints_the_added_environment() {
 fn propose_env_steps_to_its_written_form() {
     let dir = simple_project();
     let (_, out, _) = opv_in(dir.path(), &["propose", "env", "qa"]);
-    assert_eq!(
-        out.lines().last(),
-        Some("Next: opv propose env qa --write")
-    );
+    assert_eq!(out.lines().last(), Some("Next: opv propose env qa --write"));
 }
 
 /// With --write the contract file holds the proposal.
@@ -769,7 +762,14 @@ fn propose_key_with_write_declares_a_key_in_the_discovered_file() {
     let dir = simple_project();
     let (code, _, err) = opv_in(
         dir.path(),
-        &["propose", "key", "app/SENTRY_DSN", "--kind", "secret", "--write"],
+        &[
+            "propose",
+            "key",
+            "app/SENTRY_DSN",
+            "--kind",
+            "secret",
+            "--write",
+        ],
     );
     assert_eq!(code, 0, "{err}");
 }
@@ -944,14 +944,7 @@ fn sigint_with_json_exits_130() {
     let log = dir.path().join("log");
     let mut child = Command::new(env!("CARGO_BIN_EXE_opv"))
         .env_remove("GITHUB_STEP_SUMMARY")
-        .args([
-            "--config",
-            CFG,
-            "config",
-            "export",
-            "prod",
-            "--json",
-        ])
+        .args(["--config", CFG, "config", "export", "prod", "--json"])
         .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
         .env_remove("OPV_CONFIG")
         .env_remove("OPV_PRODUCT")

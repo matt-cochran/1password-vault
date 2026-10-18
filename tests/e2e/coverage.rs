@@ -33,6 +33,13 @@ const DEV_ACCOUNT: &str = "AE2EDEVACCOUNT000000000001";
 
 /// The variants no end-to-end run can reach, and why. Keep it short: prefer a scenario.
 const UNREACHABLE: &[(&str, &str)] = &[
+    // Reached by 0.11.0's explicit repair `opv tidy`, removed in 0.12.0 until `opv propose
+    // tidy` has a planner (row cli-sweep-a); a person's read that tidies reports a conflict
+    // as a note and goes on (src/app/tidy.rs), and opv-sim changes nothing between two reads.
+    (
+        "ConcurrentEdit",
+        "only opv tidy failed on a tidy conflict; reads note it and go on",
+    ),
     // design §13.4: reachable only through a bug in opv itself.
     (
         "Bug",
@@ -551,8 +558,7 @@ mod cases {
     // §4.1 configuration
 
     pub fn config_not_found() -> Case {
-        case(Scenario::new().without_config(), &["contract"])
-            .mcp("opv_configuration", json!({}))
+        case(Scenario::new().without_config(), &["contract"]).mcp("opv_configuration", json!({}))
     }
 
     pub fn config_source_mismatch() -> Case {
@@ -562,10 +568,7 @@ mod cases {
 
     pub fn config_unreadable() -> Case {
         // The given path is a folder (a mode would not stop a root builder).
-        case(
-            Scenario::new(),
-            &["--config", "{root}/project", "contract"],
-        )
+        case(Scenario::new(), &["--config", "{root}/project", "contract"])
     }
 
     pub fn config_invalid() -> Case {
@@ -780,30 +783,6 @@ mod cases {
         .mcp("opv_configuration", json!({}))
     }
 
-    pub fn needs_own_session() -> Case {
-        let s = Scenario::new();
-        let world: Value = serde_json::from_str(
-            &std::fs::read_to_string(s.path("world/world.json")).expect("world"),
-        )
-        .expect("world");
-        let token = world["op"]["service_account_tokens"][0]["token"]
-            .as_str()
-            .or_else(|| world["op"]["service_account_tokens"][0].as_str())
-            .expect("a service-account token marker")
-            .to_string();
-        case(
-            s.var("OP_SERVICE_ACCOUNT_TOKEN", &token),
-            &[
-                "config",
-                "import",
-                "--vault",
-                "e2e-manifest",
-                "--project",
-                "e2e-other",
-            ],
-        )
-    }
-
     // §4.5 guards, §4.8 person-only steps, §4.9 plans
 
     pub fn guard() -> Case {
@@ -898,7 +877,7 @@ mod cases {
 
     pub fn title_lookup() -> Case {
         case(
-            Scenario::new().git_checkout().world(|w| {
+            Scenario::new().world(|w| {
                 let vaults = w["op"]["vaults"].as_array_mut().expect("vaults");
                 let first = vaults[0].clone();
                 for id in ["vE2EDUPA000000000000000001", "vE2EDUPB000000000000000002"] {
@@ -908,7 +887,16 @@ mod cases {
                     vaults.push(v);
                 }
             }),
-            &["propose", "structure", "--rebind", "dev"],
+            &[
+                "propose",
+                "setup",
+                "--from-item",
+                "dev",
+                "--vault",
+                "e2e-app-shared-dev",
+                "--item",
+                "e2e-app · shared · dev values",
+            ],
         )
     }
 
@@ -991,22 +979,6 @@ mod cases {
         .mcp(
             "opv_deployment_plan",
             json!({"environment": "prod", "targets": ["gh"]}),
-        )
-    }
-
-    pub fn create_outcome_unknown() -> Case {
-        case(
-            Scenario::new()
-                .var("OP_ACCOUNT", DEV_ACCOUNT)
-                .faults(&fault("op", "item create", "applied_but_reply_lost")),
-            &[
-                "config",
-                "import",
-                "--vault",
-                "e2e-manifest",
-                "--project",
-                "e2e-other",
-            ],
         )
     }
 
@@ -1210,19 +1182,6 @@ mod cases {
         )
     }
 
-    pub fn concurrent_edit() -> Case {
-        case(
-            Scenario::new()
-                .faults(&fault("op", "item edit", "malformed_output"))
-                .world(|w| {
-                    web_dev_api_key(w, |f| {
-                        f.as_object_mut().expect("field").remove("section");
-                    })
-                }),
-            &["config", "export", "dev"],
-        )
-    }
-
     pub fn local_io() -> Case {
         // A folder where `.opv` belongs: opv writes only a plain file there (a mode would not
         // stop a root builder).
@@ -1320,6 +1279,46 @@ mod cases {
 /// text snapshot.
 mod text_cases {
     use super::*;
+
+    pub fn needs_own_session() -> Case {
+        let s = Scenario::new();
+        let world: Value = serde_json::from_str(
+            &std::fs::read_to_string(s.path("world/world.json")).expect("world"),
+        )
+        .expect("world");
+        let token = world["op"]["service_account_tokens"][0]["token"]
+            .as_str()
+            .or_else(|| world["op"]["service_account_tokens"][0].as_str())
+            .expect("a service-account token marker")
+            .to_string();
+        case(
+            s.var("OP_SERVICE_ACCOUNT_TOKEN", &token),
+            &[
+                "config",
+                "import",
+                "--vault",
+                "e2e-manifest",
+                "--project",
+                "e2e-other",
+            ],
+        )
+    }
+
+    pub fn create_outcome_unknown() -> Case {
+        case(
+            Scenario::new()
+                .var("OP_ACCOUNT", DEV_ACCOUNT)
+                .faults(&fault("op", "item create", "applied_but_reply_lost")),
+            &[
+                "config",
+                "import",
+                "--vault",
+                "e2e-manifest",
+                "--project",
+                "e2e-other",
+            ],
+        )
+    }
 
     pub fn copies_differ() -> Case {
         case(
@@ -1681,7 +1680,6 @@ scenarios! {
         source_only => SourceOnly,
         account_ambiguous => AccountAmbiguous,
         account_required => AccountRequired,
-        needs_own_session => NeedsOwnSession,
         guard => Guard,
         needs_terminal => NeedsTerminal,
         confirm_mismatch => ConfirmMismatch,
@@ -1700,7 +1698,6 @@ scenarios! {
         local_io => LocalIo,
         tool_unusable => ToolUnusable,
         owner_setup_required => OwnerSetupRequired,
-        create_outcome_unknown => CreateOutcomeUnknown,
         write_outcome_unknown => WriteOutcomeUnknown,
         target_refused => TargetRefused,
         fly_value_rule_refused => KeysBlocking,
@@ -1709,18 +1706,19 @@ scenarios! {
         budget_spent => Partial,
         interrupted => Interrupted,
         read_back_missing => ReadBackMissing,
-        concurrent_edit => ConcurrentEdit,
         in_no_account_on_the_machine => InOtherAccount,
         signed_out_access => NotSignedIn,
         changed_not_declared => NotDeclared,
         changed_signed_out => NotSignedIn,
-        declare_target_secrets_dir_invalid => ConfigInvalid,
+        declare_target_secrets_dir_invalid => ConfigProposalInvalid,
         k8s_mount_unreadable => MountUnreadable,
         k8s_mount_path_in_use => Guard,
         k8s_volume_refused => TargetRefused,
         k8s_configmap_right_missing => MissingRight,
     ],
     text: [
+        needs_own_session => NeedsOwnSession,
+        create_outcome_unknown => CreateOutcomeUnknown,
         copies_differ => CopiesDiffer,
         remote_unreachable => RemoteUnreachable,
         remote_disconnected => RemoteDisconnected,
@@ -1753,7 +1751,6 @@ scenarios! {
         manifest_not_found,
         changed_not_declared,
         changed_signed_out,
-        declare_target_secrets_dir_invalid,
     ],
 }
 
