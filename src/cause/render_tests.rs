@@ -203,6 +203,12 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             vec!["cfg/copy.toml", "man-shop"],
         ),
         (
+            BindingsUnapplied {
+                environments: vec![EnvName::new("env-prod")],
+            },
+            vec!["env-prod"],
+        ),
+        (
             ManifestNotFound {
                 project: "proj-shop".into(),
                 account: Some(AccountId::new("ACC-6AIN")),
@@ -901,6 +907,7 @@ fn ordinal(c: &Cause) -> usize {
         StateVaultTooWide { .. } => 6,
         ConfigNotEditable { .. } => 7,
         CopiesDiffer { .. } => 8,
+        BindingsUnapplied { .. } => 81,
         ManifestNotFound { .. } => 9,
         ManifestAmbiguous { .. } => 10,
         ManifestExists { .. } => 11,
@@ -973,13 +980,13 @@ fn ordinal(c: &Cause) -> usize {
         PersonalNotSetUp { .. } => 73,
         TargetDrift { .. } => 75,
         MountUnreadable { .. } => 76,
-        ValueInTextField { .. } => 77,
-        GateFailed { .. } => 78,
-        NeedsUndeclared { .. } => 79,
+        ValueInTextField { .. } => 78,
+        GateFailed { .. } => 79,
+        NeedsUndeclared { .. } => 80,
     }
 }
 
-const VARIANTS: usize = 80;
+const VARIANTS: usize = 82;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
