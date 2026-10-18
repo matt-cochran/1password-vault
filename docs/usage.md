@@ -784,6 +784,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `confirm_required` | 6 | never | yes | the environment sets confirm_env; a person passes --confirm <env> |
 | `file_too_open` | 6 | after_fix | no | a local file opv reads is readable by others |
 | `handoff_refused` | 6 | after_fix | no | another process connected to opv's private hand-off pipe; opv refused it and sent nothing |
+| `import_tier_refused` | 6 | after_fix | no | opv_import_local was pointed at an environment whose tier is not local; the person runs opv import instead |
 | `keys_blocking` | 6 | after_fix | yes | a write refused: keys are missing or failing a rule; nothing was written |
 | `local_io_failed` | 6 | after_fix | no | opv's own local input or output failed (a file, the current folder, standard output, ...) |
 | `mount_unreadable` | 6 | after_fix | no | the workload that would mount opv's secrets cannot read them; the fix is in its own manifest |
