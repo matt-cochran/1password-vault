@@ -15,15 +15,13 @@
 
 use std::io::Write;
 
-use toml_edit::Value;
-
+use super::propose::key;
 use super::write_err;
 use crate::cause::render::cmd_text;
 use crate::cause::{Cause, Cmd, NameKind, UsageProblem};
 use crate::config;
 use crate::config_edit::{ConfigDoc, NewKey};
 use crate::config_store::{self, ConfigStore};
-use crate::domain::Rules;
 use crate::error::Error;
 use crate::runner::CommandRunner;
 
@@ -97,7 +95,7 @@ pub fn run(
     let (product, key) = split_name(&args.name, &fleet)?;
     let (product, key) = (product.as_str(), key.as_str());
     let mut doc = ConfigDoc::parse(original)?;
-    let envs = environments(&args.envs, &doc, &fleet)?;
+    let envs = key::environments(&args.envs, &doc, &fleet)?;
     let label = format!("{product}/{key}");
 
     let summary = if doc.has_key(product, key) {
@@ -166,7 +164,7 @@ pub fn run(
         let rules = args
             .rules
             .iter()
-            .map(|r| rule(r))
+            .map(|r| key::rule(r))
             .collect::<Result<Vec<_>, _>>()?;
         for (i, (n, _)) in rules.iter().enumerate() {
             if rules[..i].iter().any(|(m, _)| m == n) {
@@ -188,6 +186,11 @@ pub fn run(
                 from: args.from.as_deref(),
                 personal: args.personal,
                 allow_same_value: args.allow_same_value,
+                except: &[],
+                source: None,
+                shape: None,
+                expires: None,
+                lifecycle: None,
             },
         )?;
         let mut parts = vec![kind.to_string(), envs.join(", ")];
@@ -323,72 +326,6 @@ fn split_name(name: &str, fleet: &crate::domain::Fleet) -> Result<(String, Strin
         }));
     }
     Ok((product.to_string(), key.to_string()))
-}
-
-/// The environments to declare: the given ones (each defined, duplicates dropped), or every
-/// environment in file order. An undeclared one is `NotDeclared` (R21): a unique close name
-/// gives the same command with it; an environment is declared before its keys.
-fn environments(
-    given: &[String],
-    doc: &ConfigDoc,
-    fleet: &crate::domain::Fleet,
-) -> Result<Vec<String>, Error> {
-    if given.is_empty() {
-        return Ok(doc.environments());
-    }
-    let mut out: Vec<String> = Vec::new();
-    for e in given {
-        super::environment(fleet, e)?;
-        if !out.contains(e) {
-            out.push(e.clone());
-        }
-    }
-    Ok(out)
-}
-
-/// `--rule name=value` (or `--rule name` for a flag rule) to a rules entry. The value is
-/// read as TOML when that is a valid value for the rule (`base64_bytes=32`,
-/// `enum=["a","b"]`), else as text (`prefix=sk_`), else as a comma-separated list
-/// (`enum=debug,info`). The rule names and types are the loader's own (`Rules`).
-fn rule(spec: &str) -> Result<(String, Value), Error> {
-    let (name, raw) = match spec.split_once('=') {
-        Some((n, v)) => (n.trim(), Some(v)),
-        None => (spec.trim(), None),
-    };
-    if name.is_empty() {
-        return Err(usage(UsageProblem::ValueFormat {
-            flag: "--rule".into(),
-            format: "name=value (or the name of a flag rule)",
-        }));
-    }
-    let candidates: Vec<Value> = match raw {
-        None => vec![Value::from(true)],
-        Some(raw) => {
-            let mut c = Vec::new();
-            if let Ok(v) = raw.trim().parse::<Value>() {
-                c.push(v);
-            }
-            c.push(Value::from(raw));
-            c.push(Value::Array(
-                raw.split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .collect(),
-            ));
-            c
-        }
-    };
-    for mut v in candidates {
-        v.decor_mut().clear();
-        let probe = format!("{name} = {v}");
-        if toml::from_str::<Rules>(&probe).is_ok() {
-            return Ok((name.to_string(), v));
-        }
-    }
-    Err(usage(UsageProblem::ValueFormat {
-        flag: format!("--rule {name}"),
-        format: "a rule name and value from the rules reference (configuration.md)",
-    }))
 }
 
 #[cfg(test)]
