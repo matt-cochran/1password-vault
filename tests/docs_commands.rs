@@ -586,13 +586,12 @@ fn heading_anchors(path: &Path) -> std::collections::HashSet<String> {
     anchors
 }
 
-/// Every relative link in configuration.md resolves: its file exists and, with a `#fragment`,
-/// the target file has a matching heading.
-#[test]
-fn configuration_relative_links_resolve() {
+/// Every relative link in a doc resolves: its file exists and, with a `#fragment`, the
+/// target file has a matching heading.
+fn relative_links_resolve(rel: &str) {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let path = root.join("docs/configuration.md");
-    let text = std::fs::read_to_string(&path).expect("read configuration.md");
+    let path = root.join(rel);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
     let mut failures = Vec::new();
     let mut in_fence = false;
     for (idx, raw) in text.lines().enumerate() {
@@ -620,11 +619,7 @@ fn configuration_relative_links_resolve() {
                 path.parent().expect("docs dir").join(file)
             };
             if !resolved.exists() {
-                failures.push(format!(
-                    "docs/configuration.md:{}: missing {}",
-                    idx + 1,
-                    resolved.display()
-                ));
+                failures.push(format!("{rel}:{}: missing {}", idx + 1, resolved.display()));
                 continue;
             }
             let is_markdown = resolved
@@ -636,7 +631,7 @@ fn configuration_relative_links_resolve() {
                 && !heading_anchors(&resolved).contains(fragment)
             {
                 failures.push(format!(
-                    "docs/configuration.md:{}: {} has no heading #{fragment}",
+                    "{rel}:{}: {} has no heading #{fragment}",
                     idx + 1,
                     resolved.display()
                 ));
@@ -645,7 +640,19 @@ fn configuration_relative_links_resolve() {
     }
     assert!(
         failures.is_empty(),
-        "configuration.md has unresolved relative links:\n{}",
+        "{rel} has unresolved relative links:\n{}",
         failures.join("\n")
     );
+}
+
+/// Every relative link in configuration.md resolves.
+#[test]
+fn configuration_relative_links_resolve() {
+    relative_links_resolve("docs/configuration.md");
+}
+
+/// Every relative link in security.md resolves.
+#[test]
+fn security_relative_links_resolve() {
+    relative_links_resolve("docs/security.md");
 }
