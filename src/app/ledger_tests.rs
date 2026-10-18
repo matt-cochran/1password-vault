@@ -100,6 +100,7 @@ fn planned_target(op: &FakeOp, fleet: &Fleet, version: &str) -> TargetState {
             current: Some(&|n: &str, v: &SecretValue| {
                 ledgers.iter().find_map(|l| l.check(n, version, v))
             }),
+            retiring_prune: false,
         },
     );
     p.rows[0].target

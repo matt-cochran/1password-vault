@@ -154,6 +154,7 @@ fn gated_state(source: &RuleSource, working: &Fleet) -> KeyState {
         digest: &|_| None,
         target_check: &|_, _| None,
         current: None,
+        retiring_prune: false,
     };
     let gate = RuleGate {
         agent: true,
