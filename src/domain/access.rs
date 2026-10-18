@@ -2,8 +2,10 @@
 //! readiness receipt (FR-52, a least-privilege CI reader).
 //!
 //! Pure: [`analyse`] takes the JSON of `op vault user list <vault> --format json` exactly
-//! as the caller read it, and [`findings`] turns the result into advisory findings. Counts
-//! and findings never carry a person's name or email; only service-account names are named.
+//! as the caller read it, and [`findings`] turns the result into advisory findings. [`analyse`]
+//! carries the names of the vault's writers, as the reply reports them (design row
+//! `access-writers`); counts and findings never carry a person's name or email, only
+//! service-account names are named.
 //!
 //! 1Password's `op vault user list` reports the `type` and `state` strings used here. The
 //! `SERVICE_ACCOUNT` type string is from 1Password's documentation and has not yet been
@@ -25,7 +27,7 @@ pub struct Reader {
 }
 
 /// What opv can see about who reads one environment's vault. Counts only for people and
-/// guests; no person's name or email is kept.
+/// guests; a person's name is kept only in [`writers`](Self::writers), never an email.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct EnvAccess {
     pub environment: String,
@@ -35,6 +37,9 @@ pub struct EnvAccess {
     pub people: usize,
     pub guests: usize,
     pub service_accounts: Vec<Reader>,
+    /// Who can write the vault, as the reply reports them (`allow_editing`), in reply order;
+    /// empty when the vault is not visible.
+    pub writers: Vec<String>,
 }
 
 /// One advisory finding about an environment's vault access.
@@ -54,6 +59,9 @@ const CI_READER_CAN_WRITE: &str = "ci_reader_can_write";
 /// 0.9.0: several service accounts with one name read a vault, as after `opv access
 /// --create` made a replacement: the older one waits to be removed in 1Password.
 pub const PENDING_REVOKE: &str = "pending_revoke";
+/// Part V, row `access-writers`: a deployed-tier vault with exactly one writer, so losing
+/// that one writer's access leaves nobody to fix the tier's values.
+pub const SINGLE_WRITER: &str = "single_writer";
 
 /// `users`: Some(parsed JSON array) when the list could be read, None when it could not (not
 /// visible to this person).
@@ -71,6 +79,7 @@ pub fn analyse(
         people: 0,
         guests: 0,
         service_accounts: Vec::new(),
+        writers: Vec::new(),
     };
     let users = match users {
         Some(Value::Array(users)) => users,
@@ -83,6 +92,13 @@ pub fn analyse(
         };
         if user.get("state").and_then(Value::as_str) != Some("ACTIVE") {
             continue;
+        }
+        if user
+            .get("permissions")
+            .and_then(Value::as_array)
+            .is_some_and(|granted| granted.iter().any(|p| p.as_str() == Some("allow_editing")))
+        {
+            access.writers.push(named(user));
         }
         match user.get("type").and_then(Value::as_str) {
             Some("MEMBER") => access.people += 1,
@@ -97,12 +113,7 @@ pub fn analyse(
 /// One ACTIVE service-account entry: its name (or a placeholder) and whether it can only
 /// read. Reading means `allow_viewing` without `allow_editing` or `allow_managing`.
 fn reader(user: &serde_json::Map<String, Value>) -> Reader {
-    let name = user
-        .get("name")
-        .and_then(Value::as_str)
-        .filter(|name| !name.is_empty())
-        .unwrap_or("(unnamed)")
-        .to_string();
+    let name = named(user);
     let permissions = user.get("permissions").and_then(Value::as_array);
     let allows = |wanted: &str| {
         permissions.is_some_and(|granted| granted.iter().any(|p| p.as_str() == Some(wanted)))
@@ -113,9 +124,18 @@ fn reader(user: &serde_json::Map<String, Value>) -> Reader {
     }
 }
 
-/// Findings for the analysed vaults, in input order, then by code order:
-/// access_not_visible, no_ci_reader, ci_reader_can_write, pending_revoke. Each names the
-/// vault and the environment that needs it (07.10); a step is a typed opv command.
+/// The entry's name, or a placeholder when 1Password reports none.
+fn named(user: &serde_json::Map<String, Value>) -> String {
+    user.get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("(unnamed)")
+        .to_string()
+}
+
+/// Findings for the analysed vaults, in input order, then by code order: access_not_visible,
+/// no_ci_reader, single_writer, ci_reader_can_write, pending_revoke. Each names the vault
+/// and the environment that needs it (07.10); a step is a typed opv command.
 pub fn findings(envs: &[EnvAccess]) -> Vec<AccessFinding> {
     let mut out = Vec::new();
     for access in envs {
@@ -141,6 +161,19 @@ pub fn findings(envs: &[EnvAccess]) -> Vec<AccessFinding> {
                 message: format!("{env} deploys but has no read-only service account for CI"),
                 // The token goes straight into the CI secret, never shown (0.9.0).
                 next: Some(format!("opv access {env} --create --github <owner/repo>")),
+            });
+        }
+        // Correction 17: a deployed-tier vault needs a second writer to fix a value when
+        // the first is unavailable. `next` is none: only 1Password can add a writer.
+        if access.deployed && access.writers.len() == 1 {
+            out.push(AccessFinding {
+                code: SINGLE_WRITER,
+                environment: env.to_string(),
+                message: format!(
+                    "{vault} has only one writer; a deployed tier needs a second writer to fix \
+                     a value when the first is unavailable"
+                ),
+                next: None,
             });
         }
         for account in &access.service_accounts {
