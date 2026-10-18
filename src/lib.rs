@@ -21,6 +21,7 @@ pub mod ports;
 pub mod provider;
 pub mod ramdir;
 pub mod runner;
+pub mod scan;
 pub mod schema;
 pub mod scrub;
 #[cfg(feature = "ui")]
