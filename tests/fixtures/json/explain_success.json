@@ -13,6 +13,9 @@
     "vault_id": "vprd",
     "item_id": "iprd"
   },
+  "environments": [
+    "prod"
+  ],
   "targets": [
     {
       "name": "portfolio",

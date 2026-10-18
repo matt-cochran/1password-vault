@@ -26,6 +26,9 @@ pub mod ci_workflow;
 pub mod config_cmd;
 pub mod config_export;
 pub mod contract;
+#[cfg(test)]
+#[path = "core_acceptance_tests.rs"]
+mod core_acceptance_tests;
 pub mod declare;
 pub mod delivery;
 pub mod delivery_preview;
