@@ -49,11 +49,12 @@ use crate::cause::{
     Cause, DiagnoseContext, EnvName, KeyName, ProductName, ResourceKind, ResourceName, ResourceRef,
     TargetName, Unusable, UsageProblem, ValueRow, ValueState,
 };
-use crate::domain::model::key_label;
+use crate::domain::capability::{self, Capability};
+use crate::domain::model::{Tier, key_label};
 use crate::domain::{Fleet, KeyState};
 use crate::error::Error;
 use crate::host::{Host, OP_CLI};
-use crate::provider::{TargetConfig, Verdict as Check};
+use crate::provider::{Check as ProviderCheck, TargetConfig, Verdict as Check};
 use crate::runner::{Call, CommandRunner, PROBE_TIMEOUT};
 
 /// Oldest `op` release opv is tested with.
@@ -425,7 +426,12 @@ fn run_on_with(
     }
     if let Some(env) = scope.env {
         match &fleet {
-            Some(f) if report.passed("op auth") => item_check(f, env, r, &mut report),
+            Some(f) if report.passed("op auth") => {
+                item_check(f, env, r, &mut report);
+                // R9: this session's reach into a production-tier environment, next to the
+                // item it just read. Advisory: a warning, never a failure.
+                reads_production_vault(f, env, r, host, &mut report);
+            }
             Some(_) => report.skip(
                 ITEM_CHECK,
                 "not checked (see the op auth line above)".into(),
@@ -789,8 +795,16 @@ fn target_checks(
         let signin = super::signin::Reach::Target;
         match super::signin::open_targeted(fleet, env_name, Some(&name), r, signin) {
             Ok(runner) => {
-                for c in target.config.doctor(&runner, host) {
+                let checks = target.config.doctor(&runner, host);
+                // R9: decide before the checks are consumed; a warning naming a live
+                // production login, never a failure (owner decision D-G).
+                let live = env.tier == Tier::Production
+                    && production_session_live(target.config.as_ref(), &checks);
+                for c in checks {
                     report.push(&c.name, c.outcome);
+                }
+                if live {
+                    production_login_warn(target.config.as_ref(), &name, env_name, report);
                 }
                 // The mounted files' checks (design §6.6), as `plan` and `status` run
                 // them: a warning for a workload that could not read them.
@@ -896,6 +910,99 @@ fn state_vault(
             "vault {vault_id} not checked (op vault get did not finish: {e})"
         ))),
     }
+}
+
+/// R9: a production-tier vault this session can read. Advisory, never a failure.
+const READS_PRODUCTION_CHECK: &str = "production vault";
+/// R9: a live platform session for a production target. Advisory, never a failure.
+const PRODUCTION_LOGIN_CHECK: &str = "production login";
+
+/// The hardened option both R9 warnings name: separate the identities, do not share one.
+const HARDENED_OPTION: &str = "hardened option: a separate 1Password admin account used \
+                                 only for production work (docs/security.md)";
+
+/// R9: for a production-tier environment, warn when this 1Password session can read (or
+/// write) one of its boundary vaults. The reach is the same `access` observes
+/// (`op whoami` then `op vault user list`, classified by [`capability::classify`]); a
+/// probe that cannot run is dropped, so this row never fails the run.
+fn reads_production_vault(
+    fleet: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+    host: &dyn Fn() -> Host,
+    report: &mut Report,
+) {
+    let Ok(env) = fleet.environment(env_name) else {
+        return;
+    };
+    if env.tier != Tier::Production {
+        return;
+    }
+    let Some(me) = crate::adapters::onepassword_init::session_user(r, host) else {
+        return;
+    };
+    let mut seen = BTreeSet::new();
+    for vault in env.boundaries.values().flatten().map(|b| &b.vault_id) {
+        if !seen.insert(vault.clone()) {
+            continue;
+        }
+        // A refused listing is not a reach this session has; nothing to warn about.
+        let Ok(users) = crate::adapters::onepassword_init::vault_users(r, vault, host) else {
+            continue;
+        };
+        if matches!(
+            capability::classify(users.as_ref(), &me),
+            Capability::Read | Capability::Write
+        ) {
+            report.warn(
+                READS_PRODUCTION_CHECK,
+                format!(
+                    "this 1Password session can read the production vault {vault} \
+                     (environment {env_name})"
+                ),
+                format!(
+                    "sign out of this 1Password account, or use a session that cannot read \
+                     {env_name} production vaults\n  {HARDENED_OPTION}"
+                ),
+            );
+        }
+    }
+}
+
+/// R9: warn (never fail) when this shell is signed in to a production target's platform.
+fn production_login_warn(
+    target: &dyn TargetConfig,
+    name: &str,
+    env_name: &str,
+    report: &mut Report,
+) {
+    let label = target.provider().label();
+    report.warn(
+        PRODUCTION_LOGIN_CHECK,
+        format!(
+            "this shell is signed in to {label} for production target {name} \
+             (environment {env_name})"
+        ),
+        format!(
+            "sign out of {label} in this shell, or use a session that is not signed in to \
+             {env_name}\n  {HARDENED_OPTION}"
+        ),
+    );
+}
+
+/// Whether this shell's platform session is live for `target`: its own sign-in check (the
+/// second one the provider prints) passed. For the cluster-runtime provider that check is
+/// the target's context being present in the kubeconfig; for the others it is the CLI's
+/// sign-in probe. Core stays provider-agnostic (FR-37): it reads the check by name, never
+/// the provider's.
+fn production_session_live(target: &dyn TargetConfig, checks: &[ProviderCheck]) -> bool {
+    let Some(signin) = target.provider().doctor_checks().get(1) else {
+        return false;
+    };
+    checks
+        .iter()
+        .find(|c| c.name.as_ref() == *signin)
+        .is_some_and(|c| matches!(c.outcome.as_ref(), Ok(Check::Ok(_))))
 }
 
 /// One target per provider and named store some environment uses, in registry order
@@ -1992,6 +2099,10 @@ mod tests {
     fn doctor_scoped(item: Output, json: bool) -> (Result<(), Error>, String, FakeRunner) {
         let mut g = good();
         g.insert(2, item);
+        // R9 production-vault reach: `op whoami`, then `op vault user list` (no entry for
+        // this session, so no warning and the goldens are unchanged).
+        g.insert(3, Output::success(WHOAMI.as_bytes().to_vec()));
+        g.insert(4, Output::success(b"[]".to_vec()));
         g.push(Output::success(Vec::new()));
         let r = FakeRunner::new(g);
         let mut out = Vec::new();
@@ -2023,6 +2134,11 @@ mod tests {
         let mut g = good();
         g.insert(2, complete_item());
         let r = FakeRunner::new(g.drain(..3));
+        // R9 production-vault reach runs after the item read, before the target.
+        r.responses.borrow_mut().extend([
+            Ok(Output::success(WHOAMI.as_bytes().to_vec())),
+            Ok(Output::success(b"[]".to_vec())),
+        ]);
         r.push_with_stderr(Output::failure(1), "[ERROR] not signed in");
         r.responses.borrow_mut().extend([
             Ok(Output::failure(1)),
@@ -2252,6 +2368,14 @@ mod tests {
                 Output::failure(1),
             ],
         );
+        // R9 production-vault reach runs after the item check.
+        g.splice(
+            5..5,
+            [
+                Output::success(WHOAMI.as_bytes().to_vec()),
+                Output::success(b"[]".to_vec()),
+            ],
+        );
         g.push(Output::success(Vec::new()));
         let r = FakeRunner::new(g);
         let mut out = Vec::new();
@@ -2469,6 +2593,11 @@ mod tests {
         r.responses
             .borrow_mut()
             .extend(op_answers.chain([complete_item()]).map(Ok));
+        // R9 production-vault reach: `op whoami`, then `op vault user list`.
+        r.responses.borrow_mut().extend([
+            Ok(Output::success(WHOAMI.as_bytes().to_vec())),
+            Ok(Output::success(b"[]".to_vec())),
+        ]);
         for name in ["api", "portfolio"] {
             if !only.is_empty() && !only.contains(&name) {
                 continue;
@@ -2715,3 +2844,7 @@ mod tests {
 #[cfg(test)]
 #[path = "doctor_settings_tests.rs"]
 mod settings_tests;
+
+#[cfg(test)]
+#[path = "doctor_r9_tests.rs"]
+mod r9_tests;
