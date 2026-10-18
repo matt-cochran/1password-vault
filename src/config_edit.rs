@@ -288,6 +288,33 @@ impl ConfigDoc {
         Ok(())
     }
 
+    /// Declare `boundaries.<boundary> = {}` (no ids yet: an apply records them) in the
+    /// declared environment `env`, unless it already declares that boundary. True when the
+    /// text changed.
+    pub fn declare_boundary(&mut self, env: &str, boundary: &str) -> Result<bool, Error> {
+        let source = self.source();
+        let env_table = self
+            .table_at_mut(&["environments", env])
+            .ok_or_else(|| layout_error(source.clone(), &format!("environments.{env}")))?;
+        if env_table.get("boundaries").is_none() {
+            let mut dotted = Table::new();
+            dotted.set_dotted(true);
+            env_table.insert("boundaries", Item::Table(dotted));
+        }
+        let boundaries = env_table
+            .get_mut("boundaries")
+            .and_then(Item::as_table_like_mut)
+            .ok_or_else(|| layout_error(source, &format!("environments.{env}.boundaries")))?;
+        if boundaries.get(boundary).is_some() {
+            return Ok(false);
+        }
+        boundaries.insert(
+            boundary,
+            Item::Value(Value::InlineTable(InlineTable::new())),
+        );
+        Ok(true)
+    }
+
     /// Add `[environments.<env>]` from `table_text` (a TOML fragment holding exactly that
     /// table), after the last environment.
     pub fn add_environment(&mut self, env: &str, table_text: &str) -> Result<(), Error> {

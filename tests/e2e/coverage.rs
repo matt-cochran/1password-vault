@@ -36,10 +36,10 @@ use serde_json::{Value, json};
 const ROOT: &str = env!("CARGO_MANIFEST_DIR");
 const OPV: &str = env!("CARGO_BIN_EXE_opv");
 const SIM: &str = env!("CARGO_BIN_EXE_opv-sim");
-const DEV_ACCOUNT: &str = "AE2EDEVACCOUNT000000000001";
+pub(crate) const DEV_ACCOUNT: &str = "AE2EDEVACCOUNT000000000001";
 /// The canary every value of a flow scenario carries (its world and its dotenv files): no
 /// snapshot may hold it.
-const MARK: &str = "S7MARKER";
+pub(crate) const MARK: &str = "S7MARKER";
 
 /// The variants no end-to-end run can reach, and why. Keep it short: prefer a scenario.
 const UNREACHABLE: &[(&str, &str)] = &[
@@ -128,11 +128,11 @@ fn snapshots() -> PathBuf {
     Path::new(ROOT).join("tests/e2e/snapshots")
 }
 
-fn scenario_snapshots() -> PathBuf {
+pub(crate) fn scenario_snapshots() -> PathBuf {
     snapshots().join("scenarios")
 }
 
-fn updating() -> bool {
+pub(crate) fn updating() -> bool {
     std::env::var("UPDATE_SNAPSHOTS").is_ok_and(|v| v == "1")
 }
 
@@ -141,7 +141,7 @@ fn updating() -> bool {
 /// A scenario directory: the world, a scratch `HOME`, the project (the app's `secrets.toml`
 /// and a `.opv` selecting the dev account), a directory outside it, and the simulator
 /// installed under every tool name.
-struct Scenario {
+pub(crate) struct Scenario {
     root: tempfile::TempDir,
     env: Vec<(String, String)>,
     cwd: &'static str,
@@ -155,7 +155,7 @@ struct Scenario {
 }
 
 impl Scenario {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let root = tempfile::tempdir().expect("temp dir");
         let s = Self {
             root,
@@ -207,7 +207,7 @@ impl Scenario {
         self
     }
 
-    fn path(&self, sub: &str) -> PathBuf {
+    pub(crate) fn path(&self, sub: &str) -> PathBuf {
         self.root.path().join(sub)
     }
 
@@ -217,7 +217,7 @@ impl Scenario {
     }
 
     /// The project's `.opv`, replaced (`None`: no `.opv`).
-    fn dot_opv(self, text: Option<&str>) -> Self {
+    pub(crate) fn dot_opv(self, text: Option<&str>) -> Self {
         let p = self.path("project/.opv");
         match text {
             Some(t) => std::fs::write(&p, t).expect(".opv"),
@@ -226,7 +226,7 @@ impl Scenario {
         self
     }
 
-    fn without_config(self) -> Self {
+    pub(crate) fn without_config(self) -> Self {
         std::fs::remove_file(self.path("project/secrets.toml")).expect("config");
         self
     }
@@ -241,7 +241,7 @@ impl Scenario {
     }
 
     /// The world, edited.
-    fn world(self, edit: impl FnOnce(&mut Value)) -> Self {
+    pub(crate) fn world(self, edit: impl FnOnce(&mut Value)) -> Self {
         let p = self.path("world/world.json");
         let mut w: Value =
             serde_json::from_str(&std::fs::read_to_string(&p).expect("world")).expect("world");
@@ -250,7 +250,7 @@ impl Scenario {
         self
     }
 
-    fn var(mut self, k: &str, v: &str) -> Self {
+    pub(crate) fn var(mut self, k: &str, v: &str) -> Self {
         self.env.push((k.into(), v.into()));
         self
     }
@@ -263,14 +263,14 @@ impl Scenario {
     }
 
     /// A file under the scenario root (parents made).
-    fn file(self, rel: &str, text: &str) -> Self {
+    pub(crate) fn file(self, rel: &str, text: &str) -> Self {
         let p = self.path(rel);
         std::fs::create_dir_all(p.parent().expect("parent")).expect("parent");
         std::fs::write(&p, text).expect("file");
         self
     }
 
-    fn mode(self, rel: &str, mode: u32) -> Self {
+    pub(crate) fn mode(self, rel: &str, mode: u32) -> Self {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(self.path(rel), std::fs::Permissions::from_mode(mode))
             .expect("chmod");
@@ -305,7 +305,7 @@ impl Scenario {
     }
 
     /// The project as a git checkout of the app's repository.
-    fn git_checkout(self) -> Self {
+    pub(crate) fn git_checkout(self) -> Self {
         for args in [
             &["init", "-q"][..],
             &[
@@ -331,7 +331,7 @@ impl Scenario {
 
     /// Every value of the world marked: a string holding a value marker (`test-marker-e2e-…`)
     /// becomes `S7MARKERVALUE-<it>`, so the canary gate finds any value a run prints.
-    fn marked(self) -> Self {
+    pub(crate) fn marked(self) -> Self {
         fn mark(v: &mut Value) {
             match v {
                 Value::String(s) if s.contains("test-marker-e2e-") => {
@@ -346,7 +346,7 @@ impl Scenario {
     }
 
     /// A dotenv file in the project, readable by its owner only, every value a marker.
-    fn dotenv(self, rel: &str, names: &[&str]) -> Self {
+    pub(crate) fn dotenv(self, rel: &str, names: &[&str]) -> Self {
         let text: String = names
             .iter()
             .map(|n| format!("{n}={MARK}VALUE-dotenv-{}\n", n.to_ascii_lowercase()))
@@ -356,7 +356,7 @@ impl Scenario {
     }
 
     /// A file of the project's git checkout, staged so the scanner's tree holds it.
-    fn tracked(self, rel: &str, text: &str) -> Self {
+    pub(crate) fn tracked(self, rel: &str, text: &str) -> Self {
         let s = self.file(&format!("project/{rel}"), text);
         let ok = Command::new("git")
             .args(["add", rel])
@@ -371,7 +371,7 @@ impl Scenario {
         s
     }
 
-    fn command(&self) -> Command {
+    pub(crate) fn command(&self) -> Command {
         self.install();
         let mut c = Command::new(OPV);
         c.current_dir(self.path(self.cwd))
@@ -391,7 +391,7 @@ impl Scenario {
     }
 
     /// `opv <args>`; `{root}` in an argument is the scenario root.
-    fn opv(&self, args: &[String]) -> Run {
+    pub(crate) fn opv(&self, args: &[String]) -> Run {
         let root = self.root.path().display().to_string();
         let args: Vec<String> = args.iter().map(|a| a.replace("{root}", &root)).collect();
         let out = match self.interrupt {
@@ -432,7 +432,7 @@ impl Scenario {
     }
 
     /// One MCP `tools/call` on `opv mcp serve --project <project>`: the tool's answer.
-    fn mcp(&self, tool: &str, arguments: &Value) -> Value {
+    pub(crate) fn mcp(&self, tool: &str, arguments: &Value) -> Value {
         let mut child = self
             .command()
             .args(["mcp", "serve", "--project"])
@@ -481,7 +481,7 @@ impl Scenario {
     }
 
     /// What a snapshot must not depend on: the scenario's path and the host's platform.
-    fn normalize(&self, s: &str) -> String {
+    pub(crate) fn normalize(&self, s: &str) -> String {
         // macOS resolves the temp directory through a symlink (/var → /private/var), so
         // opv may print either spelling of the scenario's path.
         let root = self.root.path().display().to_string();
@@ -509,10 +509,10 @@ fn re(pattern: &str) -> regex::Regex {
     regex::Regex::new(pattern).expect("regex")
 }
 
-struct Run {
-    code: Option<i32>,
-    stdout: String,
-    stderr: String,
+pub(crate) struct Run {
+    pub(crate) code: Option<i32>,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
 }
 
 // --- the scenarios --------------------------------------------------------------------------
@@ -2524,6 +2524,7 @@ fn every_scenario_snapshot_belongs_to_a_scenario() {
         .map(|(n, _, _)| *n)
         .chain(FLOWS.iter().copied())
         .chain(CORE.iter().copied())
+        .chain(crate::scenarios::assistant::SNAPSHOTS.iter().copied())
         .collect();
     let orphans: Vec<String> = std::fs::read_dir(scenario_snapshots())
         .map(|d| {

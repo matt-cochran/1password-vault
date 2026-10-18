@@ -58,6 +58,17 @@ fn names_declare_every_name() {
 }
 
 #[test]
+fn names_declare_an_environment_of_tier_local() {
+    let (_dir, path) = env_file("ALPHA=one\n");
+    let p = from_names(&path, NAMES_ENV, &[], &[]).unwrap();
+    let fleet = crate::config::parse(&p.proposal.contract_after).unwrap();
+    assert_eq!(
+        fleet.environments[NAMES_ENV].tier,
+        crate::domain::Tier::Local
+    );
+}
+
+#[test]
 fn names_apply_a_secret_key_override() {
     let (_dir, path) = env_file("APP_PORT=8080\n");
     let p = from_names(&path, "dev", &[], &["APP_PORT".to_string()]).unwrap();
