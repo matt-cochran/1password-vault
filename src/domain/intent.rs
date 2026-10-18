@@ -18,6 +18,7 @@ use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 
 use crate::cause::{Cause, ConfigSource, DottedPath, FieldRule, GivenBy, PatternId};
+use crate::domain::Date;
 use crate::domain::catalog;
 use crate::error::Error;
 
@@ -166,6 +167,8 @@ pub enum Intent {
         #[serde(default)]
         immutable: bool,
         #[serde(default)]
+        expires: Option<Date>,
+        #[serde(default)]
         lifecycle: Option<Lifecycle>,
         #[serde(default)]
         guidance: Option<Guidance>,
@@ -278,6 +281,7 @@ fn allowed_fields(kind: &str) -> Option<&'static [&'static str]> {
             "personal",
             "allow_same_value",
             "immutable",
+            "expires",
             "lifecycle",
             "guidance",
         ],
@@ -732,6 +736,7 @@ pub fn json_schema() -> serde_json::Value {
             "personal": { "type": "boolean" },
             "allow_same_value": { "type": "boolean" },
             "immutable": { "type": "boolean" },
+            "expires": name("^[0-9]{4}-[0-9]{2}-[0-9]{2}$"),
             "lifecycle": { "enum": ["active", "retiring", "retired"] },
             "guidance": guidance()
         }),

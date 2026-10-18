@@ -243,6 +243,13 @@ impl Date {
     }
 }
 
+impl std::fmt::Display for Date {
+    /// The `YYYY-MM-DD` form the contract writes, zero-padded.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:04}-{:02}-{:02}", self.year, self.month, self.day)
+    }
+}
+
 /// A Gregorian leap year.
 fn is_leap(year: u16) -> bool {
     year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
