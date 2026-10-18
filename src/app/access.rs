@@ -583,7 +583,7 @@ fn build(
         );
         access.deployed_tier = deployed;
         // Part V, row `access-writers`: the tier marking, this session's capability and who
-        // 1Password reports can write the vault. Names stay out of the text output.
+        // 1Password reports can write the vault, in the text output and `--json` alike.
         vaults.push(VaultAccess {
             vault_id: (*vault).to_string(),
             production: need.tier == Tier::Production,
@@ -661,8 +661,9 @@ fn owner_commands(checks: &[GrantCheck]) -> Vec<String> {
     commands
 }
 
-/// Print the per-principal grants, then the extra readers, then what was checked and what
-/// could not be classified, then the owner commands. `--json` prints the documented
+/// Print the per-principal grants, then the extra readers, then each readable vault's tier
+/// marking, this session's capability and writers, then the findings, what was checked and
+/// what could not be classified, then the owner commands. `--json` prints the documented
 /// document (FR-59); it never says "clean".
 fn report(out: &mut dyn Write, envs: &[EnvReport], json: bool) -> Result<(), Error> {
     if json {
@@ -714,6 +715,9 @@ fn report(out: &mut dyn Write, envs: &[EnvReport], json: bool) -> Result<(), Err
             )
             .map_err(write_err)?;
         }
+        for vault in &env.vaults {
+            writeln!(out, "  {}", vault_line(vault)).map_err(write_err)?;
+        }
         for finding in &env.findings {
             writeln!(out, "  {}: {}", finding.code, finding.message).map_err(write_err)?;
             if let Some(next) = &finding.next {
@@ -731,6 +735,44 @@ fn report(out: &mut dyn Write, envs: &[EnvReport], json: bool) -> Result<(), Err
         }
     }
     Ok(())
+}
+
+/// One vault's line in text output (row `access-writers`): what `--json` carries as
+/// `production`, `capability` and `writers`. Names and permissions only, never a value.
+fn vault_line(vault: &VaultAccess) -> String {
+    let production = if vault.production {
+        " (production)"
+    } else {
+        ""
+    };
+    let writers = if vault.writers.is_empty() {
+        "none listed".to_string()
+    } else {
+        vault.writers.join(", ")
+    };
+    format!(
+        "vault {}{production}: this session {}; writers: {writers}",
+        vault.vault_id,
+        capability_label(vault.capability)
+    )
+}
+
+/// How this session's capability is named in text output (row `capability`).
+fn capability_label(capability: Capability) -> &'static str {
+    match capability {
+        Capability::Write => "can write",
+        Capability::Read => "can read, not write",
+        Capability::None => "is not a member",
+        Capability::Unknown {
+            source: UnknownSource::NoPermissionsInReply,
+        } => "has unknown access (1Password listed no permissions)",
+        Capability::Unknown {
+            source: UnknownSource::UserListRefused,
+        } => "has unknown access (listing users needs Manage)",
+        Capability::Unknown {
+            source: UnknownSource::NoSessionUser,
+        } => "has unknown access (op whoami named no user)",
+    }
 }
 
 /// How a principal is named in text output (FR-59).

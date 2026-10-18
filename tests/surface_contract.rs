@@ -85,6 +85,12 @@ fn surface_golden_opv_propose_schema_equals_the_intent_schema() {
     assert_eq!(propose["input_schema"], opv::domain::intent::json_schema());
 }
 
+/// `opv propose tidy` is deferred past 0.12.0: it has no planner.
+#[test]
+fn surface_golden_lists_no_propose_tidy() {
+    assert!(!cli_names(&golden()).contains("propose tidy"));
+}
+
 #[test]
 fn surface_golden_lists_no_removed_zero_eleven_command() {
     let names = cli_names(&golden());

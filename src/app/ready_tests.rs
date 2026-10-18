@@ -156,6 +156,7 @@ fn env(name: &str, target: Option<&str>, rows: Vec<Row>) -> EnvInput {
             rows: Ok(Vec::new()),
             title: None,
             audience: None,
+            personal_item: Default::default(),
         },
         None => EnvInput {
             name: name.into(),
@@ -163,6 +164,7 @@ fn env(name: &str, target: Option<&str>, rows: Vec<Row>) -> EnvInput {
             rows: Ok(rows),
             title: None,
             audience: None,
+            personal_item: Default::default(),
         },
     }
 }
@@ -221,6 +223,7 @@ fn env_err(name: &str, target: Option<&str>, error: Error) -> EnvInput {
             rows: Ok(Vec::new()),
             title: None,
             audience: None,
+            personal_item: Default::default(),
         },
         None => EnvInput {
             name: name.into(),
@@ -228,6 +231,7 @@ fn env_err(name: &str, target: Option<&str>, error: Error) -> EnvInput {
             rows: Err(error),
             title: None,
             audience: None,
+            personal_item: Default::default(),
         },
     }
 }
@@ -438,7 +442,7 @@ fn an_agent_sees_a_key_with_no_rule_in_its_value_state() {
 fn an_agents_next_names_the_empty_key_with_no_rule() {
     let r = no_rule_receipt_for_an_agent();
     assert_eq!(
-        r.next.map(|n| n.command),
+        r.next.and_then(|n| n.command),
         Some("opv open app/SESSION_SECRET --env staging".to_string())
     );
 }
@@ -618,7 +622,7 @@ fn next_prefers_the_first_blocking_finding() {
     )];
     let r = receipt(&inputs(&report, envs), "0.6.0");
     assert_eq!(
-        r.next.as_ref().map(|n| n.command.as_str()),
+        r.next.as_ref().and_then(|n| n.command.as_deref()),
         Some("opv open api/STRIPE_KEY --env staging")
     );
 }
@@ -832,6 +836,7 @@ fn titled(name: &str, title: &str) -> EnvInput {
         rows: Ok(vec![]),
         title: Some(title.into()),
         audience: None,
+        personal_item: Default::default(),
     }
 }
 
@@ -912,6 +917,82 @@ fn a_missing_personal_key_is_named_as_yours() {
         "t",
     );
     assert_eq!(r.findings[0].code, "personal_key_missing");
+}
+
+/// A receipt for one run-only `dev` whose only row is the personal `api/OPENAI_API_KEY`
+/// in `state`, read from the person's item `proj · dev (personal)` (FR-55).
+fn personal_receipt(state: KeyState) -> Receipt {
+    let account = crate::app::account::credential_report(crate::host::Platform::Linux);
+    let mut env = titled("dev", "Local");
+    env.personal_item = PersonalItem {
+        title: "proj · dev (personal)".into(),
+        vaults: vec!["Private".into(), "Employee".into(), "Personal".into()],
+    };
+    env.rows = Ok(vec![crate::domain::Row {
+        product: "api".into(),
+        key: "OPENAI_API_KEY".into(),
+        kind: crate::domain::Kind::Secret,
+        state,
+        target: TargetState::Unknown,
+        guidance: String::new(),
+        source: None,
+        shared_by: Vec::new(),
+    }]);
+    receipt(
+        &Inputs {
+            config_source: None,
+            account: &account,
+            envs: vec![env],
+            personal: [("api".to_string(), "OPENAI_API_KEY".to_string())].into(),
+            health: Vec::new(),
+        },
+        "t",
+    )
+}
+
+#[test]
+fn a_missing_personal_keys_step_names_the_persons_own_item_and_field() {
+    let r = personal_receipt(KeyState::Missing);
+    assert_eq!(
+        r.findings[0].prerequisite,
+        "in your own 1Password vault (Private, Employee or Personal), create or open your \
+         item \"proj · dev (personal)\" and fill field OPENAI_API_KEY in section api"
+    );
+}
+
+#[test]
+fn an_empty_personal_keys_step_names_the_field_to_fill_in_the_persons_own_item() {
+    let r = personal_receipt(KeyState::RuleFailed("nonempty", Reason::Fixed("empty")));
+    assert_eq!(
+        r.findings[0].prerequisite,
+        "fill field OPENAI_API_KEY in section api of your item \"proj · dev (personal)\" in \
+         your own 1Password vault (Private, Employee or Personal)"
+    );
+}
+
+/// Schema 3: a personal key's step is no command, so its typed `next` is `enter_value`
+/// for the person with a null `command` (never `apply`, which means `opv apply`).
+#[test]
+fn a_personal_key_missing_documents_next_is_enter_value_with_a_null_command() {
+    let r = personal_receipt(KeyState::Missing);
+    let body = serde_json::to_vec(&r).unwrap();
+    let doc: serde_json::Value =
+        serde_json::from_slice(&crate::json::finish(&body, Ok(()), false)).unwrap();
+    assert_eq!(
+        doc["next"],
+        serde_json::json!({"kind": "enter_value", "actor": "person", "command": null})
+    );
+}
+
+#[test]
+fn the_text_next_line_shows_a_personal_keys_step() {
+    let r = personal_receipt(KeyState::Missing);
+    assert!(
+        text(&r)
+            .contains("Next (owner): in your own 1Password vault (Private, Employee or Personal)"),
+        "{}",
+        text(&r)
+    );
 }
 
 // #92: settings health ---------------------------------------------------------------
@@ -1180,6 +1261,7 @@ fn target_env(name: &str, targets: Vec<TargetInput>) -> EnvInput {
         rows: Ok(vec![]),
         title: None,
         audience: None,
+        personal_item: Default::default(),
     }
 }
 
@@ -1227,7 +1309,7 @@ fn a_state_vault_grants_missing_next_is_access_with_the_target() {
         "0.6.0",
     );
     assert_eq!(
-        r.next.as_ref().map(|n| n.command.as_str()),
+        r.next.as_ref().and_then(|n| n.command.as_deref()),
         Some("opv access staging --target web")
     );
 }

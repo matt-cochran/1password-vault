@@ -412,16 +412,6 @@
         "env"
       ],
       "flags": [
-        "json",
-        "write"
-      ],
-      "name": "propose tidy"
-    },
-    {
-      "args": [
-        "env"
-      ],
-      "flags": [
         "gate",
         "json",
         "save"
@@ -929,29 +919,6 @@
               "kind": {
                 "enum": [
                   "generate"
-                ]
-              }
-            },
-            "required": [
-              "kind",
-              "env"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "env": {
-                "pattern": "^[a-z][a-z0-9-]*$",
-                "type": "string"
-              },
-              "guidance": {
-                "maxLength": 200,
-                "type": "string"
-              },
-              "kind": {
-                "enum": [
-                  "tidy"
                 ]
               }
             },

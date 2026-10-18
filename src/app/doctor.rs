@@ -618,7 +618,7 @@ fn item_check(fleet: &Fleet, env_name: &str, r: &dyn CommandRunner, report: &mut
     }
     let sections: BTreeSet<String> = fleet.products.keys().cloned().collect();
     // Tolerant and never written, whoever runs doctor (#113): a layout a person's run would
-    // tidy is noted with the explicit `opv tidy <env>`.
+    // tidy is noted with a signed-in person's `opv config export <env>`, which tidies it.
     let item = match super::tidy::inspect(fleet, env_name, r) {
         Ok(i) => i,
         Err(e) => return report.push(ITEM_CHECK, Err(e)),

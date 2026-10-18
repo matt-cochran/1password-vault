@@ -347,7 +347,7 @@ impl Server {
 
     #[tool(
         name = "opv_propose",
-        description = "Propose a change to this project's contract from one intent document (kind key, env, target, retire, setup, structure or generate; tidy is not available here): names, enumerated attributes and catalog shape names only, never a rule parameter (regex, prefix, enum) or a value. Returns the same document as `opv propose <kind> --json`: the relaxations it makes (listed first), the contract diff or the structure steps, the questions it asks, and a plan_id that only a person's `opv apply <plan_id>` runs. Pure: writes neither the contract nor 1Password.",
+        description = "Propose a change to this project's contract from one intent document (kind key, env, target, retire, setup, structure or generate): names, enumerated attributes and catalog shape names only, never a rule parameter (regex, prefix, enum) or a value. Returns the same document as `opv propose <kind> --json`: the relaxations it makes (listed first), the contract diff or the structure steps, the questions it asks, and a plan_id that only a person's `opv apply <plan_id>` runs. Pure: writes neither the contract nor 1Password.",
         input_schema = propose_schema(),
         annotations(read_only_hint = true, destructive_hint = false)
     )]
@@ -558,10 +558,6 @@ const PROPOSE_KINDS: [&str; 7] = [
     "generate",
 ];
 
-/// What `kind` must be: `tidy` has no proposal yet (its schema arm stays, as the intent
-/// document's), so it is refused naming itself.
-const PROPOSE_KIND_FORMAT: &str = "one of key, env, target, retire, setup, structure or generate (kind tidy is not available yet: it has no proposal)";
-
 /// How one intent field is written on `opv propose <kind>`'s command line.
 #[derive(Clone, Copy)]
 enum Word {
@@ -711,7 +707,7 @@ fn propose_call(args: &rmcp::model::JsonObject, parsed: bool) -> ToolCall {
     let kind = args
         .get("kind")
         .and_then(Value::as_str)
-        .filter(|k| PROPOSE_KINDS.contains(k) || *k == "tidy");
+        .filter(|k| PROPOSE_KINDS.contains(k));
     let command: Vec<&str> = std::iter::once("propose").chain(kind).collect();
     ToolCall::new("opv_propose", &command, Vec::new(), false)
 }
@@ -864,7 +860,6 @@ fn proposal<R: Accounted>(
             let keys = keys.iter().map(|k| k.to_string()).collect();
             structure_proposal(project, r, &[], &[(env.to_string(), keys)])
         }
-        Intent::Tidy { .. } => Err(usage("kind", PROPOSE_KIND_FORMAT).into()),
     }
 }
 

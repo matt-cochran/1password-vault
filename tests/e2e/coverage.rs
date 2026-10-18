@@ -42,8 +42,8 @@ pub(crate) const MARK: &str = "S7MARKER";
 
 /// The variants no end-to-end run can reach, and why. Keep it short: prefer a scenario.
 const UNREACHABLE: &[(&str, &str)] = &[
-    // Reached by 0.11.0's explicit repair `opv tidy`, removed in 0.12.0 until `opv propose
-    // tidy` has a planner (row cli-sweep-a); a person's read that tidies reports a conflict
+    // Reached by 0.11.0's explicit repair `opv tidy`, removed in 0.12.0 (a tidy proposal is
+    // deferred: it has no planner); a person's read that tidies reports a conflict
     // as a note and goes on (src/app/tidy.rs), and opv-sim changes nothing between two reads.
     (
         "ConcurrentEdit",

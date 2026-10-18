@@ -5323,18 +5323,14 @@ mod tests {
     removed!(check_is_an_unknown_subcommand: "check", "dev");
     removed!(config_describe_is_an_unknown_subcommand: "config", "describe");
 
-    /// The command of the §25 surface golden no row wires yet: `propose tidy` (no tidy
-    /// planner exists).
-    const NOT_YET_WIRED: [&str; 1] = ["propose tidy"];
-
     /// Design §25.1 (row cli-sweep-a): `opv schema` lists exactly the surface golden's
-    /// commands but [`NOT_YET_WIRED`], each with the golden's flags (sorted).
+    /// commands, each with the golden's flags (sorted).
     #[test]
     fn schema_commands_and_flags_equal_the_surface_golden() {
         use std::collections::BTreeMap;
         let golden: serde_json::Value =
             serde_json::from_str(include_str!("../tests/e2e/expected/surface.json")).unwrap();
-        let mut want: BTreeMap<String, Vec<String>> = golden["cli"]
+        let want: BTreeMap<String, Vec<String>> = golden["cli"]
             .as_array()
             .unwrap()
             .iter()
@@ -5350,7 +5346,6 @@ mod tests {
                 (name, flags)
             })
             .collect();
-        want.retain(|name, _| !NOT_YET_WIRED.contains(&name.as_str()));
         let doc = opv::schema::describe(&cli_command(), "test");
         let got: BTreeMap<String, Vec<String>> = doc["commands"]
             .as_array()

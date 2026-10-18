@@ -21,7 +21,7 @@ opv ready --json           # what is ready, what is not, who acts next (read-onl
 `opv ready --json` and `opv doctor --env <env> --json` never write 1Password, whoever is
 signed in: they are the safe readiness checks. Other commands that read an item may tidy its
 layout when run in the user's own session (the schema's `tidies_1password`); when a layout
-needs tidying, the explicit repair is `opv propose tidy <env>` then a person's `opv apply`
+needs tidying, the explicit repair is a signed-in person's `opv config export <env>`
 (writes 1Password: ask first).
 
 Read the rules in `opv guide agent` before anything else. In short: you never see, ask for,
