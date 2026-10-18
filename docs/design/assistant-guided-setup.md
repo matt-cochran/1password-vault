@@ -1,0 +1,455 @@
+# Assistant-guided configuration: the North Star, and the gap from opv 0.11.0
+
+Status: **design for review** (2026-10-18). Tracks #173 and its parts #174 to #179. This document first describes the North Star: the ideal system from first principles, without reference to what opv does today (Part I). Most of opv's existing decisions turn out to sit on the path to it, so the gap is mostly an added layer, not a redesign. It then measures opv 0.11.0 against it (Part II), resolves the design's contradictions with TRIZ (Part III), makes confusion and failure structurally impossible where it can (Part IV, poka-yoke), and proposes an order of delivery (Part V). Part VI holds the decisions that are the owner's.
+
+## 0. The objective (owner, 2026-10-18)
+
+> An assistant (Claude Code, Cursor, Codex) can guide a person **100%** of the way, from local development to production, with full visibility of the structure and **no access to any value**. It knows every key and its attributes, and whether each one has a value, but never the value. It compares what the application needs with what is stored, and guides the person to fill the gaps under the project's 1Password conventions. Anything that needs generative AI is exposed through the CLI and MCP. Anything that can be deterministic is in opv's Rust code, so the assistant and the person can both see exactly what is going on and what to do next. A person may type a value into a masked prompt, but no value ever touches a language model.
+
+Two questions frame every decision here:
+
+1. **Can this be a function of the inputs?** If the answer follows from the repository's files, the configuration, store metadata and platform metadata, it belongs in code. It is then deterministic, tested, and identical for every assistant and every person.
+2. **Does this need a value?** If it does, it happens only inside opv's process, in the store, on a platform channel, in the running application, or at a person's masked prompt. Never anywhere an assistant can read.
+
+---
+
+# Part I: the North Star
+
+## 1. Actors and the value boundary
+
+| Actor | Can see structure | Can see values | Can approve writes | Can enter values |
+|---|---|---|---|---|
+| **Person** (owner, engineer) | yes | in 1Password only, by choice | yes, in their own terminal or the 1Password app | yes: the 1Password app, or opv's masked prompt |
+| **Assistant** (an LLM in a harness, through MCP or a shell) | yes, all of it | **never** | never | never |
+| **opv** (deterministic engine) | yes | in process memory only, zeroized | no: it carries out what a person approved | no |
+| **Store** (1Password) | n/a | holds them | n/a | n/a |
+| **CI** (a service account) | the parts it needs | in process, to deliver them | no: it runs approved, scheduled syncs | no |
+| **Platforms** (Fly, Kubernetes, Azure, GitHub, …) | n/a | hold the delivered copies | n/a | n/a |
+
+**Invariant V (the value boundary).** A value, or anything from which part of a value can be recovered, never appears on a surface an assistant can read. That covers stdout, stderr, a JSON document, an MCP response, a log, an error, a file opv writes outside a platform channel or the application's runtime directory, and a command line. "Anything from which part of a value can be recovered" includes its length, a prefix or suffix, a digest, an encoding, an entropy figure and a comparison with a guess.
+
+What may cross the boundary is a **value state**: a closed set of words computed inside opv, where each word describes a value without carrying any of it (§3.3).
+
+**The honest limit.** opv can make its own surfaces incapable of emitting a value. It cannot stop an assistant that also has an unrestricted shell, as the same OS user, from running `op read` itself. The ideal system therefore has two layers:
+- opv's surfaces are value-free by construction (Part IV);
+- opv installs deterministic guard rules into each assistant harness, and the store's own authorization prompt protects every read that bypasses opv (§9.4).
+
+Neither layer is a sandbox, and the documentation says so.
+
+## 2. The model: an application moving through environments
+
+```
+Application (one contract, versioned with the code)
+ ├─ Components            web, api, worker …   (a role; a unit of deployment)
+ │   └─ Keys              the contract: what the component needs
+ ├─ Environments          local → dev → staging → prod   (ordered lanes)
+ │   ├─ ephemeral         preview-<branch>, <engineer>-dev   (instances of a template)
+ │   └─ tier              local | shared | production   (policy follows the tier)
+ └─ Bindings              per environment: where values live (store boundaries) and where they go (targets)
+```
+
+### 2.1 A key is a contract, not a field
+
+A key declares what the application needs, independently of any environment:
+
+| Attribute | Values | Why it matters |
+|---|---|---|
+| name, component | `api/STRIPE_SECRET_KEY` | identity |
+| kind | `secret` / `setting` / `file` | the channel it travels in |
+| **source** | `person` (someone fetches it), `generated` (opv makes it), `derived` (another key's value, or composed from keys), `provisioned` (opv mints it through a provider's API) | who or what produces the value; only `person` needs a human |
+| **scope** | `shared` / `personal` | one value per environment, or one per engineer |
+| **presence** | `all` environments, minus explicit `except` (each with a reason), or `only` some | consistency by default |
+| shape | a catalog shape (`stripe_secret`, `openai_key`, `pem_private_key`, `url`, `base64_bytes(32)`, …) or explicit rules | deterministic validation and placeholder detection |
+| lifecycle | `active` / `retiring` / `retired` | removal is a state, not a deletion |
+| rotation | none, or a period, plus `expires_at` metadata the person records | expiry warnings, rotation plans |
+| guidance | one line on where to get it; a link | coaching without the assistant guessing |
+| tier policy | for example, production requires a value distinct from lower tiers, and a live key | a policy, not a habit |
+
+### 2.2 The contract lives with the code
+
+The application's key contract is a file in the repository, reviewed in the same pull request as the code that needs the key. A dependency that adds `STRIPE_WEBHOOK_SECRET` adds its declaration in the same diff. This is consistency by construction: code and contract cannot drift apart unnoticed, because a deterministic check compares them (§3.2).
+
+Bindings (vault and item IDs, target locators) are not secret and live in the same file or a sibling. IDs are recorded by opv, never typed by hand.
+
+### 2.3 State, desired and actual
+
+opv reconciles, as Terraform and Kubernetes do:
+
+- **Desired state** = contract × environments × tier policy.
+- **Actual state** = store metadata (vaults, items, fields), **value states** (computed in memory), platform metadata (what is delivered, with which version), and the code's references (what the application reads).
+- **The plan** is a deterministic function: desired minus actual, ordered, and content-addressed.
+
+Every question a person or an assistant can ask ("what is missing?", "is prod ready?", "what changed?", "what reads this key?") is a query over these two states. None of them is a judgment.
+
+## 3. The division of labour
+
+### 3.1 The rule
+
+**Deterministic (opv's code)**:
+- everything that is a function of files, configuration, metadata and value states;
+- every write, every check and every ordering;
+- every "what next";
+- every rendering of state.
+
+**Generative (the assistant)**:
+- understanding what the person wants;
+- choosing among options opv has enumerated, when the choice is a judgment;
+- supplying names or text that opv's grammar then validates;
+- explaining and coaching in natural language, from opv's documents.
+
+**Person**:
+- approving each plan;
+- entering the values only a person can obtain;
+- authorizing 1Password.
+
+The assistant never produces anything that opv consumes without checking it. Every assistant-supplied input is either a choice from an enumerated set or a string that a grammar validates, and free text is screened for values (§11, P-2).
+
+### 3.2 Every task, assigned
+
+| Task | Deterministic in opv | Generative (assistant) | Person |
+|---|---|---|---|
+| Find the names the code reads | Scanner per language and framework: env reads, settings files, mounted files, `.env.example`, Compose, Kubernetes, `fly.toml`. It reports **coverage** (files and languages scanned, patterns skipped) | Supplies names in code the scanner cannot read (dynamic names, an unsupported language). Each one is validated against the name grammar and tagged `assistant_supplied` | — |
+| Compare code with the contract | `undeclared`, `declared_unused`, `ambiguous`, `declared`, each with its value state per environment | Resolves an `ambiguous` owner by choosing from opv's candidates | — |
+| Propose components | From repository layout: build files, Dockerfiles, app manifests, monorepo paths. Each proposal carries its evidence (file:line) | Accepts, merges or renames | Reviews in the plan |
+| Propose environments and targets | Detectors over `fly.toml`, workflow `environment:` keys, Kubernetes manifests, Azure and Compose files. Candidates with evidence | Chooses | Reviews in the plan |
+| Kind, scope, source, shape | A catalog of known names and providers (`STRIPE_SECRET_KEY` → secret, shape `stripe_secret`, source `person`, guidance "Stripe › Developers › API keys"; `JWT_SECRET` → `generated` `base64_bytes(32)`; `OPENAI_API_KEY` in a local tier → suggested `personal`). Unknown names default to secret, source person, no shape | Overrides with a reason, choosing from the enumerated attribute values | Reviews |
+| Guidance text | From the catalog for known providers | Writes it for unknown keys (one line, screened, §11 P-2) | — |
+| Create structure (vaults, items, fields) | The plan, then apply | — | Approves |
+| Values a person must fetch | Lists them with links, the shape and the guidance | Coaches: where to get it, what it looks like | Enters it: 1Password, or opv's masked prompt |
+| Generated values | Generates in memory and writes to the store | — | Approves (inside the plan) |
+| Provisioned values | Mints through the provider's API and writes to the store | — | Approves; authorizes the provider |
+| Importing an existing `.env` | Parses, classifies by name, imports values directly to the store | — | Runs the person-side step (§6.1) |
+| Consistency across environments | Presence rules, the gap check, tier policy | — | — |
+| Readiness, promotion gates | The matrix and the gates | Explains | — |
+| Delivery to platforms | Plan, approval, sync, verification | — | Approves (or CI on a schedule) |
+| Rotation, retirement, leak response, offboarding | Plans in a fixed order, resumable | Explains | Approves; enters values |
+| "What do I do now?" | **One** next action, chosen by a fixed priority, plus the full queue | Turns it into conversation | Acts when the actor is the person |
+
+### 3.3 Value states (the only thing an assistant learns about a value)
+
+A closed enumeration, computed in memory from the value and the key's contract:
+
+| State | Meaning |
+|---|---|
+| `absent` | no field |
+| `empty` | the field exists and is empty |
+| `placeholder` | a known placeholder (`changeme`, `<your key>`, `xxx`, `your…here`, `todo`, …), or equal to the value in `.env.example` |
+| `malformed` | fails its declared shape or rules (the rule's name is reported, never the part that failed) |
+| `suspect` | passes its shape but trips a warning: low entropy, a test key in production, a live key outside production, the same value as a lower tier, `localhost` in a deployed tier |
+| `set` | present and passes everything |
+| `unreadable` | opv could not read it. The cause is reported, and it is **never** reported as absent or empty |
+| `not_wanted` | the key's presence excludes this environment |
+
+There is deliberately no numeric field. A score would leak information about the value.
+
+## 4. The contract between opv and every client
+
+One contract serves the person at a terminal, the assistant over MCP and the assistant in a shell. The same document is rendered as text, as JSON or as an MCP result.
+
+### 4.1 Five verbs
+
+Every capability is one of five verbs, and each verb has one shape:
+
+| Verb | Writes? | Who calls it | Returns |
+|---|---|---|---|
+| **inspect** | no | anyone | state documents (inventory, needs, readiness, access, delivery, history) |
+| **propose** | local files only (the contract), or nothing | assistant or person | a **plan**: every step by name, its actor, and a content-addressed `plan_id` |
+| **approve** | marks one plan approved; runs that plan's **person-only steps** in the person's terminal | **person only**, in a terminal | what ran, what remains |
+| **apply** | carries out the approved steps that need no person | assistant or CI | what ran, with evidence |
+| **next** | no | anyone | exactly one recommended action, plus the queue |
+
+Fewer verbs make a smaller surface for an assistant to learn, and the same shape every time lets one prompt pattern work across Claude Code, Cursor and Codex.
+
+### 4.2 The document envelope
+
+Every document has:
+- `schema_version` and `ok`;
+- the payload;
+- a typed `next`: one action with a kind (`run`, `approve`, `enter_value`, `authorize`, `wait_ci`, `none`), an actor (`assistant`, `person`, `ci`), and either the exact command or a link;
+- for a failure, a typed `error`: a closed cause, a subject, evidence, retry, `human_required`.
+
+No field ever holds free text that a client must parse to decide what to do.
+
+### 4.3 Determinism of output
+
+The same inputs give the same bytes: stable sort orders, no timestamps in plans, stable IDs. Plans are content-addressed over the project, the account, the contract text and every step, so any change makes an approval stale rather than silently different.
+
+### 4.4 Agent mode
+
+opv knows when its caller is an assistant: always over MCP, and in a shell when a harness marker or `OPV_AGENT=1` is present (§9.4 installs the marker). In agent mode:
+- **No prompt ever opens.** A person-only step returns `next.actor = person` with the exact command, instead of hanging on a prompt the assistant cannot answer and must not see.
+- **`run` redacts.** Output of a child started by `opv run` has every value opv injected masked, including their common encodings (§9.3).
+- **Value-entry commands refuse.**
+
+## 5. The surface (ideal)
+
+Each row exists in both the CLI and MCP.
+
+| Verb | CLI | MCP | Purpose |
+|---|---|---|---|
+| inspect | `opv inventory [--env …] [--json]` | `opv_inventory` | the application matrix: keys × environments, each cell a value state; attributes; delivery state per target |
+| inspect | `opv needs [--scan …] [--names …]` | `opv_needs` | code ↔ contract comparison, with scanner coverage |
+| inspect | `opv detect` | `opv_detect` | candidate components, environments and targets from the repository, with evidence |
+| inspect | `opv ready [--env] [--gate]` | `opv_ready` | findings and gates (promotion, CI) |
+| inspect | `opv exposure <KEY>` | `opv_exposure` | everywhere a key's value lives and is delivered (leak response) |
+| inspect | `opv people` | `opv_people` | who and what can read each boundary (offboarding); names of people only where 1Password reports them |
+| propose | `opv setup plan` | `opv_setup_plan` | first setup: contract, structure, imports, generation, targets, as **one** plan |
+| propose | `opv change plan` | `opv_change_plan` | add, alter or retire keys; add environments |
+| propose | `opv rotate plan <KEY>…` | `opv_rotation_plan` | rotation across environments, in order |
+| propose | `opv deploy plan <env>` | `opv_deployment_plan` | delivery to targets |
+| approve | `opv approve <plan_id>` | — (never) | the person reviews, approves, and runs the person-only steps (imports, masked entry) |
+| apply | `opv apply <plan_id>` | `opv_apply` | runs the approved non-person steps |
+| next | `opv next` | `opv_next` | one action, plus the queue |
+| person | `opv set <KEY> --env <env>` | — (never) | masked entry in the person's terminal; refuses agent mode and non-TTY |
+| guard | `opv assistant guard install` | — | writes the harness rules (§9.4) |
+
+## 6. The journeys
+
+Each journey step is marked **D** (deterministic, opv), **G** (generative, assistant) or **P** (person).
+
+### 6.1 First setup: "put this app's configuration into 1Password"
+
+1. **D** `opv_detect` and `opv_needs` read the repository: components, environments, targets and every name the code reads, with coverage.
+2. **G** The assistant resolves ambiguities from opv's candidates and writes guidance for unknown keys.
+3. **D** `opv_setup_plan` returns one plan:
+   - the contract file;
+   - boundaries (vaults and items) per environment under the project's conventions;
+   - fields for every key in every environment where it is present;
+   - generated values for `generated` keys;
+   - the `.env` import for the local environment;
+   - targets and identities.
+4. **P** `opv approve <id>` in the person's terminal shows the whole plan once. On approval it runs the person-only steps right there:
+   - the `.env` import, with values going straight from the file to 1Password;
+   - masked entry for any value the person chooses to type now.
+   
+   1Password asks for authorization once.
+5. **D** `opv_apply` runs everything else: structure, generation, contract file and IDs.
+6. **D** `opv_next` → "3 values only you can provide", each with its link, its shape and its guidance.
+7. **P** The person enters them. **D** The value states turn `set`. **G** The assistant confirms in conversation.
+
+The person's whole effort is one approval, one authorization, and the values only they can fetch.
+
+### 6.2 A new engineer joins
+
+1. **D** `opv next` on a fresh clone sees the shared environment is complete and lists the engineer's own `personal` keys as `absent`, with links to create their item.
+2. **P** They enter their own keys.
+3. **D** `opv run -- <app>` works.
+
+Access comes from vault membership, which an owner grants. `opv people` shows it.
+
+### 6.3 The application changes
+
+- **Adding a key.**
+  1. **D** In CI, `opv needs --gate` fails a pull request that reads an undeclared name, and gives the declaration command.
+  2. **G** The assistant runs `opv_change_plan` with the new key; its presence defaults to `all`.
+  3. **D** The plan adds the field everywhere and generates it if it is `generated`.
+  4. **D** The PR check shows the key's row across the matrix (dev `set`, staging `absent`, prod `absent`).
+  5. **D** The promotion gate blocks staging and prod until they are filled.
+- **Removing a key.**
+  1. **G** "We dropped Mixpanel" becomes `opv_change_plan --retire`.
+  2. **D** The plan marks the key `retiring`, prunes it from every target in lane order, then marks it `retired` and archives the 1Password fields. It is resumable, and the matrix shows a half-finished retirement.
+- **Adding an environment.** **D** The new environment receives every `all` key automatically, and its fields arrive with the next structure plan.
+
+### 6.4 Promotion: local → dev → staging → prod
+
+**D** The gate `opv ready <env> --gate` passes only when every present key is `set`, the tier policy holds and the targets are reachable. **D** CI syncs only on change, with the target's own identity. **D** Production never needs 1Password or opv at runtime: its values live in the platform's channels.
+
+### 6.5 Life after setup
+
+- **Rotation:**
+  1. **G** "Rotate the database password."
+  2. **D** The rotation plan orders every step: generate or ask, write a new version, sync each environment in lane order, verify, then report that the old credential is safe to revoke.
+  3. **P** The person approves and revokes.
+- **Expiry:** **D** keys with `expires_at` produce a finding ahead of time, with the rotation plan as `next`.
+- **Leak response:** **D** `opv exposure KEY` lists every environment, target and delivery holding it, then the rotation plan.
+- **Offboarding:** **D** `opv people` lists the boundaries a person can read, and the identities and personal items to revoke.
+- **Portfolio:** **D** One inventory spans every application in the account, and shared values are defined once.
+
+## 7. Provisioners (the ideal's far edge)
+
+For providers with an API (Fly deploy tokens, GitHub fine-grained tokens, database users, cloud service principals, 1Password service accounts), opv mints the credential itself and pipes it straight into the store. The key's source becomes `provisioned`, and no person or assistant ever handles it. Every provisioner follows the same plan → approve → apply shape. opv already does this for 1Password service accounts (`opv access --create`); the ideal generalizes it.
+
+---
+
+# Part II: gap analysis against opv 0.11.0
+
+Legend:
+- **Have:** exists in 0.11.0.
+- **Part:** exists in a narrower form.
+- **Gap:** missing.
+
+| # | Ideal capability (Part I) | opv 0.11.0 | Status | Issue |
+|---|---|---|---|---|
+| G1 | Value boundary on every surface | `SecretValue` (`Debug` and `Display` print `<REDACTED>`; no `Serialize`), the S7MARKER canary scan over CLI, `--json` and MCP, layered scrubbing, value-free MCP tools | **Have** (enforced by tests, not by types; see P-1) | — |
+| G2 | Agent cannot reach values through a shell | 1Password's authorization prompt on writes; `opv_structure_apply` refuses an inherited session | **Part:** no harness guard rules; `opv run` passes child output unredacted | new |
+| G3 | One application contract, versioned with the code | `secrets.toml` in the repository **or** a manifest in 1Password, with the same schema | **Part:** both are allowed; nothing ties the contract to the code that needs it | #175 |
+| G4 | Components | `products` (name, role, keys) | **Have** (name differs: "product") | — |
+| G5 | Key: kind | `secret` / `config`; `file` destinations | **Have** | — |
+| G6 | Key: source (`person` / `generated` / `derived` / `provisioned`) | `from` (derived), `generate` for rule-backed keys, service-account creation | **Part:** source is not an attribute, so opv cannot say "this needs a person" | new |
+| G7 | Key: scope `personal` | `personal = true` | **Have** | — |
+| G8 | Key: presence `all` minus `except`, inherited by new environments | explicit `environments` lists; `opv add` defaults to every environment that exists at the time | **Gap** | #179 |
+| G9 | Key: shape from a catalog | rules (`prefix`, `base64_bytes`, …) | **Part:** no provider catalog | #177 |
+| G10 | Key: lifecycle (`retiring` / `retired`) | three manual steps; fields remain | **Gap** | #179 |
+| G11 | Key: rotation period and expiry | `--rotate` exists for sync; no expiry metadata | **Gap** | new |
+| G12 | Environments: ordered lanes and tiers | environments are unordered; production is inferred from the name | **Gap** | #179 |
+| G13 | Ephemeral environments from a template | none (personal keys cover per-engineer values) | **Gap** (low priority) | new |
+| G14 | Tier policy | settings-health warnings (test or live key, same value, localhost) | **Part:** warnings, not policy | #177, #179 |
+| G15 | Value states (closed set, §3.3) | `opv ready` findings: missing, failing rule, placeholder, same value, … | **Part:** findings, not a state per key; `unreadable` is not a state | #174 |
+| G16 | Inventory matrix | none | **Gap** | #174 |
+| G17 | Code ↔ contract comparison with coverage | none | **Gap** | #175 |
+| G18 | Detection of components, environments and targets from the repository | none | **Gap** | new |
+| G19 | Name catalog (kind, shape, source, guidance for known providers) | name-based kind guess in `init --from` | **Part** | new |
+| G20 | Five verbs with one shape | many commands; plan → approve → apply for structure and sync only | **Part** | new |
+| G21 | Typed `next` (kind, actor) | `next` (a command) and `do` (prose for a person) | **Part:** `do` is prose; there is no actor | new |
+| G22 | `opv next`: one action from a fixed priority | `opv ready` orders findings; no single action | **Gap** | new |
+| G23 | One setup plan, approved once | `init`, `add`, `structure plan`/`approve`/`apply`, `init --from --apply`, `target add`, `access` are separate | **Gap** | new |
+| G24 | Person-only steps run inside `approve` | `approve` only approves | **Gap** | new |
+| G25 | Masked value entry in the terminal | `opv setup` has a masked prompt for its own credentials | **Part:** no `opv set` for keys | new |
+| G26 | Agent mode (no prompts; refusals naming the person's step) | MCP never prompts; the CLI does not detect an agent | **Part** | new |
+| G27 | `opv run` redaction of injected values | every value opv reads is registered with a scrubber that masks it in tool output opv shows (NR-31, `SecretValue::new`) | **Part:** the child of `opv run` writes straight to the terminal, unscrubbed | new |
+| G28 | Change plan (add, alter, retire, extend) | `opv add`, `env add`, `target add`, `init --add-env` | **Part:** no retirement, no bulk extend | #176, #179 |
+| G29 | Promotion gate | `opv ready` exit codes; `status --fail-on-drift` | **Part:** no per-environment completeness gate | #179 |
+| G30 | Rotation plan across environments | `sync --rotate` per environment | **Part** | new |
+| G31 | Exposure report (leak response) | `opv explain KEY` (one key's chain) | **Part** | new |
+| G32 | Access and offboarding report | `opv access` (identities per vault) | **Part:** no person-centred view | new |
+| G33 | Provisioners | 1Password service accounts (`access --create`) | **Part** | new (later) |
+| G34 | Generated configurations | refused by declare tools; `generator_ids` returned by structure apply | **Part** | #178 |
+| G35 | Declare from a `.env` by name only, through MCP | CLI `init --from` (imports values too) | **Part** | #176 |
+| G36 | Guard rules for assistant harnesses | none | **Gap** | new |
+| G37 | Free-text inputs screened for values | none | **Gap** | new |
+| G38 | Portfolio inventory | `opv projects`, `status --all` | **Part** | #174 |
+
+Summary of the 38 rows:
+- **Have (4):** G1, G4, G5, G7.
+- **Part (21):** G2, G3, G6, G9, G14, G15, G19, G20, G21, G25, G26, G27, G28, G29, G30, G31, G32, G33, G34, G35, G38.
+- **Gap (13):** G8, G10, G11, G12, G13, G16, G17, G18, G22, G23, G24, G36, G37.
+
+The foundation (value-free surfaces, plans bound to content, reconciliation of delivery, personal keys, shared values) is sound. The missing layer is the **application model** and the **assistant contract** on top of it.
+
+---
+
+# Part III: contradictions (TRIZ)
+
+TRIZ is worth using here because the objective contains real contradictions: two requirements that pull against each other, where a compromise would weaken both. The principles below come from the offline catalog (`triz catalog`, triz-software-2). The paid `triz analyze` (Jev through OpenRouter) was not run; it needs the owner's authorization and is offered in §15.
+
+| # | Contradiction | Type | Resolution | Principle |
+|---|---|---|---|---|
+| C1 | The assistant must know about every value, to guide the person, and must know nothing of any value | physical: information about the value must be both present and absent | **Separate by abstraction level.** Expose a closed value state (§3.3), computed in opv's process; the value itself never leaves. No numeric field, because a number is a partial leak | 2 extraction; 26 copying (a simplified copy stands in for the original) |
+| C2 | Setup should take one approval, for ergonomics, but every write must be approved, for safety | technical | **Consolidate the approval and keep it exact.** One content-addressed plan lists every step by name. Approving it approves exactly those steps; any change makes it stale and needs a new approval | 5 consolidation; 10 preliminary action |
+| C3 | Value-bearing steps (imports, typed values) need a person present, but the assistant should drive the whole setup | physical: the step must be both in the assistant's flow and outside it | **Separate in space.** The plan holds both kinds of step. The assistant's `apply` runs the steps that need no person; the person's `approve`, in their own terminal, runs the person-only steps. The plan is shared; where each step runs is not | separation in space; 1 segmentation |
+| C4 | The assistant should be able to run the application to debug it, but the application's output can contain the values opv injected | technical | **opv as intermediary.** `opv run` in agent mode masks every injected value, and its common encodings, in the child's output before the assistant sees it. opv holds the values, so it can match them exactly | 24 intermediary; 9 prior counteraction |
+| C5 | Keys must be consistent across environments, but environments legitimately differ | technical | **Consistent by default, different by declaration.** Presence `all` plus an explicit `except` with a reason, and tier policy for what must differ (production distinct from lower tiers) | 3 local quality; 4 asymmetry |
+| C6 | Scanning must find every name the code reads, but no deterministic scanner covers every language and dynamic name | technical | **Deterministic core with a validated generative supplement.** The scanner reports its coverage; the assistant supplies what it can see that the scanner can't, through a grammar-checked list tagged `assistant_supplied`. The comparison is still deterministic | 1 segmentation; 23 feedback |
+| C7 | Free-text inputs (guidance, reasons) are needed, but a value could be pasted into one | technical | **Screen before accepting.** Every free-text field passes through the same detectors as the value states (secret shapes, high entropy, known prefixes). A hit is refused with `value_in_text_field`, before anything is written | 9 prior counteraction; 11 cushion in advance |
+| C8 | The surface must be complete, but small enough that any assistant uses it consistently | technical | **One shape, few verbs.** Five verbs (§4.1) with one envelope; capability grows by adding nouns, not shapes | 6 universality; 7 nesting |
+| C9 | The contract should live with the code (reviewed in PRs), but some teams keep it in 1Password so non-repository tools can read it | technical | **One source, two views.** The repository file is the source; a manifest in 1Password is a read-only mirror stamped with the commit, for tools that cannot read the repository. Only one is writable | 4 asymmetry; 26 copying |
+| C10 | opv should prompt a person when that helps, but an assistant's shell must never hang on a prompt or see one | physical: the same command must prompt and not prompt | **Separate by condition.** Agent mode (MCP, harness markers, `OPV_AGENT`) never prompts and returns the person's command; a TTY without agent markers prompts | separation on condition |
+
+---
+
+# Part IV: poka-yoke (making confusion and failure structurally impossible)
+
+Each row names a failure or a confusion, and the structure that prevents it. **Prevents** means the failure cannot be expressed. **Detects** means it is caught before harm. **Warns** means the person is told.
+
+## 11. The value boundary
+
+| # | Failure | Structural prevention | Level |
+|---|---|---|---|
+| P-1 | A value reaches an output | Output documents are built only from value-free types: `Name`, `Id`, `ValueState`, `Path`, closed enums. `SecretValue` implements no `Serialize`, and an output type cannot hold it. A compile-time check (a sealed `ValueFree` trait required by the renderer, implemented only for those types) makes a value-bearing field fail to build. The canary scan stays as the second layer | prevents |
+| P-2 | A value is pasted into a free-text input (guidance, reason, name) | Every string input has a grammar (names: `^[A-Z][A-Z0-9_]*$`; guidance: one line, at most 200 characters). Free text passes the secret detectors, and a hit is refused (`value_in_text_field`) before any write | prevents (names), detects (free text) |
+| P-3 | A tool input accepts a value | No MCP schema has a field that carries a value. A schema test fails if any input property is not a closed enum, a grammar-checked string or an id | prevents |
+| P-4 | An assistant's shell reads a value through `op` | Harness guard rules (§9.4) deny `op read`, `op item get --reveal`, `op inject` and `opv run -- <shell>` for the assistant, and 1Password's authorization prompt protects the rest. This is not a sandbox, and the docs say so | detects |
+| P-5 | Child process output leaks an injected value | `opv run` in agent mode masks exact values and their base64, hex and URL encodings in the child's output, streaming across chunk boundaries. The mask replaces the whole match with a fixed marker, never by bytes, which keeps JSON well-formed (the 0.10.0 lesson) | detects |
+| P-6 | A person pastes a value into the chat | Outside opv's control. The skill and the MCP instructions tell the assistant to stop, never repeat it, point to `opv set`, and treat the value as exposed, which makes the rotation plan the `next` action | warns |
+
+## 12. Model and state
+
+| # | Failure | Structural prevention | Level |
+|---|---|---|---|
+| P-7 | A failed read is reported as a missing value | `unreadable` is its own value state with its cause. The type that computes states has no path from an error to `absent` | prevents |
+| P-8 | A key is missing from an environment by accident | Presence `all` by default. An explicit list that leaves out an environment needs an `except` with a reason, otherwise load warns with `environment_gap` | prevents (new keys), warns (old ones) |
+| P-9 | A new environment lacks existing keys | Presence `all` is inherited on creation; the structure plan adds its fields | prevents |
+| P-10 | A removed key leaves orphans | Lifecycle states: `retire` moves through `retiring` → `retired` in a fixed order, and archives fields instead of deleting | prevents |
+| P-11 | A dev value is copied into production | Tier policy: a production value equal to a lower tier's is `suspect` and fails the production gate unless the key says `allow_same_value`. An import into a production-tier environment needs `--confirm <env>` | detects |
+| P-12 | The code reads a key the contract doesn't declare | The `needs` gate in CI | detects |
+| P-13 | A personal key is stored as shared | The catalog marks known per-developer keys (`OPENAI_API_KEY` in a local tier) as suggested `personal`, and the plan shows the suggestion | warns |
+| P-14 | A generated contract is edited by hand | Declarations to a generated contract return fragments for the generator (#178), and an edit is refused | prevents |
+| P-15 | The contract and the 1Password mirror diverge | Only one is writable (C9). The mirror carries the commit, and `config check` compares | prevents |
+
+## 13. Contract and flow
+
+| # | Failure | Structural prevention | Level |
+|---|---|---|---|
+| P-16 | The assistant doesn't know what to do next | Every document ends with a typed `next` (kind, actor, command or link). `opv next` returns one action from a fixed priority | prevents |
+| P-17 | Different assistants do things in different orders | The order is opv's (`next`, plan step order), not the assistant's. The same state gives the same `next` | prevents |
+| P-18 | A plan changes between review and apply | Content-addressed `plan_id`; a stale plan refuses | prevents |
+| P-19 | An approval is replayed or used for another project | Single use, bound to the project, account and contract text, and claimed by an atomic rename (as today) | prevents |
+| P-20 | The assistant runs a person-only command and hangs on a prompt | Agent mode: the command refuses at once with `next.actor = person` and the exact command | prevents |
+| P-21 | A half-finished plan leaves an unknown state | Every plan is resumable. The inventory and `next` show the partial state, and a re-run converges without duplicates | prevents |
+| P-22 | Two runs race | One lock per project and environment for writes, as for sync today | prevents |
+| P-23 | A promotion goes out with missing values | `ready --gate` per environment in the CI recipe | detects |
+| P-24 | Output differs run to run, so plans never match | Stable ordering, no clock in plans, golden tests on documents | prevents |
+
+---
+
+# Part V: delivery
+
+The order puts the assistant contract and the application model first, because every later journey depends on them.
+
+| Phase | Contents | Gaps closed | Issues |
+|---|---|---|---|
+| **A. Contract hardening** | `ValueFree` output types (P-1) and the MCP input schema test (P-3); typed `next` with kind and actor; agent mode (P-20, C10); free-text screening (P-2) | G1 (by types), G21, G26, G37 | new |
+| **B. State you can see** | value states (§3.3); `opv inventory` matrix; `opv next`; scope, source and presence attributes | G6, G15, G16, G22, G38 | #174 |
+| **C. The application model** | presence `all`/`except`; ordered lanes and tiers; tier policy; the gap finding; lifecycle and `retire`; bulk extend; the promotion gate | G8, G10, G12, G14, G28, G29 | #179, #177 |
+| **D. Code ↔ contract** | the scanner with coverage; `opv needs` and its gate; name-only declaration from a `.env`; the name catalog | G3, G17, G19, G35 | #175, #176 |
+| **E. One-plan setup** | `opv detect`; `setup plan`; person-only steps inside `approve`; `opv set` (masked) | G18, G23, G24, G25 | new |
+| **F. Assistant safety in a shell** | `opv run` redaction (P-5); harness guard rules (P-4) | G2, G27, G36 | new |
+| **G. Life after setup** | rotation plan; expiry; exposure; people and offboarding | G11, G30, G31, G32 | new |
+| **H. Later** | provisioners; ephemeral environments; generated-contract fragments | G13, G33, G34 | #178 |
+
+Phases A and B are prerequisites for the rest. C and D can run in parallel after B. E needs B, C and D. F is independent and could ship first. G needs C. Swarm, GCP and VMs are already planned for 0.12.0 (delivery-transports §8–9), so Part VI asks the owner how to split this work between 0.12.0 and 0.13.0.
+
+Each phase lands with:
+- CLI and MCP parity gate scenarios;
+- canary-scan coverage of every new document;
+- e2e scenarios against opv-sim;
+- for phases B–E, an **assistant walkthrough**: a scripted run from a repository with no opv configuration to `ready --gate` passing in every environment, using only MCP tools plus the person-only steps. It runs once each under Claude Code, Cursor and Codex, and records the number of person actions.
+
+---
+
+# Part VI: decisions for the owner
+
+Each one is explained, with a recommendation.
+
+1. **Where the contract lives (C9, G3).**
+   - **The question:** today a project's configuration can be a `secrets.toml` in the repository or a manifest in 1Password. The ideal wants the key contract reviewed in the same pull request as the code that needs it, which argues for the repository file as the single writable source, with the 1Password manifest as a read-only mirror.
+   - **What changes:** projects that keep their configuration only in 1Password would move it into the repository.
+   - **Recommendation:** make the repository file the source for applications. Keep the manifest as a mirror for portfolio views.
+2. **Presence default (C5, G8).** Covered in #179.
+   - **Recommendation:** the new `all` form becomes the default for new keys, and existing explicit lists keep their meaning. Nothing breaks.
+3. **Naming: "product" or "component".**
+   - **The question:** "product" in opv means a part of the application (web, api). The ideal calls it a component and calls the whole an application.
+   - **Recommendation:** keep `products` in the file format, because renaming breaks every configuration. Use "application" and "component" in documentation and in new commands' text.
+4. **How far agent mode goes (C4, C10).**
+   - **The question:** redacting `opv run` output in agent mode protects values, but changes what an assistant sees while debugging.
+   - **Recommendation:** redact by default in agent mode, with no switch to turn it off from agent mode.
+5. **Release split.**
+   - **The question:** Phases A–F are a large body of work, and 0.12.0 already holds Swarm, GCP Secret Manager and the VM step.
+   - **Recommendation:** 0.12.0 = phases A, B and F plus the planned targets. 0.13.0 = C, D and E. 0.14.0 = G.
+6. **TRIZ analysis.** The contradictions above were resolved with the offline catalog. The paid `triz analyze` (OpenRouter) could cross-check C1–C10 and needs the owner's authorization.
+
+---
+
+## Evidence (opv 0.11.0)
+
+| What | Where |
+|---|---|
+| The value type | `src/domain/secret.rs` (`SecretValue`, `expose`) |
+| Masked entry (setup only) | `src/app/masked.rs`, `src/app/setup_runtime.rs:594` |
+| Settings-health detectors | `src/domain/health.rs` (`is_placeholder` :291) |
+| The MCP surface and its authorization model | `docs/mcp.md` |
+| The JSON envelope (`next`, `do`, typed errors) | `docs/usage.md` "Every command that takes `--json`" |
+| `opv add` defaulting to every declared environment | `src/app/add.rs:37` |
+| `init --from` (name-based kind, value import) | `docs/configuration.md` "Start from an existing `.env`" |
+| The retirement steps today | `docs/usage.md` "Prune order" |
+| Scrubbing lessons | `docs/design/error-catalog.md` |
