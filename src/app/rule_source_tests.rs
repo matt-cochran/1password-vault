@@ -44,13 +44,14 @@ fn repo() -> tempfile::TempDir {
     dir
 }
 
+/// `text` as the project keeps it (D-G): the contract, its ids in `secrets.bindings.toml`.
 fn write_contract(dir: &Path, text: &str) {
-    std::fs::write(dir.join("secrets.toml"), text).unwrap();
+    crate::config::bindings::write_split(&dir.join("secrets.toml"), text).unwrap();
 }
 
 fn commit(dir: &Path, message: &str) {
     let r = runner();
-    git(&r, dir, &["add", "secrets.toml"]);
+    git(&r, dir, &["add", "secrets.toml", "secrets.bindings.toml"]);
     git(&r, dir, &["commit", "-q", "--no-gpg-sign", "-m", message]);
 }
 
@@ -236,4 +237,27 @@ fn a_manifest_configuration_is_a_manifest_source() {
     let dir = tempfile::tempdir().unwrap();
     let source = rule_source(&runner(), dir.path(), &fleet).unwrap();
     assert!(matches!(source, RuleSource::Manifest));
+}
+
+/// D-G: the committed contract holds no ids; the bindings committed beside it fill them in,
+/// so it parses and its rules count.
+#[test]
+fn a_committed_contract_parses_with_its_committed_bindings() {
+    let dir = repo();
+    write_contract(dir.path(), &with_rule("sk-"));
+    commit(dir.path(), "contract and bindings");
+    set_origin_head(dir.path(), "main");
+    std::fs::remove_file(dir.path().join("secrets.bindings.toml")).unwrap();
+    let working = crate::config::parse_at(
+        &with_rule("sk-"),
+        crate::config::Source::File(&dir.path().join("secrets.toml")),
+    )
+    .unwrap();
+    let source = rule_source(&runner(), dir.path(), &working).unwrap();
+    assert_eq!(
+        source
+            .contract()
+            .map(|f| f.environments["dev"].boundaries["app"].item_id.clone()),
+        Some("app".to_string())
+    );
 }

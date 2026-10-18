@@ -268,8 +268,8 @@ impl Run {
     fn next(&self) -> Option<String> {
         let doc = self.doc();
         if let Some(n) = doc
-            .pointer("/error/next")
-            .or_else(|| doc.get("next"))
+            .pointer("/error/next/command")
+            .or_else(|| doc.pointer("/next/command"))
             .and_then(Value::as_str)
         {
             return Some(n.to_string());

@@ -1521,11 +1521,11 @@ fn fly_plan_json_stdout_is_one_json_document() {
 
 /// FR-21: the document declares `schema_version: 2` (the error document changed in 0.10.0).
 #[test]
-fn status_json_schema_version_is_two() {
+fn status_json_schema_version_is_three() {
     let h = Harness::new(&good_item());
     let r = h.run(&["status", "prod", "--json"]);
     let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
-    assert_eq!(doc["schema_version"], json!(2), "{}", r.all());
+    assert_eq!(doc["schema_version"], json!(3), "{}", r.all());
 }
 
 /// FR-21: the document names the environment and carries names-only totals.
@@ -1625,11 +1625,11 @@ fn status_json_row_carries_failing_reason() {
 
 /// FR-22: the JSON document keeps schema_version 2 when `reason` is added.
 #[test]
-fn status_json_reason_keeps_schema_version_two() {
+fn status_json_reason_keeps_schema_version_three() {
     let h = Harness::new(&item(good_fields("pk-S7MARKERVALUEbadprefix0014")));
     let r = h.run(&["status", "prod", "--json"]);
     let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
-    assert_eq!(doc["schema_version"], json!(2), "{}", r.all());
+    assert_eq!(doc["schema_version"], json!(3), "{}", r.all());
 }
 
 /// FR-22: text output shows `failed <rule> (<reason>)`.

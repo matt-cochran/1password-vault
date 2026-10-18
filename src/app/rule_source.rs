@@ -112,7 +112,9 @@ pub fn default_branch(runner: &dyn CommandRunner, repo: &Path) -> String {
 /// The source of `working`'s rules: [`RuleSource::Manifest`] when the configuration came
 /// from 1Password, else the contract read from `repo`'s default branch with `git show` and
 /// parsed by [`crate::config::parse`]. `repo` is the repository top; the contract's path is
-/// the working file's path relative to it.
+/// the working file's path relative to it. D-G: the committed contract holds no ids, so
+/// the `secrets.bindings.toml` committed beside it fills them in (the working tree's when
+/// the branch has none).
 pub fn rule_source(
     runner: &dyn CommandRunner,
     repo: &Path,
@@ -124,6 +126,13 @@ pub fn rule_source(
     let branch = default_branch(runner, repo);
     let relative = path.strip_prefix(repo).unwrap_or(path);
     let spec = format!("{branch}:{}", relative.to_string_lossy().replace('\\', "/"));
+    let bindings_spec = format!(
+        "{branch}:{}",
+        relative
+            .with_file_name(crate::config::bindings::FILE)
+            .to_string_lossy()
+            .replace('\\', "/")
+    );
     let dir = repo.to_str().unwrap_or(".");
     let text = match runner.probe(
         &Call::new("git", &["-C", dir, "show", spec.as_str()]),
@@ -137,7 +146,16 @@ pub fn rule_source(
             });
         }
     };
-    let contract = crate::config::parse(&text)?;
+    let ids = match runner.probe(
+        &Call::new("git", &["-C", dir, "show", bindings_spec.as_str()]),
+        PROBE_TIMEOUT,
+    ) {
+        Ok(o) if o.status == 0 => {
+            crate::config::bindings::Bindings::parse(&String::from_utf8_lossy(&o.stdout))?
+        }
+        _ => crate::config::bindings::read_sibling(path)?,
+    };
+    let contract = crate::config::parse(&crate::config::bindings::merge(&text, &ids))?;
     Ok(RuleSource::DefaultBranch {
         branch,
         contract: Some(contract),
