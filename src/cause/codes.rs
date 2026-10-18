@@ -690,8 +690,7 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
         },
         Partial {
             done: vec!["vault shop-prod".into()],
-            approval_used: Some(PlanId::new("sp-used")),
-            approval_scope: Some(sync_scope()),
+            scope: Some(sync_scope()),
             then: Box::new(BudgetSpent {
                 budget_seconds: 77,
                 writes_started: true,

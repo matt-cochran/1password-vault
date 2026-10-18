@@ -649,15 +649,13 @@ fn after_authorized(e: Error, applied: &Applied) -> Error {
             written.extend(done);
             Cause::Partial {
                 done: written,
-                approval_used: None,
-                approval_scope: Some(PlanScope::Structural),
+                scope: Some(PlanScope::Structural),
                 then,
             }
         }
         then => Cause::Partial {
             done: written,
-            approval_used: None,
-            approval_scope: Some(PlanScope::Structural),
+            scope: Some(PlanScope::Structural),
             then: Box::new(then),
         },
     };

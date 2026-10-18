@@ -1838,12 +1838,7 @@ impl Cause {
                 then.message(),
                 list_of(keys)
             ),
-            Partial {
-                done,
-                approval_used,
-                approval_scope: _,
-                then,
-            } => {
+            Partial { done, then, .. } => {
                 let mut s = match then.as_ref() {
                     // F3: next to what was already written, "opv wrote nothing" is false.
                     ChangedBeforeWrite { object } if !done.is_empty() => format!(
@@ -1854,9 +1849,6 @@ impl Cause {
                 };
                 if !done.is_empty() {
                     s.push_str(&format!("; already written: {}", list(done)));
-                }
-                if let Some(p) = approval_used {
-                    s.push_str(&format!("; approval {p} is used up"));
                 }
                 s
             }
@@ -3489,12 +3481,7 @@ impl Cause {
                 c.args = args;
                 plan(None, run_or_handoff(c))
             }
-            Partial {
-                done,
-                approval_used: _,
-                approval_scope,
-                then,
-            } => {
+            Partial { done, scope, then } => {
                 let inner = then.plan_raw(inv);
                 // A15: an empty `done` names nothing as written.
                 let action = match (inner.action, inner.do_text, done.is_empty()) {
@@ -3509,7 +3496,7 @@ impl Cause {
                     )),
                 };
                 let path: Vec<&str> = inv.command.iter().map(String::as_str).collect();
-                let next = match (approval_scope, path.as_slice()) {
+                let next = match (scope, path.as_slice()) {
                     (Some(scope), _) => scope_read(scope),
                     // A22: what `target credentials` made is read back with its show form.
                     (None, ["target", "credentials"]) => {

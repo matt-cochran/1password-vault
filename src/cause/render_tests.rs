@@ -483,14 +483,13 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
         (
             Partial {
                 done: vec!["vault shop-prod".into()],
-                approval_used: Some(PlanId::new("sp-used")),
-                approval_scope: Some(sync_scope()),
+                scope: Some(sync_scope()),
                 then: Box::new(BudgetSpent {
                     budget_seconds: 77,
                     writes_started: true,
                 }),
             },
-            vec!["vault shop-prod", "sp-used", "77"],
+            vec!["vault shop-prod", "77"],
         ),
         (
             Interrupted {
@@ -1699,6 +1698,13 @@ fn the_document_names_the_checked_account() {
 }
 
 #[test]
+fn a_partials_json_subject_has_no_approval_key() {
+    let d = document(&fixture(34), None, &inv(), false);
+    let keys: Vec<&String> = d["subject"].as_object().unwrap().keys().collect();
+    assert!(!keys.iter().any(|k| k.starts_with("approval")), "{d}");
+}
+
+#[test]
 fn the_document_category_follows_the_exit_code() {
     let d = document(&in_other_account(), None, &inv(), false);
     assert_eq!(d["category"], serde_json::json!("auth"));
@@ -2839,8 +2845,7 @@ fn a14_a_missing_config_file_steps_to_doctor() {
 fn a15_nothing_written_is_never_listed() {
     let c = Cause::Partial {
         done: vec![],
-        approval_used: None,
-        approval_scope: None,
+        scope: None,
         then: Box::new(Cause::Interrupted {
             signal: 2,
             writes_started: true,
@@ -3356,8 +3361,7 @@ fn generate_refused(reason: GenerateRefusal) -> Cause {
 fn partial(then: Cause, done: &[&str]) -> Cause {
     Cause::Partial {
         done: done.iter().map(|d| d.to_string()).collect(),
-        approval_used: None,
-        approval_scope: None,
+        scope: None,
         then: Box::new(then),
     }
 }
@@ -4118,8 +4122,7 @@ fn l10_in_env_keeps_an_environment_already_set() {
 fn l10_in_env_reaches_a_partial_then() {
     let c = Cause::Partial {
         done: Vec::new(),
-        approval_used: None,
-        approval_scope: None,
+        scope: None,
         then: Box::new(unrecognized_without_env()),
     }
     .in_env("prod");

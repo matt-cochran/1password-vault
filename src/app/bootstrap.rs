@@ -895,8 +895,7 @@ pub fn run(
             // the file itself is never rewritten (FR-52).
             return Err(Cause::Partial {
                 done: recorded.iter().map(Recorded::line).collect(),
-                approval_used: None,
-                approval_scope: None,
+                scope: None,
                 then: Box::new(Cause::ConfigNotEditable {
                     source: ConfigSource::File {
                         path: path.to_path_buf(),

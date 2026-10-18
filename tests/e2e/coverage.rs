@@ -1749,10 +1749,24 @@ fn variants() -> &'static BTreeMap<String, BTreeSet<String>> {
         let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut current = String::new();
         let mut depth = 0i32;
+        let mut skip_field = false;
         for line in src[start..].lines() {
             let l = line.trim();
-            if l.starts_with("//") || l.starts_with('#') || l.is_empty() {
+            if l.is_empty() || l.starts_with("//") {
                 continue;
+            }
+            if l.starts_with('#') {
+                // A field serde does not serialize is not part of the subject.
+                if l.starts_with("#[serde(skip") {
+                    skip_field = true;
+                }
+                continue;
+            }
+            if skip_field {
+                skip_field = false;
+                if field.is_match(l) {
+                    continue;
+                }
             }
             if depth == 0 {
                 if l.starts_with('}') {

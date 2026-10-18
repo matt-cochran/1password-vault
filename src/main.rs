@@ -4103,8 +4103,7 @@ fn mcp_install(
                 return Err(Error::Catalog(
                     Box::new(opv::cause::Cause::Partial {
                         done: done.iter().map(|d| d.client.to_string()).collect(),
-                        approval_used: None,
-                        approval_scope: None,
+                        scope: None,
                         then,
                     }),
                     upstream,
