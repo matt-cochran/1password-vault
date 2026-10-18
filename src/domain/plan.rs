@@ -1729,7 +1729,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
         let env = Environment {
             name: "ci".to_string(),
             boundaries: ["api", "web", "shared"]
-                .map(|b| (b.to_string(), at.clone()))
+                .map(|b| (b.to_string(), Some(at.clone())))
                 .into_iter()
                 .collect(),
             targets: BTreeMap::from([(
@@ -1740,7 +1740,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
                     products: Some(vec!["api".to_string()]),
                     roles: None,
                     deploy_credentials: None,
-                    state_vault_id: "sci".to_string(),
+                    state_vault_id: Some("sci".to_string()),
                     delivery_items: BTreeMap::new(),
                 },
             )]),

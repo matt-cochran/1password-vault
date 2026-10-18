@@ -3257,7 +3257,7 @@ fn a20_a_built_step_keeps_the_config_flag() {
         source: file_source(),
     };
     let inv = cli(&["opv", "sync", "prod", "--config", "cfg/secrets.toml"]);
-    assert_eq!(next_in(&c, &inv), "opv bootstrap --config cfg/secrets.toml");
+    assert_eq!(next_in(&c, &inv), "opv apply --config cfg/secrets.toml");
 }
 
 /// A21: a rejected credential needs a person to replace it.

@@ -250,7 +250,11 @@ fn two_boundary_world() -> (FakeOp, Fleet, tempfile::TempDir) {
 }
 
 fn boundary_item(fleet: &Fleet, name: &str) -> String {
-    fleet.environments["dev"].boundaries[name].item_id.clone()
+    fleet.environments["dev"].boundaries[name]
+        .as_ref()
+        .unwrap()
+        .item_id
+        .clone()
 }
 
 fn field_in(op: &FakeOp, id: &str, label: &str) -> String {
@@ -294,10 +298,10 @@ fn opts(dir: &tempfile::TempDir, dry_run: bool, replace: &[&str]) -> Opts {
 fn value_of(op: &FakeOp, fleet: &Fleet, label: &str) -> String {
     let item = op.item(
         &fleet.environments["dev"]
-            .boundaries
-            .values()
+            .bound_boundaries()
             .next()
             .unwrap()
+            .1
             .item_id,
     );
     item["fields"]
@@ -374,10 +378,10 @@ fn replace_keeps_the_old_value_in_the_kept_section() {
     .unwrap();
     let item = op.item(
         &fleet.environments["dev"]
-            .boundaries
-            .values()
+            .bound_boundaries()
             .next()
             .unwrap()
+            .1
             .item_id,
     );
     assert!(

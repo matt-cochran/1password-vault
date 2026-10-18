@@ -226,7 +226,7 @@ fn vault_title(op: &FakeOp, id: &str) -> String {
 }
 
 fn boundary(fleet: &crate::domain::Fleet, env: &str, b: &str) -> crate::domain::Boundary {
-    fleet.environments[env].boundaries[b].clone()
+    fleet.environments[env].boundaries[b].clone().unwrap()
 }
 
 fn wrote_to_1password(op: &FakeOp) -> bool {
@@ -299,7 +299,10 @@ fn a_target_without_state_vault_id_records_the_conventional_state_vault() {
     assert_eq!(
         vault_title(
             &op,
-            &fleet.environments["prod"].targets["web"].state_vault_id
+            fleet.environments["prod"].targets["web"]
+                .state_vault_id
+                .as_deref()
+                .unwrap()
         ),
         "myapp-prod-web-state"
     );
@@ -700,7 +703,7 @@ fn a_fresh_account_ends_with_every_value_to_fill_named() {
 fn once_the_owner_fills_the_values_nothing_is_left() {
     let (_dir, path, op) = workspace_with(TWO);
     let fleet = bootstrap(&path, &op);
-    for b in fleet.environments["prod"].boundaries.values() {
+    for (_, b) in fleet.environments["prod"].bound_boundaries() {
         let mut item = op.item(&b.item_id);
         for f in item["fields"].as_array_mut().unwrap() {
             if f["label"] == "API_TOKEN" || f["label"] == "SESSION_KEY" {
@@ -796,7 +799,7 @@ fn a_created_delivery_item_lives_in_its_targets_state_vault() {
     let web = &fleet.environments["prod"].targets["web"];
     assert_eq!(
         op.item(&web.delivery_items["api"])["vault"]["id"],
-        web.state_vault_id.as_str()
+        web.state_vault_id.as_deref().unwrap()
     );
 }
 

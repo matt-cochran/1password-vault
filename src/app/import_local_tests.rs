@@ -124,7 +124,11 @@ fn a_local_environment_imports_a_missing_key() {
     let (op, fleet, dir) = local_world();
     let file = dir.path().join("dev.env");
     import_local(&fleet, "dev", &file, &op, &mut Vec::new()).unwrap();
-    let id = fleet.environments["dev"].boundaries["api"].item_id.clone();
+    let id = fleet.environments["dev"].boundaries["api"]
+        .as_ref()
+        .unwrap()
+        .item_id
+        .clone();
     assert_eq!(field_in(&op, &id, "OPENAI_API_KEY"), MARK_NEW);
     assert_eq!(field_in(&op, &id, "LOG_LEVEL"), "info");
 }
@@ -134,7 +138,11 @@ fn a_written_item_carries_the_assistant_imported_tag() {
     let (op, fleet, dir) = local_world();
     let file = dir.path().join("dev.env");
     import_local(&fleet, "dev", &file, &op, &mut Vec::new()).unwrap();
-    let id = fleet.environments["dev"].boundaries["api"].item_id.clone();
+    let id = fleet.environments["dev"].boundaries["api"]
+        .as_ref()
+        .unwrap()
+        .item_id
+        .clone();
     let has = op.item(&id)["tags"]
         .as_array()
         .is_some_and(|t| t.iter().any(|v| v.as_str() == Some(ASSISTANT_IMPORTED)));

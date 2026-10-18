@@ -197,7 +197,7 @@ fn add_writes_the_created_state_vaults_id() {
     let id = vault_id(&op, "myapp-dev-site-state").unwrap();
     assert_eq!(
         a.fleet().environments["dev"].targets["site"].state_vault_id,
-        id
+        Some(id)
     );
 }
 
@@ -438,8 +438,10 @@ fn add_reuses_an_existing_state_vault() {
         .push(("vst1".into(), "myapp-dev-site-state".into()));
     let a = add_with(FLEET, add_args("dev", "site"), &op);
     assert_eq!(
-        a.fleet().environments["dev"].targets["site"].state_vault_id,
-        "vst1"
+        a.fleet().environments["dev"].targets["site"]
+            .state_vault_id
+            .as_deref(),
+        Some("vst1")
     );
 }
 

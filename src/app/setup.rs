@@ -768,22 +768,26 @@ pub fn run(
         let env = existing.environment(&recipe.environment)?;
         // The recipe writes one item (its one boundary); compare against the first recorded.
         // 05.28: no step inside the text; the cause's own step is the structure route.
-        let at = env.boundaries.values().next().ok_or_else(|| -> Error {
-            Cause::BoundaryMissing {
-                env: EnvName::new(recipe.environment.as_str()),
-                product: ProductName::new(selected.as_str()),
-                source: ConfigSource::File {
-                    path: output.clone(),
-                    given_by: match output_override {
-                        Some(_) => GivenBy::Flag {
-                            flag: "--config".into(),
+        let at = env
+            .bound_boundaries()
+            .next()
+            .map(|(_, b)| b)
+            .ok_or_else(|| -> Error {
+                Cause::BoundaryMissing {
+                    env: EnvName::new(recipe.environment.as_str()),
+                    product: ProductName::new(selected.as_str()),
+                    source: ConfigSource::File {
+                        path: output.clone(),
+                        given_by: match output_override {
+                            Some(_) => GivenBy::Flag {
+                                flag: "--config".into(),
+                            },
+                            None => GivenBy::Discovered,
                         },
-                        None => GivenBy::Discovered,
                     },
-                },
-            }
-            .into()
-        })?;
+                }
+                .into()
+            })?;
         config_compatible(
             &output,
             &recipe.manifest(&at.vault_id, &at.item_id)?,

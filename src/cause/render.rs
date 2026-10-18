@@ -2502,13 +2502,11 @@ impl Cause {
                 )),
                 Next::Rerun,
             ),
-            BoundaryMissing { source, .. } | StateVaultMissing { source, .. } => plan(
-                None,
-                match source {
-                    ConfigSource::File { .. } => Next::Run(cmd(&["bootstrap"], &[])),
-                    ConfigSource::Manifest { .. } => Next::Check(cmd(&["structure", "plan"], &[])),
-                },
-            ),
+            // D-G: ids are bound only by `opv apply`, which a person runs in their own
+            // terminal; it makes and binds every boundary and state vault the contract needs.
+            BoundaryMissing { .. } | StateVaultMissing { .. } => {
+                plan(None, Next::Handoff(cmd(&["apply"], &[])))
+            }
             StateVaultTooWide {
                 env,
                 target,

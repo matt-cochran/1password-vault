@@ -88,7 +88,11 @@ fn a_non_tty_refuses_the_terminal_before_prompting() {
 #[test]
 fn an_accepted_value_is_written_to_the_field() {
     let (op, fleet) = world();
-    let id = fleet.environments["dev"].boundaries["api"].item_id.clone();
+    let id = fleet.environments["dev"].boundaries["api"]
+        .as_ref()
+        .unwrap()
+        .item_id
+        .clone();
     set(
         &fleet,
         &FakeEnv::new("linux").tty(),

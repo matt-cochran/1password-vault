@@ -93,9 +93,11 @@ pub fn meaning(code: &str) -> &'static str {
             "free text in an intent document looks like a secret value and is refused before anything is written"
         }
         "boundary_missing" => {
-            "a product has a key desired in an environment whose boundary (vault and item) is not recorded"
+            "a product has a key desired in an environment whose boundary (vault and item) is not declared or not bound yet; a person runs opv apply"
         }
-        "state_vault_missing" => "a target has no state vault recorded for its delivery evidence",
+        "state_vault_missing" => {
+            "a target's state vault for its delivery evidence is not bound yet; a person runs opv apply"
+        }
         "state_vault_wider_than_values" => {
             "a state vault shared by targets could be readable more widely than the values its evidence describes; a person gives one target its own"
         }
