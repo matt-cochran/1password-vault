@@ -116,6 +116,12 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "BindingsUnapplied",
         "the e2e world has no apply record until opv apply lands (rows apply-core, e2e-coverage)",
     ),
+    // `opv contract --check` is a library function in this row; the CLI surface (and a
+    // committed copy for it to compare) arrives with the later `ci-workflow` row.
+    (
+        "ContractStale",
+        "opv contract --check has no CLI surface yet (row contract-data is library only)",
+    ),
 ];
 
 fn snapshots() -> PathBuf {

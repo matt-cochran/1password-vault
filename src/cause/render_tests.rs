@@ -146,6 +146,12 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             ],
         ),
         (
+            ContractStale {
+                path: Some(PathBuf::from("contract.json")),
+            },
+            vec!["contract.json"],
+        ),
+        (
             ValueInTextField {
                 field: DottedPath(vec!["guidance".into()]),
                 detector: "known_prefix",
@@ -902,6 +908,7 @@ fn ordinal(c: &Cause) -> usize {
         ConfigSourceMismatch { .. } => 1,
         ConfigUnreadable { .. } => 2,
         ConfigInvalid { .. } => 3,
+        ContractStale { .. } => 82,
         BoundaryMissing { .. } => 4,
         StateVaultMissing { .. } => 5,
         StateVaultTooWide { .. } => 6,
@@ -986,7 +993,7 @@ fn ordinal(c: &Cause) -> usize {
     }
 }
 
-const VARIANTS: usize = 82;
+const VARIANTS: usize = 83;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()

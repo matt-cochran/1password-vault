@@ -1326,6 +1326,14 @@ impl Cause {
                 let (what, _) = rule_words(&field.to_string(), rule);
                 format!("{}{}: {what}", source_words(source), at_words(at))
             }
+            ContractStale { path } => match path {
+                Some(p) => format!(
+                    "the committed contract copy {} is stale; regenerate it with opv contract",
+                    p.display()
+                ),
+                None => "the committed contract copy is stale; regenerate it with opv contract"
+                    .to_string(),
+            },
             ValueInTextField { field, detector } => format!(
                 "{field} carries what looks like a value ({detector}); free text in an intent document may not carry one"
             ),
@@ -2518,6 +2526,13 @@ impl Cause {
                     rerun_as_read(inv),
                 )
             }
+            ContractStale { path } => plan(
+                inspect(match path {
+                    Some(p) => format!("regenerate the committed copy {}", p.display()),
+                    None => "regenerate the committed copy".to_string(),
+                }),
+                Next::Run(cmd(&["contract"], &[])),
+            ),
             ValueInTextField { field, .. } => plan(
                 Some((
                     Action::EditConfig {

@@ -424,6 +424,10 @@ pub enum Cause {
         field: DottedPath,
         rule: FieldRule,
     },
+    ContractStale {
+        /// The committed copy that differs, when the caller knows its path.
+        path: Option<PathBuf>,
+    },
     ValueInTextField {
         field: DottedPath,
         /// The stable name of the detector that matched (`known_prefix`, `pem_header`,
@@ -1445,6 +1449,7 @@ impl Cause {
             ConfigSourceMismatch { .. } => "config_source_mismatch",
             ConfigUnreadable { .. } => "config_unreadable",
             ConfigInvalid { .. } => "config_invalid",
+            ContractStale { .. } => "contract_stale",
             ValueInTextField { .. } => "value_in_text_field",
             BoundaryMissing { .. } => "boundary_missing",
             StateVaultMissing { .. } => "state_vault_missing",
@@ -1571,6 +1576,7 @@ impl Cause {
             | ConfigSourceMismatch { .. }
             | ConfigUnreadable { .. }
             | ConfigInvalid { .. }
+            | ContractStale { .. }
             | NeedsUndeclared { .. }
             | ValueInTextField { .. }
             | BoundaryMissing { .. }
