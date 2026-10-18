@@ -17,7 +17,7 @@ use crate::config::bindings::write_split;
 const ACCOUNT: &str = "ACCOUNTAAA000000000000AAAA";
 
 /// Every value the world holds carries this marker; no answer may.
-const MARKER: &str = "S7MARKER";
+pub(super) const MARKER: &str = "S7MARKER";
 
 /// The clock `ready` records, fixed for both sides.
 const NOW: &str = "2026-10-18T12:00:00Z";
@@ -60,7 +60,7 @@ fn app_item(env: &str) -> Value {
 }
 
 /// `FakeOp` as the tool's runner (its account is the project's).
-struct Fake(FakeOp);
+pub(super) struct Fake(pub(super) FakeOp);
 
 impl CommandRunner for Fake {
     fn read(&self, call: &Call, refused: &[i32]) -> io::Result<Outcome> {
@@ -90,13 +90,13 @@ impl Accounted for Fake {
 /// A checkout holding [`CONTRACT`] (its ids in `secrets.bindings.toml`) and the fake's dev
 /// and prod items, both holding marked values. The checkout is no git repository, so
 /// `needs` scans the project.
-struct World {
+pub(super) struct World {
     dir: tempfile::TempDir,
-    r: Fake,
+    pub(super) r: Fake,
 }
 
 impl World {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let op = FakeOp::default();
         let item = op.insert("vdev0000000000000000000001", app_item("dev"));
         let prod = op.insert("vshr0000000000000000000002", app_item("prod"));
@@ -117,7 +117,7 @@ impl World {
         Self { dir, r: Fake(op) }
     }
 
-    fn project(&self) -> &Path {
+    pub(super) fn project(&self) -> &Path {
         self.dir.path()
     }
 
@@ -128,13 +128,13 @@ impl World {
     }
 
     /// The fleet the project loads to.
-    fn fleet(&self) -> crate::domain::Fleet {
+    pub(super) fn fleet(&self) -> crate::domain::Fleet {
         load_fleet(self.project(), &self.r).unwrap()
     }
 
     /// What `opv <words> --json` prints: `run` writes the body (or fails), framed as the CLI
     /// frames it against its own invocation.
-    fn cli(
+    pub(super) fn cli(
         &self,
         words: &[&str],
         run: impl FnOnce(&crate::domain::Fleet, &Fake, &mut Vec<u8>) -> Result<(), Error>,

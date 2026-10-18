@@ -26,6 +26,7 @@ pub const MCP_TOOLS: &[(&str, &str)] = &[
     ("opv_state", "run --preview"),
     ("opv_state", "history"),
     ("opv_state", "status"),
+    ("opv_next", "next"),
     ("opv_propose", "propose"),
     ("opv_import_local", "import"),
     ("opv_explain", "explain"),

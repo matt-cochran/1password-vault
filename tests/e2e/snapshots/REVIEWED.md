@@ -239,3 +239,9 @@ Findings for the owner (not fixed here):
 3. A person's `opv import` into the production-tier `prod` ran without `--confirm prod` (§21 P-11 names `--confirm <env>` for it).
 
 - [ ] Owner sign-off of the walkthrough snapshot.
+
+## 0.12.0: opv_next and opv_propose's next (mcp-propose, 2026-10-18)
+
+7 scenario snapshots changed, no new one. `core_next` gained its MCP half, `opv_next {}`: the CLI's whole `opv next --json` document (checked equal as JSON; a new gate, `core_next_mcp_is_the_clis_whole_json_document`, asserts it). The MCP halves of `flow_propose_key`, `_env`, `_intent`, `_target`, `_retire` and `_setup` changed in `next` only: from `{kind: none, actor: person, command: null}` to the person's step `{kind: apply, actor: person, command: "opv propose <kind> … --write"}` (the contract change, reviewed and committed). The CLI `--json` halves are unchanged (their `next` is the same `--write` command as `run`/`assistant`, the CLI's own invocation). Gate 3 now compares every MCP scenario's whole answer, failure included, with the CLI's whole `--json` document, not only `error`. No value anywhere (canary gate).
+
+- [ ] Owner sign-off of the opv_next and opv_propose snapshots.

@@ -5,7 +5,6 @@
 relaxations: none
 diff:
 +[environments.local]
-+tier = "local"
 +boundaries.app = {}
 +
 +[products.app.keys.API_KEY]
@@ -19,7 +18,7 @@ diff:
 +[products.app.keys.NEW_THING]
 +kind = "secret"
 +environments = ["local"]
-plan_id: 72309a22cd48e1ec2ff54d929464f53b70dfec857de157ef015be118701f9121
+plan_id: f7fa36dffe223dd45433a8abc6b8c74d13ddf33be8f197c78a6f4eb958a306f9
 structure: boundary app
 structure: item app
 structure: field app/API_KEY secret
@@ -31,9 +30,9 @@ Next: opv propose setup --names-from local.env --write
 
 ## json exit: 0
 ## json stdout
-{"schema_version":3,"ok":true,"proposal":{"kind":"setup","relaxations":[],"diff":"+[environments.local]\n+tier = \"local\"\n+boundaries.app = {}\n+\n+[products.app.keys.API_KEY]\n+kind = \"secret\"\n+environments = [\"local\"]\n+\n+[products.app.keys.LOG_LEVEL]\n+kind = \"config\"\n+environments = [\"local\"]\n+\n+[products.app.keys.NEW_THING]\n+kind = \"secret\"\n+environments = [\"local\"]\n","questions":[],"plan_id":"72309a22cd48e1ec2ff54d929464f53b70dfec857de157ef015be118701f9121"},"structure_steps":["boundary app","item app","field app/API_KEY secret","field app/LOG_LEVEL config","field app/NEW_THING secret"],"bindings_after":null,"written":null,"next":{"kind":"run","actor":"assistant","command":"opv propose setup --names-from local.env --json --write"},"do":null}
+{"schema_version":3,"ok":true,"proposal":{"kind":"setup","relaxations":[],"diff":"+[environments.local]\n+boundaries.app = {}\n+\n+[products.app.keys.API_KEY]\n+kind = \"secret\"\n+environments = [\"local\"]\n+\n+[products.app.keys.LOG_LEVEL]\n+kind = \"config\"\n+environments = [\"local\"]\n+\n+[products.app.keys.NEW_THING]\n+kind = \"secret\"\n+environments = [\"local\"]\n","questions":[],"plan_id":"f7fa36dffe223dd45433a8abc6b8c74d13ddf33be8f197c78a6f4eb958a306f9"},"structure_steps":["boundary app","item app","field app/API_KEY secret","field app/LOG_LEVEL config","field app/NEW_THING secret"],"bindings_after":null,"written":null,"next":{"kind":"run","actor":"assistant","command":"opv propose setup --names-from local.env --json --write"},"do":null}
 
 ## json stderr
 
 ## mcp opv_propose {"kind":"setup","names_from":"local.env"}
-{"schema_version":3,"ok":true,"proposal":{"kind":"setup","relaxations":[],"diff":"+[environments.local]\n+tier = \"local\"\n+boundaries.app = {}\n+\n+[products.app.keys.API_KEY]\n+kind = \"secret\"\n+environments = [\"local\"]\n+\n+[products.app.keys.LOG_LEVEL]\n+kind = \"config\"\n+environments = [\"local\"]\n+\n+[products.app.keys.NEW_THING]\n+kind = \"secret\"\n+environments = [\"local\"]\n","questions":[],"plan_id":"72309a22cd48e1ec2ff54d929464f53b70dfec857de157ef015be118701f9121"},"structure_steps":["boundary app","item app","field app/API_KEY secret","field app/LOG_LEVEL config","field app/NEW_THING secret"],"bindings_after":null,"written":null,"next":{"kind":"none","actor":"person","command":null},"do":null}
+{"schema_version":3,"ok":true,"proposal":{"kind":"setup","relaxations":[],"diff":"+[environments.local]\n+boundaries.app = {}\n+\n+[products.app.keys.API_KEY]\n+kind = \"secret\"\n+environments = [\"local\"]\n+\n+[products.app.keys.LOG_LEVEL]\n+kind = \"config\"\n+environments = [\"local\"]\n+\n+[products.app.keys.NEW_THING]\n+kind = \"secret\"\n+environments = [\"local\"]\n","questions":[],"plan_id":"f7fa36dffe223dd45433a8abc6b8c74d13ddf33be8f197c78a6f4eb958a306f9"},"structure_steps":["boundary app","item app","field app/API_KEY secret","field app/LOG_LEVEL config","field app/NEW_THING secret"],"bindings_after":null,"written":null,"next":{"kind":"apply","actor":"person","command":"opv propose setup --names-from local.env --write"},"do":null}
