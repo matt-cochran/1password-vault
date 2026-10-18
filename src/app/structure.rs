@@ -406,20 +406,75 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Where a structural plan applies: the configuration file, the project and the 1Password
-/// account (an account ID), resolved the same way for the CLI and the MCP tools.
+/// Where a structural plan's configuration lives (D-G): a contract file with its sibling
+/// `secrets.bindings.toml`, or a project manifest in 1Password with its contract block and
+/// its `toml opv-bindings` block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigAt {
+    File(std::path::PathBuf),
+    Manifest(crate::config_store::ManifestStore),
+}
+
+impl ConfigAt {
+    /// The contract with its bindings filled in: the text the structural plan reads. An
+    /// inline id is refused, as at load.
+    pub fn read_merged(&self, r: &dyn CommandRunner) -> Result<String, Error> {
+        use crate::config_store::ConfigStore;
+        match self {
+            ConfigAt::File(path) => crate::config::read_merged(path),
+            ConfigAt::Manifest(m) => Ok(m.read(r)?.text),
+        }
+    }
+
+    /// [`read_merged`](Self::read_merged) past `op`'s cache for a manifest (refused unless
+    /// a person runs opv, I3): the read an apply plans and checks its writes against.
+    pub fn read_for_write(&self, r: &dyn CommandRunner) -> Result<String, Error> {
+        match self {
+            ConfigAt::File(path) => crate::config::read_merged(path),
+            ConfigAt::Manifest(m) => m.read_merged_fresh(r),
+        }
+    }
+
+    /// Save `text` (the contract with its ids filled in), its ids split out (D-G): a file's
+    /// contract and sibling bindings, or a manifest's contract block and `opv-bindings` block
+    /// in one verified edit. The contract is written too: an id for a boundary the contract
+    /// declared only through the product leaves its `boundaries.<name> = {}` table there,
+    /// without which the id would fill nothing at the next load.
+    fn write(&self, r: &dyn CommandRunner, text: &str) -> Result<(), Error> {
+        match self {
+            ConfigAt::File(path) => super::init::write_config(path, text, true),
+            ConfigAt::Manifest(m) => {
+                let (contract, ids) = crate::config::bindings::split(text);
+                m.write_bindings(r, Some(&contract), &ids)
+            }
+        }
+    }
+
+    /// The store object a `changed_before_write` names.
+    fn store_object(&self) -> StoreObject {
+        use crate::config_store::ConfigStore;
+        match self {
+            ConfigAt::File(path) => StoreObject::File { path: path.clone() },
+            ConfigAt::Manifest(m) => crate::config_store::store_object(&m.cause_source()),
+        }
+    }
+}
+
+/// Where a structural plan applies: the configuration (a file or a manifest), the project
+/// and the 1Password account (an account ID), resolved the same way for the CLI and the MCP
+/// tools.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scope {
-    pub path: std::path::PathBuf,
+    pub config: ConfigAt,
     pub project: String,
     pub account: String,
 }
 
-/// The [`Scope`] of the checkout at `start`: its `secrets.toml` (here or in a parent; a
-/// configuration kept only in 1Password is not structured through this path yet), its
-/// project name (git remote, else directory), and its account (`OP_ACCOUNT`, else the
-/// `.opv` pointer, else the only account op knows). No account, or several and none
-/// chosen, is `account_required`: opv never uses op's default for a write.
+/// The [`Scope`] of the checkout at `start`: its `secrets.toml` (here or in a parent), else
+/// the project's manifest in 1Password; its project name (git remote, else directory, or
+/// the manifest's own project), and its account (`OP_ACCOUNT`, else the `.opv` pointer,
+/// else the only account op knows; a manifest's, when it was found in one). No account, or
+/// several and none chosen, is `account_required`: opv never uses op's default for a write.
 pub fn scope(start: &Path, r: &dyn CommandRunner) -> Result<Scope, Error> {
     scope_as(start, r, &invoked("propose structure"))
 }
@@ -429,7 +484,7 @@ pub fn scope(start: &Path, r: &dyn CommandRunner) -> Result<Scope, Error> {
 pub fn scope_as(start: &Path, r: &dyn CommandRunner, command: &str) -> Result<Scope, Error> {
     use crate::config_store;
     let Some(path) = config_store::walk_up(start, "secrets.toml") else {
-        return Err(no_file(start, r));
+        return manifest_scope(start, r, command);
     };
     let project = config_store::default_project(
         None,
@@ -439,7 +494,7 @@ pub fn scope_as(start: &Path, r: &dyn CommandRunner, command: &str) -> Result<Sc
     let given = config_store::account_env().or_else(|| config_store::pointer_account(start));
     let account = config_store::pick_account(r, given)?.ok_or_else(|| no_account(command))?;
     Ok(Scope {
-        path,
+        config: ConfigAt::File(path),
         project,
         account,
     })
@@ -473,12 +528,13 @@ pub fn binding_as(
     Ok((project, account))
 }
 
-/// No `secrets.toml` from `start` up (05.02): the structural plan works on a configuration
-/// file only. A project whose configuration is a 1Password manifest is told so, with the
-/// manifest's own route (`opv config edit`), never `opv bootstrap`, which needs a file too;
-/// with no configuration at all, the lookup's own cause says so.
-fn no_file(start: &Path, r: &dyn CommandRunner) -> Error {
-    use crate::config_store::{self, Found, Request};
+/// No `secrets.toml` from `start` up: the project's manifest in 1Password (D-G), whose
+/// project is its own and whose account is the one it was found in (else chosen as for a
+/// file). With no configuration at all, the lookup's own cause says so (05.02: never
+/// `opv bootstrap`).
+fn manifest_scope(start: &Path, r: &dyn CommandRunner, command: &str) -> Result<Scope, Error> {
+    use crate::cause::ConfigSource;
+    use crate::config_store::{self, ConfigStore, Found, Request};
     let req = Request {
         start: start.to_path_buf(),
         config: None,
@@ -486,18 +542,32 @@ fn no_file(start: &Path, r: &dyn CommandRunner) -> Error {
         manifest_only: true,
         account: config_store::account_env(),
     };
-    match config_store::locate(&req, r) {
-        Ok(Found::Manifest(m)) => Cause::ConfigSourceMismatch {
-            command: CommandId("propose structure".into()),
-            manifest: m.title,
+    let m = match config_store::locate(&req, r)? {
+        Found::Manifest(m) => m,
+        Found::File { .. } => {
+            return Err(Cause::Bug {
+                site: "structure: a manifest-only lookup found a file",
+            }
+            .into());
         }
-        .into(),
-        Ok(Found::File { .. }) => Cause::Bug {
-            site: "structure: a manifest-only lookup found a file",
+    };
+    let ConfigSource::Manifest { project, .. } = m.cause_source() else {
+        return Err(Cause::Bug {
+            site: "structure: a manifest named no manifest source",
         }
-        .into(),
-        Err(e) => e,
-    }
+        .into());
+    };
+    let given = m
+        .account
+        .clone()
+        .or_else(config_store::account_env)
+        .or_else(|| config_store::pointer_account(start));
+    let account = config_store::pick_account(r, given)?.ok_or_else(|| no_account(command))?;
+    Ok(Scope {
+        config: ConfigAt::Manifest(m),
+        project,
+        account,
+    })
 }
 
 /// One line per step of `p`, names and titles only, for a person to review.
@@ -580,6 +650,20 @@ pub fn apply(
     plan_id: &str,
     authorize: &mut dyn FnMut(&Plan) -> Result<(), Error>,
 ) -> Result<Applied, Error> {
+    let at = ConfigAt::File(path.to_path_buf());
+    apply_at(r, &at, project, account, plan_id, authorize)
+}
+
+/// [`apply`] to the configuration `at`, a file or a manifest (D-G: a manifest's new ids go
+/// to its `opv-bindings` block).
+pub fn apply_at(
+    r: &dyn CommandRunner,
+    at: &ConfigAt,
+    project: &str,
+    account: &str,
+    plan_id: &str,
+    authorize: &mut dyn FnMut(&Plan) -> Result<(), Error>,
+) -> Result<Applied, Error> {
     // C2: an id that is not a structural plan id names no plan at all.
     if !is_plan_id(plan_id) {
         return Err(Cause::PlanUnknown {
@@ -588,7 +672,7 @@ pub fn apply(
         }
         .into());
     }
-    let text = read(path)?;
+    let text = at.read_for_write(r)?;
     let p = plan(r, &text, project, account)?;
     if p.plan_id != plan_id {
         return Err(changed(plan_id, &p.plan_id));
@@ -607,7 +691,7 @@ pub fn apply(
         generator_ids: Vec::new(),
         concurrent_edits: Vec::new(),
     };
-    match apply_confirmed(r, path, project, &text, &p, &mut applied) {
+    match apply_confirmed(r, at, project, &text, &p, &mut applied) {
         Ok(()) => Ok(applied),
         Err(e) => Err(after_authorized(e, &applied)),
     }
@@ -665,7 +749,7 @@ fn after_authorized(e: Error, applied: &Applied) -> Error {
 /// The writes of a confirmed plan `p`, recorded into `applied` as they complete.
 fn apply_confirmed(
     r: &dyn CommandRunner,
-    path: &Path,
+    at: &ConfigAt,
     project: &str,
     text: &str,
     p: &Plan,
@@ -677,7 +761,7 @@ fn apply_confirmed(
     let mut recorded: Vec<Recorded> = Vec::new();
     let mut written_text = text.to_string();
     let phase = create_vaults(r, project, p, &mut recorded, applied, &link);
-    record(path, p, &mut doc, &recorded, &mut written_text, applied)?;
+    record(r, at, p, &mut doc, &recorded, &mut written_text, applied)?;
     phase?;
     let fleet = crate::config::parse(&doc.to_string())?;
     let mut items = Vec::new();
@@ -686,18 +770,13 @@ fn apply_confirmed(
         id.write(&mut doc);
     }
     recorded.extend(items);
-    record(path, p, &mut doc, &[], &mut written_text, applied)?;
+    record(r, at, p, &mut doc, &[], &mut written_text, applied)?;
     phase?;
     if p.generated {
         applied.generator_ids = recorded.iter().map(Recorded::line).collect();
     }
     let fleet = crate::config::parse(&doc.to_string())?;
     add_fields(r, &fleet, p, applied)
-}
-
-/// The configuration file at `path` (05.37: the path is named; no guessed `opv init`).
-fn read(path: &Path) -> Result<String, Error> {
-    crate::config::read_merged(path)
 }
 
 /// Phase 1: every boundary vault and item and every state vault the plan creates (found by
@@ -792,10 +871,11 @@ fn create_delivery_items(
     Ok(())
 }
 
-/// Record `ids` in `doc` and save it over `path` when the file is not generated and still
-/// holds what this run read (else `config_changed`: nothing is overwritten).
+/// Record `ids` in `doc` and save it to `at` when the configuration is not generated and
+/// still holds what this run read (else `config_changed`: nothing is overwritten).
 fn record(
-    path: &Path,
+    r: &dyn CommandRunner,
+    at: &ConfigAt,
     p: &Plan,
     doc: &mut toml_edit::DocumentMut,
     ids: &[Recorded],
@@ -811,17 +891,15 @@ fn record(
     }
     // Only IDs are added (the plan judged the completed file with placeholders); a part
     // recorded before a failure may not load yet, and is kept so a re-run need not find it.
-    // 05.14: the file is not overwritten; what was created stays in 1Password and the
-    // caller reports it as partial, whose step is the new structural plan.
-    if read(path)? != *written {
+    // 05.14: the configuration is not overwritten; what was created stays in 1Password and
+    // the caller reports it as partial, whose step is the new structural plan.
+    if at.read_for_write(r)? != *written {
         return Err(Cause::ChangedBeforeWrite {
-            object: StoreObject::File {
-                path: path.to_path_buf(),
-            },
+            object: at.store_object(),
         }
         .into());
     }
-    super::init::write_config(path, &new_text, true)?;
+    at.write(r, &new_text)?;
     *written = new_text;
     applied.config_written = true;
     Ok(())

@@ -66,6 +66,15 @@ fn member() -> Value {
            "permissions": ["allow_viewing", "allow_editing", "allow_managing"]})
 }
 
+/// A member who reads but cannot write: a vault holding only this entry has no writer, so a
+/// fixture that means "every required grant is missing" raises no `single_writer` (row
+/// `access-writers`).
+fn viewer() -> Value {
+    json!({"type": "MEMBER", "state": "ACTIVE", "name": "Alice Example",
+           "email": "alice@example.com",
+           "permissions": ["allow_viewing"]})
+}
+
 fn account(name: &str, permissions: &[&str]) -> Value {
     json!({"type": "SERVICE_ACCOUNT", "state": "ACTIVE", "name": name,
            "permissions": permissions})
@@ -127,7 +136,7 @@ fn members_only() -> FakeOp {
     {
         let mut users = op.vault_users.borrow_mut();
         for vault in [VSHARED, VWEB, VWORKER, VWEB_STATE, VWORKER_STATE] {
-            users.insert(vault.into(), json!([member()]));
+            users.insert(vault.into(), json!([viewer()]));
         }
     }
     op
@@ -731,4 +740,108 @@ fn an_undeclared_target_is_unknown_target() {
     )
     .unwrap_err();
     assert_eq!(e.cause().map(|(c, _)| c.code()), Some("unknown_target"));
+}
+
+// --- writers, tier membership and second writers (Part V, row `access-writers`) ------
+
+/// One environment `stage` at `tier` with a single boundary vault.
+fn stage(tier: &str) -> crate::domain::Fleet {
+    crate::config::parse(&format!(
+        r#"[environments.stage]
+tier = "{tier}"
+boundaries.shared = {{ vault_id = "vshared", item_id = "ishared" }}
+
+[products.api]
+boundary = "shared"
+[products.api.keys.SHARED]
+kind = "secret"
+environments = ["stage"]
+"#
+    ))
+    .unwrap()
+}
+
+/// The recorded `op vault user list` reply whose one writer can edit (s23).
+fn writer_users() -> Value {
+    serde_json::from_str(include_str!(
+        "../../tests/fixtures/op/success/s23-writer-vault-user-list.stdout"
+    ))
+    .unwrap()
+}
+
+/// The second recorded single-writer reply (s04).
+fn second_writer_users() -> Value {
+    serde_json::from_str(include_str!(
+        "../../tests/fixtures/op/success/s04-vault-user-list.stdout"
+    ))
+    .unwrap()
+}
+
+/// A fake whose one boundary vault reports `users`.
+fn writers_op(users: Value) -> FakeOp {
+    let op = FakeOp::default();
+    op.vault_users.borrow_mut().insert("vshared".into(), users);
+    op
+}
+
+fn run_stage(tier: &str, op: &dyn CommandRunner) -> Value {
+    let mut out = Vec::new();
+    run(
+        &stage(tier),
+        Some("stage"),
+        None,
+        Some("shop"),
+        op,
+        true,
+        &mut out,
+    )
+    .unwrap();
+    serde_json::from_slice(&out).unwrap()
+}
+
+/// The writers view of `vault` in the only environment.
+fn vault_view(doc: &Value, vault: &str) -> Value {
+    doc["environments"][0]["vaults"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["vault_id"] == vault)
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn the_writers_list_names_the_member_that_can_edit() {
+    let doc = run_stage("production", &writers_op(writer_users()));
+    assert_eq!(vault_view(&doc, "vshared")["writers"], json!(["<NAME_1>"]));
+}
+
+#[test]
+fn a_production_tier_vault_is_marked_production() {
+    let doc = run_stage("production", &writers_op(second_writer_users()));
+    assert_eq!(vault_view(&doc, "vshared")["production"], json!(true));
+}
+
+#[test]
+fn a_deployed_vault_with_one_writer_raises_single_writer() {
+    let doc = run_stage("shared", &writers_op(writer_users()));
+    assert!(
+        doc["environments"][0]["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "single_writer")
+    );
+}
+
+#[test]
+fn a_local_vault_with_one_writer_raises_no_single_writer() {
+    let doc = run_stage("local", &writers_op(second_writer_users()));
+    assert!(
+        !doc["environments"][0]["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "single_writer")
+    );
 }

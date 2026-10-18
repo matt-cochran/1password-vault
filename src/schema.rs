@@ -698,7 +698,7 @@ fn documents() -> Value {
         "doctor": ["config_source", "checks: [{name, status, detail, next, do}]"],
         "explain": [
             "environment", "product", "key", "kind", "field", "source", "personal",
-            "boundary: {name, vault_id, item_id}",
+            "boundary: {name, vault_id, item_id}", "environments",
             "targets: [{name, provider, rendered_name, details: [{label, value}]}]",
             "delivered_to: [{environment, target, product, item, item_id, records}]",
             "rules", "immutable", "guidance", "required_here", "shared_from", "shared_by",

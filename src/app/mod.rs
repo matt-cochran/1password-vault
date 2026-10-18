@@ -26,6 +26,9 @@ pub mod ci_workflow;
 pub mod config_cmd;
 pub mod config_export;
 pub mod contract;
+#[cfg(test)]
+#[path = "core_acceptance_tests.rs"]
+mod core_acceptance_tests;
 pub mod delivery;
 pub mod delivery_preview;
 pub mod doctor;
@@ -43,6 +46,7 @@ pub mod history;
 pub mod import;
 pub mod import_local;
 pub mod init;
+pub mod inventory;
 #[cfg(test)]
 pub(crate) mod json_tests;
 #[cfg(test)]
@@ -53,6 +57,7 @@ pub mod login;
 pub mod masked;
 pub mod mcp_install;
 pub mod needs;
+pub mod next;
 pub mod open;
 pub mod personal;
 #[cfg(test)]

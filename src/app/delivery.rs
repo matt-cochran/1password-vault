@@ -256,7 +256,7 @@ fn values_by_field(
 }
 
 /// A placement's delivery item as read: the receipt, the key and the evidence by name.
-struct StateItem {
+pub(crate) struct StateItem {
     /// The delivery item's vault and item, as an item read addresses them.
     at: Boundary,
     receipt: Option<Receipt>,
@@ -266,6 +266,13 @@ struct StateItem {
     /// mint a receipt and re-emitted unchanged.
     source_versions: Option<String>,
     raw: Zeroizing<Vec<u8>>,
+}
+
+impl StateItem {
+    /// Whether the delivery item carried a receipt. A value-free fact, for the inventory.
+    pub(crate) fn has_receipt(&self) -> bool {
+        self.receipt.is_some()
+    }
 }
 
 /// Where the delivery item of `product` on target `target` is: the target's state vault and
@@ -281,7 +288,7 @@ fn item_at(fleet: &Fleet, env_name: &str, target: &str, product: &str) -> Option
 
 /// Read the delivery item of `product` on target `target`, fresh and by its recorded ID;
 /// `None` when no item is recorded. Values stay in memory.
-fn read_state(
+pub(crate) fn read_state(
     fleet: &Fleet,
     env_name: &str,
     target: &str,

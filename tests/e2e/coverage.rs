@@ -561,11 +561,6 @@ mod cases {
         case(Scenario::new().without_config(), &["contract"]).mcp("opv_configuration", json!({}))
     }
 
-    pub fn config_source_mismatch() -> Case {
-        case(Scenario::new().manifest_route(), &["propose", "structure"])
-            .mcp("opv_structure_plan", json!({}))
-    }
-
     pub fn config_unreadable() -> Case {
         // The given path is a folder (a mode would not stop a root builder).
         case(Scenario::new(), &["--config", "{root}/project", "contract"])
@@ -1280,6 +1275,22 @@ mod cases {
 mod text_cases {
     use super::*;
 
+    /// `target credentials --create` records the minted item in a secrets.toml, which a
+    /// manifest project does not have: refused before anything is minted (02.01).
+    pub fn config_source_mismatch() -> Case {
+        case(
+            Scenario::new().manifest_route(),
+            &[
+                "target",
+                "credentials",
+                "prod",
+                "--target",
+                "fly",
+                "--create",
+            ],
+        )
+    }
+
     pub fn needs_own_session() -> Case {
         let s = Scenario::new();
         let world: Value = serde_json::from_str(
@@ -1659,7 +1670,6 @@ macro_rules! scenarios {
 scenarios! {
     json: [
         config_not_found => ConfigNotFound,
-        config_source_mismatch => ConfigSourceMismatch,
         config_unreadable => ConfigUnreadable,
         config_invalid => ConfigInvalid,
         boundary_missing => BoundaryMissing,
@@ -1717,6 +1727,7 @@ scenarios! {
         k8s_configmap_right_missing => MissingRight,
     ],
     text: [
+        config_source_mismatch => ConfigSourceMismatch,
         needs_own_session => NeedsOwnSession,
         create_outcome_unknown => CreateOutcomeUnknown,
         copies_differ => CopiesDiffer,
@@ -1729,7 +1740,6 @@ scenarios! {
     ],
     mcp: [
         config_not_found,
-        config_source_mismatch,
         config_invalid,
         boundary_missing,
         state_vault_missing,

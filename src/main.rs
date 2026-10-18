@@ -3684,15 +3684,15 @@ fn run_propose_early(
             // Read the project's own 1Password account, never op's default.
             let scope = structure_scope(cli.config.as_deref(), here, r)?;
             r.use_account(Some(scope.account.clone()));
-            let p = ps::propose_structure(
+            let p = ps::propose_structure_at(
                 r,
-                &scope.path,
+                &scope.config,
                 &scope.project,
                 &scope.account,
                 &rebind,
                 &generate,
             )?;
-            let mut lines = opv::app::apply::describe(&p);
+            let mut lines = opv::app::apply::describe(&p, &scope.config);
             if req.write {
                 // A structural proposal changes no contract text: `opv apply` moves ids and
                 // creates the structure, in one confirmed run.
@@ -3786,8 +3786,9 @@ fn run_propose_contract(
     }
 }
 
-/// The contract file, project and 1Password account a structural proposal or `apply` works
-/// on: the file `--config` (or `OPV_CONFIG`) names, else the `secrets.toml` found from here.
+/// The contract, project and 1Password account a structural proposal or `apply` works on:
+/// the file `--config` (or `OPV_CONFIG`) names, else the `secrets.toml` found from here,
+/// else the project's manifest.
 fn structure_scope(
     config: Option<&std::path::Path>,
     here: &std::path::Path,
@@ -3803,7 +3804,7 @@ fn structure_scope(
     let command = opv::error::invocation().command.join(" ");
     let (project, account) = opv::app::structure::binding_as(&start, r, &command)?;
     Ok(opv::app::structure::Scope {
-        path: path.to_path_buf(),
+        config: opv::app::structure::ConfigAt::File(path.to_path_buf()),
         project,
         account,
     })
@@ -3880,10 +3881,10 @@ fn run_apply(
     let mut stderr = io::stderr();
     // With --json the plan lines go to stderr, so stdout carries the one document.
     let shown: &mut dyn Write = if json { &mut stderr } else { out };
-    let applied = opv::app::apply::apply(
+    let applied = opv::app::apply::apply_at(
         r,
         &opv::host::ProcessEnv,
-        &scope.path,
+        &scope.config,
         &scope.project,
         &scope.account,
         plan_id,

@@ -362,6 +362,30 @@ impl ManifestStore {
         Ok((fleet, ids))
     }
 
+    /// The contract block as written (any inline id left in) and the ids of the
+    /// `opv-bindings` block: the two texts `opv propose structure` splits for the one-time
+    /// move (D-G). Read past `op`'s cache (C1): `opv apply` writes the move from it.
+    /// Nothing is refused here; the move itself is confirmed by
+    /// [`read_for_move`](Self::read_for_move).
+    /// The contract block with the `opv-bindings` block's ids filled in, read past `op`'s
+    /// cache and refused unless a person runs opv (I3): the text `opv apply` plans and
+    /// checks its writes against. An edit starts from [`ConfigStore::read_for_write`]
+    /// instead, which holds no id (D-G).
+    pub fn read_merged_fresh(&self, r: &dyn CommandRunner) -> Result<String, Error> {
+        crate::app::tidy::require_person(r, "this command")?;
+        let m = self.read_item(r, true)?;
+        Ok(self.snapshot(&m)?.text)
+    }
+
+    pub fn read_for_proposal(
+        &self,
+        r: &dyn CommandRunner,
+    ) -> Result<(String, config::bindings::Bindings), Error> {
+        let m = self.read_item(r, true)?;
+        let ids = config::bindings::parse_block(m.bindings.as_deref(), &self.cause_source())?;
+        Ok((m.text, ids))
+    }
+
     /// I5: after the edit, the manifest must be exactly one version past the read it was
     /// built from and hold `text` and `ids`; otherwise another edit landed in between (one
     /// of the two was lost). Reported, never retried.

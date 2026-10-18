@@ -588,3 +588,27 @@ fn a_plan_id_without_an_environment_names_the_flag() {
     .unwrap_err();
     assert!(matches!(e.cause(), Some((Cause::ChoiceRequired { flag, .. }, _)) if flag == "--env"));
 }
+
+/// The leak response names every environment holding the key, run-only ones too (G31,
+/// found by the `core-accepted` walkthrough): no target delivers it, both are listed.
+#[test]
+fn every_environment_holding_the_key_is_listed_without_a_target() {
+    let f = config::parse(
+        r#"
+[environments.dev]
+boundaries.core = { vault_id = "vdev", item_id = "idev" }
+
+[environments.prod]
+boundaries.core = { vault_id = "vprd", item_id = "iprd" }
+
+[products.api]
+boundary = "core"
+
+[products.api.keys.TOKEN]
+kind = "secret"
+"#,
+    )
+    .unwrap();
+    let text = explain_text(&f, &Asked::Key("api/TOKEN"), Some("dev"), "myapp");
+    assert_eq!(row(&text, "held in"), "dev, prod");
+}
