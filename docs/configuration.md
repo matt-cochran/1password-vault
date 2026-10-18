@@ -269,7 +269,7 @@ Optional, for `opv run --remote <name>` only. A reviewed profile pins where a pr
 
 ### Targets: where products deploy
 
-A **target** is one named placement in one environment: one provider's options, the products it serves, its deploy identity and its delivery evidence. An environment declares its targets only as `[environments.<env>.targets.<name>]`, also when there is just one. An environment with no target is run-only: `check`, `run`, `config export` and `item skeleton` work; `plan` and `sync` refuse it.
+A **target** is one named placement in one environment: one provider's options, the products it serves, its deploy identity and its delivery evidence. An environment declares its targets only as `[environments.<env>.targets.<name>]`, also when there is just one. An environment with no target is run-only: `inventory`, `run`, `config export` and `propose structure` work; `plan` and `sync` refuse it.
 
 A target holds:
 
@@ -372,7 +372,7 @@ Azure deploy credentials, by OS (the Azure CLI stores the service principal's se
 
 On native Windows, values reach `az` (the service-principal secret, Key Vault values, the Container App update) through a named pipe `\\.\pipe\opv-<random>` that only your user can open, instead of `/dev/stdin`; Linux, WSL and macOS use stdin. Fly deploy credentials work on every OS.
 
-`check`, `run`, `config export` and `item skeleton` never read `deploy_credentials`.
+`inventory`, `run`, `config export` and `propose structure` never read `deploy_credentials`.
 
 ### Guarding an environment: `confirm_env`
 
@@ -381,7 +381,7 @@ On native Windows, values reach `az` (the service-principal secret, Key Vault va
 confirm_env = true
 ```
 
-With `confirm_env = true`, `sync` must be given the environment name again: `opv sync prod --deploy --confirm prod`. Without it, opv reads the boundary items and the target and validates every key first, then refuses before the first write (exit 6), so one refusal also names any blocking keys; its `Next:` line is the exact command to re-run, with every flag you gave plus `--confirm prod`. A `--confirm` naming another environment is refused for every environment, before any call. Only `sync` changes the target, so only `sync` needs it: reading commands (`status`, `plan`, `check`, `run`) and `item skeleton` (which writes to 1Password, not the target) are unaffected. `plan` suggests the sync command with `--confirm prod` already in it. CI jobs that sync a guarded environment must pass the flag. `confirm_env` is a boolean (default `false`); any other value is a configuration error.
+With `confirm_env = true`, `sync` must be given the environment name again: `opv sync prod --deploy --confirm prod`. Without it, opv reads the boundary items and the target and validates every key first, then refuses before the first write (exit 6), so one refusal also names any blocking keys; its `Next:` line is the exact command to re-run, with every flag you gave plus `--confirm prod`. A `--confirm` naming another environment is refused for every environment, before any call. Only `sync` changes the target, so only `sync` needs it: reading commands (`status`, `plan`, `inventory`, `run`) and `propose structure` (which writes to 1Password, not the target) are unaffected. `plan` suggests the sync command with `--confirm prod` already in it. CI jobs that sync a guarded environment must pass the flag. `confirm_env` is a boolean (default `false`); any other value is a configuration error.
 
 ### Removed forms
 
@@ -600,7 +600,7 @@ rules = { prefix = "postgres://" }   # optional: checked as well as api's own ru
 - Each key keeps its own target name: `sync` writes `FLEET__API__DATABASE_URL` and `FLEET__WORKER__DATABASE_URL` from the one field, and `run --product worker` exports `DATABASE_URL` from `op://<vault>/<item>/api/DATABASE_URL`. Change the source and every key sharing it changes in the same sync.
 - Checked at load, with the line of the `from`: the source is declared, has its own field (no chains or cycles), has the same `kind`, and is declared for every environment the sharing key uses.
 - The source's rules apply first, then the sharing key's own `rules` on the same value. `immutable` follows the source and may not be set on the sharing key; `--rotate api/DATABASE_URL` rotates both.
-- `item skeleton` never adds a field for a sharing key. A leftover field from before the switch (`worker/DATABASE_URL`) is reported as an extra field; delete it in 1Password.
+- `propose structure` never adds a field for a sharing key. A leftover field from before the switch (`worker/DATABASE_URL`) is reported as an extra field; delete it in 1Password.
 
 ### One home for shared values: `source_only` products
 
@@ -628,7 +628,7 @@ environments = ["ci"]
 
 - The value lives once, in section `shared` of each environment's boundary item. Change it there and every key pointing at it changes in the next sync; `--rotate shared/FLY_API_TOKEN` rotates them all.
 - A source-only product's keys get fields, rules, `immutable` and the missing-value lines like any key, but they are never written to a target, never pruned, and their names never collide with a delivered key's.
-- `check`, `status` and `plan` warn about a source-only key that nothing points at. `opv run --product shared` is refused: run the product that uses the value.
+- `inventory`, `status` and `plan` warn about a source-only key that nothing points at. `opv run --product shared` is refused: run the product that uses the value.
 - Values never cross environments: `ci` reads the `shared` section of the `ci` boundary item only.
 - The name `shared` is a convention; any product name works.
 
@@ -706,7 +706,7 @@ tier = "production"           # real users
 
 Configuration changes are **proposed**, then **applied**. `opv propose …` writes the contract diff and the 1Password plan and nothing else; `opv apply` runs the plan you reviewed, writes the configuration where it lives (manifest or file) and records `secrets.applied.json`. Comments and order are kept, the result is validated like a hand-written file, and a concurrent change is refused. `opv config edit` covers everything else.
 
-The 0.11 commands (`opv init`, `opv add`, `opv bootstrap`, `opv target add`, `opv check`, `opv adopt`) are gone; [Migrating from 0.11](usage.md#migrating-from-011) maps each one to the command that replaces it.
+The 0.11 commands are gone; [Migrating from 0.11](usage.md#migrating-from-011) maps each one to the command that replaces it.
 
 <a id="start-from-an-existing-item-opv-init"></a>
 

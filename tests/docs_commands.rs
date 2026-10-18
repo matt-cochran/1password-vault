@@ -656,3 +656,33 @@ fn configuration_relative_links_resolve() {
 fn security_relative_links_resolve() {
     relative_links_resolve("docs/security.md");
 }
+
+/// `opv` rewrites clap's `unrecognized subcommand` error as its own exit-2 line,
+/// `opv: unrecognized subcommand '<word>'`, which [`is_clap_usage_error`] does not match.
+/// A command §25.3 removed renders exactly that line, so this is how the docs guard
+/// recognises a removed command.
+fn is_removed_command_error(code: Option<i32>, stderr: &str) -> bool {
+    code == Some(2) && stderr.contains("unrecognized subcommand")
+}
+
+/// A doc block naming a §25.3 removed command is reported: the extracted `opv bootstrap`
+/// runs and produces the removed-command line.
+#[test]
+fn reports_a_removed_command_named_in_a_doc() {
+    let found = extract("fixture.md", "```sh\nopv bootstrap\n```\n");
+    let args = &found.commands[0].args;
+    let sandbox = tempfile::tempdir().expect("tempdir");
+    let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+        .args(args)
+        .current_dir(sandbox.path())
+        .env_clear()
+        .env("PATH", "")
+        .env("HOME", sandbox.path())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run opv");
+    assert!(is_removed_command_error(
+        out.status.code(),
+        &String::from_utf8_lossy(&out.stderr)
+    ));
+}
