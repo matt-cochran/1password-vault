@@ -48,6 +48,7 @@ pub mod local_delivery;
 pub mod login;
 pub mod masked;
 pub mod mcp_install;
+pub mod needs;
 pub mod open;
 pub mod personal;
 #[cfg(test)]

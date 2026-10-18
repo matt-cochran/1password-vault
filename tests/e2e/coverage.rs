@@ -108,6 +108,10 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "GateFailed",
         "ready --gate has no e2e scenario yet (row e2e-coverage)",
     ),
+    (
+        "NeedsUndeclared",
+        "opv needs has no CLI surface yet (rows cli-sweep, e2e-coverage)",
+    ),
 ];
 
 fn snapshots() -> PathBuf {

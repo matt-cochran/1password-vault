@@ -471,6 +471,12 @@ pub enum Cause {
     InventoryIncomplete {
         unlisted: Vec<AccountId>,
     },
+    /// The code reads names the contract declares nowhere and the default-branch contract
+    /// does not declare either (design Part V, row `needs`, the `needs` gate). Names only;
+    /// never a value.
+    NeedsUndeclared {
+        names: Vec<String>,
+    },
 
     // §4.2 names and usage
     NotDeclared {
@@ -1443,6 +1449,7 @@ impl Cause {
             ManifestAmbiguous { .. } => "manifest_ambiguous",
             ManifestExists { .. } => "manifest_exists",
             InventoryIncomplete { .. } => "inventory_incomplete",
+            NeedsUndeclared { .. } => "needs_undeclared",
             NotDeclared { kind, .. } => match kind {
                 NameKind::Environment => "unknown_env",
                 NameKind::Target => "unknown_target",
@@ -1557,6 +1564,7 @@ impl Cause {
             | ConfigSourceMismatch { .. }
             | ConfigUnreadable { .. }
             | ConfigInvalid { .. }
+            | NeedsUndeclared { .. }
             | ValueInTextField { .. }
             | BoundaryMissing { .. }
             | StateVaultMissing { .. }
