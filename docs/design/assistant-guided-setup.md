@@ -1,6 +1,6 @@
 # Assistant-guided configuration: the North Star, and the gap from opv 0.11.0
 
-Status: **design for review** (2026-10-18). Tracks #173 and its parts #174 to #179. This document first describes the North Star: the ideal system from first principles, without reference to what opv does today (Part I). Most of opv's existing decisions turn out to sit on the path to it, so the gap is mostly an added layer, not a redesign. It then measures opv 0.11.0 against it (Part II), resolves the design's contradictions with TRIZ (Part III), makes confusion and failure structurally impossible where it can (Part IV, poka-yoke), and proposes an order of delivery (Part V). Part VI holds the decisions that are the owner's.
+Status: **design for review** (2026-10-18). Tracks #173 and its parts #174 to #179. This document first describes the North Star: the ideal system from first principles, without reference to what opv does today (Part I). Most of opv's existing decisions turn out to sit on the path to it, so the gap is mostly an added layer, not a redesign. It then measures opv 0.11.0 against it (Part II), resolves the design's contradictions with TRIZ (Part III), makes confusion and failure structurally impossible where it can (Part IV, poka-yoke), and proposes an order of delivery (Part V), reframes the problem so whole classes of risk cannot be expressed (Part VI), and lists the decisions that are the owner's (Part VII).
 
 ## 0. The objective (owner, 2026-10-18)
 
