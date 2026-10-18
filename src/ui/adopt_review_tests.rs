@@ -16,7 +16,8 @@ fn row(action: &str) -> ReviewRow {
 
 // ---- rows_from ----
 
-/// `opv import <env> --from <file> --dry-run --json`, recorded (`tests/fixtures/ui/`).
+/// The document `opv import <env> --from <file> --dry-run --json` prints (`tests/fixtures/ui/`;
+/// opv's own output shape, not a tool reply).
 fn import_doc() -> crate::ui::docs::AdoptDoc {
     let bytes = std::fs::read(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
