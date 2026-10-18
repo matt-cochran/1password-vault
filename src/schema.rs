@@ -19,12 +19,11 @@ pub const MCP_TOOLS: &[(&str, &str)] = &[
     ("opv_access", "access"),
     ("opv_deployment_plan", "plan"),
     ("opv_changed", "changed"),
-    ("opv_declare_key", "propose key"),
-    ("opv_declare_environment", "propose env"),
-    ("opv_declare_target", "propose target"),
     ("opv_structure_plan", "propose structure"),
-    ("opv_generate", "propose generate"),
     ("opv_delivery_preview", "run --preview"),
+    ("opv_propose", "propose"),
+    ("opv_import_local", "import"),
+    ("opv_explain", "explain"),
 ];
 
 /// What running a command can change.

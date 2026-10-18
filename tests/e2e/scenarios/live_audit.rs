@@ -1200,22 +1200,23 @@ fn live_09_mcp_changed_prints_no_value() {
 }
 
 #[test]
-fn live_09_mcp_declare_target_with_a_secrets_dir_and_roles_is_declared() {
+fn live_09_mcp_propose_target_with_a_secrets_dir_and_a_role_is_proposed() {
     let doc = Scenario::new().account(DEV_ACCOUNT).mcp(
-        "opv_declare_target",
+        "opv_propose",
         json!({
-            "environment": "prod",
-            "target": "cluster",
+            "kind": "target",
+            "env": "prod",
+            "name": "cluster",
             "options": {
                 "kubernetes-context": "e2e-cluster",
                 "kubernetes-namespace": "e2e-prod",
                 "kubernetes-deployment": "e2e-worker",
                 "kubernetes-secrets-dir": "/run/secrets/{product}",
             },
-            "roles": ["serve"],
+            "role": "serve",
         }),
     );
-    assert_eq!(doc["changed"], true, "{doc}");
+    assert_eq!(doc["ok"], true, "{doc}");
 }
 
 #[test]
@@ -1267,83 +1268,76 @@ fn live_09_mcp_structure_plan_prints_no_value() {
 
 /// The agent's own argument error is for the agent to fix, not a person.
 #[test]
-fn live_09_mcp_declare_key_with_a_malformed_name_is_not_for_a_person() {
+fn live_09_mcp_propose_key_with_a_malformed_name_is_not_for_a_person() {
     let doc = Scenario::new().account(DEV_ACCOUNT).mcp(
-        "opv_declare_key",
-        json!({"product": "web", "key": "bad-key", "kind": "secret"}),
+        "opv_propose",
+        json!({"kind": "key", "product": "web", "key": "bad-key", "field_kind": "secret"}),
     );
     assert_eq!(doc["error"]["human_required"], false, "{doc}");
 }
 
 #[test]
-fn live_09_mcp_declare_key_with_an_unknown_kind_is_not_for_a_person() {
+fn live_09_mcp_propose_key_with_an_unknown_field_kind_is_not_for_a_person() {
     let doc = Scenario::new().account(DEV_ACCOUNT).mcp(
-        "opv_declare_key",
-        json!({"product": "web", "key": "NEW_KEY", "kind": "secrit"}),
+        "opv_propose",
+        json!({"kind": "key", "product": "web", "key": "NEW_KEY", "field_kind": "secrit"}),
     );
     assert_eq!(doc["error"]["human_required"], false, "{doc}");
 }
 
 #[test]
-fn live_09_mcp_declare_key_for_an_undeclared_environment_is_unknown_env() {
+fn live_09_mcp_propose_key_for_an_undeclared_environment_is_unknown_env() {
     let doc = Scenario::new().account(DEV_ACCOUNT).mcp(
-        "opv_declare_key",
-        json!({"product": "web", "key": "NEW_KEY", "kind": "secret", "environments": ["prdo"]}),
+        "opv_propose",
+        json!({"kind": "key", "product": "web", "key": "NEW_KEY", "field_kind": "secret",
+               "environments": ["prdo"]}),
     );
     assert_eq!(doc["error"]["code"], "unknown_env", "{doc}");
 }
 
 #[test]
-fn live_09_mcp_declare_environment_with_a_capitalised_name_is_not_for_a_person() {
+fn live_09_mcp_propose_env_with_a_capitalised_name_is_not_for_a_person() {
     let doc = Scenario::new()
         .account(DEV_ACCOUNT)
-        .mcp("opv_declare_environment", json!({"environment": "Dev"}));
+        .mcp("opv_propose", json!({"kind": "env", "env": "Dev"}));
     assert_eq!(doc["error"]["human_required"], false, "{doc}");
 }
 
 #[test]
-fn live_09_mcp_declare_target_already_declared_is_already_declared() {
+fn live_09_mcp_propose_target_already_declared_is_already_declared() {
     let doc = Scenario::new().account(DEV_ACCOUNT).mcp(
-        "opv_declare_target",
-        json!({"environment": "prod", "target": "fly"}),
+        "opv_propose",
+        json!({"kind": "target", "env": "prod", "name": "fly", "options": {"fly-app": "x"}}),
     );
     assert_eq!(doc["error"]["code"], "already_declared", "{doc}");
 }
 
 #[test]
-fn live_09_mcp_declare_target_with_an_unknown_provider_is_not_for_a_person() {
+fn live_09_mcp_propose_target_with_an_unknown_provider_is_not_for_a_person() {
     let doc = Scenario::new().account(DEV_ACCOUNT).mcp(
-        "opv_declare_target",
-        json!({"environment": "prod", "target": "web", "provider": "heroku"}),
+        "opv_propose",
+        json!({"kind": "target", "env": "prod", "name": "web", "provider": "heroku"}),
     );
     assert_eq!(doc["error"]["human_required"], false, "{doc}");
 }
 
 #[test]
-fn live_09_mcp_declare_target_fly_without_an_app_is_not_for_a_person() {
+fn live_09_mcp_propose_target_fly_without_an_app_is_not_for_a_person() {
     let doc = Scenario::new().account(DEV_ACCOUNT).mcp(
-        "opv_declare_target",
-        json!({"environment": "prod", "target": "web", "provider": "fly"}),
+        "opv_propose",
+        json!({"kind": "target", "env": "prod", "name": "web", "provider": "fly"}),
     );
     assert_eq!(doc["error"]["human_required"], false, "{doc}");
 }
 
 /// opv knows why it refuses: the key has no byte-length rule, so it is the provider's.
 #[test]
-fn live_09_mcp_generate_of_a_provider_issued_key_is_policy_refused() {
+fn live_09_mcp_propose_generate_of_a_provider_issued_key_is_policy_refused() {
     let doc = Scenario::new().account(DEV_ACCOUNT).mcp(
-        "opv_generate",
-        json!({"environment": "prod", "keys": ["web/API_KEY"]}),
+        "opv_propose",
+        json!({"kind": "generate", "env": "prod", "keys": ["web/API_KEY"]}),
     );
     assert_eq!(doc["error"]["code"], "policy_refused", "{doc}");
-}
-
-#[test]
-fn live_09_mcp_generate_of_no_keys_is_usage() {
-    let doc = Scenario::new()
-        .account(DEV_ACCOUNT)
-        .mcp("opv_generate", json!({"environment": "prod", "keys": []}));
-    assert_eq!(doc["error"]["code"], "usage", "{doc}");
 }
 
 #[test]

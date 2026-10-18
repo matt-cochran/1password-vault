@@ -28,6 +28,30 @@ pub fn import_local(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
+    import_local_as(fleet, env, file, false, r, out)
+}
+
+/// [`import_local`] reporting as the `opv import --json` document: per key `imported` or
+/// skipped, never a value. The MCP tool `opv_import_local` answers with it.
+pub fn import_local_json(
+    fleet: &Fleet,
+    env: &str,
+    file: &Path,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    import_local_as(fleet, env, file, true, r, out)
+}
+
+/// [`import_local`], its report as text or as the `--json` document (`json`).
+fn import_local_as(
+    fleet: &Fleet,
+    env: &str,
+    file: &Path,
+    json: bool,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
     let tier = fleet.environment(env)?.tier;
     if tier != Tier::Local {
         return Err(Cause::ImportTierRefused {
@@ -42,7 +66,7 @@ pub fn import_local(
         rotate: Vec::new(),
         skip: Vec::new(),
         dry_run: false,
-        json: false,
+        json,
     };
     import::run_tagged(fleet, env, &opts, Some(ASSISTANT_IMPORTED), r, out)
 }

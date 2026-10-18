@@ -16,8 +16,8 @@
 use crate::{
     app::agent_view::{configuration_projection, identifier, plan_projection},
     cause::{
-        Cause, Closest, Cmd, CommandId, Guard, Invocation, NameKind, Origin, Principal,
-        UsageProblem, VarName, render,
+        Cause, Closest, Cmd, CommandId, Invocation, NameKind, Origin, Principal, UsageProblem,
+        VarName, render,
     },
     config_store,
     error::Error,
@@ -54,68 +54,6 @@ pub struct AccessScope {
 #[derive(Deserialize, schemars::JsonSchema, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Verbose {
-    /// As the CLI's --verbose: an error's upstream reply in full.
-    #[serde(default)]
-    verbose: bool,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct DeclareKey {
-    /// Product name.
-    product: String,
-    /// Key name (the variable name the app reads), never its value.
-    key: String,
-    /// `secret` or `config`.
-    kind: String,
-    /// Environments that need the key; empty means every declared environment.
-    #[serde(default)]
-    environments: Vec<String>,
-    /// Validation rules, as `opv add --rule` takes them (`prefix=sk_`, `https_url`).
-    #[serde(default)]
-    rules: Vec<String>,
-    /// One line telling the person where to get the value (never the value).
-    #[serde(default)]
-    guidance: Option<String>,
-    /// The value must never change once set (rotation needs a person's approval).
-    #[serde(default)]
-    immutable: bool,
-    /// As the CLI's --verbose: an error's upstream reply in full.
-    #[serde(default)]
-    verbose: bool,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct DeclareEnvironment {
-    /// New environment name (`^[a-z][a-z0-9-]*$`).
-    environment: String,
-    /// As the CLI's --verbose: an error's upstream reply in full.
-    #[serde(default)]
-    verbose: bool,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct DeclareTarget {
-    /// Declared environment.
-    environment: String,
-    /// New target name (`^[a-z][a-z0-9-]*$`).
-    target: String,
-    /// `fly`, `azure`, `kubernetes` or `github`; inferred from the options when omitted.
-    #[serde(default)]
-    provider: Option<String>,
-    /// Provider options by flag name, as `opv target add` takes them (`fly-app`): public
-    /// names only. Deploy credentials are refused.
-    #[serde(default)]
-    options: std::collections::BTreeMap<String, String>,
-    /// Products it delivers; empty means every product except source-only ones.
-    #[serde(default)]
-    products: Vec<String>,
-    /// Process roles this target delivers (`opv target add --role`), written as its `roles`;
-    /// needed when a delivered product's keys declare roles. Names only.
-    #[serde(default)]
-    roles: Vec<String>,
     /// As the CLI's --verbose: an error's upstream reply in full.
     #[serde(default)]
     verbose: bool,
@@ -195,17 +133,76 @@ pub struct ReadyScope {
     verbose: bool,
 }
 
-#[derive(Deserialize, schemars::JsonSchema)]
+/// `opv_import_local`'s input (design §25.2): a `local`-tier environment and a file.
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct GenerateScope {
-    /// A declared environment whose empty fields receive the generated values.
-    environment: String,
-    /// One to twenty `product/KEY` names (never a value), each declared for the environment
-    /// with a `base64_bytes` or `hex_bytes` rule.
-    keys: Vec<String>,
-    /// As the CLI's --verbose: an error's upstream reply in full.
+pub struct ImportLocalScope {
+    /// A declared environment whose tier is `local`.
+    env: String,
+    /// The `.env` file to import, relative to the project (or absolute).
+    file: String,
+}
+
+/// `opv_explain`'s input (design §25.2): a key or a run plan id, and the environment.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ExplainScope {
+    /// `[product/]KEY`.
     #[serde(default)]
-    verbose: bool,
+    key: Option<String>,
+    /// The run plan id `opv plan` prints.
+    #[serde(default)]
+    plan_id: Option<String>,
+    /// The environment, as the CLI's `--env`.
+    #[serde(default)]
+    env: Option<String>,
+}
+
+/// The name grammar of an environment (the intent document's).
+const ENV_PATTERN: &str = "^[a-z][a-z0-9-]*$";
+
+/// The grammar of a key reference, `[product/]KEY`.
+const KEY_REF_PATTERN: &str = "^([a-z][a-z0-9-]*/)?[A-Z][A-Z0-9_]*$";
+
+/// A JSON Schema object for a tool's input.
+fn schema_object(schema: Value) -> Arc<rmcp::model::JsonObject> {
+    match schema {
+        Value::Object(map) => Arc::new(map),
+        _ => Arc::new(rmcp::model::JsonObject::new()),
+    }
+}
+
+/// `opv_propose`'s input schema: exactly the intent document's (design §25.2).
+fn propose_schema() -> Arc<rmcp::model::JsonObject> {
+    schema_object(crate::domain::intent::json_schema())
+}
+
+/// `opv_import_local`'s input schema (the §25 surface golden).
+fn import_local_schema() -> Arc<rmcp::model::JsonObject> {
+    schema_object(json!({
+        "type": "object",
+        "properties": {
+            "env": { "type": "string", "pattern": ENV_PATTERN },
+            "file": { "type": "string" }
+        },
+        "required": ["env", "file"],
+        "additionalProperties": false
+    }))
+}
+
+/// `opv_explain`'s input schema: the §25 surface golden's, plus the optional `env` the
+/// CLI's `--env` is (a key declared in several environments, and every plan id, need it).
+fn explain_schema() -> Arc<rmcp::model::JsonObject> {
+    schema_object(json!({
+        "type": "object",
+        "properties": {
+            "key": { "type": "string", "pattern": KEY_REF_PATTERN },
+            "plan_id": { "type": "string" },
+            "env": { "type": "string", "pattern": ENV_PATTERN }
+        },
+        "oneOf": [{ "required": ["key"] }, { "required": ["plan_id"] }],
+        "additionalProperties": false
+    }))
 }
 
 /// One tool call as the catalog renders its failures (design §2.4, §6.1): the CLI command
@@ -244,6 +241,20 @@ impl ToolCall {
     /// The failure answer for a cause the tool itself found.
     fn refused(&self, cause: Cause) -> Value {
         self.failed(&cause.into())
+    }
+
+    /// The `--json` document of the CLI command this call is, for a command that wrote
+    /// `body` and ended with `res`: framed exactly as `opv <command> --json` frames it
+    /// ([`crate::json::finish_with`]), so a tool's answer is the CLI's document.
+    fn document(&self, body: &[u8], res: Result<(), Error>) -> Value {
+        let framed = crate::json::finish_with(
+            body,
+            res.as_ref().map(|_| ()),
+            false,
+            &self.inv,
+            self.verbose,
+        );
+        serde_json::from_slice(&framed).unwrap_or_else(|_| self.refused(UNREADABLE_REPORT))
     }
 }
 
@@ -297,7 +308,10 @@ fn own_session(command: &str, var: String) -> Cause {
 }
 
 impl Server {
+    /// The server for `project`. The MCP server is agent mode (design §25): every tool
+    /// answers as to an assistant.
     pub fn new(project: PathBuf) -> Self {
+        crate::host::mark_mcp();
         Self {
             project,
             gate: Arc::new(tokio::sync::Mutex::new(())),
@@ -452,90 +466,55 @@ impl Server {
     }
 
     #[tool(
-        name = "opv_declare_key",
-        description = "Declare a key, or extend one, in this project's secrets.toml: name, kind, environments, validation rules, one line of guidance, immutable. Names and rules only; never a value, never a shared or personal key. Edits the local file only; the empty 1Password field comes from the next approved structural plan.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true
-        )
+        name = "opv_propose",
+        description = "Propose a change to this project's contract from one intent document (kind key, env, target, retire, setup, structure or generate; tidy is not available here): names, enumerated attributes and catalog shape names only, never a rule parameter (regex, prefix, enum) or a value. Returns the same document as `opv propose <kind> --json`: the relaxations it makes (listed first), the contract diff or the structure steps, the questions it asks, and a plan_id that only a person's `opv apply <plan_id>` runs. Pure: writes neither the contract nor 1Password.",
+        input_schema = propose_schema(),
+        annotations(read_only_hint = true, destructive_hint = false)
     )]
-    async fn declare_key(&self, Parameters(args): Parameters<DeclareKey>) -> String {
-        let verbose = args.verbose;
-        self.serialized("opv_declare_key", true, verbose, move |project| {
-            declare_key(project, args)
-        })
-        .await
-    }
-
-    #[tool(
-        name = "opv_declare_environment",
-        description = "Declare an environment in this project's secrets.toml. Edits the local file only; the vaults and items that hold its values come from the next approved structural plan.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true
-        )
-    )]
-    async fn declare_environment(
-        &self,
-        Parameters(args): Parameters<DeclareEnvironment>,
-    ) -> String {
-        let verbose = args.verbose;
-        self.serialized("opv_declare_environment", true, verbose, move |project| {
-            declare_environment(project, &args.environment, verbose)
-        })
-        .await
-    }
-
-    #[tool(
-        name = "opv_declare_target",
-        description = "Declare a new named deploy target in this project's secrets.toml (provider and public options by flag name, such as fly-app, fly-config, kubernetes-config or kubernetes-secrets-dir; the products and process roles it delivers). Names and paths only, never a value. Never changes an existing target (refused as already_declared) and never takes deploy credentials. Edits the local file only; its state vault and delivery items come from the next approved structural plan. Syncing or deploying to it stays a separately approved step.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true
-        )
-    )]
-    async fn declare_target(&self, Parameters(args): Parameters<DeclareTarget>) -> String {
-        let verbose = args.verbose;
-        self.serialized("opv_declare_target", true, verbose, move |project| {
-            declare_target(project, args)
-        })
-        .await
-    }
-
-    #[tool(
-        name = "opv_generate",
-        description = "Generate self-made secrets (keys whose rules give base64_bytes or hex_bytes) with the OS random source and write them straight into their empty 1Password fields. Writes only empty fields: never replaces an existing value, never deletes, and never returns a value. The 1Password app asks the person to authorize the writes, so the server refuses to run with an op session, service-account or Connect credential in its environment.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false
-        )
-    )]
-    async fn generate(&self, Parameters(args): Parameters<GenerateScope>) -> String {
-        let verbose = args.verbose;
-        self.serialized("opv_generate", true, verbose, move |project| {
-            let call = generate_call(&args.environment, &args.keys, verbose);
-            let r = ProcessRunner::new(Budget::starting_now(Duration::from_secs(300)), false);
-            let fleet = match load_fleet(project, &r) {
-                Ok(fleet) => fleet,
-                Err(e) => return call.failed(&e),
-            };
-            // Writes go to the project's own 1Password account, never op's default.
-            match crate::app::structure::binding_as(project, &r, "generate") {
-                Ok((_, account)) => r.use_account(Some(account)),
-                Err(e) => return call.failed(&e),
+    async fn propose(&self, Parameters(args): Parameters<rmcp::model::JsonObject>) -> String {
+        self.serialized("opv_propose", false, false, move |project| {
+            let r = read_only(PROPOSE_BUDGET);
+            let answer = propose_doc(project, &r, &args);
+            if r.refused.load(Ordering::Relaxed) {
+                return propose_call(&args).refused(write_refused());
             }
-            generate(
-                &fleet,
-                &args.environment,
-                &args.keys,
-                &r,
-                std::env::vars(),
-                verbose,
-            )
+            answer
+        })
+        .await
+    }
+
+    #[tool(
+        name = "opv_import_local",
+        description = "Import a .env file's values into a local-tier environment's 1Password items, for the person's own machine. Only an environment whose tier is local is accepted (any other is refused as import_tier_refused before the file is read). Write-only: fills missing keys, never replaces a set value; each written item is tagged assistant_imported. Returns per key whether it was imported or skipped (already set, empty), never a value; the same document as `opv import <env> --from <file> --json`.",
+        input_schema = import_local_schema(),
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn import_local(&self, Parameters(args): Parameters<ImportLocalScope>) -> String {
+        self.serialized("opv_import_local", true, false, move |project| {
+            let r = ProcessRunner::new(Budget::starting_now(IMPORT_BUDGET), false);
+            import_local_doc(project, &r, &args, std::env::vars())
+        })
+        .await
+    }
+
+    #[tool(
+        name = "opv_explain",
+        description = "Explain a declared key (`[product/]KEY`) or a run plan id, with the environment when the key is declared in several (a plan id always needs it): the key's source, boundary, every target and delivery that holds it and who can read it, or each step of the plan. Names and IDs only, never a value; the same document as `opv explain <key|plan_id> [--env <env>] --json`. Changes nothing.",
+        input_schema = explain_schema(),
+        annotations(read_only_hint = true, destructive_hint = false)
+    )]
+    async fn explain(&self, Parameters(args): Parameters<ExplainScope>) -> String {
+        self.serialized("opv_explain", false, false, move |project| {
+            let r = read_only(INSPECT_BUDGET);
+            let answer = explain_doc(project, &r, &args);
+            if r.refused.load(Ordering::Relaxed) {
+                return explain_call(&args).refused(write_refused());
+            }
+            answer
         })
         .await
     }
@@ -692,15 +671,19 @@ fn load_fleet(
     r: &impl Accounted,
 ) -> Result<crate::domain::Fleet, Error> {
     r.select_account(config_store::selected_account_id(r, project)?);
-    let req = config_store::Request {
+    config_store::locate(&config_request(project), r).and_then(|found| found.load(r))
+}
+
+/// The configuration lookup from `project`, as the CLI makes it.
+fn config_request(project: &std::path::Path) -> config_store::Request {
+    config_store::Request {
         start: project.into(),
         config: None,
         // L7: the CLI's choice of project (`OPV_PROJECT`), so a tool reads what `opv` does.
         project: config_store::project_env(),
         manifest_only: false,
         account: config_store::account_env(),
-    };
-    config_store::locate(&req, r).and_then(|found| found.load(r))
+    }
 }
 
 fn inspect(
@@ -1041,210 +1024,6 @@ fn delivery_preview_from_fleet(
     }
 }
 
-/// Run a declaration on the project's `secrets.toml` on the read-only runner: its answer
-/// is whether the file changed, never its text. Without a local `secrets.toml`, a
-/// configuration kept in 1Password is declared with the CLI command instead; with neither,
-/// the answer is why none was found.
-fn declared(
-    project: &std::path::Path,
-    call: &ToolCall,
-    f: impl FnOnce(&dyn CommandRunner, &std::path::Path) -> Result<bool, Error>,
-) -> Value {
-    let Some(path) = config_store::walk_up(project, "secrets.toml") else {
-        let r = read_only(INSPECT_BUDGET);
-        return match load_fleet(project, &r) {
-            Ok(_) => call.refused(Cause::Usage {
-                problem: UsageProblem::UseInstead {
-                    command: Cmd {
-                        command: call.inv.command.clone(),
-                        args: call.inv.args.clone(),
-                    },
-                },
-            }),
-            Err(e) => call.failed(&e),
-        };
-    };
-    let r = read_only(INSPECT_BUDGET);
-    match f(&r, &path) {
-        _ if r.refused.load(Ordering::Relaxed) => call.refused(write_refused()),
-        Ok(changed) => json!({
-            "ok": true,
-            "changed": changed,
-            "human_action": "Call opv_structure_plan to see what this needs in 1Password; a person applies it with opv apply.",
-        }),
-        Err(e) => call.failed(&e),
-    }
-}
-
-/// `opv_declare_key`: `opv add <product>/<KEY>` with its kind, environments, rules and
-/// immutability.
-fn declare_key(project: &std::path::Path, args: DeclareKey) -> Value {
-    let bad = [("product", &args.product), ("key", &args.key)]
-        .into_iter()
-        .chain(args.environments.iter().map(|e| ("environments", e)))
-        .find(|(_, n)| !identifier(n));
-    if let Some((field, _)) = bad {
-        return ToolCall::new(
-            "opv_declare_key",
-            &["propose", "key"],
-            Vec::new(),
-            args.verbose,
-        )
-        .refused(not_a_name(field));
-    }
-    let mut words = vec![format!("{}/{}", args.product, args.key)];
-    if ["secret", "config"].contains(&args.kind.as_str()) {
-        words.extend(["--kind".to_string(), args.kind.clone()]);
-    }
-    for e in &args.environments {
-        words.extend(["--env".to_string(), e.clone()]);
-    }
-    let one_line = |s: &String| s.len() <= 300 && !s.chars().any(char::is_control);
-    for rule in args.rules.iter().filter(|r| one_line(r)) {
-        words.extend(["--rule".to_string(), rule.clone()]);
-    }
-    if let Some(g) = args.guidance.as_ref().filter(|g| one_line(g)) {
-        words.extend(["--guidance".to_string(), g.clone()]);
-    }
-    if args.immutable {
-        words.push("--immutable".into());
-    }
-    let call = ToolCall::new("opv_declare_key", &["propose", "key"], words, args.verbose);
-    let k = crate::app::propose::declare::Key {
-        product: args.product,
-        key: args.key,
-        kind: args.kind,
-        environments: args.environments,
-        rules: args.rules,
-        guidance: args.guidance,
-        immutable: args.immutable,
-    };
-    declared(project, &call, |r, path| {
-        crate::app::propose::declare::key(r, path, &k)
-    })
-}
-
-/// `opv_declare_environment`: `opv env add <env>`.
-fn declare_environment(project: &std::path::Path, environment: &str, verbose: bool) -> Value {
-    if !identifier(environment) {
-        return ToolCall::new(
-            "opv_declare_environment",
-            &["propose", "env"],
-            Vec::new(),
-            verbose,
-        )
-        .refused(not_a_name("environment"));
-    }
-    let call = ToolCall::new(
-        "opv_declare_environment",
-        &["propose", "env"],
-        vec![environment.to_string()],
-        verbose,
-    );
-    declared(project, &call, |r, path| {
-        crate::app::propose::declare::environment(r, path, environment)
-    })
-}
-
-/// `opv_declare_target`: `opv target add <env> <name>`. Deploy credentials are refused
-/// before anything is read, and an existing target is refused as already declared: this
-/// tool never changes one.
-fn declare_target(project: &std::path::Path, args: DeclareTarget) -> Value {
-    let names = [("environment", &args.environment), ("target", &args.target)]
-        .into_iter()
-        .chain(args.products.iter().map(|p| ("products", p)))
-        .chain(args.roles.iter().map(|r| ("roles", r)))
-        .chain(args.options.keys().map(|k| ("options", k)));
-    let bad = names
-        .into_iter()
-        .find(|(_, n)| !identifier(n))
-        .map(|(f, _)| f);
-    let bad = bad.or_else(|| {
-        args.options
-            .values()
-            .any(|v| v.len() > 256 || v.chars().any(char::is_control))
-            .then_some("options")
-    });
-    if let Some(field) = bad {
-        return ToolCall::new(
-            "opv_declare_target",
-            &["propose", "target"],
-            Vec::new(),
-            args.verbose,
-        )
-        .refused(not_a_name(field));
-    }
-    let call = ToolCall::new(
-        "opv_declare_target",
-        &["propose", "target"],
-        declare_target_words(&args),
-        args.verbose,
-    );
-    if let Some(option) = args.options.keys().find(|k| k.contains("credential")) {
-        return call.refused(Cause::Guard {
-            guard: Guard::CredentialAsOption {
-                option: option.clone(),
-            },
-        });
-    }
-    if let Some(exists) = load_fleet(project, &read_only(INSPECT_BUDGET))
-        .ok()
-        .and_then(|fleet| existing_target(&fleet, &args.environment, &args.target))
-    {
-        return call.refused(exists);
-    }
-    let t = crate::app::propose::declare::Target {
-        environment: args.environment,
-        name: args.target,
-        provider: args.provider,
-        fields: args.options,
-        products: args.products,
-        roles: args.roles,
-    };
-    declared(project, &call, |r, path| {
-        crate::app::propose::declare::target(r, path, &t)
-    })
-}
-
-/// `opv target add <env> <name>` with the provider, options, products and roles the tool
-/// was given, in that order, so a step that repeats the command names the same target. The
-/// names are checked and the option values are public one-line names or paths; a
-/// credential option is left out.
-fn declare_target_words(args: &DeclareTarget) -> Vec<String> {
-    let mut words = vec![args.environment.clone(), args.target.clone()];
-    if let Some(p) = args.provider.as_ref().filter(|p| identifier(p)) {
-        words.extend(["--provider".to_string(), p.clone()]);
-    }
-    // A deploy credential is refused, never repeated.
-    for (flag, value) in args
-        .options
-        .iter()
-        .filter(|(k, _)| !k.contains("credential"))
-    {
-        words.extend([format!("--{flag}"), value.clone()]);
-    }
-    for p in &args.products {
-        words.extend(["--products".to_string(), p.clone()]);
-    }
-    for r in &args.roles {
-        words.extend(["--role".to_string(), r.clone()]);
-    }
-    words
-}
-
-/// `target` of `env` when `fleet` already declares it: this tool never changes one.
-fn existing_target(fleet: &crate::domain::Fleet, env: &str, target: &str) -> Option<Cause> {
-    fleet
-        .environments
-        .get(env)
-        .is_some_and(|e| e.targets.contains_key(target))
-        .then(|| Cause::AlreadyDeclared {
-            kind: NameKind::Target,
-            // The CLI's words (`opv target add`): MCP answers what `--json` prints.
-            name: format!("{target} in environment {env}"),
-        })
-}
-
 /// `opv_access`'s runner budget: above the 1Password app's approval wait
 /// ([`crate::adapters::onepassword::APPROVAL_TIMEOUT`]), so the session check that follows
 /// a `wake` waiting on the app's prompt still has time to run.
@@ -1432,90 +1211,389 @@ fn structure_plan(project: &std::path::Path, verbose: bool) -> Value {
     }
 }
 
-/// `opv_generate`'s call: `opv generate <env> <product/KEY>…` when every name is checked.
-fn generate_call(env_name: &str, keys: &[String], verbose: bool) -> ToolCall {
-    let checked = identifier(env_name)
-        && !keys.is_empty()
-        && keys.len() <= 20
-        && keys.iter().all(|k| {
-            k.split_once('/')
-                .is_some_and(|(product, key)| identifier(product) && identifier(key))
-        });
-    let words = if checked {
-        std::iter::once(env_name.to_string())
-            .chain(keys.iter().cloned())
-            .collect()
+/// `opv_propose`'s runner budget: a structure proposal reads every boundary item.
+const PROPOSE_BUDGET: Duration = Duration::from_secs(60);
+
+/// `opv_import_local`'s runner budget: above the 1Password app's approval wait, with the
+/// writes after it.
+const IMPORT_BUDGET: Duration = Duration::from_secs(300);
+
+/// The intent kinds `opv_propose` has a library proposal for.
+const PROPOSE_KINDS: [&str; 7] = [
+    "key",
+    "env",
+    "target",
+    "retire",
+    "setup",
+    "structure",
+    "generate",
+];
+
+/// What `kind` must be: `tidy` has no proposal yet (its schema arm stays, as the intent
+/// document's), so it is refused naming itself.
+const PROPOSE_KIND_FORMAT: &str = "one of key, env, target, retire, setup, structure or generate (kind tidy is not available: it has no proposal yet; a person runs opv tidy <env>)";
+
+/// `opv_propose`'s call: `opv propose <kind> --json`, with the kind when it is one.
+fn propose_call(args: &rmcp::model::JsonObject) -> ToolCall {
+    let kind = args
+        .get("kind")
+        .and_then(Value::as_str)
+        .filter(|k| PROPOSE_KINDS.contains(k) || *k == "tidy");
+    let command: Vec<&str> = std::iter::once("propose").chain(kind).collect();
+    ToolCall::new("opv_propose", &command, Vec::new(), false)
+}
+
+/// `opv_propose`: the intent document parsed (an unknown field, such as a rule parameter,
+/// is refused naming itself), then the library proposal for its kind, as the `--json`
+/// document `opv propose <kind>` prints. Pure: `r` only reads, and nothing is written.
+fn propose_doc<R: Accounted>(
+    project: &std::path::Path,
+    r: &R,
+    args: &rmcp::model::JsonObject,
+) -> Value {
+    let call = propose_call(args);
+    let res = crate::domain::intent::parse(&Value::Object(args.clone()).to_string())
+        .and_then(|intent| proposal(project, r, &intent));
+    match res {
+        Ok(doc) => call.document(doc.to_string().as_bytes(), Ok(())),
+        Err(e) => call.document(&[], Err(e)),
+    }
+}
+
+/// A library document as JSON.
+fn to_doc<T: serde::Serialize>(doc: &T) -> Result<Value, Error> {
+    serde_json::to_value(doc).map_err(|_| Error::from(UNREADABLE_REPORT))
+}
+
+/// The proposal `intent` implies, by kind, from the library `opv propose` runs
+/// ([`crate::app::propose`]), as the `opv propose <kind> --json` document: the library's
+/// proposal, `written: null` (a tool never writes), and for a structural proposal the
+/// person's `opv apply` as `next`. A contract proposal has no `next` here: the CLI's is its
+/// own command line with `--write`, which a person runs.
+fn proposal<R: Accounted>(
+    project: &std::path::Path,
+    r: &R,
+    intent: &crate::domain::intent::Intent,
+) -> Result<Value, Error> {
+    use crate::app::propose::{key, setup, target};
+    use crate::domain::intent::Intent;
+    let unwritten = |mut doc: Value| {
+        doc["written"] = Value::Null;
+        doc
+    };
+    match intent {
+        Intent::Key { .. } | Intent::Env { .. } | Intent::Retire { .. } | Intent::Target { .. } => {
+            let (text, ids, rules) = contract_for_proposal(project, r)?;
+            let base = rules.as_ref().and_then(|s| s.contract());
+            let proposal = if matches!(intent, Intent::Target { .. }) {
+                target::propose(&text, &ids, base, intent)
+            } else {
+                key::propose(&text, &ids, base, intent)
+            }
+            .map_err(proposal_refused)?;
+            to_doc(&proposal).map(unwritten)
+        }
+        Intent::Setup {
+            from_item,
+            vault,
+            item,
+            names_from,
+            config_key,
+            secret_key,
+            project: named,
+            account,
+            ..
+        } => {
+            let proposed = match (from_item, names_from) {
+                (Some(env), _) => {
+                    // FR-40, NR-7: the item is read in one chosen account, never op's default.
+                    let given = account
+                        .clone()
+                        .or_else(|| config_store::pointer_account(project))
+                        .or_else(config_store::account_env);
+                    r.select_account(config_store::pick_account(r, given)?);
+                    let (vault, item) = match (vault, item) {
+                        (Some(v), Some(i)) => (v.clone(), i.clone()),
+                        (vault, item) => {
+                            let repo = config_store::git_repo(r);
+                            let name = config_store::default_project(
+                                named.as_deref(),
+                                repo.as_deref(),
+                                project,
+                            )?;
+                            let b = crate::app::init::SHARED_BOUNDARY;
+                            let env = env.as_str();
+                            (
+                                vault.clone().unwrap_or_else(|| {
+                                    crate::domain::naming::boundary_vault(&name, b, env)
+                                }),
+                                item.clone().unwrap_or_else(|| {
+                                    crate::domain::naming::boundary_item(&name, b, env)
+                                }),
+                            )
+                        }
+                    };
+                    let contract = config_store::walk_up(project, "secrets.toml")
+                        .unwrap_or_else(|| project.join("secrets.toml"));
+                    setup::from_item(r, env.as_str(), Some(&vault), Some(&item), Some(&contract))?
+                }
+                (None, Some(file)) => setup::from_names(
+                    &project.join(file),
+                    setup::NAMES_ENV,
+                    config_key,
+                    secret_key,
+                )?,
+                (None, None) => {
+                    return Err(Cause::Usage {
+                        problem: UsageProblem::NeedsFlag {
+                            flag: "opv propose setup".into(),
+                            needs: "--from-item <env> or --names-from <.env>".into(),
+                        },
+                    }
+                    .into());
+                }
+            };
+            to_doc(&proposed).map(unwritten)
+        }
+        Intent::Structure { rebind, .. } => {
+            let rebind: Vec<String> = rebind.iter().map(|e| e.to_string()).collect();
+            structure_proposal(project, r, &rebind, &[])
+        }
+        Intent::Generate { env, keys, .. } => {
+            let keys = keys.iter().map(|k| k.to_string()).collect();
+            structure_proposal(project, r, &[], &[(env.to_string(), keys)])
+        }
+        Intent::Tidy { .. } => Err(usage("kind", PROPOSE_KIND_FORMAT).into()),
+    }
+}
+
+/// A loader refusal of the proposed text is the proposal's (`config_proposal_invalid`),
+/// as `opv propose` words it: that text was never written.
+fn proposal_refused(e: Error) -> Error {
+    let Error::Catalog(cause, upstream) = e;
+    let cause = match *cause {
+        Cause::ConfigInvalid {
+            source,
+            field,
+            rule,
+            ..
+        } => Cause::ConfigProposalInvalid {
+            source,
+            field,
+            rule,
+            from_proposal: true,
+        },
+        other => other,
+    };
+    Error::Catalog(Box::new(cause), upstream)
+}
+
+/// `opv apply <plan_id>` with the `--rebind` and `--generate` a structural proposal needs
+/// to be recomputed as it was proposed: the person's step.
+fn apply_step(plan_id: &str, rebind: &[String], generate: &[(String, Vec<String>)]) -> String {
+    let mut args = vec![plan_id.to_string()];
+    for env in rebind {
+        args.extend(["--rebind".to_string(), env.clone()]);
+    }
+    for (env, keys) in generate {
+        for k in keys {
+            args.extend(["--generate".to_string(), format!("{env}:{k}")]);
+        }
+    }
+    render::cmd_text(&Cmd {
+        command: vec!["apply".into()],
+        args,
+    })
+}
+
+/// `opv propose structure|generate`: the structure plan over the project's configuration
+/// (a file or its manifest), with its project name and account as `opv propose` resolves
+/// them, and the person's `opv apply` next. Reads only.
+fn structure_proposal<R: Accounted>(
+    project: &std::path::Path,
+    r: &R,
+    rebind: &[String],
+    generate: &[(String, Vec<String>)],
+) -> Result<Value, Error> {
+    let scope = crate::app::structure::scope_as(project, r, "propose structure")?;
+    r.select_account(Some(scope.account.clone()));
+    let p = crate::app::propose::structure::propose_structure_at(
+        r,
+        &scope.config,
+        &scope.project,
+        &scope.account,
+        rebind,
+        generate,
+    )?;
+    let mut doc = to_doc(&p)?;
+    doc["next"] = json!({
+        "kind": "apply",
+        "actor": "person",
+        "command": apply_step(&p.plan_id, rebind, generate),
+    });
+    Ok(doc)
+}
+
+/// The contract and its bindings as `opv propose` reads them (the configuration's text with
+/// its ids, split), and the committed default-branch contract whose relaxations a proposal
+/// lists first (none readable: `None`).
+fn contract_for_proposal<R: Accounted>(
+    project: &std::path::Path,
+    r: &R,
+) -> Result<
+    (
+        String,
+        crate::config::bindings::Bindings,
+        Option<crate::app::rule_source::RuleSource>,
+    ),
+    Error,
+> {
+    r.select_account(config_store::selected_account_id(r, project)?);
+    let found = config_store::locate(&config_request(project), r)?;
+    let store = found.store();
+    let snap = store.read(r)?;
+    let working = store.parse(&snap.text)?;
+    let (contract, ids) = crate::config::bindings::split(&snap.text);
+    let repo = config_store::repo_root(project).unwrap_or(project);
+    let rules = crate::app::rule_source::rule_source(r, repo, &working).ok();
+    Ok((contract, ids, rules))
+}
+
+/// One line of printable text, short enough to repeat in a re-run.
+fn one_line(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control)
+}
+
+/// `opv_import_local`'s call: `opv import <env> --from <file> --json`, with the names
+/// when they are checked.
+fn import_local_call(args: &ImportLocalScope) -> ToolCall {
+    let words = if identifier(&args.env) && one_line(&args.file) {
+        vec![args.env.clone(), "--from".into(), args.file.clone()]
     } else {
         Vec::new()
     };
-    ToolCall::new("opv_generate", &["propose", "generate"], words, verbose)
+    ToolCall::new("opv_import_local", &["import"], words, false)
 }
 
-/// `opv_generate` as a value: generate each `product/KEY` and write it into its empty
-/// 1Password field, or its failure. `vars` are the process environment variables checked
-/// for a write credential (injected so a test need not set the process environment). The
-/// sink is discarded: no value and no length other than the recipe's byte count is returned.
-fn generate(
-    fleet: &crate::domain::Fleet,
-    env_name: &str,
-    keys: &[String],
-    r: &dyn CommandRunner,
+/// `opv_import_local`: the assistant's import into a `local`-tier environment
+/// ([`crate::app::import_local`]), as the `opv import --json` document. A credential in
+/// the server's environment (`vars`) or CI needs the person; any other tier is refused
+/// before the file is read. Never a value.
+fn import_local_doc<R: Accounted>(
+    project: &std::path::Path,
+    r: &R,
+    args: &ImportLocalScope,
     vars: impl Iterator<Item = (String, String)>,
-    verbose: bool,
 ) -> Value {
-    let call = generate_call(env_name, keys, verbose);
+    let call = import_local_call(args);
+    if !identifier(&args.env) {
+        return call.refused(not_a_name("env"));
+    }
+    if !one_line(&args.file) {
+        return call.refused(usage("file", "the path of a .env file, on one line"));
+    }
     if let Some(var) = credential_in_environment(vars) {
-        return call.refused(own_session("apply", var));
+        return call.refused(own_session("import", var));
     }
     if let Some(refused) = ci_refusal() {
         return call.refused(refused);
     }
-    if !identifier(env_name) {
-        return call.refused(not_a_name("environment"));
-    }
-    if keys.is_empty() || keys.len() > 20 {
-        return call.refused(usage("keys", "1 to 20 names, each <product>/<KEY>"));
-    }
-    if keys.iter().any(|k| {
-        k.split_once('/')
-            .is_none_or(|(product, key)| !identifier(product) || !identifier(key))
-    }) {
-        return call.refused(usage(
-            "keys",
-            "<product>/<KEY> names, declared (opv_configuration lists them)",
-        ));
-    }
-    if !fleet.environments.contains_key(env_name) {
-        return call.refused(unknown_env(fleet, env_name));
-    }
-    // Every name and declaration is checked before anything is written.
-    let chosen = match crate::app::generate::plan(fleet, env_name, keys) {
-        Ok(chosen) => chosen,
+    let fleet = match load_fleet(project, r) {
+        Ok(fleet) => fleet,
         Err(e) => return call.failed(&e),
     };
-    let mut sink = Vec::new();
-    if let Err(e) = crate::app::generate::run(fleet, env_name, keys, r, &mut sink) {
-        return call.failed(&e);
+    let mut out = Vec::new();
+    let res = crate::app::import_local::import_local_json(
+        &fleet,
+        &args.env,
+        &project.join(&args.file),
+        r,
+        &mut out,
+    );
+    call.document(&out, res)
+}
+
+/// A key reference, `[product/]KEY` ([`KEY_REF_PATTERN`]).
+fn key_ref(s: &str) -> bool {
+    let (product, key) = match s.split_once('/') {
+        Some((p, k)) => (Some(p), k),
+        None => (None, s),
+    };
+    let lower = |p: &str| {
+        p.starts_with(|c: char| c.is_ascii_lowercase())
+            && p.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    };
+    let upper = key.starts_with(|c: char| c.is_ascii_uppercase())
+        && key
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+    product.is_none_or(lower) && upper
+}
+
+/// A run plan id: the lowercase hex digits `opv plan` prints as `plan_id`.
+fn run_plan_id(s: &str) -> bool {
+    s.len() == crate::domain::provenance::PLAN_ID_LEN
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// What `opv_explain` was asked, when it is exactly one checked key or plan id; else the
+/// field and the format its refusal names.
+fn explain_asked(args: &ExplainScope) -> Result<&str, (&'static str, &'static str)> {
+    match (&args.key, &args.plan_id) {
+        (Some(k), None) if key_ref(k) => Ok(k),
+        (Some(_), None) => Err((
+            "key",
+            "[product/]KEY, a declared key (opv_configuration lists them)",
+        )),
+        (None, Some(p)) if run_plan_id(p) => Ok(p),
+        (None, Some(_)) => Err(("plan_id", "the lowercase hex plan_id opv plan prints")),
+        _ => Err(("key, plan_id", "exactly one of key or plan_id")),
     }
-    let generated: Vec<Value> = chosen
-        .iter()
-        .map(|(product, key, recipe)| {
-            let (encoding, bytes) = match recipe {
-                crate::app::generate::Recipe::Base64(n) => ("base64", *n),
-                crate::app::generate::Recipe::Hex(n) => ("hex", *n),
-            };
-            json!({"product": product, "key": key, "encoding": encoding, "bytes": bytes})
-        })
+}
+
+/// `opv_explain`'s call: `opv explain <key|plan_id> [--env <env>] --json`, with the names
+/// when they are checked.
+fn explain_call(args: &ExplainScope) -> ToolCall {
+    let mut words: Vec<String> = explain_asked(args)
+        .ok()
+        .map(str::to_string)
+        .into_iter()
         .collect();
-    json!({
-        "ok": true,
-        "generated": generated,
-        "human_action": "The values went straight into 1Password and were never shown.",
-        "next": render::cmd_text(&Cmd {
-            command: vec!["status".into()],
-            args: vec![env_name.to_string()],
-        }),
-    })
+    if let Some(env) = args.env.as_ref().filter(|e| identifier(e)) {
+        words.extend(["--env".to_string(), env.clone()]);
+    }
+    ToolCall::new("opv_explain", &["explain"], words, false)
+}
+
+/// `opv_explain`: the key form or the plan form of `opv explain` ([`crate::app::explain`]),
+/// as its `--json` document. Names and IDs only, never a value.
+fn explain_doc<R: Accounted>(project: &std::path::Path, r: &R, args: &ExplainScope) -> Value {
+    let call = explain_call(args);
+    let asked = match explain_asked(args) {
+        Ok(asked) => asked,
+        Err((field, format)) => return call.refused(usage(field, format)),
+    };
+    if args.env.as_ref().is_some_and(|e| !identifier(e)) {
+        return call.refused(not_a_name("env"));
+    }
+    let fleet = match load_fleet(project, r) {
+        Ok(fleet) => fleet,
+        Err(e) => return call.failed(&e),
+    };
+    let name = crate::app::personal::project_name(r, project);
+    let mut out = Vec::new();
+    let res = crate::app::explain::run_request_with(
+        r,
+        &fleet,
+        &crate::app::explain::Asked::Key(asked),
+        args.env.as_deref(),
+        &name,
+        &mut out,
+        true,
+    );
+    call.document(&out, res)
 }
 
 /// The next step an assistant may repeat for a finding: an `opv` command, or a 1Password
@@ -1684,7 +1762,6 @@ fn plan_receipt(doc: &Value, scope: &DeploymentPlanScope) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::fake_op::FakeOp;
     use crate::runner::fake::FakeRunner;
 
     #[test]
@@ -1976,234 +2053,6 @@ mod tests {
         );
     }
 
-    const GENERATE_FLEET: &str = r#"[environments.dev]
-boundaries.api = { vault_id = "vdev0000000000000000000001", item_id = "ITEM" }
-
-[products.api.keys.SESSION_KEY]
-kind = "secret"
-environments = ["dev"]
-rules = { base64_bytes = 32 }
-
-[products.api.keys.WEBHOOK_HEX]
-kind = "secret"
-environments = ["dev"]
-rules = { hex_bytes = 32 }
-
-[products.api.keys.STRIPE_KEY]
-kind = "secret"
-environments = ["dev"]
-rules = { prefix = "sk_" }
-"#;
-
-    /// A fake `op` whose dev item already holds `api/WEBHOOK_HEX` = `already-set`.
-    fn generate_world() -> (crate::domain::Fleet, FakeOp, String) {
-        let op = FakeOp::default();
-        op.signed_in.set(true);
-        let id = op.insert(
-            "vdev0000000000000000000001",
-            json!({
-                "title": "myapp · api · dev values", "category": "SECURE_NOTE",
-                "sections": [{"id": "api", "label": "api"}],
-                "fields": [{"id": "f1", "label": "WEBHOOK_HEX", "type": "CONCEALED",
-                            "section": {"id": "api", "label": "api"}, "value": "already-set"}],
-            }),
-        );
-        let fleet = crate::config::parse(&GENERATE_FLEET.replace("ITEM", &id)).unwrap();
-        (fleet, op, id)
-    }
-
-    fn generated_field(op: &FakeOp, id: &str, label: &str) -> Option<String> {
-        op.item(id)["fields"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|f| f["label"] == label)
-            .and_then(|f| f["value"].as_str().map(str::to_string))
-    }
-
-    fn no_vars() -> impl Iterator<Item = (String, String)> {
-        std::iter::empty()
-    }
-
-    #[test]
-    fn opv_generate_writes_a_base64_value_into_an_empty_field() {
-        let (fleet, op, id) = generate_world();
-        let _ = generate(
-            &fleet,
-            "dev",
-            &["api/SESSION_KEY".into()],
-            &op,
-            no_vars(),
-            false,
-        );
-        assert_eq!(
-            generated_field(&op, &id, "SESSION_KEY").map(|v| v.len()),
-            Some(44)
-        );
-    }
-
-    #[test]
-    fn opv_generate_never_returns_the_generated_value() {
-        let (fleet, op, id) = generate_world();
-        let answer = generate(
-            &fleet,
-            "dev",
-            &["api/SESSION_KEY".into()],
-            &op,
-            no_vars(),
-            false,
-        );
-        let value = generated_field(&op, &id, "SESSION_KEY").unwrap();
-        assert!(!answer.to_string().contains(&value));
-    }
-
-    #[test]
-    fn opv_generate_reports_the_base64_recipe() {
-        let (fleet, op, _) = generate_world();
-        let answer = generate(
-            &fleet,
-            "dev",
-            &["api/SESSION_KEY".into()],
-            &op,
-            no_vars(),
-            false,
-        );
-        assert_eq!(
-            answer["generated"][0],
-            json!({"product": "api", "key": "SESSION_KEY", "encoding": "base64", "bytes": 32})
-        );
-    }
-
-    #[test]
-    fn opv_generate_offers_the_status_command_next() {
-        let (fleet, op, _) = generate_world();
-        let answer = generate(
-            &fleet,
-            "dev",
-            &["api/SESSION_KEY".into()],
-            &op,
-            no_vars(),
-            false,
-        );
-        assert_eq!(answer["next"], "opv status dev");
-    }
-
-    #[test]
-    fn opv_generate_refuses_a_prefix_rule_key_with_policy_refused() {
-        let (fleet, op, _) = generate_world();
-        let answer = generate(
-            &fleet,
-            "dev",
-            &["api/STRIPE_KEY".into()],
-            &op,
-            no_vars(),
-            false,
-        );
-        assert_eq!(answer["error"]["code"], "policy_refused");
-    }
-
-    #[test]
-    fn opv_generate_writes_nothing_when_another_key_is_refused() {
-        let (fleet, op, id) = generate_world();
-        let _ = generate(
-            &fleet,
-            "dev",
-            &["api/SESSION_KEY".into(), "api/STRIPE_KEY".into()],
-            &op,
-            no_vars(),
-            false,
-        );
-        assert_eq!(generated_field(&op, &id, "SESSION_KEY"), None);
-    }
-
-    #[test]
-    fn opv_generate_refuses_a_filled_field_with_policy_refused() {
-        let (fleet, op, _) = generate_world();
-        let answer = generate(
-            &fleet,
-            "dev",
-            &["api/WEBHOOK_HEX".into()],
-            &op,
-            no_vars(),
-            false,
-        );
-        assert_eq!(answer["error"]["code"], "policy_refused");
-    }
-
-    #[test]
-    fn opv_generate_keeps_an_existing_value() {
-        let (fleet, op, id) = generate_world();
-        let _ = generate(
-            &fleet,
-            "dev",
-            &["api/WEBHOOK_HEX".into()],
-            &op,
-            no_vars(),
-            false,
-        );
-        assert_eq!(
-            generated_field(&op, &id, "WEBHOOK_HEX").as_deref(),
-            Some("already-set")
-        );
-    }
-
-    #[test]
-    fn opv_generate_refuses_a_bad_name_as_usage() {
-        let (fleet, op, _) = generate_world();
-        let answer = generate(&fleet, "dev", &["api/NO PE".into()], &op, no_vars(), false);
-        assert_eq!(answer["error"]["code"], "usage");
-    }
-
-    #[test]
-    fn opv_generate_touches_no_1password_for_an_invalid_name() {
-        let (fleet, op, _) = generate_world();
-        let _ = generate(&fleet, "dev", &["api/NO PE".into()], &op, no_vars(), false);
-        assert!(op.calls.borrow().is_empty());
-    }
-
-    #[test]
-    fn opv_generate_refuses_a_service_account_token_in_the_environment() {
-        let (fleet, op, _) = generate_world();
-        let answer = generate(
-            &fleet,
-            "dev",
-            &["api/SESSION_KEY".into()],
-            &op,
-            vars(&[("OP_SERVICE_ACCOUNT_TOKEN", "ops_x")]),
-            false,
-        );
-        assert_eq!(answer["error"]["code"], "own_session_required");
-    }
-
-    #[test]
-    fn opv_generate_reports_when_nobody_is_signed_in() {
-        let (fleet, op, _) = generate_world();
-        op.signed_in.set(false);
-        let answer = generate(
-            &fleet,
-            "dev",
-            &["api/SESSION_KEY".into()],
-            &op,
-            no_vars(),
-            false,
-        );
-        assert_eq!(answer["error"]["code"], "op_not_signed_in");
-    }
-
-    #[test]
-    fn opv_generate_returns_unknown_env_for_an_undeclared_environment() {
-        let (fleet, op, _) = generate_world();
-        let answer = generate(
-            &fleet,
-            "prod",
-            &["api/SESSION_KEY".into()],
-            &op,
-            no_vars(),
-            false,
-        );
-        assert_eq!(answer["error"]["code"], "unknown_env");
-    }
-
     #[test]
     fn every_registered_tool_has_a_cli_parity_entry() {
         let mut registered: Vec<String> = Server::tool_router()
@@ -2438,38 +2287,6 @@ rules = { prefix = "sk_" }
     }
 
     #[test]
-    fn opv_generate_under_ci_needs_a_person_at_a_terminal() {
-        let (fleet, op, _) = generate_world();
-        let answer = under_ci(|| {
-            generate(
-                &fleet,
-                "dev",
-                &["api/SESSION_KEY".into()],
-                &op,
-                no_vars(),
-                false,
-            )
-        });
-        assert_eq!(answer["error"]["code"], "terminal_required");
-    }
-
-    #[test]
-    fn opv_generate_under_ci_calls_nothing() {
-        let (fleet, op, _) = generate_world();
-        let _ = under_ci(|| {
-            generate(
-                &fleet,
-                "dev",
-                &["api/SESSION_KEY".into()],
-                &op,
-                no_vars(),
-                false,
-            )
-        });
-        assert!(op.calls.borrow().is_empty());
-    }
-
-    #[test]
     fn a_write_tool_is_refused_under_ci() {
         assert!(under_ci(ci_refusal).is_some());
     }
@@ -2614,56 +2431,11 @@ rules = { prefix = "sk_" }
         assert!(!v.to_string().contains("1Password"));
     }
 
-    // 08 (S1): a declaration refused for a credential option says so.
-    #[test]
-    fn a_declared_credential_option_is_refused_as_policy() {
-        let args = DeclareTarget {
-            environment: "prod".into(),
-            target: "web".into(),
-            provider: None,
-            options: [("deploy-credentials".to_string(), "x".to_string())].into(),
-            products: vec![],
-            roles: vec![],
-            verbose: false,
-        };
-        assert_eq!(
-            declare_target(std::path::Path::new("/nonexistent"), args)["error"]["code"],
-            "policy_refused"
-        );
-    }
-
-    // 08 (S2): declaring a target that exists is refused, not "ok, unchanged".
-    #[test]
-    fn an_existing_target_is_already_declared() {
-        let fleet = crate::app::testutil::role_fleet();
-        let env = fleet.environments.keys().next().unwrap().clone();
-        let target = fleet.environments[&env].targets.keys().next().cloned();
-        let found = target.and_then(|t| existing_target(&fleet, &env, &t));
-        assert_eq!(found.map(|c| c.code()), Some("already_declared"));
-    }
-
-    // 08 (S2): CI and a credential in the server's environment need a person.
-    #[test]
-    fn opv_generate_under_ci_needs_a_person() {
-        let (fleet, op, _) = generate_world();
-        let answer = under_ci(|| {
-            generate(
-                &fleet,
-                "dev",
-                &["api/SESSION_KEY".into()],
-                &op,
-                no_vars(),
-                false,
-            )
-        });
-        assert_eq!(answer["error"]["human_required"], true);
-    }
-
     // 08 (S2): a write tool that stopped says its write may have started.
     #[test]
     fn a_write_tool_that_stopped_says_its_write_may_have_started() {
         assert!(
-            stopped("opv_generate", true, false)["error"]["message"]
+            stopped("opv_import_local", true, false)["error"]["message"]
                 .as_str()
                 .unwrap()
                 .contains("write may have started")
@@ -2755,3 +2527,7 @@ rules = { prefix = "sk_" }
         );
     }
 }
+
+#[cfg(test)]
+#[path = "mcp_propose_tests.rs"]
+mod propose_tests;
