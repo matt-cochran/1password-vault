@@ -643,7 +643,7 @@ That is 5 tools, down from 11, all of them without side effects outside the loca
 
 ---
 
-## 24. Second reframe: lean on 1Password, roles per tier, CI only delivers, and know what the code reads (R8–R11)
+## 24. Second reframe: capability from 1Password, CI only delivers, and know what the code reads (R8–R11)
 
 The before/after comparison (`assistant-guided-setup-comparison.md`) showed the first reframe removed the oracles but left the same seven medium residuals. Those residuals have two roots:
 - capability over deployed tiers on a developer's machine;
@@ -653,37 +653,49 @@ The owner's direction (2026-10-18): access control is **1Password's job and alre
 
 **Definition.** "The assistant" in this document is always an external generative model (Claude Code, Cursor, Codex, any MCP client) using opv's MCP tools or CLI through its harness. opv has no built-in model and calls none. opv is the deterministic bridge between 1Password, the repository, CI and the platforms.
 
-### R8. People with the right role set up each tier; CI only delivers
+### R8. Capability comes from 1Password; opv helps whoever has it; CI only delivers
 
-**Owner correction (2026-10-18):** CI does not write to 1Password. CI takes the values in 1Password and applies them to the environments they go to. People set up values at every tier. The only question is which people, in which roles, may set up and manage which environments. A team may also choose that developers do not set up their own environment at all: the team configures it, grants the developer the vault they need, and everything works.
+**Owner direction (2026-10-18):**
+- CI does not write to 1Password. CI takes the values in 1Password and applies them to the environments they go to.
+- People set up values at every tier. Who may set up which environment is decided by **access to the vaults that hold its values**, which 1Password manages.
+- opv defines no roles and requires no particular path. It helps the people who have the capability to do what they need to do.
+- A team may set up a developer's environment entirely for them: grant the developer the vault, and everything works.
 
-Roles. Each role is a 1Password group with vault permissions; opv checks them and never re-implements them (R9).
+**Capability is discovered, not configured:**
+- opv reads what the current 1Password session can do with each vault the contract names: read, write, or no access. This uses 1Password's own vault permissions.
+- **Write access to a vault** means this person can set up that environment's structure and values. They can do it in the 1Password app directly, or with opv's help, using the links, empty fields, generation and masked entry opv offers. 1Password authorizes every write. opv reads the result the same way whichever route was used.
+- **Read access only** means this person can run with those values (`opv run`) and see their states, but not change them.
+- **No access** means opv shows the environment's structure from the contract and the latest value-free CI receipt, and names the vault. "Someone with write access to vault X can fill this", with the people and groups `opv access` reports for that vault when 1Password lets the session see them.
 
-| Role | Can | Does it through |
-|---|---|---|
-| **Environment manager** for a tier (for example, platform for dev; DevOps for staging and production) | create that tier's structure, enter and generate its values, approve its plans, grant people access to its vaults | `opv apply --env <tier env>` in their own terminal, and the 1Password links opv gives. 1Password authorizes every write |
-| **Developer** | read the vaults a manager granted; run the application | `opv run`. Nothing to set up. Personal keys only when the team allows them (`personal_keys = "allowed"`, default `"disallowed"` for team-managed environments) |
-| **Contract author** (a developer, or the assistant on their behalf) | propose changes to the contract | a pull request; reviewers approve the contract change |
-| **CI** | read values (a read-only service account per values vault) and deliver them to the platforms; post the value-free plan and key × environment matrix as a PR check | `opv sync`, `opv changed`, `opv ready --gate`. Its only 1Password write is delivery evidence (no values) in the target's state vault, as since 0.7.0 |
+**What each person sees:** `opv next` and the inventory list, first, the actions **this session can take**, then what is waiting on others, by vault. Nobody is told to run a command they lack the access for.
+
+**CI:**
+- reads values with a read-only service account per values vault, and delivers them to the platforms (`opv sync`, `opv changed`);
+- posts the value-free plan and key × environment matrix as a check on pull requests that change the contract;
+- its only 1Password write is delivery evidence, holding no values, in the target's state vault, as since 0.7.0.
+
+**The contract** changes through pull requests. Reviewers approve the change to *what is needed*; filling values is done by whoever has write access to each vault.
 
 **A new key, end to end:**
-1. A contract author's PR adds the key.
-2. The PR check shows its row: dev `absent`, staging `absent`, prod `absent`, and **who can fill each** (that tier's managers).
-3. After merge, each tier's managers see it in `opv next`, filtered to the tiers they manage. They fill or generate it with `opv apply --env <env>`, or through the 1Password link.
+1. A PR adds the key.
+2. The check shows its row: dev, staging and prod are each `absent`, with the vault each one lives in.
+3. After merge, each person with write access to one of those vaults sees it in their `opv next` and fills it, in the 1Password app or through opv.
 4. CI delivers on change.
-5. The promotion gate blocks a tier until its value is `set`.
+5. The promotion gate holds a tier until its value is `set`.
 
 **Team-managed developer environments:**
-1. A dev-tier manager sets up the environment once: structure, shared dev values, generated values.
-2. They grant a developer or a group access to the dev vault. opv prints the exact 1Password grant (a link or the `op` command) for the manager to run; opv never runs a grant itself.
-3. The developer clones the repository and runs `opv run -- <app>`. `opv doctor` tells them, if anything is missing, which manager role to ask. It doesn't ask them to set anything up.
+1. Someone with write access to the dev vault sets the environment up once.
+2. 1Password access to that vault is granted to the developer or their group, in 1Password. opv can print the link or the `op` command, but never grants access itself.
+3. The developer runs `opv run -- <app>`. If something is missing, `opv doctor` names the vault and who can fill it, instead of asking the developer to set anything up.
 
-**Emergencies:** a manager of the tier uses the same `opv apply`. No separate break-glass path is needed, because there is no automated writer to bypass.
+Personal keys exist only where the team gives developers their own items.
+
+**Emergencies** need no special path: anyone with write access to the vault fixes the value, and CI delivers.
 
 **What it answers:**
-- who writes each tier: that tier's managers;
-- loosened policy: relaxations appear in the PR diff and fail the check until a manager of the affected tier accepts them;
-- the assistant's visibility of deployed tiers: PR checks and CI receipts, not vault reads.
+- who writes each tier: whoever 1Password lets write its vault;
+- loosened policy: relaxations show in the PR diff and the check;
+- visibility of tiers a person can't read: the contract plus CI's value-free receipts.
 
 ### R9. Tier separation is 1Password's vault permissions; opv verifies it and never re-implements it
 
@@ -724,11 +736,11 @@ Consumers outside opv's view (another host, a partner's webhook) are declared in
 | An assistant shell reaches values (H3) | A developer machine reaches only local/dev vaults by 1Password permission. A DevOps machine stays residual, with the authorization prompt and an optional admin account |
 | Platform tools reach production | No production platform logins on developer machines; `doctor` detects them |
 | `opv run` encoding leak | Local values are sandbox-grade: recoverable, not a breach |
-| Secret downgraded to config | A flagged change in a reviewed PR; the check fails until a manager of the affected tier accepts it |
+| Secret downgraded to config | A flagged change in a reviewed PR; the check fails until it is accepted |
 | Rotation revokes while in use | Overlap plus observed rollout; declared outside consumers |
 | Retire while still read | The build fails while still read; `needs` at the deployed revision |
 | Scanner misses a name | Impossible in generated languages; detection elsewhere |
-| Nobody writes deployed tiers | That tier's environment managers, in their own terminal or the 1Password app; CI only reads and delivers (R8) |
+| Nobody writes deployed tiers | Whoever 1Password lets write that tier's vault, in the 1Password app or with opv's help; CI only reads and delivers (R8) |
 
 ---
 
