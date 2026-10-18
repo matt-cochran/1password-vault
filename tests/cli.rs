@@ -1131,11 +1131,22 @@ fn no_message_or_doc_suggests_the_deprecated_apps_resume() {
     assert_eq!(hits, Vec::<String>::new());
 }
 
-/// FR-44: `config export` without an environment prints the configuration as stored: the
-/// contract with the ids of its `secrets.bindings.toml` filled in (D-G).
+/// FR-44 (D-G): `config export` without an environment prints the contract itself, its ids
+/// left out (they live in `secrets.bindings.toml`, never in the printed contract).
 #[test]
-fn config_export_without_env_prints_the_configuration_verbatim() {
+fn config_export_without_env_prints_the_contract_without_ids() {
     let (code, out, err) = opv(&["--config", CFG, "config", "export"]);
+    let merged = opv::config::read_merged(std::path::Path::new(CFG)).unwrap();
+    assert!(
+        code == 0 && out == opv::config::bindings::split(&merged).0,
+        "{err}"
+    );
+}
+
+/// D-G: `--with-ids` (debugging only) prints the contract with its ids filled in.
+#[test]
+fn config_export_with_ids_prints_the_merged_configuration() {
+    let (code, out, err) = opv(&["--config", CFG, "config", "export", "--with-ids"]);
     assert!(
         code == 0 && out == opv::config::read_merged(std::path::Path::new(CFG)).unwrap(),
         "{err}"

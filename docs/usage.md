@@ -42,7 +42,7 @@ deliver with CI or your own terminal. The grouping is who runs a command.
 | deliver | `opv ci workflow <env> --target <t> [--github-env <e>] [--deploy]`, `… --on-change [--every <m>]`, `… --drift` | person | ready-to-commit workflows, including the `needs`, `contract --check`, `ready --gate` and `opv/relaxations` checks |
 | admin | `opv access <env> --create --github <owner/repo> [--github-env <e>] [--secret-name <n>]`, `opv target credentials <env> --target <t> [--create]` | person | CI and deploy identities |
 | admin | `opv target list [--env <env>] [--json]`, `opv vault locate <vault ID> [--json]`, `opv projects [--account <a>] [--long] [--json]` | anyone | targets, the account a vault lives in, and projects in 1Password |
-| admin | `opv config export [<env>] [--toml\|--json]`, `opv config import --vault <v> [--file <f>] …`, `opv config check --file <f>`, `opv config edit` | person | the manifest mirror; `config edit` needs your own terminal |
+| admin | `opv config export [<env>] [--toml\|--json] [--with-ids]`, `opv config import --vault <v> [--file <f>] …`, `opv config check --file <f>`, `opv config edit` | person | the manifest mirror; `config edit` needs your own terminal |
 | tooling | `opv mcp serve\|install`, `opv skill install\|status`, `opv guide agent`, `opv schema`, `opv version [--json]`, `opv completions <bash\|zsh\|fish\|powershell>`, `opv help states`, `opv help <command>` | anyone | unchanged |
 
 Hidden internal commands (`remote-send`, `remote-receive`, `local-delivery`) are not listed.
@@ -649,7 +649,7 @@ opv delivery verify prod --product p --json   # each placement's own state vault
 
 | Command | What it does |
 |---|---|
-| `opv config export [--toml\|--json]` | print the configuration (no values) |
+| `opv config export [--toml\|--json] [--with-ids]` | print the contract (no ids, no values; `--with-ids` is debugging only) |
 | `opv config export <env> --json` | that environment's config-kind values |
 | `opv config import --vault V [--file F] [--project P] [--path D]...` | save a `secrets.toml` as the project manifest; never deletes the file |
 | `opv config edit` | edit in `$VISUAL`/`$EDITOR`, validate, diff, confirm, save unless changed meanwhile |
