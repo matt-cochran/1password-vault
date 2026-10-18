@@ -1,0 +1,5 @@
+const key = "API_KEY";
+const a = process.env[key];
+const b = process.env["PREFIX_" + suffix];
+const c = process.env[`${name}`];
+const d = Deno.env.get(dynamicName);

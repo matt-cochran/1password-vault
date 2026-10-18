@@ -296,6 +296,9 @@ fn text_of(bytes: Vec<u8>) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
+pub mod lang;
+pub mod manifests;
+
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;

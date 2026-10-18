@@ -1,0 +1,10 @@
+package main
+
+import "os"
+
+func main() {
+	key := "API_KEY"
+	apiKey := os.Getenv(key)
+	dbURL, ok := os.LookupEnv(prefix + "_URL")
+	_, _, _ = apiKey, dbURL, ok
+}
