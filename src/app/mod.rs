@@ -63,6 +63,7 @@ pub mod ready;
 pub mod remote_delivery;
 pub mod remote_diagnose;
 pub mod repair;
+pub mod rule_source;
 pub mod run;
 pub mod setup;
 mod setup_import;
