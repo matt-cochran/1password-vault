@@ -238,7 +238,7 @@ fn a_key_is_declared_for_the_environment() {
     let (dir, _run) = init_with(&api_fields(), &args());
     assert_eq!(
         loaded(dir.path()).products["api"].keys["OPENAI_API_KEY"].environments,
-        ["staging"]
+        Some(vec!["staging".to_string()])
     );
 }
 
@@ -987,7 +987,7 @@ fn add_env_includes_the_keys_the_item_has() {
     let run = add_env_with(EXISTING, &args(), &two_products());
     assert_eq!(
         run.fleet().products["api"].keys["OPENAI_API_KEY"].environments,
-        vec!["prod", "staging"]
+        Some(vec!["prod".to_string(), "staging".to_string()])
     );
 }
 
@@ -996,7 +996,7 @@ fn add_env_leaves_out_the_keys_the_item_lacks() {
     let run = add_env_with(EXISTING, &args(), &two_products());
     assert_eq!(
         run.fleet().products["api"].keys["LEGACY_TOKEN"].environments,
-        vec!["prod"]
+        Some(vec!["prod".to_string()])
     );
 }
 
@@ -1054,7 +1054,7 @@ fn add_env_gives_unsectioned_fields_to_the_product() {
     let run = add_env_with(EXISTING, &api_args(), &fields);
     assert_eq!(
         run.fleet().products["api"].keys["OPENAI_API_KEY"].environments,
-        vec!["prod", "staging"]
+        Some(vec!["prod".to_string(), "staging".to_string()])
     );
 }
 
@@ -1234,7 +1234,7 @@ fn add_env_adds_a_shared_key_with_its_source() {
     let run = add_env_with(SHARED, &args(), &two_products());
     assert_eq!(
         run.fleet().products["worker"].keys["OPENAI_API_KEY"].environments,
-        vec!["prod", "staging"]
+        Some(vec!["prod".to_string(), "staging".to_string()])
     );
 }
 
@@ -1249,7 +1249,7 @@ fn add_env_leaves_out_a_shared_key_whose_source_is_absent() {
     let run = add_env_with(SHARED, &args(), &two_products());
     assert_eq!(
         run.fleet().products["worker"].keys["LEGACY_TOKEN"].environments,
-        vec!["prod"]
+        Some(vec!["prod".to_string()])
     );
 }
 

@@ -1185,7 +1185,7 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
     }
 
     let mut products = raw.products;
-    check_shared(&mut products, doc)?;
+    check_shared(&mut products, &environments, doc)?;
     let fleet = Fleet {
         environments,
         products,
@@ -1298,7 +1298,7 @@ fn check_file_mounts(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
                 }
                 let mut files: Vec<(&str, &str)> = Vec::new();
                 for (key, spec) in &p.keys {
-                    if !spec.environments.iter().any(|e| e == env_name) {
+                    if !spec.is_desired_in(env_name) {
                         continue;
                     }
                     let Some(file) = spec.file.as_deref() else {
@@ -1397,10 +1397,7 @@ fn check_evidence_width(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
                 if !fleet.delivers(env_name, name, product) {
                     continue;
                 }
-                let desired = p
-                    .keys
-                    .values()
-                    .filter(|k| k.environments.iter().any(|e| e == env_name));
+                let desired = p.keys.values().filter(|k| k.is_desired_in(env_name));
                 for k in desired {
                     let source = k.source().map_or(product.as_str(), |(sp, _)| sp);
                     for needer in [product.as_str(), source] {
@@ -1491,10 +1488,10 @@ fn check_personal(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
     for (product, p) in &fleet.products {
         for (key, spec) in &p.keys {
             if spec.personal
-                && let Some(env) = spec.environments.iter().find(|e| {
+                && let Some(env) = spec.envs_in(fleet).into_iter().find(|e| {
                     fleet
                         .environments
-                        .get(*e)
+                        .get(e)
                         .is_some_and(|x| !x.targets.is_empty())
                 })
             {
@@ -1889,11 +1886,36 @@ fn validate_key(
         ));
     }
     let declared = || environments.keys().map(String::as_str);
-    for env in &spec.environments {
+    if let Some(envs) = &spec.environments {
+        for env in envs {
+            if !environments.contains_key(env) {
+                return Err(invalid(
+                    &["environments"],
+                    undeclared(Declared::Environment, env, declared()),
+                ));
+            }
+        }
+    }
+    // Presence (Part V, `presence`): `except` removes the key from a declared environment
+    // with a reason. The reason must say something, the environment must exist, and an
+    // `environments` list that already names it hides the removal (D-G: refused, not a
+    // finding).
+    for (env, reason) in &spec.except {
+        if reason.trim().is_empty() {
+            return Err(invalid(&["except", env], FieldRule::Empty));
+        }
         if !environments.contains_key(env) {
             return Err(invalid(
-                &["environments"],
+                &["except", env],
                 undeclared(Declared::Environment, env, declared()),
+            ));
+        }
+        if spec.listed_in(env) && spec.environments.is_some() {
+            return Err(invalid(
+                &["except", env],
+                FieldRule::ConflictsWith {
+                    field: dotted(&path(&["environments"])),
+                },
             ));
         }
     }
@@ -1919,7 +1941,11 @@ fn validate_key(
                 undeclared(Declared::Environment, env, declared()),
             ));
         }
-        if spec.environments.contains(env) {
+        if spec
+            .environments
+            .as_ref()
+            .is_some_and(|envs| envs.contains(env))
+        {
             return Err(invalid(
                 &["rules", "refuse_in"],
                 FieldRule::ConflictsWith {
@@ -1981,7 +2007,7 @@ fn check_modes(
     spec: &KeySpec,
     environments: &BTreeMap<String, Environment>,
 ) -> Result<(), Error> {
-    for env_name in &spec.environments {
+    for env_name in spec.envs_among(environments.keys().map(String::as_str)) {
         let Some(env) = environments.get(env_name) else {
             continue;
         };
@@ -1990,7 +2016,7 @@ fn check_modes(
             None => FieldRule::Missing,
             Some(value) if p.values.contains_key(value) || p.skip.contains(value) => continue,
             Some(_) => FieldRule::ModeUnmapped {
-                env: crate::cause::EnvName::new(env_name.as_str()),
+                env: crate::cause::EnvName::new(env_name),
                 mode: p.mode.clone(),
                 allowed: p.values.keys().chain(&p.skip).cloned().collect(),
             },
@@ -2007,7 +2033,11 @@ fn check_modes(
 /// referencing key may not set `immutable`: it follows the source, and is copied from it
 /// here so every later check (rotate, prune, hold) treats both alike. Errors point at the
 /// `from` line.
-fn check_shared(products: &mut BTreeMap<String, Product>, doc: &Doc<'_>) -> Result<(), Error> {
+fn check_shared(
+    products: &mut BTreeMap<String, Product>,
+    environments: &BTreeMap<String, Environment>,
+    doc: &Doc<'_>,
+) -> Result<(), Error> {
     let mut follow: Vec<(String, String, bool)> = Vec::new();
     for (product, p) in products.iter() {
         for (key, spec) in &p.keys {
@@ -2064,22 +2094,15 @@ fn check_shared(products: &mut BTreeMap<String, Product>, doc: &Doc<'_>) -> Resu
                     kind: kind_name(spec.kind),
                 })));
             }
-            if let Some(env) = spec
-                .environments
-                .iter()
-                .find(|e| !src.environments.contains(e))
-            {
-                return Err(err(check(ConfigCheck::FromEnvironment {
-                    source,
-                    env: env.clone(),
-                })));
+            for env in spec.envs_among(environments.keys().map(String::as_str)) {
+                if !src.listed_in(env) {
+                    return Err(err(check(ConfigCheck::FromEnvironment {
+                        source,
+                        env: env.to_string(),
+                    })));
+                }
             }
-            if let Some(env) = spec
-                .rules
-                .refuse_in
-                .iter()
-                .find(|e| src.environments.contains(e))
-            {
+            if let Some(env) = spec.rules.refuse_in.iter().find(|e| src.listed_in(e)) {
                 return Err(doc.invalid(
                     &["products", product, "keys", key, "rules", "refuse_in"],
                     check(ConfigCheck::FromRefused {
@@ -2765,7 +2788,7 @@ environments = ["prod"]
     fn parses_the_key_environments() {
         assert_eq!(
             fixture().products["allumata"].keys["OPENAI_API_KEY"].environments,
-            vec!["prod"]
+            Some(vec!["prod".to_string()])
         );
     }
 

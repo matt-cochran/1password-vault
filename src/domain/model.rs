@@ -84,7 +84,14 @@ pub struct PrefixByMode {
 #[serde(deny_unknown_fields)]
 pub struct KeySpec {
     pub kind: Kind,
-    pub environments: Vec<String>,
+    /// The environments the key is declared for. Absent: present in every environment of
+    /// the fleet (Part V, `presence`).
+    #[serde(default)]
+    pub environments: Option<Vec<String>>,
+    /// Environments the key is not wanted in, with a person's reason
+    /// (`except = { staging = "no staging account" }`); see [`crate::domain::presence`].
+    #[serde(default)]
+    pub except: BTreeMap<String, String>,
     #[serde(default)]
     pub rules: Rules,
     /// Staged only when absent on the target unless explicitly rotated (FR-16).
@@ -124,6 +131,36 @@ impl KeySpec {
     /// load). Only meaningful after `config` validated the reference.
     pub fn source(&self) -> Option<(&str, &str)> {
         self.from.as_deref()?.split_once('/')
+    }
+
+    /// The names this key is declared for among `known`: its explicit `environments`, or
+    /// every name in `known` when the list is absent (present everywhere).
+    pub fn envs_among<'a>(&'a self, known: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
+        match &self.environments {
+            Some(list) => list.iter().map(String::as_str).collect(),
+            None => known.collect(),
+        }
+    }
+
+    /// Every environment of `fleet` this key is declared for: its explicit list, or all.
+    pub fn envs_in(&self, fleet: &Fleet) -> Vec<String> {
+        self.envs_among(fleet.environments.keys().map(String::as_str))
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Whether this key's explicit list (or its absence, which covers every environment)
+    /// covers `env`. `except` is ignored: see [`crate::domain::presence::present_in`].
+    pub fn listed_in(&self, env: &str) -> bool {
+        self.environments
+            .as_ref()
+            .is_none_or(|list| list.iter().any(|e| e == env))
+    }
+
+    /// Whether the key is present (not `except`ed) in `env`.
+    pub fn is_desired_in(&self, env: &str) -> bool {
+        crate::domain::presence::present_in(self, env) == crate::domain::presence::Presence::Present
     }
 }
 
@@ -482,9 +519,7 @@ impl Fleet {
         self.products
             .iter()
             .flat_map(|(p, prod)| prod.keys.iter().map(move |(k, s)| (p, k, s)))
-            .filter(|(_, _, s)| {
-                s.source() == Some((product, key)) && s.environments.iter().any(|e| e == env_name)
-            })
+            .filter(|(_, _, s)| s.source() == Some((product, key)) && s.is_desired_in(env_name))
             .map(|(p, k, _)| (p.clone(), k.clone()))
             .collect()
     }
@@ -509,7 +544,7 @@ impl Fleet {
             let team: Vec<&KeySpec> = p
                 .keys
                 .values()
-                .filter(|k| !k.personal && k.environments.iter().any(|e| e == env))
+                .filter(|k| !k.personal && k.is_desired_in(env))
                 .collect();
             if team.is_empty() {
                 continue;
@@ -570,10 +605,7 @@ impl Fleet {
         }
         match &t.products {
             Some(listed) => listed.iter().any(|l| l == product),
-            None => p
-                .keys
-                .values()
-                .any(|k| k.environments.iter().any(|e| e == env)),
+            None => p.keys.values().any(|k| k.is_desired_in(env)),
         }
     }
 

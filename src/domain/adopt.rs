@@ -107,7 +107,7 @@ fn declared_for(fleet: &Fleet, env_name: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for (product, p) in &fleet.products {
         for (key, spec) in &p.keys {
-            if spec.environments.iter().any(|e| e == env_name) {
+            if spec.is_desired_in(env_name) {
                 out.push((product.clone(), key.clone()));
             }
         }

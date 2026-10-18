@@ -13,6 +13,7 @@ pub mod ledger;
 pub mod model;
 pub mod naming;
 pub mod placement;
+pub mod presence;
 pub mod secret;
 
 pub use model::{
