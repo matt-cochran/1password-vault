@@ -300,14 +300,15 @@ pub fn run(
         render_text(&report, out)?;
     }
     if gate_on {
-        gate(&report, base)?;
+        gate(&report, base, fleet)?;
     }
     Ok(())
 }
 
 /// Fail (`needs_undeclared`) when a row is `undeclared` and `base` does not declare it
-/// either. Names only, never a value.
-pub fn gate(report: &NeedsReport, base: Option<&Fleet>) -> Result<(), Error> {
+/// either. Names only, never a value. The refusal names the product of `fleet` the names
+/// would be declared in when exactly one product is delivered.
+pub fn gate(report: &NeedsReport, base: Option<&Fleet>, fleet: &Fleet) -> Result<(), Error> {
     let mut names: Vec<String> = Vec::new();
     for row in &report.rows {
         if row.state == NeedState::Undeclared
@@ -320,7 +321,21 @@ pub fn gate(report: &NeedsReport, base: Option<&Fleet>) -> Result<(), Error> {
     if names.is_empty() {
         Ok(())
     } else {
-        Err(Cause::NeedsUndeclared { names }.into())
+        Err(Cause::NeedsUndeclared {
+            names,
+            product: delivered_product(fleet),
+        }
+        .into())
+    }
+}
+
+/// The one product of `fleet` that is delivered (not `source_only`), when there is exactly
+/// one: the code that reads a name belongs to it.
+fn delivered_product(fleet: &Fleet) -> Option<String> {
+    let mut delivered = fleet.products.iter().filter(|(_, p)| !p.source_only);
+    match (delivered.next(), delivered.next()) {
+        (Some((name, _)), None) => Some(name.clone()),
+        _ => None,
     }
 }
 

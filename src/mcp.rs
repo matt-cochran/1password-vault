@@ -712,6 +712,26 @@ fn propose_call(args: &rmcp::model::JsonObject, parsed: bool) -> ToolCall {
     ToolCall::new("opv_propose", &command, Vec::new(), false)
 }
 
+/// `args` without each free-text field the intent refuses for carrying a value
+/// ([`Cause::ValueInTextField`]), and whether what remains parses: the call to make again.
+fn without_value_fields(args: &rmcp::model::JsonObject) -> (rmcp::model::JsonObject, bool) {
+    let mut fixed = args.clone();
+    // Each round removes one field, so the loop ends within the field count.
+    for _ in 0..=args.len() {
+        match crate::domain::intent::parse(&Value::Object(fixed.clone()).to_string()) {
+            Ok(_) => return (fixed, true),
+            Err(e) => match e.parts().0 {
+                Cause::ValueInTextField { field, .. } => match field.0.first() {
+                    Some(f) if fixed.remove(f).is_some() => {}
+                    _ => break,
+                },
+                _ => break,
+            },
+        }
+    }
+    (fixed, false)
+}
+
 /// The person's step after a contract or setup proposal (kinds key, env, target, retire,
 /// setup): the same `opv propose <kind> … --write`, which writes the contract diff into the
 /// repository's contract file, reviewed and committed in a pull request. A tool never writes
@@ -744,7 +764,15 @@ fn propose_doc<R: Accounted>(
     args: &rmcp::model::JsonObject,
 ) -> Value {
     let parsed = crate::domain::intent::parse(&Value::Object(args.clone()).to_string());
-    let call = propose_call(args, parsed.is_ok());
+    let call = match &parsed {
+        Ok(_) => propose_call(args, true),
+        // A free-text field that carries a value: the step is the same call without that
+        // field, as the complete command that takes it (never the text itself).
+        Err(_) => {
+            let (fixed, parses) = without_value_fields(args);
+            propose_call(&fixed, parses)
+        }
+    };
     let res = parsed.and_then(|intent| proposal(project, r, &intent));
     match res {
         Ok(mut doc) => {
@@ -1005,8 +1033,24 @@ fn import_local_doc<R: Accounted>(
         &project.join(&args.file),
         r,
         &mut out,
-    );
+    )
+    .map_err(|e| as_given(e, &args.file));
     call.document(&out, res)
+}
+
+/// A tier refusal naming the file as the caller gave it (`file`), not the path the server
+/// resolved against the project: the person's own `opv import` step repeats the caller's
+/// words. Any other error is unchanged.
+fn as_given(e: Error, file: &str) -> Error {
+    match e.parts().0 {
+        Cause::ImportTierRefused { env, tier, .. } => Cause::ImportTierRefused {
+            env: env.clone(),
+            tier,
+            file: std::path::PathBuf::from(file),
+        }
+        .into(),
+        _ => e,
+    }
 }
 
 /// A key reference, `[product/]KEY` ([`KEY_REF_PATTERN`]).

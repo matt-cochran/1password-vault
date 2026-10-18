@@ -74,8 +74,12 @@ pub enum Step {
 /// texts a move or rebind leaves behind, and a content-addressed id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StructureProposal {
+    /// The one plan id of the proposal: the id `opv apply <plan_id>` accepts.
     pub plan_id: String,
     pub steps: Vec<Step>,
+    /// The detailed structure plan. Its own id is apply's internal check, so the document
+    /// leaves it out: the proposal exposes exactly one plan id, the one a person applies.
+    #[serde(serialize_with = "structure_without_id")]
     pub structure: structure::Plan,
     /// The contract text with its inline ids taken out, when there were any.
     pub contract_after: Option<String>,
@@ -180,6 +184,42 @@ pub fn propose_structure_at(
         contract_after,
         bindings_after,
     })
+}
+
+/// The structure plan as the proposal document shows it: every field but its own
+/// `plan_id`, which `opv apply` never takes, in the plan's own field order.
+fn structure_without_id<S: serde::Serializer>(
+    plan: &structure::Plan,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    #[derive(Serialize)]
+    struct Shown<'a> {
+        project: &'a str,
+        account_id: &'a str,
+        environments: &'a [crate::app::bootstrap::EnvPlan],
+        delivery_items: &'a [structure::DeliveryStep],
+        fields: &'a [structure::FieldStep],
+        generated: bool,
+    }
+    // Every field is named, so a new one in the plan fails to compile here.
+    let structure::Plan {
+        plan_id: _,
+        project,
+        account_id,
+        environments,
+        delivery_items,
+        fields,
+        generated,
+    } = plan;
+    Shown {
+        project,
+        account_id,
+        environments,
+        delivery_items,
+        fields,
+        generated: *generated,
+    }
+    .serialize(s)
 }
 
 /// The contract file at `contract_path`, as written.

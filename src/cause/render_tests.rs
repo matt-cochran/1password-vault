@@ -877,6 +877,7 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
         (
             NeedsUndeclared {
                 names: vec!["API_KEY".into(), "DB_URL".into()],
+                product: None,
             },
             vec!["API_KEY", "DB_URL"],
         ),
@@ -884,6 +885,7 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             ImportTierRefused {
                 env: EnvName::new("env-stage"),
                 tier: "shared",
+                file: PathBuf::from("local.env"),
             },
             vec!["env-stage", "shared"],
         ),

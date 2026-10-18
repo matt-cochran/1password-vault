@@ -1397,9 +1397,9 @@ impl Cause {
                     format!("accounts {}", list_of(unlisted))
                 }
             ),
-            NeedsUndeclared { names } => format!(
+            NeedsUndeclared { names, .. } => format!(
                 "the code reads {} the contract declares nowhere: {}",
-                plural(names.len(), "a name", "names"),
+                plural(names.len(), "name", "names"),
                 list_of(names)
             ),
             RetireStillRead { key, env, files } => match files.as_slice() {
@@ -2002,7 +2002,7 @@ impl Cause {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            ImportTierRefused { env, tier } => format!(
+            ImportTierRefused { env, tier, .. } => format!(
                 "environment {env} has tier {tier}, not local: opv_import_local writes only into a local environment"
             ),
             LocalFileTooOpen { path, mode, want } => format!(
@@ -3717,12 +3717,19 @@ impl Cause {
                 ),
                 None => plan(None, Next::Check(cmd(&["status"], &[env.as_str()]))),
             },
-            ImportTierRefused { env, .. } => plan(
-                inspect(format!(
-                    "run the import yourself in your own terminal: opv import {env} --from <file>"
-                )),
-                Next::Run(cmd(&["import"], &[env.as_str(), "--from", "<file>"])),
-            ),
+            ImportTierRefused { env, file, .. } => {
+                let import = cmd(
+                    &["import"],
+                    &[env.as_str(), "--from", file.display().to_string().as_str()],
+                );
+                plan(
+                    inspect(format!(
+                        "run the import yourself in your own terminal: {}",
+                        cmd_text(&import)
+                    )),
+                    Next::Run(import),
+                )
+            }
             LocalFileTooOpen {
                 path,
                 mode: _,
@@ -4194,12 +4201,21 @@ impl Cause {
                 }),
                 Next::Rerun,
             ),
-            NeedsUndeclared { names } => plan(
+            // The step that makes progress is declaring the first name: a new key needs
+            // PRODUCT/KEY and a kind, and a secret is the cautious kind to propose.
+            NeedsUndeclared { names, product } => plan(
                 inspect(format!(
-                    "declare {} with opv propose key, or stop reading them",
-                    list_of(names)
+                    "declare {} with opv propose key (secret or config), or stop reading {}",
+                    list_of(names),
+                    if names.len() == 1 { "it" } else { "them" }
                 )),
-                Next::Rerun,
+                match (product, names.first()) {
+                    (Some(p), Some(n)) => Next::Run(cmd(
+                        &["propose", "key"],
+                        &[format!("{p}/{n}").as_str(), "--kind", "secret"],
+                    )),
+                    _ => Next::Check(cmd(&["propose", "key"], &["--help"])),
+                },
             ),
             RetireStillRead { key, env, files: _ } => plan(
                 inspect(format!(
@@ -4254,12 +4270,7 @@ fn is_sign_in(c: &Cmd) -> bool {
 /// The typed `next` object of the error document (schema 3): `kind`, `actor` and the exact
 /// command (or `null`).
 pub fn next_value(n: &Next, inv: &Invocation) -> serde_json::Value {
-    // A re-run of a command only a person runs is that person's own `apply` (row
-    // `import-next`); `next_kind_actor` already covers a built `Run` or `Check`.
-    let (kind, actor) = match n {
-        Next::Rerun if person_command(&inv_cmd(inv)) => (NextKind::Apply, NextActor::Person),
-        _ => next_kind_actor(n),
-    };
+    let (kind, actor) = invocation_kind_actor(n, inv);
     serde_json::json!({
         "kind": kind,
         "actor": actor,
@@ -4267,11 +4278,34 @@ pub fn next_value(n: &Next, inv: &Invocation) -> serde_json::Value {
     })
 }
 
+/// The [`NextKind`] and [`NextActor`] of a step under this invocation: a re-run of a
+/// command only a person runs is that person's own `apply` (row `import-next`);
+/// `next_kind_actor` already covers a built `Run` or `Check`.
+fn invocation_kind_actor(n: &Next, inv: &Invocation) -> (NextKind, NextActor) {
+    match n {
+        Next::Rerun if person_command(&inv_cmd(inv)) => (NextKind::Apply, NextActor::Person),
+        _ => next_kind_actor(n),
+    }
+}
+
 /// The Next as a command line; `None` when there is nothing to run.
 pub fn next_text(n: &Next, inv: &Invocation) -> Option<String> {
+    // A person types the plain command: `--json` is the caller's machine-readable switch,
+    // so a step whose actor is a person drops it. An assistant's step keeps every flag.
+    let person = invocation_kind_actor(n, inv).1 == NextActor::Person;
+    let shown = |c: Cmd| if person { without_json(c) } else { c };
     match n {
-        Next::Rerun => Some(rerun_text(inv)),
-        Next::Run(c) | Next::Check(c) | Next::Handoff(c) => Some(cmd_text(c)),
+        Next::Rerun => Some(match &inv.origin {
+            Origin::Cli if person => {
+                let mut s = cmd_text(&without_json(inv_cmd(inv)));
+                if inv.has_child {
+                    s.push_str(" -- <command>");
+                }
+                s
+            }
+            _ => rerun_text(inv),
+        }),
+        Next::Run(c) | Next::Check(c) | Next::Handoff(c) => Some(cmd_text(&shown(c.clone()))),
         Next::Vendor(v) => Some(vendor_text(v)),
         Next::None(_) => None,
     }

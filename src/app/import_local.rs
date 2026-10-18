@@ -57,6 +57,7 @@ fn import_local_as(
         return Err(Cause::ImportTierRefused {
             env: EnvName::new(env),
             tier: tier_name(tier),
+            file: file.to_path_buf(),
         }
         .into());
     }

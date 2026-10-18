@@ -76,6 +76,7 @@ fn deployed(envs: &[&str]) -> BTreeMap<String, Option<String>> {
 fn stopped() -> Error {
     Cause::NeedsUndeclared {
         names: vec!["STOP".into()],
+        product: None,
     }
     .into()
 }

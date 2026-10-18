@@ -16,15 +16,17 @@ const ENVS: &str = "[environments.dev]\ntier = \"shared\"\n\
 /// A marker that must never appear in the document; it is placed in a key's rule regex.
 const MARKER: &str = "S7MARKER";
 
-/// The contract of one product `app` with four keys: a catalog-shaped secret, a
-/// catalog-shaped config, a custom-regex secret, and a key `except`ed in `prod`.
+/// The contract of one product `app` with five keys: a catalog-shaped secret, a
+/// catalog-shaped config, a custom-regex secret, a key `except`ed in `prod`, and a key
+/// declared for `prod` only.
 fn fleet() -> Fleet {
     parse(&format!(
         "{ENVS}\
          [products.app.keys.STRIPE_KEY]\nkind = \"secret\"\nrules = {{ prefix = \"sk_\" }}\n\n\
          [products.app.keys.URL_KEY]\nkind = \"config\"\nrules = {{ https_url = true }}\n\n\
          [products.app.keys.CUSTOM_KEY]\nkind = \"secret\"\nrules = {{ regex = \"{MARKER}\" }}\n\n\
-         [products.app.keys.EXCEPTED_KEY]\nkind = \"secret\"\nexcept = {{ prod = \"no prod account\" }}\n"
+         [products.app.keys.EXCEPTED_KEY]\nkind = \"secret\"\nexcept = {{ prod = \"no prod account\" }}\n\n\
+         [products.app.keys.PROD_ONLY_KEY]\nkind = \"config\"\nenvironments = [\"prod\"]\n"
     ))
     .expect("the fixture contract parses")
 }
@@ -79,6 +81,17 @@ fn a_rule_regex_marker_never_appears_in_the_document() {
 fn an_excepted_environment_is_not_required() {
     let doc = document(&fleet(), Some("prod"), None);
     assert!(!key(&doc, "prod", "EXCEPTED_KEY").required);
+}
+
+#[test]
+fn a_key_declared_only_for_prod_is_absent_from_devs_contract() {
+    let doc = document(&fleet(), Some("dev"), None);
+    let names: Vec<&str> = doc.components[0].environments[0]
+        .keys
+        .iter()
+        .map(|k| k.name.as_str())
+        .collect();
+    assert!(!names.contains(&"PROD_ONLY_KEY"));
 }
 
 #[test]
