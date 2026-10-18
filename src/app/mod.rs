@@ -71,6 +71,7 @@ pub mod remote_diagnose;
 pub mod repair;
 pub mod rule_source;
 pub mod run;
+pub mod set;
 pub mod setup;
 mod setup_import;
 pub mod setup_recipe;
