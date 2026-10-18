@@ -885,6 +885,10 @@ enum Cmd {
         /// Also save the receipt (names, IDs and codes only) to this file, to resume later.
         #[arg(long, value_name = "FILE")]
         save: Option<PathBuf>,
+        /// Fail (exit 8, `gate_failed`) when a present key is not in value state `set` or
+        /// its delivery evidence is older than its source item; `expires` is advisory.
+        #[arg(long)]
+        gate: bool,
     },
     /// Internal: the remote delivery step `opv run --remote` starts under `op run` (#139).
     #[command(name = "remote-send", hide = true)]
@@ -3655,13 +3659,19 @@ fn run_other(
                 }
             }
         }
-        Cmd::Ready { env, json, save } => opv::app::ready::run(
+        Cmd::Ready {
+            env,
+            json,
+            save,
+            gate,
+        } => opv::app::ready::run(
             &loaded?,
             source,
             env.as_deref(),
             r,
             json,
             save.as_deref(),
+            gate,
             out,
         ),
         Cmd::Status {
