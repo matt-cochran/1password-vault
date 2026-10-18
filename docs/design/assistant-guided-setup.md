@@ -643,6 +643,78 @@ That is 5 tools, down from 11, all of them without side effects outside the loca
 
 ---
 
+## 24. Second reframe: lean on 1Password, actuate deployed tiers through pull requests, and know what the code reads (R8–R11)
+
+The before/after comparison (`assistant-guided-setup-comparison.md`) showed the first reframe removed the oracles but left the same seven medium residuals. Those residuals have two roots:
+- capability over deployed tiers on a developer's machine;
+- opv **inferring** what the application consumes instead of knowing it.
+
+The owner's direction (2026-10-18): access control is **1Password's job and already built**, and opv should lean into it, not rebuild it. Only DevOps can read staging and production vaults. Developers have the local and dev vaults. CI uses service accounts scoped per vault. opv's model of one vault per boundary per environment exists so that 1Password's vault permissions **are** the tier boundary.
+
+**Definition.** "The assistant" in this document is always an external generative model (Claude Code, Cursor, Codex, any MCP client) using opv's MCP tools or CLI through its harness. opv has no built-in model and calls none. opv is the deterministic bridge between 1Password, the repository, CI and the platforms.
+
+### R8. Pull requests are the plan; review is the approval; CI writes deployed tiers
+
+- **The flow:**
+  1. The assistant edits the contract and opens a pull request.
+  2. opv in CI posts the plan and the value-free key × environment matrix as a check on the PR.
+  3. A reviewer (DevOps for deployed tiers) merges.
+  4. CI, with each target's own service account, creates deployed-tier structure, generates values and syncs.
+- **Person-sourced deployed values:** a DevOps person enters them through the 1Password link opv puts in the check. CI picks them up (`opv changed`).
+- **Local tier:** stays on `opv apply` in the developer's own terminal.
+- **Emergencies:** a logged break-glass path (`opv apply --break-glass`, DevOps only) covers them.
+- **What it answers:**
+  - who writes deployed tiers (the gap the comparison found);
+  - loosened policy (relaxations appear in the review diff and fail the check until accepted);
+  - the assistant's visibility of deployed tiers, through PR checks rather than vault reads.
+
+### R9. Tier separation is 1Password's vault permissions; opv verifies it and never re-implements it
+
+- **The boundary:** 1Password grants per vault, and opv puts each environment's values in its own vault(s). So "developers can't read production" is a vault permission the owner sets, through 1Password groups.
+- **opv adds no access layer.** It **checks and reports**:
+  - `opv access` already reports per-vault readers for CI identities. It extends to tier membership: "this environment is production-tier, and these people and groups can read it".
+  - `opv doctor` on a developer machine reports when the current 1Password session can read a deployed-tier vault, or when the shell holds a production platform login (kubeconfig context, `fly`/`az`/`gh` auth). Each is reported as a finding with a fix, never blocked.
+- **Local tier policy:** local and dev should hold sandbox-grade values (test-mode keys, local databases). Catalog shapes flag a live key in a local tier.
+
+**What 1Password does not cover**, so it stays in scope:
+- **(a) A DevOps person's own machine.** Their account can read production by design, so an assistant running in their shell can too. 1Password's desktop authorization prompt is the control there. The documentation states it honestly, and recommends a separate admin account for production work where the team wants the stronger form (A-1 asks whether write-without-read exists).
+- **(b) Platform credentials outside 1Password.** opv detects them, as above.
+- **(c) Everything that is not access:** rotation, retirement, scanner coverage and runtime misconfiguration (R10, R11).
+
+### R10. The contract generates the application's configuration module
+
+- **What opv generates:** for each supported language (TypeScript, Python, Rust and Go first), a typed accessor from the contract, for example `config.stripeSecretKey`.
+- **What that guarantees:**
+  - **Unknown names don't compile.** Code can't read a name the contract doesn't declare, so the scanner becomes a fallback for languages without generation.
+  - **A key can't be retired while it's still read.** Retiring removes the accessor, so a build that still uses it fails before anything is pruned. For deployed tiers, retirement also checks `needs` at the deployed revision.
+  - **Misconfiguration fails at startup.** At boot the module checks every required key's presence and shape, so a broken deploy fails its health check and rolls back instead of failing at first use.
+- **What it isn't:** a runtime dependency on opv or 1Password, which the owner decided production must never need. The module reads only the platform's own channels (env, files).
+
+### R11. Rotation overlaps and is observed
+
+A rotation:
+1. adds the new credential alongside the old;
+2. delivers it;
+3. confirms through opv's delivery evidence and the platform's rollout status that every running revision holds it;
+4. only then offers to revoke the old one.
+
+Consumers outside opv's view (another host, a partner's webhook) are declared in the contract. When any exist, revoking is a person's step with that list shown.
+
+### What R8–R11 claim, to be tested by FMECA
+
+| Residual after the first reframe | Claim under R8–R11 |
+|---|---|
+| An assistant shell reaches values (H3) | A developer machine reaches only local/dev vaults by 1Password permission. A DevOps machine stays residual, with the authorization prompt and an optional admin account |
+| Platform tools reach production | No production platform logins on developer machines; `doctor` detects them |
+| `opv run` encoding leak | Local values are sandbox-grade: recoverable, not a breach |
+| Secret downgraded to config | A flagged change in a reviewed PR; the check fails until it's accepted |
+| Rotation revokes while in use | Overlap plus observed rollout; declared outside consumers |
+| Retire while still read | The build fails while still read; `needs` at the deployed revision |
+| Scanner misses a name | Impossible in generated languages; detection elsewhere |
+| Nobody writes deployed tiers | CI after merge (R8) |
+
+---
+
 # Part VII: decisions for the owner
 
 Each one is explained, with a recommendation.
