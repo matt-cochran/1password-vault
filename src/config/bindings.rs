@@ -24,9 +24,11 @@ use super::{Doc, is_id, toml_invalid};
 /// The bindings file's name, beside `secrets.toml`.
 pub const FILE: &str = "secrets.bindings.toml";
 
-/// The apply record's path under the project: the plan last applied and the digests of the
-/// two files it wrote.
-pub const APPLIED: &str = ".opv/applied.json";
+/// The apply record's path under the project, beside `secrets.bindings.toml` and committed
+/// with it: the plan last applied and the digests of the two files it wrote, so `opv config
+/// check` in CI can tell committed bindings that were never applied. (Not under `.opv`, which
+/// is the per-checkout account pointer file.)
+pub const APPLIED: &str = "secrets.applied.json";
 
 /// The ids in `secrets.bindings.toml`, keyed by the dotted path of the field they fill in
 /// `secrets.toml`. A `BTreeMap`, so the writer's order is the canonical sorted order and a

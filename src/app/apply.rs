@@ -48,7 +48,7 @@ pub struct Applied {
     pub fields_added: Vec<structure::FieldStep>,
     /// The keys a generation step filled, by name.
     pub generated: Vec<Generated>,
-    /// True when the apply record (`.opv/applied.json`) was written: a file project only.
+    /// True when the apply record (`secrets.applied.json`) was written: a file project only.
     pub record_written: bool,
     /// True when the structure apply recorded new ids (bindings file or block).
     pub config_written: bool,

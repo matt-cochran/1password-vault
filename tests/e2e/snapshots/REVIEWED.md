@@ -181,7 +181,7 @@ Findings for the owner (not fixed here; the row touches tests only):
 5. `opv explain <key>` for a key declared in several environments without `--env` is `choice_required` with `Next: opv contract` (§25.1 says a key's explain covers every environment). `opv_explain`'s schema in `surface.json` has no `env`, so over MCP such a key cannot be explained within the surface; `flow_explain` uses a one-environment key.
 6. `flow_propose_structure`/`flow_propose_generate`: the document carries two plan ids (the top-level `plan_id` that `opv apply` takes, and `structure.plan_id`).
 7. `flow_contract`: `contract --env dev` lists `OTEL_RESOURCE` (declared for prod only) under dev with `required: false`.
-8. `bindings_unapplied`: the apply record lives at `.opv/applied.json`, which cannot exist beside the `.opv` account pointer file; the scenario selects the account with `OP_ACCOUNT` instead.
+8. `bindings_unapplied`: the apply record lives at `.opv/applied.json`, which cannot exist beside the `.opv` account pointer file; the scenario selects the account with `OP_ACCOUNT` instead. **Fixed** (row apply-record-path): the record is now `secrets.applied.json`, committed beside the bindings.
 
 - [ ] Owner sign-off of the flow snapshots.
 
