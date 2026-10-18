@@ -3542,16 +3542,16 @@ fn run_other(
             json,
         } => {
             let fleet = loaded?;
-            let source = opv::app::adopt::source_from(&fleet, &env, &from)?;
-            let opts = opv::app::adopt::Opts {
+            let source = opv::app::import::source_from(&fleet, &env, &from)?;
+            let opts = opv::app::import::Opts {
                 source,
                 replace,
                 rotate,
                 skip,
-                apply,
+                dry_run: !apply,
                 json,
             };
-            opv::app::adopt::run(&fleet, &env, &opts, r, out)
+            opv::app::import::run(&fleet, &env, &opts, r, out)
         }
         Cmd::History { env, target, json } => {
             opv::app::history::run(&loaded?, &env, target.as_deref(), r, json, out)

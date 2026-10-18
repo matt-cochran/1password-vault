@@ -1,10 +1,12 @@
-//! `opv adopt <env> --from <dotenv>|target:<name> [--replace <product/KEY>]... [--apply]
-//! [--json]` (FR-53, #78): bring values that already exist elsewhere into the environment's
-//! 1Password item, after a review. The plan is [`crate::domain::import::plan`]; this module
-//! reads the source, prints the plan (names, actions and findings only) and, with `--apply`,
-//! writes it into each key's boundary item, one verified edit per item. It never syncs,
-//! deploys, prunes, revokes or deletes the source. The bare `--from target` form was
-//! removed (FR-60): `--from target:<name>` names the target one way only.
+//! `opv import <env> --from <dotenv>|target:<name> [--replace <product/KEY>]...
+//! [--dry-run] [--json]` (FR-53, #78): bring values that already exist elsewhere into the
+//! environment's 1Password item, after a review. The plan is
+//! [`crate::domain::import::plan`]; this module reads the source, prints the plan (names,
+//! actions and presence words only) and, unless `--dry-run`, writes it into each key's
+//! boundary item, one verified edit per item. The default writes; `--dry-run` writes
+//! nothing. It never syncs, deploys, prunes, revokes or deletes the source. The bare
+//! `--from target` form was removed (FR-60): `--from target:<name>` names the target one
+//! way only.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -50,7 +52,7 @@ pub fn source_from(fleet: &Fleet, env_name: &str, from: &str) -> Result<Source, 
 /// command with `--from target:<name>` (every other flag kept); with several, the person
 /// picks one of the `target:<name>` forms (never a guessed first target, X2).
 fn bare_target(fleet: &Fleet, env_name: &str) -> Error {
-    let names = match super::resolve_targets(fleet, env_name, &[], "adopt") {
+    let names = match super::resolve_targets(fleet, env_name, &[], "import") {
         Ok(names) => names,
         Err(e) => return e,
     };
@@ -70,35 +72,36 @@ fn bare_target(fleet: &Fleet, env_name: &str) -> Error {
     }
 }
 
-/// The person's own `opv adopt` with its bare `--from target` replaced by `form`, every
-/// other flag kept; the plain `opv adopt <env> --from <form>` when the command line does
+/// The person's own `opv import` with its bare `--from target` replaced by `form`, every
+/// other flag kept; the plain `opv import <env> --from <form>` when the command line does
 /// not show that word (an MCP call, `--from=target`).
 fn with_named_target(env_name: &str, form: &str) -> Cmd {
     let inv = crate::error::invocation();
     let changed = inv.with_arg("target", form);
-    if inv.command == ["adopt"] && changed.args.iter().any(|a| a == form) {
+    if inv.command == ["import"] && changed.args.iter().any(|a| a == form) {
         return Cmd {
             command: changed.command,
             args: changed.args,
         };
     }
     Cmd {
-        command: vec!["adopt".into()],
+        command: vec!["import".into()],
         args: vec![env_name.to_string(), "--from".into(), form.to_string()],
     }
 }
 
-/// Options of `opv adopt`.
+/// Options of `opv import`.
 #[derive(Debug, Clone)]
 pub struct Opts {
     pub source: Source,
-    /// `product/KEY` to replace a differing value.
+    /// `product/KEY` to replace a value that is already set.
     pub replace: Vec<String>,
     /// Immutable keys `--replace` may change.
     pub rotate: Vec<String>,
     /// `product/KEY` (or `KEY`) left out of the import (#94).
     pub skip: Vec<String>,
-    pub apply: bool,
+    /// Show the plan and write nothing; the default writes (inverted `apply`).
+    pub dry_run: bool,
     pub json: bool,
 }
 
@@ -183,7 +186,7 @@ fn read_source(
     }
 }
 
-/// `opv adopt`: the plan, and with `apply` the verified write.
+/// `opv import`: the plan, and unless `--dry-run` the verified write.
 pub fn run(
     fleet: &Fleet,
     env_name: &str,
@@ -199,14 +202,14 @@ pub fn run(
         env_name,
         &opts.source,
         (&replace, &rotate, &skip),
-        opts.apply,
+        !opts.dry_run,
         &apply_command(env_name, opts),
         r,
     )?;
     print(out, env_name, opts, &plan)
 }
 
-/// The three key sets of `opv adopt`: `--replace`, `--rotate`, `--skip`.
+/// The three key sets of `opv import`: `--replace`, `--rotate`, `--skip`.
 type KeySets<'a> = (
     &'a BTreeSet<(String, String)>,
     &'a BTreeSet<(String, String)>,
@@ -237,7 +240,7 @@ fn plan_skipping(
     plan.writes
         .retain(|(p, k, _)| !skip.contains(&(p.clone(), k.clone())));
     if apply {
-        super::tidy::require_person(r, "opv adopt --apply")?;
+        super::tidy::require_person(r, "opv import")?;
         if !plan.writes.is_empty() {
             write(fleet, fleet.environment(env_name)?, by, &plan, r)?;
         }
@@ -258,7 +261,7 @@ pub fn plan_and_write(
 ) -> Result<AdoptPlan, Error> {
     let env = fleet.environment(env_name)?;
     if apply {
-        super::tidy::require_person(r, "opv adopt --apply")?;
+        super::tidy::require_person(r, "opv import")?;
     }
     let found = read_source(fleet, env_name, source, r)?;
     // The item as the commands read it (tidied first when a person runs opv).
@@ -284,15 +287,15 @@ fn write(
     write_values(fleet, env, &plan.writes, by, r)
 }
 
-/// The adoption plan's own read, `adopt <env> --from <source>` (without `--apply`): after
-/// a write it shows what is in 1Password now and what remains (05.10).
+/// The adoption plan's own read, `import <env> --from <source>`: after a write it shows
+/// what is in 1Password now and what remains (05.10).
 fn plan_command(env_name: &str, source: &Source) -> Cmd {
     let from = match source {
         Source::Dotenv(p) => p.display().to_string(),
         Source::Target(name) => format!("target:{name}"),
     };
     Cmd {
-        command: vec!["adopt".into()],
+        command: vec!["import".into()],
         args: vec![env_name.to_string(), "--from".into(), from],
     }
 }
@@ -300,7 +303,7 @@ fn plan_command(env_name: &str, source: &Source) -> Cmd {
 /// Write `writes` (product, key, value) into their boundary items, one verified edit per
 /// item (shared with `opv generate`, 0.9.0). `by` is the command that wrote, named by a
 /// read-back failure as the one to run again.
-pub(crate) fn write_values(
+pub fn write_values(
     fleet: &Fleet,
     env: &crate::domain::Environment,
     writes: &[(String, String, SecretValue)],
@@ -347,7 +350,7 @@ fn write_item(
                     ops.push(Op::Add {
                         section: Some(KEPT_SECTION.to_string()),
                         label: format!(
-                            "{} (replaced by opv adopt, {date})",
+                            "{} (replaced by opv import, {date})",
                             key_label(product, key)
                         ),
                         concealed: true,
@@ -390,7 +393,7 @@ fn write_item(
         .map(|(p, k, _)| FieldName::new(key_label(p, k)))
         .collect();
     if !missing.is_empty() {
-        // 05.10: the command that wrote is named, not always `opv adopt`.
+        // 05.10: the command that wrote is named, not always `opv import`.
         return Err(Cause::ReadBackMissing {
             vault: VaultId::new(&b.vault_id),
             item: ItemId::new(&b.item_id),
@@ -402,10 +405,10 @@ fn write_item(
     Ok(())
 }
 
-/// The plan's next step (design §10.1): `opv ready <env>` once applied or when nothing is
-/// to write, else the writing command, so the apply writes no more than was reviewed (05.04).
+/// The plan's next step (design §10.1): `opv ready <env>` once written or when nothing is
+/// to write, else the writing command, so the write does no more than was reviewed (05.04).
 fn next_step(env_name: &str, opts: &Opts, writes: usize) -> Cmd {
-    if opts.apply || writes == 0 {
+    if !opts.dry_run || writes == 0 {
         return Cmd {
             command: vec!["ready".into()],
             args: vec![env_name.to_string()],
@@ -414,7 +417,7 @@ fn next_step(env_name: &str, opts: &Opts, writes: usize) -> Cmd {
     apply_command(env_name, opts)
 }
 
-/// The writing command (05.04): this same review with `--apply`, keeping every
+/// The writing command (05.04): this same review with the writing default, keeping every
 /// `--replace`, `--rotate` and `--skip` it was made with.
 fn apply_command(env_name: &str, opts: &Opts) -> Cmd {
     let from = match &opts.source {
@@ -431,9 +434,8 @@ fn apply_command(env_name: &str, opts: &Opts) -> Cmd {
             args.extend([flag.to_string(), e.clone()]);
         }
     }
-    args.push("--apply".into());
     Cmd {
-        command: vec!["adopt".into()],
+        command: vec!["import".into()],
         args,
     }
 }
@@ -471,7 +473,7 @@ fn print(out: &mut dyn Write, env_name: &str, opts: &Opts, plan: &AdoptPlan) -> 
         let v = serde_json::json!({
             "schema_version": crate::json::SCHEMA_VERSION,
             "environment": env_name,
-            "applied": opts.apply,
+            "applied": !opts.dry_run,
             "rows": rows,
             "writes": writes,
             "decisions_needed": decide,
@@ -479,7 +481,7 @@ fn print(out: &mut dyn Write, env_name: &str, opts: &Opts, plan: &AdoptPlan) -> 
         });
         return writeln!(out, "{v}").map_err(write_err);
     }
-    let verb = if opts.apply { "written" } else { "to write" };
+    let verb = if opts.dry_run { "to write" } else { "written" };
     writeln!(
         out,
         "{env_name}: {} found · {writes} {verb} · {decide} need a decision",
@@ -519,5 +521,5 @@ fn print(out: &mut dyn Write, env_name: &str, opts: &Opts, plan: &AdoptPlan) -> 
 }
 
 #[cfg(test)]
-#[path = "adopt_tests.rs"]
+#[path = "import_tests.rs"]
 mod tests;

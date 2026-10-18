@@ -413,8 +413,8 @@ fn import_values(
     let Some(from) = args.from.as_ref().filter(|f| f.apply) else {
         return Ok(None);
     };
-    let source = super::adopt::Source::Dotenv(from.path.clone());
-    super::adopt::plan_and_write(
+    let source = super::import::Source::Dotenv(from.path.clone());
+    super::import::plan_and_write(
         &p.fleet,
         &args.env,
         &source,
