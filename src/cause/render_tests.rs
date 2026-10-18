@@ -4254,3 +4254,13 @@ fn a_gate_failure_fill_is_the_persons_next() {
         crate::json::NextActor::Person
     );
 }
+
+#[test]
+fn an_import_refused_for_its_tier_is_a_persons_step() {
+    let c = Cause::ImportTierRefused {
+        env: EnvName::new("env-dev"),
+        tier: "shared",
+        file: PathBuf::from("local.env"),
+    };
+    assert!(c.human_required(&inv()));
+}
