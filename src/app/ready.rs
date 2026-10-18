@@ -56,6 +56,55 @@ pub struct EnvInput {
     /// Who the environment is for (FR-55): when set, an environment this person cannot open
     /// is reported as not theirs, non-blocking.
     pub audience: Option<String>,
+    /// Where a personal key's own value is read from (FR-55): what a personal key's finding
+    /// tells the person to create or fill. Unused when no key is personal.
+    pub personal_item: PersonalItem,
+}
+
+/// A person's own item for an environment's personal keys (FR-55), as
+/// [`super::personal::locate`] reads it: the item title and the vault titles it tries, in
+/// order. Names only.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PersonalItem {
+    /// `personal_item`, else `<project> · <env> (personal)`.
+    pub title: String,
+    /// `personal_vault`, else `Private`, `Employee`, `Personal`.
+    pub vaults: Vec<String>,
+}
+
+impl PersonalItem {
+    /// `env`'s personal item for `project`, named as the reader looks it up.
+    pub fn of(env: &crate::domain::Environment, project: &str) -> Self {
+        Self {
+            title: super::personal::item_title(env, project),
+            vaults: super::personal::vault_titles(env)
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        }
+    }
+
+    /// The step for a personal key whose field in this item is missing or empty: the item,
+    /// its vault, and the field (section `section`, label `label`) opv reads. Never
+    /// `opv open`, which opens the team item.
+    fn step(&self, section: &str, label: &str, empty: bool) -> String {
+        let vault = match self.vaults.split_last() {
+            Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),
+            _ => self.vaults.concat(),
+        };
+        let field = format!("field {label} in section {section}");
+        if empty {
+            format!(
+                "fill {field} of your item \"{}\" in your own 1Password vault ({vault})",
+                self.title
+            )
+        } else {
+            format!(
+                "in your own 1Password vault ({vault}), create or open your item \"{}\" and fill {field}",
+                self.title
+            )
+        }
+    }
 }
 
 /// Everything [`receipt`] needs, already gathered by the caller.
@@ -549,6 +598,17 @@ fn row_findings(
             _ => continue,
         };
         let label = key_label(&r.product, &r.key);
+        // A personal key's value is in the person's own item (FR-55): `opv open` would open
+        // the team item, so the step names the item and field opv reads instead.
+        let (section, field) = r
+            .source
+            .clone()
+            .unwrap_or((r.product.clone(), r.key.clone()));
+        let prerequisite = match code {
+            "personal_key_missing" => env.personal_item.step(&section, &field, false),
+            "personal_key_empty" => env.personal_item.step(&section, &field, true),
+            _ => format!("opv open {label} --env {}", env.name),
+        };
         let verify = match target {
             Some(t) => format!(
                 "opv status {} --target {t} --product {}",
@@ -569,7 +629,7 @@ fn row_findings(
             blocking: true,
             actor: "owner".into(),
             effect: "writes_1password".into(),
-            prerequisite: format!("opv open {label} --env {}", env.name),
+            prerequisite,
             verify,
             message: None,
             act: None,
@@ -1000,7 +1060,18 @@ pub fn run_at(
     // Each environment's fields, copied during its one read, for the health checks (#92).
     let mut kept: Vec<(String, bool, Vec<crate::domain::plan::ItemField>)> = Vec::new();
     let mut envs: Vec<EnvInput> = Vec::new();
+    // The project name a personal item's default title uses (FR-55), found once and only
+    // when some environment declares a personal key.
+    let mut project: Option<String> = None;
     for (name, env) in ordered {
+        let personal_item = if super::personal::declared(fleet, name) {
+            let project = project.get_or_insert_with(|| {
+                super::personal::project_name(r, &std::env::current_dir().unwrap_or_default())
+            });
+            PersonalItem::of(env, project)
+        } else {
+            PersonalItem::default()
+        };
         if env.targets.is_empty() {
             // A run-only environment: one read, and its rows stand on their own (FR-56).
             let mut fields = Vec::new();
@@ -1021,6 +1092,7 @@ pub fn run_at(
                 rows,
                 title: env.title.clone(),
                 audience: env.audience.clone(),
+                personal_item,
             });
             continue;
         }
@@ -1073,6 +1145,7 @@ pub fn run_at(
             rows: Ok(Vec::new()),
             title: env.title.clone(),
             audience: env.audience.clone(),
+            personal_item,
         });
     }
     // H1 (design row `rule-gate`): a rule is evaluated for an assistant only once it is

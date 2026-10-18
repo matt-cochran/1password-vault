@@ -6,6 +6,8 @@ dev:
   ci reader dev:
     vE2ESHAREDDEV00000000000001: read: missing
     vE2EWEBDEV0000000000000001: read: missing
+  vault vE2ESHAREDDEV00000000000001: this session is not a member; writers: none listed
+  vault vE2EWEBDEV0000000000000001: this session is not a member; writers: none listed
   checked: 2, unclassified: 0
 Owner runs: op service-account create "project-dev-ci" --vault vE2ESHAREDDEV00000000000001:read_items --vault vE2EWEBDEV0000000000000001:read_items --expires-in 90d
 prod:
@@ -24,6 +26,11 @@ prod:
   ci reader prod:
     vE2ESHAREDPROD0000000000001: read: missing
     vE2EWEBPROD000000000000001: read: missing
+  vault vE2ESHAREDPROD0000000000001 (production): this session is not a member; writers: none listed
+  vault vE2ESTATEFLY00000000000001 (production): this session is not a member; writers: none listed
+  vault vE2ESTATEGH000000000000001 (production): this session has unknown access (listing users needs Manage); writers: none listed
+  vault vE2ESTATEK8S00000000000001 (production): this session is not a member; writers: none listed
+  vault vE2EWEBPROD000000000000001 (production): this session is not a member; writers: none listed
   access_not_visible: cannot see who can read vault vE2ESTATEGH000000000000001 (environment prod): viewing its access list needs the Manage permission on it, so ask a manager of the vault to run opv access prod
   no_writer: vault vE2ESHAREDPROD0000000000001 (environment prod) is a production vault with no writer; nobody can fix a value there until 1Password gives someone write access
   no_writer: vault vE2ESTATEFLY00000000000001 (environment prod) is a production vault with no writer; nobody can fix a value there until 1Password gives someone write access

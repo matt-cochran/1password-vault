@@ -123,9 +123,10 @@ with tempfile.TemporaryDirectory() as directory:
         # opv_explain takes a key or a plan_id, and the environment.
         explain_tool = next(t for t in tools if t['name'] == 'opv_explain')
         assert set(explain_tool['inputSchema']['properties']) == {'key', 'plan_id', 'env'}, explain_tool
-        # opv_propose advertises the intent document: one arm per kind, no rule parameter.
+        # opv_propose advertises the intent document: one arm per kind (seven: tidy is
+        # deferred past 0.12.0), no rule parameter.
         propose_tool = next(t for t in tools if t['name'] == 'opv_propose')
-        assert len(propose_tool['inputSchema']['oneOf']) == 8, propose_tool
+        assert len(propose_tool['inputSchema']['oneOf']) == 7, propose_tool
         for arm in propose_tool['inputSchema']['oneOf']:
             assert not set(arm['properties']) & {'value', 'regex', 'rule', 'rules', 'prefix'}, arm
         # The removed 0.11.0 tools are gone, with no alias.

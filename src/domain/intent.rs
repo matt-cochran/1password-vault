@@ -245,12 +245,6 @@ pub enum Intent {
         #[serde(default)]
         guidance: Option<Guidance>,
     },
-    /// Put an item in opv's layout.
-    Tidy {
-        env: EnvName,
-        #[serde(default)]
-        guidance: Option<Guidance>,
-    },
 }
 
 /// Parse the one JSON intent document (design §25.2). An unknown field is refused before
@@ -313,7 +307,6 @@ fn allowed_fields(kind: &str) -> Option<&'static [&'static str]> {
         ],
         "structure" => &["kind", "rebind", "guidance"],
         "generate" => &["kind", "env", "keys", "guidance"],
-        "tidy" => &["kind", "env", "guidance"],
         _ => return None,
     })
 }
@@ -368,12 +361,6 @@ fn validate(intent: &Intent) -> Result<(), Error> {
             }
         }
         Intent::Env { env, .. } => check_env("env", env)?,
-        Intent::Tidy { env, guidance } => {
-            check_env("env", env)?;
-            if let Some(g) = guidance {
-                screen("guidance", &g.text)?;
-            }
-        }
         Intent::Target {
             env,
             name,
@@ -806,14 +793,6 @@ pub fn json_schema() -> serde_json::Value {
         }),
         serde_json::json!(["kind", "env"]),
     );
-    let tidy_kind = object(
-        serde_json::json!({
-            "kind": { "enum": ["tidy"] },
-            "env": env(),
-            "guidance": guidance()
-        }),
-        serde_json::json!(["kind", "env"]),
-    );
 
     serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -826,8 +805,7 @@ pub fn json_schema() -> serde_json::Value {
             retire_kind,
             setup_kind,
             structure_kind,
-            generate_kind,
-            tidy_kind
+            generate_kind
         ]
     })
 }

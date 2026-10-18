@@ -8,9 +8,9 @@ use std::collections::BTreeSet;
 
 use super::*;
 
-/// A tiny valid tidy document carrying `text` as its guidance.
+/// A tiny valid generate document carrying `text` as its guidance.
 fn with_guidance(text: &str) -> String {
-    format!(r#"{{"kind":"tidy","env":"prod","guidance":"{text}"}}"#)
+    format!(r#"{{"kind":"generate","env":"prod","guidance":"{text}"}}"#)
 }
 
 // --- every kind parses ----------------------------------------------------------
@@ -52,9 +52,11 @@ fn a_generate_intent_parses() {
     );
 }
 
+/// `propose tidy` is deferred past 0.12.0 (no planner): `tidy` is not a kind.
 #[test]
-fn a_tidy_intent_parses() {
-    assert!(parse(r#"{"kind":"tidy","env":"prod"}"#).is_ok());
+fn a_tidy_intent_is_refused() {
+    let e = parse(r#"{"kind":"tidy","env":"prod"}"#).unwrap_err();
+    assert_eq!(e.code_str(), "config_invalid");
 }
 
 // --- grammar, shapes and forbidden fields ---------------------------------------
@@ -148,14 +150,14 @@ fn guidance_over_200_characters_is_refused() {
 
 #[test]
 fn a_multi_line_guidance_is_refused() {
-    let e = parse(r#"{"kind":"tidy","env":"prod","guidance":"line one\nline two"}"#).unwrap_err();
+    let e = parse(&with_guidance("line one\\nline two")).unwrap_err();
     assert_eq!(e.code_str(), "config_invalid");
 }
 
 // --- the schema -----------------------------------------------------------------
 
 #[test]
-fn the_schema_lists_the_eight_kinds() {
+fn the_schema_lists_the_seven_kinds() {
     let schema = json_schema();
     let kinds: BTreeSet<String> = schema["oneOf"]
         .as_array()
@@ -178,7 +180,6 @@ fn the_schema_lists_the_eight_kinds() {
             "setup".to_string(),
             "structure".to_string(),
             "generate".to_string(),
-            "tidy".to_string(),
         ])
     );
 }

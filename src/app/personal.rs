@@ -102,7 +102,7 @@ pub(crate) fn private_vault(
 
 /// The vault titles a personal item may be in: `personal_vault`, else the person's own
 /// vault by any of its names.
-fn vault_titles(team: &Environment) -> Vec<&str> {
+pub(crate) fn vault_titles(team: &Environment) -> Vec<&str> {
     match &team.personal_vault {
         Some(t) => vec![t.as_str()],
         None => PRIVATE_VAULTS.to_vec(),

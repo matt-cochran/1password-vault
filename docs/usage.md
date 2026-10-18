@@ -27,7 +27,6 @@ deliver with CI or your own terminal. The grouping is who runs a command.
 | propose | `opv propose setup [--from-item <env> [--vault <t>] [--item <t>]] [--names-from <.env> [--config-key K]… [--secret-key K]…] [--file \| --project <p>] [--account <a>]` | anyone | first setup: the contract from an existing item or a `.env`'s names, and every boundary, item, state vault and field |
 | propose | `opv propose structure [--rebind <env>]…` | anyone | the structure the contract declares, or new ids for an environment |
 | propose | `opv propose generate <env> <p/KEY>…` | anyone | generated values for rule-backed keys |
-| propose | `opv propose tidy <env>` | anyone | put an item in opv's layout |
 | propose | `opv propose --intent <file.json>` | anyone | the categorical intent document, the same as MCP `opv_propose` |
 | propose | any `opv propose …` with `--write` | anyone (CLI only) | also writes the contract diff into the repository's contract file. Without `--write`, and always over MCP, a proposal writes nothing |
 | apply | `opv apply [<plan_id>]` | **person, in a terminal** | recompute the plan from the contract on disk and the actual state, refuse a stale `<plan_id>`, show it, confirm, and run it in one process |
@@ -448,7 +447,7 @@ all clear: nothing pending
 - A failing check has its fix under it as `  fix: ...`; `doctor` then exits with the first failing check as the error, and its `Do:`/`Next:` lines are that check's fix. An older tool is a `warn` line with the upgrade command (exit code unchanged).
 - `--env <env>` checks only what that environment needs (a run-only environment needs no target CLI) and reads its item once, by IDs, checking the keys as `opv inventory` does: a key missing or failing a rule is a `FAIL  item:` line naming it, with `Next: opv inventory --env <env> --product <p>` (exit 8). `--product` limits that to one product. Without `--env` no item is read.
 - `--settings` also looks for likely-wrong values across every environment you can read (the same secret in two environments, a placeholder, stray whitespace, `localhost` where it deploys, a test key in production): one `warn  settings:` line listing each, with `fix: opv open <key> --env <env>`. It reads every environment's item; values are compared, never shown. A warning never changes the exit code. `opv ready` reports the same findings. See [settings health](configuration.md#settings-health-likely-wrong-values).
-- `doctor` never writes 1Password, whoever runs it, so an assistant can rely on it in a person's session. When an item is not laid out the way opv expects, it reads it as it is and says so once, naming `opv propose tidy <env>` then `opv apply`, the explicit repair (a signed-in person runs it; one verified edit, nothing deleted).
+- `doctor` never writes 1Password, whoever runs it, so an assistant can rely on it in a person's session. When an item is not laid out the way opv expects, it reads it as it is and says so once, naming `opv config export <env>`, the explicit repair (a signed-in person runs it; one verified edit, nothing deleted).
 - With `deploy_credentials`, a failed sign-in is one `FAIL deploy credentials` line; the other checks still run.
 - `--json` prints `{schema_version, ok, config_source, checks: [{name, status: ok|warn|fail|skip, detail, next, do}], next, do}`; the top-level `next` and `do` are the first failing check's, or `null`.
 - With no configuration at all, the config line lists both ways to start (`opv propose setup --from-item` for an existing item, `opv setup` for a project that ships `opv.setup.toml`).
@@ -465,7 +464,7 @@ Every action is an `opv` command, shown before it runs and run in your terminal,
 
 ## Who can read each vault: `opv access`
 
-Every environment needs, per target, its deploy identity's read of the boundary vaults that target's products need and read-write on that target's state vault; plus a read-only CI reader over every boundary vault of the environment. `opv access [<env>] [--target <name>]` prints, per environment and target, who needs each vault and who can read it today (one read-only listing each). People and guests are counts, never names; each service account is named with whether it can only read. `--target <name>` narrows to one target's deploy identity and omits the CI reader.
+Every environment needs, per target, its deploy identity's read of the boundary vaults that target's products need and read-write on that target's state vault; plus a read-only CI reader over every boundary vault of the environment. `opv access [<env>] [--target <name>]` prints, per environment and target, who needs each vault and who can read it today (one read-only listing each). People and guests are counts in the grant checks; each service account is named with whether it can only read. Each vault it could read then has one line: `(production)` when the environment is production-tier, what this session can do with it (`can write`, `can read, not write`, `is not a member`, or unknown with the reason), and the people 1Password lists as able to edit it (`writers`; `none listed` when that list is empty or not visible). Names and permissions only, never a value. `--target <name>` narrows to one target's deploy identity and omits the CI reader.
 
 ```text
 $ opv access prod
@@ -475,6 +474,8 @@ prod:
     vprd0000000000000000000002: read-write: missing
   ci reader prod:
     vprd0000000000000000000001: read: present
+  vault vprd0000000000000000000001 (production): this session can read, not write; writers: Avery Admin, Sam Ops
+  vault vprd0000000000000000000002 (production): this session can write; writers: Avery Admin
   checked: 3, unclassified: 0
 Owner runs: op service-account create "myapp-prod-web" --vault vprd0000000000000000000002:read_items --vault vstate0000000000000000001:read_items,write_items
 ```
@@ -483,7 +484,7 @@ The states are `present`, `missing` and `read-only needed`; a vault whose access
 
 `opv access <env> --target <name> --create --github <owner/repo> --github-env <environment>` creates the identity instead of printing its command: it checks that gh is signed in and can see the repository and environment (creating the GitHub environment if missing, after asking), shows the account name, every grant and where the token goes, asks once, runs `op service-account create … --raw`, and pipes the token into `gh secret set OP_SERVICE_ACCOUNT_TOKEN --repo … --env …` on stdin. The token is never shown, typed, logged or written to a file. It refuses before creating anything when a vault is not in the selected account, and if storing the token fails it says to remove the new account in 1Password and run it again (1Password shows a token once). An existing account of the same name is left alone: keep it until the new token has produced verified delivery evidence.
 
-`--json` gives `{environments: [{environment, report, commands, findings}]}`, where `report` holds the checks (principal, vault id, permission, state), the extra readers, the findings and the `checked`/`unclassified` counts. In `opv ui` it is the "CI access" entry in the sidebar.
+`--json` gives `{environments: [{environment, report, commands, vaults, findings}]}`, where `vaults` holds each vault line (`vault_id`, `production`, `capability`, `writers`) and `report` holds the checks (principal, vault id, permission, state), the extra readers, the findings and the `checked`/`unclassified` counts. In `opv ui` it is the "CI access" entry in the sidebar.
 
 ## Delivery receipts: `opv sync --receipt` and `opv delivery verify`
 
@@ -541,7 +542,7 @@ Needs attention:
 Next (owner): opv open api/STRIPE_KEY --env staging
 ```
 
-`--json` gives the receipt as one document (`opv schema` lists its fields). Each finding has a stable `code`, a `scope` (account, environment, product, key), `blocking`, the `actor` who acts (`owner`, `agent`, `ci`), its `effect` (`none`, `signs_in`, `writes_1password`, `writes_target`, `writes_config`), one `prerequisite` command and one `verify` command, so an assistant never parses prose; a [settings health](configuration.md#settings-health-likely-wrong-values) finding (non-blocking) also has a `message`, one sentence naming the keys and environments, never a value. `receipt_id` changes whenever anything in the receipt does; `--save <file>` keeps the receipt (names, IDs and codes only) to resume a handoff after a session ends. It never tidies or writes.
+`--json` gives the receipt as one document (`opv schema` lists its fields). Each finding has a stable `code`, a `scope` (account, environment, product, key), `blocking`, the `actor` who acts (`owner`, `agent`, `ci`), its `effect` (`none`, `signs_in`, `writes_1password`, `writes_target`, `writes_config`), one `prerequisite` command and one `verify` command, so an assistant never parses prose. The exception is a personal key (`personal_key_missing`, `personal_key_empty`): its value is in the person's own item, so its `prerequisite` is a step for the person, naming the vault, the item title and the field opv reads (`opv open` would open the team item); a [settings health](configuration.md#settings-health-likely-wrong-values) finding (non-blocking) also has a `message`, one sentence naming the keys and environments, never a value. `receipt_id` changes whenever anything in the receipt does; `--save <file>` keeps the receipt (names, IDs and codes only) to resume a handoff after a session ends. It never tidies or writes.
 
 Each target in `targets` is `ready` (every vault and item it needs could be opened) or `grants_missing`, and carries `evidence_write: "not_verified"`: an open state vault does not show that the identity can write delivery evidence there. The read-only CI reader never can; a target's deploy identity (`opv access <env> --target <name>`) can. A sync that records evidence, checked with `opv delivery verify`, is the proof.
 
@@ -581,13 +582,13 @@ opv propose target staging site --fly-app site-staging
 opv apply 3f9c0a1b2c3d4e5f                                       # a person reviews and runs it
 ```
 
-### `opv propose setup`, `structure`, `generate` and `tidy`
+### `opv propose setup`, `structure` and `generate`
 
 `opv propose setup` builds the first contract: `--from-item <env> [--vault <t>] [--item <t>]` reads names and types from an existing item, and `--names-from <.env> [--config-key K]… [--secret-key K]…` takes names only from a `.env` (never values); `--file` or `--project <p>` and `--account <a>` choose where the contract and account come from. The plan includes every boundary, item, state vault and field.
 
 `opv propose structure [--rebind <env>]…` plans the structure the contract declares (missing vaults, items, state vaults and empty fields) or new ids for an environment, and ends with the `opv apply` that runs it. It is also the one-time move that reads inline ids from `secrets.toml` and writes them to `secrets.bindings.toml`: a `secrets.toml` that still carries inline ids is refused at load by every command with `config_invalid`, naming the field, and `opv propose structure` then `opv apply` is the only path that reads them, only to move them.
 
-`opv propose generate <env> <p/KEY>…` plans generated values for rule-backed keys, and `opv propose tidy <env>` plans putting an item in opv's layout (missing sections and empty fields, labels, duplicates; nothing is deleted).
+`opv propose generate <env> <p/KEY>…` plans generated values for rule-backed keys.
 
 ### The intent document: `opv propose --intent <file.json>`
 
@@ -1045,7 +1046,7 @@ Rate limits: a cold whole-item read costs about 2 requests, so a fleet sync cost
 | `opv target add <env> <name> … [--dry-run]` | `opv propose target <env> <name> …` (always a dry run until `opv apply`) |
 | `opv item skeleton <env>` | `opv propose structure` (empty fields are part of it), then `opv apply` |
 | `opv generate <env> <p/KEY>…` | `opv propose generate <env> <p/KEY>…`, then `opv apply` |
-| `opv tidy <env>` | `opv propose tidy <env>`, then `opv apply` |
+| `opv tidy <env>` | removed in 0.12.0; a tidy proposal is deferred to a later release. A signed-in person's `opv config export <env>` tidies an item |
 | `opv adopt <env> --from <file\|target:NAME> [--replace] [--rotate] [--skip] [--apply]` | `opv import <env> --from <file\|target:NAME> [--replace] [--rotate] [--skip]`; without `--apply` → `--dry-run`. Write-only: `match`/`differs` reporting is removed |
 | `opv check <env> [--product]` | `opv inventory --env <env> [--product]` |
 | `opv config describe` | `opv inventory` (structure) and `opv contract` (the contract as data) |
@@ -1075,7 +1076,7 @@ Rate limits: a cold whole-item read costs about 2 requests, so a fleet sync cost
 
 What changes in use, in short:
 
-- Changes to the configuration are proposed, then applied by a person: `opv propose key|env|target|retire|setup|structure|generate|tidy …`, then `opv apply <plan_id>`. This replaces `opv add`, `opv env add`, `opv target add`, `opv init`, `opv bootstrap`, `opv structure plan|apply`, `opv item skeleton`, `opv generate`, `opv tidy` and `opv approve`.
+- Changes to the configuration are proposed, then applied by a person: `opv propose key|env|target|retire|setup|structure|generate …`, then `opv apply <plan_id>`. This replaces `opv add`, `opv env add`, `opv target add`, `opv init`, `opv bootstrap`, `opv structure plan|apply`, `opv item skeleton`, `opv generate`, `opv tidy` and `opv approve`.
 - `opv adopt` is now `opv import <env> --from <file|target:NAME>`. It is write-only and reports imported / skipped per key; it no longer says whether a value differs.
 - `opv check` is `opv inventory --env <env>`; `opv config describe` is `opv inventory` and `opv contract`.
 - 1Password ids move out of `secrets.toml` into `secrets.bindings.toml`. A `secrets.toml` with inline ids is refused until you run `opv propose structure`, then `opv apply`, once.

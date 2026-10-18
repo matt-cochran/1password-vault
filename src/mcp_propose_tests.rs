@@ -387,16 +387,12 @@ fn opv_propose_with_a_regex_is_refused_naming_the_field() {
     assert_eq!(doc["error"]["subject"]["field"], json!(["regex"]));
 }
 
+/// `propose tidy` is deferred past 0.12.0: `tidy` is not an intent kind.
 #[test]
-fn opv_propose_tidy_is_a_usage_error_naming_that_it_is_not_available() {
+fn opv_propose_tidy_is_refused_as_an_invalid_intent() {
     let w = World::new();
     let doc = w.propose(json!({"kind": "tidy", "env": "dev"}));
-    assert!(
-        doc["error"]["message"]
-            .as_str()
-            .is_some_and(|m| m.contains("tidy is not available")),
-        "{doc}"
-    );
+    assert_eq!(doc["error"]["code"], "config_invalid", "{doc}");
 }
 
 #[test]

@@ -1,5 +1,6 @@
 //! `opv access` (FR-52, FR-59): who needs which vault, per boundary and per target, end to
-//! end on the stateful fake `op`. People are counted, never named.
+//! end on the stateful fake `op`. People are counted in the grant checks; only a vault's
+//! writers are named (row `access-writers`).
 
 use std::io;
 use std::time::Duration;
@@ -430,10 +431,11 @@ fn a_writable_boundary_reader_is_flagged() {
     assert!(run_text(&op, Some("prod"), None).contains("ci_reader_can_write"));
 }
 
+/// Writers are named by name (row `access-writers`); an email is never shown.
 #[test]
-fn no_person_is_ever_named() {
+fn no_persons_email_is_ever_shown() {
     let text = run_text(&visible(), Some("prod"), None);
-    assert!(!text.contains("Alice") && !text.contains("alice@example.com"));
+    assert!(!text.contains("alice@example.com"), "{text}");
 }
 
 // --- observation and read-only ------------------------------------------------------
@@ -858,4 +860,75 @@ fn a_production_vault_with_no_writer_raises_no_writer() {
             .iter()
             .any(|f| f["code"] == "no_writer")
     );
+}
+
+// --- the text output shows what `--json` carries per vault (row `access-writers`) ----
+
+fn run_stage_text(tier: &str, op: &dyn CommandRunner) -> String {
+    let mut out = Vec::new();
+    run(
+        &stage(tier),
+        Some("stage"),
+        None,
+        Some("shop"),
+        op,
+        false,
+        &mut out,
+    )
+    .unwrap();
+    String::from_utf8(out).unwrap()
+}
+
+#[test]
+fn the_text_output_marks_a_production_vault() {
+    let text = run_stage_text("production", &writers_op(writer_users()));
+    assert!(text.contains("vault vshared (production):"), "{text}");
+}
+
+#[test]
+fn the_text_output_leaves_a_shared_tier_vault_unmarked() {
+    let text = run_stage_text("shared", &writers_op(writer_users()));
+    assert!(text.contains("vault vshared: this session"), "{text}");
+}
+
+/// The fake `op whoami` names no user, so the session's capability is unknown, with why.
+#[test]
+fn the_text_output_says_why_this_sessions_capability_is_unknown() {
+    let text = run_stage_text("production", &writers_op(writer_users()));
+    assert!(
+        text.contains("this session has unknown access (op whoami named no user);"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_writable_vaults_text_line_says_this_session_can_write() {
+    let line = vault_line(&VaultAccess {
+        vault_id: "vshared".into(),
+        production: false,
+        capability: Capability::Write,
+        writers: vec!["<NAME_1>".into()],
+    });
+    assert_eq!(
+        line,
+        "vault vshared: this session can write; writers: <NAME_1>"
+    );
+}
+
+#[test]
+fn the_text_output_names_the_writers() {
+    let text = run_stage_text("production", &writers_op(writer_users()));
+    assert!(text.contains("writers: <NAME_1>"), "{text}");
+}
+
+#[test]
+fn the_text_output_says_none_listed_for_a_vault_without_writers() {
+    let text = run_stage_text("production", &writers_op(json!([viewer()])));
+    assert!(text.contains("writers: none listed"), "{text}");
+}
+
+#[test]
+fn a_member_who_only_reads_is_never_named() {
+    let text = run_stage_text("production", &writers_op(json!([viewer()])));
+    assert!(!text.contains("Alice"), "{text}");
 }

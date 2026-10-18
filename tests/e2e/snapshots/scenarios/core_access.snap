@@ -6,6 +6,8 @@ dev:
   ci reader dev:
     vE2ESHAREDDEV00000000000001: read: missing
     vE2EWEBDEV0000000000000001: read: missing
+  vault vE2ESHAREDDEV00000000000001: this session can write; writers: E2E Dev, E2E Ops
+  vault vE2EWEBDEV0000000000000001: this session can write; writers: E2E Dev, E2E Ops
   checked: 2, unclassified: 0
 Owner runs: op service-account create "project-dev-ci" --vault vE2ESHAREDDEV00000000000001:read_items --vault vE2EWEBDEV0000000000000001:read_items --expires-in 90d
 prod:
@@ -24,6 +26,11 @@ prod:
   ci reader prod:
     vE2ESHAREDPROD0000000000001: read: missing
     vE2EWEBPROD000000000000001: read: missing
+  vault vE2ESHAREDPROD0000000000001 (production): this session is not a member; writers: E2E Ops
+  vault vE2ESTATEFLY00000000000001 (production): this session is not a member; writers: none listed
+  vault vE2ESTATEGH000000000000001 (production): this session is not a member; writers: none listed
+  vault vE2ESTATEK8S00000000000001 (production): this session is not a member; writers: none listed
+  vault vE2EWEBPROD000000000000001 (production): this session can write; writers: E2E Dev
   single_writer: vault vE2ESHAREDPROD0000000000001 (environment prod) has only one writer; a deployed tier needs a second writer to fix a value when the first is unavailable
   single_writer: vault vE2EWEBPROD000000000000001 (environment prod) has only one writer; a deployed tier needs a second writer to fix a value when the first is unavailable
   no_writer: vault vE2ESTATEFLY00000000000001 (environment prod) is a production vault with no writer; nobody can fix a value there until 1Password gives someone write access

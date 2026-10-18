@@ -156,6 +156,7 @@ fn env(name: &str, target: Option<&str>, rows: Vec<Row>) -> EnvInput {
             rows: Ok(Vec::new()),
             title: None,
             audience: None,
+            personal_item: Default::default(),
         },
         None => EnvInput {
             name: name.into(),
@@ -163,6 +164,7 @@ fn env(name: &str, target: Option<&str>, rows: Vec<Row>) -> EnvInput {
             rows: Ok(rows),
             title: None,
             audience: None,
+            personal_item: Default::default(),
         },
     }
 }
@@ -221,6 +223,7 @@ fn env_err(name: &str, target: Option<&str>, error: Error) -> EnvInput {
             rows: Ok(Vec::new()),
             title: None,
             audience: None,
+            personal_item: Default::default(),
         },
         None => EnvInput {
             name: name.into(),
@@ -228,6 +231,7 @@ fn env_err(name: &str, target: Option<&str>, error: Error) -> EnvInput {
             rows: Err(error),
             title: None,
             audience: None,
+            personal_item: Default::default(),
         },
     }
 }
@@ -832,6 +836,7 @@ fn titled(name: &str, title: &str) -> EnvInput {
         rows: Ok(vec![]),
         title: Some(title.into()),
         audience: None,
+        personal_item: Default::default(),
     }
 }
 
@@ -912,6 +917,69 @@ fn a_missing_personal_key_is_named_as_yours() {
         "t",
     );
     assert_eq!(r.findings[0].code, "personal_key_missing");
+}
+
+/// A receipt for one run-only `dev` whose only row is the personal `api/OPENAI_API_KEY`
+/// in `state`, read from the person's item `proj · dev (personal)` (FR-55).
+fn personal_receipt(state: KeyState) -> Receipt {
+    let account = crate::app::account::credential_report(crate::host::Platform::Linux);
+    let mut env = titled("dev", "Local");
+    env.personal_item = PersonalItem {
+        title: "proj · dev (personal)".into(),
+        vaults: vec!["Private".into(), "Employee".into(), "Personal".into()],
+    };
+    env.rows = Ok(vec![crate::domain::Row {
+        product: "api".into(),
+        key: "OPENAI_API_KEY".into(),
+        kind: crate::domain::Kind::Secret,
+        state,
+        target: TargetState::Unknown,
+        guidance: String::new(),
+        source: None,
+        shared_by: Vec::new(),
+    }]);
+    receipt(
+        &Inputs {
+            config_source: None,
+            account: &account,
+            envs: vec![env],
+            personal: [("api".to_string(), "OPENAI_API_KEY".to_string())].into(),
+            health: Vec::new(),
+        },
+        "t",
+    )
+}
+
+#[test]
+fn a_missing_personal_keys_step_names_the_persons_own_item_and_field() {
+    let r = personal_receipt(KeyState::Missing);
+    assert_eq!(
+        r.findings[0].prerequisite,
+        "in your own 1Password vault (Private, Employee or Personal), create or open your \
+         item \"proj · dev (personal)\" and fill field OPENAI_API_KEY in section api"
+    );
+}
+
+#[test]
+fn an_empty_personal_keys_step_names_the_field_to_fill_in_the_persons_own_item() {
+    let r = personal_receipt(KeyState::RuleFailed("nonempty", Reason::Fixed("empty")));
+    assert_eq!(
+        r.findings[0].prerequisite,
+        "fill field OPENAI_API_KEY in section api of your item \"proj · dev (personal)\" in \
+         your own 1Password vault (Private, Employee or Personal)"
+    );
+}
+
+#[test]
+fn a_personal_keys_next_step_is_its_own_item_never_opv_open() {
+    let r = personal_receipt(KeyState::Missing);
+    assert!(
+        r.next
+            .as_ref()
+            .is_some_and(|n| !n.command.contains("opv open")),
+        "{:?}",
+        r.next
+    );
 }
 
 // #92: settings health ---------------------------------------------------------------
@@ -1180,6 +1248,7 @@ fn target_env(name: &str, targets: Vec<TargetInput>) -> EnvInput {
         rows: Ok(vec![]),
         title: None,
         audience: None,
+        personal_item: Default::default(),
     }
 }
 

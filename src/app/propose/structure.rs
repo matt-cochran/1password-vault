@@ -6,7 +6,7 @@
 //! proposal; it never writes either. Only `apply` runs the steps. No value, length, digest
 //! or prefix of a value is carried: the steps hold names, kinds and public IDs only.
 //!
-//! Tidy is a later row: `src/app/tidy.rs` exposes no pure planner here.
+//! A tidy proposal is deferred past 0.12.0: `src/app/tidy.rs` exposes no pure planner.
 
 use std::path::Path;
 
