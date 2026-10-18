@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::app::account::Report;
+use crate::app::rule_source::{RuleStatus, rule_source};
+use crate::domain::plan::RuleGate;
 use crate::domain::{KeyState, Row, TargetState, key_label};
 use crate::error::Error;
 
@@ -355,7 +357,26 @@ fn is_finding_state(state: &KeyState) -> bool {
             | KeyState::WrongKind
             | KeyState::RuleFailed(..)
             | KeyState::SourceBlocked
+            | KeyState::RulesPendingReview
     )
+}
+
+/// Hold back every uncommitted rule for an assistant (H1, design row `rule-gate`): the
+/// rows keep their values to themselves and show [`KeyState::RulesPendingReview`] instead
+/// of a rule result. A person at a TTY and CI never reach here.
+fn gate_rows(envs: &mut [EnvInput], gate: &RuleGate<'_>) {
+    for env in envs {
+        if let Some(targets) = &mut env.target {
+            for t in targets {
+                if let Ok(rows) = &mut t.rows {
+                    crate::domain::plan::apply_rule_gate(rows, gate);
+                }
+            }
+        }
+        if let Ok(rows) = &mut env.rows {
+            crate::domain::plan::apply_rule_gate(rows, gate);
+        }
+    }
 }
 
 /// Why a target is `grants_missing`: the explicit reason the caller found, else the error
@@ -475,6 +496,7 @@ fn row_findings(
             KeyState::RuleFailed("nonempty", _) => "key_empty",
             KeyState::RuleFailed(..) => "key_failed_rule",
             KeyState::WrongKind => "key_wrong_kind",
+            KeyState::RulesPendingReview => "rules_pending_review",
             _ => continue,
         };
         let label = key_label(&r.product, &r.key);
@@ -962,6 +984,31 @@ pub fn run(
             title: env.title.clone(),
             audience: env.audience.clone(),
         });
+    }
+    // H1 (design row `rule-gate`): a rule is evaluated for an assistant only once it is
+    // committed on the repository's default branch. An agent's rows show
+    // `rules_pending_review` instead of a pass or a fail; a person at a TTY and CI are
+    // untouched. The gate reads rules, never a value.
+    if crate::host::Host::detect().agent_mode.is_some() {
+        let repo = crate::config_store::git_toplevel(r);
+        let root = repo.as_deref().unwrap_or(std::path::Path::new("."));
+        match rule_source(r, root, fleet) {
+            Ok(source) => {
+                let gate = RuleGate {
+                    agent: true,
+                    pending: &|p, k| source.status(fleet, p, k) == RuleStatus::PendingReview,
+                };
+                gate_rows(&mut envs, &gate);
+            }
+            // Without a readable committed contract no rule is committed: hold them all.
+            Err(_) => {
+                let gate = RuleGate {
+                    agent: true,
+                    pending: &|_, _| true,
+                };
+                gate_rows(&mut envs, &gate);
+            }
+        }
     }
     let values: Vec<crate::domain::health::EnvValues<'_>> = kept
         .iter()

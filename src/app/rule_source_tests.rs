@@ -2,6 +2,8 @@
 //! repository, commits a contract on the default branch, and asserts one status.
 
 use super::*;
+use crate::domain::plan::{PlanOptions, RuleGate, build_with_gate};
+use crate::domain::{ItemField, KeyState, Kind, SecretValue};
 use crate::runner::{Outcome, ProcessRunner};
 use std::path::Path;
 
@@ -128,6 +130,76 @@ fn a_rule_hand_edited_into_the_working_tree_is_pending_review() {
         source.status(&working, "app", "API_KEY"),
         RuleStatus::PendingReview
     );
+}
+
+// --- rule gate over a real repository (design row `rule-gate`) -----------------------------
+
+/// Build one `API_KEY` value through [`build_with_gate`] with an agent gate whose pending
+/// answer comes from the real [`RuleSource`]: the key reports `RulesPendingReview` exactly
+/// when the working rule is not the committed one.
+fn gated_state(source: &RuleSource, working: &Fleet) -> KeyState {
+    let item = vec![ItemField {
+        section: "app".into(),
+        label: "API_KEY".into(),
+        kind: Kind::Secret,
+        value: SecretValue::new("sk-live".into()),
+        concealed: true,
+    }];
+    let empty = std::collections::BTreeSet::new();
+    let opts = PlanOptions {
+        target: None,
+        rotate: &empty,
+        prune_immutable: &empty,
+        digest: &|_| None,
+        target_check: &|_, _| None,
+        current: None,
+    };
+    let gate = RuleGate {
+        agent: true,
+        pending: &|p, k| source.status(working, p, k) == RuleStatus::PendingReview,
+    };
+    build_with_gate(working, "dev", item, &[], &opts, &gate)
+        .rows
+        .iter()
+        .find(|r| r.key == "API_KEY")
+        .unwrap()
+        .state
+        .clone()
+}
+
+#[test]
+fn an_agent_holds_a_rule_only_in_the_working_tree_pending() {
+    let dir = repo();
+    write_contract(dir.path(), BASE);
+    commit(dir.path(), "base");
+    set_origin_head(dir.path(), "main");
+    write_contract(dir.path(), &with_rule("sk-"));
+    let working = load(dir.path());
+    let source = rule_source(&runner(), dir.path(), &working).unwrap();
+    assert_eq!(gated_state(&source, &working), KeyState::RulesPendingReview);
+}
+
+#[test]
+fn an_agent_leaves_a_hand_edited_rule_pending() {
+    let dir = repo();
+    write_contract(dir.path(), &with_rule("sk-"));
+    commit(dir.path(), "contract");
+    set_origin_head(dir.path(), "main");
+    write_contract(dir.path(), &with_rule("pk-"));
+    let working = load(dir.path());
+    let source = rule_source(&runner(), dir.path(), &working).unwrap();
+    assert_eq!(gated_state(&source, &working), KeyState::RulesPendingReview);
+}
+
+#[test]
+fn an_agent_evaluates_a_rule_committed_on_the_default_branch() {
+    let dir = repo();
+    write_contract(dir.path(), &with_rule("sk-"));
+    commit(dir.path(), "contract");
+    set_origin_head(dir.path(), "main");
+    let working = load(dir.path());
+    let source = rule_source(&runner(), dir.path(), &working).unwrap();
+    assert_eq!(gated_state(&source, &working), KeyState::Ready);
 }
 
 // --- default branch and manifest -----------------------------------------------------------

@@ -366,6 +366,28 @@ fn wrong_kind_row_maps_to_key_wrong_kind_finding() {
 }
 
 #[test]
+fn an_agent_holds_a_pending_rule_back_from_the_receipt() {
+    let report = account_report();
+    let mut envs = vec![env(
+        "staging",
+        Some("Fly"),
+        vec![row(
+            "api",
+            "STRIPE_KEY",
+            KeyState::RuleFailed("prefix", Reason::Fixed("expected sk-")),
+            TargetState::Absent,
+        )],
+    )];
+    let gate = RuleGate {
+        agent: true,
+        pending: &|_, _| true,
+    };
+    gate_rows(&mut envs, &gate);
+    let r = receipt(&inputs(&report, envs), "0.6.0");
+    assert_eq!(r.findings[0].code, "rules_pending_review");
+}
+
+#[test]
 fn source_blocked_row_produces_no_finding() {
     let report = account_report();
     let envs = vec![env(
