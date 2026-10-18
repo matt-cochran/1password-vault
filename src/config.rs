@@ -869,12 +869,16 @@ struct RawEnvironment {
     personal_item: Option<String>,
 }
 
-/// `boundaries.<name> = { vault_id, item_id }` (FR-57).
+/// `boundaries.<name> = { vault_id, item_id }` (FR-57). Both ids come from the bindings
+/// file (D-G); a boundary with neither is declared and not bound yet (`boundaries.web = {}`
+/// before the first `opv apply`).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawBoundary {
-    vault_id: String,
-    item_id: String,
+    #[serde(default)]
+    vault_id: Option<String>,
+    #[serde(default)]
+    item_id: Option<String>,
 }
 
 /// One named target (FR-56): its own options, and every other entry as a provider section.
@@ -892,7 +896,8 @@ struct RawTarget {
     /// `op://<vault>/<item>` holding the target's deploy identity (FR-40).
     #[serde(default)]
     deploy_credentials: Option<String>,
-    /// The vault holding the target's delivery evidence (FR-58); required (D12).
+    /// The vault holding the target's delivery evidence (FR-58, D12); `None` until the
+    /// first `opv apply` binds it (D-G).
     #[serde(default)]
     state_vault_id: Option<String>,
     /// product → its delivery item's ID in the state vault (FR-58), recorded by bootstrap.
@@ -1156,21 +1161,28 @@ fn environment(
             ));
         }
         for (field, value) in [("vault_id", &raw.vault_id), ("item_id", &raw.item_id)] {
-            ident(
-                doc,
-                &[&path[..], &[field]].concat(),
-                value,
-                is_id,
-                PatternId::Id,
-            )?;
+            if let Some(value) = value {
+                ident(
+                    doc,
+                    &[&path[..], &[field]].concat(),
+                    value,
+                    is_id,
+                    PatternId::Id,
+                )?;
+            }
         }
-        boundaries.insert(
-            b,
-            Boundary {
-                vault_id: raw.vault_id,
-                item_id: raw.item_id,
-            },
-        );
+        // D-G: a boundary is bound by both ids or by neither (declared, before `opv apply`).
+        let bound = match (raw.vault_id, raw.item_id) {
+            (Some(vault_id), Some(item_id)) => Some(Boundary { vault_id, item_id }),
+            (None, None) => None,
+            (Some(_), None) => {
+                return Err(doc.invalid(&[&path[..], &["item_id"]].concat(), FieldRule::Missing));
+            }
+            (None, Some(_)) => {
+                return Err(doc.invalid(&[&path[..], &["vault_id"]].concat(), FieldRule::Missing));
+            }
+        };
+        boundaries.insert(b, bound);
     }
     let mut targets = BTreeMap::new();
     for (t, raw) in e.targets {
@@ -1202,7 +1214,7 @@ pub(crate) fn is_target_name(s: &str) -> bool {
 }
 
 /// One named target (FR-56): its name, its one provider section, `products`,
-/// `deploy_credentials` and the required `state_vault_id` (FR-58, D12).
+/// `deploy_credentials` and its `state_vault_id` (FR-58, D12), unbound before `opv apply`.
 fn target(
     env: &str,
     name: &str,
@@ -1230,21 +1242,18 @@ fn target(
         None => None,
         Some(r) => Some(deploy_credentials(env, name, r, config.as_ref(), doc)?),
     };
-    let Some(state_vault_id) = raw.state_vault_id else {
-        return Err(Cause::StateVaultMissing {
-            env: crate::cause::EnvName::new(env),
-            target: crate::cause::TargetName::new(name),
-            source: parsing_source(),
-        }
-        .into());
-    };
-    ident(
-        doc,
-        &[&base[..], &["state_vault_id"]].concat(),
-        &state_vault_id,
-        is_id,
-        PatternId::Id,
-    )?;
+    // D-G: `None` until the first `opv apply` binds it; a command that needs it reports
+    // `state_vault_missing` ([`Fleet::state_vault`]).
+    let state_vault_id = raw.state_vault_id;
+    if let Some(id) = &state_vault_id {
+        ident(
+            doc,
+            &[&base[..], &["state_vault_id"]].concat(),
+            id,
+            is_id,
+            PatternId::Id,
+        )?;
+    }
     let delivery_items = raw.delivery_items.unwrap_or_default();
     for (product, id) in &delivery_items {
         ident(
@@ -1591,13 +1600,16 @@ fn check_evidence_width(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
                     let source = k.source().map_or(product.as_str(), |(sp, _)| sp);
                     for needer in [product.as_str(), source] {
                         let b = fleet.boundary_of(needer);
-                        if let Some(at) = env.boundaries.get(b) {
+                        if let Some(Some(at)) = env.boundaries.get(b) {
                             boundaries.insert(format!("{b} ({})", at.vault_id));
                         }
                     }
                 }
             }
-            reads.push((env_name, name, &target.state_vault_id, boundaries));
+            // An unbound state vault (D-G) is made for this target alone by `opv apply`.
+            if let Some(vault) = &target.state_vault_id {
+                reads.push((env_name, name, vault, boundaries));
+            }
         }
     }
     let targets: Vec<TargetReads<'_>> = reads
@@ -2948,10 +2960,10 @@ environments = ["prod"]
     fn records_each_boundary_by_ids() {
         assert_eq!(
             fixture().environments["prod"].boundaries["allumata"],
-            Boundary {
+            Some(Boundary {
                 vault_id: "vprd".into(),
                 item_id: "iprd".into()
-            }
+            })
         );
     }
 
@@ -2959,7 +2971,7 @@ environments = ["prod"]
     fn records_the_targets_state_vault() {
         assert_eq!(
             fixture().environments["prod"].targets["portfolio"].state_vault_id,
-            "sprd"
+            Some("sprd".to_string())
         );
     }
 
@@ -3492,18 +3504,150 @@ environments = ["prod"]
         );
     }
 
-    #[test]
-    fn a_target_without_state_vault_id_is_state_vault_missing() {
+    // ---- unbound ids (D-G: before the first `opv apply`) ------------------------------
+
+    /// [`WEB`] with no ids: boundary `web` declared as `{}` and target `site` without
+    /// `state_vault_id`, as `opv propose setup --write` leaves it.
+    fn unbound() -> Fleet {
         let text = web("state_vault_id = \"sweb\"\n", "");
-        assert_eq!(config_code(&text), "state_vault_missing");
+        parse(&replaced(
+            &text,
+            "{ vault_id = \"vweb\", item_id = \"iweb\" }",
+            "{}",
+        ))
+        .unwrap()
+    }
+
+    /// The step of the cause `e` carries.
+    fn next_of(e: &Error) -> crate::cause::Next {
+        e.cause()
+            .unwrap()
+            .0
+            .step(&crate::cause::Invocation::default())
+            .1
+    }
+
+    /// `opv apply`, handed to a person.
+    fn apply_handoff() -> crate::cause::Next {
+        crate::cause::Next::Handoff(crate::cause::Cmd {
+            command: vec!["apply".into()],
+            args: Vec::new(),
+        })
     }
 
     #[test]
-    fn state_vault_missing_names_the_target() {
+    fn a_target_without_state_vault_id_loads_unbound() {
+        assert_eq!(
+            unbound().environments["prod"].targets["site"].state_vault_id,
+            None
+        );
+    }
+
+    #[test]
+    fn a_boundary_without_ids_loads_unbound() {
+        assert_eq!(unbound().environments["prod"].boundaries["web"], None);
+    }
+
+    #[test]
+    fn reading_an_unbound_boundary_is_boundary_missing() {
+        assert_eq!(
+            unbound().boundary("prod", "web").unwrap_err().code_str(),
+            "boundary_missing"
+        );
+    }
+
+    #[test]
+    fn an_unbound_boundarys_next_is_opv_apply_by_a_person() {
+        assert_eq!(
+            next_of(&unbound().boundary("prod", "web").unwrap_err()),
+            apply_handoff()
+        );
+    }
+
+    #[test]
+    fn every_boundary_of_an_environment_with_an_unbound_one_is_boundary_missing() {
+        assert_eq!(
+            unbound().bound_boundaries("prod").unwrap_err().code_str(),
+            "boundary_missing"
+        );
+    }
+
+    #[test]
+    fn reading_an_unbound_state_vault_names_the_target() {
+        let f = unbound();
+        let site = &f.environments["prod"].targets["site"];
         assert!(matches!(
-            cause(&web("state_vault_id = \"sweb\"\n", "")),
-            Cause::StateVaultMissing { target, .. } if target.as_str() == "site"
+            f.state_vault("prod", site).unwrap_err().cause(),
+            Some((Cause::StateVaultMissing { target, .. }, _)) if target.as_str() == "site"
         ));
+    }
+
+    #[test]
+    fn an_unbound_state_vaults_next_is_opv_apply_by_a_person() {
+        let f = unbound();
+        let site = &f.environments["prod"].targets["site"];
+        assert_eq!(
+            next_of(&f.state_vault("prod", site).unwrap_err()),
+            apply_handoff()
+        );
+    }
+
+    #[test]
+    fn a_bound_state_vault_reads_its_id() {
+        let f = parse(WEB).unwrap();
+        let site = &f.environments["prod"].targets["site"];
+        assert_eq!(f.state_vault("prod", site).unwrap(), "sweb");
+    }
+
+    #[test]
+    fn a_boundary_with_only_its_vault_id_is_refused_at_its_item_id() {
+        assert_eq!(
+            invalid(&web(", item_id = \"iweb\"", "")),
+            (
+                "environments.prod.boundaries.web.item_id".to_string(),
+                FieldRule::Missing
+            )
+        );
+    }
+
+    #[test]
+    fn an_unbound_boundary_still_rejects_a_malformed_vault_id() {
+        assert_eq!(
+            field_of(&web("vault_id = \"vweb\"", "vault_id = \"-v\"")),
+            "environments.prod.boundaries.web.vault_id"
+        );
+    }
+
+    #[test]
+    fn a_contract_with_a_boundary_and_no_bindings_file_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("secrets.toml");
+        let text = web("{ vault_id = \"vweb\", item_id = \"iweb\" }", "{}")
+            .replace("state_vault_id = \"sweb\"\n", "");
+        std::fs::write(&p, text).unwrap();
+        assert!(load(&p).is_ok());
+    }
+
+    #[test]
+    fn a_target_without_a_state_vault_binding_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("secrets.toml");
+        std::fs::write(
+            &p,
+            web("state_vault_id = \"sweb\"\n", "")
+                .replace("{ vault_id = \"vweb\", item_id = \"iweb\" }", "{}"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(bindings::FILE),
+            "environments.prod.boundaries.web.item_id = \"iweb\"\n\
+             environments.prod.boundaries.web.vault_id = \"vweb\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load(&p).unwrap().environments["prod"].targets["site"].state_vault_id,
+            None
+        );
     }
 
     #[test]

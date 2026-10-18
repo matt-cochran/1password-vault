@@ -761,7 +761,7 @@ pub(crate) fn placement_items(
         }
         let item = ensure_item(
             r,
-            &t.state_vault_id,
+            fleet.state_vault(env, t)?,
             &naming::delivery_item(product, target),
             &format!("opv-delivery:{project}/{env}/{target}/{product}"),
             &naming::delivery_item_notes(product, target, env),
@@ -979,7 +979,7 @@ fn personal_items(
                         vault_id: vault.id.clone(),
                         item_id: item.id.clone(),
                     };
-                    (b, at)
+                    (b, Some(at))
                 })
                 .collect();
         }
@@ -1002,7 +1002,6 @@ fn ci_reader_steps(
     path: &Path,
     env: &str,
 ) -> Result<(), Error> {
-    let e = fleet.environment(env)?;
     // 05.27: `opv access` defaults its project (and so the service account's name) to the
     // repository's name, so it gets the project bootstrap used, and the same file (X1).
     let access = |extra: &[&str]| {
@@ -1020,7 +1019,11 @@ fn ci_reader_steps(
     };
     let needs = access_plan::CiNeeds {
         environment: env,
-        boundary_vaults: e.boundaries.values().map(|b| b.vault_id.as_str()).collect(),
+        boundary_vaults: fleet
+            .bound_boundaries(env)?
+            .into_iter()
+            .map(|(_, b)| b.vault_id.as_str())
+            .collect(),
     };
     let grants = access_plan::required(project, &[], &[needs]);
     // No boundary vault: no product has a team key in this environment, so a CI reader

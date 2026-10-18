@@ -67,10 +67,10 @@ fn value_of(op: &FakeOp, dir: &Path, label: &str) -> Option<String> {
     let fleet = written(dir);
     let item = op.item(
         &fleet.environments["dev"]
-            .boundaries
-            .values()
+            .bound_boundaries()
             .next()
             .unwrap()
+            .1
             .item_id,
     );
     item["fields"]

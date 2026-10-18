@@ -272,15 +272,17 @@ fn plan_needs<'a>(
         let env_name = name.as_str();
         let mut targets = Vec::new();
         let mut fields: BTreeMap<&str, DottedPath> = BTreeMap::new();
-        for (boundary, b) in &env.boundaries {
+        for (boundary, b) in env.bound_boundaries() {
             fields
                 .entry(b.vault_id.as_str())
                 .or_insert_with(|| field(&[env_name, "boundaries", boundary, "vault_id"]));
         }
         for (target_name, spec) in &env.targets {
-            fields
-                .entry(spec.state_vault_id.as_str())
-                .or_insert_with(|| field(&[env_name, "targets", target_name, "state_vault_id"]));
+            if let Some(vault) = &spec.state_vault_id {
+                fields.entry(vault.as_str()).or_insert_with(|| {
+                    field(&[env_name, "targets", target_name, "state_vault_id"])
+                });
+            }
             if target.is_some_and(|only| only != target_name) {
                 continue;
             }
@@ -299,7 +301,7 @@ fn plan_needs<'a>(
                 environment: env_name,
                 target: target_name.as_str(),
                 boundary_vaults,
-                state_vault: spec.state_vault_id.as_str(),
+                state_vault: fleet.state_vault(env_name, spec)?,
             });
         }
         let ci = if target.is_some() {
@@ -307,10 +309,10 @@ fn plan_needs<'a>(
         } else {
             vec![CiNeeds {
                 environment: env_name,
-                boundary_vaults: env
-                    .boundaries
-                    .values()
-                    .map(|b| b.vault_id.as_str())
+                boundary_vaults: fleet
+                    .bound_boundaries(env_name)?
+                    .into_iter()
+                    .map(|(_, b)| b.vault_id.as_str())
                     .collect(),
             }]
         };

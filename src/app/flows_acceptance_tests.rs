@@ -168,12 +168,26 @@ fn the_proposal_starts_from_a_checkout_with_no_contract() {
 }
 
 #[test]
+fn the_proposed_contract_loads_before_the_first_apply() {
+    let w = proposed();
+    assert!(crate::config::load(&w.contract).is_ok());
+}
+
+#[test]
+fn before_the_first_apply_the_proposed_boundary_is_unbound() {
+    let w = proposed();
+    let fleet = crate::config::load(&w.contract).unwrap();
+    assert_eq!(
+        fleet.boundary(ENV, NAMES_PRODUCT).unwrap_err().code_str(),
+        "boundary_missing"
+    );
+}
+
+#[test]
 fn the_proposed_contract_declares_every_dotenv_name() {
     let w = proposed();
-    // Before an apply the boundary has no ids, so it is judged as the structural plan
-    // judges it: with placeholders for the ids still to create.
-    let text = std::fs::read_to_string(&w.contract).unwrap();
-    let fleet = crate::config::parse(&crate::app::structure::trial_text(&text).unwrap()).unwrap();
+    // Before an apply the boundary is declared and unbound: the contract loads as it is.
+    let fleet = crate::config::load(&w.contract).unwrap();
     let keys: Vec<String> = fleet.products[NAMES_PRODUCT].keys.keys().cloned().collect();
     assert_eq!(keys, ["DATABASE_URL", "LOG_LEVEL", "STRIPE_SECRET_KEY"]);
 }
@@ -211,7 +225,10 @@ fn apply_writes_the_apply_record() {
 fn import_local_tags_the_item_assistant_imported() {
     let w = walkthrough();
     let fleet = crate::config::load(&w.world.contract).unwrap();
-    let item_id = &fleet.environments[ENV].boundaries[NAMES_PRODUCT].item_id;
+    let item_id = &fleet.environments[ENV].boundaries[NAMES_PRODUCT]
+        .as_ref()
+        .unwrap()
+        .item_id;
     let tagged = w.world.op.item(item_id)["tags"]
         .as_array()
         .is_some_and(|t| {

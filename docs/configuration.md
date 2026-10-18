@@ -83,7 +83,9 @@ The group's vault is `<project>-core-<env>` and its item `<project> · core · <
 
 Two load errors protect the boundaries:
 
-- `boundary_missing`: a product has a team key desired in an environment whose boundary is not recorded. Its next step is `opv propose structure`, then `opv apply`.
+- `boundary_missing`: a product has a team key desired in an environment whose boundary is not declared. Its next step is `opv apply`, which a person runs in their own terminal.
+
+A boundary that is declared but not bound yet (`boundaries.web = {}`, as `opv propose setup --write` leaves it, before the first `opv apply`) is not an error: the contract loads, and commands that only read the contract (`opv contract`, `opv needs`, `opv explain`, `opv propose …`) work. A command that has to reach the boundary in 1Password stops with `boundary_missing` and names `opv apply`.
 - A recorded boundary that no product with a key in that environment lives in is refused; remove it, or declare that product's keys for the environment. The configuration never names a vault nothing reads.
 
 ### Where the ids live: `secrets.bindings.toml`
@@ -319,7 +321,7 @@ Every value has exactly one source: a key's own field, or the field named by `fr
 
 ### Delivery evidence: `state_vault_id`
 
-Every target needs a state vault for its delivery evidence. `state_vault_id` records it; `opv propose target` and `opv apply` create it, and `opv propose structure` creates and records any that is missing. A target without one fails at load with `state_vault_missing`.
+Every target needs a state vault for its delivery evidence. `state_vault_id` records it; `opv propose target` and `opv apply` create it, and `opv propose structure` creates and records any that is missing. A target without one loads (it is not bound yet, before the first `opv apply`); a command that needs the state vault stops with `state_vault_missing` and names `opv apply`.
 
 Each placement (a product the target delivers) keeps its evidence in one item of that vault, `opv · delivery · <product> · <target>`. `opv apply` creates it and records its id in `secrets.bindings.toml` under the target, so no command ever looks a state item up by title:
 

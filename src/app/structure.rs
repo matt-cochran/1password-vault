@@ -778,7 +778,7 @@ fn create_delivery_items(
                     kind: "delivery_item",
                     environment: env.clone(),
                     name: format!("{target}/{product}"),
-                    vault_id: t.state_vault_id.clone(),
+                    vault_id: fleet.state_vault(env, t)?.to_string(),
                     item_id: Some(item_id.clone()),
                     link: None,
                 });

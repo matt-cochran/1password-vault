@@ -659,7 +659,11 @@ fn delivery_records(
     let Some(env) = fleet.environments.get(env_name) else {
         return false;
     };
-    let Some(vault_id) = env.targets.get(target).map(|t| t.state_vault_id.clone()) else {
+    let Some(vault_id) = env
+        .targets
+        .get(target)
+        .and_then(|t| t.state_vault_id.clone())
+    else {
         return false;
     };
     // The item's vault and ID, read fresh and by ID (FR-13: never a title lookup).
@@ -791,7 +795,12 @@ fn explain_target_in(
             "deploy credentials",
             credentials.map_or_else(|| "none".to_string(), ToString::to_string),
         ),
-        ("state vault", t.state_vault_id.clone()),
+        (
+            "state vault",
+            t.state_vault_id
+                .clone()
+                .unwrap_or_else(|| "not bound yet (opv apply binds it)".to_string()),
+        ),
         ("deploy account", account),
     ];
     let width = rows

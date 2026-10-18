@@ -75,7 +75,7 @@ fn account_is_not_added_under_a_service_account() {
     crate::adapters::onepassword::read_item(
         &env_runner,
         prod,
-        prod.boundaries.values().next().unwrap(),
+        prod.bound_boundaries().next().unwrap().1,
     )
     .unwrap();
     assert_eq!(env_of(&r.calls.borrow()[0], "OP_ACCOUNT"), None);

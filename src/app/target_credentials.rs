@@ -291,6 +291,8 @@ pub fn run(
     if target.deploy_credentials.is_some() {
         return Err(already_recorded(env, name));
     }
+    // D-G: the credential is stored in the state vault, bound by `opv apply`.
+    let state_vault = fleet.state_vault(env, target)?;
     // The capability gate and the provider's own read-only check, before asking anything.
     // A preflight failure is the provider's cause as it is: nothing was created (06.07).
     match provider.mint_preflight(r) {
@@ -313,7 +315,7 @@ pub fn run(
     ))?;
     ui.show(&format!(
         "  store: a new 1Password item {item_title:?} in state vault {}",
-        target.state_vault_id
+        state_vault
     ))?;
     ui.show("The token is never shown, copied or pasted.")?;
     if !ui.confirm("Go ahead?")? {
@@ -347,7 +349,7 @@ pub fn run(
             "item",
             "list",
             "--vault",
-            target.state_vault_id.as_str(),
+            state_vault,
             "--tags",
             tag.as_str(),
         ]
@@ -356,7 +358,7 @@ pub fn run(
     });
     let item = init_op::create_item_with_secret_fields(
         r,
-        &target.state_vault_id,
+        state_vault,
         &item_title,
         &tags,
         &field_refs,
@@ -365,7 +367,7 @@ pub fn run(
     .map_err(|e| stored_failed(e, &minted, &credential, env, name, provider, target))?;
     drop(fields);
     // Only the item's reference is recorded; the token itself stays in 1Password.
-    let reference = format!("op://{}/{}", target.state_vault_id, item.id);
+    let reference = format!("op://{}/{}", state_vault, item.id);
     super::declare::set_target_deploy_credentials(r, config, env, name, &reference).map_err(
         |e| {
             let done = vec![
@@ -374,7 +376,7 @@ pub fn run(
                     "1Password item {} in vault {}, to record as deploy_credentials = \
                      {reference:?} under [{}]",
                     item.id,
-                    target.state_vault_id,
+                    state_vault,
                     target_section(env, name)
                 ),
             ];
@@ -384,7 +386,7 @@ pub fn run(
     writeln!(
         out,
         "minted {credential:?} and stored it as item {} in vault {}; nothing was printed",
-        item.id, target.state_vault_id
+        item.id, state_vault
     )
     .map_err(write_err)?;
     writeln!(

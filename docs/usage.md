@@ -726,7 +726,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `already_declared` | 2 | never | no | the name is already declared |
 | `ambiguous_name` | 2 | never | no | the name matches more than one declared name |
 | `bindings_unapplied` | 2 | after_fix | yes | the committed secrets.bindings.toml is not the one the last opv apply wrote; a person runs opv apply |
-| `boundary_missing` | 2 | after_fix | no | a product has a key desired in an environment whose boundary (vault and item) is not recorded |
+| `boundary_missing` | 2 | after_fix | yes | a product has a key desired in an environment whose boundary (vault and item) is not declared or not bound yet; a person runs opv apply |
 | `choice_required` | 2 | never | yes | the command needs a flag to choose between several candidates |
 | `config_changed` | 2 | safe | no | the configuration changed while opv was editing it; nothing was written and re-running is safe |
 | `config_invalid` | 2 | after_fix/never | no | secrets.toml, the manifest or a change opv proposed breaks a field rule |
@@ -746,7 +746,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `nothing_in_scope` | 2 | never | no | nothing in the environment matches the scope the command was given |
 | `retire_still_read` | 2 | after_fix | no | the deployed code still reads a key a person asked to retire, or no receipt records the deployed revision |
 | `source_only` | 2 | never | no | the product is source-only: it holds shared values for other products' keys and is never run, checked or planned on its own |
-| `state_vault_missing` | 2 | after_fix | no | a target has no state vault recorded for its delivery evidence |
+| `state_vault_missing` | 2 | after_fix | yes | a target's state vault for its delivery evidence is not bound yet; a person runs opv apply |
 | `state_vault_wider_than_values` | 2 | after_fix | no | a state vault shared by targets could be readable more widely than the values its evidence describes; a person gives one target its own |
 | `title_ambiguous` | 2 | after_fix | no | more than one 1Password vault or item has exactly this title |
 | `title_not_found` | 2 | after_fix | no | no 1Password vault or item has exactly this title |

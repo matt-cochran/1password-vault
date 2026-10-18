@@ -589,13 +589,16 @@ mod cases {
         .mcp("opv_configuration", json!({}))
     }
 
+    /// A target whose state vault is not bound yet (D-G, before the first `opv apply`): the
+    /// contract loads, and a command that reads the target's delivery evidence names
+    /// `opv apply`.
     pub fn state_vault_missing() -> Case {
         case(
             Scenario::new()
                 .config(|c| without_line(c, r#"state_vault_id = "vE2ESTATEFLY00000000000001""#)),
-            &["config", "describe"],
+            &["changed", "prod"],
         )
-        .mcp("opv_configuration", json!({}))
+        .mcp("opv_changed", json!({"environment": "prod"}))
     }
 
     pub fn state_vault_too_wide() -> Case {
