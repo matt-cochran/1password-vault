@@ -5,7 +5,8 @@
 //!
 //! **Success replies from the owner's recordings** (`tests/fixtures/op/success/`, op 2.40.0):
 //! `account list` (s01), `vault list` (s02), `vault get` (s03), `vault user list` (s04; s23
-//! when the session's own user is a member: the writer's listing),
+//! when the session's own user is a member: the writer's listing, as for a vault the session
+//! created with `vault create`),
 //! `item list` (s05) and `whoami` (s06 with `--account` or `OP_ACCOUNT`, s07 without). Each
 //! reply is the recording with its marker values (`<ACCOUNT_2>`, `<ID_n>`, `<NAME_n>`,
 //! `<TITLE_n>`, …) and op's fixed values (`MEMBER`, `SECURE_NOTE`, …) replaced by the world's,
@@ -251,9 +252,15 @@ pub fn run(world: &mut World, args: &[String]) -> Reply {
         },
         ["vault", "create", name] => {
             let id = world.new_id("vsim");
+            // 1Password gives the person who creates a vault access to it: the session's
+            // own user is its one member (its listing is then the writer recording s23).
+            let mut creator = json!({"id": account["user"], "email": account["email"]});
+            if let Some(n) = account.get("name") {
+                creator["name"] = n.clone();
+            }
             world
                 .array_at("/op/vaults")
-                .push(json!({"id": id, "name": name, "account": acct, "users": []}));
+                .push(json!({"id": id, "name": name, "account": acct, "users": [creator]}));
             Reply::json(&json!({"id": id, "name": name}))
         }
         ["item", "list"] => item_list(world, &account, args),

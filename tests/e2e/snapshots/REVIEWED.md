@@ -218,3 +218,24 @@ Fixed on `v0120/core-fixes` (2026-10-18), core snapshots regenerated and reviewe
 `guard.snap` lost its MCP half: `opv_state` section `delivery_preview` takes `env` and `product` only (§25.2), so a remote profile's preview (`--role`, `--remote`) has no MCP form. The `policy_refused`/`remote_profile_refuses` cause is still reached by the CLI `--json` run of the same snapshot.
 
 - [ ] Owner sign-off of the opv_state snapshots.
+
+## 0.12.0: the assistant walkthrough (e2e-walkthrough, 2026-10-18)
+
+1 new scenario snapshot, `assistant_walkthrough` (`tests/e2e/scenarios/assistant.rs`), and 1 changed: `flow_propose_setup` (the names-only setup now declares `tier = "local"`, so its diff and plan id moved). The walkthrough is design §6.1 on opv-sim, from a checkout with no configuration to `opv ready --gate` passing in `local`, `prod` and all environments: 20 steps, the assistant's through `opv_state`, `opv_propose`, `opv_import_local` and `opv_explain` only (`opv_next` is not on this branch; `opv_state inventory` stands in), the person's `opv apply`, `opv import` and `opv set`, CI's `opv sync`. `apply` and `set` need a terminal the harness cannot give, so those two run in-process through the library (as `src/app/flows_acceptance_tests.rs` does) against the same simulator; the snapshot shows their plan lines, the confirmation and the state line. The last line is the person-action count: `person actions: 3`. The delivery revision (`drv-…`, random per sync) is normalized to `drv-<id>`.
+
+Checked by the implementing agent: no value anywhere (every value is an `S7MARKER` marker; the canary gate and the walkthrough's own test pass); the person applies exactly the `plan_id` the assistant's `opv_propose structure` returned; every MCP answer is `ok: true` except the first (`config_not_found`, next `opv propose setup --help`).
+
+Defects the walkthrough exposed, fixed (each with its own unit test):
+
+1. A names-only setup declared environment `local` without a tier, so it defaulted to `shared` and `opv_import_local` refused it (`import_tier_refused`): §6.1 step 2 could not run. It now declares `tier = "local"` (`src/app/propose/setup.rs`).
+2. `opv propose key` could not put an existing product's key into a new environment: without `boundaries.<product>` there the proposal failed `boundary_missing`, with it the loader refused the boundary as unused. The key proposal now declares the product's boundary (no ids) in each environment the team key reaches (`src/app/propose/key.rs`, `ConfigDoc::declare_boundary`).
+3. `ready --gate` failed a `local`-tier environment forever after `opv_import_local`: the `assistant_imported` item tag is never removed, and the gate refused every tagged value. The gate now ignores the tag in a `local`-tier environment, the one tier the import is for; any other tier still refuses tagged values (`src/app/ready.rs`). **Owner decision wanted**: design row `import-local` says tagged values "never count toward a gate"; this reads it as "toward promotion".
+4. opv-sim: `op vault create` left the new vault with no member, so `inventory` called the session's own new vaults `unreadable(no_access)`. The creator is now the vault's one member (its `vault user list` is the owner's writer recording s23; no new reply).
+
+Findings for the owner (not fixed here):
+
+1. `opv_state ready` for an assistant, in a checkout whose default branch has no committed contract, shows every key as blocking `rules_pending_review` (even keys with no rule), which hides `SESSION_SECRET`'s `empty` state; its `next` is `opv open app/API_KEY` (a key already set). `inventory` shows the true states.
+2. `opv_state inventory` has `next: none` while one cell is `empty` with capability `write` (`opv_next`, row mcp-propose, is meant to say it).
+3. A person's `opv import` into the production-tier `prod` ran without `--confirm prod` (§21 P-11 names `--confirm <env>` for it).
+
+- [ ] Owner sign-off of the walkthrough snapshot.

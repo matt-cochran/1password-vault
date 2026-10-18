@@ -47,6 +47,16 @@ fn a_key_proposal_diff_adds_the_key() {
 }
 
 #[test]
+fn a_key_reaching_a_new_environment_declares_its_products_boundary_there() {
+    let contract = format!("{DEV}\n[environments.prod]\ntier = \"production\"\n");
+    let intent = key_intent(
+        r#"{"kind":"key","key":"EXISTING_KEY","product":"app","field_kind":"secret","environments":["dev","prod"]}"#,
+    );
+    let proposal = propose(&contract, &Bindings::default(), None, &intent).unwrap();
+    assert!(added(&proposal.diff).contains(&"boundaries.app = {}"));
+}
+
+#[test]
 fn a_new_key_without_environments_writes_no_environments_line() {
     let intent =
         key_intent(r#"{"kind":"key","key":"NEW_KEY","product":"app","field_kind":"secret"}"#);

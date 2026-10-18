@@ -116,6 +116,15 @@ pub fn propose_with(
                     lifecycle: lifecycle.map(lifecycle_word),
                 },
             )?;
+            // A team key present in an environment where its product has no boundary yet
+            // declares that boundary there (no ids: the apply records them), so a product
+            // can grow into a new environment.
+            if !*personal && from.is_none() {
+                let boundary = fleet.boundary_of(&product).to_string();
+                for env in declared.iter().filter(|e| !excluded.contains(e)) {
+                    doc.declare_boundary(env, &boundary)?;
+                }
+            }
             questions = production_questions(&fleet, &named, &excluded);
             "key"
         }

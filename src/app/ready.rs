@@ -1380,10 +1380,17 @@ pub(crate) fn gate_keys(
             .unwrap_or_else(|| row.product.clone());
         let item = fleet.boundary(env, &source).ok().map(|b| b.item_id.clone());
         // An assistant-imported item's values never count as set (design row
-        // `import-local`), whatever the target says.
-        if item
-            .as_ref()
-            .is_some_and(|id| assistant_imported.contains(id))
+        // `import-local`), whatever the target says, except in the `local` tier the import
+        // was made for: there they are the developer's own values, and nothing promotes
+        // them (the tag stays on the item, so a local gate could otherwise never pass).
+        let local = fleet
+            .environments
+            .get(env)
+            .is_some_and(|e| e.tier == crate::domain::Tier::Local);
+        if !local
+            && item
+                .as_ref()
+                .is_some_and(|id| assistant_imported.contains(id))
         {
             out.push((row.product.clone(), row.key.clone(), "assistant_imported"));
             continue;

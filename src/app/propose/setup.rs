@@ -83,7 +83,10 @@ pub fn from_names(
 /// The contract for a names-only proposal: one environment declaring the product's
 /// boundary (without an id yet), then one table per key with its kind.
 fn names_contract(env: &str, imported: &init::Imported) -> Result<String, Error> {
-    let seed = format!("[environments.{env}]\nboundaries.{NAMES_PRODUCT} = {{}}\n");
+    // A `.env` holds a developer's own values: the environment is of tier `local`, the one
+    // tier the assistant's write-only import (`opv_import_local`) may fill (design §6.1).
+    let seed =
+        format!("[environments.{env}]\ntier = \"local\"\nboundaries.{NAMES_PRODUCT} = {{}}\n");
     let mut doc = ConfigDoc::parse(&seed)?;
     let environments = vec![env.to_string()];
     for (name, kind) in &imported.kinds {

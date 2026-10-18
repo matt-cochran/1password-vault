@@ -264,3 +264,33 @@ fn the_gate_does_not_count_a_tagged_value_as_set() {
         )]
     );
 }
+
+#[test]
+fn the_gate_counts_a_tagged_value_in_a_local_tier_environment() {
+    let fleet = crate::config::parse(
+        "[environments.dev]\ntier = \"local\"\nboundaries.app = { vault_id = \"v\", item_id = \"src1\" }\n\
+         [products.app.keys.DATABASE_URL]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
+    )
+    .unwrap();
+    let rows = vec![Row {
+        product: "app".into(),
+        key: "DATABASE_URL".into(),
+        kind: Kind::Secret,
+        state: KeyState::Ready,
+        target: TargetState::Present,
+        guidance: String::new(),
+        source: None,
+        shared_by: Vec::new(),
+    }];
+    let keys = crate::app::ready::gate_keys(
+        &fleet,
+        "dev",
+        &rows,
+        &std::collections::BTreeSet::new(),
+        &std::collections::BTreeSet::from(["app".to_string()]),
+        &std::collections::BTreeMap::from([("src1".to_string(), 3)]),
+        &std::collections::BTreeMap::from([("src1".to_string(), 3)]),
+        &std::collections::BTreeSet::from(["src1".to_string()]),
+    );
+    assert!(keys.is_empty(), "{keys:?}");
+}
