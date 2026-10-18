@@ -245,6 +245,7 @@
     {
       "args": [],
       "flags": [
+        "env",
         "json"
       ],
       "name": "next"
@@ -578,6 +579,10 @@
           }
         ],
         "properties": {
+          "env": {
+            "pattern": "^[a-z][a-z0-9-]*$",
+            "type": "string"
+          },
           "key": {
             "pattern": "^([a-z][a-z0-9-]*/)?[A-Z][A-Z0-9_]*$",
             "type": "string"

@@ -394,7 +394,8 @@ Reads each 1Password item once; never prints a value, a length or a digest.";
 const NEXT_QUICK: &str = "\
 Examples:
   opv next                             # the one action to take now, then the queue
-  opv next --json                      # the same as one document";
+  opv next --json                      # the same as one document
+  opv next --env dev                   # only what the dev environment needs";
 
 const NEXT_MORE: &str = "\
 Priority: bind an unbound boundary (opv apply); then fill an absent, empty, placeholder or
@@ -698,6 +699,9 @@ enum Cmd {
     /// others, by vault (names and commands only).
     #[command(before_help = NEXT_QUICK, after_help = NEXT_MORE)]
     Next {
+        /// Only this environment.
+        #[arg(long)]
+        env: Option<String>,
         /// Print one JSON document instead of lines.
         #[arg(long)]
         json: bool,
@@ -2361,7 +2365,7 @@ impl Cmd {
             | Cmd::Needs { json, .. }
             | Cmd::Contract { json, .. }
             | Cmd::Inventory { json, .. }
-            | Cmd::Next { json }
+            | Cmd::Next { json, .. }
             | Cmd::Apply { json, .. }
             | Cmd::Set { json, .. }
             | Cmd::Import { json, .. }
@@ -4198,9 +4202,9 @@ fn run_other(
             json,
             out,
         ),
-        Cmd::Next { json } => {
+        Cmd::Next { env, json } => {
             let (document, signals) =
-                opv::app::inventory::gather_for_next(&loaded?, None, None, r, None)?;
+                opv::app::inventory::gather_for_next(&loaded?, env.as_deref(), None, r, None)?;
             let doc = opv::app::next::next(&document, &signals);
             if json {
                 writeln!(out, "{}", doc.document()).map_err(write_err)

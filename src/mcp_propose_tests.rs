@@ -1,9 +1,9 @@
-//! The MCP tools of row `mcp-propose-a` (design §25.2): `opv_propose`, `opv_import_local`
-//! and `opv_explain`. One behaviour per test, each with one assertion. Every `op` reply comes
+//! The MCP tools of row `mcp-propose` (design §25.2): `opv_propose`, `opv_import_local`
+//! and `opv_explain`, and the five tools `tools/list` advertises. One behaviour per test, each with one assertion. Every `op` reply comes
 //! from the shared fake (`FakeOp`); no tool output is invented.
 //!
-//! Parity: each tool's answer equals the `--json` document the CLI library produces for the
-//! same input, framed as `opv <command> --json` frames it.
+//! Parity: each tool's answer, success or failure, equals the `--json` document the CLI
+//! library produces for the same input, framed as `opv <command> --json` frames it.
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -182,6 +182,30 @@ fn cli_json(body: &[u8]) -> Value {
     serde_json::from_slice(&crate::json::finish(body, Ok(()), false)).unwrap()
 }
 
+/// What `opv <words> --json` prints when it fails with `e`: the whole frame.
+fn cli_failure(words: &[&str], e: &Error) -> Value {
+    let argv: Vec<String> = std::iter::once("opv")
+        .chain(words.iter().copied())
+        .chain(std::iter::once("--json"))
+        .map(str::to_string)
+        .collect();
+    serde_json::from_slice(&crate::json::finish_with(
+        &[],
+        Err(e),
+        false,
+        &Invocation::from_cli(&argv),
+        false,
+    ))
+    .unwrap()
+}
+
+/// `doc` with the person's `--write` step as its `next`.
+fn with_write_next(doc: &[u8], command: &str) -> Vec<u8> {
+    let mut v: Value = serde_json::from_slice(doc).unwrap();
+    v["next"] = json!({"kind": "apply", "actor": "person", "command": command});
+    serde_json::to_vec(&v).unwrap()
+}
+
 fn as_json<T: serde::Serialize>(doc: &T) -> Vec<u8> {
     serde_json::to_vec(doc).unwrap()
 }
@@ -206,7 +230,10 @@ fn opv_propose_key_equals_the_librarys_proposal() {
     let want = crate::app::propose::key::propose(&text, &ids, None, &intent).unwrap();
     assert_eq!(
         w.propose(serde_json::from_str(KEY_INTENT).unwrap()),
-        cli_json(&unwritten(&want))
+        cli_json(&with_write_next(
+            &unwritten(&want),
+            "opv propose key app/NEW_KEY --kind secret --write"
+        ))
     );
 }
 
@@ -244,7 +271,90 @@ fn opv_propose_setup_from_names_equals_the_librarys_proposal() {
     .unwrap();
     assert_eq!(
         w.propose(json!({"kind": "setup", "names_from": "dev.env"})),
-        cli_json(&unwritten(&want))
+        cli_json(&with_write_next(
+            &unwritten(&want),
+            "opv propose setup --names-from dev.env --write"
+        ))
+    );
+}
+
+#[test]
+fn opv_propose_retire_of_an_undeclared_key_is_the_clis_own_failure() {
+    let w = World::new();
+    let intent = json!({"kind": "retire", "key": "NOPE", "product": "app"});
+    let parsed = crate::domain::intent::parse(&intent.to_string()).unwrap();
+    let text = std::fs::read_to_string(w.contract()).unwrap();
+    let ids = crate::config::bindings::read_sibling(&w.contract()).unwrap();
+    let err = crate::app::propose::key::propose(&text, &ids, None, &parsed)
+        .map_err(proposal_refused)
+        .unwrap_err();
+    assert_eq!(
+        w.propose(intent),
+        cli_failure(&["propose", "retire", "app/NOPE"], &err)
+    );
+}
+
+// The person's step after a contract proposal -----------------------------------------------
+
+#[test]
+fn opv_propose_key_next_is_the_persons_write() {
+    let w = World::new();
+    let doc = w.propose(json!({"kind": "key", "key": "NEW_KEY", "product": "app",
+        "field_kind": "config", "immutable": true,
+        "except": {"prod": "not used there"}, "guidance": "from the team lead"}));
+    assert_eq!(
+        doc["next"],
+        json!({"kind": "apply", "actor": "person", "command":
+            "opv propose key app/NEW_KEY --kind config \
+             --except 'prod=not used there' --guidance 'from the team lead' --immutable --write"}),
+        "{doc}"
+    );
+}
+
+#[test]
+fn opv_propose_env_next_is_the_persons_write() {
+    let w = World::new();
+    let doc = w.propose(json!({"kind": "env", "env": "staging", "tier": "shared"}));
+    assert_eq!(
+        doc["next"],
+        json!({"kind": "apply", "actor": "person",
+               "command": "opv propose env staging --tier shared --write"})
+    );
+}
+
+#[test]
+fn opv_propose_target_next_is_the_persons_write() {
+    let w = World::new();
+    let doc = w.propose(json!({"kind": "target", "env": "prod", "name": "web",
+        "provider": "fly", "options": {"fly-app": "myapp-prod"}}));
+    assert_eq!(
+        doc["next"],
+        json!({"kind": "apply", "actor": "person", "command":
+            "opv propose target prod web --provider fly --fly-app myapp-prod --write"})
+    );
+}
+
+#[test]
+fn opv_propose_retire_next_is_the_persons_write() {
+    let w = World::new();
+    let doc = w.propose(json!({"kind": "retire", "key": "LOG_LEVEL", "product": "app"}));
+    assert_eq!(
+        doc["next"],
+        json!({"kind": "apply", "actor": "person",
+               "command": "opv propose retire app/LOG_LEVEL --write"})
+    );
+}
+
+#[test]
+fn opv_propose_a_document_the_cli_cannot_say_is_written_from_the_intent() {
+    let w = World::new();
+    let doc = w.propose(
+        json!({"kind": "retire", "key": "LOG_LEVEL", "product": "app",
+                               "guidance": "replaced by RUST_LOG"}),
+    );
+    assert_eq!(
+        doc["next"]["command"],
+        "opv propose --intent <intent.json> --write"
     );
 }
 
@@ -315,6 +425,24 @@ fn opv_import_local_equals_the_librarys_import() {
 }
 
 #[test]
+fn opv_import_local_into_a_shared_environment_is_the_clis_own_failure() {
+    let mcp = World::new();
+    let cli = World::new();
+    let err = crate::app::import_local::import_local_json(
+        &cli.fleet(),
+        "prod",
+        &cli.project().join("dev.env"),
+        &cli.r,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        mcp.import("prod"),
+        cli_failure(&["import", "prod", "--from", "dev.env"], &err)
+    );
+}
+
+#[test]
 fn opv_import_local_writes_the_local_environments_empty_field() {
     let w = World::new();
     let _ = w.import("dev");
@@ -369,6 +497,25 @@ fn opv_explain_equals_the_librarys_explanation() {
 }
 
 #[test]
+fn opv_explain_of_an_undeclared_key_is_the_clis_own_failure() {
+    let w = World::new();
+    let err = crate::app::explain::run_request_with(
+        &w.r,
+        &w.fleet(),
+        &crate::app::explain::Asked::Key("app/NOPE"),
+        Some("dev"),
+        &crate::app::personal::project_name(&w.r, w.project()),
+        &mut Vec::new(),
+        true,
+    )
+    .unwrap_err();
+    assert_eq!(
+        w.explain("app/NOPE", "dev"),
+        cli_failure(&["explain", "app/NOPE", "--env", "dev"], &err)
+    );
+}
+
+#[test]
 fn opv_explain_of_a_name_that_is_not_a_key_is_usage() {
     let w = World::new();
     assert_eq!(w.explain("api key", "dev")["error"]["code"], "usage");
@@ -414,4 +561,68 @@ fn opv_propose_advertises_exactly_the_intent_schema() {
         Value::Object(tool.input_schema.as_ref().clone()),
         crate::domain::intent::json_schema()
     );
+}
+
+/// The §25 surface golden's tools: name to input schema.
+fn golden_tools() -> std::collections::BTreeMap<String, Value> {
+    let golden: Value =
+        serde_json::from_str(include_str!("../tests/e2e/expected/surface.json")).unwrap();
+    golden["mcp"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| {
+            (
+                t["name"].as_str().unwrap().to_string(),
+                t["input_schema"].clone(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn tools_list_equals_the_golden_names_and_input_schemas() {
+    let listed: std::collections::BTreeMap<String, Value> = Server::tool_router()
+        .list_all()
+        .into_iter()
+        .map(|t| {
+            (
+                t.name.to_string(),
+                Value::Object(t.input_schema.as_ref().clone()),
+            )
+        })
+        .collect();
+    assert_eq!(listed, golden_tools());
+}
+
+#[test]
+fn only_opv_import_local_is_not_read_only() {
+    let writers: Vec<String> = Server::tool_router()
+        .list_all()
+        .into_iter()
+        .filter(|t| {
+            t.annotations
+                .as_ref()
+                .and_then(|a| a.read_only_hint)
+                .is_none_or(|ro| !ro)
+        })
+        .map(|t| t.name.to_string())
+        .collect();
+    assert_eq!(writers, vec!["opv_import_local".to_string()]);
+}
+
+#[test]
+fn no_tool_is_destructive() {
+    let destructive: Vec<String> = Server::tool_router()
+        .list_all()
+        .into_iter()
+        .filter(|t| {
+            t.annotations
+                .as_ref()
+                .and_then(|a| a.destructive_hint)
+                .is_none_or(|d| d)
+        })
+        .map(|t| t.name.to_string())
+        .collect();
+    assert_eq!(destructive, Vec::<String>::new());
 }
