@@ -89,6 +89,12 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "SourceChanged",
         "a successful result (exit 10), never an error document",
     ),
+    // The intent document is screened in-process by `domain::intent::parse`; no 0.12.0 CLI or
+    // MCP surface reaches it yet (the `propose` and `mcp-propose` rows add one).
+    (
+        "ValueInTextField",
+        "the intent document has no CLI or MCP surface yet (row intent)",
+    ),
 ];
 
 fn snapshots() -> PathBuf {

@@ -1325,6 +1325,9 @@ impl Cause {
                 let (what, _) = rule_words(&field.to_string(), rule);
                 format!("{}{}: {what}", source_words(source), at_words(at))
             }
+            ValueInTextField { field, detector } => format!(
+                "{field} carries what looks like a value ({detector}); free text in an intent document may not carry one"
+            ),
             BoundaryMissing {
                 env,
                 product,
@@ -2488,6 +2491,19 @@ impl Cause {
                     rerun_as_read(inv),
                 )
             }
+            ValueInTextField { field, .. } => plan(
+                Some((
+                    Action::EditConfig {
+                        source: ConfigSource::File {
+                            path: "intent.json".into(),
+                            given_by: GivenBy::Discovered,
+                        },
+                        field: field.clone(),
+                    },
+                    format!("remove the value from {field}"),
+                )),
+                Next::Rerun,
+            ),
             BoundaryMissing { source, .. } | StateVaultMissing { source, .. } => plan(
                 None,
                 match source {

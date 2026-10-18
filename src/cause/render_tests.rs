@@ -146,6 +146,13 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             ],
         ),
         (
+            ValueInTextField {
+                field: DottedPath(vec!["guidance".into()]),
+                detector: "known_prefix",
+            },
+            vec!["guidance", "known_prefix"],
+        ),
+        (
             BoundaryMissing {
                 env: EnvName::new("env-prod"),
                 product: ProductName::new("prod-api"),
@@ -941,10 +948,11 @@ fn ordinal(c: &Cause) -> usize {
         PersonalNotSetUp { .. } => 73,
         TargetDrift { .. } => 75,
         MountUnreadable { .. } => 76,
+        ValueInTextField { .. } => 77,
     }
 }
 
-const VARIANTS: usize = 77;
+const VARIANTS: usize = 78;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()

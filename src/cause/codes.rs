@@ -86,6 +86,9 @@ pub fn meaning(code: &str) -> &'static str {
         "config_invalid" => {
             "secrets.toml, the manifest or a change opv proposed breaks a field rule"
         }
+        "value_in_text_field" => {
+            "free text in an intent document looks like a secret value and is refused before anything is written"
+        }
         "boundary_missing" => {
             "a product has a key desired in an environment whose boundary (vault and item) is not recorded"
         }
@@ -450,6 +453,10 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
             rule: FieldRule::Unknown {
                 suggestion: Some("confirm_env".into()),
             },
+        },
+        ValueInTextField {
+            field: DottedPath(vec!["guidance".into()]),
+            detector: "known_prefix",
         },
         BoundaryMissing {
             env: EnvName::new("env-prod"),

@@ -762,6 +762,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `unknown_role` | 2 | never | no | no key declares the process role |
 | `unknown_target` | 2 | never | no | the target is not declared for the environment |
 | `usage` | 2 | never | no | the command line is not valid (unknown flag, missing argument, a removed form) |
+| `value_in_text_field` | 2 | after_fix | no | free text in an intent document looks like a secret value and is refused before anything is written |
 | `child_start_failed` | 3 | after_fix | no | the command opv run starts could not be started |
 | `dependency_missing` | 3 | after_fix | no | op or the target CLI is not installed or not on PATH |
 | `remote_version_mismatch` | 3 | after_fix | no | opv on the remote host speaks another protocol version |
