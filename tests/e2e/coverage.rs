@@ -1795,8 +1795,10 @@ mod flow_cases {
 ///   `unreadable`);
 /// - shared dev and web dev: the session and the ops user write;
 /// - web dev's `SESSION_SECRET` is empty (`empty`) and its `LOG_LEVEL` is `changeme`
-///   (`placeholder`); every other value is an `S7MARKER` marker (`set`), and a key with no
-///   field in its item (`web/DATABASE_URL`) is `absent`.
+///   (`placeholder`); its `API_KEY` field is removed, so that key is `absent` there; every
+///   other value is an `S7MARKER` marker (`set`). `web/DATABASE_URL` (`from`) reads its
+///   source `shared/DATABASE_URL`; `web/PERSONAL_LLM_KEY` is read from the personal item;
+///   a key an explicit `environments` list leaves out has no cell there.
 ///
 /// No MCP half yet: `opv_state` (row mcp-state) is not on this tree.
 mod core_cases {
@@ -1825,7 +1827,9 @@ mod core_cases {
                 v["users"] = users;
             }
             item(w, WEB_DEV_ITEM, |i| {
-                for f in i["fields"].as_array_mut().expect("fields") {
+                let fields = i["fields"].as_array_mut().expect("fields");
+                fields.retain(|f| f["label"] != "API_KEY");
+                for f in fields {
                     match f["label"].as_str() {
                         Some("SESSION_SECRET") => f["value"] = json!(""),
                         Some("LOG_LEVEL") => f["value"] = json!("changeme"),

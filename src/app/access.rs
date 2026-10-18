@@ -565,6 +565,7 @@ fn build(
     // `access-writers`).
     let deployed = need.tier != Tier::Local;
     let mut env_findings = Vec::new();
+    let mut no_writer = Vec::new();
     let mut vaults = Vec::new();
     for vault in &needed {
         // #157: a vault the diagnosis classified carries that cause; no owner command is
@@ -594,6 +595,11 @@ fn build(
                 }),
             writers: access.writers.clone(),
         });
+        // A production vault whose readable user list names no writer: nobody can fix a
+        // value there (row `access-writers`).
+        if need.tier == Tier::Production && access.visible && access.writers.is_empty() {
+            no_writer.push(crate::domain::access::no_writer(vault, need.name));
+        }
         for finding in findings(&[access]) {
             // The CI-reader warning is about the CI reader; `--target` leaves it out.
             if finding.code == "no_ci_reader" && need.ci.is_empty() {
@@ -607,6 +613,8 @@ fn build(
             env_findings.push(finding);
         }
     }
+    // After every vault's own findings: the per-vault causes keep their place.
+    env_findings.extend(no_writer);
     EnvReport {
         name: need.name.to_string(),
         report,

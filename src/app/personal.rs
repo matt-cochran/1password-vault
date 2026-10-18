@@ -200,7 +200,7 @@ pub(crate) fn naming_keys(e: Error, env_name: &str, keys: &[(&str, &str)]) -> Er
 
 /// Whether `e` says the personal item or its vault is not there (not set up yet), as
 /// opposed to a sign-in or 1Password not answering.
-fn not_set_up(e: &Error) -> bool {
+pub(crate) fn not_set_up(e: &Error) -> bool {
     e.code_str() == "item_not_found"
         || matches!(
             e.cause(),

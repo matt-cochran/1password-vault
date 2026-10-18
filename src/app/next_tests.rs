@@ -43,6 +43,8 @@ fn cell(key: &str, state: ValueState, capability: Capability) -> Cell {
         state,
         capability,
         from_receipt: None,
+        from: None,
+        personal: false,
     }
 }
 
@@ -306,5 +308,83 @@ fn the_text_names_the_next_action() {
     assert_eq!(
         render_text(&next(&inv, &Signals::default())),
         "next: opv set api/A --env dev\n"
+    );
+}
+
+/// A shared key's value is entered at its source (FR-45): `next` never asks to `opv set`
+/// the key that only refers to it.
+#[test]
+fn a_shared_key_is_entered_at_its_source() {
+    let mut shared = cell("DATABASE_URL", ValueState::Absent, Capability::Write);
+    shared.product = "web".to_string();
+    shared.from = Some("api/DATABASE_URL".to_string());
+    let inv = inventory(vec![env("dev", Tier::Shared, Some("vdev"))], vec![shared]);
+    assert_eq!(
+        shown(&next(&inv, &Signals::default())),
+        Some((
+            NextKind::EnterValue,
+            NextActor::Person,
+            "opv set api/DATABASE_URL --env dev".to_string()
+        ))
+    );
+}
+
+/// A key the contract does not want in an environment (`except`) is `not_wanted`, never a
+/// value to fill: `next` queues nothing for it.
+#[test]
+fn a_not_wanted_key_asks_for_nothing() {
+    let not_wanted = ValueState::NotWanted {
+        reason: "no dev account".to_string(),
+    };
+    let inv = inventory(
+        vec![env("dev", Tier::Shared, Some("vdev"))],
+        vec![cell("A", not_wanted, Capability::Write)],
+    );
+    assert_eq!(shown(&next(&inv, &Signals::default())), None);
+}
+
+/// A personal key lives in the person's own item, which `opv set` does not write (FR-55):
+/// `next` never queues an `opv set` for it.
+#[test]
+fn a_personal_key_is_never_an_opv_set() {
+    let mut personal = cell("LLM_KEY", ValueState::Absent, Capability::Write);
+    personal.personal = true;
+    let inv = inventory(vec![env("dev", Tier::Shared, Some("vdev"))], vec![personal]);
+    assert_eq!(shown(&next(&inv, &Signals::default())), None);
+}
+
+/// One command asked for by several keys is one action naming them, not one line per key.
+#[test]
+fn one_command_for_several_keys_is_one_action() {
+    let inv = inventory(
+        vec![env("prod", Tier::Production, Some("vprod"))],
+        vec![
+            Cell {
+                env: "prod".to_string(),
+                ..cell("A", ValueState::Set, Capability::Write)
+            },
+            Cell {
+                env: "prod".to_string(),
+                ..cell("B", ValueState::Set, Capability::Write)
+            },
+        ],
+    );
+    assert_eq!(
+        next(&inv, &Signals::default()).next.map(|a| a.keys),
+        Some(vec!["api/A".to_string(), "api/B".to_string()])
+    );
+}
+
+/// `single_writer` reads the same in `opv next` as in `opv access`.
+#[test]
+fn single_writer_is_worded_as_access_words_it() {
+    let inv = inventory(vec![env("dev", Tier::Shared, Some("vdev"))], Vec::new());
+    let signals = Signals {
+        delivered: BTreeSet::new(),
+        writers: BTreeMap::from([("vdev".to_string(), 1)]),
+    };
+    assert_eq!(
+        next(&inv, &signals).findings[0].message,
+        crate::domain::access::single_writer_message("vdev", "dev")
     );
 }

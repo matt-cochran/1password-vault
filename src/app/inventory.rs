@@ -198,6 +198,7 @@ fn read(
         cells.capabilities.insert(vault_id, capability);
     }
     read_boundaries(&scoped, &source, r, &needs, &mut cells)?;
+    read_personal(&scoped, &source, r, &me, &mut cells);
 
     let view = match receipt {
         Some(path) => Some(read_receipt(path)?),
@@ -246,7 +247,8 @@ fn read_boundaries(
         let found = convention::resolve(&layout, &part);
         for (product, declared) in &part.products {
             for (key, spec) in &declared.keys {
-                if !spec.is_desired_in(env_name) {
+                // A personal key's value is never in the team item (FR-55): `read_personal`.
+                if !spec.is_desired_in(env_name) || spec.personal {
                     continue;
                 }
                 let read = found
@@ -268,6 +270,87 @@ fn read_boundaries(
         }
     }
     Ok(())
+}
+
+/// Read each scoped environment's personal item (FR-55) once, filling the state of every
+/// personal key declared there and the vault that holds it, so its capability is the
+/// person's own vault's. A personal item or vault not set up yet holds no value: its keys
+/// are `absent`. Any other failure to locate or read it is `unreadable`, never absent (a
+/// failed read is never absence); the rest of the inventory is still built.
+fn read_personal(
+    fleet: &Fleet,
+    source: &Option<crate::app::rule_source::RuleSource>,
+    r: &dyn CommandRunner,
+    me: &Option<String>,
+    cells: &mut CellInputs,
+) {
+    use crate::app::rule_source::RuleStatus;
+    use crate::domain::value_state::{ReadError, UnreadableCause};
+    let project = super::personal::project_name(r, &std::env::current_dir().unwrap_or_default());
+    for (env_name, environment) in &fleet.environments {
+        let mine = super::personal::personal_fleet(fleet, env_name);
+        if mine.products.is_empty() {
+            continue;
+        }
+        // The item's fields, `Ok(None)` when the item or its vault is not set up yet.
+        let read = match super::personal::locate(r, fleet, env_name, &project) {
+            Ok(Some(at)) => {
+                let users = onepassword_init::vault_users(r, &at.vault_id, &Host::detect)
+                    .ok()
+                    .flatten();
+                let capability = match me.as_deref() {
+                    Some(user) => capability::classify(users.as_ref(), user),
+                    None => Capability::Unknown {
+                        source: UnknownSource::NoSessionUser,
+                    },
+                };
+                cells.capabilities.insert(at.vault_id.clone(), capability);
+                for (product, p) in &mine.products {
+                    for key in p.keys.keys() {
+                        cells.vaults.insert(
+                            (product.clone(), key.clone(), env_name.clone()),
+                            at.vault_id.clone(),
+                        );
+                    }
+                }
+                onepassword::read_whole(r, environment, &at)
+                    .and_then(|item| onepassword_tidy::parse(item.raw()).map(|(l, _)| l))
+                    .map(Some)
+                    .map_err(|_| ReadError::new(UnreadableCause::OpFailed))
+            }
+            Ok(None) => Ok(None),
+            Err(e) if super::personal::not_set_up(&e) => Ok(None),
+            Err(_) => Err(ReadError::new(UnreadableCause::OpFailed)),
+        };
+        let found = read
+            .as_ref()
+            .ok()
+            .and_then(Option::as_ref)
+            .map(|layout| convention::resolve(layout, &mine));
+        for (product, p) in &mine.products {
+            for (key, spec) in &p.keys {
+                let field = match (&read, &found) {
+                    (Err(e), _) => Err(e.clone()),
+                    (Ok(Some(layout)), Some(found)) => Ok(found
+                        .chosen
+                        .get(&(product.clone(), key.clone()))
+                        .map(|i| &layout.fields[*i].value)),
+                    _ => Ok(None),
+                };
+                let committed = source
+                    .as_ref()
+                    .is_some_and(|s| s.status(fleet, product, key) == RuleStatus::Committed);
+                let state = classify(field, present_in(spec, env_name), committed, |v| {
+                    rules::check(product, key, spec, env_name, environment, v)
+                        .map(|_| ())
+                        .map_err(|f| f.rule)
+                });
+                cells
+                    .states
+                    .insert((product.clone(), key.clone(), env_name.clone()), state);
+            }
+        }
+    }
 }
 
 /// One row per placement with a recorded delivery item: its state comes from
@@ -394,10 +477,12 @@ fn body(document: &Inventory, deliveries: &[DeliveryRow]) -> Result<Value, Error
     Ok(Value::Object(fields))
 }
 
-/// The first wanted key with no value, as the person's `opv set` command.
+/// The first wanted key with no value, as the person's `opv set` command: a shared key's
+/// value is entered at its source (FR-45). A personal key is skipped: its value lives in the
+/// person's own item, which `opv set` does not write (FR-55).
 fn next_command(document: &Inventory) -> Option<String> {
     for cell in &document.cells {
-        if cell.state != ValueState::Absent {
+        if cell.state != ValueState::Absent || cell.personal {
             continue;
         }
         let wanted = document
@@ -407,10 +492,11 @@ fn next_command(document: &Inventory) -> Option<String> {
             .and_then(|k| k.presence.get(&cell.env))
             .is_some_and(|p| *p == PresenceView::Present);
         if wanted {
-            return Some(format!(
-                "opv set {}/{} --env {}",
-                cell.product, cell.key, cell.env
-            ));
+            let label = cell
+                .from
+                .clone()
+                .unwrap_or_else(|| format!("{}/{}", cell.product, cell.key));
+            return Some(format!("opv set {label} --env {}", cell.env));
         }
     }
     None
@@ -479,8 +565,7 @@ fn render(document: &Inventory, deliveries: &[DeliveryRow]) -> String {
         for key in &document.keys {
             let text = by_cell
                 .get(&(key.product.as_str(), key.key.as_str(), env.env.as_str()))
-                .map(|c| cell_text(c))
-                .unwrap_or_default();
+                .map_or_else(|| NOT_DECLARED.to_string(), |c| cell_text(c));
             widths[i] = widths[i].max(text.len());
         }
     }
@@ -495,8 +580,7 @@ fn render(document: &Inventory, deliveries: &[DeliveryRow]) -> String {
         for (i, env) in document.environments.iter().enumerate() {
             let cell = by_cell
                 .get(&(key.product.as_str(), key.key.as_str(), env.env.as_str()))
-                .map(|c| cell_text(c))
-                .unwrap_or_default();
+                .map_or_else(|| NOT_DECLARED.to_string(), |c| cell_text(c));
             line.push_str(&format!("  {:<w$}", cell, w = widths[i]));
         }
         text.push_str(line.trim_end());
@@ -540,6 +624,10 @@ fn render(document: &Inventory, deliveries: &[DeliveryRow]) -> String {
     }
     text
 }
+
+/// The matrix entry of a key the contract does not declare for an environment: no cell, no
+/// state, nothing to fill.
+const NOT_DECLARED: &str = "-";
 
 fn cell_text(cell: &inventory::Cell) -> String {
     let mut out = format!(

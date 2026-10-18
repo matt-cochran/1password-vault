@@ -28,6 +28,9 @@ pub struct CellInputs {
     /// Vault id → what this session can do with that vault ([`Capability`]). A vault with no
     /// entry is `unknown` rather than guessed.
     pub capabilities: BTreeMap<String, Capability>,
+    /// `(product, key, env)` → the vault that holds the cell when it is not the product's
+    /// boundary vault: a personal key's own item (FR-55). Its capability is that vault's.
+    pub vaults: BTreeMap<(String, String, String), String>,
 }
 
 /// The newest saved receipt as the builder needs it: the value state it recorded for the
@@ -110,6 +113,14 @@ pub struct Cell {
     pub state: ValueState,
     pub capability: Capability,
     pub from_receipt: Option<ReceiptUse>,
+    /// A shared key (FR-45): the `<product>/<KEY>` whose field holds the value. The cell's
+    /// state, capability and boundary are that source's, and the value is entered there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// A personal key (FR-55): its state is read from the person's own item, which no
+    /// `opv set` writes (that writes the team boundary item).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub personal: bool,
 }
 
 /// The inventory document: the environment columns, the key rows and the cells, each in
@@ -125,9 +136,12 @@ pub struct Inventory {
 /// this session cannot read, the newest `receipt`.
 ///
 /// The capability of a cell is the capability of its product's boundary vault in that
-/// environment. A cell whose capability is exactly [`Capability::None`] (the session is not
-/// a member) takes its state from `receipt` when the receipt recorded one, with the receipt's
-/// age; otherwise the live state is used. A `not_wanted` key is `not_wanted` from the
+/// environment (a shared key's: its source product's; a personal key's: its own item's
+/// vault, from `cells.vaults`). A key the contract leaves out of an environment (an explicit
+/// `environments` list without it and no `except`) has no cell there. A cell whose
+/// capability is exactly [`Capability::None`] (the session is not a member) takes its state
+/// from `receipt` when the receipt recorded one, with the receipt's age; otherwise the live
+/// state is used. A `not_wanted` key is `not_wanted` from the
 /// contract, never from a read.
 pub fn build(fleet: &Fleet, cells: &CellInputs, receipt: Option<&ReceiptView>) -> Inventory {
     let environments: Vec<EnvironmentColumn> = fleet
@@ -156,22 +170,33 @@ pub fn build(fleet: &Fleet, cells: &CellInputs, receipt: Option<&ReceiptView>) -
     let mut matrix = Vec::new();
     for (product, p) in &fleet.products {
         for (key, spec) in &p.keys {
-            let boundary = fleet.boundary_of(product).to_string();
+            // A shared key (FR-45) has no field of its own: its state is its source's field,
+            // in the source product's boundary item of the same environment (FR-57).
+            let (at_product, at_key) = spec.source().unwrap_or((product, key));
+            let boundary = fleet.boundary_of(at_product).to_string();
             let mut presence = BTreeMap::new();
             for (env, e) in &fleet.environments {
                 let here = present_in(spec, env);
                 presence.insert(env.clone(), PresenceView::from(here.clone()));
+                // A key the contract does not declare for this environment has no cell: there
+                // is no value to hold, so nothing for a reader to rank or fill.
+                if here == Presence::Absent {
+                    continue;
+                }
 
-                let capability = e
-                    .boundaries
-                    .get(&boundary)
-                    .and_then(Option::as_ref)
-                    .and_then(|b| cells.capabilities.get(&b.vault_id).copied())
+                let at = || (at_product.to_string(), at_key.to_string(), env.clone());
+                let vault = cells.vaults.get(&at()).cloned().or_else(|| {
+                    e.boundaries
+                        .get(&boundary)
+                        .and_then(Option::as_ref)
+                        .map(|b| b.vault_id.clone())
+                });
+                let capability = vault
+                    .and_then(|v| cells.capabilities.get(&v).copied())
                     .unwrap_or(Capability::Unknown {
                         source: UnknownSource::NoPermissionsInReply,
                     });
 
-                let at = || (product.clone(), key.clone(), env.clone());
                 let live = || {
                     cells
                         .states
@@ -210,6 +235,8 @@ pub fn build(fleet: &Fleet, cells: &CellInputs, receipt: Option<&ReceiptView>) -
                     state,
                     capability,
                     from_receipt,
+                    from: spec.from.clone(),
+                    personal: spec.personal,
                 });
             }
             keys.push(KeyRow {

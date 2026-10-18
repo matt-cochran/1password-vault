@@ -845,3 +845,17 @@ fn a_local_vault_with_one_writer_raises_no_single_writer() {
             .any(|f| f["code"] == "single_writer")
     );
 }
+
+/// A production vault whose readable user list names no writer raises `no_writer`: nobody
+/// could fix a value there (row `access-writers`).
+#[test]
+fn a_production_vault_with_no_writer_raises_no_writer() {
+    let doc = run_stage("production", &writers_op(json!([viewer()])));
+    assert!(
+        doc["environments"][0]["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "no_writer")
+    );
+}

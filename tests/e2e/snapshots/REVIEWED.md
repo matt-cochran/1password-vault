@@ -200,6 +200,15 @@ Findings for the owner (not fixed here; the row touches tests only):
 5. `single_writer` is worded differently by `next` and `access`; a production state vault with no writer (`writers: []`) raises nothing.
 6. access text prints neither the per-vault production marking, capability nor writers (JSON only); access `next` is `none` while it prints owner `op service-account create` commands.
 
+Fixed on `v0120/core-fixes` (2026-10-18), core snapshots regenerated and reviewed (no value, no `changeme`; `schema_version` 3; `next` typed with the right actor). The core world now also drops web dev's `API_KEY` field, so a genuinely `absent` cell stays pinned (`core_inventory_shows_set_absent_placeholder_and_unreadable_cells`):
+
+- Finding 1 fixed: a shared key takes its source's state, capability and boundary (`web/DATABASE_URL`: dev `set/W`, prod `unreadable(no_access)/-`, cell `from: "shared/DATABASE_URL"`); `next` and inventory's `next` enter a shared key's value at its source (`opv set shared/DATABASE_URL …`), never the referencing key.
+- Finding 2 fixed: a key an explicit `environments` list leaves out has no cell (text `-`: `web/OTEL_RESOURCE` dev, `web/PERSONAL_LLM_KEY` prod); `not_wanted` (via `except`) keeps its state and is never ranked. Personal keys are read from the person's own item (`personal: true` on the cell, capability of that vault): `web/PERSONAL_LLM_KEY` dev is `set/W`. `next` never queues `opv set` for a personal key, since `opv set` writes the team boundary item.
+- Finding 3 fixed: the gate classifies a placeholder of any kind as `placeholder` before any rule (`web/LOG_LEVEL (placeholder)`); its fill `next` is `{kind: apply, actor: person}` (`opv open …`), consistent with `human_required: true`.
+- Finding 4 fixed: identical `next` commands fold into one action naming its keys (`opv sync prod  (7 keys: …)`; JSON `keys: [...]`, no single `product`/`key`).
+- Finding 5 fixed: `single_writer` has one wording (`domain::access::single_writer_message`) in `next` and `access`; `opv access` raises `no_writer` for a production vault whose readable user list names no writer (core_access: the three state vaults; the `access__*` matrix snapshots, whose world has empty user lists, gain `no_writer` lines for each production vault).
+- Finding 6 not addressed (out of this row's scope).
+
 - [ ] Owner sign-off of the core snapshots.
 
 ## 0.12.0: opv_state (mcp-state, 2026-10-18)

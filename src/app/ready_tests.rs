@@ -1708,3 +1708,51 @@ fn gate_fails_an_environment_it_could_not_read() {
     );
     assert_eq!(res.unwrap_err().code_str(), "gate_failed");
 }
+
+/// A placeholder that also fails a committed rule (`LOG_LEVEL = changeme` against an enum)
+/// is `placeholder`, as `opv inventory` reports it, not `malformed`.
+#[test]
+fn gate_reports_a_placeholder_failing_a_rule_as_placeholder() {
+    let fleet = crate::config::parse(
+        "[environments.dev]\n\
+         boundaries.app = { vault_id = \"v\", item_id = \"src1\" }\n\
+         [products.app.keys.LOG_LEVEL]\nkind = \"config\"\nenvironments = [\"dev\"]\n",
+    )
+    .unwrap();
+    let rows = vec![row(
+        "app",
+        "LOG_LEVEL",
+        KeyState::RuleFailed("enum", Reason::Fixed("not one of the allowed values")),
+        TargetState::Present,
+    )];
+    let keys = gate_keys(
+        &fleet,
+        "dev",
+        &rows,
+        &BTreeSet::from([("app".to_string(), "LOG_LEVEL".to_string())]),
+        &BTreeSet::new(),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+    );
+    assert_eq!(
+        keys,
+        vec![("app".to_string(), "LOG_LEVEL".to_string(), "placeholder")]
+    );
+}
+
+/// A config value can be a placeholder too (`LOG_LEVEL = changeme`): the gate refuses it as
+/// `placeholder`, as `opv inventory` classifies it, though settings health flags secrets only.
+#[test]
+fn gate_fails_a_placeholder_config_value() {
+    let (res, _) = run_gate(
+        true,
+        gated_fields("LOG_LEVEL", "changeme"),
+        "[products.app.keys.LOG_LEVEL]\nkind = \"config\"\nenvironments = [\"dev\"]\n",
+        "2026-07-01T00:00:00Z",
+    );
+    assert_eq!(
+        gate_keys_of(&res.unwrap_err()),
+        vec![("app".into(), "LOG_LEVEL".into(), "placeholder")]
+    );
+}
