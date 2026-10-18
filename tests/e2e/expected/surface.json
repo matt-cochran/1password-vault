@@ -1,0 +1,987 @@
+{
+  "cli": [
+    {
+      "args": [
+        "env"
+      ],
+      "flags": [
+        "create",
+        "github",
+        "github-env",
+        "json",
+        "project",
+        "secret-name",
+        "target"
+      ],
+      "name": "access"
+    },
+    {
+      "args": [],
+      "flags": [
+        "account",
+        "json"
+      ],
+      "name": "account list"
+    },
+    {
+      "args": [
+        "who"
+      ],
+      "flags": [
+        "json"
+      ],
+      "name": "account use"
+    },
+    {
+      "args": [
+        "plan_id"
+      ],
+      "flags": [
+        "json"
+      ],
+      "name": "apply"
+    },
+    {
+      "args": [
+        "env"
+      ],
+      "flags": [
+        "json",
+        "product",
+        "target"
+      ],
+      "name": "changed"
+    },
+    {
+      "args": [
+        "env"
+      ],
+      "flags": [
+        "deploy",
+        "drift",
+        "every",
+        "github-env",
+        "on-change",
+        "target"
+      ],
+      "name": "ci workflow"
+    },
+    {
+      "args": [
+        "shell"
+      ],
+      "flags": [],
+      "name": "completions"
+    },
+    {
+      "args": [],
+      "flags": [
+        "file"
+      ],
+      "name": "config check"
+    },
+    {
+      "args": [],
+      "flags": [],
+      "name": "config edit"
+    },
+    {
+      "args": [
+        "env"
+      ],
+      "flags": [
+        "json",
+        "toml"
+      ],
+      "name": "config export"
+    },
+    {
+      "args": [],
+      "flags": [
+        "file",
+        "path",
+        "project",
+        "vault"
+      ],
+      "name": "config import"
+    },
+    {
+      "args": [],
+      "flags": [
+        "base",
+        "check",
+        "component",
+        "env",
+        "json",
+        "relaxations",
+        "schema"
+      ],
+      "name": "contract"
+    },
+    {
+      "args": [
+        "env"
+      ],
+      "flags": [
+        "json",
+        "product",
+        "receipt",
+        "target"
+      ],
+      "name": "delivery verify"
+    },
+    {
+      "args": [],
+      "flags": [
+        "env",
+        "json",
+        "product",
+        "settings",
+        "target"
+      ],
+      "name": "doctor"
+    },
+    {
+      "args": [
+        "target"
+      ],
+      "flags": [
+        "env",
+        "json"
+      ],
+      "name": "explain"
+    },
+    {
+      "args": [
+        "topic"
+      ],
+      "flags": [],
+      "name": "guide"
+    },
+    {
+      "args": [
+        "topic"
+      ],
+      "flags": [],
+      "name": "help"
+    },
+    {
+      "args": [
+        "env"
+      ],
+      "flags": [
+        "json",
+        "target"
+      ],
+      "name": "history"
+    },
+    {
+      "args": [
+        "env"
+      ],
+      "flags": [
+        "dry-run",
+        "from",
+        "json",
+        "replace",
+        "rotate",
+        "skip"
+      ],
+      "name": "import"
+    },
+    {
+      "args": [],
+      "flags": [
+        "env",
+        "json",
+        "product"
+      ],
+      "name": "inventory"
+    },
+    {
+      "args": [
+        "env",
+        "command"
+      ],
+      "flags": [
+        "account",
+        "add",
+        "no-record"
+      ],
+      "name": "login"
+    },
+    {
+      "args": [],
+      "flags": [
+        "client",
+        "force",
+        "json",
+        "name",
+        "project"
+      ],
+      "name": "mcp install"
+    },
+    {
+      "args": [],
+      "flags": [
+        "project"
+      ],
+      "name": "mcp serve"
+    },
+    {
+      "args": [],
+      "flags": [
+        "gate",
+        "json"
+      ],
+      "name": "needs"
+    },
+    {
+      "args": [],
+      "flags": [
+        "json"
+      ],
+      "name": "next"
+    },
+    {
+      "args": [
+        "target"
+      ],
+      "flags": [
+        "env",
+        "json",
+        "print"
+      ],
+      "name": "open"
+    },
+    {
+      "args": [
+        "env"
+      ],
+      "flags": [
+        "json",
+        "product",
+        "rotate",
+        "target"
+      ],
+      "name": "plan"
+    },
+    {
+      "args": [],
+      "flags": [
+        "account",
+        "json",
+        "long"
+      ],
+      "name": "projects"
+    },
+    {
+      "args": [],
+      "flags": [
+        "intent",
+        "json",
+        "write"
+      ],
+      "name": "propose"
+    },
+    {
+      "args": [
+        "env"
+      ],
+      "flags": [
+        "json",
+        "tier",
+        "write"
+      ],
+      "name": "propose env"
+    },
+    {
+      "args": [
+        "env",
+        "keys"
+      ],
+      "flags": [
+        "json",
+        "write"
+      ],
+      "name": "propose generate"
+    },
+    {
+      "args": [
+        "key"
+      ],
+      "flags": [
+        "allow-same-value",
+        "env",
+        "except",
+        "expires",
+        "from",
+        "guidance",
+        "immutable",
+        "json",
+        "kind",
+        "personal",
+        "rule",
+        "shape",
+        "source",
+        "write"
+      ],
+      "name": "propose key"
+    },
+    {
+      "args": [
+        "key"
+      ],
+      "flags": [
+        "json",
+        "write"
+      ],
+      "name": "propose retire"
+    },
+    {
+      "args": [],
+      "flags": [
+        "account",
+        "config-key",
+        "file",
+        "from-item",
+        "item",
+        "json",
+        "names-from",
+        "project",
+        "secret-key",
+        "vault",
+        "write"
+      ],
+      "name": "propose setup"
+    },
+    {
+      "args": [],
+      "flags": [
+        "json",
+        "rebind",
+        "write"
+      ],
+      "name": "propose structure"
+    },
+    {
+      "args": [
+        "env",
+        "name"
+      ],
+      "flags": [
+        "azure-config",
+        "azure-container",
+        "azure-container-app",
+        "azure-env-name",
+        "azure-identity",
+        "azure-key-vault",
+        "azure-resource-group",
+        "azure-subscription",
+        "deploy-credentials",
+        "fly-app",
+        "fly-config",
+        "fly-secret-name",
+        "github-environment",
+        "github-repo",
+        "github-secret-name",
+        "json",
+        "kubernetes-config",
+        "kubernetes-container",
+        "kubernetes-context",
+        "kubernetes-deployment",
+        "kubernetes-env-name",
+        "kubernetes-namespace",
+        "kubernetes-secrets-dir",
+        "products",
+        "project",
+        "provider",
+        "role",
+        "write"
+      ],
+      "name": "propose target"
+    },
+    {
+      "args": [
+        "env"
+      ],
+      "flags": [
+        "json",
+        "write"
+      ],
+      "name": "propose tidy"
+    },
+    {
+      "args": [
+        "env"
+      ],
+      "flags": [
+        "gate",
+        "json",
+        "save"
+      ],
+      "name": "ready"
+    },
+    {
+      "args": [
+        "env",
+        "command"
+      ],
+      "flags": [
+        "confirm",
+        "json",
+        "preview",
+        "product",
+        "remote",
+        "role"
+      ],
+      "name": "run"
+    },
+    {
+      "args": [],
+      "flags": [],
+      "name": "schema"
+    },
+    {
+      "args": [
+        "key"
+      ],
+      "flags": [
+        "env",
+        "json"
+      ],
+      "name": "set"
+    },
+    {
+      "args": [],
+      "flags": [
+        "account",
+        "product",
+        "recipe"
+      ],
+      "name": "setup"
+    },
+    {
+      "args": [],
+      "flags": [
+        "force",
+        "json",
+        "project",
+        "target",
+        "user"
+      ],
+      "name": "skill install"
+    },
+    {
+      "args": [],
+      "flags": [
+        "json"
+      ],
+      "name": "skill status"
+    },
+    {
+      "args": [
+        "env"
+      ],
+      "flags": [
+        "all",
+        "fail-on-drift",
+        "json",
+        "product",
+        "target"
+      ],
+      "name": "status"
+    },
+    {
+      "args": [
+        "env"
+      ],
+      "flags": [
+        "confirm",
+        "deploy",
+        "expect-plan",
+        "json",
+        "product",
+        "prune",
+        "prune-immutable",
+        "receipt",
+        "rotate",
+        "target"
+      ],
+      "name": "sync"
+    },
+    {
+      "args": [
+        "env"
+      ],
+      "flags": [
+        "create",
+        "target"
+      ],
+      "name": "target credentials"
+    },
+    {
+      "args": [],
+      "flags": [
+        "env",
+        "json"
+      ],
+      "name": "target list"
+    },
+    {
+      "args": [],
+      "flags": [],
+      "name": "ui"
+    },
+    {
+      "args": [
+        "vault"
+      ],
+      "flags": [
+        "json"
+      ],
+      "name": "vault locate"
+    },
+    {
+      "args": [],
+      "flags": [
+        "json"
+      ],
+      "name": "version"
+    }
+  ],
+  "global_flags": [
+    "color",
+    "config",
+    "timeout",
+    "verbose"
+  ],
+  "mcp": [
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "oneOf": [
+          {
+            "required": [
+              "key"
+            ]
+          },
+          {
+            "required": [
+              "plan_id"
+            ]
+          }
+        ],
+        "properties": {
+          "key": {
+            "pattern": "^([a-z][a-z0-9-]*/)?[A-Z][A-Z0-9_]*$",
+            "type": "string"
+          },
+          "plan_id": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "opv_explain",
+      "writes": false
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "env": {
+            "pattern": "^[a-z][a-z0-9-]*$",
+            "type": "string"
+          },
+          "file": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "env",
+          "file"
+        ],
+        "type": "object"
+      },
+      "name": "opv_import_local",
+      "writes": true
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "env": {
+            "pattern": "^[a-z][a-z0-9-]*$",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "opv_next",
+      "writes": false
+    },
+    {
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "allow_same_value": {
+                "type": "boolean"
+              },
+              "environments": {
+                "items": {
+                  "pattern": "^[a-z][a-z0-9-]*$",
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "except": {
+                "additionalProperties": {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "field_kind": {
+                "enum": [
+                  "secret",
+                  "config"
+                ]
+              },
+              "from": {
+                "type": "string"
+              },
+              "guidance": {
+                "maxLength": 200,
+                "type": "string"
+              },
+              "immutable": {
+                "type": "boolean"
+              },
+              "key": {
+                "pattern": "^[A-Z][A-Z0-9_]*$",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "key"
+                ]
+              },
+              "lifecycle": {
+                "enum": [
+                  "active",
+                  "retiring",
+                  "retired"
+                ]
+              },
+              "personal": {
+                "type": "boolean"
+              },
+              "product": {
+                "pattern": "^[a-z][a-z0-9-]*$",
+                "type": "string"
+              },
+              "shape": {
+                "enum": [
+                  "base64_bytes_32",
+                  "email_list",
+                  "hex_bytes_32",
+                  "https_url",
+                  "openai_key",
+                  "pem_private_key",
+                  "stripe_secret",
+                  "url"
+                ]
+              },
+              "source": {
+                "enum": [
+                  "person",
+                  "generated",
+                  "derived"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "key"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "env": {
+                "pattern": "^[a-z][a-z0-9-]*$",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "env"
+                ]
+              },
+              "tier": {
+                "enum": [
+                  "local",
+                  "shared",
+                  "production"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "env"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "deploy_credentials": {
+                "type": "string"
+              },
+              "env": {
+                "pattern": "^[a-z][a-z0-9-]*$",
+                "type": "string"
+              },
+              "guidance": {
+                "maxLength": 200,
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "target"
+                ]
+              },
+              "name": {
+                "pattern": "^[a-z][a-z0-9-]*$",
+                "type": "string"
+              },
+              "products": {
+                "items": {
+                  "pattern": "^[a-z][a-z0-9-]*$",
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "provider": {
+                "type": "string"
+              },
+              "role": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "env",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "guidance": {
+                "maxLength": 200,
+                "type": "string"
+              },
+              "key": {
+                "pattern": "^[A-Z][A-Z0-9_]*$",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "retire"
+                ]
+              },
+              "product": {
+                "pattern": "^[a-z][a-z0-9-]*$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "key"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "account": {
+                "type": "string"
+              },
+              "config_key": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "file": {
+                "type": "boolean"
+              },
+              "from_item": {
+                "pattern": "^[a-z][a-z0-9-]*$",
+                "type": "string"
+              },
+              "guidance": {
+                "maxLength": 200,
+                "type": "string"
+              },
+              "item": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "setup"
+                ]
+              },
+              "names_from": {
+                "type": "string"
+              },
+              "project": {
+                "type": "string"
+              },
+              "secret_key": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "vault": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "guidance": {
+                "maxLength": 200,
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "structure"
+                ]
+              },
+              "rebind": {
+                "items": {
+                  "pattern": "^[a-z][a-z0-9-]*$",
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "env": {
+                "pattern": "^[a-z][a-z0-9-]*$",
+                "type": "string"
+              },
+              "guidance": {
+                "maxLength": 200,
+                "type": "string"
+              },
+              "keys": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "enum": [
+                  "generate"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "env"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "env": {
+                "pattern": "^[a-z][a-z0-9-]*$",
+                "type": "string"
+              },
+              "guidance": {
+                "maxLength": 200,
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "tidy"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "env"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "opv intent document",
+        "type": "object"
+      },
+      "name": "opv_propose",
+      "writes": false
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "env": {
+            "pattern": "^[a-z][a-z0-9-]*$",
+            "type": "string"
+          },
+          "product": {
+            "pattern": "^[a-z][a-z0-9-]*$",
+            "type": "string"
+          },
+          "section": {
+            "enum": [
+              "inventory",
+              "needs",
+              "contract",
+              "ready",
+              "plan",
+              "changed",
+              "access",
+              "delivery_preview",
+              "history",
+              "status"
+            ]
+          },
+          "target": {
+            "pattern": "^[a-z][a-z0-9-]*$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "section"
+        ],
+        "type": "object"
+      },
+      "name": "opv_state",
+      "writes": false
+    }
+  ]
+}
