@@ -24,8 +24,9 @@ pub mod value_state;
 mod tier_tests;
 
 pub use model::{
-    Boundary, Date, Environment, Fleet, ItemRef, KeySpec, Kind, Lifecycle, OneOrMany, Origin,
-    PrefixByMode, Product, Rules, Target, Tier, ValueSource, boundary_missing, key_label,
+    Boundary, Date, Environment, Fleet, Ignore, ItemRef, KeySpec, Kind, Lifecycle, OneOrMany,
+    Origin, PrefixByMode, Product, Rules, Target, Tier, ValueSource, boundary_missing, key_label,
+    span_of,
 };
 pub use secret::SecretValue;
 pub mod plan;
@@ -41,3 +42,7 @@ pub use runtime::{
 #[cfg(test)]
 #[path = "key_attrs_tests.rs"]
 mod key_attrs_tests;
+
+#[cfg(test)]
+#[path = "annotations_tests.rs"]
+mod annotations_tests;

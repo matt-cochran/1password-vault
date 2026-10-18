@@ -1209,6 +1209,7 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
         }
         validate_local(doc, product, p)?;
         validate_remotes(doc, product, p, &environments)?;
+        validate_ignore(doc, product, p)?;
     }
 
     let mut products = raw.products;
@@ -1228,6 +1229,30 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
     check_evidence_width(&fleet, doc)?;
     check_delivery_items(&fleet, doc)?;
     Ok(fleet)
+}
+
+/// Ignore annotations (Part V, row `annotations`): a scanner-observed name a person judged
+/// a false positive. Its name is key-shaped (`^[A-Z][A-Z0-9_]*$`, the scanner's grammar)
+/// and its reason must say something (D-G: refused, not a finding). The span is left as the
+/// scanner recorded it: it is a stable hash of the evidence line, never a value.
+fn validate_ignore(doc: &Doc<'_>, product: &str, p: &crate::domain::Product) -> Result<(), Error> {
+    for (name, annotation) in &p.ignore {
+        if !is_env_name(name) {
+            return Err(doc.invalid(
+                &["products", product, "ignore", name],
+                FieldRule::Pattern {
+                    id: PatternId::KeyName,
+                },
+            ));
+        }
+        if annotation.reason.trim().is_empty() {
+            return Err(doc.invalid(
+                &["products", product, "ignore", name, "reason"],
+                FieldRule::Empty,
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// A process role name (M3, #136): `^[a-z0-9-]{1,32}$`, so a shell never has to quote it.
