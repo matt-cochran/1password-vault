@@ -112,6 +112,12 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "NeedsUndeclared",
         "opv needs has no CLI surface yet (rows cli-sweep, e2e-coverage)",
     ),
+    // `opv contract --check` is a library function in this row; the CLI surface (and a
+    // committed copy for it to compare) arrives with the later `ci-workflow` row.
+    (
+        "ContractStale",
+        "opv contract --check has no CLI surface yet (row contract-data is library only)",
+    ),
 ];
 
 fn snapshots() -> PathBuf {

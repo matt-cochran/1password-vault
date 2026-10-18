@@ -26,6 +26,7 @@ pub(crate) mod ci_summary;
 pub mod ci_workflow;
 pub mod config_cmd;
 pub mod config_export;
+pub mod contract;
 pub mod declare;
 pub mod delivery;
 pub mod delivery_preview;

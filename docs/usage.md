@@ -733,6 +733,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `config_not_found` | 2 | after_fix | no | no secrets.toml in this folder or a parent, and no 1Password manifest for this checkout |
 | `config_source_mismatch` | 2 | never | no | the command works on a secrets.toml, but this project's configuration is a 1Password manifest |
 | `config_unreadable` | 2 | after_fix | no | the configuration file could not be read |
+| `contract_stale` | 2 | after_fix | no | a committed contract copy differs from the contract this configuration produces; regenerate it with opv contract |
 | `copies_differ` | 2 | never | no | a committed secrets.toml and the manifest differ; a person picks which is right |
 | `input_invalid` | 2 | after_fix | no/yes | an input file (a dotenv file, a setup recipe, a receipt) breaks a rule |
 | `input_unreadable` | 2 | after_fix | no | an input file (a dotenv file, a setup recipe, a receipt) could not be read |
@@ -802,6 +803,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `target_not_signed_in` | 7 | after_fix | yes | not signed in to the target CLI |
 | `delivery_unverified` | 8 | after_fix | yes | a placement no longer holds what opv delivered, or could not be checked |
 | `findings` | 8 | after_fix | yes | keys are missing or failing a rule (values are filled in 1Password by a person) |
+| `gate_failed` | 8 | after_fix | yes | ready --gate found present keys that are not in value state set or whose delivery evidence is older than the item; a person fills or re-delivers them |
 | `target_drift` | 8 | after_fix | no | a pinned target no longer holds the version 1Password records (drift); opv sync restores it |
 | `budget_spent` | 9 | after_fix/check_first | no | the run's --timeout budget was spent |
 | `create_outcome_unknown` | 9 | check_first/safe | no/yes | a create may or may not have happened; find it before creating again |

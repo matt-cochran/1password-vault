@@ -86,6 +86,9 @@ pub fn meaning(code: &str) -> &'static str {
         "config_invalid" => {
             "secrets.toml, the manifest or a change opv proposed breaks a field rule"
         }
+        "contract_stale" => {
+            "a committed contract copy differs from the contract this configuration produces; regenerate it with opv contract"
+        }
         "value_in_text_field" => {
             "free text in an intent document looks like a secret value and is refused before anything is written"
         }
@@ -462,6 +465,9 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
             rule: FieldRule::Unknown {
                 suggestion: Some("confirm_env".into()),
             },
+        },
+        ContractStale {
+            path: Some(PathBuf::from("contract.json")),
         },
         ValueInTextField {
             field: DottedPath(vec!["guidance".into()]),
