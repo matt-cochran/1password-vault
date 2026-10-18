@@ -2007,6 +2007,14 @@ impl Cause {
                 plural(rows.len(), "value", "values"),
                 value_rows(rows)
             ),
+            GateFailed { env, keys } => format!(
+                "environment {env} is not ready to promote: {}: {}",
+                plural(keys.len(), "key", "keys"),
+                keys.iter()
+                    .map(|(product, key, reason)| format!("{product}/{key} ({reason})"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             LocalFileTooOpen { path, mode, want } => format!(
                 "{} has mode {mode:04o}; opv needs {want:04o} or stricter",
                 path.display()
@@ -3705,6 +3713,29 @@ impl Cause {
                         Next::Run(cmd(&["open"], &[&name, "--env", env.as_str()])),
                     )
                 }
+                None => plan(None, Next::Check(cmd(&["status"], &[env.as_str()]))),
+            },
+            GateFailed { env, keys } => match keys.first() {
+                Some((product, key, reason)) if *reason == "not_delivered" => plan(
+                    inspect(format!(
+                        "re-deliver {product}/{key} to environment {env}: its delivery evidence is older than the source item"
+                    )),
+                    Next::Run(cmd(&["sync"], &[env.as_str()])),
+                ),
+                Some((product, key, _)) => plan(
+                    Some((
+                        Action::FillValue {
+                            product: product.clone(),
+                            key: key.clone(),
+                            env: env.clone(),
+                        },
+                        format!("fill {product}/{key} in 1Password for environment {env}"),
+                    )),
+                    Next::Run(cmd(
+                        &["open"],
+                        &[&format!("{product}/{key}"), "--env", env.as_str()],
+                    )),
+                ),
                 None => plan(None, Next::Check(cmd(&["status"], &[env.as_str()]))),
             },
             LocalFileTooOpen {

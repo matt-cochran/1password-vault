@@ -1064,7 +1064,7 @@ fn inspect(
         return configuration_projection(&fleet);
     }
     let mut bytes = zeroize::Zeroizing::new(Vec::new());
-    let result = crate::app::ready::run(&fleet, None, env, &r, true, None, &mut *bytes);
+    let result = crate::app::ready::run(&fleet, None, env, &r, true, None, false, &mut *bytes);
     receipt_answer(&call, &r, &bytes, result, ready_receipt)
 }
 

@@ -1606,7 +1606,16 @@ fn ready_never_writes_a_persons_messy_item() {
     let op = FakeOp::person(messy_item());
     let _on = activate();
     let mut out = Vec::new();
-    let _ = crate::app::ready::run(&fleet(), None, Some("dev"), &op, true, None, &mut out);
+    let _ = crate::app::ready::run(
+        &fleet(),
+        None,
+        Some("dev"),
+        &op,
+        true,
+        None,
+        false,
+        &mut out,
+    );
     assert_eq!(op.count(&["item"]) - op.count(&["item", "get"]), 0);
 }
 

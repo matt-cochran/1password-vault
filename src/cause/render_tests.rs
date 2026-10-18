@@ -857,6 +857,17 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
         ),
         (Bug { site: "site-xyz" }, vec!["site-xyz"]),
         (
+            GateFailed {
+                env: EnvName::new("env-prod"),
+                keys: vec![(
+                    ProductName::new("prod-api"),
+                    KeyName::new("OPENAI_API_KEY"),
+                    "absent",
+                )],
+            },
+            vec!["env-prod", "prod-api", "OPENAI_API_KEY", "absent"],
+        ),
+        (
             MountUnreadable {
                 workload: "work-xyz".into(),
                 container: "cont-xyz".into(),
@@ -957,10 +968,11 @@ fn ordinal(c: &Cause) -> usize {
         TargetDrift { .. } => 75,
         MountUnreadable { .. } => 76,
         ValueInTextField { .. } => 77,
+        GateFailed { .. } => 78,
     }
 }
 
-const VARIANTS: usize = 78;
+const VARIANTS: usize = 79;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()

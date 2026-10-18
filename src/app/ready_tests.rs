@@ -1070,7 +1070,7 @@ fn ready_on_two_items(dev: &str, ci: &str) -> serde_json::Value {
     ))
     .unwrap();
     let mut out = Vec::new();
-    run(&fleet, None, None, &op, true, None, &mut out).unwrap();
+    run(&fleet, None, None, &op, true, None, false, &mut out).unwrap();
     serde_json::from_slice(&out).unwrap()
 }
 
@@ -1218,7 +1218,7 @@ fn ready_doc(
     use crate::runner::fake::FakeRunner;
     let r = FakeRunner::new(responses);
     let mut out = Vec::new();
-    run(fleet, None, only, &r, true, None, &mut out).unwrap();
+    run(fleet, None, only, &r, true, None, false, &mut out).unwrap();
     serde_json::from_slice(&out).unwrap()
 }
 
@@ -1453,6 +1453,7 @@ fn ready_signed_out_is_op_not_signed_in() {
         &op,
         true,
         None,
+        false,
         &mut Vec::new(),
     )
     .unwrap_err();
@@ -1473,7 +1474,17 @@ fn ready_checks_the_state_vault_in_the_environments_account() {
         fly_empty(),
         Output::success(b"[]".to_vec()),
     ]);
-    run(&fleet, None, Some("prod"), &r, true, None, &mut Vec::new()).unwrap();
+    run(
+        &fleet,
+        None,
+        Some("prod"),
+        &r,
+        true,
+        None,
+        false,
+        &mut Vec::new(),
+    )
+    .unwrap();
     let calls = r.calls.borrow();
     let state = calls
         .iter()
@@ -1487,4 +1498,212 @@ fn ready_checks_the_state_vault_in_the_environments_account() {
             .env
             .contains(&("OP_ACCOUNT".to_string(), "work.1password.com".to_string()))
     );
+}
+
+// FR-51 `ready --gate` (design Part V, row `gate`) -----------------------------------
+
+/// The JSON item `fields` for a single concealed `label` in section `app`.
+fn gated_fields(label: &str, value: &str) -> serde_json::Value {
+    serde_json::json!({
+        "title": "t", "category": "SECURE_NOTE",
+        "sections": [{"id": "app", "label": "app"}],
+        "fields": [{"id": "f1", "type": "CONCEALED",
+                    "section": {"id": "app", "label": "app"},
+                    "label": label, "value": value}]
+    })
+}
+
+/// One `app/DATABASE_URL` secret in `dev`.
+const GATED_KEY: &str =
+    "[products.app.keys.DATABASE_URL]\nkind = \"secret\"\nenvironments = [\"dev\"]\n";
+
+/// `app/DATABASE_URL` and a declared `app/OTHER` that the item does not hold.
+const GATED_TWO_KEYS: &str = "[products.app.keys.DATABASE_URL]\nkind = \"secret\"\n\
+                              environments = [\"dev\"]\n\
+                              [products.app.keys.OTHER]\nkind = \"secret\"\n\
+                              environments = [\"dev\"]\n";
+
+/// Run `ready` (with `gate`) over one run-only `dev` environment holding one item, and
+/// return the outcome and the raw stdout body.
+fn run_gate(
+    gate: bool,
+    fields: serde_json::Value,
+    keys: &str,
+    generated_at: &str,
+) -> (Result<(), Error>, Vec<u8>) {
+    use crate::adapters::fake_op::FakeOp;
+    let op = FakeOp::default();
+    let id = op.insert("vdev0000000000000000000001", fields);
+    let fleet = crate::config::parse(&format!(
+        "[environments.dev]\n\
+         boundaries.app = {{ vault_id = \"vdev0000000000000000000001\", item_id = \"{id}\" }}\n\
+         {keys}"
+    ))
+    .unwrap();
+    let mut out = Vec::new();
+    let res = run_at(
+        &fleet,
+        None,
+        None,
+        &op,
+        true,
+        None,
+        gate,
+        generated_at,
+        &mut out,
+    );
+    (res, out)
+}
+
+/// The `(product, key, reason)` rows of a `gate_failed` error.
+fn gate_keys_of(e: &Error) -> Vec<(String, String, &'static str)> {
+    match e.cause() {
+        Some((Cause::GateFailed { keys, .. }, _)) => keys
+            .iter()
+            .map(|(p, k, r)| (p.to_string(), k.to_string(), *r))
+            .collect(),
+        Some((other, _)) => panic!("expected GateFailed, got {other:?}"),
+        None => panic!("expected a catalog cause"),
+    }
+}
+
+#[test]
+fn gate_fails_a_key_that_is_absent() {
+    let (res, _) = run_gate(
+        true,
+        gated_fields("DATABASE_URL", "real-value-here"),
+        GATED_TWO_KEYS,
+        "2026-07-01T00:00:00Z",
+    );
+    assert_eq!(
+        gate_keys_of(&res.unwrap_err()),
+        vec![("app".into(), "OTHER".into(), "absent")]
+    );
+}
+
+#[test]
+fn gate_fails_a_placeholder_value() {
+    let (res, _) = run_gate(
+        true,
+        gated_fields("DATABASE_URL", "changeme"),
+        GATED_KEY,
+        "2026-07-01T00:00:00Z",
+    );
+    assert_eq!(
+        gate_keys_of(&res.unwrap_err()),
+        vec![("app".into(), "DATABASE_URL".into(), "placeholder")]
+    );
+}
+
+#[test]
+fn gate_passes_a_set_and_delivered_key() {
+    let (res, _) = run_gate(
+        true,
+        gated_fields("DATABASE_URL", "real-value-here"),
+        GATED_KEY,
+        "2026-07-01T00:00:00Z",
+    );
+    assert!(res.is_ok());
+}
+
+#[test]
+fn gate_fails_a_set_key_whose_delivery_evidence_is_older() {
+    let fleet = crate::config::parse(
+        "[environments.dev]\n\
+         boundaries.app = { vault_id = \"v\", item_id = \"src1\" }\n\
+         [products.app.keys.DATABASE_URL]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
+    )
+    .unwrap();
+    let rows = vec![row(
+        "app",
+        "DATABASE_URL",
+        KeyState::Ready,
+        TargetState::Present,
+    )];
+    let keys = gate_keys(
+        &fleet,
+        "dev",
+        &rows,
+        &BTreeSet::new(),
+        &BTreeSet::from(["app".to_string()]),
+        &BTreeMap::from([("src1".to_string(), 3)]),
+        &BTreeMap::from([("src1".to_string(), 5)]),
+    );
+    assert_eq!(
+        keys,
+        vec![(
+            "app".to_string(),
+            "DATABASE_URL".to_string(),
+            "not_delivered"
+        )]
+    );
+}
+
+#[test]
+fn gate_flags_an_expiry_within_thirty_days_as_advisory() {
+    let keys = "[products.app.keys.DATABASE_URL]\nkind = \"secret\"\n\
+                environments = [\"dev\"]\nexpires = \"2026-07-10\"\n";
+    let (res, out) = run_gate(
+        true,
+        gated_fields("DATABASE_URL", "real-value-here"),
+        keys,
+        "2026-07-01T00:00:00Z",
+    );
+    let doc: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert!(
+        res.is_ok()
+            && doc["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["code"] == "expires_soon")
+    );
+}
+
+#[test]
+fn without_gate_an_absent_key_does_not_change_the_exit() {
+    let (res, _) = run_gate(
+        false,
+        gated_fields("DATABASE_URL", "real-value-here"),
+        GATED_TWO_KEYS,
+        "2026-07-01T00:00:00Z",
+    );
+    assert!(res.is_ok());
+}
+
+#[test]
+fn gate_never_prints_a_value_even_framed_as_json() {
+    let (res, out) = run_gate(
+        true,
+        gated_fields("DATABASE_URL", "S7MARKER-gate"),
+        GATED_KEY,
+        "2026-07-01T00:00:00Z",
+    );
+    let framed = crate::json::finish(&out, res.as_ref().map(|_| ()), false);
+    assert!(!String::from_utf8_lossy(&framed).contains("S7MARKER"));
+}
+
+#[test]
+fn gate_fails_an_environment_it_could_not_read() {
+    use crate::adapters::fake_op::FakeOp;
+    let op = FakeOp::default();
+    let fleet = crate::config::parse(&format!(
+        "[environments.dev]\n\
+         boundaries.app = {{ vault_id = \"vdev0000000000000000000001\", item_id = \"inotthere00000000000000001\" }}\n\
+         {GATED_KEY}"
+    ))
+    .unwrap();
+    let mut out = Vec::new();
+    let res = run_at(
+        &fleet,
+        None,
+        None,
+        &op,
+        true,
+        None,
+        true,
+        "2026-07-01T00:00:00Z",
+        &mut out,
+    );
+    assert_eq!(res.unwrap_err().code_str(), "gate_failed");
 }

@@ -890,6 +890,14 @@ pub enum Cause {
         /// The candidates by title and ID: the listing's for none, the matches for several.
         candidates: Vec<String>,
     },
+    /// `ready --gate` found present keys that are not ready to promote (design row `gate`):
+    /// a value state other than `set`, or delivery evidence older than the source item now.
+    /// `keys` carries the product, the key and the reason (the state name, or
+    /// `not_delivered`); never a value (SR-1). Public code `gate_failed`, exit 8.
+    GateFailed {
+        env: EnvName,
+        keys: Vec<(ProductName, KeyName, &'static str)>,
+    },
     Bug {
         site: &'static str,
     },
@@ -1510,6 +1518,7 @@ impl Cause {
             NeedsConfirm { .. } => "confirm_required",
             ConfirmMismatch { .. } => "confirm_mismatch",
             ValuesNeeded { .. } => "findings",
+            GateFailed { .. } => "gate_failed",
             KeysBlocking { .. } => "keys_blocking",
             LocalFileTooOpen { .. } => "file_too_open",
             InputInvalid { .. } => "input_invalid",
@@ -1625,7 +1634,10 @@ impl Cause {
             | InOtherAccount { .. }
             | NeedsOwnSession { .. }
             | CredentialRejected { .. } => 7,
-            ValuesNeeded { .. } | DeliveryUnverified { .. } | TargetDrift { .. } => 8,
+            ValuesNeeded { .. }
+            | DeliveryUnverified { .. }
+            | TargetDrift { .. }
+            | GateFailed { .. } => 8,
             SourceChanged { .. } => 10,
             CreateOutcomeUnknown { .. }
             | WriteOutcomeUnknown { .. }

@@ -66,6 +66,7 @@ fn the_saved_receipt_carries_the_generated_at_clock() {
         &op,
         true,
         Some(&path),
+        false,
         "2026-01-02T03:04:05Z",
         &mut out,
     )

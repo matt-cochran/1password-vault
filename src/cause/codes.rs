@@ -214,6 +214,9 @@ pub fn meaning(code: &str) -> &'static str {
         "findings" => {
             "keys are missing or failing a rule (values are filled in 1Password by a person)"
         }
+        "gate_failed" => {
+            "ready --gate found present keys that are not in value state set or whose delivery evidence is older than the item; a person fills or re-delivers them"
+        }
         "keys_blocking" => {
             "a write refused: keys are missing or failing a rule; nothing was written"
         }
@@ -915,6 +918,14 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
                 matches: 0,
                 candidates: Vec::new(),
             }),
+        },
+        GateFailed {
+            env: EnvName::new("env-prod"),
+            keys: vec![(
+                ProductName::new("prod-api"),
+                KeyName::new("OPENAI_API_KEY"),
+                "absent",
+            )],
         },
         Bug { site: "site-xyz" },
     ]
