@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 
 use crate::domain::plan::ItemField;
-use crate::domain::{Fleet, KeySpec, Kind};
+use crate::domain::{Fleet, KeySpec, Kind, Tier};
 
 /// One environment's values, as the caller read them (the team item; never a personal one).
 pub struct EnvValues<'a> {
@@ -25,6 +25,8 @@ pub struct EnvValues<'a> {
     /// The environment has a target (it deploys).
     pub deployed: bool,
     pub fields: &'a [ItemField],
+    /// The environment's tier (FR-59).
+    pub tier: Tier,
 }
 
 /// One likely-wrong setting. Names only.
@@ -344,8 +346,9 @@ fn points_at_local(value: &str) -> bool {
     .any(|l| contains_ignore_case(value, l))
 }
 
-/// A production environment by its name or title: `prod`, but not `preprod` or `nonprod`.
-fn is_production(env: &EnvValues<'_>) -> bool {
+/// An environment named or titled as production: `prod`, but not `preprod` or `nonprod`.
+/// The loader uses this to give an environment without a written `tier` its default.
+pub(crate) fn default_tier(name: &str, title: Option<&str>) -> Tier {
     let named = |s: &str| {
         let s = s.to_ascii_lowercase();
         s.contains("prod")
@@ -353,7 +356,16 @@ fn is_production(env: &EnvValues<'_>) -> bool {
             && !s.contains("pre-prod")
             && !s.contains("nonprod")
     };
-    named(env.name) || env.title.is_some_and(named)
+    if named(name) || title.is_some_and(named) {
+        Tier::Production
+    } else {
+        Tier::Shared
+    }
+}
+
+/// A production environment by its tier (FR-59): the tier decides, not the name or title.
+pub(crate) fn is_production(env: &EnvValues<'_>) -> bool {
+    env.tier == Tier::Production
 }
 
 #[cfg(test)]

@@ -16,9 +16,13 @@ pub mod placement;
 pub mod presence;
 pub mod secret;
 
+#[cfg(test)]
+#[path = "tier_tests.rs"]
+mod tier_tests;
+
 pub use model::{
     Boundary, Environment, Fleet, ItemRef, KeySpec, Kind, OneOrMany, Origin, PrefixByMode, Product,
-    Rules, Target, boundary_missing, key_label,
+    Rules, Target, Tier, boundary_missing, key_label,
 };
 pub use secret::SecretValue;
 pub mod plan;

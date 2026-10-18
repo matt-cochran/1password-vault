@@ -710,6 +710,7 @@ fn settings_check(fleet: &Fleet, only: Option<&str>, r: &dyn CommandRunner, repo
             title: env.title.as_deref(),
             deployed: !env.targets.is_empty(),
             fields,
+            tier: env.tier,
         })
         .collect();
     let findings: Vec<_> = check(fleet, &values)
