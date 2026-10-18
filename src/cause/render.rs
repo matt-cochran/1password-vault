@@ -1412,6 +1412,11 @@ impl Cause {
                     format!("accounts {}", list_of(unlisted))
                 }
             ),
+            NeedsUndeclared { names } => format!(
+                "the code reads {} the contract declares nowhere: {}",
+                plural(names.len(), "a name", "names"),
+                list_of(names)
+            ),
             NotDeclared {
                 kind,
                 given,
@@ -4192,6 +4197,13 @@ impl Cause {
                         resource_kind(*kind)
                     ),
                 }),
+                Next::Rerun,
+            ),
+            NeedsUndeclared { names } => plan(
+                inspect(format!(
+                    "declare {} with opv add, or stop reading them",
+                    list_of(names)
+                )),
                 Next::Rerun,
             ),
             Bug { site: _ } => plan(

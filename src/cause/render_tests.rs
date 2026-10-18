@@ -867,6 +867,12 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             },
             vec!["work-xyz", "cont-xyz", "10001"],
         ),
+        (
+            NeedsUndeclared {
+                names: vec!["API_KEY".into(), "DB_URL".into()],
+            },
+            vec!["API_KEY", "DB_URL"],
+        ),
     ]
 }
 
@@ -957,10 +963,11 @@ fn ordinal(c: &Cause) -> usize {
         TargetDrift { .. } => 75,
         MountUnreadable { .. } => 76,
         ValueInTextField { .. } => 77,
+        NeedsUndeclared { .. } => 78,
     }
 }
 
-const VARIANTS: usize = 78;
+const VARIANTS: usize = 79;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()

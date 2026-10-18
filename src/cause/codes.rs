@@ -114,6 +114,9 @@ pub fn meaning(code: &str) -> &'static str {
         "inventory_incomplete" => {
             "one or more 1Password accounts could not be listed, so the project inventory is incomplete; a project missing from it is not evidence that it does not exist"
         }
+        "needs_undeclared" => {
+            "the code reads names the contract declares nowhere and the default branch does not declare either"
+        }
         "unknown_env" => "the environment is not declared",
         "unknown_target" => "the target is not declared for the environment",
         "unknown_product" => "the product is not declared",
@@ -503,6 +506,9 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
         },
         InventoryIncomplete {
             unlisted: vec![AccountId::new("ACC-ONE"), AccountId::new("ACC-TWO")],
+        },
+        NeedsUndeclared {
+            names: vec!["API_KEY".into(), "DB_URL".into()],
         },
         NotDeclared {
             kind: NameKind::Environment,

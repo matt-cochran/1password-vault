@@ -748,6 +748,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `manifest_ambiguous` | 2 | after_fix | yes | several 1Password manifests match; a person keeps one and archives the others |
 | `manifest_exists` | 2 | never | no | a manifest for this project already exists; change it with opv config edit |
 | `manifest_not_found` | 2 | after_fix | no | no 1Password manifest has the project's title (OPV_PROJECT or .opv) |
+| `needs_undeclared` | 2 | after_fix | no | the code reads names the contract declares nowhere and the default branch does not declare either |
 | `no_target` | 2 | never | no | the environment has no deployment target (run-only) |
 | `nothing_in_scope` | 2 | never | no | nothing in the environment matches the scope the command was given |
 | `source_only` | 2 | never | no | the product is source-only: it holds shared values for other products' keys and is never run, checked or planned on its own |
