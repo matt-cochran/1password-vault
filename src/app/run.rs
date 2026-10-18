@@ -306,7 +306,7 @@ fn launch(
                         "opv could not tidy it in this run (see the note above)".to_string()
                     }
                     Some(super::tidy::Identity::DeployCredentials) => format!(
-                        "run opv check {env_name} (without deploy credentials) and opv will tidy it"
+                        "run opv config export {env_name} (it reads the item without deploy credentials) and opv will tidy it"
                     ),
                     Some(_) => {
                         format!("run as yourself (opv login {env_name}) and opv will tidy it")

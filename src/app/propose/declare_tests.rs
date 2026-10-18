@@ -137,7 +137,7 @@ fn a_target_is_declared_without_a_state_vault() {
 fn a_declared_target_is_planned_a_state_vault() {
     let (_d, path) = file(FRESH);
     target(&FakeRunner::default(), &path, &fly_target("web")).unwrap();
-    let envs = super::super::bootstrap::plan(
+    let envs = crate::app::bootstrap::plan(
         &crate::adapters::fake_op::FakeOp::default(),
         &text(&path),
         "myapp",
@@ -196,7 +196,7 @@ fn a_key_for_an_undeclared_environment_steps_to_the_configuration() {
     let mut k = key_decl("billing", "STRIPE_KEY");
     k.environments = vec!["staging".into()];
     let e = key(&FakeRunner::default(), &path, &k).unwrap_err();
-    assert_eq!(e.next_text().unwrap_or_default(), "opv config describe");
+    assert_eq!(e.next_text().unwrap_or_default(), "opv contract");
 }
 
 #[test]

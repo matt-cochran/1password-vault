@@ -198,8 +198,7 @@ fn is_login(cmd: &Cmd) -> bool {
 fn is_file_only(cmd: &Cmd) -> bool {
     let path: Vec<&str> = cmd.command.iter().map(String::as_str).collect();
     match path.as_slice() {
-        ["bootstrap"] => true,
-        ["init"] => has_flag(cmd, "--file"),
+        ["propose", "setup"] => has_flag(cmd, "--file"),
         ["config", "check"] => has_flag(cmd, "--file"),
         _ => false,
     }

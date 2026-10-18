@@ -817,7 +817,7 @@ pub enum Cause {
     },
     /// A source item changed since the last sync, or no recorded source versions exist
     /// (`delivery-transports` §2.2). A result, not a failure: `ok: true`, exit 10; the
-    /// step it names is the sync (or `opv bootstrap` when no delivery item is recorded).
+    /// step it names is the sync (or `opv apply` when no delivery item is recorded).
     SourceChanged {
         env: EnvName,
         /// No `source versions` recorded for the placement: its delivery item is missing,
@@ -977,7 +977,7 @@ impl GenerateRefusal {
                 "it is a shared key, so its value comes from the key it reads from"
             }
             GenerateRefusal::HasValue => {
-                "its field already holds a value, and opv generate never replaces one (rotation is a reviewed step)"
+                "its field already holds a value, and opv apply never replaces one (rotation is a reviewed step)"
             }
         }
     }

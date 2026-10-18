@@ -119,6 +119,6 @@ fn sentence_returns_the_documented_text() {
         "state vault v1 is shared by targets prod/api, prod/web, but prod/api cannot read \
          boundary staging; that target's deploy identity would read evidence for values it \
          cannot read. Give each target its own state vault: delete state_vault_id from \
-         [environments.prod.targets.api] and run opv bootstrap."
+         [environments.prod.targets.api] and run opv propose structure, then opv apply."
     );
 }

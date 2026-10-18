@@ -15,15 +15,15 @@ use crate::json::SCHEMA_VERSION;
 /// `opv schema` exposes this as `mcp_tools`.
 pub const MCP_TOOLS: &[(&str, &str)] = &[
     ("opv_ready", "ready"),
-    ("opv_configuration", "config describe"),
+    ("opv_configuration", "contract"),
     ("opv_access", "access"),
     ("opv_deployment_plan", "plan"),
     ("opv_changed", "changed"),
-    ("opv_declare_key", "add"),
-    ("opv_declare_environment", "env add"),
-    ("opv_declare_target", "target add"),
-    ("opv_structure_plan", "structure plan"),
-    ("opv_generate", "generate"),
+    ("opv_declare_key", "propose key"),
+    ("opv_declare_environment", "propose env"),
+    ("opv_declare_target", "propose target"),
+    ("opv_structure_plan", "propose structure"),
+    ("opv_generate", "propose generate"),
     ("opv_delivery_preview", "run --preview"),
 ];
 
@@ -68,13 +68,6 @@ pub const EFFECTS: &[Effect] = &[
         ask_user_first: false,
     },
     Effect {
-        command: "check",
-        effect: "reads",
-        needs_terminal: false,
-        handles_values: false,
-        ask_user_first: false,
-    },
-    Effect {
         command: "status",
         effect: "reads",
         needs_terminal: false,
@@ -89,13 +82,6 @@ pub const EFFECTS: &[Effect] = &[
         ask_user_first: false,
     },
     Effect {
-        command: "adopt",
-        effect: "reads",
-        needs_terminal: false,
-        handles_values: true,
-        ask_user_first: true,
-    },
-    Effect {
         command: "ui",
         effect: "interactive",
         needs_terminal: true,
@@ -108,13 +94,6 @@ pub const EFFECTS: &[Effect] = &[
         needs_terminal: false,
         handles_values: false,
         ask_user_first: false,
-    },
-    Effect {
-        command: "tidy",
-        effect: "writes_1password",
-        needs_terminal: false,
-        handles_values: false,
-        ask_user_first: true,
     },
     Effect {
         command: "delivery verify",
@@ -152,13 +131,6 @@ pub const EFFECTS: &[Effect] = &[
         ask_user_first: false,
     },
     Effect {
-        command: "generate",
-        effect: "writes_1password",
-        needs_terminal: false,
-        handles_values: false,
-        ask_user_first: true,
-    },
-    Effect {
         command: "vault locate",
         effect: "reads",
         needs_terminal: false,
@@ -185,13 +157,6 @@ pub const EFFECTS: &[Effect] = &[
         needs_terminal: false,
         handles_values: false,
         ask_user_first: false,
-    },
-    Effect {
-        command: "bootstrap",
-        effect: "writes_1password",
-        needs_terminal: false,
-        handles_values: false,
-        ask_user_first: true,
     },
     Effect {
         command: "account list",
@@ -264,13 +229,6 @@ pub const EFFECTS: &[Effect] = &[
         ask_user_first: false,
     },
     Effect {
-        command: "item skeleton",
-        effect: "writes_1password",
-        needs_terminal: false,
-        handles_values: false,
-        ask_user_first: true,
-    },
-    Effect {
         command: "explain",
         effect: "none",
         needs_terminal: false,
@@ -290,20 +248,6 @@ pub const EFFECTS: &[Effect] = &[
         needs_terminal: false,
         handles_values: false,
         ask_user_first: false,
-    },
-    Effect {
-        command: "init",
-        effect: "writes_config",
-        needs_terminal: false,
-        handles_values: false,
-        ask_user_first: true,
-    },
-    Effect {
-        command: "add",
-        effect: "writes_config",
-        needs_terminal: false,
-        handles_values: false,
-        ask_user_first: true,
     },
     Effect {
         command: "completions",
@@ -340,15 +284,6 @@ pub const EFFECTS: &[Effect] = &[
         handles_values: false,
         ask_user_first: false,
     },
-    // `target add` declares a target (writes_config) and, in the same confirmed step,
-    // creates its state vault (writes_1password): FR-56, FR-58. It always asks first.
-    Effect {
-        command: "target add",
-        effect: "writes_config",
-        needs_terminal: false,
-        handles_values: false,
-        ask_user_first: true,
-    },
     Effect {
         command: "target list",
         effect: "reads",
@@ -366,25 +301,99 @@ pub const EFFECTS: &[Effect] = &[
         ask_user_first: true,
     },
     Effect {
-        command: "env add",
-        effect: "writes_config",
+        command: "needs",
+        effect: "reads",
         needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    Effect {
+        command: "contract",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    // A proposal writes nothing; `--write` writes the contract file (FLAG_EFFECTS).
+    Effect {
+        command: "propose",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    Effect {
+        command: "propose key",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    Effect {
+        command: "propose env",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    Effect {
+        command: "propose target",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    Effect {
+        command: "propose retire",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    Effect {
+        command: "propose setup",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    Effect {
+        command: "propose structure",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    Effect {
+        command: "propose generate",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    // `apply` creates vaults, items and fields, generates values and records their ids
+    // (secrets.bindings.toml, the apply record): a person in their own terminal.
+    Effect {
+        command: "apply",
+        effect: "writes_1password",
+        needs_terminal: true,
         handles_values: false,
         ask_user_first: true,
     },
     Effect {
-        command: "structure plan",
-        effect: "reads",
-        needs_terminal: false,
+        command: "set",
+        effect: "writes_1password",
+        needs_terminal: true,
         handles_values: false,
-        ask_user_first: false,
+        ask_user_first: true,
     },
+    // `import` reads values from a file or a target and writes them into 1Password.
     Effect {
-        command: "config describe",
-        effect: "reads",
+        command: "import",
+        effect: "writes_1password",
         needs_terminal: false,
-        handles_values: false,
-        ask_user_first: false,
+        handles_values: true,
+        ask_user_first: true,
     },
 ];
 
@@ -392,41 +401,43 @@ pub const EFFECTS: &[Effect] = &[
 /// them (FR-43, [`crate::app`]'s `tidy::read`): one verified, non-destructive edit, never
 /// under a service account, Connect, CI or deploy credentials. Their effect stays `reads`
 /// (no value changes); `tidies_1password` says so. `doctor` and `ready` are not here: they
-/// never write (#113); `tidy` is the explicit repair and says `writes_1password`.
-pub const TIDIES_1PASSWORD: [&str; 12] = [
+/// never write (#113).
+pub const TIDIES_1PASSWORD: [&str; 10] = [
     "setup",
-    "check",
     "status",
     "projects",
-    "adopt",
+    "import",
     "ui",
     "history",
     "run",
     "plan",
     "sync",
     "config export",
-    "init",
 ];
 
 /// Commands that also create 1Password vaults or items with no flag asking for it, beside
-/// their own `effect` (02.16): `init` creates the boundary vault and item when they are
-/// missing, and `target add` creates the target's state vault. `opv schema` marks them
+/// their own `effect` (02.16). None since 0.12.0: a proposal writes nothing in 1Password and
+/// `opv apply` says `writes_1password`. `opv schema` still marks each command
 /// `also_writes_1password`.
-pub const ALSO_WRITES_1PASSWORD: [&str; 2] = ["init", "target add"];
+pub const ALSO_WRITES_1PASSWORD: [&str; 0] = [];
 
 /// What a flag adds to its command's effect: (command, long flag, effect). Every one of
 /// these needs the user's yes for the run.
-pub const FLAG_EFFECTS: [(&str, &str, &str); 11] = [
+pub const FLAG_EFFECTS: [(&str, &str, &str); 14] = [
     ("sync", "deploy", "deploys"),
     ("sync", "prune", "deletes"),
     ("sync", "rotate", "replaces_immutable"),
     ("sync", "prune-immutable", "deletes_immutable"),
     ("sync", "confirm", "confirms_guarded_environment"),
-    ("init", "force", "overwrites_file"),
-    ("init", "apply", "writes_1password"),
-    ("adopt", "apply", "writes_1password"),
-    ("adopt", "replace", "replaces_value"),
-    ("adopt", "rotate", "replaces_immutable"),
+    // `--write` writes the contract file (or the project's manifest), nothing else.
+    ("propose", "write", "writes_config"),
+    ("propose key", "write", "writes_config"),
+    ("propose env", "write", "writes_config"),
+    ("propose target", "write", "writes_config"),
+    ("propose retire", "write", "writes_config"),
+    ("propose setup", "write", "writes_config"),
+    ("import", "replace", "replaces_value"),
+    ("import", "rotate", "replaces_immutable"),
     // 0.9.0: creates a service account and stores its token as a GitHub secret (the owner,
     // in their own terminal; the token is never shown).
     ("access", "create", "creates_credential"),
@@ -459,7 +470,7 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
             "human_required": "true when an agent must hand `do` and `next` to the user instead of acting",
             "text": "every failure ends with an optional `Do: <action>` line and exactly one `Next: <command>` line, the last line on stderr",
             "values": "no document ever contains a secret value; config export prints config-kind values only",
-            "tidy": "a command with tidies_1password true, run by a signed-in person (opv login), may tidy the item's layout in one non-destructive edit (nothing deleted; listed in `tidy`); service accounts, Connect, CI, runs under deploy credentials and the project manifest item are never written. doctor and ready never write 1Password, whoever runs them: they are the safe readiness checks (doctor --env <env> --json, ready --json). opv tidy <env> is the explicit repair (writes_1password, a signed-in person only)",
+            "tidy": "a command with tidies_1password true, run by a signed-in person (opv login), may tidy the item's layout in one non-destructive edit (nothing deleted; listed in `tidy`); service accounts, Connect, CI, runs under deploy credentials and the project manifest item are never written. doctor and ready never write 1Password, whoever runs them: they are the safe readiness checks (doctor --env <env> --json, ready --json). a signed-in person's opv config export <env> tidies an item explicitly",
             "plan_id": "plan --json prints plan_id when the plan is clean; it covers exactly the targets planned (every target of the environment, or those --target names); sync --expect-plan <plan_id> applies exactly that plan to the same targets or fails with stale_plan (exit 6) and changes nothing",
             "targets": "status, plan and sync cover every target of the environment in name order, or only those --target names (repeatable); every row and key reference names its target",
             "run": "run always passes op:// references to op run, so op run masks values in the child's output; a value needing a fix a person's tidy would make is warned about on stderr, never injected",
@@ -498,11 +509,30 @@ fn leaf_commands(cmd: &clap::Command, prefix: String, out: &mut Vec<Value>) {
         format!("{prefix} {}", cmd.get_name())
     };
     if cmd.has_subcommands() {
+        // A parent that also runs on its own flags (`propose --intent <file>`) is a command
+        // of its own, listed before its subcommands.
+        if own_flags(cmd) {
+            out.push(command_entry(cmd, &path));
+        }
         for sub in cmd.get_subcommands() {
             leaf_commands(sub, path.clone(), out);
         }
         return;
     }
+    out.push(command_entry(cmd, &path));
+}
+
+/// Whether `cmd` takes a flag of its own (not a global, not `--help`/`--version`).
+fn own_flags(cmd: &clap::Command) -> bool {
+    cmd.get_arguments().any(|a| {
+        !a.is_positional()
+            && !a.is_global_set()
+            && !matches!(a.get_id().as_str(), "help" | "version")
+    })
+}
+
+/// The schema entry of the command `cmd` at `path`.
+fn command_entry(cmd: &clap::Command, path: &str) -> Value {
     let effect = EFFECTS.iter().find(|e| e.command == path);
     let args: Vec<Value> = cmd
         .get_arguments()
@@ -540,9 +570,9 @@ fn leaf_commands(cmd: &clap::Command, prefix: String, out: &mut Vec<Value>) {
             f
         })
         .collect();
-    let json = JSON_ONLY.contains(&path.as_str())
+    let json = JSON_ONLY.contains(&path)
         || cmd.get_arguments().any(|a| a.get_long() == Some("json"));
-    out.push(json!({
+    json!({
         "name": path,
         "about": first_line(cmd.get_about()),
         "args": args,
@@ -552,9 +582,9 @@ fn leaf_commands(cmd: &clap::Command, prefix: String, out: &mut Vec<Value>) {
         "needs_terminal": effect.map(|e| e.needs_terminal),
         "handles_values": effect.map(|e| e.handles_values),
         "ask_user_first": effect.map(|e| e.ask_user_first),
-        "tidies_1password": effect.map(|_| TIDIES_1PASSWORD.contains(&path.as_str())),
-        "also_writes_1password": effect.map(|_| ALSO_WRITES_1PASSWORD.contains(&path.as_str())),
-    }));
+        "tidies_1password": effect.map(|_| TIDIES_1PASSWORD.contains(&path)),
+        "also_writes_1password": effect.map(|_| ALSO_WRITES_1PASSWORD.contains(&path)),
+    })
 }
 
 /// `(provider section, required)` when `long` is a provider's `opv target add` option
@@ -659,10 +689,6 @@ fn documents() -> Value {
             "environment", "product", "changes", "rows", "extras", "undelivered?", "unreferenced_sources?", "drift?", "tidy?", "tidy_error?", "stage",
             "held", "prune", "totals", "plan_id? (a clean plan only)"
         ],
-        "check": [
-            "environment", "product", "target_checked", "rows", "findings", "totals", "tidy?",
-            "tidy_error?"
-        ],
         "sync": [
             "environment", "product", "targets: [{target, provider, deployed, revision}]",
             "written", "unchanged", "held", "deployed", "deploy_reason", "deployed_names",
@@ -679,15 +705,6 @@ fn documents() -> Value {
             "reference", "inspect", "readers: {deploy: [service account], ci}",
             "explain --target: {environment, target, provider, locator, products, deploy_credentials, state_vault_id, deploy_account}"
         ],
-        "init": [
-            "path", "manifest", "environment", "boundary", "vault_id", "item_id", "created",
-            "keys: [{product, key, kind}]", "skipped"
-        ],
-        "init --add-env": [
-            "environment", "saved_in", "boundary", "vault_id", "item_id", "added", "absent",
-            "undeclared"
-        ],
-        "add": ["product", "key", "kind", "environments", "saved_in", "changed"],
         "version": [
             "opv: {version}",
             "tools: [{program, vendor, status: installed | missing | unknown, version, reason, providers, configured}]",
@@ -708,12 +725,15 @@ fn documents() -> Value {
             "projects: [{project, vault, environments: [status_overview environment], error_code, error}]",
             "notes"
         ],
-        "item skeleton": ["environment", "added: [{product, key, kind}]"],
         "open": ["environment", "product", "key", "section", "field", "open_url"],
-        "adopt": "{environment, applied, rows [{found, product, key, action (match|format_only|import|replace|differs|held_immutable|fails_rule|conflict|ambiguous|not_declared|not_applicable), rule}], writes, decisions_needed, next}: names, actions and findings only, never a value",
+        "propose": "{kind, relaxations [{product, key, env?, kind, reason}], diff, questions [{env, ask}], plan_id, written}: the contract diff (names and rules, never a value or an id); propose setup adds structure_steps and bindings_after; propose structure and generate print {plan_id, steps [{step, ...}], structure, contract_after, bindings_after}",
+        "apply": "{plan_id, confirmed, steps_run, created, fields_added, generated [{environment, product, key}], record_written, config_written}: names and public ids only",
+        "set": "{key, environment, state}: the key's value state after the entry (a word, never the value)",
+        "import": "{environment, applied, rows [{found, product, key, action, rule}], writes, decisions_needed, next}: per key imported or skipped, names only, never a value",
+        "needs": "{rows [{name, state (undeclared|declared_unobserved|ambiguous|declared), files, product, annotation_stale}], coverage}: names and file:line only",
+        "contract": "{components [{name, environments [{name, keys [{name, kind, shape, required}]}]}], contract_digest}; --relaxations: {base, relaxations}",
         "ready": "{receipt_id, opv_version, config {source}, account ({account_id, by} or null), matrix [{environment, product, target, keys, saved, findings, delivered}], targets [{environment, name, provider, locator, state (ready|grants_missing), reason?, evidence_write (not_verified: an open state vault does not prove delivery evidence can be written; a sync checked with opv delivery verify does)}], findings [{code (an error code, an account finding, or key_missing|key_empty|key_failed_rule|key_wrong_kind), scope {account?, environment?, product?, key?}, blocking, actor (owner|agent|ci), effect (none|signs_in|writes_1password|writes_target|writes_config), prerequisite, verify}], next ({kind, actor, command} or null)}: names, IDs and codes only. A target whose deploy credentials, state vault or boundaries cannot be opened is `grants_missing` in the matrix, naming what could not be opened",
         "access": "{environments: [{environment, report: {checks: [{grant: {principal: {kind (deploy|ci_reader), environment, target?}, service_account, vault_id, permission (read|read_write)}, state (present|missing|read_only_needed|not_visible)}], extra: [{vault_id, service_account}], checked, unclassified}, commands: [string]}]}: who needs each boundary and target and the owner's exact commands for the missing grants; --target narrows to one target; read-only, never says clean",
-        "bootstrap": "{environments: [{environment, boundaries: [{boundary, products, action (ok|create|ids_not_in_account), vault_id?, item_id?, vault?, item?}], state_vaults: [{target, action (ok|create|ids_not_in_account), vault_id?, vault?}]}]}: per environment, each needed boundary and each target's state vault with its action; no --state flag",
         "account list": "{discovery (ok|unavailable|op_missing|credential: a service account or Connect decides the account), platform, cli_accounts_only, selected ({account_id, by (flag|env|pointer|manifest|only), source} or null), accounts [{account_id, user_id, email, address, shorthand, source, signed_in (true|false|null), selected}], findings [{code (no_accounts|selected_account_absent|account_ambiguous|selected_signed_out|discovery_unavailable|op_missing), human_required, message, next}], next}: account metadata only, never a credential, session or field value",
         "account use": "{account_id, path}: the .opv file written",
         "config export": "with <ENV>: the config-kind values, always {product: {KEY: value}}; with --json and no <ENV>: the configuration itself (IDs, names, kinds, rules); no frame on success",

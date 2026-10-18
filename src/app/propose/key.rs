@@ -27,6 +27,18 @@ fn usage(problem: UsageProblem) -> Error {
     Cause::Usage { problem }.into()
 }
 
+/// What a person's command line adds to a key intent beyond the categorical document:
+/// rule parameters (`--rule`, reviewed in the pull request and counted only once committed
+/// on the default branch) and an expiry date (`--expires`). An assistant's intent carries
+/// neither.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Extras {
+    /// `name=value` or `name` (a flag rule), as [`rule`] reads them.
+    pub rules: Vec<String>,
+    /// `YYYY-MM-DD`.
+    pub expires: Option<String>,
+}
+
 /// The proposal a categorical intent implies for `contract_text`, against the
 /// default-branch contract `base` (whose relaxations the proposal lists first). `bindings`
 /// are the ids of `secrets.bindings.toml`, used only to validate; the diff never holds an id.
@@ -36,6 +48,23 @@ pub fn propose(
     base: Option<&Fleet>,
     intent: &Intent,
 ) -> Result<Proposal, Error> {
+    propose_with(contract_text, bindings, base, intent, &Extras::default())
+}
+
+/// [`propose`] with a person's [`Extras`] for a key intent (ignored for `env` and
+/// `retire`).
+pub fn propose_with(
+    contract_text: &str,
+    bindings: &Bindings,
+    base: Option<&Fleet>,
+    intent: &Intent,
+    extras: &Extras,
+) -> Result<Proposal, Error> {
+    let rules: Vec<(String, Value)> = extras
+        .rules
+        .iter()
+        .map(|spec| rule(spec))
+        .collect::<Result<_, _>>()?;
     // The contract carries no ids (D-G): validate it with its bindings filled in.
     let fleet = config::parse(&config::bindings::merge(contract_text, bindings))?;
     let mut doc = ConfigDoc::parse(contract_text)?;
@@ -75,7 +104,7 @@ pub fn propose(
                 &NewKey {
                     kind,
                     environments: written,
-                    rules: &[],
+                    rules: &rules,
                     guidance: guidance.as_ref().map(|g| g.text.as_str()),
                     immutable: *immutable,
                     from: from.as_ref().map(|r| r.as_str()),
@@ -84,7 +113,7 @@ pub fn propose(
                     except: &except,
                     source: source.map(source_word),
                     shape: shape_name,
-                    expires: None,
+                    expires: extras.expires.as_deref(),
                     lifecycle: lifecycle.map(lifecycle_word),
                 },
             )?;
@@ -121,6 +150,7 @@ pub fn propose(
         diff,
         questions,
         plan_id: plan_id(kind, &proposed),
+        contract_after: proposed,
     })
 }
 

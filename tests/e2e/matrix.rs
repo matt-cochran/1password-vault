@@ -41,8 +41,7 @@ const ACCOUNT: &str = "AE2EDEVACCOUNT000000000001";
 /// The commands of the matrix: a slug and the arguments after `opv` (text mode; the `--json`
 /// run appends `--json`). Read-only commands and dry runs only.
 const COMMANDS: &[(&str, &[&str])] = &[
-    ("check_dev", &["check", "dev"]),
-    ("check_prod", &["check", "prod"]),
+    ("doctor_prod", &["doctor", "--env", "prod"]),
     ("status_prod", &["status", "prod"]),
     ("plan_prod", &["plan", "prod"]),
     ("doctor_dev", &["doctor", "--env", "dev"]),
@@ -70,11 +69,11 @@ const COMMANDS: &[(&str, &[&str])] = &[
         &["vault", "locate", "vE2ESHAREDDEV00000000000001"],
     ),
     ("account_list", &["account", "list"]),
-    ("config_describe", &["config", "describe"]),
+    ("contract", &["contract"]),
     // `sync` has no dry run: on a confirm_env environment without --confirm it reads, then
     // refuses before writing.
     ("sync_prod_unconfirmed", &["sync", "prod"]),
-    ("bootstrap_dry_run", &["bootstrap", "--dry-run"]),
+    ("propose_structure", &["propose", "structure"]),
 ];
 
 /// The fault kinds `opv-sim` knows for every tool (tests/sim/faults.rs).

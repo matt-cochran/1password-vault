@@ -355,12 +355,15 @@ fn opv_project_picks_one_of_several_repo_matches() {
 }
 
 #[test]
-fn no_match_names_init_as_the_next_step() {
+fn no_match_names_the_setup_proposal_as_the_next_step() {
     let op = FakeOp::with_remote("https://github.com/acme/myapp.git");
     let dir = tempfile::tempdir().unwrap();
     let e = locate(&req(dir.path()), &op).unwrap_err();
     assert!(
-        e.next_text().as_deref().unwrap().starts_with("opv init "),
+        e.next_text()
+            .as_deref()
+            .unwrap()
+            .starts_with("opv propose setup "),
         "{e:?}"
     );
 }

@@ -12,19 +12,19 @@ use std::process::Command;
 /// The fixture directory, the project and the world in one.
 const APP: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/e2e/app");
 
-/// FR-4: `config describe` resolves every environment, product, key and boundary of the
-/// project. It reads the configuration only, so no 1Password call is needed.
+/// FR-4: `contract` resolves every environment, product and key of the project. It reads
+/// the configuration only, so no 1Password call is needed.
 #[test]
-fn config_describe_loads_the_e2e_app() {
+fn contract_loads_the_e2e_app() {
     let out = Command::new(env!("CARGO_BIN_EXE_opv"))
         .arg("--config")
         .arg(Path::new(APP).join("secrets.toml"))
-        .args(["config", "describe", "--json"])
+        .args(["contract", "--json"])
         .output()
         .expect("run opv");
     assert!(
         out.status.success(),
-        "opv config describe failed: {}",
+        "opv contract failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 }

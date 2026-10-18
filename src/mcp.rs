@@ -711,7 +711,7 @@ fn inspect(
 ) -> Value {
     let (tool, command): (&str, &[&str]) = match operation {
         Operation::Ready => ("opv_ready", &["ready"]),
-        Operation::Configuration => ("opv_configuration", &["config", "describe"]),
+        Operation::Configuration => ("opv_configuration", &["contract"]),
     };
     if env.is_some_and(|e| !identifier(e)) {
         return ToolCall::new(tool, command, Vec::new(), verbose)
@@ -1084,7 +1084,7 @@ fn declare_key(project: &std::path::Path, args: DeclareKey) -> Value {
         .chain(args.environments.iter().map(|e| ("environments", e)))
         .find(|(_, n)| !identifier(n));
     if let Some((field, _)) = bad {
-        return ToolCall::new("opv_declare_key", &["add"], Vec::new(), args.verbose)
+        return ToolCall::new("opv_declare_key", &["propose", "key"], Vec::new(), args.verbose)
             .refused(not_a_name(field));
     }
     let mut words = vec![format!("{}/{}", args.product, args.key)];
@@ -1104,8 +1104,8 @@ fn declare_key(project: &std::path::Path, args: DeclareKey) -> Value {
     if args.immutable {
         words.push("--immutable".into());
     }
-    let call = ToolCall::new("opv_declare_key", &["add"], words, args.verbose);
-    let k = crate::app::declare::Key {
+    let call = ToolCall::new("opv_declare_key", &["propose", "key"], words, args.verbose);
+    let k = crate::app::propose::declare::Key {
         product: args.product,
         key: args.key,
         kind: args.kind,
@@ -1115,7 +1115,7 @@ fn declare_key(project: &std::path::Path, args: DeclareKey) -> Value {
         immutable: args.immutable,
     };
     declared(project, &call, |r, path| {
-        crate::app::declare::key(r, path, &k)
+        crate::app::propose::declare::key(r, path, &k)
     })
 }
 
@@ -1124,7 +1124,7 @@ fn declare_environment(project: &std::path::Path, environment: &str, verbose: bo
     if !identifier(environment) {
         return ToolCall::new(
             "opv_declare_environment",
-            &["env", "add"],
+            &["propose", "env"],
             Vec::new(),
             verbose,
         )
@@ -1132,12 +1132,12 @@ fn declare_environment(project: &std::path::Path, environment: &str, verbose: bo
     }
     let call = ToolCall::new(
         "opv_declare_environment",
-        &["env", "add"],
+        &["propose", "env"],
         vec![environment.to_string()],
         verbose,
     );
     declared(project, &call, |r, path| {
-        crate::app::declare::environment(r, path, environment)
+        crate::app::propose::declare::environment(r, path, environment)
     })
 }
 
@@ -1163,7 +1163,7 @@ fn declare_target(project: &std::path::Path, args: DeclareTarget) -> Value {
     if let Some(field) = bad {
         return ToolCall::new(
             "opv_declare_target",
-            &["target", "add"],
+            &["propose", "target"],
             Vec::new(),
             args.verbose,
         )
@@ -1171,7 +1171,7 @@ fn declare_target(project: &std::path::Path, args: DeclareTarget) -> Value {
     }
     let call = ToolCall::new(
         "opv_declare_target",
-        &["target", "add"],
+        &["propose", "target"],
         declare_target_words(&args),
         args.verbose,
     );
@@ -1188,7 +1188,7 @@ fn declare_target(project: &std::path::Path, args: DeclareTarget) -> Value {
     {
         return call.refused(exists);
     }
-    let t = crate::app::declare::Target {
+    let t = crate::app::propose::declare::Target {
         environment: args.environment,
         name: args.target,
         provider: args.provider,
@@ -1197,7 +1197,7 @@ fn declare_target(project: &std::path::Path, args: DeclareTarget) -> Value {
         roles: args.roles,
     };
     declared(project, &call, |r, path| {
-        crate::app::declare::target(r, path, &t)
+        crate::app::propose::declare::target(r, path, &t)
     })
 }
 
@@ -1396,13 +1396,13 @@ fn access_answer(doc: &Value) -> Value {
 fn structure_plan(project: &std::path::Path, verbose: bool) -> Value {
     let call = ToolCall::new(
         "opv_structure_plan",
-        &["structure", "plan"],
+        &["propose", "structure"],
         Vec::new(),
         verbose,
     );
     let r = read_only(Duration::from_secs(60));
     let planned =
-        crate::app::structure::scope_as(project, &r, "structure plan").and_then(|scope| {
+        crate::app::structure::scope_as(project, &r, "propose structure").and_then(|scope| {
             r.inner.use_account(Some(scope.account.clone()));
             let text = std::fs::read_to_string(&scope.path).map_err(|e| -> Error {
                 Cause::ConfigUnreadable {
@@ -1439,7 +1439,7 @@ fn generate_call(env_name: &str, keys: &[String], verbose: bool) -> ToolCall {
     } else {
         Vec::new()
     };
-    ToolCall::new("opv_generate", &["generate"], words, verbose)
+    ToolCall::new("opv_generate", &["propose", "generate"], words, verbose)
 }
 
 /// `opv_generate` as a value: generate each `product/KEY` and write it into its empty
@@ -1456,7 +1456,7 @@ fn generate(
 ) -> Value {
     let call = generate_call(env_name, keys, verbose);
     if let Some(var) = credential_in_environment(vars) {
-        return call.refused(own_session("generate", var));
+        return call.refused(own_session("apply", var));
     }
     if let Some(refused) = ci_refusal() {
         return call.refused(refused);

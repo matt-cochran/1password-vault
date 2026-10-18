@@ -29,7 +29,7 @@ fn unknown_environment_exits_2_before_any_subprocess() {
         vec!["plan", "qa"],
         vec!["sync", "qa"],
         vec!["config", "export", "qa", "--json"],
-        vec!["item", "skeleton", "qa"],
+        vec!["import", "qa", "--from", "x.env", "--dry-run"],
     ] {
         let mut args = vec!["--config", CFG];
         args.extend(&cmd);
@@ -177,12 +177,12 @@ fn missing_discovered_config_names_starting_directory() {
 
 /// P3: the first-run router offers both starting paths.
 #[test]
-fn missing_discovered_config_offers_init_and_setup() {
+fn missing_discovered_config_offers_the_setup_proposal_and_setup() {
     let dir = tempfile::tempdir().unwrap();
     let (_, _, err) = opv_in(dir.path(), &["status", "prod"]);
     assert!(
-        // 09.03b: init starts the environment the command named.
-        err.contains("Next: opv init prod") && err.contains("opv setup"),
+        // 09.03b: the setup proposal starts the environment the command named.
+        err.contains("Next: opv propose setup --from-item prod") && err.contains("opv setup"),
         "{err}"
     );
 }
@@ -298,11 +298,8 @@ fn env_without_fly_section_exits_2_for_fly_commands() {
             "{cmd:?}: {err}"
         );
     }
-    // config export and item skeleton get past config to the 1Password read (op missing: 3).
-    for cmd in [
-        vec!["config", "export", "dev", "--json"],
-        vec!["item", "skeleton", "dev"],
-    ] {
+    // config export gets past config to the 1Password read (op missing: 3).
+    for cmd in [vec!["config", "export", "dev", "--json"]] {
         let mut args = vec!["--config", cfg];
         args.extend(&cmd);
         let (code, _, err) = opv(&args);
@@ -316,7 +313,7 @@ fn help_has_examples_and_no_requirement_ids() {
     let (code, out, err) = opv(&["--help"]);
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("Examples:"), "{out}");
-    assert!(out.contains("opv item skeleton staging"), "{out}");
+    assert!(out.contains("opv propose env staging --write"), "{out}");
     assert!(out.contains("7 authentication"), "{out}");
     assert!(
         out.contains("<ENV>") || out.contains("environment defined"),
@@ -329,7 +326,7 @@ fn help_has_examples_and_no_requirement_ids() {
         vec!["plan", "--help"],
         vec!["run", "--help"],
         vec!["doctor", "--help"],
-        vec!["item", "skeleton", "--help"],
+        vec!["propose", "key", "--help"],
         vec!["config", "export", "--help"],
     ] {
         let (_, out, _) = opv(&args);
@@ -377,7 +374,7 @@ fn simple_unknown_environment_exits_2_before_any_subprocess() {
         vec!["plan", "qa"],
         vec!["sync", "qa"],
         vec!["config", "export", "qa", "--json"],
-        vec!["item", "skeleton", "qa"],
+        vec!["import", "qa", "--from", "x.env", "--dry-run"],
     ] {
         let mut args = vec!["--config", SIMPLE];
         args.extend(&cmd);
@@ -652,39 +649,44 @@ fn explain_undeclared_bare_key_under_fleet_exits_2() {
     assert_eq!(code, 2, "{err}");
 }
 
-// --- init (FR-23) ---
+// --- propose setup and propose env (design §25.1) ---
 
-const INIT: [&str; 6] = ["init", "staging", "--vault", "v", "--item", "i"];
+/// The setup proposal of an existing item, by title.
+const PROPOSE_SETUP: [&str; 7] = [
+    "propose",
+    "setup",
+    "--from-item",
+    "staging",
+    "--vault",
+    "v",
+    "--item",
+];
 
+/// The setup proposal reads the item in 1Password (without `op` on PATH a dependency
+/// error) and announces no ancestor configuration.
 #[test]
-fn init_refuses_an_existing_file_without_force_exit_2_naming_the_path() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("secrets.toml");
-    std::fs::write(&path, "# mine\n").unwrap();
-    let (code, out, err) = opv_in(dir.path(), &INIT);
-    assert_eq!(code, 2, "{err}");
-    assert!(out.is_empty(), "{out}");
-    // The cause's own wording: init never merges, so the step adds the environment.
-    assert!(err.contains("--add-env"), "{err}");
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), "# mine\n");
+fn propose_setup_without_op_is_a_dependency_error() {
+    let (dir, nested) = dir_with_ancestor_config();
+    let mut args = PROPOSE_SETUP.to_vec();
+    args.push("i");
+    let (code, _, err) = opv_in(&nested, &args);
+    assert_eq!(code, 3, "{err}");
+    drop(dir);
 }
 
-/// I5: a new environment in an existing project is added with --add-env, never a loop.
+/// A proposal writes nothing, even when the 1Password read fails.
 #[test]
-fn init_in_an_existing_project_suggests_add_env() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("secrets.toml"), "# mine\n").unwrap();
-    let (_, _, err) = opv_in(dir.path(), &INIT);
-    assert_eq!(
-        err.lines().last(),
-        Some("Next: opv init staging --vault v --item i --add-env"),
-        "{err}"
-    );
+fn propose_setup_writes_nothing_when_op_is_missing() {
+    let (dir, nested) = dir_with_ancestor_config();
+    let mut args = PROPOSE_SETUP.to_vec();
+    args.extend(["i", "--write"]);
+    let _ = opv_in(&nested, &args);
+    assert!(!nested.join("secrets.toml").exists());
+    drop(dir);
 }
 
-/// I5: an environment the file already declares is changed with opv config edit.
-#[test]
-fn init_of_a_declared_environment_suggests_config_edit() {
+/// A simple-profile project in a scratch directory (its contract and bindings).
+fn simple_project() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     std::fs::copy(
         "tests/fixtures/simple/secrets.toml",
@@ -696,23 +698,124 @@ fn init_of_a_declared_environment_suggests_config_edit() {
         dir.path().join("secrets.bindings.toml"),
     )
     .unwrap();
-    let (_, _, err) = opv_in(
-        dir.path(),
-        &["init", "prod", "--vault", "v", "--item", "i", "--add-env"],
-    );
-    assert_eq!(err.lines().last(), Some("Next: opv config edit"), "{err}");
+    dir
 }
 
-/// init reads no configuration: an ancestor secrets.toml is neither announced nor loaded,
-/// and without op on PATH it fails as a dependency error, writing nothing.
+/// An environment the contract already declares is refused before any call.
 #[test]
-fn init_ignores_discovery_and_writes_nothing_when_op_is_missing() {
-    let (dir, nested) = dir_with_ancestor_config();
-    let (code, _, err) = opv_in(&nested, &INIT);
-    assert_eq!(code, 3, "{err}");
-    assert!(!err.contains("using "), "{err}");
-    assert!(!nested.join("secrets.toml").exists());
-    drop(dir);
+fn propose_env_refuses_an_existing_environment() {
+    let dir = simple_project();
+    let (code, _, err) = opv_in(dir.path(), &["propose", "env", "prod"]);
+    assert!(
+        code == 2 && err.contains("already declared"),
+        "{code} {err}"
+    );
+}
+
+/// A proposal without --write leaves the contract as it was.
+#[test]
+fn propose_env_without_write_leaves_the_contract_unchanged() {
+    let dir = simple_project();
+    let before = std::fs::read_to_string(dir.path().join("secrets.toml")).unwrap();
+    let _ = opv_in(dir.path(), &["propose", "env", "qa"]);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("secrets.toml")).unwrap(),
+        before
+    );
+}
+
+/// A proposal prints the contract diff: the new environment's table, added.
+#[test]
+fn propose_env_prints_the_added_environment() {
+    let dir = simple_project();
+    let (_, out, _) = opv_in(dir.path(), &["propose", "env", "qa"]);
+    assert!(out.contains("+[environments.qa]"), "{out}");
+}
+
+/// Before --write, the step is the same proposal with --write.
+#[test]
+fn propose_env_steps_to_its_written_form() {
+    let dir = simple_project();
+    let (_, out, _) = opv_in(dir.path(), &["propose", "env", "qa"]);
+    assert_eq!(
+        out.lines().last(),
+        Some("Next: opv propose env qa --write")
+    );
+}
+
+/// With --write the contract file holds the proposal.
+#[test]
+fn propose_env_with_write_writes_the_contract() {
+    let dir = simple_project();
+    let _ = opv_in(dir.path(), &["propose", "env", "qa", "--write"]);
+    assert!(
+        std::fs::read_to_string(dir.path().join("secrets.toml"))
+            .unwrap()
+            .contains("[environments.qa]")
+    );
+}
+
+/// After --write, the step is the person's `opv apply`.
+#[test]
+fn propose_env_with_write_steps_to_apply() {
+    let dir = simple_project();
+    let (_, out, _) = opv_in(dir.path(), &["propose", "env", "qa", "--write"]);
+    assert_eq!(out.lines().last(), Some("Next: opv apply"));
+}
+
+/// H2: `opv propose key --write` edits the discovered file end to end.
+#[test]
+fn propose_key_with_write_declares_a_key_in_the_discovered_file() {
+    let dir = simple_project();
+    let (code, _, err) = opv_in(
+        dir.path(),
+        &["propose", "key", "app/SENTRY_DSN", "--kind", "secret", "--write"],
+    );
+    assert_eq!(code, 0, "{err}");
+}
+
+/// `apply` is a person's own: without a terminal it is refused before anything is read.
+#[test]
+fn apply_without_a_terminal_exits_6() {
+    let dir = simple_project();
+    let (code, _, err) = opv_in(dir.path(), &["apply"]);
+    assert_eq!(code, 6, "{err}");
+}
+
+/// `set` is a person's own: without a terminal it is refused before anything is read.
+#[test]
+fn set_without_a_terminal_exits_6() {
+    let dir = simple_project();
+    let (code, _, err) = opv_in(dir.path(), &["set", "app/KEY", "--env", "prod"]);
+    assert_eq!(code, 6, "{err}");
+}
+
+/// `contract --schema` prints the document's JSON Schema, with no 1Password call.
+#[test]
+fn contract_schema_is_a_json_schema() {
+    let dir = simple_project();
+    let (_, out, err) = opv_in(dir.path(), &["contract", "--schema"]);
+    let doc: serde_json::Value = serde_json::from_str(&out).expect(&err);
+    assert_eq!(doc["title"], "opv contract");
+}
+
+/// `contract --check` passes on a copy `opv contract` just printed.
+#[test]
+fn contract_check_passes_on_a_fresh_copy() {
+    let dir = simple_project();
+    let (_, out, _) = opv_in(dir.path(), &["contract"]);
+    std::fs::write(dir.path().join("contract.json"), out).unwrap();
+    let (code, _, err) = opv_in(dir.path(), &["contract", "--check", "contract.json"]);
+    assert_eq!(code, 0, "{err}");
+}
+
+/// `contract --check` fails (exit 2, contract_stale) on a stale copy.
+#[test]
+fn contract_check_fails_on_a_stale_copy() {
+    let dir = simple_project();
+    std::fs::write(dir.path().join("contract.json"), "{\"components\": []}").unwrap();
+    let (code, _, err) = opv_in(dir.path(), &["contract", "--check", "contract.json"]);
+    assert_eq!(code, 2, "{err}");
 }
 
 /// 0.4.0: the `fly` subcommand is gone; clap reports an unknown subcommand (exit 2).
@@ -729,80 +832,6 @@ fn plan_is_a_top_level_command() {
     assert_eq!(code, 0);
 }
 
-#[test]
-fn init_rejects_config_flag_and_bad_profile() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut a = vec!["--config", "x.toml"];
-    a.extend(INIT);
-    let (code, _, err) = opv_in(dir.path(), &a);
-    assert_eq!(code, 2, "{err}");
-    assert!(
-        err.contains("opv init and --config cannot be used together"),
-        "{err}"
-    );
-    let mut a = INIT.to_vec();
-    a.extend(["--profile", "both"]);
-    let (code, _, err) = opv_in(dir.path(), &a);
-    assert_eq!(code, 2, "{err}");
-    assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
-}
-
-/// Exit code of `opv <args>` with only a fake `op` on PATH: `script` is its shell body. The
-/// fixture item has no allumata fields, so every desired key is missing.
-#[cfg(unix)]
-fn code_with_op(script: &str, args: &[&str]) -> Option<i32> {
-    use std::os::unix::fs::PermissionsExt;
-    let dir = tempfile::tempdir().unwrap();
-    let op = dir.path().join("op");
-    std::fs::write(&op, format!("#!/bin/sh\n{script}\n")).unwrap();
-    std::fs::set_permissions(&op, std::fs::Permissions::from_mode(0o755)).unwrap();
-    Command::new(env!("CARGO_BIN_EXE_opv"))
-        .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
-        .args(args)
-        .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
-        .env_remove("OPV_CONFIG")
-        .env_remove("OPV_PRODUCT")
-        .env_remove("OP_CONNECT_TOKEN")
-        .env("PATH", dir.path())
-        .env("OP_ITEM", "tests/fixtures/op_item.json")
-        // Test builds only: retries (NR-3) without waiting out the backoff.
-        .env("OPV_TEST_BACKOFF_SCALE", "0")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .unwrap()
-        .status
-        .code()
-}
-
-/// #52: `check` without `op` is a dependency error, before any target is considered.
-#[test]
-fn check_without_op_exits_3() {
-    let (code, _, err) = opv(&["--config", CFG, "check", "prod", "--product", "allumata"]);
-    assert_eq!(code, 3, "{err}");
-}
-
-/// #52: `check` reports missing keys as findings (exit 8).
-#[cfg(unix)]
-#[test]
-fn check_with_missing_keys_exits_8() {
-    let code = code_with_op(
-        "/bin/cat \"$OP_ITEM\"",
-        &["--config", CFG, "check", "prod", "--product", "allumata"],
-    );
-    assert_eq!(code, Some(8));
-}
-
-/// #52: a signed-out `op` makes `check` an authentication error (exit 7).
-#[cfg(unix)]
-#[test]
-fn check_when_signed_out_exits_7() {
-    let code = code_with_op(
-        "exit 1",
-        &["--config", CFG, "check", "prod", "--product", "allumata"],
-    );
-    assert_eq!(code, Some(7));
-}
-
 /// #52: `doctor --product` needs `--env` (usage error, exit 2).
 #[test]
 fn doctor_product_requires_env() {
@@ -810,119 +839,12 @@ fn doctor_product_requires_env() {
     assert_eq!(code, 2);
 }
 
-/// #52: `init` accepts a run-only environment without `--fly-app` (it gets as far as `op`).
+/// H3: every provider's options reach `opv propose target` from the plug-in contract.
 #[test]
-fn init_accepts_a_run_only_environment() {
-    let dir = tempfile::tempdir().unwrap();
-    let (code, _, err) = opv_in(dir.path(), &["init", "dev", "--vault", "v", "--item", "i"]);
-    assert_eq!(code, 3, "{err}");
-}
-
-/// H3: every provider's options reach `opv target add` from the plug-in contract.
-#[test]
-fn target_add_help_lists_each_providers_options() {
-    let (_, out, _) = opv(&["target", "add", "--help"]);
+fn propose_target_help_lists_each_providers_options() {
+    let (_, out, _) = opv(&["propose", "target", "--help"]);
     let flags = ["--fly-app", "--azure-key-vault", "--kubernetes-namespace"];
     assert!(flags.iter().all(|f| out.contains(f)), "{out}");
-}
-
-/// FR-56, FR-60: `opv init` writes no target, so its help lists no provider option.
-#[test]
-fn init_help_lists_no_provider_option() {
-    let (_, out, _) = opv(&["init", "--help"]);
-    assert!(!out.contains("--azure-key-vault"), "{out}");
-}
-
-/// FR-56, FR-60: `opv init` takes no target name.
-#[test]
-fn init_help_lists_no_target_name() {
-    let (_, out, _) = opv(&["init", "--help"]);
-    assert!(!out.contains("--target-name"), "{out}");
-}
-
-/// The target options removed from `opv init` (FR-60), as a person might still type them.
-const INIT_WITH_TARGET: [&str; 10] = [
-    "init",
-    "prod",
-    "--vault",
-    "v",
-    "--item",
-    "i",
-    "--fly-app",
-    "app",
-    "--target-name",
-    "web",
-];
-
-/// FR-60: a removed form fails fast as a usage error, before any call.
-#[test]
-fn init_with_a_target_option_exits_2() {
-    let dir = tempfile::tempdir().unwrap();
-    let (code, _, err) = opv_in(dir.path(), &INIT_WITH_TARGET);
-    assert_eq!(code, 2, "{err}");
-}
-
-/// FR-60: the refusal names the replacement exactly, with the same name and options.
-#[test]
-fn init_with_a_target_option_names_target_add() {
-    let dir = tempfile::tempdir().unwrap();
-    let (_, _, err) = opv_in(dir.path(), &INIT_WITH_TARGET);
-    assert_eq!(
-        err.lines().last(),
-        Some("Next: opv target add prod web --fly-app app"),
-        "{err}"
-    );
-}
-
-/// FR-60: without a target name the replacement is target add's help, never a placeholder.
-#[test]
-fn init_with_a_provider_option_alone_names_target_add_help() {
-    let dir = tempfile::tempdir().unwrap();
-    let (_, _, err) = opv_in(dir.path(), &["init", "prod", "--azure-key-vault", "kv"]);
-    assert_eq!(
-        err.lines().last(),
-        Some("Next: opv target add --help"),
-        "{err}"
-    );
-}
-
-/// H2: `opv add` edits the discovered file end to end.
-#[test]
-fn add_declares_a_key_in_the_discovered_file() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("secrets.toml");
-    std::fs::copy("tests/fixtures/simple/secrets.toml", &path).unwrap();
-    std::fs::copy(
-        "tests/fixtures/simple/secrets.bindings.toml",
-        dir.path().join("secrets.bindings.toml"),
-    )
-    .unwrap();
-    let (code, _, err) = opv_in(dir.path(), &["add", "app/SENTRY_DSN", "--kind", "secret"]);
-    assert_eq!(code, 0, "{err}");
-}
-
-/// H2: `init --add-env` refuses an environment the file already has, before any call.
-#[test]
-fn init_add_env_refuses_an_existing_environment() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::copy(
-        "tests/fixtures/simple/secrets.toml",
-        dir.path().join("secrets.toml"),
-    )
-    .unwrap();
-    std::fs::copy(
-        "tests/fixtures/simple/secrets.bindings.toml",
-        dir.path().join("secrets.bindings.toml"),
-    )
-    .unwrap();
-    let (code, _, err) = opv_in(
-        dir.path(),
-        &["init", "prod", "--vault", "v", "--item", "i", "--add-env"],
-    );
-    assert!(
-        code == 2 && err.contains("already declared"),
-        "{code} {err}"
-    );
 }
 
 /// A fake `op` that runs `script`, in a fresh PATH dir; returns the dir.
@@ -944,7 +866,7 @@ fn proxy_env_is_inherited() {
     let log = dir.path().join("log");
     Command::new(env!("CARGO_BIN_EXE_opv"))
         .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
-        .args(["--config", CFG, "check", "prod", "--product", "allumata"])
+        .args(["--config", CFG, "config", "export", "prod"])
         .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
         .env_remove("OPV_CONFIG")
         .env_remove("OPV_PRODUCT")
@@ -975,7 +897,7 @@ fn sigterm_forwards_and_exits_143() {
     let log = dir.path().join("log");
     let child = Command::new(env!("CARGO_BIN_EXE_opv"))
         .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
-        .args(["--config", CFG, "check", "prod", "--product", "allumata"])
+        .args(["--config", CFG, "config", "export", "prod"])
         .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
         .env_remove("OPV_CONFIG")
         .env_remove("OPV_PRODUCT")
@@ -1005,7 +927,7 @@ fn sigterm_forwards_and_exits_143() {
             Some(143),
             "forwarded",
             "opv: interrupted by signal 15 before any write\n\
-             Next: opv check --config tests/fixtures/secrets.toml prod --product allumata"
+             Next: opv config export --config tests/fixtures/secrets.toml prod"
         )
     );
 }
@@ -1025,10 +947,9 @@ fn sigint_with_json_exits_130() {
         .args([
             "--config",
             CFG,
-            "check",
+            "config",
+            "export",
             "prod",
-            "--product",
-            "allumata",
             "--json",
         ])
         .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
@@ -1244,18 +1165,23 @@ fn schema_says_doctor_never_tidies_1password() {
 }
 
 #[test]
-fn schema_says_check_may_tidy_1password() {
-    assert_eq!(schema_command("check")["tidies_1password"], true);
+fn schema_says_import_may_tidy_1password() {
+    assert_eq!(schema_command("import")["tidies_1password"], true);
 }
 
 #[test]
-fn schema_says_tidy_writes_1password() {
-    assert_eq!(schema_command("tidy")["effect"], "writes_1password");
+fn schema_says_apply_writes_1password() {
+    assert_eq!(schema_command("apply")["effect"], "writes_1password");
 }
 
 #[test]
-fn schema_says_an_agent_asks_before_tidy() {
-    assert_eq!(schema_command("tidy")["ask_user_first"], true);
+fn schema_says_an_agent_asks_before_apply() {
+    assert_eq!(schema_command("apply")["ask_user_first"], true);
+}
+
+#[test]
+fn schema_says_a_proposal_only_reads() {
+    assert_eq!(schema_command("propose key")["effect"], "reads");
 }
 
 #[test]
@@ -1324,7 +1250,7 @@ fn sighup_is_handled_and_exits_129() {
     let log = dir.path().join("log");
     let child = Command::new(env!("CARGO_BIN_EXE_opv"))
         .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
-        .args(["--config", CFG, "check", "prod", "--product", "allumata"])
+        .args(["--config", CFG, "config", "export", "prod"])
         .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
         .env_remove("OPV_CONFIG")
         .env_remove("OPV_PRODUCT")

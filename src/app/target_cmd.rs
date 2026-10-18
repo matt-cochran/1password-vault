@@ -79,7 +79,7 @@ fn opv(command: &[&str], args: &[&str]) -> Cmd {
     }
 }
 
-/// A command-line refusal: its Next is `opv target add --help` (flag errors only, 06.27).
+/// A command-line refusal: its Next is `opv propose target --help` (flag errors only, 06.27).
 fn usage(problem: UsageProblem) -> Error {
     Cause::Usage { problem }.into()
 }
@@ -249,7 +249,7 @@ pub(crate) fn provider_and_values(
         Some(named) => registry::find(named).ok_or_else(|| {
             usage(UsageProblem::ValueFormat {
                 flag: format!("--provider {named}"),
-                format: "a provider opv knows (opv target add --help lists them)",
+                format: "a provider opv knows (opv propose target --help lists them)",
             })
         })?,
         None => inferred_provider(args)?,
@@ -303,7 +303,7 @@ fn inferred_provider(args: &AddArgs) -> Result<&'static dyn Provider, Error> {
     match owners.as_slice() {
         [(one, _)] => Ok(*one),
         [] => Err(usage(UsageProblem::NeedsFlag {
-            flag: "opv target add".into(),
+            flag: "opv propose target".into(),
             needs: format!(
                 "the target's provider options or --provider <{}>",
                 registry::sections().join("|")

@@ -755,14 +755,14 @@ fn removed_forms(doc: &Doc<'_>) -> Result<(), Error> {
                     &path,
                     "an environment's vault_id",
                     "one boundary per product, boundaries.<product> = { vault_id = \"...\", \
-                     item_id = \"...\" } (opv bootstrap records them)"
+                     item_id = \"...\" } (opv apply records them)"
                         .into(),
                 ),
                 "item_id" => removed(
                     &path,
                     "an environment's item_id",
                     "one boundary per product, boundaries.<product> = { vault_id = \"...\", \
-                     item_id = \"...\" } (opv bootstrap records them)"
+                     item_id = \"...\" } (opv apply records them)"
                         .into(),
                 ),
                 "deploy_credentials" => removed(

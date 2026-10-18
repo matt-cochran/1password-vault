@@ -5,7 +5,7 @@
   "next": {
     "kind": "run",
     "actor": "assistant",
-    "command": "opv config describe"
+    "command": "opv contract"
   },
   "do": null,
   "error": {
@@ -32,7 +32,7 @@
     "next": {
       "kind": "run",
       "actor": "assistant",
-      "command": "opv config describe"
+      "command": "opv contract"
     }
   }
 }

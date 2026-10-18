@@ -91,13 +91,9 @@ refusal_rows! {
         cmd(&["login", "dev"]),
         Some(RefusedBecause::ServiceAccount);
 
-    a_manifest_project_refuses_bootstrap:
+    a_manifest_project_refuses_a_setup_proposal_into_a_file:
         { let mut s = base(); s.config_source = manifest(); s },
-        cmd(&["bootstrap"]),
-        Some(RefusedBecause::ManifestProject);
-    a_manifest_project_refuses_init_file:
-        { let mut s = base(); s.config_source = manifest(); s },
-        cmd_with_args(&["init"], &["dev", "--file"]),
+        cmd_with_args(&["propose", "setup"], &["--from-item", "dev", "--file"]),
         Some(RefusedBecause::ManifestProject);
     a_manifest_project_refuses_config_check_file:
         { let mut s = base(); s.config_source = manifest(); s },

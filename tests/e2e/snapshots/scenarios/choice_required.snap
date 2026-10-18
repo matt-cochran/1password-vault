@@ -7,17 +7,17 @@
 using <SCENARIO>/project/secrets.toml
 opv: this command needs --role, one of migrate, serve
 Do: pick one of migrate, serve and pass it with --role
-Next: opv config describe
+Next: opv config export
 
 ## json exit: 2
 ## json stdout
-{"schema_version":3,"ok":false,"exit_code":2,"next":{"kind":"run","actor":"assistant","command":"opv config describe"},"do":"pick one of migrate, serve and pass it with --role","error":{"code":"choice_required","category":"config","message":"this command needs --role, one of migrate, serve","subject":{"candidates":["migrate","serve"],"flag":"--role"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":true,"do":"pick one of migrate, serve and pass it with --role","next":{"kind":"run","actor":"assistant","command":"opv config describe"}}}
+{"schema_version":3,"ok":false,"exit_code":2,"next":{"kind":"run","actor":"assistant","command":"opv config export"},"do":"pick one of migrate, serve and pass it with --role","error":{"code":"choice_required","category":"config","message":"this command needs --role, one of migrate, serve","subject":{"candidates":["migrate","serve"],"flag":"--role"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":true,"do":"pick one of migrate, serve and pass it with --role","next":{"kind":"run","actor":"assistant","command":"opv config export"}}}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml
 opv: this command needs --role, one of migrate, serve
 Do: pick one of migrate, serve and pass it with --role
-Next: opv config describe
+Next: opv config export
 
 ## mcp opv_delivery_preview {"environment":"dev","product":"web"}
-{"ok":false,"error":{"code":"choice_required","category":"config","message":"this command needs --role, one of migrate, serve","subject":{"candidates":["migrate","serve"],"flag":"--role"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":true,"do":"pick one of migrate, serve and pass it with --role","next":{"kind":"run","actor":"assistant","command":"opv config describe"}}}
+{"ok":false,"error":{"code":"choice_required","category":"config","message":"this command needs --role, one of migrate, serve","subject":{"candidates":["migrate","serve"],"flag":"--role"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":true,"do":"pick one of migrate, serve and pass it with --role","next":{"kind":"run","actor":"assistant","command":"opv config export"}}}

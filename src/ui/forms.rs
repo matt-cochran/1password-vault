@@ -1,6 +1,6 @@
 //! The configuration forms of `opv ui` (#97): declare a key, add an environment. A form only
 //! collects names and choices; on submit it is validated and becomes the exact
-//! `opv propose key --write` / `opv init --add-env` command ([`super::config_forms`]), which
+//! `opv propose key --write` / `opv propose env --write` command ([`super::config_forms`]), which
 //! the UI shows and runs after a confirmation like every other write. A form never holds a
 //! value.
 
@@ -19,8 +19,6 @@ pub enum Row {
     Personal,
     AllowSame,
     EnvName,
-    Vault,
-    Item,
 }
 
 /// Which form is open.
@@ -78,8 +76,6 @@ impl FormState {
         FormState {
             form: Form::AddEnv(AddEnvForm {
                 name: String::new(),
-                vault: String::new(),
-                item: String::new(),
             }),
             envs,
             at: 0,
@@ -104,7 +100,7 @@ impl FormState {
                 v.extend([Row::Guidance, Row::Personal, Row::AllowSame]);
                 v
             }
-            Form::AddEnv(_) => vec![Row::EnvName, Row::Vault, Row::Item],
+            Form::AddEnv(_) => vec![Row::EnvName],
         }
     }
 
@@ -115,8 +111,6 @@ impl FormState {
             (Form::AddKey(f), Row::Key) => Some(&mut f.key),
             (Form::AddKey(f), Row::Guidance) => Some(&mut f.guidance),
             (Form::AddEnv(f), Row::EnvName) => Some(&mut f.name),
-            (Form::AddEnv(f), Row::Vault) => Some(&mut f.vault),
-            (Form::AddEnv(f), Row::Item) => Some(&mut f.item),
             _ => None,
         }
     }
@@ -249,8 +243,6 @@ impl FormState {
                         ),
                     ),
                     (Form::AddEnv(f), Row::EnvName) => ("name".into(), f.name.clone()),
-                    (Form::AddEnv(f), Row::Vault) => ("vault".into(), f.vault.clone()),
-                    (Form::AddEnv(f), Row::Item) => ("item".into(), f.item.clone()),
                     _ => (String::new(), String::new()),
                 };
                 (label, text, i == self.at)
@@ -267,8 +259,8 @@ impl FormState {
     }
 }
 
-/// The `opv propose key <[p/]KEY> … --write` command the add-key form runs: the same flags
-/// as `opv add`, under the one 0.12.0 interface (Part V, `ui-remap`). `--write` commits the
+/// The `opv propose key <[p/]KEY> … --write` command the add-key form runs: the key form's
+/// flags, under the one 0.12.0 interface (Part V, `ui-remap`). `--write` commits the
 /// contract diff; the UI then runs `opv apply` (see [`super::run`]).
 fn propose_key(add: Vec<String>) -> Vec<String> {
     // `add_key_command` returns ["add", label, flags…]; keep everything after `add`.

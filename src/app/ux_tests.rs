@@ -269,8 +269,8 @@ fn unknown_environment_without_a_close_name_next_is_the_overview() {
 fn unknown_product_next_checks_the_closest_product() {
     let e = super::local::select(&two_products(), "prod", Some("wb"), true).unwrap_err();
     assert_eq!(
-        next_for(&e, &["opv", "check", "prod", "--product", "wb"]),
-        Some("opv check prod --product web".into())
+        next_for(&e, &["opv", "status", "prod", "--product", "wb"]),
+        Some("opv status prod --product web".into())
     );
 }
 

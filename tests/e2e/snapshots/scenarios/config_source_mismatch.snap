@@ -1,21 +1,21 @@
-# config_source_mismatch: opv structure plan
+# config_source_mismatch: opv propose structure
 
 ## text exit: 2
 ## text stdout
 
 ## text stderr
-opv: opv structure works on a secrets.toml, but this project's configuration is the 1Password manifest opv · e2e-app
+opv: opv propose structure works on a secrets.toml, but this project's configuration is the 1Password manifest opv · e2e-app
 Do: change the manifest opv · e2e-app with opv config edit
 Next: opv config edit
 
 ## json exit: 2
 ## json stdout
-{"schema_version":3,"ok":false,"exit_code":2,"next":{"kind":"run","actor":"assistant","command":"opv config edit"},"do":"change the manifest opv · e2e-app with opv config edit","error":{"code":"config_source_mismatch","category":"config","message":"opv structure works on a secrets.toml, but this project's configuration is the 1Password manifest opv · e2e-app","subject":{"manifest":"opv · e2e-app","command":"structure"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":"change the manifest opv · e2e-app with opv config edit","next":{"kind":"run","actor":"assistant","command":"opv config edit"}}}
+{"schema_version":3,"ok":false,"exit_code":2,"next":{"kind":"run","actor":"assistant","command":"opv config edit"},"do":"change the manifest opv · e2e-app with opv config edit","error":{"code":"config_source_mismatch","category":"config","message":"opv propose structure works on a secrets.toml, but this project's configuration is the 1Password manifest opv · e2e-app","subject":{"manifest":"opv · e2e-app","command":"propose structure"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":"change the manifest opv · e2e-app with opv config edit","next":{"kind":"run","actor":"assistant","command":"opv config edit"}}}
 
 ## json stderr
-opv: opv structure works on a secrets.toml, but this project's configuration is the 1Password manifest opv · e2e-app
+opv: opv propose structure works on a secrets.toml, but this project's configuration is the 1Password manifest opv · e2e-app
 Do: change the manifest opv · e2e-app with opv config edit
 Next: opv config edit
 
 ## mcp opv_structure_plan {}
-{"ok":false,"error":{"code":"config_source_mismatch","category":"config","message":"opv structure works on a secrets.toml, but this project's configuration is the 1Password manifest opv · e2e-app","subject":{"manifest":"opv · e2e-app","command":"structure"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":"change the manifest opv · e2e-app with opv config edit","next":{"kind":"run","actor":"assistant","command":"opv config edit"}}}
+{"ok":false,"error":{"code":"config_source_mismatch","category":"config","message":"opv propose structure works on a secrets.toml, but this project's configuration is the 1Password manifest opv · e2e-app","subject":{"manifest":"opv · e2e-app","command":"propose structure"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":"change the manifest opv · e2e-app with opv config edit","next":{"kind":"run","actor":"assistant","command":"opv config edit"}}}

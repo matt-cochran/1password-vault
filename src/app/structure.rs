@@ -421,7 +421,7 @@ pub struct Scope {
 /// `.opv` pointer, else the only account op knows). No account, or several and none
 /// chosen, is `account_required`: opv never uses op's default for a write.
 pub fn scope(start: &Path, r: &dyn CommandRunner) -> Result<Scope, Error> {
-    scope_as(start, r, &invoked("structure"))
+    scope_as(start, r, &invoked("propose structure"))
 }
 
 /// [`scope`] for the opv command `command` (an MCP tool names its command itself, L8:
@@ -488,7 +488,7 @@ fn no_file(start: &Path, r: &dyn CommandRunner) -> Error {
     };
     match config_store::locate(&req, r) {
         Ok(Found::Manifest(m)) => Cause::ConfigSourceMismatch {
-            command: CommandId("structure".into()),
+            command: CommandId("propose structure".into()),
             manifest: m.title,
         }
         .into(),

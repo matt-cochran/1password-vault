@@ -1064,9 +1064,9 @@ fn render(args: &InitArgs, ids: (&str, &str), d: &Declared) -> String {
     let env = &args.env;
     let mut s = String::new();
     s.push_str(
-        "# Written by opv init: IDs, key names and kinds only; values stay in 1Password.\n\
-         # Add keys with opv add, environments with opv init <env> --add-env, targets with \
-         opv target add; rules and guidance by hand.\n\n",
+        "# Written by opv propose setup: key names and kinds only; values stay in 1Password.\n\
+         # Propose keys with opv propose key, environments with opv propose env, targets with \
+         opv propose target; rules and guidance by hand.\n\n",
     );
     s.push_str(&env_table(env, d.boundary(), ids));
     let shared = d.keys.len() > 1;

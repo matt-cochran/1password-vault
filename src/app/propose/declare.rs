@@ -1,16 +1,18 @@
-//! Declarations an assistant may make through MCP (#133): products and keys (kind,
+//! Declarations an assistant may make through the MCP `opv_declare_*` tools (#133), kept
+//! until those tools are removed (row `mcp-propose-a`); `opv target credentials` records
+//! a deploy identity through [`set_target_deploy_credentials`]. Products and keys (kind,
 //! environments, rules, guidance, immutable), environments, and named targets, edited in
 //! the local `secrets.toml` only. Nothing here reads or writes 1Password, and no value is
 //! accepted: what a declaration needs in 1Password (a boundary vault and item, a target's
 //! state vault and delivery items, empty fields) is created by the structural plan a person
-//! applies ([`super::structure`], `opv apply`).
+//! applies ([`crate::app::structure`], `opv apply`).
 //!
 //! A declaration works on a configuration that is not bootstrapped yet: it is validated as
 //! the file will load once the structural plan records the missing IDs (placeholders, as
 //! the plan itself judges it). Shared (`from`) and personal keys, deploy credentials,
 //! removals and changes to an existing target are not declarations: they change where
-//! values flow or who holds them, and stay with the person (`opv add`, `opv target add`,
-//! `opv config edit`). A generated configuration is never edited (FR-52).
+//! values flow or who holds them, and stay with the person (`opv propose key`, `opv propose
+//! target`, `opv config edit`). A generated configuration is never edited (FR-52).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -47,7 +49,7 @@ impl ConfigStore for Declaring {
         self.0.source()
     }
     fn parse(&self, text: &str) -> Result<Fleet, Error> {
-        crate::config::parse_at(&super::structure::trial_text(text)?, self.0.source())
+        crate::config::parse_at(&crate::app::structure::trial_text(text)?, self.0.source())
     }
 }
 
@@ -58,7 +60,7 @@ fn read(path: &Path) -> Result<String, Error> {
 
 fn store(path: &Path) -> Result<Declaring, Error> {
     let text = read(path)?;
-    if super::bootstrap::is_generated(&text) {
+    if crate::app::bootstrap::is_generated(&text) {
         return Err(Cause::ConfigNotEditable {
             source: ConfigSource::File {
                 path: PathBuf::from(path),
@@ -84,12 +86,12 @@ fn format_error(flag: &str, format: &'static str) -> Error {
     .into()
 }
 
-/// What a person declares with `opv target add <env> <name>` in their own terminal.
+/// What a person proposes with `opv propose target <env> <name>` in their own terminal.
 fn target_add(env: &str, name: &str) -> Error {
     Cause::Usage {
         problem: UsageProblem::UseInstead {
             command: Cmd {
-                command: vec!["target".into(), "add".into()],
+                command: vec!["propose".into(), "target".into()],
                 args: vec![env.into(), name.into()],
             },
         },
@@ -112,13 +114,13 @@ pub struct Key {
     pub kind: String,
     /// Empty: every declared environment.
     pub environments: Vec<String>,
-    /// `name=value` or `name` (a flag rule such as `https_url`), as `opv add --rule`.
+    /// `name=value` or `name` (a flag rule such as `https_url`), as `opv propose key --rule`.
     pub rules: Vec<String>,
     pub guidance: Option<String>,
     pub immutable: bool,
 }
 
-/// Declare or extend `key` in the configuration at `path` (as `opv add`, without `--from`
+/// Declare or extend `key` in the configuration at `path` (as 0.11.0's `opv add`, without `--from`
 /// or `--personal`): true when the file changed.
 pub fn key(r: &dyn CommandRunner, path: &Path, k: &Key) -> Result<bool, Error> {
     if let Some(g) = &k.guidance
@@ -131,7 +133,7 @@ pub fn key(r: &dyn CommandRunner, path: &Path, k: &Key) -> Result<bool, Error> {
     }
     let store = store(path)?;
     // 05.19: an environment the file does not declare is named, with the declared ones;
-    // `opv init --add-env` is never the step (it needs an existing item).
+    // `opv propose env` is the step only when the person asks for it (it needs review).
     let declared = environments(path)?;
     if let Some(env) = k.environments.iter().find(|e| !declared.contains(*e)) {
         return Err(Cause::NotDeclared {
@@ -143,7 +145,7 @@ pub fn key(r: &dyn CommandRunner, path: &Path, k: &Key) -> Result<bool, Error> {
         .into());
     }
     let before = std::fs::read_to_string(path).unwrap_or_default();
-    let args = super::add::AddArgs {
+    let args = crate::app::add::AddArgs {
         name: format!("{}/{}", k.product, k.key),
         kind: Some(k.kind.clone()),
         envs: k.environments.clone(),
@@ -153,7 +155,7 @@ pub fn key(r: &dyn CommandRunner, path: &Path, k: &Key) -> Result<bool, Error> {
         json: true,
         ..Default::default()
     };
-    super::add::run(&args, &store, r, &mut std::io::sink())?;
+    crate::app::add::run(&args, &store, r, &mut std::io::sink())?;
     Ok(std::fs::read_to_string(path).unwrap_or_default() != before)
 }
 
@@ -177,7 +179,7 @@ pub fn environment(r: &dyn CommandRunner, path: &Path, name: &str) -> Result<boo
 }
 
 fn has_env(text: &str, name: &str) -> Result<bool, Error> {
-    let doc = super::bootstrap::parse_doc(text)?;
+    let doc = crate::app::bootstrap::parse_doc(text)?;
     Ok(doc
         .get("environments")
         .and_then(|e| e.as_table_like())
@@ -191,7 +193,7 @@ pub struct Target {
     pub environment: String,
     pub name: String,
     pub provider: Option<String>,
-    /// Provider options by flag name, as `opv target add` takes them (`fly-app`).
+    /// Provider options by flag name, as `opv propose target` takes them (`fly-app`).
     pub fields: BTreeMap<String, String>,
     /// The products it delivers; empty means every product.
     pub products: Vec<String>,
@@ -202,13 +204,13 @@ pub struct Target {
 /// Declare a new target in the configuration at `path`, without its state vault: the
 /// approved structural plan creates the state vault and delivery items and records their
 /// IDs. An existing target is never changed. True when the file changed. The edit itself
-/// is [`super::propose::target`]'s, so one builder serves `opv propose target` and this
+/// is [`super::target`]'s, so one builder serves `opv propose target` and this
 /// declaration.
 pub fn target(r: &dyn CommandRunner, path: &Path, t: &Target) -> Result<bool, Error> {
     if !crate::config::is_target_name(&t.name) {
         return Err(format_error("the target name", NAME_FORMAT));
     }
-    // Deploy credentials are not declared here: a person adds them with opv target add.
+    // Deploy credentials are not declared here: a person adds them with opv propose target.
     if t.fields.keys().any(|k| k.contains("credential")) {
         return Err(target_add(&t.environment, &t.name));
     }
@@ -219,7 +221,7 @@ pub fn target(r: &dyn CommandRunner, path: &Path, t: &Target) -> Result<bool, Er
     if env.targets.contains_key(&t.name) {
         return Ok(false);
     }
-    let spec = super::propose::target::TargetSpec {
+    let spec = super::target::TargetSpec {
         env: t.environment.clone(),
         name: t.name.clone(),
         provider: t.provider.clone(),
@@ -228,7 +230,7 @@ pub fn target(r: &dyn CommandRunner, path: &Path, t: &Target) -> Result<bool, Er
         roles: t.roles.clone(),
         deploy_credentials: None,
     };
-    let text = super::propose::target::target_text(&base.text, &fleet, &spec)?;
+    let text = super::target::target_text(&base.text, &fleet, &spec)?;
     store.parse(&text)?;
     crate::config_store::save(&store, r, &base, &text)?;
     Ok(true)
@@ -248,7 +250,7 @@ pub fn set_target_deploy_credentials(
 ) -> Result<(), Error> {
     let store = store(path)?;
     let base = store.read(r)?;
-    let mut doc = super::bootstrap::parse_doc(&base.text)?;
+    let mut doc = crate::app::bootstrap::parse_doc(&base.text)?;
     let declared: Vec<String> = doc
         .get("environments")
         .and_then(|e| e.get(env))
@@ -281,7 +283,7 @@ pub fn set_target_deploy_credentials(
 /// The environment names declared in the file at `path` (for checks before a declaration).
 pub fn environments(path: &Path) -> Result<BTreeSet<String>, Error> {
     let text = read(path)?;
-    let doc = super::bootstrap::parse_doc(&text)?;
+    let doc = crate::app::bootstrap::parse_doc(&text)?;
     Ok(doc
         .get("environments")
         .and_then(|e| e.as_table_like())

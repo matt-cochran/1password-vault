@@ -446,7 +446,7 @@ pub fn record(
         }
         let Some(state) = read_state(fleet, env_name, target, &product, r)? else {
             why.push(format!(
-                "no delivery item is recorded for {product} on {}; opv bootstrap creates it",
+                "no delivery item is recorded for {product} on {}; opv apply creates it",
                 super::placement(env_name, target)
             ));
             out.not_minted.push(NotMinted {

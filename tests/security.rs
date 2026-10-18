@@ -562,7 +562,6 @@ const COMMANDS: &[&[&str]] = &[
     &["sync", "prod"],
     &["sync", "prod", "--prune", "--deploy"],
     &["config", "export", "prod", "--json"],
-    &["item", "skeleton", "prod"],
 ];
 
 fn assert_no_marker(what: &str, text: &str) {
@@ -824,7 +823,6 @@ fn child_stderr_suppressed() {
         &["plan", "prod"],
         &["sync", "prod"],
         &["config", "export", "prod", "--json"],
-        &["item", "skeleton", "prod"],
     ] {
         h.reset();
         let r = h.run(cmd);
@@ -885,7 +883,7 @@ fn no_files_written() {
         check(&h, cmd);
     }
     check(&h, &["run", "prod", "--product", "allumata", "--", "true"]);
-    // Item with missing fields: skeleton writes (to op stdin, never to disk).
+    // Item with missing fields: a person's read tidies it (to op stdin, never to disk).
     h.set_item(&item(vec![]));
     for cmd in COMMANDS {
         check(&h, cmd);
@@ -893,13 +891,6 @@ fn no_files_written() {
     h.set_item(&good_item());
     h.set("FAKE_FLY_LIST_FAIL_AT", "2");
     check(&h, &["sync", "prod", "--prune", "--deploy"]);
-    // Skeleton did reach `op item edit` with its template on stdin.
-    h.unset("FAKE_FLY_LIST_FAIL_AT");
-    h.set_item(&item(vec![]));
-    h.reset();
-    let r = h.run(&["item", "skeleton", "prod"]);
-    assert_eq!(r.code, 0, "{}", r.all());
-    assert!(h.calls().iter().any(|c| c.argv[..2] == ["item", "edit"]));
 }
 
 /// Review Focus 4: `flyctl secrets list` (A) fails → Target (5) before anything is staged.
@@ -1044,7 +1035,6 @@ const READERS: &[&[&str]] = &[
     &["plan", "prod"],
     &["sync", "prod"],
     &["config", "export", "prod", "--json"],
-    &["item", "skeleton", "prod"],
 ];
 
 /// `op` calls of the last run, as `argv[0] argv[1]`.
@@ -1743,7 +1733,7 @@ fn json_documents_carry_no_value() {
     for args in [
         &["status", "prod", "--json"][..],
         &["plan", "prod", "--json"],
-        &["check", "prod", "--product", "allumata", "--json"],
+        &["ready", "prod", "--json"],
         &["sync", "prod", "--json"],
         &["doctor", "--env", "prod", "--json"],
         &[

@@ -184,7 +184,7 @@ pub fn apply(
 }
 
 /// One line per reviewed step, plus the plan id: names, kinds and public ids only.
-fn describe(p: &StructureProposal) -> Vec<String> {
+pub fn describe(p: &StructureProposal) -> Vec<String> {
     let mut out = Vec::new();
     for (n, step) in p.steps.iter().enumerate() {
         let n = n + 1;

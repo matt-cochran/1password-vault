@@ -578,7 +578,7 @@ pub fn note_with(config: &str, previous: Option<&str>, project: &str) -> String 
          environment keeps them. **No secret values are stored here.**\n\n\
          - Values: in each environment's own item (its `vault_id` and `item_id` below). Open \
          one with `opv open KEY --env ENV`.\n\
-         - Change keys with `opv add KEY` or `opv config edit`. Hand edits are fine inside the \
+         - Change keys with `opv propose key KEY --write` or `opv config edit`. Hand edits are fine inside the \
          code block while it stays valid TOML; opv reads only the code block.\n\
          - About opv: https://github.com/matt-cochran/1password-vault\n\n\
          {block}"

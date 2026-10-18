@@ -1392,11 +1392,15 @@ fn the_product_advice_keeps_the_vault_and_item() {
 
 // 05.07: the step is init's help, never a rebuilt `init --product` that moves the titles.
 #[test]
-fn the_product_advice_steps_to_init_help() {
+fn the_product_advice_steps_to_the_setup_proposal_help() {
     let (_dir, run) = init_with(&unsectioned_fields(), &args());
     assert_eq!(
-        next_of(run.err(), &["opv", "init", "staging"]).as_deref(),
-        Some("opv init --help")
+        next_of(
+            run.err(),
+            &["opv", "propose", "setup", "--from-item", "staging"]
+        )
+        .as_deref(),
+        Some("opv propose setup --help")
     );
 }
 

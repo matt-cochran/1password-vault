@@ -114,10 +114,10 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
         ),
         (
             ConfigSourceMismatch {
-                command: CommandId("bootstrap".into()),
+                command: CommandId("apply".into()),
                 manifest: "man-shop".into(),
             },
-            vec!["bootstrap", "man-shop"],
+            vec!["apply", "man-shop"],
         ),
         (
             ConfigUnreadable {
@@ -522,11 +522,11 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                 item: ItemId::new("itm-1"),
                 fields: vec![FieldName::new("fld-api")],
                 by: Cmd {
-                    command: vec!["tidy".into()],
+                    command: vec!["config".into(), "export".into()],
                     args: vec!["prod".into()],
                 },
             },
-            vec!["vlt-atqr", "itm-1", "fld-api", "tidy"],
+            vec!["vlt-atqr", "itm-1", "fld-api", "config export"],
         ),
         (
             ToolMissing {
@@ -721,7 +721,7 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                 env: EnvName::new("env-prod"),
                 no_record: true,
             },
-            vec!["env-prod", "bootstrap"],
+            vec!["env-prod", "apply"],
         ),
         (
             KeyNotDeclared {
@@ -1372,30 +1372,33 @@ fn a_misspelt_sync_never_carries_its_confirmation_into_the_plan() {
 }
 
 #[test]
-fn a_misspelt_bootstrap_becomes_its_dry_run() {
-    let i = invoked(&["bootstrap"], &["--rebind", "prdo"]);
+fn a_misspelt_import_becomes_its_dry_run() {
+    let i = invoked(&["import"], &["prdo", "--from", ".env"]);
     assert_eq!(
         next_line(&misspelt_env(), &i).as_deref(),
-        Some("opv bootstrap --rebind prod --dry-run")
+        Some("opv import prod --from .env --dry-run")
     );
 }
 
 #[test]
-fn a_misspelt_target_add_becomes_its_dry_run() {
-    let i = invoked(&["target", "add"], &["prdo", "site", "--fly-app", "site-x"]);
+fn a_misspelt_written_proposal_becomes_the_proposal_alone() {
+    let i = invoked(
+        &["propose", "target"],
+        &["prdo", "site", "--fly-app", "site-x", "--write"],
+    );
     assert_eq!(
         next_line(&misspelt_env(), &i).as_deref(),
-        Some("opv target add prod site --fly-app site-x --dry-run")
+        Some("opv propose target prod site --fly-app site-x")
     );
 }
 
 #[test]
 fn a_misspelt_write_without_a_read_form_lists_the_names() {
-    let i = invoked(&["generate"], &["prdo", "api/K"]);
+    let i = invoked(&["set"], &["api/K", "--env", "prdo"]);
     assert_eq!(
         misspelt_env().step(&i).1,
         Next::Check(Cmd {
-            command: vec!["config".into(), "describe".into()],
+            command: vec!["contract".into()],
             args: vec![],
         })
     );
@@ -1746,7 +1749,7 @@ fn an_unknown_plan_of_a_known_scope_reads_that_scope() {
         plan: "sp-what".into(),
         scope: Some(PlanScope::Structural),
     };
-    assert_eq!(next_of(&c).as_deref(), Some("opv structure plan"));
+    assert_eq!(next_of(&c).as_deref(), Some("opv propose structure"));
 }
 
 #[test]
@@ -3202,7 +3205,10 @@ fn a20_a_built_step_keeps_the_config_flag() {
         source: file_source(),
     };
     let inv = cli(&["opv", "sync", "prod", "--config", "cfg/secrets.toml"]);
-    assert_eq!(next_in(&c, &inv), "opv bootstrap --config cfg/secrets.toml");
+    assert_eq!(
+        next_in(&c, &inv),
+        "opv propose structure --config cfg/secrets.toml"
+    );
 }
 
 /// A21: a rejected credential needs a person to replace it.
@@ -3323,9 +3329,9 @@ fn secret_not_stored(refind: Option<VendorCmd>) -> Cause {
     }
 }
 
-/// F2 (R21): `opv add` into an undeclared environment steps to declaring it.
+/// F2 (R21): a key proposed into an undeclared environment steps to proposing it.
 #[test]
-fn f2_an_undeclared_environment_from_add_steps_to_env_add() {
+fn f2_an_undeclared_environment_from_propose_key_steps_to_propose_env() {
     let c = Cause::NotDeclared {
         kind: NameKind::Environment,
         given: "staging".into(),
@@ -3333,8 +3339,11 @@ fn f2_an_undeclared_environment_from_add_steps_to_env_add() {
         closest: None,
     };
     assert_eq!(
-        next_in(&c, &cli(&["opv", "add", "staging", "web/KEY"])),
-        "opv env add staging"
+        next_in(
+            &c,
+            &cli(&["opv", "propose", "key", "web/KEY", "--env", "staging"])
+        ),
+        "opv propose env staging"
     );
 }
 
@@ -3357,8 +3366,8 @@ fn f2_a_shared_key_steps_to_generating_its_source() {
         from: "api/TOKEN".into(),
     });
     assert_eq!(
-        next_in(&c, &cli(&["opv", "generate", "prod", "web/TOKEN"])),
-        "opv generate prod api/TOKEN"
+        next_in(&c, &cli(&["opv", "apply", "--generate", "prod:web/TOKEN"])),
+        "opv propose generate prod api/TOKEN"
     );
 }
 
@@ -3367,7 +3376,7 @@ fn f2_a_shared_key_steps_to_generating_its_source() {
 fn f2_a_byte_count_out_of_range_steps_to_config_edit() {
     let c = generate_refused(GenerateRefusal::ByteCountOutOfRange);
     assert_eq!(
-        next_in(&c, &cli(&["opv", "generate", "prod", "web/TOKEN"])),
+        next_in(&c, &cli(&["opv", "apply", "--generate", "prod:web/TOKEN"])),
         "opv config edit"
     );
 }
@@ -3377,14 +3386,14 @@ fn f2_a_byte_count_out_of_range_steps_to_config_edit() {
 fn f2_a_field_with_a_value_steps_to_the_rotation_plan() {
     let c = generate_refused(GenerateRefusal::HasValue);
     assert_eq!(
-        next_in(&c, &cli(&["opv", "generate", "prod", "web/TOKEN"])),
+        next_in(&c, &cli(&["opv", "apply", "--generate", "prod:web/TOKEN"])),
         "opv plan prod --rotate web/TOKEN"
     );
 }
 
-/// F2 (R46): a provider that hides values steps to adopt's help for the environment.
+/// F2 (R46): a provider that hides values steps to import's help for the environment.
 #[test]
-fn f2_a_provider_that_hides_values_steps_to_adopt_help() {
+fn f2_a_provider_that_hides_values_steps_to_import_help() {
     let c = Cause::Guard {
         guard: Guard::ProviderHidesValues {
             system: System::Fly,
@@ -3393,9 +3402,9 @@ fn f2_a_provider_that_hides_values_steps_to_adopt_help() {
     assert_eq!(
         next_in(
             &c,
-            &cli(&["opv", "adopt", "staging", "--from", "target:portfolio"])
+            &cli(&["opv", "import", "staging", "--from", "target:portfolio"])
         ),
-        "opv adopt staging --help"
+        "opv import staging --help"
     );
 }
 
@@ -3407,14 +3416,14 @@ fn f2_a_read_back_by_a_path_with_a_space_keeps_it_one_word() {
         item: ItemId::new("itm-1"),
         fields: vec![FieldName::new("web/KEY")],
         by: Cmd {
-            command: vec!["adopt".into()],
+            command: vec!["import".into()],
             args: vec!["dev".into(), "--from".into(), "my values.env".into()],
         },
     };
     let want = if cfg!(windows) {
-        "opv adopt dev --from \"my values.env\""
+        "opv import dev --from \"my values.env\""
     } else {
-        "opv adopt dev --from 'my values.env'"
+        "opv import dev --from 'my values.env'"
     };
     assert_eq!(next_in(&c, &inv()), want);
 }
@@ -3537,8 +3546,11 @@ fn f4_a_file_that_exists_hands_off_with_force() {
         },
     };
     assert_eq!(
-        next_in(&c, &cli(&["opv", "init", "dev"])),
-        "opv init dev --force"
+        next_in(
+            &c,
+            &cli(&["opv", "skill", "install", "--project", "/work/app"])
+        ),
+        "opv skill install --project /work/app --force"
     );
 }
 
@@ -3631,7 +3643,7 @@ fn d3_a_built_step_keeps_the_project_flag() {
     };
     assert_eq!(
         next_in(&c, &cli(&["opv", "access", "prod", "--project", "acme"])),
-        "opv init prod --project acme"
+        "opv propose setup --from-item prod --project acme"
     );
 }
 
@@ -3895,8 +3907,8 @@ fn a_generated_configuration_names_no_opv_command_as_next() {
         reason: NotEditable::Generated { generator: None },
     };
     let inv = Invocation {
-        command: vec!["env".into()],
-        args: vec!["add".into(), "staging".into()],
+        command: vec!["propose".into(), "env".into()],
+        args: vec!["staging".into(), "--write".into()],
         ..inv()
     };
     assert_eq!(c.step(&inv).1, Next::None(NoNext::NothingToRun));
@@ -4124,15 +4136,15 @@ fn a_file_delivery_without_a_runtime_folder_names_xdg_runtime_dir() {
     );
 }
 
-/// R2-8: a value missing after adopt points at the item, not the item's history.
+/// R2-8: a value missing after import points at the item, not the item's history.
 #[test]
-fn a_value_missing_after_adopt_checks_the_item() {
+fn a_value_missing_after_import_checks_the_item() {
     let c = Cause::ReadBackMissing {
         vault: VaultId::new("vlt-atqr"),
         item: ItemId::new("itm-1"),
         fields: vec![FieldName::new("web/KEY")],
         by: Cmd {
-            command: vec!["adopt".into()],
+            command: vec!["import".into()],
             args: vec!["dev".into()],
         },
     };
@@ -4151,7 +4163,7 @@ fn a_value_missing_after_tidy_is_restored_from_history() {
         item: ItemId::new("itm-1"),
         fields: vec![FieldName::new("web/KEY")],
         by: Cmd {
-            command: vec!["tidy".into()],
+            command: vec!["config".into(), "export".into()],
             args: vec!["dev".into()],
         },
     };

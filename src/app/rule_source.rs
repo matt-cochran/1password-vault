@@ -120,14 +120,31 @@ pub fn rule_source(
     repo: &Path,
     working: &Fleet,
 ) -> Result<RuleSource, Error> {
-    let ConfigSource::File { path, .. } = &working.read_from.0 else {
+    let ConfigSource::File { .. } = &working.read_from.0 else {
         return Ok(RuleSource::Manifest);
     };
     let branch = default_branch(runner, repo);
+    let contract = contract_at(runner, repo, working, &branch)?;
+    Ok(RuleSource::DefaultBranch { branch, contract })
+}
+
+/// The contract committed at the git ref `rev` (a branch, tag or commit), read with `git
+/// show` at the working file's path relative to `repo` and parsed with its committed
+/// `secrets.bindings.toml` (the working tree's when `rev` has none). `None` when the
+/// configuration is a manifest or `rev` has no such file. Nothing is written.
+pub fn contract_at(
+    runner: &dyn CommandRunner,
+    repo: &Path,
+    working: &Fleet,
+    rev: &str,
+) -> Result<Option<Fleet>, Error> {
+    let ConfigSource::File { path, .. } = &working.read_from.0 else {
+        return Ok(None);
+    };
     let relative = path.strip_prefix(repo).unwrap_or(path);
-    let spec = format!("{branch}:{}", relative.to_string_lossy().replace('\\', "/"));
+    let spec = format!("{rev}:{}", relative.to_string_lossy().replace('\\', "/"));
     let bindings_spec = format!(
-        "{branch}:{}",
+        "{rev}:{}",
         relative
             .with_file_name(crate::config::bindings::FILE)
             .to_string_lossy()
@@ -139,12 +156,7 @@ pub fn rule_source(
         PROBE_TIMEOUT,
     ) {
         Ok(o) if o.status == 0 => String::from_utf8_lossy(&o.stdout).into_owned(),
-        _ => {
-            return Ok(RuleSource::DefaultBranch {
-                branch,
-                contract: None,
-            });
-        }
+        _ => return Ok(None),
     };
     let ids = match runner.probe(
         &Call::new("git", &["-C", dir, "show", bindings_spec.as_str()]),
@@ -155,11 +167,9 @@ pub fn rule_source(
         }
         _ => crate::config::bindings::read_sibling(path)?,
     };
-    let contract = crate::config::parse(&crate::config::bindings::merge(&text, &ids))?;
-    Ok(RuleSource::DefaultBranch {
-        branch,
-        contract: Some(contract),
-    })
+    Ok(Some(crate::config::parse(
+        &crate::config::bindings::merge(&text, &ids),
+    )?))
 }
 
 #[cfg(test)]

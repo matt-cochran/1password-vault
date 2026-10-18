@@ -22,8 +22,6 @@ fn key_form() -> AddKeyForm {
 fn env_form() -> AddEnvForm {
     AddEnvForm {
         name: "dev".to_string(),
-        vault: String::new(),
-        item: String::new(),
     }
 }
 
@@ -191,36 +189,13 @@ fn add_key_rejects_personal_with_a_config_key() {
 // ---- add_env_command ----
 
 #[test]
-fn add_env_builds_the_full_command_with_vault_and_item() {
+fn add_env_builds_the_written_proposal_of_the_environment() {
     let form = AddEnvForm {
         name: "staging".to_string(),
-        vault: "  myapp-staging  ".to_string(),
-        item: "  myapp · staging values  ".to_string(),
     };
     assert_eq!(
         add_env_command(&form, &[]),
-        Ok(v(&[
-            "init",
-            "staging",
-            "--add-env",
-            "--vault",
-            "myapp-staging",
-            "--item",
-            "myapp · staging values",
-        ]))
-    );
-}
-
-#[test]
-fn add_env_builds_the_minimal_command_without_vault_or_item() {
-    let form = AddEnvForm {
-        vault: "   ".to_string(),
-        item: String::new(),
-        ..env_form()
-    };
-    assert_eq!(
-        add_env_command(&form, &[]),
-        Ok(v(&["init", "dev", "--add-env"]))
+        Ok(v(&["propose", "env", "staging", "--write"]))
     );
 }
 
