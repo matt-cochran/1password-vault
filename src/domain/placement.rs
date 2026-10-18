@@ -101,7 +101,7 @@ impl WiderThanValues {
             "state vault {} is shared by targets {}, but {}/{} cannot read boundary {}; that \
              target's deploy identity would read evidence for values it cannot read. Give each \
              target its own state vault: delete state_vault_id from \
-             [environments.{}.targets.{}] and run opv bootstrap.",
+             [environments.{}.targets.{}] and run opv propose structure, then opv apply.",
             self.state_vault_id,
             self.targets.join(", "),
             self.environment,

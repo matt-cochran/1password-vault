@@ -362,12 +362,12 @@ fn the_next_step_checks_the_environment_which_adds_the_field() {
 }
 
 #[test]
-fn a_refusal_points_at_the_add_help() {
+fn a_refusal_points_at_the_propose_key_help() {
     let a = add_to(COMMENTED, new_key("api/bad"));
-    let inv = cli(&["add", "api/bad", "--kind", "secret"]);
+    let inv = cli(&["propose", "key", "api/bad", "--kind", "secret"]);
     assert_eq!(
         next_of(a.res.as_ref().unwrap_err(), &inv).as_deref(),
-        Some("opv add --help")
+        Some("opv propose key --help")
     );
 }
 

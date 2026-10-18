@@ -140,10 +140,10 @@ fn the_schema_is_current_for_named_targets_and_boundaries() {
             .unwrap_or_else(|| panic!("schema has no command {name}"))
             .clone()
     };
-    assert_eq!(command("target add")["effect"], "writes_config");
-    assert_eq!(command("target add")["ask_user_first"], true);
+    assert_eq!(command("propose target")["effect"], "reads");
+    assert_eq!(command("propose target")["ask_user_first"], false);
     assert_eq!(command("target list")["effect"], "reads");
-    for name in ["access", "bootstrap", "delivery verify", "config export"] {
+    for name in ["access", "propose", "delivery verify", "config export"] {
         assert!(
             v["documents"].get(name).is_some(),
             "schema documents must describe {name}"

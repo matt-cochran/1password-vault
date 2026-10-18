@@ -250,11 +250,11 @@ fn changed_with_no_delivery_item_reports_every_placement_as_no_record() {
 }
 
 #[test]
-fn changed_with_no_delivery_item_steps_to_bootstrap() {
+fn changed_with_no_delivery_item_steps_to_apply() {
     let out = Scenario::new("").opv(&["changed", "prod", "--json"]);
     assert_eq!(
         document(&out)["next"]["command"],
-        "opv bootstrap",
+        "opv apply",
         "{}",
         shown(&out)
     );

@@ -186,6 +186,13 @@ fn as_json<T: serde::Serialize>(doc: &T) -> Vec<u8> {
     serde_json::to_vec(doc).unwrap()
 }
 
+/// A contract or setup proposal as `opv propose --json` prints it without `--write`.
+fn unwritten<T: serde::Serialize>(doc: &T) -> Vec<u8> {
+    let mut v = serde_json::to_value(doc).unwrap();
+    v["written"] = Value::Null;
+    serde_json::to_vec(&v).unwrap()
+}
+
 const KEY_INTENT: &str = r#"{"kind":"key","key":"NEW_KEY","product":"app","field_kind":"secret"}"#;
 
 // opv_propose ------------------------------------------------------------------------------
@@ -199,7 +206,7 @@ fn opv_propose_key_equals_the_librarys_proposal() {
     let want = crate::app::propose::key::propose(&text, &ids, None, &intent).unwrap();
     assert_eq!(
         w.propose(serde_json::from_str(KEY_INTENT).unwrap()),
-        cli_json(&as_json(&want))
+        cli_json(&unwritten(&want))
     );
 }
 
@@ -216,21 +223,28 @@ fn opv_propose_structure_equals_the_librarys_proposal() {
         &[],
     )
     .unwrap();
+    let mut doc = serde_json::to_value(&want).unwrap();
+    doc["next"] = json!({"kind": "apply", "actor": "person",
+                         "command": format!("opv apply {}", want.plan_id)});
     assert_eq!(
         w.propose(json!({"kind": "structure"})),
-        cli_json(&as_json(&want))
+        cli_json(&as_json(&doc))
     );
 }
 
 #[test]
 fn opv_propose_setup_from_names_equals_the_librarys_proposal() {
     let w = World::new();
-    let want =
-        crate::app::propose::setup::from_names(&w.project().join("dev.env"), NAMES_ENV, &[], &[])
-            .unwrap();
+    let want = crate::app::propose::setup::from_names(
+        &w.project().join("dev.env"),
+        crate::app::propose::setup::NAMES_ENV,
+        &[],
+        &[],
+    )
+    .unwrap();
     assert_eq!(
         w.propose(json!({"kind": "setup", "names_from": "dev.env"})),
-        cli_json(&as_json(&want))
+        cli_json(&unwritten(&want))
     );
 }
 

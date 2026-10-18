@@ -460,7 +460,7 @@ pub(crate) fn plan_checked(
 }
 
 /// A file whose first line says it is generated is never rewritten (FR-52).
-pub(crate) fn is_generated(text: &str) -> bool {
+pub fn is_generated(text: &str) -> bool {
     text.lines().next().is_some_and(|l| {
         l.trim_start()
             .to_ascii_lowercase()

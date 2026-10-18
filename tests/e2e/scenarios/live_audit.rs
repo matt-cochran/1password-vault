@@ -361,21 +361,21 @@ fn prod_log_level_invalid(c: String) -> String {
 // --- no configuration (scenarios 1–7) ---------------------------------------------------------
 
 #[test]
-fn live_09_01_check_with_no_configuration_is_config_not_found() {
+fn live_09_01_status_with_no_configuration_is_config_not_found() {
     let out = Scenario::new()
         .without_config()
-        .opv_elsewhere(&["check", "prod", "--json"]);
+        .opv_elsewhere(&["status", "prod", "--json"]);
     assert_eq!(out.code(), "config_not_found", "{}", out.shown());
 }
 
 #[test]
-fn live_09_03b_check_prod_with_no_configuration_steps_to_init_prod() {
+fn live_09_03b_status_prod_with_no_configuration_steps_to_the_setup_proposal_of_prod() {
     let out = Scenario::new()
         .without_config()
-        .opv_elsewhere(&["check", "prod", "--json"]);
+        .opv_elsewhere(&["status", "prod", "--json"]);
     assert_eq!(
         out.next().as_deref(),
-        Some("opv init prod"),
+        Some("opv propose setup --from-item prod"),
         "{}",
         out.shown()
     );
@@ -392,10 +392,10 @@ fn live_09_02_status_signed_out_with_no_configuration_fails_on_the_configuration
 
 #[test]
 fn live_09_03_a_misplaced_json_flag_steps_to_the_corrected_command() {
-    let out = Scenario::new().opv(&["--json", "check", "prod"]);
+    let out = Scenario::new().opv(&["--json", "status", "prod"]);
     assert_eq!(
         out.next().as_deref(),
-        Some("opv check prod --json"),
+        Some("opv status prod --json"),
         "{}",
         out.shown()
     );
@@ -422,10 +422,10 @@ fn live_09_07_version_with_no_configuration_exits_0() {
 }
 
 #[test]
-fn live_09_81_config_describe_with_no_configuration_is_config_not_found() {
+fn live_09_81_contract_with_no_configuration_is_config_not_found() {
     let out = Scenario::new()
         .without_config()
-        .opv_elsewhere(&["config", "describe", "--json"]);
+        .opv_elsewhere(&["contract", "--json"]);
     assert_eq!(out.code(), "config_not_found", "{}", out.shown());
 }
 
@@ -481,9 +481,9 @@ fn live_09_94_login_add_without_a_terminal_exits_6() {
 // --- steps keep --config (11, 14, 18, 22, 33, 34, 95) -----------------------------------------
 
 #[test]
-fn live_09_11_check_with_an_invalid_value_keeps_config_in_its_next() {
+fn live_09_11_status_with_an_invalid_value_keeps_config_in_its_next() {
     let s = Scenario::new().edit_config(prod_log_level_invalid);
-    let out = s.opv_config(&["check", "prod", "--json"]);
+    let out = s.opv_config(&["status", "prod", "--json"]);
     assert!(
         keeps_config(out.next().as_deref(), &s.config_arg()),
         "{}",
@@ -494,11 +494,11 @@ fn live_09_11_check_with_an_invalid_value_keeps_config_in_its_next() {
 #[test]
 fn live_09_14_a_product_typo_substitutes_the_product_and_keeps_config() {
     let s = Scenario::new();
-    let out = s.opv_config(&["check", "prod", "--product", "wb", "--json"]);
+    let out = s.opv_config(&["status", "prod", "--product", "wb", "--json"]);
     assert_eq!(
         out.next().as_deref().map(words),
         Some(expected(
-            &["check", "prod", "--product", "web", "--json"],
+            &["status", "prod", "--product", "web", "--json"],
             Some(&s.config_arg())
         )),
         "{}",
@@ -566,10 +566,10 @@ fn live_09_95_a_confirm_mismatch_keeps_config_in_its_next() {
 // --- checks, plans and syncs (12, 17, 23, 24, 28, 29, 31, 32, 36) -----------------------------
 
 #[test]
-fn live_09_12_check_with_a_missing_value_exits_8() {
+fn live_09_12_status_with_a_missing_value_exits_8() {
     let out = Scenario::new()
         .edit_world(blank(WEB_PROD_ITEM, "API_KEY"))
-        .opv(&["check", "prod"]);
+        .opv(&["status", "prod"]);
     assert_eq!(out.exit(), Some(8), "{}", out.shown());
 }
 
@@ -621,14 +621,14 @@ fn live_09_29_sync_with_an_outdated_expected_plan_is_stale_plan() {
 }
 
 #[test]
-fn live_09_31_check_with_every_value_valid_exits_0() {
-    let out = Scenario::new().opv(&["check", "prod"]);
+fn live_09_31_status_with_every_value_valid_exits_0() {
+    let out = Scenario::new().opv(&["status", "prod"]);
     assert_eq!(out.exit(), Some(0), "{}", out.shown());
 }
 
 #[test]
-fn live_09_32_check_json_prints_no_value() {
-    let out = Scenario::new().opv(&["check", "prod", "--json"]);
+fn live_09_32_status_json_prints_no_value() {
+    let out = Scenario::new().opv(&["status", "prod", "--json"]);
     assert_eq!(out.canary(), None, "{}", out.shown());
 }
 
@@ -650,10 +650,10 @@ fn live_09_36_sync_json_prints_no_value() {
 
 #[test]
 fn live_09_13_a_transposed_environment_steps_to_the_same_command_with_it_corrected() {
-    let out = Scenario::new().opv(&["check", "prdo"]);
+    let out = Scenario::new().opv(&["status", "prdo"]);
     assert_eq!(
         out.next().as_deref(),
-        Some("opv check prod"),
+        Some("opv status prod"),
         "{}",
         out.shown()
     );
@@ -778,7 +778,7 @@ fn live_09_87_a_role_typo_steps_to_the_declared_role() {
 fn live_09_m_syntax_a_toml_syntax_error_is_config_invalid() {
     let out = Scenario::new()
         .edit_config(|c| c.replacen("kind = \"secret\"", "kind = \"secret", 1))
-        .opv(&["check", "prod", "--json"]);
+        .opv(&["status", "prod", "--json"]);
     assert_eq!(out.code(), "config_invalid", "{}", out.shown());
 }
 
@@ -786,7 +786,7 @@ fn live_09_m_syntax_a_toml_syntax_error_is_config_invalid() {
 fn live_09_m_unknown_a_misspelt_field_is_config_invalid() {
     let out = Scenario::new()
         .edit_config(|c| c.replace("guidance = \"the service", "guidence = \"the service"))
-        .opv(&["check", "prod", "--json"]);
+        .opv(&["status", "prod", "--json"]);
     assert_eq!(out.code(), "config_invalid", "{}", out.shown());
 }
 
@@ -794,7 +794,7 @@ fn live_09_m_unknown_a_misspelt_field_is_config_invalid() {
 fn live_09_m_badkey_a_malformed_key_name_is_config_invalid() {
     let out = Scenario::new()
         .edit_config(|c| c.replace("products.web.keys.API_KEY]", "products.web.keys.api-key]"))
-        .opv(&["check", "prod", "--json"]);
+        .opv(&["status", "prod", "--json"]);
     assert_eq!(out.code(), "config_invalid", "{}", out.shown());
 }
 
@@ -802,7 +802,7 @@ fn live_09_m_badkey_a_malformed_key_name_is_config_invalid() {
 fn live_09_m_unknown2_fly_app_spelt_with_an_underscore_is_config_invalid() {
     let out = Scenario::new()
         .edit_config(|c| c.replace("fly.app = ", "fly_app = "))
-        .opv(&["check", "prod", "--json"]);
+        .opv(&["status", "prod", "--json"]);
     assert_eq!(out.code(), "config_invalid", "{}", out.shown());
 }
 
@@ -810,7 +810,7 @@ fn live_09_m_unknown2_fly_app_spelt_with_an_underscore_is_config_invalid() {
 fn live_09_m_rm_profile_a_profile_table_is_config_invalid() {
     let out = Scenario::new()
         .edit_config(|c| format!("{c}\n[profile]\nkind = \"fleet\"\n"))
-        .opv(&["check", "prod", "--json"]);
+        .opv(&["status", "prod", "--json"]);
     assert_eq!(out.code(), "config_invalid", "{}", out.shown());
 }
 
@@ -823,7 +823,7 @@ fn live_09_m_rm_vault_an_environment_vault_id_is_config_invalid() {
                 "order = 2\nvault_id = \"vE2EWEBPROD000000000000001\"\n",
             )
         })
-        .opv(&["check", "prod", "--json"]);
+        .opv(&["status", "prod", "--json"]);
     assert_eq!(out.code(), "config_invalid", "{}", out.shown());
 }
 
@@ -836,7 +836,7 @@ fn live_09_m_rm_pattern_a_pattern_rule_is_config_invalid() {
                 "rules = { pattern = \"^[a-z]+$\" }",
             )
         })
-        .opv(&["check", "prod", "--json"]);
+        .opv(&["status", "prod", "--json"]);
     assert_eq!(out.code(), "config_invalid", "{}", out.shown());
 }
 
@@ -955,7 +955,7 @@ fn live_09_64_doctor_for_prod_json_prints_no_value() {
 
 #[test]
 fn live_09_80_config_describe_exits_0() {
-    let out = Scenario::new().opv(&["config", "describe"]);
+    let out = Scenario::new().opv(&["contract"]);
     assert_eq!(out.exit(), Some(0), "{}", out.shown());
 }
 
@@ -979,7 +979,7 @@ fn live_09_91_open_a_declared_key_exits_0() {
 fn live_09_65_a_vault_outside_the_selected_account_steps_to_the_account_that_holds_it() {
     let out = Scenario::new()
         .account(OPS_ACCOUNT)
-        .opv(&["check", "prod", "--json"]);
+        .opv(&["status", "prod", "--json"]);
     let selects = format!("opv account use {DEV_ACCOUNT}");
     assert_eq!(
         out.next().as_deref(),
@@ -1027,10 +1027,10 @@ fn live_09_72_an_unknown_selected_account_steps_to_login_add() {
 }
 
 #[test]
-fn live_09_73_check_with_an_unknown_selected_account_is_account_not_registered() {
+fn live_09_73_status_with_an_unknown_selected_account_is_account_not_registered() {
     let out = Scenario::new()
         .account(UNKNOWN_ACCOUNT)
-        .opv(&["check", "prod", "--json"]);
+        .opv(&["status", "prod", "--json"]);
     assert_eq!(out.exit(), Some(7), "{}", out.shown());
 }
 
@@ -1038,7 +1038,7 @@ fn live_09_73_check_with_an_unknown_selected_account_is_account_not_registered()
 fn live_09_74_malformed_item_json_is_unexpected_output() {
     let out = Scenario::new()
         .faults(&fault("op", "item get", "malformed_output"))
-        .opv(&["check", "prod", "--json"]);
+        .opv(&["status", "prod", "--json"]);
     assert_eq!(out.code(), "unexpected_output", "{}", out.shown());
 }
 
@@ -1046,7 +1046,7 @@ fn live_09_74_malformed_item_json_is_unexpected_output() {
 fn live_09_76_a_vault_that_does_not_exist_steps_to_vault_locate() {
     let out = Scenario::new()
         .edit_config(|c| c.replace("vE2EWEBPROD000000000000001", "vE2ENOSUCHVAULT00000000001"))
-        .opv(&["check", "prod", "--json"]);
+        .opv(&["status", "prod", "--json"]);
     assert_eq!(
         out.next().as_deref(),
         Some("opv vault locate vE2ENOSUCHVAULT00000000001"),
@@ -1061,7 +1061,7 @@ fn live_09_77_op_hanging_past_the_timeout_exits_9() {
         .faults(
             "[[fault]]\nprogram = \"op\"\ncall = \"item get\"\nkind = \"timeout\"\nseconds = 30\n",
         )
-        .opv(&["--timeout", "3", "check", "prod"]);
+        .opv(&["--timeout", "3", "status", "prod"]);
     assert_eq!(out.exit(), Some(9), "{}", out.shown());
 }
 
@@ -1079,7 +1079,7 @@ fn live_09_78_flyctl_hanging_past_the_timeout_exits_9() {
 #[test]
 fn live_09_88_a_rejected_service_account_token_under_ci_is_credential_rejected() {
     let out = Scenario::new().opv_env(
-        &["check", "prod", "--json"],
+        &["status", "prod", "--json"],
         &[
             ("CI", "true"),
             ("OP_SERVICE_ACCOUNT_TOKEN", "ops_e2e_marker_rejected_token"),
@@ -1307,7 +1307,7 @@ fn live_09_mcp_propose_env_with_a_capitalised_name_is_not_for_a_person() {
 fn live_09_mcp_propose_target_already_declared_is_already_declared() {
     let doc = Scenario::new().account(DEV_ACCOUNT).mcp(
         "opv_propose",
-        json!({"kind": "target", "env": "prod", "name": "fly"}),
+        json!({"kind": "target", "env": "prod", "name": "fly", "options": {"fly-app": "x"}}),
     );
     assert_eq!(doc["error"]["code"], "already_declared", "{doc}");
 }

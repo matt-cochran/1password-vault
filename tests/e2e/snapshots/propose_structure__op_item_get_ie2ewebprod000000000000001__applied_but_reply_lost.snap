@@ -1,0 +1,24 @@
+# propose_structure__op_item_get_ie2ewebprod000000000000001__applied_but_reply_lost: opv propose structure | fault applied_but_reply_lost on op item get iE2EWEBPROD000000000000001
+
+## text exit: 9
+## text stdout
+
+## text stderr
+retrying op item get (2/3) in <delay>
+retrying op item get (3/3) in <delay>
+opv: 1Password did not answer after 3 attempts: it was stopped by signal 9 before it answered
+  checked: op item get iE2EWEBPROD000000000000001 --vault vE2EWEBPROD000000000000001 --format json --cache (stopped by signal 9)
+Do: approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network
+Next: opv propose structure
+
+## json exit: 9
+## json stdout
+{"schema_version":3,"ok":false,"exit_code":9,"next":{"kind":"run","actor":"assistant","command":"opv propose structure --json"},"do":"approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network","error":{"code":"provider_unavailable","category":"unknown","message":"1Password did not answer after 3 attempts: it was stopped by signal 9 before it answered","subject":{"attempts":3,"system":"one_password","why":{"why":"killed","signal":9}},"evidence":{"checked":"op item get iE2EWEBPROD000000000000001 --vault vE2EWEBPROD000000000000001 --format json --cache","account":null,"upstream":null},"retry":"safe","human_required":false,"do":"approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network","next":{"kind":"run","actor":"assistant","command":"opv propose structure --json"}}}
+
+## json stderr
+retrying op item get (2/3) in <delay>
+retrying op item get (3/3) in <delay>
+opv: 1Password did not answer after 3 attempts: it was stopped by signal 9 before it answered
+  checked: op item get iE2EWEBPROD000000000000001 --vault vE2EWEBPROD000000000000001 --format json --cache (stopped by signal 9)
+Do: approve the 1Password app's prompt if it shows one; otherwise check 1Password's status page (https://status.1password.com) or the network
+Next: opv propose structure --json

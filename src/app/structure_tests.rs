@@ -545,7 +545,7 @@ fn a_configuration_changed_during_apply_is_never_overwritten() {
 /// values in 1Password.
 fn end_to_end() -> (tempfile::TempDir, PathBuf, FakeOp, Result<Applied, Error>) {
     let (d, path, op) = workspace();
-    let mut key = super::super::declare::Key {
+    let mut key = crate::app::propose::declare::Key {
         product: "billing".into(),
         key: "WEBHOOK_SECRET".into(),
         kind: "secret".into(),
@@ -553,11 +553,11 @@ fn end_to_end() -> (tempfile::TempDir, PathBuf, FakeOp, Result<Applied, Error>) 
         guidance: Some("Stripe dashboard > Webhooks".into()),
         ..Default::default()
     };
-    super::super::declare::key(&op, &path, &key).unwrap();
+    crate::app::propose::declare::key(&op, &path, &key).unwrap();
     key.key = "PUBLISHABLE_KEY".into();
     key.kind = "config".into();
-    super::super::declare::key(&op, &path, &key).unwrap();
-    let target = super::super::declare::Target {
+    crate::app::propose::declare::key(&op, &path, &key).unwrap();
+    let target = crate::app::propose::declare::Target {
         environment: "prod".into(),
         name: "billing".into(),
         provider: Some("fly".into()),
@@ -565,7 +565,7 @@ fn end_to_end() -> (tempfile::TempDir, PathBuf, FakeOp, Result<Applied, Error>) 
         products: vec!["billing".into()],
         roles: vec![],
     };
-    super::super::declare::target(&op, &path, &target).unwrap();
+    crate::app::propose::declare::target(&op, &path, &target).unwrap();
     let id = plan_of(&path, &op).plan_id;
     let res = apply(&op, &path, "myapp", ACCOUNT, &id, &mut approve_all);
     (d, path, op, res)
@@ -693,7 +693,7 @@ fn a_stale_plan_id_steps_to_the_new_structural_plan() {
     )
     .unwrap();
     let e = apply(&op, &path, "myapp", ACCOUNT, &id, &mut approve_all).unwrap_err();
-    assert_eq!(e.next_text().unwrap_or_default(), "opv structure plan");
+    assert_eq!(e.next_text().unwrap_or_default(), "opv propose structure");
 }
 
 /// 05.14, X4: after the approval was used, the step reads the new plan, never this apply
@@ -708,7 +708,7 @@ fn a_configuration_changed_during_apply_steps_to_the_new_plan() {
         Ok(())
     };
     let e = apply(&op, &path, "myapp", ACCOUNT, &id, &mut edit_during).unwrap_err();
-    assert_eq!(e.next_text().unwrap_or_default(), "opv structure plan");
+    assert_eq!(e.next_text().unwrap_or_default(), "opv propose structure");
 }
 
 /// 05.14, X20: the failure says the approval is used up.
@@ -730,7 +730,7 @@ fn a_configuration_changed_during_apply_never_claims_an_approval() {
 fn a_partial_apply_steps_to_the_new_plan() {
     let (_d, path, r) = failing_at(3);
     let e = apply_reviewed(&path, &r).unwrap_err();
-    assert_eq!(e.next_text().unwrap_or_default(), "opv structure plan");
+    assert_eq!(e.next_text().unwrap_or_default(), "opv propose structure");
 }
 
 /// X20: a partial apply names what it already created.

@@ -5,6 +5,7 @@
 //! Pure: a proposal reads no file and runs no command. Only [`key::write`] touches the
 //! contract file, and only when a caller asks it to.
 
+pub mod declare;
 pub mod key;
 pub mod setup;
 pub mod structure;
@@ -40,6 +41,10 @@ pub struct Proposal {
     pub questions: Vec<Question>,
     /// Lowercase hex SHA-256 of the kind and the proposed contract text.
     pub plan_id: String,
+    /// The proposed contract text itself (names and rules only, never an id or a value):
+    /// what `--write` saves. Not part of the wire document, which carries the diff.
+    #[serde(skip)]
+    pub contract_after: String,
 }
 
 impl Proposal {
@@ -99,6 +104,18 @@ struct RelaxationView<'a> {
     env: Option<&'a str>,
     kind: &'a str,
     reason: &'a str,
+}
+
+/// One relaxation as its wire object: product, key, environment, kind and fixed reason.
+pub fn relaxation_json(r: &Relaxation) -> serde_json::Value {
+    serde_json::to_value(RelaxationView {
+        product: &r.product,
+        key: &r.key,
+        env: r.env.as_deref(),
+        kind: relaxation_kind_name(r.kind),
+        reason: r.reason,
+    })
+    .unwrap_or(serde_json::Value::Null)
 }
 
 /// The wire name of a relaxation kind.

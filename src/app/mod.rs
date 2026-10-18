@@ -29,7 +29,6 @@ pub mod contract;
 #[cfg(test)]
 #[path = "core_acceptance_tests.rs"]
 mod core_acceptance_tests;
-pub mod declare;
 pub mod delivery;
 pub mod delivery_preview;
 pub mod doctor;
@@ -98,7 +97,6 @@ mod skill_tests;
 mod staged_tests;
 pub mod status;
 pub mod structure;
-pub mod structure_cmd;
 pub mod suggest;
 pub mod sync;
 pub mod target_cmd;

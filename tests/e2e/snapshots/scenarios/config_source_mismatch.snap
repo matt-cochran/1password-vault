@@ -1,18 +1,10 @@
-# config_source_mismatch: opv bootstrap
+# config_source_mismatch: opv target credentials prod --target fly --create
 
 ## text exit: 2
 ## text stdout
 
 ## text stderr
-opv: opv bootstrap works on a secrets.toml, but this project's configuration is the 1Password manifest opv · e2e-app
-Do: change the manifest opv · e2e-app with opv config edit
-Next: opv config edit
-
-## json exit: 2
-## json stdout
-{"schema_version":3,"ok":false,"exit_code":2,"next":{"kind":"run","actor":"assistant","command":"opv config edit"},"do":"change the manifest opv · e2e-app with opv config edit","error":{"code":"config_source_mismatch","category":"config","message":"opv bootstrap works on a secrets.toml, but this project's configuration is the 1Password manifest opv · e2e-app","subject":{"manifest":"opv · e2e-app","command":"bootstrap"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":"change the manifest opv · e2e-app with opv config edit","next":{"kind":"run","actor":"assistant","command":"opv config edit"}}}
-
-## json stderr
-opv: opv bootstrap works on a secrets.toml, but this project's configuration is the 1Password manifest opv · e2e-app
+using manifest "opv · e2e-app" in vault e2e-manifest (from OPV_PROJECT)
+opv: opv target credentials --create works on a secrets.toml, but this project's configuration is the 1Password manifest opv · e2e-app
 Do: change the manifest opv · e2e-app with opv config edit
 Next: opv config edit

@@ -269,7 +269,7 @@ pub struct AccessFinding {
     pub next: Option<String>,
 }
 
-/// `opv adopt <env> --from <file> --json` (#94).
+/// `opv import <env> --from <file> --dry-run --json` (#94).
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AdoptDoc {
     #[serde(default)]

@@ -15,7 +15,7 @@ project without a file. Because `../secrets.toml` is a parent of any directory u
 project, the route must be forced with `OPV_PROJECT`:
 
 ```
-OPV_PROJECT=e2e-app OP_ACCOUNT=AE2EDEVACCOUNT000000000001 opv config describe --json
+OPV_PROJECT=e2e-app OP_ACCOUNT=AE2EDEVACCOUNT000000000001 opv contract --json
 ```
 
 The account is required because the world signs in two accounts on one sign-in address;

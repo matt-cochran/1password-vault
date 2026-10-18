@@ -142,10 +142,14 @@ fn a_missing_boundary_item_is_a_structure_step() {
 }
 
 #[test]
-fn rebind_drops_the_environment_ids() {
+fn rebind_drops_the_environments_boundary_ids() {
     let (_d, path, op) = clean_world();
     let p = propose_structure(&op, &path, "myapp", ACCOUNT, &["dev".to_string()], &[]).unwrap();
-    assert!(!p.bindings_after.unwrap().contains("environments.dev."));
+    assert!(
+        !p.bindings_after
+            .unwrap()
+            .contains("environments.dev.boundaries.")
+    );
 }
 
 #[test]

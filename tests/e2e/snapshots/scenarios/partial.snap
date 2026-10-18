@@ -5,13 +5,13 @@
 prod/fly: warning: web/LOG_LEVEL not delivered (no config channel: set fly.config)
 prod/fly: warning: web/OTEL_RESOURCE not delivered (no config channel: set fly.config)
 prod/fly: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
-prod/fly: delivery: web not recorded: no delivery item is recorded for web on prod/fly; opv bootstrap creates it
+prod/fly: delivery: web not recorded: no delivery item is recorded for web on prod/fly; opv apply creates it
 prod/fly: written: web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET), web/TLS_CERTIFICATE (E2E__WEB__TLS_CERTIFICATE), web/TLS_PRIVATE_KEY (E2E__WEB__TLS_PRIVATE_KEY)
 prod/fly: extra, not pruned (pass --prune to remove): web/MIGRATION_TOKEN (E2E__WEB__MIGRATION_TOKEN)
 prod/fly: pending deploy (pass --deploy): web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET), web/TLS_CERTIFICATE (E2E__WEB__TLS_CERTIFICATE), web/TLS_PRIVATE_KEY (E2E__WEB__TLS_PRIVATE_KEY)
 prod/fly: summary: written 5 · unchanged 0 · held 0 · deployed no · pending 5 · pruned 0 · kept 1 · skipped 1
 prod/gh: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
-prod/gh: delivery: web not recorded: no delivery item is recorded for web on prod/gh; opv bootstrap creates it
+prod/gh: delivery: web not recorded: no delivery item is recorded for web on prod/gh; opv apply creates it
 prod/gh: written: web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET), web/TLS_CERTIFICATE (E2E__WEB__TLS_CERTIFICATE), web/TLS_PRIVATE_KEY (E2E__WEB__TLS_PRIVATE_KEY), web/LOG_LEVEL (E2E__WEB__LOG_LEVEL), web/OTEL_RESOURCE (E2E__WEB__OTEL_RESOURCE)
 prod/gh: summary: written 7 · unchanged 0 · held 0 · deployed no · pending 0 · pruned 0 · kept 0 · skipped 1
 prod/k8s: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it

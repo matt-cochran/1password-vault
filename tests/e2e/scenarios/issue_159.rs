@@ -1,7 +1,8 @@
-//! #159: `opv --verbose bootstrap --file <f> --project <p> --rebind staging --rebind prod
-//! --dry-run --json`, with both environments' values vaults outside the selected account and
-//! the state vaults inside it. Expected: one JSON document, `create` for every boundary, `ok`
-//! for every state vault; any failure has its own `error.code` and names its call.
+//! #159, as 0.12.0 asks it: `opv --verbose --config <f> propose structure --rebind staging
+//! --rebind prod --json` (0.11.0's `bootstrap --rebind … --dry-run`), with both
+//! environments' values vaults outside the selected account and the state vaults inside it.
+//! Expected: one JSON document, `create` for every boundary, `ok` for every state vault; any
+//! failure has its own `error.code` and names its call.
 //!
 //! The reported "You are signed in, but vault access failed … setup vault" came from no
 //! bootstrap code: only `opv login`'s own sign-in (`setup::prepare`) wrote it, when the
@@ -102,16 +103,14 @@ impl Scenario {
 /// The command of the report.
 const REBOUND: &[&str] = &[
     "--verbose",
-    "bootstrap",
-    "--file",
+    "--config",
     "fleet.toml",
-    "--project",
-    "e2e-app",
+    "propose",
+    "structure",
     "--rebind",
     "staging",
     "--rebind",
     "prod",
-    "--dry-run",
     "--json",
 ];
 
@@ -127,9 +126,10 @@ fn document(out: &Output) -> serde_json::Value {
     documents(out).into_iter().next().unwrap_or_default()
 }
 
-/// The `action` of every entry of `list` (`boundaries`, `state_vaults`) in every environment.
+/// The `action` of every entry of `list` (`boundaries`, `state_vaults`) in every environment
+/// of the proposal's structure plan.
 fn actions(doc: &serde_json::Value, list: &str) -> Vec<String> {
-    doc["environments"]
+    doc["structure"]["environments"]
         .as_array()
         .into_iter()
         .flatten()

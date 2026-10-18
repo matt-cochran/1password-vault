@@ -26,6 +26,9 @@ use crate::error::Error;
 /// id yet; an apply records the item its fields were read from.
 pub const NAMES_PRODUCT: &str = "app";
 
+/// The environment a names-only proposal declares: a `.env` holds a developer's own values.
+pub const NAMES_ENV: &str = "local";
+
 /// A setup proposal: init's [`Proposal`] plus the structure an apply creates first.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SetupProposal {
@@ -119,6 +122,13 @@ fn names_steps(imported: &init::Imported) -> Vec<String> {
     steps
 }
 
+/// Write the proposed contract to `path` (`opv propose setup --write`), replacing what the
+/// diff was computed against; the contract only, never a value or an id. D-G: the bindings
+/// file is written only by `opv apply`, which finds the item by its title.
+pub fn write(path: &Path, proposal: &SetupProposal) -> Result<(), Error> {
+    init::write_atomic(path, &proposal.proposal.contract_after, true)
+}
+
 /// Assemble the proposal: the diff against `file_target`, the plan id and the structure.
 fn build(
     contract: String,
@@ -135,6 +145,7 @@ fn build(
             diff: config_cmd::diff(&base, &contract),
             questions: Vec::new(),
             plan_id: plan_id(&contract),
+            contract_after: contract,
         },
         structure_steps,
         bindings_after: None,

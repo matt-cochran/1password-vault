@@ -1,4 +1,4 @@
-# read_back_missing: opv adopt dev --from .env.dev --apply
+# read_back_missing: opv import dev --from .env.dev
 
 ## text exit: 4
 ## text stdout

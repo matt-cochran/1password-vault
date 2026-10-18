@@ -135,19 +135,19 @@ fn inv_env(inv: &Invocation) -> Option<&str> {
         .filter(|a| !a.starts_with('-'))
 }
 
-/// `opv plan <env>` (a read), or `opv structure plan` when no environment is known.
+/// `opv plan <env>` (a read), or `opv propose structure` when no environment is known.
 fn plan_read(inv: &Invocation) -> Next {
     match inv_env(inv) {
         Some(env) => Next::Check(cmd(&["plan"], &[env])),
-        None => Next::Check(cmd(&["structure", "plan"], &[])),
+        None => Next::Check(cmd(&["propose", "structure"], &[])),
     }
 }
 
 /// The read of a plan scope: `opv plan <env>` with every scope flag `plan` takes, or
-/// `opv structure plan`.
+/// `opv propose structure`.
 fn scope_read(scope: &PlanScope) -> Next {
     match scope {
-        PlanScope::Structural => Next::Check(cmd(&["structure", "plan"], &[])),
+        PlanScope::Structural => Next::Check(cmd(&["propose", "structure"], &[])),
         PlanScope::Sync {
             env,
             targets,
@@ -250,7 +250,17 @@ fn read_form(c: Cmd) -> Option<Cmd> {
                 args,
             })
         }
-        "bootstrap" | "target add" => Some(with_flag(c, "--dry-run")),
+        "import" => Some(with_flag(c, "--dry-run")),
+        // A proposal reads; `--write` is what writes the contract file.
+        p if p.starts_with("propose") => Some(Cmd {
+            command: c.command,
+            args: c.args.into_iter().filter(|a| a != "--write").collect(),
+        }),
+        // `apply` runs the structural plan; its read is the proposal of that plan.
+        "apply" => Some(Cmd {
+            command: vec!["propose".into(), "structure".into()],
+            args: Vec::new(),
+        }),
         "run" => Some(with_flag(c, "--preview")),
         _ => {
             // 09.85: `open` writes nothing (it shows a 1Password link), so a unique close
@@ -497,10 +507,9 @@ fn takes_project(command: &[String]) -> bool {
     matches!(
         path.as_slice(),
         ["access"]
-            | ["bootstrap"]
             | ["explain"]
-            | ["init"]
-            | ["target", "add"]
+            | ["propose", "setup"]
+            | ["propose", "target"]
             | ["config", "import"]
     )
 }
@@ -519,12 +528,11 @@ fn flag_listing(flag: &str, inv: &Invocation) -> Next {
     match flag {
         "--target" => Next::Check(cmd(&["target", "list"], &[])),
         "--account" => Next::Check(cmd(&["account", "list"], &[])),
-        "--env" | "--product" | "--role" | "--remote" | "--key" => {
-            Next::Check(cmd(&["config", "describe"], &[]))
-        }
+        "--env" | "--product" | "--key" => Next::Check(cmd(&["contract"], &[])),
+        "--role" | "--remote" => Next::Check(cmd(&["config", "export"], &[])),
         _ => match inv_env(inv) {
             Some(env) => Next::Check(cmd(&["status"], &[env])),
-            None => Next::Check(cmd(&["config", "describe"], &[])),
+            None => Next::Check(cmd(&["contract"], &[])),
         },
     }
 }
@@ -635,11 +643,10 @@ fn name_kind(k: NameKind) -> &'static str {
 fn name_listing(k: NameKind, inv: &Invocation) -> Next {
     match k {
         NameKind::Target => Next::Check(cmd(&["target", "list"], &[])),
-        NameKind::Environment
-        | NameKind::Product
-        | NameKind::Key
-        | NameKind::Role
-        | NameKind::RemoteProfile => Next::Check(cmd(&["config", "describe"], &[])),
+        NameKind::Environment | NameKind::Product | NameKind::Key => {
+            Next::Check(cmd(&["contract"], &[]))
+        }
+        NameKind::Role | NameKind::RemoteProfile => Next::Check(cmd(&["config", "export"], &[])),
         NameKind::Mode => help_of(inv),
         NameKind::HelpTopic => Next::Check(cmd(&["help"], &[])),
     }
@@ -1177,7 +1184,8 @@ fn plan(action: Option<(Action, String)>, next: Next) -> Plan {
     }
 }
 
-/// The Do and Next of a refused `opv generate`, per reason (F2, R64).
+/// The Do and Next of a refused generation (`opv apply` of a `propose generate`), per
+/// reason (F2, R64).
 fn generate_refused(
     product: &ProductName,
     key: &KeyName,
@@ -1209,7 +1217,10 @@ fn generate_refused(
         ),
         GenerateRefusal::Shared { from } => plan(
             inspect(format!("generate {from}, the key {pk} reads from")),
-            Next::Run(cmd(&["generate"], &[env.as_str(), from.as_str()])),
+            Next::Run(cmd(
+                &["propose", "generate"],
+                &[env.as_str(), from.as_str()],
+            )),
         ),
         GenerateRefusal::ByteCountOutOfRange => plan(
             inspect(format!(
@@ -2110,7 +2121,7 @@ impl Cause {
             SourceChanged { env, no_record } => {
                 if *no_record {
                     format!(
-                        "no source versions are recorded for environment {env}: run opv bootstrap to record delivery items"
+                        "no source versions are recorded for environment {env}: run opv apply to record delivery items"
                     )
                 } else {
                     format!("the source items of environment {env} changed since the last sync")
@@ -2383,16 +2394,13 @@ impl Cause {
     /// The read a refused step falls back to (design §6.4).
     fn fallback(
         &self,
-        why: RefusedBecause,
-        shown: &str,
+        _why: RefusedBecause,
+        _shown: &str,
         inv: &Invocation,
         sit: &Situation,
     ) -> Next {
-        let candidate = match (why, self) {
-            (RefusedBecause::ManifestProject, _) if shown.starts_with("opv bootstrap") => {
-                Some(Next::Check(cmd(&["structure", "plan"], &[])))
-            }
-            (_, Cause::NotSignedIn { .. } | Cause::CredentialRejected { .. }) => {
+        let candidate = match self {
+            Cause::NotSignedIn { .. } | Cause::CredentialRejected { .. } => {
                 Some(signed_in_check(inv))
             }
             _ => {
@@ -2425,13 +2433,13 @@ impl Cause {
             } => plan(
                 // P3: the first-run router's other starting paths.
                 inspect(
-                    "start one with opv init, run opv setup when the project ships opv.setup.toml, \
+                    "start one with opv propose setup, run opv setup when the project ships opv.setup.toml, \
                      point to one with --config <path>, or list the manifests in your other \
                      accounts with opv projects",
                 ),
                 match env {
-                    Some(e) => Next::Run(cmd(&["init"], &[e.as_str()])),
-                    None => Next::Check(cmd(&["init"], &["--help"])),
+                    Some(e) => Next::Run(cmd(&["propose", "setup"], &["--from-item", e.as_str()])),
+                    None => Next::Check(cmd(&["propose", "setup"], &["--help"])),
                 },
             ),
             ConfigSourceMismatch {
@@ -2540,9 +2548,9 @@ impl Cause {
                         ),
                     )),
                     match source {
-                        ConfigSource::File { .. } => Next::Run(cmd(&["bootstrap"], &[])),
+                        ConfigSource::File { .. } => Next::Run(cmd(&["propose", "structure"], &[])),
                         ConfigSource::Manifest { .. } => {
-                            Next::Check(cmd(&["structure", "plan"], &[]))
+                            Next::Check(cmd(&["propose", "structure"], &[]))
                         }
                     },
                 )
@@ -2659,9 +2667,10 @@ impl Cause {
                     .as_ref()
                     .and_then(|c| substituted(inv, given, c.as_str()));
                 let next = match (kind, path.as_slice(), substitute) {
-                    // F2 (R21): `opv add` into an undeclared environment declares it first.
-                    (NameKind::Environment, ["add"], _) => {
-                        Next::Run(cmd(&["env", "add"], &[given.as_str()]))
+                    // F2 (R21): a key proposed into an undeclared environment proposes the
+                    // environment first.
+                    (NameKind::Environment, ["propose", "key"], _) => {
+                        Next::Run(cmd(&["propose", "env"], &[given.as_str()]))
                     }
                     // F4: setup is a person's guided command; the near name is theirs to run.
                     (_, ["setup"], Some(c)) => Next::Handoff(c),
@@ -2675,9 +2684,9 @@ impl Cause {
             }
             KeyNotDeclared { key, env, .. } => plan(
                 inspect(format!(
-                    "declare {key} for environment {env} (opv add), or use a key it declares"
+                    "declare {key} for environment {env} (opv propose key), or use a key it declares"
                 )),
-                Next::Check(cmd(&["config", "describe"], &[])),
+                Next::Check(cmd(&["contract"], &[])),
             ),
             Ambiguous {
                 kind,
@@ -2706,7 +2715,7 @@ impl Cause {
             NothingInScope { env, what } => match what {
                 Scope::NoProductHasKeys => plan(
                     inspect(format!(
-                        "declare a key for environment {env} (opv add --help)"
+                        "declare a key for environment {env} (opv propose key --help)"
                     )),
                     Next::Check(cmd(&["status"], &[env.as_str()])),
                 ),
@@ -2724,7 +2733,7 @@ impl Cause {
                         "declare a target in environment {env} for {}",
                         list_of(products)
                     )),
-                    Next::Check(cmd(&["target", "add"], &["--help"])),
+                    Next::Check(cmd(&["propose", "target"], &["--help"])),
                 ),
             },
             Usage { problem } => plan(
@@ -3321,8 +3330,8 @@ impl Cause {
                         "put the values in a private dotenv file (chmod 600) or type them in 1Password",
                     ),
                     match (inv.command.as_slice(), inv_env(inv)) {
-                        ([c], Some(env)) if c == "adopt" => {
-                            Next::Check(cmd(&["adopt"], &[env, "--help"]))
+                        ([c], Some(env)) if c == "import" => {
+                            Next::Check(cmd(&["import"], &[env, "--help"]))
                         }
                         _ => help_of(inv),
                     },
@@ -3520,7 +3529,7 @@ impl Cause {
                         None => Next::Check(cmd(&["status"], &[])),
                     },
                     StoreObject::File { .. } | StoreObject::Manifest { .. } => {
-                        Next::Check(cmd(&["config", "describe"], &[]))
+                        Next::Check(cmd(&["config", "export"], &[]))
                     }
                 };
                 plan(
@@ -3540,7 +3549,9 @@ impl Cause {
                 fields,
                 by,
             } => {
-                let text = if by.command == ["tidy"] {
+                // A tidy (a person's `config export <env>` or another read) lost fields:
+                // restore them from the item's history.
+                let text = if by.command == ["config", "export"] {
                     format!(
                         "restore {} from the history of item {item} in 1Password",
                         list_of(fields)
@@ -4011,8 +4022,8 @@ impl Cause {
             SourceChanged { env, no_record } => {
                 if *no_record {
                     plan(
-                        inspect("run opv bootstrap to record delivery items"),
-                        Next::Handoff(cmd(&["bootstrap"], &[])),
+                        inspect("run opv apply to record delivery items"),
+                        Next::Handoff(cmd(&["apply"], &[])),
                     )
                 } else {
                     plan(None, Next::Run(cmd(&["sync"], &[env.as_str(), "--deploy"])))
@@ -4166,9 +4177,9 @@ impl Cause {
                         if let Some(q) = reader {
                             args.extend(["--product", q.as_str()]);
                         }
-                        Next::Check(cmd(&["check"], &args))
+                        Next::Check(cmd(&["status"], &args))
                     }
-                    (None, None) => Next::Check(cmd(&["config", "describe"], &[])),
+                    (None, None) => Next::Check(cmd(&["contract"], &[])),
                 };
                 plan(
                     reader
@@ -4197,7 +4208,7 @@ impl Cause {
             ),
             NeedsUndeclared { names } => plan(
                 inspect(format!(
-                    "declare {} with opv add, or stop reading them",
+                    "declare {} with opv propose key, or stop reading them",
                     list_of(names)
                 )),
                 Next::Rerun,

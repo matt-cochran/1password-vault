@@ -694,7 +694,7 @@ fn inspect(
 ) -> Value {
     let (tool, command): (&str, &[&str]) = match operation {
         Operation::Ready => ("opv_ready", &["ready"]),
-        Operation::Configuration => ("opv_configuration", &["config", "describe"]),
+        Operation::Configuration => ("opv_configuration", &["contract"]),
     };
     if env.is_some_and(|e| !identifier(e)) {
         return ToolCall::new(tool, command, Vec::new(), verbose)
@@ -1180,13 +1180,13 @@ fn access_answer(doc: &Value) -> Value {
 fn structure_plan(project: &std::path::Path, verbose: bool) -> Value {
     let call = ToolCall::new(
         "opv_structure_plan",
-        &["structure", "plan"],
+        &["propose", "structure"],
         Vec::new(),
         verbose,
     );
     let r = read_only(Duration::from_secs(60));
     let planned =
-        crate::app::structure::scope_as(project, &r, "structure plan").and_then(|scope| {
+        crate::app::structure::scope_as(project, &r, "propose structure").and_then(|scope| {
             r.inner.use_account(Some(scope.account.clone()));
             let text = match &scope.config {
                 crate::app::structure::ConfigAt::File(path) => std::fs::read_to_string(path)
@@ -1233,10 +1233,6 @@ const PROPOSE_KINDS: [&str; 7] = [
 /// document's), so it is refused naming itself.
 const PROPOSE_KIND_FORMAT: &str = "one of key, env, target, retire, setup, structure or generate (kind tidy is not available: it has no proposal yet; a person runs opv tidy <env>)";
 
-/// The environment a names-only setup (`setup` with `names_from`) declares: the `local`
-/// tier, the one an assistant's `opv_import_local` then fills.
-const NAMES_ENV: &str = "local";
-
 /// `opv_propose`'s call: `opv propose <kind> --json`, with the kind when it is one.
 fn propose_call(args: &rmcp::model::JsonObject) -> ToolCall {
     let kind = args
@@ -1270,7 +1266,10 @@ fn to_doc<T: serde::Serialize>(doc: &T) -> Result<Value, Error> {
 }
 
 /// The proposal `intent` implies, by kind, from the library `opv propose` runs
-/// ([`crate::app::propose`]).
+/// ([`crate::app::propose`]), as the `opv propose <kind> --json` document: the library's
+/// proposal, `written: null` (a tool never writes), and for a structural proposal the
+/// person's `opv apply` as `next`. A contract proposal has no `next` here: the CLI's is its
+/// own command line with `--write`, which a person runs.
 fn proposal<R: Accounted>(
     project: &std::path::Path,
     r: &R,
@@ -1278,15 +1277,21 @@ fn proposal<R: Accounted>(
 ) -> Result<Value, Error> {
     use crate::app::propose::{key, setup, target};
     use crate::domain::intent::Intent;
+    let unwritten = |mut doc: Value| {
+        doc["written"] = Value::Null;
+        doc
+    };
     match intent {
         Intent::Key { .. } | Intent::Env { .. } | Intent::Retire { .. } | Intent::Target { .. } => {
             let (text, ids, rules) = contract_for_proposal(project, r)?;
             let base = rules.as_ref().and_then(|s| s.contract());
-            if matches!(intent, Intent::Target { .. }) {
-                to_doc(&target::propose(&text, &ids, base, intent)?)
+            let proposal = if matches!(intent, Intent::Target { .. }) {
+                target::propose(&text, &ids, base, intent)
             } else {
-                to_doc(&key::propose(&text, &ids, base, intent)?)
+                key::propose(&text, &ids, base, intent)
             }
+            .map_err(proposal_refused)?;
+            to_doc(&proposal).map(unwritten)
         }
         Intent::Setup {
             from_item,
@@ -1295,31 +1300,61 @@ fn proposal<R: Accounted>(
             names_from,
             config_key,
             secret_key,
+            project: named,
+            account,
             ..
-        } => match (from_item, names_from) {
-            (Some(env), None) => {
-                r.select_account(config_store::selected_account_id(r, project)?);
-                let contract = config_store::walk_up(project, "secrets.toml");
-                to_doc(&setup::from_item(
-                    r,
-                    env.as_str(),
-                    vault.as_deref(),
-                    item.as_deref(),
-                    contract.as_deref(),
-                )?)
-            }
-            (None, Some(file)) => to_doc(&setup::from_names(
-                &project.join(file),
-                NAMES_ENV,
-                config_key,
-                secret_key,
-            )?),
-            _ => Err(usage(
-                "from_item, names_from",
-                "exactly one of from_item or names_from",
-            )
-            .into()),
-        },
+        } => {
+            let proposed = match (from_item, names_from) {
+                (Some(env), _) => {
+                    // FR-40, NR-7: the item is read in one chosen account, never op's default.
+                    let given = account
+                        .clone()
+                        .or_else(|| config_store::pointer_account(project))
+                        .or_else(config_store::account_env);
+                    r.select_account(config_store::pick_account(r, given)?);
+                    let (vault, item) = match (vault, item) {
+                        (Some(v), Some(i)) => (v.clone(), i.clone()),
+                        (vault, item) => {
+                            let repo = config_store::git_repo(r);
+                            let name = config_store::default_project(
+                                named.as_deref(),
+                                repo.as_deref(),
+                                project,
+                            )?;
+                            let b = crate::app::init::SHARED_BOUNDARY;
+                            let env = env.as_str();
+                            (
+                                vault.clone().unwrap_or_else(|| {
+                                    crate::domain::naming::boundary_vault(&name, b, env)
+                                }),
+                                item.clone().unwrap_or_else(|| {
+                                    crate::domain::naming::boundary_item(&name, b, env)
+                                }),
+                            )
+                        }
+                    };
+                    let contract = config_store::walk_up(project, "secrets.toml")
+                        .unwrap_or_else(|| project.join("secrets.toml"));
+                    setup::from_item(r, env.as_str(), Some(&vault), Some(&item), Some(&contract))?
+                }
+                (None, Some(file)) => setup::from_names(
+                    &project.join(file),
+                    setup::NAMES_ENV,
+                    config_key,
+                    secret_key,
+                )?,
+                (None, None) => {
+                    return Err(Cause::Usage {
+                        problem: UsageProblem::NeedsFlag {
+                            flag: "opv propose setup".into(),
+                            needs: "--from-item <env> or --names-from <.env>".into(),
+                        },
+                    }
+                    .into());
+                }
+            };
+            to_doc(&proposed).map(unwritten)
+        }
         Intent::Structure { rebind, .. } => {
             let rebind: Vec<String> = rebind.iter().map(|e| e.to_string()).collect();
             structure_proposal(project, r, &rebind, &[])
@@ -1332,9 +1367,48 @@ fn proposal<R: Accounted>(
     }
 }
 
+/// A loader refusal of the proposed text is the proposal's (`config_proposal_invalid`),
+/// as `opv propose` words it: that text was never written.
+fn proposal_refused(e: Error) -> Error {
+    let Error::Catalog(cause, upstream) = e;
+    let cause = match *cause {
+        Cause::ConfigInvalid {
+            source,
+            field,
+            rule,
+            ..
+        } => Cause::ConfigProposalInvalid {
+            source,
+            field,
+            rule,
+            from_proposal: true,
+        },
+        other => other,
+    };
+    Error::Catalog(Box::new(cause), upstream)
+}
+
+/// `opv apply <plan_id>` with the `--rebind` and `--generate` a structural proposal needs
+/// to be recomputed as it was proposed: the person's step.
+fn apply_step(plan_id: &str, rebind: &[String], generate: &[(String, Vec<String>)]) -> String {
+    let mut args = vec![plan_id.to_string()];
+    for env in rebind {
+        args.extend(["--rebind".to_string(), env.clone()]);
+    }
+    for (env, keys) in generate {
+        for k in keys {
+            args.extend(["--generate".to_string(), format!("{env}:{k}")]);
+        }
+    }
+    render::cmd_text(&Cmd {
+        command: vec!["apply".into()],
+        args,
+    })
+}
+
 /// `opv propose structure|generate`: the structure plan over the project's configuration
 /// (a file or its manifest), with its project name and account as `opv propose` resolves
-/// them. Reads only.
+/// them, and the person's `opv apply` next. Reads only.
 fn structure_proposal<R: Accounted>(
     project: &std::path::Path,
     r: &R,
@@ -1343,19 +1417,26 @@ fn structure_proposal<R: Accounted>(
 ) -> Result<Value, Error> {
     let scope = crate::app::structure::scope_as(project, r, "propose structure")?;
     r.select_account(Some(scope.account.clone()));
-    to_doc(&crate::app::propose::structure::propose_structure_at(
+    let p = crate::app::propose::structure::propose_structure_at(
         r,
         &scope.config,
         &scope.project,
         &scope.account,
         rebind,
         generate,
-    )?)
+    )?;
+    let mut doc = to_doc(&p)?;
+    doc["next"] = json!({
+        "kind": "apply",
+        "actor": "person",
+        "command": apply_step(&p.plan_id, rebind, generate),
+    });
+    Ok(doc)
 }
 
-/// The contract as written and its bindings (a file and its sibling `secrets.bindings.toml`,
-/// or a manifest's two blocks), and the committed default-branch contract whose
-/// relaxations a proposal lists first (none readable: `None`).
+/// The contract and its bindings as `opv propose` reads them (the configuration's text with
+/// its ids, split), and the committed default-branch contract whose relaxations a proposal
+/// lists first (none readable: `None`).
 fn contract_for_proposal<R: Accounted>(
     project: &std::path::Path,
     r: &R,
@@ -1369,19 +1450,13 @@ fn contract_for_proposal<R: Accounted>(
 > {
     r.select_account(config_store::selected_account_id(r, project)?);
     let found = config_store::locate(&config_request(project), r)?;
-    let fleet = found.load(r)?;
-    let (text, ids) = match &found {
-        config_store::Found::File { store, .. } => {
-            let text = std::fs::read_to_string(&store.path).map_err(|e| {
-                config_store::unreadable(&store.path, &e, crate::cause::GivenBy::Discovered)
-            })?;
-            (text, crate::config::bindings::read_sibling(&store.path)?)
-        }
-        config_store::Found::Manifest(m) => m.read_for_proposal(r)?,
-    };
+    let store = found.store();
+    let snap = store.read(r)?;
+    let working = store.parse(&snap.text)?;
+    let (contract, ids) = crate::config::bindings::split(&snap.text);
     let repo = config_store::repo_root(project).unwrap_or(project);
-    let rules = crate::app::rule_source::rule_source(r, repo, &fleet).ok();
-    Ok((text, ids, rules))
+    let rules = crate::app::rule_source::rule_source(r, repo, &working).ok();
+    Ok((contract, ids, rules))
 }
 
 /// One line of printable text, short enough to repeat in a re-run.
