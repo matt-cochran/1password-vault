@@ -89,6 +89,13 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "SourceChanged",
         "a successful result (exit 10), never an error document",
     ),
+    // Agent mode is set only by an assistant's own environment (MCP, OPV_AGENT, a harness
+    // marker), which the e2e harness does not set, and the person-only commands that call the
+    // refusal (`apply`, `set`) land in later rows of 0.12.0. Reached by src/host.rs tests.
+    (
+        "PersonOnly",
+        "needs an agent-mode marker the e2e harness does not set; no person-only command calls it yet",
+    ),
 ];
 
 fn snapshots() -> PathBuf {

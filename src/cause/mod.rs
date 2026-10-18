@@ -681,6 +681,13 @@ pub enum Cause {
     NeedsTerminal {
         why: NoTerminal,
     },
+    /// A person-only command was called from an assistant (MCP or an agent-mode shell): it
+    /// refuses at once and hands the exact command to the person. Presentation only, never
+    /// a security control (R1); `marker` names what made opv think the caller is one.
+    PersonOnly {
+        command: Cmd,
+        marker: crate::host::AgentMarker,
+    },
     NeedsConfirm {
         env: EnvName,
     },
@@ -1492,6 +1499,7 @@ impl Cause {
             UnexpectedOutput { .. } => "unexpected_output",
             Unrecognized { .. } => "unrecognized_failure",
             NeedsTerminal { .. } => "terminal_required",
+            PersonOnly { .. } => "person_only",
             NeedsConfirm { .. } => "confirm_required",
             ConfirmMismatch { .. } => "confirm_mismatch",
             ValuesNeeded { .. } => "findings",
@@ -1590,6 +1598,7 @@ impl Cause {
             Guard { .. }
             | MountUnreadable { .. }
             | NeedsTerminal { .. }
+            | PersonOnly { .. }
             | NeedsConfirm { .. }
             | ConfirmMismatch { .. }
             | LocalFileTooOpen { .. }
@@ -1654,6 +1663,7 @@ impl Cause {
             | NeedsOwnSession { .. }
             | Guard { .. }
             | NeedsTerminal { .. }
+            | PersonOnly { .. }
             | NeedsConfirm { .. }
             | ConfirmMismatch { .. }
             | ApprovalUsed { .. }

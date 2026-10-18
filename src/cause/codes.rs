@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use super::situation::{OpFlavour, Situation};
 use super::*;
-use crate::host::{Platform, Shell};
+use crate::host::{AgentMarker, Platform, Shell};
 
 /// One public code: every exit code, retry class and `human_required` its causes have.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,6 +203,9 @@ pub fn meaning(code: &str) -> &'static str {
             "a tool failed for a reason opv does not recognise; what opv did establish is named"
         }
         "terminal_required" => "the command needs the person's own interactive terminal",
+        "person_only" => {
+            "a person-only command was called from an assistant; it runs only in a person's terminal"
+        }
         "confirm_required" => "the environment sets confirm_env; a person passes --confirm <env>",
         "confirm_mismatch" => "--confirm names another environment",
         "findings" => {
@@ -712,6 +715,10 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
         },
         NeedsTerminal {
             why: NoTerminal::Ci,
+        },
+        PersonOnly {
+            command: check_cmd(),
+            marker: AgentMarker::ClaudeCode,
         },
         NeedsConfirm {
             env: EnvName::new("env-prod"),
