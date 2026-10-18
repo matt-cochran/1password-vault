@@ -991,6 +991,7 @@ fn json_state(s: &KeyState) -> &'static str {
         KeyState::Ready => "saved",
         KeyState::Skipped => "skipped",
         KeyState::SourceBlocked => "source_blocked",
+        KeyState::RulesPendingReview => "rules_pending_review",
     }
 }
 
@@ -1063,6 +1064,7 @@ pub(crate) fn state_label(s: &KeyState) -> String {
         KeyState::Ready => "saved".into(),
         KeyState::Skipped => "skipped".into(),
         KeyState::SourceBlocked => "blocked by source".into(),
+        KeyState::RulesPendingReview => "rules pending review".into(),
     }
 }
 

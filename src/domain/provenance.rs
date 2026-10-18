@@ -125,6 +125,7 @@ pub fn plan_id(input: &PlanIdInput<'_>, plan: &SyncPlan) -> String {
             KeyState::Ready => "ready",
             KeyState::Skipped => "skipped",
             KeyState::SourceBlocked => "source-blocked",
+            KeyState::RulesPendingReview => "rules-pending-review",
         });
         let applies = r.kind == Kind::Secret
             && r.state == KeyState::Ready

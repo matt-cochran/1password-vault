@@ -657,7 +657,10 @@ fn item_check(fleet: &Fleet, env_name: &str, r: &dyn CommandRunner, report: &mut
                     reason: Some(why.to_string()),
                 },
             ),
-            KeyState::Ready | KeyState::Skipped | KeyState::SourceBlocked => continue,
+            KeyState::Ready
+            | KeyState::Skipped
+            | KeyState::SourceBlocked
+            | KeyState::RulesPendingReview => continue,
         };
         blocking.push(format!("{} ({word})", key_label(&row.product, &row.key)));
         rows.push(ValueRow {
