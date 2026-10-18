@@ -403,6 +403,7 @@ pub(crate) fn plan_item_with(
                 .as_ref()
                 .map(|c| c as &plan::CurrentCheck<'_>)
                 .or(by_ledger.as_ref().map(|c| c as &plan::CurrentCheck<'_>)),
+            retiring_prune: false,
         },
     );
     let mut p = p;
