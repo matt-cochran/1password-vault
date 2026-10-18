@@ -969,6 +969,21 @@ fn reads_production_vault(
     }
 }
 
+/// R9's production-vault rows for `env_name`, printed as `opv doctor --env` prints them.
+/// The acceptance walkthrough (`core_acceptance_tests`) renders them in-process: the full
+/// run first needs an `op --version` reply, which neither the fake nor the recordings hold.
+#[cfg(test)]
+pub(crate) fn production_vault_rows(
+    fleet: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let mut report = Report::default();
+    reads_production_vault(fleet, env_name, r, &Host::detect, &mut report);
+    print_text(&report, out, &mut std::io::sink())
+}
+
 /// R9: warn (never fail) when this shell is signed in to a production target's platform.
 fn production_login_warn(
     target: &dyn TargetConfig,

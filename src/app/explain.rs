@@ -436,6 +436,13 @@ fn explain_in(
     // FR-22, G31: every environment the key is desired in, every target that delivers its
     // product, and the delivery item recording it. Names only.
     let deliveries = delivered_to(fleet, product, key, spec, r);
+    // Every environment whose boundary item holds the key, with a target or run-only.
+    let environments: Vec<&str> = fleet
+        .environments
+        .keys()
+        .filter(|e| spec.is_desired_in(e))
+        .map(String::as_str)
+        .collect();
     if json {
         let mut doc = serde_json::json!({
             "schema_version": crate::json::SCHEMA_VERSION,
@@ -451,6 +458,7 @@ fn explain_in(
                 "vault_id": &b.vault_id,
                 "item_id": &b.item_id,
             })),
+            "environments": environments,
             "targets": targets,
             "delivered_to": deliveries
                 .iter()
@@ -515,6 +523,7 @@ fn explain_in(
     if spec.personal {
         rows.push(("personal".into(), "each person's own item".into()));
     }
+    rows.push(("held in".into(), environments.join(", ")));
     rows.extend(target_rows);
     if let Some(ci) = &ci {
         rows.push(("readers".into(), readers_line(&deploy_accounts, ci)));

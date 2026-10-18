@@ -52,17 +52,47 @@ pub fn run(
     json: bool,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    if let Some(name) = env {
-        fleet.environment(name)?;
-    }
-    super::check_product(fleet, product, env)?;
+    let document = gather(fleet, env, product, r, receipt)?;
+    let deliveries = delivery_rows(&scoped(fleet, env), product, r);
 
-    // An environment scope keeps the read to that environment's items; a product scope
-    // only narrows the rendered document (a boundary is read whole for its environment).
+    if json {
+        let body = body(&document, &deliveries)?;
+        let rendered = serde_json::to_vec(&body)
+            .map_err(|_| Cause::Bug {
+                site: "the inventory document serializes",
+            })
+            .map(|bytes| crate::json::finish(&bytes, Ok(()), false))?;
+        return out.write_all(&rendered).map_err(super::write_err);
+    }
+    let text = render(&document, &deliveries);
+    out.write_all(text.as_bytes()).map_err(super::write_err)
+}
+
+/// The fleet narrowed to `env`, when given: an environment scope keeps the read to that
+/// environment's items; a product scope only narrows the rendered document (a boundary is
+/// read whole for its environment).
+fn scoped(fleet: &Fleet, env: Option<&str>) -> Fleet {
     let mut scoped = fleet.clone();
     if let Some(name) = env {
         scoped.environments.retain(|e, _| e == name);
     }
+    scoped
+}
+
+/// Read and build the inventory document [`run`] renders, without rendering it: the input
+/// `opv next` ranks ([`super::next::next`]). Same validation, reads and scope as [`run`].
+pub fn gather(
+    fleet: &Fleet,
+    env: Option<&str>,
+    product: Option<&str>,
+    r: &dyn CommandRunner,
+    receipt: Option<&Path>,
+) -> Result<Inventory, Error> {
+    if let Some(name) = env {
+        fleet.environment(name)?;
+    }
+    super::check_product(fleet, product, env)?;
+    let scoped = scoped(fleet, env);
 
     let source = committed_rules(r, &scoped);
     let mut cells = CellInputs::default();
@@ -94,23 +124,11 @@ pub fn run(
         None => None,
     };
     let mut document = inventory::build(&scoped, &cells, view.as_ref());
-    let deliveries = delivery_rows(&scoped, product, r);
     if let Some(name) = product {
         document.keys.retain(|k| k.product == name);
         document.cells.retain(|c| c.product == name);
     }
-
-    if json {
-        let body = body(&document, &deliveries)?;
-        let rendered = serde_json::to_vec(&body)
-            .map_err(|_| Cause::Bug {
-                site: "the inventory document serializes",
-            })
-            .map(|bytes| crate::json::finish(&bytes, Ok(()), false))?;
-        return out.write_all(&rendered).map_err(super::write_err);
-    }
-    let text = render(&document, &deliveries);
-    out.write_all(text.as_bytes()).map_err(super::write_err)
+    Ok(document)
 }
 
 /// The committed-rule source, as `ready` reads it: `Manifest` when the contract is in

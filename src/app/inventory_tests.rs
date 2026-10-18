@@ -220,3 +220,17 @@ environments = ["prod"]
     let doc: Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(doc["deliveries"][0]["state"], "delivered");
 }
+
+/// `gather` hands back the document `run` renders, so `opv next` can rank it (found by the
+/// `core-accepted` walkthrough: `next` had no library route from a read inventory).
+#[test]
+fn gather_returns_the_read_document() {
+    let (op, fleet, _) = world();
+    let document = super::gather(&fleet, None, None, &op, None).unwrap();
+    let state = document
+        .cells
+        .iter()
+        .find(|c| c.key == "OPENAI_API_KEY")
+        .map(|c| c.state.clone());
+    assert_eq!(state, Some(crate::domain::value_state::ValueState::Set));
+}
