@@ -8,30 +8,32 @@ When the project's configuration already lives in 1Password (a [manifest](config
 
 ```sh
 opv login dev                                # sign in to dev's 1Password account
-opv check dev --product api                  # every key saved and valid? names only
+opv inventory --env dev --product api        # every key saved and valid? names only
 opv run dev --product api -- npm run dev
 ```
 
-Every project uses products: a project with one app is a configuration with one product (FR-60). When exactly one product has keys desired in the environment, `--product` may be omitted (D10), so this also works: `opv check dev`, then `opv run dev -- npm run dev`. With several products it is a usage error that lists them; name the product.
+Every project uses products: a project with one app is a configuration with one product (FR-60). When exactly one product has keys desired in the environment, `--product` may be omitted (D10), so this also works: `opv inventory --env dev`, then `opv run dev -- npm run dev`. With several products it is a usage error that lists them; name the product.
 
-Requirements: the 1Password CLI `op` 2.40.0 or newer, signed in (`opv login dev`, or the 1Password desktop app integration). No deployment CLI is needed. `opv doctor --env dev` checks exactly what local work needs (configuration, `op`, its sign-in, whether `op` can start a local command) and reads the item once, as `check` does.
+Requirements: the 1Password CLI `op` 2.40.0 or newer, signed in (`opv login dev`, or the 1Password desktop app integration). No deployment CLI is needed. `opv doctor --env dev` checks exactly what local work needs (configuration, `op`, its sign-in, whether `op` can start a local command) and reads the item once, as `inventory` does.
 
 ## No configuration yet
 
-Let `init` write the configuration. Without `--vault` and `--item` it uses vault `<project>-dev` and item `<project> · dev values`, creating them if missing; pass both to start from an item you already have. Without a target option it declares a run-only environment, which needs no deployment target:
+Let `opv propose setup` plan the configuration; `opv apply` writes it. Without `--vault` and `--item` it uses vault `<project>-core-dev` and item `<project> · core · dev values`, creating them if missing; pass both to start from an item you already have. Without a target option it declares a run-only environment, which needs no deployment target:
 
 ```sh
-opv init dev                                 # new project: a manifest in 1Password (--file for secrets.toml)
-opv check dev --product api
+opv propose setup --from-item dev            # new project: a manifest in 1Password (--file for secrets.toml)
+opv apply
+opv inventory --env dev --product api
 ```
 
-If the project already has a configuration for its deployed environments, add the local one with `--add-env`; it includes `dev` in every declared key the item has and names the rest:
+If the project already has a configuration for its deployed environments, add the local one with `opv propose env`; it includes `dev` in every declared key the item has and names the rest:
 
 ```sh
-opv init dev --add-env
+opv propose env dev
+opv apply
 ```
 
-A key the item does not have yet: `opv add api/STRIPE_KEY --kind secret --env dev`, then `opv item skeleton dev` adds its empty field, and you type the value in 1Password. A project that ships `opv.setup.toml` has a guided path instead: [guided setup](guided-setup.md).
+A key the item does not have yet: `opv propose key api/STRIPE_KEY --kind secret --env dev`, then `opv propose structure`; `opv apply` adds its empty field, and you type the value in 1Password. A project that ships `opv.setup.toml` has a guided path instead: [guided setup](guided-setup.md).
 
 ## How `run` works
 
@@ -133,7 +135,7 @@ The remote host needs the same opv release and, for `file` keys, a user-owned `$
 
 ## Several products or checkouts
 
-- `OPV_PRODUCT=api` sets the default `--product` for `check`, `run`, `open`, `explain`, `status`, `plan` and `doctor --env` (never `sync`); stderr says `product api (from OPV_PRODUCT)`. A single-product repository in a fleet can export it once, for example in `.envrc`.
+- `OPV_PRODUCT=api` sets the default `--product` for `inventory`, `run`, `open`, `explain`, `status`, `plan` and `doctor --env` (never `sync`); stderr says `product api (from OPV_PRODUCT)`. A single-product repository in a fleet can export it once, for example in `.envrc`.
 - Worktrees and clones of one repository find the same manifest by its git remote. In a monorepo, a manifest tagged with paths covers its directories ([monorepo paths](configuration.md#how-opv-finds-the-configuration)).
 - To use a configuration from elsewhere, name it: `OPV_PROJECT=<name>` for a manifest, `--config <path>` (or `OPV_CONFIG`) for a file. Never infer a product from a directory name.
 

@@ -67,19 +67,21 @@ opv run dev -- npm run dev       # your app, with dev's settings as environment 
 
 opv finds the configuration by the repository's git remote, and `op run` resolves the values without creating a local secret-value file for this workflow.
 
-A whole fleet from a fresh account (several products and environments, Fly and CI): [examples/fleet-fly](examples/fleet-fly/), driven by `opv bootstrap` and `opv ready`.
+A whole fleet from a fresh account (several products and environments, Fly and CI): [examples/fleet-fly](examples/fleet-fly/), driven by `opv propose structure` then `opv apply`, and `opv ready`.
 
 Starting from nothing: [install `op`](docs/install.md) (on macOS and Windows, also turn on **Settings > Developer > Integrate with 1Password CLI** in the 1Password app). Then, in your project:
 
 ```sh
 opv login --account you@example.com            # adds the account to op if needed, signs in, remembers it for the project
-opv init dev --product api                     # run-only: vault myapp-api-dev, item "myapp · api · dev values" (created if missing); configuration saved in 1Password
-opv add api/API_KEY --kind secret --env dev
-opv check dev                                  # adds the empty field; opv open api/API_KEY, click Edit, type the value
+opv propose setup --from-item dev              # the contract from dev's existing item; nothing written
+opv apply                                      # create them and record the boundary
+opv propose key api/API_KEY --kind secret --env dev
+opv apply                                      # adds the empty field; opv open api/API_KEY, click Edit, type the value
+opv inventory --env dev                        # every key saved and valid? names only
 opv run dev -- npm run dev
 ```
 
-Already have a `.env`? `opv init dev --from .env --apply` declares every key and imports the values, verified, in one step ([details](docs/configuration.md#start-from-an-existing-env-opv-init---from)). `opv init` can also start from an item you already have ([configuration](docs/configuration.md#start-from-an-existing-item-opv-init)), and `opv setup` walks a person through a project that ships a setup recipe ([guided setup](docs/guided-setup.md)).
+Already have a `.env`? `opv propose setup --names-from .env` declares every key by name, `opv apply` creates the item and fields, and `opv import local --from .env` writes the values, verified ([details](docs/configuration.md#start-from-an-existing-env-opv-init---from)). `opv propose setup` can also start from an item you already have ([configuration](docs/configuration.md#start-from-an-existing-item-opv-init)), and `opv setup` walks a person through a project that ships a setup recipe ([guided setup](docs/guided-setup.md)).
 
 Then, for a deployed environment:
 
@@ -134,8 +136,8 @@ For a quick technical review, start with the [architecture and review map](docs/
 
 - [Read-only MCP server](docs/mcp.md): readiness, configuration metadata, and deployment previews; human-approved changes remain outside MCP.
 - [Installing](docs/install.md): install script, binaries, npm, source, verifying downloads, prerequisites.
-- [Configuration](docs/configuration.md): where the configuration lives, the schema, store layout, every target, shared keys, `init` and `add`, rules.
-- [Local development](docs/local-development.md): `opv run`, `opv check`, several products, WSL.
+- [Configuration](docs/configuration.md): where the configuration lives, the schema, store layout, every target, shared keys, `propose setup` and `propose key`, rules.
+- [Local development](docs/local-development.md): `opv run`, `opv inventory`, several products, WSL.
 - [Guided setup](docs/guided-setup.md): `opv login` and `opv setup` for people.
 - [Usage](docs/usage.md): every command and flag, the JSON contract, exit codes, GitHub Actions, security model.
 - [Security](docs/security.md): the value boundary, the honest limit, the admin-account option, courier delivery and harness guard rules.
