@@ -562,6 +562,10 @@ const COMMANDS: &[&[&str]] = &[
     &["sync", "prod"],
     &["sync", "prod", "--prune", "--deploy"],
     &["config", "export", "prod", "--json"],
+    &["inventory"],
+    &["inventory", "--json"],
+    &["next"],
+    &["next", "--json"],
 ];
 
 fn assert_no_marker(what: &str, text: &str) {

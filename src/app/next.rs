@@ -30,7 +30,8 @@ use crate::json::{NextActor, NextKind};
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Signals {
     /// `(product, key, env)` cells whose delivery evidence is current. A `set` cell not in
-    /// this set is stale and asks for `opv sync`.
+    /// this set is stale and asks for `opv sync`. A cell no target of its environment
+    /// delivers belongs here (`inventory::gather_for_next`): it has nothing to sync to.
     pub delivered: BTreeSet<(String, String, String)>,
     /// Vault id → the number of writers 1Password reports. A vault absent here is not
     /// judged, so no `single_writer` finding is raised for it.

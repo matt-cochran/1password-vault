@@ -318,6 +318,22 @@ pub const EFFECTS: &[Effect] = &[
         handles_values: false,
         ask_user_first: false,
     },
+    // `inventory` and `next` read each item once to classify its fields; neither prints a
+    // value nor tidies.
+    Effect {
+        command: "inventory",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    Effect {
+        command: "next",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
     // A proposal writes nothing; `--write` writes the contract file (FLAG_EFFECTS).
     Effect {
         command: "propose",

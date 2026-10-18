@@ -1,0 +1,8 @@
+# bindings_unapplied: opv config check --file secrets.toml
+
+## text exit: 2
+## text stdout
+
+## text stderr
+opv: the committed secrets.bindings.toml was not the one the last opv apply wrote (the ids of environments dev, prod); a person runs opv apply
+Next: opv apply
