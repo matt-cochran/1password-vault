@@ -66,6 +66,37 @@ fn a_bad_key_name_is_refused() {
 }
 
 #[test]
+fn an_intent_with_an_expiry_date_parses() {
+    let intent = parse(r#"{"kind":"key","key":"OPENAI_API_KEY","expires":"2027-01-31"}"#)
+        .expect("the intent parses");
+    match intent {
+        Intent::Key { expires, .. } => assert_eq!(expires, Date::new(2027, 1, 31)),
+        other => panic!("expected a key intent, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_invalid_expiry_date_is_refused() {
+    let e = parse(r#"{"kind":"key","key":"OPENAI_API_KEY","expires":"2026-02-30"}"#).unwrap_err();
+    assert_eq!(e.code_str(), "config_invalid");
+}
+
+#[test]
+fn the_key_arm_schema_advertises_the_expiry_date_pattern() {
+    let schema = json_schema();
+    let key_arm = schema["oneOf"]
+        .as_array()
+        .expect("oneOf")
+        .iter()
+        .find(|arm| arm["properties"]["kind"]["enum"][0] == "key")
+        .expect("the key arm");
+    assert_eq!(
+        key_arm["properties"]["expires"]["pattern"],
+        "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    );
+}
+
+#[test]
 fn an_unknown_shape_is_refused_naming_the_field() {
     let e = parse(r#"{"kind":"key","key":"OPENAI_API_KEY","shape":"not_a_shape"}"#).unwrap_err();
     assert!(e.to_string().contains("shape"));

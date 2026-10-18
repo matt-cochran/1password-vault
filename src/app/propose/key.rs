@@ -53,6 +53,7 @@ pub fn propose(
             personal,
             allow_same_value,
             immutable,
+            expires,
             lifecycle,
             guidance,
         } => {
@@ -69,6 +70,7 @@ pub fn propose(
                 .map(|(env, reason)| (env.to_string(), reason.0.clone()))
                 .collect();
             let excluded: Vec<String> = except.iter().map(|(env, _)| env.clone()).collect();
+            let expires_text = expires.map(|d| d.to_string());
             doc.add_key(
                 &product,
                 key.as_str(),
@@ -84,7 +86,7 @@ pub fn propose(
                     except: &except,
                     source: source.map(source_word),
                     shape: shape_name,
-                    expires: None,
+                    expires: expires_text.as_deref(),
                     lifecycle: lifecycle.map(lifecycle_word),
                 },
             )?;
