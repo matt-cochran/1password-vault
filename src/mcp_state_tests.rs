@@ -7,7 +7,6 @@
 //! same world: the library entry point `src/main.rs` calls, with `--json`, framed as the CLI
 //! frames it against the CLI's own invocation (`opv <command> <args> --json`).
 
-use std::io::Write as _;
 use std::path::Path;
 
 use super::*;
@@ -176,11 +175,7 @@ fn the_needs_section_is_opv_needs_json() {
     let w = World::new();
     let repo = w.project().to_path_buf();
     let want = w.cli(&["needs"], |f, r, out| {
-        let source = crate::app::rule_source::rule_source(r, &repo, f)?;
-        let report =
-            crate::app::needs::needs(r, &repo, &crate::scan::WorkTree, f, source.contract());
-        writeln!(out, "{}", serde_json::to_value(&report).unwrap()).unwrap();
-        Ok(())
+        crate::app::needs::run(r, &repo, f, false, true, out)
     });
     assert_eq!(w.tool(json!({"section": "needs"})), want);
 }
@@ -190,11 +185,7 @@ fn the_contract_section_is_opv_contract_json() {
     let w = World::new();
     let want = w.cli(
         &["contract", "--env", "prod", "--component", "app"],
-        |f, _, out| {
-            let doc = crate::app::contract::document(f, Some("prod"), Some("app"));
-            writeln!(out, "{}", serde_json::to_value(&doc).unwrap()).unwrap();
-            Ok(())
-        },
+        |f, _, out| crate::app::contract::write_document(f, Some("prod"), Some("app"), true, out),
     );
     assert_eq!(
         w.tool(json!({"section": "contract", "env": "prod", "product": "app"})),
@@ -304,6 +295,24 @@ fn an_undeclared_environment_is_the_clis_own_error() {
     assert_eq!(w.tool(json!({"section": "plan", "env": "prdo"})), want);
 }
 
+#[test]
+fn a_missing_configuration_is_the_clis_own_error() {
+    let dir = tempfile::Builder::new().prefix("myapp-").tempdir().unwrap();
+    let r = Fake(FakeOp::default());
+    let err = load_fleet(dir.path(), &r).unwrap_err();
+    let argv = ["opv", "contract", "--json"].map(str::to_string);
+    let want: Value = serde_json::from_slice(&crate::json::finish_with(
+        &[],
+        Err(&err),
+        false,
+        &Invocation::from_cli(&argv),
+        false,
+    ))
+    .unwrap();
+    let scope: StateScope = serde_json::from_value(json!({"section": "contract"})).unwrap();
+    assert_eq!(state_doc(dir.path(), &r, &scope, Some(NOW)), want);
+}
+
 // Refusals ------------------------------------------------------------------------------------
 
 #[test]
@@ -363,33 +372,30 @@ fn an_unknown_field_is_not_an_input() {
 
 // The canary: no section answers a value ------------------------------------------------------
 
-/// Every section with the widest scope it takes in the world.
-fn every_section() -> Vec<Value> {
-    vec![
-        json!({"section": "inventory"}),
-        json!({"section": "needs"}),
-        json!({"section": "contract"}),
-        json!({"section": "ready"}),
-        json!({"section": "plan", "env": "prod"}),
-        json!({"section": "changed", "env": "prod"}),
-        json!({"section": "access"}),
-        json!({"section": "delivery_preview", "env": "dev"}),
-        json!({"section": "history", "env": "prod"}),
-        json!({"section": "status"}),
-        json!({"section": "status", "env": "dev"}),
-    ]
+/// One canary test per section, with the widest scope the section takes in the world: the
+/// answer holds no part of any value the fake's items carry.
+macro_rules! canary {
+    ($($name:ident: $args:tt,)*) => {$(
+        #[test]
+        fn $name() {
+            let w = World::new();
+            assert!(!w.tool(json!($args)).to_string().contains(MARKER));
+        }
+    )*};
 }
 
-#[test]
-fn no_section_answers_a_value() {
-    let w = World::new();
-    let leaked: Vec<String> = every_section()
-        .into_iter()
-        .map(|args| (args.to_string(), w.tool(args).to_string()))
-        .filter(|(_, answer)| answer.contains(MARKER))
-        .map(|(args, _)| args)
-        .collect();
-    assert!(leaked.is_empty(), "sections answering a value: {leaked:?}");
+canary! {
+    the_inventory_section_answers_no_value: {"section": "inventory"},
+    the_needs_section_answers_no_value: {"section": "needs"},
+    the_contract_section_answers_no_value: {"section": "contract"},
+    the_ready_section_answers_no_value: {"section": "ready"},
+    the_plan_section_answers_no_value: {"section": "plan", "env": "prod"},
+    the_changed_section_answers_no_value: {"section": "changed", "env": "prod"},
+    the_access_section_answers_no_value: {"section": "access"},
+    the_delivery_preview_section_answers_no_value: {"section": "delivery_preview", "env": "dev"},
+    the_history_section_answers_no_value: {"section": "history", "env": "prod"},
+    the_status_overview_answers_no_value: {"section": "status"},
+    the_status_section_answers_no_value: {"section": "status", "env": "dev"},
 }
 
 // The surface ---------------------------------------------------------------------------------

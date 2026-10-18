@@ -15,8 +15,8 @@ use crate::json::SCHEMA_VERSION;
 /// `opv schema` exposes this as `mcp_tools`.
 pub const MCP_TOOLS: &[(&str, &str)] = &[
     // `opv_state`: one entry per section, each the command whose `--json` document the
-    // section answers (design §25.2). Its `inventory` section answers `opv inventory`, listed
-    // here once that command has its EFFECTS entry.
+    // section answers (design §25.2).
+    ("opv_state", "inventory"),
     ("opv_state", "needs"),
     ("opv_state", "contract"),
     ("opv_state", "ready"),

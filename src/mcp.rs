@@ -1082,15 +1082,17 @@ fn state_doc<R: Accounted>(
 ) -> Value {
     let call = state_call(args);
     let section = Section::parse(&args.section);
+    // Every failure is framed as the CLI frames it, so a refusal and a load failure are
+    // the same document `opv <command> --json` prints.
     if let Some(cause) = state_refusal(section, args) {
-        return call.refused(cause);
+        return call.document(&[], Err(cause.into()));
     }
     let Some(section) = section else {
-        return call.refused(usage("section", SECTION_FORMAT));
+        return call.document(&[], Err(usage("section", SECTION_FORMAT).into()));
     };
     let fleet = match load_fleet(project, r) {
         Ok(fleet) => fleet,
-        Err(e) => return call.failed(&e),
+        Err(e) => return call.document(&[], Err(e)),
     };
     let (env, product, target) = (
         args.env.as_deref(),
@@ -1104,8 +1106,12 @@ fn state_doc<R: Accounted>(
         Section::Inventory => {
             crate::app::inventory::run(&fleet, env, product, r, None, true, &mut *out)
         }
-        Section::Needs => needs_json(&fleet, r, &needs_repo(r, project), &mut *out),
-        Section::Contract => contract_json(&fleet, env, product, &mut *out),
+        Section::Needs => {
+            crate::app::needs::run(r, &needs_repo(r, project), &fleet, false, true, &mut *out)
+        }
+        Section::Contract => {
+            crate::app::contract::write_document(&fleet, env, product, true, &mut *out)
+        }
         Section::Ready => {
             let now = generated_at
                 .map(str::to_string)
@@ -1166,32 +1172,6 @@ fn needs_repo(r: &dyn CommandRunner, project: &std::path::Path) -> PathBuf {
         }
         _ => project.to_path_buf(),
     }
-}
-
-/// `opv needs --json`'s body for `repo`: the report against the contract, the default
-/// branch's deciding which undeclared names are new.
-fn needs_json(
-    fleet: &crate::domain::Fleet,
-    r: &dyn CommandRunner,
-    repo: &std::path::Path,
-    out: &mut dyn io::Write,
-) -> Result<(), Error> {
-    let source = crate::app::rule_source::rule_source(r, repo, fleet)?;
-    let report =
-        crate::app::needs::needs(r, repo, &crate::scan::WorkTree, fleet, source.contract());
-    let doc = to_doc(&report)?;
-    writeln!(out, "{doc}").map_err(|_| Error::from(UNREADABLE_REPORT))
-}
-
-/// `opv contract [--env e] [--component p] --json`'s body: the contract as data.
-fn contract_json(
-    fleet: &crate::domain::Fleet,
-    env: Option<&str>,
-    component: Option<&str>,
-    out: &mut dyn io::Write,
-) -> Result<(), Error> {
-    let doc = to_doc(&crate::app::contract::document(fleet, env, component))?;
-    writeln!(out, "{doc}").map_err(|_| Error::from(UNREADABLE_REPORT))
 }
 
 #[cfg(test)]

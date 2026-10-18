@@ -3978,26 +3978,7 @@ fn run_needs(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    use opv::app::needs;
-    let repo = repo_top(r);
-    let source = opv::app::rule_source::rule_source(r, &repo, fleet)?;
-    let base = source.contract();
-    let report = needs::needs(r, &repo, &opv::scan::WorkTree, fleet, base);
-    if json {
-        let doc = serde_json::to_value(&report).map_err(|_| -> Error {
-            opv::cause::Cause::Bug {
-                site: "needs: the report did not serialize",
-            }
-            .into()
-        })?;
-        writeln!(out, "{doc}").map_err(write_err)?;
-    } else {
-        needs::render_text(&report, out)?;
-    }
-    if gate {
-        needs::gate(&report, base)?;
-    }
-    Ok(())
+    opv::app::needs::run(r, &repo_top(r), fleet, gate, json, out)
 }
 
 /// What `opv contract` was asked for.
@@ -4094,13 +4075,7 @@ fn run_contract(
         }
         return writeln!(out, "{}: current", path.display()).map_err(write_err);
     }
-    let doc = serde_json::to_value(&doc).map_err(|_| -> Error {
-        opv::cause::Cause::Bug {
-            site: "contract: the document did not serialize",
-        }
-        .into()
-    })?;
-    print(out, &doc)
+    contract::write_document(fleet, req.env, req.component, req.json, out)
 }
 
 fn run_other(
@@ -4681,7 +4656,7 @@ fn mcp_install(
             "schema_version": opv::json::SCHEMA_VERSION,
             "server": {"name": name, "command": command, "args": args},
             "registered": done,
-            "next": "restart the assistant, then ask it to call opv_ready",
+            "next": "restart the assistant, then ask it to call opv_state with section ready",
         });
         return writeln!(out, "{doc}").map_err(write_err);
     }

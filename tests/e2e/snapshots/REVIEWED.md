@@ -184,3 +184,11 @@ Findings for the owner (not fixed here; the row touches tests only):
 8. `bindings_unapplied`: the apply record lives at `.opv/applied.json`, which cannot exist beside the `.opv` account pointer file; the scenario selects the account with `OP_ACCOUNT` instead.
 
 - [ ] Owner sign-off of the flow snapshots.
+
+## 0.12.0: opv_state (mcp-state, 2026-10-18)
+
+20 scenario snapshots changed, no new one. 19 MCP halves moved from the removed read tools (`opv_ready`, `opv_configuration`, `opv_deployment_plan`, `opv_changed`, `opv_access`, `opv_delivery_preview`) onto `opv_state` sections (`ready`, `contract`, `plan`, `changed`, `access`, `delivery_preview`); each answer is now the CLI's whole `--json` document (`schema_version`, `exit_code`, top-level `next` and `do` included), not the bare `{ok, error}`. Checked by the implementing agent: in all 19 the MCP document equals the snapshot's own `--json` stdout as JSON, and gate 3 now asserts that whole-document equality for every `opv_state` scenario. No value anywhere.
+
+`guard.snap` lost its MCP half: `opv_state` section `delivery_preview` takes `env` and `product` only (§25.2), so a remote profile's preview (`--role`, `--remote`) has no MCP form. The `policy_refused`/`remote_profile_refuses` cause is still reached by the CLI `--json` run of the same snapshot.
+
+- [ ] Owner sign-off of the opv_state snapshots.

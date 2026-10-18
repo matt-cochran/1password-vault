@@ -9,7 +9,8 @@
 //! - **Every call the matrix discovers is faulted** with every fault kind, or listed in
 //!   `snapshots/SKIPPED.md` with its reason.
 //! - **MCP equals the CLI**: for each scenario an MCP tool reaches, the tool's `error` object
-//!   is the CLI's `--json` `error` object, byte for byte (owner decision).
+//!   is the CLI's `--json` `error` object, byte for byte (owner decision); an `opv_state`
+//!   answer is the CLI's whole `--json` document (design §25.2).
 //! - **Every flow document of §25.1/§25.2 is pinned** (`flows`): a text, `--json` and, where a
 //!   tool exists, MCP run of each `propose` kind, `import`, `needs`, `contract` and `explain`,
 //!   on a world whose every value is an `S7MARKER` marker; no scenario snapshot may hold one.
@@ -1904,14 +1905,25 @@ fn variant_test(name: &str, want: &str) {
     assert_eq!(got.as_deref(), Some(want), "{name}");
 }
 
-/// Gate 3: the MCP tool's `error` is the CLI's `--json` `error`.
+/// Gate 3: the MCP tool's `error` is the CLI's `--json` `error`; `opv_state`'s whole answer
+/// is the CLI's whole `--json` document (design §25.2: the same document as the command).
 fn mcp_equals_cli_test(name: &str) {
     let snap = committed(name);
-    let cli = json_document(&snap).and_then(|d| d.get("error").cloned());
-    let mcp = mcp_answer(&snap).and_then(|d| d.get("error").cloned());
+    let whole = sections(&snap)
+        .iter()
+        .any(|(h, _)| h.starts_with("mcp opv_state "));
+    let pick = |d: Value| {
+        if whole {
+            Some(d)
+        } else {
+            d.get("error").cloned()
+        }
+    };
+    let cli = json_document(&snap).and_then(pick);
+    let mcp = mcp_answer(&snap).and_then(pick);
     assert_eq!(
         mcp, cli,
-        "{name}: the MCP error is not the CLI's --json error"
+        "{name}: the MCP answer is not the CLI's --json document"
     );
 }
 
