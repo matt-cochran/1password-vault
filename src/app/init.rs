@@ -1373,6 +1373,68 @@ fn add_env_on(
     w(out, format!("Next: {next}"))
 }
 
+/// A contract `opv init` would write, with the 1Password ids taken out of it (D-G) and the
+/// structure an apply creates first, by name. Built read-only: nothing is created.
+pub(crate) struct ItemSetup {
+    /// The proposed `secrets.toml` text, carrying no id.
+    pub contract: String,
+    /// What an apply creates first: the boundary, the item and each field, by name.
+    pub steps: Vec<String>,
+    /// The existing item's ids, for `secrets.bindings.toml` (names of vaults and items,
+    /// never a value).
+    pub bindings: crate::config::bindings::Bindings,
+}
+
+/// Build (never write) the contract `opv init <env> --vault <title> --item <title>` would
+/// write for an item that exists, with the ids split out of the contract (D-G). Reads at
+/// most the three dev-time calls `init` reads; a missing vault or item is an error, never a
+/// create (that is the person-only apply step).
+pub(crate) fn plan_item(
+    r: &dyn CommandRunner,
+    env: &str,
+    vault_title: &str,
+    item_title: &str,
+    product: Option<&str>,
+) -> Result<ItemSetup, Error> {
+    let args = InitArgs {
+        env: env.to_string(),
+        vault: vault_title.to_string(),
+        item: item_title.to_string(),
+        product: product.map(str::to_string),
+        ..InitArgs::default()
+    };
+    check_args(&args)?;
+    let vault = onepassword_init::find_vault(r, vault_title, &Host::detect)?.found()?;
+    let item = onepassword_init::find_item(r, &vault.id, item_title, &Host::detect)?.found()?;
+    let fields = onepassword_init::read_field_shapes(r, &vault.id, &item.id, &Host::detect)?;
+    let decl = declare(&fields, product, vault_title, item_title)?;
+    let text = render(&args, (vault.id.as_str(), item.id.as_str()), &decl);
+    // Validated exactly like the file init writes; its ids are then moved out of the
+    // contract, which loads again once `secrets.bindings.toml` supplies them (D-G).
+    config::parse(&text).map_err(would_write(None))?;
+    let (contract, bindings) = crate::config::bindings::split(&text);
+    Ok(ItemSetup {
+        contract,
+        steps: setup_steps(&decl),
+        bindings,
+    })
+}
+
+/// The structure a setup proposal creates, by name: the boundary, the item and each field.
+fn setup_steps(d: &Declared) -> Vec<String> {
+    let mut steps = Vec::new();
+    if let Some(boundary) = d.boundary() {
+        steps.push(format!("boundary {boundary}"));
+        steps.push(format!("item {boundary}"));
+    }
+    for (product, keys) in &d.keys {
+        for (key, kind) in keys {
+            steps.push(format!("field {product}/{key} {}", kind_word(*kind)));
+        }
+    }
+    steps
+}
+
 #[cfg(test)]
 #[path = "init_tests.rs"]
 mod tests;

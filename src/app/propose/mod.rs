@@ -6,6 +6,7 @@
 //! contract file, and only when a caller asks it to.
 
 pub mod key;
+pub mod setup;
 
 use serde::Serialize;
 
