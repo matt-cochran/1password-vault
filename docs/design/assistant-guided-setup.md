@@ -669,10 +669,13 @@ The owner's direction (2026-10-18): access control is **1Password's job and alre
 
 **What each person sees:** `opv next` and the inventory list, first, the actions **this session can take**, then what is waiting on others, by vault. Nobody is told to run a command they lack the access for.
 
-**CI:**
-- reads values with a read-only service account per values vault, and delivers them to the platforms (`opv sync`, `opv changed`);
-- posts the value-free plan and key × environment matrix as a check on pull requests that change the contract;
-- its only 1Password write is delivery evidence, holding no values, in the target's state vault, as since 0.7.0.
+**CI runs opv; opv carries values; nobody in CI sees them.**
+- A CI job runs `opv sync` (or `opv changed`, then `opv sync`) for the configured destinations.
+- Inside that run, opv itself is the courier. Using a service account that can only read the values vault, it reads each value from 1Password into its own process memory and writes it straight to the platform's channel: Fly secrets on stdin, Kubernetes Secrets and ConfigMaps by `kubectl apply` on stdin, Key Vault through the named pipe or stdin, GitHub secrets by `gh secret set` on stdin.
+- **A value never appears in the CI job's logs, files, environment variables or command arguments**, so no person or tool reading CI sees it. The scrubber (NR-31) masks any value a platform tool echoes.
+- Something has to carry the bytes from 1Password to the platform. The only alternative is the platform reading 1Password itself at runtime, which the owner ruled out: production never needs 1Password. So the value's only stop on the CI runner is opv's memory, for the length of the run.
+- CI also posts the value-free plan and key × environment matrix as a check on pull requests that change the contract.
+- Its only 1Password write is delivery evidence, holding no values, in the target's state vault, as since 0.7.0.
 
 **The contract** changes through pull requests. Reviewers approve the change to *what is needed*; filling values is done by whoever has write access to each vault.
 
@@ -740,7 +743,7 @@ Consumers outside opv's view (another host, a partner's webhook) are declared in
 | Rotation revokes while in use | Overlap plus observed rollout; declared outside consumers |
 | Retire while still read | The build fails while still read; `needs` at the deployed revision |
 | Scanner misses a name | Impossible in generated languages; detection elsewhere |
-| Nobody writes deployed tiers | Whoever 1Password lets write that tier's vault, in the 1Password app or with opv's help; CI only reads and delivers (R8) |
+| Nobody writes deployed tiers | Whoever 1Password lets write that tier's vault, in the 1Password app or with opv's help; CI only runs opv, which carries values from 1Password to the platforms without exposing them (R8) |
 
 ---
 
