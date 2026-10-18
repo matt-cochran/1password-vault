@@ -277,7 +277,7 @@ fn run_on(
     }
     let imported = from_apply(args)?;
     let p = prepare(args, imported.as_ref(), r, host)?;
-    write_atomic(&target, &p.text, args.force)?;
+    write_config(&target, &p.text, args.force)?;
     tidy_declared(args, &p, r);
     let place = Place::File(target.display().to_string());
     let adopted = import_values(args, &p, &place, r)?;
@@ -801,7 +801,7 @@ fn check_args(args: &InitArgs) -> Result<(), Error> {
 /// `--add-env` (the exact command is the step); an environment the file already declares is
 /// changed with `opv config edit`. Never a step that repeats the failing command.
 fn existing_refusal(args: &InitArgs, target: &Path) -> Error {
-    let declared = fs::read_to_string(target)
+    let declared = crate::config::read_merged(target)
         .ok()
         .and_then(|t| crate::config::parse(&t).ok())
         .is_some_and(|f| f.environments.contains_key(&args.env));
@@ -1094,6 +1094,15 @@ fn render(args: &InitArgs, ids: (&str, &str), d: &Declared) -> String {
 /// again just before the rename (it may have appeared during the 1Password calls).
 pub(crate) fn write_atomic(target: &Path, text: &str, force: bool) -> Result<(), Error> {
     config_edit::write_atomic(target, text, || refuse_existing(target, force))
+}
+
+/// Write the configuration `text` to `target` as [`write_atomic`] does, with its ids moved
+/// to the sibling `secrets.bindings.toml` (D-G), so what opv writes loads again. The
+/// contract is written first: a refused write leaves the bindings as they were.
+pub(crate) fn write_config(target: &Path, text: &str, force: bool) -> Result<(), Error> {
+    let (contract, ids) = crate::config::bindings::split(text);
+    write_atomic(target, &contract, force)?;
+    crate::config::bindings::write_sibling(target, &ids)
 }
 
 /// Run `init <env> --add-env`: add the environment to the existing configuration.

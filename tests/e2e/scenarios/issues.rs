@@ -48,6 +48,11 @@ impl Scenario {
             s.project().join("secrets.toml"),
         )
         .unwrap();
+        std::fs::copy(
+            Path::new(APP).join("secrets.bindings.toml"),
+            s.project().join("secrets.bindings.toml"),
+        )
+        .unwrap();
         std::fs::write(
             s.project().join(".opv"),
             format!("account = \"{PROJECT}\"\n"),

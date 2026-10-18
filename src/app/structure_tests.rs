@@ -69,7 +69,7 @@ fn workspace_with(text: &str) -> (tempfile::TempDir, PathBuf, FakeOp) {
                         "section": {"id": "web", "label": "web"}, "value": MARKER}],
         }),
     );
-    std::fs::write(&path, text.replace("ITEM", &id)).unwrap();
+    crate::config::bindings::write_split(&path, &text.replace("ITEM", &id)).unwrap();
     (dir, path, op)
 }
 
@@ -78,7 +78,7 @@ fn workspace() -> (tempfile::TempDir, PathBuf, FakeOp) {
 }
 
 fn text(path: &std::path::Path) -> String {
-    std::fs::read_to_string(path).unwrap()
+    crate::config::read_merged(path).unwrap()
 }
 
 fn plan_of(path: &std::path::Path, op: &dyn CommandRunner) -> Plan {
@@ -126,7 +126,11 @@ fn another_project_plans_another_id() {
 fn a_changed_configuration_plans_another_id() {
     let (_d, path, op) = workspace();
     let before = plan_of(&path, &op).plan_id;
-    std::fs::write(&path, text(&path) + "\n# a comment\n").unwrap();
+    std::fs::write(
+        &path,
+        std::fs::read_to_string(&path).unwrap() + "\n# a comment\n",
+    )
+    .unwrap();
     assert_ne!(plan_of(&path, &op).plan_id, before);
 }
 
@@ -315,7 +319,11 @@ fn a_created_boundary_carries_a_link_for_key_entry() {
 fn a_stale_plan_id_is_refused() {
     let (_d, path, op) = workspace();
     let id = plan_of(&path, &op).plan_id;
-    std::fs::write(&path, text(&path) + "\n# changed after review\n").unwrap();
+    std::fs::write(
+        &path,
+        std::fs::read_to_string(&path).unwrap() + "\n# changed after review\n",
+    )
+    .unwrap();
     let e = apply(&op, &path, "myapp", ACCOUNT, &id, &mut approve_all).unwrap_err();
     assert_eq!(e.code_str(), "stale_plan");
 }
@@ -324,7 +332,11 @@ fn a_stale_plan_id_is_refused() {
 fn a_stale_plan_creates_nothing() {
     let (_d, path, op) = workspace();
     let id = plan_of(&path, &op).plan_id;
-    std::fs::write(&path, text(&path) + "\n# changed after review\n").unwrap();
+    std::fs::write(
+        &path,
+        std::fs::read_to_string(&path).unwrap() + "\n# changed after review\n",
+    )
+    .unwrap();
     let _ = apply(&op, &path, "myapp", ACCOUNT, &id, &mut approve_all);
     assert_eq!(op.count(&["op", "vault", "create"]), 0);
 }
@@ -729,7 +741,11 @@ fn a_malformed_plan_id_is_plan_unknown() {
 fn a_stale_plan_id_steps_to_the_new_structural_plan() {
     let (_d, path, op) = workspace();
     let id = plan_of(&path, &op).plan_id;
-    std::fs::write(&path, text(&path) + "\n# changed after review\n").unwrap();
+    std::fs::write(
+        &path,
+        std::fs::read_to_string(&path).unwrap() + "\n# changed after review\n",
+    )
+    .unwrap();
     let e = apply(&op, &path, "myapp", ACCOUNT, &id, &mut approve_all).unwrap_err();
     assert_eq!(e.next_text().unwrap_or_default(), "opv structure plan");
 }

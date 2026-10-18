@@ -807,13 +807,7 @@ pub fn run(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    let text = std::fs::read_to_string(path).map_err(|e| {
-        Error::from(Cause::ConfigUnreadable {
-            path: path.to_path_buf(),
-            io: e.kind().into(),
-            given_by: GivenBy::Discovered,
-        })
-    })?;
+    let text = crate::config::read_merged(path)?;
     let dir = path
         .parent()
         .filter(|d| !d.as_os_str().is_empty())
@@ -913,7 +907,7 @@ pub fn run(
             }
             .into());
         }
-        super::init::write_atomic(path, &new_text, true)?;
+        super::init::write_config(path, &new_text, true)?;
     }
     // Every declared field, empty, in each boundary item.
     for p in &plans {

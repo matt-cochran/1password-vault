@@ -172,11 +172,12 @@ impl ConfigStore for FileStore {
         self.path.display().to_string()
     }
 
+    /// The contract with its sibling `secrets.bindings.toml` filled in (D-G): an edit sees the
+    /// ids where it did before they moved out, and [`replace`](Self::replace) moves them back.
+    /// An inline id is refused, as at load.
     fn read(&self, _: &dyn CommandRunner) -> Result<Snapshot, Error> {
-        let text = fs::read_to_string(&self.path)
-            .map_err(|e| unreadable(&self.path, &e, GivenBy::Discovered))?;
         Ok(Snapshot {
-            text,
+            text: config::read_merged(&self.path)?,
             version: None,
         })
     }
@@ -191,9 +192,15 @@ impl ConfigStore for FileStore {
         if now.text != base.text {
             return Ok(Replaced::Changed(now));
         }
-        // Atomic (temporary file, then rename), symlinks followed, permissions kept, and
-        // compared once more right before the rename.
-        match crate::config_edit::replace(&self.path, &base.text, text) {
+        // D-G: the ids go to the sibling bindings file, the rest to the contract. Atomic
+        // (temporary file, then rename), symlinks followed, permissions kept, and compared
+        // once more right before the rename.
+        let (contract, ids) = config::bindings::split(text);
+        let raw = fs::read_to_string(&self.path)
+            .map_err(|e| unreadable(&self.path, &e, GivenBy::Discovered))?;
+        let saved = crate::config_edit::replace(&self.path, &raw, &contract)
+            .and_then(|()| config::bindings::write_sibling(&self.path, &ids));
+        match saved {
             Ok(()) => Ok(Replaced::Saved),
             Err(e) => match self.read(r) {
                 Ok(now) if now.text != base.text => Ok(Replaced::Changed(now)),
@@ -204,6 +211,20 @@ impl ConfigStore for FileStore {
 
     fn source(&self) -> config::Source<'_> {
         config::Source::File(&self.path)
+    }
+
+    /// [`config::parse_at`]; for the text [`read`](Self::read) gives, an error names the line
+    /// of the contract as written, not of the text with its ids filled in (D-G).
+    fn parse(&self, text: &str) -> Result<Fleet, Error> {
+        let raw = fs::read_to_string(&self.path).ok();
+        if let Some(raw) = raw
+            && config::with_bindings(&raw, &self.path).is_ok_and(|merged| merged == text)
+        {
+            let mut fleet = config::parse_file(&raw, &self.path, GivenBy::Discovered)?;
+            fleet.read_from.0 = self.cause_source();
+            return Ok(fleet);
+        }
+        config::parse_at(text, self.source())
     }
 }
 

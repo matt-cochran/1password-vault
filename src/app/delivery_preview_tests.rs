@@ -157,7 +157,7 @@ fn a_run_naming_an_undeclared_role_makes_no_1password_call() {
 
 #[test]
 fn an_empty_roles_list_is_refused_at_load() {
-    let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+    let text = crate::config::merged_text("tests/fixtures/secrets.toml");
     let e = crate::config::parse(&format!(
         "{text}\n[products.allumata.keys.BAD_ROLES]\nkind = \"secret\"\nenvironments = [\"prod\"]\nroles = []\n"
     ))
@@ -170,7 +170,7 @@ fn an_empty_roles_list_is_refused_at_load() {
 
 #[test]
 fn a_role_name_outside_the_pattern_is_refused_at_load() {
-    let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+    let text = crate::config::merged_text("tests/fixtures/secrets.toml");
     let e = crate::config::parse(&format!(
         "{text}\n[products.allumata.keys.BAD_ROLES]\nkind = \"secret\"\nenvironments = [\"prod\"]\nroles = [\"Serve\"]\n"
     ))

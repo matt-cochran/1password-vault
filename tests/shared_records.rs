@@ -9,7 +9,7 @@ use opv::domain::plan::{self, ItemField};
 use opv::domain::{Fleet, Kind, SecretValue, StoreEntry, SyncPlan};
 use opv::runner::fake::FakeRunner;
 
-const FIXTURE: &str = "tests/fixtures/shared_records.toml";
+const FIXTURE: &str = "tests/fixtures/shared_records/secrets.toml";
 const API: &str = "FLEET__API__FLY_API_TOKEN";
 const WEB: &str = "FLEET__WEB__FLY_API_TOKEN";
 const SHARED: &str = "FLEET__SHARED__FLY_API_TOKEN";

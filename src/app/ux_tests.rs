@@ -20,7 +20,7 @@ const WEB_OLD: &str = "FLEET__WEB__OLD";
 
 /// The fixture with `confirm_env = true` on prod.
 fn guarded() -> Fleet {
-    let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+    let text = crate::config::merged_text("tests/fixtures/secrets.toml");
     config::parse(&text.replace(
         "modes.allumata.payments = \"off\"",
         "modes.allumata.payments = \"off\"\nconfirm_env = true",
@@ -32,7 +32,7 @@ fn guarded() -> Fleet {
 ///
 /// The old environment item held both products, so it stays one opt-in boundary group.
 fn two_products() -> Fleet {
-    let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+    let text = crate::config::merged_text("tests/fixtures/secrets.toml");
     let text = text
         .replace("boundaries.allumata =", "boundaries.core =")
         .replace(
@@ -404,7 +404,7 @@ fn guarded_sync_next_step_never_adds_the_confirm_flag() {
 
 #[test]
 fn confirm_env_must_be_a_boolean() {
-    let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+    let text = crate::config::merged_text("tests/fixtures/secrets.toml");
     let bad = text.replace(
         "modes.allumata.payments = \"off\"",
         "modes.allumata.payments = \"off\"\nconfirm_env = \"yes\"",

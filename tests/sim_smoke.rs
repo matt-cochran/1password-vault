@@ -409,6 +409,11 @@ fn opv_check_passes_against_the_simulated_op() {
         project.join("secrets.toml"),
     )
     .unwrap();
+    std::fs::copy(
+        Path::new(SCENARIO).join("secrets.bindings.toml"),
+        project.join("secrets.bindings.toml"),
+    )
+    .unwrap();
     // The project's account, so no `.opv` above the temp directory is read.
     std::fs::write(project.join(".opv"), format!("account = \"{ACCOUNT}\"\n")).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_opv"))

@@ -2285,7 +2285,7 @@ pub(crate) mod testutil {
 
     /// The fixture fleet plus extra TOML appended (e.g. another key).
     pub fn fleet_with(extra: &str) -> Fleet {
-        let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+        let text = crate::config::merged_text("tests/fixtures/secrets.toml");
         config::parse(&format!("{text}\n{extra}")).unwrap()
     }
 
@@ -2308,7 +2308,7 @@ pub(crate) mod testutil {
 
     /// The fixture with every deployment target removed (see [`without_targets`]).
     pub fn fleet_without_targets(extra: &str) -> Fleet {
-        let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+        let text = crate::config::merged_text("tests/fixtures/secrets.toml");
         config::parse(&format!("{}\n{extra}", without_targets(&text))).unwrap()
     }
 
@@ -2329,8 +2329,7 @@ roles = [\"migrate\"]
     /// role-scoped keys, so its targets carry no roles; a test that appends [`ROLE_KEYS`]
     /// (or any role-scoped key) needs this text, or the load is refused (M3, §4.4).
     pub fn role_fixture_text() -> String {
-        std::fs::read_to_string("tests/fixtures/secrets.toml")
-            .unwrap()
+        crate::config::merged_text("tests/fixtures/secrets.toml")
             .replace(
                 "state_vault_id = \"sstg\"",
                 "state_vault_id = \"sstg\"\nroles = [\"serve\", \"migrate\"]",

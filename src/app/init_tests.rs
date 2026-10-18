@@ -175,6 +175,30 @@ fn the_boundary_records_the_items_ids() {
     );
 }
 
+/// D-G: init records the item's ids in `secrets.bindings.toml` beside the contract.
+#[test]
+fn init_writes_the_items_ids_to_the_bindings_file() {
+    let (dir, _run) = init_with(&api_fields(), &args());
+    let ids = crate::config::bindings::read_sibling(&dir.path().join(FILE_NAME)).unwrap();
+    assert_eq!(
+        ids.get("environments.staging.boundaries.api.item_id"),
+        Some(ITEM_ID)
+    );
+}
+
+/// D-G: the contract init writes holds no id.
+#[test]
+fn init_writes_no_id_into_the_contract() {
+    let (_dir, run) = init_with(&api_fields(), &args());
+    assert!(
+        crate::config::bindings::inline_ids(run.file())
+            .unwrap()
+            .is_empty(),
+        "{}",
+        run.file()
+    );
+}
+
 #[test]
 fn a_several_section_item_records_the_core_boundary() {
     let (dir, _run) = init_with(&two_products(), &args());
@@ -497,7 +521,14 @@ fn force_overwrites_and_leaves_no_temp_file() {
     let mut a = args();
     a.force = true;
     let _run = run_in(dir.path(), &a, vec![vaults(), items(), item(&api_fields())]);
-    assert_eq!(dir_entries(dir.path()), vec![FILE_NAME.to_string()]);
+    // D-G: the contract and its ids beside it, nothing else.
+    assert_eq!(
+        dir_entries(dir.path()),
+        vec![
+            crate::config::bindings::FILE.to_string(),
+            FILE_NAME.to_string()
+        ]
+    );
 }
 
 #[test]
@@ -753,7 +784,7 @@ fn with_fly_target(dir: &Path) -> Fleet {
     let section = fly
         .init_section(&BTreeMap::from([("app", "myapp-staging".to_string())]))
         .unwrap();
-    let text = fs::read_to_string(dir.join(FILE_NAME)).unwrap()
+    let text = crate::config::read_merged(&dir.join(FILE_NAME)).unwrap()
         + "\n[environments.staging.targets.web]\nstate_vault_id = \"sstg\"\n"
         + &section;
     config::parse(&text).unwrap()
@@ -922,7 +953,7 @@ struct AddEnv {
 
 impl AddEnv {
     fn text(&self) -> String {
-        fs::read_to_string(&self.path).unwrap()
+        crate::config::read_merged(&self.path).unwrap()
     }
     fn fleet(&self) -> Fleet {
         config::parse(&self.text()).unwrap()
@@ -939,7 +970,7 @@ impl AddEnv {
 fn add_env_with(file: &str, a: &InitArgs, fields: &[Field]) -> AddEnv {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(FILE_NAME);
-    fs::write(&path, file).unwrap();
+    crate::config::bindings::write_split(&path, file).unwrap();
     let r = FakeRunner::new(vec![vaults(), items(), item(fields)]);
     let mut out = Vec::new();
     let store = crate::config_store::FileStore { path: path.clone() };

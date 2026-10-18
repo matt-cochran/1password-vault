@@ -36,6 +36,8 @@ use crate::provider::{
 
 mod locate;
 
+pub mod bindings;
+
 /// Read and validate the configuration at `path`, found by discovery. An error names the
 /// file, the line and the field the validator checked, and the fix built from the field and
 /// its rule (H10, FR-2, audit 03.01).
@@ -54,16 +56,151 @@ pub fn load_given(path: impl AsRef<Path>, given_by: GivenBy) -> Result<Fleet, Er
             given_by: given_by.clone(),
         })
     })?;
-    parse(&text).map_err(|e| {
-        locate::relocate_at(
-            e,
-            &text,
-            ConfigSource::File {
-                path: path.to_path_buf(),
-                given_by,
-            },
+    parse_file(&text, path, given_by)
+}
+
+/// [`parse`] for the text of the contract file at `path` (D-G): an inline id is refused,
+/// the sibling `secrets.bindings.toml`'s ids are filled in, and an error names `path` at
+/// the line of the contract as the person wrote it, not of the filled-in text.
+pub fn parse_file(text: &str, path: &Path, given_by: GivenBy) -> Result<Fleet, Error> {
+    let source = || ConfigSource::File {
+        path: path.to_path_buf(),
+        given_by: given_by.clone(),
+    };
+    let merged = merged(text, path, source())?;
+    parse(&merged).map_err(|e| {
+        in_contract(
+            locate::relocate_at(e, &merged, source()),
+            text,
+            &merged,
+            path,
         )
     })
+}
+
+/// The contract text at `path` with its sibling bindings filled in: the text the writers
+/// that predate the bindings file edit (D-G). An inline id is refused, as at load.
+pub fn read_merged(path: &Path) -> Result<String, Error> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| crate::config_store::unreadable(path, &e, GivenBy::Discovered))?;
+    with_bindings(&text, path)
+}
+
+/// `text`, the contract read from `path`, with its sibling bindings filled in (D-G): what
+/// [`read_merged`] gives for a text already read. An inline id is refused, as at load.
+pub fn with_bindings(text: &str, path: &Path) -> Result<String, Error> {
+    let source = ConfigSource::File {
+        path: path.to_path_buf(),
+        given_by: GivenBy::Discovered,
+    };
+    merged(text, path, source)
+}
+
+/// `text` (the contract at `path`, named `source`) refused when it writes an id inline,
+/// else with the sibling bindings filled in. An error in the bindings file names that file.
+fn merged(text: &str, path: &Path, source: ConfigSource) -> Result<String, Error> {
+    // D-G: ids live in the sibling `secrets.bindings.toml`, one-way out of the contract.
+    bindings::refuse_inline(text).map_err(|e| locate::relocate_at(e, text, source))?;
+    let ids = bindings::read_sibling(path)?;
+    Ok(bindings::merge(text, &ids))
+}
+
+/// `e`, from parsing `merged` (the contract at `path`, `original`, with its bindings filled
+/// in) and naming the contract, placed at the line of `original` it came from. A line the
+/// bindings filled in has no line in the contract: the error names the bindings file at the
+/// id's line when the field is one of its ids, else the deepest part of its field the
+/// contract declares.
+fn in_contract(e: Error, original: &str, merged: &str, path: &Path) -> Error {
+    let Some((cause, _)) = e.cause() else {
+        return e;
+    };
+    let mut cause = cause.clone();
+    let (source, at, field) = match &mut cause {
+        Cause::ConfigInvalid {
+            source, at, field, ..
+        } => (source, at, field.0.clone()),
+        Cause::StateVaultTooWide {
+            source,
+            at,
+            env,
+            target,
+            ..
+        } => (
+            source,
+            at,
+            vec![
+                "environments".to_string(),
+                env.to_string(),
+                "targets".to_string(),
+                target.to_string(),
+                "state_vault_id".to_string(),
+            ],
+        ),
+        _ => return e,
+    };
+    let Some(loc) = at.as_mut() else {
+        return e;
+    };
+    let lines = bindings::original_lines(original, merged);
+    if let Some(Some(line)) = usize::try_from(loc.line)
+        .ok()
+        .and_then(|l| lines.get(l.checked_sub(1)?).copied())
+    {
+        loc.line = u32::try_from(line + 1).unwrap_or(u32::MAX);
+        return cause.into();
+    }
+    let sibling = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(bindings::FILE);
+    let key = format!("{} ", field.join("."));
+    let in_bindings = std::fs::read_to_string(&sibling).ok().and_then(|text| {
+        text.lines()
+            .position(|l| l.starts_with(&key))
+            .and_then(|i| u32::try_from(i + 1).ok())
+    });
+    match in_bindings {
+        Some(line) => {
+            *source = ConfigSource::File {
+                path: sibling,
+                given_by: GivenBy::Discovered,
+            };
+            *at = Some(Location { line, col: 1 });
+        }
+        None => {
+            let refs: Vec<&str> = field.iter().map(String::as_str).collect();
+            *at = Doc::parse(original).ok().and_then(|d| d.location(&refs));
+        }
+    }
+    cause.into()
+}
+
+#[cfg(test)]
+/// The contract file at `path` with its sibling bindings filled in, for a test that edits a
+/// fixture's text before parsing it.
+pub fn merged_text(path: impl AsRef<Path>) -> String {
+    read_merged(path.as_ref()).unwrap()
+}
+
+/// Read the configuration at `path` with its ids left inline, returning the fleet and the
+/// ids to move into `secrets.bindings.toml` (D-G; `opv propose structure`). This is the only
+/// reader that accepts inline ids: [`load`] refuses them.
+pub fn load_for_move(path: impl AsRef<Path>) -> Result<(Fleet, bindings::Bindings), Error> {
+    let path = path.as_ref();
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        Error::from(Cause::ConfigUnreadable {
+            path: path.to_path_buf(),
+            io: e.kind().into(),
+            given_by: GivenBy::Discovered,
+        })
+    })?;
+    let source = || ConfigSource::File {
+        path: path.to_path_buf(),
+        given_by: GivenBy::Discovered,
+    };
+    let ids = bindings::inline_ids(&text).map_err(|e| locate::relocate_at(e, &text, source()))?;
+    let fleet = parse(&text).map_err(|e| locate::relocate_at(e, &text, source()))?;
+    Ok((fleet, ids))
 }
 
 /// Where a configuration text came from, for its error messages (H10, FR-44).
@@ -2483,10 +2620,13 @@ mod tests {
     use crate::domain::Kind;
 
     const RAW: &str = include_str!("../tests/fixtures/secrets.toml");
+    const RAW_BINDINGS: &str = include_str!("../tests/fixtures/secrets.bindings.toml");
 
-    /// The fixture with LF line endings, whatever the checkout did (Windows may give CRLF).
+    /// The fixture with its bindings filled in and LF line endings, whatever the checkout
+    /// did (Windows may give CRLF).
     fn ok() -> String {
-        RAW.replace("\r\n", "\n")
+        let ids = bindings::Bindings::parse(&RAW_BINDINGS.replace("\r\n", "\n")).unwrap();
+        bindings::merge(&RAW.replace("\r\n", "\n"), &ids)
     }
 
     /// `text` with `from` replaced by `to`. Panics if `from` does not occur, so a mutation
@@ -2774,6 +2914,7 @@ environments = ["prod"]
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("secrets.toml");
         std::fs::write(&p, RAW).unwrap();
+        std::fs::write(dir.path().join(bindings::FILE), RAW_BINDINGS).unwrap();
         assert!(load(&p).is_ok());
     }
 
@@ -3077,7 +3218,7 @@ environments = ["prod"]
             "rules = { ensure_prefix = \"p-\", pattern = \"[a-z]+\" }\n",
         );
         assert!(
-            config_err(&text).contains(" at line 48, column 33: "),
+            config_err(&text).contains(" at line 50, column 33: "),
             "{}",
             config_err(&text)
         );
@@ -4122,7 +4263,7 @@ environments = ["prod"]
         let e = config_err(&shared(
             "kind = \"secret\"\nfrom = \"api/DB_URL\"\nenvironments = [\"prod\"]",
         ));
-        assert!(e.contains("at line 53, column 1"), "{e}");
+        assert!(e.contains("at line 55, column 1"), "{e}");
     }
 
     #[test]
