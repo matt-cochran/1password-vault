@@ -333,6 +333,11 @@ impl Harness {
         // `.opv` can apply (v0101-security-hermetic).
         let config = root.path().join("secrets.toml");
         fs::copy(CONFIG, &config).unwrap();
+        fs::copy(
+            Path::new(CONFIG).with_file_name("secrets.bindings.toml"),
+            root.path().join("secrets.bindings.toml"),
+        )
+        .unwrap();
         let cat = ["/bin/cat", "/usr/bin/cat"]
             .into_iter()
             .find(|p| Path::new(p).exists())
@@ -371,7 +376,7 @@ impl Harness {
     /// Run every later command against `toml` instead of the shared fixture.
     fn use_config(&mut self, toml: &str) -> &mut Self {
         let p = self.fix.join("secrets.toml");
-        fs::write(&p, toml).unwrap();
+        opv::config::bindings::write_split(&p, toml).unwrap();
         self.config = p;
         self
     }
@@ -1760,7 +1765,10 @@ fn json_documents_carry_no_value() {
 
 // ------------------------------------------------------------ simple profile (FR-20)
 
-const SIMPLE_CONFIG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/simple.toml");
+const SIMPLE_CONFIG: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/simple/secrets.toml"
+);
 const S_DB: &str = "postgres://S7MARKERVALUEdb0006";
 
 /// A simple-profile item: unsectioned fields, plus a notes value and a sectioned field
@@ -2571,10 +2579,12 @@ fn exit_paths() -> Vec<(&'static str, Run)> {
     h9.set("FAKE_FLY_IMPORT_SLEEP", "5");
     v.push(("unknown", h9.run(&["--timeout", "2", "sync", "prod"])));
     let mut guarded = Harness::new(&good_item());
-    let text = fs::read_to_string(CONFIG).unwrap().replace(
-        "modes.allumata.payments = \"off\"",
-        "modes.allumata.payments = \"off\"\nconfirm_env = true",
-    );
+    let text = opv::config::read_merged(Path::new(CONFIG))
+        .unwrap()
+        .replace(
+            "modes.allumata.payments = \"off\"",
+            "modes.allumata.payments = \"off\"\nconfirm_env = true",
+        );
     guarded.use_config(&text);
     v.push(("confirm_env", guarded.run(&["sync", "prod", "--deploy"])));
     v
@@ -2608,10 +2618,12 @@ fn exit_paths_cover_every_category() {
 #[test]
 fn confirm_env_refusal_ends_with_the_exact_command() {
     let mut h = Harness::new(&good_item());
-    let text = fs::read_to_string(CONFIG).unwrap().replace(
-        "modes.allumata.payments = \"off\"",
-        "modes.allumata.payments = \"off\"\nconfirm_env = true",
-    );
+    let text = opv::config::read_merged(Path::new(CONFIG))
+        .unwrap()
+        .replace(
+            "modes.allumata.payments = \"off\"",
+            "modes.allumata.payments = \"off\"\nconfirm_env = true",
+        );
     h.use_config(&text);
     let r = h.run(&["sync", "prod", "--deploy"]);
     // The handoff is the command as typed, its --config kept (09.04), plus --confirm.

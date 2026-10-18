@@ -51,6 +51,11 @@ impl Scenario {
         .unwrap();
         std::fs::write(s.world().join("faults.toml"), "").unwrap();
         std::fs::copy(Path::new(APP).join("secrets.toml"), s.config()).unwrap();
+        std::fs::copy(
+            Path::new(APP).join("secrets.bindings.toml"),
+            s.config().with_file_name("secrets.bindings.toml"),
+        )
+        .unwrap();
         s
     }
 
@@ -71,9 +76,11 @@ impl Scenario {
     }
 
     /// The project's `secrets.toml`, edited.
+    /// The configuration edited as one text with its ids filled in; the ids of the edited
+    /// text go back to `secrets.bindings.toml` (D-G).
     fn edit_config(self, edit: impl FnOnce(String) -> String) -> Self {
-        let text = std::fs::read_to_string(self.config()).unwrap();
-        std::fs::write(self.config(), edit(text)).unwrap();
+        let text = opv::config::read_merged(&self.config()).unwrap();
+        opv::config::bindings::write_split(&self.config(), &edit(text)).unwrap();
         self
     }
 

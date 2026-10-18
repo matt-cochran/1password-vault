@@ -719,7 +719,7 @@ mod tests {
     /// The fixture plus `extra`, recording a boundary for every product `extra`
     /// introduces under the fixture's shared vault and item.
     fn fleet_with(extra: &str) -> Fleet {
-        let base = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+        let base = crate::config::merged_text("tests/fixtures/secrets.toml");
         let doc: toml::Table = toml::from_str(&format!("{base}\n{extra}")).unwrap();
         let ids = |env: &str| match env {
             "prod" => ("vprd", "iprd"),

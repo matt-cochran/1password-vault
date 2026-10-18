@@ -16,7 +16,7 @@ const WORKER_DB: &str = "FLEET__WORKER__DATABASE_URL";
 /// The fixture plus `extra`: every product `extra` introduces shares the fixture's single
 /// boundary (`allumata`), so the environment's products are read once (FR-57).
 fn bounded_with(extra: &str) -> crate::domain::Fleet {
-    let base = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+    let base = crate::config::merged_text("tests/fixtures/secrets.toml");
     let combined: toml::Table = toml::from_str(&format!("{base}\n{extra}")).unwrap();
     let declared: BTreeSet<String> = toml::from_str::<toml::Table>(&base).unwrap()["products"]
         .as_table()

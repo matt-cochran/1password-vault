@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use crate::app::agent_view;
 use crate::app::structure::{self, Scope};
 use crate::cause::render::cmd_text;
-use crate::cause::{Cause, Cmd, EnvName, GivenBy};
+use crate::cause::{Cause, Cmd, EnvName};
 use crate::domain::{Fleet, Kind};
 use crate::error::Error;
 use crate::runner::CommandRunner;
@@ -107,8 +107,7 @@ pub(crate) fn plan_scoped(
     json: bool,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    let text = std::fs::read_to_string(&scope.path)
-        .map_err(|e| crate::config_store::unreadable(&scope.path, &e, GivenBy::Discovered))?;
+    let text = crate::config::read_merged(&scope.path)?;
     let p = structure::plan(r, &text, &scope.project, &scope.account)?;
     if json {
         return write_json(out, &agent_view::plan_projection(&p));

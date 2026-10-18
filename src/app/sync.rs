@@ -3138,7 +3138,7 @@ mod tests {
     /// is judged on list A, and `--deploy` still deploys the earlier run's staged name.
     #[test]
     fn sync_deploys_pending_when_nothing_staged() {
-        let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+        let text = crate::config::merged_text("tests/fixtures/secrets.toml");
         let fl = crate::config::parse(&text.replace(
             "guidance = \"OpenAI platform / API keys\"",
             "guidance = \"OpenAI platform / API keys\"\nimmutable = true",

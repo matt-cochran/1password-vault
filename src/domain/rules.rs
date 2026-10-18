@@ -435,7 +435,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn f() -> Fleet {
-        parse(include_str!("../../tests/fixtures/secrets.toml")).unwrap()
+        parse(&crate::config::merged_text("tests/fixtures/secrets.toml")).unwrap()
     }
     fn chk(env: &str, key: &str, v: &str) -> Result<Option<String>, RuleFailure> {
         let f = f();
@@ -592,7 +592,7 @@ mod tests {
         assert_eq!(e.rule, "prefix_by_mode");
     }
     fn stripe_lists(env: &str, v: &str) -> Result<Option<String>, RuleFailure> {
-        let t = include_str!("../../tests/fixtures/secrets.toml").replace(
+        let t = crate::config::merged_text("tests/fixtures/secrets.toml").replace(
             r#"values = { test = "sk_test_", live = "sk_live_" }"#,
             r#"values = { test = ["sk_test_", "rk_test_"], live = ["sk_live_", "rk_live_"] }"#,
         );

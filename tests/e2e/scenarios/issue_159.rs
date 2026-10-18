@@ -49,6 +49,10 @@ impl Scenario {
             .replace("[\"dev\", \"prod\"]", "[\"staging\", \"prod\"]")
             .replace("[\"dev\"]", "[\"staging\"]");
         std::fs::write(s.project().join("fleet.toml"), config).unwrap();
+        let bindings = std::fs::read_to_string(Path::new(APP).join("secrets.bindings.toml"))
+            .unwrap()
+            .replace("environments.dev.", "environments.staging.");
+        std::fs::write(s.project().join("secrets.bindings.toml"), bindings).unwrap();
         std::fs::write(
             s.project().join(".opv"),
             format!("account = \"{SELECTED}\"\n"),

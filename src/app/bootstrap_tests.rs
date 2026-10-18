@@ -196,7 +196,8 @@ fn workspace_with(text: &str) -> (tempfile::TempDir, PathBuf, FakeOp) {
         "vdev0000000000000000000001",
         serde_json::json!({"title": "myapp · api · dev values", "category": "SECURE_NOTE", "fields": [], "sections": []}),
     );
-    std::fs::write(&path, text.replace("idev0000000000000000000001", &id)).unwrap();
+    crate::config::bindings::write_split(&path, &text.replace("idev0000000000000000000001", &id))
+        .unwrap();
     (dir, path, op)
 }
 
@@ -588,7 +589,7 @@ fn a_vault_get_op_answers_signed_out_is_op_not_signed_in() {
 fn a_missing_personal_vault_names_no_bare_bootstrap() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("secrets.toml");
-    std::fs::write(&path, TEAM).unwrap();
+    crate::config::bindings::write_split(&path, TEAM).unwrap();
     let e = run_with(&path, &FakeOp::default(), &Opts::default()).unwrap_err();
     assert_ne!(e.next_text().as_deref(), Some("opv bootstrap"));
 }

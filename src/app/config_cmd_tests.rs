@@ -11,10 +11,11 @@ fn text(out: &[u8]) -> String {
     String::from_utf8(out.to_vec()).unwrap()
 }
 
-/// A checkout with `secrets.toml`, and a fake op with the checkout's remote.
+/// A checkout with `secrets.toml` (its ids in `secrets.bindings.toml` beside it, D-G), and
+/// a fake op with the checkout's remote.
 fn checkout() -> (tempfile::TempDir, FakeOp) {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("secrets.toml"), TOML).unwrap();
+    crate::config::bindings::write_split(&dir.path().join("secrets.toml"), TOML).unwrap();
     (dir, FakeOp::with_remote(REMOTE))
 }
 
@@ -98,7 +99,7 @@ fn import_ends_with_a_typed_next_step_comparing_the_copy() {
 #[test]
 fn import_without_a_remote_says_to_write_the_pointer() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("secrets.toml"), TOML).unwrap();
+    crate::config::bindings::write_split(&dir.path().join("secrets.toml"), TOML).unwrap();
     let args = ImportArgs {
         project: Some("myapp".into()),
         ..import_args(dir.path())
@@ -170,6 +171,26 @@ fn check_of_an_identical_copy_passes() {
 fn check_of_a_different_copy_is_copies_differ() {
     let (dir, op) = checkout();
     put(&op, "myapp", &TOML.replace("dashboard", "console"));
+    let found = manifest_of(dir.path(), &op);
+    let e = check(
+        &found,
+        &dir.path().join("secrets.toml"),
+        &op,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(e.code_str(), "copies_differ");
+}
+
+/// D-G: a manifest whose inline ids differ from the file's bindings is a different copy.
+#[test]
+fn check_of_a_copy_with_other_ids_is_copies_differ() {
+    let (dir, op) = checkout();
+    put(
+        &op,
+        "myapp",
+        &TOML.replace("item_id = \"app\"", "item_id = \"other\""),
+    );
     let found = manifest_of(dir.path(), &op);
     let e = check(
         &found,
@@ -348,9 +369,10 @@ fn edit_works_on_a_file_too() {
         on_confirm: Box::new(|| {}),
     };
     edit(&found, &op, &mut ui, &mut Vec::new()).unwrap();
+    // D-G: the edit lands in the contract; its ids stay in the bindings file.
     assert_eq!(
         std::fs::read_to_string(dir.path().join("secrets.toml")).unwrap(),
-        edited()
+        crate::config::bindings::split(&edited()).0
     );
 }
 

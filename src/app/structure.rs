@@ -24,8 +24,7 @@ use sha2::{Digest, Sha256};
 use super::bootstrap::{self, BoundaryStep, EnvPlan, Recorded, StateStep};
 use crate::adapters::onepassword;
 use crate::cause::{
-    Cause, CommandId, GivenBy, PlanId, PlanScope, Principal, SessionState, StoreObject, System,
-    VarName,
+    Cause, CommandId, PlanId, PlanScope, Principal, SessionState, StoreObject, System, VarName,
 };
 use crate::domain::{Fleet, naming};
 use crate::error::Error;
@@ -731,8 +730,7 @@ fn apply_approved(
 
 /// The configuration file at `path` (05.37: the path is named; no guessed `opv init`).
 fn read(path: &Path) -> Result<String, Error> {
-    std::fs::read_to_string(path)
-        .map_err(|e| crate::config_store::unreadable(path, &e, GivenBy::Discovered))
+    crate::config::read_merged(path)
 }
 
 /// Phase 1: every boundary vault and item and every state vault the plan creates (found by
@@ -856,7 +854,7 @@ fn record(
         }
         .into());
     }
-    super::init::write_atomic(path, &new_text, true)?;
+    super::init::write_config(path, &new_text, true)?;
     *written = new_text;
     applied.config_written = true;
     Ok(())

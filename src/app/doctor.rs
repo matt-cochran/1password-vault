@@ -1754,7 +1754,7 @@ mod tests {
 
     #[test]
     fn next_step_for_unknown_field_error_is_fix_and_rerun() {
-        let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+        let text = crate::config::merged_text("tests/fixtures/secrets.toml");
         let e = crate::config::parse(&text.replace(
             "guidance = \"OpenAI platform / API keys\"",
             "guidance = \"OpenAI platform / API keys\"\nbogus = 1",
@@ -2001,7 +2001,7 @@ mod tests {
 
     /// The fixture with prod's target signing in to Fly with `op://deploy-prd/fly`.
     fn fleet_with_deploy_credentials() -> Fleet {
-        let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+        let text = crate::config::merged_text("tests/fixtures/secrets.toml");
         crate::config::parse(&text.replacen(
             "state_vault_id = \"sprd\"\n",
             "state_vault_id = \"sprd\"\ndeploy_credentials = \"op://deploy-prd/fly\"\n",

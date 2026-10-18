@@ -102,6 +102,8 @@ pub fn import(
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     let text = fs::read_to_string(&args.file).map_err(|e| unreadable_file(&args.file, &e))?;
+    // D-G: the file's ids live beside it; the manifest keeps them inline.
+    let text = config::with_bindings(&text, &args.file)?;
     config::parse_at(&text, config::Source::File(&args.file))?;
     let paths = normalize_paths(&args.paths)?;
     let repo = store::git_repo(r);
@@ -211,13 +213,26 @@ pub fn check(
 ) -> Result<(), Error> {
     let committed = fs::read_to_string(file).map_err(|e| unreadable_file(file, &e))?;
     // The file must be a configuration before any of it is printed as a diff: a `.env`
-    // given by mistake would otherwise reach stdout line by line (C1, SR-1).
-    config::parse_at(&committed, config::Source::File(file))?;
+    // given by mistake would otherwise reach stdout line by line (C1, SR-1). D-G: its ids
+    // live beside it, so it is judged with them filled in.
+    config::parse_at(
+        &config::with_bindings(&committed, file)?,
+        config::Source::File(file),
+    )?;
     let current = found.store().read(r)?;
-    let (a, b) = (
-        current.text.replace("\r\n", "\n"),
+    // The manifest keeps its ids inline: it is compared the way the file keeps it, the
+    // contract first, then (when that matches) the ids.
+    let (contract, ids) = config::bindings::split(&current.text);
+    let (contract, committed) = (
+        contract.replace("\r\n", "\n"),
         committed.replace("\r\n", "\n"),
     );
+    let (a, b) = if contract.trim_end() == committed.trim_end() {
+        let committed_ids = config::bindings::read_sibling(file)?;
+        (ids.render(), committed_ids.render())
+    } else {
+        (contract, committed)
+    };
     if a.trim_end() == b.trim_end() {
         return line(
             out,

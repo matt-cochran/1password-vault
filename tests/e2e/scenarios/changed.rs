@@ -63,6 +63,11 @@ impl Scenario {
             s.project().join("secrets.toml"),
         )
         .expect("config");
+        std::fs::copy(
+            Path::new(APP).join("secrets.bindings.toml"),
+            s.project().join("secrets.bindings.toml"),
+        )
+        .expect("config");
         std::fs::write(
             s.project().join(".opv"),
             format!("account = \"{PROJECT}\"\n"),

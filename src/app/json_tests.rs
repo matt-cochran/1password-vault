@@ -145,8 +145,7 @@ fn plan_success() {
 
 /// The fixture fleet with `fly.config = "secrets"` on its prod Fly target.
 fn config_secrets_fleet() -> crate::domain::Fleet {
-    let text = std::fs::read_to_string("tests/fixtures/secrets.toml")
-        .unwrap()
+    let text = crate::config::merged_text("tests/fixtures/secrets.toml")
         .replace(
             "fly.secret_name = \"FLEET__{PRODUCT}__{KEY}\"\nstate_vault_id = \"sprd\"",
             "fly.secret_name = \"FLEET__{PRODUCT}__{KEY}\"\nfly.config = \"secrets\"\nstate_vault_id = \"sprd\"",

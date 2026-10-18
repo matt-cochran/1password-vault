@@ -4,7 +4,7 @@
 use std::process::Command;
 
 const CFG: &str = "tests/fixtures/secrets.toml";
-const SIMPLE: &str = "tests/fixtures/simple.toml";
+const SIMPLE: &str = "tests/fixtures/simple/secrets.toml";
 
 /// Run opv with `envs` set, no `op` or target CLI on PATH, and none of opv's own variables
 /// inherited from the developer's shell.

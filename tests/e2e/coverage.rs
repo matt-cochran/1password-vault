@@ -139,6 +139,11 @@ impl Scenario {
         std::fs::copy(app.join("world.json"), s.path("world/world.json")).expect("world");
         std::fs::write(s.path("world/faults.toml"), "").expect("faults");
         std::fs::copy(app.join("secrets.toml"), s.path("project/secrets.toml")).expect("config");
+        std::fs::copy(
+            app.join("secrets.bindings.toml"),
+            s.path("project/secrets.bindings.toml"),
+        )
+        .expect("bindings");
         std::fs::write(
             s.path("project/.opv"),
             format!("account = \"{DEV_ACCOUNT}\"\n"),
@@ -193,11 +198,12 @@ impl Scenario {
         self
     }
 
-    /// The project's `secrets.toml`, edited.
+    /// The project's `secrets.toml`, edited as one text with its ids filled in; the ids of
+    /// the edited text go back to `secrets.bindings.toml` (D-G).
     fn config(self, edit: impl FnOnce(String) -> String) -> Self {
         let p = self.path("project/secrets.toml");
-        let text = std::fs::read_to_string(&p).expect("config");
-        std::fs::write(&p, edit(text)).expect("config");
+        let text = opv::config::read_merged(&p).expect("config");
+        opv::config::bindings::write_split(&p, &edit(text)).expect("config");
         self
     }
 
@@ -557,13 +563,13 @@ mod cases {
         case(
             Scenario::new().config(|c| {
                 c.replacen(
-                    "state_vault_id = \"vE2ESTATEGH000000000000001\"\nroles = [\"serve\"]\n",
-                    "state_vault_id = \"vE2ESTATEGH000000000000001\"\nroles = [\"serve\"]\n\n\
-                     [environments.staging]\ntitle = \"Staging\"\norder = 3\n\
+                    "# A source-only home for a value",
+                    "[environments.staging]\ntitle = \"Staging\"\norder = 3\n\
                      boundaries.web = { vault_id = \"vE2EWEBDEV0000000000000001\", item_id = \"iE2EWEBDEV0000000000000001\" }\n\n\
                      [environments.staging.targets.fly]\nfly.app = \"e2e-app-staging\"\n\
                      fly.secret_name = \"E2E__{PRODUCT}__{KEY}\"\n\
-                     state_vault_id = \"vE2ESTATEFLY00000000000001\"\nroles = [\"serve\"]\n",
+                     state_vault_id = \"vE2ESTATEFLY00000000000001\"\nroles = [\"serve\"]\n\n\
+                     # A source-only home for a value",
                     1,
                 )
                 .replace(

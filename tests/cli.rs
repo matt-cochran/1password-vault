@@ -54,7 +54,8 @@ fn missing_config_file_exits_2() {
 fn removed_pattern_rule_exits_2_with_the_equivalent_regex() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("secrets.toml");
-    std::fs::write(
+    // D-G: the ids go to secrets.bindings.toml, so `pattern` is on line 8 of the contract.
+    opv::config::bindings::write_split(
         &path,
         "[environments.prod]\n\
          boundaries.app = { vault_id = \"v\", item_id = \"i\" }\n\
@@ -72,7 +73,7 @@ fn removed_pattern_rule_exits_2_with_the_equivalent_regex() {
     assert!(
         out.is_empty()
             && err.contains(
-                " at line 9, column 33: products.app.keys.K1.rules.pattern uses the removed form pattern"
+                " at line 8, column 33: products.app.keys.K1.rules.pattern uses the removed form pattern"
             ),
         "{err}"
     );
@@ -100,9 +101,9 @@ fn opv_in(dir: &std::path::Path, args: &[&str]) -> (i32, String, String) {
 /// A temp dir with a valid `secrets.toml` at its root and a `nested` child to run from.
 fn dir_with_ancestor_config() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        dir.path().join("secrets.toml"),
-        std::fs::read_to_string(CFG).unwrap(),
+    opv::config::bindings::write_split(
+        &dir.path().join("secrets.toml"),
+        &opv::config::read_merged(std::path::Path::new(CFG)).unwrap(),
     )
     .unwrap();
     let nested = dir.path().join("nested");
@@ -272,10 +273,10 @@ fn expect_no_change_is_not_a_flag() {
 fn env_without_fly_section_exits_2_for_fly_commands() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = dir.path().join("secrets.toml");
-    let text = std::fs::read_to_string(CFG).unwrap();
-    std::fs::write(
+    let text = opv::config::read_merged(std::path::Path::new(CFG)).unwrap();
+    opv::config::bindings::write_split(
         &cfg,
-        format!(
+        &format!(
             "{text}\n[environments.dev]\nboundaries.allumata = {{ vault_id = \"vdev\", \
              item_id = \"idev\" }}\n\n[products.allumata.keys.DEV_ONLY]\nkind = \"secret\"\n\
              environments = [\"dev\"]\n"
@@ -356,7 +357,7 @@ fn run_requires_a_command() {
     assert_eq!(code, 2, "{err}");
 }
 
-const SIMPLE: &str = "tests/fixtures/simple.toml";
+const SIMPLE: &str = "tests/fixtures/simple/secrets.toml";
 
 /// FR-20: doctor accepts a simple-profile file.
 #[test]
@@ -686,8 +687,13 @@ fn init_in_an_existing_project_suggests_add_env() {
 fn init_of_a_declared_environment_suggests_config_edit() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::copy(
-        "tests/fixtures/simple.toml",
+        "tests/fixtures/simple/secrets.toml",
         dir.path().join("secrets.toml"),
+    )
+    .unwrap();
+    std::fs::copy(
+        "tests/fixtures/simple/secrets.bindings.toml",
+        dir.path().join("secrets.bindings.toml"),
     )
     .unwrap();
     let (_, _, err) = opv_in(
@@ -885,7 +891,12 @@ fn init_with_a_provider_option_alone_names_target_add_help() {
 fn add_declares_a_key_in_the_discovered_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("secrets.toml");
-    std::fs::copy("tests/fixtures/simple.toml", &path).unwrap();
+    std::fs::copy("tests/fixtures/simple/secrets.toml", &path).unwrap();
+    std::fs::copy(
+        "tests/fixtures/simple/secrets.bindings.toml",
+        dir.path().join("secrets.bindings.toml"),
+    )
+    .unwrap();
     let (code, _, err) = opv_in(dir.path(), &["add", "app/SENTRY_DSN", "--kind", "secret"]);
     assert_eq!(code, 0, "{err}");
 }
@@ -895,8 +906,13 @@ fn add_declares_a_key_in_the_discovered_file() {
 fn init_add_env_refuses_an_existing_environment() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::copy(
-        "tests/fixtures/simple.toml",
+        "tests/fixtures/simple/secrets.toml",
         dir.path().join("secrets.toml"),
+    )
+    .unwrap();
+    std::fs::copy(
+        "tests/fixtures/simple/secrets.bindings.toml",
+        dir.path().join("secrets.bindings.toml"),
     )
     .unwrap();
     let (code, _, err) = opv_in(
@@ -1115,12 +1131,13 @@ fn no_message_or_doc_suggests_the_deprecated_apps_resume() {
     assert_eq!(hits, Vec::<String>::new());
 }
 
-/// FR-44: `config export` without an environment prints the configuration as stored.
+/// FR-44: `config export` without an environment prints the configuration as stored: the
+/// contract with the ids of its `secrets.bindings.toml` filled in (D-G).
 #[test]
 fn config_export_without_env_prints_the_configuration_verbatim() {
     let (code, out, err) = opv(&["--config", CFG, "config", "export"]);
     assert!(
-        code == 0 && out == std::fs::read_to_string(CFG).unwrap(),
+        code == 0 && out == opv::config::read_merged(std::path::Path::new(CFG)).unwrap(),
         "{err}"
     );
 }
@@ -1376,7 +1393,7 @@ JSON"#,
     let runtime = tempfile::Builder::new().tempdir_in("/dev/shm").unwrap();
     std::fs::set_permissions(runtime.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let cfg = bin.path().join("secrets.toml");
-    std::fs::write(
+    opv::config::bindings::write_split(
         &cfg,
         "[environments.prod]\n\
          boundaries.app = { vault_id = \"vprd\", item_id = \"iprd\" }\n\

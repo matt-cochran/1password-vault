@@ -1122,7 +1122,7 @@ fn finish(
     config::parse(&manifest)?;
     config_compatible(output, &manifest, recipe_path)?;
     if !output.exists() {
-        super::init::write_atomic(output, &manifest, false)?;
+        super::init::write_config(output, &manifest, false)?;
     }
     ui.show(&format!(
         "\nLocal configuration ready: {} (IDs and declarations only)",

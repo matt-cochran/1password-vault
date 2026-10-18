@@ -214,6 +214,11 @@ impl Scenario {
         std::fs::copy(app.join("world.json"), world.join("world.json")).expect("world");
         std::fs::write(world.join("faults.toml"), faults).expect("faults");
         std::fs::copy(app.join("secrets.toml"), project.join("secrets.toml")).expect("config");
+        std::fs::copy(
+            app.join("secrets.bindings.toml"),
+            project.join("secrets.bindings.toml"),
+        )
+        .expect("bindings");
         // The project's own account, so no `.opv` above the temp directory is read.
         std::fs::write(project.join(".opv"), format!("account = \"{ACCOUNT}\"\n")).expect(".opv");
         let raw = p.join("sim-bin");

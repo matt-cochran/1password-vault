@@ -26,8 +26,17 @@ struct Added {
     out: String,
 }
 
+/// `text` as a project keeps it (D-G): the contract without its ids.
+fn without_ids(text: &str) -> String {
+    crate::config::bindings::split(text).0
+}
+
 impl Added {
     fn text(&self) -> String {
+        crate::config::read_merged(&self.path).unwrap()
+    }
+    /// The contract file itself, its ids in the bindings file beside it.
+    fn contract(&self) -> String {
         fs::read_to_string(&self.path).unwrap()
     }
     fn err(&self) -> String {
@@ -41,7 +50,7 @@ impl Added {
 fn add_to(file: &str, a: AddArgs) -> Added {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("secrets.toml");
-    fs::write(&path, file).unwrap();
+    crate::config::bindings::write_split(&path, file).unwrap();
     let mut out = Vec::new();
     let store = FileStore { path: path.clone() };
     let res = run(&a, &store, &FakeOp::default(), &mut out);
@@ -79,7 +88,11 @@ fn new_key(name: &str) -> AddArgs {
 #[test]
 fn adding_a_key_keeps_every_comment_and_line() {
     let a = add_to(COMMENTED, new_key("api/STRIPE_KEY"));
-    assert!(a.text().starts_with(COMMENTED), "{}", a.text());
+    assert!(
+        a.contract().starts_with(&without_ids(COMMENTED)),
+        "{}",
+        a.contract()
+    );
 }
 
 #[test]
@@ -136,17 +149,18 @@ fn a_refused_add_leaves_the_file_byte_for_byte() {
         "[environments.prod]\nboundaries.my_app = { vault_id = \"vprd\", item_id = \"iprd\" }\n",
     );
     let a = add_to(&file, new_key("my-app/K"));
-    assert_eq!(a.text(), file);
+    assert_eq!(a.contract(), without_ids(&file));
 }
 
 #[test]
 fn the_write_leaves_no_temporary_file() {
     let a = add_to(COMMENTED, new_key("api/STRIPE_KEY"));
-    let names: Vec<String> = fs::read_dir(a.path.parent().unwrap())
+    let mut names: Vec<String> = fs::read_dir(a.path.parent().unwrap())
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(names, vec!["secrets.toml"]);
+    names.sort();
+    assert_eq!(names, vec!["secrets.bindings.toml", "secrets.toml"]);
 }
 
 #[test]
@@ -332,7 +346,7 @@ fn a_declared_key_already_in_every_environment_changes_nothing() {
     let mut args = new_key("api/DATABASE_URL");
     args.kind = None;
     let a = add_to(COMMENTED, args);
-    assert_eq!(a.text(), COMMENTED);
+    assert_eq!(a.contract(), without_ids(COMMENTED));
 }
 
 #[test]
@@ -495,10 +509,14 @@ fn a_manifest_changed_since_it_was_read_is_refused() {
 fn a_file_changed_since_it_was_read_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("secrets.toml");
-    fs::write(&path, COMMENTED).unwrap();
+    crate::config::bindings::write_split(&path, COMMENTED).unwrap();
     let store = FileStore { path: path.clone() };
     let base = store.read(&FakeOp::default()).unwrap();
-    fs::write(&path, format!("{COMMENTED}\n# someone else\n")).unwrap();
+    fs::write(
+        &path,
+        format!("{}\n# someone else\n", without_ids(COMMENTED)),
+    )
+    .unwrap();
     let e = crate::config_store::save(&store, &FakeOp::default(), &base, COMMENTED).unwrap_err();
     assert_eq!(e.code_str(), "config_changed", "{e}");
 }

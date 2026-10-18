@@ -485,11 +485,31 @@ fn manifest_replace_refuses_when_the_version_moved() {
     assert!(matches!(res, Replaced::Changed(_)));
 }
 
+/// D-G: an edit saved to a file keeps its ids in `secrets.bindings.toml`, not the contract.
+#[test]
+fn a_file_save_records_a_changed_id_in_the_bindings_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(FILE_NAME);
+    crate::config::bindings::write_split(&path, TOML).unwrap();
+    let s = FileStore { path: path.clone() };
+    let base = s.read(&FakeOp::default()).unwrap();
+    let edited = base
+        .text
+        .replace("item_id = \"app\"", "item_id = \"other\"");
+    s.replace(&FakeOp::default(), &base, &edited).unwrap();
+    assert_eq!(
+        crate::config::bindings::read_sibling(&path)
+            .unwrap()
+            .get("environments.dev.boundaries.app.item_id"),
+        Some("other")
+    );
+}
+
 #[test]
 fn file_replace_refuses_when_the_file_changed() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(FILE_NAME);
-    std::fs::write(&path, TOML).unwrap();
+    crate::config::bindings::write_split(&path, TOML).unwrap();
     let s = FileStore { path: path.clone() };
     let base = s.read(&FakeOp::default()).unwrap();
     std::fs::write(&path, "# changed\n").unwrap();
@@ -828,7 +848,7 @@ fn an_environments_own_account_wins_over_the_manifests() {
 #[test]
 fn a_file_config_records_the_dot_opv_its_account_came_from() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join(FILE_NAME), TOML).unwrap();
+    crate::config::bindings::write_split(&dir.path().join(FILE_NAME), TOML).unwrap();
     std::fs::write(
         dir.path().join(DOT_FILE),
         "account = \"AENV00000000000000000000AA\"\n",

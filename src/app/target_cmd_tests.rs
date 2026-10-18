@@ -2,7 +2,6 @@
 //! validated by the loader before it is saved, every refusal names its problem and writes
 //! nothing, and the state vault is created once and reused after. Names only (SR-1).
 
-use std::fs;
 use std::path::PathBuf;
 
 use super::*;
@@ -101,7 +100,7 @@ struct Added {
 
 impl Added {
     fn text(&self) -> String {
-        fs::read_to_string(&self.path).unwrap()
+        crate::config::read_merged(&self.path).unwrap()
     }
     fn err(&self) -> String {
         self.res.as_ref().unwrap_err().to_string()
@@ -125,7 +124,7 @@ fn add_args(env: &str, name: &str) -> AddArgs {
 fn add_with(file: &str, a: AddArgs, op: &FakeOp) -> Added {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("secrets.toml");
-    fs::write(&path, file).unwrap();
+    crate::config::bindings::write_split(&path, file).unwrap();
     let mut out = Vec::new();
     let store = FileStore { path: path.clone() };
     let res = add(&a, &store, op, &mut out);
