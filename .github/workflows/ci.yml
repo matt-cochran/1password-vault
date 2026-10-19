@@ -1,83 +1,71 @@
 name: CI
-
-on:
-  pull_request:
+'on':
+  pull_request: null
   push:
-    branches: [dev, staging, main]
-
+    branches:
+    - dev
+    - staging
+    - main
+  workflow_dispatch: null
+  workflow_call: null
 permissions:
   contents: read
-
+  actions: read
+  pull-requests: read
+concurrency:
+  group: retained-ci.yml-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
-  test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+  resolve:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft != true }}
+    runs-on: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    outputs:
+      build-required: ${{ steps.resolve.outputs.build-required }}
+      run-id: ${{ steps.resolve.outputs.run-id }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      # FR-26: the shell-syntax tests parse each suggested sign-in command with the real
-      # shell; on Ubuntu every shell must be present (OPV_REQUIRE_SHELLS below). pwsh, bash
-      # and sh ship with the runner image.
-      - name: Install shells for the syntax tests
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh fish
-      - name: Check formatting
-        run: cargo fmt --all --check
-      - name: Run clippy
-        run: cargo clippy --all-targets --features fake,mcp -- -D warnings
-      - name: Run tests
-        run: cargo test --locked --features fake,mcp
-        env:
-          OPV_REQUIRE_SHELLS: ${{ runner.os == 'Linux' && '1' || '' }}
-
-  mcp-protocol:
-    name: MCP stdio protocol
-    runs-on: ubuntu-latest
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - id: resolve
+      uses: ./.github/actions/retained-build
+      with:
+        mode: resolve
+        runner-mode: ${{ vars.CI_RUNNER_MODE || 'github' }}
+        runner-label: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'github' }}
+        workflow: ci.yml
+        token: ${{ github.token }}
+  checks:
+    needs: resolve
+    if: needs.resolve.outputs.build-required == 'true'
+    uses: ./.github/workflows/ci-checks.yml
+    secrets: inherit
+  build-gate:
+    name: Build gate
+    needs:
+    - resolve
+    - checks
+    if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true) }}
+    runs-on: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-      - name: Build optional MCP server
-        run: cargo build --locked --bin opv
-      - name: Exercise protocol without credentials
-        run: python3 tests/mcp_protocol.py target/debug/opv
-
-  deny:
-    name: cargo-deny
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
-        with:
-          command: check advisories licenses bans sources
-
-  install-script:
-    name: Install script (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: shellcheck install.sh
-        if: runner.os == 'Linux'
-        run: shellcheck install.sh
-      - name: Test install.sh
-        run: bash tests/install/test_install.sh
-      - name: Test npm install/uninstall scripts
-        run: node --test 'packaging/npm/**/*.test.js'
-
-  readiness-hook:
-    name: Claude readiness hook
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Test opt-in adapter with fake opv
-        run: python3 -m unittest discover -s examples/claude-readiness-hook -p 'test_*.py' -v
+    - name: Require full checks or verified retained staging results
+      env:
+        RESOLVE_RESULT: ${{ needs.resolve.result }}
+        BUILD_REQUIRED: ${{ needs.resolve.outputs.build-required }}
+        CHECKS_RESULT: ${{ needs.checks.result }}
+        SOURCE_RUN: ${{ needs.resolve.outputs.run-id }}
+      shell: bash
+      run: "set -euo pipefail\ntest \"$RESOLVE_RESULT\" = success\nif [ \"$BUILD_REQUIRED\" = true ]; then\n  test\
+        \ \"$CHECKS_RESULT\" = success\nelse\n  test \"$BUILD_REQUIRED\" = false\n  test -n \"$SOURCE_RUN\"\n  test\
+        \ \"$CHECKS_RESULT\" = skipped\nfi\n"
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      if: needs.resolve.outputs.build-required == 'true'
+      with:
+        persist-credentials: false
+    - uses: ./.github/actions/retained-build
+      if: needs.resolve.outputs.build-required == 'true'
+      with:
+        mode: record
+        runner-mode: ${{ vars.CI_RUNNER_MODE || 'github' }}
+        runner-label: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'github' }}
+        workflow: ci.yml
+        token: ${{ github.token }}
