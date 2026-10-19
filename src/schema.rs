@@ -507,7 +507,7 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
         "states": {
             "row_state": ["saved", "missing", "failing_rule", "skipped", "source_blocked"],
             "row_kind": ["secret", "config"],
-            "row_target_state": ["present", "absent", "would_change", null],
+            "row_target_state": ["present", "absent", "would_change", "unknown", null],
             "row_action": ["would_stage", "would_prune", "held", null],
             "row_binding": ["current", "stale", "unbound"],
             "doctor_status": ["ok", "warn", "fail", "skip"],
@@ -918,5 +918,18 @@ mod tests {
             .map(|e| (e["tool"].as_str().unwrap(), e["cli"].as_str().unwrap()))
             .collect();
         assert_eq!(tools.as_slice(), MCP_TOOLS);
+    }
+
+    /// #201 decision 2: the schema documents `unknown` among the row `target_state` values.
+    #[test]
+    fn schema_lists_unknown_among_row_target_states() {
+        let doc = describe(&clap::Command::new("opv"), "test");
+        let states = doc["states"]["row_target_state"]
+            .as_array()
+            .expect("states.row_target_state is a list");
+        assert!(
+            states.iter().any(|v| v.as_str() == Some("unknown")),
+            "states.row_target_state does not list unknown: {states:?}"
+        );
     }
 }
