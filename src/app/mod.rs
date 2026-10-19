@@ -14,6 +14,7 @@ pub mod access_create;
 pub mod account;
 pub mod agent_view;
 pub mod apply;
+pub mod attest;
 #[cfg(test)]
 mod azure_tests;
 pub mod bootstrap;

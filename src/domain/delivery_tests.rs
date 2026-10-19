@@ -44,6 +44,7 @@ fn receipt() -> Receipt {
         delivered_at: "2026-10-13T12:00:00Z".into(),
         plan_id: Some("7f3c9a1e".into()),
         opv_version: "0.7.0".into(),
+        attested: Vec::new(),
     }
 }
 

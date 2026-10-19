@@ -148,6 +148,12 @@ fn plan_read(inv: &Invocation) -> Next {
 fn scope_read(scope: &PlanScope) -> Next {
     match scope {
         PlanScope::Structural => Next::Check(cmd(&["propose", "structure"], &[])),
+        // #201: `opv apply` without a plan id recomputes the attestation and shows it before
+        // it asks: the person's own review of the new plan.
+        PlanScope::Attest { .. } => Next::Handoff(Cmd {
+            command: vec!["apply".into()],
+            args: scope.attest_args(),
+        }),
         PlanScope::Sync {
             env,
             targets,
@@ -1187,6 +1193,67 @@ fn plan(action: Option<(Action, String)>, next: Next) -> Plan {
 
 /// The Do and Next of a refused generation (`opv apply` of a `propose generate`), per
 /// reason (F2, R64).
+/// The step after a refused attestation (#201): the read that shows where the key stands,
+/// never the attestation itself.
+fn attest_refused(
+    product: &ProductName,
+    key: &KeyName,
+    env: &EnvName,
+    target: &TargetName,
+    reason: AttestRefusal,
+) -> Plan {
+    let pk = format!("{product}/{key}");
+    let on_target = [env.as_str(), "--target", target.as_str()];
+    let plan_of = Next::Check(cmd(&["plan"], &on_target));
+    let rotate = Next::Check(cmd(
+        &["plan"],
+        &[env.as_str(), "--target", target.as_str(), "--rotate", &pk],
+    ));
+    match reason {
+        AttestRefusal::NotDelivered => plan(
+            inspect(format!(
+                "attest only a key target {target} delivers; opv explain shows where {pk} goes"
+            )),
+            Next::Check(cmd(&["explain"], &[pk.as_str(), "--env", env.as_str()])),
+        ),
+        AttestRefusal::NotImmutable | AttestRefusal::NotOnTarget => plan(
+            inspect(format!(
+                "let opv sync write {pk}: the write records its evidence"
+            )),
+            plan_of,
+        ),
+        AttestRefusal::ComparedDirectly | AttestRefusal::NotHeld => plan(
+            inspect(format!("no attestation is needed for {pk}")),
+            plan_of,
+        ),
+        AttestRefusal::Proven => plan(
+            inspect(format!("nothing to attest: {pk} is already proven")),
+            Next::Check(cmd(
+                &["delivery", "verify"],
+                &[
+                    env.as_str(),
+                    "--target",
+                    target.as_str(),
+                    "--product",
+                    product.as_str(),
+                ],
+            )),
+        ),
+        AttestRefusal::Differs | AttestRefusal::Drifted => plan(
+            inspect(format!(
+                "rotate {pk} so opv writes 1Password's value; never attest a value known to differ"
+            )),
+            rotate,
+        ),
+        AttestRefusal::NotRecorded => plan(
+            inspect(format!(
+                "run opv sync for {env}/{target} first: it records the placement's evidence key"
+            )),
+            plan_of,
+        ),
+    }
+}
+
 fn generate_refused(
     product: &ProductName,
     key: &KeyName,
@@ -1752,6 +1819,16 @@ impl Cause {
                     "opv does not generate {product}/{key} for environment {env}: {}",
                     reason.words()
                 ),
+                self::Guard::AttestRefused {
+                    product,
+                    key,
+                    env,
+                    target,
+                    reason,
+                } => format!(
+                    "opv does not record an attestation of {product}/{key} on {env}/{target}: {}",
+                    reason.words()
+                ),
                 self::Guard::RemoteProfileRefuses {
                     profile,
                     asked,
@@ -2030,6 +2107,9 @@ impl Cause {
                 Some(PlanScope::Structural) => format!("no structure plan {plan} is known"),
                 Some(PlanScope::Sync { env, .. }) => {
                     format!("no sync plan {plan} is known for environment {env}")
+                }
+                Some(PlanScope::Attest { env, target, .. }) => {
+                    format!("no attestation plan {plan} is known for {env}/{target}")
                 }
                 None => format!("no plan {plan} is known"),
             },
@@ -3349,6 +3429,13 @@ impl Cause {
                     env,
                     reason,
                 } => generate_refused(product, key, env, reason),
+                self::Guard::AttestRefused {
+                    product,
+                    key,
+                    env,
+                    target,
+                    reason,
+                } => attest_refused(product, key, env, target, *reason),
                 self::Guard::RemoteProfileRefuses {
                     profile, allowed, ..
                 } => plan(

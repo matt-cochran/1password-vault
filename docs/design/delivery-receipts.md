@@ -89,8 +89,13 @@ The receipt (schema `opv.delivery/1`):
  "deployed": {"state": "deployed", "generation": "v42"}}
 ```
 
+An optional `attested: [names]` (#201, 0.12.3) lists the names of `bindings` the revision
+counts on a person's attestation rather than a write or a proof; it is omitted when empty,
+so the schema id is unchanged and an older receipt reads as attesting nothing. See
+[attestation](../attestation.md).
+
 `verify` returns `{revision, state: verified|changed|unverifiable|not_delivered,
-names: [{name, state, reason}], deployed}`. The two other documents agents use advertise
+names: [{name, state, reason}], attested?, deployed}`. The two other documents agents use advertise
 the capability:
 - `opv schema`: `capabilities: ["delivery_receipts/1"]`, the installed-version check;
 - `opv guide agent`.

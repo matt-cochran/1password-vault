@@ -130,7 +130,8 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 | Variant | Fields | Code | Retry | Do | Next |
 |---|---|---|---|---|---|
 | `TargetRefused` | system; subject; serving: Option<Revision>; why: Validation / Quota / Unhealthy{new_revision} / NoRevision | update_refused / target_unhealthy | after_fix | per why (authorization goes to `MissingRight`) | `opv doctor --env E --target T` [R45, R47, R48] |
-| `Guard` | guard: Guard (ValueTooLarge{key, limit, store} / NotManagedByOpv{name, store} / CredentialAsOption{option} / ProviderHidesValues{provider} / ImmutableWithoutRotate{key} / GenerateRefused{key, reason} / RemoteProfileRefuses{profile, asked, allowed} / MountPathInUse{workload, container, path, volume} / …) | policy_refused | never | per guard | per guard [R46, R64, R79] |
+| `Guard` | guard: Guard (ValueTooLarge{key, limit, store} / NotManagedByOpv{name, store} / CredentialAsOption{option} / ProviderHidesValues{provider} / ImmutableWithoutRotate{key} / GenerateRefused{key, reason} / AttestRefused{product, key, env, target, reason} / RemoteProfileRefuses{profile, asked, allowed} / MountPathInUse{workload, container, path, volume} / …) | policy_refused | never | per guard | per guard [R46, R64, R79] |
+| `Guard::AttestRefused` (#201) | product; key; env; target; reason: NotDelivered / NotImmutable / NotOnTarget / ComparedDirectly / NotHeld / Proven / Differs / Drifted / NotRecorded | policy_refused (guard `attest_refused`) | never | NotDelivered: "attest only a key target T delivers"; NotImmutable, NotOnTarget: "let opv sync write P/K: the write records its evidence"; ComparedDirectly, NotHeld: "no attestation is needed for P/K"; Proven: "nothing to attest"; Differs, Drifted: "rotate P/K so opv writes 1Password's value; never attest a value known to differ"; NotRecorded: "run opv sync for E/T first" | NotDelivered: `opv explain <p/K> --env <e>`; Proven: `opv delivery verify <e> --target <t> --product <p>`; Differs, Drifted: `opv plan <e> --target <t> --rotate <p/K>`; otherwise `opv plan <e> --target <t>`. Never the attestation itself. A guard, not a new code, so agents keep one code for opv's refusals (`docs/attestation.md`) |
 | `MountUnreadable` | workload; container; run_as: Option<u32>; why: NoFsGroup / RunAsUnknown; env; target | **mount_unreadable** | after_fix | "set spec.template.spec.securityContext.fsGroup (any group, for example 10001), or runAsUser: 0. Nothing was written." | `opv plan <env> --target <t>` (K5/K6 wire it) |
 
 ### 4.6 Outcomes, availability and budgets
@@ -174,7 +175,7 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 |---|---|---|---|---|---|
 | `ApprovalMissing` | plan_id; scope: PlanScope | approval_required | after_fix | "approve it in your own terminal" | a handoff: `opv approve <id>` plus every scope flag [R69] |
 | `ApprovalUsed` | plan_id; scope; partial: bool | **approval_used** | never | "review what remains and approve its new plan" | `opv plan <scope>`; never `--approved <used id>` [R70] |
-| `PlanChanged` | old_id; new_id; scope | stale_plan | never | "review the new plan" | `opv plan <scope>` (the approval route is a handoff to `opv approve <new_id>`) [R71] |
+| `PlanChanged` | old_id; new_id; scope | stale_plan | never | "review the new plan" | `opv plan <scope>` (the approval route is a handoff to `opv approve <new_id>`); scope Attest{env, target, keys} (#201): a handoff to `opv apply --attest <env>:<target>:<p/K>…`, which shows the new attestation before it asks [R71] |
 | `PlanUnknown` | plan_id; kind | **plan_unknown** | never | — | `opv plan <env>` / `opv structure plan` [R72] |
 
 ### 4.10 Platform, delivery and internal

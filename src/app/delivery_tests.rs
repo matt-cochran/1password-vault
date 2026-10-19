@@ -1315,3 +1315,7 @@ fn a_key_withheld_by_the_targets_roles_is_not_bound() {
         .collect();
     assert!(!names.contains(&"FLEET__ALLUMATA__DATABASE_URL_UNPOOLED".to_string()));
 }
+
+/// #201: a person's attestation, on this module's world.
+#[path = "attest_tests.rs"]
+mod attest_tests;
