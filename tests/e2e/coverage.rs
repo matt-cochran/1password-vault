@@ -382,6 +382,8 @@ impl Scenario {
             .env("HOME", self.path("home"))
             .env("OPV_NO_SKILL", "1")
             .env("OPV_SIM_WORLD", self.path("world"))
+            // Doctor's core-dump check reads this, not the host's `fs.suid_dumpable`.
+            .env("OPV_TEST_SUID_DUMPABLE", "0")
             .stdin(Stdio::null());
         for (k, v) in &self.env {
             c.env(k, v);

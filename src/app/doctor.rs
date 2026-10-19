@@ -1295,9 +1295,19 @@ const CORE_DUMPS_CHECK: &str = "core dumps";
 /// builds, so golden output never depends on the machine running the tests.
 #[cfg(all(target_os = "linux", not(test)))]
 fn core_dumps() -> Option<Check> {
-    std::fs::read_to_string("/proc/sys/fs/suid_dumpable")
-        .ok()
-        .map(|raw| suid_dumpable(&raw))
+    suid_dumpable_setting().map(|raw| suid_dumpable(&raw))
+}
+
+/// The contents of `/proc/sys/fs/suid_dumpable`. Builds with the `fake` feature (tests only;
+/// release builds never enable it) read `OPV_TEST_SUID_DUMPABLE` instead when it is set, so
+/// the end-to-end snapshots never depend on the kernel setting of the machine running them.
+#[cfg(all(target_os = "linux", not(test)))]
+fn suid_dumpable_setting() -> Option<String> {
+    #[cfg(feature = "fake")]
+    if let Ok(v) = std::env::var("OPV_TEST_SUID_DUMPABLE") {
+        return Some(v);
+    }
+    std::fs::read_to_string("/proc/sys/fs/suid_dumpable").ok()
 }
 
 #[cfg(any(not(target_os = "linux"), test))]

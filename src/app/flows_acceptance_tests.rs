@@ -293,3 +293,13 @@ fn config_check_passes_right_after_apply() {
     let res = crate::app::config_cmd::check(&found, &world.contract, &world.op, &mut Vec::new());
     assert!(res.is_ok(), "{res:?}");
 }
+
+/// The person's apply is judged by the host it was given: this process running under CI
+/// (simulated with `with_test_host`, so no process variable is touched) refuses nothing.
+#[test]
+fn a_persons_apply_is_not_refused_because_this_process_runs_under_ci() {
+    let world = proposed();
+    let ci = crate::host::Host::from_env(&FakeEnv::new("linux").shell("/bin/bash").var("CI"));
+    let res = crate::host::with_test_host(ci, || run_apply(&world, &tty(), &mut Vec::new()));
+    assert!(res.is_ok(), "{res:?}");
+}

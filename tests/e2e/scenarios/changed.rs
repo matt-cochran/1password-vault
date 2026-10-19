@@ -105,6 +105,7 @@ impl Scenario {
             .env("HOME", self.root.path().join("home"))
             .env("OPV_NO_SKILL", "1")
             .env("OPV_SIM_WORLD", self.world())
+            .env("OPV_TEST_SUID_DUMPABLE", "0")
             .stdin(Stdio::null())
             .output()
             .expect("run opv")

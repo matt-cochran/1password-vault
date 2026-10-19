@@ -122,6 +122,10 @@ pub fn apply_at(
         }
         .into());
     }
+    // Every later check of who runs this apply is judged by the host the caller gave,
+    // never by this process's own variables (a library caller's person at a terminal is
+    // not refused because the process itself runs under CI).
+    let host = crate::host::Host::from_env(env);
 
     // (2) Recompute from what is on disk and what 1Password holds now. A different id means
     // the state moved since the proposal was reviewed.
@@ -154,17 +158,18 @@ pub fn apply_at(
             Err(structure::changed(&confirmed_id, &plan.plan_id))
         }
     };
-    let applied = structure::apply_at(
+    let applied = structure::apply_on(
         r,
         at,
         project,
         account,
         &proposal.structure.plan_id,
+        host,
         &mut authorize,
     )?;
     // (4c) Generation: the existing `generate::run` guards against overwriting a value and
     // writes through the importer's stdin-only field writer.
-    let generated = generate_steps(&proposal, r, at, out)?;
+    let generated = generate_steps(&proposal, r, at, host, out)?;
 
     // (5) The apply record: the plan id and the digests of the two files as written. A
     // manifest has no committed bindings file to check against a record, so none is kept.
@@ -309,6 +314,7 @@ fn generate_steps(
     p: &StructureProposal,
     r: &dyn CommandRunner,
     at: &ConfigAt,
+    host: crate::host::Host,
     out: &mut dyn Write,
 ) -> Result<Vec<Generated>, Error> {
     let grouped = grouped_generate(&p.steps);
@@ -321,7 +327,7 @@ fn generate_steps(
     };
     let mut generated = Vec::new();
     for (env, keys) in &grouped {
-        crate::app::generate::run(&fleet, env, keys, r, out)?;
+        crate::app::generate::run_on(&fleet, env, keys, r, host, out)?;
         for label in keys {
             if let Some((product, key)) = label.split_once('/') {
                 generated.push(Generated {
