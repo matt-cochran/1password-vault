@@ -1434,6 +1434,8 @@ pub enum InputKind {
     /// An environment's deploy credentials item in 1Password (`path`: its `op://`
     /// reference, empty when not known).
     DeployCredentials,
+    /// The file of names an assistant found itself (`opv needs --names <FILE>`, #175).
+    NamesFile,
 }
 
 /// What an in-memory folder was needed for (R74).

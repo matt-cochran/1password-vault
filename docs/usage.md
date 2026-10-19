@@ -10,7 +10,7 @@ deliver with CI or your own terminal. The grouping is who runs a command.
 | Group | Command | Who | What it does |
 |---|---|---|---|
 | inspect | `opv inventory [--env <e>] [--product <p>] [--json]` | anyone | the matrix: keys × environments, each cell a value state ([States](#states)) and this session's capability on its vault (`write`/`read`/`none`/`unknown`), with ids, source, presence, tier and delivery state per target; a deployed tier this session cannot read comes from the CI receipt, with its age |
-| inspect | `opv needs [--gate]` | anyone, CI | code ↔ contract: `undeclared`, `declared_unobserved`, `ambiguous`, `declared`, with the scanner's coverage; `--gate` fails on a new undeclared name |
+| inspect | `opv needs [<env>] [--product] [--scan <dir> \| --names <file>] [--gate]` | anyone, CI | code ↔ contract: `undeclared`, `declared_unobserved`, `ambiguous`, `declared`, with the scanner's coverage; `--gate` fails on a new undeclared name |
 | inspect | `opv contract [--env <e>] [--component <c>] [--schema] [--check <file>] [--relaxations [--base <ref>]]` | anyone, CI | the contract as data and its JSON Schema; `--check` fails on a stale committed copy; `--relaxations` lists the relaxations against the default branch |
 | inspect | `opv ready [<env>] [--gate] [--save <file>] [--json]` | anyone, CI | findings, receipts and gates; `--gate` fails unless every present key is `set` with delivery evidence at its item version ([below](#readiness-opv-ready)) |
 | inspect | `opv next` | anyone | one action this session can take, then the queue, then what waits on others, by vault |
@@ -556,7 +556,7 @@ Each target in `targets` is `ready` (every vault and item it needs could be open
 
 ## Code and contract: `opv needs` and `opv contract`
 
-`opv needs [--gate]` scans the code for the environment names it reads and compares them with the contract: each name is `undeclared`, `declared_unobserved`, `ambiguous` or `declared`, with the scanner's coverage (files, languages, skipped patterns). `--gate` exits 8 on a new `undeclared` name, so a pull request cannot add a key the contract does not declare. It is for anyone and CI, and prints names only.
+`opv needs [<env>] [--product <p>] [--scan <dir> | --names <file>] [--gate]` scans the code for the environment names it reads and compares them with the contract (`--scan` walks a directory without git; `--names` takes names an assistant found itself, one per line, `-` for standard input, reported without file:line; `<env>` and `--product` narrow the declared keys): each name is `undeclared`, `declared_unobserved`, `ambiguous` or `declared`, with the scanner's coverage (files, languages, skipped patterns). `--gate` exits 8 on a new `undeclared` name, so a pull request cannot add a key the contract does not declare. It is for anyone and CI, and prints names only.
 
 `opv contract [--env <e>] [--component <c>] [--schema] [--check <file>] [--relaxations [--base <ref>]]` prints the contract as data: per component and environment, the name, kind, shape name, required state (contract × presence) and the contract digest. An environment lists only the keys declared for it: a key whose explicit `environments` list leaves the environment out is not in that environment's contract, and an `except`ed key is listed with `required: false`. `--schema` prints the JSON Schema it validates against; `--check <file>` exits 2 when a committed copy is stale; `--relaxations` lists the relaxations against the default branch (an `except` of a production-tier environment, `allow_same_value`, a removed shape, narrowed presence, `secret` → `config`), which CI posts as the separate `opv/relaxations` check until review accepts them. No id, rule parameter or value appears.
 
@@ -662,7 +662,7 @@ opv delivery verify prod --product p --json   # each placement's own state vault
 | `opv config export <env> --json [--product P]` | that environment's config-kind values, `{product: {KEY: value}}`: every product, or only `P` |
 | `opv config import --vault V [--file F] [--project P] [--path D]...` | save a `secrets.toml` as the project manifest; never deletes the file |
 | `opv config edit` | edit in `$VISUAL`/`$EDITOR`, validate, diff, confirm, save unless changed meanwhile |
-| `opv config check --file F` | exit 2 with a diff when a committed copy differs from the manifest |
+| `opv config check --file F` | exit 2 with a diff when a committed copy differs from the manifest; on a file project (`--config`, or a secrets.toml found from here and no `.opv`), F is a regenerated file that must load and equal the committed one (exit 0 equal, 2 with a diff) |
 
 Details, discovery and the review trade-off: [configuration in 1Password](configuration.md#configuration-in-1password). Declaring keys, environments and targets is `opv propose`: [configuration](configuration.md#start-from-an-existing-item-opv-init).
 

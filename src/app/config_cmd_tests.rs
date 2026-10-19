@@ -940,3 +940,67 @@ mod discovery {
         assert_eq!(res.unwrap_err().code_str(), "inventory_incomplete");
     }
 }
+
+// --- config check on a file project (#178) -------------------------------------------------
+
+/// A regenerated copy of the checkout's contract at `out/secrets.toml`.
+fn regenerated(dir: &Path, text: &str) -> PathBuf {
+    let out = dir.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let file = out.join("secrets.toml");
+    std::fs::write(&file, text).unwrap();
+    file
+}
+
+/// The contract half of [`TOML`]: what a generator writes (its ids stay in the bindings).
+fn contract_text(dir: &Path) -> String {
+    std::fs::read_to_string(dir.join("secrets.toml")).unwrap()
+}
+
+#[test]
+fn a_regenerated_file_with_the_same_configuration_passes() {
+    let (dir, op) = checkout();
+    let file = regenerated(
+        dir.path(),
+        &format!("# generated\n{}", contract_text(dir.path())),
+    );
+    let res = check_file_project(
+        &dir.path().join("secrets.toml"),
+        &file,
+        &op,
+        &mut Vec::new(),
+    );
+    assert!(res.is_ok(), "{res:?}");
+}
+
+#[test]
+fn a_regenerated_file_with_another_configuration_is_copies_differ() {
+    let (dir, op) = checkout();
+    let changed = contract_text(dir.path()).replace("dashboard", "console");
+    let file = regenerated(dir.path(), &changed);
+    let e = check_file_project(
+        &dir.path().join("secrets.toml"),
+        &file,
+        &op,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(e.code_str(), "copies_differ");
+}
+
+#[test]
+fn a_regenerated_file_that_does_not_load_is_refused_before_any_diff() {
+    let (dir, op) = checkout();
+    let file = regenerated(dir.path(), "API_KEY=not-a-configuration\n");
+    let mut out = Vec::new();
+    let _ = check_file_project(&dir.path().join("secrets.toml"), &file, &op, &mut out);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn a_file_regenerated_in_place_outside_git_is_config_unreadable() {
+    let (dir, op) = checkout();
+    let file = dir.path().join("secrets.toml");
+    let e = check_file_project(&file, &file, &op, &mut Vec::new()).unwrap_err();
+    assert_eq!(e.code_str(), "config_unreadable");
+}

@@ -238,10 +238,15 @@
       "name": "mcp serve"
     },
     {
-      "args": [],
+      "args": [
+        "env"
+      ],
       "flags": [
         "gate",
-        "json"
+        "json",
+        "names",
+        "product",
+        "scan"
       ],
       "name": "needs"
     },

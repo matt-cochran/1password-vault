@@ -1427,9 +1427,15 @@ fn state_doc<R: Accounted>(
         Section::Inventory => {
             crate::app::inventory::run(&fleet, env, product, r, None, true, &mut *out)
         }
-        Section::Needs => {
-            crate::app::needs::run(r, &needs_repo(r, project), &fleet, false, true, &mut *out)
-        }
+        Section::Needs => crate::app::needs::run(
+            r,
+            &needs_repo(r, project),
+            &fleet,
+            &crate::app::needs::NeedsOptions::default(),
+            false,
+            true,
+            &mut *out,
+        ),
         Section::Contract => {
             crate::app::contract::write_document(&fleet, env, product, true, &mut *out)
         }

@@ -178,6 +178,51 @@ impl Tree for WorkTree {
     }
 }
 
+/// A directory on disk, walked without git (`opv needs --scan <DIR>`): every regular file
+/// under the root, sorted, symlinks never followed; [`SKIP_DIRS`] are pruned while walking.
+pub struct DirTree;
+
+impl Tree for DirTree {
+    fn files(&self, _runner: &dyn CommandRunner, repo: &Path) -> Vec<String> {
+        let mut found = Vec::new();
+        walk(repo, "", &mut found);
+        found.sort();
+        found
+    }
+
+    fn read(&self, runner: &dyn CommandRunner, repo: &Path, path: &str) -> Option<String> {
+        WorkTree.read(runner, repo, path)
+    }
+}
+
+/// The regular files under `dir` (relative to the walk's root, `/`-separated, prefixed with
+/// `prefix`), skipping [`SKIP_DIRS`] and never following a symlink.
+fn walk(dir: &Path, prefix: &str, found: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let rel = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        if kind.is_dir() {
+            if !SKIP_DIRS.contains(&name.as_str()) {
+                walk(&entry.path(), &rel, found);
+            }
+        } else if kind.is_file() {
+            found.push(rel);
+        }
+    }
+}
+
 /// A committed revision: `git ls-tree -r -z --name-only <rev>` and `git show <rev>:<path>`,
 /// so a scan can read the deployed revision rather than the working tree.
 pub struct Revision<'a>(pub &'a str);
