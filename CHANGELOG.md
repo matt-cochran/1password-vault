@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-10-19
+
+### Fixed
+
+- `opv config export <env>` works with several products. It used to ask for `--product`, which the command did not accept, so a configuration with more than one product could not export its config values at all (since 0.10). It now prints every product's config values as `{product: {KEY: value}}`, leaving out source-only products and products with no config value there; `--product <p>` limits it to one product, and then only that product's keys (and the shared sources it reads) can block the export (#188).
+- `opv propose target`, `opv propose structure` and `opv apply` take `--project <name>`, as `opv access` does, so new state vaults and items keep a project's established name when the checkout's directory or repository is named differently. The next steps opv prints carry the flag, and a plan proposed under one project is refused under another (#183).
+- On a generated configuration, `opv propose … --write` is still refused, and the refusal now shows the change to make in the generator's input and steps to `opv propose structure`, then `opv apply`, which returns the ids for the generator to record. The read-only proposal no longer offers the refused `--write` as its next step, from the CLI or MCP (#184).
+- `opv needs` matches the names a target delivers a declared key under (for example `FLEET__WEB__API_KEY` from `secret_name = "FLEET__{PRODUCT}__{KEY}"`): such a read is the declared key, not an undeclared name, and the key is no longer reported as unobserved (#187).
+- Output masking no longer hides the word after a bare "Bearer" in prose, so a guidance string such as "never a Bearer header." survives `config export`. A value after `Authorization: Bearer` (also in JSON or `=` form) is always masked, and a bare "Bearer" before a token-like word (one with a digit, or 16 characters or more) still is (#186).
+- Docs: `opv config export` prints the contract without its 1Password ids; `--with-ids` fills them in (#185).
+
 ## [0.12.0] - 2026-10-18
 
 0.12.0 is a breaking release with one interface for people and assistants, from the CLI and five MCP tools: an assistant can guide setup end to end and sees every key's value state but never a value (#173-#178; design: `docs/design/assistant-guided-setup.md`).
