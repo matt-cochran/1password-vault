@@ -62,6 +62,8 @@ pub mod personal;
 #[cfg(test)]
 mod pinned_tests;
 #[cfg(test)]
+mod plan_tests;
+#[cfg(test)]
 #[path = "placement_tests.rs"]
 mod placement_tests;
 pub(crate) mod preflight;
@@ -741,7 +743,9 @@ fn changes(
         .iter()
         .filter(|r| r.action == Some("would_stage"))
         .collect();
-    let certain = staged.iter().any(|r| r.target_state != Some("present"))
+    let certain = staged
+        .iter()
+        .any(|r| !matches!(r.target_state, Some("present") | Some("unknown")))
         || !plan.prune.is_empty()
         || pinned.is_some_and(|m| m.values().any(|b| b.pending_deploy));
     if certain {
@@ -832,7 +836,8 @@ pub(crate) struct JsonRow {
     /// Why `rule` failed (FR-22): from the rule's fixed set or the configuration only.
     reason: Option<String>,
     target_name: Option<String>,
-    /// The row's state on its target: `present`, `absent`, `would_change` or null.
+    /// The row's state on its target: `present`, `absent`, `would_change`, `unknown`,
+    /// `not_delivered` or null (a config key the target does not deliver).
     target_state: Option<&'static str>,
     action: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1004,16 +1009,19 @@ fn json_reason(s: &KeyState) -> Option<String> {
     }
 }
 
-/// Target presence: secrets are present/absent/would-change; config only where the target
-/// delivers it itself (FR-46), otherwise none.
+/// Target presence: secrets are present/absent/would-change/unknown; config only where the
+/// target delivers it itself (FR-46), otherwise none.
 fn json_target(kind: Kind, target: TargetState) -> Option<&'static str> {
     match (kind, target) {
         (Kind::Config, TargetState::Unknown) => None,
+        // A secret opv cannot compare (no local digest, no store value) is not proof of
+        // presence (#201 decision 2).
+        (Kind::Secret, TargetState::Unknown) => Some("unknown"),
         // Read and checked, never written to this target (FR-47, FR-48).
         (_, TargetState::NotDelivered) => Some("not_delivered"),
         (_, TargetState::Absent) => Some("absent"),
         (_, TargetState::WouldChange) => Some("would_change"),
-        (_, _) => Some("present"),
+        (_, TargetState::Present) => Some("present"),
     }
 }
 

@@ -112,7 +112,7 @@ The count lines count the rows per target. `status` and `plan` exit 8 when a key
 | ON TARGET | `new` | not on the target yet; the next sync writes it |
 | | `same` | on the target with the same value (Azure, Kubernetes; GitHub variables) |
 | | `changed` | on the target with another value; the next sync writes it |
-| | `unknown` | on the target, but the target does not reveal values, so opv cannot compare them; on Fly sync stages and compares digests, on GitHub it writes the secret again |
+| | `unknown` | on the target, but the target does not reveal values, so opv cannot compare them; on Fly sync stages and compares digests, on GitHub it writes the secret again. JSON `target_state` is `unknown`, never `present` |
 | | `pending` | written but not yet live; the next `sync --deploy` rolls it out |
 | | `held` | immutable and already set; replace it with `--rotate` |
 | | `extra` | on the target but not wanted in this environment; removed only with `--prune` (sync prints `extra, not pruned`) |
@@ -878,8 +878,8 @@ renaming or removing a field, or changing its meaning, increments it.
 `state` is `saved`, `missing`, `failing_rule`, `skipped` or `source_blocked`; `rule` names the
 failing rule when `state` is `failing_rule`, and `reason` says why (see
 [Failure reasons](configuration.md#failure-reasons)); `target` names the row's target (FR-56); `target_name` is the key's name on the
-target for every provider; `target_state` is `present`, `absent` or `would_change` for a secret, `not_delivered`
-for a key the target does not deliver (a source-only value, or a product left out of
+target for every provider; `target_state` is `present`, `absent`, `would_change` or `unknown` for a secret,
+`not_delivered` for a key the target does not deliver (a source-only value, or a product left out of
 the target's `products`), and `null` for a config key (or `present`/`absent`/`would_change` where
 the target takes config as variables), exactly the row's ON TARGET column; `action` is `would_stage`, `would_prune`, `held` or `null`. The same row shape,
 in the same key order, is used by `status` and `plan`. With `--product`,
