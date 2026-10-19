@@ -176,8 +176,17 @@ impl Cell {
 }
 
 /// The per-call limit a `timeout` cell runs opv with (`OPV_TEST_CALL_LIMIT`, `fake` builds
-/// only), so the hang ends as opv's own timeout without waiting out the real limits.
+/// only), so the hang ends as opv's own timeout without waiting out the real limits. It holds
+/// for the hanging call only (`OPV_TEST_CALL_LIMIT_CALL`): every other call keeps opv's real
+/// limits, so a loaded machine cannot time out a call the fault does not target (#205). A run
+/// that shows one anyway is disturbed ([`disturbance`]), run again and never cached.
 const CALL_LIMIT_SECS: &str = "2";
+
+/// How many times a disturbed cell is run before its disturbed outcome is reported.
+const DISTURBED_ATTEMPTS: usize = 3;
+
+/// The harness's own real-time limit on one opv run.
+const RUN_LIMIT: Duration = Duration::from_secs(180);
 
 fn slug(s: &str) -> String {
     let mut out = String::new();
@@ -196,8 +205,9 @@ fn slug(s: &str) -> String {
 /// simulator that log each call's argv and exit, a scratch `HOME` and a project copy.
 struct Scenario {
     root: tempfile::TempDir,
-    /// Set for a scenario with a `timeout` fault: `OPV_TEST_CALL_LIMIT` for opv.
-    call_limit: bool,
+    /// The hanging call of a `timeout` cell (`<program> <words>`): `OPV_TEST_CALL_LIMIT`
+    /// for that call only.
+    call_limit: Option<String>,
 }
 
 impl Scenario {
@@ -234,13 +244,19 @@ impl Scenario {
             let name = name.to_string_lossy();
             // The child keeps its stderr (fd 3); bash's own job report of a killed child
             // ("line 4: <pid> Killed …", with a PID and the builder's path) goes nowhere.
+            // `open/<id>` holds the call's argv while it runs: one left behind is a call opv
+            // cut off ([`Scenario::cut_off`]).
             let script = format!(
                 "#!/bin/bash\n\
                  printf '%s\\x1f' '{name}' \"$@\" >> \"$OPV_SIM_WORLD/argv.log\"\n\
                  printf '\\x1e' >> \"$OPV_SIM_WORLD/argv.log\"\n\
+                 open=\"$OPV_SIM_WORLD/open/$$.$RANDOM$RANDOM\"\n\
+                 mkdir -p \"$OPV_SIM_WORLD/open\"\n\
+                 printf '%s\\x1f' '{name}' \"$@\" > \"$open\"\n\
                  exec 3>&2\n\
                  {{ ( exec -a '{name}' '{SIM}' \"$@\" 2>&3 ); }} 2>/dev/null\n\
                  rc=$?\n\
+                 rm -f \"$open\"\n\
                  echo \"$rc\" >> \"$OPV_SIM_WORLD/exits.log\"\n\
                  if [ \"$rc\" -gt 128 ] && [ \"$rc\" -lt 160 ]; then kill -$((rc - 128)) $$; fi\n\
                  exit $rc\n"
@@ -252,7 +268,7 @@ impl Scenario {
         }
         Self {
             root,
-            call_limit: faults.contains("kind = \"timeout\""),
+            call_limit: None,
         }
     }
 
@@ -276,18 +292,25 @@ impl Scenario {
             // Doctor's core-dump check reads this, not the host's `fs.suid_dumpable`: the
             // warning count in the summary line must not depend on the builder.
             .env("OPV_TEST_SUID_DUMPABLE", "0")
-            .envs(
-                self.call_limit
-                    .then_some(("OPV_TEST_CALL_LIMIT", CALL_LIMIT_SECS)),
-            )
+            .envs(self.call_limit.iter().flat_map(|scope| {
+                [
+                    ("OPV_TEST_CALL_LIMIT", CALL_LIMIT_SECS),
+                    ("OPV_TEST_CALL_LIMIT_CALL", scope.as_str()),
+                ]
+            }))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .expect("run opv");
-        let deadline = Instant::now() + Duration::from_secs(180);
+        let deadline = Instant::now() + RUN_LIMIT;
+        let mut overran = false;
         loop {
-            if child.try_wait().expect("wait").is_some() || Instant::now() > deadline {
+            if child.try_wait().expect("wait").is_some() {
+                break;
+            }
+            if Instant::now() > deadline {
+                overran = true;
                 break;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -298,7 +321,20 @@ impl Scenario {
             code: out.status.code(),
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            overran,
         }
+    }
+
+    /// The simulated calls opv cut off (killed before they answered), as `(program, words)`.
+    fn cut_off(&self) -> Vec<(String, Vec<String>)> {
+        std::fs::read_dir(self.path("world/open"))
+            .map(|d| {
+                d.filter_map(Result::ok)
+                    .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+                    .map(|r| call_record(&r))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Every simulated call so far, as `(program, words)`.
@@ -306,22 +342,7 @@ impl Scenario {
         let log = std::fs::read_to_string(self.path("world/argv.log")).unwrap_or_default();
         log.split('\x1e')
             .filter(|r| !r.is_empty())
-            .map(|r| {
-                let mut parts: Vec<String> = r.split('\x1f').map(str::to_string).collect();
-                parts.pop(); // after the last separator
-                let name = parts.remove(0);
-                let program = if name == "fly" { "flyctl".into() } else { name };
-                let words = if program == "ssh" {
-                    parts
-                        .iter()
-                        .filter(|a| !a.starts_with('-'))
-                        .cloned()
-                        .collect()
-                } else {
-                    sim_args::words(&parts, boolean_flags(&program))
-                };
-                (program, words)
-            })
+            .map(call_record)
             .collect()
     }
 
@@ -357,6 +378,25 @@ impl Scenario {
             .replace_all(&s, r#"{"name":"core dumps","host":true}"#)
             .into_owned()
     }
+}
+
+/// One logged call (`<name>\x1f<arg>\x1f…\x1f`) as `(program, words)`, the words computed as
+/// the simulator computes them.
+fn call_record(r: &str) -> (String, Vec<String>) {
+    let mut parts: Vec<String> = r.split('\x1f').map(str::to_string).collect();
+    parts.pop(); // after the last separator
+    let name = parts.remove(0);
+    let program = if name == "fly" { "flyctl".into() } else { name };
+    let words = if program == "ssh" {
+        parts
+            .iter()
+            .filter(|a| !a.starts_with('-'))
+            .cloned()
+            .collect()
+    } else {
+        sim_args::words(&parts, boolean_flags(&program))
+    };
+    (program, words)
 }
 
 /// The tools the simulator stands in for: never taken from the host.
@@ -435,6 +475,9 @@ struct Run {
     code: Option<i32>,
     stdout: String,
     stderr: String,
+    /// The harness stopped opv at its own real-time limit ([`RUN_LIMIT`]).
+    #[serde(skip)]
+    overran: bool,
 }
 
 /// What one cell produced, normalized for the snapshot.
@@ -446,6 +489,41 @@ struct Outcome {
     sim_exits: Vec<i32>,
     /// The `next` of the `--json` document, and the exit of `opv <next> --help`.
     next_help: Option<(String, Option<i32>)>,
+    /// Why the run says nothing about opv: the machine, not the fault, decided it
+    /// ([`disturbance`]). A disturbed outcome is never cached.
+    #[serde(skip)]
+    disturbed: Option<String>,
+}
+
+impl Cell {
+    /// Whether the cell's fault hits a call: its program, and its words leading the call's.
+    fn targets(&self, program: &str, words: &[String]) -> bool {
+        let wanted: Vec<&str> = self.call.split_whitespace().collect();
+        program == self.program
+            && wanted.len() <= words.len()
+            && wanted.iter().zip(words).all(|(w, a)| w == a)
+    }
+}
+
+/// Why a cell's run was decided by the machine rather than the fault: the harness had to stop
+/// opv at its own real-time limit, or opv cut off a call the fault does not target (only the
+/// targeted call hangs; any other call ran into the short call limit because it was slow).
+fn disturbance(cell: &Cell, overran: bool, cut_off: &[(String, Vec<String>)]) -> Option<String> {
+    if overran {
+        return Some(format!(
+            "opv ran past the harness's {}s limit",
+            RUN_LIMIT.as_secs()
+        ));
+    }
+    cut_off
+        .iter()
+        .find(|(program, words)| !cell.targets(program, words))
+        .map(|(program, words)| {
+            format!(
+                "`{program} {}` is not the faulted call but opv cut it off",
+                words.join(" ")
+            )
+        })
 }
 
 /// The recordings directory of a simulated tool (tests/sim/<tool>.rs `DIR`).
@@ -558,8 +636,22 @@ impl Outcome {
     }
 }
 
+/// Run the cell until a run is not disturbed, at most [`DISTURBED_ATTEMPTS`] times.
 fn run_cell(cell: &Cell) -> Outcome {
-    let sc = Scenario::new(&cell.faults());
+    let mut o = run_cell_once(cell);
+    for _ in 1..DISTURBED_ATTEMPTS {
+        let Some(why) = &o.disturbed else {
+            break;
+        };
+        eprintln!("matrix: {} disturbed, running it again: {why}", cell.name());
+        o = run_cell_once(cell);
+    }
+    o
+}
+
+fn run_cell_once(cell: &Cell) -> Outcome {
+    let mut sc = Scenario::new(&cell.faults());
+    sc.call_limit = (cell.kind == "timeout").then(|| format!("{} {}", cell.program, cell.call));
     let base: Vec<String> = cell.args().iter().map(|a| a.to_string()).collect();
     let text = sc.opv(&base);
     let mut json_args = base.clone();
@@ -570,14 +662,17 @@ fn run_cell(cell: &Cell) -> Outcome {
             code: text.code,
             stdout: sc.normalize(&text.stdout),
             stderr: sc.normalize(&text.stderr),
+            overran: text.overran,
         },
         json: Run {
             code: json.code,
             stdout: sc.normalize(&json.stdout),
             stderr: sc.normalize(&json.stderr),
+            overran: json.overran,
         },
         sim_exits: sc.sim_exits(),
         next_help: None,
+        disturbed: disturbance(cell, text.overran || json.overran, &sc.cut_off()),
     };
     if let Some(next) = out.document().as_ref().and_then(next_of) {
         let code = match shell_words(&next) {
@@ -585,7 +680,11 @@ fn run_cell(cell: &Cell) -> Outcome {
                 w.remove(0);
                 let at = w.iter().position(|a| a == "--").unwrap_or(w.len());
                 w.insert(at, "--help".into());
-                sc.opv(&w).code
+                let help = sc.opv(&w);
+                if help.overran && out.disturbed.is_none() {
+                    out.disturbed = disturbance(cell, true, &[]);
+                }
+                help.code
             }
             // Another program's command (op, kubectl, …): clap has nothing to say.
             Some(_) => Some(0),
@@ -598,24 +697,45 @@ fn run_cell(cell: &Cell) -> Outcome {
 
 // --- the cache shared by the rule tests of one cell -----------------------------------------
 
-/// The fingerprint of everything a cell's result depends on.
+/// The fingerprint of everything a cell's result depends on, the recordings the simulator
+/// reads at run time included.
 fn inputs_key() -> String {
     static KEY: OnceLock<String> = OnceLock::new();
     KEY.get_or_init(|| {
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        for p in [
+        let mut inputs = vec![
             PathBuf::from(OPV),
             PathBuf::from(SIM),
             Path::new(ROOT).join("tests/e2e/app/world.json"),
             Path::new(ROOT).join("tests/e2e/app/secrets.toml"),
+            Path::new(ROOT).join("tests/e2e/app/secrets.bindings.toml"),
             Path::new(ROOT).join("tests/e2e/matrix.rs"),
-        ] {
+        ];
+        files_under(&Path::new(ROOT).join("tests/fixtures"), &mut inputs);
+        for p in inputs {
             let m = std::fs::metadata(&p).expect("input");
+            p.hash(&mut h);
             (m.len(), m.modified().unwrap_or(SystemTime::UNIX_EPOCH)).hash(&mut h);
         }
         format!("{:016x}", h.finish())
     })
     .clone()
+}
+
+/// Every file under `dir`, in a stable order.
+fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    paths.sort();
+    for p in paths {
+        if p.is_dir() {
+            files_under(&p, out);
+        } else {
+            out.push(p);
+        }
+    }
 }
 
 fn cache_dir() -> PathBuf {
@@ -650,11 +770,30 @@ fn compute(cell: &Cell) -> Option<Outcome> {
         return None;
     }
     let o = cached(cell).unwrap_or_else(|| run_cell(cell));
-    let tmp = dir.join(format!("{}.{}.tmp", cell.name(), std::process::id()));
-    std::fs::write(&tmp, serde_json::to_vec(&o).expect("encode")).expect("cache");
-    std::fs::rename(&tmp, dir.join(format!("{}.json", cell.name()))).expect("cache");
+    store(&dir, cell, &o);
     let _ = std::fs::remove_file(&lock);
     Some(o)
+}
+
+/// Cache an outcome in `dir`, unless the machine decided it: a disturbed result would fail
+/// every later run of the same build.
+fn store(dir: &Path, cell: &Cell, o: &Outcome) {
+    if o.disturbed.is_some() {
+        return;
+    }
+    let tmp = dir.join(format!("{}.{}.tmp", cell.name(), std::process::id()));
+    std::fs::write(&tmp, serde_json::to_vec(o).expect("encode")).expect("cache");
+    std::fs::rename(&tmp, dir.join(format!("{}.json", cell.name()))).expect("cache");
+}
+
+/// Fail a test on a disturbed outcome with the reason, not with a misleading rule or diff.
+fn assert_undisturbed(cell: &Cell, o: &Outcome) {
+    if let Some(why) = &o.disturbed {
+        panic!(
+            "{}: no result after {DISTURBED_ATTEMPTS} runs: {why}",
+            cell.name()
+        );
+    }
 }
 
 /// The cell's outcome, computed once per build of the inputs and shared between the rule
@@ -918,6 +1057,7 @@ fn known_legacy() -> &'static BTreeSet<String> {
 /// fails (an entry whose rule now holds must be removed).
 fn rule_test(cell: &Cell, rule: Rule) {
     let o = outcome(cell);
+    assert_undisturbed(cell, &o);
     let result = rule.check(cell, &o);
     let listed = known_legacy().contains(&format!("{} {}", cell.name(), rule.name()));
     assert_eq!(
@@ -941,6 +1081,7 @@ fn snapshot_test(cell: &Cell) {
         return;
     }
     let o = outcome(cell);
+    assert_undisturbed(cell, &o);
     let path = snapshots().join(format!("{}.snap", cell.name()));
     let got = o.snapshot(cell);
     if updating() {
@@ -1283,4 +1424,105 @@ fn every_snapshot_belongs_to_a_cell() {
         })
         .unwrap_or_default();
     assert!(orphans.is_empty(), "snapshots without a cell: {orphans:?}");
+}
+
+// --- the harness's own logic ----------------------------------------------------------------
+
+mod harness {
+    use super::*;
+
+    fn timeout_cell() -> Cell {
+        Cell {
+            command: "doctor_prod".into(),
+            program: "kubectl".into(),
+            call: "auth can-i".into(),
+            kind: "timeout".into(),
+        }
+    }
+
+    fn call(program: &str, words: &[&str]) -> (String, Vec<String>) {
+        (
+            program.into(),
+            words.iter().map(|w| w.to_string()).collect(),
+        )
+    }
+
+    fn disturbed() -> Outcome {
+        Outcome {
+            disturbed: Some("loaded".into()),
+            ..Outcome::default()
+        }
+    }
+
+    #[test]
+    fn a_cut_off_call_the_fault_targets_is_no_disturbance() {
+        let cut = [call("kubectl", &["auth", "can-i", "patch", "configmaps"])];
+        assert_eq!(disturbance(&timeout_cell(), false, &cut), None);
+    }
+
+    #[test]
+    fn a_cut_off_call_the_fault_does_not_target_disturbs_the_run() {
+        let cut = [call("op", &["vault", "user", "list"])];
+        assert!(disturbance(&timeout_cell(), false, &cut).is_some());
+    }
+
+    #[test]
+    fn a_run_past_the_harness_limit_disturbs_it() {
+        assert!(disturbance(&timeout_cell(), true, &[]).is_some());
+    }
+
+    #[test]
+    fn a_disturbed_outcome_is_not_cached() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        store(dir.path(), &timeout_cell(), &disturbed());
+        let name = format!("{}.json", timeout_cell().name());
+        assert!(!dir.path().join(name).exists());
+    }
+
+    #[test]
+    fn an_undisturbed_outcome_is_cached() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        store(dir.path(), &timeout_cell(), &Outcome::default());
+        let name = format!("{}.json", timeout_cell().name());
+        assert!(dir.path().join(name).exists());
+    }
+
+    /// Run the scenario's `kubectl auth can-i get deployments` wrapper, killing it after
+    /// `after` as opv kills a call at its limit.
+    fn kubectl_killed_after(sc: &Scenario, after: Duration) {
+        let mut child = Command::new(sc.path("bin/kubectl"))
+            .args(["auth", "can-i", "get", "deployments"])
+            .env("OPV_SIM_WORLD", sc.path("world"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("run wrapper");
+        let deadline = Instant::now() + after;
+        while child.try_wait().expect("wait").is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn a_call_killed_before_it_answers_is_cut_off() {
+        let sc = Scenario::new(&format!(
+            "{}seconds = 5\n",
+            timeout_cell().faults().replace("seconds = 60\n", "")
+        ));
+        kubectl_killed_after(&sc, Duration::from_millis(500));
+        assert_eq!(
+            sc.cut_off(),
+            vec![call("kubectl", &["auth", "can-i", "get", "deployments"])]
+        );
+    }
+
+    #[test]
+    fn a_call_that_answers_is_not_cut_off() {
+        let sc = Scenario::new("");
+        kubectl_killed_after(&sc, Duration::from_secs(60));
+        assert!(sc.cut_off().is_empty());
+    }
 }

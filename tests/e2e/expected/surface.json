@@ -37,6 +37,7 @@
         "plan_id"
       ],
       "flags": [
+        "attest",
         "generate",
         "json",
         "project",
@@ -929,6 +930,39 @@
             "required": [
               "kind",
               "env"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "env": {
+                "pattern": "^[a-z][a-z0-9-]*$",
+                "type": "string"
+              },
+              "keys": {
+                "items": {
+                  "pattern": "^[a-z][a-z0-9-]*/[A-Z][A-Z0-9_]*$",
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              },
+              "kind": {
+                "enum": [
+                  "attest"
+                ]
+              },
+              "target": {
+                "pattern": "^[a-z][a-z0-9-]*$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "env",
+              "target",
+              "keys"
             ],
             "type": "object"
           }

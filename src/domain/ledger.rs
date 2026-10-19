@@ -25,6 +25,8 @@ pub struct Ledger {
     key: Option<SecretValue>,
     /// name → (store version, fingerprint hex).
     entries: BTreeMap<String, (String, String)>,
+    /// Names whose line is a person's attestation (#201), not opv's own evidence.
+    attested: std::collections::BTreeSet<String>,
 }
 
 impl fmt::Debug for Ledger {
@@ -76,7 +78,22 @@ impl Ledger {
                     )
                 })
                 .collect(),
+            attested: evidence
+                .iter()
+                .filter(|e| e.attested())
+                .map(|e| e.name.clone())
+                .collect(),
         }
+    }
+
+    /// Whether `name`'s line is a person's attestation at the store's version `version_now`
+    /// (#201): the ledger then judges it identical, but attested, not proven.
+    pub fn attested(&self, name: &str, version_now: &str) -> bool {
+        self.attested.contains(name)
+            && self
+                .entries
+                .get(name)
+                .is_some_and(|(v, _)| v == version_now)
     }
 
     /// Each recorded name with the store version opv's own sync left it at (#95). Never a

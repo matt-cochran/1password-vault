@@ -22,8 +22,14 @@ function writeCanonical(h, version, marker) {
   fs.chmodSync(h.target, 0o755);
 }
 
-function wrapper(h, args) {
-  return run(path.join(h.pkgDir, 'bin', 'opv.js'), { home: h.home, args });
+// The fixture package is not under `npm root -g`, so tests of the shared-copy rules
+// ask for a global install explicitly; npm sets npm_config_global for a global script.
+function wrapper(h, args, env = {}) {
+  return run(path.join(h.pkgDir, 'bin', 'opv.js'), {
+    home: h.home,
+    args,
+    env: { npm_config_global: 'true', ...env },
+  });
 }
 
 test('wrapper runs the canonical binary when its version matches', unix, () => {
@@ -101,6 +107,40 @@ test('the shim installs a missing canonical binary', unix, () => {
   const h = setup({ binary: bundledBody });
   wrapper(h, ['x']);
   assert.equal(fs.readFileSync(h.target, 'utf8'), bundledBody);
+});
+
+test('a project-local shim does not create the canonical binary', unix, () => {
+  const h = setup({ binary: bundledBody });
+  wrapper(h, ['x'], { npm_config_global: 'false' });
+  assert.equal(fs.existsSync(h.target), false);
+});
+
+test('a project-local shim runs the platform package binary', unix, () => {
+  const h = setup();
+  const marker = path.join(h.root, 'bundled-ran');
+  writeBundled(h, marker);
+  writeCanonical(h, '1.2.3', path.join(h.root, 'canonical-ran'));
+  wrapper(h, ['hello'], { npm_config_global: 'false' });
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'hello');
+});
+
+test('a project-local shim leaves an existing canonical binary unchanged', unix, () => {
+  const h = setup();
+  const existing = '#!/bin/sh\necho "opv 0.9.0"\n';
+  fs.writeFileSync(h.target, existing);
+  fs.chmodSync(h.target, 0o755);
+  wrapper(h, ['x'], { npm_config_global: 'false' });
+  assert.equal(fs.readFileSync(h.target, 'utf8'), existing);
+});
+
+test('a shim outside npm root -g does not create the canonical binary', unix, () => {
+  const h = setup({ binary: bundledBody });
+  run(path.join(h.pkgDir, 'bin', 'opv.js'), {
+    home: h.home,
+    args: ['x'],
+    env: { npm_config_global: '', npm_config_prefix: path.join(h.root, 'global') },
+  });
+  assert.equal(fs.existsSync(h.target), false);
 });
 
 test('the shim records npm as the installer after a repair', unix, () => {

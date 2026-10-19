@@ -440,6 +440,26 @@ pub enum PlanScope {
     },
     /// A structural plan (`opv propose structure`).
     Structural,
+    /// A person's attestation of held keys on one target (#201, `opv apply --attest`).
+    Attest {
+        env: EnvName,
+        target: TargetName,
+        keys: Vec<ProductKey>,
+    },
+}
+
+impl PlanScope {
+    /// `--attest <env>:<target>:<product/KEY>` for each key of an attestation scope, as
+    /// `opv apply` takes them; empty for every other scope.
+    pub fn attest_args(&self) -> Vec<String> {
+        match self {
+            PlanScope::Attest { env, target, keys } => keys
+                .iter()
+                .flat_map(|k| ["--attest".to_string(), format!("{env}:{target}:{k}")])
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
 }
 
 /// Where the name of a resource that was not found came from, so the Do says where to fix it.

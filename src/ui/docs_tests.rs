@@ -72,6 +72,7 @@ fn status_document() -> Vec<u8> {
         no_channel: Vec::new(),
         concealed_config: Vec::new(),
         drift: Vec::new(),
+        attested: Vec::new(),
         undelivered: Vec::new(),
         unreferenced_sources: Vec::new(),
         tidy: Vec::new(),

@@ -47,7 +47,6 @@ const KEY_FIELD: &str = "evidence key";
 /// The non-secret field a sync records for `opv changed` (C2): one `v1|<item_id>|<version>`
 /// line per source item, ids and integers only. Written only after a confirmed sync.
 const SOURCE_VERSIONS_FIELD: &str = "source versions";
-
 /// The binding set of `product` on target `target` of `env_name`: exactly the secrets the
 /// target delivers for it, by target name, with the 1Password field each value comes from
 /// (a shared key names its source, FR-45), in the source's boundary item (FR-57). A key
@@ -484,11 +483,24 @@ pub fn record(
                 unread |= !values.contains_key(&b.source.field);
                 continue;
             };
+            let fingerprint = hmac_hex(key.as_bytes(), value.expose().as_bytes());
+            // #201: a name this sync did not write keeps a person's attestation while its
+            // line still says the same version and value; a write records ordinary evidence.
+            let attested_at = evidence
+                .get(&b.name)
+                .filter(|e| {
+                    !written.contains(&b.name)
+                        && e.store_version == version
+                        && e.fingerprint == fingerprint
+                        && e.source == b.source
+                })
+                .and_then(|e| e.attested_at.clone());
             let line = Evidence {
                 name: b.name.clone(),
                 store_version: version,
-                fingerprint: hmac_hex(key.as_bytes(), value.expose().as_bytes()),
+                fingerprint,
                 source: b.source.clone(),
+                attested_at,
             };
             // A store version the evidence line cannot hold (empty, or with `|`) is never
             // recorded: the name stays unconfirmed, so no revision vouches for it.
@@ -507,6 +519,12 @@ pub fn record(
                 unrecordable.join(", ")
             ));
         }
+        // #201: the names whose evidence is still a person's attestation (sorted).
+        let attested: Vec<String> = evidence
+            .values()
+            .filter(|e| e.attested())
+            .map(|e| e.name.clone())
+            .collect();
         let evidence: Vec<Evidence> = evidence.into_values().collect();
         let this_scope = scope(fleet, env_name, target, &product, &account)?;
         let receipt = if why.is_empty() {
@@ -514,6 +532,7 @@ pub fn record(
             let unchanged = state.receipt.as_ref().filter(|rec| {
                 rec.scope == this_scope
                     && rec.bindings == set
+                    && rec.attested == attested
                     && lines(&state.evidence) == lines(&evidence)
             });
             Some(match unchanged {
@@ -529,6 +548,7 @@ pub fn record(
                         delivered_at: crate::domain::provenance::utc_now(),
                         plan_id: Some(plan_id.to_string()),
                         opv_version: env!("CARGO_PKG_VERSION").into(),
+                        attested,
                     }
                 }
             })
@@ -560,6 +580,149 @@ pub fn record(
     Ok(out)
 }
 
+/// One name a person attests on a placement (#201): its binding, the target's current
+/// store version, and the keyed fingerprint of its 1Password value under the placement's
+/// evidence key. Debug prints the name only.
+#[derive(Clone)]
+pub(crate) struct Attest {
+    pub(crate) binding: BindingRef,
+    pub(crate) store_version: String,
+    pub(crate) fingerprint: String,
+    /// [`key_check`] of the evidence key the fingerprint was made under: a key replaced
+    /// since makes the attestation stale.
+    pub(crate) key_check: String,
+}
+
+/// A keyed check of an evidence key (#201): equal for the same key, and reveals nothing of it.
+pub(crate) fn key_check(key: &str) -> String {
+    hmac_hex(key.as_bytes(), b"opv-attest-key-check")
+}
+
+/// What [`record_attestation`] found in the freshly read delivery item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AttestWrite {
+    /// These names were recorded now (empty: each was already attested as planned, so a
+    /// retry of the same plan records nothing again).
+    Recorded(Vec<String>),
+    /// The item changed since the plan was made (its evidence key, or a line for a name):
+    /// the plan is stale and nothing was written.
+    Changed,
+}
+
+impl std::fmt::Debug for Attest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Attest")
+            .field("name", &self.binding.name)
+            .finish()
+    }
+}
+
+/// The evidence key of `product`'s delivery item on target `target` (#201): what an
+/// attestation fingerprints with. `None` when the placement has no delivery item or no
+/// evidence key yet (no sync recorded it).
+pub(crate) fn evidence_key(
+    fleet: &Fleet,
+    env_name: &str,
+    target: &str,
+    product: &str,
+    r: &dyn CommandRunner,
+) -> Result<Option<Zeroizing<String>>, Error> {
+    Ok(read_state(fleet, env_name, target, product, r)?.and_then(|s| s.key))
+}
+
+/// The keyed fingerprint of `value` under `key`: what an evidence line holds.
+pub(crate) fn fingerprint(key: &str, value: &SecretValue) -> String {
+    hmac_hex(key.as_bytes(), value.expose().as_bytes())
+}
+
+/// The 1Password values of the environment's boundary items, by `product/KEY` field.
+pub(crate) fn values_of(
+    fleet: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+) -> Result<BTreeMap<String, SecretValue>, Error> {
+    values_by_field(fleet, env_name, r)
+}
+
+/// Record a person's attestation of `names` on `product`'s placement on target `target`
+/// (#201): each name's evidence line, tagged `a1` with `at`, at the store version and
+/// fingerprint the plan computed. The item is read fresh first and checked again: the same
+/// evidence key, and for each name either no line (it is recorded) or the very line this
+/// plan records (already attested: skipped, so a retry succeeds). Anything else is
+/// [`AttestWrite::Changed`] and nothing is written. The receipt is kept as it is: the next
+/// sync proves the names through these lines and mints the revision. Nothing is written to
+/// the target; only the placement's own delivery item is read and written.
+pub(crate) fn record_attestation(
+    fleet: &Fleet,
+    env_name: &str,
+    target: &str,
+    product: &str,
+    names: &[Attest],
+    at: &str,
+    r: &dyn CommandRunner,
+) -> Result<AttestWrite, Error> {
+    let env = fleet.environment(env_name)?;
+    let Some(state) = read_state(fleet, env_name, target, product, r)? else {
+        return Ok(AttestWrite::Changed);
+    };
+    let Some(key) = state.key.clone() else {
+        return Ok(AttestWrite::Changed);
+    };
+    let check = key_check(&key);
+    let mut evidence: BTreeMap<String, Evidence> = state
+        .evidence
+        .iter()
+        .map(|e| (e.name.clone(), e.clone()))
+        .collect();
+    let mut recorded = Vec::new();
+    for n in names {
+        if n.key_check != check {
+            return Ok(AttestWrite::Changed);
+        }
+        match evidence.get(&n.binding.name) {
+            None => {}
+            Some(e)
+                if e.attested()
+                    && e.store_version == n.store_version
+                    && e.fingerprint == n.fingerprint
+                    && e.source == n.binding.source =>
+            {
+                continue;
+            }
+            Some(_) => return Ok(AttestWrite::Changed),
+        }
+        let line = Evidence {
+            name: n.binding.name.clone(),
+            store_version: n.store_version.clone(),
+            fingerprint: n.fingerprint.clone(),
+            source: n.binding.source.clone(),
+            attested_at: Some(at.to_string()),
+        };
+        if encode_evidence(&line).is_none() {
+            return Err(Cause::Bug {
+                site: "attest: a store version checked before the write does not encode",
+            }
+            .into());
+        }
+        recorded.push(line.name.clone());
+        evidence.insert(line.name.clone(), line);
+    }
+    if recorded.is_empty() {
+        return Ok(AttestWrite::Recorded(recorded));
+    }
+    let evidence: Vec<Evidence> = evidence.into_values().collect();
+    write_state(
+        r,
+        env,
+        &state,
+        state.receipt.as_ref(),
+        &key,
+        &evidence,
+        state.source_versions.as_deref(),
+    )?;
+    Ok(AttestWrite::Recorded(recorded))
+}
+
 /// The encoded evidence lines, sorted: what two readings of an item compare by.
 fn lines(evidence: &[Evidence]) -> Vec<String> {
     let mut out: Vec<String> = evidence.iter().filter_map(encode_evidence).collect();
@@ -582,7 +745,7 @@ fn versions_text(set: &[BindingRef], source_versions: &BTreeMap<String, u64>) ->
 
 /// Rewrite the placement's delivery item `state`: its notes kept, then the receipt (when
 /// one was ever minted), the recorded source versions (C2), the key and one concealed
-/// evidence field per name.
+/// evidence field per name (a person's attestation is its own `a1` line, #201).
 fn write_state(
     r: &dyn CommandRunner,
     env: &crate::domain::Environment,
@@ -1036,6 +1199,16 @@ fn report(
         }
         for n in v.names.iter().filter(|n| n.state != "verified") {
             writeln!(out, "  {:<32} {}", n.name, state_words(n.state)).map_err(write_err)?;
+        }
+        // #201: a name the revision counts on a person's attestation is said so, whatever
+        // its state: the ledger proves it unchanged since, not that it was right.
+        for n in v.names.iter().filter(|n| n.attested) {
+            writeln!(
+                out,
+                "  {:<32} attested by a person, not proven (docs/attestation.md)",
+                n.name
+            )
+            .map_err(write_err)?;
         }
     }
     if checks.is_empty() {

@@ -245,6 +245,14 @@ pub enum Intent {
         #[serde(default)]
         guidance: Option<Guidance>,
     },
+    /// A person's attestation of held immutable keys on one staged target (#201): their
+    /// evidence recorded at the target's current version without a write.
+    Attest {
+        env: EnvName,
+        target: TargetName,
+        /// `product/KEY` each; at least one.
+        keys: Vec<KeyRef>,
+    },
 }
 
 /// Parse the one JSON intent document (design §25.2). An unknown field is refused before
@@ -307,6 +315,7 @@ fn allowed_fields(kind: &str) -> Option<&'static [&'static str]> {
         ],
         "structure" => &["kind", "rebind", "guidance"],
         "generate" => &["kind", "env", "keys", "guidance"],
+        "attest" => &["kind", "env", "target", "keys"],
         _ => return None,
     })
 }
@@ -454,6 +463,26 @@ fn validate(intent: &Intent) -> Result<(), Error> {
             check_env("env", env)?;
             if let Some(g) = guidance {
                 screen("guidance", &g.text)?;
+            }
+        }
+        Intent::Attest { env, target, keys } => {
+            check_env("env", env)?;
+            check_target("target", target)?;
+            if keys.is_empty() {
+                return Err(bad("keys", FieldRule::Missing));
+            }
+            for (i, k) in keys.iter().enumerate() {
+                let field = format!("keys[{i}]");
+                let Some((p, key)) = k.as_str().split_once('/') else {
+                    return Err(bad(
+                        &field,
+                        FieldRule::Type {
+                            expected: "<product>/<KEY>",
+                        },
+                    ));
+                };
+                check_product(&field, &ProductName::new(p))?;
+                check_key(&field, &KeyName::new(key))?;
             }
         }
     }
@@ -793,6 +822,19 @@ pub fn json_schema() -> serde_json::Value {
         }),
         serde_json::json!(["kind", "env"]),
     );
+    let attest_kind = object(
+        serde_json::json!({
+            "kind": { "enum": ["attest"] },
+            "env": env(),
+            "target": target(),
+            "keys": {
+                "type": "array",
+                "minItems": 1,
+                "items": name("^[a-z][a-z0-9-]*/[A-Z][A-Z0-9_]*$")
+            }
+        }),
+        serde_json::json!(["kind", "env", "target", "keys"]),
+    );
 
     serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -805,7 +847,8 @@ pub fn json_schema() -> serde_json::Value {
             retire_kind,
             setup_kind,
             structure_kind,
-            generate_kind
+            generate_kind,
+            attest_kind
         ]
     })
 }

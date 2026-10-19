@@ -1204,7 +1204,7 @@ fn opv_on_path(r: &dyn CommandRunner) -> Result<Check, Error> {
         return Ok(match wrappers.first() {
             None => Check::Ok("not found on PATH".into()),
             Some((p, v)) => Check::Ok(format!(
-                "{} {} (npm wrapper running its bundled copy; run: npm rebuild -g @matthew-cochran/opv)",
+                "{} {} (npm wrapper running its bundled copy; run: {NPM_REPAIR})",
                 p.display(),
                 v.as_deref().unwrap_or("version not recognised")
             )),
@@ -2070,6 +2070,15 @@ mod tests {
     fn doctor_lists_one_opv_on_path_with_its_version() {
         let out = doctor_with_opv_copies(vec![binary("/opt/opv/bin/opv")], &["1.2.3"]);
         assert!(out.contains("ok    opv: /opt/opv/bin/opv 1.2.3"), "{out}");
+    }
+
+    #[test]
+    fn doctor_names_the_repair_command_when_only_the_npm_wrapper_is_on_path() {
+        let out = doctor_with_opv_copies(vec![wrapper("/usr/bin/opv", Some("1.2.3"))], &[]);
+        assert!(
+            out.contains("run: node \"$(npm root -g)/@matthew-cochran/opv/install.js\""),
+            "{out}"
+        );
     }
 
     #[test]

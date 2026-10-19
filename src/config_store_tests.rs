@@ -1002,6 +1002,40 @@ fn recording_the_account_refuses_a_pointer_that_does_not_parse() {
     assert!(record_account(dir.path(), "ALABS000000000000000000001").is_err());
 }
 
+#[test]
+fn recording_a_new_account_reports_a_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let outcome = record_account(dir.path(), "ALABS000000000000000000001").unwrap();
+    assert!(outcome.changed);
+}
+
+#[test]
+fn recording_the_account_already_in_the_pointer_reports_no_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let _ = record_account(dir.path(), "ALABS000000000000000000001").unwrap();
+    let again = record_account(dir.path(), "ALABS000000000000000000001").unwrap();
+    assert!(!again.changed);
+}
+
+#[test]
+fn recording_the_account_already_in_the_pointer_keeps_the_pointer_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let written_by_hand =
+        "# hand-written pointer\nproject = \"myapp\"\naccount = \"ALABS000000000000000000001\"\n";
+    std::fs::write(dir.path().join(DOT_FILE), written_by_hand).unwrap();
+    let _ = record_account(dir.path(), "ALABS000000000000000000001").unwrap();
+    let text = std::fs::read_to_string(dir.path().join(DOT_FILE)).unwrap();
+    assert_eq!(text, written_by_hand);
+}
+
+#[test]
+fn recording_a_different_account_reports_a_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let _ = record_account(dir.path(), "ALABS000000000000000000001").unwrap();
+    let switched = record_account(dir.path(), "AFAMILY0000000000000000001").unwrap();
+    assert!(switched.changed);
+}
+
 // --- §12.4: `.opv` discovery stops at the repository root (09.08) ---
 
 #[test]
@@ -1081,7 +1115,7 @@ fn recording_the_account_ignores_a_pointer_above_the_repository() {
     let repo = dir.path().join("repo");
     std::fs::create_dir_all(repo.join(".git")).unwrap();
     let written = record_account(&repo, "ALABS000000000000000000001").unwrap();
-    assert_eq!(written, repo.join(DOT_FILE));
+    assert_eq!(written.path, repo.join(DOT_FILE));
 }
 
 /// Found live: in WSL, op keeps its own accounts, so the step for an email op does not
