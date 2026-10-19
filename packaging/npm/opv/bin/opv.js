@@ -1,12 +1,24 @@
 #!/usr/bin/env node
 'use strict';
 
-// The npm `opv` command. It runs the canonical binary (~/.local/bin/opv) when it
-// exists and reports the same version as this package, so every `opv` on PATH runs the
-// same file. Otherwise it falls back to this package's bundled copy, which is what
-// makes `npx @matthew-cochran/opv` and `--ignore-scripts` installs work.
+// The npm `opv` command. It runs the canonical binary (~/.local/bin/opv), so every `opv`
+// on PATH runs the same file, and repairs that copy when npm skipped the postinstall
+// (`--ignore-scripts`, or npm 12's default):
+//
+//   1. installed-by records this package's version and the file exists: run it. This is
+//      the common case and costs one stat and one small read.
+//   2. the file is missing, or installed-by says npm placed it for another version and its
+//      sha256 still matches that record: copy the platform binary there (install.js's
+//      placeCanonical), say so in one stderr line, and run it.
+//   3. another method placed it (installed-by absent or not npm, or the file no longer
+//      matches npm's record): never overwrite it. Run it when it reports this version;
+//      otherwise run the platform package's own binary and print one hint.
+//
+// When the copy cannot be written (an unwritable directory, or sudo for another user),
+// the platform package's binary runs instead, so `opv` always works.
 
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
@@ -21,31 +33,94 @@ const SUPPORTED = [
   'win32-arm64',
 ];
 
-const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
-const version = pkg.version;
+const version = install.packageVersion();
 
-// Print the install hint once per home: with --ignore-scripts the canonical binary is
-// never written, and every run would otherwise repeat the same line.
-function printInstallHintOnce(stale) {
+// `~/.local/bin/opv` rather than the full home path, as the docs name it.
+function shown(file) {
+  if (process.platform === 'win32') return file;
+  const home = os.homedir();
+  return file.startsWith(`${home}${path.sep}`) ? `~${file.slice(home.length)}` : file;
+}
+
+// Print `text` at most once per mismatch: the marker holds the last hint shown, so a run
+// that repeats the same situation stays quiet, and a new mismatch is reported once.
+function printHintOnce(text) {
   let marker;
   try {
     marker = path.join(install.dataDir(), 'npm-hint-shown');
   } catch {
     return;
   }
-  if (fs.existsSync(marker)) return;
+  try {
+    if (fs.readFileSync(marker, 'utf8') === text) return;
+  } catch {
+    // No marker yet: show the hint.
+  }
   try {
     fs.mkdirSync(install.dataDir(), { recursive: true });
-    fs.writeFileSync(marker, '');
+    fs.writeFileSync(marker, text);
   } catch {
-    // The hint is best-effort; running the bundled copy still matters more.
+    // The hint is best-effort; running opv still matters more.
   }
-  const where =
-    process.platform === 'win32' ? '%LOCALAPPDATA%\\Programs\\opv' : '~/.local/bin';
-  const what = stale
-    ? `opv at ${where} is ${stale}, not ${version}`
-    : `opv is not installed at ${where}`;
-  process.stderr.write(`${what}; run: npm rebuild -g @matthew-cochran/opv --allow-scripts=@matthew-cochran/opv\n`);
+  process.stderr.write(`opv: ${text}\n`);
+}
+
+function fileExists(file) {
+  try {
+    return fs.statSync(file).isFile();
+  } catch {
+    return false;
+  }
+}
+
+// Copy the platform binary to `target` (rule 2). Returns true when the copy now runs.
+function repair(target) {
+  const problem = install.sudoProblem();
+  if (problem) return false;
+  try {
+    install.placeCanonical(version);
+  } catch (e) {
+    printHintOnce(
+      `could not update ${shown(target)} to ${version} (${e.code || e.message}), so npm's ` +
+        `copy ran; fix the cause, then run: ${install.REPAIR_COMMAND}`,
+    );
+    return false;
+  }
+  try {
+    install.registerSkill(target);
+  } catch {
+    // Best effort, as in the postinstall.
+  }
+  process.stderr.write(
+    `opv: updated ${shown(target)} to ${version} (npm skipped its install script)\n`,
+  );
+  return true;
+}
+
+// Which binary to run for this invocation, following the rules at the top of this file.
+function choose() {
+  const target = install.canonicalPath();
+  const exists = fileExists(target);
+  const record = install.readRecord();
+  if (exists && record && record.version === version) return target;
+
+  const npmOwned =
+    exists &&
+    record !== null &&
+    record.manager === 'npm' &&
+    install.hashOrNull(target) === record.sha;
+  if (!exists || npmOwned) {
+    return repair(target) ? target : bundledBinary();
+  }
+
+  const have = install.versionOf(target);
+  if (have === version) return target;
+  const by = record && record.manager !== 'npm' ? record.manager : 'another method';
+  printHintOnce(
+    `${shown(target)} is ${have || 'an unknown version'}, not ${version} (installed by ${by}), ` +
+      `so npm's copy ran; update it the way it was installed, or let npm own it: ${install.REPAIR_COMMAND}`,
+  );
+  return bundledBinary();
 }
 
 function bundledBinary() {
@@ -65,15 +140,7 @@ function bundledBinary() {
 }
 
 function main() {
-  const target = install.canonicalPath();
-  let bin = null;
-  const have = fs.existsSync(target) ? install.versionOf(target) : null;
-  if (have === version) {
-    bin = target;
-  } else {
-    printInstallHintOnce(have);
-    bin = bundledBinary();
-  }
+  const bin = choose();
 
   const result = spawnSync(bin, process.argv.slice(2), { stdio: 'inherit' });
 
