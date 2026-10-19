@@ -749,7 +749,7 @@ fn documents() -> Value {
             "notes"
         ],
         "open": ["environment", "product", "key", "section", "field", "open_url"],
-        "propose": "{kind, relaxations [{product, key, env?, kind, reason}], diff, questions [{env, ask}], plan_id, written}: the contract diff (names and rules, never a value or an id); propose setup adds structure_steps and bindings_after; propose structure and generate print {plan_id, steps [{step, ...}], structure, contract_after, bindings_after}",
+        "propose": "{kind, relaxations [{product, key, env?, kind, reason}], diff, questions [{env, ask}], plan_id, written, generated?}: the contract diff (names and rules, never a value or an id); generated: true when the configuration is generated, so the diff goes into its generator and next is opv propose structure; propose setup adds structure_steps and bindings_after; propose structure and generate print {plan_id, steps [{step, ...}], structure, contract_after, bindings_after}",
         "apply": "{plan_id, confirmed, steps_run, created, fields_added, generated [{environment, product, key}], record_written, config_written}: names and public ids only",
         "set": "{key, environment, state}: the key's value state after the entry (a word, never the value)",
         "import": "{environment, applied, rows [{found, product, key, action, rule}], writes, decisions_needed, next}: per key imported or skipped, names only, never a value",

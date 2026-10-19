@@ -206,7 +206,10 @@ pub(crate) fn recordable(config: &Path, env: &str, name: &str) -> Result<(), Err
     if super::bootstrap::is_generated(&text) {
         return Err(Cause::ConfigNotEditable {
             source: file_source(config),
-            reason: NotEditable::Generated { generator: None },
+            reason: NotEditable::Generated {
+                generator: None,
+                diff: None,
+            },
         }
         .into());
     }
@@ -438,7 +441,10 @@ fn store(path: &Path) -> Result<Declaring, Error> {
                 path: PathBuf::from(path),
                 given_by: GivenBy::Discovered,
             },
-            reason: NotEditable::Generated { generator: None },
+            reason: NotEditable::Generated {
+                generator: None,
+                diff: None,
+            },
         }
         .into());
     }

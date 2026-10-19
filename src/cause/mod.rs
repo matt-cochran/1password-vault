@@ -1039,9 +1039,13 @@ impl From<std::io::ErrorKind> for IoKind {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum NotEditable {
-    /// Generated from `generator`, when opv knows what generates it (A22).
+    /// Generated from `generator`, when opv knows what generates it (A22). `diff`: the
+    /// contract diff of a refused `propose … --write` (FR-52), the edit to make in the
+    /// generator instead; names and rules only, never a value or an id.
     Generated {
         generator: Option<PathBuf>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        diff: Option<String>,
     },
     UnsupportedLayout {
         section: String,
