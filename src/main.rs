@@ -4744,8 +4744,9 @@ fn sign_in_here() -> Result<bool, Error> {
     let account =
         opv::runner::signed_out_account().or_else(|| config_store::selected_account(&here));
     eprintln!(
-        "You are not signed in to 1Password (a session also ends after 30 minutes idle). Sign \
-         in to go on; your password goes only to 1Password's prompt."
+        "You are not signed in to 1Password. Sign in to go on; your password goes only to \
+         1Password's prompt. This sign-in lasts for this command only: to keep one across \
+         several commands, run them inside `opv login` (#203)."
     );
     let command = std::env::args().nth(1).unwrap_or_else(|| "opv".into());
     let mut runtime = Runtime::with_account(account.as_deref()).for_command(&command);

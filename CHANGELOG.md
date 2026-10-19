@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-10-19
+
+### Added
+
+- `opv apply --attest <env>:<target>:<product/KEY>` records a person's attestation that a staged target (Fly) already holds 1Password's value of an immutable key that every sync holds and so can never prove. It writes the key's delivery evidence at the target's current version and never writes the target, so the product can get a delivery revision again; receipts and `opv delivery verify` list such names as `attested`, not proven. Proposed with an `attest` intent (`opv propose --intent <file>` or MCP `opv_propose`); applying needs a person's own terminal and refuses CI and agent mode. See [Attesting a held immutable key](docs/attestation.md) (#201).
+
+### Fixed
+
+- `plan --json` and `status --json` report a secret opv cannot compare as `target_state: "unknown"`, not `"present"`; only a proven match reads `present` (#201).
+- `opv login -- <command> > file` works: login and opv's own sign-in prompt need stdin and stderr to be terminals, not stdout (#202).
+- `opv login` rewrites `.opv`, and says "commit it", only when the recorded account changes. The sign-in prompt no longer suggests that a session outlives the command; the WSL notes say how to sign in once for several commands (#203).
+- `install.js` and `opv doctor` name the repair `node "$(npm root -g)/@matthew-cochran/opv/install.js"` instead of `npm rebuild --allow-scripts` (#204).
+- Only a global npm install owns `~/.local/bin/opv`; a project-local install runs its own binary and never touches the shared copy (on Windows the global root is `%APPDATA%\npm`) (#200).
+- Releases publish the six platform npm packages first and wait until npm serves each tarball before publishing `@matthew-cochran/opv`, so a fresh install never finds the main package without its binary (#199). The publish jobs run on GitHub-hosted runners with npm scripts disabled (#195).
+- A CI run called by the release workflow no longer shares a concurrency group with a direct CI run, so neither cancels the other; a staging push whose tree already has a retained candidate reuses it instead of rebuilding (#197).
+
+### Internal
+
+- The e2e matrix applies its short call limit only to the call under test and never caches a run that a real slow call disturbed (#205). CI runs every `tests/*.test.ts`.
+
 ## [0.12.2] - 2026-10-19
 
 ### Fixed
@@ -587,7 +607,8 @@ Local development without a deployment target. Two deprecated forms are removed,
 - `secretctl` renamed to `opv` ([#4](https://github.com/matt-cochran/1password-vault/pull/4)).
 - Gitflow guard, CI on `dev`/`staging`/`main`, and Dependabot targeting `dev` ([#5](https://github.com/matt-cochran/1password-vault/pull/5)).
 
-[Unreleased]: https://github.com/matt-cochran/1password-vault/compare/v0.12.2...HEAD
+[Unreleased]: https://github.com/matt-cochran/1password-vault/compare/v0.12.3...HEAD
+[0.12.3]: https://github.com/matt-cochran/1password-vault/compare/v0.12.2...v0.12.3
 [0.12.2]: https://github.com/matt-cochran/1password-vault/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/matt-cochran/1password-vault/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/matt-cochran/1password-vault/compare/v0.11.0...v0.12.0

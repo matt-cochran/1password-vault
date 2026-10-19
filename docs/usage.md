@@ -29,7 +29,7 @@ deliver with CI or your own terminal. The grouping is who runs a command.
 | propose | `opv propose generate <env> <p/KEY>…` | anyone | generated values for rule-backed keys |
 | propose | `opv propose --intent <file.json>` | anyone | the categorical intent document, the same as MCP `opv_propose` |
 | propose | any `opv propose …` with `--write` | anyone (CLI only) | also writes the contract diff into the repository's contract file. Without `--write`, and always over MCP, a proposal writes nothing |
-| apply | `opv apply [<plan_id>] [--project <p>]` | **person, in a terminal** | recompute the plan from the contract on disk and the actual state, refuse a stale `<plan_id>`, show it, confirm, and run it in one process |
+| apply | `opv apply [<plan_id>] [--project <p>] [--attest <env>:<target>:<product/KEY>]…` | **person, in a terminal** | recompute the plan from the contract on disk and the actual state, refuse a stale `<plan_id>`, show it, confirm, and run it in one process |
 | person | `opv set <[p/]KEY> --env <e>` | **person, in a terminal** | masked entry of one value |
 | person | `opv import <env> --from <file.env \| target:NAME> [--replace <p/KEY>]… [--rotate <p/KEY>]… [--skip <p/KEY>]… [--dry-run] [--confirm <env>]` | **person** | write-only import: per key `imported`, `skipped: already set` or `skipped: empty`; never "differs" |
 | person | `opv open <[p/]KEY> [--env <e>] [--print] [--json]` | person | the key's item in 1Password, where a value is typed |
@@ -570,6 +570,8 @@ The configuration changes one way: anyone proposes, a person applies. `opv propo
 
 `opv apply [<plan_id>]` recomputes the plan from the contract on disk and the actual state, refuses if a given `<plan_id>` no longer matches (`stale_plan`, exit 6), shows it, asks you to confirm, and runs it in one process: bindings and the apply record, structure, generation and retirement steps, and masked entry for any value typed now. It needs your own terminal and refuses under CI or agent mode with a typed `next` (`kind: apply`, `actor: person`). `--project <p>` names the project for new vault and item titles (a state vault is `<p>-<env>-<target>-state`) when it is not the repository's name, as on `opv access`; give `opv propose structure` the same one, since a plan proposed under one project is refused (`stale_plan`) under another. The 0.11.0 commands that did this are gone: [Migrating from 0.11](#migrating-from-011).
 
+`opv apply [<plan_id>] --attest <env>:<target>:<product/KEY>` (repeatable, one environment and target per run) records a person's **attestation** that a staged target (Fly) already holds 1Password's value of an immutable key that every sync holds and so never proves. It writes the key's delivery evidence at the target's current version and never writes the target; receipts list such names under `attested` ("attested, not proven"). Propose it first with an `attest` intent (`opv propose --intent <file>` or MCP `opv_propose`), which prints each key, its name on the target and the target's version (never a value) and the `ap-…` plan id; apply refuses a changed plan (`stale_plan`) and anything not eligible (`policy_refused`, with the reason). It needs your own terminal and a person's 1Password session, and refuses under CI and agent mode. When to use it and the risk: [Attesting a held immutable key](attestation.md).
+
 ### `opv propose key`, `env`, `target` and `retire`
 
 `opv propose key <[p/]KEY>` declares or changes one key: `--kind secret|config`, `--env` (repeatable), `--except <env>=<reason>` for a production-tier environment the key is not wanted in, `--source person|generated|derived`, `--shape <name>` from the catalog (a shape name only, never a rule), `--rule <NAME[=VALUE]>`, `--personal`, `--from <p/KEY>`, `--guidance`, `--allow-same-value`, `--immutable` and `--expires <date>`. A `--rule` counts in the contract only once it is committed on the default branch; a hand-edited or branch-only rule shows `rules_pending_review` and is not evaluated for MCP or agent-mode callers. Each production-tier environment the key is wanted in is asked as a categorical choice: a value, or `except`.
@@ -983,7 +985,7 @@ jobs:
     env:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
       OP_CACHE: "false"
-      OPV_VERSION: v0.12.2  # pin the release you tested; bump it deliberately
+      OPV_VERSION: v0.12.3  # pin the release you tested; bump it deliberately
     steps:
       - uses: actions/checkout@v4
       - name: Install the 1Password CLI
