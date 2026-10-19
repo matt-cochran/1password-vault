@@ -243,6 +243,20 @@ fn world() -> (World, Fleet) {
     (w, fleet)
 }
 
+/// `world()` with api/TOKEN declared immutable.
+fn world_with_immutable_token() -> (World, Fleet) {
+    let (w, mut fleet) = world();
+    let token = fleet
+        .products
+        .get_mut("api")
+        .unwrap()
+        .keys
+        .get_mut("TOKEN")
+        .unwrap();
+    token.immutable = true;
+    (w, fleet)
+}
+
 fn sync_with(w: &World, fleet: &Fleet, opts: SyncOpts) -> (Result<(), Error>, String) {
     let mut out = Vec::new();
     let res = sync::run(fleet, "prod", w, &mut out, &opts);
@@ -340,6 +354,33 @@ fn a_resync_after_rotation_mints_a_new_revision() {
     w.set_value("api", "TOKEN", &format!("tok2-{MARK}"));
     sync_all(&w, &fleet).unwrap();
     assert_ne!(revision_of(&verify_doc(&w, &fleet), "api"), before);
+}
+
+/// #201: an immutable key the sync holds, which opv delivered and Fly still lists at the
+/// recorded version with the same value, is proved identical by the placement's ledger,
+/// so a change elsewhere in the binding set still mints a revision.
+#[test]
+fn a_held_immutable_key_identical_on_fly_counts_toward_the_receipt() {
+    let _person = crate::app::tidy::activate();
+    let (w, fleet) = world_with_immutable_token();
+    sync_all(&w, &fleet).unwrap();
+    let before = revision_of(&verify_doc(&w, &fleet), "api");
+    w.set_value("shared", "KEY", &format!("key2-{MARK}"));
+    sync_all(&w, &fleet).unwrap();
+    assert_ne!(revision_of(&verify_doc(&w, &fleet), "api"), before);
+}
+
+/// #201, the staging run: an immutable key already on Fly when the placement has no
+/// evidence line for it is held, and Fly's digest cannot be computed locally (D0), so
+/// nothing proves it identical and the product gets no revision.
+#[test]
+fn a_held_immutable_key_with_no_evidence_line_blocks_the_receipt() {
+    let _person = crate::app::tidy::activate();
+    let (w, fleet) = world_with_immutable_token();
+    w.app("myapp")
+        .insert("FLEET__API__TOKEN".into(), (format!("tok-{MARK}"), false));
+    sync_all(&w, &fleet).unwrap();
+    assert_eq!(state_of(&verify_doc(&w, &fleet), "api"), "not_delivered");
 }
 
 #[test]
