@@ -302,11 +302,13 @@ fn opv_propose_key_next_is_the_persons_write() {
     let doc = w.propose(json!({"kind": "key", "key": "NEW_KEY", "product": "app",
         "field_kind": "config", "immutable": true,
         "except": {"prod": "not used there"}, "guidance": "from the team lead"}));
+    // A word with a space is quoted the platform's way: single quotes, double on Windows.
+    let q = if cfg!(windows) { '"' } else { '\'' };
     assert_eq!(
         doc["next"],
-        json!({"kind": "apply", "actor": "person", "command":
+        json!({"kind": "apply", "actor": "person", "command": format!(
             "opv propose key app/NEW_KEY --kind config \
-             --except 'prod=not used there' --guidance 'from the team lead' --immutable --write"}),
+             --except {q}prod=not used there{q} --guidance {q}from the team lead{q} --immutable --write")}),
         "{doc}"
     );
 }

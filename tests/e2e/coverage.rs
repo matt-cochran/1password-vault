@@ -1902,9 +1902,9 @@ fn snapshot_path(name: &str) -> PathBuf {
 }
 
 /// Scenarios whose messages are platform advice by design (how to install op, where an
-/// in-memory folder lives): their committed snapshot is the Linux one, so other hosts skip
+/// in-memory folder lives, the Linux-only core-dump check): their committed snapshot is the Linux one, so other hosts skip
 /// the comparison. The variant still counts as reached from the committed snapshot.
-const LINUX_WORDED: [&str; 2] = ["ram_dir_unavailable", "tool_missing"];
+const LINUX_WORDED: [&str; 3] = ["core_doctor", "ram_dir_unavailable", "tool_missing"];
 
 fn snapshot_test(name: &str, build: fn() -> Case, text_only: bool) {
     if !cfg!(target_os = "linux") && LINUX_WORDED.contains(&name) {
