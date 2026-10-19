@@ -203,8 +203,8 @@ No deploy or removal without --deploy/--prune (--prune-immutable for an immutabl
 
 const EXPORT_QUICK: &str = "\
 Examples:
-  opv config export                # the configuration as TOML (file or manifest)
-  opv config export --json         # the configuration as JSON
+  opv config export                # the contract as TOML, without ids (file or manifest)
+  opv config export --json         # the contract as JSON, without ids
   opv config export staging --json # staging's config-kind values (reads 1Password)";
 
 const EXPORT_MORE: &str = "\
