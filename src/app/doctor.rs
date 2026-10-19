@@ -1171,6 +1171,10 @@ fn local_run(r: &dyn CommandRunner, local_only: bool) -> Result<Check, Error> {
     }
 }
 
+/// Reruns the npm package's postinstall, which copies its binary to the canonical path.
+/// `$(...)` works in both POSIX shells and PowerShell.
+const NPM_REPAIR: &str = r#"node "$(npm root -g)/@matthew-cochran/opv/install.js""#;
+
 /// Task I: every `opv` on PATH, one check line. The npm `bin` wrapper runs the canonical
 /// binary, so a wrapper beside the binary is the intended state and reads `ok`. A second
 /// native copy, or a wrapper whose package version differs from the binary, is a warning
@@ -1211,11 +1215,26 @@ fn opv_on_path(r: &dyn CommandRunner) -> Result<Check, Error> {
         .skip(1)
         .map(|(p, _)| removal_command(p))
         .collect();
-    let stale_wrapper = wrappers.iter().any(|(_, v)| {
-        v.as_deref()
-            .is_some_and(|v| v != first_version.trim_start_matches('v'))
+    let binary_version = first_version.trim_start_matches('v');
+    let differs = |v: &Option<String>| v.as_deref().is_some_and(|v| v != binary_version);
+    // A wrapper newer than the binary means npm upgraded the package but skipped its
+    // install script (`--ignore-scripts`, npm 12's default), so the binary was never
+    // replaced: rerunning that script is the repair. Any other difference is an old
+    // package.
+    let newer_wrapper = wrappers.iter().any(|(_, v)| {
+        differs(v)
+            && matches!(
+                (v.as_deref().and_then(parse_version), parse_version(binary_version)),
+                (Some(w), Some(b)) if w > b
+            )
     });
-    if stale_wrapper || wrappers.len() > 1 {
+    let stale_wrapper = wrappers.iter().any(|(_, v)| differs(v));
+    if newer_wrapper {
+        fixes.push(format!(
+            "npm skipped its install script, so {} was not updated; run: {NPM_REPAIR}",
+            first.display()
+        ));
+    } else if stale_wrapper || wrappers.len() > 1 {
         fixes.push("npm update -g @matthew-cochran/opv".into());
     }
     if fixes.is_empty() {
@@ -2102,6 +2121,25 @@ mod tests {
             out.lines()
                 .any(|l| l.starts_with("warn  opv:")
                     && l.contains("npm update -g @matthew-cochran/opv")),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn doctor_names_the_skipped_install_script_when_the_npm_wrapper_is_newer() {
+        let out = doctor_with_opv_copies(
+            vec![
+                binary("/home/x/.local/bin/opv"),
+                wrapper("/usr/bin/opv", Some("1.3.0")),
+            ],
+            &["1.2.3"],
+        );
+        assert!(
+            out.lines().any(|l| l.starts_with("warn  opv:")
+                && l.contains(
+                    "npm skipped its install script, so /home/x/.local/bin/opv was not updated; \
+                     run: node \"$(npm root -g)/@matthew-cochran/opv/install.js\""
+                )),
             "{out}"
         );
     }
