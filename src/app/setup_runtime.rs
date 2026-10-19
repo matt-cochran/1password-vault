@@ -504,7 +504,12 @@ impl Console {
         if ci {
             return Err(terminal_refusal(NoTerminal::Ci));
         }
-        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        if !prompt_terminal(
+            command,
+            io::stdin().is_terminal(),
+            io::stdout().is_terminal(),
+            io::stderr().is_terminal(),
+        ) {
             return Err(terminal_refusal(NoTerminal::NoTty));
         }
         for key in [
@@ -518,6 +523,32 @@ impl Console {
         }
         Ok(())
     }
+}
+
+/// Where a command's console carries its prompts.
+enum PromptStream {
+    Stdout,
+    Stderr,
+}
+
+/// `login` and opv's in-command sign-in (`""`) prompt on stderr, so their stdout may be
+/// redirected (`opv login -- cmd > file`); guided setup and the rest prompt on stdout
+/// (C17, #202).
+fn prompt_stream(command: &str) -> PromptStream {
+    match command {
+        "login" | "" => PromptStream::Stderr,
+        _ => PromptStream::Stdout,
+    }
+}
+
+/// Whether a person can be prompted for `command`: a terminal on stdin and on the stream
+/// its console uses. Injectable so the terminal test runs without a real tty.
+fn prompt_terminal(command: &str, stdin_tty: bool, stdout_tty: bool, stderr_tty: bool) -> bool {
+    stdin_tty
+        && match prompt_stream(command) {
+            PromptStream::Stdout => stdout_tty,
+            PromptStream::Stderr => stderr_tty,
+        }
 }
 
 /// `opv <command>` under a service-account or Connect credential in `var` (R33): it runs
@@ -770,6 +801,42 @@ mod terminal_tests {
             cause_of(&own_session_refusal("setup", "OP_SERVICE_ACCOUNT_TOKEN")).code(),
             "own_session_required"
         );
+    }
+
+    // #202: `opv login` prompts on stderr, so its stdout may be redirected.
+    #[test]
+    fn login_prompts_on_stderr_with_stdout_redirected() {
+        assert!(super::prompt_terminal("login", true, false, true));
+    }
+
+    // #202: opv's in-command sign-in also prompts on stderr.
+    #[test]
+    fn in_command_sign_in_prompts_on_stderr_with_stdout_redirected() {
+        assert!(super::prompt_terminal("", true, false, true));
+    }
+
+    // #202: login still needs stderr, where its prompt goes.
+    #[test]
+    fn login_refuses_with_stderr_redirected() {
+        assert!(!super::prompt_terminal("login", true, true, false));
+    }
+
+    // #202: login still needs stdin, where the sign-in reads.
+    #[test]
+    fn login_refuses_without_stdin_terminal() {
+        assert!(!super::prompt_terminal("login", false, true, true));
+    }
+
+    // #202: guided setup prompts on stdout, so it is unchanged.
+    #[test]
+    fn setup_refuses_with_stdout_redirected() {
+        assert!(!super::prompt_terminal("setup", true, false, true));
+    }
+
+    // #202: `config edit` also prompts on stdout, so it is unchanged.
+    #[test]
+    fn config_edit_refuses_with_stdout_redirected() {
+        assert!(!super::prompt_terminal("config edit", true, false, true));
     }
 
     #[test]
