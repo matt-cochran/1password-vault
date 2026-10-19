@@ -662,8 +662,11 @@ pub fn use_account(
     match matching(accounts, who).as_slice() {
         [one] => {
             let account_id = one.account_uuid.clone();
-            let path = crate::config_store::record_account(start, &account_id)?;
-            Ok(UseOutcome { account_id, path })
+            let recorded = crate::config_store::record_account(start, &account_id)?;
+            Ok(UseOutcome {
+                account_id,
+                path: recorded.path,
+            })
         }
         [] => Err(Cause::AccountNotOnMachine {
             account: account_ref(who),

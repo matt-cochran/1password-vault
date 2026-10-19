@@ -390,12 +390,17 @@ pub fn record_chosen(
     backend: &dyn Backend,
     ui: &mut dyn Interaction,
 ) -> Result<(), Error> {
-    let path = crate::config_store::record_account(start, uuid)?;
-    ui.show(&format!(
-        "This project uses 1Password account {}; recorded in {} (commit it).",
-        backend.account_label(uuid),
-        path.display()
-    ))
+    let recorded = crate::config_store::record_account(start, uuid)?;
+    // #203: only a pointer that actually changed is worth committing, so only then does opv
+    // say so.
+    if recorded.changed {
+        ui.show(&format!(
+            "This project uses 1Password account {}; recorded in {} (commit it).",
+            backend.account_label(uuid),
+            recorded.path.display()
+        ))?;
+    }
+    Ok(())
 }
 
 /// Whether `start` is inside a project: a git repository, or a folder with a `.opv` at or
