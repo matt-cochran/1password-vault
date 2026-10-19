@@ -95,6 +95,10 @@ then propose it with `opv_propose` `kind: generate` (CLI: `opv propose generate 
 <product/KEY>`), and have the person run `opv apply <plan_id>`: the value goes straight into
 1Password and is never shown. Never suggest `openssl rand` or pasting generated values.
 
+A held immutable key on Fly that blocks a product's delivery revision can be attested
+(`opv_propose` `kind: attest`, then the person's `opv apply <plan_id> --attest …`): explain
+the risk in docs/attestation.md first, and offer rotation as the proven alternative.
+
 ## Local secret files and Workers
 
 Never create `.env`, `.dev.vars` or any file holding a value, and never write a wrapper that

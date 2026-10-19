@@ -143,4 +143,6 @@ The remote host needs the same opv release and, for `file` keys, a user-owned `$
 
 Use the Linux `op` installed inside WSL, signed in with its own session (`opv login dev` adds the account at `op`'s prompts if none is set up yet). A Windows `op.exe` first on `PATH` can read metadata through the Windows desktop app but cannot start a Linux command: `run` refuses it (exit 3), and `doctor` reports it on its `op local run` line (a failure under `--env` for a run-only environment, a warning otherwise). Shell aliases do not count, because subprocess lookup ignores them. On native Windows, use the Windows `opv` and `op` in PowerShell.
 
+The Linux `op` in WSL cannot use the Windows desktop app, so each sign-in asks for your password, and a sign-in that a command makes for itself lasts for that command only (opv never writes a session to disk). To sign in once for several commands, open a signed-in shell with `opv login --account <id>`, run them there, then `exit`; or run one command with `opv login --account <id> -- <command>`.
+
 Follow sign-in prompts yourself; never give credentials or session tokens to an assistant, and do not save them in shell profiles.

@@ -146,6 +146,8 @@ For scripts, `opv status staging --json` returns names and states only (`schema_
 
 Self-made secrets (an encryption, session or signing key: a key whose rules give `base64_bytes` or `hex_bytes`) need no person to type them: after the user agrees, propose `opv propose generate <env> <product/KEY>…`, then have the person run `opv apply <plan_id>`. opv makes the value and writes it straight into the empty 1Password field; you never see it, and it never replaces a value. Provider-issued keys (anything with a prefix rule) are still typed by the user in 1Password. Never suggest `openssl rand` or any command whose output the user would paste.
 
+An immutable key that a sync keeps holding on Fly, so its product never gets a delivery revision (`delivery: <product> not recorded: not confirmed by this sync`), can be attested: explain the risk in [attestation.md](attestation.md) first (a wrong attestation is only caught when the app fails, and rotating is the proven alternative). If the user is sure the target holds 1Password's value, propose it with `opv_propose` `kind: attest` (`env`, `target`, `keys`). The person records it with the `opv apply <plan_id> --attest <env>:<target>:<product/KEY>` the proposal prints; you never run it.
+
 ## 5. Plan, then sync
 
 ```sh

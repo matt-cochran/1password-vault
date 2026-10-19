@@ -33,7 +33,7 @@
       "rule": null,
       "reason": null,
       "target_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
-      "target_state": "present",
+      "target_state": "unknown",
       "action": null,
       "open_url": "https://start.1password.com/open/i?v=vprd&i=iprd"
     },

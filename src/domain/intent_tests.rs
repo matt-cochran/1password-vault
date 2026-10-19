@@ -157,7 +157,7 @@ fn a_multi_line_guidance_is_refused() {
 // --- the schema -----------------------------------------------------------------
 
 #[test]
-fn the_schema_lists_the_seven_kinds() {
+fn the_schema_lists_the_eight_kinds() {
     let schema = json_schema();
     let kinds: BTreeSet<String> = schema["oneOf"]
         .as_array()
@@ -180,6 +180,7 @@ fn the_schema_lists_the_seven_kinds() {
             "setup".to_string(),
             "structure".to_string(),
             "generate".to_string(),
+            "attest".to_string(),
         ])
     );
 }
@@ -211,4 +212,11 @@ fn a_provider_that_is_not_a_word_is_refused() {
     let e =
         parse(r#"{"kind":"target","env":"prod","name":"web","provider":"fly; rm"}"#).unwrap_err();
     assert_eq!(e.code_str(), "config_invalid");
+}
+
+/// #201: an attestation names each key as `product/KEY`; a bare key is refused.
+#[test]
+fn an_attest_key_without_its_product_is_refused() {
+    let doc = r#"{"kind": "attest", "env": "prod", "target": "web", "keys": ["JWT_SECRET"]}"#;
+    assert!(parse(doc).is_err());
 }

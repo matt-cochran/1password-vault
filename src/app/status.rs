@@ -252,9 +252,19 @@ impl StatusPart<'_> {
             .products
             .get(&row.product)
             .and_then(|p| p.keys.get(&row.key));
+        // #201: a key present only through a person's attestation says so.
+        let attested = self
+            .plan
+            .attested
+            .iter()
+            .any(|(p, k)| *p == row.product && *k == row.key);
         target_cell(
             row,
-            target_word(row, held, binding),
+            if attested {
+                "attested"
+            } else {
+                target_word(row, held, binding)
+            },
             &self.t.channels(),
             spec,
         )

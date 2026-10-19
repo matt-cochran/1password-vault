@@ -760,15 +760,27 @@ pub fn pointer_account(start: &Path) -> Option<String> {
     parse_dot_opv(&text, &path).ok()?.account
 }
 
+/// The `.opv` [`record_account`] resolved, and whether the account had to be recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordOutcome {
+    /// The pointer file opv writes (and wrote when [`RecordOutcome::changed`] is `true`).
+    pub path: PathBuf,
+    /// `false` when the pointer already recorded `account`, so opv left it untouched.
+    pub changed: bool,
+}
+
 /// Record `account` (an account ID) as this checkout's 1Password account: in the nearest
 /// `.opv` up to the repository root, keeping its `project`, or in a new `.opv` at the
-/// repository root (or `start` outside a repository). Returns the file written. It holds an
-/// ID, never a secret, and is meant to be committed so every checkout uses the same account.
+/// repository root (or `start` outside a repository). It holds an ID, never a secret, and is
+/// meant to be committed so every checkout uses the same account.
+///
+/// Returns the file and whether it was (re)written: a pointer that already records `account`
+/// is left as it is (#203), so callers can avoid claiming a change that did not happen.
 ///
 /// A cloned repository is untrusted, so the file is never written through a symlink, an
 /// existing `.opv` that does not parse is refused rather than replaced, and nothing above
 /// the repository root is touched.
-pub fn record_account(start: &Path, account: &str) -> Result<PathBuf, Error> {
+pub fn record_account(start: &Path, account: &str) -> Result<RecordOutcome, Error> {
     let root = repo_root(start).unwrap_or(start);
     let path = start
         .ancestors()
@@ -789,7 +801,7 @@ pub fn record_account(start: &Path, account: &str) -> Result<PathBuf, Error> {
         }
         .into()
     };
-    let project = match path.symlink_metadata() {
+    let existing = match path.symlink_metadata() {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(refuse(LocalOp::Read, e.kind().into())),
         // A symlink or another kind of file: opv only writes a plain .opv, never through it.
@@ -799,18 +811,29 @@ pub fn record_account(start: &Path, account: &str) -> Result<PathBuf, Error> {
         Ok(_) => {
             let text =
                 fs::read_to_string(&path).map_err(|e| refuse(LocalOp::Read, e.kind().into()))?;
-            parse_dot_opv(&text, &path)?.project
+            Some(parse_dot_opv(&text, &path)?)
         }
     };
+    // #203: a pointer that already records this account is not rewritten (nor its mtime
+    // touched), so a login that changes nothing says nothing.
+    if existing.as_ref().and_then(|d| d.account.as_deref()) == Some(account) {
+        return Ok(RecordOutcome {
+            path,
+            changed: false,
+        });
+    }
     let mut text = String::from(
         "# opv: this project's 1Password account (an ID, not a secret). Commit this file.\n",
     );
-    if let Some(p) = project {
+    if let Some(p) = existing.and_then(|d| d.project) {
         text.push_str(&format!("project = \"{p}\"\n"));
     }
     text.push_str(&format!("account = \"{account}\"\n"));
     write_no_follow(&path, &text).map_err(|e| refuse(LocalOp::Write, e.kind().into()))?;
-    Ok(path)
+    Ok(RecordOutcome {
+        path,
+        changed: true,
+    })
 }
 
 /// Write `text` to `path`, refusing (rather than following) a symlink put there since the

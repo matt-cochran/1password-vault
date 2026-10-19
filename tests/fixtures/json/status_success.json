@@ -32,7 +32,7 @@
       "rule": null,
       "reason": null,
       "target_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
-      "target_state": "present",
+      "target_state": "unknown",
       "action": "would_stage"
     },
     {

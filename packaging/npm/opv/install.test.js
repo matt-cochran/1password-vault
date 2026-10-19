@@ -6,12 +6,17 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const { setup, run, sha256 } = require('./_harness.js');
-const { registerSkill } = require('./install.js');
+const { registerSkill, globalRoot } = require('./install.js');
 
 const unix = { skip: process.platform === 'win32' ? 'POSIX shell fixture' : false };
 
+// The fixture package is not under `npm root -g`, so tests of the shared-copy rules
+// ask for a global install explicitly; npm sets npm_config_global for a global script.
 function install(h, env = {}) {
-  return run(path.join(h.pkgDir, 'install.js'), { home: h.home, env });
+  return run(path.join(h.pkgDir, 'install.js'), {
+    home: h.home,
+    env: { npm_config_global: 'true', ...env },
+  });
 }
 
 test('install copies the platform binary to the canonical path', unix, () => {
@@ -34,6 +39,21 @@ test('install writes the npm installed-by record with version and sha256', unix,
     fs.readFileSync(h.record, 'utf8').trim(),
     `npm 1.2.3 ${sha256(Buffer.from(binary))}`,
   );
+});
+
+test('a project-local postinstall does not create the canonical binary', unix, () => {
+  const h = setup();
+  install(h, { npm_config_global: 'false' });
+  assert.equal(fs.existsSync(h.target), false);
+});
+
+test('a project-local postinstall leaves the canonical binary untouched', unix, () => {
+  const h = setup();
+  const existing = '#!/bin/sh\necho "opv 0.9.0"\n';
+  fs.writeFileSync(h.target, existing);
+  fs.chmodSync(h.target, 0o755);
+  install(h, { npm_config_global: 'false' });
+  assert.equal(fs.readFileSync(h.target, 'utf8'), existing);
 });
 
 test('install prints opv old to new when replacing an opv binary', unix, () => {
@@ -108,12 +128,18 @@ test('install names the next step when it leaves a foreign file alone', unix, ()
   const h = setup();
   fs.writeFileSync(h.target, 'not opv\n');
   fs.chmodSync(h.target, 0o755);
-  assert.match(install(h).stderr, /npm rebuild -g @matthew-cochran\/opv/);
+  assert.match(
+    install(h).stderr,
+    /node "\$\(npm root -g\)\/@matthew-cochran\/opv\/install\.js"/,
+  );
 });
 
 test('install under sudo is refused for the invoking user', () => {
   const { sudoProblem } = require('./install.js');
-  assert.match(sudoProblem({ SUDO_USER: 'mc' }, 0), /without sudo: npm rebuild -g/);
+  assert.match(
+    sudoProblem({ SUDO_USER: 'mc' }, 0),
+    /without sudo: node "\$\(npm root -g\)\/@matthew-cochran\/opv\/install\.js"/,
+  );
 });
 
 test('install as root without sudo is allowed', () => {
@@ -183,4 +209,11 @@ test('registerSkill warns on stderr and does not throw when the binary fails', (
     },
   });
   assert.match(warnings, /could not register the agent skill/);
+});
+
+test("the global npm root on Windows is under %APPDATA%\\npm, not node's directory", () => {
+  assert.equal(
+    globalRoot({ APPDATA: 'C:\\Users\\a\\AppData\\Roaming' }, 'C:\\Program Files\\nodejs\\node.exe', 'win32'),
+    path.join('C:\\Users\\a\\AppData\\Roaming', 'npm', 'node_modules'),
+  );
 });

@@ -967,6 +967,71 @@ pub enum GenerateRefusal {
     HasValue,
 }
 
+/// Why opv does not record a person's attestation of a key (#201): each reason has its own
+/// step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum AttestRefusal {
+    /// The target does not deliver the key (another target's product, a mode skip, a
+    /// personal or source-only key).
+    NotDelivered,
+    /// The key is not immutable: the sync writes it, and the write is its evidence.
+    NotImmutable,
+    /// The target does not list the key with a version: the sync writes it once.
+    NotOnTarget,
+    /// The target's values are read and compared exactly (a pinned store): nothing to attest.
+    ComparedDirectly,
+    /// The sync does not hold the key (its 1Password value is not ready, or a rotation is
+    /// asked): there is nothing for an attestation to unblock.
+    NotHeld,
+    /// The ledger already proves the key identical at the target's version.
+    Proven,
+    /// A person's attestation of the key is already recorded at the target's version.
+    AlreadyAttested,
+    /// The ledger shows the target holds another value than 1Password at this version.
+    Differs,
+    /// The target lists another version than the one opv recorded: changed outside opv.
+    Drifted,
+    /// The placement has no delivery item or evidence key yet: no sync recorded it.
+    NotRecorded,
+}
+
+impl AttestRefusal {
+    /// The reason in words.
+    pub fn words(self) -> &'static str {
+        match self {
+            AttestRefusal::NotDelivered => "the target does not deliver it",
+            AttestRefusal::NotImmutable => {
+                "it is not immutable, so opv sync writes it and records its evidence itself"
+            }
+            AttestRefusal::NotOnTarget => {
+                "the target does not list it with a version, so opv sync writes it once"
+            }
+            AttestRefusal::ComparedDirectly => {
+                "the target's values are read and compared exactly, so there is nothing to attest"
+            }
+            AttestRefusal::NotHeld => {
+                "opv sync does not hold it back (its value is not ready, or it is being rotated)"
+            }
+            AttestRefusal::Proven => {
+                "its delivery evidence already proves the target holds the 1Password value"
+            }
+            AttestRefusal::AlreadyAttested => {
+                "a person's attestation of it is already recorded at the target's version"
+            }
+            AttestRefusal::Differs => {
+                "its delivery evidence shows the target holds another value than 1Password"
+            }
+            AttestRefusal::Drifted => {
+                "the target changed it outside opv since opv recorded its evidence"
+            }
+            AttestRefusal::NotRecorded => {
+                "no sync has recorded this placement's delivery item and evidence key yet"
+            }
+        }
+    }
+}
+
 impl GenerateRefusal {
     /// The reason in words.
     pub fn words(&self) -> &'static str {
@@ -1269,6 +1334,16 @@ pub enum Guard {
         key: KeyName,
         env: EnvName,
         reason: GenerateRefusal,
+    },
+    /// opv does not record a person's attestation of `product/key` on target `target`
+    /// (#201, `docs/attestation.md`): only an immutable key the sync holds on a staged
+    /// target, listed there with a version and with no evidence line, can be attested.
+    AttestRefused {
+        product: ProductName,
+        key: KeyName,
+        env: EnvName,
+        target: TargetName,
+        reason: AttestRefusal,
     },
     RemoteProfileRefuses {
         profile: ProfileName,
