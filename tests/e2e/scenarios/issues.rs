@@ -1,4 +1,4 @@
-//! Regression scenarios for #150, #153, #157, #160, #183, #184 and #188 (design §13.5): the
+//! Regression scenarios for #150, #153, #157, #160, #183, #184, #188 and #201 (design §13.5): the
 //! real `opv` binary against `opv-sim`, on the test application in `tests/e2e/app`. Each
 //! scenario copies the app's world and configuration into a scratch directory, changes the
 //! world where the issue needs it (an account signed out, a vault moved to the other
@@ -522,4 +522,39 @@ fn issue_188_config_export_with_several_products_exports_each() {
         .map(|o| o.keys().cloned().collect())
         .unwrap_or_default();
     assert_eq!(products, ["api", "web"], "{doc}");
+}
+
+// ---------------------------------------------------------------------------------------
+// #201: a person's attestation of a held immutable key is proposed, never assumed.
+// ---------------------------------------------------------------------------------------
+
+/// #201: an attestation proposal on a placement no sync has recorded (the app's Fly target
+/// has no delivery items) is refused naming the key and the target, through the same
+/// intent document `opv_propose` takes. The full record-then-mint path needs a terminal
+/// and recorded delivery items, and is covered on the library's world
+/// (`src/app/attest_tests.rs`).
+#[test]
+fn issue_201_an_attestation_on_an_unrecorded_placement_is_refused() {
+    let s = Scenario::new(|_| {});
+    let file = s.project().join("secrets.toml");
+    let toml = std::fs::read_to_string(&file).unwrap().replace(
+        "roles = [\"serve\"]\n\n# The migrating",
+        "roles = [\"serve\"]\nimmutable = true\n\n# The migrating",
+    );
+    std::fs::write(&file, toml).unwrap();
+    std::fs::write(
+        s.project().join("attest.json"),
+        r#"{"kind": "attest", "env": "prod", "target": "fly", "keys": ["web/SESSION_SECRET"]}"#,
+    )
+    .unwrap();
+    let out = s.opv(&["propose", "--intent", "attest.json", "--json"]);
+    let message = document(&out)["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        message.contains("attestation of web/SESSION_SECRET on prod/fly"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
 }

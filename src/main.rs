@@ -812,6 +812,15 @@ enum Cmd {
         /// Generate this key's value, as `opv propose generate` proposed (repeatable).
         #[arg(long, value_name = "ENV:PRODUCT/KEY")]
         generate: Vec<String>,
+        /// Attest that the target already holds 1Password's value of this held immutable
+        /// key: record its delivery evidence without writing the target (repeatable; one
+        /// environment and target). See docs/attestation.md.
+        #[arg(
+            long,
+            value_name = "ENV:TARGET:PRODUCT/KEY",
+            conflicts_with_all = ["rebind", "generate", "project"]
+        )]
+        attest: Vec<String>,
         /// Project name for new vault and item titles; defaults to the repository's name.
         /// The plan id covers it, so it must be the one the proposal was made with.
         #[arg(long, value_name = "NAME")]
@@ -2670,7 +2679,9 @@ fn run(
         generate,
         project,
         json,
+        attest,
     } = &cli.cmd
+        && attest.is_empty()
     {
         return run_apply(
             &r,
@@ -2844,6 +2855,13 @@ fn run(
     // (FR-44); with --write they edit it with the same validation and concurrency refusal.
     if let Cmd::Propose(p) = &cli.cmd {
         let req = propose_request(p, target_options)?;
+        // #201: an attestation proposal reads the target, 1Password and the ledger.
+        if let opv::domain::intent::Intent::Attest { env, target, keys } = &req.intent {
+            let fleet = found?.load(&r)?;
+            let keys: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+            return run_propose_attest(&fleet, env.as_str(), target.as_str(), &keys, &req, &r, out)
+                .map(|()| 0);
+        }
         return run_propose_contract(&req, &found?, &r, out).map(|()| 0);
     }
     // `target credentials` mints the provider token and records the new item's reference in
@@ -2908,6 +2926,18 @@ fn run(
     )?);
     r.use_account(run_account.clone());
     let loaded = found.and_then(|f| f.load(&r));
+    // #201: `apply --attest` records a person's attestation; it needs the configuration and
+    // reaches the target with its own deploy identity (the library signs in).
+    if let Cmd::Apply {
+        plan_id,
+        attest,
+        json,
+        ..
+    } = &cli.cmd
+        && !attest.is_empty()
+    {
+        return run_apply_attest(&loaded?, plan_id.as_deref(), attest, *json, &r, out).map(|()| 0);
+    }
     let mut cmd = cli.cmd;
     // 09.03b: no configuration at all starts the environment the command named.
     let env_named = cmd.env().map(|(e, _)| e.to_string());
@@ -3370,7 +3400,10 @@ impl ProposeCmd {
 fn person_only(cmd: &Cmd) -> Option<opv::cause::Cmd> {
     let (command, args) = match cmd {
         Cmd::Apply {
-            plan_id, project, ..
+            plan_id,
+            project,
+            attest,
+            ..
         } => (
             vec!["apply"],
             plan_id
@@ -3380,6 +3413,11 @@ fn person_only(cmd: &Cmd) -> Option<opv::cause::Cmd> {
                     project
                         .iter()
                         .flat_map(|p| ["--project".to_string(), p.clone()]),
+                )
+                .chain(
+                    attest
+                        .iter()
+                        .flat_map(|a| ["--attest".to_string(), a.clone()]),
                 )
                 .collect(),
         ),
@@ -3412,7 +3450,11 @@ impl ProposeReq {
         use opv::domain::intent::Intent;
         matches!(
             self.intent,
-            Intent::Key { .. } | Intent::Env { .. } | Intent::Target { .. } | Intent::Retire { .. }
+            Intent::Key { .. }
+                | Intent::Env { .. }
+                | Intent::Target { .. }
+                | Intent::Retire { .. }
+                | Intent::Attest { .. }
         )
     }
 }
@@ -3970,6 +4012,127 @@ fn proposal_refused(e: Error) -> Error {
         other => other,
     };
     Error::Catalog(Box::new(cause), upstream)
+}
+
+/// `opv propose --intent` of kind `attest` (#201): what a person's attestation would record
+/// (names and the target's version, never a value) and its plan id; nothing is written.
+fn run_propose_attest(
+    fleet: &opv::domain::Fleet,
+    env: &str,
+    target: &str,
+    keys: &[String],
+    req: &ProposeReq,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let p = opv::app::attest::propose(fleet, env, target, keys, r)?;
+    let mut lines = opv::app::attest::describe(&p);
+    if req.write {
+        lines.push("written: nothing (opv apply records the attestation)".into());
+    }
+    let doc = serde_json::to_value(&p).map_err(|_| -> Error {
+        opv::cause::Cause::Bug {
+            site: "propose attest: the proposal did not serialize",
+        }
+        .into()
+    })?;
+    let next = opv::cause::render::cmd_text(&opv::app::attest::apply_step(&p));
+    print_proposal(doc, &lines, &next, true, req.json, out)
+}
+
+/// The environment, target and `product/KEY`s of `--attest <env>:<target>:<product/KEY>`
+/// flags: one environment and one target.
+fn attest_flags(attest: &[String]) -> Result<(String, String, Vec<String>), Error> {
+    let format = || -> Error {
+        opv::cause::Cause::Usage {
+            problem: opv::cause::UsageProblem::ValueFormat {
+                flag: "--attest".into(),
+                format: "ENV:TARGET:PRODUCT/KEY, one environment and target",
+            },
+        }
+        .into()
+    };
+    let mut at: Option<(String, String)> = None;
+    let mut keys = Vec::new();
+    for a in attest {
+        let mut parts = a.splitn(3, ':');
+        let (Some(env), Some(target), Some(key)) = (parts.next(), parts.next(), parts.next())
+        else {
+            return Err(format());
+        };
+        if env.is_empty() || target.is_empty() || !key.contains('/') {
+            return Err(format());
+        }
+        match &at {
+            Some((e, t)) if e != env || t != target => return Err(format()),
+            Some(_) => {}
+            None => at = Some((env.to_string(), target.to_string())),
+        }
+        keys.push(key.to_string());
+    }
+    let (env, target) = at.ok_or_else(format)?;
+    Ok((env, target, keys))
+}
+
+/// `opv apply [<plan_id>] --attest …` (#201): the attestation recomputed, shown, confirmed on
+/// this terminal and recorded in each placement's delivery item; the target is not written.
+fn run_apply_attest(
+    fleet: &opv::domain::Fleet,
+    plan_id: Option<&str>,
+    attest: &[String],
+    json: bool,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let (env, target, keys) = attest_flags(attest)?;
+    let mut confirm = |_: &opv::app::attest::AttestProposal| {
+        let _ = write!(io::stderr(), "Record this attestation? [y/N] ");
+        let _ = io::stderr().flush();
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer).is_ok()
+            && matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+    };
+    let mut stderr = io::stderr();
+    let shown: &mut dyn Write = if json { &mut stderr } else { out };
+    let done = opv::app::attest::apply(
+        fleet,
+        &env,
+        &target,
+        &keys,
+        plan_id,
+        &opv::host::ProcessEnv,
+        &mut confirm,
+        shown,
+        r,
+    )?;
+    if json {
+        let doc = serde_json::to_value(&done).map_err(|_| -> Error {
+            opv::cause::Cause::Bug {
+                site: "apply --attest: the result did not serialize",
+            }
+            .into()
+        })?;
+        return writeln!(out, "{doc}").map_err(write_err);
+    }
+    if !done.confirmed {
+        return writeln!(out, "Nothing was recorded.").map_err(write_err);
+    }
+    writeln!(
+        out,
+        "attested {}: {} (recorded as attested, not proven; the target was not written)",
+        done.plan_id,
+        done.attested.join(", ")
+    )
+    .map_err(write_err)?;
+    writeln!(
+        out,
+        "Next: {}",
+        opv::cause::render::cmd_text(&opv::cause::Cmd {
+            command: vec!["sync".into()],
+            args: vec![env, "--target".into(), target],
+        })
+    )
+    .map_err(write_err)
 }
 
 /// `opv apply [<plan_id>]`: the project's structural plan, recomputed, shown, confirmed on

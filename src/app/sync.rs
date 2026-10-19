@@ -1185,9 +1185,18 @@ fn record_delivery(
             }
             if !opts.json {
                 for m in &rec.minted {
+                    // #201: the names the revision counts on a person's attestation.
+                    let attested = if m.attested.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (attested, not proven: {})", m.attested.join(", "))
+                    };
                     p_line(
                         out,
-                        format!("delivery: {} revision {}", m.scope.product, m.revision),
+                        format!(
+                            "delivery: {} revision {}{attested}",
+                            m.scope.product, m.revision
+                        ),
                     )?;
                 }
                 for n in &rec.not_minted {

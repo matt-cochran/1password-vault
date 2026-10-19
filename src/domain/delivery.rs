@@ -43,6 +43,12 @@ pub struct Receipt {
     pub delivered_at: String,
     pub plan_id: Option<String>,
     pub opv_version: String,
+    /// The names of `bindings` this revision counts on a person's attestation (#201,
+    /// `docs/attestation.md`), not on a write or a proof: sorted. Optional, so a receipt
+    /// without it (every receipt before 0.12.3) reads as attesting nothing; omitted when
+    /// empty, so the `opv.delivery/1` schema is unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attested: Vec<String>,
 }
 
 /// Two or more receipts in one file share a full scope (FR-58).
@@ -89,6 +95,59 @@ impl fmt::Debug for Evidence {
             .field("name", &self.name)
             .finish()
     }
+}
+
+/// A person's attestation (#201): `name` was recorded as identical to its 1Password value at
+/// the target's `store_version` without opv writing it. Kept beside the evidence line it
+/// vouches for, in the same private delivery item; it holds while that line keeps this store
+/// version, and a write by sync replaces it. Debug prints the name only.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Attestation {
+    pub name: String,
+    pub store_version: String,
+    /// RFC 3339 UTC, when the person recorded it.
+    pub at: String,
+}
+
+impl fmt::Debug for Attestation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Attestation")
+            .field("name", &self.name)
+            .finish()
+    }
+}
+
+/// One `"a1|<name>|<store_version>|<at>"` line per attestation, sorted by name; an
+/// attestation with a part that is empty or holds `'|'` or a newline is left out.
+pub fn encode_attestations(list: &[Attestation]) -> String {
+    let mut lines: Vec<String> = list
+        .iter()
+        .filter(|a| valid_part(&a.name) && valid_part(&a.store_version) && valid_part(&a.at))
+        .map(|a| format!("a1|{}|{}|{}", a.name, a.store_version, a.at))
+        .collect();
+    lines.sort();
+    lines.join("\n")
+}
+
+/// The inverse of [`encode_attestations`]; a line in another format is skipped.
+pub fn decode_attestations(text: &str) -> Vec<Attestation> {
+    text.lines()
+        .filter_map(|line| {
+            let mut parts = line.split('|');
+            if parts.next()? != "a1" {
+                return None;
+            }
+            let (name, store_version, at) = (parts.next()?, parts.next()?, parts.next()?);
+            if parts.next().is_some() || [name, store_version, at].iter().any(|p| p.is_empty()) {
+                return None;
+            }
+            Some(Attestation {
+                name: name.to_string(),
+                store_version: store_version.to_string(),
+                at: at.to_string(),
+            })
+        })
+        .collect()
 }
 
 /// `"drv-"` followed by the lowercase RFC 4648 base32 (no padding) of the 16 bytes: 26
@@ -154,6 +213,10 @@ pub struct Verification {
     pub state: &'static str,
     pub reason: Option<String>,
     pub names: Vec<NameCheck>,
+    /// The names the checked revision counts on a person's attestation, not a proof (#201):
+    /// the receipt's `attested`. Omitted when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attested: Vec<String>,
 }
 
 /// What a read-only check sees now, per name.
@@ -178,6 +241,7 @@ pub fn verify(
             state: "not_delivered",
             reason: Some("no delivery recorded".to_string()),
             names: Vec::new(),
+            attested: Vec::new(),
         };
     };
 
@@ -187,6 +251,7 @@ pub fn verify(
             state: "not_delivered",
             reason: Some(format!("recorded for another {field}")),
             names: Vec::new(),
+            attested: Vec::new(),
         };
     }
 
@@ -198,6 +263,7 @@ pub fn verify(
             state: "not_delivered",
             reason: Some("the binding set changed".to_string()),
             names: Vec::new(),
+            attested: Vec::new(),
         };
     }
 
@@ -238,6 +304,7 @@ pub fn verify(
         state,
         reason,
         names,
+        attested: receipt.attested.clone(),
     }
 }
 
