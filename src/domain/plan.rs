@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use crate::domain::model::{Fleet, KeySpec, Kind};
+use crate::domain::model::{Fleet, KeySpec, Kind, Lifecycle};
 use crate::domain::rules::{self, Reason};
 use crate::domain::secret::SecretValue;
 use crate::provider::{Channel, FileCapability};
@@ -60,11 +60,60 @@ pub enum KeyState {
     WrongKind,
     /// The failing rule's stable name and why it failed (FR-15, FR-22). Never the value.
     RuleFailed(&'static str, Reason),
+    /// The key's rules are not committed on the repository's default branch (H1, design row
+    /// `rule-gate`): an assistant (MCP or an agent marker) never evaluates them, so the key
+    /// reports this instead of a pass or a fail. A person and CI evaluate as before.
+    RulesPendingReview,
     Ready,
     Skipped,
     /// A shared key (FR-45) whose source has a finding: the finding is reported once, on
     /// the source's row, which also blocks the sync. Not counted as a finding of its own.
     SourceBlocked,
+}
+
+/// The per-key rule gate (H1, design row `rule-gate`): `agent` says the caller is an
+/// assistant (MCP or an agent marker), and `pending` answers whether a key's rules exist
+/// only outside the contract committed on the default branch. An agent never evaluates a
+/// pending rule; the key reports [`KeyState::RulesPendingReview`] and no rule text meets
+/// the value. [`RuleGate::today`] is the unchanged behaviour for every other caller.
+pub struct RuleGate<'a> {
+    /// The caller is MCP or carries an agent marker (presentation only, R1).
+    pub agent: bool,
+    /// True when `(product, key)`'s rules are not committed on the default branch.
+    pub pending: &'a dyn Fn(&str, &str) -> bool,
+}
+
+impl RuleGate<'static> {
+    /// Today's behaviour, unchanged: no agent, no rule held back.
+    pub fn today() -> Self {
+        fn none(_: &str, _: &str) -> bool {
+            false
+        }
+        RuleGate {
+            agent: false,
+            pending: &none,
+        }
+    }
+}
+
+/// Hold back every rule of `rows` whose status is pending, for a gated evaluation (design
+/// row `rule-gate`). Used where the rows were built before the gate was known (the `ready`
+/// receipt): a present value shows [`KeyState::RulesPendingReview`] instead of its rule
+/// result, and a shared row blocked by a pending source follows its source.
+pub fn apply_rule_gate(rows: &mut [Row], gate: &RuleGate<'_>) {
+    if !gate.agent {
+        return;
+    }
+    for r in rows {
+        let blocked_by_pending_source = matches!(r.state, KeyState::SourceBlocked)
+            && r.source
+                .as_ref()
+                .is_some_and(|(sp, sk)| (gate.pending)(sp, sk));
+        let present = matches!(r.state, KeyState::Ready | KeyState::RuleFailed(..));
+        if (present && (gate.pending)(&r.product, &r.key)) || blocked_by_pending_source {
+            r.state = KeyState::RulesPendingReview;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,6 +272,12 @@ pub struct PlanOptions<'a> {
     /// For a store that can read its values back (pinned flow, FR-31): each ready secret
     /// the store lists is compared exactly. `None` keeps the digest compare alone (Fly).
     pub current: Option<&'a CurrentCheck<'a>>,
+    /// Prune a `retiring` key (design Part V, row `retire-guard`). `false` (every plain
+    /// sync): a `retiring` key is staged and kept exactly like an `active` one. `true`:
+    /// only retire's [`RetireStep::Prune`](crate::app::retire::RetireStep::Prune) step, run
+    /// through this sync path, releases it to the prune list. `retired` is never delivered
+    /// either way.
+    pub retiring_prune: bool,
 }
 
 /// Plan a sync of `item` into the first target of `env_name` (by name), with no prune
@@ -256,6 +311,7 @@ pub fn build(
             digest,
             target_check: &|_, _| None,
             current: None,
+            retiring_prune: false,
         },
     )
 }
@@ -270,6 +326,20 @@ pub fn build_with(
     item: Vec<ItemField>,
     on_store: &[StoreEntry],
     opts: &PlanOptions<'_>,
+) -> SyncPlan {
+    build_with_gate(fleet, env_name, item, on_store, opts, &RuleGate::today())
+}
+
+/// [`build_with`] with the rule gate (design row `rule-gate`): an agent evaluating a key
+/// whose rules are not committed on the default branch gets [`KeyState::RulesPendingReview`]
+/// and no rule runs. Every existing caller keeps [`RuleGate::today`] through [`build_with`].
+pub fn build_with_gate(
+    fleet: &Fleet,
+    env_name: &str,
+    item: Vec<ItemField>,
+    on_store: &[StoreEntry],
+    opts: &PlanOptions<'_>,
+    gate: &RuleGate<'_>,
 ) -> SyncPlan {
     let env = fleet
         .environments
@@ -326,6 +396,15 @@ pub fn build_with(
             target_roles.is_some_and(|served| !roles.iter().any(|r| served.contains(r)))
         });
         match field {
+            // H1: an agent never evaluates an uncommitted rule. The key reports the pending
+            // review, never a pass or a fail, and no rule text meets the value.
+            _ if gate.agent
+                && !withheld_by_role
+                && field.is_some()
+                && (gate.pending)(product, key) =>
+            {
+                Err(KeyState::RulesPendingReview)
+            }
             _ if refused => Err(KeyState::RuleFailed(
                 "refuse_in",
                 Reason::Fixed(rules::REASON_REFUSED),
@@ -392,7 +471,7 @@ pub fn build_with(
                 .as_deref()
                 .and_then(|n| on_target.get(n).copied());
             let field = by_name.get(&(product.as_str(), key.as_str()));
-            let declared_here = spec.environments.iter().any(|e| e == env_name);
+            let declared_here = spec.is_desired_in(env_name);
             if declared_here && !delivered && !p.source_only {
                 plan.undelivered.push((product.clone(), key.clone()));
             }
@@ -414,6 +493,7 @@ pub fn build_with(
                     match evaluate(sp, sk, src_spec, src_field) {
                         Ok(Some(v)) => evaluate(product, key, spec, Some((spec.kind, &v))),
                         Ok(None) => evaluate(product, key, spec, src_field),
+                        Err(KeyState::RulesPendingReview) => Err(KeyState::RulesPendingReview),
                         Err(_) if rules::applies(spec, env_name, env, product) => {
                             Err(KeyState::SourceBlocked)
                         }
@@ -431,6 +511,16 @@ pub fn build_with(
                     }
                 }
                 (o, _, _) => o,
+            };
+            // Lifecycle (design Part V, rows `retire` and `retire-guard`): `retired` is
+            // delivered nowhere, exactly like an undeclared key, so a target that still
+            // holds it prunes it. A `retiring` key is delivered (staged and kept) like an
+            // `active` one, so a plain `--prune` never removes it; only retire's prune step
+            // sets `retiring_prune`, which releases it to the prune list. Additive: nothing
+            // active is affected.
+            let outcome = match (spec.lifecycle, opts.retiring_prune) {
+                (Lifecycle::Active, _) | (Lifecycle::Retiring, false) => outcome,
+                (Lifecycle::Retiring, true) | (Lifecycle::Retired, _) => Ok(None),
             };
 
             let mut row = Row {
@@ -572,7 +662,7 @@ pub fn build_with(
             continue;
         }
         for (key, spec) in &p.keys {
-            if spec.environments.iter().any(|e| e == env_name)
+            if spec.is_desired_in(env_name)
                 && !referenced.contains(&(product.as_str(), key.as_str()))
             {
                 plan.unreferenced_sources
@@ -882,6 +972,7 @@ mod tests {
                 digest: &|_| None,
                 target_check: &|_, _| None,
                 current: None,
+                retiring_prune: false,
             },
         )
     }
@@ -1273,6 +1364,81 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
     }
 
     #[test]
+    fn a_plain_prune_keeps_a_retiring_key() {
+        let leaving = TWO_KEYS.replace(
+            "[products.p.keys.BOTH]\nkind = \"secret\"",
+            "[products.p.keys.BOTH]\nkind = \"secret\"\nlifecycle = \"retiring\"",
+        );
+        let fleet = config::parse(&leaving).unwrap();
+        let fly = [fly_secret("FLEET__P__BOTH", None)];
+        let p = build(&fleet, "prod", vec![], &fly, &no_rotate(), &none);
+        assert!(p.prune.is_empty());
+    }
+
+    #[test]
+    fn a_retiring_key_is_staged_like_an_active_key() {
+        let leaving = TWO_KEYS.replace(
+            "[products.p.keys.BOTH]\nkind = \"secret\"",
+            "[products.p.keys.BOTH]\nkind = \"secret\"\nlifecycle = \"retiring\"",
+        );
+        let fleet = config::parse(&leaving).unwrap();
+        let p = build(
+            &fleet,
+            "prod",
+            vec![secret("p", "BOTH", "v")],
+            &[],
+            &no_rotate(),
+            &none,
+        );
+        assert_eq!(p.stage.len(), 1);
+    }
+
+    #[test]
+    fn a_retiring_key_present_on_a_target_is_pruned() {
+        let leaving = TWO_KEYS.replace(
+            "[products.p.keys.BOTH]\nkind = \"secret\"",
+            "[products.p.keys.BOTH]\nkind = \"secret\"\nlifecycle = \"retiring\"",
+        );
+        let fleet = config::parse(&leaving).unwrap();
+        let fly = [fly_secret("FLEET__P__BOTH", None)];
+        let empty = BTreeSet::new();
+        let p = build_with(
+            &fleet,
+            "prod",
+            vec![],
+            &fly,
+            &PlanOptions {
+                target: Some("portfolio"),
+                rotate: &empty,
+                prune_immutable: &empty,
+                digest: &none,
+                target_check: &|_, _| None,
+                current: None,
+                retiring_prune: true,
+            },
+        );
+        assert_eq!(p.prune, vec!["FLEET__P__BOTH".to_string()]);
+    }
+
+    #[test]
+    fn a_retired_key_is_never_staged() {
+        let gone = TWO_KEYS.replace(
+            "[products.p.keys.BOTH]\nkind = \"secret\"",
+            "[products.p.keys.BOTH]\nkind = \"secret\"\nlifecycle = \"retired\"",
+        );
+        let fleet = config::parse(&gone).unwrap();
+        let p = build(
+            &fleet,
+            "prod",
+            vec![secret("p", "BOTH", "v")],
+            &[],
+            &no_rotate(),
+            &none,
+        );
+        assert!(p.stage.is_empty());
+    }
+
+    #[test]
     fn declared_applicable_present_key_is_never_pruned() {
         let fleet = config::parse(TWO_KEYS).unwrap();
         let fly = [fly_secret("FLEET__P__BOTH", None)];
@@ -1337,6 +1503,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
             digest: &none,
             target_check,
             current: None,
+            retiring_prune: false,
         }
     }
 
@@ -1535,7 +1702,8 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
         fn key() -> KeySpec {
             KeySpec {
                 kind: Kind::Secret,
-                environments: vec!["ci".to_string()],
+                environments: Some(vec!["ci".to_string()]),
+                except: Default::default(),
                 rules: Default::default(),
                 immutable: false,
                 guidance: String::new(),
@@ -1544,6 +1712,9 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
                 allow_same_value: false,
                 file: None,
                 roles: None,
+                value_source: None,
+                expires: None,
+                lifecycle: Default::default(),
             }
         }
         let target = GithubTarget {
@@ -1558,7 +1729,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
         let env = Environment {
             name: "ci".to_string(),
             boundaries: ["api", "web", "shared"]
-                .map(|b| (b.to_string(), at.clone()))
+                .map(|b| (b.to_string(), Some(at.clone())))
                 .into_iter()
                 .collect(),
             targets: BTreeMap::from([(
@@ -1569,7 +1740,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
                     products: Some(vec!["api".to_string()]),
                     roles: None,
                     deploy_credentials: None,
-                    state_vault_id: "sci".to_string(),
+                    state_vault_id: Some("sci".to_string()),
                     delivery_items: BTreeMap::new(),
                 },
             )]),
@@ -1584,6 +1755,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
                     keys: BTreeMap::from([("TOKEN".to_string(), key())]),
                     local: None,
                     remotes: Default::default(),
+                    ignore: Default::default(),
                 },
             ),
             (
@@ -1594,6 +1766,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
                     keys: BTreeMap::from([("TOKEN".to_string(), key())]),
                     local: None,
                     remotes: Default::default(),
+                    ignore: Default::default(),
                 },
             ),
             (
@@ -1604,6 +1777,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
                     keys: BTreeMap::from([("TOKEN".to_string(), key())]),
                     local: None,
                     remotes: Default::default(),
+                    ignore: Default::default(),
                 },
             ),
         ]);
@@ -1679,5 +1853,110 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
                     KeyState::RuleFailed("prefix", Reason::ExpectedPrefix(_))
                 )
         }));
+    }
+
+    // --- rule gate (design row `rule-gate`, H1) ------------------------------------------
+
+    /// One secret key whose value must start with `sk-`.
+    fn gate_fleet() -> Fleet {
+        config::parse(
+            "[environments.dev]\n\
+             boundaries.app = { vault_id = \"vdev0000000000000000000001\", item_id = \"app\" }\n\
+             [products.app.keys.API_KEY]\n\
+             kind = \"secret\"\n\
+             environments = [\"dev\"]\n\
+             rules = { prefix = \"sk-\" }\n",
+        )
+        .unwrap()
+    }
+
+    fn gated_state(gate: &RuleGate<'_>, value: &str) -> KeyState {
+        let empty = BTreeSet::new();
+        let opts = PlanOptions {
+            target: None,
+            rotate: &empty,
+            prune_immutable: &empty,
+            digest: &none,
+            target_check: &|_, _| None,
+            current: None,
+            retiring_prune: false,
+        };
+        let plan = build_with_gate(
+            &gate_fleet(),
+            "dev",
+            vec![secret("app", "API_KEY", value)],
+            &[],
+            &opts,
+            gate,
+        );
+        plan.rows
+            .iter()
+            .find(|r| r.key == "API_KEY")
+            .unwrap()
+            .state
+            .clone()
+    }
+
+    #[test]
+    fn an_agent_reports_a_pending_rule_as_rules_pending_review() {
+        let gate = RuleGate {
+            agent: true,
+            pending: &|_, _| true,
+        };
+        assert_eq!(gated_state(&gate, "sk-live"), KeyState::RulesPendingReview);
+    }
+
+    #[test]
+    fn an_agent_never_fails_a_pending_rule() {
+        let gate = RuleGate {
+            agent: true,
+            pending: &|_, _| true,
+        };
+        assert_eq!(gated_state(&gate, "wrong"), KeyState::RulesPendingReview);
+    }
+
+    #[test]
+    fn an_agent_evaluates_a_committed_rule() {
+        let gate = RuleGate {
+            agent: true,
+            pending: &|_, _| false,
+        };
+        assert_eq!(gated_state(&gate, "sk-live"), KeyState::Ready);
+    }
+
+    #[test]
+    fn an_mcp_caller_holds_a_pending_rule_pending_review() {
+        let host = crate::host::Host::from_env(&crate::host::FakeEnv::new("linux").mcp());
+        let gate = RuleGate {
+            agent: host.agent_mode.is_some(),
+            pending: &|_, _| true,
+        };
+        assert_eq!(gated_state(&gate, "sk-live"), KeyState::RulesPendingReview);
+    }
+
+    #[test]
+    fn a_person_at_a_tty_evaluates_a_pending_rule() {
+        let host = crate::host::Host::from_env(&crate::host::FakeEnv::new("linux").tty());
+        let gate = RuleGate {
+            agent: host.agent_mode.is_some(),
+            pending: &|_, _| true,
+        };
+        assert!(matches!(
+            gated_state(&gate, "wrong"),
+            KeyState::RuleFailed("prefix", _)
+        ));
+    }
+
+    #[test]
+    fn ci_evaluates_a_pending_rule() {
+        let host = crate::host::Host::from_env(&crate::host::FakeEnv::new("linux").var("CI"));
+        let gate = RuleGate {
+            agent: host.agent_mode.is_some(),
+            pending: &|_, _| true,
+        };
+        assert!(matches!(
+            gated_state(&gate, "wrong"),
+            KeyState::RuleFailed("prefix", _)
+        ));
     }
 }

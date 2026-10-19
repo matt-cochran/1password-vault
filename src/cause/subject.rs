@@ -438,7 +438,7 @@ pub enum PlanScope {
         prune: bool,
         rotate: Vec<ProductKey>,
     },
-    /// A structural plan (`opv structure plan`).
+    /// A structural plan (`opv propose structure`).
     Structural,
 }
 

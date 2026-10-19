@@ -111,10 +111,23 @@ pub fn run(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
+    run_on(fleet, env_name, keys, r, crate::host::Host::detect(), out)
+}
+
+/// [`run`] with the person's own-session check judged by `host` (the host `opv apply` was
+/// given), never by this process's variables.
+pub fn run_on(
+    fleet: &crate::domain::Fleet,
+    env_name: &str,
+    keys: &[String],
+    r: &dyn CommandRunner,
+    host: crate::host::Host,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
     let env = fleet.environment(env_name)?;
     // Everything is checked before anything is written.
     let chosen = plan(fleet, env_name, keys)?;
-    super::tidy::require_person(r, "opv generate")?;
+    super::tidy::require_person_on(r, "opv apply", host)?;
     // Never over a value: what 1Password holds now, read fresh.
     let read = super::tidy::read(fleet, env_name, r)?;
     for (product, key, _) in &chosen {
@@ -130,15 +143,16 @@ pub fn run(
         .iter()
         .map(|(p, k, rcp)| make(*rcp).map(|v| (p.clone(), k.clone(), v)))
         .collect::<Result<_, _>>()?;
-    // A read-back failure names this command (05.10): run again, a value that landed is
-    // refused as already there, never replaced.
+    // A read-back failure names the apply that generates (05.10): run again, a value that
+    // landed is refused as already there, never replaced.
     let by = crate::cause::Cmd {
-        command: vec!["generate".into()],
-        args: std::iter::once(env_name.to_string())
-            .chain(keys.iter().cloned())
+        command: vec!["apply".into()],
+        args: keys
+            .iter()
+            .flat_map(|k| ["--generate".to_string(), format!("{env_name}:{k}")])
             .collect(),
     };
-    super::adopt::write_values(fleet, env, &writes, &by, r)?;
+    super::import::write_values(fleet, env, &writes, &by, r)?;
     for (p, k, rcp) in &chosen {
         writeln!(
             out,
@@ -178,14 +192,14 @@ pub fn plan(
         // Declared at all, then declared for this environment: each names the keys that
         // are (05.39), so a typo gets the same command with the right name.
         let spec = fleet.products.get(product).and_then(|p| p.keys.get(key));
-        let Some(spec) = spec.filter(|s| s.environments.iter().any(|e| e == env_name)) else {
+        let Some(spec) = spec.filter(|s| s.is_desired_in(env_name)) else {
             let declared: Vec<String> = fleet
                 .products
                 .iter()
                 .flat_map(|(p, prod)| {
                     prod.keys
                         .iter()
-                        .filter(|(_, s)| s.environments.iter().any(|e| e == env_name))
+                        .filter(|(_, s)| s.is_desired_in(env_name))
                         .map(move |(k, _)| key_label(p, k))
                 })
                 .collect();

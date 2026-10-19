@@ -166,7 +166,7 @@ impl Interaction for Answer {
 fn file(text: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("secrets.toml");
-    std::fs::write(&path, text).unwrap();
+    crate::config::bindings::write_split(&path, text).unwrap();
     (dir, path)
 }
 

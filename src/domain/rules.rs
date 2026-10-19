@@ -146,7 +146,7 @@ pub fn refused_in(spec: &KeySpec, env_name: &str) -> bool {
 /// Whether the key is expected for this environment and not skipped by a payments-style
 /// mode. A missing mode does not skip (it fails in `check` instead).
 pub fn applies(spec: &KeySpec, env_name: &str, env: &Environment, product: &str) -> bool {
-    if !spec.environments.iter().any(|e| e == env_name) {
+    if !spec.is_desired_in(env_name) {
         return false;
     }
     if let Some(p) = &spec.rules.prefix_by_mode
@@ -435,7 +435,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn f() -> Fleet {
-        parse(include_str!("../../tests/fixtures/secrets.toml")).unwrap()
+        parse(&crate::config::merged_text("tests/fixtures/secrets.toml")).unwrap()
     }
     fn chk(env: &str, key: &str, v: &str) -> Result<Option<String>, RuleFailure> {
         let f = f();
@@ -456,7 +456,8 @@ mod tests {
         let f = f();
         let spec = KeySpec {
             kind: Kind::Secret,
-            environments: vec!["prod".into(), "staging".into()],
+            environments: Some(vec!["prod".into(), "staging".into()]),
+            except: Default::default(),
             rules,
             immutable: false,
             guidance: String::new(),
@@ -465,6 +466,9 @@ mod tests {
             allow_same_value: false,
             file: None,
             roles: None,
+            value_source: None,
+            expires: None,
+            lifecycle: Default::default(),
         };
         let env = &f.environments["prod"];
         check(
@@ -592,7 +596,7 @@ mod tests {
         assert_eq!(e.rule, "prefix_by_mode");
     }
     fn stripe_lists(env: &str, v: &str) -> Result<Option<String>, RuleFailure> {
-        let t = include_str!("../../tests/fixtures/secrets.toml").replace(
+        let t = crate::config::merged_text("tests/fixtures/secrets.toml").replace(
             r#"values = { test = "sk_test_", live = "sk_live_" }"#,
             r#"values = { test = ["sk_test_", "rk_test_"], live = ["sk_live_", "rk_live_"] }"#,
         );
@@ -696,7 +700,8 @@ mod tests {
         let f = f();
         let spec = KeySpec {
             kind: Kind::Secret,
-            environments: vec!["prod".into()],
+            environments: Some(vec!["prod".into()]),
+            except: Default::default(),
             rules: Rules {
                 refuse_in: vec!["staging".into()],
                 ..Rules::default()
@@ -708,6 +713,9 @@ mod tests {
             allow_same_value: false,
             file: None,
             roles: None,
+            value_source: None,
+            expires: None,
+            lifecycle: Default::default(),
         };
         let env = &f.environments["staging"];
         assert!(!applies(&spec, "staging", env, "allumata"));

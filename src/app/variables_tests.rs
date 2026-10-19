@@ -75,6 +75,7 @@ fn planned(field: Option<ItemField>, vars: &FakeVars) -> (SyncPlan, VarPlan) {
             digest: &|_| None,
             target_check: &|_, _| None,
             current: None,
+            retiring_prune: false,
         },
     );
     let (name, t) = f.environments["staging"]
@@ -194,6 +195,7 @@ fn a_store_refusal_fails_the_row() {
             digest: &|_| None,
             target_check: &|_, _| None,
             current: None,
+            retiring_prune: false,
         },
     );
     let (name, t) = f.environments["staging"]
@@ -229,6 +231,8 @@ fn a_managed_variable_no_key_wants_is_pruned() {
         .get_mut("SIGNUP_POLICY")
         .unwrap()
         .environments
+        .as_mut()
+        .unwrap()
         .retain(|e| e != "staging");
     let mut p = plan::build(&f2, "staging", vec![], &[], &BTreeSet::new(), &|_| None);
     let (name, t) = f2.environments["staging"]

@@ -1,8 +1,12 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "ok": false,
   "exit_code": 6,
-  "next": "<the command as typed> --confirm prod",
+  "next": {
+    "kind": "apply",
+    "actor": "person",
+    "command": "<the command as typed> --confirm prod"
+  },
   "do": "make sure prod is the environment you mean (agents: ask the user)",
   "error": {
     "code": "confirm_required",
@@ -19,7 +23,10 @@
     "retry": "never",
     "human_required": true,
     "do": "make sure prod is the environment you mean (agents: ask the user)",
-    "next": "<the command as typed> --confirm prod",
-    "next_kind": "handoff"
+    "next": {
+      "kind": "apply",
+      "actor": "person",
+      "command": "<the command as typed> --confirm prod"
+    }
   }
 }

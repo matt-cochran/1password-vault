@@ -14,7 +14,7 @@ use serde_json::json;
 
 use super::{status, write_err};
 use crate::adapters::onepassword_manifest::{self as manifest, Row};
-use crate::cause::{AccountId, Cause, Cmd, GivenBy, UsageProblem};
+use crate::cause::{AccountId, Cause, Cmd, EnvName, GivenBy, UsageProblem};
 use crate::config;
 use crate::config_store::{
     self as store, ConfigStore, Found, ManifestStore, Matched, Replaced, Snapshot,
@@ -30,6 +30,52 @@ fn line(out: &mut dyn Write, s: impl AsRef<str>) -> Result<(), Error> {
 /// opv's own failure at `site` (never the person's).
 fn bug(site: &'static str) -> Error {
     Cause::Bug { site }.into()
+}
+
+/// D-G: the committed `secrets.bindings.toml` must be the one the last `opv apply` wrote.
+/// The apply record holds only digests, so a difference is reported with the environments
+/// named in the bindings file (the record names none). No record means nothing was applied
+/// yet, which passes; only names and digests are compared, never a value.
+fn check_bindings(file: &Path) -> Result<(), Error> {
+    let dir = file.parent().unwrap_or_else(|| Path::new("."));
+    let Some(record) = config::bindings::read_record(&dir.join(config::bindings::APPLIED))? else {
+        return Ok(());
+    };
+    let path = dir.join(config::bindings::FILE);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(unreadable_file(&path, &e)),
+    };
+    if config::bindings::digest(&bytes) == record.bindings_digest {
+        return Ok(());
+    }
+    let ids = config::bindings::read_sibling(file)?;
+    Err(Cause::BindingsUnapplied {
+        environments: environments_of(&ids),
+    }
+    .into())
+}
+
+/// The environments a bindings file names, in the file's sorted order: the second dotted key
+/// of every `environments.<env>…` path.
+fn environments_of(ids: &config::bindings::Bindings) -> Vec<EnvName> {
+    let mut envs: Vec<EnvName> = Vec::new();
+    for line in ids.render().lines() {
+        let Some(path) = line.split(" = ").next() else {
+            continue;
+        };
+        let mut parts = path.split('.');
+        if parts.next() != Some("environments") {
+            continue;
+        }
+        let Some(env) = parts.next() else { continue };
+        let env = EnvName::new(env);
+        if !envs.contains(&env) {
+            envs.push(env);
+        }
+    }
+    envs
 }
 
 /// A file named with `--file` that could not be read.
@@ -61,7 +107,8 @@ pub enum Format {
 }
 
 /// `config export [--toml|--json]`: the configuration itself (no secrets), validated. TOML
-/// is printed byte for byte as stored.
+/// is the contract as stored with its ids filled in (D-G: from `secrets.bindings.toml` or
+/// the manifest's `opv-bindings` block), the text `opv ui` and `config edit` work on.
 pub fn export(
     found: &Found,
     format: Format,
@@ -76,6 +123,35 @@ pub fn export(
             // The text was just validated as TOML: a failure here is opv's bug.
             let v: toml::Value =
                 toml::from_str(&snap.text).map_err(|_| bug("config export: parse"))?;
+            let s =
+                serde_json::to_string_pretty(&v).map_err(|_| bug("config export: serialize"))?;
+            line(out, s)
+        }
+    }
+}
+
+/// `config export [--toml|--json]` without ids (D-G, the default): the contract itself,
+/// validated, with every 1Password id left where it lives (a file project's
+/// `secrets.bindings.toml`, a manifest's `opv-bindings` block). `--with-ids` (debugging
+/// only) prints the merged form through [`export`].
+pub fn export_contract(
+    found: &Found,
+    format: Format,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let snap = found.store().read(r)?;
+    store::parse_from(found, &snap.text)?;
+    let (contract, _) = config::bindings::split(&snap.text);
+    write_text(&contract, format, out)
+}
+
+/// Write an already-validated configuration `text` in `format` (shared by the export forms).
+fn write_text(text: &str, format: Format, out: &mut dyn Write) -> Result<(), Error> {
+    match format {
+        Format::Toml => out.write_all(text.as_bytes()).map_err(write_err),
+        Format::Json => {
+            let v: toml::Value = toml::from_str(text).map_err(|_| bug("config export: parse"))?;
             let s =
                 serde_json::to_string_pretty(&v).map_err(|_| bug("config export: serialize"))?;
             line(out, s)
@@ -102,6 +178,10 @@ pub fn import(
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     let text = fs::read_to_string(&args.file).map_err(|e| unreadable_file(&args.file, &e))?;
+    // D-G: the manifest gets the contract only. A file still carrying an inline id is
+    // refused naming the field; the ids beside it are never copied: the manifest's
+    // `opv-bindings` block is written only by `opv apply`.
+    config::bindings::refuse_inline(&text)?;
     config::parse_at(&text, config::Source::File(&args.file))?;
     let paths = normalize_paths(&args.paths)?;
     let repo = store::git_repo(r);
@@ -211,14 +291,28 @@ pub fn check(
 ) -> Result<(), Error> {
     let committed = fs::read_to_string(file).map_err(|e| unreadable_file(file, &e))?;
     // The file must be a configuration before any of it is printed as a diff: a `.env`
-    // given by mistake would otherwise reach stdout line by line (C1, SR-1).
-    config::parse_at(&committed, config::Source::File(file))?;
+    // given by mistake would otherwise reach stdout line by line (C1, SR-1). D-G: its ids
+    // live beside it, so it is judged with them filled in.
+    config::parse_at(
+        &config::with_bindings(&committed, file)?,
+        config::Source::File(file),
+    )?;
     let current = found.store().read(r)?;
-    let (a, b) = (
-        current.text.replace("\r\n", "\n"),
+    // The manifest's read fills its `opv-bindings` ids in: it is compared the way the file
+    // keeps it, the contract first, then (when that matches) the ids.
+    let (contract, ids) = config::bindings::split(&current.text);
+    let (contract, committed) = (
+        contract.replace("\r\n", "\n"),
         committed.replace("\r\n", "\n"),
     );
+    let (a, b) = if contract.trim_end() == committed.trim_end() {
+        let committed_ids = config::bindings::read_sibling(file)?;
+        (ids.render(), committed_ids.render())
+    } else {
+        (contract, committed)
+    };
     if a.trim_end() == b.trim_end() {
+        check_bindings(file)?;
         return line(
             out,
             format!("{} matches {}", file.display(), found.store().describe()),

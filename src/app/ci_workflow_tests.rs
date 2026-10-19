@@ -100,7 +100,12 @@ fn fly_target_names_no_deploy_token() {
 
 #[test]
 fn fly_target_references_only_the_service_account_secret() {
-    assert_eq!(fly_workflow(None, false).matches("${{ secrets.").count(), 1);
+    let yaml = fly_workflow(None, false);
+    assert_eq!(
+        yaml.matches("${{ secrets.").count(),
+        yaml.matches("${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}")
+            .count()
+    );
 }
 
 #[test]
@@ -354,5 +359,99 @@ fn the_detect_step_branches_on_changed() {
 fn the_change_workflow_puts_every_sync_in_one_concurrency_group() {
     assert!(
         fly_change(false, 15).contains("concurrency: {group: opv-sync, cancel-in-progress: false}")
+    );
+}
+
+// --- the pull-request checks and the relaxations job (Part V, row `ci-workflow`) ---------
+
+/// The single-target workflow for the fixture configuration's `prod`/`portfolio`.
+fn fixture_run(env: &str, target: &str) -> String {
+    let fleet = fixture_fleet();
+    let mut out = Vec::new();
+    run(&fleet, env, target, None, false, &mut out).unwrap();
+    text_of(&out)
+}
+
+#[test]
+fn pr_workflow_triggers_on_pull_request() {
+    assert!(fly_workflow(None, false).contains("  pull_request:\n"));
+}
+
+#[test]
+fn sync_job_runs_only_on_dispatch() {
+    assert!(
+        fly_workflow(None, false).contains("    if: github.event_name == 'workflow_dispatch'\n")
+    );
+}
+
+#[test]
+fn pr_checks_run_the_needs_gate() {
+    assert!(fly_workflow(None, false).contains("        run: opv needs --gate\n"));
+}
+
+#[test]
+fn pr_checks_run_the_contract_check() {
+    assert!(
+        fly_workflow(None, false).contains("        run: opv contract --check contract.json\n")
+    );
+}
+
+#[test]
+fn pr_checks_run_the_ready_gate() {
+    assert!(fly_workflow(None, false).contains("        run: opv ready prod --gate\n"));
+}
+
+#[test]
+fn the_relaxations_status_is_named_opv_relaxations() {
+    assert!(fly_workflow(None, false).contains("    name: opv/relaxations\n"));
+}
+
+#[test]
+fn relaxations_are_listed_against_the_default_branch() {
+    assert!(
+        fly_workflow(None, false).contains(
+            "          relaxations=$(opv contract --relaxations --base \"$BASE\" --json)\n"
+        )
+    );
+}
+
+#[test]
+fn the_default_branch_is_the_repositorys_default_branch() {
+    assert!(
+        fly_workflow(None, false)
+            .contains("          BASE: origin/${{ github.event.repository.default_branch }}\n")
+    );
+}
+
+#[test]
+fn the_relaxations_job_uses_the_workflow_token() {
+    assert!(fly_workflow(None, false).contains("      GH_TOKEN: ${{ github.token }}\n"));
+}
+
+#[test]
+fn the_relaxations_job_requires_approval_at_the_head() {
+    assert!(
+        fly_workflow(None, false)
+            .contains("select(.state == \"APPROVED\" and .commit_id == $head)")
+    );
+}
+
+#[test]
+fn run_workflow_matches_the_fixture_golden() {
+    assert_eq!(
+        fixture_run("prod", "portfolio"),
+        std::fs::read_to_string("tests/fixtures/ci/pr.yml").unwrap()
+    );
+}
+
+#[test]
+fn the_example_pr_workflow_equals_the_output() {
+    let fleet = config::load("examples/ci-change-detection/secrets.toml").unwrap();
+    let mut out = Vec::new();
+    run(&fleet, "prod", "app", None, false, &mut out).unwrap();
+    assert_eq!(
+        text_of(&out),
+        std::fs::read_to_string("examples/ci-change-detection/.github/workflows/opv-pr.yml")
+            .unwrap()
     );
 }

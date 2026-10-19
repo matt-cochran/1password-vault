@@ -11,10 +11,11 @@ fn text(out: &[u8]) -> String {
     String::from_utf8(out.to_vec()).unwrap()
 }
 
-/// A checkout with `secrets.toml`, and a fake op with the checkout's remote.
+/// A checkout with `secrets.toml` (its ids in `secrets.bindings.toml` beside it, D-G), and
+/// a fake op with the checkout's remote.
 fn checkout() -> (tempfile::TempDir, FakeOp) {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("secrets.toml"), TOML).unwrap();
+    crate::config::bindings::write_split(&dir.path().join("secrets.toml"), TOML).unwrap();
     (dir, FakeOp::with_remote(REMOTE))
 }
 
@@ -25,6 +26,15 @@ fn import_args(dir: &Path) -> ImportArgs {
         project: None,
         paths: Vec::new(),
     }
+}
+
+/// The file project found at the checkout (no manifest): the `secrets.toml` walk-up.
+fn file_of(dir: &Path, op: &FakeOp) -> Found {
+    let req = Request {
+        start: dir.to_path_buf(),
+        ..Request::default()
+    };
+    locate(&req, op).unwrap()
 }
 
 /// The manifest found for the checkout's remote, skipping its secrets.toml.
@@ -57,7 +67,8 @@ fn import_then_export_is_byte_equivalent() {
     import(&import_args(dir.path()), dir.path(), &op, &mut Vec::new()).unwrap();
     let mut out = Vec::new();
     export(&manifest_of(dir.path(), &op), Format::Toml, &op, &mut out).unwrap();
-    assert_eq!(text(&out), TOML);
+    // D-G: import carries the contract only; the ids come from the manifest's first apply.
+    assert_eq!(text(&out), crate::config::bindings::split(TOML).0);
 }
 
 #[test]
@@ -98,7 +109,7 @@ fn import_ends_with_a_typed_next_step_comparing_the_copy() {
 #[test]
 fn import_without_a_remote_says_to_write_the_pointer() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("secrets.toml"), TOML).unwrap();
+    crate::config::bindings::write_split(&dir.path().join("secrets.toml"), TOML).unwrap();
     let args = ImportArgs {
         project: Some("myapp".into()),
         ..import_args(dir.path())
@@ -144,9 +155,54 @@ fn export_json_holds_the_environments() {
     let mut out = Vec::new();
     export(&manifest_of(dir.path(), &op), Format::Json, &op, &mut out).unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
-    assert_eq!(
-        v["environments"]["dev"]["boundaries"]["app"]["item_id"],
-        "app"
+    assert!(
+        v["environments"]["dev"]["boundaries"]["app"].is_object(),
+        "{v}"
+    );
+}
+
+/// D-G: a file project's plain export is the contract, its ids left in the bindings file.
+#[test]
+fn plain_export_of_a_file_project_holds_no_vault_id() {
+    let (dir, op) = checkout();
+    let mut out = Vec::new();
+    export_contract(&file_of(dir.path(), &op), Format::Toml, &op, &mut out).unwrap();
+    assert!(!text(&out).contains("vault_id"), "{}", text(&out));
+}
+
+/// D-G: splitting the ids out keeps the contract's declared keys.
+#[test]
+fn plain_export_holds_the_declared_keys() {
+    let (dir, op) = checkout();
+    let mut out = Vec::new();
+    export_contract(&file_of(dir.path(), &op), Format::Toml, &op, &mut out).unwrap();
+    assert!(text(&out).contains("API_KEY"), "{}", text(&out));
+}
+
+/// D-G: `--with-ids` (debugging only) fills the boundary's vault id back in.
+#[test]
+fn with_ids_export_holds_the_boundarys_vault_id() {
+    let (dir, op) = checkout();
+    let mut out = Vec::new();
+    export(&file_of(dir.path(), &op), Format::Toml, &op, &mut out).unwrap();
+    assert!(
+        text(&out).contains("vdev0000000000000000000001"),
+        "{}",
+        text(&out)
+    );
+}
+
+/// D-G: a manifest project's plain export also holds no id.
+#[test]
+fn a_manifest_projects_plain_export_holds_no_id() {
+    let (dir, op) = checkout();
+    import(&import_args(dir.path()), dir.path(), &op, &mut Vec::new()).unwrap();
+    let mut out = Vec::new();
+    export_contract(&manifest_of(dir.path(), &op), Format::Toml, &op, &mut out).unwrap();
+    assert!(
+        !text(&out).contains("vdev0000000000000000000001"),
+        "{}",
+        text(&out)
     );
 }
 
@@ -170,6 +226,26 @@ fn check_of_an_identical_copy_passes() {
 fn check_of_a_different_copy_is_copies_differ() {
     let (dir, op) = checkout();
     put(&op, "myapp", &TOML.replace("dashboard", "console"));
+    let found = manifest_of(dir.path(), &op);
+    let e = check(
+        &found,
+        &dir.path().join("secrets.toml"),
+        &op,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(e.code_str(), "copies_differ");
+}
+
+/// D-G: a manifest whose inline ids differ from the file's bindings is a different copy.
+#[test]
+fn check_of_a_copy_with_other_ids_is_copies_differ() {
+    let (dir, op) = checkout();
+    put(
+        &op,
+        "myapp",
+        &TOML.replace("item_id = \"app\"", "item_id = \"other\""),
+    );
     let found = manifest_of(dir.path(), &op);
     let e = check(
         &found,
@@ -219,6 +295,70 @@ fn check_of_a_different_copy_prints_the_diff() {
     );
 }
 
+/// Write the apply record at `<dir>/secrets.applied.json` with `bindings_digest`.
+fn put_record(dir: &Path, bindings_digest: String) {
+    let record = crate::config::bindings::ApplyRecord {
+        plan_id: "01JPLAN".into(),
+        contract_digest: crate::config::bindings::digest(b"contract"),
+        bindings_digest,
+    };
+    crate::config::bindings::write_record(&dir.join(crate::config::bindings::APPLIED), &record)
+        .unwrap();
+}
+
+/// The sha256 of the committed bindings file's bytes.
+fn committed_bindings_digest(dir: &Path) -> String {
+    let bytes = std::fs::read(dir.join(crate::config::bindings::FILE)).unwrap();
+    crate::config::bindings::digest(&bytes)
+}
+
+#[test]
+fn check_of_an_unapplied_bindings_digest_is_bindings_unapplied() {
+    let (dir, op) = checkout();
+    put(&op, "myapp", TOML);
+    put_record(dir.path(), crate::config::bindings::digest(b"other"));
+    let found = manifest_of(dir.path(), &op);
+    let e = check(
+        &found,
+        &dir.path().join("secrets.toml"),
+        &op,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(e.code_str(), "bindings_unapplied");
+}
+
+#[test]
+fn check_of_an_unapplied_bindings_digest_names_the_environment() {
+    let (dir, op) = checkout();
+    put(&op, "myapp", TOML);
+    put_record(dir.path(), crate::config::bindings::digest(b"other"));
+    let found = manifest_of(dir.path(), &op);
+    let e = check(
+        &found,
+        &dir.path().join("secrets.toml"),
+        &op,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert!(e.to_string().contains("dev"), "{e}");
+}
+
+#[test]
+fn check_of_a_matching_bindings_digest_passes() {
+    let (dir, op) = checkout();
+    put(&op, "myapp", TOML);
+    put_record(dir.path(), committed_bindings_digest(dir.path()));
+    let found = manifest_of(dir.path(), &op);
+    let res = check(
+        &found,
+        &dir.path().join("secrets.toml"),
+        &op,
+        &mut Vec::new(),
+    );
+    assert!(res.is_ok(), "{res:?}");
+}
+
 // --- edit ---
 
 /// Scripted editor: each `edit` returns the next text (or the input when none is left);
@@ -242,8 +382,11 @@ impl EditUi for Script<'_> {
     }
 }
 
+/// A person's edit of the contract (D-G: the text an edit starts from holds no id).
 fn edited() -> String {
-    TOML.replace("dashboard", "console")
+    crate::config::bindings::split(TOML)
+        .0
+        .replace("dashboard", "console")
 }
 
 #[test]
@@ -260,10 +403,50 @@ fn edit_saves_the_new_text_to_the_manifest() {
         .as_str()
         .unwrap()
         .to_string();
+    // D-G: the contract block holds the edit with its ids taken out.
     assert_eq!(
         crate::adapters::onepassword_manifest::config_text(&notes),
-        edited()
+        crate::config::bindings::split(&edited()).0
     );
+}
+
+/// D-G: `config import` keeps the file's ids out of the manifest's contract block.
+#[test]
+fn import_keeps_the_ids_out_of_the_manifests_contract_block() {
+    let (dir, op) = checkout();
+    import(&import_args(dir.path()), dir.path(), &op, &mut Vec::new()).unwrap();
+    let Found::Manifest(m) = manifest_of(dir.path(), &op) else {
+        unreachable!("a manifest-only lookup")
+    };
+    let notes = op.item(&m.item_id)["fields"][0]["value"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        !crate::adapters::onepassword_manifest::config_text(&notes).contains("vault_id"),
+        "{notes}"
+    );
+}
+
+/// D-G: `config import` carries the file's `secrets.bindings.toml` into the manifest's
+/// `opv-bindings` block, so the manifest loads with the same ids.
+#[test]
+fn import_writes_no_bindings_into_the_manifest() {
+    let (dir, op) = checkout();
+    import(&import_args(dir.path()), dir.path(), &op, &mut Vec::new()).unwrap();
+    let Found::Manifest(m) = manifest_of(dir.path(), &op) else {
+        unreachable!("a manifest-only lookup")
+    };
+    assert!(m.read_bindings(&op).unwrap().is_empty());
+}
+
+/// D-G: a file that still writes an inline id is refused `config_invalid`, naming it.
+#[test]
+fn import_of_a_file_with_an_inline_id_is_config_invalid() {
+    let (dir, op) = checkout();
+    std::fs::write(dir.path().join("secrets.toml"), TOML).unwrap();
+    let e = import(&import_args(dir.path()), dir.path(), &op, &mut Vec::new()).unwrap_err();
+    assert_eq!(e.code_str(), "config_invalid");
 }
 
 #[test]
@@ -348,9 +531,10 @@ fn edit_works_on_a_file_too() {
         on_confirm: Box::new(|| {}),
     };
     edit(&found, &op, &mut ui, &mut Vec::new()).unwrap();
+    // D-G: the edit lands in the contract; its ids stay in the bindings file.
     assert_eq!(
         std::fs::read_to_string(dir.path().join("secrets.toml")).unwrap(),
-        edited()
+        crate::config::bindings::split(&edited()).0
     );
 }
 

@@ -23,11 +23,74 @@
 
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::adapters::registry;
-use crate::cause::Cause;
+use crate::cause::{Cause, Cmd};
 use crate::error::Error;
 use crate::runner::CommandRunner;
+
+/// Which environment marker says the caller is probably an assistant.
+///
+/// Agent mode is presentation only, never a security control (R1, review M2): every
+/// marker is under the caller's control, so it selects UX only, never a guarantee.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum AgentMarker {
+    /// The MCP server, marked explicitly by that row.
+    #[serde(rename = "mcp")]
+    Mcp,
+    /// `OPV_AGENT=1`.
+    #[serde(rename = "opv_agent")]
+    OpvAgent,
+    /// `CLAUDECODE=1` (Claude Code).
+    #[serde(rename = "claude_code")]
+    ClaudeCode,
+    /// `CURSOR_AGENT=1` (Cursor).
+    #[serde(rename = "cursor_agent")]
+    Cursor,
+    /// `CODEX_SANDBOX` set (Codex).
+    #[serde(rename = "codex_sandbox")]
+    Codex,
+    /// `GEMINI_CLI=1` (Gemini CLI).
+    #[serde(rename = "gemini_cli")]
+    GeminiCli,
+}
+
+impl AgentMarker {
+    /// The stable snake_case name.
+    pub fn name(self) -> &'static str {
+        match self {
+            AgentMarker::Mcp => "mcp",
+            AgentMarker::OpvAgent => "opv_agent",
+            AgentMarker::ClaudeCode => "claude_code",
+            AgentMarker::Cursor => "cursor_agent",
+            AgentMarker::Codex => "codex_sandbox",
+            AgentMarker::GeminiCli => "gemini_cli",
+        }
+    }
+
+    /// The marker as the caller set it, named in a refusal message.
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentMarker::Mcp => "MCP",
+            AgentMarker::OpvAgent => "OPV_AGENT",
+            AgentMarker::ClaudeCode => "CLAUDECODE",
+            AgentMarker::Cursor => "CURSOR_AGENT",
+            AgentMarker::Codex => "CODEX_SANDBOX",
+            AgentMarker::GeminiCli => "GEMINI_CLI",
+        }
+    }
+}
+
+/// Set once by the MCP server (that row calls [`mark_mcp`]): the caller is an assistant.
+/// Agent mode is presentation only, never a security control (R1).
+static MCP_MODE: AtomicBool = AtomicBool::new(false);
+
+/// Mark this process as the MCP server, so [`HostEnv::agent_mode`] reports
+/// [`AgentMarker::Mcp`]. Presentation only; never a security control (R1).
+pub fn mark_mcp() {
+    MCP_MODE.store(true, Ordering::Relaxed);
+}
 
 /// Where detection reads its facts. [`ProcessEnv`] is the real one; tests use
 /// [`FakeEnv`].
@@ -52,6 +115,51 @@ pub trait HostEnv {
     /// True when stdin and stdout are both a terminal (a person at the keyboard).
     fn interactive(&self) -> bool {
         false
+    }
+    /// True when this process is the MCP server (set with [`mark_mcp`]). Default false.
+    fn mcp(&self) -> bool {
+        false
+    }
+    /// The marker that puts this caller in agent mode, if any.
+    ///
+    /// Agent mode is presentation only, never a security control (R1, review M2): the
+    /// markers are under the caller's control. An MCP session and an assistant's shell
+    /// set it; a person's own terminal does not.
+    fn agent_mode(&self) -> Option<AgentMarker> {
+        if self.mcp() {
+            return Some(AgentMarker::Mcp);
+        }
+        let truthy = |name: &str| {
+            self.flag(name).is_some_and(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                !v.is_empty() && v != "false" && v != "0"
+            })
+        };
+        if truthy("OPV_AGENT") {
+            Some(AgentMarker::OpvAgent)
+        } else if truthy("CLAUDECODE") {
+            Some(AgentMarker::ClaudeCode)
+        } else if truthy("CURSOR_AGENT") {
+            Some(AgentMarker::Cursor)
+        } else if self.is_set("CODEX_SANDBOX") {
+            Some(AgentMarker::Codex)
+        } else if truthy("GEMINI_CLI") {
+            Some(AgentMarker::GeminiCli)
+        } else {
+            None
+        }
+    }
+}
+
+/// Refuse a command only a person may run, at once, when the caller looks like an
+/// assistant: the typed [`Cause::PersonOnly`] names the marker and hands the exact
+/// command to the person. It never opens a prompt and never reads stdin.
+///
+/// Agent mode is presentation only, never a security control (R1, review M2).
+pub fn refuse_if_agent(env: &dyn HostEnv, command: Cmd) -> Result<(), Error> {
+    match env.agent_mode() {
+        Some(marker) => Err(Cause::PersonOnly { command, marker }.into()),
+        None => Ok(()),
     }
 }
 
@@ -88,6 +196,10 @@ impl HostEnv for ProcessEnv {
         use std::io::IsTerminal;
         std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
     }
+
+    fn mcp(&self) -> bool {
+        MCP_MODE.load(Ordering::Relaxed)
+    }
 }
 
 /// A fixed environment for tests.
@@ -103,6 +215,8 @@ pub struct FakeEnv {
     pub op_windows_exe: bool,
     /// Stdin and stdout are a terminal.
     pub tty: bool,
+    /// This process is the MCP server.
+    pub mcp: bool,
 }
 
 #[cfg(any(test, feature = "fake"))]
@@ -146,6 +260,12 @@ impl FakeEnv {
         self.tty = true;
         self
     }
+
+    /// This process is the MCP server.
+    pub fn mcp(mut self) -> Self {
+        self.mcp = true;
+        self
+    }
 }
 
 #[cfg(any(test, feature = "fake"))]
@@ -173,6 +293,9 @@ impl HostEnv for FakeEnv {
     }
     fn interactive(&self) -> bool {
         self.tty
+    }
+    fn mcp(&self) -> bool {
+        self.mcp
     }
 }
 
@@ -441,6 +564,9 @@ pub struct Host {
     pub op_credential: Option<OpCredential>,
     /// Stdin and stdout are a terminal: `opv login` can sign in here (P7).
     pub interactive: bool,
+    /// The marker that says this caller is probably an assistant, if any. Presentation
+    /// only, never a security control (R1).
+    pub agent_mode: Option<AgentMarker>,
     /// Which of [`registry::credential_vars`] are set, one bit each (by name; values are
     /// never read). Read with [`Host::token`].
     tokens: u64,
@@ -532,9 +658,16 @@ impl Host {
             ci,
             op_credential,
             interactive: env.interactive(),
+            agent_mode: env.agent_mode(),
             tokens,
             op_windows_exe,
         }
+    }
+
+    /// The marker that puts this caller in agent mode, if any. Presentation only, never
+    /// a security control (R1).
+    pub fn agent_mode(&self) -> Option<AgentMarker> {
+        self.agent_mode
     }
 
     /// True when the `op` on `PATH` is the Windows `op.exe` (WSL with `op` linked to it).
@@ -1170,5 +1303,101 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("op"), b"MZ\x90\x00").unwrap();
         assert!(op_on_path_is_windows_exe(dir.path().as_os_str()));
+    }
+
+    /// The command a later row refuses (`opv apply`): the exact words are handed off.
+    fn agent_cmd() -> crate::cause::Cmd {
+        crate::cause::Cmd {
+            command: vec!["apply".into()],
+            args: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn mcp_marker_puts_the_caller_in_agent_mode() {
+        let env = FakeEnv::new("linux").mcp();
+        assert_eq!(env.agent_mode(), Some(AgentMarker::Mcp));
+    }
+
+    #[test]
+    fn opv_agent_marker_puts_the_caller_in_agent_mode() {
+        let env = FakeEnv::new("linux").var_val("OPV_AGENT", "1");
+        assert_eq!(env.agent_mode(), Some(AgentMarker::OpvAgent));
+    }
+
+    #[test]
+    fn claude_code_marker_puts_the_caller_in_agent_mode() {
+        let env = FakeEnv::new("linux").var_val("CLAUDECODE", "1");
+        assert_eq!(env.agent_mode(), Some(AgentMarker::ClaudeCode));
+    }
+
+    #[test]
+    fn cursor_marker_puts_the_caller_in_agent_mode() {
+        let env = FakeEnv::new("linux").var_val("CURSOR_AGENT", "1");
+        assert_eq!(env.agent_mode(), Some(AgentMarker::Cursor));
+    }
+
+    #[test]
+    fn codex_marker_puts_the_caller_in_agent_mode() {
+        let env = FakeEnv::new("linux").var("CODEX_SANDBOX");
+        assert_eq!(env.agent_mode(), Some(AgentMarker::Codex));
+    }
+
+    #[test]
+    fn gemini_cli_marker_puts_the_caller_in_agent_mode() {
+        let env = FakeEnv::new("linux").var_val("GEMINI_CLI", "1");
+        assert_eq!(env.agent_mode(), Some(AgentMarker::GeminiCli));
+    }
+
+    #[test]
+    fn no_marker_leaves_the_caller_out_of_agent_mode() {
+        let env = FakeEnv::new("linux");
+        assert_eq!(env.agent_mode(), None);
+    }
+
+    #[test]
+    fn a_person_only_command_refused_in_agent_mode_is_person_only() {
+        let env = FakeEnv::new("linux").var_val("CLAUDECODE", "1");
+        let err = refuse_if_agent(&env, agent_cmd()).unwrap_err();
+        assert_eq!(err.code_str(), "person_only");
+    }
+
+    #[test]
+    fn a_person_only_command_refused_in_agent_mode_hands_off_the_exact_command() {
+        let env = FakeEnv::new("linux").var_val("CLAUDECODE", "1");
+        let err = refuse_if_agent(&env, agent_cmd()).unwrap_err();
+        let (cause, _) = err.parts();
+        let doc = crate::cause::render::document(
+            cause,
+            None,
+            &crate::cause::Invocation::default(),
+            false,
+        );
+        assert_eq!(
+            doc["next"],
+            serde_json::json!({"kind": "apply", "actor": "person", "command": "opv apply"})
+        );
+    }
+
+    #[test]
+    fn a_person_only_command_refused_in_agent_mode_names_the_marker() {
+        let env = FakeEnv::new("linux").var_val("CLAUDECODE", "1");
+        let err = refuse_if_agent(&env, agent_cmd()).unwrap_err();
+        assert!(err.to_string().contains("CLAUDECODE"));
+    }
+
+    #[test]
+    fn a_person_only_command_is_allowed_outside_agent_mode() {
+        let env = FakeEnv::new("linux");
+        assert!(refuse_if_agent(&env, agent_cmd()).is_ok());
+    }
+
+    /// The refusal opens no prompt: nothing is run, so no stdin is read.
+    #[test]
+    fn refusing_in_agent_mode_runs_no_command() {
+        let env = FakeEnv::new("linux").var_val("OPV_AGENT", "1");
+        let runner = crate::runner::fake::FakeRunner::default();
+        let _ = refuse_if_agent(&env, agent_cmd());
+        assert!(runner.calls.borrow().is_empty());
     }
 }

@@ -1,20 +1,20 @@
-# read_back_missing: opv adopt dev --from .env.dev --apply
+# read_back_missing: opv import dev --from .env.dev
 
 ## text exit: 4
 ## text stdout
 
 ## text stderr
 using <SCENARIO>/project/secrets.toml
-opv: after opv adopt dev --from .env.dev --apply, fields web/API_KEY of item iE2EWEBDEV0000000000000001 in vault vE2EWEBDEV0000000000000001 were missing when read back
+opv: after opv import dev --from .env.dev, fields web/API_KEY of item iE2EWEBDEV0000000000000001 in vault vE2EWEBDEV0000000000000001 were missing when read back
 Do: check item iE2EWEBDEV0000000000000001 in 1Password: another edit may have removed web/API_KEY after opv wrote it
-Next: opv adopt dev --from .env.dev --apply
+Next: opv import dev --from .env.dev
 
 ## json exit: 4
 ## json stdout
-{"schema_version":2,"ok":false,"exit_code":4,"next":"opv adopt dev --from .env.dev --apply","do":"check item iE2EWEBDEV0000000000000001 in 1Password: another edit may have removed web/API_KEY after opv wrote it","error":{"code":"tidy_unverified","category":"source","message":"after opv adopt dev --from .env.dev --apply, fields web/API_KEY of item iE2EWEBDEV0000000000000001 in vault vE2EWEBDEV0000000000000001 were missing when read back","subject":{"by":{"command":["adopt"],"args":["dev","--from",".env.dev","--apply"]},"vault":"vE2EWEBDEV0000000000000001","item":"iE2EWEBDEV0000000000000001","fields":["web/API_KEY"]},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"check item iE2EWEBDEV0000000000000001 in 1Password: another edit may have removed web/API_KEY after opv wrote it","next":"opv adopt dev --from .env.dev --apply","next_kind":"run"}}
+{"schema_version":3,"ok":false,"exit_code":4,"next":{"kind":"apply","actor":"person","command":"opv import dev --from .env.dev"},"do":"check item iE2EWEBDEV0000000000000001 in 1Password: another edit may have removed web/API_KEY after opv wrote it","error":{"code":"tidy_unverified","category":"source","message":"after opv import dev --from .env.dev, fields web/API_KEY of item iE2EWEBDEV0000000000000001 in vault vE2EWEBDEV0000000000000001 were missing when read back","subject":{"by":{"command":["import"],"args":["dev","--from",".env.dev"]},"vault":"vE2EWEBDEV0000000000000001","item":"iE2EWEBDEV0000000000000001","fields":["web/API_KEY"]},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"check item iE2EWEBDEV0000000000000001 in 1Password: another edit may have removed web/API_KEY after opv wrote it","next":{"kind":"apply","actor":"person","command":"opv import dev --from .env.dev"}}}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml
-opv: after opv adopt dev --from .env.dev --apply, fields web/API_KEY of item iE2EWEBDEV0000000000000001 in vault vE2EWEBDEV0000000000000001 were missing when read back
+opv: after opv import dev --from .env.dev, fields web/API_KEY of item iE2EWEBDEV0000000000000001 in vault vE2EWEBDEV0000000000000001 were missing when read back
 Do: check item iE2EWEBDEV0000000000000001 in 1Password: another edit may have removed web/API_KEY after opv wrote it
-Next: opv adopt dev --from .env.dev --apply
+Next: opv import dev --from .env.dev

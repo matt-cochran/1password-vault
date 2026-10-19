@@ -143,7 +143,7 @@ pub fn run_recording(
 /// there fails with a flag conflict (recorded case 04) unless `OP_ACCOUNT` is unset for it.
 pub fn banner(scope: &str, account: Option<&str>) -> String {
     let base = format!(
-        "Signed in{scope}. This terminal can run opv check, run, plan and sync. Type exit to \
+        "Signed in{scope}. This terminal can run opv ready, run, plan and sync. Type exit to \
          leave."
     );
     match account {

@@ -1,77 +1,14 @@
-//! `item skeleton <env>` use case (FR-19): the explicit 1Password write, for any identity.
-//! (A signed-in person's runs also tidy the item, FR-43, [`super::tidy`].)
+//! The empty fields a boundary item lacks (FR-19), for the structural plan and its apply
+//! ([`super::structure`]; 0.11.0's `item skeleton`, removed in 0.12.0).
 //!
-//! One read of the item, then at most one edit adding every key declared for `env` (all
-//! products, mode-skipped keys included) that has no field yet, as an empty field of the
-//! declared kind. Existing fields are never touched, whatever their kind or value.
+//! Every key declared for an environment (all products, mode-skipped keys included) that
+//! has no field yet gets an empty field of its declared kind. Existing fields are never
+//! touched, whatever their kind or value.
 
-use std::io::Write;
-
-use super::{kind_label, write_err};
 use crate::adapters::{onepassword, onepassword_tidy};
-use crate::domain::{Fleet, Kind, convention, key_label};
+use crate::domain::{Fleet, Kind, convention};
 use crate::error::Error;
 use crate::runner::CommandRunner;
-
-pub fn run(
-    fleet: &Fleet,
-    env_name: &str,
-    r: &dyn CommandRunner,
-    out: &mut dyn Write,
-) -> Result<(), Error> {
-    run_as(fleet, env_name, r, out, false)
-}
-
-/// [`run`], printing `{schema_version, environment, added: [{product, key, kind}]}` instead
-/// of lines when `json` (A5). Names and kinds only.
-pub fn run_as(
-    fleet: &Fleet,
-    env_name: &str,
-    r: &dyn CommandRunner,
-    out: &mut dyn Write,
-    json: bool,
-) -> Result<(), Error> {
-    let env = fleet.environment(env_name)?;
-    // One write per boundary item the environment's products need (FR-57), each with only
-    // the products whose values it holds.
-    let mut missing = Vec::new();
-    for (name, b) in super::tidy::boundaries_needed(fleet, env_name)? {
-        let part = super::tidy::in_boundary(fleet, &name);
-        missing.extend(skeleton_item(&part, env, b, env_name, r)?);
-    }
-    print_added(out, env_name, &missing, json)
-}
-
-/// [`run_as`] on one boundary item `b`, holding `fleet`'s products: the fields it added.
-fn skeleton_item(
-    fleet: &Fleet,
-    env: &crate::domain::Environment,
-    b: &crate::domain::Boundary,
-    env_name: &str,
-    r: &dyn CommandRunner,
-) -> Result<Vec<(String, String, Kind)>, Error> {
-    // The tolerant reader (FR-43): a field opv would read for a key (another label
-    // spelling, a wrong section, another type, a duplicate) counts as present, so no
-    // second field is added beside it, and an item the strict reader refuses still works.
-    // The read the write is built from bypasses op's cache (C1): a cached copy would put
-    // stale values over a newer edit.
-    let (item, missing) = missing_fields(fleet, env, b, env_name, r)?;
-    if !missing.is_empty() {
-        let written = onepassword::write_skeleton(r, env, b, &item, &missing)?;
-        // I5: one version after the read it was built from, or another edit landed with it.
-        if let (Some(v), Some(w)) = (item.version, written)
-            && w != v + 1
-        {
-            r.note(&format!(
-                "1Password ({env_name}): another edit landed while opv item skeleton wrote the \
-                 item (version {w} instead of {}); opv did not retry. Check the item's history \
-                 in 1Password.",
-                v + 1
-            ));
-        }
-    }
-    Ok(missing)
-}
 
 /// The refusal for boundary item `b` of `env` that is the project's manifest (M2): nothing
 /// is written; it names the boundary and the item's IDs, and the fix is a values item of
@@ -93,7 +30,7 @@ fn manifest_as_boundary(
     let name = env
         .boundaries
         .iter()
-        .find(|(_, x)| x.vault_id == b.vault_id && x.item_id == b.item_id)
+        .find(|(_, x)| x.as_ref() == Some(b))
         .map_or_else(String::new, |(n, _)| format!("boundaries.{n} "));
     crate::cause::Cause::ConfigNotEditable {
         source: crate::cause::ConfigSource::Manifest {
@@ -113,7 +50,7 @@ fn manifest_as_boundary(
 pub(crate) type Field = (String, String, Kind);
 
 /// The declared fields of `fleet`'s products in `env_name` that boundary item `b` lacks,
-/// with the fresh read they were judged on (the read [`skeleton_item`]'s write is built
+/// with the fresh read they were judged on (the read the structural apply's write is built
 /// from). Names and kinds only; the item's values stay in the zeroized read (#133: the
 /// structural plan lists these without writing).
 pub(crate) fn missing_fields(
@@ -141,7 +78,7 @@ pub(crate) fn missing_fields(
                 .filter(|(_, spec)| spec.from.is_none())
                 // FR-55: a personal key's field lives in each person's own item.
                 .filter(|(_, spec)| !spec.personal)
-                .filter(|(_, spec)| spec.environments.iter().any(|e| e == env_name))
+                .filter(|(_, spec)| spec.is_desired_in(env_name))
                 .map(move |(key, spec)| (product.clone(), key.clone(), spec.kind))
         })
         .filter(|(product, key, _)| !found.contains_key(&(product.clone(), key.clone())))
@@ -159,210 +96,27 @@ pub(crate) fn declared_fields(fleet: &Fleet, env_name: &str) -> Vec<(String, Str
             p.keys
                 .iter()
                 .filter(|(_, spec)| spec.from.is_none() && !spec.personal)
-                .filter(|(_, spec)| spec.environments.iter().any(|e| e == env_name))
+                .filter(|(_, spec)| spec.is_desired_in(env_name))
                 .map(move |(key, spec)| (product.clone(), key.clone(), spec.kind))
         })
         .collect()
-}
-
-/// The fields `run_as` added, as lines or (`json`) one document.
-fn print_added(
-    out: &mut dyn Write,
-    env_name: &str,
-    missing: &[(String, String, Kind)],
-    json: bool,
-) -> Result<(), Error> {
-    if json {
-        let added: Vec<serde_json::Value> = missing
-            .iter()
-            .map(|(product, key, kind)| {
-                serde_json::json!({
-                    "product": Some(product.to_string()),
-                    "key": key,
-                    "kind": kind_label(*kind),
-                })
-            })
-            .collect();
-        let doc = serde_json::json!({
-            "schema_version": crate::json::SCHEMA_VERSION,
-            "environment": env_name,
-            "added": added,
-        });
-        return writeln!(out, "{doc}").map_err(write_err);
-    }
-    if missing.is_empty() {
-        writeln!(out, "nothing to add: every declared field exists").map_err(write_err)?;
-        return Ok(());
-    }
-    for (product, key, kind) in missing {
-        writeln!(
-            out,
-            "added {} ({}, empty)",
-            key_label(product, key),
-            kind_label(*kind)
-        )
-        .map_err(write_err)?;
-    }
-    writeln!(
-        out,
-        "{} added",
-        super::plural(missing.len(), "field", "fields")
-    )
-    .map_err(write_err)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::testutil::*;
-    use crate::runner::Output;
-    use crate::runner::fake::FakeRunner;
-    use serde_json::Value;
-
-    fn skeleton(item: Output) -> (Result<(), Error>, String, FakeRunner) {
-        let r = FakeRunner::new([item, ok()]);
-        let mut out = Vec::new();
-        let res = run(&fleet(), "prod", &r, &mut out);
-        (res, text_of(&out), r)
-    }
 
     /// 03.19: the refusal names the boundary that records the manifest item.
     #[test]
     fn a_manifest_boundary_refusal_names_the_boundary() {
         let f = fleet();
         let env = &f.environments["prod"];
-        let (name, b) = env.boundaries.iter().next().unwrap();
+        let (name, b) = env.bound_boundaries().next().unwrap();
         let e = manifest_as_boundary(env, b, "prod", r#"{"title":"opv · app"}"#.as_bytes());
         assert!(
             e.to_string().contains(&format!("boundaries.{name} ")),
             "{e}"
         );
-    }
-
-    fn edit_template(r: &FakeRunner) -> Value {
-        let calls = r.calls.borrow();
-        let c = calls
-            .iter()
-            .find(|c| c.program == "op" && c.args.get(1).is_some_and(|a| a == "edit"))
-            .expect("no op item edit call");
-        serde_json::from_slice(c.stdin.as_ref().unwrap()).unwrap()
-    }
-
-    fn field<'a>(t: &'a Value, section: &str, label: &str) -> Option<&'a Value> {
-        t["fields"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|f| f["section"]["label"] == section && f["label"] == label)
-    }
-
-    #[test]
-    fn adds_only_missing_declared_fields_with_their_kind() {
-        let (res, out, r) = skeleton(item(&[secret("allumata", "OPENAI_API_KEY", OPENAI)]));
-        res.unwrap();
-        let t = edit_template(&r);
-        // Every key declared for prod, including mode-skipped ones (STRIPE in payments=off).
-        for (label, ty) in [
-            ("INTEGRATION_ENC_KEY", "CONCEALED"),
-            ("STRIPE_SECRET_KEY", "CONCEALED"),
-            ("SIGNUP_POLICY", "STRING"),
-        ] {
-            let f = field(&t, "allumata", label).unwrap_or_else(|| panic!("{label} not added"));
-            assert_eq!(f["type"], ty, "{label}");
-            assert_eq!(f["value"], "", "{label}");
-        }
-        // The existing field is sent back unchanged (full-item template).
-        assert_eq!(
-            field(&t, "allumata", "OPENAI_API_KEY").unwrap()["value"],
-            OPENAI
-        );
-        assert!(out.contains("allumata/INTEGRATION_ENC_KEY"), "{out}");
-        assert!(out.contains("3 fields added"), "{out}");
-        assert_no_values(&out);
-    }
-
-    #[test]
-    fn one_read_and_one_edit() {
-        let (res, _, r) = skeleton(item(&[]));
-        res.unwrap();
-        let a = argvs(&r);
-        assert_eq!(
-            a,
-            vec![
-                "op item get iprd --vault vprd --format json --cache=false",
-                "op item edit iprd --vault vprd --format json",
-            ]
-        );
-        assert_no_values_in_argv(&r);
-    }
-
-    #[test]
-    fn complete_item_makes_no_edit() {
-        let mut fs = complete_fields();
-        fs.push(secret("allumata", "STRIPE_SECRET_KEY", ""));
-        let (res, out, r) = skeleton(item(&fs));
-        res.unwrap();
-        assert_eq!(op_calls(&r), 1);
-        assert!(out.contains("nothing to add"), "{out}");
-    }
-
-    /// Existing fields are never touched, even with the wrong kind (status reports that).
-    #[test]
-    fn wrong_kind_field_is_left_alone() {
-        let (res, _, r) = skeleton(item(&[text("allumata", "OPENAI_API_KEY", OPENAI)]));
-        res.unwrap();
-        let t = edit_template(&r);
-        let f = field(&t, "allumata", "OPENAI_API_KEY").unwrap();
-        assert_eq!(f["type"], "STRING");
-        assert_eq!(f["value"], OPENAI);
-        let n = t["fields"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|f| f["label"] == "OPENAI_API_KEY")
-            .count();
-        assert_eq!(n, 1);
-    }
-
-    /// Only keys declared for the requested env: OPENAI_API_KEY is prod-only.
-    #[test]
-    fn staging_skeleton_omits_prod_only_keys() {
-        let r = FakeRunner::new([item(&[]), ok()]);
-        run(&fleet(), "staging", &r, &mut Vec::new()).unwrap();
-        let t = edit_template(&r);
-        assert!(field(&t, "allumata", "OPENAI_API_KEY").is_none());
-        assert!(field(&t, "allumata", "INTEGRATION_ENC_KEY").is_some());
-    }
-
-    /// I5: item skeleton works for an environment without a `fly` section.
-    #[test]
-    fn works_without_fly_section() {
-        let fl = fleet_with(
-            "[environments.dev]\nboundaries.allumata = { vault_id = \"vdev\", item_id = \"idev\" }\n\
-             [products.allumata.keys.DEV_FLAG]\nkind = \"config\"\nenvironments = [\"dev\"]\n",
-        );
-        let r = FakeRunner::new([item(&[]), ok()]);
-        let mut out = Vec::new();
-        run(&fl, "dev", &r, &mut out).unwrap();
-        assert!(
-            text_of(&out).contains("added allumata/DEV_FLAG"),
-            "{}",
-            text_of(&out)
-        );
-        assert_eq!(
-            argvs(&r),
-            vec![
-                "op item get idev --vault vdev --format json --cache=false",
-                "op item edit idev --vault vdev --format json",
-            ]
-        );
-    }
-
-    #[test]
-    fn unknown_env_is_config_error_before_any_call() {
-        let r = FakeRunner::new([]);
-        let e = run(&fleet(), "qa", &r, &mut Vec::new()).unwrap_err();
-        assert_eq!(e.code_str(), "unknown_env", "{e}");
-        assert!(r.calls.borrow().is_empty());
     }
 }

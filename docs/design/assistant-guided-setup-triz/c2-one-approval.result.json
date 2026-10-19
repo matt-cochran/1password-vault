@@ -1,0 +1,299 @@
+{
+  "schemaVersion": 1,
+  "inputHash": "sha256:0493be3feb6fb3da36e0d96522c3b5f0386e6095b33f84028c8a1042e1dcb29e",
+  "catalogVersion": "triz-software-2",
+  "requested": {
+    "provider": "openrouter",
+    "model": "~typesafe/jev-latest"
+  },
+  "reported": {
+    "provider": "openrouter",
+    "model": "~typesafe/jev-latest",
+    "available": true
+  },
+  "classification": "technical",
+  "confidence": 0.93,
+  "groundedEvidenceIds": [
+    "E1",
+    "E2",
+    "E3"
+  ],
+  "rationale": "",
+  "principles": [
+    {
+      "id": "1",
+      "name": "segmentation",
+      "heuristic": "Split the conflicting system, responsibility, data, or workflow into independently changeable parts so each can be optimized without forcing the same trade-off on the whole.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "2",
+      "name": "extraction",
+      "heuristic": "Extract or isolate the component, responsibility, data, behavior, or dependency causing the harmful effect, or retain only the part actually required.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "3",
+      "name": "local quality",
+      "heuristic": "Replace uniform treatment with locally specialized structure, behavior, configuration, or policy so each part operates under conditions suited to its role.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "4",
+      "name": "asymmetry",
+      "heuristic": "Break unnecessary symmetry: allow different components, replicas, paths, users, or states to have different roles or policies when identical treatment creates the conflict.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "5",
+      "name": "consolidation",
+      "heuristic": "Combine compatible components, resources, requests, or operations in space or time when duplication, separation, or coordination overhead creates the conflict.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "6",
+      "name": "universality",
+      "heuristic": "Let one component or abstraction perform several compatible functions so redundant components, interfaces, dependencies, or transformations can be removed.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "7",
+      "name": "nesting",
+      "heuristic": "Compose components, scopes, containers, or abstractions hierarchically so one can contain, encapsulate, or pass through another.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "8",
+      "name": "counterweight",
+      "heuristic": "Offset load, latency, cost, risk, or resource pressure with a compensating mechanism rather than strengthening the constrained mechanism directly.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "9",
+      "name": "prior counteraction",
+      "heuristic": "Apply a compensating or protective action before an expected harmful effect occurs so the later effect is neutralized when it arrives.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "10",
+      "name": "preliminary action",
+      "heuristic": "Precompute, preload, prefetch, preconfigure, validate, reserve, or position what will be needed before the latency-sensitive or failure-sensitive path begins.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "11",
+      "name": "cushion in advance",
+      "heuristic": "Prepare redundancy, rollback, fallback, reserve capacity, circuit breaking, recovery data, or other emergency protection before a failure occurs.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "12",
+      "name": "equipotentiality",
+      "heuristic": "Equalize states, representations, interfaces, privileges, or operating levels so useful work no longer requires repeated expensive transitions between them.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "13",
+      "name": "do it in reverse",
+      "heuristic": "Reverse direction, responsibility, dependency, ownership, control flow, or operation; make the active side passive or the fixed side movable when the conventional direction creates the conflict.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "14",
+      "name": "spheroidality",
+      "heuristic": "Replace unnecessarily linear structures or flows with cyclic, ring, rotational, curved, or recursive organization when linearity creates the constraint.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "15",
+      "name": "dynamicity",
+      "heuristic": "Make components, parameters, policies, capacity, topology, or bindings adjustable and reconfigurable so behavior can change with operating conditions.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "16",
+      "name": "partial or excessive action",
+      "heuristic": "When the exact target is expensive or difficult to achieve directly, deliberately under-shoot or over-shoot it and handle the smaller remaining difference separately.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "17",
+      "name": "transition into a new dimension",
+      "heuristic": "Add an axis, layer, hierarchy, partition, channel, dimension, or level of indirection to escape a constraint imposed by the current representation.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "18",
+      "name": "mechanical vibration",
+      "heuristic": "Replace static behavior with controlled oscillation, pulsing, polling, heartbeats, resonance, or higher-frequency interaction when periodic variation exposes a better operating regime.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "19",
+      "name": "periodic action",
+      "heuristic": "Replace continuous work with periodic, event-driven, scheduled, sampled, or batched action; tune the cadence and use the gaps for other useful work.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "20",
+      "name": "continuity of useful action",
+      "heuristic": "Keep useful work flowing and minimize idle or intermediate stages through streaming, pipelining, concurrency, background processing, or reuse of otherwise idle capacity.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "21",
+      "name": "rushing through",
+      "heuristic": "Perform an unavoidable harmful, inconsistent, blocked, or risky transitional state quickly so the system spends the minimum possible time exposed to it.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "22",
+      "name": "convert harm into benefit",
+      "heuristic": "Turn a harmful factor, waste product, failure mode, contention signal, or rejected result into a useful resource or signal; combine harmful effects when doing so can neutralize them.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "23",
+      "name": "feedback",
+      "heuristic": "Observe the actual outcome and feed it back into control decisions so behavior adapts instead of accepting the trade-off; change the feedback loop when the existing one is ineffective or unstable.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "24",
+      "name": "intermediary",
+      "heuristic": "Insert a mediator, proxy, adapter, broker, queue, cache, buffer, gateway, or temporary abstraction between conflicting parties.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "25",
+      "name": "self-service",
+      "heuristic": "Make a component observe, maintain, heal, configure, replenish, or clean up itself, and reuse otherwise wasted outputs or resources where practical.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "26",
+      "name": "copying",
+      "heuristic": "Operate on a replica, cache, snapshot, proxy, model, simulation, projection, or transformed representation when operating on the original is expensive, dangerous, unavailable, or disruptive.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "27",
+      "name": "dispose",
+      "heuristic": "Replace an expensive long-lived element with inexpensive disposable or ephemeral instances when durability, lifecycle, or cleanup guarantees create unnecessary complexity.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "28",
+      "name": "replacement of mechanical system",
+      "heuristic": "Replace direct or tightly coupled interaction with signals, metadata, events, sensing, declarative rules, virtualization, or another more controllable interaction mechanism.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "29",
+      "name": "pneumatic or hydraulic constructions",
+      "heuristic": "Replace rigidly provisioned capacity with elastic or flow-based mechanisms such as queues, streams, pools, buffers, backpressure, or dynamically allocated resources.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "30",
+      "name": "flexible membranes or thin films",
+      "heuristic": "Use a lightweight flexible boundary such as a wrapper, facade, policy layer, filter, interceptor, or virtual boundary instead of rigid structural separation.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "31",
+      "name": "porous material",
+      "heuristic": "Make a boundary selectively permeable using controlled openings, filters, extension points, plugins, admission rules, sampling, or pre-established channels.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "32",
+      "name": "changing the color",
+      "heuristic": "Change representation, labeling, visibility, transparency, telemetry, or observability so otherwise hidden state, differences, or behavior become distinguishable.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "33",
+      "name": "homogeneity",
+      "heuristic": "Make interacting elements use the same or closely compatible representation, protocol, abstraction, runtime, or substrate to reduce conversion and mismatch costs.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "34",
+      "name": "rejecting and regenerating parts",
+      "heuristic": "Expire, discard, release, recycle, or transform elements after their useful function is complete, and regenerate or restore them when they become necessary again.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "35",
+      "name": "transformation of properties",
+      "heuristic": "Resolve the conflict by changing state, configuration, granularity, consistency, concentration, flexibility, precision, capacity, or another governing parameter rather than redesigning the whole system.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "36",
+      "name": "phase transition",
+      "heuristic": "Move the element into a qualitatively different operating state, mode, representation, or lifecycle phase whose properties remove the original conflict.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "37",
+      "name": "thermal expansion",
+      "heuristic": "Use controlled expansion or contraction of capacity, scope, buffering, replication, or resource allocation in response to changing operating conditions.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "38",
+      "name": "accelerated oxidation",
+      "heuristic": "Increase the strength or activation level of an enabling mechanism stepwise—such as validation, enforcement, isolation, replication, or signal intensity—when a weaker interaction requires compensating complexity.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "39",
+      "name": "inert environment",
+      "heuristic": "Run the interaction in an isolated, neutralized, sandboxed, side-effect-free, simulated, or otherwise controlled environment so harmful interactions cannot propagate.",
+      "source": "https://triz.org/principles/"
+    },
+    {
+      "id": "40",
+      "name": "composite materials",
+      "heuristic": "Combine heterogeneous components, representations, storage models, algorithms, or execution strategies so the composite provides properties that a uniform design cannot.",
+      "source": "https://triz.org/principles/"
+    }
+  ],
+  "usage": {
+    "input": 757,
+    "output": 131,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 888,
+    "available": true,
+    "costUsd": 0.000031794,
+    "piReported": {
+      "amountUsd": 0.000031794,
+      "available": true,
+      "source": "pi_reported"
+    }
+  },
+  "billedCostUsd": null,
+  "inferenceDeterministic": false,
+  "catalog": {
+    "version": "triz-software-2",
+    "citations": [
+      "https://triz.org/contradictions/",
+      "https://triz.org/principles/",
+      "https://matriz.org/methodology/",
+      "https://wiki.matriz.org/docs/triz/problem-solving-tools-5890/contradictions/",
+      "https://wiki.matriz.org/docs/triz/problem-solving-tools-5890/contradictions/engineering-contradiction-5995/contradiction-matrix-6026/",
+      "https://matriz.org/wp-content/uploads/2020/04/Selected-Topics-for-Level-1-Training.pdf",
+      "https://doi.org/10.1016/j.proeng.2015.12.413"
+    ],
+    "canonicalMatrixLookup": false,
+    "disclaimer": "Complete software-adapted TRIZ contradiction-resolution heuristic catalog: all 40 main Inventive Principles plus the modern MATRIZ physical-contradiction resolution routes. Heuristic wording is software-adapted rather than canonical TRIZ wording. This object does not embed the classical 39x39 Altshuller contradiction matrix and is not a complete representation of the broader TRIZ body of knowledge, which also includes ARIZ, Substance-Field analysis, Standard Inventive Solutions, trends of engineering-system evolution, scientific effects, function analysis, and related methods."
+  },
+  "notes": [
+    "Provider reported a model alias; the resolved underlying model version is unavailable.",
+    "Classifier output is probabilistic inference; only the catalog mapping is deterministic.",
+    "Billed cost is unknown: no upstream provider billing response is captured. A finite Pi SDK usage cost is labelled as Pi-reported (source: pi_reported) and is an estimate, not a bill; an absent cost is unknown, not free."
+  ]
+}

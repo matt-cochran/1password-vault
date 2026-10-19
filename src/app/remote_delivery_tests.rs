@@ -280,7 +280,7 @@ fn profile(fields: &str) -> String {
 }
 
 fn base() -> String {
-    without_targets(&std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap())
+    without_targets(&crate::config::merged_text("tests/fixtures/secrets.toml"))
 }
 
 fn loads(fields: &str) -> Result<crate::domain::Fleet, Error> {

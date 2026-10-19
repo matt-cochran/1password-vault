@@ -77,18 +77,6 @@ fn source_only_item() -> Output {
 // ---- one qualifying product: no flag, and that product is used -------------------------
 
 #[test]
-fn check_with_one_product_needs_no_flag() {
-    let r = FakeRunner::new([complete_item()]);
-    let mut out = Vec::new();
-    local::check(&fleet(), "prod", None, &r, &mut out, false).unwrap();
-    assert!(
-        text_of(&out).contains("OPENAI_API_KEY"),
-        "{}",
-        text_of(&out)
-    );
-}
-
-#[test]
 fn run_with_one_product_needs_no_flag() {
     let r = FakeRunner::new([Output::success(Vec::new())]);
     let code = run::run_for(&fleet(), "prod", None, None, &cmd(&["env"]), &r).unwrap();
@@ -117,20 +105,6 @@ fn open_with_one_product_needs_no_flag() {
 }
 
 // ---- several qualifying products: usage error (exit 2) ---------------------------------
-
-#[test]
-fn check_with_several_products_exits_two() {
-    let e = local::check(
-        &two_products(),
-        "prod",
-        None,
-        &FakeRunner::new([]),
-        &mut Vec::new(),
-        false,
-    )
-    .unwrap_err();
-    assert_eq!(e.exit_code(), 2);
-}
 
 #[test]
 fn run_with_several_products_exits_two() {
@@ -172,52 +146,7 @@ fn open_with_several_products_exits_two() {
     assert_eq!(e.exit_code(), 2);
 }
 
-#[test]
-fn check_with_several_products_lists_them() {
-    let e = local::check(
-        &two_products(),
-        "prod",
-        None,
-        &FakeRunner::new([]),
-        &mut Vec::new(),
-        false,
-    )
-    .unwrap_err();
-    assert!(e.to_string().contains("alpha, beta"), "{e}");
-}
-
-/// X2: several products are a person's choice; opv never names the first for them.
-#[test]
-fn check_with_several_products_is_a_choice() {
-    let e = local::check(
-        &two_products(),
-        "prod",
-        None,
-        &FakeRunner::new([]),
-        &mut Vec::new(),
-        false,
-    )
-    .unwrap_err();
-    assert_eq!(e.code_str(), "choice_required");
-}
-
 // ---- a source-only product never qualifies ---------------------------------------------
-
-#[test]
-fn check_with_a_source_only_product_needs_no_flag() {
-    let r = FakeRunner::new([source_only_item()]);
-    let mut out = Vec::new();
-    local::check(
-        &one_product_and_a_source_only(),
-        "ci",
-        None,
-        &r,
-        &mut out,
-        false,
-    )
-    .unwrap();
-    assert!(text_of(&out).contains("API_ONLY"), "{}", text_of(&out));
-}
 
 #[test]
 fn run_with_a_source_only_product_needs_no_flag() {

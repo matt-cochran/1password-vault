@@ -333,6 +333,11 @@ impl Harness {
         // `.opv` can apply (v0101-security-hermetic).
         let config = root.path().join("secrets.toml");
         fs::copy(CONFIG, &config).unwrap();
+        fs::copy(
+            Path::new(CONFIG).with_file_name("secrets.bindings.toml"),
+            root.path().join("secrets.bindings.toml"),
+        )
+        .unwrap();
         let cat = ["/bin/cat", "/usr/bin/cat"]
             .into_iter()
             .find(|p| Path::new(p).exists())
@@ -371,7 +376,7 @@ impl Harness {
     /// Run every later command against `toml` instead of the shared fixture.
     fn use_config(&mut self, toml: &str) -> &mut Self {
         let p = self.fix.join("secrets.toml");
-        fs::write(&p, toml).unwrap();
+        opv::config::bindings::write_split(&p, toml).unwrap();
         self.config = p;
         self
     }
@@ -539,6 +544,15 @@ impl Mcp {
             .unwrap()
             .to_string()
     }
+
+    /// The `tools/list` tools, each its `name` and `inputSchema` (P-3).
+    fn tools(&mut self) -> Vec<Value> {
+        let reply = self.call("tools/list", &json!({}));
+        reply["result"]["tools"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }
 }
 
 impl Drop for Mcp {
@@ -557,8 +571,135 @@ const COMMANDS: &[&[&str]] = &[
     &["sync", "prod"],
     &["sync", "prod", "--prune", "--deploy"],
     &["config", "export", "prod", "--json"],
-    &["item", "skeleton", "prod"],
+    &["inventory"],
+    &["inventory", "--json"],
+    &["next"],
+    &["next", "--json"],
 ];
+
+/// canary-surface: the 0.12.0 CLI's document commands, each the plain command line; the
+/// test appends `--json` to cover both forms of every document. Every command of the
+/// surface golden (`tests/e2e/expected/surface.json`) that prints a document and can run
+/// against this harness's fixture world is here. `apply` and `set` need a person's
+/// terminal, so their refusal is scanned instead (`apply_and_set_refusals_carry_no_marker`).
+fn surface_commands(env_file: &Path) -> Vec<Vec<String>> {
+    let file = env_file.to_string_lossy().into_owned();
+    let rows: &[&[&str]] = &[
+        &["inventory"],
+        &["next"],
+        &["needs"],
+        &["contract"],
+        &["ready", "prod", "--gate"],
+        &["explain", "allumata/OPENAI_API_KEY", "--env", "prod"],
+        &["status", "prod"],
+        &["plan", "prod"],
+        &["history", "prod"],
+        &["access", "prod"],
+        &["doctor", "--env", "prod"],
+        &[
+            "propose",
+            "key",
+            "allumata/CANARY_KEY",
+            "--kind",
+            "secret",
+            "--env",
+            "prod",
+        ],
+        &["propose", "env", "canary"],
+        &[
+            "propose",
+            "target",
+            "prod",
+            "canary",
+            "--fly-app",
+            "canary-app",
+        ],
+        &["propose", "retire", "allumata/STRIPE_SECRET_KEY"],
+        &["propose", "setup", "--names-from", "{file}"],
+        &["propose", "structure"],
+        &[
+            "propose",
+            "generate",
+            "prod",
+            "allumata/INTEGRATION_ENC_KEY",
+        ],
+        &["import", "prod", "--from", "{file}", "--dry-run"],
+        &["changed", "prod"],
+        &["delivery", "verify", "prod"],
+    ];
+    rows.iter()
+        .map(|row| {
+            row.iter()
+                .map(|word| {
+                    if *word == "{file}" {
+                        file.clone()
+                    } else {
+                        (*word).to_string()
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// The `.env` the surface scan reads: every value carries the marker, so a document that
+/// echoed one would fail the scan.
+const SURFACE_ENV_FILE: &str = "\
+OPENAI_API_KEY=sk-proj-S7MARKERVALUEsurface0001
+INTEGRATION_ENC_KEY=S7MARKERVALUEsurfaceenc0002
+CANARY_KEY=S7MARKERVALUEsurface0003
+";
+
+/// The value-boundary problems in one CLI run, as messages; `[]` when clean. A marker
+/// anywhere in stdout or stderr is a leak (a JSON failure document's
+/// `error.evidence.upstream` is scrubbed too); the child canary only on a labelled excerpt
+/// line (NR-31).
+fn marker_problems(cmd: &[&str], r: &Run) -> Vec<String> {
+    let mut problems = Vec::new();
+    if r.stdout.contains(MARK) {
+        problems.push(format!("{cmd:?} stdout carries a value:\n{}", r.stdout));
+    }
+    if r.stderr.contains(MARK) {
+        problems.push(format!("{cmd:?} stderr carries a value:\n{}", r.stderr));
+    }
+    if without_upstream(&r.stdout).contains(CHILD_STDERR) {
+        problems.push(format!(
+            "{cmd:?} stdout shows child stderr outside the reply"
+        ));
+    }
+    for l in r.stderr.lines() {
+        if l.contains(CHILD_STDERR) && !is_excerpt_line(l) {
+            problems.push(format!("{cmd:?} child stderr outside an excerpt: {l}"));
+        }
+    }
+    problems
+}
+
+/// The value-boundary problem in one MCP answer, or `None`: a marker anywhere is a leak;
+/// the child canary is allowed only inside the scrubbed `error.evidence.upstream` reply.
+fn mcp_value_problem(what: &str, text: &str) -> Option<String> {
+    if text.contains(MARK) {
+        return Some(format!("{what} carries a value:\n{text}"));
+    }
+    if without_upstream(text).contains(CHILD_STDERR) {
+        return Some(format!(
+            "{what} shows child stderr outside the scrubbed reply"
+        ));
+    }
+    None
+}
+
+/// A project directory the MCP server reads: the shared fixture's contract and bindings
+/// beside each other, as a real project carries them.
+fn project_with_fixture(h: &Harness) -> PathBuf {
+    fs::copy(CONFIG, h.fix.join("secrets.toml")).unwrap();
+    fs::copy(
+        Path::new(CONFIG).with_file_name("secrets.bindings.toml"),
+        h.fix.join("secrets.bindings.toml"),
+    )
+    .unwrap();
+    h.fix.clone()
+}
 
 fn assert_no_marker(what: &str, text: &str) {
     for m in [MARK, CHILD_STDERR] {
@@ -819,7 +960,6 @@ fn child_stderr_suppressed() {
         &["plan", "prod"],
         &["sync", "prod"],
         &["config", "export", "prod", "--json"],
-        &["item", "skeleton", "prod"],
     ] {
         h.reset();
         let r = h.run(cmd);
@@ -880,7 +1020,7 @@ fn no_files_written() {
         check(&h, cmd);
     }
     check(&h, &["run", "prod", "--product", "allumata", "--", "true"]);
-    // Item with missing fields: skeleton writes (to op stdin, never to disk).
+    // Item with missing fields: a person's read tidies it (to op stdin, never to disk).
     h.set_item(&item(vec![]));
     for cmd in COMMANDS {
         check(&h, cmd);
@@ -888,13 +1028,6 @@ fn no_files_written() {
     h.set_item(&good_item());
     h.set("FAKE_FLY_LIST_FAIL_AT", "2");
     check(&h, &["sync", "prod", "--prune", "--deploy"]);
-    // Skeleton did reach `op item edit` with its template on stdin.
-    h.unset("FAKE_FLY_LIST_FAIL_AT");
-    h.set_item(&item(vec![]));
-    h.reset();
-    let r = h.run(&["item", "skeleton", "prod"]);
-    assert_eq!(r.code, 0, "{}", r.all());
-    assert!(h.calls().iter().any(|c| c.argv[..2] == ["item", "edit"]));
 }
 
 /// Review Focus 4: `flyctl secrets list` (A) fails → Target (5) before anything is staged.
@@ -1039,7 +1172,6 @@ const READERS: &[&[&str]] = &[
     &["plan", "prod"],
     &["sync", "prod"],
     &["config", "export", "prod", "--json"],
-    &["item", "skeleton", "prod"],
 ];
 
 /// `op` calls of the last run, as `argv[0] argv[1]`.
@@ -1516,11 +1648,11 @@ fn fly_plan_json_stdout_is_one_json_document() {
 
 /// FR-21: the document declares `schema_version: 2` (the error document changed in 0.10.0).
 #[test]
-fn status_json_schema_version_is_two() {
+fn status_json_schema_version_is_three() {
     let h = Harness::new(&good_item());
     let r = h.run(&["status", "prod", "--json"]);
     let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
-    assert_eq!(doc["schema_version"], json!(2), "{}", r.all());
+    assert_eq!(doc["schema_version"], json!(3), "{}", r.all());
 }
 
 /// FR-21: the document names the environment and carries names-only totals.
@@ -1620,11 +1752,11 @@ fn status_json_row_carries_failing_reason() {
 
 /// FR-22: the JSON document keeps schema_version 2 when `reason` is added.
 #[test]
-fn status_json_reason_keeps_schema_version_two() {
+fn status_json_reason_keeps_schema_version_three() {
     let h = Harness::new(&item(good_fields("pk-S7MARKERVALUEbadprefix0014")));
     let r = h.run(&["status", "prod", "--json"]);
     let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
-    assert_eq!(doc["schema_version"], json!(2), "{}", r.all());
+    assert_eq!(doc["schema_version"], json!(3), "{}", r.all());
 }
 
 /// FR-22: text output shows `failed <rule> (<reason>)`.
@@ -1738,7 +1870,7 @@ fn json_documents_carry_no_value() {
     for args in [
         &["status", "prod", "--json"][..],
         &["plan", "prod", "--json"],
-        &["check", "prod", "--product", "allumata", "--json"],
+        &["ready", "prod", "--json"],
         &["sync", "prod", "--json"],
         &["doctor", "--env", "prod", "--json"],
         &[
@@ -1760,7 +1892,10 @@ fn json_documents_carry_no_value() {
 
 // ------------------------------------------------------------ simple profile (FR-20)
 
-const SIMPLE_CONFIG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/simple.toml");
+const SIMPLE_CONFIG: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/simple/secrets.toml"
+);
 const S_DB: &str = "postgres://S7MARKERVALUEdb0006";
 
 /// A simple-profile item: unsectioned fields, plus a notes value and a sectioned field
@@ -2571,10 +2706,12 @@ fn exit_paths() -> Vec<(&'static str, Run)> {
     h9.set("FAKE_FLY_IMPORT_SLEEP", "5");
     v.push(("unknown", h9.run(&["--timeout", "2", "sync", "prod"])));
     let mut guarded = Harness::new(&good_item());
-    let text = fs::read_to_string(CONFIG).unwrap().replace(
-        "modes.allumata.payments = \"off\"",
-        "modes.allumata.payments = \"off\"\nconfirm_env = true",
-    );
+    let text = opv::config::read_merged(Path::new(CONFIG))
+        .unwrap()
+        .replace(
+            "modes.allumata.payments = \"off\"",
+            "modes.allumata.payments = \"off\"\nconfirm_env = true",
+        );
     guarded.use_config(&text);
     v.push(("confirm_env", guarded.run(&["sync", "prod", "--deploy"])));
     v
@@ -2608,10 +2745,12 @@ fn exit_paths_cover_every_category() {
 #[test]
 fn confirm_env_refusal_ends_with_the_exact_command() {
     let mut h = Harness::new(&good_item());
-    let text = fs::read_to_string(CONFIG).unwrap().replace(
-        "modes.allumata.payments = \"off\"",
-        "modes.allumata.payments = \"off\"\nconfirm_env = true",
-    );
+    let text = opv::config::read_merged(Path::new(CONFIG))
+        .unwrap()
+        .replace(
+            "modes.allumata.payments = \"off\"",
+            "modes.allumata.payments = \"off\"\nconfirm_env = true",
+        );
     h.use_config(&text);
     let r = h.run(&["sync", "prod", "--deploy"]);
     // The handoff is the command as typed, its --config kept (09.04), plus --confirm.
@@ -2751,10 +2890,9 @@ fn env_file_given_to_config_import_never_prints_a_value() {
 // --- M5 (delivery-transports §1.6): no value on any machine-readable surface ---
 //
 // ConfigMap rows need a fake `kubectl`; the Kubernetes e2e canary scan covers them in K6.
-// The deployment-plan projection is not one of `agent_view`'s builders: `opv_deployment_plan`
-// returns the reduced `plan_receipt` built in `src/mcp.rs` (rows of names, `plan_id` and an
-// `approve_command`), so no `agent_view` projection forwards `JsonRow`s and `agent_view.rs`
-// is unchanged. `opv_delivery_preview` does share the CLI's `delivery_preview` builder.
+// `opv_state` answers each section with the CLI command's own `--json` document (design
+// §25.2): section `plan` is `plan --json`, section `delivery_preview` is `run --preview
+// --json`, so the canary below covers the MCP form of each.
 
 /// M5: `plan --json` for a Fly target that delivers config as secrets, with a file key row,
 /// holds no value (the new `channel`, `via`, `delivered_as`, `form` and `path` fields name
@@ -2785,37 +2923,37 @@ fn changed_json_never_prints_a_value() {
     assert_no_marker("changed --json", &format!("{}{}", r.stdout, r.stderr));
 }
 
-/// M5: the MCP `opv_deployment_plan` answer (a plan projection) holds no value.
+/// M5: the MCP `opv_state` section `plan` answer (the CLI's `plan --json`) holds no value.
 #[test]
-fn mcp_deployment_plan_never_prints_a_value() {
+fn mcp_state_plan_never_prints_a_value() {
     let mut h = Harness::new(&no_value_item());
     h.use_config(NO_VALUE_CONFIG);
     let project = h.fix.clone();
     let mut mcp = Mcp::start(&h, &project);
-    let text = mcp.tool_text("opv_deployment_plan", &json!({"environment": "prod"}));
-    assert_no_marker("opv_deployment_plan", &text);
+    let text = mcp.tool_text("opv_state", &json!({"section": "plan", "env": "prod"}));
+    assert_no_marker("opv_state plan", &text);
 }
 
-/// M5: the MCP `opv_delivery_preview` answer (the shared CLI document) holds no value.
+/// M5: the MCP `opv_state` section `delivery_preview` answer (the shared CLI document) holds
+/// no value.
 #[test]
-fn mcp_delivery_preview_never_prints_a_value() {
+fn mcp_state_delivery_preview_never_prints_a_value() {
     let mut h = Harness::new(&no_value_item());
     h.use_config(NO_VALUE_CONFIG);
     let project = h.fix.clone();
     let mut mcp = Mcp::start(&h, &project);
     let text = mcp.tool_text(
-        "opv_delivery_preview",
-        &json!({"environment": "prod", "product": "allumata"}),
+        "opv_state",
+        &json!({"section": "delivery_preview", "env": "prod", "product": "allumata"}),
     );
-    assert_no_marker("opv_delivery_preview", &text);
+    assert_no_marker("opv_state delivery_preview", &text);
 }
 
-/// M5 (FM-04): MCP and CLI plan the same thing. `opv_deployment_plan` is a projection of
-/// the CLI's `plan --json` document (`plan_receipt` in `src/mcp.rs`: names, actions and the
-/// plan id, never the whole row), so the documents cannot be equal byte for byte; equal plan
-/// ids prove the same plan, since the id hashes every row's channel and form (M4).
+/// M5 (FM-04): MCP and CLI plan the same thing. `opv_state` section `plan` is the CLI's
+/// `plan --json` document; the MCP server is agent mode and the CLI here is not, so equal
+/// plan ids prove the same plan, since the id hashes every row's channel and form (M4).
 #[test]
-fn mcp_deployment_plan_has_the_cli_plan_id() {
+fn mcp_state_plan_has_the_cli_plan_id() {
     let mut h = Harness::new(&no_value_item());
     h.use_config(NO_VALUE_CONFIG);
     // The fake `flyctl secrets list` answers list A first and list B after; start past A so
@@ -2824,7 +2962,290 @@ fn mcp_deployment_plan_has_the_cli_plan_id() {
     let cli: Value = serde_json::from_str(&h.run(&["plan", "prod", "--json"]).stdout).unwrap();
     let project = h.fix.clone();
     let mut mcp = Mcp::start(&h, &project);
-    let text = mcp.tool_text("opv_deployment_plan", &json!({"environment": "prod"}));
+    let text = mcp.tool_text("opv_state", &json!({"section": "plan", "env": "prod"}));
     let tool: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(tool["plan_id"], cli["plan_id"], "{text}");
+}
+
+// ------------------------------------------------------- canary-surface (0.12.0 interface)
+
+/// canary-surface: every 0.12.0 CLI document of the one interface, in text and `--json`,
+/// carries no value marker (S7MARKER) and no child canary outside a scrubbed excerpt.
+#[test]
+fn every_surface_command_document_is_marker_free() {
+    let h = Harness::new(&good_item());
+    let env_file = h.fix.join("canary.env");
+    fs::write(&env_file, SURFACE_ENV_FILE).unwrap();
+    let mut leaked = Vec::new();
+    for base in surface_commands(&env_file) {
+        let json_args = [base.clone(), vec!["--json".to_string()]].concat();
+        for args in [base, json_args] {
+            h.reset();
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            leaked.extend(marker_problems(&refs, &h.run(&refs)));
+        }
+    }
+    assert!(leaked.is_empty(), "{leaked:#?}");
+}
+
+/// canary-surface: `apply` and `set` need a person's terminal, so here they run against no
+/// terminal and refuse; the refusal carries no value marker either.
+#[test]
+fn apply_and_set_refusals_carry_no_marker() {
+    let h = Harness::new(&good_item());
+    let mut leaked = Vec::new();
+    for args in [
+        &["apply", "00000000"][..],
+        &["apply", "00000000", "--json"],
+        &["set", "OPENAI_API_KEY"],
+        &["set", "OPENAI_API_KEY", "--json"],
+    ] {
+        h.reset();
+        leaked.extend(marker_problems(args, &h.run(args)));
+    }
+    assert!(leaked.is_empty(), "{leaked:#?}");
+}
+
+/// The `opv_state` sections and the arguments each needs (§25.2), against the fixture
+/// world: plan, changed, delivery_preview and history need an environment.
+fn state_calls() -> Vec<(&'static str, Value)> {
+    vec![
+        ("inventory", json!({"section": "inventory"})),
+        ("needs", json!({"section": "needs"})),
+        ("contract", json!({"section": "contract"})),
+        ("ready", json!({"section": "ready", "env": "prod"})),
+        ("plan", json!({"section": "plan", "env": "prod"})),
+        ("changed", json!({"section": "changed", "env": "prod"})),
+        ("access", json!({"section": "access", "env": "prod"})),
+        (
+            "delivery_preview",
+            json!({"section": "delivery_preview", "env": "prod", "product": "allumata"}),
+        ),
+        ("history", json!({"section": "history", "env": "prod"})),
+        ("status", json!({"section": "status", "env": "prod"})),
+    ]
+}
+
+/// canary-surface: every `opv_state` section's answer carries no value marker.
+#[test]
+fn mcp_state_every_section_answer_is_marker_free() {
+    let h = Harness::new(&good_item());
+    let project = project_with_fixture(&h);
+    let mut mcp = Mcp::start(&h, &project);
+    let mut leaked = Vec::new();
+    for (section, args) in state_calls() {
+        let text = mcp.tool_text("opv_state", &args);
+        leaked.extend(mcp_value_problem(&format!("opv_state {section}"), &text));
+    }
+    assert!(leaked.is_empty(), "{leaked:#?}");
+}
+
+/// canary-surface: `opv_next`'s answer carries no value marker.
+#[test]
+fn mcp_next_answer_is_marker_free() {
+    let h = Harness::new(&good_item());
+    let project = project_with_fixture(&h);
+    let mut mcp = Mcp::start(&h, &project);
+    let text = mcp.tool_text("opv_next", &json!({"env": "prod"}));
+    assert!(mcp_value_problem("opv_next", &text).is_none(), "{text}");
+}
+
+/// The seven `opv_propose` kinds as one intent document each (§25.2), the same documents
+/// the MCP tool takes.
+fn propose_intents() -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "key",
+            json!({"kind": "key", "key": "CANARY_KEY", "product": "allumata",
+                   "field_kind": "secret", "environments": ["prod"]}),
+        ),
+        (
+            "env",
+            json!({"kind": "env", "env": "canary", "tier": "shared"}),
+        ),
+        (
+            "target",
+            json!({"kind": "target", "env": "prod", "name": "canary",
+                   "options": {"fly-app": "canary-app"}}),
+        ),
+        (
+            "retire",
+            json!({"kind": "retire", "key": "OPENAI_API_KEY", "product": "allumata"}),
+        ),
+        ("setup", json!({"kind": "setup"})),
+        ("structure", json!({"kind": "structure"})),
+        (
+            "generate",
+            json!({"kind": "generate", "env": "prod",
+                   "keys": ["allumata/INTEGRATION_ENC_KEY"]}),
+        ),
+    ]
+}
+
+/// canary-surface: every `opv_propose` kind's answer carries no value marker.
+#[test]
+fn mcp_propose_every_kind_answer_is_marker_free() {
+    let h = Harness::new(&good_item());
+    let project = project_with_fixture(&h);
+    let mut mcp = Mcp::start(&h, &project);
+    let mut leaked = Vec::new();
+    for (kind, intent) in propose_intents() {
+        let text = mcp.tool_text("opv_propose", &intent);
+        leaked.extend(mcp_value_problem(&format!("opv_propose {kind}"), &text));
+    }
+    assert!(leaked.is_empty(), "{leaked:#?}");
+}
+
+/// A contract with a `local`-tier environment, the only tier `opv_import_local` accepts.
+const LOCAL_CONFIG: &str = r#"
+[environments.dev]
+tier = "local"
+boundaries.allumata = { vault_id = "vprd", item_id = "iprd" }
+
+[products.allumata.keys.OPENAI_API_KEY]
+kind = "secret"
+environments = ["dev"]
+"#;
+
+/// canary-surface: `opv_import_local`'s answer, for a local-tier environment, carries no
+/// value marker even though the file it reads does.
+#[test]
+fn mcp_import_local_answer_is_marker_free() {
+    let mut h = Harness::new(&good_item());
+    h.use_config(LOCAL_CONFIG);
+    fs::write(
+        h.fix.join("canary.env"),
+        "OPENAI_API_KEY=sk-proj-S7MARKERVALUEsurface0001\n",
+    )
+    .unwrap();
+    let project = h.fix.clone();
+    let mut mcp = Mcp::start(&h, &project);
+    let text = mcp.tool_text(
+        "opv_import_local",
+        &json!({"env": "dev", "file": "canary.env"}),
+    );
+    assert!(
+        mcp_value_problem("opv_import_local", &text).is_none(),
+        "{text}"
+    );
+}
+
+/// canary-surface: `opv_explain`'s answer carries no value marker.
+#[test]
+fn mcp_explain_answer_is_marker_free() {
+    let h = Harness::new(&good_item());
+    let project = project_with_fixture(&h);
+    let mut mcp = Mcp::start(&h, &project);
+    let text = mcp.tool_text(
+        "opv_explain",
+        &json!({"key": "allumata/OPENAI_API_KEY", "env": "prod"}),
+    );
+    assert!(mcp_value_problem("opv_explain", &text).is_none(), "{text}");
+}
+
+// -------------------------------------------------------------------- P-3 (no value input)
+
+/// The five tools `tools/list` advertises (design §25.2), the ones P-3 walks.
+const MCP_TOOL_NAMES: &[&str] = &[
+    "opv_state",
+    "opv_next",
+    "opv_propose",
+    "opv_import_local",
+    "opv_explain",
+];
+
+/// The MCP input properties that carry a person's own screened text, never a value: the
+/// proposal's `guidance`, an intent `except` reason and a target `options` value. Each is
+/// screened before it is accepted (P-2), and named here.
+const SCREENED_TEXT: &[&str] = &["guidance", "except", "options"];
+
+/// The MCP input properties that are an id, a path or a name reference: their grammar is
+/// the platform's, so the schema carries no `pattern`.
+const ID_OR_PATH: &[&str] = &[
+    "from",
+    "plan_id",
+    "file",
+    "project",
+    "account",
+    "vault",
+    "item",
+    "names_from",
+    "role",
+    "provider",
+    "deploy_credentials",
+    "config_key",
+    "secret_key",
+    "keys",
+];
+
+/// Every property of `schema` that is not a closed enum, a grammar-checked name, an id or a
+/// path, or a named screened-text exception, appended to `unclassified`.
+fn unclassified_properties(name: &str, schema: &Value, unclassified: &mut Vec<String>) {
+    if let Some(arms) = schema.get("oneOf").and_then(Value::as_array) {
+        for arm in arms {
+            unclassified_properties(name, arm, unclassified);
+        }
+        return;
+    }
+    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+        return;
+    };
+    for (prop, sub) in properties {
+        if !closed_or_named(prop, sub, unclassified) {
+            unclassified.push(format!("{name}.{prop}: {sub}"));
+        }
+    }
+}
+
+/// Whether one property is a closed enum, a grammar-checked name, an id or a path, or a
+/// named screened-text exception.
+fn closed_or_named(prop: &str, sub: &Value, unclassified: &mut Vec<String>) -> bool {
+    match sub.get("type").and_then(Value::as_str) {
+        Some("boolean") => true,
+        Some("string") => {
+            sub.get("pattern").is_some()
+                || SCREENED_TEXT.contains(&prop)
+                || ID_OR_PATH.contains(&prop)
+        }
+        Some("array") => match sub.get("items") {
+            Some(items) if items.get("properties").is_some() => {
+                unclassified_properties(prop, items, unclassified);
+                true
+            }
+            Some(items) => items.get("pattern").is_some() || ID_OR_PATH.contains(&prop),
+            None => false,
+        },
+        Some("object") => {
+            if sub.get("properties").is_some() {
+                unclassified_properties(prop, sub, unclassified);
+                true
+            } else {
+                SCREENED_TEXT.contains(&prop)
+            }
+        }
+        _ => sub.get("enum").is_some(),
+    }
+}
+
+/// P-3: no MCP tool input accepts a value. Every property of every `tools/list` input
+/// schema is a closed enum, a grammar-checked name (`pattern`), an id or a path, or one of
+/// the named screened-text exceptions (`guidance`, an intent `except` reason, a target
+/// `options` value) — one assertion over the whole walk of the five tools.
+#[test]
+fn every_mcp_input_property_is_closed_or_named() {
+    let h = Harness::new(&good_item());
+    let project = h.fix.clone();
+    let mut mcp = Mcp::start(&h, &project);
+    let tools = mcp.tools();
+    let mut unclassified = Vec::new();
+    for name in MCP_TOOL_NAMES {
+        match tools.iter().find(|tool| tool["name"] == json!(name)) {
+            Some(tool) => {
+                let schema = tool.get("inputSchema").cloned().unwrap_or(Value::Null);
+                unclassified_properties(name, &schema, &mut unclassified);
+            }
+            None => unclassified.push(format!("{name}: not in tools/list")),
+        }
+    }
+    assert!(unclassified.is_empty(), "{unclassified:#?}");
 }

@@ -1,0 +1,207 @@
+//! Shape and provider catalog (deliverable `catalog`): a known shape name maps to the
+//! [`Rules`] the contract would use, plus the suggestion a person or assistant sees:
+//! kind, source, scope and one line of guidance. Every entry carries the date and the
+//! public source its format was taken from (review M8: the catalog is advisory and ages).
+//!
+//! Nothing here holds a value: an entry describes the *shape* of a value, never one. The
+//! catalog is pure data and knows no vendor CLI, no `op` and no I/O (FR-12).
+
+use std::sync::OnceLock;
+
+use crate::domain::model::{Kind, Rules};
+
+/// Who or what produces a value of this shape (design §2.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// A person fetches it from the provider's console.
+    Person,
+    /// opv generates it (`base64_bytes` or `hex_bytes`).
+    Generated,
+    /// Composed from other keys' values.
+    Derived,
+}
+
+/// How many values of this shape a key has: one per environment, or one per engineer (§2.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// One value per environment.
+    Shared,
+    /// One value per engineer.
+    Personal,
+}
+
+/// The date and public source a shape was taken from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Dated {
+    /// ISO 8601 (`YYYY-MM-DD`) date the format was last checked against the source.
+    pub date: &'static str,
+    /// Public source the format was taken from.
+    pub source: &'static str,
+}
+
+/// One catalog entry: a shape name, the rules it maps to, and the suggestion it carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shape {
+    /// The shape name, matching `^[a-z][a-z0-9_]*$`.
+    pub name: &'static str,
+    /// The rules this shape maps to (only the existing [`Rules`] fields).
+    pub rules: Rules,
+    /// The field kind the shape suggests.
+    pub kind: Kind,
+    /// Who or what produces the value.
+    pub source: Source,
+    /// How many values the key has.
+    pub scope: Scope,
+    /// One line on where to get it.
+    pub guidance: &'static str,
+    /// When and from where this entry was taken.
+    pub dated: Dated,
+}
+
+/// One entry, with the review date shared by the catalog.
+fn entry(
+    name: &'static str,
+    rules: Rules,
+    kind: Kind,
+    source: Source,
+    scope: Scope,
+    guidance: &'static str,
+    source_name: &'static str,
+) -> Shape {
+    Shape {
+        name,
+        rules,
+        kind,
+        source,
+        scope,
+        guidance,
+        dated: Dated {
+            date: "2026-10-18",
+            source: source_name,
+        },
+    }
+}
+
+/// Build the catalog.
+fn build() -> Vec<Shape> {
+    vec![
+        entry(
+            "stripe_secret",
+            Rules {
+                prefix: Some("sk_".to_owned()),
+                ..Rules::default()
+            },
+            Kind::Secret,
+            Source::Person,
+            Scope::Shared,
+            "Stripe Dashboard > Developers > API keys; the secret key starts sk_.",
+            "Stripe API reference, API keys",
+        ),
+        entry(
+            "openai_key",
+            Rules {
+                prefix: Some("sk-".to_owned()),
+                ..Rules::default()
+            },
+            Kind::Secret,
+            Source::Person,
+            Scope::Personal,
+            "OpenAI Platform > API keys; create a project key.",
+            "OpenAI API reference, authentication",
+        ),
+        entry(
+            "pem_private_key",
+            Rules {
+                regex: Some("^-----BEGIN [A-Z ]*PRIVATE KEY-----".to_owned()),
+                ..Rules::default()
+            },
+            Kind::Secret,
+            Source::Person,
+            Scope::Shared,
+            "Generate with openssl or a provider console; PEM-encoded private key.",
+            "RFC 7468 (PEM) and RFC 5208 (PKCS#8)",
+        ),
+        entry(
+            "https_url",
+            Rules {
+                https_url: true,
+                ..Rules::default()
+            },
+            Kind::Config,
+            Source::Person,
+            Scope::Shared,
+            "An absolute https:// URL, including host, optional port and path.",
+            "RFC 3986 (URI), https scheme",
+        ),
+        entry(
+            "url",
+            Rules {
+                regex: Some("^[a-z][a-z0-9+.-]*://[^\\s]+$".to_owned()),
+                ..Rules::default()
+            },
+            Kind::Config,
+            Source::Person,
+            Scope::Shared,
+            "An absolute URL with a scheme, such as https:// or postgres://.",
+            "RFC 3986 (URI)",
+        ),
+        entry(
+            "base64_bytes_32",
+            Rules {
+                base64_bytes: Some(32),
+                ..Rules::default()
+            },
+            Kind::Secret,
+            Source::Generated,
+            Scope::Shared,
+            "Generated by opv: 32 random bytes, standard base64.",
+            "RFC 4648 section 4 (Base64)",
+        ),
+        entry(
+            "hex_bytes_32",
+            Rules {
+                hex_bytes: Some(32),
+                ..Rules::default()
+            },
+            Kind::Secret,
+            Source::Generated,
+            Scope::Shared,
+            "Generated by opv: 32 random bytes, lowercase hex.",
+            "RFC 4648 section 8 (Base16)",
+        ),
+        entry(
+            "email_list",
+            Rules {
+                email_list: true,
+                ..Rules::default()
+            },
+            Kind::Config,
+            Source::Person,
+            Scope::Shared,
+            "Comma-separated email addresses for alerts or an access list.",
+            "RFC 5322 (addr-spec), comma-separated list",
+        ),
+    ]
+}
+
+/// The catalog, built once.
+fn catalog() -> &'static [Shape] {
+    static CATALOG: OnceLock<Vec<Shape>> = OnceLock::new();
+    CATALOG.get_or_init(build)
+}
+
+/// The shape called `name`, if the catalog knows it.
+pub fn lookup(name: &str) -> Option<&'static Shape> {
+    catalog().iter().find(|shape| shape.name == name)
+}
+
+/// Every known shape name, sorted.
+pub fn names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = catalog().iter().map(|shape| shape.name).collect();
+    names.sort_unstable();
+    names
+}
+
+#[cfg(test)]
+#[path = "catalog_tests.rs"]
+mod tests;

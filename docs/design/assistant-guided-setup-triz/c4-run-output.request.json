@@ -1,0 +1,22 @@
+{
+  "evidence": [
+    {
+      "id": "E1",
+      "text": "An assistant debugging an application wants to start it with opv run and read its output."
+    },
+    {
+      "id": "E2",
+      "text": "opv run injects secret values into the child process environment or files; the child's stdout and stderr go straight to the caller."
+    },
+    {
+      "id": "E3",
+      "text": "Applications sometimes print configuration or environment variables, which would expose injected values to the assistant."
+    },
+    {
+      "id": "E4",
+      "text": "opv already registers every value it reads with a scrubber for tool output it shows, but the run child's output is not scrubbed."
+    }
+  ],
+  "desiredImprovement": "The assistant can run and observe the application to help debug it",
+  "worseningOutcome": "Exposure of injected secret values through the application's own output"
+}

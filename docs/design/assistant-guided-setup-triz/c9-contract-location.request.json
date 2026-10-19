@@ -1,0 +1,23 @@
+{
+  "evidence": [
+    {
+      "id": "E1",
+      "text": "An application's key contract should change in the same pull request as the code that needs a new key, so it should live in the repository."
+    },
+    {
+      "id": "E2",
+      "text": "opv also supports keeping the configuration as a manifest in 1Password, readable by tools and people without the repository."
+    },
+    {
+      "id": "E3",
+      "text": "Two writable copies of the configuration can drift apart."
+    }
+  ],
+  "desiredImprovement": "The contract is reviewed and versioned with the code",
+  "worseningOutcome": "Availability of the configuration to tools and people outside the repository",
+  "element": "the application's key contract",
+  "opposingProperties": [
+    "in the repository",
+    "in 1Password"
+  ]
+}

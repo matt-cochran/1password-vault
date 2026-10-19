@@ -634,7 +634,7 @@ pub fn plan(layout: &Layout, fleet: &Fleet, env_name: &str, date: &str) -> TidyP
         {
             let name = key_label(product, key);
             let id = (product.clone(), key.clone());
-            let here = spec.environments.iter().any(|e| e == env_name);
+            let here = spec.is_desired_in(env_name);
             let Some(&c) = res.chosen.get(&id) else {
                 if here {
                     ensure_section(&mut p, &home);

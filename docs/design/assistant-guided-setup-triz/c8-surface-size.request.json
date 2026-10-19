@@ -1,0 +1,18 @@
+{
+  "evidence": [
+    {
+      "id": "E1",
+      "text": "opv exposes about twenty CLI commands and eleven MCP tools, each with its own input and output shape."
+    },
+    {
+      "id": "E2",
+      "text": "The owner wants every capability available through both CLI and MCP, so the surface keeps growing."
+    },
+    {
+      "id": "E3",
+      "text": "Different assistants (Claude Code, Cursor, Codex) use a large, irregular tool surface inconsistently, in different orders."
+    }
+  ],
+  "desiredImprovement": "Completeness of capabilities exposed to assistants",
+  "worseningOutcome": "Consistency and learnability of the surface for assistants"
+}

@@ -69,7 +69,7 @@ fn workspace_with(text: &str) -> (tempfile::TempDir, PathBuf, FakeOp) {
                         "section": {"id": "web", "label": "web"}, "value": MARKER}],
         }),
     );
-    std::fs::write(&path, text.replace("ITEM", &id)).unwrap();
+    crate::config::bindings::write_split(&path, &text.replace("ITEM", &id)).unwrap();
     (dir, path, op)
 }
 
@@ -78,7 +78,7 @@ fn workspace() -> (tempfile::TempDir, PathBuf, FakeOp) {
 }
 
 fn text(path: &std::path::Path) -> String {
-    std::fs::read_to_string(path).unwrap()
+    crate::config::read_merged(path).unwrap()
 }
 
 fn plan_of(path: &std::path::Path, op: &dyn CommandRunner) -> Plan {
@@ -126,7 +126,11 @@ fn another_project_plans_another_id() {
 fn a_changed_configuration_plans_another_id() {
     let (_d, path, op) = workspace();
     let before = plan_of(&path, &op).plan_id;
-    std::fs::write(&path, text(&path) + "\n# a comment\n").unwrap();
+    std::fs::write(
+        &path,
+        std::fs::read_to_string(&path).unwrap() + "\n# a comment\n",
+    )
+    .unwrap();
     assert_ne!(plan_of(&path, &op).plan_id, before);
 }
 
@@ -315,7 +319,11 @@ fn a_created_boundary_carries_a_link_for_key_entry() {
 fn a_stale_plan_id_is_refused() {
     let (_d, path, op) = workspace();
     let id = plan_of(&path, &op).plan_id;
-    std::fs::write(&path, text(&path) + "\n# changed after review\n").unwrap();
+    std::fs::write(
+        &path,
+        std::fs::read_to_string(&path).unwrap() + "\n# changed after review\n",
+    )
+    .unwrap();
     let e = apply(&op, &path, "myapp", ACCOUNT, &id, &mut approve_all).unwrap_err();
     assert_eq!(e.code_str(), "stale_plan");
 }
@@ -324,7 +332,11 @@ fn a_stale_plan_id_is_refused() {
 fn a_stale_plan_creates_nothing() {
     let (_d, path, op) = workspace();
     let id = plan_of(&path, &op).plan_id;
-    std::fs::write(&path, text(&path) + "\n# changed after review\n").unwrap();
+    std::fs::write(
+        &path,
+        std::fs::read_to_string(&path).unwrap() + "\n# changed after review\n",
+    )
+    .unwrap();
     let _ = apply(&op, &path, "myapp", ACCOUNT, &id, &mut approve_all);
     assert_eq!(op.count(&["op", "vault", "create"]), 0);
 }
@@ -344,11 +356,7 @@ fn a_refused_authorization_creates_nothing() {
     let (_d, path, op) = workspace();
     let id = plan_of(&path, &op).plan_id;
     let mut refuse = |_: &Plan| -> Result<(), Error> {
-        Err(crate::cause::Cause::ApprovalMissing {
-            plan: crate::cause::PlanId::new("p"),
-            scope: crate::cause::PlanScope::Structural,
-        }
-        .into())
+        Err(changed("sp-0000000000000000", "sp-1111111111111111"))
     };
     let _ = apply(&op, &path, "myapp", ACCOUNT, &id, &mut refuse);
     assert_eq!(op.count(&["op", "vault", "create"]), 0);
@@ -532,55 +540,37 @@ fn a_configuration_changed_during_apply_is_never_overwritten() {
 
 // End to end (#133 acceptance) -------------------------------------------------------------
 
-/// An assistant declares a new product key and a new target, plans, a person approves in
-/// their terminal, the assistant applies; what is left is entering values in 1Password.
+/// A new product key and a new target are declared in the configuration (as `opv propose
+/// key` and `opv propose target` write them), and a person confirms and applies the plan
+/// (authorized by a closure, as `opv apply` does); what is left is entering values in
+/// 1Password.
 fn end_to_end() -> (tempfile::TempDir, PathBuf, FakeOp, Result<Applied, Error>) {
-    let (d, path, op) = workspace();
-    let approvals = tempfile::tempdir().unwrap();
-    let mut key = super::super::declare::Key {
-        product: "billing".into(),
-        key: "WEBHOOK_SECRET".into(),
-        kind: "secret".into(),
-        environments: vec!["prod".into()],
-        guidance: Some("Stripe dashboard > Webhooks".into()),
-        ..Default::default()
-    };
-    super::super::declare::key(&op, &path, &key).unwrap();
-    key.key = "PUBLISHABLE_KEY".into();
-    key.kind = "config".into();
-    super::super::declare::key(&op, &path, &key).unwrap();
-    let target = super::super::declare::Target {
-        environment: "prod".into(),
-        name: "billing".into(),
-        provider: Some("fly".into()),
-        fields: [("fly-app".to_string(), "myapp-billing-prod".to_string())].into(),
-        products: vec!["billing".into()],
-        roles: vec![],
-    };
-    super::super::declare::target(&op, &path, &target).unwrap();
+    let declared = format!(
+        "{FLEET}{}",
+        r#"
+[environments.prod.targets.billing]
+fly.app = "myapp-billing-prod"
+fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+products = ["billing"]
+
+[products.billing.keys.WEBHOOK_SECRET]
+kind = "secret"
+environments = ["prod"]
+guidance = "Stripe dashboard > Webhooks"
+
+[products.billing.keys.PUBLISHABLE_KEY]
+kind = "config"
+environments = ["prod"]
+"#
+    );
+    let (d, path, op) = workspace_with(&declared);
     let id = plan_of(&path, &op).plan_id;
-    crate::approval::record_in(
-        &approvals.path().join("approvals"),
-        &id,
-        "myapp",
-        ACCOUNT,
-        100,
-    )
-    .unwrap();
-    let res = apply(&op, &path, "myapp", ACCOUNT, &id, &mut |p| {
-        crate::approval::consume_in(
-            &approvals.path().join("approvals"),
-            &p.plan_id,
-            "myapp",
-            ACCOUNT,
-            200,
-        )
-    });
+    let res = apply(&op, &path, "myapp", ACCOUNT, &id, &mut approve_all);
     (d, path, op, res)
 }
 
 #[test]
-fn end_to_end_the_approved_plan_applies() {
+fn end_to_end_the_confirmed_plan_applies() {
     let (_d, _path, _op, res) = end_to_end();
     assert!(res.is_ok(), "{res:?}");
 }
@@ -630,40 +620,6 @@ fn end_to_end_the_existing_shared_value_is_kept() {
             .unwrap()
             .contains(MARKER)
     );
-}
-
-#[test]
-fn end_to_end_the_approval_cannot_be_replayed() {
-    let (_d, path, op) = workspace();
-    let approvals = tempfile::tempdir().unwrap();
-    let id = plan_of(&path, &op).plan_id;
-    crate::approval::record_in(
-        &approvals.path().join("approvals"),
-        &id,
-        "myapp",
-        ACCOUNT,
-        100,
-    )
-    .unwrap();
-    let mut consume = |p: &Plan| {
-        crate::approval::consume_in(
-            &approvals.path().join("approvals"),
-            &p.plan_id,
-            "myapp",
-            ACCOUNT,
-            200,
-        )
-    };
-    let _ = apply(&op, &path, "myapp", ACCOUNT, &id, &mut consume);
-    let e = crate::approval::consume_in(
-        &approvals.path().join("approvals"),
-        &id,
-        "myapp",
-        ACCOUNT,
-        201,
-    )
-    .unwrap_err();
-    assert_eq!(e.code_str(), "approval_used");
 }
 
 // 0.10.0 error catalog (C2, 05.02, 05.14, 05.15, X4) ----------------------------------------
@@ -729,9 +685,13 @@ fn a_malformed_plan_id_is_plan_unknown() {
 fn a_stale_plan_id_steps_to_the_new_structural_plan() {
     let (_d, path, op) = workspace();
     let id = plan_of(&path, &op).plan_id;
-    std::fs::write(&path, text(&path) + "\n# changed after review\n").unwrap();
+    std::fs::write(
+        &path,
+        std::fs::read_to_string(&path).unwrap() + "\n# changed after review\n",
+    )
+    .unwrap();
     let e = apply(&op, &path, "myapp", ACCOUNT, &id, &mut approve_all).unwrap_err();
-    assert_eq!(e.next_text().unwrap_or_default(), "opv structure plan");
+    assert_eq!(e.next_text().unwrap_or_default(), "opv propose structure");
 }
 
 /// 05.14, X4: after the approval was used, the step reads the new plan, never this apply
@@ -746,12 +706,12 @@ fn a_configuration_changed_during_apply_steps_to_the_new_plan() {
         Ok(())
     };
     let e = apply(&op, &path, "myapp", ACCOUNT, &id, &mut edit_during).unwrap_err();
-    assert_eq!(e.next_text().unwrap_or_default(), "opv structure plan");
+    assert_eq!(e.next_text().unwrap_or_default(), "opv propose structure");
 }
 
 /// 05.14, X20: the failure says the approval is used up.
 #[test]
-fn a_configuration_changed_during_apply_says_the_approval_is_used() {
+fn a_configuration_changed_during_apply_never_claims_an_approval() {
     let (_d, path, op) = workspace();
     let id = plan_of(&path, &op).plan_id;
     let p2 = path.clone();
@@ -760,15 +720,15 @@ fn a_configuration_changed_during_apply_says_the_approval_is_used() {
         Ok(())
     };
     let e = apply(&op, &path, "myapp", ACCOUNT, &id, &mut edit_during).unwrap_err();
-    assert!(e.to_string().contains(&format!("approval {id} is used up")));
+    assert!(!e.to_string().contains("approval"), "{e}");
 }
 
-/// X4: a create that fails after the approval was used never steps to the apply again.
+/// X4: a create that fails after the plan was authorized never steps to the apply again.
 #[test]
 fn a_partial_apply_steps_to_the_new_plan() {
     let (_d, path, r) = failing_at(3);
     let e = apply_reviewed(&path, &r).unwrap_err();
-    assert_eq!(e.next_text().unwrap_or_default(), "opv structure plan");
+    assert_eq!(e.next_text().unwrap_or_default(), "opv propose structure");
 }
 
 /// X20: a partial apply names what it already created.
@@ -785,14 +745,4 @@ fn a_checkout_without_a_file_never_steps_to_bootstrap() {
     let dir = tempfile::tempdir().unwrap();
     let e = scope(dir.path(), &FakeOp::default()).unwrap_err();
     assert!(!e.next_text().unwrap_or_default().contains("bootstrap"));
-}
-
-#[test]
-fn a_changed_plan_never_approved_here_is_plan_unknown() {
-    // C2 (09.mcp): never "changed since it was approved" for an id never approved.
-    let e = unknown_unless_approved(
-        changed("sp-0000000000000000", "sp-1111111111111111"),
-        &|_| false,
-    );
-    assert_eq!(e.code_str(), "plan_unknown");
 }

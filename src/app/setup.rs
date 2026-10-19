@@ -768,22 +768,26 @@ pub fn run(
         let env = existing.environment(&recipe.environment)?;
         // The recipe writes one item (its one boundary); compare against the first recorded.
         // 05.28: no step inside the text; the cause's own step is the structure route.
-        let at = env.boundaries.values().next().ok_or_else(|| -> Error {
-            Cause::BoundaryMissing {
-                env: EnvName::new(recipe.environment.as_str()),
-                product: ProductName::new(selected.as_str()),
-                source: ConfigSource::File {
-                    path: output.clone(),
-                    given_by: match output_override {
-                        Some(_) => GivenBy::Flag {
-                            flag: "--config".into(),
+        let at = env
+            .bound_boundaries()
+            .next()
+            .map(|(_, b)| b)
+            .ok_or_else(|| -> Error {
+                Cause::BoundaryMissing {
+                    env: EnvName::new(recipe.environment.as_str()),
+                    product: ProductName::new(selected.as_str()),
+                    source: ConfigSource::File {
+                        path: output.clone(),
+                        given_by: match output_override {
+                            Some(_) => GivenBy::Flag {
+                                flag: "--config".into(),
+                            },
+                            None => GivenBy::Discovered,
                         },
-                        None => GivenBy::Discovered,
                     },
-                },
-            }
-            .into()
-        })?;
+                }
+                .into()
+            })?;
         config_compatible(
             &output,
             &recipe.manifest(&at.vault_id, &at.item_id)?,
@@ -1048,13 +1052,11 @@ pub fn run(
     // Actual value/rule validation is deliberately explicit: the check, with this run's
     // configuration and product (X1).
     let check = missing.is_empty().then(|| crate::cause::Cmd {
-        command: vec!["check".into()],
+        command: vec!["ready".into()],
         args: vec![
             "--config".into(),
             output.display().to_string(),
             recipe.environment.clone(),
-            "--product".into(),
-            selected.clone(),
         ],
     });
     let finished = finish(
@@ -1122,7 +1124,7 @@ fn finish(
     config::parse(&manifest)?;
     config_compatible(output, &manifest, recipe_path)?;
     if !output.exists() {
-        super::init::write_atomic(output, &manifest, false)?;
+        super::init::write_config(output, &manifest, false)?;
     }
     ui.show(&format!(
         "\nLocal configuration ready: {} (IDs and declarations only)",

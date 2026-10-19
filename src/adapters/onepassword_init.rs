@@ -127,6 +127,27 @@ pub fn vault_users(
     }
 }
 
+/// The session's own `user_uuid` from `op whoami --format json` (#96): the identifier used
+/// only to find this session's entry in a vault's user list ([`vault_users`]), never an
+/// email, name or any other identity detail. `None` when whoami answers without one (for
+/// example a service-account credential) or could not be read: the caller then reports the
+/// capability as unknown rather than guessing, and never fails the read on this probe
+/// alone (`require_session` already decided the session).
+pub fn session_user(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Who {
+        #[serde(default)]
+        user_uuid: Option<String>,
+    }
+    let args = ["whoami", "--format", "json"];
+    let out = read_op(r, &args, host).ok()?;
+    if out.status != 0 {
+        return None;
+    }
+    let who: Who = serde_json::from_slice(&out.stdout).ok()?;
+    who.user_uuid.filter(|id| !id.is_empty())
+}
+
 /// The item in `vault_id` whose title is exactly `title` (case-sensitive). One `op item
 /// list --vault <vault_id>` call (item metadata only; it carries no field values).
 #[cfg(test)]
@@ -343,55 +364,6 @@ fn invalid_id(kind: ResourceKind, args: &[&str]) -> Error {
         }
         .into(),
     }
-}
-
-/// Create the vault `title` for a person running `init` (FR-43): `op vault create <title>
-/// --format json`, one write, never retried (NR-2). The title is a name, never a value. A
-/// refused create (the account may not allow it) names the manual step.
-pub fn create_vault(r: &dyn CommandRunner, title: &str) -> Result<Named, Error> {
-    let args = ["vault", "create", title, "--format", "json"];
-    created(
-        r,
-        &args,
-        None,
-        CreateKind::Vault,
-        title,
-        None,
-        Refind::ByTitle,
-    )
-}
-
-/// Create an empty Secure Note `title` in `vault_id` for a person running `init` (FR-43):
-/// the same `op item create` call `setup` makes, the template on stdin.
-pub fn create_item(r: &dyn CommandRunner, vault_id: &str, title: &str) -> Result<Named, Error> {
-    create_item_tagged(r, vault_id, title, &[])
-}
-
-/// [`create_item`] with `tags` on the new item (names, never values), e.g. `opv bootstrap`'s
-/// `opv-env:<project>/<env>` (FR-55).
-pub fn create_item_tagged(
-    r: &dyn CommandRunner,
-    vault_id: &str,
-    title: &str,
-    tags: &[String],
-) -> Result<Named, Error> {
-    let args = [
-        "item", "create", "-", "--vault", vault_id, "--title", title, "--format", "json",
-    ];
-    let template = serde_json::to_vec(&serde_json::json!({
-        "category": "SECURE_NOTE", "fields": [], "sections": [], "tags": tags,
-    }))
-    .expect("a fixed template serializes");
-    let template = template.as_slice();
-    created(
-        r,
-        &args,
-        Some(template),
-        CreateKind::Item,
-        title,
-        Some(vault_id),
-        Refind::ByTitle,
-    )
 }
 
 /// One typed field of the template [`create_item_with_secret_fields`] serializes: no value
@@ -722,33 +694,6 @@ mod tests {
         ]));
         let e = read_field_shapes(&r, "v1", "i1", &linux).unwrap_err();
         assert_eq!(e.to_string(), "item i1 in v1 was not found at 1Password");
-    }
-
-    /// 04.04: a vault create whose outcome is unknown is never "could not create".
-    #[test]
-    fn an_unfinished_vault_create_is_create_outcome_unknown() {
-        let r = FakeRunner::default();
-        r.push_unknown("timeout");
-        let e = create_vault(&r, "acme-prod").unwrap_err();
-        assert_eq!(e.code_str(), "create_outcome_unknown");
-    }
-
-    /// 04.04: its step is to re-run (opv finds the vault by title), never "create the vault
-    /// in the 1Password app", which would make a second one.
-    #[test]
-    fn an_unfinished_vault_create_has_no_manual_create_step() {
-        let r = FakeRunner::default();
-        r.push_unknown("timeout");
-        let e = create_vault(&r, "acme-prod").unwrap_err();
-        assert_eq!(e.do_text(), None);
-    }
-
-    /// 04.04: a create that printed no ID may have made the item.
-    #[test]
-    fn a_create_without_an_id_is_create_outcome_unknown() {
-        let r = FakeRunner::new([Output::success("{}")]);
-        let e = create_item(&r, "v1", "acme · prod").unwrap_err();
-        assert_eq!(e.code_str(), "create_outcome_unknown");
     }
 
     /// 04.26: a listing op answered with JSON opv cannot read is an unexpected output.

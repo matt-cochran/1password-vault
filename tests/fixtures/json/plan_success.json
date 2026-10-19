@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "ok": true,
   "environment": "prod",
   "product": null,
@@ -80,6 +80,10 @@
     "to_prune": 0
   },
   "plan_id": "375730d8",
-  "next": "opv sync prod --deploy --expect-plan 375730d8",
+  "next": {
+    "kind": "run",
+    "actor": "assistant",
+    "command": "opv sync prod --deploy --expect-plan 375730d8"
+  },
   "do": null
 }

@@ -1,0 +1,10 @@
+use std::env;
+
+fn main() {
+    let a = std::env::var("DATABASE_URL").unwrap();
+    let b = env::var_os("CACHE_DIR");
+    let c = env!("BUILD_ID");
+    let d = option_env!("RELEASE_CHANNEL");
+    let e = dotenvy::var("DOTENV_TOKEN");
+    println!("{a:?} {b:?} {c} {d:?} {e:?}");
+}

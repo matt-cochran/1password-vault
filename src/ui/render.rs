@@ -341,7 +341,7 @@ const KEYS: [&str; 15] = [
     "enter open",
     "esc back",
     "s sync…",
-    "i adopt…",
+    "i import…",
     "o open in 1Password",
     "+ key…",
     "E environment…",
@@ -450,7 +450,7 @@ fn modal(f: &mut Frame, area: Rect, m: &Modal) {
             (form.title().to_string(), out)
         }
         Modal::Input { prompt, value, .. } => (
-            "Adopt".to_string(),
+            "Import".to_string(),
             vec![
                 Line::raw(prompt.clone()),
                 Line::raw(format!("{value}▏")),

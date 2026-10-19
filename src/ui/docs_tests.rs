@@ -120,6 +120,7 @@ mod documents_round_trip {
                 )]),
                 title: None,
                 audience: None,
+                personal_item: Default::default(),
             }],
             personal: Default::default(),
             health: Vec::new(),

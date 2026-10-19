@@ -156,6 +156,7 @@ fn env(name: &str, target: Option<&str>, rows: Vec<Row>) -> EnvInput {
             rows: Ok(Vec::new()),
             title: None,
             audience: None,
+            personal_item: Default::default(),
         },
         None => EnvInput {
             name: name.into(),
@@ -163,6 +164,7 @@ fn env(name: &str, target: Option<&str>, rows: Vec<Row>) -> EnvInput {
             rows: Ok(rows),
             title: None,
             audience: None,
+            personal_item: Default::default(),
         },
     }
 }
@@ -221,6 +223,7 @@ fn env_err(name: &str, target: Option<&str>, error: Error) -> EnvInput {
             rows: Ok(Vec::new()),
             title: None,
             audience: None,
+            personal_item: Default::default(),
         },
         None => EnvInput {
             name: name.into(),
@@ -228,6 +231,7 @@ fn env_err(name: &str, target: Option<&str>, error: Error) -> EnvInput {
             rows: Err(error),
             title: None,
             audience: None,
+            personal_item: Default::default(),
         },
     }
 }
@@ -363,6 +367,84 @@ fn wrong_kind_row_maps_to_key_wrong_kind_finding() {
     )];
     let r = receipt(&inputs(&report, envs), "0.6.0");
     assert_eq!(r.findings[0].code, "key_wrong_kind");
+}
+
+#[test]
+fn an_agent_holds_a_pending_rule_back_from_the_receipt() {
+    let report = account_report();
+    let mut envs = vec![env(
+        "staging",
+        Some("Fly"),
+        vec![row(
+            "api",
+            "STRIPE_KEY",
+            KeyState::RuleFailed("prefix", Reason::Fixed("expected sk-")),
+            TargetState::Absent,
+        )],
+    )];
+    let gate = RuleGate {
+        agent: true,
+        pending: &|_, _| true,
+    };
+    gate_rows(&mut envs, &gate);
+    let r = receipt(&inputs(&report, envs), "0.6.0");
+    assert_eq!(r.findings[0].code, "rules_pending_review");
+}
+
+/// Two keys with no rule in `staging`, as a names-only setup declares them.
+fn no_rule_fleet() -> crate::domain::Fleet {
+    crate::config::parse(
+        "[environments.staging]\n\
+         boundaries.app = { vault_id = \"vstg0000000000000000000001\", item_id = \"app\" }\n\
+         [products.app.keys.API_KEY]\n\
+         kind = \"secret\"\n\
+         environments = [\"staging\"]\n\
+         [products.app.keys.SESSION_SECRET]\n\
+         kind = \"secret\"\n\
+         environments = [\"staging\"]\n",
+    )
+    .unwrap()
+}
+
+/// Walkthrough finding 1: an assistant's receipt for keys with no rule, in a checkout with
+/// no committed contract: `API_KEY` is set and `SESSION_SECRET` is empty.
+fn no_rule_receipt_for_an_agent() -> Receipt {
+    let report = account_report();
+    let fleet = no_rule_fleet();
+    let mut envs = vec![env(
+        "staging",
+        None,
+        vec![
+            row("app", "API_KEY", KeyState::Ready, TargetState::Absent),
+            row(
+                "app",
+                "SESSION_SECRET",
+                KeyState::RuleFailed("nonempty", Reason::Fixed("empty")),
+                TargetState::Absent,
+            ),
+        ],
+    )];
+    let gate = RuleGate {
+        agent: true,
+        pending: &|p, k| pending_for_agent(None, &fleet, p, k),
+    };
+    gate_rows(&mut envs, &gate);
+    receipt(&inputs(&report, envs), "0.6.0")
+}
+
+#[test]
+fn an_agent_sees_a_key_with_no_rule_in_its_value_state() {
+    let r = no_rule_receipt_for_an_agent();
+    assert!(r.findings.iter().all(|f| f.code != "rules_pending_review"));
+}
+
+#[test]
+fn an_agents_next_names_the_empty_key_with_no_rule() {
+    let r = no_rule_receipt_for_an_agent();
+    assert_eq!(
+        r.next.and_then(|n| n.command),
+        Some("opv open app/SESSION_SECRET --env staging".to_string())
+    );
 }
 
 #[test]
@@ -540,7 +622,7 @@ fn next_prefers_the_first_blocking_finding() {
     )];
     let r = receipt(&inputs(&report, envs), "0.6.0");
     assert_eq!(
-        r.next.as_ref().map(|n| n.command.as_str()),
+        r.next.as_ref().and_then(|n| n.command.as_deref()),
         Some("opv open api/STRIPE_KEY --env staging")
     );
 }
@@ -754,6 +836,7 @@ fn titled(name: &str, title: &str) -> EnvInput {
         rows: Ok(vec![]),
         title: Some(title.into()),
         audience: None,
+        personal_item: Default::default(),
     }
 }
 
@@ -836,6 +919,82 @@ fn a_missing_personal_key_is_named_as_yours() {
     assert_eq!(r.findings[0].code, "personal_key_missing");
 }
 
+/// A receipt for one run-only `dev` whose only row is the personal `api/OPENAI_API_KEY`
+/// in `state`, read from the person's item `proj · dev (personal)` (FR-55).
+fn personal_receipt(state: KeyState) -> Receipt {
+    let account = crate::app::account::credential_report(crate::host::Platform::Linux);
+    let mut env = titled("dev", "Local");
+    env.personal_item = PersonalItem {
+        title: "proj · dev (personal)".into(),
+        vaults: vec!["Private".into(), "Employee".into(), "Personal".into()],
+    };
+    env.rows = Ok(vec![crate::domain::Row {
+        product: "api".into(),
+        key: "OPENAI_API_KEY".into(),
+        kind: crate::domain::Kind::Secret,
+        state,
+        target: TargetState::Unknown,
+        guidance: String::new(),
+        source: None,
+        shared_by: Vec::new(),
+    }]);
+    receipt(
+        &Inputs {
+            config_source: None,
+            account: &account,
+            envs: vec![env],
+            personal: [("api".to_string(), "OPENAI_API_KEY".to_string())].into(),
+            health: Vec::new(),
+        },
+        "t",
+    )
+}
+
+#[test]
+fn a_missing_personal_keys_step_names_the_persons_own_item_and_field() {
+    let r = personal_receipt(KeyState::Missing);
+    assert_eq!(
+        r.findings[0].prerequisite,
+        "in your own 1Password vault (Private, Employee or Personal), create or open your \
+         item \"proj · dev (personal)\" and fill field OPENAI_API_KEY in section api"
+    );
+}
+
+#[test]
+fn an_empty_personal_keys_step_names_the_field_to_fill_in_the_persons_own_item() {
+    let r = personal_receipt(KeyState::RuleFailed("nonempty", Reason::Fixed("empty")));
+    assert_eq!(
+        r.findings[0].prerequisite,
+        "fill field OPENAI_API_KEY in section api of your item \"proj · dev (personal)\" in \
+         your own 1Password vault (Private, Employee or Personal)"
+    );
+}
+
+/// Schema 3: a personal key's step is no command, so its typed `next` is `enter_value`
+/// for the person with a null `command` (never `apply`, which means `opv apply`).
+#[test]
+fn a_personal_key_missing_documents_next_is_enter_value_with_a_null_command() {
+    let r = personal_receipt(KeyState::Missing);
+    let body = serde_json::to_vec(&r).unwrap();
+    let doc: serde_json::Value =
+        serde_json::from_slice(&crate::json::finish(&body, Ok(()), false)).unwrap();
+    assert_eq!(
+        doc["next"],
+        serde_json::json!({"kind": "enter_value", "actor": "person", "command": null})
+    );
+}
+
+#[test]
+fn the_text_next_line_shows_a_personal_keys_step() {
+    let r = personal_receipt(KeyState::Missing);
+    assert!(
+        text(&r)
+            .contains("Next (owner): in your own 1Password vault (Private, Employee or Personal)"),
+        "{}",
+        text(&r)
+    );
+}
+
 // #92: settings health ---------------------------------------------------------------
 
 fn health_finding() -> crate::domain::health::HealthFinding {
@@ -885,6 +1044,125 @@ fn a_health_finding_opens_the_key_in_its_first_environment() {
     );
 }
 
+/// A `same_value_under_two_keys` warning for the health surface tests.
+fn health_finding_under_two() -> crate::domain::health::HealthFinding {
+    crate::domain::health::HealthFinding {
+        code: crate::domain::health::SAME_UNDER_TWO,
+        environments: vec!["dev".into()],
+        product: "api".into(),
+        key: "DATABASE_URL".into(),
+        other: Some(("api".into(), "DATABASE_URL_RO".into())),
+        message: "api/DATABASE_URL and api/DATABASE_URL_RO hold the same value in dev".into(),
+    }
+}
+
+/// The receipt for one health finding, read under `host` as the CLI reads it.
+fn health_receipt_on(host: crate::host::Host, h: crate::domain::health::HealthFinding) -> Receipt {
+    let report = account_report();
+    let mut i = inputs(&report, Vec::new());
+    i.health = vec![h];
+    crate::host::with_test_host(host, || receipt(&i, "test"))
+}
+
+fn agent_host() -> crate::host::Host {
+    crate::host::Host::from_env(&crate::host::FakeEnv::new("linux").var_val("OPV_AGENT", "1"))
+}
+
+fn person_host() -> crate::host::Host {
+    crate::host::Host::from_env(&crate::host::FakeEnv::new("linux").shell("/bin/bash").tty())
+}
+
+fn ci_host() -> crate::host::Host {
+    crate::host::Host::from_env(
+        &crate::host::FakeEnv::new("linux")
+            .shell("/bin/bash")
+            .var("CI"),
+    )
+}
+
+fn mcp_host() -> crate::host::Host {
+    crate::host::Host::from_env(&crate::host::FakeEnv::new("linux").shell("/bin/bash").mcp())
+}
+
+#[test]
+fn an_mcp_caller_sees_no_cross_tier_health_warning() {
+    let r = health_receipt_on(mcp_host(), health_finding());
+    assert!(
+        r.findings
+            .iter()
+            .all(|f| f.code != "same_value_across_environments")
+    );
+}
+
+#[test]
+fn agent_mode_hides_same_value_across_environments() {
+    let r = health_receipt_on(agent_host(), health_finding());
+    assert!(
+        r.findings
+            .iter()
+            .all(|f| f.code != "same_value_across_environments")
+    );
+}
+
+#[test]
+fn agent_mode_hides_same_value_under_two_keys() {
+    let r = health_receipt_on(agent_host(), health_finding_under_two());
+    assert!(
+        r.findings
+            .iter()
+            .all(|f| f.code != "same_value_under_two_keys")
+    );
+}
+
+#[test]
+fn a_person_at_a_terminal_sees_same_value_across_environments() {
+    let r = health_receipt_on(person_host(), health_finding());
+    assert!(
+        r.findings
+            .iter()
+            .any(|f| f.code == "same_value_across_environments")
+    );
+}
+
+#[test]
+fn a_person_at_a_terminal_sees_same_value_under_two_keys() {
+    let r = health_receipt_on(person_host(), health_finding_under_two());
+    assert!(
+        r.findings
+            .iter()
+            .any(|f| f.code == "same_value_under_two_keys")
+    );
+}
+
+#[test]
+fn ci_sees_same_value_across_environments() {
+    let r = health_receipt_on(ci_host(), health_finding());
+    assert!(
+        r.findings
+            .iter()
+            .any(|f| f.code == "same_value_across_environments")
+    );
+}
+
+#[test]
+fn ci_sees_same_value_under_two_keys() {
+    let r = health_receipt_on(ci_host(), health_finding_under_two());
+    assert!(
+        r.findings
+            .iter()
+            .any(|f| f.code == "same_value_under_two_keys")
+    );
+}
+
+#[test]
+fn no_health_finding_blocks_readiness() {
+    let report = account_report();
+    let mut i = inputs(&report, Vec::new());
+    i.health = vec![health_finding(), health_finding_under_two()];
+    let r = receipt(&i, "test");
+    assert!(r.findings.iter().all(|f| !f.blocking));
+}
+
 #[test]
 fn a_readiness_finding_has_no_message_in_its_json() {
     let report = account_report();
@@ -929,7 +1207,7 @@ fn ready_on_two_items(dev: &str, ci: &str) -> serde_json::Value {
     ))
     .unwrap();
     let mut out = Vec::new();
-    run(&fleet, None, None, &op, true, None, &mut out).unwrap();
+    run(&fleet, None, None, &op, true, None, false, &mut out).unwrap();
     serde_json::from_slice(&out).unwrap()
 }
 
@@ -983,6 +1261,7 @@ fn target_env(name: &str, targets: Vec<TargetInput>) -> EnvInput {
         rows: Ok(vec![]),
         title: None,
         audience: None,
+        personal_item: Default::default(),
     }
 }
 
@@ -1030,7 +1309,7 @@ fn a_state_vault_grants_missing_next_is_access_with_the_target() {
         "0.6.0",
     );
     assert_eq!(
-        r.next.as_ref().map(|n| n.command.as_str()),
+        r.next.as_ref().and_then(|n| n.command.as_deref()),
         Some("opv access staging --target web")
     );
 }
@@ -1077,7 +1356,7 @@ fn ready_doc(
     use crate::runner::fake::FakeRunner;
     let r = FakeRunner::new(responses);
     let mut out = Vec::new();
-    run(fleet, None, only, &r, true, None, &mut out).unwrap();
+    run(fleet, None, only, &r, true, None, false, &mut out).unwrap();
     serde_json::from_slice(&out).unwrap()
 }
 
@@ -1312,6 +1591,7 @@ fn ready_signed_out_is_op_not_signed_in() {
         &op,
         true,
         None,
+        false,
         &mut Vec::new(),
     )
     .unwrap_err();
@@ -1332,7 +1612,17 @@ fn ready_checks_the_state_vault_in_the_environments_account() {
         fly_empty(),
         Output::success(b"[]".to_vec()),
     ]);
-    run(&fleet, None, Some("prod"), &r, true, None, &mut Vec::new()).unwrap();
+    run(
+        &fleet,
+        None,
+        Some("prod"),
+        &r,
+        true,
+        None,
+        false,
+        &mut Vec::new(),
+    )
+    .unwrap();
     let calls = r.calls.borrow();
     let state = calls
         .iter()
@@ -1345,5 +1635,262 @@ fn ready_checks_the_state_vault_in_the_environments_account() {
         state
             .env
             .contains(&("OP_ACCOUNT".to_string(), "work.1password.com".to_string()))
+    );
+}
+
+// FR-51 `ready --gate` (design Part V, row `gate`) -----------------------------------
+
+/// The JSON item `fields` for a single concealed `label` in section `app`.
+fn gated_fields(label: &str, value: &str) -> serde_json::Value {
+    serde_json::json!({
+        "title": "t", "category": "SECURE_NOTE",
+        "sections": [{"id": "app", "label": "app"}],
+        "fields": [{"id": "f1", "type": "CONCEALED",
+                    "section": {"id": "app", "label": "app"},
+                    "label": label, "value": value}]
+    })
+}
+
+/// One `app/DATABASE_URL` secret in `dev`.
+const GATED_KEY: &str =
+    "[products.app.keys.DATABASE_URL]\nkind = \"secret\"\nenvironments = [\"dev\"]\n";
+
+/// `app/DATABASE_URL` and a declared `app/OTHER` that the item does not hold.
+const GATED_TWO_KEYS: &str = "[products.app.keys.DATABASE_URL]\nkind = \"secret\"\n\
+                              environments = [\"dev\"]\n\
+                              [products.app.keys.OTHER]\nkind = \"secret\"\n\
+                              environments = [\"dev\"]\n";
+
+/// Run `ready` (with `gate`) over one run-only `dev` environment holding one item, and
+/// return the outcome and the raw stdout body.
+fn run_gate(
+    gate: bool,
+    fields: serde_json::Value,
+    keys: &str,
+    generated_at: &str,
+) -> (Result<(), Error>, Vec<u8>) {
+    use crate::adapters::fake_op::FakeOp;
+    let op = FakeOp::default();
+    let id = op.insert("vdev0000000000000000000001", fields);
+    let fleet = crate::config::parse(&format!(
+        "[environments.dev]\n\
+         boundaries.app = {{ vault_id = \"vdev0000000000000000000001\", item_id = \"{id}\" }}\n\
+         {keys}"
+    ))
+    .unwrap();
+    let mut out = Vec::new();
+    let res = run_at(
+        &fleet,
+        None,
+        None,
+        &op,
+        true,
+        None,
+        gate,
+        generated_at,
+        &mut out,
+    );
+    (res, out)
+}
+
+/// The `(product, key, reason)` rows of a `gate_failed` error.
+fn gate_keys_of(e: &Error) -> Vec<(String, String, &'static str)> {
+    match e.cause() {
+        Some((Cause::GateFailed { keys, .. }, _)) => keys
+            .iter()
+            .map(|(p, k, r)| (p.to_string(), k.to_string(), *r))
+            .collect(),
+        Some((other, _)) => panic!("expected GateFailed, got {other:?}"),
+        None => panic!("expected a catalog cause"),
+    }
+}
+
+#[test]
+fn gate_fails_a_key_that_is_absent() {
+    let (res, _) = run_gate(
+        true,
+        gated_fields("DATABASE_URL", "real-value-here"),
+        GATED_TWO_KEYS,
+        "2026-07-01T00:00:00Z",
+    );
+    assert_eq!(
+        gate_keys_of(&res.unwrap_err()),
+        vec![("app".into(), "OTHER".into(), "absent")]
+    );
+}
+
+#[test]
+fn gate_fails_a_placeholder_value() {
+    let (res, _) = run_gate(
+        true,
+        gated_fields("DATABASE_URL", "changeme"),
+        GATED_KEY,
+        "2026-07-01T00:00:00Z",
+    );
+    assert_eq!(
+        gate_keys_of(&res.unwrap_err()),
+        vec![("app".into(), "DATABASE_URL".into(), "placeholder")]
+    );
+}
+
+#[test]
+fn gate_passes_a_set_and_delivered_key() {
+    let (res, _) = run_gate(
+        true,
+        gated_fields("DATABASE_URL", "real-value-here"),
+        GATED_KEY,
+        "2026-07-01T00:00:00Z",
+    );
+    assert!(res.is_ok());
+}
+
+#[test]
+fn gate_fails_a_set_key_whose_delivery_evidence_is_older() {
+    let fleet = crate::config::parse(
+        "[environments.dev]\n\
+         boundaries.app = { vault_id = \"v\", item_id = \"src1\" }\n\
+         [products.app.keys.DATABASE_URL]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
+    )
+    .unwrap();
+    let rows = vec![row(
+        "app",
+        "DATABASE_URL",
+        KeyState::Ready,
+        TargetState::Present,
+    )];
+    let keys = gate_keys(
+        &fleet,
+        "dev",
+        &rows,
+        &BTreeSet::new(),
+        &BTreeSet::from(["app".to_string()]),
+        &BTreeMap::from([("src1".to_string(), 3)]),
+        &BTreeMap::from([("src1".to_string(), 5)]),
+        &BTreeSet::new(),
+    );
+    assert_eq!(
+        keys,
+        vec![(
+            "app".to_string(),
+            "DATABASE_URL".to_string(),
+            "not_delivered"
+        )]
+    );
+}
+
+#[test]
+fn gate_flags_an_expiry_within_thirty_days_as_advisory() {
+    let keys = "[products.app.keys.DATABASE_URL]\nkind = \"secret\"\n\
+                environments = [\"dev\"]\nexpires = \"2026-07-10\"\n";
+    let (res, out) = run_gate(
+        true,
+        gated_fields("DATABASE_URL", "real-value-here"),
+        keys,
+        "2026-07-01T00:00:00Z",
+    );
+    let doc: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert!(
+        res.is_ok()
+            && doc["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["code"] == "expires_soon")
+    );
+}
+
+#[test]
+fn without_gate_an_absent_key_does_not_change_the_exit() {
+    let (res, _) = run_gate(
+        false,
+        gated_fields("DATABASE_URL", "real-value-here"),
+        GATED_TWO_KEYS,
+        "2026-07-01T00:00:00Z",
+    );
+    assert!(res.is_ok());
+}
+
+#[test]
+fn gate_never_prints_a_value_even_framed_as_json() {
+    let (res, out) = run_gate(
+        true,
+        gated_fields("DATABASE_URL", "S7MARKER-gate"),
+        GATED_KEY,
+        "2026-07-01T00:00:00Z",
+    );
+    let framed = crate::json::finish(&out, res.as_ref().map(|_| ()), false);
+    assert!(!String::from_utf8_lossy(&framed).contains("S7MARKER"));
+}
+
+#[test]
+fn gate_fails_an_environment_it_could_not_read() {
+    use crate::adapters::fake_op::FakeOp;
+    let op = FakeOp::default();
+    let fleet = crate::config::parse(&format!(
+        "[environments.dev]\n\
+         boundaries.app = {{ vault_id = \"vdev0000000000000000000001\", item_id = \"inotthere00000000000000001\" }}\n\
+         {GATED_KEY}"
+    ))
+    .unwrap();
+    let mut out = Vec::new();
+    let res = run_at(
+        &fleet,
+        None,
+        None,
+        &op,
+        true,
+        None,
+        true,
+        "2026-07-01T00:00:00Z",
+        &mut out,
+    );
+    assert_eq!(res.unwrap_err().code_str(), "gate_failed");
+}
+
+/// A placeholder that also fails a committed rule (`LOG_LEVEL = changeme` against an enum)
+/// is `placeholder`, as `opv inventory` reports it, not `malformed`.
+#[test]
+fn gate_reports_a_placeholder_failing_a_rule_as_placeholder() {
+    let fleet = crate::config::parse(
+        "[environments.dev]\n\
+         boundaries.app = { vault_id = \"v\", item_id = \"src1\" }\n\
+         [products.app.keys.LOG_LEVEL]\nkind = \"config\"\nenvironments = [\"dev\"]\n",
+    )
+    .unwrap();
+    let rows = vec![row(
+        "app",
+        "LOG_LEVEL",
+        KeyState::RuleFailed("enum", Reason::Fixed("not one of the allowed values")),
+        TargetState::Present,
+    )];
+    let keys = gate_keys(
+        &fleet,
+        "dev",
+        &rows,
+        &BTreeSet::from([("app".to_string(), "LOG_LEVEL".to_string())]),
+        &BTreeSet::new(),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+    );
+    assert_eq!(
+        keys,
+        vec![("app".to_string(), "LOG_LEVEL".to_string(), "placeholder")]
+    );
+}
+
+/// A config value can be a placeholder too (`LOG_LEVEL = changeme`): the gate refuses it as
+/// `placeholder`, as `opv inventory` classifies it, though settings health flags secrets only.
+#[test]
+fn gate_fails_a_placeholder_config_value() {
+    let (res, _) = run_gate(
+        true,
+        gated_fields("LOG_LEVEL", "changeme"),
+        "[products.app.keys.LOG_LEVEL]\nkind = \"config\"\nenvironments = [\"dev\"]\n",
+        "2026-07-01T00:00:00Z",
+    );
+    assert_eq!(
+        gate_keys_of(&res.unwrap_err()),
+        vec![("app".into(), "LOG_LEVEL".into(), "placeholder")]
     );
 }

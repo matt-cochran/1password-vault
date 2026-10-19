@@ -10,17 +10,20 @@ checks for drift.
 | [secrets.toml](secrets.toml) | the configuration: two `fly` environments, `staging` and `prod`, one product |
 | [.github/workflows/opv-sync-on-change.yml](.github/workflows/opv-sync-on-change.yml) | detect a change, sync staging, plan-then-sync prod |
 | [.github/workflows/opv-drift.yml](.github/workflows/opv-drift.yml) | nightly `status --fail-on-drift` and `delivery verify` |
+| [.github/workflows/opv-pr.yml](.github/workflows/opv-pr.yml) | pull request: `needs --gate`, `contract --check`, `ready --gate`, and the `opv/relaxations` status |
 | [.github/actions/install-opv/action.yml](.github/actions/install-opv/action.yml) | install the 1Password CLI and opv, checksum-verified |
 
-Both workflow files are exactly what `opv ci workflow --on-change` and `opv ci workflow
---drift` print for this configuration, so regenerate them instead of editing by hand:
+All three workflow files are exactly what `opv ci workflow --on-change`, `opv ci workflow
+--drift` and `opv ci workflow prod --target app` print for this configuration, so regenerate
+them instead of editing by hand:
 
 ```sh
-opv ci workflow --on-change > .github/workflows/opv-sync-on-change.yml
-opv ci workflow --drift     > .github/workflows/opv-drift.yml
+opv ci workflow --on-change              > .github/workflows/opv-sync-on-change.yml
+opv ci workflow --drift                  > .github/workflows/opv-drift.yml
+opv ci workflow prod --target app        > .github/workflows/opv-pr.yml
 ```
 
-## What the two workflows do
+## What the three workflows do
 
 **`opv-sync-on-change.yml`** runs every 15 minutes, on a push that edits `secrets.toml`, or
 by hand. Its `detect` job runs `opv changed <env> --json` for each environment:
@@ -33,6 +36,18 @@ by hand. Its `detect` job runs `opv changed <env> --json` for each environment:
 **`opv-drift.yml`** runs nightly. For each environment it runs `opv status <env>
 --fail-on-drift` (exit 8, `target_drift`, when the target no longer matches 1Password) and
 `opv delivery verify <env> --json` (exit 8, `delivery_unverified`).
+
+**`opv-pr.yml`** runs on every pull request, on its own repository token and the reader
+service account, and holds the sync back to a manual `workflow_dispatch`:
+
+- A `checks-<env>-<target>` job runs `opv needs --gate` (a name the code reads but the
+contract does not declare fails), `opv contract --check contract.json` (a stale committed
+contract fails) and `opv ready prod --gate` (the promotion gate fails).
+- A separate `opv/relaxations` job runs `opv contract --relaxations --json` against
+`origin/<default branch>`. It succeeds when the contract lists no relaxation; while it
+lists one, it fails unless the pull request's head SHA has an approving review. Make
+`opv/relaxations` a required status check so an unapproved relaxation cannot merge. It reads
+`${{ github.token }}` and no 1Password secret, and prints names and reasons only.
 
 ## Two service accounts
 

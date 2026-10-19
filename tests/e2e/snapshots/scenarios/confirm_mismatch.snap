@@ -11,7 +11,7 @@ Next: opv plan prod
 
 ## json exit: 6
 ## json stdout
-{"schema_version":2,"ok":false,"exit_code":6,"next":"opv plan prod","do":"check which environment you meant","error":{"code":"confirm_mismatch","category":"policy","message":"the confirmation dev does not match environment prod","subject":{"env":"prod","given":"dev"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":true,"do":"check which environment you meant","next":"opv plan prod","next_kind":"check"}}
+{"schema_version":3,"ok":false,"exit_code":6,"next":{"kind":"run","actor":"assistant","command":"opv plan prod"},"do":"check which environment you meant","error":{"code":"confirm_mismatch","category":"policy","message":"the confirmation dev does not match environment prod","subject":{"env":"prod","given":"dev"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":true,"do":"check which environment you meant","next":{"kind":"run","actor":"assistant","command":"opv plan prod"}}}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml

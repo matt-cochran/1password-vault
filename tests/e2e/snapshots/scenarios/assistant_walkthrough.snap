@@ -1,0 +1,150 @@
+# assistant_walkthrough: from no configuration to opv ready --gate (design §6.1)
+
+## 1. assistant: opv_state {"section":"needs"}
+{"schema_version":3,"ok":false,"exit_code":2,"next":{"kind":"run","actor":"assistant","command":"opv propose setup --help"},"do":"start one with opv propose setup, run opv setup when the project ships opv.setup.toml, point to one with --config <path>, or list the manifests in your other accounts with opv projects","error":{"code":"config_not_found","category":"config","message":"no opv configuration was found in <SCENARIO>/project or any folder above it, and no 1Password manifest in account AE2EDEVACCOUNT000000000001 is tagged for github.com/e2e-org/e2e-app","subject":{"manifest":{"repo":"github.com/e2e-org/e2e-app","account":"AE2EDEVACCOUNT000000000001"},"searched_from":"<SCENARIO>/project","env":null},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"start one with opv propose setup, run opv setup when the project ships opv.setup.toml, point to one with --config <path>, or list the manifests in your other accounts with opv projects","next":{"kind":"run","actor":"assistant","command":"opv propose setup --help"}}}
+
+## 2. assistant: opv_propose {"kind":"setup","names_from":".env"}
+{"schema_version":3,"ok":true,"proposal":{"kind":"setup","relaxations":[],"diff":"+[environments.local]\n+tier = \"local\"\n+boundaries.app = {}\n+\n+[products.app.keys.API_KEY]\n+kind = \"secret\"\n+environments = [\"local\"]\n+\n+[products.app.keys.LOG_LEVEL]\n+kind = \"config\"\n+environments = [\"local\"]\n+\n+[products.app.keys.SESSION_SECRET]\n+kind = \"secret\"\n+environments = [\"local\"]\n","questions":[],"plan_id":"0ddf25e544997d58f960fe32aa0aec29e3631978c98d5f939e49a5710ae123a4"},"structure_steps":["boundary app","item app","field app/API_KEY secret","field app/LOG_LEVEL config","field app/SESSION_SECRET secret"],"bindings_after":null,"written":null,"next":{"kind":"apply","actor":"person","command":"opv propose setup --names-from .env --write"},"do":null}
+
+## 3. assistant: opv_propose {"kind":"env","env":"prod","tier":"production"}
+{"schema_version":3,"ok":true,"kind":"env","relaxations":[],"diff":" [environments.local]\n tier = \"local\"\n boundaries.app = {}\n \n+[environments.prod]\n+tier = \"production\"\n+\n [products.app.keys.API_KEY]\n kind = \"secret\"\n environments = [\"local\"]\n \n [products.app.keys.LOG_LEVEL]\n kind = \"config\"\n environments = [\"local\"]\n \n [products.app.keys.SESSION_SECRET]\n kind = \"secret\"\n environments = [\"local\"]\n","questions":[],"plan_id":"166b1a1e368ff8394a1a580f4929197c70c38f61d56973700a8abcc5e4125102","written":null,"next":{"kind":"apply","actor":"person","command":"opv propose env prod --tier production --write"},"do":null}
+
+## 4. assistant: opv_propose {"kind":"key","product":"app","key":"API_KEY","field_kind":"secret","environments":["local","prod"]}
+{"schema_version":3,"ok":true,"kind":"key","relaxations":[],"diff":" [environments.local]\n tier = \"local\"\n boundaries.app = {}\n \n [environments.prod]\n tier = \"production\"\n+boundaries.app = {}\n \n [products.app.keys.API_KEY]\n kind = \"secret\"\n-environments = [\"local\"]\n+environments = [\"local\", \"prod\"]\n \n [products.app.keys.LOG_LEVEL]\n kind = \"config\"\n environments = [\"local\"]\n \n [products.app.keys.SESSION_SECRET]\n kind = \"secret\"\n environments = [\"local\"]\n","questions":[{"env":"prod","ask":"a value, or except?"}],"plan_id":"d9a830444a55dd818a6a47a40203974308fe451877252d50a547d64ef39f36d7","written":null,"next":{"kind":"apply","actor":"person","command":"opv propose key app/API_KEY --kind secret --env local --env prod --write"},"do":null}
+
+## 5. assistant: opv_propose {"kind":"key","product":"app","key":"LOG_LEVEL","field_kind":"config","environments":["local","prod"]}
+{"schema_version":3,"ok":true,"kind":"key","relaxations":[],"diff":" [environments.local]\n tier = \"local\"\n boundaries.app = {}\n \n [environments.prod]\n tier = \"production\"\n boundaries.app = {}\n \n [products.app.keys.API_KEY]\n kind = \"secret\"\n environments = [\"local\", \"prod\"]\n \n [products.app.keys.LOG_LEVEL]\n kind = \"config\"\n-environments = [\"local\"]\n+environments = [\"local\", \"prod\"]\n \n [products.app.keys.SESSION_SECRET]\n kind = \"secret\"\n environments = [\"local\"]\n","questions":[{"env":"prod","ask":"a value, or except?"}],"plan_id":"5cc2e77479b8837faa682aa043eb7be6fec7b6f10d8eccfd4f980a4a9e711161","written":null,"next":{"kind":"apply","actor":"person","command":"opv propose key app/LOG_LEVEL --kind config --env local --env prod --write"},"do":null}
+
+## 6. assistant: opv_propose {"kind":"key","product":"app","key":"SESSION_SECRET","field_kind":"secret","environments":["local","prod"]}
+{"schema_version":3,"ok":true,"kind":"key","relaxations":[],"diff":" [environments.local]\n tier = \"local\"\n boundaries.app = {}\n \n [environments.prod]\n tier = \"production\"\n boundaries.app = {}\n \n [products.app.keys.API_KEY]\n kind = \"secret\"\n environments = [\"local\", \"prod\"]\n \n [products.app.keys.LOG_LEVEL]\n kind = \"config\"\n environments = [\"local\", \"prod\"]\n \n [products.app.keys.SESSION_SECRET]\n kind = \"secret\"\n-environments = [\"local\"]\n+environments = [\"local\", \"prod\"]\n","questions":[{"env":"prod","ask":"a value, or except?"}],"plan_id":"8c21c36191ba20d35e750958a93eb54a7b1ae48ef4f53ca6486afe58e7e6702b","written":null,"next":{"kind":"apply","actor":"person","command":"opv propose key app/SESSION_SECRET --kind secret --env local --env prod --write"},"do":null}
+
+## 7. assistant: opv_propose {"kind":"target","env":"prod","name":"gh","options":{"github-repo":"e2e-org/e2e-app","github-environment":"production"}}
+{"schema_version":3,"ok":true,"kind":"target","relaxations":[],"diff":" [environments.local]\n tier = \"local\"\n boundaries.app = {}\n \n [environments.prod]\n tier = \"production\"\n boundaries.app = {}\n \n+# deploy target gh in prod; declared through opv's MCP tools (its state vault comes from the approved structural plan)\n+[environments.prod.targets.gh]\n+github.repo = \"e2e-org/e2e-app\"\n+github.environment = \"production\"\n+\n [products.app.keys.API_KEY]\n kind = \"secret\"\n environments = [\"local\", \"prod\"]\n \n [products.app.keys.LOG_LEVEL]\n kind = \"config\"\n environments = [\"local\", \"prod\"]\n \n [products.app.keys.SESSION_SECRET]\n kind = \"secret\"\n environments = [\"local\", \"prod\"]\n","questions":[],"plan_id":"5fe65b316740909fdea0afe75e4bdfa79b6dab945701f3ce6659e84888953fb3","written":null,"next":{"kind":"apply","actor":"person","command":"opv propose target prod gh --github-repo e2e-org/e2e-app --github-environment production --write"},"do":null}
+
+## 8. assistant: the contract it wrote: secrets.toml
+[environments.local]
+tier = "local"
+boundaries.app = {}
+
+[environments.prod]
+tier = "production"
+boundaries.app = {}
+
+# deploy target gh in prod; declared through opv's MCP tools (its state vault comes from the approved structural plan)
+[environments.prod.targets.gh]
+github.repo = "e2e-org/e2e-app"
+github.environment = "production"
+
+[products.app.keys.API_KEY]
+kind = "secret"
+environments = ["local", "prod"]
+
+[products.app.keys.LOG_LEVEL]
+kind = "config"
+environments = ["local", "prod"]
+
+[products.app.keys.SESSION_SECRET]
+kind = "secret"
+environments = ["local", "prod"]
+
+## 9. assistant: opv_state {"section":"needs"}
+{"schema_version":3,"ok":true,"rows":[{"name":"API_KEY","state":"declared","files":["src/main.rs:2"],"product":"app","annotation_stale":false},{"name":"LOG_LEVEL","state":"declared","files":["src/main.rs:3"],"product":"app","annotation_stale":false},{"name":"SESSION_SECRET","state":"declared","files":["src/main.rs:4"],"product":"app","annotation_stale":false}],"coverage":{"files":1,"languages":["rust"],"skipped_patterns":0},"next":{"kind":"none","actor":"person","command":null},"do":null}
+
+## 10. assistant: opv_propose {"kind":"structure"}
+{"schema_version":3,"ok":true,"plan_id":"sp-b4460e372ed9787a","steps":[{"step":"create_boundary","environment":"local","boundary":"app","vault":"e2e-app-app-local","item":"e2e-app · app · local values"},{"step":"create_boundary","environment":"prod","boundary":"app","vault":"e2e-app-app-prod","item":"e2e-app · app · prod values"},{"step":"create_state_vault","environment":"prod","target":"gh","vault":"e2e-app-prod-gh-state"},{"step":"create_delivery_item","environment":"prod","target":"gh","product":"app","item":"opv · delivery · app · gh"},{"step":"add_field","environment":"local","boundary":"app","product":"app","key":"API_KEY","field_kind":"secret"},{"step":"add_field","environment":"local","boundary":"app","product":"app","key":"LOG_LEVEL","field_kind":"config"},{"step":"add_field","environment":"local","boundary":"app","product":"app","key":"SESSION_SECRET","field_kind":"secret"},{"step":"add_field","environment":"prod","boundary":"app","product":"app","key":"API_KEY","field_kind":"secret"},{"step":"add_field","environment":"prod","boundary":"app","product":"app","key":"LOG_LEVEL","field_kind":"config"},{"step":"add_field","environment":"prod","boundary":"app","product":"app","key":"SESSION_SECRET","field_kind":"secret"}],"structure":{"project":"e2e-app","account_id":"AE2EDEVACCOUNT000000000001","environments":[{"environment":"local","boundaries":[{"boundary":"app","products":["app"],"action":"create","vault":"e2e-app-app-local","item":"e2e-app · app · local values"}],"state_vaults":[]},{"environment":"prod","boundaries":[{"boundary":"app","products":["app"],"action":"create","vault":"e2e-app-app-prod","item":"e2e-app · app · prod values"}],"state_vaults":[{"target":"gh","action":"create","vault":"e2e-app-prod-gh-state"}]}],"delivery_items":[{"environment":"prod","target":"gh","product":"app","item":"opv · delivery · app · gh"}],"fields":[{"environment":"local","boundary":"app","product":"app","key":"API_KEY","kind":"secret"},{"environment":"local","boundary":"app","product":"app","key":"LOG_LEVEL","kind":"config"},{"environment":"local","boundary":"app","product":"app","key":"SESSION_SECRET","kind":"secret"},{"environment":"prod","boundary":"app","product":"app","key":"API_KEY","kind":"secret"},{"environment":"prod","boundary":"app","product":"app","key":"LOG_LEVEL","kind":"config"},{"environment":"prod","boundary":"app","product":"app","key":"SESSION_SECRET","kind":"secret"}],"generated":false},"contract_after":null,"bindings_after":null,"next":{"kind":"apply","actor":"person","command":"opv apply sp-b4460e372ed9787a"},"do":null}
+
+## 11. person: opv apply sp-b4460e372ed9787a
+1. create vault "e2e-app-app-local" and item "e2e-app · app · local values" for boundary app in local
+2. create vault "e2e-app-app-prod" and item "e2e-app · app · prod values" for boundary app in prod
+3. create state vault "e2e-app-prod-gh-state" for target gh in prod
+4. create delivery item "opv · delivery · app · gh" for app on target gh in prod
+5. add empty secret field app/API_KEY to the app item in local
+6. add empty config field app/LOG_LEVEL to the app item in local
+7. add empty secret field app/SESSION_SECRET to the app item in local
+8. add empty secret field app/API_KEY to the app item in prod
+9. add empty config field app/LOG_LEVEL to the app item in prod
+10. add empty secret field app/SESSION_SECRET to the app item in prod
+plan_id: sp-b4460e372ed9787a
+Apply this plan? [y/N] y
+applied sp-b4460e372ed9787a: 10 step(s), 4 created, 6 field(s) added, 0 generated
+secrets.bindings.toml:
+environments.local.boundaries.app.item_id = "isim0000000000000000000002"
+environments.local.boundaries.app.vault_id = "vsim0000000000000000000001"
+environments.prod.boundaries.app.item_id = "isim0000000000000000000004"
+environments.prod.boundaries.app.vault_id = "vsim0000000000000000000003"
+environments.prod.targets.gh.delivery_items.app = "isim0000000000000000000006"
+environments.prod.targets.gh.state_vault_id = "vsim0000000000000000000005"
+
+## 12. assistant: opv_import_local {"env":"local","file":".env"}
+{"schema_version":3,"ok":true,"environment":"local","applied":true,"rows":[{"found":["API_KEY"],"product":"app","key":"API_KEY","action":"imported","rule":null},{"found":["LOG_LEVEL"],"product":"app","key":"LOG_LEVEL","action":"imported","rule":null},{"found":["SESSION_SECRET"],"product":"app","key":"SESSION_SECRET","action":"imported","rule":null}],"writes":3,"decisions_needed":0,"next":{"kind":"run","actor":"assistant","command":"opv ready local"},"do":null}
+
+## 13. person: opv import prod --from prod.env --confirm prod
+exit: 0
+stdout:
+prod: 2 found · 2 written · 0 need a decision
+  app/API_KEY                      import (written)  (from API_KEY)
+  app/LOG_LEVEL                    import (written)  (from LOG_LEVEL)
+Next: opv ready prod
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 14. assistant: opv_state {"section":"inventory","env":"prod"}
+{"schema_version":3,"ok":true,"environments":[{"env":"prod","tier":"production","boundaries":{"app":{"vault_id":"vsim0000000000000000000003","item_id":"isim0000000000000000000004"}}}],"keys":[{"product":"app","key":"API_KEY","kind":"secret","source":null,"presence":{"prod":"present"},"lifecycle":"active","expires":null},{"product":"app","key":"LOG_LEVEL","kind":"config","source":null,"presence":{"prod":"present"},"lifecycle":"active","expires":null},{"product":"app","key":"SESSION_SECRET","kind":"secret","source":null,"presence":{"prod":"present"},"lifecycle":"active","expires":null}],"cells":[{"product":"app","key":"API_KEY","env":"prod","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"LOG_LEVEL","env":"prod","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"SESSION_SECRET","env":"prod","boundary":"app","state":{"state":"empty"},"capability":"write","from_receipt":null}],"deliveries":[{"environment":"prod","target":"gh","product":"app","state":"not_delivered"}],"next":{"kind":"enter_value","actor":"person","command":"opv set app/SESSION_SECRET --env prod"},"do":null}
+
+## 15. person: opv set app/SESSION_SECRET --env prod
+app/SESSION_SECRET (masked; Enter to skip): ********
+set
+
+## 16. ci: opv sync prod --confirm prod
+exit: 0
+stdout:
+prod/gh: delivery: app revision drv-<id>
+prod/gh: written: app/API_KEY (API_KEY), app/SESSION_SECRET (SESSION_SECRET), app/LOG_LEVEL (LOG_LEVEL)
+prod/gh: summary: written 3 · unchanged 0 · held 0 · deployed no · pending 0 · pruned 0 · kept 0 · skipped 0
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 17. assistant: opv_explain {"key":"app/API_KEY","env":"prod"}
+{"schema_version":3,"ok":true,"environment":"prod","product":"app","key":"API_KEY","kind":"secret","field":"concealed field","source":"own field","personal":false,"boundary":{"name":"app","vault_id":"vsim0000000000000000000003","item_id":"isim0000000000000000000004"},"environments":["local","prod"],"targets":[{"name":"gh","provider":"github","rendered_name":"API_KEY","details":[{"label":"github as","value":"Actions secret: ${{ secrets.API_KEY }}"},{"label":"github name","value":"API_KEY"},{"label":"github repos","value":"e2e-org/e2e-app"},{"label":"github environment","value":"production"}]}],"delivered_to":[{"environment":"prod","target":"gh","product":"app","item":"opv · delivery · app · gh","item_id":"isim0000000000000000000006","records":true}],"rules":[],"immutable":false,"guidance":null,"required_here":true,"shared_from":null,"shared_by":[],"reference":"op://vsim0000000000000000000003/isim0000000000000000000004/app/API_KEY","inspect":"op item get isim0000000000000000000004 --vault vsim0000000000000000000003","readers":{"deploy":["e2e-app-prod-gh-deploy"],"ci":"e2e-app-prod-ci"},"next":{"kind":"none","actor":"person","command":null},"do":null}
+
+## 18. ci: opv ready local --gate
+exit: 0
+stdout:
+ready: 0 blocking · 1 finding · receipt rcpt-<id>
+PRODUCT  local
+app      3/3
+Needs attention:
+  [owner] shared_sign_in_address AE2EDEVACCOUNT000000000001 → opv account list
+Next (owner): opv account list
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 19. ci: opv ready prod --gate
+exit: 0
+stdout:
+ready: 0 blocking · 1 finding · receipt rcpt-<id>
+PRODUCT  prod
+app      3/3
+Targets:
+  prod gh GitHub · repos e2e-org/e2e-app environment production ready
+Needs attention:
+  [owner] shared_sign_in_address AE2EDEVACCOUNT000000000001 → opv account list
+Next (owner): opv account list
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 20. ci: opv ready --gate
+exit: 0
+stdout:
+ready: 0 blocking · 1 finding · receipt rcpt-<id>
+PRODUCT  local  prod
+app      3/3    3/3
+Targets:
+  prod gh GitHub · repos e2e-org/e2e-app environment production ready
+Needs attention:
+  [owner] shared_sign_in_address AE2EDEVACCOUNT000000000001 → opv account list
+Next (owner): opv account list
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+person actions: 3

@@ -1,0 +1,23 @@
+{
+  "evidence": [
+    {
+      "id": "E1",
+      "text": "Importing values from a .env file and typing a value at a masked prompt are value-bearing steps that must run where only the person can see them."
+    },
+    {
+      "id": "E2",
+      "text": "The assistant is meant to drive the whole setup flow end to end without the person orchestrating steps."
+    },
+    {
+      "id": "E3",
+      "text": "Over MCP the assistant cannot answer terminal prompts and must never see a prompt that shows or takes a value."
+    }
+  ],
+  "desiredImprovement": "The assistant drives the entire setup flow",
+  "worseningOutcome": "Value-bearing steps must stay outside anything the assistant can observe",
+  "element": "a value-bearing setup step",
+  "opposingProperties": [
+    "inside the assistant-driven flow",
+    "outside the assistant's observation"
+  ]
+}

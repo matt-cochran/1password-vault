@@ -84,7 +84,14 @@ pub struct PrefixByMode {
 #[serde(deny_unknown_fields)]
 pub struct KeySpec {
     pub kind: Kind,
-    pub environments: Vec<String>,
+    /// The environments the key is declared for. Absent: present in every environment of
+    /// the fleet (Part V, `presence`).
+    #[serde(default)]
+    pub environments: Option<Vec<String>>,
+    /// Environments the key is not wanted in, with a person's reason
+    /// (`except = { staging = "no staging account" }`); see [`crate::domain::presence`].
+    #[serde(default)]
+    pub except: BTreeMap<String, String>,
     #[serde(default)]
     pub rules: Rules,
     /// Staged only when absent on the target unless explicitly rotated (FR-16).
@@ -116,6 +123,20 @@ pub struct KeySpec {
     /// Roles apply to local `run` delivery only, never to sync or a target.
     #[serde(default)]
     pub roles: Option<Vec<String>>,
+    /// Key attribute (Part V, `key-attrs`): who or what produces the value
+    /// (`source = "person" | "generated" | "derived"`). Absent: not declared. `derived`
+    /// requires `from`; `generated` requires a generate recipe
+    /// ([`KeySpec::has_generate_recipe`]). Validated at load: see `crate::config`.
+    #[serde(default, rename = "source")]
+    pub value_source: Option<ValueSource>,
+    /// Key attribute (Part V, `key-attrs`): the calendar date the value should be rotated by
+    /// (`expires = "YYYY-MM-DD"`). Absent: no date recorded.
+    #[serde(default)]
+    pub expires: Option<Date>,
+    /// Key attribute (Part V, `key-attrs`): where the key is in its life
+    /// (`active` / `retiring` / `retired`). Absent: `active`.
+    #[serde(default)]
+    pub lifecycle: Lifecycle,
 }
 
 impl KeySpec {
@@ -124,6 +145,148 @@ impl KeySpec {
     /// load). Only meaningful after `config` validated the reference.
     pub fn source(&self) -> Option<(&str, &str)> {
         self.from.as_deref()?.split_once('/')
+    }
+
+    /// The names this key is declared for among `known`: its explicit `environments`, or
+    /// every name in `known` when the list is absent (present everywhere).
+    pub fn envs_among<'a>(&'a self, known: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
+        match &self.environments {
+            Some(list) => list.iter().map(String::as_str).collect(),
+            None => known.collect(),
+        }
+    }
+
+    /// Every environment of `fleet` this key is declared for: its explicit list, or all.
+    pub fn envs_in(&self, fleet: &Fleet) -> Vec<String> {
+        self.envs_among(fleet.environments.keys().map(String::as_str))
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Whether this key's explicit list (or its absence, which covers every environment)
+    /// covers `env`. `except` is ignored: see [`crate::domain::presence::present_in`].
+    pub fn listed_in(&self, env: &str) -> bool {
+        self.environments
+            .as_ref()
+            .is_none_or(|list| list.iter().any(|e| e == env))
+    }
+
+    /// Whether the key is present (not `except`ed) in `env`.
+    pub fn is_desired_in(&self, env: &str) -> bool {
+        crate::domain::presence::present_in(self, env) == crate::domain::presence::Presence::Present
+    }
+
+    /// Whether this key's rules give a generate recipe: the pure part of
+    /// [`crate::app::generate::recipe`]. Mirrors the refusals there (a provider-issued prefix
+    /// rule, a personal key, a shared key, or no in-range byte count), so `source =
+    /// "generated"` names a key opv can actually generate. `generate.rs` evaluates the same
+    /// conditions.
+    pub fn has_generate_recipe(&self) -> bool {
+        let r = &self.rules;
+        if r.prefix.is_some() || r.ensure_prefix.is_some() || r.prefix_by_mode.is_some() {
+            return false;
+        }
+        if self.personal || self.from.is_some() {
+            return false;
+        }
+        matches!(
+            (r.base64_bytes, r.hex_bytes),
+            (Some(n), None) | (None, Some(n)) if (16..=1024).contains(&n)
+        )
+    }
+}
+
+/// Key attribute (Part V, `key-attrs`): who or what produces a key's value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ValueSource {
+    /// A person fetches it (only `person` needs a human).
+    Person,
+    /// opv makes it from the key's byte-count rule.
+    Generated,
+    /// Another key's value, named by `from`.
+    Derived,
+}
+
+/// Key attribute (Part V, `key-attrs`): where a key is in its life. Absent: `active`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Lifecycle {
+    #[default]
+    Active,
+    Retiring,
+    Retired,
+}
+
+/// Key attribute (Part V, `key-attrs`): a calendar date (`expires = "YYYY-MM-DD"`),
+/// validated at parse and ordered chronologically, so a later expiry compares greater.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Date {
+    year: u16,
+    month: u8,
+    day: u8,
+}
+
+impl Date {
+    /// The calendar date `year-month-day`, or `None` when it is not one (a month outside
+    /// 1–12, a day outside the month, or a leap day on a non-leap year).
+    pub fn new(year: u16, month: u8, day: u8) -> Option<Self> {
+        let last = match month {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 if is_leap(year) => 29,
+            2 => 28,
+            _ => return None,
+        };
+        (year != 0 && (1..=last).contains(&day)).then_some(Self { year, month, day })
+    }
+}
+
+impl std::fmt::Display for Date {
+    /// The `YYYY-MM-DD` form the contract writes, zero-padded.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:04}-{:02}-{:02}", self.year, self.month, self.day)
+    }
+}
+
+/// A Gregorian leap year.
+fn is_leap(year: u16) -> bool {
+    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
+}
+
+impl std::str::FromStr for Date {
+    type Err = String;
+
+    /// A `YYYY-MM-DD` date, or the words to write instead. Never echoes the input.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let b = text.as_bytes();
+        let shape = "is not a date; write it as YYYY-MM-DD";
+        if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+            return Err(shape.to_string());
+        }
+        let number = |range: std::ops::Range<usize>| -> Option<u16> {
+            let digits = &b[range];
+            digits.iter().all(u8::is_ascii_digit).then(|| {
+                digits
+                    .iter()
+                    .fold(0u16, |n, d| n * 10 + u16::from(d - b'0'))
+            })
+        };
+        let year = number(0..4).ok_or_else(|| shape.to_string())?;
+        let month = number(5..7).ok_or_else(|| shape.to_string())?;
+        let day = number(8..10).ok_or_else(|| shape.to_string())?;
+        Date::new(year, month as u8, day as u8).ok_or_else(|| shape.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Date {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let text = String::deserialize(deserializer)?;
+        text.parse().map_err(serde::de::Error::custom)
     }
 }
 
@@ -152,6 +315,37 @@ pub struct Product {
     /// there. Empty: the product has no remote delivery.
     #[serde(default)]
     pub remotes: BTreeMap<String, Remote>,
+    /// Ignore annotations (Part V, `annotations`): a scanner-observed name the person
+    /// judged a false positive, with the reason and the evidence span it was made against.
+    /// The annotation is re-checked (shown again as unannotated) when the span changes; see
+    /// [`span_of`]. Absent: no name is ignored.
+    #[serde(default)]
+    pub ignore: BTreeMap<String, Ignore>,
+}
+
+/// One ignore annotation (Part V, row `annotations`): the person's reason and the evidence
+/// span of the line the name was observed on. The span is a stable hash of that line
+/// ([`span_of`]), so changing the line invalidates the annotation. Never a value: the
+/// evidence line holds code, not a secret, and nothing here reaches a secret's value.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Ignore {
+    /// Why the observed name is a false positive. Must say something.
+    pub reason: String,
+    /// The evidence span the annotation was made against ([`span_of`]).
+    pub span: String,
+}
+
+/// The evidence span of an annotation (Part V, row `annotations`): a stable hash of the
+/// file path plus the evidence line trimmed of surrounding whitespace, as 16 lower-case hex
+/// characters of SHA-256. The same line in the same file gives the same span; any change to
+/// the line (other than surrounding whitespace) gives a different one. The evidence line
+/// holds code, never a secret value, so the input is safe to hash and the output carries no
+/// part of a value.
+pub fn span_of(file: &str, line: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("{file}\n{}", line.trim()).as_bytes());
+    hex::encode(digest)[..16].to_string()
 }
 
 /// `[products.<p>.remotes.<name>]`: one reviewed remote execution profile (#139). Every
@@ -213,8 +407,10 @@ pub enum LocalEnvironment {
     DeclaredOnly,
 }
 
-/// One recorded access boundary of an environment (FR-57): the vault holding exactly one
-/// opv values item, and that item, by IDs (FR-13). Written by `opv bootstrap`.
+/// One bound access boundary of an environment (FR-57): the vault holding exactly one
+/// opv values item, and that item, by IDs (FR-13). Recorded in `secrets.bindings.toml` by
+/// `opv apply` (D-G); before then the boundary is declared and unbound
+/// ([`Environment::boundaries`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Boundary {
     pub vault_id: String,
@@ -241,8 +437,9 @@ pub struct Target {
     /// `status`, `plan` and `sync` to sign the target CLI in for the run only.
     pub deploy_credentials: Option<ItemRef>,
     /// The vault holding this target's delivery evidence (FR-58, D12): one item per
-    /// placement, written by the deploy identity after a confirmed sync. Required.
-    pub state_vault_id: String,
+    /// placement, written by the deploy identity after a confirmed sync. `None`: declared
+    /// and not bound yet (D-G, before the first `opv apply`); see [`Fleet::state_vault`].
+    pub state_vault_id: Option<String>,
     /// product → the ID of its placement's delivery item in the state vault
     /// (`delivery_items`, FR-58), recorded by `opv bootstrap` when it creates the item, so
     /// nothing looks a state item up by title (FR-13). A product with none has no evidence.
@@ -279,14 +476,30 @@ impl Clone for Target {
     }
 }
 
+/// An environment's tier (FR-59): how far its values may travel and who may write them.
+/// `local` never deploys and never confirms. A configuration without `tier` gets
+/// [`crate::domain::health::default_tier`]; `Default` (shared) is only for literals.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tier {
+    Local,
+    #[default]
+    Shared,
+    Production,
+}
+
 /// One deployment environment: its access boundaries (FR-57) and its named targets
 /// (FR-56). An environment with no target is run-only.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Environment {
     /// The environment's name in the configuration (for messages: `opv login <name>`).
     pub name: String,
-    /// boundary name → recorded vault and item (FR-57); see [`Fleet::boundary`].
-    pub boundaries: BTreeMap<String, Boundary>,
+    /// How far this environment's values may travel (FR-59). Absent: `production` when
+    /// the name or title reads as production, else `shared`.
+    pub tier: Tier,
+    /// boundary name → its vault and item (FR-57); `None`: declared and not bound yet (D-G,
+    /// before the first `opv apply`). See [`Fleet::boundary`].
+    pub boundaries: BTreeMap<String, Option<Boundary>>,
     /// target name → target (FR-56), in name order.
     pub targets: BTreeMap<String, Target>,
     /// product → mode name → mode value, e.g. `allumata.payments = "off"`.
@@ -319,6 +532,13 @@ impl Environment {
     /// The display name: [`Environment::title`], else the key.
     pub fn display(&self) -> &str {
         self.title.as_deref().unwrap_or(&self.name)
+    }
+
+    /// Each bound boundary by name, skipping the ones declared and not bound yet (D-G).
+    pub fn bound_boundaries(&self) -> impl Iterator<Item = (&String, &Boundary)> {
+        self.boundaries
+            .iter()
+            .filter_map(|(name, b)| Some((name, b.as_ref()?)))
     }
 }
 
@@ -482,9 +702,7 @@ impl Fleet {
         self.products
             .iter()
             .flat_map(|(p, prod)| prod.keys.iter().map(move |(k, s)| (p, k, s)))
-            .filter(|(_, _, s)| {
-                s.source() == Some((product, key)) && s.environments.iter().any(|e| e == env_name)
-            })
+            .filter(|(_, _, s)| s.source() == Some((product, key)) && s.is_desired_in(env_name))
             .map(|(p, k, _)| (p.clone(), k.clone()))
             .collect()
     }
@@ -509,7 +727,7 @@ impl Fleet {
             let team: Vec<&KeySpec> = p
                 .keys
                 .values()
-                .filter(|k| !k.personal && k.environments.iter().any(|e| e == env))
+                .filter(|k| !k.personal && k.is_desired_in(env))
                 .collect();
             if team.is_empty() {
                 continue;
@@ -522,16 +740,49 @@ impl Fleet {
         out
     }
 
-    /// The recorded boundary of `product` in `env` (FR-57): the vault and item its values
+    /// The bound boundary of `product` in `env` (FR-57): the vault and item its values
     /// live in. An undefined environment is [`Fleet::environment`]'s error; a boundary not
-    /// recorded is `boundary_missing` (load refuses that for every product with a key
-    /// desired in the environment, so only an undesired product reaches it).
+    /// declared (load refuses that for every product with a key desired in the environment)
+    /// or declared and not bound yet (D-G, before the first `opv apply`) is
+    /// `boundary_missing`, whose step is `opv apply`.
     pub fn boundary(&self, env: &str, product: &str) -> Result<&Boundary, Error> {
         let name = self.boundary_of(product);
         self.environment(env)?
             .boundaries
             .get(name)
+            .and_then(Option::as_ref)
             .ok_or_else(|| boundary_missing(env, product, self.read_from.0.clone()).into())
+    }
+
+    /// Every boundary of `env` with its ids, by name; `boundary_missing` naming a product
+    /// that needs it for the first one declared and not bound yet (D-G). For a command that
+    /// reaches every boundary of the environment.
+    pub fn bound_boundaries(&self, env: &str) -> Result<Vec<(&str, &Boundary)>, Error> {
+        let needed = self.needed_boundaries(env);
+        self.environment(env)?
+            .boundaries
+            .iter()
+            .map(|(name, b)| match b {
+                Some(b) => Ok((name.as_str(), b)),
+                None => {
+                    let needer = needed.get(name.as_str()).copied().unwrap_or(name);
+                    Err(boundary_missing(env, needer, self.read_from.0.clone()).into())
+                }
+            })
+            .collect()
+    }
+
+    /// The state vault of `target` in `env` (FR-58): `state_vault_missing` while it is not
+    /// bound (D-G, before the first `opv apply`), whose step is `opv apply`.
+    pub fn state_vault<'t>(&self, env: &str, target: &'t Target) -> Result<&'t str, Error> {
+        target.state_vault_id.as_deref().ok_or_else(|| {
+            crate::cause::Cause::StateVaultMissing {
+                env: crate::cause::EnvName::new(env),
+                target: crate::cause::TargetName::new(target.name.as_str()),
+                source: self.read_from.0.clone(),
+            }
+            .into()
+        })
     }
 
     /// Target name (runtime env var name) for `product`/`key` on target `target` of `env`.
@@ -570,10 +821,7 @@ impl Fleet {
         }
         match &t.products {
             Some(listed) => listed.iter().any(|l| l == product),
-            None => p
-                .keys
-                .values()
-                .any(|k| k.environments.iter().any(|e| e == env)),
+            None => p.keys.values().any(|k| k.is_desired_in(env)),
         }
     }
 

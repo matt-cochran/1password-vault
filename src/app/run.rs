@@ -306,7 +306,7 @@ fn launch(
                         "opv could not tidy it in this run (see the note above)".to_string()
                     }
                     Some(super::tidy::Identity::DeployCredentials) => format!(
-                        "run opv check {env_name} (without deploy credentials) and opv will tidy it"
+                        "run opv config export {env_name} (it reads the item without deploy credentials) and opv will tidy it"
                     ),
                     Some(_) => {
                         format!("run as yourself (opv login {env_name}) and opv will tidy it")
@@ -517,12 +517,10 @@ mod tests {
 
     /// #136, #137: the fixture's allumata delivers OPENAI_API_KEY as a file, declared-only.
     fn local_fleet() -> Fleet {
-        let text = std::fs::read_to_string("tests/fixtures/secrets.toml")
-            .unwrap()
-            .replace(
-                "guidance = \"OpenAI platform / API keys\"",
-                "guidance = \"OpenAI platform / API keys\"\nfile = \"openai/api-key\"",
-            );
+        let text = crate::config::merged_text("tests/fixtures/secrets.toml").replace(
+            "guidance = \"OpenAI platform / API keys\"",
+            "guidance = \"OpenAI platform / API keys\"\nfile = \"openai/api-key\"",
+        );
         crate::config::parse(&format!(
             "{text}\n[products.allumata.local]\nenvironment = \"declared_only\"\nsecrets_dir_env = \"APP_SECRETS_DIR\"\n"
         ))

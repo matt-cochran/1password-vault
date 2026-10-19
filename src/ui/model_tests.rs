@@ -24,7 +24,7 @@ impl Source for Fixtures {
             ["config", "export", ..] => Ok(exported_config()),
             ["ready", ..] => fixture("ready.json"),
             ["status", "ci", ..] => fixture("status-ci.json"),
-            ["check", "local", "--product", "api", ..] => fixture("check-local-api.json"),
+            ["inventory", "--env", "local", "--json"] => fixture("inventory-local.json"),
             other => Err(format!("no fixture for {other:?}")),
         }
     }
@@ -158,12 +158,13 @@ fn a_cell_reads_the_rows_target_state() {
     );
 }
 
+/// A run-only environment has no target to read: its cells come from `opv inventory`.
 #[test]
-fn a_findings_document_still_gives_its_rows() {
+fn a_run_only_environment_reads_its_cells_from_the_inventory() {
     let s = snap();
-    assert!(
-        s.cells
-            .contains_key(&("local".into(), "api".into(), "OPENAI_API_KEY".into()))
+    assert_eq!(
+        s.cells[&("local".into(), "api".into(), "OPENAI_API_KEY".into())].state,
+        "missing"
     );
 }
 

@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "ok": true,
   "environment": "prod",
   "product": "allumata",
@@ -13,6 +13,9 @@
     "vault_id": "vprd",
     "item_id": "iprd"
   },
+  "environments": [
+    "prod"
+  ],
   "targets": [
     {
       "name": "portfolio",
@@ -24,6 +27,16 @@
           "value": "FLEET__ALLUMATA__OPENAI_API_KEY"
         }
       ]
+    }
+  ],
+  "delivered_to": [
+    {
+      "environment": "prod",
+      "target": "portfolio",
+      "product": "allumata",
+      "item": "opv · delivery · allumata · portfolio",
+      "item_id": null,
+      "records": false
     }
   ],
   "rules": [
@@ -43,6 +56,10 @@
     ],
     "ci": "myapp-prod-ci"
   },
-  "next": null,
+  "next": {
+    "kind": "none",
+    "actor": "person",
+    "command": null
+  },
   "do": null
 }

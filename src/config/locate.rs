@@ -43,14 +43,20 @@ mod tests {
     use crate::cause::{Cause, ConfigSource, Invocation};
     use crate::error::Error;
 
-    /// The fixture with `from` replaced by `to`, loaded from a file; the error's text and
-    /// the file's path.
+    /// The fixture with `from` replaced by `to`, loaded from a file beside the fixture's
+    /// bindings (whose ids `load` fills in, shifting the filled-in text's lines); the error's
+    /// text and the file's path.
     fn load_err(from: &str, to: &str) -> (Error, String) {
         let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
         assert!(text.contains(from), "{from}");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secrets.toml");
         std::fs::write(&path, text.replacen(from, to, 1)).unwrap();
+        std::fs::copy(
+            "tests/fixtures/secrets.bindings.toml",
+            dir.path().join("secrets.bindings.toml"),
+        )
+        .unwrap();
         let e = crate::config::load(&path).unwrap_err();
         (e, path.display().to_string())
     }
@@ -165,9 +171,11 @@ mod tests {
     /// 03.01: a manifest's refusal names the manifest, and no file line.
     #[test]
     fn a_manifest_refusal_names_the_manifest() {
-        let text = std::fs::read_to_string("tests/fixtures/secrets.toml")
-            .unwrap()
-            .replacen("kind = \"secret\"", "kind = \"secert\"", 1);
+        let text = crate::config::merged_text("tests/fixtures/secrets.toml").replacen(
+            "kind = \"secret\"",
+            "kind = \"secert\"",
+            1,
+        );
         let e = crate::config::parse_at(
             &text,
             crate::config::Source::ManifestIn {
@@ -226,7 +234,7 @@ mod tests {
 
     #[test]
     fn mistyped_string_error_never_shows_the_value() {
-        let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+        let text = crate::config::merged_text("tests/fixtures/secrets.toml");
         let bad = text.replacen(
             "[environments.staging]",
             &format!("stores = \"{MARKER}\"\n[environments.staging]"),

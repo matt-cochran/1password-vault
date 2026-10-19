@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 
 use crate::domain::plan::ItemField;
-use crate::domain::{Fleet, KeySpec, Kind};
+use crate::domain::{Fleet, KeySpec, Kind, Tier};
 
 /// One environment's values, as the caller read them (the team item; never a personal one).
 pub struct EnvValues<'a> {
@@ -25,6 +25,11 @@ pub struct EnvValues<'a> {
     /// The environment has a target (it deploys).
     pub deployed: bool,
     pub fields: &'a [ItemField],
+    /// The environment's tier (FR-59).
+    pub tier: Tier,
+    /// The environment's team item carries the `assistant_imported` tag (design row
+    /// `import-local`): its values are left out of the cross-tier comparisons.
+    pub assistant_imported: bool,
 }
 
 /// One likely-wrong setting. Names only.
@@ -102,7 +107,7 @@ fn in_scope<'a>(
 ) -> impl Iterator<Item = (&'a ItemField, &'a KeySpec)> + 'a {
     env.fields.iter().filter_map(move |f| {
         let spec = fleet.products.get(&f.section)?.keys.get(&f.label)?;
-        let declared_here = spec.environments.iter().any(|e| e == env.name);
+        let declared_here = spec.is_desired_in(env.name);
         (declared_here && !spec.personal && !f.value.expose().is_empty()).then_some((f, spec))
     })
 }
@@ -135,6 +140,9 @@ fn same_across(fleet: &Fleet, envs: &[EnvValues<'_>], out: &mut Vec<HealthFindin
     // (product, key) -> [(environment, field)], in environment order.
     let mut by_key: BTreeMap<(&str, &str), Vec<(&str, &ItemField)>> = BTreeMap::new();
     for env in envs {
+        if env.assistant_imported {
+            continue;
+        }
         for (f, spec) in in_scope(fleet, env) {
             if spec.kind == Kind::Secret && !spec.allow_same_value {
                 by_key
@@ -177,6 +185,9 @@ fn same_under_two(
     fields: &[(&ItemField, &KeySpec)],
     out: &mut Vec<HealthFinding>,
 ) {
+    if env.assistant_imported {
+        return;
+    }
     let mut secrets: Vec<&ItemField> = fields
         .iter()
         .filter(|(_, spec)| spec.kind == Kind::Secret)
@@ -204,6 +215,14 @@ fn same_under_two(
             ));
         }
     }
+}
+
+/// A cross-tier warning: the same value across environments ([`SAME_ACROSS`]) or under two
+/// keys ([`SAME_UNDER_TWO`]). A person at a terminal and CI see these; assistant surfaces
+/// (agent mode) do not (`opv ready`, deliverable `health-filter`). Health is advisory
+/// everywhere: no health finding ever blocks.
+pub fn is_cross_tier(code: &str) -> bool {
+    code == SAME_ACROSS || code == SAME_UNDER_TWO
 }
 
 /// The checks of one value on its own.
@@ -288,7 +307,7 @@ fn per_value(env: &EnvValues<'_>, f: &ItemField, spec: &KeySpec, out: &mut Vec<H
 }
 
 /// A known placeholder: a stock word, a run of x, `<…>`, or `your…here`.
-fn is_placeholder(value: &str) -> bool {
+pub(crate) fn is_placeholder(value: &str) -> bool {
     const WORDS: [&str; 16] = [
         "changeme",
         "change-me",
@@ -344,8 +363,9 @@ fn points_at_local(value: &str) -> bool {
     .any(|l| contains_ignore_case(value, l))
 }
 
-/// A production environment by its name or title: `prod`, but not `preprod` or `nonprod`.
-fn is_production(env: &EnvValues<'_>) -> bool {
+/// An environment named or titled as production: `prod`, but not `preprod` or `nonprod`.
+/// The loader uses this to give an environment without a written `tier` its default.
+pub(crate) fn default_tier(name: &str, title: Option<&str>) -> Tier {
     let named = |s: &str| {
         let s = s.to_ascii_lowercase();
         s.contains("prod")
@@ -353,7 +373,16 @@ fn is_production(env: &EnvValues<'_>) -> bool {
             && !s.contains("pre-prod")
             && !s.contains("nonprod")
     };
-    named(env.name) || env.title.is_some_and(named)
+    if named(name) || title.is_some_and(named) {
+        Tier::Production
+    } else {
+        Tier::Shared
+    }
+}
+
+/// A production environment by its tier (FR-59): the tier decides, not the name or title.
+pub(crate) fn is_production(env: &EnvValues<'_>) -> bool {
+    env.tier == Tier::Production
 }
 
 #[cfg(test)]

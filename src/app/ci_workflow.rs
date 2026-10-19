@@ -330,9 +330,10 @@ fn workflow(job: &Job<'_>, setup: Option<&str>) -> String {
          #   opv access {env} --target {target} --create --github <owner/repo>{github_env_flag}\n"
     ));
     s.push_str(&format!("name: {id}\n\n"));
-    s.push_str("on:\n  workflow_dispatch:\n\n");
+    s.push_str("on:\n  pull_request:\n  pull_request_review:\n    types: [submitted]\n  workflow_dispatch:\n\n");
     s.push_str("permissions:\n  contents: read\n\n");
     s.push_str(&format!("jobs:\n  {id}:\n"));
+    s.push_str("    if: github.event_name == 'workflow_dispatch'\n");
     s.push_str("    runs-on: ubuntu-latest\n");
     if let Some(g) = github_env {
         s.push_str(&format!("    environment: {g}\n"));
@@ -378,6 +379,105 @@ fn workflow(job: &Job<'_>, setup: Option<&str>) -> String {
     s.push_str(&format!(
         "        run: opv delivery verify {env} --target {target} --receipt {target}.receipt.json\n"
     ));
+    s.push_str(&pull_request_jobs(job));
+    s
+}
+
+/// The pull-request checks a single-target workflow runs: a `checks-<env>-<target>` job with
+/// the `needs --gate`, `contract --check` and `ready --gate` steps, and the separate
+/// `opv/relaxations` status (its job id is `relaxations`) that fails while the working
+/// contract relaxes the default branch and the pull request's head has no approving review.
+/// The sync job runs only on `workflow_dispatch`; these jobs only on `pull_request`.
+fn pull_request_jobs(job: &Job<'_>) -> String {
+    let (env, target) = (job.env, job.target);
+    let version = env!("CARGO_PKG_VERSION");
+    let id = format!("checks-{env}-{target}");
+    let mut s = String::new();
+    s.push_str(&format!("  {id}:\n"));
+    s.push_str("    if: github.event_name == 'pull_request'\n");
+    s.push_str("    runs-on: ubuntu-latest\n");
+    s.push_str("    env:\n");
+    s.push_str("      OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}\n");
+    s.push_str("      OP_CACHE: \"false\"\n");
+    s.push_str(&format!(
+        "      OPV_VERSION: v{version}   # pin the release you tested; bump it deliberately\n"
+    ));
+    s.push_str("    steps:\n");
+    s.push_str("      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0   # the default branch, for needs and relaxations\n");
+    s.push_str("      - name: Install the 1Password CLI\n");
+    s.push_str("        uses: 1password/install-cli-action@v1\n");
+    s.push_str(&install_opv());
+    s.push_str("      - name: Fail on a name the code reads but the contract does not declare\n");
+    s.push_str("        run: opv needs --gate\n");
+    s.push_str("      - name: Fail on a stale committed contract\n");
+    s.push_str("        run: opv contract --check contract.json\n");
+    s.push_str(&format!(
+        "      - name: Fail unless {env} passes the promotion gate\n"
+    ));
+    s.push_str(&format!("        run: opv ready {env} --gate\n"));
+    s.push_str(&relaxations_job());
+    s
+}
+
+/// An `Install opv` step, indented as a `steps:` entry: the same pinned, checksum-verified
+/// install every generated job uses.
+fn install_opv() -> String {
+    let mut s = String::new();
+    s.push_str("      - name: Install opv\n");
+    s.push_str("        run: |\n");
+    s.push_str(
+        "          base=https://github.com/matt-cochran/1password-vault/releases/download/$OPV_VERSION\n",
+    );
+    s.push_str("          curl -fsSLO \"$base/opv-x86_64-unknown-linux-musl\"\n");
+    s.push_str("          curl -fsSLO \"$base/SHA256SUMS\"\n");
+    s.push_str("          sha256sum -c SHA256SUMS --ignore-missing\n");
+    s.push_str("          install -m 0755 opv-x86_64-unknown-linux-musl /usr/local/bin/opv\n");
+    s
+}
+
+/// The separate `opv/relaxations` required status: list the working contract's relaxations
+/// against the default branch and fail while any is unapproved at the pull request's head
+/// SHA. It reads the GitHub token the workflow already has and no 1Password secret, and it
+/// prints names and reasons only.
+fn relaxations_job() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    let mut s = String::new();
+    s.push_str("  relaxations:\n");
+    s.push_str("    name: opv/relaxations\n");
+    s.push_str("    if: github.event_name == 'pull_request' || github.event_name == 'pull_request_review'\n");
+    s.push_str("    runs-on: ubuntu-latest\n");
+    s.push_str("    permissions: {contents: read, pull-requests: read}\n");
+    s.push_str("    env:\n");
+    s.push_str("      GH_TOKEN: ${{ github.token }}\n");
+    s.push_str("      OP_CACHE: \"false\"\n");
+    s.push_str(&format!(
+        "      OPV_VERSION: v{version}   # pin the release you tested; bump it deliberately\n"
+    ));
+    s.push_str("    steps:\n");
+    s.push_str("      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0   # the default branch, for needs and relaxations\n");
+    s.push_str(&install_opv());
+    s.push_str("      - name: Fail on an unapproved contract relaxation\n");
+    s.push_str("        env:\n");
+    s.push_str("          BASE: origin/${{ github.event.repository.default_branch }}\n");
+    s.push_str("          PR: ${{ github.event.pull_request.number }}\n");
+    s.push_str("          REPO: ${{ github.repository }}\n");
+    s.push_str("        run: |\n");
+    s.push_str("          relaxations=$(opv contract --relaxations --base \"$BASE\" --json)\n");
+    s.push_str("          count=$(jq 'if type == \"array\" then length else (.relaxations // [] | length) end' <<<\"$relaxations\")\n");
+    s.push_str("          if [ \"$count\" -eq 0 ]; then\n");
+    s.push_str("            echo \"no contract relaxations\"\n");
+    s.push_str("            exit 0\n");
+    s.push_str("          fi\n");
+    s.push_str("          api=\"https://api.github.com/repos/$REPO/pulls/$PR\"\n");
+    s.push_str("          auth=\"Authorization: Bearer $GH_TOKEN\"\n");
+    s.push_str("          head=$(curl -fsSL -H \"$auth\" \"$api\" | jq -r .head.sha)\n");
+    s.push_str("          approved=$(curl -fsSL -H \"$auth\" \"$api/reviews\" | jq --arg head \"$head\" '[.[] | select(.state == \"APPROVED\" and .commit_id == $head)] | length')\n");
+    s.push_str("          if [ \"$approved\" -eq 0 ]; then\n");
+    s.push_str("            echo \"contract relaxations need an approving review at $head:\"\n");
+    s.push_str("            jq . <<<\"$relaxations\"\n");
+    s.push_str("            exit 1\n");
+    s.push_str("          fi\n");
+    s.push_str("          echo \"contract relaxations approved at $head\"\n");
     s
 }
 
