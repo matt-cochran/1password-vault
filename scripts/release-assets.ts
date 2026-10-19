@@ -42,10 +42,74 @@ export function validate(manifest: Manifest, run: Run, repository: string, tree:
   if (!manifest.files['dist/opv'] || !manifest.files['dist/SHA256SUMS']) throw new Error('Missing release aliases or checksums');
   if (Object.keys(manifest.files).filter(p => p.startsWith('npm/') && p.endsWith('.tgz')).length !== 7) throw new Error('Expected all seven staged npm tarballs');
 }
+export type NpmTarball = { file: string; path: string; name: string; version: string; integrity: string };
+const npmMainPackage = '@matthew-cochran/opv';
+// Platform packages must be published before the main package that depends on them.
+export function orderNpmTarballs<T extends { name: string }>(packages: T[]): T[] {
+  const rank = (pkg: { name: string }) => Number(pkg.name === npmMainPackage);
+  return [...packages].sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
+}
+// An identical retained tarball is skipped; different published bytes are always refused.
+export function npmPublishAction(existing: string | undefined, expected: string, label: string): 'publish' | 'skip' {
+  if (existing === undefined) return 'publish';
+  if (existing !== expected) throw new Error(`Published npm bytes differ for ${label}`);
+  return 'skip';
+}
+export type TarballWait = {
+  fetch: (url: string) => Promise<{ status: number }>;
+  now: () => number;
+  sleep: (milliseconds: number) => Promise<void>;
+  timeoutMs?: number;
+  intervalMs?: number;
+};
+// Poll until the registry serves the published tarball, then stop. A bounded wall clock
+// (injectable so tests never sleep) guarantees we fail rather than wait forever.
+export async function waitForTarball(url: string, wait: TarballWait): Promise<void> {
+  const timeoutMs = wait.timeoutMs ?? 300_000;
+  const intervalMs = wait.intervalMs ?? 5_000;
+  const deadline = wait.now() + timeoutMs;
+  for (;;) {
+    if ((await wait.fetch(url)).status === 200) return;
+    if (wait.now() >= deadline) throw new Error(`npm tarball was not served within ${timeoutMs}ms: ${url}`);
+    await wait.sleep(intervalMs);
+  }
+}
+function readNpmTarballs(directory: string): NpmTarball[] {
+  return readdirSync(directory).filter((name) => name.endsWith('.tgz')).map((file) => {
+    const path = join(directory, file);
+    const metadata = JSON.parse(command(['tar', '-xOf', path, 'package/package.json']));
+    return { file, path, name: metadata.name, version: metadata.version, integrity: `sha512-${createHash('sha512').update(readFileSync(path)).digest('base64')}` };
+  });
+}
+function registryTarballUrl(pkg: NpmTarball): string {
+  const short = pkg.name.split('/').pop()!;
+  return `https://registry.npmjs.org/${pkg.name}/-/${short}-${pkg.version}.tgz`;
+}
+async function publishNpmTarball(pkg: NpmTarball): Promise<void> {
+  let existing: string | undefined;
+  try {
+    existing = JSON.parse(command(['npm', 'view', `${pkg.name}@${pkg.version}`, 'dist.integrity', '--json']));
+  } catch (error) {
+    let response: any;
+    try { response = JSON.parse(String((error as { stdout?: unknown }).stdout)); } catch { throw new Error(`Cannot verify existing npm release ${pkg.name}@${pkg.version}`); }
+    if (response.error?.code !== 'E404') throw new Error('npm lookup failed; refusing a blind publication');
+  }
+  if (npmPublishAction(existing, pkg.integrity, `${pkg.name}@${pkg.version}`) === 'skip') {
+    console.log(`Already published identical retained bytes: ${pkg.name}@${pkg.version}`);
+    return;
+  }
+  execFileSync('npm', ['publish', pkg.path, '--provenance', '--access', 'public'], { stdio: 'inherit' });
+  await waitForTarball(registryTarballUrl(pkg), {
+    fetch: (url: string) => fetch(url, { method: 'HEAD' }),
+    now: () => Date.now(),
+    sleep: (milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)),
+  });
+  console.log(`Served ${pkg.name}@${pkg.version}`);
+}
 function output(name: string, value: string): void { if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `${name}=${value}\n`); }
-export function main(): void {
+export async function main(): Promise<void> {
   const [mode, directory] = process.argv.slice(2);
-  if (!directory) throw new Error('Usage: release-assets.ts record|resolve|verify DIRECTORY');
+  if (!directory) throw new Error('Usage: release-assets.ts record|resolve|verify|publish DIRECTORY');
   const root = resolve(directory);
   const repository = process.env.GITHUB_REPOSITORY!;
   const tree = command(['git', 'rev-parse', 'HEAD^{tree}']);
@@ -69,6 +133,10 @@ export function main(): void {
     output('artifact', `opv-release-${tree}-${run.run_attempt}`);
     return;
   }
+  if (mode === 'publish') {
+    for (const pkg of orderNpmTarballs(readNpmTarballs(join(root, 'npm')))) await publishNpmTarball(pkg);
+    return;
+  }
   if (mode !== 'resolve') throw new Error('Unknown release asset mode');
   if (existsSync(root)) throw new Error('Use a fresh release candidate directory');
   for (let page = 1; page <= 10; page++) {
@@ -90,4 +158,6 @@ export function main(): void {
   }
   throw new Error('No successful retained staging release matches this complete source tree. Build and validate staging first; production never rebuilds or retests.');
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error: unknown) => { console.error(error instanceof Error ? error.message : error); process.exit(1); });
+}
