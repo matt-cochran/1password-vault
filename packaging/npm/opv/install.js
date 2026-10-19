@@ -9,6 +9,9 @@
 //   ~/.local/bin/opv                              (Linux, macOS, WSL)
 //   %LOCALAPPDATA%\Programs\opv\opv.exe           (Windows)
 //
+// Only a global install writes the shared copy; a project-local postinstall is left to
+// run the package's own binary and never touches it (or the user's skill).
+//
 // The copy is atomic (a temporary file in the destination directory, then rename) so
 // an interrupted install never leaves a broken `opv`. The script records what it
 // installed in ~/.local/share/opv/installed-by (`npm <version> <sha256>`) so
@@ -31,6 +34,35 @@ function canonicalPath(platform = process.platform) {
     return path.join(base, 'Programs', 'opv', 'opv.exe');
   }
   return path.join(os.homedir(), '.local', 'bin', 'opv');
+}
+
+// npm's global node_modules directory (`npm root -g`), derived without spawning npm. npm
+// exposes its effective prefix to lifecycle scripts as `npm_config_prefix`; outside npm,
+// the node executable's own prefix gives the default. Cheap enough to compute per call.
+function globalRoot(env = process.env, execPath = process.execPath, platform = process.platform) {
+  const explicit = env.npm_config_prefix || env.NPM_CONFIG_PREFIX;
+  if (isWindows(platform)) {
+    // npm's default global prefix on Windows is %APPDATA%\npm, not node's own directory.
+    const prefix = explicit || (env.APPDATA ? path.join(env.APPDATA, 'npm') : path.dirname(execPath));
+    return path.join(prefix, 'node_modules');
+  }
+  return path.join(explicit || path.dirname(path.dirname(execPath)), 'lib', 'node_modules');
+}
+
+// Whether this package is the global npm install. Only a global install owns the shared
+// binary; a project-local install must never create or replace it. `npm_config_global`,
+// which npm sets while running a script, is authoritative when present. Otherwise the
+// package's own directory is compared with npm's global root; a package under a project's
+// `node_modules` (or one npm names a prefix for) is project-local, while a direct
+// invocation with no npm signal keeps today's install behaviour.
+function isGlobalInstall(env = process.env, dir = __dirname) {
+  if (env.npm_config_global === 'true') return true;
+  if (env.npm_config_global === 'false') return false;
+  const resolved = path.resolve(dir);
+  const inNodeModules = resolved.split(path.sep).includes('node_modules');
+  if (!inNodeModules && !env.npm_config_prefix) return true;
+  const expected = path.join(globalRoot(env), '@matthew-cochran', 'opv');
+  return resolved === path.resolve(expected);
 }
 
 // The shared metadata directory: what installed the binary, and its hash.
@@ -140,7 +172,7 @@ function sudoProblem(env = process.env, uid = process.getuid ? process.getuid() 
     return (
       `npm is running as root for ${env.SUDO_USER}, so opv was not copied to their ` +
       'home (it would become root-owned). The npm command still works. ' +
-      'To install the shared copy, run without sudo: npm rebuild -g @matthew-cochran/opv --allow-scripts=@matthew-cochran/opv'
+      `To install the shared copy, run without sudo: ${REPAIR_COMMAND}`
     );
   }
   return null;
@@ -205,6 +237,11 @@ function install() {
     process.stderr.write(`opv: ${problem}\n`);
     return;
   }
+  if (!isGlobalInstall()) {
+    // A project-local install runs its own bundled binary and must not write the shared
+    // copy (or register the user's skill); the npm wrapper already falls back to it.
+    return;
+  }
   const version = packageVersion();
   const target = canonicalPath();
   const dir = path.dirname(target);
@@ -216,7 +253,7 @@ function install() {
     if (!ours && !isOpvBinary(target)) {
       throw new Error(
         `${target} is not an opv binary, so it was left untouched. The npm command still ` +
-          'works. Move that file, then run: npm rebuild -g @matthew-cochran/opv --allow-scripts=@matthew-cochran/opv',
+          `works. Move that file, then run: ${REPAIR_COMMAND}`,
       );
     }
     oldVersion = versionOf(target);
@@ -245,7 +282,7 @@ if (require.main === module) {
     // Never fail `npm install`: the wrapper falls back to its bundled binary.
     process.stderr.write(
       `opv: could not install to the shared location (${e.message}). ` +
-        'The npm command still works; fix the cause, then run: npm rebuild -g @matthew-cochran/opv --allow-scripts=@matthew-cochran/opv\n',
+        `The npm command still works; fix the cause, then run: ${REPAIR_COMMAND}\n`,
     );
   }
 }
@@ -253,6 +290,8 @@ if (require.main === module) {
 module.exports = {
   sudoProblem,
   canonicalPath,
+  globalRoot,
+  isGlobalInstall,
   dataDir,
   recordPath,
   sha256File,

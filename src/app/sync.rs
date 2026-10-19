@@ -446,11 +446,16 @@ fn write_run_json(
             .filter_map(|(_, r)| r.delivery.as_ref())
             .flat_map(|d| &d.minted)
             .map(|m| {
-                serde_json::json!({
+                let mut v = serde_json::json!({
                     "target": m.scope.target,
                     "product": m.scope.product,
                     "revision": m.revision,
-                })
+                });
+                // #201: the names this revision counts on a person's attestation.
+                if !m.attested.is_empty() {
+                    v["attested"] = serde_json::json!(m.attested);
+                }
+                v
             })
             .collect();
         let not_minted: Vec<serde_json::Value> = both()
@@ -1185,9 +1190,18 @@ fn record_delivery(
             }
             if !opts.json {
                 for m in &rec.minted {
+                    // #201: the names the revision counts on a person's attestation.
+                    let attested = if m.attested.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (attested, not proven: {})", m.attested.join(", "))
+                    };
                     p_line(
                         out,
-                        format!("delivery: {} revision {}", m.scope.product, m.revision),
+                        format!(
+                            "delivery: {} revision {}{attested}",
+                            m.scope.product, m.revision
+                        ),
                     )?;
                 }
                 for n in &rec.not_minted {
@@ -2322,6 +2336,14 @@ impl PlanPart<'_> {
     fn word(&self, row: &Row) -> String {
         let word = if super::rotated(&self.rotate, row) {
             "rotate"
+        } else if self
+            .plan
+            .attested
+            .iter()
+            .any(|(p, k)| *p == row.product && *k == row.key)
+        {
+            // #201: present only through a person's attestation.
+            "attested"
         } else {
             let held = self
                 .plan

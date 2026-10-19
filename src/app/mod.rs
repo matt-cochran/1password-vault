@@ -14,6 +14,7 @@ pub mod access_create;
 pub mod account;
 pub mod agent_view;
 pub mod apply;
+pub mod attest;
 #[cfg(test)]
 mod azure_tests;
 pub mod bootstrap;
@@ -64,6 +65,8 @@ mod pinned_tests;
 #[cfg(test)]
 #[path = "placement_tests.rs"]
 mod placement_tests;
+#[cfg(test)]
+mod plan_tests;
 pub(crate) mod preflight;
 #[cfg(test)]
 #[path = "product_flag_tests.rs"]
@@ -399,6 +402,28 @@ pub(crate) fn plan_item_with(
             .map(|e| e.name.clone())
             .filter(|n| drifted.contains(n) && managed.contains(n))
             .collect();
+        // #201: a name proven only by a person's attestation is `present`, but says so.
+        if let Some(tc) = fleet
+            .environments
+            .get(env_name)
+            .and_then(|e| e.targets.get(t))
+        {
+            let attested: Vec<(String, String)> = p
+                .rows
+                .iter()
+                .filter(|row| row.target == TargetState::Present)
+                .filter(|row| {
+                    let name = tc.config.env_name(&row.product, &row.key);
+                    on_target
+                        .iter()
+                        .find(|e| e.name == name)
+                        .and_then(|e| e.version.as_deref())
+                        .is_some_and(|v| ledgers.iter().any(|l| l.attested(&name, v)))
+                })
+                .map(|row| (row.product.clone(), row.key.clone()))
+                .collect();
+            p.attested = attested;
+        }
     }
     if let Some(e) = failed.into_inner() {
         return Err(e);
@@ -719,6 +744,10 @@ fn json_rows(
                 open_url: link.filter(|_| is_blocking(r)).map(str::to_string),
                 target: Some(part.target.to_string()),
                 rotate,
+                attested: plan
+                    .attested
+                    .iter()
+                    .any(|(p, k)| *p == r.product && *k == r.key),
                 via,
                 delivered_as,
                 form,
@@ -741,7 +770,9 @@ fn changes(
         .iter()
         .filter(|r| r.action == Some("would_stage"))
         .collect();
-    let certain = staged.iter().any(|r| r.target_state != Some("present"))
+    let certain = staged
+        .iter()
+        .any(|r| !matches!(r.target_state, Some("present") | Some("unknown")))
         || !plan.prune.is_empty()
         || pinned.is_some_and(|m| m.values().any(|b| b.pending_deploy));
     if certain {
@@ -832,7 +863,8 @@ pub(crate) struct JsonRow {
     /// Why `rule` failed (FR-22): from the rule's fixed set or the configuration only.
     reason: Option<String>,
     target_name: Option<String>,
-    /// The row's state on its target: `present`, `absent`, `would_change` or null.
+    /// The row's state on its target: `present`, `absent`, `would_change`, `unknown`,
+    /// `not_delivered` or null (a config key the target does not deliver).
     target_state: Option<&'static str>,
     action: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -853,6 +885,10 @@ pub(crate) struct JsonRow {
     /// otherwise, so a plan without rotation is unchanged.
     #[serde(skip_serializing_if = "is_false")]
     rotate: bool,
+    /// True when the row is `present` only through a person's attestation (#201): attested,
+    /// not proven. Absent otherwise.
+    #[serde(skip_serializing_if = "is_false")]
+    attested: bool,
 }
 
 /// Serialize a `false` boolean field only when true (`rotate`).
@@ -892,6 +928,7 @@ impl JsonRow {
             open_url: None,
             shared_from: json_source(r),
             rotate: false,
+            attested: false,
         }
     }
 }
@@ -1004,16 +1041,19 @@ fn json_reason(s: &KeyState) -> Option<String> {
     }
 }
 
-/// Target presence: secrets are present/absent/would-change; config only where the target
-/// delivers it itself (FR-46), otherwise none.
+/// Target presence: secrets are present/absent/would-change/unknown; config only where the
+/// target delivers it itself (FR-46), otherwise none.
 fn json_target(kind: Kind, target: TargetState) -> Option<&'static str> {
     match (kind, target) {
         (Kind::Config, TargetState::Unknown) => None,
+        // A secret opv cannot compare (no local digest, no store value) is not proof of
+        // presence (#201 decision 2).
+        (Kind::Secret, TargetState::Unknown) => Some("unknown"),
         // Read and checked, never written to this target (FR-47, FR-48).
         (_, TargetState::NotDelivered) => Some("not_delivered"),
         (_, TargetState::Absent) => Some("absent"),
         (_, TargetState::WouldChange) => Some("would_change"),
-        (_, _) => Some("present"),
+        (_, TargetState::Present) => Some("present"),
     }
 }
 
@@ -1194,6 +1234,8 @@ ON TARGET: the key on its deployment target (the TARGET column names the target)
               sync writes it again (a staging target stages it and compares digests)
   pending     written, not yet live; the next sync --deploy rolls it out
   held        immutable and already set; kept as it is (replace with --rotate)
+  attested    immutable and held; counted as delivered only because a person attested it,
+              not proven (docs/attestation.md)
   rotate      an immutable key this plan replaces because --rotate named it
   extra       on the target but not wanted in this environment; not pruned without --prune
   drift       the running app is bound to something other than what opv last wrote

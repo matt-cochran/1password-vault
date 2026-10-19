@@ -347,7 +347,7 @@ impl Server {
 
     #[tool(
         name = "opv_propose",
-        description = "Propose a change to this project's contract from one intent document (kind key, env, target, retire, setup, structure or generate): names, enumerated attributes and catalog shape names only, never a rule parameter (regex, prefix, enum) or a value. Returns the same document as `opv propose <kind> --json`: the relaxations it makes (listed first), the contract diff or the structure steps, the questions it asks, and a plan_id that only a person's `opv apply <plan_id>` runs. Pure: writes neither the contract nor 1Password.",
+        description = "Propose a change to this project's contract from one intent document (kind key, env, target, retire, setup, structure, generate or attest): names, enumerated attributes and catalog shape names only, never a rule parameter (regex, prefix, enum) or a value. Returns the same document as `opv propose <kind> --json`: the relaxations it makes (listed first), the contract diff or the structure steps, the questions it asks, and a plan_id that only a person's `opv apply <plan_id>` runs. Pure: writes neither the contract nor 1Password.",
         input_schema = propose_schema(),
         annotations(read_only_hint = true, destructive_hint = false)
     )]
@@ -899,6 +899,20 @@ fn proposal<R: Accounted>(
         Intent::Generate { env, keys, .. } => {
             let keys = keys.iter().map(|k| k.to_string()).collect();
             structure_proposal(project, r, &[], &[(env.to_string(), keys)])
+        }
+        // #201: what a person's attestation would record, read only; only the person's
+        // `opv apply <plan_id> --attest …` records it.
+        Intent::Attest { env, target, keys } => {
+            let fleet = load_fleet(project, r)?;
+            let keys: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+            let p = crate::app::attest::propose(&fleet, env.as_str(), target.as_str(), &keys, r)?;
+            let mut doc = to_doc(&p)?;
+            doc["next"] = json!({
+                "kind": "apply",
+                "actor": "person",
+                "command": render::cmd_text(&crate::app::attest::apply_step(&p)),
+            });
+            Ok(doc)
         }
     }
 }

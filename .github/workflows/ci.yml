@@ -13,7 +13,7 @@ permissions:
   actions: read
   pull-requests: read
 concurrency:
-  group: retained-ci.yml-${{ github.event.pull_request.number || github.ref }}
+  group: retained-ci.yml-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
   resolve:

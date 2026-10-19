@@ -34,6 +34,8 @@ struct World {
     fly: RefCell<BTreeMap<String, Secrets>>,
     /// The next `secrets import` fails before it reaches Fly.
     fail_import: std::cell::Cell<bool>,
+    /// Every 1Password write that names this item ID fails (#201: a partial apply).
+    fail_op_write_on: RefCell<Option<String>>,
 }
 
 /// The value of `--app` in a flyctl call.
@@ -119,6 +121,15 @@ impl CommandRunner for World {
     }
 
     fn write(&self, call: &Call<'_>) -> io::Result<Outcome> {
+        let failing = self.fail_op_write_on.borrow().clone();
+        if call.program == "op"
+            && failing.is_some_and(|id| call.args.iter().any(|a| a.contains(id.as_str())))
+        {
+            return Ok(Outcome::Unknown {
+                reason: "failed-write",
+                status: Some(1),
+            });
+        }
         if call.program == "op" || call.program == "git" {
             return self.op.write(call);
         }
@@ -239,7 +250,22 @@ fn world() -> (World, Fleet) {
         op,
         fly: RefCell::default(),
         fail_import: std::cell::Cell::new(false),
+        fail_op_write_on: RefCell::default(),
     };
+    (w, fleet)
+}
+
+/// `world()` with api/TOKEN declared immutable.
+fn world_with_immutable_token() -> (World, Fleet) {
+    let (w, mut fleet) = world();
+    let token = fleet
+        .products
+        .get_mut("api")
+        .unwrap()
+        .keys
+        .get_mut("TOKEN")
+        .unwrap();
+    token.immutable = true;
     (w, fleet)
 }
 
@@ -340,6 +366,33 @@ fn a_resync_after_rotation_mints_a_new_revision() {
     w.set_value("api", "TOKEN", &format!("tok2-{MARK}"));
     sync_all(&w, &fleet).unwrap();
     assert_ne!(revision_of(&verify_doc(&w, &fleet), "api"), before);
+}
+
+/// #201: an immutable key the sync holds, which opv delivered and Fly still lists at the
+/// recorded version with the same value, is proved identical by the placement's ledger,
+/// so a change elsewhere in the binding set still mints a revision.
+#[test]
+fn a_held_immutable_key_identical_on_fly_counts_toward_the_receipt() {
+    let _person = crate::app::tidy::activate();
+    let (w, fleet) = world_with_immutable_token();
+    sync_all(&w, &fleet).unwrap();
+    let before = revision_of(&verify_doc(&w, &fleet), "api");
+    w.set_value("shared", "KEY", &format!("key2-{MARK}"));
+    sync_all(&w, &fleet).unwrap();
+    assert_ne!(revision_of(&verify_doc(&w, &fleet), "api"), before);
+}
+
+/// #201, the staging run: an immutable key already on Fly when the placement has no
+/// evidence line for it is held, and Fly's digest cannot be computed locally (D0), so
+/// nothing proves it identical and the product gets no revision.
+#[test]
+fn a_held_immutable_key_with_no_evidence_line_blocks_the_receipt() {
+    let _person = crate::app::tidy::activate();
+    let (w, fleet) = world_with_immutable_token();
+    w.app("myapp")
+        .insert("FLEET__API__TOKEN".into(), (format!("tok-{MARK}"), false));
+    sync_all(&w, &fleet).unwrap();
+    assert_eq!(state_of(&verify_doc(&w, &fleet), "api"), "not_delivered");
 }
 
 #[test]
@@ -887,6 +940,7 @@ fn two_targets() -> (World, Fleet) {
         op,
         fly: RefCell::default(),
         fail_import: std::cell::Cell::new(false),
+        fail_op_write_on: RefCell::default(),
     };
     (w, fleet)
 }
@@ -909,6 +963,7 @@ fn no_secrets() -> (World, Fleet) {
         op,
         fly: RefCell::default(),
         fail_import: std::cell::Cell::new(false),
+        fail_op_write_on: RefCell::default(),
     };
     (w, fleet)
 }
@@ -1274,3 +1329,7 @@ fn a_key_withheld_by_the_targets_roles_is_not_bound() {
         .collect();
     assert!(!names.contains(&"FLEET__ALLUMATA__DATABASE_URL_UNPOOLED".to_string()));
 }
+
+/// #201: a person's attestation, on this module's world.
+#[path = "attest_tests.rs"]
+mod attest_tests;

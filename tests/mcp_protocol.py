@@ -126,7 +126,7 @@ with tempfile.TemporaryDirectory() as directory:
         # opv_propose advertises the intent document: one arm per kind (seven: tidy is
         # deferred past 0.12.0), no rule parameter.
         propose_tool = next(t for t in tools if t['name'] == 'opv_propose')
-        assert len(propose_tool['inputSchema']['oneOf']) == 7, propose_tool
+        assert len(propose_tool['inputSchema']['oneOf']) == 8, propose_tool  # 0.12.3 adds the attest intent (#201)
         for arm in propose_tool['inputSchema']['oneOf']:
             assert not set(arm['properties']) & {'value', 'regex', 'rule', 'rules', 'prefix'}, arm
         # The removed 0.11.0 tools are gone, with no alias.

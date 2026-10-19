@@ -197,7 +197,7 @@ fn plan_shows_an_undesired_key_on_the_target_as_extra() {
 #[test]
 fn states_help_defines_every_target_word() {
     for w in [
-        "new", "same", "changed", "unknown", "pending", "held", "extra", "drift", "n/a",
+        "new", "same", "changed", "unknown", "pending", "held", "attested", "extra", "drift", "n/a",
     ] {
         assert!(super::STATES_HELP.contains(&format!("\n  {w:<11} ")), "{w}");
     }

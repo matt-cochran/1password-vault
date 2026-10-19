@@ -10,7 +10,7 @@ value in 1Password or at opv's masked prompt.
 |---|---|---|---|
 | `opv_state` | nothing | `section`: `inventory`, `needs`, `contract`, `ready`, `plan`, `changed`, `access`, `delivery_preview`, `history`, `status`; optional `env`, `product`, `target` | the same document as the CLI command of that name |
 | `opv_next` | nothing | optional `env` | one action this session can take, the queue, and what waits on others |
-| `opv_propose` | nothing (pure) | the intent document: `kind` (`key`, `env`, `target`, `retire`, `setup`, `structure`, `generate`), names (grammar-checked), enumerated attributes, **catalog shape names only (no rule parameters)**, references, optional guidance (screened, stored `assistant_written`) | the contract diff and the plan with its `plan_id`, which only a person's `opv apply` runs |
+| `opv_propose` | nothing (pure) | the intent document: `kind` (`key`, `env`, `target`, `retire`, `setup`, `structure`, `generate`, `attest`), names (grammar-checked), enumerated attributes, **catalog shape names only (no rule parameters)**, references, optional guidance (screened, stored `assistant_written`) | the contract diff and the plan with its `plan_id`, which only a person's `opv apply` runs |
 | `opv_import_local` | the local vault only | `env` (must be tier `local`), a file path | per key `imported` / `skipped: already set` / `skipped: empty`; values tagged `assistant_imported` |
 | `opv_explain` | nothing | a key or a `plan_id` | the explanation, including every place the key is delivered |
 

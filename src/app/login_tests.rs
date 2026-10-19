@@ -482,6 +482,25 @@ fn a_recorded_account_never_shows_a_menu() {
 }
 
 #[test]
+fn recording_a_changed_account_prints_the_recorded_line() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    let mut ui = Ui::default();
+    record_chosen(dir.path(), A, &Fake::signed_in(0), &mut ui).unwrap();
+    assert!(ui.shown.iter().any(|m| m.contains("recorded in")));
+}
+
+#[test]
+fn recording_an_account_already_recorded_prints_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    crate::config_store::record_account(dir.path(), A).unwrap();
+    let mut ui = Ui::default();
+    record_chosen(dir.path(), A, &Fake::signed_in(0), &mut ui).unwrap();
+    assert!(ui.shown.is_empty());
+}
+
+#[test]
 fn login_add_adds_the_named_account_at_ops_prompts() {
     let dir = tempfile::tempdir().unwrap();
     let mut b = Fake::signed_in(0);
