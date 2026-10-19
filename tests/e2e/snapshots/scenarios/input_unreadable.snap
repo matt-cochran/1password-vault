@@ -1,4 +1,4 @@
-# input_unreadable: opv adopt dev --from missing.env
+# input_unreadable: opv import dev --from missing.env --dry-run
 
 ## text exit: 2
 ## text stdout
@@ -7,14 +7,14 @@
 using <SCENARIO>/project/secrets.toml
 opv: opv could not read the .env file missing.env: it does not exist
 Do: check that the .env file missing.env exists and you can read it
-Next: opv adopt dev --from missing.env
+Next: opv import dev --from missing.env --dry-run
 
 ## json exit: 2
 ## json stdout
-{"schema_version":2,"ok":false,"exit_code":2,"next":"opv adopt dev --from missing.env --json","do":"check that the .env file missing.env exists and you can read it","error":{"code":"input_unreadable","category":"config","message":"opv could not read the .env file missing.env: it does not exist","subject":{"io":"not_found","path":"missing.env","kind":"dotenv"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"check that the .env file missing.env exists and you can read it","next":"opv adopt dev --from missing.env --json","next_kind":"rerun"}}
+{"schema_version":3,"ok":false,"exit_code":2,"next":{"kind":"apply","actor":"person","command":"opv import dev --from missing.env --dry-run"},"do":"check that the .env file missing.env exists and you can read it","error":{"code":"input_unreadable","category":"config","message":"opv could not read the .env file missing.env: it does not exist","subject":{"io":"not_found","path":"missing.env","kind":"dotenv"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"check that the .env file missing.env exists and you can read it","next":{"kind":"apply","actor":"person","command":"opv import dev --from missing.env --dry-run"}}}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml
 opv: opv could not read the .env file missing.env: it does not exist
 Do: check that the .env file missing.env exists and you can read it
-Next: opv adopt dev --from missing.env --json
+Next: opv import dev --from missing.env --dry-run

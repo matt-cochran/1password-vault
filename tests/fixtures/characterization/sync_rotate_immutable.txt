@@ -9,7 +9,7 @@ $ op whoami --format json
 $ op item get iprd --vault vprd --format json --cache=false
 --- stdout
 prod/portfolio: warning: allumata/SIGNUP_POLICY not delivered (no config channel: set fly.config)
-prod/portfolio: delivery: allumata not recorded: no delivery item is recorded for allumata on prod/portfolio; opv bootstrap creates it
+prod/portfolio: delivery: allumata not recorded: no delivery item is recorded for allumata on prod/portfolio; opv apply creates it
 prod/portfolio: written: allumata/INTEGRATION_ENC_KEY (FLEET__ALLUMATA__INTEGRATION_ENC_KEY), allumata/OPENAI_API_KEY (FLEET__ALLUMATA__OPENAI_API_KEY)
 prod/portfolio: pending deploy (pass --deploy): allumata/INTEGRATION_ENC_KEY (FLEET__ALLUMATA__INTEGRATION_ENC_KEY), allumata/OPENAI_API_KEY (FLEET__ALLUMATA__OPENAI_API_KEY)
 prod/portfolio: summary: written 2 · unchanged 0 · held 0 · deployed no · pending 2 · pruned 0 · kept 0 · skipped 1

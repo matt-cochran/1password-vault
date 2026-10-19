@@ -1,8 +1,12 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "ok": false,
   "exit_code": 2,
-  "next": "opv config describe",
+  "next": {
+    "kind": "run",
+    "actor": "assistant",
+    "command": "opv contract"
+  },
   "do": null,
   "error": {
     "code": "undeclared_key",
@@ -27,7 +31,10 @@
     "retry": "never",
     "human_required": false,
     "do": null,
-    "next": "opv config describe",
-    "next_kind": "check"
+    "next": {
+      "kind": "run",
+      "actor": "assistant",
+      "command": "opv contract"
+    }
   }
 }

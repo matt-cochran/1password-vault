@@ -25,7 +25,7 @@ pub enum Screen {
     History(String),
     /// Who can read each environment's vault (#96), from `opv access --json`.
     Access,
-    /// The adoption review (#94): what `opv adopt <env> --from <from>` found, per key.
+    /// The import review (#94): what `opv import <env> --from <from> --dry-run` found, per key.
     Adopt {
         env: String,
         from: String,
@@ -85,7 +85,7 @@ pub enum Effect {
     LoadHistory(String),
     /// Read `opv access --json` for the access screen (#96).
     LoadAccess,
-    /// Read `opv adopt <env> --from <from> --json` and open the adoption review (#94).
+    /// Read `opv import <env> --from <from> --dry-run --json` and open the import review (#94).
     AdoptPlan {
         env: String,
         from: String,
@@ -295,7 +295,7 @@ impl App {
             Key::Char('i') => {
                 if let Some(env) = self.current_env() {
                     self.modal = Some(Modal::Input {
-                        prompt: format!("Adopt existing values into {env} from which file?"),
+                        prompt: format!("Import existing values into {env} from which file?"),
                         value: String::new(),
                         env,
                     });
@@ -377,7 +377,7 @@ impl App {
         Effect::None
     }
 
-    /// Open the adoption review from `opv adopt <env> --from <from> --json` (#94).
+    /// Open the import review from `opv import <env> --from <from> --dry-run --json` (#94).
     pub fn open_adopt(&mut self, env: &str, from: &str, doc: &super::docs::AdoptDoc) {
         let snap = &self.snap;
         let immutable = |p: &str, k: &str| {
@@ -417,7 +417,7 @@ impl App {
                 let args = command(&env, &from, &self.adopt);
                 let guarded = self.snap.env(&env).is_some_and(|e| e.guarded);
                 self.modal = Some(Modal::Confirm {
-                    title: format!("Adopt into {env}"),
+                    title: format!("Import into {env}"),
                     lines: vec![
                         format!(
                             "writes {n} field(s) in 1Password, read back and verified; a replaced value is kept in opv · kept"
@@ -530,16 +530,11 @@ impl App {
                 }
                 super::forms::Outcome::Command(command) => {
                     let what = form.title();
-                    let effect = if command.iter().any(|w| w == "--add-env") {
-                        // `opv init <env> --add-env` also creates the environment's vault and
-                        // item when they are missing (07.25).
-                        "adds the environment to the configuration and creates its 1Password \
-                         vault and item if they are missing (no value), validated first: a \
-                         refused change writes nothing"
-                    } else {
-                        "edits the configuration (no value), validated first: a refused \
-                         change writes nothing"
-                    };
+                    // `propose … --write` edits the contract, then `opv apply` shows the
+                    // structure it needs (an environment's vault and item) and asks again.
+                    let effect = "edits the configuration (no value), validated first: a \
+                                  refused change writes nothing; then opv apply shows what it \
+                                  needs in 1Password and asks before creating it";
                     self.modal = Some(Modal::Confirm {
                         title: what.into(),
                         lines: vec![effect.into(), format!("runs: {}", command_line(&command))],

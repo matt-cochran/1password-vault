@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use super::super::evidence::{BOX_LINES, upstream_box};
 use super::*;
-use crate::host::{Platform, Shell};
+use crate::host::{AgentMarker, Platform, Shell};
 
 fn seen(principal: Principal) -> Observed {
     Observed::from_failed_call(
@@ -114,10 +114,10 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
         ),
         (
             ConfigSourceMismatch {
-                command: CommandId("bootstrap".into()),
+                command: CommandId("apply".into()),
                 manifest: "man-shop".into(),
             },
-            vec!["bootstrap", "man-shop"],
+            vec!["apply", "man-shop"],
         ),
         (
             ConfigUnreadable {
@@ -144,6 +144,19 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                 "line 12",
                 "confirm_env",
             ],
+        ),
+        (
+            ContractStale {
+                path: Some(PathBuf::from("contract.json")),
+            },
+            vec!["contract.json"],
+        ),
+        (
+            ValueInTextField {
+                field: DottedPath(vec!["guidance".into()]),
+                detector: "known_prefix",
+            },
+            vec!["guidance", "known_prefix"],
         ),
         (
             BoundaryMissing {
@@ -194,6 +207,12 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                 manifest: "man-shop".into(),
             },
             vec!["cfg/copy.toml", "man-shop"],
+        ),
+        (
+            BindingsUnapplied {
+                environments: vec![EnvName::new("env-prod")],
+            },
+            vec!["env-prod"],
         ),
         (
             ManifestNotFound {
@@ -464,14 +483,13 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
         (
             Partial {
                 done: vec!["vault shop-prod".into()],
-                approval_used: Some(PlanId::new("sp-used")),
-                approval_scope: Some(sync_scope()),
+                scope: Some(sync_scope()),
                 then: Box::new(BudgetSpent {
                     budget_seconds: 77,
                     writes_started: true,
                 }),
             },
-            vec!["vault shop-prod", "sp-used", "77"],
+            vec!["vault shop-prod", "77"],
         ),
         (
             Interrupted {
@@ -503,11 +521,11 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                 item: ItemId::new("itm-1"),
                 fields: vec![FieldName::new("fld-api")],
                 by: Cmd {
-                    command: vec!["tidy".into()],
+                    command: vec!["config".into(), "export".into()],
                     args: vec!["prod".into()],
                 },
             },
-            vec!["vlt-atqr", "itm-1", "fld-api", "tidy"],
+            vec!["vlt-atqr", "itm-1", "fld-api", "config export"],
         ),
         (
             ToolMissing {
@@ -553,6 +571,13 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                 why: NoTerminal::Ci,
             },
             vec!["CI"],
+        ),
+        (
+            PersonOnly {
+                command: check_cmd(),
+                marker: AgentMarker::ClaudeCode,
+            },
+            vec!["opv access prod", "CLAUDECODE"],
         ),
         (
             NeedsConfirm {
@@ -603,21 +628,6 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                 "BAD KEY",
                 "upper-case letters, digits and _",
             ],
-        ),
-        (
-            ApprovalMissing {
-                plan: PlanId::new("sp-9f3"),
-                scope: sync_scope(),
-            },
-            vec!["sp-9f3"],
-        ),
-        (
-            ApprovalUsed {
-                plan: PlanId::new("sp-9f3"),
-                scope: sync_scope(),
-                partial: true,
-            },
-            vec!["sp-9f3"],
         ),
         (
             PlanChanged {
@@ -710,7 +720,7 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                 env: EnvName::new("env-prod"),
                 no_record: true,
             },
-            vec!["env-prod", "bootstrap"],
+            vec!["env-prod", "apply"],
         ),
         (
             KeyNotDeclared {
@@ -843,6 +853,17 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
         ),
         (Bug { site: "site-xyz" }, vec!["site-xyz"]),
         (
+            GateFailed {
+                env: EnvName::new("env-prod"),
+                keys: vec![(
+                    ProductName::new("prod-api"),
+                    KeyName::new("OPENAI_API_KEY"),
+                    "absent",
+                )],
+            },
+            vec!["env-prod", "prod-api", "OPENAI_API_KEY", "absent"],
+        ),
+        (
             MountUnreadable {
                 workload: "work-xyz".into(),
                 container: "cont-xyz".into(),
@@ -852,6 +873,29 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                 target: TargetName::new("tgt-web"),
             },
             vec!["work-xyz", "cont-xyz", "10001"],
+        ),
+        (
+            NeedsUndeclared {
+                names: vec!["API_KEY".into(), "DB_URL".into()],
+                product: None,
+            },
+            vec!["API_KEY", "DB_URL"],
+        ),
+        (
+            ImportTierRefused {
+                env: EnvName::new("env-stage"),
+                tier: "shared",
+                file: PathBuf::from("local.env"),
+            },
+            vec!["env-stage", "shared"],
+        ),
+        (
+            RetireStillRead {
+                key: KeyName::new("OPENAI_API_KEY"),
+                env: EnvName::new("env-prod"),
+                files: vec!["src/lib.rs:12".into()],
+            },
+            vec!["OPENAI_API_KEY", "env-prod", "src/lib.rs:12"],
         ),
     ]
 }
@@ -865,11 +909,13 @@ fn ordinal(c: &Cause) -> usize {
         ConfigSourceMismatch { .. } => 1,
         ConfigUnreadable { .. } => 2,
         ConfigInvalid { .. } => 3,
+        ContractStale { .. } => 50,
         BoundaryMissing { .. } => 4,
         StateVaultMissing { .. } => 5,
         StateVaultTooWide { .. } => 6,
         ConfigNotEditable { .. } => 7,
         CopiesDiffer { .. } => 8,
+        BindingsUnapplied { .. } => 49,
         ManifestNotFound { .. } => 9,
         ManifestAmbiguous { .. } => 10,
         ManifestExists { .. } => 11,
@@ -908,13 +954,12 @@ fn ordinal(c: &Cause) -> usize {
         UnexpectedOutput { .. } => 41,
         Unrecognized { .. } => 42,
         NeedsTerminal { .. } => 43,
+        PersonOnly { .. } => 77,
         NeedsConfirm { .. } => 44,
         ConfirmMismatch { .. } => 45,
         ValuesNeeded { .. } => 46,
         LocalFileTooOpen { .. } => 47,
         InputInvalid { .. } => 48,
-        ApprovalMissing { .. } => 49,
-        ApprovalUsed { .. } => 50,
         PlanChanged { .. } => 51,
         PlanUnknown { .. } => 52,
         RamDirUnavailable { .. } => 53,
@@ -941,10 +986,15 @@ fn ordinal(c: &Cause) -> usize {
         PersonalNotSetUp { .. } => 73,
         TargetDrift { .. } => 75,
         MountUnreadable { .. } => 76,
+        ValueInTextField { .. } => 78,
+        GateFailed { .. } => 79,
+        NeedsUndeclared { .. } => 80,
+        ImportTierRefused { .. } => 81,
+        RetireStillRead { .. } => 82,
     }
 }
 
-const VARIANTS: usize = 77;
+const VARIANTS: usize = 83;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
@@ -1055,9 +1105,86 @@ fn a_source_changed_sync_is_a_run() {
         no_record: false,
     };
     assert_eq!(
-        crate::cause::render::next_kind(&cause.step(&inv()).1),
-        "run"
+        crate::cause::render::next_kind_actor(&cause.step(&inv()).1).0,
+        crate::json::NextKind::Run
     );
+}
+
+#[test]
+fn a_login_handoff_is_an_authorize_for_the_person() {
+    let n = Next::Handoff(Cmd {
+        command: vec!["login".into()],
+        args: Vec::new(),
+    });
+    assert_eq!(
+        next_kind_actor(&n),
+        (
+            crate::json::NextKind::Authorize,
+            crate::json::NextActor::Person
+        )
+    );
+}
+
+#[test]
+fn a_vendor_step_is_a_run_for_the_person() {
+    let n = Next::Vendor(VendorCmd {
+        program: "op".into(),
+        args: vec!["signin".into()],
+    });
+    assert_eq!(
+        next_kind_actor(&n),
+        (crate::json::NextKind::Run, crate::json::NextActor::Person)
+    );
+}
+
+/// Row `import-next`: an import failure's next is the person's own action.
+#[test]
+fn an_import_read_back_failure_names_the_person() {
+    let c = Cause::ReadBackMissing {
+        vault: VaultId::new("vlt-atqr"),
+        item: ItemId::new("itm-1"),
+        fields: vec![FieldName::new("web/KEY")],
+        by: Cmd {
+            command: vec!["import".into()],
+            args: vec!["dev".into(), "--from".into(), ".env.dev".into()],
+        },
+    };
+    let (_, next) = c.step_in(&inv(), &person_at_terminal());
+    assert_eq!(next_kind_actor(&next).1, NextActor::Person);
+}
+
+/// Row `import-next`: that person action is an `apply`.
+#[test]
+fn an_import_read_back_failure_nexts_an_apply() {
+    let c = Cause::ReadBackMissing {
+        vault: VaultId::new("vlt-atqr"),
+        item: ItemId::new("itm-1"),
+        fields: vec![FieldName::new("web/KEY")],
+        by: Cmd {
+            command: vec!["import".into()],
+            args: vec!["dev".into(), "--from".into(), ".env.dev".into()],
+        },
+    };
+    let (_, next) = c.step_in(&inv(), &person_at_terminal());
+    assert_eq!(next_kind_actor(&next).0, NextKind::Apply);
+}
+
+/// Row `import-next`: re-running an import is the person's own action.
+#[test]
+fn an_import_rerun_names_the_person() {
+    let import = Invocation {
+        origin: Origin::Cli,
+        command: vec!["import".into()],
+        args: vec!["dev".into(), "--from".into(), ".env.dev".into()],
+        has_child: false,
+    };
+    assert_eq!(next_value(&Next::Rerun, &import)["actor"], "person");
+}
+
+/// Row `import-next`: a re-run of a command no person owns stays the assistant's.
+#[test]
+fn a_non_person_rerun_stays_the_assistants() {
+    assert_eq!(next_value(&Next::Rerun, &inv())["actor"], "assistant");
 }
 
 #[test]
@@ -1160,7 +1287,6 @@ fn human_required_matches_step() {
                     Cause::NeedsTerminal { .. }
                         | Cause::NeedsOwnSession { .. }
                         | Cause::NeedsConfirm { .. }
-                        | Cause::ApprovalMissing { .. }
                         | Cause::CredentialRejected { .. }
                 );
             derived != c.human_required(&inv())
@@ -1207,10 +1333,10 @@ fn create_unknown_never_reruns() {
 }
 
 #[test]
-fn partial_and_used_approvals_only_read() {
+fn partial_runs_only_read() {
     let bad: Vec<&str> = causes()
         .iter()
-        .filter(|c| matches!(c, Cause::Partial { .. } | Cause::ApprovalUsed { .. }))
+        .filter(|c| matches!(c, Cause::Partial { .. }))
         .filter(|c| !matches!(c.step(&inv()).1, Next::Check(_) | Next::Run(_)))
         .map(Cause::code)
         .collect();
@@ -1286,7 +1412,10 @@ fn a_misspelt_sync_becomes_its_plan_with_the_scope_flags() {
 
 #[test]
 fn a_misspelt_sync_never_carries_its_confirmation_into_the_plan() {
-    let i = invoked(&["sync"], &["prdo", "--confirm", "prdo", "--approved=sp-1"]);
+    let i = invoked(
+        &["sync"],
+        &["prdo", "--confirm", "prdo", "--expect-plan=sp-1"],
+    );
     assert_eq!(
         next_line(&misspelt_env(), &i).as_deref(),
         Some("opv plan prod")
@@ -1294,30 +1423,33 @@ fn a_misspelt_sync_never_carries_its_confirmation_into_the_plan() {
 }
 
 #[test]
-fn a_misspelt_bootstrap_becomes_its_dry_run() {
-    let i = invoked(&["bootstrap"], &["--rebind", "prdo"]);
+fn a_misspelt_import_becomes_its_dry_run() {
+    let i = invoked(&["import"], &["prdo", "--from", ".env"]);
     assert_eq!(
         next_line(&misspelt_env(), &i).as_deref(),
-        Some("opv bootstrap --rebind prod --dry-run")
+        Some("opv import prod --from .env --dry-run")
     );
 }
 
 #[test]
-fn a_misspelt_target_add_becomes_its_dry_run() {
-    let i = invoked(&["target", "add"], &["prdo", "site", "--fly-app", "site-x"]);
+fn a_misspelt_written_proposal_becomes_the_proposal_alone() {
+    let i = invoked(
+        &["propose", "target"],
+        &["prdo", "site", "--fly-app", "site-x", "--write"],
+    );
     assert_eq!(
         next_line(&misspelt_env(), &i).as_deref(),
-        Some("opv target add prod site --fly-app site-x --dry-run")
+        Some("opv propose target prod site --fly-app site-x")
     );
 }
 
 #[test]
 fn a_misspelt_write_without_a_read_form_lists_the_names() {
-    let i = invoked(&["generate"], &["prdo", "api/K"]);
+    let i = invoked(&["set"], &["api/K", "--env", "prdo"]);
     assert_eq!(
         misspelt_env().step(&i).1,
         Next::Check(Cmd {
-            command: vec!["config".into(), "describe".into()],
+            command: vec!["contract".into()],
             args: vec![],
         })
     );
@@ -1571,24 +1703,10 @@ fn the_document_names_the_checked_account() {
 }
 
 #[test]
-fn the_document_kinds_a_handoff() {
-    let c = Cause::ApprovalMissing {
-        plan: PlanId::new("sp-9f3"),
-        scope: PlanScope::Structural,
-    };
-    let d = document(&c, None, &inv(), false);
-    assert_eq!(
-        (
-            d["next_kind"].clone(),
-            d["next"].clone(),
-            d["human_required"].clone()
-        ),
-        (
-            serde_json::json!("handoff"),
-            serde_json::json!("opv approve sp-9f3"),
-            serde_json::json!(true)
-        )
-    );
+fn a_partials_json_subject_has_no_approval_key() {
+    let d = document(&fixture(34), None, &inv(), false);
+    let keys: Vec<&String> = d["subject"].as_object().unwrap().keys().collect();
+    assert!(!keys.iter().any(|k| k.starts_with("approval")), "{d}");
 }
 
 #[test]
@@ -1611,11 +1729,11 @@ fn every_variant_documents_its_code() {
 fn an_mcp_rerun_names_the_tool() {
     let i = Invocation {
         origin: Origin::Mcp {
-            tool: "opv_sync".into(),
+            tool: "opv_generate".into(),
         },
         ..inv()
     };
-    assert_eq!(rerun_text(&i), "call opv_sync again");
+    assert_eq!(rerun_text(&i), "call opv_generate again");
 }
 
 #[test]
@@ -1667,36 +1785,8 @@ fn an_unrecognized_failure_checks_the_environment_it_knows() {
     );
 }
 
-#[test]
-fn a_missing_approval_hands_off_every_scope_flag() {
-    let c = Cause::ApprovalMissing {
-        plan: PlanId::new("sp-9f3"),
-        scope: sync_scope(),
-    };
-    assert_eq!(
-        next_of(&c).as_deref(),
-        Some(
-            "opv approve sp-9f3 --sync prod --deploy --prune --target web --target worker --product api --rotate api/SIGNING_KEY"
-        )
-    );
-}
-
-#[test]
-fn a_structural_approval_hands_off_the_plan_id_alone() {
-    let c = Cause::ApprovalMissing {
-        plan: PlanId::new("sp-9f3"),
-        scope: PlanScope::Structural,
-    };
-    assert_eq!(next_of(&c).as_deref(), Some("opv approve sp-9f3"));
-}
-
 const SCOPED_PLAN: &str =
     "opv plan prod --target web --target worker --product api --rotate api/SIGNING_KEY";
-
-#[test]
-fn a_used_approval_reads_the_plan_of_the_same_scope() {
-    assert_eq!(next_of(&fixture(50)).as_deref(), Some(SCOPED_PLAN));
-}
 
 #[test]
 fn a_changed_plan_reads_the_plan_of_the_same_scope() {
@@ -1717,11 +1807,11 @@ fn an_unknown_plan_of_a_known_scope_reads_that_scope() {
         plan: "sp-what".into(),
         scope: Some(PlanScope::Structural),
     };
-    assert_eq!(next_of(&c).as_deref(), Some("opv structure plan"));
+    assert_eq!(next_of(&c).as_deref(), Some("opv propose structure"));
 }
 
 #[test]
-fn a_partial_run_on_an_approval_reads_what_remains_in_its_scope() {
+fn a_partial_run_reads_what_remains_in_its_scope() {
     assert_eq!(next_of(&fixture(34)).as_deref(), Some(SCOPED_PLAN));
 }
 
@@ -2510,15 +2600,15 @@ fn a8_colour_dims_the_upstream_box() {
     assert!(text.contains("\x1b[2m"), "{text}");
 }
 
-/// A9 (X4): a re-run never repeats a used approval; it is the read.
+/// A9 (X4): a re-run never repeats an expected plan; it is the read.
 #[test]
-fn a9_a_rerun_never_repeats_the_approval() {
+fn a9_a_rerun_never_repeats_the_expected_plan() {
     let c = Cause::WriteOutcomeUnknown {
         system: System::Fly,
         subject: res(ResourceKind::FlyApp, "app-web"),
         seen: fly_seen(),
     };
-    let inv = cli(&["opv", "sync", "prod", "--approved", "ab12cd34"]);
+    let inv = cli(&["opv", "sync", "prod", "--expect-plan", "ab12cd34"]);
     assert_eq!(next_in(&c, &inv), "opv plan prod");
 }
 
@@ -2729,6 +2819,17 @@ fn a14_differing_copies_are_not_human_required() {
     assert!(!c.human_required(&inv()));
 }
 
+/// D-G: the differing-copies advice names the plain `config export` (no `--with-ids`).
+#[test]
+fn copies_differ_advice_names_the_plain_export() {
+    let c = Cause::CopiesDiffer {
+        file: PathBuf::from("secrets.toml"),
+        manifest: "opv shop".into(),
+    };
+    let d = c.do_text(&inv()).unwrap_or_default();
+    assert!(d.contains("opv config export --toml >"), "{d}");
+}
+
 /// A14: one ambiguous manifest is singular.
 #[test]
 fn a14_one_manifest_matches_in_the_singular() {
@@ -2760,8 +2861,7 @@ fn a14_a_missing_config_file_steps_to_doctor() {
 fn a15_nothing_written_is_never_listed() {
     let c = Cause::Partial {
         done: vec![],
-        approval_used: None,
-        approval_scope: None,
+        scope: None,
         then: Box::new(Cause::Interrupted {
             signal: 2,
             writes_started: true,
@@ -3173,7 +3273,7 @@ fn a20_a_built_step_keeps_the_config_flag() {
         source: file_source(),
     };
     let inv = cli(&["opv", "sync", "prod", "--config", "cfg/secrets.toml"]);
-    assert_eq!(next_in(&c, &inv), "opv bootstrap --config cfg/secrets.toml");
+    assert_eq!(next_in(&c, &inv), "opv apply --config cfg/secrets.toml");
 }
 
 /// A21: a rejected credential needs a person to replace it.
@@ -3277,8 +3377,7 @@ fn generate_refused(reason: GenerateRefusal) -> Cause {
 fn partial(then: Cause, done: &[&str]) -> Cause {
     Cause::Partial {
         done: done.iter().map(|d| d.to_string()).collect(),
-        approval_used: None,
-        approval_scope: None,
+        scope: None,
         then: Box::new(then),
     }
 }
@@ -3294,9 +3393,9 @@ fn secret_not_stored(refind: Option<VendorCmd>) -> Cause {
     }
 }
 
-/// F2 (R21): `opv add` into an undeclared environment steps to declaring it.
+/// F2 (R21): a key proposed into an undeclared environment steps to proposing it.
 #[test]
-fn f2_an_undeclared_environment_from_add_steps_to_env_add() {
+fn f2_an_undeclared_environment_from_propose_key_steps_to_propose_env() {
     let c = Cause::NotDeclared {
         kind: NameKind::Environment,
         given: "staging".into(),
@@ -3304,8 +3403,11 @@ fn f2_an_undeclared_environment_from_add_steps_to_env_add() {
         closest: None,
     };
     assert_eq!(
-        next_in(&c, &cli(&["opv", "add", "staging", "web/KEY"])),
-        "opv env add staging"
+        next_in(
+            &c,
+            &cli(&["opv", "propose", "key", "web/KEY", "--env", "staging"])
+        ),
+        "opv propose env staging"
     );
 }
 
@@ -3328,8 +3430,8 @@ fn f2_a_shared_key_steps_to_generating_its_source() {
         from: "api/TOKEN".into(),
     });
     assert_eq!(
-        next_in(&c, &cli(&["opv", "generate", "prod", "web/TOKEN"])),
-        "opv generate prod api/TOKEN"
+        next_in(&c, &cli(&["opv", "apply", "--generate", "prod:web/TOKEN"])),
+        "opv propose generate prod api/TOKEN"
     );
 }
 
@@ -3338,7 +3440,7 @@ fn f2_a_shared_key_steps_to_generating_its_source() {
 fn f2_a_byte_count_out_of_range_steps_to_config_edit() {
     let c = generate_refused(GenerateRefusal::ByteCountOutOfRange);
     assert_eq!(
-        next_in(&c, &cli(&["opv", "generate", "prod", "web/TOKEN"])),
+        next_in(&c, &cli(&["opv", "apply", "--generate", "prod:web/TOKEN"])),
         "opv config edit"
     );
 }
@@ -3348,14 +3450,14 @@ fn f2_a_byte_count_out_of_range_steps_to_config_edit() {
 fn f2_a_field_with_a_value_steps_to_the_rotation_plan() {
     let c = generate_refused(GenerateRefusal::HasValue);
     assert_eq!(
-        next_in(&c, &cli(&["opv", "generate", "prod", "web/TOKEN"])),
+        next_in(&c, &cli(&["opv", "apply", "--generate", "prod:web/TOKEN"])),
         "opv plan prod --rotate web/TOKEN"
     );
 }
 
-/// F2 (R46): a provider that hides values steps to adopt's help for the environment.
+/// F2 (R46): a provider that hides values steps to import's help for the environment.
 #[test]
-fn f2_a_provider_that_hides_values_steps_to_adopt_help() {
+fn f2_a_provider_that_hides_values_steps_to_import_help() {
     let c = Cause::Guard {
         guard: Guard::ProviderHidesValues {
             system: System::Fly,
@@ -3364,9 +3466,9 @@ fn f2_a_provider_that_hides_values_steps_to_adopt_help() {
     assert_eq!(
         next_in(
             &c,
-            &cli(&["opv", "adopt", "staging", "--from", "target:portfolio"])
+            &cli(&["opv", "import", "staging", "--from", "target:portfolio"])
         ),
-        "opv adopt staging --help"
+        "opv import staging --help"
     );
 }
 
@@ -3378,14 +3480,14 @@ fn f2_a_read_back_by_a_path_with_a_space_keeps_it_one_word() {
         item: ItemId::new("itm-1"),
         fields: vec![FieldName::new("web/KEY")],
         by: Cmd {
-            command: vec!["adopt".into()],
+            command: vec!["import".into()],
             args: vec!["dev".into(), "--from".into(), "my values.env".into()],
         },
     };
     let want = if cfg!(windows) {
-        "opv adopt dev --from \"my values.env\""
+        "opv import dev --from \"my values.env\""
     } else {
-        "opv adopt dev --from 'my values.env'"
+        "opv import dev --from 'my values.env'"
     };
     assert_eq!(next_in(&c, &inv()), want);
 }
@@ -3469,8 +3571,8 @@ fn f4_setups_near_product_is_a_handoff() {
     };
     let inv = cli(&["opv", "setup", "--product", "apu"]);
     assert_eq!(
-        next_kind(&c.step_in(&inv, &person_at_terminal()).1),
-        "handoff"
+        next_kind_actor(&c.step_in(&inv, &person_at_terminal()).1).0,
+        crate::json::NextKind::Apply
     );
 }
 
@@ -3508,8 +3610,11 @@ fn f4_a_file_that_exists_hands_off_with_force() {
         },
     };
     assert_eq!(
-        next_in(&c, &cli(&["opv", "init", "dev"])),
-        "opv init dev --force"
+        next_in(
+            &c,
+            &cli(&["opv", "skill", "install", "--project", "/work/app"])
+        ),
+        "opv skill install --project /work/app --force"
     );
 }
 
@@ -3602,7 +3707,7 @@ fn d3_a_built_step_keeps_the_project_flag() {
     };
     assert_eq!(
         next_in(&c, &cli(&["opv", "access", "prod", "--project", "acme"])),
-        "opv init prod --project acme"
+        "opv propose setup --from-item prod --project acme"
     );
 }
 
@@ -3866,8 +3971,8 @@ fn a_generated_configuration_names_no_opv_command_as_next() {
         reason: NotEditable::Generated { generator: None },
     };
     let inv = Invocation {
-        command: vec!["env".into()],
-        args: vec!["add".into(), "staging".into()],
+        command: vec!["propose".into(), "env".into()],
+        args: vec!["staging".into(), "--write".into()],
         ..inv()
     };
     assert_eq!(c.step(&inv).1, Next::None(NoNext::NothingToRun));
@@ -4039,8 +4144,7 @@ fn l10_in_env_keeps_an_environment_already_set() {
 fn l10_in_env_reaches_a_partial_then() {
     let c = Cause::Partial {
         done: Vec::new(),
-        approval_used: None,
-        approval_scope: None,
+        scope: None,
         then: Box::new(unrecognized_without_env()),
     }
     .in_env("prod");
@@ -4095,15 +4199,15 @@ fn a_file_delivery_without_a_runtime_folder_names_xdg_runtime_dir() {
     );
 }
 
-/// R2-8: a value missing after adopt points at the item, not the item's history.
+/// R2-8: a value missing after import points at the item, not the item's history.
 #[test]
-fn a_value_missing_after_adopt_checks_the_item() {
+fn a_value_missing_after_import_checks_the_item() {
     let c = Cause::ReadBackMissing {
         vault: VaultId::new("vlt-atqr"),
         item: ItemId::new("itm-1"),
         fields: vec![FieldName::new("web/KEY")],
         by: Cmd {
-            command: vec!["adopt".into()],
+            command: vec!["import".into()],
             args: vec!["dev".into()],
         },
     };
@@ -4122,7 +4226,7 @@ fn a_value_missing_after_tidy_is_restored_from_history() {
         item: ItemId::new("itm-1"),
         fields: vec![FieldName::new("web/KEY")],
         by: Cmd {
-            command: vec!["tidy".into()],
+            command: vec!["config".into(), "export".into()],
             args: vec!["dev".into()],
         },
     };
@@ -4131,4 +4235,32 @@ fn a_value_missing_after_tidy_is_restored_from_history() {
             .unwrap_or_default()
             .starts_with("restore ")
     );
+}
+
+/// A failed gate asks a person to fill a value (`human_required`): its `next` is the
+/// person's, never the assistant's.
+#[test]
+fn a_gate_failure_fill_is_the_persons_next() {
+    let c = Cause::GateFailed {
+        env: EnvName::new("env-dev"),
+        keys: vec![(
+            ProductName::new("prod-api"),
+            KeyName::new("MY_TOKEN"),
+            "placeholder",
+        )],
+    };
+    assert_eq!(
+        next_kind_actor(&c.step(&inv()).1).1,
+        crate::json::NextActor::Person
+    );
+}
+
+#[test]
+fn an_import_refused_for_its_tier_is_a_persons_step() {
+    let c = Cause::ImportTierRefused {
+        env: EnvName::new("env-dev"),
+        tier: "shared",
+        file: PathBuf::from("local.env"),
+    };
+    assert!(c.human_required(&inv()));
 }

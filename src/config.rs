@@ -26,8 +26,8 @@ use crate::cause::{
 };
 use crate::domain::rules::{SIGNOZ_BODY, SIGNOZ_PREFIX};
 use crate::domain::{
-    Boundary, Environment, Fleet, ItemRef, KeySpec, Kind, Product, Target, boundary_missing,
-    key_label,
+    Boundary, Environment, Fleet, ItemRef, KeySpec, Kind, Product, Target, Tier, ValueSource,
+    boundary_missing, key_label,
 };
 use crate::error::Error;
 use crate::provider::{
@@ -35,6 +35,8 @@ use crate::provider::{
 };
 
 mod locate;
+
+pub mod bindings;
 
 /// Read and validate the configuration at `path`, found by discovery. An error names the
 /// file, the line and the field the validator checked, and the fix built from the field and
@@ -54,16 +56,151 @@ pub fn load_given(path: impl AsRef<Path>, given_by: GivenBy) -> Result<Fleet, Er
             given_by: given_by.clone(),
         })
     })?;
-    parse(&text).map_err(|e| {
-        locate::relocate_at(
-            e,
-            &text,
-            ConfigSource::File {
-                path: path.to_path_buf(),
-                given_by,
-            },
+    parse_file(&text, path, given_by)
+}
+
+/// [`parse`] for the text of the contract file at `path` (D-G): an inline id is refused,
+/// the sibling `secrets.bindings.toml`'s ids are filled in, and an error names `path` at
+/// the line of the contract as the person wrote it, not of the filled-in text.
+pub fn parse_file(text: &str, path: &Path, given_by: GivenBy) -> Result<Fleet, Error> {
+    let source = || ConfigSource::File {
+        path: path.to_path_buf(),
+        given_by: given_by.clone(),
+    };
+    let merged = merged(text, path, source())?;
+    parse(&merged).map_err(|e| {
+        in_contract(
+            locate::relocate_at(e, &merged, source()),
+            text,
+            &merged,
+            path,
         )
     })
+}
+
+/// The contract text at `path` with its sibling bindings filled in: the text the writers
+/// that predate the bindings file edit (D-G). An inline id is refused, as at load.
+pub fn read_merged(path: &Path) -> Result<String, Error> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| crate::config_store::unreadable(path, &e, GivenBy::Discovered))?;
+    with_bindings(&text, path)
+}
+
+/// `text`, the contract read from `path`, with its sibling bindings filled in (D-G): what
+/// [`read_merged`] gives for a text already read. An inline id is refused, as at load.
+pub fn with_bindings(text: &str, path: &Path) -> Result<String, Error> {
+    let source = ConfigSource::File {
+        path: path.to_path_buf(),
+        given_by: GivenBy::Discovered,
+    };
+    merged(text, path, source)
+}
+
+/// `text` (the contract at `path`, named `source`) refused when it writes an id inline,
+/// else with the sibling bindings filled in. An error in the bindings file names that file.
+fn merged(text: &str, path: &Path, source: ConfigSource) -> Result<String, Error> {
+    // D-G: ids live in the sibling `secrets.bindings.toml`, one-way out of the contract.
+    bindings::refuse_inline(text).map_err(|e| locate::relocate_at(e, text, source))?;
+    let ids = bindings::read_sibling(path)?;
+    Ok(bindings::merge(text, &ids))
+}
+
+/// `e`, from parsing `merged` (the contract at `path`, `original`, with its bindings filled
+/// in) and naming the contract, placed at the line of `original` it came from. A line the
+/// bindings filled in has no line in the contract: the error names the bindings file at the
+/// id's line when the field is one of its ids, else the deepest part of its field the
+/// contract declares.
+fn in_contract(e: Error, original: &str, merged: &str, path: &Path) -> Error {
+    let Some((cause, _)) = e.cause() else {
+        return e;
+    };
+    let mut cause = cause.clone();
+    let (source, at, field) = match &mut cause {
+        Cause::ConfigInvalid {
+            source, at, field, ..
+        } => (source, at, field.0.clone()),
+        Cause::StateVaultTooWide {
+            source,
+            at,
+            env,
+            target,
+            ..
+        } => (
+            source,
+            at,
+            vec![
+                "environments".to_string(),
+                env.to_string(),
+                "targets".to_string(),
+                target.to_string(),
+                "state_vault_id".to_string(),
+            ],
+        ),
+        _ => return e,
+    };
+    let Some(loc) = at.as_mut() else {
+        return e;
+    };
+    let lines = bindings::original_lines(original, merged);
+    if let Some(Some(line)) = usize::try_from(loc.line)
+        .ok()
+        .and_then(|l| lines.get(l.checked_sub(1)?).copied())
+    {
+        loc.line = u32::try_from(line + 1).unwrap_or(u32::MAX);
+        return cause.into();
+    }
+    let sibling = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(bindings::FILE);
+    let key = format!("{} ", field.join("."));
+    let in_bindings = std::fs::read_to_string(&sibling).ok().and_then(|text| {
+        text.lines()
+            .position(|l| l.starts_with(&key))
+            .and_then(|i| u32::try_from(i + 1).ok())
+    });
+    match in_bindings {
+        Some(line) => {
+            *source = ConfigSource::File {
+                path: sibling,
+                given_by: GivenBy::Discovered,
+            };
+            *at = Some(Location { line, col: 1 });
+        }
+        None => {
+            let refs: Vec<&str> = field.iter().map(String::as_str).collect();
+            *at = Doc::parse(original).ok().and_then(|d| d.location(&refs));
+        }
+    }
+    cause.into()
+}
+
+#[cfg(test)]
+/// The contract file at `path` with its sibling bindings filled in, for a test that edits a
+/// fixture's text before parsing it.
+pub fn merged_text(path: impl AsRef<Path>) -> String {
+    read_merged(path.as_ref()).unwrap()
+}
+
+/// Read the configuration at `path` with its ids left inline, returning the fleet and the
+/// ids to move into `secrets.bindings.toml` (D-G; `opv propose structure`). This is the only
+/// reader that accepts inline ids: [`load`] refuses them.
+pub fn load_for_move(path: impl AsRef<Path>) -> Result<(Fleet, bindings::Bindings), Error> {
+    let path = path.as_ref();
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        Error::from(Cause::ConfigUnreadable {
+            path: path.to_path_buf(),
+            io: e.kind().into(),
+            given_by: GivenBy::Discovered,
+        })
+    })?;
+    let source = || ConfigSource::File {
+        path: path.to_path_buf(),
+        given_by: GivenBy::Discovered,
+    };
+    let ids = bindings::inline_ids(&text).map_err(|e| locate::relocate_at(e, &text, source()))?;
+    let fleet = parse(&text).map_err(|e| locate::relocate_at(e, &text, source()))?;
+    Ok((fleet, ids))
 }
 
 /// Where a configuration text came from, for its error messages (H10, FR-44).
@@ -618,14 +755,14 @@ fn removed_forms(doc: &Doc<'_>) -> Result<(), Error> {
                     &path,
                     "an environment's vault_id",
                     "one boundary per product, boundaries.<product> = { vault_id = \"...\", \
-                     item_id = \"...\" } (opv bootstrap records them)"
+                     item_id = \"...\" } (opv apply records them)"
                         .into(),
                 ),
                 "item_id" => removed(
                     &path,
                     "an environment's item_id",
                     "one boundary per product, boundaries.<product> = { vault_id = \"...\", \
-                     item_id = \"...\" } (opv bootstrap records them)"
+                     item_id = \"...\" } (opv apply records them)"
                         .into(),
                 ),
                 "deploy_credentials" => removed(
@@ -711,6 +848,10 @@ struct RawEnvironment {
     /// `sync` needs `--confirm <env>` (NR-20).
     #[serde(default)]
     confirm_env: bool,
+    /// How far this environment's values may travel (FR-59); absent: derived from the
+    /// name or title.
+    #[serde(default)]
+    tier: Option<Tier>,
     /// The 1Password account for this environment's `op` calls (FR-40).
     #[serde(default)]
     account: Option<String>,
@@ -728,12 +869,16 @@ struct RawEnvironment {
     personal_item: Option<String>,
 }
 
-/// `boundaries.<name> = { vault_id, item_id }` (FR-57).
+/// `boundaries.<name> = { vault_id, item_id }` (FR-57). Both ids come from the bindings
+/// file (D-G); a boundary with neither is declared and not bound yet (`boundaries.web = {}`
+/// before the first `opv apply`).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawBoundary {
-    vault_id: String,
-    item_id: String,
+    #[serde(default)]
+    vault_id: Option<String>,
+    #[serde(default)]
+    item_id: Option<String>,
 }
 
 /// One named target (FR-56): its own options, and every other entry as a provider section.
@@ -751,7 +896,8 @@ struct RawTarget {
     /// `op://<vault>/<item>` holding the target's deploy identity (FR-40).
     #[serde(default)]
     deploy_credentials: Option<String>,
-    /// The vault holding the target's delivery evidence (FR-58); required (D12).
+    /// The vault holding the target's delivery evidence (FR-58, D12); `None` until the
+    /// first `opv apply` binds it (D-G).
     #[serde(default)]
     state_vault_id: Option<String>,
     /// product → its delivery item's ID in the state vault (FR-58), recorded by bootstrap.
@@ -981,6 +1127,28 @@ fn environment(
             },
         ));
     }
+    let tier = match e.tier {
+        Some(tier) => tier,
+        None => crate::domain::health::default_tier(name, e.title.as_deref()),
+    };
+    if tier == Tier::Local {
+        if !e.targets.is_empty() {
+            return Err(doc.invalid(
+                &["environments", name, "tier"],
+                FieldRule::ConflictsWith {
+                    field: DottedPath(vec!["targets".into()]),
+                },
+            ));
+        }
+        if e.confirm_env {
+            return Err(doc.invalid(
+                &["environments", name, "tier"],
+                FieldRule::ConflictsWith {
+                    field: DottedPath(vec!["confirm_env".into()]),
+                },
+            ));
+        }
+    }
     let mut boundaries = BTreeMap::new();
     for (b, raw) in e.boundaries {
         let path = ["environments", name, "boundaries", b.as_str()];
@@ -993,21 +1161,28 @@ fn environment(
             ));
         }
         for (field, value) in [("vault_id", &raw.vault_id), ("item_id", &raw.item_id)] {
-            ident(
-                doc,
-                &[&path[..], &[field]].concat(),
-                value,
-                is_id,
-                PatternId::Id,
-            )?;
+            if let Some(value) = value {
+                ident(
+                    doc,
+                    &[&path[..], &[field]].concat(),
+                    value,
+                    is_id,
+                    PatternId::Id,
+                )?;
+            }
         }
-        boundaries.insert(
-            b,
-            Boundary {
-                vault_id: raw.vault_id,
-                item_id: raw.item_id,
-            },
-        );
+        // D-G: a boundary is bound by both ids or by neither (declared, before `opv apply`).
+        let bound = match (raw.vault_id, raw.item_id) {
+            (Some(vault_id), Some(item_id)) => Some(Boundary { vault_id, item_id }),
+            (None, None) => None,
+            (Some(_), None) => {
+                return Err(doc.invalid(&[&path[..], &["item_id"]].concat(), FieldRule::Missing));
+            }
+            (None, Some(_)) => {
+                return Err(doc.invalid(&[&path[..], &["vault_id"]].concat(), FieldRule::Missing));
+            }
+        };
+        boundaries.insert(b, bound);
     }
     let mut targets = BTreeMap::new();
     for (t, raw) in e.targets {
@@ -1016,6 +1191,7 @@ fn environment(
     }
     Ok(Environment {
         name: name.to_string(),
+        tier,
         boundaries,
         targets,
         modes: e.modes,
@@ -1038,7 +1214,7 @@ pub(crate) fn is_target_name(s: &str) -> bool {
 }
 
 /// One named target (FR-56): its name, its one provider section, `products`,
-/// `deploy_credentials` and the required `state_vault_id` (FR-58, D12).
+/// `deploy_credentials` and its `state_vault_id` (FR-58, D12), unbound before `opv apply`.
 fn target(
     env: &str,
     name: &str,
@@ -1066,21 +1242,18 @@ fn target(
         None => None,
         Some(r) => Some(deploy_credentials(env, name, r, config.as_ref(), doc)?),
     };
-    let Some(state_vault_id) = raw.state_vault_id else {
-        return Err(Cause::StateVaultMissing {
-            env: crate::cause::EnvName::new(env),
-            target: crate::cause::TargetName::new(name),
-            source: parsing_source(),
-        }
-        .into());
-    };
-    ident(
-        doc,
-        &[&base[..], &["state_vault_id"]].concat(),
-        &state_vault_id,
-        is_id,
-        PatternId::Id,
-    )?;
+    // D-G: `None` until the first `opv apply` binds it; a command that needs it reports
+    // `state_vault_missing` ([`Fleet::state_vault`]).
+    let state_vault_id = raw.state_vault_id;
+    if let Some(id) = &state_vault_id {
+        ident(
+            doc,
+            &[&base[..], &["state_vault_id"]].concat(),
+            id,
+            is_id,
+            PatternId::Id,
+        )?;
+    }
     let delivery_items = raw.delivery_items.unwrap_or_default();
     for (product, id) in &delivery_items {
         ident(
@@ -1182,10 +1355,11 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
         }
         validate_local(doc, product, p)?;
         validate_remotes(doc, product, p, &environments)?;
+        validate_ignore(doc, product, p)?;
     }
 
     let mut products = raw.products;
-    check_shared(&mut products, doc)?;
+    check_shared(&mut products, &environments, doc)?;
     let fleet = Fleet {
         environments,
         products,
@@ -1201,6 +1375,30 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
     check_evidence_width(&fleet, doc)?;
     check_delivery_items(&fleet, doc)?;
     Ok(fleet)
+}
+
+/// Ignore annotations (Part V, row `annotations`): a scanner-observed name a person judged
+/// a false positive. Its name is key-shaped (`^[A-Z][A-Z0-9_]*$`, the scanner's grammar)
+/// and its reason must say something (D-G: refused, not a finding). The span is left as the
+/// scanner recorded it: it is a stable hash of the evidence line, never a value.
+fn validate_ignore(doc: &Doc<'_>, product: &str, p: &crate::domain::Product) -> Result<(), Error> {
+    for (name, annotation) in &p.ignore {
+        if !is_env_name(name) {
+            return Err(doc.invalid(
+                &["products", product, "ignore", name],
+                FieldRule::Pattern {
+                    id: PatternId::KeyName,
+                },
+            ));
+        }
+        if annotation.reason.trim().is_empty() {
+            return Err(doc.invalid(
+                &["products", product, "ignore", name, "reason"],
+                FieldRule::Empty,
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// A process role name (M3, #136): `^[a-z0-9-]{1,32}$`, so a shell never has to quote it.
@@ -1298,7 +1496,7 @@ fn check_file_mounts(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
                 }
                 let mut files: Vec<(&str, &str)> = Vec::new();
                 for (key, spec) in &p.keys {
-                    if !spec.environments.iter().any(|e| e == env_name) {
+                    if !spec.is_desired_in(env_name) {
                         continue;
                     }
                     let Some(file) = spec.file.as_deref() else {
@@ -1397,21 +1595,21 @@ fn check_evidence_width(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
                 if !fleet.delivers(env_name, name, product) {
                     continue;
                 }
-                let desired = p
-                    .keys
-                    .values()
-                    .filter(|k| k.environments.iter().any(|e| e == env_name));
+                let desired = p.keys.values().filter(|k| k.is_desired_in(env_name));
                 for k in desired {
                     let source = k.source().map_or(product.as_str(), |(sp, _)| sp);
                     for needer in [product.as_str(), source] {
                         let b = fleet.boundary_of(needer);
-                        if let Some(at) = env.boundaries.get(b) {
+                        if let Some(Some(at)) = env.boundaries.get(b) {
                             boundaries.insert(format!("{b} ({})", at.vault_id));
                         }
                     }
                 }
             }
-            reads.push((env_name, name, &target.state_vault_id, boundaries));
+            // An unbound state vault (D-G) is made for this target alone by `opv apply`.
+            if let Some(vault) = &target.state_vault_id {
+                reads.push((env_name, name, vault, boundaries));
+            }
         }
     }
     let targets: Vec<TargetReads<'_>> = reads
@@ -1491,10 +1689,10 @@ fn check_personal(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
     for (product, p) in &fleet.products {
         for (key, spec) in &p.keys {
             if spec.personal
-                && let Some(env) = spec.environments.iter().find(|e| {
+                && let Some(env) = spec.envs_in(fleet).into_iter().find(|e| {
                     fleet
                         .environments
-                        .get(*e)
+                        .get(e)
                         .is_some_and(|x| !x.targets.is_empty())
                 })
             {
@@ -1878,6 +2076,32 @@ fn validate_key(
             },
         ));
     }
+    // Key attributes (Part V, `key-attrs`): `source` must agree with the declaration it
+    // names (D-G: refused, never a finding). `derived` names another key via `from`;
+    // `generated` names a key whose rules give a generate recipe, mirroring the refusals of
+    // `crate::app::generate::recipe` (provider-issued prefix, personal, shared, byte count).
+    match (spec.value_source, &spec.from) {
+        (Some(ValueSource::Derived), None) => {
+            return Err(invalid(&["from"], FieldRule::Missing));
+        }
+        (Some(source), Some(_)) if source != ValueSource::Derived => {
+            return Err(invalid(
+                &["source"],
+                FieldRule::ConflictsWith {
+                    field: dotted(&path(&["from"])),
+                },
+            ));
+        }
+        (Some(ValueSource::Generated), None) if !spec.has_generate_recipe() => {
+            return Err(invalid(
+                &["source"],
+                FieldRule::Type {
+                    expected: "generated only when the key has a base64_bytes or hex_bytes rule",
+                },
+            ));
+        }
+        _ => {}
+    }
     // PATH finds `op`, HOME and XDG_CONFIG_HOME locate its configuration, OP_* holds its
     // sign-in.
     if matches!(key, "PATH" | "HOME" | "XDG_CONFIG_HOME") || key.starts_with("OP_") {
@@ -1889,11 +2113,36 @@ fn validate_key(
         ));
     }
     let declared = || environments.keys().map(String::as_str);
-    for env in &spec.environments {
+    if let Some(envs) = &spec.environments {
+        for env in envs {
+            if !environments.contains_key(env) {
+                return Err(invalid(
+                    &["environments"],
+                    undeclared(Declared::Environment, env, declared()),
+                ));
+            }
+        }
+    }
+    // Presence (Part V, `presence`): `except` removes the key from a declared environment
+    // with a reason. The reason must say something, the environment must exist, and an
+    // `environments` list that already names it hides the removal (D-G: refused, not a
+    // finding).
+    for (env, reason) in &spec.except {
+        if reason.trim().is_empty() {
+            return Err(invalid(&["except", env], FieldRule::Empty));
+        }
         if !environments.contains_key(env) {
             return Err(invalid(
-                &["environments"],
+                &["except", env],
                 undeclared(Declared::Environment, env, declared()),
+            ));
+        }
+        if spec.listed_in(env) && spec.environments.is_some() {
+            return Err(invalid(
+                &["except", env],
+                FieldRule::ConflictsWith {
+                    field: dotted(&path(&["environments"])),
+                },
             ));
         }
     }
@@ -1919,7 +2168,11 @@ fn validate_key(
                 undeclared(Declared::Environment, env, declared()),
             ));
         }
-        if spec.environments.contains(env) {
+        if spec
+            .environments
+            .as_ref()
+            .is_some_and(|envs| envs.contains(env))
+        {
             return Err(invalid(
                 &["rules", "refuse_in"],
                 FieldRule::ConflictsWith {
@@ -1981,7 +2234,7 @@ fn check_modes(
     spec: &KeySpec,
     environments: &BTreeMap<String, Environment>,
 ) -> Result<(), Error> {
-    for env_name in &spec.environments {
+    for env_name in spec.envs_among(environments.keys().map(String::as_str)) {
         let Some(env) = environments.get(env_name) else {
             continue;
         };
@@ -1990,7 +2243,7 @@ fn check_modes(
             None => FieldRule::Missing,
             Some(value) if p.values.contains_key(value) || p.skip.contains(value) => continue,
             Some(_) => FieldRule::ModeUnmapped {
-                env: crate::cause::EnvName::new(env_name.as_str()),
+                env: crate::cause::EnvName::new(env_name),
                 mode: p.mode.clone(),
                 allowed: p.values.keys().chain(&p.skip).cloned().collect(),
             },
@@ -2007,7 +2260,11 @@ fn check_modes(
 /// referencing key may not set `immutable`: it follows the source, and is copied from it
 /// here so every later check (rotate, prune, hold) treats both alike. Errors point at the
 /// `from` line.
-fn check_shared(products: &mut BTreeMap<String, Product>, doc: &Doc<'_>) -> Result<(), Error> {
+fn check_shared(
+    products: &mut BTreeMap<String, Product>,
+    environments: &BTreeMap<String, Environment>,
+    doc: &Doc<'_>,
+) -> Result<(), Error> {
     let mut follow: Vec<(String, String, bool)> = Vec::new();
     for (product, p) in products.iter() {
         for (key, spec) in &p.keys {
@@ -2064,22 +2321,15 @@ fn check_shared(products: &mut BTreeMap<String, Product>, doc: &Doc<'_>) -> Resu
                     kind: kind_name(spec.kind),
                 })));
             }
-            if let Some(env) = spec
-                .environments
-                .iter()
-                .find(|e| !src.environments.contains(e))
-            {
-                return Err(err(check(ConfigCheck::FromEnvironment {
-                    source,
-                    env: env.clone(),
-                })));
+            for env in spec.envs_among(environments.keys().map(String::as_str)) {
+                if !src.listed_in(env) {
+                    return Err(err(check(ConfigCheck::FromEnvironment {
+                        source,
+                        env: env.to_string(),
+                    })));
+                }
             }
-            if let Some(env) = spec
-                .rules
-                .refuse_in
-                .iter()
-                .find(|e| src.environments.contains(e))
-            {
+            if let Some(env) = spec.rules.refuse_in.iter().find(|e| src.listed_in(e)) {
                 return Err(doc.invalid(
                     &["products", product, "keys", key, "rules", "refuse_in"],
                     check(ConfigCheck::FromRefused {
@@ -2382,10 +2632,13 @@ mod tests {
     use crate::domain::Kind;
 
     const RAW: &str = include_str!("../tests/fixtures/secrets.toml");
+    const RAW_BINDINGS: &str = include_str!("../tests/fixtures/secrets.bindings.toml");
 
-    /// The fixture with LF line endings, whatever the checkout did (Windows may give CRLF).
+    /// The fixture with its bindings filled in and LF line endings, whatever the checkout
+    /// did (Windows may give CRLF).
     fn ok() -> String {
-        RAW.replace("\r\n", "\n")
+        let ids = bindings::Bindings::parse(&RAW_BINDINGS.replace("\r\n", "\n")).unwrap();
+        bindings::merge(&RAW.replace("\r\n", "\n"), &ids)
     }
 
     /// `text` with `from` replaced by `to`. Panics if `from` does not occur, so a mutation
@@ -2673,6 +2926,7 @@ environments = ["prod"]
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("secrets.toml");
         std::fs::write(&p, RAW).unwrap();
+        std::fs::write(dir.path().join(bindings::FILE), RAW_BINDINGS).unwrap();
         assert!(load(&p).is_ok());
     }
 
@@ -2706,10 +2960,10 @@ environments = ["prod"]
     fn records_each_boundary_by_ids() {
         assert_eq!(
             fixture().environments["prod"].boundaries["allumata"],
-            Boundary {
+            Some(Boundary {
                 vault_id: "vprd".into(),
                 item_id: "iprd".into()
-            }
+            })
         );
     }
 
@@ -2717,7 +2971,7 @@ environments = ["prod"]
     fn records_the_targets_state_vault() {
         assert_eq!(
             fixture().environments["prod"].targets["portfolio"].state_vault_id,
-            "sprd"
+            Some("sprd".to_string())
         );
     }
 
@@ -2765,7 +3019,7 @@ environments = ["prod"]
     fn parses_the_key_environments() {
         assert_eq!(
             fixture().products["allumata"].keys["OPENAI_API_KEY"].environments,
-            vec!["prod"]
+            Some(vec!["prod".to_string()])
         );
     }
 
@@ -2976,7 +3230,7 @@ environments = ["prod"]
             "rules = { ensure_prefix = \"p-\", pattern = \"[a-z]+\" }\n",
         );
         assert!(
-            config_err(&text).contains(" at line 48, column 33: "),
+            config_err(&text).contains(" at line 50, column 33: "),
             "{}",
             config_err(&text)
         );
@@ -3250,18 +3504,150 @@ environments = ["prod"]
         );
     }
 
-    #[test]
-    fn a_target_without_state_vault_id_is_state_vault_missing() {
+    // ---- unbound ids (D-G: before the first `opv apply`) ------------------------------
+
+    /// [`WEB`] with no ids: boundary `web` declared as `{}` and target `site` without
+    /// `state_vault_id`, as `opv propose setup --write` leaves it.
+    fn unbound() -> Fleet {
         let text = web("state_vault_id = \"sweb\"\n", "");
-        assert_eq!(config_code(&text), "state_vault_missing");
+        parse(&replaced(
+            &text,
+            "{ vault_id = \"vweb\", item_id = \"iweb\" }",
+            "{}",
+        ))
+        .unwrap()
+    }
+
+    /// The step of the cause `e` carries.
+    fn next_of(e: &Error) -> crate::cause::Next {
+        e.cause()
+            .unwrap()
+            .0
+            .step(&crate::cause::Invocation::default())
+            .1
+    }
+
+    /// `opv apply`, handed to a person.
+    fn apply_handoff() -> crate::cause::Next {
+        crate::cause::Next::Handoff(crate::cause::Cmd {
+            command: vec!["apply".into()],
+            args: Vec::new(),
+        })
     }
 
     #[test]
-    fn state_vault_missing_names_the_target() {
+    fn a_target_without_state_vault_id_loads_unbound() {
+        assert_eq!(
+            unbound().environments["prod"].targets["site"].state_vault_id,
+            None
+        );
+    }
+
+    #[test]
+    fn a_boundary_without_ids_loads_unbound() {
+        assert_eq!(unbound().environments["prod"].boundaries["web"], None);
+    }
+
+    #[test]
+    fn reading_an_unbound_boundary_is_boundary_missing() {
+        assert_eq!(
+            unbound().boundary("prod", "web").unwrap_err().code_str(),
+            "boundary_missing"
+        );
+    }
+
+    #[test]
+    fn an_unbound_boundarys_next_is_opv_apply_by_a_person() {
+        assert_eq!(
+            next_of(&unbound().boundary("prod", "web").unwrap_err()),
+            apply_handoff()
+        );
+    }
+
+    #[test]
+    fn every_boundary_of_an_environment_with_an_unbound_one_is_boundary_missing() {
+        assert_eq!(
+            unbound().bound_boundaries("prod").unwrap_err().code_str(),
+            "boundary_missing"
+        );
+    }
+
+    #[test]
+    fn reading_an_unbound_state_vault_names_the_target() {
+        let f = unbound();
+        let site = &f.environments["prod"].targets["site"];
         assert!(matches!(
-            cause(&web("state_vault_id = \"sweb\"\n", "")),
-            Cause::StateVaultMissing { target, .. } if target.as_str() == "site"
+            f.state_vault("prod", site).unwrap_err().cause(),
+            Some((Cause::StateVaultMissing { target, .. }, _)) if target.as_str() == "site"
         ));
+    }
+
+    #[test]
+    fn an_unbound_state_vaults_next_is_opv_apply_by_a_person() {
+        let f = unbound();
+        let site = &f.environments["prod"].targets["site"];
+        assert_eq!(
+            next_of(&f.state_vault("prod", site).unwrap_err()),
+            apply_handoff()
+        );
+    }
+
+    #[test]
+    fn a_bound_state_vault_reads_its_id() {
+        let f = parse(WEB).unwrap();
+        let site = &f.environments["prod"].targets["site"];
+        assert_eq!(f.state_vault("prod", site).unwrap(), "sweb");
+    }
+
+    #[test]
+    fn a_boundary_with_only_its_vault_id_is_refused_at_its_item_id() {
+        assert_eq!(
+            invalid(&web(", item_id = \"iweb\"", "")),
+            (
+                "environments.prod.boundaries.web.item_id".to_string(),
+                FieldRule::Missing
+            )
+        );
+    }
+
+    #[test]
+    fn an_unbound_boundary_still_rejects_a_malformed_vault_id() {
+        assert_eq!(
+            field_of(&web("vault_id = \"vweb\"", "vault_id = \"-v\"")),
+            "environments.prod.boundaries.web.vault_id"
+        );
+    }
+
+    #[test]
+    fn a_contract_with_a_boundary_and_no_bindings_file_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("secrets.toml");
+        let text = web("{ vault_id = \"vweb\", item_id = \"iweb\" }", "{}")
+            .replace("state_vault_id = \"sweb\"\n", "");
+        std::fs::write(&p, text).unwrap();
+        assert!(load(&p).is_ok());
+    }
+
+    #[test]
+    fn a_target_without_a_state_vault_binding_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("secrets.toml");
+        std::fs::write(
+            &p,
+            web("state_vault_id = \"sweb\"\n", "")
+                .replace("{ vault_id = \"vweb\", item_id = \"iweb\" }", "{}"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(bindings::FILE),
+            "environments.prod.boundaries.web.item_id = \"iweb\"\n\
+             environments.prod.boundaries.web.vault_id = \"vweb\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load(&p).unwrap().environments["prod"].targets["site"].state_vault_id,
+            None
+        );
     }
 
     #[test]
@@ -4021,7 +4407,7 @@ environments = ["prod"]
         let e = config_err(&shared(
             "kind = \"secret\"\nfrom = \"api/DB_URL\"\nenvironments = [\"prod\"]",
         ));
-        assert!(e.contains("at line 53, column 1"), "{e}");
+        assert!(e.contains("at line 55, column 1"), "{e}");
     }
 
     #[test]

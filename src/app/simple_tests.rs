@@ -9,7 +9,7 @@
 use serde_json::Value;
 
 use super::testutil::*;
-use super::{config_export, run, skeleton, status, sync};
+use super::{config_export, run, status, sync};
 use crate::config;
 use crate::domain::Fleet;
 use crate::error::Error;
@@ -593,51 +593,6 @@ fn sync_prune_immutable_takes_the_product_qualified_name() {
 }
 
 // ---------- item skeleton ----------
-
-#[test]
-fn skeleton_adds_missing_keys_under_the_product() {
-    let r = FakeRunner::new([prod_item_without("DATABASE_URL"), ok()]);
-    let (res, out) = out_of(|o| skeleton::run(&simple(), "prod", &r, o));
-    res.unwrap();
-    // Every key declared for prod: STRIPE (mode-skipped) and DATABASE_URL are missing.
-    assert!(
-        out.contains("added app/DATABASE_URL (secret, empty)")
-            && out.contains("added app/STRIPE_SECRET_KEY (secret, empty)"),
-        "{out}"
-    );
-}
-
-#[test]
-fn skeleton_writes_fields_in_the_products_section() {
-    let r = FakeRunner::new([prod_item_without("DATABASE_URL"), ok()]);
-    out_of(|o| skeleton::run(&simple(), "prod", &r, o))
-        .0
-        .unwrap();
-    let calls = r.calls.borrow();
-    let tpl: Value = serde_json::from_slice(calls[1].stdin.as_ref().unwrap()).unwrap();
-    let f = tpl["fields"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|f| f["label"] == "DATABASE_URL")
-        .unwrap();
-    assert_eq!(
-        f["section"],
-        serde_json::json!({"id": "app", "label": "app"}),
-        "{f}"
-    );
-}
-
-#[test]
-fn skeleton_with_every_field_present_makes_no_write() {
-    let mut fs = prod_fields();
-    fs.push(app_secret("STRIPE_SECRET_KEY", ""));
-    let r = FakeRunner::new([item(&fs)]);
-    let (res, out) = out_of(|o| skeleton::run(&simple(), "prod", &r, o));
-    res.unwrap();
-    assert!(out.contains("nothing to add"), "{out}");
-    assert_eq!(r.calls.borrow().len(), 1);
-}
 
 // ---------- config export ----------
 

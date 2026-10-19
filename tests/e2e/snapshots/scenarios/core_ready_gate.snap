@@ -1,0 +1,20 @@
+# core_ready_gate: opv ready --gate
+
+## text exit: 8
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: environment dev is not ready to promote: 3 keys: web/API_KEY (absent), web/LOG_LEVEL (placeholder), web/SESSION_SECRET (empty)
+Do: fill web/API_KEY in 1Password for environment dev
+Next: opv open web/API_KEY --env dev
+
+## json exit: 8
+## json stdout
+{"schema_version":3,"ok":false,"exit_code":8,"next":{"kind":"apply","actor":"person","command":"opv open web/API_KEY --env dev"},"do":"fill web/API_KEY in 1Password for environment dev","error":{"code":"gate_failed","category":"findings","message":"environment dev is not ready to promote: 3 keys: web/API_KEY (absent), web/LOG_LEVEL (placeholder), web/SESSION_SECRET (empty)","subject":{"keys":[["web","API_KEY","absent"],["web","LOG_LEVEL","placeholder"],["web","SESSION_SECRET","empty"]],"env":"dev"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":true,"do":"fill web/API_KEY in 1Password for environment dev","next":{"kind":"apply","actor":"person","command":"opv open web/API_KEY --env dev"}}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: environment dev is not ready to promote: 3 keys: web/API_KEY (absent), web/LOG_LEVEL (placeholder), web/SESSION_SECRET (empty)
+Do: fill web/API_KEY in 1Password for environment dev
+Next: opv open web/API_KEY --env dev

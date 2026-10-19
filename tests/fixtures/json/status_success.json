@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "ok": true,
   "environment": "prod",
   "product": null,
@@ -79,6 +79,10 @@
     "held": 0,
     "to_prune": 0
   },
-  "next": null,
+  "next": {
+    "kind": "none",
+    "actor": "person",
+    "command": null
+  },
   "do": null
 }

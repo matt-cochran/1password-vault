@@ -31,6 +31,17 @@ pub struct NewKey<'a> {
     pub personal: bool,
     /// `allow_same_value = true` (#92).
     pub allow_same_value: bool,
+    /// `except = { <env> = "<reason>" }`: environments the key is present in but needs no
+    /// value in (Part V, `presence`), in the order given.
+    pub except: &'a [(String, String)],
+    /// `source = "person" | "generated" | "derived"`.
+    pub source: Option<&'a str>,
+    /// A catalog shape name: its `Rules` are written as `rules = { … }`.
+    pub shape: Option<&'a str>,
+    /// `expires = "<date>"`.
+    pub expires: Option<&'a str>,
+    /// `lifecycle = "active" | "retiring" | "retired"`.
+    pub lifecycle: Option<&'a str>,
 }
 
 /// A parsed `secrets.toml` that keeps its formatting.
@@ -112,44 +123,6 @@ impl ConfigDoc {
         self.key(product, key).is_some()
     }
 
-    /// The declared key's `environments`, in file order.
-    pub fn key_environments(&self, product: &str, key: &str) -> Vec<String> {
-        self.key(product, key)
-            .and_then(|t| t.get("environments"))
-            .and_then(Item::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// Every declared key as (product, key), in file order.
-    pub fn keys(&self) -> Vec<(String, String)> {
-        let names = |t: &dyn TableLike| -> Vec<String> {
-            t.iter()
-                .filter(|(_, v)| v.is_table_like())
-                .map(|(k, _)| k.to_string())
-                .collect()
-        };
-        let Some(products) = self.table_at(&["products"]) else {
-            return Vec::new();
-        };
-        products
-            .iter()
-            .flat_map(|(p, v)| {
-                let keys = v
-                    .as_table_like()
-                    .and_then(|t| t.get("keys"))
-                    .and_then(Item::as_table_like)
-                    .map(names)
-                    .unwrap_or_default();
-                keys.into_iter().map(move |k| (p.to_string(), k))
-            })
-            .collect()
-    }
-
     /// Declare `product/key`, after the product's last key (a new product goes last).
     /// Keys written as inline tables (`K = { kind = … }`) get one more inline table.
     pub fn add_key(&mut self, product: &str, key: &str, k: &NewKey<'_>) -> Result<(), Error> {
@@ -168,18 +141,37 @@ impl ConfigDoc {
                 .ok_or_else(|| layout_error(source.clone(), &path.join(".")))?;
         }
         let inline = t.iter().any(|(_, v)| v.is_inline_table());
-        let mut fields: Vec<(&str, Value)> = vec![
-            ("kind", Value::from(k.kind)),
-            ("environments", env_array(k.environments)),
-        ];
-        if !k.rules.is_empty() {
-            let mut rules: InlineTable = k
-                .rules
+        let mut fields: Vec<(&str, Value)> = vec![("kind", Value::from(k.kind))];
+        // An empty list means every environment: write no `environments` line at all.
+        if !k.environments.is_empty() {
+            fields.push(("environments", env_array(k.environments)));
+        }
+        if !k.except.is_empty() {
+            let mut except: InlineTable = k
+                .except
                 .iter()
-                .map(|(n, v)| (n.as_str(), v.clone()))
+                .map(|(env, reason)| (env.as_str(), reason.as_str()))
                 .collect();
-            rules.fmt();
-            fields.push(("rules", Value::InlineTable(rules)));
+            except.fmt();
+            fields.push(("except", Value::InlineTable(except)));
+        }
+        // A shape's catalog rules, then any explicit `--rule` (which wins on a clash).
+        let mut rules: Vec<(String, Value)> = k.shape.map(shape_rules).unwrap_or_default();
+        rules.extend(k.rules.iter().cloned());
+        if !rules.is_empty() {
+            let mut table: InlineTable =
+                rules.iter().map(|(n, v)| (n.as_str(), v.clone())).collect();
+            table.fmt();
+            fields.push(("rules", Value::InlineTable(table)));
+        }
+        if let Some(source) = k.source {
+            fields.push(("source", Value::from(source)));
+        }
+        if let Some(expires) = k.expires {
+            fields.push(("expires", Value::from(expires)));
+        }
+        if let Some(lifecycle) = k.lifecycle {
+            fields.push(("lifecycle", Value::from(lifecycle)));
         }
         if k.immutable {
             fields.push(("immutable", Value::from(true)));
@@ -215,30 +207,48 @@ impl ConfigDoc {
         }
     }
 
-    /// Append `env` to the declared key's `environments`, keeping the array's style.
-    pub fn add_key_env(&mut self, product: &str, key: &str, env: &str) -> Result<(), Error> {
+    /// Set `lifecycle` on the declared key (the retirement proposal's only edit).
+    pub fn set_key_lifecycle(
+        &mut self,
+        product: &str,
+        key: &str,
+        lifecycle: &str,
+    ) -> Result<(), Error> {
         let source = self.source();
         let mut path = keys_path(product);
         path.push(key);
-        let arr = self
+        let t = self
             .table_at_mut(&path)
-            .and_then(|t| t.get_mut("environments"))
-            .and_then(Item::as_array_mut)
-            .ok_or_else(|| -> Error {
-                let mut field: Vec<String> = path.iter().map(|s| s.to_string()).collect();
-                field.push("environments".into());
-                Cause::ConfigInvalid {
-                    source,
-                    at: None,
-                    field: DottedPath(field),
-                    rule: FieldRule::Type {
-                        expected: "a list of environment names",
-                    },
-                }
-                .into()
-            })?;
-        arr.push(env);
+            .ok_or_else(|| layout_error(source, &path.join(".")))?;
+        t.insert("lifecycle", Item::Value(Value::from(lifecycle)));
         Ok(())
+    }
+
+    /// Declare `boundaries.<boundary> = {}` (no ids yet: an apply records them) in the
+    /// declared environment `env`, unless it already declares that boundary. True when the
+    /// text changed.
+    pub fn declare_boundary(&mut self, env: &str, boundary: &str) -> Result<bool, Error> {
+        let source = self.source();
+        let env_table = self
+            .table_at_mut(&["environments", env])
+            .ok_or_else(|| layout_error(source.clone(), &format!("environments.{env}")))?;
+        if env_table.get("boundaries").is_none() {
+            let mut dotted = Table::new();
+            dotted.set_dotted(true);
+            env_table.insert("boundaries", Item::Table(dotted));
+        }
+        let boundaries = env_table
+            .get_mut("boundaries")
+            .and_then(Item::as_table_like_mut)
+            .ok_or_else(|| layout_error(source, &format!("environments.{env}.boundaries")))?;
+        if boundaries.get(boundary).is_some() {
+            return Ok(false);
+        }
+        boundaries.insert(
+            boundary,
+            Item::Value(Value::InlineTable(InlineTable::new())),
+        );
+        Ok(true)
     }
 
     /// Add `[environments.<env>]` from `table_text` (a TOML fragment holding exactly that
@@ -309,6 +319,34 @@ fn env_array(envs: &[String]) -> Value {
     let mut a: Array = envs.iter().map(String::as_str).collect();
     a.fmt();
     Value::Array(a)
+}
+
+/// The `rules` entries a catalog shape names: its [`crate::domain::Rules`] with the fields
+/// left at their default omitted. An unknown shape has no rules (the caller reports it).
+fn shape_rules(name: &str) -> Vec<(String, Value)> {
+    let Some(shape) = crate::domain::catalog::lookup(name) else {
+        return Vec::new();
+    };
+    let Ok(default) = toml::Value::try_from(crate::domain::Rules::default()) else {
+        return Vec::new();
+    };
+    let Ok(value) = toml::Value::try_from(&shape.rules) else {
+        return Vec::new();
+    };
+    let (toml::Value::Table(default), toml::Value::Table(mut value)) = (default, value) else {
+        return Vec::new();
+    };
+    value.retain(|k, v| default.get(k) != Some(v));
+    let Ok(text) = toml::to_string(&toml::Value::Table(value)) else {
+        return Vec::new();
+    };
+    let Ok(frag) = text.parse::<DocumentMut>() else {
+        return Vec::new();
+    };
+    frag.as_table()
+        .iter()
+        .filter_map(|(k, v)| v.clone().into_value().ok().map(|v| (k.to_string(), v)))
+        .collect()
 }
 
 /// A table moved from another document takes its place from where it is inserted.
@@ -420,6 +458,11 @@ mod tests {
             from: None,
             personal: false,
             allow_same_value: false,
+            except: &[],
+            source: None,
+            shape: None,
+            expires: None,
+            lifecycle: None,
         }
     }
 
@@ -439,16 +482,6 @@ mod tests {
         assert_eq!(
             &d.to_string()[FILE.len()..],
             "\n[products.web.keys.C]\nkind = \"config\"\nenvironments = [\"prod\"]\n"
-        );
-    }
-
-    #[test]
-    fn add_key_env_appends_inside_the_existing_array() {
-        let mut d = ConfigDoc::parse(FILE).unwrap();
-        d.add_key_env("api", "A", "dev").unwrap();
-        assert!(
-            d.to_string()
-                .contains("environments = [\"prod\", \"dev\"]  # only prod\n")
         );
     }
 

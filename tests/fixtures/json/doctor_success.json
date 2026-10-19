@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "ok": true,
   "config_source": null,
   "checks": [
@@ -52,6 +52,14 @@
       "do": null
     },
     {
+      "name": "production login",
+      "target": "portfolio",
+      "status": "warn",
+      "detail": "this shell is signed in to Fly for production target portfolio (environment prod)",
+      "next": "sign out of Fly in this shell, or use a session that is not signed in to prod\n  hardened option: a separate 1Password admin account used only for production work (docs/security.md)",
+      "do": null
+    },
+    {
       "name": "state vault",
       "target": "portfolio",
       "status": "ok",
@@ -76,6 +84,10 @@
       "do": null
     }
   ],
-  "next": null,
+  "next": {
+    "kind": "none",
+    "actor": "person",
+    "command": null
+  },
   "do": null
 }

@@ -1,0 +1,7 @@
+import os
+
+key = "DATABASE_URL"
+a = os.environ[key]
+b = os.environ.get(f"{prefix}_DIR")
+c = os.getenv(name)
+d = environ.get(build_name())

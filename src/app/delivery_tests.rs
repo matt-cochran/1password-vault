@@ -512,7 +512,9 @@ fn source_versions(w: &World, fleet: &Fleet, product: &str) -> Option<String> {
 #[test]
 fn a_confirmed_sync_records_each_source_items_version() {
     let (w, fleet) = delivered();
-    let source = &fleet.environments["prod"].boundaries["api"];
+    let source = fleet.environments["prod"].boundaries["api"]
+        .as_ref()
+        .unwrap();
     let expected = format!(
         "v1|{}|{}\n",
         source.item_id,
@@ -524,7 +526,9 @@ fn a_confirmed_sync_records_each_source_items_version() {
 #[test]
 fn an_unconfirmed_sync_keeps_the_recorded_source_versions() {
     let (w, fleet) = delivered();
-    let source = &fleet.environments["prod"].boundaries["api"];
+    let source = fleet.environments["prod"].boundaries["api"]
+        .as_ref()
+        .unwrap();
     let before = format!(
         "v1|{}|{}\n",
         source.item_id,
@@ -539,7 +543,9 @@ fn an_unconfirmed_sync_keeps_the_recorded_source_versions() {
 #[test]
 fn changed_is_unchanged_after_a_confirmed_sync() {
     let (w, fleet) = delivered();
-    let source = &fleet.environments["prod"].boundaries["api"];
+    let source = fleet.environments["prod"].boundaries["api"]
+        .as_ref()
+        .unwrap();
     let delivery = &fleet.environments["prod"].targets["app"].delivery_items["api"];
     let list = format!(
         "[{{\"id\":\"{}\",\"version\":{}}},{{\"id\":\"{delivery}\",\"version\":9}},\
@@ -1163,7 +1169,11 @@ fn with_a_mode_skipped_key() -> (World, Fleet) {
     let (w, fleet) = world();
     let api = fleet.environments["prod"].targets["app"].delivery_items["api"].clone();
     let web = fleet.environments["prod"].targets["app"].delivery_items["web"].clone();
-    let id = fleet.environments["prod"].boundaries["api"].item_id.clone();
+    let id = fleet.environments["prod"].boundaries["api"]
+        .as_ref()
+        .unwrap()
+        .item_id
+        .clone();
     let fleet = crate::config::parse(&format!(
         "{}modes.api.payments = \"off\"\n{}{PRODUCTS}\
          [products.api.keys.STRIPE]\nkind = \"secret\"\nenvironments = [\"prod\"]\n\

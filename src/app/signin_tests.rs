@@ -12,7 +12,7 @@ const TOKEN: &str = "fo1_FIXTUREVALUE_deploy_token";
 
 /// The fixture with prod in `ACCOUNT`, signing in to Fly with `op://deploy-prd/fly`.
 fn fleet_with_credentials() -> Fleet {
-    let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+    let text = crate::config::merged_text("tests/fixtures/secrets.toml");
     let text = text.replacen(
         "[environments.prod]\n",
         &format!("[environments.prod]\naccount = \"{ACCOUNT}\"\n"),
@@ -75,7 +75,7 @@ fn account_is_not_added_under_a_service_account() {
     crate::adapters::onepassword::read_item(
         &env_runner,
         prod,
-        prod.boundaries.values().next().unwrap(),
+        prod.bound_boundaries().next().unwrap().1,
     )
     .unwrap();
     assert_eq!(env_of(&r.calls.borrow()[0], "OP_ACCOUNT"), None);

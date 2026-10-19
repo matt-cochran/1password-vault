@@ -1,0 +1,18 @@
+{
+  "evidence": [
+    {
+      "id": "E1",
+      "text": "To compare an application's needs with stored keys, the names the code reads must be found."
+    },
+    {
+      "id": "E2",
+      "text": "A deterministic scanner can recognize common patterns (process.env, os.environ, std::env::var, framework settings) but not dynamic names or unsupported languages."
+    },
+    {
+      "id": "E3",
+      "text": "An LLM can read arbitrary code and find more names, but its output is non-deterministic and can be wrong."
+    }
+  ],
+  "desiredImprovement": "Completeness of the list of names the application reads",
+  "worseningOutcome": "Determinism and verifiability of that list"
+}

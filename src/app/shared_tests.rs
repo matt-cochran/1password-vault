@@ -16,7 +16,7 @@ const WORKER_DB: &str = "FLEET__WORKER__DATABASE_URL";
 /// The fixture plus `extra`: every product `extra` introduces shares the fixture's single
 /// boundary (`allumata`), so the environment's products are read once (FR-57).
 fn bounded_with(extra: &str) -> crate::domain::Fleet {
-    let base = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+    let base = crate::config::merged_text("tests/fixtures/secrets.toml");
     let combined: toml::Table = toml::from_str(&format!("{base}\n{extra}")).unwrap();
     let declared: BTreeSet<String> = toml::from_str::<toml::Table>(&base).unwrap()["products"]
         .as_table()
@@ -193,18 +193,6 @@ fn leftover_field_of_a_shared_key_is_an_extra() {
 }
 
 #[test]
-fn product_check_reports_the_missing_source_of_its_shared_key() {
-    let r = FakeRunner::new([complete_item()]);
-    let mut out = Vec::new();
-    let _ = super::local::check(&fleet_shared(), "prod", Some("worker"), &r, &mut out, false);
-    assert!(
-        text_of(&out).contains("api/DATABASE_URL: missing (affects worker/DATABASE_URL)"),
-        "{}",
-        text_of(&out)
-    );
-}
-
-#[test]
 fn explain_shows_the_shared_chain() {
     let mut out = Vec::new();
     crate::app::testutil::explain(
@@ -238,14 +226,6 @@ fn explain_of_a_source_names_the_keys_sharing_it() {
         "{}",
         text_of(&out)
     );
-}
-
-#[test]
-fn skeleton_creates_no_field_for_a_shared_key() {
-    let r = FakeRunner::new([complete_item(), ok()]);
-    let mut out = Vec::new();
-    super::skeleton::run(&fleet_shared(), "prod", &r, &mut out).unwrap();
-    assert!(!text_of(&out).contains("worker/"), "{}", text_of(&out));
 }
 
 #[test]

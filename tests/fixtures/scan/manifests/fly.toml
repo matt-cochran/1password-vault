@@ -1,0 +1,14 @@
+app = "opv-web"
+primary_region = "fra"
+
+[build]
+  image = "opv/web"
+
+[env]
+  DATABASE_URL = "postgres://user:changeme@db:5432/app"
+  API_TOKEN = "changeme"
+  LOG_LEVEL = "info"
+
+[http_service]
+  internal_port = 8080
+  force_https = true

@@ -135,10 +135,14 @@ pub fn run(source: Exe, out: &mut dyn Write) -> Result<i32, Error> {
                 Effect::AdoptPlan { env, from } => {
                     busy(&mut term, &mut app, &format!("reading {from}…"))?;
                     app.status.clear();
-                    match fetch::<AdoptDoc>(&source, &["adopt", &env, "--from", &from, "--json"]) {
+                    match fetch::<AdoptDoc>(
+                        &source,
+                        &["import", &env, "--from", &from, "--dry-run", "--json"],
+                    ) {
                         Ok(doc) => app.open_adopt(&env, &from, &doc),
                         Err(failure) => {
-                            app.status = format!("opv adopt {env} --from {from}: {failure}")
+                            app.status =
+                                format!("opv import {env} --from {from} --dry-run: {failure}")
                         }
                     }
                 }
@@ -166,12 +170,22 @@ pub fn run(source: Exe, out: &mut dyn Write) -> Result<i32, Error> {
                 }
                 Effect::Run(args) => {
                     leave(&mut term)?;
-                    let line = super::app::command_line(&args);
-                    println!("\n$ {line}");
-                    let words: Vec<&str> = args.iter().map(String::as_str).collect();
                     // The command owns the terminal now: Ctrl-C stops it, not opv ui.
                     signals::set_child_owns_terminal(true);
-                    let status = source.command(&words).status();
+                    let run = |args: &[String]| {
+                        let line = super::app::command_line(args);
+                        println!("\n$ {line}");
+                        let words: Vec<&str> = args.iter().map(String::as_str).collect();
+                        (line, source.command(&words).status())
+                    };
+                    let (mut line, mut status) = run(&args);
+                    if matches!(&status, Ok(s) if s.success())
+                        && let Some(next) = follow_up(&args)
+                    {
+                        let (next_line, next_status) = run(&next);
+                        line = next_line;
+                        status = next_status;
+                    }
                     println!("\nPress Enter to return to opv ui.");
                     let _ = io::stdin().read_line(&mut String::new());
                     signals::set_child_owns_terminal(false);
@@ -194,6 +208,13 @@ pub fn run(source: Exe, out: &mut dyn Write) -> Result<i32, Error> {
     })();
     leave(&mut term)?;
     result.map(|()| 0)
+}
+
+/// The command that follows a proposal: `apply` recomputes the plan from the contract on
+/// disk and runs it. `propose … --write` is the first step and `apply` the second (Part V,
+/// `ui-remap`); every other action runs alone.
+fn follow_up(args: &[String]) -> Option<Vec<String>> {
+    (args.first().map(String::as_str) == Some("propose")).then(|| vec!["apply".to_string()])
 }
 
 type Term = Terminal<CrosstermBackend<io::Stdout>>;

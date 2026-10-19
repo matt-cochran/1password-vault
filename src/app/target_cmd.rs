@@ -1,18 +1,10 @@
-//! `opv target add` and `opv target list` (FR-56, `docs/design/placements-and-access-boundaries.md`
-//! §5.2).
+//! The target builders `opv propose target` uses (FR-56,
+//! `docs/design/placements-and-access-boundaries.md` §5.2), and `opv target list`.
 //!
-//! `target add` declares one named target under `[environments.<env>.targets.<name>]`: the
-//! provider's section (its options and validation come through the
-//! provider plug-in contract, FR-37), the products it delivers (FR-48), its deploy identity
-//! (`deploy_credentials`, FR-40) and its state vault (FR-58). In the same confirmed step it
-//! finds or creates the state vault titled [`naming::state_vault`] and records its ID. The
-//! edit goes through [`crate::config_store`]: 1Password writes happen only in a person's own
-//! session (FR-43, SR-3, SR-5), comments and order are kept ([`toml_edit`]), the edited text
-//! is validated by the same loader as a hand-written file before anything is written, and a
-//! concurrent change is refused. Names only, never a value (SR-1).
-//!
-//! `target list` is read-only: every target with its environment, provider, locator and
-//! scope.
+//! A target is one table under `[environments.<env>.targets.<name>]`: the provider's section
+//! (its options and validation come through the provider plug-in contract, FR-37), the
+//! products it delivers (FR-48) and its deploy identity (`deploy_credentials`, FR-40); its
+//! state vault comes from `opv apply`. Names only, never a value (SR-1).
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -20,47 +12,14 @@ use std::io::Write;
 use toml_edit::{DocumentMut, Item, Table};
 
 use super::write_err;
-use crate::adapters::onepassword_init::{self as init_op, Lookup};
 use crate::adapters::registry;
-use crate::app::{bootstrap, personal, tidy};
 use crate::cause::{
     Cause, Cmd, ConfigSource, DottedPath, FieldRule, NameKind, NotEditable, UsageProblem,
 };
-use crate::config;
-use crate::config_store::{self, ConfigStore};
-use crate::domain::{Fleet, naming};
+use crate::config_store;
+use crate::domain::Fleet;
 use crate::error::Error;
-use crate::host::Host;
 use crate::provider::{InitField, Provider, init_flag};
-use crate::runner::CommandRunner;
-
-/// `opv target add` arguments.
-#[derive(Debug, Clone, Default)]
-pub struct AddArgs {
-    /// Environment name from the configuration.
-    pub env: String,
-    /// New target name (`^[a-z][a-z0-9-]*$`).
-    pub name: String,
-    /// `--provider`: `fly`, `azure`, `kubernetes`, `github`; `None` infers it from the
-    /// provider options given, as `opv init` does.
-    pub provider: Option<String>,
-    /// The provider's options, by flag (`fly-app` → its value); validated against the
-    /// provider's [`InitField`]s.
-    pub fields: BTreeMap<String, String>,
-    /// `--products <p>[,<p>…]`: the products it delivers; empty means every product.
-    pub products: Vec<String>,
-    /// `--role <name>` (repeatable): the process roles it delivers, written as the target's
-    /// `roles` (delivery-transports §4.4); names only. Empty: no `roles` line.
-    pub roles: Vec<String>,
-    /// `--deploy-credentials op://<vault>/<item>` (FR-40).
-    pub deploy_credentials: Option<String>,
-    /// `--project <name>`: the project naming the state vault; default: the repository's.
-    pub project: Option<String>,
-    /// `--dry-run`: print what would be written and created, change nothing.
-    pub dry_run: bool,
-    /// `--json`: print one document (A5).
-    pub json: bool,
-}
 
 /// `target list --env <ENV> [--json]`.
 #[derive(Debug, Clone, Default)]
@@ -79,7 +38,7 @@ fn opv(command: &[&str], args: &[&str]) -> Cmd {
     }
 }
 
-/// A command-line refusal: its Next is `opv target add --help` (flag errors only, 06.27).
+/// A command-line refusal: its Next is `opv propose target --help` (flag errors only, 06.27).
 fn usage(problem: UsageProblem) -> Error {
     Cause::Usage { problem }.into()
 }
@@ -116,149 +75,27 @@ fn bug(site: &'static str) -> Error {
     Cause::Bug { site }.into()
 }
 
-/// `opv target add` (FR-56). Every refusal is a catalog cause with its own step: flag
-/// errors lead to `--help`, configuration-shape refusals to `opv config edit` (06.27).
-pub fn add(
-    args: &AddArgs,
-    store: &dyn ConfigStore,
-    r: &dyn CommandRunner,
-    out: &mut dyn Write,
-) -> Result<(), Error> {
-    add_inner(args, store, r, out)
-}
-
-fn add_inner(
-    args: &AddArgs,
-    store: &dyn ConfigStore,
-    r: &dyn CommandRunner,
-    out: &mut dyn Write,
-) -> Result<(), Error> {
-    // The text the write is built from: for the manifest, a person's fresh read (I3, C1).
-    let base = store.read_for_write(r)?;
-    let original = &base.text;
-    let place = store.describe();
-    let source = store.cause_source();
-    let fleet = store.parse(original)?;
-    let environment = fleet.environment(&args.env)?;
-    if !config::is_target_name(&args.name) {
-        return Err(usage(UsageProblem::ValueFormat {
-            flag: format!("the target name {:?}", args.name),
-            format: "a name matching ^[a-z][a-z0-9-]*$",
-        }));
-    }
-    if environment.targets.contains_key(&args.name) {
-        return Err(exists(&args.env, &args.name));
-    }
-    let (provider, values) = provider_and_values(args)?;
-    let section = provider.init_section(&values).ok_or_else(by_hand)?;
-    let products = checked_products(&fleet, &args.products)?;
-
-    let dir = std::env::current_dir().unwrap_or_default();
-    let project = match &args.project {
-        Some(p) => {
-            if !config_store::is_project_name(p) {
-                return Err(usage(UsageProblem::ValueFormat {
-                    flag: "--project".into(),
-                    format: "a name matching ^[A-Za-z0-9][A-Za-z0-9._-]*$ (at most 64 characters)",
-                }));
-            }
-            p.clone()
-        }
-        None => personal::project_name(r, &dir),
-    };
-    let title = naming::state_vault(&project, &args.env, &args.name);
-    let comment = format!(
-        "# deploy target {} in {}; added by opv target add",
-        args.name, args.env
-    );
-    let build = |state_vault_id: &str, items: &[(String, String)]| -> Result<String, Error> {
-        let body = target_table(
-            &args.env,
-            &args.name,
-            &section,
-            &products,
-            &args.roles,
-            args.deploy_credentials.as_deref(),
-            Some(state_vault_id),
-            items,
-        );
-        let text = insert_target_in(original, &source, &args.env, &args.name, &body, &comment)?;
-        // The same validation as a hand-written file: provider fields, products, deploy
-        // credentials and the state vault, before anything is written or created.
-        store.parse(&text)?;
-        Ok(text)
-    };
-    let next =
-        crate::cause::render::cmd_text(&opv(&["access"], &[&args.env, "--target", &args.name]));
-
-    if args.dry_run {
-        // Read-only: report whether the state vault would be created or reused.
-        let (state_vault_id, created) = match init_op::find_vault(r, &title, &Host::detect)? {
-            Lookup::Found(n) => (n.id, false),
-            Lookup::Missing(_) => (title.clone(), true),
-        };
-        build(&state_vault_id, &[])?;
-        // #150: the write needs a login session of the person's own.
-        r.note(&super::login::dry_run_session_note(
-            crate::config_store::selected_account(&dir).as_deref(),
-            &super::login::this_command(),
-        ));
-        if args.json {
-            return write_json(out, &args.env, &args.name, &state_vault_id, created, &next);
-        }
-        return print_add(
-            out,
-            &args.env,
-            &args.name,
-            &place,
-            &title,
-            &state_vault_id,
-            created,
-            true,
-            &next,
-        );
-    }
-
-    // Creating the vault and writing the configuration write to 1Password: a person's own
-    // session (FR-43). The target is validated before the vault is created.
-    tidy::require_person(r, "opv target add")?;
-    build(&title, &[])?;
-    let notes = naming::state_vault_notes(&project, &args.env, &args.name);
-    let vault = bootstrap::ensure_vault(r, &title, &notes)?;
-    // Each placement's delivery item too (FR-58), so the first sync can record evidence
-    // without another opv bootstrap: one command per intent (E2).
-    let planned = store.parse(&build(&vault.id, &[])?)?;
-    let items = bootstrap::placement_items(&planned, &project, &args.env, &args.name, r)?;
-    let text = build(&vault.id, &items)?;
-    config_store::save(store, r, &base, &text)?;
-    if args.json {
-        return write_json(out, &args.env, &args.name, &vault.id, false, &next);
-    }
-    print_add(
-        out, &args.env, &args.name, &place, &title, &vault.id, false, false, &next,
-    )
-}
-
 /// The provider named by `--provider`, or else the one provider whose options were given,
 /// with the options checked against its [`InitField`]s: unknown option, another provider's
 /// option, or a missing required one is refused (H3).
 pub(crate) fn provider_and_values(
-    args: &AddArgs,
+    provider: Option<&str>,
+    fields: &BTreeMap<String, String>,
 ) -> Result<(&'static dyn Provider, BTreeMap<&'static str, String>), Error> {
-    let provider = match &args.provider {
+    let provider = match provider {
         Some(named) => registry::find(named).ok_or_else(|| {
             usage(UsageProblem::ValueFormat {
                 flag: format!("--provider {named}"),
-                format: "a provider opv knows (opv target add --help lists them)",
+                format: "a provider opv knows (opv propose target --help lists them)",
             })
         })?,
-        None => inferred_provider(args)?,
+        None => inferred_provider(fields)?,
     };
     if provider.init_fields().is_empty() {
         return Err(by_hand());
     }
     let mut values = BTreeMap::new();
-    for (flag, value) in &args.fields {
+    for (flag, value) in fields {
         let (owner, field) = find_field(flag).ok_or_else(|| {
             usage(UsageProblem::UnknownFlag {
                 flag: format!("--{flag}"),
@@ -290,10 +127,10 @@ pub(crate) fn provider_and_values(
 
 /// The one provider whose options `args` gives, when `--provider` is omitted: none or
 /// several are refused, naming what to pass.
-fn inferred_provider(args: &AddArgs) -> Result<&'static dyn Provider, Error> {
+fn inferred_provider(fields: &BTreeMap<String, String>) -> Result<&'static dyn Provider, Error> {
     // Each provider whose option was given, with the first such flag.
     let mut owners: Vec<(&'static dyn Provider, &str)> = Vec::new();
-    for flag in args.fields.keys() {
+    for flag in fields.keys() {
         if let Some((p, _)) = find_field(flag)
             && !owners.iter().any(|(o, _)| o.section() == p.section())
         {
@@ -303,7 +140,7 @@ fn inferred_provider(args: &AddArgs) -> Result<&'static dyn Provider, Error> {
     match owners.as_slice() {
         [(one, _)] => Ok(*one),
         [] => Err(usage(UsageProblem::NeedsFlag {
-            flag: "opv target add".into(),
+            flag: "opv propose target".into(),
             needs: format!(
                 "the target's provider options or --provider <{}>",
                 registry::sections().join("|")
@@ -515,73 +352,6 @@ fn clear_positions(t: &mut Table) {
     }
 }
 
-/// `target add --json` (A5): what was written, names and the state vault's ID only.
-fn write_json(
-    out: &mut dyn Write,
-    env: &str,
-    target: &str,
-    state_vault_id: &str,
-    created_state_vault: bool,
-    next: &str,
-) -> Result<(), Error> {
-    let doc = serde_json::json!({
-        "schema_version": crate::json::SCHEMA_VERSION,
-        "environment": env,
-        "target": target,
-        "state_vault_id": state_vault_id,
-        "created_state_vault": created_state_vault,
-        "next": next,
-    });
-    writeln!(out, "{doc}").map_err(write_err)
-}
-
-/// `target add` text: what was written, the state vault, and the next step.
-#[allow(clippy::too_many_arguments)]
-fn print_add(
-    out: &mut dyn Write,
-    env: &str,
-    name: &str,
-    place: &str,
-    title: &str,
-    state_vault_id: &str,
-    created: bool,
-    dry_run: bool,
-    next: &str,
-) -> Result<(), Error> {
-    let w = |out: &mut dyn Write, s: String| writeln!(out, "{s}").map_err(write_err);
-    if dry_run {
-        w(
-            out,
-            format!("would add [environments.{env}.targets.{name}] to {place}"),
-        )?;
-        if created {
-            w(out, format!("would create state vault {title}"))?;
-        } else {
-            w(
-                out,
-                format!("would reuse state vault {title} ({state_vault_id})"),
-            )?;
-        }
-    } else {
-        w(
-            out,
-            format!("added [environments.{env}.targets.{name}] to {place}"),
-        )?;
-        if created {
-            w(
-                out,
-                format!("created state vault {title} ({state_vault_id})"),
-            )?;
-        } else {
-            w(
-                out,
-                format!("reusing state vault {title} ({state_vault_id})"),
-            )?;
-        }
-    }
-    w(out, format!("Next: {next}"))
-}
-
 /// `opv target list` (FR-56): read-only. One line per target, in environment then name
 /// order; `--json` instead prints an array of `{environment, name, provider, locator,
 /// products, deploy_credentials}`. Never a value (SR-1).
@@ -647,7 +417,7 @@ pub fn list(fleet: &Fleet, args: &ListArgs, out: &mut dyn Write) -> Result<(), E
         writeln!(
             out,
             "Next: {}",
-            crate::cause::render::cmd_text(&opv(&["target", "add"], &["--help"]))
+            crate::cause::render::cmd_text(&opv(&["propose", "target"], &["--help"]))
         )
         .map_err(write_err)?;
     }

@@ -1,23 +1,55 @@
-//! The agent guide (`opv guide agent`) and the agent skill name every command the installed
-//! binary has, so a command added without guidance for assistants fails here (#76).
+//! The agent guide (`opv guide agent`) and the agent skill name every command of the §25
+//! surface contract, so a command added without guidance for assistants fails here (#76).
 
+use std::collections::BTreeSet;
 use std::process::Command;
 
+use serde_json::Value;
+
+const GOLDEN_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/e2e/expected/surface.json"
+);
+
+/// The §25 surface golden, parsed. A malformed golden is a test failure, not a panic in a
+/// helper.
+fn golden() -> Value {
+    let text = std::fs::read_to_string(GOLDEN_PATH).expect("the surface golden is readable");
+    serde_json::from_str(&text).expect("the surface golden is valid JSON")
+}
+
+/// Every command path the golden fixes, as a set.
+fn golden_cli_names() -> BTreeSet<String> {
+    golden()["cli"]
+        .as_array()
+        .expect("cli is an array")
+        .iter()
+        .map(|command| {
+            command["name"]
+                .as_str()
+                .expect("a cli command has a name")
+                .to_string()
+        })
+        .collect()
+}
+
+/// Every MCP tool name the golden fixes, as a set.
+fn golden_mcp_names() -> BTreeSet<String> {
+    golden()["mcp"]
+        .as_array()
+        .expect("mcp is an array")
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("a tool name").to_string())
+        .collect()
+}
+
+/// The live schema, for the parts of the contract the installed binary already carries.
 fn schema() -> serde_json::Value {
     let out = Command::new(env!("CARGO_BIN_EXE_opv"))
         .arg("schema")
         .output()
         .expect("opv schema runs");
     serde_json::from_slice(&out.stdout).expect("schema is JSON")
-}
-
-fn schema_commands() -> Vec<String> {
-    schema()["commands"]
-        .as_array()
-        .expect("commands")
-        .iter()
-        .filter_map(|c| c["name"].as_str().map(str::to_string))
-        .collect()
 }
 
 fn read(path: &str) -> String {
@@ -29,9 +61,9 @@ fn read(path: &str) -> String {
 const NOT_FOR_ASSISTANTS: &[&str] = &["completions", "help"];
 
 #[test]
-fn the_agent_guide_names_every_command() {
+fn the_agent_guide_names_every_contract_command() {
     let guide = read("docs/agent-setup.md");
-    let missing: Vec<String> = schema_commands()
+    let missing: Vec<String> = golden_cli_names()
         .into_iter()
         .filter(|c| !NOT_FOR_ASSISTANTS.contains(&c.as_str()))
         .filter(|c| !guide.contains(&format!("opv {c}")) && !guide.contains(&format!("`{c}`")))
@@ -62,23 +94,36 @@ fn the_skill_carries_its_version_placeholder() {
 #[test]
 fn the_skill_describes_the_one_form_and_the_placement_flows() {
     let skill = read("docs/agent-skill.md");
-    assert!(
-        !skill.contains("profile") && !skill.contains("simple"),
-        "docs/agent-skill.md still describes a profile: {skill}"
-    );
-    for needle in [
+    let needles = [
         "[products.",
-        "opv target add",
+        "opv propose target",
         "grants_missing",
         "state_vault_wider_than_values",
         "every placement",
-        "opv bootstrap",
-    ] {
-        assert!(
-            skill.contains(needle),
-            "docs/agent-skill.md does not name {needle:?}"
-        );
-    }
+        "opv propose structure",
+    ];
+    assert!(
+        !skill.contains("profile")
+            && !skill.contains("simple")
+            && needles.iter().all(|needle| skill.contains(needle)),
+        "docs/agent-skill.md does not describe the one form and the placement flows"
+    );
+}
+
+/// `docs/mcp.md` documents exactly the five tools the §25 golden fixes (and no 0.11.0 one).
+#[test]
+fn the_mcp_doc_names_exactly_the_five_contract_tools() {
+    let doc = read("docs/mcp.md");
+    let named: BTreeSet<String> = doc
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|word| word.starts_with("opv_"))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        named,
+        golden_mcp_names(),
+        "docs/mcp.md names a different MCP tool set"
+    );
 }
 
 /// `opv schema` states the new commands' effects, describes the named commands' JSON
@@ -95,10 +140,10 @@ fn the_schema_is_current_for_named_targets_and_boundaries() {
             .unwrap_or_else(|| panic!("schema has no command {name}"))
             .clone()
     };
-    assert_eq!(command("target add")["effect"], "writes_config");
-    assert_eq!(command("target add")["ask_user_first"], true);
+    assert_eq!(command("propose target")["effect"], "reads");
+    assert_eq!(command("propose target")["ask_user_first"], false);
     assert_eq!(command("target list")["effect"], "reads");
-    for name in ["access", "bootstrap", "delivery verify", "config export"] {
+    for name in ["access", "propose", "delivery verify", "config export"] {
         assert!(
             v["documents"].get(name).is_some(),
             "schema documents must describe {name}"
@@ -123,4 +168,26 @@ fn the_schema_is_current_for_named_targets_and_boundaries() {
     ] {
         assert!(slugs.contains(&slug), "error_codes is missing {slug}");
     }
+}
+
+/// Every command line in docs/rotation.md names a command of the surface golden, so the
+/// documented rotation procedure cannot drift from the 0.12.0 surface (the golden).
+#[test]
+fn the_rotation_doc_names_only_commands_of_the_surface() {
+    let doc = read("docs/rotation.md");
+    let known = golden_cli_names();
+    let unknown: Vec<&str> = doc
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("opv "))
+        .filter(|rest| {
+            !known.iter().any(|name| {
+                let words: Vec<&str> = name.split_whitespace().collect();
+                !words.is_empty() && rest.split_whitespace().take(words.len()).eq(words)
+            })
+        })
+        .collect();
+    assert!(
+        unknown.is_empty(),
+        "docs/rotation.md names commands outside the surface: {unknown:?}"
+    );
 }

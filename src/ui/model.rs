@@ -1,5 +1,5 @@
 //! The view model of `opv ui` (#82): one snapshot built only from opv's own JSON documents
-//! (`config export --json`, `ready --json`, `status`/`check --json`), so the TUI keeps no
+//! (`config export --json`, `ready --json`, `status`/`inventory --json`), so the TUI keeps no
 //! state of its own and shows exactly what the CLI would. Names, states, rules and config
 //! values only: a secret's value is never in any of these documents. The documents are read
 //! as types ([`super::docs`]); a command that failed is a [`Problem`] with its error's steps,
@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 
 pub use super::docs::Source;
-use super::docs::{Failure, ReadyDoc, RowsDoc, fetch, fetch_config};
+use super::docs::{Failure, InventoryDoc, ReadyDoc, RowsDoc, fetch, fetch_config};
 use crate::domain::Fleet;
 
 /// One target of an environment (FR-56): its name and its provider's label.
@@ -67,10 +67,12 @@ pub struct ProductView {
     pub keys: Vec<KeyView>,
 }
 
-/// One key in one environment: its state words as `status`/`check` print them.
+/// One key in one environment: its state words as `status` prints them (a run-only
+/// environment's, from `inventory`'s value state).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Cell {
-    /// `saved`, `missing`, `failing_rule`, `wrong_kind`, `skipped`, `source_blocked`.
+    /// `saved`, `missing`, `failing_rule`, `wrong_kind`, `skipped`, `source_blocked`; from
+    /// the inventory also `empty`, `placeholder` and `unreadable`.
     pub state: String,
     /// `present`, `absent`, `would_change`, `not_delivered`, or none (config, run-only).
     pub target: Option<String>,
@@ -162,6 +164,8 @@ impl Snapshot {
             Ok(ready) => snap.read_ready(ready),
             Err(failure) => snap.problem("readiness (opv ready)", failure),
         }
+        // A deployed environment's rows come from `opv status`; a run-only one has no
+        // target to read, so its cells come from `opv inventory`'s value states.
         let envs = snap.envs.clone();
         for env in &envs {
             if env.deployed() {
@@ -170,23 +174,10 @@ impl Snapshot {
                     Err(failure) => snap.problem(&format!("opv status {}", env.key), failure),
                 }
             } else {
-                for p in snap.products.clone() {
-                    if p.source_only || !p.keys.iter().any(|k| k.environments.contains(&env.key)) {
-                        continue;
-                    }
-                    let args = [
-                        "check",
-                        env.key.as_str(),
-                        "--product",
-                        p.name.as_str(),
-                        "--json",
-                    ];
-                    match fetch::<RowsDoc>(source, &args) {
-                        Ok(doc) => snap.read_rows(&env.key, doc),
-                        Err(failure) => snap.problem(
-                            &format!("opv check {} --product {}", env.key, p.name),
-                            failure,
-                        ),
+                match fetch::<InventoryDoc>(source, &["inventory", "--env", &env.key, "--json"]) {
+                    Ok(doc) => snap.read_inventory(doc),
+                    Err(failure) => {
+                        snap.problem(&format!("opv inventory --env {}", env.key), failure)
                     }
                 }
             }
@@ -246,7 +237,7 @@ impl Snapshot {
                         immutable: k.immutable,
                         from: k.from.clone(),
                         guidance: k.guidance.clone(),
-                        environments: k.environments.clone(),
+                        environments: k.envs_in(fleet),
                     })
                     .collect(),
             })
@@ -283,7 +274,10 @@ impl Snapshot {
                 message: f.message,
             })
             .collect();
-        self.next = ready.next.map(|n| (n.actor, n.command));
+        // A personal key's step has no command (FR-55): nothing for `n` to run.
+        self.next = ready
+            .next
+            .and_then(|n| n.command.map(|command| (n.actor, command)));
     }
 
     /// One environment's rows. With several targets a key has one row per target; its cell
@@ -306,6 +300,32 @@ impl Snapshot {
             if !keep {
                 self.cells.insert(at, cell);
             }
+        }
+    }
+
+    /// A run-only environment's cells, from the inventory's value states in `status`'s
+    /// words where one exists (`set` is `saved`, `absent` is `missing`, `malformed` is
+    /// `failing_rule` with its rule, `not_wanted` is `skipped`).
+    fn read_inventory(&mut self, doc: InventoryDoc) {
+        use crate::domain::value_state::ValueState;
+        for c in doc.cells {
+            let (state, rule) = match c.state {
+                ValueState::Set => ("saved", None),
+                ValueState::Absent => ("missing", None),
+                ValueState::Empty => ("empty", None),
+                ValueState::Placeholder => ("placeholder", None),
+                ValueState::Malformed { rule } => ("failing_rule", Some(rule)),
+                ValueState::Unreadable { .. } => ("unreadable", None),
+                ValueState::NotWanted { .. } => ("skipped", None),
+            };
+            self.cells.insert(
+                (c.env, c.product, c.key),
+                Cell {
+                    state: state.to_string(),
+                    target: None,
+                    rule,
+                },
+            );
         }
     }
 

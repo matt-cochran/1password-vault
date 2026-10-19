@@ -1,5 +1,5 @@
 //! The configuration forms of `opv ui` (#97): the fields a person fills in to declare a key
-//! (`opv add`) or an environment (`opv init <env> --add-env`), and the exact `opv` argument
+//! (`opv propose key`) or an environment (`opv propose env <env>`), and the exact `opv` argument
 //! list each form runs. Pure: names, kinds and choices only, and never a value.
 
 /// Whether a declared key is a concealed secret or plain configuration.
@@ -9,7 +9,7 @@ pub enum KindChoice {
     Config,
 }
 
-/// The fields of the `opv add` form.
+/// The fields of the `opv propose key` form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddKeyForm {
     pub product: Option<String>,
@@ -21,12 +21,11 @@ pub struct AddKeyForm {
     pub allow_same_value: bool,
 }
 
-/// The fields of the `opv init <env> --add-env` form.
+/// The fields of the `opv propose env <env>` form: its vaults and items come from the
+/// structure `opv apply` creates, so only the name is asked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddEnvForm {
     pub name: String,
-    pub vault: String,
-    pub item: String,
 }
 
 /// `["add", label, "--kind", "secret"|"config"]` where label is "product/KEY" when product is Some, else "KEY"; then "--env" and the environments joined with "," when not empty; then "--guidance" and the trimmed guidance when it is not empty; then "--personal" when personal; then "--allow-same-value" when allow_same_value.
@@ -87,7 +86,8 @@ pub fn add_key_command(form: &AddKeyForm) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// `["init", name, "--add-env"]` then "--vault" vault when vault (trimmed) is not empty, then "--item" item when item (trimmed) is not empty.
+/// `["propose", "env", name, "--write"]`: the proposal written into the contract; the UI then
+/// runs `opv apply` (see [`super::run`]).
 /// Err(one English sentence) when name is not ^[A-Za-z0-9][A-Za-z0-9_-]*$ or name is already in `existing`.
 pub fn add_env_command(form: &AddEnvForm, existing: &[String]) -> Result<Vec<String>, String> {
     if !is_env_name(&form.name) {
@@ -100,22 +100,12 @@ pub fn add_env_command(form: &AddEnvForm, existing: &[String]) -> Result<Vec<Str
     if existing.iter().any(|name| name == &form.name) {
         return Err(format!("environment {} already exists.", form.name));
     }
-    let mut out = vec![
-        "init".to_string(),
+    Ok(vec![
+        "propose".to_string(),
+        "env".to_string(),
         form.name.clone(),
-        "--add-env".to_string(),
-    ];
-    let vault = form.vault.trim();
-    if !vault.is_empty() {
-        out.push("--vault".to_string());
-        out.push(vault.to_string());
-    }
-    let item = form.item.trim();
-    if !item.is_empty() {
-        out.push("--item".to_string());
-        out.push(item.to_string());
-    }
-    Ok(out)
+        "--write".to_string(),
+    ])
 }
 
 /// `^[A-Z][A-Z0-9_]*$`, checked by hand (never a regex).

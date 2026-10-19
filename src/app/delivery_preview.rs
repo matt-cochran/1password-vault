@@ -1,5 +1,5 @@
 //! Metadata-only delivery preview for `opv run --preview` and the MCP tool
-//! `opv_delivery_preview` (#136, items 1 and 2). It reads identifiers only: no value, no
+//! `opv_state` section `delivery_preview` (#136, items 1 and 2). It reads identifiers only: no value, no
 //! `op run`, no `op read`, no `op item get`. The one optional `op` call is the cheap
 //! read-only session probe (`op whoami`, with `op account list` as its own fallback); a
 //! prerequisite that cannot be determined is reported as `unknown`, never as missing.
@@ -101,7 +101,7 @@ pub fn select<'a>(
     })
 }
 
-/// The preview document for `opv run --preview --json` and `opv_delivery_preview`: one JSON
+/// The preview document for `opv run --preview --json` and `opv_state` section `delivery_preview`: one JSON
 /// object, `schema_version` 2, built field by field from identifiers. No value is read and
 /// no `op run`/`op read`/`op item get` is made; the only `op` call is the session probe.
 pub fn build(
@@ -186,7 +186,7 @@ pub fn build_for(
             ),
         };
     // A4: the Compose `user:` the recipe needs, so the container reads the RAM directory as
-    // the same user. In the shared document so `opv_delivery_preview` carries it too.
+    // the same user. In the shared document so `opv_state` section `delivery_preview` carries it too.
     let has_file = selection
         .delivered
         .iter()
@@ -374,7 +374,7 @@ fn write_text(doc: &Value, out: &mut dyn Write) -> io::Result<()> {
     }
     // A4: a local file run reads its files as the invoking user; the Compose recipe's
     // `user:` needs the same effective ids. The line lives in the shared document, so it is
-    // printed here and returned by `opv_delivery_preview` alike.
+    // printed here and returned by `opv_state` section `delivery_preview` alike.
     if has_file
         && !r.is_object()
         && fd["supported"].as_bool().unwrap_or(false)

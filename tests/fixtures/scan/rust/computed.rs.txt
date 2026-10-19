@@ -1,0 +1,9 @@
+use std::env;
+
+fn main() {
+    let key = "DATABASE_URL";
+    let a = env::var(key).unwrap();
+    let b = env::var_os(format!("{}_DIR", "CACHE"));
+    let c = option_env!(concat!("BUILD_", "ID"));
+    println!("{a:?} {b:?} {c:?}");
+}

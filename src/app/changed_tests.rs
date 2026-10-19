@@ -201,7 +201,7 @@ fn the_json_reply_matches_the_contract() {
     assert_eq!(
         doc,
         json!({
-            "schema_version": 2,
+            "schema_version": 3,
             "environment": "prod",
             "changed": true,
             "placements": [{
@@ -217,12 +217,12 @@ fn the_json_reply_matches_the_contract() {
 }
 
 #[test]
-fn a_missing_delivery_item_nexts_bootstrap() {
+fn a_missing_delivery_item_nexts_apply() {
     let fleet = fleet_with("");
     let r = FakeRunner::new([listed(8)]);
     let (_, out) = run(&r, &fleet, true);
     let doc: serde_json::Value = serde_json::from_slice(&out).unwrap();
-    assert_eq!(doc["next"], "opv bootstrap");
+    assert_eq!(doc["next"], "opv apply");
 }
 
 #[test]

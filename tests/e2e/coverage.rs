@@ -8,8 +8,14 @@
 //!   reached end to end are in [`UNREACHABLE`], each with its reason.
 //! - **Every call the matrix discovers is faulted** with every fault kind, or listed in
 //!   `snapshots/SKIPPED.md` with its reason.
-//! - **MCP equals the CLI**: for each scenario an MCP tool reaches, the tool's `error` object
-//!   is the CLI's `--json` `error` object, byte for byte (owner decision).
+//! - **MCP equals the CLI**: for each scenario an MCP tool reaches, the tool's whole answer,
+//!   a failure included, is the CLI's whole `--json` document (owner decision, design §25.2).
+//! - **Every flow document of §25.1/§25.2 is pinned** (`flows`): a text, `--json` and, where a
+//!   tool exists, MCP run of each `propose` kind, `import`, `needs`, `contract` and `explain`,
+//!   on a world whose every value is an `S7MARKER` marker; no scenario snapshot may hold one.
+//! - **Every core document of §25.1 is pinned** (`core`): a text and `--json` run of
+//!   `inventory`, `next`, `ready --gate`, `doctor --env prod` (R9) and `access`, on a marked
+//!   world with vault members; `next`'s MCP half is `opv_next`.
 //!
 //! Each scenario runs the real `opv` against `opv-sim` on the test application
 //! (`tests/e2e/app`): a scratch `HOME`, `OPV_NO_SKILL=1`, no real credential, only recorded
@@ -29,10 +35,20 @@ use serde_json::{Value, json};
 const ROOT: &str = env!("CARGO_MANIFEST_DIR");
 const OPV: &str = env!("CARGO_BIN_EXE_opv");
 const SIM: &str = env!("CARGO_BIN_EXE_opv-sim");
-const DEV_ACCOUNT: &str = "AE2EDEVACCOUNT000000000001";
+pub(crate) const DEV_ACCOUNT: &str = "AE2EDEVACCOUNT000000000001";
+/// The canary every value of a flow scenario carries (its world and its dotenv files): no
+/// snapshot may hold it.
+pub(crate) const MARK: &str = "S7MARKER";
 
 /// The variants no end-to-end run can reach, and why. Keep it short: prefer a scenario.
 const UNREACHABLE: &[(&str, &str)] = &[
+    // Reached by 0.11.0's explicit repair `opv tidy`, removed in 0.12.0 (a tidy proposal is
+    // deferred: it has no planner); a person's read that tidies reports a conflict
+    // as a note and goes on (src/app/tidy.rs), and opv-sim changes nothing between two reads.
+    (
+        "ConcurrentEdit",
+        "only opv tidy failed on a tidy conflict; reads note it and go on",
+    ),
     // design §13.4: reachable only through a bug in opv itself.
     (
         "Bug",
@@ -89,17 +105,33 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "SourceChanged",
         "a successful result (exit 10), never an error document",
     ),
+    // `app::retire::retire` (the ordered retirement that refuses while deployed code still
+    // reads the key) has no caller outside its tests: `opv propose retire` only marks the key
+    // `retiring` in the contract (scenarios/flow_propose_retire.snap), and `opv apply` runs no
+    // retirement step yet.
+    (
+        "RetireStillRead",
+        "no command runs the retirement yet: propose retire only marks the key retiring, apply runs no retire step",
+    ),
+    // `structure::apply` refuses an id that is not a structural plan id, but its only caller
+    // is `opv apply` (src/app/apply.rs), which passes the id it just recomputed (a different
+    // given id is `plan_changed` first). `opv apply` also refuses a run with no terminal before
+    // it reads anything, and the harness gives opv none (scenarios/apply_needs_terminal.snap).
+    (
+        "PlanUnknown",
+        "only opv apply reaches the structural apply, with its own recomputed id, and only at a terminal",
+    ),
 ];
 
 fn snapshots() -> PathBuf {
     Path::new(ROOT).join("tests/e2e/snapshots")
 }
 
-fn scenario_snapshots() -> PathBuf {
+pub(crate) fn scenario_snapshots() -> PathBuf {
     snapshots().join("scenarios")
 }
 
-fn updating() -> bool {
+pub(crate) fn updating() -> bool {
     std::env::var("UPDATE_SNAPSHOTS").is_ok_and(|v| v == "1")
 }
 
@@ -108,7 +140,7 @@ fn updating() -> bool {
 /// A scenario directory: the world, a scratch `HOME`, the project (the app's `secrets.toml`
 /// and a `.opv` selecting the dev account), a directory outside it, and the simulator
 /// installed under every tool name.
-struct Scenario {
+pub(crate) struct Scenario {
     root: tempfile::TempDir,
     env: Vec<(String, String)>,
     cwd: &'static str,
@@ -122,7 +154,7 @@ struct Scenario {
 }
 
 impl Scenario {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let root = tempfile::tempdir().expect("temp dir");
         let s = Self {
             root,
@@ -139,6 +171,11 @@ impl Scenario {
         std::fs::copy(app.join("world.json"), s.path("world/world.json")).expect("world");
         std::fs::write(s.path("world/faults.toml"), "").expect("faults");
         std::fs::copy(app.join("secrets.toml"), s.path("project/secrets.toml")).expect("config");
+        std::fs::copy(
+            app.join("secrets.bindings.toml"),
+            s.path("project/secrets.bindings.toml"),
+        )
+        .expect("bindings");
         std::fs::write(
             s.path("project/.opv"),
             format!("account = \"{DEV_ACCOUNT}\"\n"),
@@ -169,7 +206,7 @@ impl Scenario {
         self
     }
 
-    fn path(&self, sub: &str) -> PathBuf {
+    pub(crate) fn path(&self, sub: &str) -> PathBuf {
         self.root.path().join(sub)
     }
 
@@ -179,7 +216,7 @@ impl Scenario {
     }
 
     /// The project's `.opv`, replaced (`None`: no `.opv`).
-    fn dot_opv(self, text: Option<&str>) -> Self {
+    pub(crate) fn dot_opv(self, text: Option<&str>) -> Self {
         let p = self.path("project/.opv");
         match text {
             Some(t) => std::fs::write(&p, t).expect(".opv"),
@@ -188,21 +225,22 @@ impl Scenario {
         self
     }
 
-    fn without_config(self) -> Self {
+    pub(crate) fn without_config(self) -> Self {
         std::fs::remove_file(self.path("project/secrets.toml")).expect("config");
         self
     }
 
-    /// The project's `secrets.toml`, edited.
+    /// The project's `secrets.toml`, edited as one text with its ids filled in; the ids of
+    /// the edited text go back to `secrets.bindings.toml` (D-G).
     fn config(self, edit: impl FnOnce(String) -> String) -> Self {
         let p = self.path("project/secrets.toml");
-        let text = std::fs::read_to_string(&p).expect("config");
-        std::fs::write(&p, edit(text)).expect("config");
+        let text = opv::config::read_merged(&p).expect("config");
+        opv::config::bindings::write_split(&p, &edit(text)).expect("config");
         self
     }
 
     /// The world, edited.
-    fn world(self, edit: impl FnOnce(&mut Value)) -> Self {
+    pub(crate) fn world(self, edit: impl FnOnce(&mut Value)) -> Self {
         let p = self.path("world/world.json");
         let mut w: Value =
             serde_json::from_str(&std::fs::read_to_string(&p).expect("world")).expect("world");
@@ -211,7 +249,7 @@ impl Scenario {
         self
     }
 
-    fn var(mut self, k: &str, v: &str) -> Self {
+    pub(crate) fn var(mut self, k: &str, v: &str) -> Self {
         self.env.push((k.into(), v.into()));
         self
     }
@@ -224,14 +262,14 @@ impl Scenario {
     }
 
     /// A file under the scenario root (parents made).
-    fn file(self, rel: &str, text: &str) -> Self {
+    pub(crate) fn file(self, rel: &str, text: &str) -> Self {
         let p = self.path(rel);
         std::fs::create_dir_all(p.parent().expect("parent")).expect("parent");
         std::fs::write(&p, text).expect("file");
         self
     }
 
-    fn mode(self, rel: &str, mode: u32) -> Self {
+    pub(crate) fn mode(self, rel: &str, mode: u32) -> Self {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(self.path(rel), std::fs::Permissions::from_mode(mode))
             .expect("chmod");
@@ -266,7 +304,7 @@ impl Scenario {
     }
 
     /// The project as a git checkout of the app's repository.
-    fn git_checkout(self) -> Self {
+    pub(crate) fn git_checkout(self) -> Self {
         for args in [
             &["init", "-q"][..],
             &[
@@ -290,7 +328,49 @@ impl Scenario {
         self
     }
 
-    fn command(&self) -> Command {
+    /// Every value of the world marked: a string holding a value marker (`test-marker-e2e-…`)
+    /// becomes `S7MARKERVALUE-<it>`, so the canary gate finds any value a run prints.
+    pub(crate) fn marked(self) -> Self {
+        fn mark(v: &mut Value) {
+            match v {
+                Value::String(s) if s.contains("test-marker-e2e-") => {
+                    *s = format!("{MARK}VALUE-{s}");
+                }
+                Value::Array(a) => a.iter_mut().for_each(mark),
+                Value::Object(o) => o.values_mut().for_each(mark),
+                _ => {}
+            }
+        }
+        self.world(mark)
+    }
+
+    /// A dotenv file in the project, readable by its owner only, every value a marker.
+    pub(crate) fn dotenv(self, rel: &str, names: &[&str]) -> Self {
+        let text: String = names
+            .iter()
+            .map(|n| format!("{n}={MARK}VALUE-dotenv-{}\n", n.to_ascii_lowercase()))
+            .collect();
+        let rel = format!("project/{rel}");
+        self.file(&rel, &text).mode(&rel, 0o600)
+    }
+
+    /// A file of the project's git checkout, staged so the scanner's tree holds it.
+    pub(crate) fn tracked(self, rel: &str, text: &str) -> Self {
+        let s = self.file(&format!("project/{rel}"), text);
+        let ok = Command::new("git")
+            .args(["add", rel])
+            .current_dir(s.path("project"))
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", s.path("home"))
+            .status()
+            .expect("git add")
+            .success();
+        assert!(ok, "git add {rel}");
+        s
+    }
+
+    pub(crate) fn command(&self) -> Command {
         self.install();
         let mut c = Command::new(OPV);
         c.current_dir(self.path(self.cwd))
@@ -302,6 +382,8 @@ impl Scenario {
             .env("HOME", self.path("home"))
             .env("OPV_NO_SKILL", "1")
             .env("OPV_SIM_WORLD", self.path("world"))
+            // Doctor's core-dump check reads this, not the host's `fs.suid_dumpable`.
+            .env("OPV_TEST_SUID_DUMPABLE", "0")
             .stdin(Stdio::null());
         for (k, v) in &self.env {
             c.env(k, v);
@@ -310,7 +392,7 @@ impl Scenario {
     }
 
     /// `opv <args>`; `{root}` in an argument is the scenario root.
-    fn opv(&self, args: &[String]) -> Run {
+    pub(crate) fn opv(&self, args: &[String]) -> Run {
         let root = self.root.path().display().to_string();
         let args: Vec<String> = args.iter().map(|a| a.replace("{root}", &root)).collect();
         let out = match self.interrupt {
@@ -350,19 +432,8 @@ impl Scenario {
         child.wait_with_output().expect("output")
     }
 
-    /// The id of the prod plan this world gives (`opv plan prod --json`).
-    fn plan_id(&self) -> String {
-        let out = self
-            .command()
-            .args(["plan", "prod", "--json"])
-            .output()
-            .expect("plan");
-        let doc: Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
-        doc["plan_id"].as_str().expect("plan_id").to_string()
-    }
-
     /// One MCP `tools/call` on `opv mcp serve --project <project>`: the tool's answer.
-    fn mcp(&self, tool: &str, arguments: &Value) -> Value {
+    pub(crate) fn mcp(&self, tool: &str, arguments: &Value) -> Value {
         let mut child = self
             .command()
             .args(["mcp", "serve", "--project"])
@@ -411,7 +482,7 @@ impl Scenario {
     }
 
     /// What a snapshot must not depend on: the scenario's path and the host's platform.
-    fn normalize(&self, s: &str) -> String {
+    pub(crate) fn normalize(&self, s: &str) -> String {
         // macOS resolves the temp directory through a symlink (/var → /private/var), so
         // opv may print either spelling of the scenario's path.
         let root = self.root.path().display().to_string();
@@ -439,10 +510,10 @@ fn re(pattern: &str) -> regex::Regex {
     regex::Regex::new(pattern).expect("regex")
 }
 
-struct Run {
-    code: Option<i32>,
-    stdout: String,
-    stderr: String,
+pub(crate) struct Run {
+    pub(crate) code: Option<i32>,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
 }
 
 // --- the scenarios --------------------------------------------------------------------------
@@ -499,6 +570,7 @@ fn item(w: &mut Value, id: &str, edit: impl Fn(&mut Value)) {
 
 const MANIFEST_ITEM: &str = "iE2EMANIFEST00000000000001";
 const WEB_PROD_ITEM: &str = "iE2EWEBPROD000000000000001";
+const WEB_DEV_ITEM: &str = "iE2EWEBDEV0000000000000001";
 
 mod cases {
     use super::*;
@@ -506,29 +578,21 @@ mod cases {
     // §4.1 configuration
 
     pub fn config_not_found() -> Case {
-        case(Scenario::new().without_config(), &["config", "describe"])
-            .mcp("opv_configuration", json!({}))
-    }
-
-    pub fn config_source_mismatch() -> Case {
-        case(Scenario::new().manifest_route(), &["structure", "plan"])
-            .mcp("opv_structure_plan", json!({}))
+        case(Scenario::new().without_config(), &["contract"])
+            .mcp("opv_state", json!({"section": "contract"}))
     }
 
     pub fn config_unreadable() -> Case {
         // The given path is a folder (a mode would not stop a root builder).
-        case(
-            Scenario::new(),
-            &["--config", "{root}/project", "config", "describe"],
-        )
+        case(Scenario::new(), &["--config", "{root}/project", "contract"])
     }
 
     pub fn config_invalid() -> Case {
         case(
             Scenario::new().config(|c| c.replacen("[environments.dev]", "[environments.dev\n", 1)),
-            &["config", "describe"],
+            &["contract"],
         )
-        .mcp("opv_configuration", json!({}))
+        .mcp("opv_state", json!({"section": "contract"}))
     }
 
     pub fn boundary_missing() -> Case {
@@ -539,31 +603,34 @@ mod cases {
                     r#"boundaries.shared = { vault_id = "vE2ESHAREDPROD0000000000001""#,
                 )
             }),
-            &["config", "describe"],
+            &["contract"],
         )
-        .mcp("opv_configuration", json!({}))
+        .mcp("opv_state", json!({"section": "contract"}))
     }
 
+    /// A target whose state vault is not bound yet (D-G, before the first `opv apply`): the
+    /// contract loads, and a command that reads the target's delivery evidence names
+    /// `opv apply`.
     pub fn state_vault_missing() -> Case {
         case(
             Scenario::new()
                 .config(|c| without_line(c, r#"state_vault_id = "vE2ESTATEFLY00000000000001""#)),
-            &["config", "describe"],
+            &["changed", "prod"],
         )
-        .mcp("opv_configuration", json!({}))
+        .mcp("opv_state", json!({"section": "changed", "env": "prod"}))
     }
 
     pub fn state_vault_too_wide() -> Case {
         case(
             Scenario::new().config(|c| {
                 c.replacen(
-                    "state_vault_id = \"vE2ESTATEGH000000000000001\"\nroles = [\"serve\"]\n",
-                    "state_vault_id = \"vE2ESTATEGH000000000000001\"\nroles = [\"serve\"]\n\n\
-                     [environments.staging]\ntitle = \"Staging\"\norder = 3\n\
+                    "# A source-only home for a value",
+                    "[environments.staging]\ntitle = \"Staging\"\norder = 3\n\
                      boundaries.web = { vault_id = \"vE2EWEBDEV0000000000000001\", item_id = \"iE2EWEBDEV0000000000000001\" }\n\n\
                      [environments.staging.targets.fly]\nfly.app = \"e2e-app-staging\"\n\
                      fly.secret_name = \"E2E__{PRODUCT}__{KEY}\"\n\
-                     state_vault_id = \"vE2ESTATEFLY00000000000001\"\nroles = [\"serve\"]\n",
+                     state_vault_id = \"vE2ESTATEFLY00000000000001\"\nroles = [\"serve\"]\n\n\
+                     # A source-only home for a value",
                     1,
                 )
                 .replace(
@@ -571,17 +638,16 @@ mod cases {
                     "[products.web.keys.API_KEY]\nkind = \"secret\"\nenvironments = [\"dev\", \"prod\", \"staging\"]",
                 )
             }),
-            &["config", "describe"],
+            &["contract"],
         )
-        .mcp("opv_configuration", json!({}))
+        .mcp("opv_state", json!({"section": "contract"}))
     }
 
     pub fn config_not_editable() -> Case {
         case(
             Scenario::new().config(|c| format!("# generated by hand-tool\n{c}")),
-            &["env", "add", "staging"],
+            &["propose", "env", "staging", "--write"],
         )
-        .mcp("opv_declare_environment", json!({"environment": "staging"}))
     }
 
     pub fn manifest_not_found() -> Case {
@@ -589,10 +655,10 @@ mod cases {
             Scenario::new()
                 .manifest_route()
                 .var("OPV_PROJECT", "no-such-app"),
-            &["config", "describe"],
+            &["contract"],
         )
         // L7: MCP honours OPV_PROJECT as the CLI does.
-        .mcp("opv_configuration", json!({}))
+        .mcp("opv_state", json!({"section": "contract"}))
     }
 
     pub fn manifest_ambiguous() -> Case {
@@ -607,7 +673,7 @@ mod cases {
                 copy["id"] = json!("iE2EMANIFEST00000000000002");
                 items.push(copy);
             }),
-            &["config", "describe"],
+            &["contract"],
         )
     }
 
@@ -626,15 +692,16 @@ mod cases {
                             .retain(|f| f["id"] != "notesPlain" && f["purpose"] != "NOTES");
                     })
                 }),
-            &["config", "describe"],
+            &["contract"],
         )
-        .mcp("opv_configuration", json!({}))
+        .mcp("opv_state", json!({"section": "contract"}))
     }
 
     // §4.2 names and usage
 
     pub fn not_declared() -> Case {
-        case(Scenario::new(), &["ready", "nope"]).mcp("opv_ready", json!({"environment": "nope"}))
+        case(Scenario::new(), &["ready", "nope"])
+            .mcp("opv_state", json!({"section": "ready", "env": "nope"}))
     }
 
     pub fn key_not_declared() -> Case {
@@ -643,6 +710,10 @@ mod cases {
             Scenario::new(),
             &["explain", "web/OTEL_RESOURCE", "--env", "dev"],
         )
+        .mcp(
+            "opv_explain",
+            json!({"key": "web/OTEL_RESOURCE", "env": "dev"}),
+        )
     }
 
     pub fn ambiguous() -> Case {
@@ -650,6 +721,7 @@ mod cases {
             Scenario::new(),
             &["explain", "DATABASE_URL", "--env", "prod"],
         )
+        .mcp("opv_explain", json!({"key": "DATABASE_URL", "env": "prod"}))
     }
 
     pub fn choice_required() -> Case {
@@ -658,28 +730,24 @@ mod cases {
             &["run", "dev", "--preview", "--product", "web"],
         )
         .mcp(
-            "opv_delivery_preview",
-            json!({"environment": "dev", "product": "web"}),
+            "opv_state",
+            json!({"section": "delivery_preview", "env": "dev", "product": "web"}),
         )
     }
 
     pub fn nothing_in_scope() -> Case {
         case(Scenario::new(), &["plan", "dev"])
-            .mcp("opv_deployment_plan", json!({"environment": "dev"}))
+            .mcp("opv_state", json!({"section": "plan", "env": "dev"}))
     }
 
     pub fn usage() -> Case {
-        case(Scenario::new(), &["check", "dev", "--bogus"])
+        case(Scenario::new(), &["ready", "dev", "--bogus"])
     }
 
     pub fn already_declared() -> Case {
         case(
             Scenario::new(),
-            &["target", "add", "prod", "fly", "--fly-app", "x"],
-        )
-        .mcp(
-            "opv_declare_target",
-            json!({"environment": "prod", "target": "fly", "options": {"fly-app": "x"}}),
+            &["propose", "target", "prod", "fly", "--fly-app", "x"],
         )
     }
 
@@ -687,15 +755,13 @@ mod cases {
         case(
             Scenario::new(),
             &[
-                "init",
-                "staging",
-                "--add-env",
-                "--vault",
-                "e2e-dev-private",
-                "--item",
-                "e2e-app · dev (personal)",
-                "--product",
-                "web",
+                "propose",
+                "key",
+                "web/NEW_KEY",
+                "--kind",
+                "secret",
+                "--from",
+                "web/NOPE",
             ],
         )
     }
@@ -706,8 +772,8 @@ mod cases {
             &["run", "dev", "--preview", "--product", "shared"],
         )
         .mcp(
-            "opv_delivery_preview",
-            json!({"environment": "dev", "product": "shared"}),
+            "opv_state",
+            json!({"section": "delivery_preview", "env": "dev", "product": "shared"}),
         )
     }
 
@@ -719,7 +785,7 @@ mod cases {
             Scenario::new().dot_opv(Some("account = \"e2e.1password.com\"\n")),
             &["access"],
         )
-        .mcp("opv_access", json!({}))
+        .mcp("opv_state", json!({"section": "access"}))
     }
 
     /// I8: two accounts on the machine and no `.opv`: a person picks (pick_account_at).
@@ -729,26 +795,12 @@ mod cases {
                 .without_config()
                 .dot_opv(None)
                 .git_checkout(),
-            &["config", "describe"],
+            &["contract"],
         )
-        .mcp("opv_configuration", json!({}))
+        .mcp("opv_state", json!({"section": "contract"}))
     }
 
-    pub fn needs_own_session() -> Case {
-        let s = Scenario::new();
-        let world: Value = serde_json::from_str(
-            &std::fs::read_to_string(s.path("world/world.json")).expect("world"),
-        )
-        .expect("world");
-        let token = world["op"]["service_account_tokens"][0]["token"]
-            .as_str()
-            .or_else(|| world["op"]["service_account_tokens"][0].as_str())
-            .expect("a service-account token marker")
-            .to_string();
-        case(s.var("OP_SERVICE_ACCOUNT_TOKEN", &token), &["bootstrap"])
-    }
-
-    // §4.5 guards, §4.8 person-only steps, §4.9 approvals
+    // §4.5 guards, §4.8 person-only steps, §4.9 plans
 
     pub fn guard() -> Case {
         // The builder profile allows dev only (O9: it may name no deployed environment).
@@ -766,10 +818,8 @@ mod cases {
                 "builder",
             ],
         )
-        .mcp(
-            "opv_delivery_preview",
-            json!({"environment": "prod", "product": "web", "role": "serve", "remote": "builder"}),
-        )
+        // No MCP half: `opv_state` section `delivery_preview` takes env and product only
+        // (design §25.2); a remote profile's preview is the person's `opv run --preview`.
     }
 
     pub fn needs_terminal() -> Case {
@@ -809,87 +859,35 @@ mod cases {
                     }
                 })
             }),
-            &["check", "prod"],
+            &["status", "prod"],
         )
-    }
-
-    fn approved(s: Scenario) -> Case {
-        let id = s.plan_id();
-        Case {
-            args: vec![
-                "sync".into(),
-                "prod".into(),
-                "--approved".into(),
-                id.clone(),
-            ],
-            scenario: s,
-            mcp: Some(("opv_sync", json!({"environment": "prod", "plan_id": id}))),
-        }
-    }
-
-    pub fn approval_missing() -> Case {
-        approved(Scenario::new())
-    }
-
-    pub fn approval_used() -> Case {
-        let s = Scenario::new().dir("home/.local/state/opv/approvals", 0o700);
-        let id = s.plan_id();
-        let s = s.file(&format!("home/.local/state/opv/approvals/{id}.claim"), "");
-        approved(s)
     }
 
     pub fn plan_changed() -> Case {
-        case(Scenario::new(), &["sync", "prod", "--approved", "deadbeef"]).mcp(
-            "opv_sync",
-            json!({"environment": "prod", "plan_id": "deadbeef"}),
-        )
-    }
-
-    pub fn plan_unknown() -> Case {
         case(
             Scenario::new(),
-            &["structure", "apply", "sp-0000000000000000"],
-        )
-        .mcp(
-            "opv_structure_apply",
-            json!({"plan_id": "sp-0000000000000000"}),
+            &["sync", "prod", "--expect-plan", "deadbeef"],
         )
     }
 
-    /// L8: under a person's op session token in the environment (which the MCP server
-    /// refuses to write with), an id that names no plan is still `plan_unknown` first, over
-    /// MCP as on the command line.
-    pub fn plan_unknown_under_an_op_session() -> Case {
-        case(
-            Scenario::new().var("OP_SESSION_e2e", "e2e-test-marker-not-a-session"),
-            &["structure", "apply", "sp-0000000000000000"],
-        )
-        .mcp(
-            "opv_structure_apply",
-            json!({"plan_id": "sp-0000000000000000"}),
-        )
-    }
-
-    /// L8: under a service-account token, the structure is a person's own: the same refusal,
-    /// naming the same command, over MCP as on the command line.
-    pub fn own_session_under_a_service_account() -> Case {
-        case(
-            Scenario::new().var("OP_SERVICE_ACCOUNT_TOKEN", "e2e-test-marker-not-a-token"),
-            &["structure", "apply", "sp-0000000000000000"],
-        )
-        .mcp(
-            "opv_structure_apply",
-            json!({"plan_id": "sp-0000000000000000"}),
-        )
-    }
-
+    /// A dotenv file others can read is refused before it is read.
     pub fn local_file_too_open() -> Case {
-        approved(Scenario::new().dir("home/.local/state/opv/approvals", 0o755))
+        case(
+            Scenario::new()
+                .file("project/legacy.env", "API_KEY=e2e-test-marker\n")
+                .mode("project/legacy.env", 0o644),
+            &["import", "prod", "--from", "legacy.env", "--dry-run"],
+        )
     }
 
+    /// The Codex configuration folder cannot be made (its parent is read-only).
     pub fn private_dir_failed() -> Case {
-        // A file where the approvals folder belongs.
-        approved(Scenario::new().file("home/.local/state/opv/approvals", ""))
+        let s = Scenario::new().dir("readonly", 0o500);
+        let codex = s.path("readonly/codex");
+        case(
+            s.var("CODEX_HOME", codex.to_str().expect("utf-8 path")),
+            &["mcp", "install", "--client", "codex"],
+        )
     }
 
     pub fn title_lookup() -> Case {
@@ -904,19 +902,31 @@ mod cases {
                     vaults.push(v);
                 }
             }),
-            &["bootstrap", "--rebind", "dev", "--project", "e2e-app"],
+            &[
+                "propose",
+                "setup",
+                "--from-item",
+                "dev",
+                "--vault",
+                "e2e-app-shared-dev",
+                "--item",
+                "e2e-app · shared · dev values",
+            ],
         )
     }
 
     pub fn input_invalid() -> Case {
         case(
             Scenario::new().dir("project/dir.env", 0o700),
-            &["adopt", "dev", "--from", "dir.env"],
+            &["import", "dev", "--from", "dir.env", "--dry-run"],
         )
     }
 
     pub fn input_unreadable() -> Case {
-        case(Scenario::new(), &["adopt", "dev", "--from", "missing.env"])
+        case(
+            Scenario::new(),
+            &["import", "dev", "--from", "missing.env", "--dry-run"],
+        )
     }
 
     // §4.6 outcomes, §4.7 tools, §4.10 delivery
@@ -949,7 +959,7 @@ mod cases {
             Scenario::new().faults("[[fault]]\nprogram = \"op\"\nkind = \"tool_missing\"\n"),
             &["ready", "dev"],
         )
-        .mcp("opv_ready", json!({"environment": "dev"}))
+        .mcp("opv_state", json!({"section": "ready", "env": "dev"}))
     }
 
     pub fn tool_unusable() -> Case {
@@ -965,8 +975,8 @@ mod cases {
             &["plan", "prod", "--target", "fly"],
         )
         .mcp(
-            "opv_deployment_plan",
-            json!({"environment": "prod", "targets": ["fly"]}),
+            "opv_state",
+            json!({"section": "plan", "env": "prod", "target": "fly"}),
         )
     }
 
@@ -982,15 +992,8 @@ mod cases {
             &["plan", "prod", "--target", "gh"],
         )
         .mcp(
-            "opv_deployment_plan",
-            json!({"environment": "prod", "targets": ["gh"]}),
-        )
-    }
-
-    pub fn create_outcome_unknown() -> Case {
-        case(
-            Scenario::new().faults(&fault("op", "vault create", "applied_but_reply_lost")),
-            &["bootstrap", "--rebind", "dev"],
+            "opv_state",
+            json!({"section": "plan", "env": "prod", "target": "gh"}),
         )
     }
 
@@ -1154,7 +1157,7 @@ mod cases {
             "[[fault]]\nprogram = \"op\"\ncall = \"item get\"\nkind = \"timeout\"\nseconds = 30\n",
         );
         s.interrupt = Some(("item get", "TERM"));
-        case(s, &["check", "prod"])
+        case(s, &["config", "export", "prod"])
     }
 
     /// The edit answers with garbled output and is not applied (opv-sim answers a malformed
@@ -1190,20 +1193,7 @@ mod cases {
                     "API_KEY=test-marker-e2e-adopted-value\n",
                 )
                 .mode("project/.env.dev", 0o600),
-            &["adopt", "dev", "--from", ".env.dev", "--apply"],
-        )
-    }
-
-    pub fn concurrent_edit() -> Case {
-        case(
-            Scenario::new()
-                .faults(&fault("op", "item edit", "malformed_output"))
-                .world(|w| {
-                    web_dev_api_key(w, |f| {
-                        f.as_object_mut().expect("field").remove("section");
-                    })
-                }),
-            &["tidy", "dev"],
+            &["import", "dev", "--from", ".env.dev"],
         )
     }
 
@@ -1231,7 +1221,7 @@ mod cases {
                 "vault get vE2ESHAREDDEV00000000000001",
                 "not_found",
             )),
-            &["bootstrap", "--dry-run"],
+            &["propose", "structure"],
         )
     }
 
@@ -1240,15 +1230,16 @@ mod cases {
             Scenario::new().faults(&fault("op", "whoami", "signed_out")),
             &["access"],
         )
-        .mcp("opv_access", json!({}))
+        .mcp("opv_state", json!({"section": "access"}))
     }
 
-    // 0.11.0 MCP parity: `opv_changed` and the target options of `opv_declare_target`.
+    // MCP parity: `opv_state` section `changed`; the target options of `opv target add` (its MCP tool,
+    // `opv_declare_target`, was removed in 0.12.0: a target is proposed with `opv_propose`).
 
     /// `opv changed` of an undeclared environment: the same refusal over MCP.
     pub fn changed_not_declared() -> Case {
         case(Scenario::new(), &["changed", "nope"])
-            .mcp("opv_changed", json!({"environment": "nope"}))
+            .mcp("opv_state", json!({"section": "changed", "env": "nope"}))
     }
 
     /// `op item list` answered as signed out (recording 07): the same sign-in refusal over
@@ -1258,17 +1249,32 @@ mod cases {
             Scenario::new().faults(&fault("op", "item list", "signed_out")),
             &["changed", "prod"],
         )
-        .mcp("opv_changed", json!({"environment": "prod"}))
+        .mcp("opv_state", json!({"section": "changed", "env": "prod"}))
     }
 
-    /// A relative `kubernetes.secrets_dir`: refused by the loader before anything is written,
-    /// over MCP as on the command line.
+    // 0.12.0 inspect commands (row cli-sweep-b); no MCP tool of theirs exists yet.
+
+    /// `opv inventory` of an undeclared environment: refused before any item is read.
+    pub fn inventory_not_declared() -> Case {
+        case(Scenario::new(), &["inventory", "--env", "nope"])
+    }
+
+    /// `opv next` when 1Password refuses the vault user list as signed out: the read stops
+    /// with the sign-in error, never a guessed capability.
+    pub fn next_signed_out() -> Case {
+        case(
+            Scenario::new().faults(&fault("op", "vault user list", "signed_out")),
+            &["next"],
+        )
+    }
+
+    /// A relative `kubernetes.secrets_dir`: refused by the loader before anything is written.
     pub fn declare_target_secrets_dir_invalid() -> Case {
         case(
             Scenario::new(),
             &[
+                "propose",
                 "target",
-                "add",
                 "prod",
                 "cluster",
                 "--kubernetes-context",
@@ -1283,27 +1289,139 @@ mod cases {
                 "serve",
             ],
         )
-        .mcp(
-            "opv_declare_target",
-            json!({
-                "environment": "prod",
-                "target": "cluster",
-                "options": {
-                    "kubernetes-context": "e2e-cluster",
-                    "kubernetes-namespace": "e2e-prod",
-                    "kubernetes-deployment": "e2e-app",
-                    "kubernetes-secrets-dir": "run/secrets",
-                },
-                "roles": ["serve"],
-            }),
+    }
+
+    // §25.1 flows: the person-only commands' refusals, the inspect gates and the intent's
+    // screen. `apply` and `set` need a person at a terminal; the harness gives opv no
+    // terminal (stdin is null), so it pins both refusals: no terminal, and an assistant.
+
+    pub fn apply_needs_terminal() -> Case {
+        case(Scenario::new().marked(), &["apply"])
+    }
+
+    pub fn apply_person_only() -> Case {
+        case(Scenario::new().marked().var("OPV_AGENT", "1"), &["apply"])
+    }
+
+    pub fn set_needs_terminal() -> Case {
+        case(
+            Scenario::new().marked(),
+            &["set", "web/API_KEY", "--env", "dev"],
         )
     }
+
+    pub fn set_person_only() -> Case {
+        case(
+            Scenario::new().marked().var("OPV_AGENT", "1"),
+            &["set", "web/API_KEY", "--env", "dev"],
+        )
+    }
+
+    /// The code reads a name the contract does not declare: the needs gate fails.
+    pub fn needs_undeclared() -> Case {
+        case(
+            Scenario::new()
+                .marked()
+                .git_checkout()
+                .tracked("src/main.rs", READS_UNDECLARED),
+            &["needs", "--gate"],
+        )
+    }
+
+    /// A committed contract copy that is not the current contract document.
+    pub fn contract_stale() -> Case {
+        case(
+            Scenario::new()
+                .marked()
+                .file("project/contract.json", "{\"components\": []}\n"),
+            &["contract", "--check", "contract.json"],
+        )
+    }
+
+    /// Free text of an intent document carrying what looks like a value (a PEM header): the
+    /// CLI's `--intent` and `opv_propose` refuse the same document, naming the field only.
+    pub fn value_in_text_field() -> Case {
+        case(
+            Scenario::new()
+                .marked()
+                .file("project/intent.json", &value_intent().to_string()),
+            &["propose", "--intent", "intent.json"],
+        )
+        .mcp("opv_propose", value_intent())
+    }
+}
+
+/// A Rust file reading one declared name (`API_KEY`) and one the contract does not declare.
+const READS_UNDECLARED: &str = "fn main() {\n    let _ = std::env::var(\"API_KEY\");\n    \
+                                let _ = std::env::var(\"NEW_THING\");\n}\n";
+
+/// A key intent whose guidance carries a PEM header and a value marker.
+fn value_intent() -> Value {
+    json!({"kind": "key", "product": "web", "key": "NEW_KEY", "field_kind": "secret",
+           "environments": ["dev"],
+           "guidance": format!("paste -----BEGIN {MARK}VALUE-guidance here")})
 }
 
 /// A scenario whose command has no `--json`: its variant is the one declared, pinned by the
 /// text snapshot.
 mod text_cases {
     use super::*;
+
+    /// `target credentials --create` records the minted item in a secrets.toml, which a
+    /// manifest project does not have: refused before anything is minted (02.01).
+    pub fn config_source_mismatch() -> Case {
+        case(
+            Scenario::new().manifest_route(),
+            &[
+                "target",
+                "credentials",
+                "prod",
+                "--target",
+                "fly",
+                "--create",
+            ],
+        )
+    }
+
+    pub fn needs_own_session() -> Case {
+        let s = Scenario::new();
+        let world: Value = serde_json::from_str(
+            &std::fs::read_to_string(s.path("world/world.json")).expect("world"),
+        )
+        .expect("world");
+        let token = world["op"]["service_account_tokens"][0]["token"]
+            .as_str()
+            .or_else(|| world["op"]["service_account_tokens"][0].as_str())
+            .expect("a service-account token marker")
+            .to_string();
+        case(
+            s.var("OP_SERVICE_ACCOUNT_TOKEN", &token),
+            &[
+                "config",
+                "import",
+                "--vault",
+                "e2e-manifest",
+                "--project",
+                "e2e-other",
+            ],
+        )
+    }
+
+    pub fn create_outcome_unknown() -> Case {
+        case(
+            Scenario::new()
+                .var("OP_ACCOUNT", DEV_ACCOUNT)
+                .faults(&fault("op", "item create", "applied_but_reply_lost")),
+            &[
+                "config",
+                "import",
+                "--vault",
+                "e2e-manifest",
+                "--project",
+                "e2e-other",
+            ],
+        )
+    }
 
     pub fn copies_differ() -> Case {
         case(
@@ -1456,6 +1574,296 @@ mod text_cases {
             ],
         )
     }
+
+    /// The committed bindings are not the ones the last `opv apply` recorded (D-G): the
+    /// apply record's digest differs (the record is `secrets.applied.json`, beside the
+    /// bindings).
+    pub fn bindings_unapplied() -> Case {
+        case(
+            Scenario::new()
+                .marked()
+                .dot_opv(None)
+                .var("OPV_PROJECT", "e2e-app")
+                .var("OP_ACCOUNT", DEV_ACCOUNT)
+                .file(
+                    "project/secrets.applied.json",
+                    "{\"plan_id\":\"sp-0000000000000000\",\"contract_digest\":\"00\",\
+                     \"bindings_digest\":\"00\"}\n",
+                ),
+            &["config", "check", "--file", "secrets.toml"],
+        )
+    }
+}
+
+/// The flow documents of §25.1 and §25.2, each a successful run (or the MCP tool's own
+/// refusal): the text run, the `--json` run and, where a tool exists, the MCP answer. Every
+/// value in their world and dotenv files is an `S7MARKER` marker (the canary gate).
+mod flow_cases {
+    use super::*;
+
+    fn flow() -> Scenario {
+        Scenario::new().marked()
+    }
+
+    pub fn flow_propose_key() -> Case {
+        case(
+            flow(),
+            &[
+                "propose",
+                "key",
+                "web/NEW_KEY",
+                "--kind",
+                "secret",
+                "--env",
+                "dev",
+            ],
+        )
+        .mcp(
+            "opv_propose",
+            json!({"kind": "key", "product": "web", "key": "NEW_KEY",
+                   "field_kind": "secret", "environments": ["dev"]}),
+        )
+    }
+
+    pub fn flow_propose_env() -> Case {
+        case(flow(), &["propose", "env", "staging", "--tier", "shared"]).mcp(
+            "opv_propose",
+            json!({"kind": "env", "env": "staging", "tier": "shared"}),
+        )
+    }
+
+    pub fn flow_propose_target() -> Case {
+        case(
+            flow(),
+            &[
+                "propose",
+                "target",
+                "prod",
+                "fly2",
+                "--fly-app",
+                "e2e-app-prod2",
+                "--role",
+                "serve",
+            ],
+        )
+        .mcp(
+            "opv_propose",
+            json!({"kind": "target", "env": "prod", "name": "fly2", "role": "serve",
+                   "options": {"fly-app": "e2e-app-prod2"}}),
+        )
+    }
+
+    pub fn flow_propose_retire() -> Case {
+        case(flow(), &["propose", "retire", "web/MIGRATION_TOKEN"]).mcp(
+            "opv_propose",
+            json!({"kind": "retire", "product": "web", "key": "MIGRATION_TOKEN"}),
+        )
+    }
+
+    /// First setup from a `.env`'s names, in a project with no contract yet.
+    pub fn flow_propose_setup() -> Case {
+        case(
+            flow()
+                .without_config()
+                .dotenv("local.env", &["API_KEY", "LOG_LEVEL", "NEW_THING"]),
+            &["propose", "setup", "--names-from", "local.env"],
+        )
+        .mcp(
+            "opv_propose",
+            json!({"kind": "setup", "names_from": "local.env"}),
+        )
+    }
+
+    pub fn flow_propose_structure() -> Case {
+        case(flow(), &["propose", "structure"]).mcp("opv_propose", json!({"kind": "structure"}))
+    }
+
+    /// A rule-backed key (a byte length) with no field yet: the structure adds it and
+    /// generates its value.
+    pub fn flow_propose_generate() -> Case {
+        case(
+            flow().config(|c| {
+                format!(
+                    "{c}\n[products.web.keys.SIGNING_KEY]\nkind = \"secret\"\n\
+                     environments = [\"dev\"]\nrules = {{ base64_bytes = 32 }}\n"
+                )
+            }),
+            &["propose", "generate", "dev", "web/SIGNING_KEY"],
+        )
+        .mcp(
+            "opv_propose",
+            json!({"kind": "generate", "env": "dev", "keys": ["web/SIGNING_KEY"]}),
+        )
+    }
+
+    /// `--intent` takes the document `opv_propose` takes.
+    pub fn flow_propose_intent() -> Case {
+        let intent = json!({"kind": "env", "env": "staging", "tier": "shared"});
+        case(
+            flow().file("project/intent.json", &intent.to_string()),
+            &["propose", "--intent", "intent.json"],
+        )
+        .mcp("opv_propose", intent)
+    }
+
+    /// A person's import into the shared dev environment: one key is empty and is imported,
+    /// one is already set, one fails its rule, one is not declared. `opv_import_local`
+    /// refuses the same environment: its tier is not `local`.
+    pub fn flow_import() -> Case {
+        case(
+            flow()
+                .world(|w| {
+                    item(w, WEB_DEV_ITEM, |i| {
+                        for f in i["fields"].as_array_mut().expect("fields") {
+                            if f["label"] == "SESSION_SECRET" {
+                                f["value"] = json!("");
+                            }
+                        }
+                    })
+                })
+                .dotenv(
+                    "local.env",
+                    &["API_KEY", "LOG_LEVEL", "SESSION_SECRET", "NEW_THING"],
+                ),
+            &["import", "dev", "--from", "local.env"],
+        )
+        .mcp(
+            "opv_import_local",
+            json!({"env": "dev", "file": "local.env"}),
+        )
+    }
+
+    /// The same import into a `local`-tier dev environment, where `opv_import_local` writes
+    /// (and tags the item `assistant_imported`).
+    pub fn flow_import_local() -> Case {
+        case(
+            flow()
+                .config(|c| {
+                    c.replacen(
+                        "title = \"Local development\"",
+                        "title = \"Local development\"\ntier = \"local\"",
+                        1,
+                    )
+                })
+                .world(|w| {
+                    item(w, WEB_DEV_ITEM, |i| {
+                        for f in i["fields"].as_array_mut().expect("fields") {
+                            if f["label"] == "SESSION_SECRET" {
+                                f["value"] = json!("");
+                            }
+                        }
+                    })
+                })
+                .dotenv("local.env", &["API_KEY", "SESSION_SECRET"]),
+            &["import", "dev", "--from", "local.env"],
+        )
+        .mcp(
+            "opv_import_local",
+            json!({"env": "dev", "file": "local.env"}),
+        )
+    }
+
+    /// Code ↔ contract: one declared name read, one undeclared, the rest unobserved.
+    pub fn flow_needs() -> Case {
+        case(
+            flow()
+                .git_checkout()
+                .tracked("src/main.rs", READS_UNDECLARED),
+            &["needs"],
+        )
+    }
+
+    pub fn flow_contract() -> Case {
+        case(flow(), &["contract", "--env", "dev", "--component", "web"])
+    }
+
+    /// A key declared in one environment, so neither form needs `--env` (the tool's input
+    /// is a key or a plan id only).
+    pub fn flow_explain() -> Case {
+        case(flow(), &["explain", "web/PERSONAL_LLM_KEY"])
+            .mcp("opv_explain", json!({"key": "web/PERSONAL_LLM_KEY"}))
+    }
+}
+
+/// The core documents of §25.1 (`inventory`, `next`, `ready --gate`, `doctor`'s R9 rows,
+/// `access`), each over one world where this session's own user (`UE2EDEVUSER…`, the
+/// `whoami` user) is a member of the vaults it reads, so op answers `vault user list` with the
+/// owner's writer recording (s23):
+///
+/// - web prod: the session is the only writer (one writer: `single_writer`; a production
+///   vault this session can write: doctor's R9 warning);
+/// - shared prod: the session is not a member (capability `none`: its cells are
+///   `unreadable`);
+/// - shared dev and web dev: the session and the ops user write;
+/// - web dev's `SESSION_SECRET` is empty (`empty`) and its `LOG_LEVEL` is `changeme`
+///   (`placeholder`); its `API_KEY` field is removed, so that key is `absent` there; every
+///   other value is an `S7MARKER` marker (`set`). `web/DATABASE_URL` (`from`) reads its
+///   source `shared/DATABASE_URL`; `web/PERSONAL_LLM_KEY` is read from the personal item;
+///   a key an explicit `environments` list leaves out has no cell there.
+///
+/// `next`'s MCP half is `opv_next` (row mcp-propose).
+mod core_cases {
+    use super::*;
+
+    const ME: &str = "UE2EDEVUSER000000000000001";
+    const OPS: &str = "UE2EOPSUSER000000000000002";
+
+    fn member(id: &str, name: &str, email: &str) -> Value {
+        json!({"id": id, "name": name, "email": email})
+    }
+
+    fn core() -> Scenario {
+        Scenario::new().marked().world(|w| {
+            let me = member(ME, "E2E Dev", "dev@example.com");
+            let ops = member(OPS, "E2E Ops", "ops@example.test");
+            for v in w["op"]["vaults"].as_array_mut().expect("vaults") {
+                let users = match v["id"].as_str().unwrap_or_default() {
+                    "vE2EWEBPROD000000000000001" => json!([me]),
+                    "vE2ESHAREDPROD0000000000001" => json!([ops]),
+                    "vE2ESHAREDDEV00000000000001"
+                    | "vE2EWEBDEV0000000000000001"
+                    | "vE2EPRIVATE000000000000001" => json!([me, ops]),
+                    _ => continue,
+                };
+                v["users"] = users;
+            }
+            item(w, WEB_DEV_ITEM, |i| {
+                let fields = i["fields"].as_array_mut().expect("fields");
+                fields.retain(|f| f["label"] != "API_KEY");
+                for f in fields {
+                    match f["label"].as_str() {
+                        Some("SESSION_SECRET") => f["value"] = json!(""),
+                        Some("LOG_LEVEL") => f["value"] = json!("changeme"),
+                        _ => {}
+                    }
+                }
+            })
+        })
+    }
+
+    pub fn core_inventory() -> Case {
+        case(core(), &["inventory"])
+    }
+
+    /// The MCP half is `opv_next`, the same document as `opv next --json`.
+    pub fn core_next() -> Case {
+        case(core(), &["next"]).mcp("opv_next", json!({}))
+    }
+
+    /// The gate fails on dev's empty and placeholder values (`gate_failed`).
+    pub fn core_ready_gate() -> Case {
+        case(core(), &["ready", "--gate"])
+    }
+
+    /// R9: this session can write the production vault web prod, and the shell is signed in
+    /// to the production targets' platforms.
+    pub fn core_doctor() -> Case {
+        case(core(), &["doctor", "--env", "prod"])
+    }
+
+    pub fn core_access() -> Case {
+        case(core(), &["access"])
+    }
 }
 
 // --- one scenario's snapshot ----------------------------------------------------------------
@@ -1494,12 +1902,18 @@ fn snapshot_path(name: &str) -> PathBuf {
 }
 
 /// Scenarios whose messages are platform advice by design (how to install op, where an
-/// in-memory folder lives): their committed snapshot is the Linux one, so other hosts skip
+/// in-memory folder lives, the Linux-only core-dump check): their committed snapshot is the Linux one, so other hosts skip
 /// the comparison. The variant still counts as reached from the committed snapshot.
-const LINUX_WORDED: [&str; 2] = ["ram_dir_unavailable", "tool_missing"];
+const LINUX_WORDED: [&str; 3] = ["core_doctor", "ram_dir_unavailable", "tool_missing"];
 
 fn snapshot_test(name: &str, build: fn() -> Case, text_only: bool) {
     if !cfg!(target_os = "linux") && LINUX_WORDED.contains(&name) {
+        return;
+    }
+    if name == "private_dir_failed" && skip_under_root(effective_uid()) {
+        eprintln!(
+            "skipped: private_dir_failed needs a non-root user: root ignores directory modes"
+        );
         return;
     }
     let got = record(name, build, text_only);
@@ -1570,14 +1984,15 @@ fn variant_test(name: &str, want: &str) {
     assert_eq!(got.as_deref(), Some(want), "{name}");
 }
 
-/// Gate 3: the MCP tool's `error` is the CLI's `--json` `error`.
+/// Gate 3: every MCP tool's whole answer, a failure included, is the CLI's whole `--json`
+/// document (design §25.2: the same document as the command).
 fn mcp_equals_cli_test(name: &str) {
     let snap = committed(name);
-    let cli = json_document(&snap).and_then(|d| d.get("error").cloned());
-    let mcp = mcp_answer(&snap).and_then(|d| d.get("error").cloned());
+    let cli = json_document(&snap);
+    let mcp = mcp_answer(&snap);
     assert_eq!(
         mcp, cli,
-        "{name}: the MCP error is not the CLI's --json error"
+        "{name}: the MCP answer is not the CLI's --json document"
     );
 }
 
@@ -1585,7 +2000,9 @@ macro_rules! scenarios {
     (
         json: [$($j:ident => $jv:ident),* $(,)?],
         text: [$($t:ident => $tv:ident),* $(,)?],
-        mcp: [$($m:ident),* $(,)?] $(,)?
+        mcp: [$($m:ident),* $(,)?],
+        flows: [$($f:ident),* $(,)?],
+        core: [$($c:ident),* $(,)?] $(,)?
     ) => {
         /// Every scenario: its name, the variant it reaches, whether it has `--json`.
         const SCENARIOS: &[(&str, &str, bool)] = &[
@@ -1594,6 +2011,26 @@ macro_rules! scenarios {
         ];
         /// The scenarios an MCP tool also reaches.
         const MCP_SCENARIOS: &[&str] = &[$(stringify!($m)),*];
+        /// The flow documents (§25.1, §25.2): a text, `--json` and MCP run each, no variant.
+        const FLOWS: &[&str] = &[$(stringify!($f)),*];
+        mod flows {
+            $(
+                #[test]
+                fn $f() {
+                    super::snapshot_test(stringify!($f), super::flow_cases::$f, false);
+                }
+            )*
+        }
+        /// The core documents (§25.1): a text and `--json` run each.
+        const CORE: &[&str] = &[$(stringify!($c)),*];
+        mod core {
+            $(
+                #[test]
+                fn $c() {
+                    super::snapshot_test(stringify!($c), super::core_cases::$c, false);
+                }
+            )*
+        }
         mod reach {
             $(
                 mod $j {
@@ -1638,7 +2075,6 @@ macro_rules! scenarios {
 scenarios! {
     json: [
         config_not_found => ConfigNotFound,
-        config_source_mismatch => ConfigSourceMismatch,
         config_unreadable => ConfigUnreadable,
         config_invalid => ConfigInvalid,
         boundary_missing => BoundaryMissing,
@@ -1659,18 +2095,12 @@ scenarios! {
         source_only => SourceOnly,
         account_ambiguous => AccountAmbiguous,
         account_required => AccountRequired,
-        needs_own_session => NeedsOwnSession,
         guard => Guard,
         needs_terminal => NeedsTerminal,
         confirm_mismatch => ConfirmMismatch,
         keys_blocking => KeysBlocking,
         values_needed => ValuesNeeded,
-        approval_missing => ApprovalMissing,
-        approval_used => ApprovalUsed,
         plan_changed => PlanChanged,
-        plan_unknown => PlanUnknown,
-        plan_unknown_under_an_op_session => PlanUnknown,
-        own_session_under_a_service_account => NeedsOwnSession,
         local_file_too_open => LocalFileTooOpen,
         private_dir_failed => PrivateDirFailed,
         title_lookup => TitleLookup,
@@ -1683,7 +2113,6 @@ scenarios! {
         local_io => LocalIo,
         tool_unusable => ToolUnusable,
         owner_setup_required => OwnerSetupRequired,
-        create_outcome_unknown => CreateOutcomeUnknown,
         write_outcome_unknown => WriteOutcomeUnknown,
         target_refused => TargetRefused,
         fly_value_rule_refused => KeysBlocking,
@@ -1692,18 +2121,29 @@ scenarios! {
         budget_spent => Partial,
         interrupted => Interrupted,
         read_back_missing => ReadBackMissing,
-        concurrent_edit => ConcurrentEdit,
         in_no_account_on_the_machine => InOtherAccount,
         signed_out_access => NotSignedIn,
         changed_not_declared => NotDeclared,
         changed_signed_out => NotSignedIn,
-        declare_target_secrets_dir_invalid => ConfigInvalid,
+        inventory_not_declared => NotDeclared,
+        next_signed_out => NotSignedIn,
+        declare_target_secrets_dir_invalid => ConfigProposalInvalid,
         k8s_mount_unreadable => MountUnreadable,
         k8s_mount_path_in_use => Guard,
         k8s_volume_refused => TargetRefused,
         k8s_configmap_right_missing => MissingRight,
+        apply_needs_terminal => NeedsTerminal,
+        apply_person_only => PersonOnly,
+        set_needs_terminal => NeedsTerminal,
+        set_person_only => PersonOnly,
+        needs_undeclared => NeedsUndeclared,
+        contract_stale => ContractStale,
+        value_in_text_field => ValueInTextField,
     ],
     text: [
+        config_source_mismatch => ConfigSourceMismatch,
+        needs_own_session => NeedsOwnSession,
+        create_outcome_unknown => CreateOutcomeUnknown,
         copies_differ => CopiesDiffer,
         remote_unreachable => RemoteUnreachable,
         remote_disconnected => RemoteDisconnected,
@@ -1711,32 +2151,21 @@ scenarios! {
         personal_not_set_up => PersonalNotSetUp,
         child_start_failed => ChildStartFailed,
         ram_dir_unavailable => RamDirUnavailable,
+        bindings_unapplied => BindingsUnapplied,
     ],
     mcp: [
         config_not_found,
-        config_source_mismatch,
         config_invalid,
         boundary_missing,
         state_vault_missing,
         state_vault_too_wide,
-        config_not_editable,
         item_unusable,
         not_declared,
         choice_required,
         nothing_in_scope,
-        already_declared,
         source_only,
         account_ambiguous,
         account_required,
-        guard,
-        approval_missing,
-        approval_used,
-        plan_changed,
-        plan_unknown,
-        plan_unknown_under_an_op_session,
-        own_session_under_a_service_account,
-        local_file_too_open,
-        private_dir_failed,
         tool_missing,
         tool_unusable,
         owner_setup_required,
@@ -1744,8 +2173,122 @@ scenarios! {
         manifest_not_found,
         changed_not_declared,
         changed_signed_out,
-        declare_target_secrets_dir_invalid,
+        key_not_declared,
+        ambiguous,
     ],
+    flows: [
+        flow_propose_key,
+        flow_propose_env,
+        flow_propose_target,
+        flow_propose_retire,
+        flow_propose_setup,
+        flow_propose_structure,
+        flow_propose_generate,
+        flow_propose_intent,
+        flow_import,
+        flow_import_local,
+        flow_needs,
+        flow_contract,
+        flow_explain,
+    ],
+    core: [
+        core_inventory,
+        core_next,
+        core_ready_gate,
+        core_doctor,
+        core_access,
+    ],
+}
+
+// --- the core documents: what each committed snapshot shows -----------------------------------
+
+/// The `--json` document of a committed core scenario.
+fn core_document(name: &str) -> Value {
+    json_document(&committed(name)).unwrap_or(Value::Null)
+}
+
+#[test]
+fn core_inventory_shows_set_absent_placeholder_and_unreadable_cells() {
+    let states: BTreeSet<String> = core_document("core_inventory")["cells"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c["state"]["state"].as_str().map(str::to_string))
+        .collect();
+    let want: BTreeSet<String> = ["set", "absent", "placeholder", "unreadable"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    assert!(want.is_subset(&states), "{states:?}");
+}
+
+/// `opv_next`'s answer is the whole `opv next --json` document (design §25.2).
+#[test]
+fn core_next_mcp_is_the_clis_whole_json_document() {
+    let snap = committed("core_next");
+    assert_eq!(mcp_answer(&snap), json_document(&snap));
+}
+
+#[test]
+fn core_ready_gate_reaches_gate_failed() {
+    variant_test("core_ready_gate", "GateFailed");
+}
+
+/// The warnings `opv doctor --env prod --json` raises under one check name.
+fn doctor_warnings(name: &str) -> usize {
+    core_document("core_doctor")["checks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| c["name"] == name && c["status"] == "warn")
+        .count()
+}
+
+#[test]
+fn core_doctor_warns_that_this_session_reads_the_production_vault() {
+    assert_eq!(doctor_warnings("production vault"), 1);
+}
+
+#[test]
+fn core_doctor_warns_of_each_production_login() {
+    assert_eq!(doctor_warnings("production login"), 3);
+}
+
+/// The vault `id` of environment `env` in `opv access --json`.
+fn access_vault(env: &str, id: &str) -> Value {
+    core_document("core_access")["environments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|e| e["environment"] == env)
+        .flat_map(|e| e["vaults"].as_array().cloned().unwrap_or_default())
+        .find(|v| v["vault_id"] == id)
+        .unwrap_or(Value::Null)
+}
+
+#[test]
+fn core_access_marks_the_production_vault_this_session_writes() {
+    let v = access_vault("prod", "vE2EWEBPROD000000000000001");
+    assert_eq!(
+        (v["production"].clone(), v["capability"].clone()),
+        (json!(true), json!("write"))
+    );
+}
+
+#[test]
+fn core_access_raises_single_writer_for_the_vault_with_one_writer() {
+    let raised = core_document("core_access")["environments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|e| e["findings"].as_array().cloned().unwrap_or_default())
+        .any(|f| {
+            f["code"] == "single_writer"
+                && f["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("vE2EWEBPROD000000000000001"))
+        });
+    assert!(raised);
 }
 
 // --- the catalog, read from its source ------------------------------------------------------
@@ -1763,10 +2306,24 @@ fn variants() -> &'static BTreeMap<String, BTreeSet<String>> {
         let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut current = String::new();
         let mut depth = 0i32;
+        let mut skip_field = false;
         for line in src[start..].lines() {
             let l = line.trim();
-            if l.starts_with("//") || l.starts_with('#') || l.is_empty() {
+            if l.is_empty() || l.starts_with("//") {
                 continue;
+            }
+            if l.starts_with('#') {
+                // A field serde does not serialize is not part of the subject.
+                if l.starts_with("#[serde(skip") {
+                    skip_field = true;
+                }
+                continue;
+            }
+            if skip_field {
+                skip_field = false;
+                if field.is_match(l) {
+                    continue;
+                }
             }
             if depth == 0 {
                 if l.starts_with('}') {
@@ -1965,7 +2522,13 @@ fn every_document_variant_is_told_apart_by_its_fields_and_code() {
 
 #[test]
 fn every_scenario_snapshot_belongs_to_a_scenario() {
-    let names: BTreeSet<&str> = SCENARIOS.iter().map(|(n, _, _)| *n).collect();
+    let names: BTreeSet<&str> = SCENARIOS
+        .iter()
+        .map(|(n, _, _)| *n)
+        .chain(FLOWS.iter().copied())
+        .chain(CORE.iter().copied())
+        .chain(crate::scenarios::assistant::SNAPSHOTS.iter().copied())
+        .collect();
     let orphans: Vec<String> = std::fs::read_dir(scenario_snapshots())
         .map(|d| {
             d.filter_map(Result::ok)
@@ -1979,6 +2542,27 @@ fn every_scenario_snapshot_belongs_to_a_scenario() {
         orphans.is_empty(),
         "snapshots without a scenario: {orphans:?}"
     );
+}
+
+/// The canary: no scenario snapshot holds a value. Every flow scenario's values are
+/// `S7MARKER` markers, and every other world value carries `test-marker-e2e-`. The MCP
+/// heading line is the request the harness sent (`value_in_text_field` sends a marker on
+/// purpose), not something opv printed.
+#[test]
+fn no_scenario_snapshot_holds_a_value() {
+    let holding: Vec<String> = std::fs::read_dir(scenario_snapshots())
+        .expect("scenario snapshots")
+        .filter_map(Result::ok)
+        .filter(|e| {
+            std::fs::read_to_string(e.path())
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| !l.starts_with("## mcp "))
+                .any(|l| l.contains(MARK) || l.contains("test-marker-e2e-"))
+        })
+        .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .collect();
+    assert!(holding.is_empty(), "snapshots holding a value: {holding:?}");
 }
 
 #[test]
@@ -2141,4 +2725,26 @@ fn i8_mcp_with_two_accounts_and_no_dot_opv_is_account_required() {
     let (tool, args) = c.mcp.clone().expect("an MCP call");
     let answer = c.scenario.mcp(tool, &args);
     assert_eq!(answer["error"]["code"], "account_required", "{answer}");
+}
+
+/// The effective uid of this test process (never root off Unix).
+#[cfg(unix)]
+fn effective_uid() -> u32 {
+    // SAFETY: `geteuid` only reads the process's effective user id.
+    unsafe { libc::geteuid() as u32 }
+}
+
+#[cfg(not(unix))]
+fn effective_uid() -> u32 {
+    1
+}
+
+/// `private_dir_failed` needs a real directory mode, which root ignores: skip it as root.
+fn skip_under_root(euid: u32) -> bool {
+    euid == 0
+}
+
+#[test]
+fn non_root_does_not_skip_private_dir() {
+    assert!(!skip_under_root(1000));
 }

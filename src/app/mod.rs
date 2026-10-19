@@ -12,10 +12,8 @@
 pub mod access;
 pub mod access_create;
 pub mod account;
-pub mod add;
-pub mod adopt;
 pub mod agent_view;
-pub mod approve;
+pub mod apply;
 #[cfg(test)]
 mod azure_tests;
 pub mod bootstrap;
@@ -26,11 +24,17 @@ pub(crate) mod ci_summary;
 pub mod ci_workflow;
 pub mod config_cmd;
 pub mod config_export;
-pub mod declare;
+pub mod contract;
+#[cfg(test)]
+#[path = "core_acceptance_tests.rs"]
+mod core_acceptance_tests;
 pub mod delivery;
 pub mod delivery_preview;
 pub mod doctor;
 pub mod explain;
+#[cfg(test)]
+#[path = "flows_acceptance_tests.rs"]
+mod flows_acceptance_tests;
 pub mod generate;
 #[cfg(test)]
 mod github_tests;
@@ -38,7 +42,10 @@ mod github_tests;
 mod guidance_tests;
 pub mod guide;
 pub mod history;
+pub mod import;
+pub mod import_local;
 pub mod init;
+pub mod inventory;
 #[cfg(test)]
 pub(crate) mod json_tests;
 #[cfg(test)]
@@ -48,6 +55,8 @@ pub mod local_delivery;
 pub mod login;
 pub mod masked;
 pub mod mcp_install;
+pub mod needs;
+pub mod next;
 pub mod open;
 pub mod personal;
 #[cfg(test)]
@@ -59,11 +68,15 @@ pub(crate) mod preflight;
 #[cfg(test)]
 #[path = "product_flag_tests.rs"]
 mod product_flag_tests;
+pub mod propose;
 pub mod ready;
+pub mod receipt_age;
 pub mod remote_delivery;
 pub mod remote_diagnose;
-pub mod repair;
+pub mod retire;
+pub mod rule_source;
 pub mod run;
+pub mod set;
 pub mod setup;
 mod setup_import;
 pub mod setup_recipe;
@@ -82,7 +95,6 @@ mod skill_tests;
 mod staged_tests;
 pub mod status;
 pub mod structure;
-pub mod structure_cmd;
 pub mod suggest;
 pub mod sync;
 pub mod target_cmd;
@@ -260,25 +272,6 @@ pub(crate) fn plan_id_of(
     )
 }
 
-/// [`read_and_plan`] for a local check of the products in `fleet` only, with no target.
-/// The item is read (and tidied) against `full`, the whole configuration, so fields of
-/// products outside `fleet` are never mistaken for strays; they cannot block the check,
-/// because the plan covers `fleet` only.
-pub(crate) fn read_and_plan_products(
-    fleet: &Fleet,
-    full: &Fleet,
-    env_name: &str,
-    r: &dyn CommandRunner,
-) -> Result<SyncPlan, Error> {
-    fleet.environment(env_name)?;
-    let read = tidy::read_for(fleet, full, env_name, r)?;
-    let none = BTreeSet::new();
-    let mut plan = plan_item(fleet, env_name, None, read.fields, None, &none, &none)?.0;
-    plan.tidy = read.changes;
-    plan.tidy_error = read.tidy_error;
-    Ok(plan)
-}
-
 /// The plan of `fields` for target `target` of `env_name` (`None`: no target).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn plan_item(
@@ -392,6 +385,7 @@ pub(crate) fn plan_item_with(
                 .as_ref()
                 .map(|c| c as &plan::CurrentCheck<'_>)
                 .or(by_ledger.as_ref().map(|c| c as &plan::CurrentCheck<'_>)),
+            retiring_prune: false,
         },
     );
     let mut p = p;
@@ -439,8 +433,11 @@ pub(crate) fn compare(current: &SecretValue, desired: &SecretValue) -> plan::Cur
 /// show these and never a step of their own (07.06, 07.07).
 pub(crate) fn own_step(e: &Error) -> (Option<String>, Option<String>) {
     let doc = crate::error::document(e, &crate::error::invocation(), false);
-    let text = |k: &str| doc[k].as_str().map(str::to_string);
-    (text("do"), text("next"))
+    (
+        doc["do"].as_str().map(str::to_string),
+        // Schema 3: the typed `next` carries the command in its own field.
+        doc["next"]["command"].as_str().map(str::to_string),
+    )
 }
 
 pub(crate) fn write_err(e: io::Error) -> Error {
@@ -987,6 +984,7 @@ fn json_state(s: &KeyState) -> &'static str {
         KeyState::Ready => "saved",
         KeyState::Skipped => "skipped",
         KeyState::SourceBlocked => "source_blocked",
+        KeyState::RulesPendingReview => "rules_pending_review",
     }
 }
 
@@ -1059,6 +1057,7 @@ pub(crate) fn state_label(s: &KeyState) -> String {
         KeyState::Ready => "saved".into(),
         KeyState::Skipped => "skipped".into(),
         KeyState::SourceBlocked => "blocked by source".into(),
+        KeyState::RulesPendingReview => "rules pending review".into(),
     }
 }
 
@@ -1210,16 +1209,6 @@ pub(crate) fn is_blocking(r: &Row) -> bool {
         r.state,
         KeyState::Missing | KeyState::WrongKind | KeyState::RuleFailed(..)
     )
-}
-
-/// A shared key's provenance (FR-45), for a row's own line: ` (shared from api/KEY)` on a
-/// key that shares another's value, ` (affects worker/KEY, ...)` on a source with a
-/// finding, so the finding is reported once with every key it holds up. Names only.
-pub(crate) fn shared_note(r: &Row) -> String {
-    match shared_text(r) {
-        Some(t) => format!(" ({t})"),
-        None => String::new(),
-    }
 }
 
 /// [`shared_note`] without the parentheses: `shared from api/KEY` or `affects worker/KEY`.
@@ -1984,15 +1973,33 @@ pub(crate) fn unmanaged_on_target<'a>(
         .collect())
 }
 
+/// Every `.rs` file under `dir`, recursively (`src/app/propose/` included), for the guards.
+#[cfg(test)]
+fn rust_files(dir: &str) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![std::path::PathBuf::from(dir)];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+#[cfg(test)]
 /// FR-12, §8 item 27: use cases reach a target only through the ports. `init` writes a
 /// provider section by design (FR-37), so it may name an adapter.
-#[cfg(test)]
 #[test]
 fn use_cases_name_no_target_adapter() {
     let mut hits = Vec::new();
     for dir in ["src/app", "src/domain"] {
-        for e in std::fs::read_dir(dir).unwrap() {
-            let p = e.unwrap().path();
+        for p in rust_files(dir) {
             let exempt = ["init.rs", "characterization_tests.rs"];
             if exempt.iter().any(|x| p.ends_with(x)) {
                 continue;
@@ -2181,9 +2188,7 @@ fn core_modules_name_no_provider() {
             .map(std::path::PathBuf::from)
             .collect();
     for dir in ["src/app", "src/domain", "src/config"] {
-        for e in std::fs::read_dir(dir).unwrap() {
-            files.push(e.unwrap().path());
-        }
+        files.extend(rust_files(dir));
     }
     let hits: Vec<String> = files
         .iter()
@@ -2278,7 +2283,7 @@ pub(crate) mod testutil {
 
     /// The fixture fleet plus extra TOML appended (e.g. another key).
     pub fn fleet_with(extra: &str) -> Fleet {
-        let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+        let text = crate::config::merged_text("tests/fixtures/secrets.toml");
         config::parse(&format!("{text}\n{extra}")).unwrap()
     }
 
@@ -2299,12 +2304,6 @@ pub(crate) mod testutil {
         out
     }
 
-    /// The fixture with every deployment target removed (see [`without_targets`]).
-    pub fn fleet_without_targets(extra: &str) -> Fleet {
-        let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
-        config::parse(&format!("{}\n{extra}", without_targets(&text))).unwrap()
-    }
-
     /// Two prod keys scoped to the process roles `serve` and `migrate` (#136).
     pub const ROLE_KEYS: &str = "\
 [products.allumata.keys.SERVE_TOKEN]
@@ -2322,8 +2321,7 @@ roles = [\"migrate\"]
     /// role-scoped keys, so its targets carry no roles; a test that appends [`ROLE_KEYS`]
     /// (or any role-scoped key) needs this text, or the load is refused (M3, §4.4).
     pub fn role_fixture_text() -> String {
-        std::fs::read_to_string("tests/fixtures/secrets.toml")
-            .unwrap()
+        crate::config::merged_text("tests/fixtures/secrets.toml")
             .replace(
                 "state_vault_id = \"sstg\"",
                 "state_vault_id = \"sstg\"\nroles = [\"serve\", \"migrate\"]",

@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "inputHash": "sha256:140d743dd25d3c19deda100ee702cdeca6edbc62fdf66a56ba1a243d1de07f6d",
+  "catalogVersion": "triz-software-2",
+  "requested": {
+    "provider": "openrouter",
+    "model": "~typesafe/jev-latest"
+  },
+  "reported": {
+    "provider": "openrouter",
+    "model": "~typesafe/jev-latest",
+    "available": true
+  },
+  "classification": "uncertain",
+  "confidence": 0.35,
+  "groundedEvidenceIds": [],
+  "rationale": "",
+  "principles": [],
+  "usage": {
+    "input": 888,
+    "output": 151,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 1039,
+    "available": true,
+    "costUsd": 0.000037296000000000003,
+    "piReported": {
+      "amountUsd": 0.000037296000000000003,
+      "available": true,
+      "source": "pi_reported"
+    }
+  },
+  "billedCostUsd": null,
+  "inferenceDeterministic": false,
+  "catalog": {
+    "version": "triz-software-2",
+    "citations": [
+      "https://triz.org/contradictions/",
+      "https://triz.org/principles/",
+      "https://matriz.org/methodology/",
+      "https://wiki.matriz.org/docs/triz/problem-solving-tools-5890/contradictions/",
+      "https://wiki.matriz.org/docs/triz/problem-solving-tools-5890/contradictions/engineering-contradiction-5995/contradiction-matrix-6026/",
+      "https://matriz.org/wp-content/uploads/2020/04/Selected-Topics-for-Level-1-Training.pdf",
+      "https://doi.org/10.1016/j.proeng.2015.12.413"
+    ],
+    "canonicalMatrixLookup": false,
+    "disclaimer": "Complete software-adapted TRIZ contradiction-resolution heuristic catalog: all 40 main Inventive Principles plus the modern MATRIZ physical-contradiction resolution routes. Heuristic wording is software-adapted rather than canonical TRIZ wording. This object does not embed the classical 39x39 Altshuller contradiction matrix and is not a complete representation of the broader TRIZ body of knowledge, which also includes ARIZ, Substance-Field analysis, Standard Inventive Solutions, trends of engineering-system evolution, scientific effects, function analysis, and related methods."
+  },
+  "notes": [
+    "classifier confidence was below the grounding threshold",
+    "Provider reported a model alias; the resolved underlying model version is unavailable.",
+    "Classifier output is probabilistic inference; only the catalog mapping is deterministic.",
+    "Billed cost is unknown: no upstream provider billing response is captured. A finite Pi SDK usage cost is labelled as Pi-reported (source: pi_reported) and is an estimate, not a bill; an absent cost is unknown, not free."
+  ]
+}

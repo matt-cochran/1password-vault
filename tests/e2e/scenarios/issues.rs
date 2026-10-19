@@ -48,6 +48,11 @@ impl Scenario {
             s.project().join("secrets.toml"),
         )
         .unwrap();
+        std::fs::copy(
+            Path::new(APP).join("secrets.bindings.toml"),
+            s.project().join("secrets.bindings.toml"),
+        )
+        .unwrap();
         std::fs::write(
             s.project().join(".opv"),
             format!("account = \"{PROJECT}\"\n"),
@@ -243,7 +248,7 @@ fn issue_150_sync_without_confirm_writes_nothing_and_the_confirmed_write_is_the_
 #[test]
 fn issue_153_a_value_vault_in_the_other_account_names_that_account() {
     let s = Scenario::new(|w| set_vault(w, "vE2EWEBDEV0000000000000001", "account", OTHER));
-    let error = document(&s.opv(&["check", "dev", "--json"]))["error"].clone();
+    let error = document(&s.opv(&["config", "export", "dev", "--json"]))["error"].clone();
     assert!(
         error["code"] != "item_not_found" && error.to_string().contains(OTHER),
         "{error}"
@@ -258,7 +263,7 @@ fn issue_153_a_session_variable_for_the_other_account_is_not_used_for_the_projec
     let s = Scenario::new(|w| w["op"]["default_account"] = OTHER.into());
     let session = format!("OP_SESSION_{OTHER}");
     let out = s.opv_with(
-        &["check", "dev", "--json"],
+        &["config", "export", "dev", "--json"],
         &[(session.as_str(), "test-marker-e2e-ops-session")],
     );
     assert_eq!(

@@ -1,0 +1,23 @@
+{
+  "evidence": [
+    {
+      "id": "E1",
+      "text": "A person at a terminal benefits from opv prompting them, for example a masked value prompt or a confirmation."
+    },
+    {
+      "id": "E2",
+      "text": "An assistant running opv through a shell cannot answer prompts; a prompt hangs the run or, worse, shows the assistant something it must not see."
+    },
+    {
+      "id": "E3",
+      "text": "The same command is run by both people and assistants."
+    }
+  ],
+  "desiredImprovement": "Interactive help for a person at a terminal",
+  "worseningOutcome": "Reliability and safety when an assistant runs the same command",
+  "element": "an opv command",
+  "opposingProperties": [
+    "prompts interactively",
+    "never prompts"
+  ]
+}

@@ -1,6 +1,7 @@
 //! Every example configuration loads with this version of opv, so a copied example never
-//! starts with a configuration error. An example may leave the boundary IDs and each
-//! target's `state_vault_id` to `opv bootstrap`; it is checked with placeholder IDs.
+//! starts with a configuration error. An example keeps its IDs in `secrets.bindings.toml`
+//! beside it (D-G) and may leave the boundary IDs and each target's `state_vault_id` to `opv
+//! bootstrap`; it is checked with placeholder IDs for those.
 
 use std::path::{Path, PathBuf};
 
@@ -16,7 +17,7 @@ fn example_configs() -> Vec<PathBuf> {
 }
 
 /// The example with placeholder IDs wherever `opv bootstrap` records them: a boundary's
-/// `vault_id`/`item_id` and a target's `state_vault_id`, left empty in the file. Each
+/// `vault_id`/`item_id` and a target's `state_vault_id`, not yet recorded. Each
 /// placeholder is distinct, as bootstrap's real IDs are, so two vaults never look shared.
 fn with_ids(text: &str) -> String {
     let mut next = 0;
@@ -40,10 +41,10 @@ fn with_ids(text: &str) -> String {
                 let Some(b) = boundary.as_table_like_mut() else {
                     continue;
                 };
-                if b.get("vault_id").and_then(|v| v.as_str()) == Some("") {
+                if unrecorded(b.get("vault_id")) {
                     b.insert("vault_id", toml_edit::value(id("v")));
                 }
-                if b.get("item_id").and_then(|v| v.as_str()) == Some("") {
+                if unrecorded(b.get("item_id")) {
                     b.insert("item_id", toml_edit::value(id("i")));
                 }
             }
@@ -53,13 +54,23 @@ fn with_ids(text: &str) -> String {
                 let Some(t) = target.as_table_like_mut() else {
                     continue;
                 };
-                if t.get("state_vault_id").and_then(|v| v.as_str()) == Some("") {
+                if unrecorded(t.get("state_vault_id")) {
                     t.insert("state_vault_id", toml_edit::value(id("vstate")));
                 }
             }
         }
     }
     doc.to_string()
+}
+
+/// An id `opv bootstrap` has not recorded yet: absent, or empty.
+fn unrecorded(id: Option<&toml_edit::Item>) -> bool {
+    id.and_then(|v| v.as_str()).is_none_or(str::is_empty)
+}
+
+/// The example at `path` as opv reads it: the contract with its bindings filled in.
+fn read(path: &Path) -> String {
+    opv::config::read_merged(path).expect("the example reads")
 }
 
 #[test]
@@ -70,7 +81,7 @@ fn there_is_at_least_one_example_configuration() {
 #[test]
 fn the_overflow_example_places_p_on_two_targets() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/shared-overflow/secrets.toml");
-    let text = std::fs::read_to_string(&path).expect("the overflow example exists");
+    let text = read(&path);
     let fleet = opv::config::parse(&with_ids(&text)).expect("the overflow example loads");
     let placed = ["shared", "p-overflow"]
         .iter()
@@ -84,8 +95,8 @@ fn every_example_configuration_loads() {
     let failures: Vec<String> = example_configs()
         .iter()
         .filter_map(|p| {
-            let text = std::fs::read_to_string(p).unwrap();
-            opv::config::parse(&with_ids(&text))
+            opv::config::read_merged(p)
+                .and_then(|text| opv::config::parse(&with_ids(&text)))
                 .err()
                 .map(|e| format!("{}: {e}", p.display()))
         })

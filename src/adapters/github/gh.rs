@@ -520,8 +520,7 @@ fn write_failure(
         Error::Catalog(cause, up) if !done.is_empty() => Error::Catalog(
             Box::new(Cause::Partial {
                 done,
-                approval_used: None,
-                approval_scope: None,
+                scope: None,
                 then: cause,
             }),
             up,

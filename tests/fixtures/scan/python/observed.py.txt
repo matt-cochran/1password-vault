@@ -1,0 +1,6 @@
+import os
+
+database_url = os.environ["DATABASE_URL"]
+cache_dir = os.environ.get("CACHE_DIR")
+api_key = os.getenv("API_KEY")
+debug = environ.get("DEBUG")

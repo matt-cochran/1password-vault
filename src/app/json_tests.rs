@@ -3,9 +3,9 @@
 //! `UPDATE_GOLDEN=1` rewrites them in `tests/fixtures/json/`. Every fixture value carries
 //! [`MARKER`]; no golden may contain it (SR-1).
 
+use super::status;
 use super::sync::{self, SyncOpts};
 use super::testutil::*;
-use super::{local, skeleton, status};
 use crate::error::Error;
 use crate::runner::fake::FakeRunner;
 
@@ -145,8 +145,7 @@ fn plan_success() {
 
 /// The fixture fleet with `fly.config = "secrets"` on its prod Fly target.
 fn config_secrets_fleet() -> crate::domain::Fleet {
-    let text = std::fs::read_to_string("tests/fixtures/secrets.toml")
-        .unwrap()
+    let text = crate::config::merged_text("tests/fixtures/secrets.toml")
         .replace(
             "fly.secret_name = \"FLEET__{PRODUCT}__{KEY}\"\nstate_vault_id = \"sprd\"",
             "fly.secret_name = \"FLEET__{PRODUCT}__{KEY}\"\nfly.config = \"secrets\"\nstate_vault_id = \"sprd\"",
@@ -175,26 +174,6 @@ fn plan_findings() {
     golden(
         "plan_findings",
         &plan_json(item_without("allumata", "OPENAI_API_KEY")),
-    );
-}
-
-fn check_json(item: crate::runner::Output) -> String {
-    let r = FakeRunner::new([item]);
-    let mut out = Vec::new();
-    let res = local::check(&fleet(), "prod", Some("allumata"), &r, &mut out, true);
-    framed(&out, &res, "opv check prod --product allumata --json")
-}
-
-#[test]
-fn check_success() {
-    golden("check_success", &check_json(complete_item()));
-}
-
-#[test]
-fn check_findings() {
-    golden(
-        "check_findings",
-        &check_json(item_without("allumata", "OPENAI_API_KEY")),
     );
 }
 
@@ -248,8 +227,8 @@ fn sync_confirm_required() {
     // does not have: the golden keeps the shape and leaves the command out.
     let mut doc: serde_json::Value =
         serde_json::from_str(&framed(&out, &res, "opv sync prod --deploy --json")).unwrap();
-    doc["next"] = "<the command as typed> --confirm prod".into();
-    doc["error"]["next"] = "<the command as typed> --confirm prod".into();
+    doc["next"]["command"] = "<the command as typed> --confirm prod".into();
+    doc["error"]["next"]["command"] = "<the command as typed> --confirm prod".into();
     golden("sync_confirm_required", &doc.to_string());
 }
 
@@ -267,27 +246,6 @@ fn explain_success() {
 #[test]
 fn explain_undeclared_key() {
     golden("explain_undeclared", &explain_json("allumata/OPENAI_KEY"));
-}
-
-#[test]
-fn skeleton_success() {
-    let r = FakeRunner::new([item_without("allumata", "OPENAI_API_KEY"), ok()]);
-    let mut out = Vec::new();
-    let res = skeleton::run_as(&fleet(), "prod", &r, &mut out, true);
-    golden(
-        "skeleton_success",
-        &framed(&out, &res, "opv item skeleton prod --json"),
-    );
-}
-
-#[test]
-fn skeleton_unknown_environment() {
-    let mut out = Vec::new();
-    let res = skeleton::run_as(&fleet(), "qa", &FakeRunner::new([]), &mut out, true);
-    golden(
-        "skeleton_unknown_env",
-        &framed(&out, &res, "opv item skeleton qa --json"),
-    );
 }
 
 // ---- The schema covers every field (A4): links (H1), changes (H8), shared keys (FR-45),
@@ -706,6 +664,11 @@ fn the_schema_lists_every_field_of_every_golden_document() {
             "skeleton" => "item skeleton",
             other => other,
         };
+        // Documents of 0.11.0 commands removed in 0.12.0 (design §25.3): their builders are
+        // still library code, but `opv schema` no longer describes them.
+        if ["check", "init", "item skeleton"].contains(&name) {
+            continue;
+        }
         let doc: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         for f in undocumented(&doc, name) {

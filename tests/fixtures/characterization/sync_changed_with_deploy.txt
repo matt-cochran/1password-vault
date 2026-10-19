@@ -10,7 +10,7 @@ $ op item get iprd --vault vprd --format json --cache=false
 $ flyctl secrets deploy --app mcproductlabs-portfolio-production
 --- stdout
 prod/portfolio: warning: allumata/SIGNUP_POLICY not delivered (no config channel: set fly.config)
-prod/portfolio: delivery: allumata not recorded: not confirmed by this sync: FLEET__ALLUMATA__INTEGRATION_ENC_KEY; no delivery item is recorded for allumata on prod/portfolio; opv bootstrap creates it
+prod/portfolio: delivery: allumata not recorded: not confirmed by this sync: FLEET__ALLUMATA__INTEGRATION_ENC_KEY; no delivery item is recorded for allumata on prod/portfolio; opv apply creates it
 prod/portfolio: written: allumata/OPENAI_API_KEY (FLEET__ALLUMATA__OPENAI_API_KEY)
 prod/portfolio: held (immutable), not rewritten (pass --rotate PRODUCT/KEY to replace): allumata/INTEGRATION_ENC_KEY (FLEET__ALLUMATA__INTEGRATION_ENC_KEY)
 prod/portfolio: deployed: allumata/OPENAI_API_KEY (FLEET__ALLUMATA__OPENAI_API_KEY)

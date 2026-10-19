@@ -56,6 +56,18 @@ fn a_signal_is_passed_on_as_128_plus_the_signal() {
 }
 
 #[test]
+fn a_proposal_is_followed_by_apply() {
+    let args = ["propose", "key", "api/TOKEN", "--write"].map(String::from);
+    assert_eq!(follow_up(&args), Some(vec!["apply".to_string()]));
+}
+
+#[test]
+fn an_import_runs_alone() {
+    let args = ["import", "local", "--from", "dev.env"].map(String::from);
+    assert_eq!(follow_up(&args), None);
+}
+
+#[test]
 fn opv_that_cannot_start_is_a_catalog_cause() {
     // C11: the cause comes from the catalog, never free text.
     assert!(matches!(

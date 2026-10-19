@@ -160,7 +160,7 @@ pub struct Upstream {
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
 pub struct Invocation {
     pub origin: Origin,
-    /// Subcommand path (`["run"]`, `["target", "add"]`).
+    /// Subcommand path (`["run"]`, `["target", "list"]`).
     pub command: Vec<String>,
     /// Every flag and positional argument before `--`, in order, as the person gave them.
     pub args: Vec<String>,
@@ -246,8 +246,6 @@ pub enum Action {
     AddAccount { account: AccountRef },
     /// Pick between candidates that only a person can tell apart.
     PickBetween,
-    /// Approve a plan in the person's own terminal.
-    Approve { plan: PlanId },
     /// Confirm the environment.
     Confirm { env: EnvName },
     /// Revoke an orphan whose secret was never stored.
@@ -282,7 +280,6 @@ impl Action {
                 | Action::UnlockApp
                 | Action::AddAccount { .. }
                 | Action::PickBetween
-                | Action::Approve { .. }
                 | Action::Confirm { .. }
                 | Action::Revoke { .. }
                 | Action::OwnerSetup { .. }
@@ -424,6 +421,16 @@ pub enum Cause {
         field: DottedPath,
         rule: FieldRule,
     },
+    ContractStale {
+        /// The committed copy that differs, when the caller knows its path.
+        path: Option<PathBuf>,
+    },
+    ValueInTextField {
+        field: DottedPath,
+        /// The stable name of the detector that matched (`known_prefix`, `pem_header`,
+        /// `high_entropy`); never the text it matched in.
+        detector: &'static str,
+    },
     BoundaryMissing {
         env: EnvName,
         product: ProductName,
@@ -450,6 +457,12 @@ pub enum Cause {
         file: PathBuf,
         manifest: String,
     },
+    /// The committed `secrets.bindings.toml` is not the one the last `opv apply` wrote
+    /// (D-G); the apply record holds only digests, so the environments named here are the
+    /// ones in the bindings file. A person runs `opv apply`.
+    BindingsUnapplied {
+        environments: Vec<EnvName>,
+    },
     ManifestNotFound {
         project: String,
         account: Option<AccountId>,
@@ -464,6 +477,25 @@ pub enum Cause {
     },
     InventoryIncomplete {
         unlisted: Vec<AccountId>,
+    },
+    /// The code reads names the contract declares nowhere and the default-branch contract
+    /// does not declare either (design Part V, row `needs`, the `needs` gate). Names only;
+    /// never a value.
+    NeedsUndeclared {
+        names: Vec<String>,
+        /// The product the names would be declared in: the only delivered product, when
+        /// the contract has exactly one.
+        product: Option<String>,
+    },
+    /// The deployed code still reads a key a person asked to retire (design Part V, row
+    /// `retire`): retirement prunes a key from a target only once the deployed revision no
+    /// longer binds it, so pruning now would break the running application. An empty
+    /// `files` means no deployed receipt records the revision, which is the same refusal.
+    /// Names and `file:line` only; never a value.
+    RetireStillRead {
+        key: KeyName,
+        env: EnvName,
+        files: Vec<String>,
     },
 
     // §4.2 names and usage
@@ -621,9 +653,10 @@ pub enum Cause {
     },
     Partial {
         done: Vec<String>,
-        approval_used: Option<PlanId>,
-        /// What the used approval covered: Next reads what remains in that same scope.
-        approval_scope: Option<PlanScope>,
+        /// What the run covered: Next reads what remains in that same scope. Internal;
+        /// never part of the JSON subject.
+        #[serde(skip)]
+        scope: Option<PlanScope>,
         then: Box<Cause>,
     },
     Interrupted {
@@ -681,6 +714,13 @@ pub enum Cause {
     NeedsTerminal {
         why: NoTerminal,
     },
+    /// A person-only command was called from an assistant (MCP or an agent-mode shell): it
+    /// refuses at once and hands the exact command to the person. Presentation only, never
+    /// a security control (R1); `marker` names what made opv think the caller is one.
+    PersonOnly {
+        command: Cmd,
+        marker: crate::host::AgentMarker,
+    },
     NeedsConfirm {
         env: EnvName,
     },
@@ -712,15 +752,6 @@ pub enum Cause {
     },
 
     // §4.9 approvals and plans
-    ApprovalMissing {
-        plan: PlanId,
-        scope: PlanScope,
-    },
-    ApprovalUsed {
-        plan: PlanId,
-        scope: PlanScope,
-        partial: bool,
-    },
     PlanChanged {
         old: PlanId,
         new: PlanId,
@@ -790,7 +821,7 @@ pub enum Cause {
     },
     /// A source item changed since the last sync, or no recorded source versions exist
     /// (`delivery-transports` §2.2). A result, not a failure: `ok: true`, exit 10; the
-    /// step it names is the sync (or `opv bootstrap` when no delivery item is recorded).
+    /// step it names is the sync (or `opv apply` when no delivery item is recorded).
     SourceChanged {
         env: EnvName,
         /// No `source versions` recorded for the placement: its delivery item is missing,
@@ -877,6 +908,24 @@ pub enum Cause {
         /// The candidates by title and ID: the listing's for none, the matches for several.
         candidates: Vec<String>,
     },
+    /// `ready --gate` found present keys that are not ready to promote (design row `gate`):
+    /// a value state other than `set`, or delivery evidence older than the source item now.
+    /// `keys` carries the product, the key and the reason (the state name, or
+    /// `not_delivered`); never a value (SR-1). Public code `gate_failed`, exit 8.
+    GateFailed {
+        env: EnvName,
+        keys: Vec<(ProductName, KeyName, &'static str)>,
+    },
+    /// `opv_import_local` was pointed at an environment whose tier is not `local` (design
+    /// row `import-local`): only a `local` environment may take an assistant's import. The
+    /// environment and its tier are named; the next step is the person's own
+    /// `opv import <env> --from <file>`. Never a value.
+    ImportTierRefused {
+        env: EnvName,
+        tier: &'static str,
+        /// The file the caller named, as given: the person's own import reads it.
+        file: PathBuf,
+    },
     Bug {
         site: &'static str,
     },
@@ -934,7 +983,7 @@ impl GenerateRefusal {
                 "it is a shared key, so its value comes from the key it reads from"
             }
             GenerateRefusal::HasValue => {
-                "its field already holds a value, and opv generate never replaces one (rotation is a reviewed step)"
+                "its field already holds a value, and opv apply never replaces one (rotation is a reviewed step)"
             }
         }
     }
@@ -1053,11 +1102,6 @@ pub enum UsageProblem {
     /// A file the command would write already exists; `--force` replaces it (F4).
     FileExists {
         path: PathBuf,
-    },
-    /// A removed form (FR-60): what was removed, and the command that does it now.
-    Removed {
-        what: &'static str,
-        instead: Cmd,
     },
     /// A command line the parser refused: its own first line (it names the argument it
     /// could not place), and the subcommand path whose help to read (empty: `opv --help`).
@@ -1179,8 +1223,6 @@ pub enum LocalOp {
     CurrentExe,
     HomeDir,
     Stdout,
-    /// Standard input (a prompt's answer).
-    Stdin,
     /// The MCP session with its client over standard input and output: the handshake.
     McpHandshake,
     /// The MCP session after the handshake.
@@ -1211,9 +1253,6 @@ pub enum Guard {
     },
     NotManagedByOpv {
         name: String,
-    },
-    CredentialAsOption {
-        option: String,
     },
     ProviderHidesValues {
         system: System,
@@ -1412,15 +1451,20 @@ impl Cause {
             ConfigSourceMismatch { .. } => "config_source_mismatch",
             ConfigUnreadable { .. } => "config_unreadable",
             ConfigInvalid { .. } => "config_invalid",
+            ContractStale { .. } => "contract_stale",
+            ValueInTextField { .. } => "value_in_text_field",
             BoundaryMissing { .. } => "boundary_missing",
             StateVaultMissing { .. } => "state_vault_missing",
             StateVaultTooWide { .. } => "state_vault_wider_than_values",
             ConfigNotEditable { .. } => "config_not_editable",
             CopiesDiffer { .. } => "copies_differ",
+            BindingsUnapplied { .. } => "bindings_unapplied",
             ManifestNotFound { .. } => "manifest_not_found",
             ManifestAmbiguous { .. } => "manifest_ambiguous",
             ManifestExists { .. } => "manifest_exists",
             InventoryIncomplete { .. } => "inventory_incomplete",
+            NeedsUndeclared { .. } => "needs_undeclared",
+            RetireStillRead { .. } => "retire_still_read",
             NotDeclared { kind, .. } => match kind {
                 NameKind::Environment => "unknown_env",
                 NameKind::Target => "unknown_target",
@@ -1492,14 +1536,15 @@ impl Cause {
             UnexpectedOutput { .. } => "unexpected_output",
             Unrecognized { .. } => "unrecognized_failure",
             NeedsTerminal { .. } => "terminal_required",
+            PersonOnly { .. } => "person_only",
             NeedsConfirm { .. } => "confirm_required",
             ConfirmMismatch { .. } => "confirm_mismatch",
             ValuesNeeded { .. } => "findings",
+            GateFailed { .. } => "gate_failed",
+            ImportTierRefused { .. } => "import_tier_refused",
             KeysBlocking { .. } => "keys_blocking",
             LocalFileTooOpen { .. } => "file_too_open",
             InputInvalid { .. } => "input_invalid",
-            ApprovalMissing { .. } => "approval_required",
-            ApprovalUsed { .. } => "approval_used",
             PlanChanged { .. } => "stale_plan",
             PlanUnknown { .. } => "plan_unknown",
             RamDirUnavailable { .. } => "ram_dir_unavailable",
@@ -1533,11 +1578,16 @@ impl Cause {
             | ConfigSourceMismatch { .. }
             | ConfigUnreadable { .. }
             | ConfigInvalid { .. }
+            | ContractStale { .. }
+            | NeedsUndeclared { .. }
+            | RetireStillRead { .. }
+            | ValueInTextField { .. }
             | BoundaryMissing { .. }
             | StateVaultMissing { .. }
             | StateVaultTooWide { .. }
             | ConfigNotEditable { .. }
             | CopiesDiffer { .. }
+            | BindingsUnapplied { .. }
             | ManifestNotFound { .. }
             | ManifestAmbiguous { .. }
             | ManifestExists { .. }
@@ -1590,17 +1640,17 @@ impl Cause {
             Guard { .. }
             | MountUnreadable { .. }
             | NeedsTerminal { .. }
+            | PersonOnly { .. }
             | NeedsConfirm { .. }
             | ConfirmMismatch { .. }
             | LocalFileTooOpen { .. }
-            | ApprovalMissing { .. }
-            | ApprovalUsed { .. }
             | PlanChanged { .. }
             | PlanUnknown { .. }
             | RamDirUnavailable { .. }
             | PrivateDirFailed { .. }
             | LocalIo { .. }
             | KeysBlocking { .. }
+            | ImportTierRefused { .. }
             | HandoffPipeContested { .. } => 6,
             NotSignedIn { .. }
             | AccountNotOnMachine { .. }
@@ -1608,7 +1658,10 @@ impl Cause {
             | InOtherAccount { .. }
             | NeedsOwnSession { .. }
             | CredentialRejected { .. } => 7,
-            ValuesNeeded { .. } | DeliveryUnverified { .. } | TargetDrift { .. } => 8,
+            ValuesNeeded { .. }
+            | DeliveryUnverified { .. }
+            | TargetDrift { .. }
+            | GateFailed { .. } => 8,
             SourceChanged { .. } => 10,
             CreateOutcomeUnknown { .. }
             | WriteOutcomeUnknown { .. }
@@ -1654,9 +1707,9 @@ impl Cause {
             | NeedsOwnSession { .. }
             | Guard { .. }
             | NeedsTerminal { .. }
+            | PersonOnly { .. }
             | NeedsConfirm { .. }
             | ConfirmMismatch { .. }
-            | ApprovalUsed { .. }
             | PlanChanged { .. }
             | PlanUnknown { .. }
             | UnexpectedOutput { .. }

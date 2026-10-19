@@ -63,6 +63,11 @@ impl Scenario {
             s.project().join("secrets.toml"),
         )
         .expect("config");
+        std::fs::copy(
+            Path::new(APP).join("secrets.bindings.toml"),
+            s.project().join("secrets.bindings.toml"),
+        )
+        .expect("config");
         std::fs::write(
             s.project().join(".opv"),
             format!("account = \"{PROJECT}\"\n"),
@@ -100,6 +105,7 @@ impl Scenario {
             .env("HOME", self.root.path().join("home"))
             .env("OPV_NO_SKILL", "1")
             .env("OPV_SIM_WORLD", self.world())
+            .env("OPV_TEST_SUID_DUMPABLE", "0")
             .stdin(Stdio::null())
             .output()
             .expect("run opv")
@@ -245,9 +251,14 @@ fn changed_with_no_delivery_item_reports_every_placement_as_no_record() {
 }
 
 #[test]
-fn changed_with_no_delivery_item_steps_to_bootstrap() {
+fn changed_with_no_delivery_item_steps_to_apply() {
     let out = Scenario::new("").opv(&["changed", "prod", "--json"]);
-    assert_eq!(document(&out)["next"], "opv bootstrap", "{}", shown(&out));
+    assert_eq!(
+        document(&out)["next"]["command"],
+        "opv apply",
+        "{}",
+        shown(&out)
+    );
 }
 
 #[test]

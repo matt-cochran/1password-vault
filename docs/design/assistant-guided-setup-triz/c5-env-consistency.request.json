@@ -1,0 +1,18 @@
+{
+  "evidence": [
+    {
+      "id": "E1",
+      "text": "Keys are declared with an explicit list of environments; a key added for dev alone does not appear in staging or production."
+    },
+    {
+      "id": "E2",
+      "text": "A new environment does not inherit existing keys automatically."
+    },
+    {
+      "id": "E3",
+      "text": "Environments legitimately differ: some keys exist only in production, some only locally, and production values must differ from lower tiers."
+    }
+  ],
+  "desiredImprovement": "Consistency of the key set across every environment of an application",
+  "worseningOutcome": "Ability to express legitimate per-environment differences"
+}

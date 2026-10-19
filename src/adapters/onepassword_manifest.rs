@@ -3,9 +3,11 @@
 //!
 //! The notes are Markdown, which 1Password renders: an "opv managed configuration"
 //! heading and a short explanation for whoever opens the item, then the TOML in one fenced
-//! `toml` code block. opv reads only that block ([`config_text`]); notes without one (a
-//! manifest written before the heading) are read whole. An edit replaces only the block's
-//! contents, so text a person adds around it is kept ([`note_with`]).
+//! `toml` code block, the contract. opv reads only that block ([`config_text`]); notes
+//! without one (a manifest written before the heading) are read whole. The 1Password ids
+//! live in a second block tagged `toml opv-bindings` ([`bindings_text`]; D-G), one sorted
+//! dotted line per id as `secrets.bindings.toml` holds them. An edit replaces only the two
+//! blocks' contents, so text a person adds around them is kept ([`note_with`]).
 //!
 //! Calls, all through the runner (reads retried, writes never retried; NR-2, NR-3):
 //! - [`list`]: `op item list --tags opv-manifest --format json` (item metadata only: IDs,
@@ -78,7 +80,10 @@ pub struct VaultRef {
 /// it back whole; it holds no secret).
 #[derive(Debug, Clone)]
 pub struct Manifest {
+    /// The contract: the `toml` block (or the whole notes, for an older manifest).
     pub text: String,
+    /// The `toml opv-bindings` block's contents, when the notes have one (D-G).
+    pub bindings: Option<String>,
     pub version: u64,
     pub project: Option<String>,
     pub raw: Value,
@@ -489,7 +494,6 @@ fn parse(raw: Value, item_id: &str, vault_id: &str) -> Result<Manifest, Error> {
         .iter()
         .find(|f| f["purpose"] == "NOTES" || f["id"] == "notesPlain")
         .and_then(|f| f["value"].as_str())
-        .map(config_text)
         .ok_or_else(|| {
             Error::from(Cause::ItemUnusable {
                 vault: Some(crate::cause::VaultId::new(vault_id)),
@@ -503,22 +507,26 @@ fn parse(raw: Value, item_id: &str, vault_id: &str) -> Result<Manifest, Error> {
         .and_then(|f| f["value"].as_str())
         .map(str::to_string);
     Ok(Manifest {
-        text: notes,
+        text: config_text(notes),
+        bindings: bindings_text(notes),
         version: raw["version"].as_u64().unwrap_or(0),
         project,
         raw,
     })
 }
 
-/// The item JSON for a new manifest.
+/// The item JSON for a new manifest holding `text`: its inline ids, if any, go to the
+/// `opv-bindings` block and the rest to the contract block (D-G).
 pub fn template(title: &str, project: &str, tags: &[String], text: &str) -> Value {
+    let (contract, ids) = crate::config::bindings::split(text);
+    let bindings = ids.render();
     json!({
         "title": title,
         "category": "SECURE_NOTE",
         "tags": tags,
         "fields": [
             {"id": "notesPlain", "type": "STRING", "purpose": "NOTES", "label": "notesPlain",
-             "value": note_with(text, None, project)},
+             "value": note_with(&contract, Some(&bindings), None, project)},
             {"id": "project", "type": "STRING", "label": "project", "value": project},
             {"id": "convention", "type": "STRING", "label": "convention", "value": CONVENTION},
         ],
@@ -528,29 +536,56 @@ pub fn template(title: &str, project: &str, tags: &[String], text: &str) -> Valu
 /// The configuration in manifest notes: the first fenced `toml` code block's contents, or
 /// the whole notes when there is none (a manifest written before the Markdown layout).
 pub fn config_text(notes: &str) -> String {
-    match fenced(notes) {
-        Some((_, body, _)) => body.to_string(),
+    match fenced(notes, CONTRACT) {
+        Some(b) => notes[b.body.clone()].to_string(),
         None => notes.to_string(),
     }
 }
 
-/// Split `notes` around its first fenced `toml` block: (before, contents, after), the fence
-/// lines excluded from all three. The closing fence is a line of exactly the opening's
-/// backticks (Markdown's rule), so a shorter run inside the TOML never ends the block.
-fn fenced(notes: &str) -> Option<(&str, &str, &str)> {
+/// The ids in manifest notes (D-G): the first fenced `toml opv-bindings` block's contents,
+/// or `None` when the notes have none (no `opv apply` has recorded an id yet).
+pub fn bindings_text(notes: &str) -> Option<String> {
+    fenced(notes, BINDINGS).map(|b| notes[b.body].to_string())
+}
+
+/// The info string of the contract block.
+const CONTRACT: &[&str] = &["toml"];
+/// The info string of the bindings block (D-G).
+const BINDINGS: &[&str] = &["toml", "opv-bindings"];
+
+/// Where a fenced block sits in the notes: the whole block, fence lines included, and its
+/// contents.
+struct Block {
+    whole: std::ops::Range<usize>,
+    body: std::ops::Range<usize>,
+}
+
+/// The first fenced block of `notes` whose info string is the words `info`. Only blocks whose
+/// info starts with `toml` are tracked, so another block's lines never open or end one. The
+/// closing fence is a line of exactly the opening's backticks (Markdown's rule), so a
+/// shorter run inside the TOML never ends the block.
+fn fenced(notes: &str, info: &[&str]) -> Option<Block> {
     let mut at = 0;
-    let mut open: Option<(usize, usize, &str)> = None; // (start of fence, start of body, ticks)
+    // (start of fence, start of body, ticks, the info's words)
+    let mut open: Option<(usize, usize, &str, Vec<&str>)> = None;
     for line in notes.split_inclusive('\n') {
         let bare = line.trim_end_matches(['\n', '\r']);
-        match open {
+        match &open {
             None => {
                 let ticks = bare.len() - bare.trim_start_matches('`').len();
-                if ticks >= 3 && bare[ticks..].trim() == "toml" {
-                    open = Some((at, at + line.len(), &bare[..ticks]));
+                let words: Vec<&str> = bare[ticks..].split_whitespace().collect();
+                if ticks >= 3 && words.first() == Some(&"toml") {
+                    open = Some((at, at + line.len(), &bare[..ticks], words));
                 }
             }
-            Some((start, body, ticks)) if bare.trim_end() == ticks => {
-                return Some((&notes[..start], &notes[body..at], &notes[at + line.len()..]));
+            Some((start, body, ticks, words)) if bare.trim_end() == *ticks => {
+                if words.as_slice() == info {
+                    return Some(Block {
+                        whole: *start..at + line.len(),
+                        body: *body..at,
+                    });
+                }
+                open = None;
             }
             Some(_) => {}
         }
@@ -559,30 +594,66 @@ fn fenced(notes: &str) -> Option<(&str, &str, &str)> {
     None
 }
 
-/// Manifest notes holding `config`: the `previous` notes with only their code block's
-/// contents replaced, or, when they have no block (a new or older manifest), the heading
-/// and explanation followed by the block.
-pub fn note_with(config: &str, previous: Option<&str>, project: &str) -> String {
-    let ticks = "`".repeat(longest_tick_run(config).max(2) + 1);
-    let mut body = config.to_string();
-    if !body.ends_with('\n') {
+/// `body` in a fenced block tagged `info`, with a fence longer than any backtick run in it.
+fn block(info: &str, body: &str) -> String {
+    let ticks = "`".repeat(longest_tick_run(body).max(2) + 1);
+    let mut body = body.to_string();
+    if !body.is_empty() && !body.ends_with('\n') {
         body.push('\n');
     }
-    let block = format!("{ticks}toml\n{body}{ticks}\n");
-    if let Some((before, _, after)) = previous.and_then(fenced) {
-        return format!("{before}{block}{after}");
+    format!("{ticks}{info}\n{body}{ticks}\n")
+}
+
+/// Manifest notes holding `config` and, when `bindings` is given, those ids (D-G): the
+/// `previous` notes with only their blocks' contents replaced, or, when they have no
+/// contract block (a new or older manifest), the heading and explanation followed by the
+/// blocks. `bindings: None` keeps the bindings block as it is; an empty `Some` empties an
+/// existing block and adds none.
+pub fn note_with(
+    config: &str,
+    bindings: Option<&str>,
+    previous: Option<&str>,
+    project: &str,
+) -> String {
+    let contract = block("toml", if config.is_empty() { "\n" } else { config });
+    let notes = match previous.and_then(|p| fenced(p, CONTRACT).map(|b| (p, b))) {
+        Some((p, b)) => format!("{}{contract}{}", &p[..b.whole.start], &p[b.whole.end..]),
+        None => format!(
+            "# opv managed configuration\n\n\
+             opv reads this note to know which keys the project **{project}** needs and where \
+             each environment keeps them. **No secret values are stored here.**\n\n\
+             - Values: in each environment's own item, whose ids are in the `opv-bindings` \
+             block below. Open one with `opv open KEY --env ENV`.\n\
+             - Change keys with `opv propose key KEY --write` or `opv config edit`. Hand edits are fine inside \
+             the first code block while it stays valid TOML; opv reads only the code blocks. \
+             The `opv-bindings` block is written by `opv apply`; leave it as it is.\n\
+             - About opv: https://github.com/matt-cochran/1password-vault\n\n\
+             {contract}"
+        ),
+    };
+    let Some(ids) = bindings else {
+        return notes;
+    };
+    let ids_block = block("toml opv-bindings", ids);
+    if let Some(b) = fenced(&notes, BINDINGS) {
+        return format!(
+            "{}{ids_block}{}",
+            &notes[..b.whole.start],
+            &notes[b.whole.end..]
+        );
     }
-    format!(
-        "# opv managed configuration\n\n\
-         opv reads this note to know which keys the project **{project}** needs and where each \
-         environment keeps them. **No secret values are stored here.**\n\n\
-         - Values: in each environment's own item (its `vault_id` and `item_id` below). Open \
-         one with `opv open KEY --env ENV`.\n\
-         - Change keys with `opv add KEY` or `opv config edit`. Hand edits are fine inside the \
-         code block while it stays valid TOML; opv reads only the code block.\n\
-         - About opv: https://github.com/matt-cochran/1password-vault\n\n\
-         {block}"
-    )
+    if ids.is_empty() {
+        return notes;
+    }
+    // A first block of ids goes right after the contract block.
+    match fenced(&notes, CONTRACT) {
+        Some(b) => format!(
+            "{}\n{ids_block}{}",
+            &notes[..b.whole.end],
+            &notes[b.whole.end..]
+        ),
+        None => format!("{notes}\n{ids_block}"),
+    }
 }
 
 fn longest_tick_run(text: &str) -> usize {
@@ -633,22 +704,26 @@ pub fn create(
     }
 }
 
-/// What a manifest edit wrote, as `op item edit` printed it back: its version and notes
-/// (I5). `None` fields when op printed no item.
+/// What a manifest edit wrote, as `op item edit` printed it back: its version, contract and
+/// bindings block (I5). `None` fields when op printed no item.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Written {
     pub version: Option<u64>,
     pub text: Option<String>,
+    pub bindings: Option<Option<String>>,
 }
 
-/// Replace the manifest's notes with `text`, sending the whole item back (`base` is the
-/// item as last read, fresh). One write, never retried. Returns what op says it wrote.
+/// Replace the manifest's contract block with `text` and, when given, its bindings block
+/// with `bindings` ([`note_with`]), sending the whole item back (`base` is the item as last
+/// read, fresh). One write, never retried. Returns what op says it wrote.
+#[allow(clippy::too_many_arguments)]
 pub fn edit(
     r: &dyn CommandRunner,
     vault_id: &str,
     item_id: &str,
     base: &Value,
     text: &str,
+    bindings: Option<&str>,
     account: Option<&str>,
     host: &dyn Fn() -> Host,
 ) -> Result<Written, Error> {
@@ -672,7 +747,7 @@ pub fn edit(
         .find(|f| f["purpose"] == "NOTES" || f["id"] == "notesPlain")
         .ok_or_else(not_read)?;
     let previous = notes["value"].as_str().map(str::to_string);
-    notes["value"] = Value::String(note_with(text, previous.as_deref(), &project));
+    notes["value"] = Value::String(note_with(text, bindings, previous.as_deref(), &project));
     let body = serde_json::to_vec(&item).map_err(|_| Cause::Bug {
         site: "onepassword_manifest: the manifest item does not serialize",
     })?;
@@ -686,10 +761,14 @@ pub fn edit(
     let ctx = context(account, Some((item_id, vault_id)), true);
     match r.write(&call) {
         Ok(Outcome::Done(o)) => Ok(match serde_json::from_slice::<Value>(&o.stdout) {
-            Ok(v) => Written {
-                version: v["version"].as_u64(),
-                text: parse(v, item_id, vault_id).ok().map(|m| m.text),
-            },
+            Ok(v) => {
+                let m = parse(v.clone(), item_id, vault_id).ok();
+                Written {
+                    version: v["version"].as_u64(),
+                    bindings: m.as_ref().map(|m| m.bindings.clone()),
+                    text: m.map(|m| m.text),
+                }
+            }
             Err(_) => Written::default(),
         }),
         // A refusal of an edit built from a fresh read is the missing Write grant unless
@@ -810,12 +889,17 @@ mod tests {
 
     #[test]
     fn a_new_manifest_note_opens_with_the_opv_heading() {
-        assert!(note_with("x = 1\n", None, "app").starts_with("# opv managed configuration\n"));
+        assert!(
+            note_with("x = 1\n", None, None, "app").starts_with("# opv managed configuration\n")
+        );
     }
 
     #[test]
     fn the_configuration_is_read_from_the_code_block_only() {
-        assert_eq!(config_text(&note_with("x = 1\n", None, "app")), "x = 1\n");
+        assert_eq!(
+            config_text(&note_with("x = 1\n", None, None, "app")),
+            "x = 1\n"
+        );
     }
 
     #[test]
@@ -827,15 +911,78 @@ mod tests {
     fn an_edit_keeps_what_a_person_wrote_around_the_code_block() {
         let before = "My notes\n```toml\nx = 1\n```\nMore notes\n";
         assert_eq!(
-            note_with("x = 2\n", Some(before), "app"),
+            note_with("x = 2\n", None, Some(before), "app"),
             "My notes\n```toml\nx = 2\n```\nMore notes\n"
+        );
+    }
+
+    /// D-G: the two blocks a manifest keeps, with a person's text around them.
+    const TWO_BLOCKS: &str = "My notes\n```toml\nx = 1\n```\nBetween\n```toml opv-bindings\na = \"b\"\n```\nMore notes\n";
+
+    /// A configuration with two inline ids.
+    const INLINE: &str =
+        "[environments.dev]\nboundaries.app = { vault_id = \"v1\", item_id = \"i1\" }\n";
+
+    #[test]
+    fn the_ids_are_read_from_the_bindings_block() {
+        assert_eq!(bindings_text(TWO_BLOCKS).as_deref(), Some("a = \"b\"\n"));
+    }
+
+    #[test]
+    fn the_contract_is_read_from_the_untagged_toml_block_only() {
+        assert_eq!(config_text(TWO_BLOCKS), "x = 1\n");
+    }
+
+    #[test]
+    fn notes_without_a_bindings_block_hold_no_ids() {
+        assert_eq!(bindings_text("```toml\nx = 1\n```\n"), None);
+    }
+
+    #[test]
+    fn an_edit_of_both_blocks_keeps_what_a_person_wrote_around_them() {
+        assert_eq!(
+            note_with("x = 2\n", Some("a = \"c\"\n"), Some(TWO_BLOCKS), "app"),
+            "My notes\n```toml\nx = 2\n```\nBetween\n```toml opv-bindings\na = \"c\"\n```\nMore notes\n"
+        );
+    }
+
+    #[test]
+    fn an_edit_of_the_contract_alone_keeps_the_bindings_block() {
+        let notes = note_with("x = 2\n", None, Some(TWO_BLOCKS), "app");
+        assert_eq!(bindings_text(&notes).as_deref(), Some("a = \"b\"\n"));
+    }
+
+    #[test]
+    fn the_first_ids_go_right_after_the_contract_block() {
+        let before = "Mine\n```toml\nx = 1\n```\nEnd\n";
+        assert_eq!(
+            note_with("x = 1\n", Some("a = \"b\"\n"), Some(before), "app"),
+            "Mine\n```toml\nx = 1\n```\n\n```toml opv-bindings\na = \"b\"\n```\nEnd\n"
+        );
+    }
+
+    #[test]
+    fn a_new_manifest_keeps_its_ids_out_of_the_contract_block() {
+        let t = template("opv · app", "app", &[], INLINE);
+        assert!(!parse(t, "i", "v").unwrap().text.contains("v1"));
+    }
+
+    #[test]
+    fn a_new_manifest_keeps_its_ids_in_the_bindings_block() {
+        let t = template("opv · app", "app", &[], INLINE);
+        assert_eq!(
+            parse(t, "i", "v").unwrap().bindings.as_deref(),
+            Some(
+                "environments.dev.boundaries.app.item_id = \"i1\"\n\
+                 environments.dev.boundaries.app.vault_id = \"v1\"\n"
+            )
         );
     }
 
     #[test]
     fn backticks_inside_the_configuration_never_end_its_code_block() {
         let config = "guidance = \"\"\"\n```\nnot the end\n```\n\"\"\"\n";
-        assert_eq!(config_text(&note_with(config, None, "app")), config);
+        assert_eq!(config_text(&note_with(config, None, None, "app")), config);
     }
 
     #[test]
