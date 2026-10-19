@@ -18,12 +18,10 @@ fn key_form() -> AddKeyForm {
     }
 }
 
-/// An environment form with everything unset, so a test only states what it exercises.
+/// The environment form for `dev`.
 fn env_form() -> AddEnvForm {
     AddEnvForm {
         name: "dev".to_string(),
-        vault: String::new(),
-        item: String::new(),
     }
 }
 
@@ -191,36 +189,13 @@ fn add_key_rejects_personal_with_a_config_key() {
 // ---- add_env_command ----
 
 #[test]
-fn add_env_builds_the_full_command_with_vault_and_item() {
+fn add_env_builds_the_written_proposal_of_the_environment() {
     let form = AddEnvForm {
         name: "staging".to_string(),
-        vault: "  myapp-staging  ".to_string(),
-        item: "  myapp · staging values  ".to_string(),
     };
     assert_eq!(
         add_env_command(&form, &[]),
-        Ok(v(&[
-            "init",
-            "staging",
-            "--add-env",
-            "--vault",
-            "myapp-staging",
-            "--item",
-            "myapp · staging values",
-        ]))
-    );
-}
-
-#[test]
-fn add_env_builds_the_minimal_command_without_vault_or_item() {
-    let form = AddEnvForm {
-        vault: "   ".to_string(),
-        item: String::new(),
-        ..env_form()
-    };
-    assert_eq!(
-        add_env_command(&form, &[]),
-        Ok(v(&["init", "dev", "--add-env"]))
+        Ok(v(&["propose", "env", "staging", "--write"]))
     );
 }
 
@@ -228,7 +203,6 @@ fn add_env_builds_the_minimal_command_without_vault_or_item() {
 fn add_env_rejects_a_name_with_a_space() {
     let form = AddEnvForm {
         name: "bad name".to_string(),
-        ..env_form()
     };
     assert_eq!(
         add_env_command(&form, &[]),
@@ -244,7 +218,6 @@ fn add_env_rejects_a_name_with_a_space() {
 fn add_env_rejects_an_empty_name() {
     let form = AddEnvForm {
         name: String::new(),
-        ..env_form()
     };
     assert_eq!(
         add_env_command(&form, &[]),
@@ -294,7 +267,6 @@ fn add_key_product_refusal_states_the_naming_rule_without_a_pattern() {
 fn add_env_refusal_states_the_naming_rule_without_a_pattern() {
     let form = AddEnvForm {
         name: "bad name".to_string(),
-        ..env_form()
     };
     let message = add_env_command(&form, &[]).unwrap_err();
     assert!(

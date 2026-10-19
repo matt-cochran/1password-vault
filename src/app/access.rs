@@ -23,11 +23,13 @@ use crate::cause::{
     AccountId, Cause, DiagnoseContext, DottedPath, EnvName, ExitClass, NameKind, NamedBy, Observed,
     ResourceKind, ResourceName, ResourceRef, Scope, System, TargetName, Upstream,
 };
+use crate::domain::Tier;
 use crate::domain::access::{AccessFinding, Reader, VAULT_NOT_IN_ACCOUNT, analyse, findings};
 use crate::domain::access_plan::{
     AccessReport, CiNeeds, Grant, GrantCheck, GrantState, ObservedVault, Permission, Principal,
     TargetNeeds, compare, create_command, required,
 };
+use crate::domain::capability::{self, Capability, UnknownSource};
 use crate::error::Error;
 use crate::host::Host;
 use crate::runner::CommandRunner;
@@ -38,6 +40,8 @@ type Observations = BTreeMap<String, Option<serde_json::Value>>;
 type Readers = BTreeMap<String, Option<Vec<Reader>>>;
 /// The diagnosed cause per vault whose user list could not be read (#153, #157).
 type Unreadable = BTreeMap<String, VaultCause>;
+/// What the session can do with each needed vault (design Part V, row `capability`).
+type Capabilities = BTreeMap<String, Capability>;
 
 /// Why one needed vault's user list could not be read, as the 1Password diagnosis
 /// classified the failed calls in the environment's own account (#157, design §5).
@@ -90,6 +94,8 @@ struct Needs<'a> {
     fields: BTreeMap<&'a str, DottedPath>,
     targets: Vec<TargetNeeds<'a>>,
     ci: Vec<CiNeeds<'a>>,
+    /// The environment's tier; a `local` tier is not deployed, so it needs no second writer.
+    tier: Tier,
 }
 
 /// One environment's comparison and the owner commands for its missing grants (FR-59).
@@ -98,6 +104,22 @@ struct EnvReport {
     report: AccessReport,
     commands: Vec<String>,
     findings: Vec<AccessFinding>,
+    /// One entry per needed vault that could be read (Part V, row `access-writers`).
+    vaults: Vec<VaultAccess>,
+}
+
+/// One needed vault as `opv access` shows it (Part V, row `access-writers`): its tier
+/// marking, this session's capability, and who can write it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct VaultAccess {
+    vault_id: String,
+    /// `true` when the environment that needs it is production-tier.
+    production: bool,
+    /// What this session can do with the vault (Part V, row `capability`).
+    capability: Capability,
+    /// Who can write it, as `op vault user list` reports them (`allow_editing`), in reply
+    /// order; empty when the list is not visible.
+    writers: Vec<String>,
 }
 
 /// Run `opv access`.
@@ -146,8 +168,15 @@ pub fn run(
         if sessions.insert(need.account_id.clone()) {
             crate::adapters::onepassword::require_session(&er, &Host::detect, "opv access")?;
         }
-        let (observations, readers, unreadable) = observe(&er, need)?;
-        envs.push(build(need, &project, &observations, &readers, &unreadable));
+        let (observations, readers, unreadable, capabilities) = observe(&er, need)?;
+        envs.push(build(
+            need,
+            &project,
+            &observations,
+            &readers,
+            &unreadable,
+            &capabilities,
+        ));
     }
     report(out, &envs, json)
 }
@@ -219,7 +248,7 @@ pub fn identity(
     let service_account = first.service_account.clone();
     let er = crate::app::signin::EnvRunner::with_account(r, need.account_id.clone());
     crate::adapters::onepassword::require_session(&er, &Host::detect, "opv access")?;
-    let (_, readers, unreadable) = observe(&er, need)?;
+    let (_, readers, unreadable, _capabilities) = observe(&er, need)?;
     let observed: Vec<ObservedVault> = grants
         .iter()
         .map(|g| ObservedVault {
@@ -272,15 +301,17 @@ fn plan_needs<'a>(
         let env_name = name.as_str();
         let mut targets = Vec::new();
         let mut fields: BTreeMap<&str, DottedPath> = BTreeMap::new();
-        for (boundary, b) in &env.boundaries {
+        for (boundary, b) in env.bound_boundaries() {
             fields
                 .entry(b.vault_id.as_str())
                 .or_insert_with(|| field(&[env_name, "boundaries", boundary, "vault_id"]));
         }
         for (target_name, spec) in &env.targets {
-            fields
-                .entry(spec.state_vault_id.as_str())
-                .or_insert_with(|| field(&[env_name, "targets", target_name, "state_vault_id"]));
+            if let Some(vault) = &spec.state_vault_id {
+                fields.entry(vault.as_str()).or_insert_with(|| {
+                    field(&[env_name, "targets", target_name, "state_vault_id"])
+                });
+            }
             if target.is_some_and(|only| only != target_name) {
                 continue;
             }
@@ -289,10 +320,7 @@ fn plan_needs<'a>(
                 if !fleet.delivers(env_name, target_name, product) {
                     continue;
                 }
-                let desired = p
-                    .keys
-                    .values()
-                    .filter(|k| k.environments.iter().any(|e| e == env_name));
+                let desired = p.keys.values().filter(|k| k.is_desired_in(env_name));
                 for key in desired {
                     let needer = key.source().map_or(product.as_str(), |(source, _)| source);
                     boundary_vaults.insert(fleet.boundary(env_name, needer)?.vault_id.as_str());
@@ -302,7 +330,7 @@ fn plan_needs<'a>(
                 environment: env_name,
                 target: target_name.as_str(),
                 boundary_vaults,
-                state_vault: spec.state_vault_id.as_str(),
+                state_vault: fleet.state_vault(env_name, spec)?,
             });
         }
         let ci = if target.is_some() {
@@ -310,10 +338,10 @@ fn plan_needs<'a>(
         } else {
             vec![CiNeeds {
                 environment: env_name,
-                boundary_vaults: env
-                    .boundaries
-                    .values()
-                    .map(|b| b.vault_id.as_str())
+                boundary_vaults: fleet
+                    .bound_boundaries(env_name)?
+                    .into_iter()
+                    .map(|(_, b)| b.vault_id.as_str())
                     .collect(),
             }]
         };
@@ -323,6 +351,7 @@ fn plan_needs<'a>(
             fields,
             targets,
             ci,
+            tier: env.tier,
         });
     }
     Ok(needs)
@@ -346,7 +375,7 @@ fn field(path: &[&str]) -> DottedPath {
 fn observe(
     r: &dyn CommandRunner,
     need: &Needs<'_>,
-) -> Result<(Observations, Readers, Unreadable), Error> {
+) -> Result<(Observations, Readers, Unreadable, Capabilities), Error> {
     let mut wanted: BTreeSet<&str> = BTreeSet::new();
     for target in &need.targets {
         wanted.extend(target.boundary_vaults.iter().copied());
@@ -355,27 +384,50 @@ fn observe(
     for ci in &need.ci {
         wanted.extend(ci.boundary_vaults.iter().copied());
     }
+    let me = onepassword_init::session_user(r, &Host::detect);
     let mut observations = BTreeMap::new();
     let mut readers = BTreeMap::new();
     let mut unreadable = BTreeMap::new();
+    let mut capabilities = BTreeMap::new();
     for vault in wanted {
         let users = onepassword_init::vault_users(r, vault, &Host::detect)?;
         let access = analyse(need.name, vault, false, users.as_ref());
+        let mut diagnosed = None;
         if !access.visible
-            && let Some(diagnosed) = diagnose_vault(r, need, vault)
+            && let Some(found) = diagnose_vault(r, need, vault)
         {
-            if is_session(&diagnosed.cause) {
-                return Err(diagnosed.error());
+            if is_session(&found.cause) {
+                return Err(found.error());
             }
-            unreadable.insert(vault.to_string(), diagnosed);
+            diagnosed = Some(found);
+        }
+        // The capability comes from this session's own entry in the user list; a refused
+        // listing is only `none` when the diagnosis says the vault is not in this account.
+        let capability = match users.as_ref() {
+            Some(list) => match me.as_deref() {
+                Some(me) => capability::classify(Some(list), me),
+                None => Capability::Unknown {
+                    source: UnknownSource::NoSessionUser,
+                },
+            },
+            None => diagnosed
+                .as_ref()
+                .and_then(|found| capability::from_refusal(&found.cause))
+                .unwrap_or(Capability::Unknown {
+                    source: UnknownSource::UserListRefused,
+                }),
+        };
+        if let Some(found) = diagnosed {
+            unreadable.insert(vault.to_string(), found);
         }
         readers.insert(
             vault.to_string(),
             access.visible.then_some(access.service_accounts),
         );
         observations.insert(vault.to_string(), users);
+        capabilities.insert(vault.to_string(), capability);
     }
-    Ok((observations, readers, unreadable))
+    Ok((observations, readers, unreadable, capabilities))
 }
 
 /// The failed call the runner observed last, with its scrubbed reply and whether that was
@@ -479,6 +531,7 @@ fn build(
     observations: &Observations,
     readers: &Readers,
     unreadable: &Unreadable,
+    capabilities: &Capabilities,
 ) -> EnvReport {
     let grants = required(project, &need.targets, &need.ci);
     let boundary: BTreeSet<&str> = need
@@ -508,7 +561,12 @@ fn build(
         }
     }
     let commands = owner_commands(&report.checks);
+    // A deployed-tier vault needs a second writer; a local tier does not (design row
+    // `access-writers`).
+    let deployed = need.tier != Tier::Local;
     let mut env_findings = Vec::new();
+    let mut no_writer = Vec::new();
+    let mut vaults = Vec::new();
     for vault in &needed {
         // #157: a vault the diagnosis classified carries that cause; no owner command is
         // printed for an identity needing a vault outside this account (#153).
@@ -517,13 +575,36 @@ fn build(
             continue;
         }
         // 07.10: the environment is the environment, and the vault is named on its own.
-        let access = analyse(
+        let mut access = analyse(
             need.name,
             vault,
             false,
             observations.get(*vault).and_then(|o| o.as_ref()),
         );
+        access.deployed_tier = deployed;
+        // Part V, row `access-writers`: the tier marking, this session's capability and who
+        // 1Password reports can write the vault, in the text output and `--json` alike.
+        vaults.push(VaultAccess {
+            vault_id: (*vault).to_string(),
+            production: need.tier == Tier::Production,
+            capability: capabilities
+                .get(*vault)
+                .copied()
+                .unwrap_or(Capability::Unknown {
+                    source: UnknownSource::UserListRefused,
+                }),
+            writers: access.writers.clone(),
+        });
+        // A production vault whose readable user list names no writer: nobody can fix a
+        // value there (row `access-writers`).
+        if need.tier == Tier::Production && access.visible && access.writers.is_empty() {
+            no_writer.push(crate::domain::access::no_writer(vault, need.name));
+        }
         for finding in findings(&[access]) {
+            // The CI-reader warning is about the CI reader; `--target` leaves it out.
+            if finding.code == "no_ci_reader" && need.ci.is_empty() {
+                continue;
+            }
             // A deploy identity writes its own state vault by design (FR-59); the CI-reader
             // warning is about writing values, so it applies to the boundary vaults only.
             if finding.code == "ci_reader_can_write" && !boundary.contains(*vault) {
@@ -532,11 +613,14 @@ fn build(
             env_findings.push(finding);
         }
     }
+    // After every vault's own findings: the per-vault causes keep their place.
+    env_findings.extend(no_writer);
     EnvReport {
         name: need.name.to_string(),
         report,
         commands,
         findings: env_findings,
+        vaults,
     }
 }
 
@@ -577,8 +661,9 @@ fn owner_commands(checks: &[GrantCheck]) -> Vec<String> {
     commands
 }
 
-/// Print the per-principal grants, then the extra readers, then what was checked and what
-/// could not be classified, then the owner commands. `--json` prints the documented
+/// Print the per-principal grants, then the extra readers, then each readable vault's tier
+/// marking, this session's capability and writers, then the findings, what was checked and
+/// what could not be classified, then the owner commands. `--json` prints the documented
 /// document (FR-59); it never says "clean".
 fn report(out: &mut dyn Write, envs: &[EnvReport], json: bool) -> Result<(), Error> {
     if json {
@@ -589,6 +674,7 @@ fn report(out: &mut dyn Write, envs: &[EnvReport], json: bool) -> Result<(), Err
                     "environment": env.name,
                     "report": env.report,
                     "commands": env.commands,
+                    "vaults": env.vaults,
                     "findings": env.findings.iter().map(|f| serde_json::json!({
                         "code": f.code, "message": f.message, "next": f.next,
                     })).collect::<Vec<_>>(),
@@ -629,6 +715,9 @@ fn report(out: &mut dyn Write, envs: &[EnvReport], json: bool) -> Result<(), Err
             )
             .map_err(write_err)?;
         }
+        for vault in &env.vaults {
+            writeln!(out, "  {}", vault_line(vault)).map_err(write_err)?;
+        }
         for finding in &env.findings {
             writeln!(out, "  {}: {}", finding.code, finding.message).map_err(write_err)?;
             if let Some(next) = &finding.next {
@@ -646,6 +735,44 @@ fn report(out: &mut dyn Write, envs: &[EnvReport], json: bool) -> Result<(), Err
         }
     }
     Ok(())
+}
+
+/// One vault's line in text output (row `access-writers`): what `--json` carries as
+/// `production`, `capability` and `writers`. Names and permissions only, never a value.
+fn vault_line(vault: &VaultAccess) -> String {
+    let production = if vault.production {
+        " (production)"
+    } else {
+        ""
+    };
+    let writers = if vault.writers.is_empty() {
+        "none listed".to_string()
+    } else {
+        vault.writers.join(", ")
+    };
+    format!(
+        "vault {}{production}: this session {}; writers: {writers}",
+        vault.vault_id,
+        capability_label(vault.capability)
+    )
+}
+
+/// How this session's capability is named in text output (row `capability`).
+fn capability_label(capability: Capability) -> &'static str {
+    match capability {
+        Capability::Write => "can write",
+        Capability::Read => "can read, not write",
+        Capability::None => "is not a member",
+        Capability::Unknown {
+            source: UnknownSource::NoPermissionsInReply,
+        } => "has unknown access (1Password listed no permissions)",
+        Capability::Unknown {
+            source: UnknownSource::UserListRefused,
+        } => "has unknown access (listing users needs Manage)",
+        Capability::Unknown {
+            source: UnknownSource::NoSessionUser,
+        } => "has unknown access (op whoami named no user)",
+    }
 }
 
 /// How a principal is named in text output (FR-59).

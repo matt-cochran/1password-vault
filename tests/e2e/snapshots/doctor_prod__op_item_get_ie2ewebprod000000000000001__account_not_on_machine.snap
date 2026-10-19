@@ -1,0 +1,51 @@
+# doctor_prod__op_item_get_ie2ewebprod000000000000001__account_not_on_machine: opv doctor --env prod | fault account_not_on_machine on op item get iE2EWEBPROD000000000000001
+
+## text exit: 7
+## text stdout
+ok    config: valid (1 environment, 2 products); source: <SCENARIO>/project/secrets.toml
+ok    op: version 2.40.0
+FAIL  op auth: 1Password account AE2EDEVACCOUNT000000000001 (chosen by the .opv file <SCENARIO>/project/.opv) is not added to op on this machine
+  do: add account AE2EDEVACCOUNT000000000001 at op's prompt
+  fix: opv login --add
+skip  item: not checked (see the op auth line above)
+warn  fly: flyctl: version v0.4.111; opv is tested with flyctl 0.4.112 or a later 0.4.x patch (its secrets import format may differ)
+  install: curl -L https://fly.io/install.sh | sh
+ok    fly: fly auth: signed in
+warn  fly: production login: this shell is signed in to Fly for production target fly (environment prod)
+  fix: sign out of Fly in this shell, or use a session that is not signed in to prod
+  hardened option: a separate 1Password admin account used only for production work (docs/security.md)
+skip  fly: state vault: not checked (see the op auth line above)
+ok    gh: gh: version 2.102.0
+ok    gh: gh auth: signed in
+warn  gh: production login: this shell is signed in to GitHub for production target gh (environment prod)
+  fix: sign out of GitHub in this shell, or use a session that is not signed in to prod
+  hardened option: a separate 1Password admin account used only for production work (docs/security.md)
+skip  gh: state vault: not checked (see the op auth line above)
+ok    k8s: kubectl: version v1.36.1
+ok    k8s: kubernetes context: context e2e-cluster is in your kubeconfig
+ok    k8s: kubernetes cluster: API server for context e2e-cluster answers
+ok    k8s: kubernetes access: has every right sync needs in namespace e2e-prod
+warn  k8s: production login: this shell is signed in to Kubernetes for production target k8s (environment prod)
+  fix: sign out of Kubernetes in this shell, or use a session that is not signed in to prod
+  hardened option: a separate 1Password admin account used only for production work (docs/security.md)
+skip  k8s: state vault: not checked (see the op auth line above)
+ok    op local run: native op; opv run can start local commands
+ok    opv: not found on PATH
+ok    agent skill: not installed (optional: opv skill install)
+<host core-dump check>
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: 1Password account AE2EDEVACCOUNT000000000001 (chosen by the .opv file <SCENARIO>/project/.opv) is not added to op on this machine
+Do: add account AE2EDEVACCOUNT000000000001 at op's prompt
+Next: opv login --add
+
+## json exit: 7
+## json stdout
+{"schema_version":3,"ok":false,"exit_code":7,"config_source":"<SCENARIO>/project/secrets.toml","checks":[{"name":"config","target":null,"status":"ok","detail":"valid (1 environment, 2 products); source: <SCENARIO>/project/secrets.toml","next":null,"do":null},{"name":"op","target":null,"status":"ok","detail":"version 2.40.0","next":null,"do":null},{"name":"op auth","target":null,"status":"fail","detail":"1Password account AE2EDEVACCOUNT000000000001 (chosen by the .opv file <SCENARIO>/project/.opv) is not added to op on this machine","next":"opv login --add","do":"add account AE2EDEVACCOUNT000000000001 at op's prompt"},{"name":"item","target":null,"status":"skip","detail":"not checked (see the op auth line above)","next":null,"do":null},{"name":"flyctl","target":"fly","status":"warn","detail":"version v0.4.111; opv is tested with flyctl 0.4.112 or a later 0.4.x patch (its secrets import format may differ)","next":null,"do":"install: curl -L https://fly.io/install.sh | sh"},{"name":"fly auth","target":"fly","status":"ok","detail":"signed in","next":null,"do":null},{"name":"production login","target":"fly","status":"warn","detail":"this shell is signed in to Fly for production target fly (environment prod)","next":"sign out of Fly in this shell, or use a session that is not signed in to prod\n  hardened option: a separate 1Password admin account used only for production work (docs/security.md)","do":null},{"name":"state vault","target":"fly","status":"skip","detail":"not checked (see the op auth line above)","next":null,"do":null},{"name":"gh","target":"gh","status":"ok","detail":"version 2.102.0","next":null,"do":null},{"name":"gh auth","target":"gh","status":"ok","detail":"signed in","next":null,"do":null},{"name":"production login","target":"gh","status":"warn","detail":"this shell is signed in to GitHub for production target gh (environment prod)","next":"sign out of GitHub in this shell, or use a session that is not signed in to prod\n  hardened option: a separate 1Password admin account used only for production work (docs/security.md)","do":null},{"name":"state vault","target":"gh","status":"skip","detail":"not checked (see the op auth line above)","next":null,"do":null},{"name":"kubectl","target":"k8s","status":"ok","detail":"version v1.36.1","next":null,"do":null},{"name":"kubernetes context","target":"k8s","status":"ok","detail":"context e2e-cluster is in your kubeconfig","next":null,"do":null},{"name":"kubernetes cluster","target":"k8s","status":"ok","detail":"API server for context e2e-cluster answers","next":null,"do":null},{"name":"kubernetes access","target":"k8s","status":"ok","detail":"has every right sync needs in namespace e2e-prod","next":null,"do":null},{"name":"production login","target":"k8s","status":"warn","detail":"this shell is signed in to Kubernetes for production target k8s (environment prod)","next":"sign out of Kubernetes in this shell, or use a session that is not signed in to prod\n  hardened option: a separate 1Password admin account used only for production work (docs/security.md)","do":null},{"name":"state vault","target":"k8s","status":"skip","detail":"not checked (see the op auth line above)","next":null,"do":null},{"name":"op local run","target":null,"status":"ok","detail":"native op; opv run can start local commands","next":null,"do":null},{"name":"opv","target":null,"status":"ok","detail":"not found on PATH","next":null,"do":null},{"name":"agent skill","target":null,"status":"ok","detail":"not installed (optional: opv skill install)","next":null,"do":null},{"name":"core dumps","host":true}],"next":{"kind":"authorize","actor":"person","command":"opv login --add"},"do":"add account AE2EDEVACCOUNT000000000001 at op's prompt","error":{"code":"account_not_registered","category":"auth","message":"1Password account AE2EDEVACCOUNT000000000001 (chosen by the .opv file <SCENARIO>/project/.opv) is not added to op on this machine","subject":{"in_app":false,"account":{"by":"id","value":"AE2EDEVACCOUNT000000000001"},"selected_by":{"from":"dot_opv","path":"<SCENARIO>/project/.opv"}},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":true,"do":"add account AE2EDEVACCOUNT000000000001 at op's prompt","next":{"kind":"authorize","actor":"person","command":"opv login --add"}}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: 1Password account AE2EDEVACCOUNT000000000001 (chosen by the .opv file <SCENARIO>/project/.opv) is not added to op on this machine
+Do: add account AE2EDEVACCOUNT000000000001 at op's prompt
+Next: opv login --add

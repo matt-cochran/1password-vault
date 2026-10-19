@@ -50,7 +50,7 @@ reads the source product's field.
 The Rust test `tests/e2e_app_loads.rs` loads the configuration and opens the world through
 the simulator:
 
-- `opv --config tests/e2e/app/secrets.toml config describe --json` must exit 0.
+- `opv --config tests/e2e/app/secrets.toml contract --json` must exit 0.
 - `OPV_SIM_WORLD=tests/e2e/app opv-sim … op whoami` must exit 0, proving `world.json`
   parses and answers.
 
@@ -58,7 +58,7 @@ For the manifest route, force the project and name one of the two accounts (the 
 signs in two accounts on `https://e2e.1password.com`):
 
 ```
-OPV_PROJECT=e2e-app OP_ACCOUNT=AE2EDEVACCOUNT000000000001 opv config describe --json
+OPV_PROJECT=e2e-app OP_ACCOUNT=AE2EDEVACCOUNT000000000001 opv contract --json
 ```
 
 with the `op` name provided by `opv-sim` (`opv-sim install <bin>` and `PATH=<bin>:$PATH`).

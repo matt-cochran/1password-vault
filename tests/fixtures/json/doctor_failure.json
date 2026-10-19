@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "ok": false,
   "exit_code": 8,
   "config_source": null,
@@ -53,6 +53,14 @@
       "do": null
     },
     {
+      "name": "production login",
+      "target": "portfolio",
+      "status": "warn",
+      "detail": "this shell is signed in to Fly for production target portfolio (environment prod)",
+      "next": "sign out of Fly in this shell, or use a session that is not signed in to prod\n  hardened option: a separate 1Password admin account used only for production work (docs/security.md)",
+      "do": null
+    },
+    {
       "name": "state vault",
       "target": "portfolio",
       "status": "ok",
@@ -77,7 +85,11 @@
       "do": null
     }
   ],
-  "next": "opv open allumata/OPENAI_API_KEY --env prod",
+  "next": {
+    "kind": "run",
+    "actor": "assistant",
+    "command": "opv open allumata/OPENAI_API_KEY --env prod"
+  },
   "do": "fill in allumata/OPENAI_API_KEY in 1Password for environment prod (click Edit on the item: it hides empty fields until then)",
   "error": {
     "code": "findings",
@@ -104,7 +116,10 @@
     "retry": "after_fix",
     "human_required": true,
     "do": "fill in allumata/OPENAI_API_KEY in 1Password for environment prod (click Edit on the item: it hides empty fields until then)",
-    "next": "opv open allumata/OPENAI_API_KEY --env prod",
-    "next_kind": "run"
+    "next": {
+      "kind": "run",
+      "actor": "assistant",
+      "command": "opv open allumata/OPENAI_API_KEY --env prod"
+    }
   }
 }

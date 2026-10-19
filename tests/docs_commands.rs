@@ -454,3 +454,235 @@ fn usage_error_code_table_matches_the_code() {
         "run UPDATE_DOCS=1 cargo test --features fake --test docs_commands"
     );
 }
+
+/// One of the four id fields (`vault_id`, `item_id`, `state_vault_id`, `delivery_items`) written
+/// as a bare or inline-table assignment in a `secrets.toml` example. A dotted path
+/// (`environments.prod.boundaries.api.vault_id = …`) is the bindings-file form, not inline.
+fn inline_id_field(line: &str) -> Option<&'static str> {
+    const NAMES: [&str; 4] = ["vault_id", "item_id", "state_vault_id", "delivery_items"];
+    let code = strip_comment(line);
+    for name in NAMES {
+        let mut from = 0;
+        while let Some(pos) = code[from..].find(name) {
+            let i = from + pos;
+            let before = code[..i].chars().rev().find(|c| !c.is_whitespace());
+            let after = code[i + name.len()..].trim_start();
+            if before != Some('.') && after.starts_with('=') {
+                return Some(name);
+            }
+            from = i + name.len();
+        }
+    }
+    None
+}
+
+/// Every `secrets.toml` example in configuration.md keeps 1Password ids out of the contract:
+/// the only id assignments are in the `secrets.bindings.toml` block.
+#[test]
+fn configuration_secrets_examples_have_no_inline_ids() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let text =
+        std::fs::read_to_string(root.join("docs/configuration.md")).expect("read configuration.md");
+    let mut in_toml = false;
+    let mut bindings = false;
+    let mut offenders = Vec::new();
+    for (idx, raw) in text.lines().enumerate() {
+        let trimmed = raw.trim();
+        if let Some(info) = trimmed.strip_prefix("```") {
+            if in_toml {
+                in_toml = false;
+                bindings = false;
+            } else if info.trim().eq_ignore_ascii_case("toml") {
+                in_toml = true;
+                bindings = false;
+            }
+            continue;
+        }
+        if !in_toml {
+            continue;
+        }
+        if raw.contains("secrets.bindings.toml") {
+            bindings = true;
+        }
+        if bindings {
+            continue;
+        }
+        if let Some(name) = inline_id_field(raw) {
+            offenders.push(format!("docs/configuration.md:{}: {name} = …", idx + 1));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "secrets.toml examples must keep 1Password ids in secrets.bindings.toml:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// The contents of every inline Markdown link target on `line`.
+fn links(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = line;
+    while let Some(i) = rest.find("](") {
+        let after = &rest[i + 2..];
+        match after.find(')') {
+            Some(end) => {
+                out.push(after[..end].to_string());
+                rest = &after[end + 1..];
+            }
+            None => break,
+        }
+    }
+    out
+}
+
+/// Drop inline code spans (`` `…` ``) so a `](...)` inside code is not read as a link.
+fn strip_code_spans(line: &str) -> String {
+    let mut out = String::new();
+    let mut in_code = false;
+    for c in line.chars() {
+        if c == '`' {
+            in_code = !in_code;
+        } else if !in_code {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// GitHub's heading anchor: lower-case, spaces to hyphens, other punctuation dropped.
+fn heading_anchor(heading: &str) -> String {
+    let mut out = String::new();
+    for c in heading.chars() {
+        if c.is_alphanumeric() || c == '-' || c == '_' {
+            out.extend(c.to_lowercase());
+        } else if c == ' ' {
+            out.push('-');
+        }
+    }
+    out
+}
+
+/// The anchors of every ATX heading in a Markdown file, fences excluded.
+fn heading_anchors(path: &Path) -> std::collections::HashSet<String> {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let mut anchors = std::collections::HashSet::new();
+    let mut in_fence = false;
+    for raw in text.lines() {
+        let trimmed = raw.trim_start();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        if let Some(h) = trimmed.strip_prefix('#') {
+            let h = h.trim_start_matches('#').trim();
+            if !h.is_empty() {
+                anchors.insert(heading_anchor(h));
+            }
+        }
+    }
+    anchors
+}
+
+/// Every relative link in a doc resolves: its file exists and, with a `#fragment`, the
+/// target file has a matching heading.
+fn relative_links_resolve(rel: &str) {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join(rel);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+    let mut failures = Vec::new();
+    let mut in_fence = false;
+    for (idx, raw) in text.lines().enumerate() {
+        if raw.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        for target in links(&strip_code_spans(raw)) {
+            if target.starts_with("http://")
+                || target.starts_with("https://")
+                || target.starts_with("mailto:")
+            {
+                continue;
+            }
+            let (file, fragment) = match target.split_once('#') {
+                Some((file, fragment)) => (file, Some(fragment)),
+                None => (target.as_str(), None),
+            };
+            let resolved = if file.is_empty() {
+                path.clone()
+            } else {
+                path.parent().expect("docs dir").join(file)
+            };
+            if !resolved.exists() {
+                failures.push(format!("{rel}:{}: missing {}", idx + 1, resolved.display()));
+                continue;
+            }
+            let is_markdown = resolved
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e == "md" || e == "txt");
+            if let Some(fragment) = fragment
+                && is_markdown
+                && !heading_anchors(&resolved).contains(fragment)
+            {
+                failures.push(format!(
+                    "{rel}:{}: {} has no heading #{fragment}",
+                    idx + 1,
+                    resolved.display()
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{rel} has unresolved relative links:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// Every relative link in configuration.md resolves.
+#[test]
+fn configuration_relative_links_resolve() {
+    relative_links_resolve("docs/configuration.md");
+}
+
+/// Every relative link in security.md resolves.
+#[test]
+fn security_relative_links_resolve() {
+    relative_links_resolve("docs/security.md");
+}
+
+/// `opv` rewrites clap's `unrecognized subcommand` error as its own exit-2 line,
+/// `opv: unrecognized subcommand '<word>'`, which [`is_clap_usage_error`] does not match.
+/// A command §25.3 removed renders exactly that line, so this is how the docs guard
+/// recognises a removed command.
+fn is_removed_command_error(code: Option<i32>, stderr: &str) -> bool {
+    code == Some(2) && stderr.contains("unrecognized subcommand")
+}
+
+/// A doc block naming a §25.3 removed command is reported: the extracted `opv bootstrap`
+/// runs and produces the removed-command line.
+#[test]
+fn reports_a_removed_command_named_in_a_doc() {
+    let found = extract("fixture.md", "```sh\nopv bootstrap\n```\n");
+    let args = &found.commands[0].args;
+    let sandbox = tempfile::tempdir().expect("tempdir");
+    let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+        .args(args)
+        .current_dir(sandbox.path())
+        .env_clear()
+        .env("PATH", "")
+        .env("HOME", sandbox.path())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run opv");
+    assert!(is_removed_command_error(
+        out.status.code(),
+        &String::from_utf8_lossy(&out.stderr)
+    ));
+}

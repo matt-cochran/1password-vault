@@ -4,7 +4,7 @@ For a project that ships an `opv.setup.toml` recipe, `opv setup` walks a person 
 ```sh
 opv login dev
 opv setup
-opv check dev --product api
+opv inventory --env dev --product api
 opv run dev --product api -- npm run dev
 ```
 
@@ -40,12 +40,13 @@ A missing vault requires creation in the 1Password app, or selecting the account
 
 Declare a new key without editing `secrets.toml` by hand, then add its empty field to the item and fill it:
 ```sh
-opv add api/STRIPE_KEY --kind secret --env dev --rule prefix=sk_
-opv item skeleton dev
-opv check dev --product api
+opv propose key api/STRIPE_KEY --kind secret --env dev --rule prefix=sk_
+opv propose structure
+opv apply
+opv inventory --env dev --product api
 ```
 
-`opv add` edits the configuration where it lives (a `secrets.toml`, or the manifest in 1Password), keeps comments and order, validates the result like a hand-written file and never reads the item. Add the key to the recipe's `[[fields]]` too, so the next person's `opv setup` asks for it. `opv init <env> --add-env` adds another environment the same way. See [configuration.md](configuration.md#declare-a-key-opv-add).
+`opv propose key` plans the edit where the configuration lives (a `secrets.toml`, or the manifest in 1Password), keeps comments and order, and validates the result like a hand-written file; `opv apply` writes it and never reads the item. Add the key to the recipe's `[[fields]]` too, so the next person's `opv setup` asks for it. `opv propose env <env>` adds another environment the same way. See [configuration.md](configuration.md#declare-a-key-opv-propose-key).
 
 ## Existing local settings
 
@@ -55,7 +56,7 @@ Multiline settings need the exact full value from that private file, or entry in
 
 ## Recovery and readiness
 
-Partial setup exits 8 and lists the remaining settings by their human names. Cancellation exits 6 without saving. Successful saving does not prove provider permissions: `check` validates declared kinds and rules; the application or owner provisioning command verifies actual access. Saved progress survives an expired sign-in.
+Partial setup exits 8 and lists the remaining settings by their human names. Cancellation exits 6 without saving. Successful saving does not prove provider permissions: `inventory` validates declared kinds and rules; the application or owner provisioning command verifies actual access. Saved progress survives an expired sign-in.
 
-These commands require an owner terminal and refuse CI, service-account and Connect authentication. Existing `init`, `doctor`, `check`, `run`, `status`, `plan`, `sync`, `config export`, `item skeleton` and `explain` remain noninteractive; when you run them signed in as yourself they also tidy the item's layout the same way, with one line saying what changed, and under CI or a service account they only read. Deployment, rotation and pruning retain their explicit flags.
+These commands require an owner terminal and refuse CI, service-account and Connect authentication. Existing `propose setup`, `doctor`, `inventory`, `run`, `status`, `plan`, `sync`, `config export`, `propose structure` and `explain` remain noninteractive; when you run them signed in as yourself they also tidy the item's layout the same way, with one line saying what changed, and under CI or a service account they only read. Deployment, rotation and pruning retain their explicit flags.
 

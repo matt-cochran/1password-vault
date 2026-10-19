@@ -1,0 +1,26 @@
+{
+  "evidence": [
+    {
+      "id": "E1",
+      "text": "The owner requires an AI assistant to guide a person through configuring every secret and setting for an application across all environments."
+    },
+    {
+      "id": "E2",
+      "text": "To guide well, the assistant must know for each key whether a value exists, is a placeholder, is malformed, or is valid."
+    },
+    {
+      "id": "E3",
+      "text": "The owner forbids any secret value, or anything from which part of it can be recovered, from reaching the assistant or any language model."
+    },
+    {
+      "id": "E4",
+      "text": "opv already holds values only in process memory in a redacting, zeroized type, and a canary scan checks every output for test markers."
+    }
+  ],
+  "desiredImprovement": "The assistant's knowledge of each value's condition, so it can guide the person precisely",
+  "element": "information about a stored secret value",
+  "opposingProperties": [
+    "present for the assistant (to guide)",
+    "absent from the assistant (to protect)"
+  ]
+}

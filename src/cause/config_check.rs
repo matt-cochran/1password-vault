@@ -97,9 +97,6 @@ pub enum ConfigCheck {
     /// A recorded boundary no product with a key in the environment lives in. `products`
     /// are the products that live in it (their keys are not declared for `env`).
     BoundaryUnused { env: String, products: Vec<String> },
-    /// Every key the item `init --add-env` read gives the environment is personal (FR-55),
-    /// so the item cannot be the environment's boundary: its shared item must be given.
-    PersonalItemBoundary { env: String, item: String },
     /// A delivery item for a product the target does not deliver.
     DeliveryItemUndelivered { product: String },
     /// A personal key declared for an environment with a deployment target.
@@ -242,10 +239,6 @@ impl ConfigCheck {
             BoundaryUnused { env, .. } => {
                 format!("is recorded, but no product with a key in {env} lives in it")
             }
-            PersonalItemBoundary { env, item } => format!(
-                "would use item {item} as its boundary, but every key that item gives {env} is \
-                 personal, so it cannot be {env}'s boundary; give {env}'s shared item"
-            ),
             DeliveryItemUndelivered { product } => {
                 format!(
                     "records a delivery item for product {product}, which the target does not deliver"
@@ -359,9 +352,6 @@ impl ConfigCheck {
     /// [`ConfigCheck::fix`] already names only that.
     pub fn proposal_fix(&self, field: &str) -> Option<String> {
         match self {
-            ConfigCheck::PersonalItemBoundary { env, item } => Some(format!(
-                "give the shared item for {env} instead of item {item}"
-            )),
             ConfigCheck::BoundaryUnused { env, products } => {
                 let leaf = field.rsplit('.').next().unwrap_or(field);
                 Some(match products.as_slice() {
@@ -437,10 +427,6 @@ impl ConfigCheck {
             BoundaryUnused { env, .. } => {
                 format!("remove {field}, or declare that product's keys for {env}")
             }
-            PersonalItemBoundary { env, item } => format!(
-                "give the shared item for {env} instead of item {item}, so its team keys have a \
-                 boundary"
-            ),
             DeliveryItemUndelivered { .. } => format!("remove {field}"),
             PersonalOnTarget { env } => {
                 format!("declare a team key for {env}, or remove {env} from the key's environments")

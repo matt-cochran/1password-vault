@@ -25,14 +25,21 @@ fn the_cursor_starts_on_the_key_name() {
 }
 
 #[test]
-fn a_typed_key_becomes_the_command() {
+fn a_typed_key_becomes_the_propose_command() {
     let mut f = key_form("STRIPE_KEY");
     assert_eq!(
         f.handle(Key::Enter),
         Outcome::Command(
-            ["add", "api/STRIPE_KEY", "--kind", "secret"]
-                .map(String::from)
-                .to_vec()
+            [
+                "propose",
+                "key",
+                "api/STRIPE_KEY",
+                "--kind",
+                "secret",
+                "--write"
+            ]
+            .map(String::from)
+            .to_vec()
         )
     );
 }
@@ -83,7 +90,7 @@ fn esc_cancels() {
 fn backspace_removes_a_typed_character() {
     let mut f = key_form("ABC");
     f.handle(Key::Backspace);
-    assert_eq!(f.command().unwrap()[1], "api/AB");
+    assert_eq!(f.command().unwrap()[2], "api/AB");
 }
 
 #[test]
@@ -93,12 +100,16 @@ fn the_add_key_form_always_asks_for_the_product() {
 }
 
 #[test]
-fn a_new_environment_becomes_init_add_env() {
+fn a_new_environment_becomes_its_written_proposal() {
     let mut f = FormState::add_env(envs());
     type_in(&mut f, "staging");
     assert_eq!(
         f.handle(Key::Enter),
-        Outcome::Command(["init", "staging", "--add-env"].map(String::from).to_vec())
+        Outcome::Command(
+            ["propose", "env", "staging", "--write"]
+                .map(String::from)
+                .to_vec()
+        )
     );
 }
 

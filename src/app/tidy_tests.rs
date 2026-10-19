@@ -812,39 +812,6 @@ fn values_never_reach_the_notes() {
     assert!(!op.notes().contains(MARKER), "{}", op.notes());
 }
 
-fn check_json(op: &FakeOp) -> String {
-    let _on = activate();
-    let mut out = Vec::new();
-    let _ = crate::app::local::check(&fleet(), "dev", Some("api"), op, &mut out, true);
-    String::from_utf8(out).unwrap()
-}
-
-#[test]
-fn json_carries_a_tidy_array() {
-    let op = FakeOp::person(item(&[(
-        "api",
-        "OPENAI_API_KEY",
-        "STRING",
-        "sk-TIDYMARKER",
-    )]));
-    let doc: Value = serde_json::from_str(&check_json(&op)).unwrap();
-    assert_eq!(
-        doc["tidy"],
-        json!([
-            {"action": "created_field", "name": "api/LOG_LEVEL"},
-            {"action": "made_concealed", "name": "api/OPENAI_API_KEY"},
-            {"action": "created_section", "name": "web"},
-            {"action": "created_field", "name": "web/SESSION_KEY"},
-        ])
-    );
-}
-
-#[test]
-fn json_never_carries_a_value() {
-    let op = FakeOp::person(messy_item());
-    assert!(!check_json(&op).contains(MARKER));
-}
-
 #[test]
 fn run_references_a_misplaced_field_by_id_when_read_only() {
     let op = FakeOp::new(
@@ -874,26 +841,6 @@ fn run_after_a_persons_tidy_uses_the_convention_reference() {
         "OPENAI_API_KEY".into(),
         "op://vdev/idev/api/OPENAI_API_KEY".into()
     )));
-}
-
-/// A service account never writes 1Password (FR-9, SR-5): `opv init` for a missing item
-/// creates nothing under one (a person's session creates it: init_tests).
-#[test]
-fn init_never_creates_an_item_for_a_service_account() {
-    let dir = tempfile::tempdir().unwrap();
-    let op = FakeOp::new(json!({}), "SERVICE_ACCOUNT");
-    let args = crate::app::init::InitArgs {
-        env: "dev".into(),
-        vault: "myapp-dev".into(),
-        item: "app".into(),
-        product: Some("app".into()),
-        force: false,
-        from: None,
-    };
-    let _on = activate();
-    let mut out = Vec::new();
-    let _ = crate::app::init::run(&args, dir.path(), &op, &mut out);
-    assert_eq!(op.count(&["item", "create"]), 0);
 }
 
 // ---- Integration seams: shared keys (FR-45), links (H1), read-only consistency ----------
@@ -1075,73 +1022,6 @@ fn run_never_puts_a_value_in_argv_or_the_child_env() {
         .iter()
         .all(|(_, v)| !v.contains(MARKER));
     assert!(argv && env);
-}
-
-#[test]
-fn item_skeleton_counts_a_misplaced_field_as_present() {
-    let op = FakeOp::person(item(&[
-        ("Misc", "log-level", "STRING", "debug"),
-        ("api", "OPENAI_API_KEY", "CONCEALED", "sk-TIDYMARKER"),
-        ("web", "SESSION_KEY", "CONCEALED", "s-TIDYMARKER"),
-    ]));
-    let mut out = Vec::new();
-    crate::app::skeleton::run(&fleet(), "dev", &op, &mut out).unwrap();
-    assert_eq!(op.edits(), 0, "{}", String::from_utf8_lossy(&out));
-}
-
-#[test]
-fn item_skeleton_reads_an_item_the_strict_reader_refuses() {
-    // Two fields with the same section and label: the strict reader's duplicate error.
-    let op = FakeOp::person(item(&[
-        ("api", "OPENAI_API_KEY", "CONCEALED", "sk-TIDYMARKER"),
-        ("api", "OPENAI_API_KEY", "CONCEALED", ""),
-    ]));
-    let mut out = Vec::new();
-    let res = crate::app::skeleton::run(&fleet(), "dev", &op, &mut out);
-    assert!(res.is_ok(), "{res:?}");
-}
-
-#[test]
-fn a_shared_key_reads_its_misplaced_source_tolerantly() {
-    let op = FakeOp::person(item(&[(
-        "Misc",
-        "openai-api-key",
-        "STRING",
-        "sk-TIDYMARKER",
-    )]));
-    let out = with_host(FakeEnv::new("linux").var("CI"), || {
-        let _on = activate();
-        let mut out = Vec::new();
-        let _ =
-            crate::app::local::check(&shared_fleet(), "dev", Some("worker"), &op, &mut out, true);
-        String::from_utf8(out).unwrap()
-    });
-    let doc: Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(doc["findings"], 0, "{doc}");
-}
-
-#[test]
-fn the_schema_lists_the_tidy_fields_of_a_check_document() {
-    let op = FakeOp::person(item(&[(
-        "api",
-        "OPENAI_API_KEY",
-        "STRING",
-        "sk-TIDYMARKER",
-    )]));
-    let doc: Value = serde_json::from_str(&check_json(&op)).unwrap();
-    assert!(
-        crate::app::json_tests::undocumented(&doc, "check").is_empty(),
-        "{doc}"
-    );
-}
-
-#[test]
-fn a_tidy_conflict_is_in_the_check_document() {
-    let op = FakeOp::person(messy_item());
-    op.editors.borrow_mut().push((2, someone_edits_session));
-    op.editors.borrow_mut().push((3, someone_edits_session));
-    let doc: Value = serde_json::from_str(&check_json(&op)).unwrap();
-    assert_eq!(doc["tidy_error"], "tidy_conflict");
 }
 
 // ---- Final review: fresh reads (C1), version checks (I5), data-preserving tidy (I4),
@@ -1336,12 +1216,12 @@ fn an_attachment_added_before_the_write_stops_it() {
 }
 
 #[test]
-fn deploy_credentials_note_names_opv_check() {
+fn deploy_credentials_note_names_opv_config_export() {
     let op = FakeOp::person(messy_item());
     let _on = activate();
     let _ = read(&fleet(), "dev", &UnderDeployCredentials(&op));
     assert!(
-        op.notes().contains("opv check dev tidies it"),
+        op.notes().contains("opv config export dev tidies it"),
         "{}",
         op.notes()
     );
@@ -1377,48 +1257,6 @@ fn run_after_a_persons_failed_tidy_points_at_the_note() {
         "{}",
         person.notes()
     );
-}
-
-#[test]
-fn item_skeleton_refuses_the_manifest_item() {
-    let mut v = item(&[]);
-    v["tags"] = json!([crate::adapters::onepassword_manifest::MANIFEST_TAG]);
-    let op = FakeOp::person(v);
-    let res = crate::app::skeleton::run(&fleet(), "dev", &op, &mut Vec::new());
-    assert!(res.is_err());
-}
-
-#[test]
-fn item_skeleton_never_writes_the_manifest_item() {
-    let mut v = item(&[]);
-    v["tags"] = json!([crate::adapters::onepassword_manifest::MANIFEST_TAG]);
-    let op = FakeOp::person(v);
-    let _ = crate::app::skeleton::run(&fleet(), "dev", &op, &mut Vec::new());
-    assert_eq!(op.edits(), 0);
-}
-
-#[test]
-fn item_skeleton_never_writes_over_an_edit_ops_cache_hides() {
-    let op = FakeOp::person(item(&[("web", "SESSION_KEY", "CONCEALED", "s-TIDYMARKER")]));
-    *op.cache.borrow_mut() = Some(op.item.borrow().clone());
-    {
-        let mut current = op.item.borrow_mut();
-        someone_edits_session(&mut current);
-        bump(&mut current);
-    }
-    crate::app::skeleton::run(&fleet(), "dev", &op, &mut Vec::new()).unwrap();
-    assert_eq!(
-        op.field(Some("web"), "SESSION_KEY").unwrap()["value"],
-        "edited-by-someone"
-    );
-}
-
-#[test]
-fn item_skeleton_reports_an_edit_landing_with_it() {
-    let op = FakeOp::person(item(&[]));
-    op.racing.set(Some(someone_edits_session));
-    crate::app::skeleton::run(&fleet(), "dev", &op, &mut Vec::new()).unwrap();
-    assert!(op.notes().contains("another edit landed"), "{}", op.notes());
 }
 
 /// Found live: an empty key reached the app as "" with no word from `run`.
@@ -1480,7 +1318,11 @@ fn doctor_leaves_the_item_version_unchanged() {
 fn doctor_names_the_explicit_repair() {
     let op = FakeOp::person(messy_item());
     doctor(&op, false);
-    assert!(op.notes().contains("opv tidy dev"), "{}", op.notes());
+    assert!(
+        op.notes().contains("opv config export dev"),
+        "{}",
+        op.notes()
+    );
 }
 
 #[test]
@@ -1506,107 +1348,22 @@ fn an_inspect_read_finds_a_misplaced_field() {
     assert_eq!(f.value.expose(), "debug");
 }
 
-fn repair(op: &FakeOp, json: bool) -> (Result<(), Error>, String) {
-    let _on = activate();
-    let mut out = Vec::new();
-    let res = crate::app::repair::run(&fleet(), "dev", op, json, &mut out);
-    (res, String::from_utf8(out).unwrap())
-}
-
-#[test]
-fn opv_tidy_writes_one_edit_for_a_person() {
-    let op = FakeOp::person(messy_item());
-    let _ = repair(&op, false);
-    assert_eq!(op.edits(), 1);
-}
-
-#[test]
-fn opv_tidy_refuses_a_service_account_until_a_person_runs_it() {
-    let op = FakeOp::new(messy_item(), "SERVICE_ACCOUNT");
-    let (res, _) = repair(&op, false);
-    assert_eq!(res.unwrap_err().code_str(), "own_session_required");
-}
-
-#[test]
-fn opv_tidy_never_writes_for_a_service_account() {
-    let op = FakeOp::new(messy_item(), "SERVICE_ACCOUNT");
-    let _ = repair(&op, false);
-    assert_eq!(op.count(&["item"]) - op.count(&["item", "get"]), 0);
-}
-
-#[test]
-fn opv_tidy_never_writes_in_ci() {
-    let op = FakeOp::person(messy_item());
-    let _ = with_host(FakeEnv::new("linux").var("CI"), || repair(&op, false));
-    assert_eq!(op.count(&["item"]) - op.count(&["item", "get"]), 0);
-}
-
-#[test]
-fn opv_tidy_never_writes_under_deploy_credentials() {
-    let op = FakeOp::person(messy_item());
-    let _on = activate();
-    let mut out = Vec::new();
-    let _ = crate::app::repair::run(
-        &fleet(),
-        "dev",
-        &UnderDeployCredentials(&op),
-        false,
-        &mut out,
-    );
-    assert_eq!(op.edits(), 0);
-}
-
-#[test]
-fn opv_tidy_json_lists_what_changed_by_name() {
-    let op = FakeOp::person(item(&[(
-        "api",
-        "OPENAI_API_KEY",
-        "STRING",
-        "sk-TIDYMARKER",
-    )]));
-    let (_, out) = repair(&op, true);
-    let doc: Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(
-        doc["tidy"],
-        json!([
-            {"action": "created_field", "name": "api/LOG_LEVEL"},
-            {"action": "made_concealed", "name": "api/OPENAI_API_KEY"},
-            {"action": "created_section", "name": "web"},
-            {"action": "created_field", "name": "web/SESSION_KEY"},
-        ])
-    );
-}
-
-#[test]
-fn opv_tidy_json_never_carries_a_value() {
-    let op = FakeOp::person(messy_item());
-    assert!(!repair(&op, true).1.contains(MARKER));
-}
-
-/// The exit matches the code's own table entry (4), not outcome-unknown (9).
-#[test]
-fn opv_tidy_with_a_conflict_exits_as_a_source_error() {
-    let op = FakeOp::person(messy_item());
-    op.editors.borrow_mut().push((2, someone_edits_session));
-    op.editors.borrow_mut().push((3, someone_edits_session));
-    let (res, _) = repair(&op, false);
-    assert_eq!(res.unwrap_err().exit_code(), 4);
-}
-
-#[test]
-fn opv_tidy_on_a_tidy_item_writes_nothing() {
-    let op = FakeOp::person(tidy_item());
-    let _ = repair(&op, false);
-    assert_eq!(op.edits(), 0);
-}
-
 /// #113 AC4: the handoff receipt never tidies, so it never bumps the item version.
 #[test]
 fn ready_never_writes_a_persons_messy_item() {
     let op = FakeOp::person(messy_item());
     let _on = activate();
     let mut out = Vec::new();
-    let _ = crate::app::ready::run(&fleet(), None, Some("dev"), &op, true, None, &mut out);
+    let _ = crate::app::ready::run(
+        &fleet(),
+        None,
+        Some("dev"),
+        &op,
+        true,
+        None,
+        false,
+        &mut out,
+    );
     assert_eq!(op.count(&["item"]) - op.count(&["item", "get"]), 0);
 }
 
@@ -1769,14 +1526,19 @@ fn a_field_the_write_dropped_is_named_on_read_back() {
 }
 
 #[test]
-fn a_field_the_write_dropped_steps_to_opv_tidy() {
+fn a_field_the_write_dropped_steps_to_the_tidying_read() {
     let op = FakeOp::person(messy_item());
     op.edit.set(Edit::Lossy);
-    let inv = crate::cause::Invocation::from_cli(&["opv".to_string(), "tidy".to_string()]);
+    let inv = crate::cause::Invocation::from_cli(&[
+        "opv".to_string(),
+        "config".to_string(),
+        "export".to_string(),
+        "dev".to_string(),
+    ]);
     assert_eq!(
         tidy_cause(&op).step(&inv).1,
         crate::cause::Next::Run(crate::cause::Cmd {
-            command: vec!["tidy".into()],
+            command: vec!["config".into(), "export".into()],
             args: vec!["dev".into()],
         })
     );

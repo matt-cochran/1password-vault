@@ -12,7 +12,7 @@ Next: opv doctor
 
 ## json exit: 5
 ## json stdout
-{"schema_version":2,"ok":false,"exit_code":5,"next":"opv doctor","do":"update kubectl (opv doctor checks its version)","error":{"code":"unexpected_output","category":"target","message":"opv could not read the reply of kubectl from Kubernetes at line 59, column 18","subject":{"during":"read","system":"kubernetes","at":{"line":59,"col":18},"problem":{"problem":"unparseable"}},"evidence":{"checked":"kubectl --context e2e-cluster --namespace e2e-prod --request-timeout=60s get deployment e2e-app -o json","account":null,"upstream":null},"retry":"never","human_required":false,"do":"update kubectl (opv doctor checks its version)","next":"opv doctor","next_kind":"run"}}
+{"schema_version":3,"ok":false,"exit_code":5,"next":{"kind":"run","actor":"assistant","command":"opv doctor"},"do":"update kubectl (opv doctor checks its version)","error":{"code":"unexpected_output","category":"target","message":"opv could not read the reply of kubectl from Kubernetes at line 59, column 18","subject":{"during":"read","system":"kubernetes","at":{"line":59,"col":18},"problem":{"problem":"unparseable"}},"evidence":{"checked":"kubectl --context e2e-cluster --namespace e2e-prod --request-timeout=60s get deployment e2e-app -o json","account":null,"upstream":null},"retry":"never","human_required":false,"do":"update kubectl (opv doctor checks its version)","next":{"kind":"run","actor":"assistant","command":"opv doctor"}}}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml

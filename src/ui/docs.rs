@@ -31,7 +31,7 @@ pub struct ErrorDoc {
     #[serde(rename = "do", default)]
     pub act: Option<String>,
     /// The one command that runs next, when any.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::json::next_command")]
     pub next: Option<String>,
 }
 
@@ -120,7 +120,7 @@ pub fn fetch<T: DeserializeOwned>(source: &dyn Source, args: &[&str]) -> Result<
 /// (07.01).
 pub fn fetch_config(source: &dyn Source) -> Result<crate::domain::Fleet, Failure> {
     let stdout = source
-        .stdout(&["config", "export", "--json"])
+        .stdout(&["config", "export", "--json", "--with-ids"])
         .map_err(Failure::NoDocument)?;
     parse_config(&stdout)
 }
@@ -180,6 +180,23 @@ pub struct RowDoc {
     pub rule: Option<String>,
     /// `present`, `absent`, `would_change`, `not_delivered`, or `null`.
     pub target_state: Option<String>,
+}
+
+/// `opv inventory --env <env> --json` (design §25.1): the environment's per-key cells, each
+/// with the domain's own value state. A run-only environment's rows come from here: it has
+/// no target for `opv status` to read.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InventoryDoc {
+    pub cells: Vec<InventoryCell>,
+}
+
+/// One cell of the inventory: a key in an environment and its value state (never a value).
+#[derive(Debug, Clone, Deserialize)]
+pub struct InventoryCell {
+    pub product: String,
+    pub key: String,
+    pub env: String,
+    pub state: crate::domain::value_state::ValueState,
 }
 
 /// `opv history <env> --json` (#95): one target's rows, or one block per target when the
@@ -269,7 +286,7 @@ pub struct AccessFinding {
     pub next: Option<String>,
 }
 
-/// `opv adopt <env> --from <file> --json` (#94).
+/// `opv import <env> --from <file> --dry-run --json` (#94).
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AdoptDoc {
     #[serde(default)]

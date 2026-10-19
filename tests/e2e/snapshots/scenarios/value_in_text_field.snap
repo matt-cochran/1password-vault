@@ -1,0 +1,21 @@
+# value_in_text_field: opv propose --intent intent.json
+
+## text exit: 2
+## text stdout
+
+## text stderr
+opv: guidance carries what looks like a value (pem_header); free text in an intent document may not carry one
+Do: remove the value from guidance
+Next: opv propose --intent intent.json
+
+## json exit: 2
+## json stdout
+{"schema_version":3,"ok":false,"exit_code":2,"next":{"kind":"run","actor":"assistant","command":"opv propose --intent intent.json --json"},"do":"remove the value from guidance","error":{"code":"value_in_text_field","category":"config","message":"guidance carries what looks like a value (pem_header); free text in an intent document may not carry one","subject":{"detector":"pem_header","field":["guidance"]},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"remove the value from guidance","next":{"kind":"run","actor":"assistant","command":"opv propose --intent intent.json --json"}}}
+
+## json stderr
+opv: guidance carries what looks like a value (pem_header); free text in an intent document may not carry one
+Do: remove the value from guidance
+Next: opv propose --intent intent.json --json
+
+## mcp opv_propose {"kind":"key","product":"web","key":"NEW_KEY","field_kind":"secret","environments":["dev"],"guidance":"paste -----BEGIN S7MARKERVALUE-guidance here"}
+{"schema_version":3,"ok":false,"exit_code":2,"next":{"kind":"run","actor":"assistant","command":"opv propose key web/NEW_KEY --kind secret --env dev --json"},"do":"remove the value from guidance","error":{"code":"value_in_text_field","category":"config","message":"guidance carries what looks like a value (pem_header); free text in an intent document may not carry one","subject":{"detector":"pem_header","field":["guidance"]},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"remove the value from guidance","next":{"kind":"run","actor":"assistant","command":"opv propose key web/NEW_KEY --kind secret --env dev --json"}}}

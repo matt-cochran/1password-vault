@@ -57,3 +57,5 @@ case	exit	command
 17-delete-configmaps	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=120s delete configmap opv-api--otel-resource-klmnopqrst opv-api--otel-resource-uvwxyz2345 --ignore-not-found
 17-delete-configmaps-missing-ignored	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=120s delete configmap opv-api--otel-resource-klmnopqrst opv-api--otel-resource-uvwxyz2345 --ignore-not-found
 17-delete-configmap-one	0	kubectl --context opv-rbac --namespace opv-rec --request-timeout=120s delete configmap opv-api--log-level-abcdefghij --ignore-not-found
+20-config-current-context	1	kubectl config current-context 
+20-config-view-minify	1	kubectl config view --minify -o json 

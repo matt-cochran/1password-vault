@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "ok": true,
   "environment": "prod",
   "product": null,
@@ -65,10 +65,14 @@
       {
         "target": "portfolio",
         "product": "allumata",
-        "reason": "no delivery item is recorded for allumata on prod/portfolio; opv bootstrap creates it"
+        "reason": "no delivery item is recorded for allumata on prod/portfolio; opv apply creates it"
       }
     ]
   },
-  "next": "opv sync prod --deploy",
+  "next": {
+    "kind": "run",
+    "actor": "assistant",
+    "command": "opv sync prod --deploy"
+  },
   "do": null
 }

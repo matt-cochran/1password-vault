@@ -1,0 +1,25 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: opv
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      BUILD_PROFILE: release
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build
+        env:
+          CARGO_TERM_COLOR: always
+      - run: ./deploy.sh
+        env:
+          API_TOKEN: ${{ secrets.CI_API_TOKEN }}
+          SITE_URL: ${{ vars.BASE_URL }}
+      - run: echo "${{ secrets.DEPLOY_TOKEN }}"

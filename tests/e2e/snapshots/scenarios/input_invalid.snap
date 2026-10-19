@@ -1,4 +1,4 @@
-# input_invalid: opv adopt dev --from dir.env
+# input_invalid: opv import dev --from dir.env --dry-run
 
 ## text exit: 2
 ## text stdout
@@ -7,14 +7,14 @@
 using <SCENARIO>/project/secrets.toml
 opv: the .env file dir.env: the file must be a regular file (not a link or folder) under 1 MiB
 Do: edit dir.env: make the file a regular file (not a link or folder) under 1 MiB
-Next: opv adopt dev --from dir.env
+Next: opv import dev --from dir.env --dry-run
 
 ## json exit: 2
 ## json stdout
-{"schema_version":2,"ok":false,"exit_code":2,"next":"opv adopt dev --from dir.env --json","do":"edit dir.env: make the file a regular file (not a link or folder) under 1 MiB","error":{"code":"input_invalid","category":"config","message":"the .env file dir.env: the file must be a regular file (not a link or folder) under 1 MiB","subject":{"rule":{"rule":"type","expected":"a regular file (not a link or folder) under 1 MiB"},"path":"dir.env","kind":"dotenv","at":null,"field":"the file"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":true,"do":"edit dir.env: make the file a regular file (not a link or folder) under 1 MiB","next":"opv adopt dev --from dir.env --json","next_kind":"rerun"}}
+{"schema_version":3,"ok":false,"exit_code":2,"next":{"kind":"apply","actor":"person","command":"opv import dev --from dir.env --dry-run"},"do":"edit dir.env: make the file a regular file (not a link or folder) under 1 MiB","error":{"code":"input_invalid","category":"config","message":"the .env file dir.env: the file must be a regular file (not a link or folder) under 1 MiB","subject":{"rule":{"rule":"type","expected":"a regular file (not a link or folder) under 1 MiB"},"path":"dir.env","kind":"dotenv","at":null,"field":"the file"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":true,"do":"edit dir.env: make the file a regular file (not a link or folder) under 1 MiB","next":{"kind":"apply","actor":"person","command":"opv import dev --from dir.env --dry-run"}}}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml
 opv: the .env file dir.env: the file must be a regular file (not a link or folder) under 1 MiB
 Do: edit dir.env: make the file a regular file (not a link or folder) under 1 MiB
-Next: opv adopt dev --from dir.env --json
+Next: opv import dev --from dir.env --dry-run

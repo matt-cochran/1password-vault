@@ -8,12 +8,16 @@
 //! [`render_text`] prints the same receipt for a person: a counts line, a
 //! product × environment grid and the findings with one runnable prerequisite each.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::app::account::Report;
+use crate::app::rule_source::{RuleSource, RuleStatus, rule_source};
+use crate::cause::{Cause, EnvName, KeyName, ProductName};
+use crate::domain::plan::RuleGate;
 use crate::domain::{KeyState, Row, TargetState, key_label};
 use crate::error::Error;
 
@@ -52,6 +56,55 @@ pub struct EnvInput {
     /// Who the environment is for (FR-55): when set, an environment this person cannot open
     /// is reported as not theirs, non-blocking.
     pub audience: Option<String>,
+    /// Where a personal key's own value is read from (FR-55): what a personal key's finding
+    /// tells the person to create or fill. Unused when no key is personal.
+    pub personal_item: PersonalItem,
+}
+
+/// A person's own item for an environment's personal keys (FR-55), as
+/// [`super::personal::locate`] reads it: the item title and the vault titles it tries, in
+/// order. Names only.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PersonalItem {
+    /// `personal_item`, else `<project> · <env> (personal)`.
+    pub title: String,
+    /// `personal_vault`, else `Private`, `Employee`, `Personal`.
+    pub vaults: Vec<String>,
+}
+
+impl PersonalItem {
+    /// `env`'s personal item for `project`, named as the reader looks it up.
+    pub fn of(env: &crate::domain::Environment, project: &str) -> Self {
+        Self {
+            title: super::personal::item_title(env, project),
+            vaults: super::personal::vault_titles(env)
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        }
+    }
+
+    /// The step for a personal key whose field in this item is missing or empty: the item,
+    /// its vault, and the field (section `section`, label `label`) opv reads. Never
+    /// `opv open`, which opens the team item.
+    fn step(&self, section: &str, label: &str, empty: bool) -> String {
+        let vault = match self.vaults.split_last() {
+            Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),
+            _ => self.vaults.concat(),
+        };
+        let field = format!("field {label} in section {section}");
+        if empty {
+            format!(
+                "fill {field} of your item \"{}\" in your own 1Password vault ({vault})",
+                self.title
+            )
+        } else {
+            format!(
+                "in your own 1Password vault ({vault}), create or open your item \"{}\" and fill {field}",
+                self.title
+            )
+        }
+    }
 }
 
 /// Everything [`receipt`] needs, already gathered by the caller.
@@ -71,7 +124,7 @@ pub struct Inputs<'a> {
 }
 
 /// `config` of the receipt: where the configuration was read from.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigRef {
     pub source: Option<String>,
 }
@@ -160,15 +213,30 @@ pub struct Finding {
 }
 
 /// The first step: the actor and the command of the first blocking finding, else of the
-/// first finding.
+/// first finding. A personal key's step (FR-55) is no command: it is `enter_value` with a
+/// null `command`, and the person reads the step in the finding's `prerequisite`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Next {
+    /// The schema-3 kind when the actor alone does not give it (`enter_value` for a
+    /// personal key); omitted otherwise, so the typed `next` derives it from the actor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<crate::json::NextKind>,
     pub actor: String,
-    pub command: String,
+    /// The command to run; `None` for a personal key's step, which is no command.
+    pub command: Option<String>,
+    /// The finding's step as the text output shows it; never serialized.
+    #[serde(skip)]
+    pub step: String,
+}
+
+/// Whether `code` is a personal key's finding (FR-55): its step is in the person's own
+/// item, never a command.
+fn is_personal_step(code: &str) -> bool {
+    matches!(code, "personal_key_missing" | "personal_key_empty")
 }
 
 /// The FR-51 document.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Receipt {
     pub receipt_id: String,
     pub opv_version: String,
@@ -179,6 +247,19 @@ pub struct Receipt {
     pub targets: Vec<TargetReport>,
     pub findings: Vec<Finding>,
     pub next: Option<Next>,
+    /// RFC 3339 UTC the receipt was generated (design row `receipts`). The `--save` receipt
+    /// always carries it; omitted when a caller built the receipt without a clock. A time,
+    /// never a value (SR-1).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub generated_at: String,
+    /// Item id → the `op item list` `version` this receipt saw (C2, as `changed` reads it).
+    /// An integer, never a value or a digest of one (SR-1); omitted when none were read.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub item_versions: BTreeMap<String, u64>,
+    /// The git commit (`git rev-parse HEAD`) this receipt was generated at; `None` outside a
+    /// repository. Hex only, never a value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
     /// The environments in input order, with their display names, for [`render_text`]'s
     /// columns; never serialized.
     #[serde(skip)]
@@ -189,6 +270,20 @@ pub struct Receipt {
 /// `receipt_id`, which binds the receipt to `(config.source, account, matrix, findings)`
 /// and holds no value.
 pub fn receipt(inputs: &Inputs<'_>, opv_version: &str) -> Receipt {
+    receipt_with(inputs, opv_version, "", BTreeMap::new(), None)
+}
+
+/// [`receipt`] with the clock, item versions and git revision the `--save` receipt records
+/// (design row `receipts`). `generated_at` is RFC 3339 UTC, `item_versions` is item id →
+/// the `op item list` version, and `revision` is `git rev-parse HEAD` (`None` outside a
+/// repository). All three are times, integers and hex only: never a value (SR-1).
+fn receipt_with(
+    inputs: &Inputs<'_>,
+    opv_version: &str,
+    generated_at: &str,
+    item_versions: BTreeMap<String, u64>,
+    revision: Option<String>,
+) -> Receipt {
     let config = ConfigRef {
         source: inputs.config_source.clone(),
     };
@@ -198,14 +293,19 @@ pub fn receipt(inputs: &Inputs<'_>, opv_version: &str) -> Receipt {
     });
     let matrix = build_matrix(inputs);
     let targets = build_targets(inputs);
-    let findings = build_findings(inputs);
+    let findings = build_findings(inputs, crate::host::Host::detect().agent_mode().is_some());
     let next = findings
         .iter()
         .find(|f| f.blocking)
         .or_else(|| findings.first())
-        .map(|f| Next {
-            actor: f.actor.clone(),
-            command: f.prerequisite.clone(),
+        .map(|f| {
+            let personal = is_personal_step(&f.code);
+            Next {
+                kind: personal.then_some(crate::json::NextKind::EnterValue),
+                actor: f.actor.clone(),
+                command: (!personal).then(|| f.prerequisite.clone()),
+                step: f.prerequisite.clone(),
+            }
         });
     let receipt_id = receipt_id(&config, &account, &matrix, &findings);
     let environments = inputs
@@ -227,6 +327,9 @@ pub fn receipt(inputs: &Inputs<'_>, opv_version: &str) -> Receipt {
         targets,
         findings,
         next,
+        generated_at: generated_at.to_string(),
+        item_versions,
+        revision,
         environments,
     }
 }
@@ -355,7 +458,43 @@ fn is_finding_state(state: &KeyState) -> bool {
             | KeyState::WrongKind
             | KeyState::RuleFailed(..)
             | KeyState::SourceBlocked
+            | KeyState::RulesPendingReview
     )
+}
+
+/// Whether an assistant holds `(product, key)`'s rules back (H1, default 2): only when the
+/// key declares a rule that is not committed on the default branch. Without a readable
+/// committed contract (`source` is `None`) no rule is committed, so every key that declares
+/// one is held. A key with no rule is never pending (walkthrough finding 1): it is
+/// evaluated normally and shows `empty`, `absent` or `set`.
+fn pending_for_agent(
+    source: Option<&RuleSource>,
+    fleet: &crate::domain::Fleet,
+    product: &str,
+    key: &str,
+) -> bool {
+    match source {
+        Some(source) => source.status(fleet, product, key) == RuleStatus::PendingReview,
+        None => crate::app::rule_source::declares_rules(fleet, product, key),
+    }
+}
+
+/// Hold back every uncommitted rule for an assistant (H1, design row `rule-gate`): the
+/// rows keep their values to themselves and show [`KeyState::RulesPendingReview`] instead
+/// of a rule result. A person at a TTY and CI never reach here.
+fn gate_rows(envs: &mut [EnvInput], gate: &RuleGate<'_>) {
+    for env in envs {
+        if let Some(targets) = &mut env.target {
+            for t in targets {
+                if let Ok(rows) = &mut t.rows {
+                    crate::domain::plan::apply_rule_gate(rows, gate);
+                }
+            }
+        }
+        if let Ok(rows) = &mut env.rows {
+            crate::domain::plan::apply_rule_gate(rows, gate);
+        }
+    }
 }
 
 /// Why a target is `grants_missing`: the explicit reason the caller found, else the error
@@ -475,9 +614,21 @@ fn row_findings(
             KeyState::RuleFailed("nonempty", _) => "key_empty",
             KeyState::RuleFailed(..) => "key_failed_rule",
             KeyState::WrongKind => "key_wrong_kind",
+            KeyState::RulesPendingReview => "rules_pending_review",
             _ => continue,
         };
         let label = key_label(&r.product, &r.key);
+        // A personal key's value is in the person's own item (FR-55): `opv open` would open
+        // the team item, so the step names the item and field opv reads instead.
+        let (section, field) = r
+            .source
+            .clone()
+            .unwrap_or((r.product.clone(), r.key.clone()));
+        let prerequisite = match code {
+            "personal_key_missing" => env.personal_item.step(&section, &field, false),
+            "personal_key_empty" => env.personal_item.step(&section, &field, true),
+            _ => format!("opv open {label} --env {}", env.name),
+        };
         let verify = match target {
             Some(t) => format!(
                 "opv status {} --target {t} --product {}",
@@ -498,7 +649,7 @@ fn row_findings(
             blocking: true,
             actor: "owner".into(),
             effect: "writes_1password".into(),
-            prerequisite: format!("opv open {label} --env {}", env.name),
+            prerequisite,
             verify,
             message: None,
             act: None,
@@ -508,7 +659,9 @@ fn row_findings(
 
 /// The findings, in order (FR-51): every account finding, then each environment's error,
 /// then each row's own finding. A `SourceBlocked` row produces none (its source's does).
-fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
+/// `agent` is true on assistant surfaces (MCP or a marker): cross-tier health warnings are
+/// hidden there, while a person at a terminal and CI still see them.
+fn build_findings(inputs: &Inputs<'_>, agent: bool) -> Vec<Finding> {
     let mut out = Vec::new();
     let selected = inputs
         .account
@@ -627,12 +780,18 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
     }
     // Settings health (#92): likely-wrong values, never blocking. The scope is the first
     // environment named (in configured order), where `opv open` takes the person to fix it.
+    // Cross-tier warnings (the same value across environments, or under two keys) are for a
+    // person at a terminal and CI; they are hidden from assistant surfaces (agent mode).
+    // Health stays advisory everywhere: a health finding is never blocking.
     for h in &inputs.health {
+        if agent && crate::domain::health::is_cross_tier(h.code) {
+            continue;
+        }
         let Some(env) = h.environments.first() else {
             continue;
         };
         let (product, label) = (Some(h.product.clone()), key_label(&h.product, &h.key));
-        out.push(Finding {
+        let finding = Finding {
             code: h.code.into(),
             scope: Scope {
                 environment: Some(env.clone()),
@@ -641,6 +800,8 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
                 key: Some(h.key.clone()),
                 account: None,
             },
+            // Advisory (#92): a person judges a likely-wrong value; readiness never fails
+            // on one, so `opv ready`'s exit code never changes.
             blocking: false,
             actor: "owner".into(),
             effect: "writes_1password".into(),
@@ -648,7 +809,9 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
             verify: "opv ready --json".into(),
             message: Some(h.message.clone()),
             act: None,
-        });
+        };
+        debug_assert!(!finding.blocking, "a health finding never blocks");
+        out.push(finding);
     }
     out
 }
@@ -744,7 +907,8 @@ pub fn render_text(r: &Receipt, out: &mut dyn Write) -> Result<(), Error> {
         }
     }
     if let Some(n) = &r.next {
-        writeln!(out, "Next ({}): {}", n.actor, n.command).map_err(super::write_err)?;
+        let step = n.command.as_deref().unwrap_or(&n.step);
+        writeln!(out, "Next ({}): {step}", n.actor).map_err(super::write_err)?;
     }
     Ok(())
 }
@@ -854,8 +1018,10 @@ fn state_vault_grants(r: &dyn crate::runner::CommandRunner, vault_id: &str) -> O
 
 /// `opv ready [<env>] [--json] [--save <file>]` (FR-51): read-only. The account report
 /// (FR-49), then each environment (or `only` that one) read as `status` reads it, joined into
-/// the receipt. Findings never fail the command: the receipt reports them, and `next` is the
-/// first step to take.
+/// the receipt. Findings never fail the command, except `--gate`, which fails on present
+/// keys that are not in value state `set` or whose delivery evidence is older than the
+/// source item; `next` is the first step to take.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     fleet: &crate::domain::Fleet,
     config_source: Option<&str>,
@@ -863,6 +1029,34 @@ pub fn run(
     r: &dyn crate::runner::CommandRunner,
     json: bool,
     save: Option<&std::path::Path>,
+    gate: bool,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    run_at(
+        fleet,
+        config_source,
+        only,
+        r,
+        json,
+        save,
+        gate,
+        &crate::domain::provenance::utc_now(),
+        out,
+    )
+}
+
+/// [`run`] with the clock the `--save` receipt records, injected so a test is deterministic
+/// (design row `receipts`).
+#[allow(clippy::too_many_arguments)]
+pub fn run_at(
+    fleet: &crate::domain::Fleet,
+    config_source: Option<&str>,
+    only: Option<&str>,
+    r: &dyn crate::runner::CommandRunner,
+    json: bool,
+    save: Option<&std::path::Path>,
+    gate: bool,
+    generated_at: &str,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     if let Some(e) = only {
@@ -887,7 +1081,18 @@ pub fn run(
     // Each environment's fields, copied during its one read, for the health checks (#92).
     let mut kept: Vec<(String, bool, Vec<crate::domain::plan::ItemField>)> = Vec::new();
     let mut envs: Vec<EnvInput> = Vec::new();
+    // The project name a personal item's default title uses (FR-55), found once and only
+    // when some environment declares a personal key.
+    let mut project: Option<String> = None;
     for (name, env) in ordered {
+        let personal_item = if super::personal::declared(fleet, name) {
+            let project = project.get_or_insert_with(|| {
+                super::personal::project_name(r, &std::env::current_dir().unwrap_or_default())
+            });
+            PersonalItem::of(env, project)
+        } else {
+            PersonalItem::default()
+        };
         if env.targets.is_empty() {
             // A run-only environment: one read, and its rows stand on their own (FR-56).
             let mut fields = Vec::new();
@@ -908,6 +1113,7 @@ pub fn run(
                 rows,
                 title: env.title.clone(),
                 audience: env.audience.clone(),
+                personal_item,
             });
             continue;
         }
@@ -936,13 +1142,12 @@ pub fn run(
             if readable {
                 reading = false;
             }
-            let grants_missing = if readable {
-                vault_checks
-                    .entry(t.state_vault_id.clone())
-                    .or_insert_with(|| state_vault_grants(&env_runner, &t.state_vault_id))
-                    .clone()
-            } else {
-                None
+            let grants_missing = match &t.state_vault_id {
+                Some(vault) if readable => vault_checks
+                    .entry(vault.clone())
+                    .or_insert_with(|| state_vault_grants(&env_runner, vault))
+                    .clone(),
+                _ => None,
             };
             targets.push(TargetInput {
                 name: tname.clone(),
@@ -961,7 +1166,22 @@ pub fn run(
             rows: Ok(Vec::new()),
             title: env.title.clone(),
             audience: env.audience.clone(),
+            personal_item,
         });
+    }
+    // H1 (design row `rule-gate`): a rule is evaluated for an assistant only once it is
+    // committed on the repository's default branch. An agent's rows show
+    // `rules_pending_review` instead of a pass or a fail; a person at a TTY and CI are
+    // untouched. The gate reads rules, never a value.
+    if crate::host::Host::detect().agent_mode.is_some() {
+        let repo = crate::config_store::git_toplevel(r);
+        let root = repo.as_deref().unwrap_or(std::path::Path::new("."));
+        let source = rule_source(r, root, fleet).ok();
+        let gate = RuleGate {
+            agent: true,
+            pending: &|p, k| pending_for_agent(source.as_ref(), fleet, p, k),
+        };
+        gate_rows(&mut envs, &gate);
     }
     let values: Vec<crate::domain::health::EnvValues<'_>> = kept
         .iter()
@@ -974,10 +1194,17 @@ pub fn run(
                     .and_then(|e| e.title.as_deref()),
                 deployed: *deployed,
                 fields,
+                tier: fleet.environments[name].tier,
+                assistant_imported: false,
             },
         )
         .collect();
-    let health = crate::domain::health::check(fleet, &values);
+    let mut health = crate::domain::health::check(fleet, &values);
+    // `--gate`: an `expires` within 30 days is an advisory finding, never blocking (design
+    // row `gate`). Without `--gate` the receipt is unchanged.
+    if gate {
+        health.extend(expires_soon(fleet, &envs, generated_at));
+    }
     let personal = fleet
         .products
         .iter()
@@ -988,7 +1215,48 @@ pub fn run(
                 .map(move |(k, _)| (p.clone(), k.clone()))
         })
         .collect();
-    let doc = receipt(
+    // The saved receipt records what this run saw: the item versions of each boundary
+    // (`op item list`, as `changed` reads them) and the git revision. A `--gate` run needs
+    // the versions to judge delivery evidence too; the plain report needs neither.
+    let (versions, assistant_imported): (BTreeMap<String, u64>, BTreeSet<String>) =
+        if save.is_some() || gate {
+            read_item_versions(fleet, only, r)?
+        } else {
+            (BTreeMap::new(), BTreeSet::new())
+        };
+    // `--gate` fails the command (`gate_failed`, exit 8) on present keys that are not in
+    // value state `set` or whose delivery evidence is older than the source item now. The
+    // receipt is not written when the gate fails: the error names the keys.
+    // Every placeholder value by (env, product, key), of any kind, as `classify` judges it:
+    // the settings health flags secrets only, and a config `changeme` is a placeholder too.
+    let placeholder_values: BTreeSet<(String, String, String)> = kept
+        .iter()
+        .flat_map(|(name, _, fields)| {
+            fields
+                .iter()
+                .filter(|f| crate::domain::health::is_placeholder(f.value.expose()))
+                .map(move |f| (name.clone(), f.section.clone(), f.label.clone()))
+        })
+        .collect();
+    if gate
+        && let Some(cause) = gate_failure(
+            fleet,
+            &envs,
+            &health,
+            &placeholder_values,
+            &versions,
+            &assistant_imported,
+            r,
+        )
+    {
+        return Err(cause.into());
+    }
+    let revision = if save.is_some() {
+        git_revision(r)
+    } else {
+        None
+    };
+    let doc = receipt_with(
         &Inputs {
             config_source: config_source.map(str::to_string),
             account: &account,
@@ -997,6 +1265,13 @@ pub fn run(
             health,
         },
         env!("CARGO_PKG_VERSION"),
+        if save.is_some() { generated_at } else { "" },
+        if save.is_some() {
+            versions
+        } else {
+            BTreeMap::new()
+        },
+        revision,
     );
     // The receipt is plain data: failing to serialize it is opv's own bug.
     let bug = |_| {
@@ -1018,4 +1293,438 @@ pub fn run(
         writeln!(out, "saved: {}", path.display()).map_err(super::write_err)?;
     }
     Ok(())
+}
+
+/// The git commit of the repository, `git rev-parse HEAD` through the runner; `None`
+/// outside a repository (design row `receipts`). Hex only, never a value.
+fn git_revision(r: &dyn crate::runner::CommandRunner) -> Option<String> {
+    match r.probe(
+        &crate::runner::Call::new("git", &["rev-parse", "HEAD"]),
+        crate::runner::PROBE_TIMEOUT,
+    ) {
+        Ok(o) if o.status == 0 => {
+            let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            (!text.is_empty()).then_some(text)
+        }
+        _ => {
+            // Not a repository, no git, or no commit yet: its stderr explains nothing later.
+            let _ = crate::runner::take_failure_excerpt();
+            None
+        }
+    }
+}
+
+/// One row of `op item list --vault <vault> --format json` (as `changed` reads them).
+#[derive(serde::Deserialize)]
+struct ListRow {
+    id: String,
+    #[serde(default)]
+    version: u64,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+/// Item id → the `op item list` `version` of each boundary item in scope (design row
+/// `receipts`, the versions `changed` reads). One listing per vault, as `changed` does.
+/// Also the item ids whose `op item list` tags include `assistant_imported` (design row
+/// `import-local`): their values never count as set for the gate.
+fn read_item_versions(
+    fleet: &crate::domain::Fleet,
+    only: Option<&str>,
+    r: &dyn crate::runner::CommandRunner,
+) -> Result<(BTreeMap<String, u64>, BTreeSet<String>), Error> {
+    let mut versions = BTreeMap::new();
+    let mut assistant_imported = BTreeSet::new();
+    for name in fleet.environments.keys() {
+        if only.is_some_and(|o| o != name.as_str()) {
+            continue;
+        }
+        for (_, b) in fleet.bound_boundaries(name)? {
+            let args = [
+                "item",
+                "list",
+                "--vault",
+                b.vault_id.as_str(),
+                "--format",
+                "json",
+            ];
+            let out = crate::adapters::onepassword::read_op(r, &args, &crate::host::Host::detect)?;
+            if out.status != 0 || out.stdout.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            if let Ok(rows) = serde_json::from_slice::<Vec<ListRow>>(&out.stdout) {
+                for row in rows {
+                    if row
+                        .tags
+                        .iter()
+                        .any(|t| t == crate::app::import_local::ASSISTANT_IMPORTED)
+                    {
+                        assistant_imported.insert(row.id.clone());
+                    }
+                    versions.insert(row.id, row.version);
+                }
+            }
+        }
+    }
+    Ok((versions, assistant_imported))
+}
+
+/// One line of the `source versions` field a sync writes (`delivery` row): `v1|<item
+/// id>|<version>`. Names and integers only (SR-1).
+const SOURCE_VERSIONS_FIELD: &str = "source versions";
+
+/// The source item versions a placement's delivery item records now: item id → version.
+/// Empty when there is no delivery item or it cannot be read. Never a value (SR-1).
+fn recorded_versions(
+    fleet: &crate::domain::Fleet,
+    env_name: &str,
+    target: &str,
+    product: &str,
+    r: &dyn crate::runner::CommandRunner,
+) -> BTreeMap<String, u64> {
+    let Some(t) = fleet
+        .environments
+        .get(env_name)
+        .and_then(|e| e.targets.get(target))
+    else {
+        return BTreeMap::new();
+    };
+    let (Some(item_id), Some(vault_id)) = (t.delivery_items.get(product), &t.state_vault_id) else {
+        return BTreeMap::new();
+    };
+    let boundary = crate::domain::Boundary {
+        vault_id: vault_id.clone(),
+        item_id: item_id.clone(),
+    };
+    let Ok(env) = fleet.environment(env_name) else {
+        return BTreeMap::new();
+    };
+    let Ok(read) = crate::adapters::onepassword::read_whole_fresh(r, env, &boundary) else {
+        return BTreeMap::new();
+    };
+    let Ok(doc) = serde_json::from_slice::<serde_json::Value>(read.raw()) else {
+        return BTreeMap::new();
+    };
+    let Some(text) = doc["fields"].as_array().and_then(|fields| {
+        fields.iter().find_map(|f| {
+            (f["label"].as_str() == Some(SOURCE_VERSIONS_FIELD))
+                .then(|| f["value"].as_str())
+                .flatten()
+        })
+    }) else {
+        return BTreeMap::new();
+    };
+    let mut out = BTreeMap::new();
+    for line in text.lines() {
+        let mut parts = line.split('|');
+        if parts.next() != Some("v1") {
+            continue;
+        }
+        let (Some(id), Some(version)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        if let Ok(version) = version.parse() {
+            out.insert(id.to_string(), version);
+        }
+    }
+    out
+}
+
+/// The keys of `rows` that `--gate` refuses: present but not in value state `set`, or (when
+/// the target delivers the product) with delivery evidence older than the source item now.
+/// `placeholders` are the (product, key) pairs the settings health found a placeholder in;
+/// `delivered` is the products this target delivers; `recorded` is the version each source
+/// item had at the last sync; `current` is each boundary item's `op item list` version now.
+/// Names, states and integers only (SR-1).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn gate_keys(
+    fleet: &crate::domain::Fleet,
+    env: &str,
+    rows: &[Row],
+    placeholders: &BTreeSet<(String, String)>,
+    delivered: &BTreeSet<String>,
+    recorded: &BTreeMap<String, u64>,
+    current: &BTreeMap<String, u64>,
+    assistant_imported: &BTreeSet<String>,
+) -> Vec<(String, String, &'static str)> {
+    let mut out = Vec::new();
+    for row in rows {
+        let placeholder = placeholders.contains(&(row.product.clone(), row.key.clone()));
+        let reason = match &row.state {
+            // A placeholder is `placeholder` whatever rule it also fails, as `classify` (and
+            // so `opv inventory`) reports it: empty, then placeholder, then malformed.
+            KeyState::Ready | KeyState::RulesPendingReview | KeyState::WrongKind if placeholder => {
+                Some("placeholder")
+            }
+            KeyState::RuleFailed(rule, _) if placeholder && *rule != "nonempty" => {
+                Some("placeholder")
+            }
+            // Rules not committed are not evaluated: the value state is `set` (design row
+            // `value-state`). A shared key's finding is reported on its source's row.
+            KeyState::Ready | KeyState::RulesPendingReview | KeyState::Skipped => None,
+            KeyState::Missing => Some("absent"),
+            KeyState::RuleFailed("nonempty", _) => Some("empty"),
+            KeyState::RuleFailed(..) | KeyState::WrongKind => Some("malformed"),
+            KeyState::SourceBlocked => None,
+        };
+        if let Some(reason) = reason {
+            out.push((row.product.clone(), row.key.clone(), reason));
+            continue;
+        }
+        let source = fleet
+            .products
+            .get(&row.product)
+            .and_then(|p| p.keys.get(&row.key))
+            .and_then(|s| s.source())
+            .map(|(p, _)| p.to_string())
+            .unwrap_or_else(|| row.product.clone());
+        let item = fleet.boundary(env, &source).ok().map(|b| b.item_id.clone());
+        // An assistant-imported item's values never count as set (design row
+        // `import-local`), whatever the target says, except in the `local` tier the import
+        // was made for: there they are the developer's own values, and nothing promotes
+        // them (the tag stays on the item, so a local gate could otherwise never pass).
+        let local = fleet
+            .environments
+            .get(env)
+            .is_some_and(|e| e.tier == crate::domain::Tier::Local);
+        if !local
+            && item
+                .as_ref()
+                .is_some_and(|id| assistant_imported.contains(id))
+        {
+            out.push((row.product.clone(), row.key.clone(), "assistant_imported"));
+            continue;
+        }
+        if !delivered.contains(&row.product) {
+            continue;
+        }
+        let fresh = match item {
+            Some(id) => matches!(
+                (recorded.get(&id), current.get(&id)),
+                (Some(recorded), Some(current)) if recorded >= current
+            ),
+            None => true,
+        };
+        if !fresh {
+            out.push((row.product.clone(), row.key.clone(), "not_delivered"));
+        }
+    }
+    out
+}
+
+/// The first environment whose present keys fail `--gate`, or `None` when every one passes.
+fn gate_failure(
+    fleet: &crate::domain::Fleet,
+    envs: &[EnvInput],
+    health: &[crate::domain::health::HealthFinding],
+    placeholder_values: &BTreeSet<(String, String, String)>,
+    current: &BTreeMap<String, u64>,
+    assistant_imported: &BTreeSet<String>,
+    r: &dyn crate::runner::CommandRunner,
+) -> Option<Cause> {
+    for env in envs {
+        let mut placeholders: BTreeSet<(String, String)> = health
+            .iter()
+            .filter(|h| {
+                h.code == crate::domain::health::PLACEHOLDER
+                    && h.environments.iter().any(|e| e == &env.name)
+            })
+            .map(|h| (h.product.clone(), h.key.clone()))
+            .collect();
+        placeholders.extend(
+            placeholder_values
+                .iter()
+                .filter(|(e, _, _)| e == &env.name)
+                .map(|(_, p, k)| (p.clone(), k.clone())),
+        );
+        let mut keys: Vec<(String, String, &'static str)> = Vec::new();
+        match &env.target {
+            Some(targets) => {
+                for t in targets {
+                    let Ok(rows) = &t.rows else {
+                        // A gate never passes what it could not read.
+                        keys.extend(unreadable_keys(fleet, &env.name));
+                        continue;
+                    };
+                    let mut delivered = BTreeSet::new();
+                    let mut recorded = BTreeMap::new();
+                    let products: BTreeSet<String> =
+                        rows.iter().map(|row| row.product.clone()).collect();
+                    for product in products {
+                        if fleet.delivers(&env.name, &t.name, &product) {
+                            recorded
+                                .extend(recorded_versions(fleet, &env.name, &t.name, &product, r));
+                            delivered.insert(product);
+                        }
+                    }
+                    keys.extend(gate_keys(
+                        fleet,
+                        &env.name,
+                        rows,
+                        &placeholders,
+                        &delivered,
+                        &recorded,
+                        current,
+                        assistant_imported,
+                    ));
+                }
+            }
+            None => {
+                match &env.rows {
+                    Ok(rows) => keys.extend(gate_keys(
+                        fleet,
+                        &env.name,
+                        rows,
+                        &placeholders,
+                        &BTreeSet::new(),
+                        &BTreeMap::new(),
+                        current,
+                        assistant_imported,
+                    )),
+                    // A gate never passes what it could not read.
+                    Err(_) => keys.extend(unreadable_keys(fleet, &env.name)),
+                }
+            }
+        }
+        if !keys.is_empty() {
+            return Some(Cause::GateFailed {
+                env: EnvName::new(env.name.clone()),
+                keys: keys
+                    .into_iter()
+                    .map(|(product, key, reason)| {
+                        (ProductName::new(product), KeyName::new(key), reason)
+                    })
+                    .collect(),
+            });
+        }
+    }
+    None
+}
+
+/// Every key desired in `env`, each `unreadable`: what `--gate` reports for rows it could
+/// not read, so an unreadable environment never passes. Names only.
+fn unreadable_keys(fleet: &crate::domain::Fleet, env: &str) -> Vec<(String, String, &'static str)> {
+    let mut out: Vec<(String, String, &'static str)> = Vec::new();
+    for (product, p) in &fleet.products {
+        for (key, spec) in &p.keys {
+            if spec.is_desired_in(env) {
+                out.push((product.clone(), key.clone(), "unreadable"));
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// `--gate`'s advisory findings: a key whose `expires` is at or before `generated_at`'s
+/// date plus 30 days. Advisory only: it never blocks and never changes the exit code.
+fn expires_soon(
+    fleet: &crate::domain::Fleet,
+    envs: &[EnvInput],
+    generated_at: &str,
+) -> Vec<crate::domain::health::HealthFinding> {
+    let Some(limit) = thirty_days_after(generated_at) else {
+        return Vec::new();
+    };
+    let mut seen: BTreeSet<(String, String, String)> = BTreeSet::new();
+    let mut out = Vec::new();
+    let mut each = |env: &str, rows: &[Row]| {
+        for row in rows {
+            let Some(expires) = fleet
+                .products
+                .get(&row.product)
+                .and_then(|p| p.keys.get(&row.key))
+                .and_then(|spec| spec.expires)
+            else {
+                continue;
+            };
+            if expires > limit {
+                continue;
+            }
+            if !seen.insert((env.to_string(), row.product.clone(), row.key.clone())) {
+                continue;
+            }
+            out.push(crate::domain::health::HealthFinding {
+                code: "expires_soon",
+                environments: vec![env.to_string()],
+                product: row.product.clone(),
+                key: row.key.clone(),
+                other: None,
+                message: format!(
+                    "{} expires within 30 days; rotate it",
+                    key_label(&row.product, &row.key)
+                ),
+            });
+        }
+    };
+    for env in envs {
+        match &env.target {
+            Some(targets) => {
+                for t in targets {
+                    if let Ok(rows) = &t.rows {
+                        each(&env.name, rows);
+                    }
+                }
+            }
+            None => {
+                if let Ok(rows) = &env.rows {
+                    each(&env.name, rows);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The date 30 days after the date in `stamp` (`YYYY-MM-DD...`); `None` when it is not an
+/// opv date stamp. Calendar arithmetic only.
+fn thirty_days_after(stamp: &str) -> Option<crate::domain::Date> {
+    let (year, month, day) = date_parts(stamp)?;
+    let (year, month, day) = civil_from_days(days_from_civil(year, month, day) + 30);
+    crate::domain::Date::new(
+        u16::try_from(year).ok()?,
+        u8::try_from(month).ok()?,
+        u8::try_from(day).ok()?,
+    )
+}
+
+/// The `(year, month, day)` at the front of `stamp`.
+fn date_parts(stamp: &str) -> Option<(i64, i64, i64)> {
+    let b = stamp.as_bytes();
+    if b.len() < 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    Some((
+        stamp.get(0..4)?.parse().ok()?,
+        stamp.get(5..7)?.parse().ok()?,
+        stamp.get(8..10)?.parse().ok()?,
+    ))
+}
+
+/// Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant's
+/// `days_from_civil`).
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// The proleptic Gregorian date for days since 1970-01-01 (Howard Hinnant's
+/// `civil_from_days`).
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }

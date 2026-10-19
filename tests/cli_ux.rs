@@ -4,7 +4,7 @@
 use std::process::Command;
 
 const CFG: &str = "tests/fixtures/secrets.toml";
-const SIMPLE: &str = "tests/fixtures/simple.toml";
+const SIMPLE: &str = "tests/fixtures/simple/secrets.toml";
 
 /// Run opv with `envs` set, no `op` or target CLI on PATH, and none of opv's own variables
 /// inherited from the developer's shell.
@@ -29,7 +29,7 @@ fn opv_with(envs: &[(&str, &str)], args: &[&str]) -> (i32, String, String) {
 }
 
 const COMMANDS: [&str; 8] = [
-    "sync", "run", "check", "init", "explain", "doctor", "status", "plan",
+    "sync", "run", "import", "apply", "explain", "doctor", "status", "plan",
 ];
 
 #[test]
@@ -163,24 +163,6 @@ fn config_help_shows_opv_config() {
     assert!(out.contains("[env: OPV_CONFIG"), "{out}");
 }
 
-#[test]
-fn init_refuses_opv_config() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_opv"))
-        .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
-        .args(["init", "dev", "--vault", "v", "--item", "i"])
-        .current_dir(dir.path())
-        .env("OPV_CONFIG", "elsewhere.toml")
-        .env("PATH", "")
-        .output()
-        .unwrap();
-    let err = String::from_utf8(out.stderr).unwrap();
-    assert!(
-        err.contains("opv init and OPV_CONFIG cannot be used together"),
-        "{err}"
-    );
-}
-
 // --- OPV_PRODUCT (P15) ---
 
 const EXPLAIN_BARE: [&str; 6] = [
@@ -211,7 +193,7 @@ fn opv_product_is_reported_on_stderr() {
 fn product_flag_is_not_reported_as_from_opv_product() {
     let (_, _, err) = opv_with(
         &[("OPV_PRODUCT", "allumata")],
-        &["--config", CFG, "check", "qa", "--product", "allumata"],
+        &["--config", CFG, "status", "qa", "--product", "allumata"],
     );
     assert!(!err.contains("OPV_PRODUCT"), "{err}");
 }

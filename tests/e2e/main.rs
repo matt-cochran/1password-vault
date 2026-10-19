@@ -5,6 +5,7 @@
 mod coverage;
 
 mod scenarios {
+    pub mod assistant;
     pub mod changed;
     pub mod issue_159;
     pub mod issues;

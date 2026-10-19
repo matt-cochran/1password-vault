@@ -2,21 +2,33 @@
 
 pub mod access;
 pub mod access_plan;
-pub mod adopt;
+pub mod capability;
+pub mod catalog;
 pub mod convention;
 pub mod delivery;
 pub mod health;
 pub mod history;
+pub mod import;
+pub mod intent;
+pub mod inventory;
 pub mod kind_guess;
 pub mod ledger;
 pub mod model;
 pub mod naming;
 pub mod placement;
+pub mod presence;
+pub mod relaxation;
 pub mod secret;
+pub mod value_state;
+
+#[cfg(test)]
+#[path = "tier_tests.rs"]
+mod tier_tests;
 
 pub use model::{
-    Boundary, Environment, Fleet, ItemRef, KeySpec, Kind, OneOrMany, Origin, PrefixByMode, Product,
-    Rules, Target, boundary_missing, key_label,
+    Boundary, Date, Environment, Fleet, Ignore, ItemRef, KeySpec, Kind, Lifecycle, OneOrMany,
+    Origin, PrefixByMode, Product, Rules, Target, Tier, ValueSource, boundary_missing, key_label,
+    span_of,
 };
 pub use secret::SecretValue;
 pub mod plan;
@@ -28,3 +40,15 @@ pub use provenance::Stamp;
 pub use runtime::{
     AccessFinding, Binding, Health, RawSpec, Revision, RuntimeChange, RuntimeSnapshot,
 };
+
+#[cfg(test)]
+#[path = "capability_tests.rs"]
+mod capability_tests;
+
+#[cfg(test)]
+#[path = "key_attrs_tests.rs"]
+mod key_attrs_tests;
+
+#[cfg(test)]
+#[path = "annotations_tests.rs"]
+mod annotations_tests;

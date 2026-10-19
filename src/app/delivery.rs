@@ -256,7 +256,7 @@ fn values_by_field(
 }
 
 /// A placement's delivery item as read: the receipt, the key and the evidence by name.
-struct StateItem {
+pub(crate) struct StateItem {
     /// The delivery item's vault and item, as an item read addresses them.
     at: Boundary,
     receipt: Option<Receipt>,
@@ -268,20 +268,27 @@ struct StateItem {
     raw: Zeroizing<Vec<u8>>,
 }
 
+impl StateItem {
+    /// Whether the delivery item carried a receipt. A value-free fact, for the inventory.
+    pub(crate) fn has_receipt(&self) -> bool {
+        self.receipt.is_some()
+    }
+}
+
 /// Where the delivery item of `product` on target `target` is: the target's state vault and
 /// the item ID recorded in its `delivery_items` (FR-13: never a title lookup). `None` when
 /// none is recorded.
 fn item_at(fleet: &Fleet, env_name: &str, target: &str, product: &str) -> Option<Boundary> {
     let t = fleet.environments.get(env_name)?.targets.get(target)?;
     Some(Boundary {
-        vault_id: t.state_vault_id.clone(),
+        vault_id: t.state_vault_id.clone()?,
         item_id: t.delivery_items.get(product)?.clone(),
     })
 }
 
 /// Read the delivery item of `product` on target `target`, fresh and by its recorded ID;
 /// `None` when no item is recorded. Values stay in memory.
-fn read_state(
+pub(crate) fn read_state(
     fleet: &Fleet,
     env_name: &str,
     target: &str,
@@ -363,7 +370,7 @@ pub(crate) fn ledgers(
                     "the delivery evidence of {product} on {} (state vault {}) could not be \
                      read: {why}; its names show as unknown",
                     super::placement(env_name, target),
-                    t.state_vault_id
+                    t.state_vault_id.as_deref().unwrap_or("not bound")
                 ))
             }
         }
@@ -446,7 +453,7 @@ pub fn record(
         }
         let Some(state) = read_state(fleet, env_name, target, &product, r)? else {
             why.push(format!(
-                "no delivery item is recorded for {product} on {}; opv bootstrap creates it",
+                "no delivery item is recorded for {product} on {}; opv apply creates it",
                 super::placement(env_name, target)
             ));
             out.not_minted.push(NotMinted {

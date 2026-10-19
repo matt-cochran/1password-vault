@@ -1,23 +1,20 @@
-# local_file_too_open: opv sync prod --approved 623778c8
+# local_file_too_open: opv import prod --from legacy.env --dry-run
 
 ## text exit: 6
 ## text stdout
 
 ## text stderr
 using <SCENARIO>/project/secrets.toml
-opv: <SCENARIO>/home/.local/state/opv/approvals has mode 0755; opv needs 0700 or stricter
-Do: chmod 700 <SCENARIO>/home/.local/state/opv/approvals
-Next: opv plan prod
+opv: legacy.env has mode 0644; opv needs 0600 or stricter
+Do: chmod 600 legacy.env
+Next: opv import prod --from legacy.env --dry-run
 
 ## json exit: 6
 ## json stdout
-{"schema_version":2,"ok":false,"exit_code":6,"next":"opv plan prod --json","do":"chmod 700 <SCENARIO>/home/.local/state/opv/approvals","error":{"code":"file_too_open","category":"policy","message":"<SCENARIO>/home/.local/state/opv/approvals has mode 0755; opv needs 0700 or stricter","subject":{"want":448,"path":"<SCENARIO>/home/.local/state/opv/approvals","mode":493},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"chmod 700 <SCENARIO>/home/.local/state/opv/approvals","next":"opv plan prod --json","next_kind":"check"}}
+{"schema_version":3,"ok":false,"exit_code":6,"next":{"kind":"apply","actor":"person","command":"opv import prod --from legacy.env --dry-run"},"do":"chmod 600 legacy.env","error":{"code":"file_too_open","category":"policy","message":"legacy.env has mode 0644; opv needs 0600 or stricter","subject":{"want":384,"path":"legacy.env","mode":420},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"chmod 600 legacy.env","next":{"kind":"apply","actor":"person","command":"opv import prod --from legacy.env --dry-run"}}}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml
-opv: <SCENARIO>/home/.local/state/opv/approvals has mode 0755; opv needs 0700 or stricter
-Do: chmod 700 <SCENARIO>/home/.local/state/opv/approvals
-Next: opv plan prod --json
-
-## mcp opv_sync {"environment":"prod","plan_id":"623778c8"}
-{"ok":false,"error":{"code":"file_too_open","category":"policy","message":"<SCENARIO>/home/.local/state/opv/approvals has mode 0755; opv needs 0700 or stricter","subject":{"want":448,"path":"<SCENARIO>/home/.local/state/opv/approvals","mode":493},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"chmod 700 <SCENARIO>/home/.local/state/opv/approvals","next":"opv plan prod --json","next_kind":"check"}}
+opv: legacy.env has mode 0644; opv needs 0600 or stricter
+Do: chmod 600 legacy.env
+Next: opv import prod --from legacy.env --dry-run

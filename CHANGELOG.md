@@ -7,6 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-18
+
+0.12.0 is a breaking release with one interface for people and assistants, from the CLI and five MCP tools: an assistant can guide setup end to end and sees every key's value state but never a value (#173-#178; design: `docs/design/assistant-guided-setup.md`).
+
+### Breaking: one interface
+
+opv 0.12.0 replaces the plan/approve/apply commands and the MCP tool set with one
+interface. There are no aliases: update scripts and assistant settings when you upgrade.
+
+- Changes to the configuration are proposed, then applied by a person:
+  `opv propose key|env|target|retire|setup|structure|generate …`, then `opv apply <plan_id>`.
+  This replaces `opv add`, `opv env add`, `opv target add`, `opv init`, `opv bootstrap`,
+  `opv structure plan|apply`, `opv item skeleton`, `opv generate`, `opv tidy` and `opv approve`.
+  `opv tidy` is removed with no replacement in 0.12.0 (deferred).
+- `opv adopt` is now `opv import <env> --from <file|target:NAME>`. It is write-only and
+  reports imported / skipped per key; it no longer says whether a value differs.
+- `opv check` is `opv inventory --env <env>`; `opv config describe` is `opv inventory`
+  and `opv contract`.
+- 1Password ids move out of `secrets.toml` into `secrets.bindings.toml`. A `secrets.toml`
+  with inline ids is refused until you run `opv propose structure`, then `opv apply`, once.
+  A manifest project keeps its ids in a `toml opv-bindings` block inside the manifest
+  instead of `secrets.bindings.toml`.
+- `opv apply` records what it applied in `secrets.applied.json` beside the bindings, and
+  refuses under CI and agent mode.
+- Assistant-approved syncs are gone (`opv approve --sync`, `opv sync --approved`). Run
+  `opv sync` yourself, or let CI run it.
+- MCP: 13 tools become 5 (`opv_state`, `opv_next`, `opv_propose`, `opv_import_local`,
+  `opv_explain`). `opv_structure_apply`, `opv_generate` and `opv_sync` are removed, and
+  `opv_declare_*` are replaced by `opv_propose`, which accepts catalog shape names, not rule text. Re-run `opv mcp install`
+  and `opv skill install` after upgrading.
+- Validation rules count for assistants only once committed on the default branch;
+  until then they show `rules_pending_review`.
+- `opv ready --gate` fails on a value that is set but not yet delivered.
+
+### Added
+
+- `opv inventory [--env <env>] [--product <p>] [--json]` prints a key by environment matrix of value states: absent, empty, placeholder, malformed, set, unreadable and not_wanted. A cell never carries any part of a value, and a vault this session cannot read is unreadable, never absent.
+- `opv next [--env <env>] [--json]` picks the one action this session can take, from unbound boundary to apply, absent/empty/placeholder/malformed to set, stale delivery to sync, else none; the rest queue, and actions on a vault the session cannot write wait on others by vault. Identical commands fold into one action naming its keys.
+- `opv contract [--env <env>] [--component <c>] [--schema] [--check] [--relaxations] [--base <ref>]` prints the contract as data per component and environment (name, kind, catalog shape name, required, digest), with no id, rule parameter or value; `--schema` prints the contract's own JSON Schema, `--check` fails `contract_stale` on a stale committed copy, and `--relaxations` classifies relaxations against the default branch.
+- `opv import <env> --from <file|target:NAME>` replaces `opv adopt`: it is write-only, with `--replace`, `--rotate`, `--skip` and `--dry-run`, reports imported and skipped per key, and passes each value from the file to 1Password on stdin only. Import into a `confirm_env` or production-tier environment needs `--confirm <env>`.
+- `opv set <key>` reads one value with masked entry and writes it to 1Password; agent mode and a missing terminal are refused before any prompt, and only the key's new value state is printed.
+- `opv access` lists for each vault who can write it where 1Password reports it (names only, never an email), marks production-tier vaults and this session's capability in text and `--json`, and raises `single_writer` for a deployed-tier vault with exactly one writer and `no_writer` for a production vault whose readable user list names no writer.
+- `opv doctor` warns, never fails, when this session can read a production-tier vault or is signed in live to a production target's platform; each names the fix and the hardened option of a separate 1Password admin account.
+- `opv ready --gate` fails `gate_failed` unless every present key is set and delivered at the source item version 1Password now has, and fails an environment it could not read as unreadable. A key `expires` within 30 days is the advisory `expires_soon`.
+- Environments have a `tier` of `local`, `shared` or `production`; absent, it is production where the name or title reads as production today, else shared, and `local` with a target or `confirm_env` is refused.
+- Keys carry `source` (person, generated, derived), `expires` and `lifecycle` (active, retiring, retired), and a retiring key is pruned by tier and archived after its needs are checked at the deployed revision; `retire_still_read` names the file that still reads it.
+- `opv explain <KEY>` lists every place the key is delivered, for leak response: every environment it is desired in, every target that delivers its product and the delivery item recording it, names only. `opv explain <plan_id>` explains each step of the recomputed plan.
+- The safe rotation procedure is documented on `opv sync --rotate` and `opv delivery verify`, including consumers outside opv and the `expires` attribute with `ready`'s advisory finding.
+- `opv_import_local` imports write-only into a local-tier environment only (`import_tier_refused` otherwise) and tags each written item `assistant_imported`; health comparisons skip tagged values, and `opv ready --gate` counts them as set only in a local-tier environment, so they never count toward promotion.
+- `opv ci workflow <env> --target <t>` also prints pull-request jobs that run `opv needs --gate`, `opv contract --check` and `opv ready --gate`, plus an `opv/relaxations` status that fails until the pull request has an approving review at its head; both check out full history for the default branch.
+
+### Changed
+
+- Value states are computed in memory from committed rules only, and a read error never converts to absent. Every `--json` document now uses schema 3 with the typed `next {kind, actor, command}`.
+- The removed commands fail as unknown subcommands, with no aliases. `opv ui` actions call `import`, `propose key` and `propose env`, then `apply`.
+- 1Password ids live only in `secrets.bindings.toml` (or a manifest project's `toml opv-bindings` block); inline ids are refused at load, naming the field, and a contract without bindings loads with an `opv apply` handoff.
+- `opv config check` fails `bindings_unapplied` when the committed bindings differ from the `secrets.applied.json` apply record.
+- MCP is five tools: `opv_state` answers each section with the CLI's whole `--json` document, `opv_next` answers `opv next`, `opv_propose` answers `opv propose`, `opv_import_local` is the only writer, and `opv_explain` answers `opv explain`. Every failure is the CLI's whole `--json` frame.
+- Retiring a key checks needs at each environment's deployed revision, prunes shared tiers before production, archives the fields and marks the key retired last, and is resumable.
+
+### Removed
+
+- `opv add`, `opv env add`, `opv target add`, `opv init`, `opv bootstrap`, `opv structure plan|apply`, `opv item skeleton`, `opv generate`, `opv tidy`, `opv adopt`, `opv check`, `opv config describe` and `opv approve`, with no aliases.
+- The approval file and every approve path, including assistant-approved syncs.
+- MCP `opv_declare_key`, `opv_declare_environment`, `opv_declare_target`, `opv_ready`, `opv_configuration`, `opv_deployment_plan`, `opv_changed`, `opv_access`, `opv_delivery_preview`, `opv_structure_plan`, `opv_structure_apply`, `opv_generate` and `opv_sync`, with no aliases.
+
+### Deferred
+
+- `opv propose tidy`, purpose tokens, Docker Swarm, GCP Secret Manager and VMs.
+
 ## [0.11.0] - 2026-10-17
 
 1Password stays the single source of truth for config and secrets: `opv sync` runs from CI and puts each kind into the platform's own channel, and nothing in production needs 1Password or opv at runtime (#136; design: `docs/design/delivery-transports.md`).

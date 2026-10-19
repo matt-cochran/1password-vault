@@ -1,0 +1,110 @@
+# this job signs in to Fly with target portfolio's deploy credentials, which are not recorded yet; a person adds them first with:
+#   opv target credentials prod --target portfolio --create
+# secrets.OP_SERVICE_ACCOUNT_TOKEN is created once, by a person in their own terminal, with:
+#   opv access prod --target portfolio --create --github <owner/repo>
+name: sync-prod-portfolio
+
+on:
+  pull_request:
+  pull_request_review:
+    types: [submitted]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync-prod-portfolio:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+      OP_CACHE: "false"
+      OPV_VERSION: v0.12.0   # pin the release you tested; bump it deliberately
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the 1Password CLI
+        uses: 1password/install-cli-action@v1
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@1.6
+      - name: Install opv
+        run: |
+          base=https://github.com/matt-cochran/1password-vault/releases/download/$OPV_VERSION
+          curl -fsSLO "$base/opv-x86_64-unknown-linux-musl"
+          curl -fsSLO "$base/SHA256SUMS"
+          sha256sum -c SHA256SUMS --ignore-missing
+          install -m 0755 opv-x86_64-unknown-linux-musl /usr/local/bin/opv
+      - name: Sync secrets to portfolio
+        run: opv sync prod --target portfolio --receipt portfolio.receipt.json
+      - uses: actions/upload-artifact@v4
+        with: { name: portfolio-delivery, path: portfolio.receipt.json }
+      - name: Verify portfolio's delivery
+        run: opv delivery verify prod --target portfolio --receipt portfolio.receipt.json
+  checks-prod-portfolio:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+      OP_CACHE: "false"
+      OPV_VERSION: v0.12.0   # pin the release you tested; bump it deliberately
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the default branch, for needs and relaxations
+      - name: Install the 1Password CLI
+        uses: 1password/install-cli-action@v1
+      - name: Install opv
+        run: |
+          base=https://github.com/matt-cochran/1password-vault/releases/download/$OPV_VERSION
+          curl -fsSLO "$base/opv-x86_64-unknown-linux-musl"
+          curl -fsSLO "$base/SHA256SUMS"
+          sha256sum -c SHA256SUMS --ignore-missing
+          install -m 0755 opv-x86_64-unknown-linux-musl /usr/local/bin/opv
+      - name: Fail on a name the code reads but the contract does not declare
+        run: opv needs --gate
+      - name: Fail on a stale committed contract
+        run: opv contract --check contract.json
+      - name: Fail unless prod passes the promotion gate
+        run: opv ready prod --gate
+  relaxations:
+    name: opv/relaxations
+    if: github.event_name == 'pull_request' || github.event_name == 'pull_request_review'
+    runs-on: ubuntu-latest
+    permissions: {contents: read, pull-requests: read}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      OP_CACHE: "false"
+      OPV_VERSION: v0.12.0   # pin the release you tested; bump it deliberately
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the default branch, for needs and relaxations
+      - name: Install opv
+        run: |
+          base=https://github.com/matt-cochran/1password-vault/releases/download/$OPV_VERSION
+          curl -fsSLO "$base/opv-x86_64-unknown-linux-musl"
+          curl -fsSLO "$base/SHA256SUMS"
+          sha256sum -c SHA256SUMS --ignore-missing
+          install -m 0755 opv-x86_64-unknown-linux-musl /usr/local/bin/opv
+      - name: Fail on an unapproved contract relaxation
+        env:
+          BASE: origin/${{ github.event.repository.default_branch }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          relaxations=$(opv contract --relaxations --base "$BASE" --json)
+          count=$(jq 'if type == "array" then length else (.relaxations // [] | length) end' <<<"$relaxations")
+          if [ "$count" -eq 0 ]; then
+            echo "no contract relaxations"
+            exit 0
+          fi
+          api="https://api.github.com/repos/$REPO/pulls/$PR"
+          auth="Authorization: Bearer $GH_TOKEN"
+          head=$(curl -fsSL -H "$auth" "$api" | jq -r .head.sha)
+          approved=$(curl -fsSL -H "$auth" "$api/reviews" | jq --arg head "$head" '[.[] | select(.state == "APPROVED" and .commit_id == $head)] | length')
+          if [ "$approved" -eq 0 ]; then
+            echo "contract relaxations need an approving review at $head:"
+            jq . <<<"$relaxations"
+            exit 1
+          fi
+          echo "contract relaxations approved at $head"

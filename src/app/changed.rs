@@ -185,7 +185,7 @@ fn placements<'a>(
             out.push(Placement {
                 product: product.clone(),
                 target,
-                state_vault: &t.state_vault_id,
+                state_vault: fleet.state_vault(env_name, t)?,
                 delivery_item: t.delivery_items.get(product).map(String::as_str),
             });
         }
@@ -196,9 +196,8 @@ fn placements<'a>(
 /// Every vault holding a source item the environment watches, once each (FM-12), plus the
 /// manifest vault when the configuration itself lives in 1Password.
 fn source_vaults(fleet: &Fleet, env_name: &str) -> Result<Vec<String>, Error> {
-    let e = fleet.environment(env_name)?;
     let mut vaults = BTreeSet::new();
-    for b in e.boundaries.values() {
+    for (_, b) in fleet.bound_boundaries(env_name)? {
         vaults.insert(b.vault_id.clone());
     }
     if let crate::cause::ConfigSource::Manifest { vault, .. } = &fleet.read_from.0 {

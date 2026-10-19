@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use super::situation::{OpFlavour, Situation};
 use super::*;
-use crate::host::{Platform, Shell};
+use crate::host::{AgentMarker, Platform, Shell};
 
 /// One public code: every exit code, retry class and `human_required` its causes have.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,10 +86,18 @@ pub fn meaning(code: &str) -> &'static str {
         "config_invalid" => {
             "secrets.toml, the manifest or a change opv proposed breaks a field rule"
         }
-        "boundary_missing" => {
-            "a product has a key desired in an environment whose boundary (vault and item) is not recorded"
+        "contract_stale" => {
+            "a committed contract copy differs from the contract this configuration produces; regenerate it with opv contract"
         }
-        "state_vault_missing" => "a target has no state vault recorded for its delivery evidence",
+        "value_in_text_field" => {
+            "free text in an intent document looks like a secret value and is refused before anything is written"
+        }
+        "boundary_missing" => {
+            "a product has a key desired in an environment whose boundary (vault and item) is not declared or not bound yet; a person runs opv apply"
+        }
+        "state_vault_missing" => {
+            "a target's state vault for its delivery evidence is not bound yet; a person runs opv apply"
+        }
         "state_vault_wider_than_values" => {
             "a state vault shared by targets could be readable more widely than the values its evidence describes; a person gives one target its own"
         }
@@ -98,6 +106,9 @@ pub fn meaning(code: &str) -> &'static str {
         }
         "copies_differ" => {
             "a committed secrets.toml and the manifest differ; a person picks which is right"
+        }
+        "bindings_unapplied" => {
+            "the committed secrets.bindings.toml is not the one the last opv apply wrote; a person runs opv apply"
         }
         "manifest_not_found" => {
             "no 1Password manifest has the project's title (OPV_PROJECT or .opv)"
@@ -110,6 +121,12 @@ pub fn meaning(code: &str) -> &'static str {
         }
         "inventory_incomplete" => {
             "one or more 1Password accounts could not be listed, so the project inventory is incomplete; a project missing from it is not evidence that it does not exist"
+        }
+        "needs_undeclared" => {
+            "the code reads names the contract declares nowhere and the default branch does not declare either"
+        }
+        "retire_still_read" => {
+            "the deployed code still reads a key a person asked to retire, or no receipt records the deployed revision"
         }
         "unknown_env" => "the environment is not declared",
         "unknown_target" => "the target is not declared for the environment",
@@ -203,20 +220,25 @@ pub fn meaning(code: &str) -> &'static str {
             "a tool failed for a reason opv does not recognise; what opv did establish is named"
         }
         "terminal_required" => "the command needs the person's own interactive terminal",
+        "person_only" => {
+            "a person-only command was called from an assistant; it runs only in a person's terminal"
+        }
         "confirm_required" => "the environment sets confirm_env; a person passes --confirm <env>",
         "confirm_mismatch" => "--confirm names another environment",
         "findings" => {
             "keys are missing or failing a rule (values are filled in 1Password by a person)"
+        }
+        "gate_failed" => {
+            "ready --gate found present keys that are not in value state set or whose delivery evidence is older than the item; a person fills or re-delivers them"
+        }
+        "import_tier_refused" => {
+            "opv_import_local was pointed at an environment whose tier is not local; the person runs opv import instead"
         }
         "keys_blocking" => {
             "a write refused: keys are missing or failing a rule; nothing was written"
         }
         "file_too_open" => "a local file opv reads is readable by others",
         "input_invalid" => "an input file (a dotenv file, a setup recipe, a receipt) breaks a rule",
-        "approval_required" => {
-            "the plan has no unused, unexpired approval; a person runs opv approve <plan_id> in their own terminal"
-        }
-        "approval_used" => "the approval was already used; read what remains, never re-run with it",
         "stale_plan" => {
             "the plan changed since it was reviewed (the item, the target or the configuration); nothing was changed"
         }
@@ -433,7 +455,7 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
             }),
         },
         ConfigSourceMismatch {
-            command: CommandId("bootstrap".into()),
+            command: CommandId("apply".into()),
             manifest: "man-shop".into(),
         },
         ConfigUnreadable {
@@ -450,6 +472,13 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
             rule: FieldRule::Unknown {
                 suggestion: Some("confirm_env".into()),
             },
+        },
+        ContractStale {
+            path: Some(PathBuf::from("contract.json")),
+        },
+        ValueInTextField {
+            field: DottedPath(vec!["guidance".into()]),
+            detector: "known_prefix",
         },
         BoundaryMissing {
             env: EnvName::new("env-prod"),
@@ -479,6 +508,9 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
             file: PathBuf::from("cfg/copy.toml"),
             manifest: "man-shop".into(),
         },
+        BindingsUnapplied {
+            environments: vec![EnvName::new("env-prod")],
+        },
         ManifestNotFound {
             project: "proj-shop".into(),
             account: Some(AccountId::new("ACC-6AIN")),
@@ -493,6 +525,15 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
         },
         InventoryIncomplete {
             unlisted: vec![AccountId::new("ACC-ONE"), AccountId::new("ACC-TWO")],
+        },
+        NeedsUndeclared {
+            names: vec!["API_KEY".into(), "DB_URL".into()],
+            product: Some("web".into()),
+        },
+        RetireStillRead {
+            key: KeyName::new("OPENAI_API_KEY"),
+            env: EnvName::new("env-prod"),
+            files: vec!["src/lib.rs:12".into()],
         },
         NotDeclared {
             kind: NameKind::Environment,
@@ -552,7 +593,7 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
             seen: person(),
         },
         NeedsOwnSession {
-            command: CommandId("approve".into()),
+            command: CommandId("apply".into()),
             identity: Principal::ShellToken {
                 var: VarName::new("OP_SERVICE_ACCOUNT_TOKEN"),
             },
@@ -652,8 +693,7 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
         },
         Partial {
             done: vec!["vault shop-prod".into()],
-            approval_used: Some(PlanId::new("sp-used")),
-            approval_scope: Some(sync_scope()),
+            scope: Some(sync_scope()),
             then: Box::new(BudgetSpent {
                 budget_seconds: 77,
                 writes_started: true,
@@ -679,7 +719,7 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
             item: ItemId::new("itm-1"),
             fields: vec![FieldName::new("fld-api")],
             by: Cmd {
-                command: vec!["tidy".into()],
+                command: vec!["config".into(), "export".into()],
                 args: vec!["prod".into()],
             },
         },
@@ -713,6 +753,10 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
         NeedsTerminal {
             why: NoTerminal::Ci,
         },
+        PersonOnly {
+            command: check_cmd(),
+            marker: AgentMarker::ClaudeCode,
+        },
         NeedsConfirm {
             env: EnvName::new("env-prod"),
         },
@@ -742,15 +786,6 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
             rule: FieldRule::Pattern {
                 id: PatternId::KeyName,
             },
-        },
-        ApprovalMissing {
-            plan: PlanId::new("sp-9f3"),
-            scope: sync_scope(),
-        },
-        ApprovalUsed {
-            plan: PlanId::new("sp-9f3"),
-            scope: sync_scope(),
-            partial: true,
         },
         PlanChanged {
             old: PlanId::new("sp-old"),
@@ -901,6 +936,19 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
                 matches: 0,
                 candidates: Vec::new(),
             }),
+        },
+        GateFailed {
+            env: EnvName::new("env-prod"),
+            keys: vec![(
+                ProductName::new("prod-api"),
+                KeyName::new("OPENAI_API_KEY"),
+                "absent",
+            )],
+        },
+        ImportTierRefused {
+            env: EnvName::new("env-prod"),
+            tier: "shared",
+            file: PathBuf::from("local.env"),
         },
         Bug { site: "site-xyz" },
     ]

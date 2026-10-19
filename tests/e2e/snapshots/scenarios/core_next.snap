@@ -1,0 +1,25 @@
+# core_next: opv next
+
+## text exit: 0
+## text stdout
+next: opv set web/API_KEY --env dev
+then:
+  opv set web/SESSION_SECRET --env dev
+  opv set web/LOG_LEVEL --env dev
+  opv sync prod  (7 keys: web/API_KEY, web/LOG_LEVEL, web/MIGRATION_TOKEN, web/OTEL_RESOURCE, web/SESSION_SECRET, web/TLS_CERTIFICATE, web/TLS_PRIVATE_KEY)
+findings:
+  single_writer: vault vE2ESHAREDPROD0000000000001 (environment prod) has only one writer; a deployed tier needs a second writer to fix a value when the first is unavailable
+  single_writer: vault vE2EWEBPROD000000000000001 (environment prod) has only one writer; a deployed tier needs a second writer to fix a value when the first is unavailable
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+
+## json exit: 0
+## json stdout
+{"schema_version":3,"ok":true,"queue":[{"kind":"enter_value","actor":"person","command":"opv set web/SESSION_SECRET --env dev","product":"web","key":"SESSION_SECRET","env":"dev","vault":"vE2EWEBDEV0000000000000001"},{"kind":"enter_value","actor":"person","command":"opv set web/LOG_LEVEL --env dev","product":"web","key":"LOG_LEVEL","env":"dev","vault":"vE2EWEBDEV0000000000000001"},{"kind":"run","actor":"ci","command":"opv sync prod","env":"prod","vault":"vE2EWEBPROD000000000000001","keys":["web/API_KEY","web/LOG_LEVEL","web/MIGRATION_TOKEN","web/OTEL_RESOURCE","web/SESSION_SECRET","web/TLS_CERTIFICATE","web/TLS_PRIVATE_KEY"]}],"waits_on":[],"findings":[{"code":"single_writer","env":"prod","vault":"vE2ESHAREDPROD0000000000001","message":"vault vE2ESHAREDPROD0000000000001 (environment prod) has only one writer; a deployed tier needs a second writer to fix a value when the first is unavailable"},{"code":"single_writer","env":"prod","vault":"vE2EWEBPROD000000000000001","message":"vault vE2EWEBPROD000000000000001 (environment prod) has only one writer; a deployed tier needs a second writer to fix a value when the first is unavailable"}],"next":{"kind":"enter_value","actor":"person","command":"opv set web/API_KEY --env dev"},"do":null}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+
+## mcp opv_next {}
+{"schema_version":3,"ok":true,"queue":[{"kind":"enter_value","actor":"person","command":"opv set web/SESSION_SECRET --env dev","product":"web","key":"SESSION_SECRET","env":"dev","vault":"vE2EWEBDEV0000000000000001"},{"kind":"enter_value","actor":"person","command":"opv set web/LOG_LEVEL --env dev","product":"web","key":"LOG_LEVEL","env":"dev","vault":"vE2EWEBDEV0000000000000001"},{"kind":"run","actor":"ci","command":"opv sync prod","env":"prod","vault":"vE2EWEBPROD000000000000001","keys":["web/API_KEY","web/LOG_LEVEL","web/MIGRATION_TOKEN","web/OTEL_RESOURCE","web/SESSION_SECRET","web/TLS_CERTIFICATE","web/TLS_PRIVATE_KEY"]}],"waits_on":[],"findings":[{"code":"single_writer","env":"prod","vault":"vE2ESHAREDPROD0000000000001","message":"vault vE2ESHAREDPROD0000000000001 (environment prod) has only one writer; a deployed tier needs a second writer to fix a value when the first is unavailable"},{"code":"single_writer","env":"prod","vault":"vE2EWEBPROD000000000000001","message":"vault vE2EWEBPROD000000000000001 (environment prod) has only one writer; a deployed tier needs a second writer to fix a value when the first is unavailable"}],"next":{"kind":"enter_value","actor":"person","command":"opv set web/API_KEY --env dev"},"do":null}

@@ -12,19 +12,19 @@ use std::process::Command;
 /// The fixture directory, the project and the world in one.
 const APP: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/e2e/app");
 
-/// FR-4: `config describe` resolves every environment, product, key and boundary of the
-/// project. It reads the configuration only, so no 1Password call is needed.
+/// FR-4: `contract` resolves every environment, product and key of the project. It reads
+/// the configuration only, so no 1Password call is needed.
 #[test]
-fn config_describe_loads_the_e2e_app() {
+fn contract_loads_the_e2e_app() {
     let out = Command::new(env!("CARGO_BIN_EXE_opv"))
         .arg("--config")
         .arg(Path::new(APP).join("secrets.toml"))
-        .args(["config", "describe", "--json"])
+        .args(["contract", "--json"])
         .output()
         .expect("run opv");
     assert!(
         out.status.success(),
-        "opv config describe failed: {}",
+        "opv contract failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
@@ -43,5 +43,51 @@ fn simulator_opens_the_e2e_app_world() {
         out.status.success(),
         "op whoami against the world failed: {}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The committed manifest mirror (`manifest/opv-item.md`).
+fn mirror() -> String {
+    std::fs::read_to_string(Path::new(APP).join("manifest/opv-item.md")).expect("the mirror")
+}
+
+/// The mirror is the notes of the world's manifest item `opv · e2e-app`, byte for byte.
+#[test]
+fn the_manifest_mirror_is_the_world_items_notes() {
+    let world: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(Path::new(APP).join("world.json")).expect("the world"),
+    )
+    .expect("world.json parses");
+    let notes = world["op"]["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|i| i["title"] == "opv · e2e-app")
+        .and_then(|i| i["fields"].as_array())
+        .into_iter()
+        .flatten()
+        .find(|f| f["id"] == "notesPlain")
+        .and_then(|f| f["value"].as_str())
+        .map(str::to_string);
+    assert_eq!(notes, Some(mirror()));
+}
+
+/// D-G: the mirror's contract block is `secrets.toml`, which holds no id.
+#[test]
+fn the_manifest_mirrors_contract_block_is_secrets_toml() {
+    let contract = std::fs::read_to_string(Path::new(APP).join("secrets.toml")).unwrap();
+    assert_eq!(
+        opv::adapters::onepassword_manifest::config_text(&mirror()),
+        contract
+    );
+}
+
+/// D-G: the mirror's `opv-bindings` block is `secrets.bindings.toml`.
+#[test]
+fn the_manifest_mirrors_bindings_block_is_secrets_bindings_toml() {
+    let ids = std::fs::read_to_string(Path::new(APP).join("secrets.bindings.toml")).unwrap();
+    assert_eq!(
+        opv::adapters::onepassword_manifest::bindings_text(&mirror()),
+        Some(ids)
     );
 }

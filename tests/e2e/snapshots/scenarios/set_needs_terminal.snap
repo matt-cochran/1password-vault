@@ -1,0 +1,18 @@
+# set_needs_terminal: opv set web/API_KEY --env dev
+
+## text exit: 6
+## text stdout
+
+## text stderr
+opv: this step needs a person at a terminal, and there is none
+Do: run it in your own terminal
+Next: opv set web/API_KEY --env dev
+
+## json exit: 6
+## json stdout
+{"schema_version":3,"ok":false,"exit_code":6,"next":{"kind":"apply","actor":"person","command":"opv set web/API_KEY --env dev"},"do":"run it in your own terminal","error":{"code":"terminal_required","category":"policy","message":"this step needs a person at a terminal, and there is none","subject":{"why":"no_tty"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":true,"do":"run it in your own terminal","next":{"kind":"apply","actor":"person","command":"opv set web/API_KEY --env dev"}}}
+
+## json stderr
+opv: this step needs a person at a terminal, and there is none
+Do: run it in your own terminal
+Next: opv set web/API_KEY --env dev

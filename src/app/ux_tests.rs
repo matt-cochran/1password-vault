@@ -20,7 +20,7 @@ const WEB_OLD: &str = "FLEET__WEB__OLD";
 
 /// The fixture with `confirm_env = true` on prod.
 fn guarded() -> Fleet {
-    let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+    let text = crate::config::merged_text("tests/fixtures/secrets.toml");
     config::parse(&text.replace(
         "modes.allumata.payments = \"off\"",
         "modes.allumata.payments = \"off\"\nconfirm_env = true",
@@ -32,7 +32,7 @@ fn guarded() -> Fleet {
 ///
 /// The old environment item held both products, so it stays one opt-in boundary group.
 fn two_products() -> Fleet {
-    let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+    let text = crate::config::merged_text("tests/fixtures/secrets.toml");
     let text = text
         .replace("boundaries.allumata =", "boundaries.core =")
         .replace(
@@ -158,7 +158,7 @@ fn json_doc(r: &FakeRunner) -> Value {
 
 #[test]
 fn sync_json_is_one_versioned_document() {
-    assert_eq!(json_doc(&new_secrets())["schema_version"], 2);
+    assert_eq!(json_doc(&new_secrets())["schema_version"], 3);
 }
 
 #[test]
@@ -269,8 +269,8 @@ fn unknown_environment_without_a_close_name_next_is_the_overview() {
 fn unknown_product_next_checks_the_closest_product() {
     let e = super::local::select(&two_products(), "prod", Some("wb"), true).unwrap_err();
     assert_eq!(
-        next_for(&e, &["opv", "check", "prod", "--product", "wb"]),
-        Some("opv check prod --product web".into())
+        next_for(&e, &["opv", "status", "prod", "--product", "wb"]),
+        Some("opv status prod --product web".into())
     );
 }
 
@@ -404,7 +404,7 @@ fn guarded_sync_next_step_never_adds_the_confirm_flag() {
 
 #[test]
 fn confirm_env_must_be_a_boolean() {
-    let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+    let text = crate::config::merged_text("tests/fixtures/secrets.toml");
     let bad = text.replace(
         "modes.allumata.payments = \"off\"",
         "modes.allumata.payments = \"off\"\nconfirm_env = \"yes\"",
@@ -863,35 +863,6 @@ fn status_json_rows_carry_target_name() {
 
 // ---- P1: check guidance is not a next step -------------------------------------------
 
-#[test]
-fn check_labels_guidance_as_guidance() {
-    let r = FakeRunner::new([item_without("allumata", "OPENAI_API_KEY")]);
-    let mut out = Vec::new();
-    let _ = super::local::check(&fleet(), "prod", Some("allumata"), &r, &mut out, false);
-    assert!(
-        text_of(&out).contains("\n  guidance: OpenAI platform / API keys\n"),
-        "{}",
-        text_of(&out)
-    );
-}
-
-#[test]
-fn check_findings_next_step_opens_the_first_key() {
-    let r = FakeRunner::new([item_without("allumata", "OPENAI_API_KEY")]);
-    let res = super::local::check(
-        &fleet(),
-        "prod",
-        Some("allumata"),
-        &r,
-        &mut Vec::new(),
-        false,
-    );
-    assert_eq!(
-        crate::app::testutil::next_of_error(&res.unwrap_err()),
-        "opv open allumata/OPENAI_API_KEY --env prod"
-    );
-}
-
 // ---- A7 / FR-41: plan ids and --expect-plan (Fly) ---------------------------------------
 
 /// The plan id `opv plan prod --json` reports for the item and an empty Fly app.
@@ -1183,15 +1154,6 @@ fn sync_with_an_undeclared_product_suggests_its_plan() {
         ),
         Some("opv plan prod --product allumata".into())
     );
-}
-
-/// M4: `check` counts its findings once, on the error line (`opv: 1 finding`).
-#[test]
-fn check_with_findings_does_not_count_them_on_stdout() {
-    let r = FakeRunner::new([item_without("allumata", "OPENAI_API_KEY")]);
-    let mut out = Vec::new();
-    let _ = super::local::check(&fleet(), "prod", Some("allumata"), &r, &mut out, false);
-    assert!(!text_of(&out).contains("finding"), "{}", text_of(&out));
 }
 
 /// The Next a cataloged error renders for the command line `line` (a unit test has no CLI
