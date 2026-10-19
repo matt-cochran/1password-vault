@@ -16,7 +16,7 @@ name: Release
       dry_run:
         description: Build and upload artifacts without publishing a release
         type: boolean
-        default: true
+        default: 'true'
 permissions:
   contents: read
   actions: read
@@ -29,7 +29,7 @@ jobs:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
         fetch-depth: 0
-        persist-credentials: false
+        persist-credentials: 'false'
     - name: Compare tag and package version
       if: startsWith(github.ref, 'refs/tags/v')
       shell: bash
@@ -49,7 +49,7 @@ jobs:
     runs-on: ${{ matrix.os == 'ubuntu-latest' && vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404'
       || matrix.os }}
     strategy:
-      fail-fast: false
+      fail-fast: 'false'
       matrix:
         include:
         - target: x86_64-unknown-linux-musl
@@ -126,7 +126,7 @@ jobs:
         node-version: '24'
     - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
       with:
-        merge-multiple: true
+        merge-multiple: 'true'
         path: dist
     - name: Create alias and checksums
       shell: bash
@@ -174,7 +174,7 @@ jobs:
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
-        persist-credentials: false
+        persist-credentials: 'false'
     - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
       with:
         node-version: '24'
@@ -228,8 +228,18 @@ jobs:
       run: npm install -g npm@^11.5.1
     - name: Publish npm packages
       shell: bash
-      run: "set -euo pipefail\nfor tarball in candidate/npm/*.tgz; do\n  npm publish \"$tarball\" --provenance --access\
-        \ public\ndone\n"
+      run: "set -euo pipefail\nnode --input-type=module <<'NODE'\nimport {execFileSync} from 'node:child_process';\n\
+        import {createHash} from 'node:crypto';\nimport {readFileSync,readdirSync} from 'node:fs';\nfor (const file\
+        \ of readdirSync('candidate/npm').filter(f=>f.endsWith('.tgz')).sort()) {\n  const path='./candidate/npm/'+file;\n\
+        \  const {name,version}=JSON.parse(execFileSync('tar',['-xOf',path,'package/package.json'],{encoding:'utf8'}));\n\
+        \  const expected='sha512-'+createHash('sha512').update(readFileSync(path)).digest('base64');\n  let existing;\n\
+        \  try {\n    existing=JSON.parse(execFileSync('npm',['view',name+'@'+version,'dist.integrity','--json'],{encoding:'utf8',stdio:['ignore','pipe','pipe']}));\n\
+        \  } catch(error) {\n    let response;\n    try { response=JSON.parse(String(error.stdout)); } catch { throw\
+        \ new Error('Cannot verify existing npm release '+name+'@'+version); }\n    if(response.error?.code!=='E404')\
+        \ throw new Error('npm lookup failed; refusing a blind publication');\n  }\n  if(existing!==undefined) {\n\
+        \    if(existing!==expected) throw new Error('Published npm bytes differ for '+name+'@'+version);\n    console.log('Already\
+        \ published identical retained bytes: '+name+'@'+version);\n    continue;\n  }\n  execFileSync('npm',['publish',path,'--provenance','--access','public'],{stdio:'inherit'});\n\
+        }\nNODE\n"
   release-checks:
     if: github.ref == 'refs/heads/staging'
     uses: ./.github/workflows/ci.yml
@@ -245,7 +255,7 @@ jobs:
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
-        persist-credentials: false
+        persist-credentials: 'false'
     - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
       with:
         node-version: '24'
