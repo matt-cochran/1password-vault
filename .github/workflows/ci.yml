@@ -1,14 +1,13 @@
-# Build on Blacksmith once for staging; verify retained results on production promotion.
 name: CI
-on:
-  pull_request:
+'on':
+  pull_request: null
   push:
-    branches: [dev, staging, main]
-
-  workflow_dispatch:
-
-  workflow_call:
-
+    branches:
+    - dev
+    - staging
+    - main
+  workflow_dispatch: null
+  workflow_call: null
 permissions:
   contents: read
   actions: read
@@ -24,17 +23,17 @@ jobs:
       build-required: ${{ steps.resolve.outputs.build-required }}
       run-id: ${{ steps.resolve.outputs.run-id }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - id: resolve
-        uses: ./.github/actions/retained-build
-        with:
-          mode: resolve
-          runner-mode: ${{ vars.CI_RUNNER_MODE || 'github' }}
-          runner-label: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'github' }}
-          workflow: ci.yml
-          token: ${{ github.token }}
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - id: resolve
+      uses: ./.github/actions/retained-build
+      with:
+        mode: resolve
+        runner-mode: ${{ vars.CI_RUNNER_MODE || 'github' }}
+        runner-label: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'github' }}
+        workflow: ci.yml
+        token: ${{ github.token }}
   checks:
     needs: resolve
     if: needs.resolve.outputs.build-required == 'true'
@@ -42,36 +41,31 @@ jobs:
     secrets: inherit
   build-gate:
     name: Build gate
-    needs: [resolve, checks]
+    needs:
+    - resolve
+    - checks
     if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true) }}
     runs-on: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     steps:
-      - name: Require full checks or verified retained staging results
-        env:
-          RESOLVE_RESULT: ${{ needs.resolve.result }}
-          BUILD_REQUIRED: ${{ needs.resolve.outputs.build-required }}
-          CHECKS_RESULT: ${{ needs.checks.result }}
-          SOURCE_RUN: ${{ needs.resolve.outputs.run-id }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$RESOLVE_RESULT" = success
-          if [ "$BUILD_REQUIRED" = true ]; then
-            test "$CHECKS_RESULT" = success
-          else
-            test "$BUILD_REQUIRED" = false
-            test -n "$SOURCE_RUN"
-            test "$CHECKS_RESULT" = skipped
-          fi
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        if: needs.resolve.outputs.build-required == 'true'
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/retained-build
-        if: needs.resolve.outputs.build-required == 'true'
-        with:
-          mode: record
-          runner-mode: ${{ vars.CI_RUNNER_MODE || 'github' }}
-          runner-label: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'github' }}
-          workflow: ci.yml
-          token: ${{ github.token }}
+    - name: Require full checks or verified retained staging results
+      env:
+        RESOLVE_RESULT: ${{ needs.resolve.result }}
+        BUILD_REQUIRED: ${{ needs.resolve.outputs.build-required }}
+        CHECKS_RESULT: ${{ needs.checks.result }}
+        SOURCE_RUN: ${{ needs.resolve.outputs.run-id }}
+      shell: bash
+      run: "set -euo pipefail\ntest \"$RESOLVE_RESULT\" = success\nif [ \"$BUILD_REQUIRED\" = true ]; then\n  test\
+        \ \"$CHECKS_RESULT\" = success\nelse\n  test \"$BUILD_REQUIRED\" = false\n  test -n \"$SOURCE_RUN\"\n  test\
+        \ \"$CHECKS_RESULT\" = skipped\nfi\n"
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      if: needs.resolve.outputs.build-required == 'true'
+      with:
+        persist-credentials: false
+    - uses: ./.github/actions/retained-build
+      if: needs.resolve.outputs.build-required == 'true'
+      with:
+        mode: record
+        runner-mode: ${{ vars.CI_RUNNER_MODE || 'github' }}
+        runner-label: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'github' }}
+        workflow: ci.yml
+        token: ${{ github.token }}
