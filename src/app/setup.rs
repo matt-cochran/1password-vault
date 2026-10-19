@@ -623,6 +623,7 @@ fn config_compatible(path: &Path, expected: &str, recipe_path: &Path) -> Result<
             },
             reason: NotEditable::Generated {
                 generator: Some(recipe_path.to_path_buf()),
+                diff: None,
             },
         }
         .into());

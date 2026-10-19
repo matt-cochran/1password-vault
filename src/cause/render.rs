@@ -510,6 +510,8 @@ fn takes_project(command: &[String]) -> bool {
             | ["explain"]
             | ["propose", "setup"]
             | ["propose", "target"]
+            | ["propose", "structure"]
+            | ["apply"]
             | ["config", "import"]
     )
 }
@@ -1342,7 +1344,7 @@ impl Cause {
                 list_of(shared_with)
             ),
             ConfigNotEditable { source, reason } => match reason {
-                NotEditable::Generated { generator } => match generator {
+                NotEditable::Generated { generator, .. } => match generator {
                     Some(g) => format!(
                         "opv does not edit {}: it is generated from {}",
                         source_words(source),
@@ -2552,6 +2554,12 @@ impl Cause {
             }
             ConfigNotEditable { source, reason } => {
                 let next = match reason {
+                    // FR-52 (#184): a refused proposal's diff goes into the generator; once
+                    // it emits the configuration, the structure is proposed and applied, and
+                    // apply returns the ids (`generator_ids`) for the generator to record.
+                    NotEditable::Generated { diff: Some(_), .. } => {
+                        Next::Run(cmd(&["propose", "structure"], &[]))
+                    }
                     // The fix is in the generator's input, outside opv; its configuration is
                     // generated again from there (retry never: no opv command makes progress).
                     NotEditable::Generated { .. } => Next::None(NoNext::NothingToRun),
@@ -2559,13 +2567,20 @@ impl Cause {
                 };
                 plan(
                     inspect(match reason {
-                    NotEditable::Generated { generator } => match generator {
-                        Some(g) => format!(
-                            "change {} instead, and generate the configuration again",
-                            g.display()
-                        ),
-                        None => "change its generator's input instead, and generate the configuration again".to_string(),
-                    },
+                    NotEditable::Generated { generator, diff } => {
+                        let input = generator.as_ref().map_or_else(
+                            || "its generator's input".to_string(),
+                            |g| g.display().to_string(),
+                        );
+                        match diff {
+                            Some(_) => format!(
+                                "make the proposal's diff in {input} instead and generate the configuration again; then propose its structure, and opv apply returns the ids for the generator to record"
+                            ),
+                            None => format!(
+                                "change {input} instead, and generate the configuration again"
+                            ),
+                        }
+                    }
                     NotEditable::UnsupportedLayout { section } => {
                         format!(
                             "edit section [{section}] of {} by hand",

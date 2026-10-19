@@ -743,6 +743,6 @@ fn a_partial_apply_names_what_it_created() {
 #[test]
 fn a_checkout_without_a_file_never_steps_to_bootstrap() {
     let dir = tempfile::tempdir().unwrap();
-    let e = scope(dir.path(), &FakeOp::default()).unwrap_err();
+    let e = scope(dir.path(), &FakeOp::default(), None).unwrap_err();
     assert!(!e.next_text().unwrap_or_default().contains("bootstrap"));
 }

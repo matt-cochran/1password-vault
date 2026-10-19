@@ -3647,7 +3647,10 @@ fn a22_a_secret_never_stored_steps_to_the_vendor_refind() {
 fn a22_a_generated_config_without_a_known_generator_names_none() {
     let c = Cause::ConfigNotEditable {
         source: file_source(),
-        reason: NotEditable::Generated { generator: None },
+        reason: NotEditable::Generated {
+            generator: None,
+            diff: None,
+        },
     };
     assert!(c.message().ends_with("it is generated"));
 }
@@ -3968,7 +3971,10 @@ fn a_remote_disconnect_hands_back_the_run_with_its_confirmation() {
 fn a_generated_configuration_names_no_opv_command_as_next() {
     let c = Cause::ConfigNotEditable {
         source: file_source(),
-        reason: NotEditable::Generated { generator: None },
+        reason: NotEditable::Generated {
+            generator: None,
+            diff: None,
+        },
     };
     let inv = Invocation {
         command: vec!["propose".into(), "env".into()],
@@ -3976,6 +3982,71 @@ fn a_generated_configuration_names_no_opv_command_as_next() {
         ..inv()
     };
     assert_eq!(c.step(&inv).1, Next::None(NoNext::NothingToRun));
+}
+
+/// #184: a refused `propose … --write` on a generated configuration, with its diff.
+fn generated_proposal_refused() -> Cause {
+    Cause::ConfigNotEditable {
+        source: file_source(),
+        reason: NotEditable::Generated {
+            generator: None,
+            diff: Some("+[environments.staging]\n".into()),
+        },
+    }
+}
+
+/// #184: once the generator emits the proposed change, the structure is proposed, with
+/// the invocation's `--config`.
+#[test]
+fn a_refused_generated_proposal_steps_to_propose_structure() {
+    assert_eq!(
+        next_in(
+            &generated_proposal_refused(),
+            &cli(&[
+                "opv",
+                "propose",
+                "env",
+                "staging",
+                "--config",
+                "cfg/secrets.toml",
+                "--write"
+            ])
+        ),
+        "opv propose structure --config cfg/secrets.toml"
+    );
+}
+
+/// #184 with #183: a `--project` given to `propose target` rides along to the structure.
+#[test]
+fn a_refused_generated_proposal_keeps_the_project_flag() {
+    assert_eq!(
+        next_in(
+            &generated_proposal_refused(),
+            &cli(&[
+                "opv",
+                "propose",
+                "target",
+                "prod",
+                "fleet",
+                "--fly-app",
+                "a",
+                "--project",
+                "acme",
+                "--write"
+            ])
+        ),
+        "opv propose structure --project acme"
+    );
+}
+
+/// #184: the refusal's document carries the diff to make in the generator.
+#[test]
+fn a_refused_generated_proposal_carries_its_diff() {
+    let doc = crate::error::document(&generated_proposal_refused().into(), &inv(), false);
+    assert_eq!(
+        doc["subject"]["reason"]["diff"],
+        serde_json::json!("+[environments.staging]\n")
+    );
 }
 
 /// D (snapshot review): an invalid proposal (retry never) names no command, never the
