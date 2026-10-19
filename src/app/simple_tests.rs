@@ -599,7 +599,7 @@ fn sync_prune_immutable_takes_the_product_qualified_name() {
 #[test]
 fn config_export_is_a_key_map_per_product() {
     let r = FakeRunner::new([prod_item()]);
-    let (res, out) = out_of(|o| config_export::run(&simple(), "prod", &r, o));
+    let (res, out) = out_of(|o| config_export::run(&simple(), "prod", None, &r, o));
     res.unwrap();
     assert_eq!(
         json_doc(&out),
@@ -610,7 +610,7 @@ fn config_export_is_a_key_map_per_product() {
 #[test]
 fn config_export_never_contacts_fly() {
     let r = FakeRunner::new([prod_item()]);
-    out_of(|o| config_export::run(&simple(), "prod", &r, o))
+    out_of(|o| config_export::run(&simple(), "prod", None, &r, o))
         .0
         .unwrap();
     assert_eq!(

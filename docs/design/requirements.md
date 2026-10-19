@@ -729,7 +729,7 @@ opv check <environment> [--product <product>] [--json]
 - Reads each boundary item it needs once, by IDs (FR-13, FR-57), and reports each selected key as saved, missing, failing a rule or skipped, by name only (SR-1). Exit 8 when any key blocks (FR-10).
 - Never lists, stages or deploys on a target, even when the environment has one; `--json` carries `target_checked: false`.
 - With `--product`, fields in other products' sections are skipped before they are validated, so they can neither block nor fail the check.
-- `--product` names one product. It may be omitted when exactly one product has keys desired in the environment, and that product is used; with several, a missing `--product` is a usage error listing them (exit 2). The same rule applies to `run`, `config export` and `open`.
+- `--product` names one product. It may be omitted when exactly one product has keys desired in the environment, and that product is used; with several, a missing `--product` is a usage error listing them (exit 2). The same rule applies to `run` and `open`. `config export <env>` without `--product` exports every product's config values, `{product: {KEY: value}}` (source-only products and products with no config value left out); with it, only that product, and only its keys block (#188).
 
 ## FR-35 — Managed-Key Isolation in `run`
 
