@@ -7,10 +7,12 @@
 //
 //   1. installed-by records this package's version and the file exists: run it. This is
 //      the common case and costs one stat and one small read.
-//   2. the file is missing, or installed-by says npm placed it for another version and its
+//   2. this package is project-local (not the global install): run the platform package's
+//      own binary and never create or replace the shared copy.
+//   3. the file is missing, or installed-by says npm placed it for another version and its
 //      sha256 still matches that record: copy the platform binary there (install.js's
 //      placeCanonical), say so in one stderr line, and run it.
-//   3. another method placed it (installed-by absent or not npm, or the file no longer
+//   4. another method placed it (installed-by absent or not npm, or the file no longer
 //      matches npm's record): never overwrite it. Run it when it reports this version;
 //      otherwise run the platform package's own binary and print one hint.
 //
@@ -103,6 +105,10 @@ function choose() {
   const exists = fileExists(target);
   const record = install.readRecord();
   if (exists && record && record.version === version) return target;
+
+  // Only a global npm install owns the shared copy. A project-local install runs the
+  // platform package's own binary and never creates or replaces ~/.local/bin/opv.
+  if (!install.isGlobalInstall()) return bundledBinary();
 
   const npmOwned =
     exists &&
