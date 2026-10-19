@@ -13,13 +13,19 @@ use crate::runner::fake::FakeRunner;
 /// `json_target` maps an uncomparable secret to `unknown` (the direct acceptance edge).
 #[test]
 fn json_target_reports_an_uncomparable_secret_as_unknown() {
-    assert_eq!(json_target(Kind::Secret, TargetState::Unknown), Some("unknown"));
+    assert_eq!(
+        json_target(Kind::Secret, TargetState::Unknown),
+        Some("unknown")
+    );
 }
 
 /// `json_target` maps a secret the target proved identical to `present`.
 #[test]
 fn json_target_reports_a_proven_secret_as_present() {
-    assert_eq!(json_target(Kind::Secret, TargetState::Present), Some("present"));
+    assert_eq!(
+        json_target(Kind::Secret, TargetState::Present),
+        Some("present")
+    );
 }
 
 /// The observable outcome: `plan --json` reports a Fly secret whose digest opv cannot

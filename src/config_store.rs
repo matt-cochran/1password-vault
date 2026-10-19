@@ -830,7 +830,10 @@ pub fn record_account(start: &Path, account: &str) -> Result<RecordOutcome, Erro
     }
     text.push_str(&format!("account = \"{account}\"\n"));
     write_no_follow(&path, &text).map_err(|e| refuse(LocalOp::Write, e.kind().into()))?;
-    Ok(RecordOutcome { path, changed: true })
+    Ok(RecordOutcome {
+        path,
+        changed: true,
+    })
 }
 
 /// Write `text` to `path`, refusing (rather than following) a symlink put there since the

@@ -63,10 +63,10 @@ pub mod personal;
 #[cfg(test)]
 mod pinned_tests;
 #[cfg(test)]
-mod plan_tests;
-#[cfg(test)]
 #[path = "placement_tests.rs"]
 mod placement_tests;
+#[cfg(test)]
+mod plan_tests;
 pub(crate) mod preflight;
 #[cfg(test)]
 #[path = "product_flag_tests.rs"]
