@@ -128,12 +128,18 @@ test('install names the next step when it leaves a foreign file alone', unix, ()
   const h = setup();
   fs.writeFileSync(h.target, 'not opv\n');
   fs.chmodSync(h.target, 0o755);
-  assert.match(install(h).stderr, /npm rebuild -g @matthew-cochran\/opv/);
+  assert.match(
+    install(h).stderr,
+    /node "\$\(npm root -g\)\/@matthew-cochran\/opv\/install\.js"/,
+  );
 });
 
 test('install under sudo is refused for the invoking user', () => {
   const { sudoProblem } = require('./install.js');
-  assert.match(sudoProblem({ SUDO_USER: 'mc' }, 0), /without sudo: npm rebuild -g/);
+  assert.match(
+    sudoProblem({ SUDO_USER: 'mc' }, 0),
+    /without sudo: node "\$\(npm root -g\)\/@matthew-cochran\/opv\/install\.js"/,
+  );
 });
 
 test('install as root without sudo is allowed', () => {
