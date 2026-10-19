@@ -1719,16 +1719,44 @@ fn backoff_scale() -> f64 {
 /// never enable it) read `OPV_TEST_CALL_LIMIT` (seconds) and stop a call at the lower of it
 /// and `limit`, so the end-to-end matrix sees a hanging tool end as opv's own timeout, the
 /// runner fact a real hang produces, without waiting out the real limits.
-fn test_call_limit(limit: Duration) -> Duration {
+/// `OPV_TEST_CALL_LIMIT_CALL` (`<program> <word>…`) narrows that to the hanging call
+/// ([`in_test_limit_scope`]): every other call keeps its real limit, so a slow machine cannot
+/// time it out.
+fn test_call_limit(limit: Duration, call: &Call) -> Duration {
     #[cfg(feature = "fake")]
     if let Some(s) = std::env::var("OPV_TEST_CALL_LIMIT")
         .ok()
         .and_then(|v| v.parse::<f64>().ok())
         .filter(|s| s.is_finite() && *s > 0.0)
+        && std::env::var("OPV_TEST_CALL_LIMIT_CALL")
+            .ok()
+            .is_none_or(|scope| in_test_limit_scope(&scope, call.program, call.args))
     {
         return limit.min(Duration::from_secs_f64(s));
     }
+    #[cfg(not(feature = "fake"))]
+    let _ = call;
     limit
+}
+
+/// Whether a call is in a `<program> <word>…` scope: the same program (`fly` is `flyctl`) and
+/// the words in its argv in order, flags and their values anywhere between them.
+#[cfg(any(feature = "fake", test))]
+fn in_test_limit_scope(scope: &str, program: &str, args: &[&str]) -> bool {
+    let name = |p: &str| {
+        let base = std::path::Path::new(p)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(p)
+            .to_string();
+        if base == "fly" { "flyctl".into() } else { base }
+    };
+    let mut words = scope.split_whitespace();
+    if words.next().is_none_or(|p| name(p) != name(program)) {
+        return false;
+    }
+    let mut args = args.iter();
+    words.all(|w| args.any(|a| *a == w))
 }
 
 impl Engine for ProcessRunner {
@@ -1754,7 +1782,7 @@ impl Engine for ProcessRunner {
         self.verbose
     }
     fn attempt(&self, call: &Call, limit: Duration) -> io::Result<(Attempt, Stderr)> {
-        self.spawn_attempt(call, test_call_limit(limit))
+        self.spawn_attempt(call, test_call_limit(limit, call))
     }
     fn wrote(&self, program: &str) {
         if target_write(program) {
@@ -2546,6 +2574,38 @@ mod observed_tests;
 mod tests {
     use super::fake::FakeRunner;
     use super::*;
+
+    // ------------------------------------------------------------ the matrix's call limit
+
+    #[test]
+    fn a_call_with_the_scope_words_in_order_is_in_the_test_limit_scope() {
+        let args = ["--account", "A", "item", "get", "i1", "--format", "json"];
+        assert!(in_test_limit_scope("op item get i1", "op", &args));
+    }
+
+    #[test]
+    fn a_call_of_another_program_is_out_of_the_test_limit_scope() {
+        assert!(!in_test_limit_scope("op whoami", "kubectl", &["whoami"]));
+    }
+
+    #[test]
+    fn a_call_missing_a_scope_word_is_out_of_the_test_limit_scope() {
+        let args = ["auth", "can-i", "get", "secrets"];
+        assert!(!in_test_limit_scope(
+            "kubectl auth can-i get deployments",
+            "kubectl",
+            &args
+        ));
+    }
+
+    #[test]
+    fn fly_is_flyctl_in_the_test_limit_scope() {
+        assert!(in_test_limit_scope(
+            "flyctl auth whoami",
+            "fly",
+            &["auth", "whoami"]
+        ));
+    }
 
     fn read_fake(r: &FakeRunner) -> Outcome {
         r.read(&Call::new("op", &["item", "get", "i"]), &[])
