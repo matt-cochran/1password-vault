@@ -1,8 +1,9 @@
 //! `config export <env> --json` use case (FR-18, spec §7.2).
 //!
-//! Prints `plan.config` (config-kind values only) as JSON. Refuses with
-//! `Cause::ValuesNeeded` (each key and why), printing nothing, when a config key is missing, fails a rule or is stored as a secret,
-//! or when a secret key is stored as text: the kind check is S5's `WrongKind`. One `op`
+//! Prints `plan.config` (config-kind values only) as JSON, `{product: {KEY: value}}`, for every
+//! product or the one `--product` names (#188). Refuses with `Cause::ValuesNeeded` (each key
+//! and why), printing nothing, when a config key in scope is missing, fails a rule or is
+//! stored as a secret, or when a secret key is stored as text: the kind check is S5's `WrongKind`. One `op`
 //! call; Fly is not contacted.
 
 use std::collections::BTreeSet;
@@ -17,21 +18,38 @@ use crate::runner::CommandRunner;
 pub fn run(
     fleet: &Fleet,
     env_name: &str,
+    product: Option<&str>,
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    // D10/FR-34: `config export` has no `--product`; with several products that have keys
-    // desired here the exported product is ambiguous, and naming the first is a usage error.
-    // With one, that product's config is exported (and no other product's).
-    let product = super::pick_product(fleet, env_name, None)?;
+    // D10/FR-34 (#188): without `--product` the document holds every product's config,
+    // `{product: {KEY: value}}`; `--product` limits it to that product, checked exactly as
+    // `run` checks it (an unknown or source-only product is refused before any call).
+    // FR-47: a source-only product is never run, so it is never a key of the document; the
+    // products that read its values carry them. A product with no config value here is
+    // left out, as `plan.config` never holds an empty product.
+    super::check_product(fleet, product, Some(env_name))?;
     let none = BTreeSet::new();
     let (plan, _) = read_and_plan(fleet, env_name, None, r, None, &none, &none)?;
+    // With `--product`, only that product's keys (and the sources they read) block it;
+    // without, every key does.
+    let sources: BTreeSet<(&str, &str)> = plan
+        .rows
+        .iter()
+        .filter(|r| Some(r.product.as_str()) == product)
+        .filter_map(|r| r.source.as_ref())
+        .map(|(p, k)| (p.as_str(), k.as_str()))
+        .collect();
+    let in_scope = |r: &Row| match product {
+        None => true,
+        Some(p) => r.product == p || sources.contains(&(r.product.as_str(), r.key.as_str())),
+    };
     // 03.06: each key that blocks the export, with why (missing, failing its rule, or kept
     // in the wrong kind of field); filling a value is a person's step in 1Password.
     let rows: Vec<ValueRow> = plan
         .rows
         .iter()
-        .filter(|r| refuses(r))
+        .filter(|r| in_scope(r) && refuses(r))
         .map(|r| ValueRow {
             product: ProductName::new(r.product.clone()),
             key: KeyName::new(r.key.clone()),
@@ -58,9 +76,12 @@ pub fn run(
     // M4 (owner ruling): config kept concealed in 1Password is accepted, but its value is
     // never printed.
     let mut config = plan.config.clone();
-    config.retain(|p, _| p == &product);
-    for (product, key) in &plan.concealed_config {
-        if let Some(v) = config.get_mut(product).and_then(|m| m.get_mut(key)) {
+    config.retain(|p, _| {
+        product.is_none_or(|only| p == only)
+            && fleet.products.get(p).is_some_and(|spec| !spec.source_only)
+    });
+    for (p, key) in &plan.concealed_config {
+        if let Some(v) = config.get_mut(p).and_then(|m| m.get_mut(key)) {
             *v = CONCEALED.to_string();
         }
     }
@@ -94,7 +115,7 @@ mod tests {
     fn export(item: Output) -> (Result<(), Error>, Vec<u8>, FakeRunner) {
         let r = FakeRunner::new([item, fly_empty()]);
         let mut out = Vec::new();
-        let res = run(&fleet(), "prod", &r, &mut out);
+        let res = run(&fleet(), "prod", None, &r, &mut out);
         (res, out, r)
     }
 
@@ -224,7 +245,7 @@ mod tests {
         );
         let r = FakeRunner::new([item(&[text("allumata", "DEV_FLAG", "on")])]);
         let mut out = Vec::new();
-        run(&fl, "dev", &r, &mut out).unwrap();
+        run(&fl, "dev", None, &r, &mut out).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["allumata"]["DEV_FLAG"], "on");
         assert_eq!(
@@ -236,7 +257,7 @@ mod tests {
     #[test]
     fn unknown_env_is_config_error_before_any_call() {
         let r = FakeRunner::new([]);
-        let e = run(&fleet(), "qa", &r, &mut Vec::new()).unwrap_err();
+        let e = run(&fleet(), "qa", None, &r, &mut Vec::new()).unwrap_err();
         assert_eq!(e.code_str(), "unknown_env", "{e}");
         assert!(r.calls.borrow().is_empty());
     }

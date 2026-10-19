@@ -210,7 +210,10 @@ Examples:
 const EXPORT_MORE: &str = "\
 Without <ENV>, prints the contract itself: names, kinds and rules, never a value. Its 1Password
 ids are not printed; --with-ids fills them in and is for debugging only.
-With <ENV>, prints the values of config-kind keys by design, never secrets. A config key
+With <ENV>, prints the values of config-kind keys by design, never secrets, as
+{product: {KEY: value}} for every product (a source-only product, or one with no config
+value there, is left out); --product <P> limits it to that product, and then only its own
+keys can block the export. A config key
 stored in a concealed field is accepted and delivered as a plain value, but opv never prints
 its value (opv status warns about it once).";
 
@@ -1640,6 +1643,9 @@ enum ConfigCmd {
         /// Print the configuration with its 1Password ids filled in (debugging only).
         #[arg(long, conflicts_with = "env")]
         with_ids: bool,
+        /// Only this product's config-kind values; without it, every product's.
+        #[arg(long, requires = "env")]
+        product: Option<String>,
     },
     /// Save a secrets.toml as this project's manifest in 1Password (never deletes the file).
     #[command(before_help = IMPORT_QUICK, after_help = IMPORT_MORE)]
@@ -4393,9 +4399,11 @@ fn run_other(
             let env = a.env.clone();
             sync::run(&loaded?, &env, r, out, &a.into()).map_err(|e| e.in_env(&env))
         }
-        Cmd::Config(ConfigCmd::Export { env: Some(env), .. }) => {
-            config_export::run(&loaded?, &env, r, out)
-        }
+        Cmd::Config(ConfigCmd::Export {
+            env: Some(env),
+            product,
+            ..
+        }) => config_export::run(&loaded?, &env, product.as_deref(), r, out),
         // Reached only when discovery failed: its error is the result.
         Cmd::Config(_) => loaded.map(|_| ()),
         Cmd::Explain {

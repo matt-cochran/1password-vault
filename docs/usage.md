@@ -41,7 +41,7 @@ deliver with CI or your own terminal. The grouping is who runs a command.
 | deliver | `opv ci workflow <env> --target <t> [--github-env <e>] [--deploy]`, `… --on-change [--every <m>]`, `… --drift` | person | ready-to-commit workflows, including the `needs`, `contract --check`, `ready --gate` and `opv/relaxations` checks |
 | admin | `opv access <env> --create --github <owner/repo> [--github-env <e>] [--secret-name <n>]`, `opv target credentials <env> --target <t> [--create]` | person | CI and deploy identities |
 | admin | `opv target list [--env <env>] [--json]`, `opv vault locate <vault ID> [--json]`, `opv projects [--account <a>] [--long] [--json]` | anyone | targets, the account a vault lives in, and projects in 1Password |
-| admin | `opv config export [<env>] [--toml\|--json] [--with-ids]`, `opv config import --vault <v> [--file <f>] …`, `opv config check --file <f>`, `opv config edit` | person | the manifest mirror; `config edit` needs your own terminal |
+| admin | `opv config export [<env>] [--toml\|--json] [--with-ids] [--product <p>]`, `opv config import --vault <v> [--file <f>] …`, `opv config check --file <f>`, `opv config edit` | person | the manifest mirror; `config edit` needs your own terminal |
 | tooling | `opv mcp serve\|install`, `opv skill install\|status`, `opv guide agent`, `opv schema`, `opv version [--json]`, `opv completions <bash\|zsh\|fish\|powershell>`, `opv help states`, `opv help <command>` | anyone | unchanged |
 
 Hidden internal commands (`remote-send`, `remote-receive`, `local-delivery`) are not listed.
@@ -329,7 +329,9 @@ Lists follow the summary line's order and hold `{target, product, key, target_na
 
 ### One product: `--product`
 
-On `inventory`, `run`, `config export` and `open`, `--product` may be left out when exactly one product has keys desired in that environment: opv uses that one. When several do, it is a usage error that lists them.
+On `inventory`, `run` and `open`, `--product` may be left out when exactly one product has keys desired in that environment: opv uses that one. When several do, it is a usage error that lists them.
+
+`config export <env>` without `--product` prints every product's config-kind values in one document, `{product: {KEY: value}}`; a source-only product, and a product with no config value in that environment, are left out. `--product <p>` limits the document to that product (an undeclared or source-only product is refused as on `run`), and then only that product's keys, and the shared sources they read, can block the export.
 
 `status`, `plan` and `sync` take `--product <p>`, and `propose key`/`explain` use `PRODUCT/KEY`:
 
@@ -653,7 +655,7 @@ opv delivery verify prod --product p --json   # each placement's own state vault
 | Command | What it does |
 |---|---|
 | `opv config export [--toml\|--json] [--with-ids]` | print the contract (no ids, no values; `--with-ids` is debugging only) |
-| `opv config export <env> --json` | that environment's config-kind values |
+| `opv config export <env> --json [--product P]` | that environment's config-kind values, `{product: {KEY: value}}`: every product, or only `P` |
 | `opv config import --vault V [--file F] [--project P] [--path D]...` | save a `secrets.toml` as the project manifest; never deletes the file |
 | `opv config edit` | edit in `$VISUAL`/`$EDITOR`, validate, diff, confirm, save unless changed meanwhile |
 | `opv config check --file F` | exit 2 with a diff when a committed copy differs from the manifest |

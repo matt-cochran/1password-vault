@@ -1,5 +1,5 @@
-//! Regression scenarios for #150, #153, #157 and #160 (design §13.5): the real `opv` binary
-//! against `opv-sim`, on the test application in `tests/e2e/app`. Each scenario copies the
+//! Regression scenarios for #150, #153, #157, #160 and #188 (design §13.5): the real `opv`
+//! binary against `opv-sim`, on the test application in `tests/e2e/app`. Each scenario copies the
 //! app's world and configuration into a scratch directory, changes the world where the issue
 //! needs it (an account signed out, a vault moved to the other account), and asserts once on
 //! opv's public output: the exit code, the JSON `error.code`, or whether a file exists.
@@ -429,4 +429,50 @@ fn issue_160_signin_without_another_live_session_is_unsupported() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(87));
+}
+
+// ---------------------------------------------------------------------------------------
+// #188: `config export <env>` with several products exports each one's config values.
+// ---------------------------------------------------------------------------------------
+
+/// A second runnable product, `api`, with one config key in the web boundary's dev item.
+const API_PRODUCT: &str = r#"
+[products.api]
+boundary = "web"
+
+[products.api.keys.API_MODE]
+kind = "config"
+environments = ["dev"]
+"#;
+
+/// The app plus [`API_PRODUCT`], its `API_MODE` field filled in the dev web item.
+fn with_api_product() -> Scenario {
+    let s = Scenario::new(|w| {
+        for i in w["op"]["items"].as_array_mut().unwrap() {
+            if i["id"] == "iE2EWEBDEV0000000000000001" {
+                i["fields"].as_array_mut().unwrap().push(serde_json::json!({
+                    "id": "api_api_mode",
+                    "section": {"id": "api", "label": "api"},
+                    "type": "STRING",
+                    "label": "API_MODE",
+                    "value": "strict"
+                }));
+            }
+        }
+    });
+    let file = s.project().join("secrets.toml");
+    let toml = std::fs::read_to_string(&file).unwrap() + API_PRODUCT;
+    std::fs::write(&file, toml).unwrap();
+    s
+}
+
+#[test]
+fn issue_188_config_export_with_several_products_exports_each() {
+    let s = with_api_product();
+    let doc = document(&s.opv(&["config", "export", "dev", "--json"]));
+    let products: Vec<String> = doc
+        .as_object()
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
+    assert_eq!(products, ["api", "web"], "{doc}");
 }

@@ -93,6 +93,7 @@
       ],
       "flags": [
         "json",
+        "product",
         "toml",
         "with-ids"
       ],
