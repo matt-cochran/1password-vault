@@ -22,14 +22,14 @@ deliver with CI or your own terminal. The grouping is who runs a command.
 | inspect | `opv doctor [--env <e> [--product <p>] [--target <t>]] [--settings] [--json]` | anyone | setup problems; it names a production-tier vault this session can read and a production platform login |
 | propose | `opv propose key <[p/]KEY> --kind … [--env …] [--except <env>=<reason>] [--source …] [--shape <name>] [--rule <NAME[=VALUE]>] [--personal] [--from <p/KEY>] [--guidance …] [--allow-same-value] [--immutable] [--expires <date>]` | anyone | a new or changed key: the contract diff and plan |
 | propose | `opv propose env <env> [--tier local\|shared\|production]` | anyone | a new environment, inheriting every `all` key |
-| propose | `opv propose target <env> <name> --<provider options> [--products …] [--role …] [--deploy-credentials <op://…>]` | anyone | a new target |
+| propose | `opv propose target <env> <name> --<provider options> [--products …] [--role …] [--deploy-credentials <op://…>] [--project <p>]` | anyone | a new target |
 | propose | `opv propose retire <[p/]KEY>` | anyone | retirement in order: `needs` at the deployed revision, prune from targets, archive the fields |
 | propose | `opv propose setup [--from-item <env> [--vault <t>] [--item <t>]] [--names-from <.env> [--config-key K]… [--secret-key K]…] [--file \| --project <p>] [--account <a>]` | anyone | first setup: the contract from an existing item or a `.env`'s names, and every boundary, item, state vault and field |
-| propose | `opv propose structure [--rebind <env>]…` | anyone | the structure the contract declares, or new ids for an environment |
+| propose | `opv propose structure [--rebind <env>]… [--project <p>]` | anyone | the structure the contract declares, or new ids for an environment |
 | propose | `opv propose generate <env> <p/KEY>…` | anyone | generated values for rule-backed keys |
 | propose | `opv propose --intent <file.json>` | anyone | the categorical intent document, the same as MCP `opv_propose` |
 | propose | any `opv propose …` with `--write` | anyone (CLI only) | also writes the contract diff into the repository's contract file. Without `--write`, and always over MCP, a proposal writes nothing |
-| apply | `opv apply [<plan_id>]` | **person, in a terminal** | recompute the plan from the contract on disk and the actual state, refuse a stale `<plan_id>`, show it, confirm, and run it in one process |
+| apply | `opv apply [<plan_id>] [--project <p>]` | **person, in a terminal** | recompute the plan from the contract on disk and the actual state, refuse a stale `<plan_id>`, show it, confirm, and run it in one process |
 | person | `opv set <[p/]KEY> --env <e>` | **person, in a terminal** | masked entry of one value |
 | person | `opv import <env> --from <file.env \| target:NAME> [--replace <p/KEY>]… [--rotate <p/KEY>]… [--skip <p/KEY>]… [--dry-run] [--confirm <env>]` | **person** | write-only import: per key `imported`, `skipped: already set` or `skipped: empty`; never "differs" |
 | person | `opv open <[p/]KEY> [--env <e>] [--print] [--json]` | person | the key's item in 1Password, where a value is typed |
@@ -41,7 +41,7 @@ deliver with CI or your own terminal. The grouping is who runs a command.
 | deliver | `opv ci workflow <env> --target <t> [--github-env <e>] [--deploy]`, `… --on-change [--every <m>]`, `… --drift` | person | ready-to-commit workflows, including the `needs`, `contract --check`, `ready --gate` and `opv/relaxations` checks |
 | admin | `opv access <env> --create --github <owner/repo> [--github-env <e>] [--secret-name <n>]`, `opv target credentials <env> --target <t> [--create]` | person | CI and deploy identities |
 | admin | `opv target list [--env <env>] [--json]`, `opv vault locate <vault ID> [--json]`, `opv projects [--account <a>] [--long] [--json]` | anyone | targets, the account a vault lives in, and projects in 1Password |
-| admin | `opv config export [<env>] [--toml\|--json] [--with-ids]`, `opv config import --vault <v> [--file <f>] …`, `opv config check --file <f>`, `opv config edit` | person | the manifest mirror; `config edit` needs your own terminal |
+| admin | `opv config export [<env>] [--toml\|--json] [--with-ids] [--product <p>]`, `opv config import --vault <v> [--file <f>] …`, `opv config check --file <f>`, `opv config edit` | person | the manifest mirror; `config edit` needs your own terminal |
 | tooling | `opv mcp serve\|install`, `opv skill install\|status`, `opv guide agent`, `opv schema`, `opv version [--json]`, `opv completions <bash\|zsh\|fish\|powershell>`, `opv help states`, `opv help <command>` | anyone | unchanged |
 
 Hidden internal commands (`remote-send`, `remote-receive`, `local-delivery`) are not listed.
@@ -329,7 +329,9 @@ Lists follow the summary line's order and hold `{target, product, key, target_na
 
 ### One product: `--product`
 
-On `inventory`, `run`, `config export` and `open`, `--product` may be left out when exactly one product has keys desired in that environment: opv uses that one. When several do, it is a usage error that lists them.
+On `inventory`, `run` and `open`, `--product` may be left out when exactly one product has keys desired in that environment: opv uses that one. When several do, it is a usage error that lists them.
+
+`config export <env>` without `--product` prints every product's config-kind values in one document, `{product: {KEY: value}}`; a source-only product, and a product with no config value in that environment, are left out. `--product <p>` limits the document to that product (an undeclared or source-only product is refused as on `run`), and then only that product's keys, and the shared sources they read, can block the export.
 
 `status`, `plan` and `sync` take `--product <p>`, and `propose key`/`explain` use `PRODUCT/KEY`:
 
@@ -566,13 +568,15 @@ Each target in `targets` is `ready` (every vault and item it needs could be open
 
 The configuration changes one way: anyone proposes, a person applies. `opv propose` takes an intent and returns the contract diff and a content-addressed plan id; without `--write` (CLI only) it writes nothing, and over MCP it always writes nothing. `--write` writes the diff into the repository's contract file, where the pull request reviews it.
 
-`opv apply [<plan_id>]` recomputes the plan from the contract on disk and the actual state, refuses if a given `<plan_id>` no longer matches (`stale_plan`, exit 6), shows it, asks you to confirm, and runs it in one process: bindings and the apply record, structure, generation and retirement steps, and masked entry for any value typed now. It needs your own terminal and refuses under CI or agent mode with a typed `next` (`kind: apply`, `actor: person`). The 0.11.0 commands that did this are gone: [Migrating from 0.11](#migrating-from-011).
+`opv apply [<plan_id>]` recomputes the plan from the contract on disk and the actual state, refuses if a given `<plan_id>` no longer matches (`stale_plan`, exit 6), shows it, asks you to confirm, and runs it in one process: bindings and the apply record, structure, generation and retirement steps, and masked entry for any value typed now. It needs your own terminal and refuses under CI or agent mode with a typed `next` (`kind: apply`, `actor: person`). `--project <p>` names the project for new vault and item titles (a state vault is `<p>-<env>-<target>-state`) when it is not the repository's name, as on `opv access`; give `opv propose structure` the same one, since a plan proposed under one project is refused (`stale_plan`) under another. The 0.11.0 commands that did this are gone: [Migrating from 0.11](#migrating-from-011).
 
 ### `opv propose key`, `env`, `target` and `retire`
 
 `opv propose key <[p/]KEY>` declares or changes one key: `--kind secret|config`, `--env` (repeatable), `--except <env>=<reason>` for a production-tier environment the key is not wanted in, `--source person|generated|derived`, `--shape <name>` from the catalog (a shape name only, never a rule), `--rule <NAME[=VALUE]>`, `--personal`, `--from <p/KEY>`, `--guidance`, `--allow-same-value`, `--immutable` and `--expires <date>`. A `--rule` counts in the contract only once it is committed on the default branch; a hand-edited or branch-only rule shows `rules_pending_review` and is not evaluated for MCP or agent-mode callers. Each production-tier environment the key is wanted in is asked as a categorical choice: a value, or `except`.
 
-`opv propose env <env> [--tier local|shared|production]` declares an environment, inheriting every `all` key. `opv propose target <env> <name> --<provider options> [--products <p>]… [--role <r>]… [--deploy-credentials <op://…>]` declares a target. `opv propose retire <[p/]KEY>` retires a key in order: `needs` at the deployed revision first, then prune from the targets, then archive the fields.
+`opv propose env <env> [--tier local|shared|production]` declares an environment, inheriting every `all` key. `opv propose target <env> <name> --<provider options> [--products <p>]… [--role <r>]… [--deploy-credentials <op://…>]` declares a target. `opv propose retire <[p/]KEY>` retires a key in order: `needs` at the deployed revision first, then prune from the targets, then archive the fields. `opv propose target … --project <p>` carries the project name to the next step, where the target's state vault is named.
+
+A generated configuration (its first line starts with `# generated`) is never edited; its generator is. Without `--write` the proposal still prints its diff, says to make it in the generator, and its `Next:` (and `--json` `next`, also over MCP, with `"generated": true`) is `opv propose structure`; `--write` is refused with `config_not_editable`, after the same diff is printed (in `--json`, as the error's `subject.reason.diff`). Once the generator emits the change, `opv propose structure` then `opv apply` creates what it declares and returns the ids for the generator to record (`generator_ids`).
 
 ```sh
 opv propose key api/STRIPE_KEY --kind secret --shape stripe_secret --env prod --env staging
@@ -586,7 +590,7 @@ opv apply 3f9c0a1b2c3d4e5f                                       # a person revi
 
 `opv propose setup` builds the first contract: `--from-item <env> [--vault <t>] [--item <t>]` reads names and types from an existing item, and `--names-from <.env> [--config-key K]… [--secret-key K]…` takes names only from a `.env` (never values); `--file` or `--project <p>` and `--account <a>` choose where the contract and account come from. The plan includes every boundary, item, state vault and field.
 
-`opv propose structure [--rebind <env>]…` plans the structure the contract declares (missing vaults, items, state vaults and empty fields) or new ids for an environment, and ends with the `opv apply` that runs it. It is also the one-time move that reads inline ids from `secrets.toml` and writes them to `secrets.bindings.toml`: a `secrets.toml` that still carries inline ids is refused at load by every command with `config_invalid`, naming the field, and `opv propose structure` then `opv apply` is the only path that reads them, only to move them.
+`opv propose structure [--rebind <env>]… [--project <p>]` plans the structure the contract declares (missing vaults, items, state vaults and empty fields) or new ids for an environment, and ends with the `opv apply` that runs it. It is also the one-time move that reads inline ids from `secrets.toml` and writes them to `secrets.bindings.toml`: a `secrets.toml` that still carries inline ids is refused at load by every command with `config_invalid`, naming the field, and `opv propose structure` then `opv apply` is the only path that reads them, only to move them.
 
 `opv propose generate <env> <p/KEY>…` plans generated values for rule-backed keys.
 
@@ -653,7 +657,7 @@ opv delivery verify prod --product p --json   # each placement's own state vault
 | Command | What it does |
 |---|---|
 | `opv config export [--toml\|--json] [--with-ids]` | print the contract (no ids, no values; `--with-ids` is debugging only) |
-| `opv config export <env> --json` | that environment's config-kind values |
+| `opv config export <env> --json [--product P]` | that environment's config-kind values, `{product: {KEY: value}}`: every product, or only `P` |
 | `opv config import --vault V [--file F] [--project P] [--path D]...` | save a `secrets.toml` as the project manifest; never deletes the file |
 | `opv config edit` | edit in `$VISUAL`/`$EDITOR`, validate, diff, confirm, save unless changed meanwhile |
 | `opv config check --file F` | exit 2 with a diff when a committed copy differs from the manifest |
@@ -979,7 +983,7 @@ jobs:
     env:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
       OP_CACHE: "false"
-      OPV_VERSION: v0.12.0  # pin the release you tested; bump it deliberately
+      OPV_VERSION: v0.12.1  # pin the release you tested; bump it deliberately
     steps:
       - uses: actions/checkout@v4
       - name: Install the 1Password CLI

@@ -75,6 +75,38 @@ impl Proposal {
     }
 }
 
+/// FR-52 (#184): opv never edits a generated configuration (one whose first line starts
+/// with `# generated`); its generator is. The refusal a `--write` of `proposal` meets on
+/// the configuration `source`: it carries the proposal's diff, the edit to make in the
+/// generator, and steps to `opv propose structure` once the generator emits it.
+pub fn generated_refusal(
+    source: crate::cause::ConfigSource,
+    proposal: &Proposal,
+) -> crate::cause::Cause {
+    crate::cause::Cause::ConfigNotEditable {
+        source,
+        reason: crate::cause::NotEditable::Generated {
+            generator: None,
+            diff: Some(proposal.diff.clone()),
+        },
+    }
+}
+
+/// The `next` of a read-only proposal on a generated configuration (the CLI's and the MCP
+/// tool's alike): never the `--write` that [`generated_refusal`] refuses, but that
+/// refusal's own step under `inv`, the structure once the generator emits the change.
+pub fn generated_next(
+    source: crate::cause::ConfigSource,
+    proposal: &Proposal,
+    inv: &crate::cause::Invocation,
+) -> serde_json::Value {
+    let next = generated_refusal(source, proposal).step(inv).1;
+    crate::cause::render::next_value(&next, inv)
+}
+
+/// The line a read-only proposal on a generated configuration prints before its `Next:`.
+pub const GENERATED_ROUTE: &str = "generated: make this diff in the configuration's generator, never in the configuration; once the generator emits it, opv propose structure, then opv apply, returns the ids (generator_ids) for the generator to record";
+
 /// Serialize the relaxations (which carry no `Serialize` of their own) as objects, so the
 /// wire form names the product, key, environment, kind and fixed reason only.
 fn relaxations_json<S>(relaxations: &[Relaxation], serializer: S) -> Result<S::Ok, S::Error>

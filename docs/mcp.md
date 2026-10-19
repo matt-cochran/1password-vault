@@ -66,7 +66,8 @@ and every document carries a typed `next`: `{kind, actor, command}`.
    returns the contract diff and a plan whose every step names its actor and a
    content-addressed `plan_id`. The assistant declares names, kinds and catalog shapes; it
    cannot express a rule parameter. A generated configuration is never edited: declare in
-   its generator's input instead.
+   its generator's input instead. Its proposal says so (`"generated": true`) and its `next`
+   is `opv propose structure`, for once the generator emits the diff.
 2. **The assistant may import into a local tier.** For an environment of tier `local` only,
    `opv_import_local` writes a file's values straight into the local vault. It reports
    presence per key and writes nothing anywhere else. For any other tier the import is the

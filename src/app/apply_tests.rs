@@ -241,6 +241,42 @@ fn the_proposals_only_plan_id_is_the_one_apply_accepts() {
     assert_eq!(ids, vec![applied.plan_id]);
 }
 
+/// #183: the plan id covers the project, so a plan proposed under one project name is
+/// never applied under another (no vault is created with the other name).
+#[test]
+fn apply_with_another_project_than_the_proposal_is_refused() {
+    let (_d, path, op) = fleet_world();
+    let proposal =
+        crate::app::propose::structure::propose_structure(&op, &path, "myapp", ACCOUNT, &[], &[])
+            .unwrap();
+    let e = apply(
+        &op,
+        &tty(),
+        &path,
+        "otherapp",
+        ACCOUNT,
+        Some(&proposal.plan_id),
+        ApplyOpts::default(),
+        &mut |_| true,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(e.code_str(), "stale_plan");
+}
+
+/// #183: `--project` names the project of a file configuration's structural plan.
+#[test]
+fn a_given_project_names_the_scope_of_a_file_configuration() {
+    let (d, _path, op) = fleet_world();
+    std::fs::write(
+        d.path().join(crate::config_store::DOT_FILE),
+        format!("account = \"{ACCOUNT}\"\n"),
+    )
+    .unwrap();
+    let scope = crate::app::structure::scope(d.path(), &op, Some("mcproductlabs-infra")).unwrap();
+    assert_eq!(scope.project, "mcproductlabs-infra");
+}
+
 // Confirm -----------------------------------------------------------------------------------
 
 #[test]
@@ -602,6 +638,6 @@ fn a_second_manifest_apply_finds_no_steps() {
 fn scope_accepts_a_manifest() {
     let op = FakeOp::default();
     let (dir, _id, _at) = manifest_in(&op, &INLINE.replace("ITEM", "item"), None);
-    let scope = crate::app::structure::scope(dir.path(), &op).unwrap();
+    let scope = crate::app::structure::scope(dir.path(), &op, None).unwrap();
     assert!(matches!(scope.config, ConfigAt::Manifest(_)));
 }

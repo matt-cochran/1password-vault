@@ -66,7 +66,8 @@ impl NeedState {
 /// One row of a [`NeedsReport`]. Names and `file:line` only, never a value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NeedRow {
-    /// The observed name, or the declared key; empty for an [`NeedState::Ambiguous`] row,
+    /// The undeclared name as observed, or the declared key (also when the code reads it
+    /// under a name a target delivers it as); empty for an [`NeedState::Ambiguous`] row,
     /// whose location is in `files`.
     pub name: String,
     /// How the name stands against the contract.
@@ -131,6 +132,11 @@ fn classify(
         }
     }
 
+    // name -> (key, product) for every name a declared key is delivered under on a target.
+    let delivered = delivered_names(fleet);
+
+    // (key, product) -> where the code reads the key, under its own name or a delivered one.
+    let mut matched: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
     let mut observed: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut ambiguous: Vec<String> = Vec::new();
     for observation in &scan.observations {
@@ -138,8 +144,16 @@ fn classify(
         match observation.kind {
             Kind::Ambiguous => ambiguous.push(location),
             Kind::Observed => {
-                if let Some(name) = &observation.name {
-                    observed.entry(name.clone()).or_default().push(location);
+                let Some(name) = &observation.name else {
+                    continue;
+                };
+                let owner = match declared.get(name) {
+                    Some(product) => Some((name.clone(), product.clone())),
+                    None => delivered.get(name).cloned(),
+                };
+                match owner {
+                    Some(owner) => matched.entry(owner).or_default().push(location),
+                    None => observed.entry(name.clone()).or_default().push(location),
                 }
             }
         }
@@ -148,17 +162,17 @@ fn classify(
     let mut rows: Vec<NeedRow> = Vec::new();
     let mut texts: BTreeMap<String, Option<String>> = BTreeMap::new();
 
+    for ((key, product), files) in &matched {
+        rows.push(NeedRow {
+            name: key.clone(),
+            state: NeedState::Declared,
+            files: files.clone(),
+            product: Some(product.clone()),
+            annotation_stale: false,
+        });
+    }
+
     for (name, files) in &observed {
-        if let Some(product) = declared.get(name) {
-            rows.push(NeedRow {
-                name: name.clone(),
-                state: NeedState::Declared,
-                files: files.clone(),
-                product: Some(product.clone()),
-                annotation_stale: false,
-            });
-            continue;
-        }
         if let Some((product, span)) = ignores.get(name) {
             if annotation_is_current(
                 runner,
@@ -190,7 +204,7 @@ fn classify(
     }
 
     for (name, product) in &declared {
-        if !observed.contains_key(name) {
+        if !matched.keys().any(|(key, _)| key == name) {
             rows.push(NeedRow {
                 name: name.clone(),
                 state: NeedState::DeclaredUnobserved,
@@ -216,6 +230,33 @@ fn classify(
         rows,
         coverage: scan.coverage,
     }
+}
+
+/// Every name a declared key of `fleet` is delivered under on a target: name -> (key,
+/// product), rendered by each target's own name template exactly as a sync renders it, for
+/// every environment the key is desired in and every target that delivers its product.
+/// Products iterate sorted, so a name two products render belongs to the first, as a plain
+/// key two products declare does.
+fn delivered_names(fleet: &Fleet) -> BTreeMap<String, (String, String)> {
+    let mut names: BTreeMap<String, (String, String)> = BTreeMap::new();
+    for (product, p) in &fleet.products {
+        for (env_name, env) in &fleet.environments {
+            for target in env.targets.keys() {
+                if !fleet.delivers(env_name, target, product) {
+                    continue;
+                }
+                for (key, spec) in &p.keys {
+                    if !spec.is_desired_in(env_name) {
+                        continue;
+                    }
+                    names
+                        .entry(fleet.target_name(env_name, target, product, key))
+                        .or_insert_with(|| (key.clone(), product.clone()));
+                }
+            }
+        }
+    }
+    names
 }
 
 /// Whether some observation of `name` still carries `recorded` as its evidence span, so the
@@ -339,9 +380,12 @@ fn delivered_product(fleet: &Fleet) -> Option<String> {
     }
 }
 
-/// Whether any product of `base` declares `name`.
+/// Whether any product of `base` declares `name`, or delivers a key under it on a target.
 fn declared_in(base: Option<&Fleet>, name: &str) -> bool {
-    base.is_some_and(|fleet| fleet.products.values().any(|p| p.keys.contains_key(name)))
+    base.is_some_and(|fleet| {
+        fleet.products.values().any(|p| p.keys.contains_key(name))
+            || delivered_names(fleet).contains_key(name)
+    })
 }
 
 /// Render `report` for a person: a counts line, one line per row (state, name, product and
