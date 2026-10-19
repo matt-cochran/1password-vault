@@ -166,7 +166,7 @@ jobs:
     name: Publish release
     needs: resolve
     if: startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true
-    runs-on: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     permissions:
       contents: write
       id-token: write
@@ -197,11 +197,13 @@ jobs:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         GH_REPO: ${{ github.repository }}
       run: gh release create "$GITHUB_REF_NAME" candidate/dist/* --verify-tag --title "$GITHUB_REF_NAME"
+    env:
+      NPM_CONFIG_IGNORE_SCRIPTS: 'true'
   npm:
     name: Publish npm packages
     needs: resolve
     if: startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true && vars.NPM_PUBLISH == 'true'
-    runs-on: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
@@ -240,6 +242,8 @@ jobs:
         \    if(existing!==expected) throw new Error('Published npm bytes differ for '+name+'@'+version);\n    console.log('Already\
         \ published identical retained bytes: '+name+'@'+version);\n    continue;\n  }\n  execFileSync('npm',['publish',path,'--provenance','--access','public'],{stdio:'inherit'});\n\
         }\nNODE\n"
+    env:
+      NPM_CONFIG_IGNORE_SCRIPTS: 'true'
   release-checks:
     if: github.ref == 'refs/heads/staging'
     uses: ./.github/workflows/ci.yml
