@@ -41,11 +41,29 @@ jobs:
       if: startsWith(github.ref, 'refs/tags/v')
       shell: bash
       run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+  check:
+    name: Reuse an existing release candidate
+    if: github.ref == 'refs/heads/staging'
+    runs-on: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    outputs:
+      found: ${{ steps.check.outputs.found }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: 'false'
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      with:
+        node-version: '24'
+    - id: check
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: node scripts/release-assets.ts check "$RUNNER_TEMP/opv-candidate-check"
   build:
     name: Build (${{ matrix.target }})
     needs:
     - version
     - release-checks
+    - check
     runs-on: ${{ matrix.os == 'ubuntu-latest' && vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404'
       || matrix.os }}
     strategy:
@@ -112,10 +130,12 @@ jobs:
         name: opv-${{ matrix.target }}
         path: dist/opv-${{ matrix.target }}*
         if-no-files-found: error
-    if: github.ref == 'refs/heads/staging'
+    if: github.ref == 'refs/heads/staging' && needs.check.outputs.found != 'true'
   package:
     name: Package release assets
-    needs: build
+    needs:
+    - build
+    - check
     runs-on: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     permissions:
       contents: read
@@ -161,7 +181,7 @@ jobs:
         path: candidate/
         if-no-files-found: error
         retention-days: 90
-    if: github.ref == 'refs/heads/staging'
+    if: github.ref == 'refs/heads/staging' && needs.check.outputs.found != 'true' && needs.build.result == 'success'
   publish:
     name: Publish release
     needs: resolve

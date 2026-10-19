@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { npmPublishAction, orderNpmTarballs, validate, waitForTarball, type Manifest } from '../scripts/release-assets.ts';
+import { findRetainedCandidate, npmPublishAction, orderNpmTarballs, validate, waitForTarball, type Manifest } from '../scripts/release-assets.ts';
 const repository = 'matt-cochran/1password-vault';
 const tree = 'a'.repeat(40);
 const actual: Record<string, string> = {};
@@ -31,6 +31,33 @@ test('path traversal and missing targets are refused', () => {
 test('all seven npm tarballs are required', () => {
   const missing = { ...actual }; delete missing['npm/package-6.tgz'];
   assert.throws(() => validate({ ...manifest, files: missing }, run, repository, tree, missing));
+});
+
+const retained = `opv-release-${tree}-${run.run_attempt}`;
+const retainedArtifacts = [{ name: retained, expired: false }];
+
+test('a successful staging run retaining the current tree candidate is found', () => {
+  assert.deepEqual(findRetainedCandidate([run], () => retainedArtifacts, repository, tree, 99), { run, artifact: retained });
+});
+
+test('the current run is never reused as its own candidate', () => {
+  assert.equal(findRetainedCandidate([run], () => retainedArtifacts, repository, tree, run.id), undefined);
+});
+
+test('an expired retained artifact is not a candidate', () => {
+  assert.equal(findRetainedCandidate([run], () => [{ name: retained, expired: true }], repository, tree, 99), undefined);
+});
+
+test('a main-branch run is not a staging candidate', () => {
+  assert.equal(findRetainedCandidate([{ ...run, head_branch: 'main' }], () => retainedArtifacts, repository, tree, 99), undefined);
+});
+
+test('a fork run is not a staging candidate', () => {
+  assert.equal(findRetainedCandidate([{ ...run, head_repository: { full_name: 'fork/opv' } }], () => retainedArtifacts, repository, tree, 99), undefined);
+});
+
+test('an artifact named for a different tree is not a candidate', () => {
+  assert.equal(findRetainedCandidate([run], () => [{ name: `opv-release-${'c'.repeat(40)}-${run.run_attempt}`, expired: false }], repository, tree, 99), undefined);
 });
 
 const platforms = ['linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64', 'win32-x64', 'win32-arm64'];
