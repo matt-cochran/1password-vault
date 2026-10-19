@@ -146,14 +146,66 @@ function sudoProblem(env = process.env, uid = process.getuid ? process.getuid() 
   return null;
 }
 
+// This package's version, from the package.json beside this file.
+function packageVersion() {
+  return JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')).version;
+}
+
+// Write `text` to `file` through a temporary file in the same directory and a rename, so
+// a reader never sees a partial file.
+function writeAtomic(file, text) {
+  const tmp = `${file}.tmp.${process.pid}`;
+  try {
+    fs.writeFileSync(tmp, text);
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {
+      // Best effort: the rename failed, so the temporary file may remain.
+    }
+    throw e;
+  }
+}
+
+// Copy the platform package's binary to the canonical path and record it as npm's
+// (`npm <version> <sha256>`). Both writes are atomic, so an interrupted copy leaves the
+// old binary in place. Shared by the postinstall and by the `opv` shim when npm skipped
+// the postinstall. Throws when the destination cannot be written. Returns the target.
+function placeCanonical(version) {
+  const target = canonicalPath();
+  const dir = path.dirname(target);
+  fs.mkdirSync(dir, { recursive: true });
+  const source = bundledBinary();
+  const tmp = path.join(dir, `.opv.tmp.${process.pid}`);
+  try {
+    fs.copyFileSync(source, tmp);
+    fs.chmodSync(tmp, 0o755);
+    fs.renameSync(tmp, target);
+  } catch (e) {
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {
+      // Best effort: the rename failed, so the temporary file may remain.
+    }
+    throw e;
+  }
+  const hash = sha256File(target);
+  fs.mkdirSync(dataDir(), { recursive: true });
+  writeAtomic(recordPath(), `npm ${version} ${hash}\n`);
+  return target;
+}
+
+// The command that reruns this postinstall by hand, for npm installs that skipped it.
+const REPAIR_COMMAND = 'node "$(npm root -g)/@matthew-cochran/opv/install.js"';
+
 function install() {
   const problem = sudoProblem();
   if (problem) {
     process.stderr.write(`opv: ${problem}\n`);
     return;
   }
-  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
-  const version = pkg.version;
+  const version = packageVersion();
   const target = canonicalPath();
   const dir = path.dirname(target);
 
@@ -170,25 +222,7 @@ function install() {
     oldVersion = versionOf(target);
   }
 
-  fs.mkdirSync(dir, { recursive: true });
-  const source = bundledBinary();
-  const tmp = path.join(dir, `.opv.tmp.${process.pid}`);
-  try {
-    fs.copyFileSync(source, tmp);
-    fs.chmodSync(tmp, 0o755);
-    fs.renameSync(tmp, target);
-  } catch (e) {
-    try {
-      fs.rmSync(tmp, { force: true });
-    } catch {
-      // Best effort: the rename failed, so the temporary file may remain.
-    }
-    throw e;
-  }
-
-  const hash = sha256File(target);
-  fs.mkdirSync(dataDir(), { recursive: true });
-  fs.writeFileSync(recordPath(), `npm ${version} ${hash}\n`);
+  placeCanonical(version);
 
   try {
     registerSkill(target);
@@ -227,6 +261,10 @@ module.exports = {
   versionOf,
   isOpvBinary,
   install,
+  packageVersion,
+  placeCanonical,
+  hashOrNull,
+  REPAIR_COMMAND,
   printPathHint,
   shouldRegisterSkill,
   registerSkill,
