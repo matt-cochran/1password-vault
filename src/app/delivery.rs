@@ -33,9 +33,8 @@ use crate::cause::{
     Scope as InScope, System, TargetName, Unverified, Upstream, UsageProblem,
 };
 use crate::domain::delivery::{
-    Attestation, BindingRef, Evidence, Observed, Receipt, SCHEMA, Scope, Source, Verification,
-    decode_attestations, decode_evidence, encode_attestations, encode_evidence, new_revision,
-    select,
+    BindingRef, Evidence, Observed, Receipt, SCHEMA, Scope, Source, Verification, decode_evidence,
+    encode_evidence, new_revision, select,
 };
 use crate::domain::ledger::{Ledger, hmac_hex, random_key};
 use crate::domain::plan::StoreEntry;
@@ -48,12 +47,6 @@ const KEY_FIELD: &str = "evidence key";
 /// The non-secret field a sync records for `opv changed` (C2): one `v1|<item_id>|<version>`
 /// line per source item, ids and integers only. Written only after a confirmed sync.
 const SOURCE_VERSIONS_FIELD: &str = "source versions";
-/// The private field of a person's attestations (#201, `docs/attestation.md`): one
-/// `a1|<name>|<store_version>|<at>` line per name whose evidence line a person recorded
-/// without a write. Concealed, like the evidence lines: a store version can be a digest of
-/// the value (Fly).
-const ATTESTATIONS_FIELD: &str = "attestations";
-
 /// The binding set of `product` on target `target` of `env_name`: exactly the secrets the
 /// target delivers for it, by target name, with the 1Password field each value comes from
 /// (a shared key names its source, FR-45), in the source's boundary item (FR-57). A key
@@ -271,9 +264,6 @@ pub(crate) struct StateItem {
     /// The `source versions` text the item held when read (C2): kept when this run does not
     /// mint a receipt and re-emitted unchanged.
     source_versions: Option<String>,
-    /// A person's attestations (#201): names whose evidence line was recorded without a
-    /// write by opv.
-    attestations: Vec<Attestation>,
     raw: Zeroizing<Vec<u8>>,
 }
 
@@ -323,7 +313,6 @@ pub(crate) fn read_state(
     let mut key = None;
     let mut evidence = Vec::new();
     let mut source_versions = None;
-    let mut attestations = Vec::new();
     for f in doc["fields"].as_array().into_iter().flatten() {
         let (Some(label), Some(value)) = (f["label"].as_str(), f["value"].as_str()) else {
             continue;
@@ -332,7 +321,6 @@ pub(crate) fn read_state(
             RECEIPT_FIELD => receipt = serde_json::from_str::<Receipt>(value).ok(),
             KEY_FIELD if !value.is_empty() => key = Some(Zeroizing::new(value.to_string())),
             SOURCE_VERSIONS_FIELD => source_versions = Some(value.to_string()),
-            ATTESTATIONS_FIELD => attestations = decode_attestations(value),
             name => {
                 if let Some(e) = decode_evidence(name, value) {
                     evidence.push(e);
@@ -346,7 +334,6 @@ pub(crate) fn read_state(
         key,
         evidence,
         source_versions,
-        attestations,
         raw,
     }))
 }
@@ -496,11 +483,24 @@ pub fn record(
                 unread |= !values.contains_key(&b.source.field);
                 continue;
             };
+            let fingerprint = hmac_hex(key.as_bytes(), value.expose().as_bytes());
+            // #201: a name this sync did not write keeps a person's attestation while its
+            // line still says the same version and value; a write records ordinary evidence.
+            let attested_at = evidence
+                .get(&b.name)
+                .filter(|e| {
+                    !written.contains(&b.name)
+                        && e.store_version == version
+                        && e.fingerprint == fingerprint
+                        && e.source == b.source
+                })
+                .and_then(|e| e.attested_at.clone());
             let line = Evidence {
                 name: b.name.clone(),
                 store_version: version,
-                fingerprint: hmac_hex(key.as_bytes(), value.expose().as_bytes()),
+                fingerprint,
                 source: b.source.clone(),
+                attested_at,
             };
             // A store version the evidence line cannot hold (empty, or with `|`) is never
             // recorded: the name stays unconfirmed, so no revision vouches for it.
@@ -519,10 +519,12 @@ pub fn record(
                 unrecordable.join(", ")
             ));
         }
-        // #201: an attestation holds while its name's evidence line keeps the attested store
-        // version; a write by this sync replaces it with ordinary evidence.
-        let attestations = still_attested(&state.attestations, &evidence, written);
-        let attested: Vec<String> = attestations.iter().map(|a| a.name.clone()).collect();
+        // #201: the names whose evidence is still a person's attestation (sorted).
+        let attested: Vec<String> = evidence
+            .values()
+            .filter(|e| e.attested())
+            .map(|e| e.name.clone())
+            .collect();
         let evidence: Vec<Evidence> = evidence.into_values().collect();
         let this_scope = scope(fleet, env_name, target, &product, &account)?;
         let receipt = if why.is_empty() {
@@ -563,19 +565,9 @@ pub fn record(
         let changed = state.key.is_none()
             || lines(&state.evidence) != lines(&evidence)
             || kept.map(|k| &k.revision) != state.receipt.as_ref().map(|k| &k.revision)
-            || write_versions != state.source_versions.as_deref()
-            || attestations != state.attestations;
+            || write_versions != state.source_versions.as_deref();
         if changed {
-            write_state(
-                r,
-                env,
-                &state,
-                kept,
-                &key,
-                &evidence,
-                write_versions,
-                &attestations,
-            )?;
+            write_state(r, env, &state, kept, &key, &evidence, write_versions)?;
         }
         match receipt {
             Some(rec) => out.minted.push(rec),
@@ -588,29 +580,6 @@ pub fn record(
     Ok(out)
 }
 
-/// The attestations of `held` that still vouch for their name (#201): its evidence line in
-/// `evidence` keeps the attested store version, and this sync did not write it. Sorted by
-/// name.
-fn still_attested(
-    held: &[Attestation],
-    evidence: &BTreeMap<String, Evidence>,
-    written: &BTreeSet<String>,
-) -> Vec<Attestation> {
-    let mut out: Vec<Attestation> = held
-        .iter()
-        .filter(|a| !written.contains(&a.name))
-        .filter(|a| {
-            evidence
-                .get(&a.name)
-                .is_some_and(|e| e.store_version == a.store_version)
-        })
-        .cloned()
-        .collect();
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    out.dedup_by(|a, b| a.name == b.name);
-    out
-}
-
 /// One name a person attests on a placement (#201): its binding, the target's current
 /// store version, and the keyed fingerprint of its 1Password value under the placement's
 /// evidence key. Debug prints the name only.
@@ -619,6 +588,25 @@ pub(crate) struct Attest {
     pub(crate) binding: BindingRef,
     pub(crate) store_version: String,
     pub(crate) fingerprint: String,
+    /// [`key_check`] of the evidence key the fingerprint was made under: a key replaced
+    /// since makes the attestation stale.
+    pub(crate) key_check: String,
+}
+
+/// A keyed check of an evidence key (#201): equal for the same key, and reveals nothing of it.
+pub(crate) fn key_check(key: &str) -> String {
+    hmac_hex(key.as_bytes(), b"opv-attest-key-check")
+}
+
+/// What [`record_attestation`] found in the freshly read delivery item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AttestWrite {
+    /// These names were recorded now (empty: each was already attested as planned, so a
+    /// retry of the same plan records nothing again).
+    Recorded(Vec<String>),
+    /// The item changed since the plan was made (its evidence key, or a line for a name):
+    /// the plan is stale and nothing was written.
+    Changed,
 }
 
 impl std::fmt::Debug for Attest {
@@ -657,10 +645,13 @@ pub(crate) fn values_of(
 }
 
 /// Record a person's attestation of `names` on `product`'s placement on target `target`
-/// (#201): each name's evidence line at the store version given, with the fingerprint
-/// given, and the attestation beside it, at `at`. The receipt is kept as it is: the next
-/// sync proves the names through these lines and mints the revision. Nothing is written
-/// to the target. Only the placement's own delivery item is read and written.
+/// (#201): each name's evidence line, tagged `a1` with `at`, at the store version and
+/// fingerprint the plan computed. The item is read fresh first and checked again: the same
+/// evidence key, and for each name either no line (it is recorded) or the very line this
+/// plan records (already attested: skipped, so a retry succeeds). Anything else is
+/// [`AttestWrite::Changed`] and nothing is written. The receipt is kept as it is: the next
+/// sync proves the names through these lines and mints the revision. Nothing is written to
+/// the target; only the placement's own delivery item is read and written.
 pub(crate) fn record_attestation(
     fleet: &Fleet,
     env_name: &str,
@@ -669,34 +660,43 @@ pub(crate) fn record_attestation(
     names: &[Attest],
     at: &str,
     r: &dyn CommandRunner,
-) -> Result<(), Error> {
+) -> Result<AttestWrite, Error> {
     let env = fleet.environment(env_name)?;
-    let state = read_state(fleet, env_name, target, product, r)?.ok_or_else(|| {
-        Error::from(Cause::Bug {
-            site: "attest: a delivery item checked before the write was gone at it",
-        })
-    })?;
-    let key = state.key.clone().ok_or_else(|| {
-        Error::from(Cause::Bug {
-            site: "attest: an evidence key checked before the write was gone at it",
-        })
-    })?;
+    let Some(state) = read_state(fleet, env_name, target, product, r)? else {
+        return Ok(AttestWrite::Changed);
+    };
+    let Some(key) = state.key.clone() else {
+        return Ok(AttestWrite::Changed);
+    };
+    let check = key_check(&key);
     let mut evidence: BTreeMap<String, Evidence> = state
         .evidence
         .iter()
         .map(|e| (e.name.clone(), e.clone()))
         .collect();
-    let mut attestations: BTreeMap<String, Attestation> = state
-        .attestations
-        .iter()
-        .map(|a| (a.name.clone(), a.clone()))
-        .collect();
+    let mut recorded = Vec::new();
     for n in names {
+        if n.key_check != check {
+            return Ok(AttestWrite::Changed);
+        }
+        match evidence.get(&n.binding.name) {
+            None => {}
+            Some(e)
+                if e.attested()
+                    && e.store_version == n.store_version
+                    && e.fingerprint == n.fingerprint
+                    && e.source == n.binding.source =>
+            {
+                continue;
+            }
+            Some(_) => return Ok(AttestWrite::Changed),
+        }
         let line = Evidence {
             name: n.binding.name.clone(),
             store_version: n.store_version.clone(),
             fingerprint: n.fingerprint.clone(),
             source: n.binding.source.clone(),
+            attested_at: Some(at.to_string()),
         };
         if encode_evidence(&line).is_none() {
             return Err(Cause::Bug {
@@ -704,18 +704,13 @@ pub(crate) fn record_attestation(
             }
             .into());
         }
+        recorded.push(line.name.clone());
         evidence.insert(line.name.clone(), line);
-        attestations.insert(
-            n.binding.name.clone(),
-            Attestation {
-                name: n.binding.name.clone(),
-                store_version: n.store_version.clone(),
-                at: at.to_string(),
-            },
-        );
+    }
+    if recorded.is_empty() {
+        return Ok(AttestWrite::Recorded(recorded));
     }
     let evidence: Vec<Evidence> = evidence.into_values().collect();
-    let attestations: Vec<Attestation> = attestations.into_values().collect();
     write_state(
         r,
         env,
@@ -724,8 +719,8 @@ pub(crate) fn record_attestation(
         &key,
         &evidence,
         state.source_versions.as_deref(),
-        &attestations,
-    )
+    )?;
+    Ok(AttestWrite::Recorded(recorded))
 }
 
 /// The encoded evidence lines, sorted: what two readings of an item compare by.
@@ -749,9 +744,8 @@ fn versions_text(set: &[BindingRef], source_versions: &BTreeMap<String, u64>) ->
 }
 
 /// Rewrite the placement's delivery item `state`: its notes kept, then the receipt (when
-/// one was ever minted), the recorded source versions (C2), the key, one concealed
-/// evidence field per name and a person's attestations (#201), when there are any.
-#[allow(clippy::too_many_arguments)]
+/// one was ever minted), the recorded source versions (C2), the key and one concealed
+/// evidence field per name (a person's attestation is its own `a1` line, #201).
 fn write_state(
     r: &dyn CommandRunner,
     env: &crate::domain::Environment,
@@ -760,7 +754,6 @@ fn write_state(
     key: &str,
     evidence: &[Evidence],
     source_versions: Option<&str>,
-    attestations: &[Attestation],
 ) -> Result<(), Error> {
     let mut doc: Value = serde_json::from_slice(&state.raw).map_err(|_| {
         Error::from(Cause::Bug {
@@ -800,10 +793,6 @@ fn write_state(
             })
         })?;
         fields.push(json!({"id": e.name, "label": e.name, "type": "CONCEALED", "value": line}));
-    }
-    if !attestations.is_empty() {
-        fields.push(json!({"id": "attestations", "label": ATTESTATIONS_FIELD,
-                           "type": "CONCEALED", "value": encode_attestations(attestations)}));
     }
     doc["fields"] = Value::Array(fields);
     doc.as_object_mut().map(|o| o.remove("sections"));
@@ -1213,10 +1202,11 @@ fn report(
         }
         // #201: a name the revision counts on a person's attestation is said so, whatever
         // its state: the ledger proves it unchanged since, not that it was right.
-        for name in &v.attested {
+        for n in v.names.iter().filter(|n| n.attested) {
             writeln!(
                 out,
-                "  {name:<32} attested by a person, not proven (docs/attestation.md)"
+                "  {:<32} attested by a person, not proven (docs/attestation.md)",
+                n.name
             )
             .map_err(write_err)?;
         }

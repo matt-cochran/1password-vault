@@ -986,6 +986,8 @@ pub enum AttestRefusal {
     NotHeld,
     /// The ledger already proves the key identical at the target's version.
     Proven,
+    /// A person's attestation of the key is already recorded at the target's version.
+    AlreadyAttested,
     /// The ledger shows the target holds another value than 1Password at this version.
     Differs,
     /// The target lists another version than the one opv recorded: changed outside opv.
@@ -1013,6 +1015,9 @@ impl AttestRefusal {
             }
             AttestRefusal::Proven => {
                 "its delivery evidence already proves the target holds the 1Password value"
+            }
+            AttestRefusal::AlreadyAttested => {
+                "a person's attestation of it is already recorded at the target's version"
             }
             AttestRefusal::Differs => {
                 "its delivery evidence shows the target holds another value than 1Password"

@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `opv apply --attest <env>:<target>:<product/KEY>` records a person's attestation that a staged target (Fly) already holds 1Password's value of an immutable key that every sync holds and so can never prove. It writes the key's delivery evidence at the target's current version and never writes the target, so the product can get a delivery revision again; receipts and `opv delivery verify` list such names as `attested`, not proven. Proposed with an `attest` intent (`opv propose --intent <file>` or MCP `opv_propose`); applying needs a person's own terminal and refuses CI and agent mode. See [Attesting a held immutable key](docs/attestation.md) (#201).
+- `opv apply --attest <env>:<target>:<product/KEY>` records a person's attestation that a staged target (Fly) already holds 1Password's value of an immutable key that every sync holds and so can never prove. It writes the key's delivery evidence at the target's current version and never writes the target, so the product can get a delivery revision again; receipts, `plan`, `status`, `sync` and `opv delivery verify` mark such names `attested`, not proven, and an opv before 0.12.3 drops an attested line rather than read it as proof. Proposed with an `attest` intent (`opv propose --intent <file>` or MCP `opv_propose`); applying needs a person's own terminal and refuses CI and agent mode. See [Attesting a held immutable key](docs/attestation.md) (#201).
 
 ### Fixed
 

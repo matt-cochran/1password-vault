@@ -54,6 +54,7 @@ fn evidence(name: &str) -> Evidence {
         store_version: VERSION.into(),
         fingerprint: FP.into(),
         source: source(),
+        attested_at: None,
     }
 }
 
@@ -639,4 +640,13 @@ fn evidence_debug_never_shows_the_store_version() {
 fn evidence_debug_never_shows_the_fingerprint() {
     let text = format!("{:?}", evidence(NAME));
     assert!(!text.contains(FP));
+}
+
+/// #201: a person's attestation is its own `a1` line, and reads back as attested.
+#[test]
+fn an_attested_evidence_line_reads_back_as_attested() {
+    let mut e = evidence(NAME);
+    e.attested_at = Some("2026-10-19T12:00:00Z".into());
+    let line = encode_evidence(&e).unwrap();
+    assert_eq!(decode_evidence(NAME, &line), Some(e));
 }

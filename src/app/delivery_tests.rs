@@ -34,6 +34,8 @@ struct World {
     fly: RefCell<BTreeMap<String, Secrets>>,
     /// The next `secrets import` fails before it reaches Fly.
     fail_import: std::cell::Cell<bool>,
+    /// Every 1Password write that names this item ID fails (#201: a partial apply).
+    fail_op_write_on: RefCell<Option<String>>,
 }
 
 /// The value of `--app` in a flyctl call.
@@ -119,6 +121,15 @@ impl CommandRunner for World {
     }
 
     fn write(&self, call: &Call<'_>) -> io::Result<Outcome> {
+        let failing = self.fail_op_write_on.borrow().clone();
+        if call.program == "op"
+            && failing.is_some_and(|id| call.args.iter().any(|a| a.contains(id.as_str())))
+        {
+            return Ok(Outcome::Unknown {
+                reason: "failed-write",
+                status: Some(1),
+            });
+        }
         if call.program == "op" || call.program == "git" {
             return self.op.write(call);
         }
@@ -239,6 +250,7 @@ fn world() -> (World, Fleet) {
         op,
         fly: RefCell::default(),
         fail_import: std::cell::Cell::new(false),
+        fail_op_write_on: RefCell::default(),
     };
     (w, fleet)
 }
@@ -928,6 +940,7 @@ fn two_targets() -> (World, Fleet) {
         op,
         fly: RefCell::default(),
         fail_import: std::cell::Cell::new(false),
+        fail_op_write_on: RefCell::default(),
     };
     (w, fleet)
 }
@@ -950,6 +963,7 @@ fn no_secrets() -> (World, Fleet) {
         op,
         fly: RefCell::default(),
         fail_import: std::cell::Cell::new(false),
+        fail_op_write_on: RefCell::default(),
     };
     (w, fleet)
 }

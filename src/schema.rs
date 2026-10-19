@@ -517,7 +517,7 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
                 "created_section", "renamed_section", "created_field", "made_concealed",
                 "renamed_field", "moved_field", "kept_duplicate", "normalized_value"
             ],
-            "text_on_target": ["new", "same", "changed", "unknown", "pending", "held", "rotate", "extra", "drift", "n/a"],
+            "text_on_target": ["new", "same", "changed", "unknown", "pending", "held", "attested", "rotate", "extra", "drift", "n/a"],
         },
         "documents": documents(),
     })
@@ -686,7 +686,8 @@ fn documents() -> Value {
         "drift?",
         "chain?",
         "open_url?",
-        "shared_from?"
+        "shared_from?",
+        "attested? (true: present only through a person's attestation, not proven; docs/attestation.md)"
     ]);
     let key_ref = json!(["target", "product", "key", "target_name"]);
     json!({
@@ -716,7 +717,7 @@ fn documents() -> Value {
             "environment", "product", "targets: [{target, provider, deployed, revision}]",
             "written", "unchanged", "held", "deployed", "deploy_reason", "deployed_names",
             "pending", "pruned", "kept", "skipped", "written_names", "plan_id",
-            "delivery? ({minted: [{target, product, revision}], not_minted: [{target, product, reason}]})"
+            "delivery? ({minted: [{target, product, revision, attested?}], not_minted: [{target, product, reason}]})"
         ],
         "doctor": ["config_source", "checks: [{name, status, detail, next, do}]"],
         "explain": [
@@ -760,7 +761,7 @@ fn documents() -> Value {
         "account list": "{discovery (ok|unavailable|op_missing|credential: a service account or Connect decides the account), platform, cli_accounts_only, selected ({account_id, by (flag|env|pointer|manifest|only), source} or null), accounts [{account_id, user_id, email, address, shorthand, source, signed_in (true|false|null), selected}], findings [{code (no_accounts|selected_account_absent|account_ambiguous|selected_signed_out|discovery_unavailable|op_missing), human_required, message, next}], next}: account metadata only, never a credential, session or field value",
         "account use": "{account_id, path}: the .opv file written",
         "config export": "with <ENV>: the config-kind values, always {product: {KEY: value}}, every product (source-only products and products with no config value left out) or only --product's; with --json and no <ENV>: the configuration itself (IDs, names, kinds, rules); no frame on success",
-        "delivery verify": "{environment, placements: [{product, target, revision, state, reason, names: [{name, state}], deployed, receipt_revision?}]}: every placement of the product, each with its target and state; --target narrows to one placement; a receipt kept from sync --receipt must be the current delivery",
+        "delivery verify": "{environment, placements: [{product, target, revision, state, reason, names: [{name, state, attested?}], attested?, deployed, receipt_revision?}]}: every placement of the product, each with its target and state; --target narrows to one placement; a receipt kept from sync --receipt must be the current delivery; attested (a name's flag, the placement's list from its receipt) marks a name counted on a person's attestation, not proven (docs/attestation.md)",
         "changed": "{environment, changed, placements: [{product, target, state (unchanged|changed|no_record), items?: [{item_id, recorded, current?}]}], next, do}: each placement's recorded source versions against the item's current version (item IDs and version numbers only, never a value); exit 10 when something changed, with ok true",
         "schema": "this document",
         "skill install": "{written: [{target, path}], kept: [{target, path, reason}]}",

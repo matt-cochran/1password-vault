@@ -24,7 +24,7 @@ use std::io::Write;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use super::delivery::{self, Attest};
+use super::delivery::{self, Attest, AttestWrite};
 use super::signin::{self, Reach};
 use super::write_err;
 use crate::cause::{
@@ -57,6 +57,10 @@ pub struct AttestedName {
     /// A keyed tag of the target's current version (HMAC under the placement's evidence
     /// key, 12 hex digits): it changes when the version does, and reveals nothing of it.
     pub version_tag: String,
+    /// True when this very attestation is already recorded (a retry of the same plan after
+    /// a failure): applying skips it. Absent otherwise.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub already_attested: bool,
 }
 
 /// What `opv apply --attest` would record on one target (#201).
@@ -86,6 +90,8 @@ pub struct Attested {
 struct Eligible {
     product: String,
     attest: Attest,
+    /// Already recorded as this plan records it: skipped.
+    already: bool,
 }
 
 /// The `product/KEY` labels as given, split; a label with no `/` is `usage`.
@@ -239,8 +245,11 @@ fn survey(
             .rows
             .iter()
             .find(|row| row.product == *p && row.key == *k);
+        // Present through a person's attestation: this plan's own record when the value and
+        // version are unchanged (a retry skips it); proven by opv's own evidence otherwise.
+        let already = plan.attested.iter().any(|(ap, ak)| ap == p && ak == k);
         match row.map(|row| row.target) {
-            Some(TargetState::Present) => return Err(no(AttestRefusal::Proven)),
+            Some(TargetState::Present) if !already => return Err(no(AttestRefusal::Proven)),
             Some(TargetState::WouldChange) => return Err(no(AttestRefusal::Differs)),
             _ => {}
         }
@@ -291,6 +300,7 @@ fn survey(
                 name: name.clone(),
                 version: (!hides_versions).then(|| version.clone()),
                 version_tag,
+                already_attested: already,
             },
             bind,
         ));
@@ -303,8 +313,21 @@ fn survey(
                 },
                 store_version: version,
                 fingerprint,
+                key_check: delivery::key_check(key),
             },
+            already,
         });
+    }
+    // Nothing left to record: every name is already attested as asked.
+    if eligible.iter().all(|e| e.already) {
+        let (p, k) = &wanted[0];
+        return Err(refused(
+            p,
+            k,
+            env_name,
+            target,
+            AttestRefusal::AlreadyAttested,
+        ));
     }
     let plan_id = plan_id(env_name, target, &names);
     Ok((
@@ -366,8 +389,13 @@ pub fn describe(p: &AttestProposal) -> Vec<String> {
                 n.version_tag
             ),
         };
+        let already = if n.already_attested {
+            " (already attested as planned; skipped)"
+        } else {
+            ""
+        };
         lines.push(format!(
-            "  {} as {} at {version}",
+            "  {} as {} at {version}{already}",
             key_label(&n.product, &n.key),
             n.name
         ));
@@ -378,6 +406,20 @@ pub fn describe(p: &AttestProposal) -> Vec<String> {
     );
     lines.push(format!("plan_id: {}", p.plan_id));
     lines
+}
+
+/// After a failure part way through an apply: the names recorded before it, so the person
+/// knows what stands (applying the same plan again skips them).
+fn say_recorded(out: &mut dyn Write, recorded: &[String]) -> Result<(), Error> {
+    let line = if recorded.is_empty() {
+        "recorded before the failure: nothing".to_string()
+    } else {
+        format!(
+            "recorded before the failure: {}; applying the same plan again skips them",
+            recorded.join(", ")
+        )
+    };
+    writeln!(out, "{line}").map_err(write_err)
 }
 
 /// `opv apply <plan_id> --attest …` for `p`: the person's step after a proposal.
@@ -475,8 +517,42 @@ pub fn apply(
             .or_default()
             .push(e.attest.clone());
     }
+    // Each placement is one write of its own item. A failure part way names what was
+    // recorded before it; the same plan then applies again, skipping what is recorded.
+    let label_of = |name: &str| {
+        proposal
+            .names
+            .iter()
+            .find(|n| n.name == name)
+            .map(|n| key_label(&n.product, &n.key))
+            .unwrap_or_else(|| name.to_string())
+    };
+    let mut recorded: Vec<String> = Vec::new();
     for (product, names) in &by_product {
-        delivery::record_attestation(fleet, env_name, target, product, names, &at, r)?;
+        let wrote = delivery::record_attestation(fleet, env_name, target, product, names, &at, r);
+        match wrote {
+            Ok(AttestWrite::Recorded(done)) => {
+                recorded.extend(done.iter().map(|n| label_of(n)));
+            }
+            Ok(AttestWrite::Changed) => {
+                say_recorded(out, &recorded)?;
+                // L4: the item changed since the plan was made: the plan is stale.
+                let new = match survey(fleet, env_name, target, keys, r) {
+                    Ok((p, _)) => p.plan_id,
+                    Err(e) => return Err(e),
+                };
+                return Err(Cause::PlanChanged {
+                    old: PlanId::new(plan_id.unwrap_or(&proposal.plan_id)),
+                    new: PlanId::new(&new),
+                    scope,
+                }
+                .into());
+            }
+            Err(e) => {
+                say_recorded(out, &recorded)?;
+                return Err(e);
+            }
+        }
     }
     Ok(Attested {
         plan_id: proposal.plan_id,

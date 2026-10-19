@@ -91,11 +91,15 @@ The receipt (schema `opv.delivery/1`):
 
 An optional `attested: [names]` (#201, 0.12.3) lists the names of `bindings` the revision
 counts on a person's attestation rather than a write or a proof; it is omitted when empty,
-so the schema id is unchanged and an older receipt reads as attesting nothing. See
+so the schema id is unchanged and an older receipt reads as attesting nothing. A consumer
+that ignores fields it does not know reads an attested name as proven: one that cares must
+read `attested`. The private evidence of an attested name is its own line,
+`a1|<version>|<fingerprint>|<item>|<field>|<attested at>`, which an opv before 0.12.3 does not
+read and drops on rewrite (the name is then held again, with no new revision). See
 [attestation](../attestation.md).
 
 `verify` returns `{revision, state: verified|changed|unverifiable|not_delivered,
-names: [{name, state, reason}], attested?, deployed}`. The two other documents agents use advertise
+names: [{name, state, reason, attested?}], attested?, deployed}`. The two other documents agents use advertise
 the capability:
 - `opv schema`: `capabilities: ["delivery_receipts/1"]`, the installed-version check;
 - `opv guide agent`.

@@ -1239,6 +1239,21 @@ fn attest_refused(
                 ],
             )),
         ),
+        AttestRefusal::AlreadyAttested => plan(
+            inspect(format!(
+                "nothing to attest: {pk} is already attested (attested, not proven)"
+            )),
+            Next::Check(cmd(
+                &["delivery", "verify"],
+                &[
+                    env.as_str(),
+                    "--target",
+                    target.as_str(),
+                    "--product",
+                    product.as_str(),
+                ],
+            )),
+        ),
         AttestRefusal::Differs | AttestRefusal::Drifted => plan(
             inspect(format!(
                 "rotate {pk} so opv writes 1Password's value; never attest a value known to differ"

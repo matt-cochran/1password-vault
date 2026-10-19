@@ -402,6 +402,28 @@ pub(crate) fn plan_item_with(
             .map(|e| e.name.clone())
             .filter(|n| drifted.contains(n) && managed.contains(n))
             .collect();
+        // #201: a name proven only by a person's attestation is `present`, but says so.
+        if let Some(tc) = fleet
+            .environments
+            .get(env_name)
+            .and_then(|e| e.targets.get(t))
+        {
+            let attested: Vec<(String, String)> = p
+                .rows
+                .iter()
+                .filter(|row| row.target == TargetState::Present)
+                .filter(|row| {
+                    let name = tc.config.env_name(&row.product, &row.key);
+                    on_target
+                        .iter()
+                        .find(|e| e.name == name)
+                        .and_then(|e| e.version.as_deref())
+                        .is_some_and(|v| ledgers.iter().any(|l| l.attested(&name, v)))
+                })
+                .map(|row| (row.product.clone(), row.key.clone()))
+                .collect();
+            p.attested = attested;
+        }
     }
     if let Some(e) = failed.into_inner() {
         return Err(e);
@@ -722,6 +744,10 @@ fn json_rows(
                 open_url: link.filter(|_| is_blocking(r)).map(str::to_string),
                 target: Some(part.target.to_string()),
                 rotate,
+                attested: plan
+                    .attested
+                    .iter()
+                    .any(|(p, k)| *p == r.product && *k == r.key),
                 via,
                 delivered_as,
                 form,
@@ -859,6 +885,10 @@ pub(crate) struct JsonRow {
     /// otherwise, so a plan without rotation is unchanged.
     #[serde(skip_serializing_if = "is_false")]
     rotate: bool,
+    /// True when the row is `present` only through a person's attestation (#201): attested,
+    /// not proven. Absent otherwise.
+    #[serde(skip_serializing_if = "is_false")]
+    attested: bool,
 }
 
 /// Serialize a `false` boolean field only when true (`rotate`).
@@ -898,6 +928,7 @@ impl JsonRow {
             open_url: None,
             shared_from: json_source(r),
             rotate: false,
+            attested: false,
         }
     }
 }
@@ -1203,6 +1234,8 @@ ON TARGET: the key on its deployment target (the TARGET column names the target)
               sync writes it again (a staging target stages it and compares digests)
   pending     written, not yet live; the next sync --deploy rolls it out
   held        immutable and already set; kept as it is (replace with --rotate)
+  attested    immutable and held; counted as delivered only because a person attested it,
+              not proven (docs/attestation.md)
   rotate      an immutable key this plan replaces because --rotate named it
   extra       on the target but not wanted in this environment; not pruned without --prune
   drift       the running app is bound to something other than what opv last wrote

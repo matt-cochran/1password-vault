@@ -79,6 +79,7 @@ reason) a key that:
 - is on a target whose values opv reads and compares exactly (`compared_directly`);
 - sync does not hold back, because its 1Password value is not ready (`not_held`);
 - the ledger already proves (`proven`);
+- is already attested at the target's current version (`already_attested`);
 - the ledger shows differs from 1Password (`differs`), or that changed on the target outside
   opv since opv recorded it (`drifted`). Rotate these: never attest a value known to differ;
 - is on a placement that no sync has recorded yet, with no delivery item or evidence key
@@ -95,12 +96,21 @@ opv apply ap-0123456789abcdef --attest staging:web:api/JWT_SECRET
 - it recomputes the proposal;
 - it refuses the plan id if anything changed since (`stale_plan`): the target's version of a
   name, or its 1Password value;
-- it shows the names, asks once, and records each name's evidence line and attestation in its
-  placement's delivery item in the state vault;
+- it shows the names, asks once, and records each name's evidence line in its placement's
+  delivery item in the state vault, tagged as an attestation (below);
+- it reads each delivery item again just before writing it, and refuses the plan as stale
+  (`stale_plan`) if the item changed since the proposal (another evidence key, or a line
+  recorded for the name meanwhile);
 - without a plan id it shows the attestation it would record and asks before recording it.
 
 Nothing is written to the target. `--attest` takes `<env>:<target>:<product/KEY>`, can be
 repeated, and names one environment and target per run.
+
+Each product's delivery item is one write. If a write fails part way (for example, the
+second of two products), `opv apply` prints the names it recorded before the failure, and
+running the same `opv apply <plan_id> --attest …` again succeeds: names already attested
+as the plan says are skipped. A plan whose names are all attested already is refused
+(`already_attested`).
 
 Who can record one:
 
@@ -119,22 +129,40 @@ opv sync staging --target web
 The ledger now proves the attested names identical at the target's version, so the
 product's revision is minted.
 
-## How it appears in receipts
+## How it is recorded
 
-The receipt (schema `opv.delivery/1`, unchanged) has an optional field `attested`: the names
-of `bindings` that the revision counts on an attestation, not on a write or a proof.
+An attested name's evidence line is the ledger line sync writes, under its own tag:
 
-```json
-{"schema": "opv.delivery/1", "revision": "drv-…", "bindings": [ … ],
- "attested": ["FLEET__API__JWT_SECRET"], "…": "…"}
-```
+- opv's own evidence: `v1|<version>|<fingerprint>|<item>|<field>`;
+- a person's attestation: `a1|<version>|<fingerprint>|<item>|<field>|<attested at>`.
 
-The field is left out when no name is attested, so every receipt without it reads as
-attesting nothing. The same list shows up in three more places:
+opv 0.12.3 and later read both: the ledger judges an `a1` line exactly like a `v1` line (the
+target still holds that version of 1Password's value), and reports the name as attested
+everywhere. An opv before 0.12.3 does not read an `a1` line. When it rewrites the delivery
+item it drops the line, so the key goes back to held and the product gets no new revision:
+an older opv never counts an attested name as proven.
 
-- `opv sync` prints `delivery: api revision drv-… (attested, not proven: FLEET__API__JWT_SECRET)`;
-- `opv delivery verify --json` gives each placement an `attested` list;
-- the text report of `opv delivery verify` adds `attested by a person, not proven` under the
+## How it appears
+
+Everywhere an attested name is shown, it says so:
+
+- the receipt (schema `opv.delivery/1`, unchanged) has an optional field `attested`: the names
+  of `bindings` that the revision counts on an attestation, not on a write or a proof;
+
+  ```json
+  {"schema": "opv.delivery/1", "revision": "drv-…", "bindings": [ … ],
+   "attested": ["FLEET__API__JWT_SECRET"], "…": "…"}
+  ```
+
+  The field is left out when no name is attested. A receipt consumer that ignores fields it
+  does not know (as JSON readers usually do) reads an attested name as proven: check
+  `attested` wherever the difference matters;
+- `opv sync` prints `delivery: api revision drv-… (attested, not proven: FLEET__API__JWT_SECRET)`,
+  and its `--json` gives each minted revision an `attested` list;
+- `opv plan` and `opv status` show `attested` in the ON TARGET column instead of `held` or
+  `same`, and their `--json` rows add `"attested": true` beside `"target_state": "present"`;
+- `opv delivery verify --json` gives each name an `"attested": true` and each placement the
+  receipt's `attested` list; its text report adds `attested by a person, not proven` under the
   placement.
 
 `opv ready --gate` passes on an attested key. The owner accepted attestation as delivery, and
@@ -143,13 +171,15 @@ findings do not list attested names: run `opv delivery verify <env>` to see them
 
 ## When it ends
 
-An attestation lasts while its evidence line keeps the version it was recorded at.
+An attestation lasts while its `a1` line keeps the version and value it was recorded at.
 
-- **A sync writes the name** (`--rotate`): the write records ordinary evidence and the
-  attestation is dropped. The next revision no longer lists the name as attested.
+- **A sync writes the name** (`--rotate`): the write records an ordinary `v1` line and the
+  next revision no longer lists the name as attested.
 - **The target's version changes outside opv**: the name shows as drifted, and the attestation
   no longer vouches for anything.
+- **1Password's value changes**: the ledger shows the target holds another value; rotate it.
+- **An opv before 0.12.3 rewrites the delivery item**: it drops the `a1` line (above), and the
+  key is held again.
 
-An opv older than 0.12.3 does not read the `attestations` field. When it rewrites the
-delivery item it drops the field, and the evidence line is then indistinguishable from a
-proven one.
+Who attested is not recorded in the line; 1Password's own item history shows who edited the
+delivery item, and when.
