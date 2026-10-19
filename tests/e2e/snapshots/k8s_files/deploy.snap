@@ -31,7 +31,7 @@ prod/k8s: chain: web/LOG_LEVEL (E2E__WEB__LOG_LEVEL) → configmap opv-e2e--web-
 prod/k8s: chain: web/OTEL_RESOURCE (E2E__WEB__OTEL_RESOURCE) → configmap opv-e2e--web--otel-resource-<id> → file /run/secrets/web/otel/resource
 prod/k8s: chain: web/TLS_CERTIFICATE (E2E__WEB__TLS_CERTIFICATE) → secret opv-e2e--web--tls-certificate-<id> → file /run/secrets/web/tls/certificate
 prod/k8s: chain: web/TLS_PRIVATE_KEY (E2E__WEB__TLS_PRIVATE_KEY) → secret opv-e2e--web--tls-private-key-<id> → file /run/secrets/web/tls/private-key
-prod/k8s: Kubernetes: last changed by opv 0.12.0 at <time> (plan <plan>)
+prod/k8s: Kubernetes: last changed by opv 0.12.1 at <time> (plan <plan>)
 
 ## stderr
 using <SCENARIO>/project/secrets.toml

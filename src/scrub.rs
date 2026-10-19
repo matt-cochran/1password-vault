@@ -329,8 +329,18 @@ fn token_patterns() -> &'static [(Regex, String)] {
             // Fly.io macaroon tokens: `FlyV1 fm2_…,fm2_…`, and a bare `fm1_`/`fm2_` one.
             (r(r"\bFlyV1\s+[A-Za-z0-9_+/=,.-]+"), MASK.to_string()),
             (r(r"\bfm[12][a-z]?_[A-Za-z0-9_+/=-]{16,}"), MASK.to_string()),
-            // `Bearer <token>` (also a kubeconfig's bearer token on the wire).
-            (r(r"(?i)\b(bearer)(\s+)[A-Za-z0-9._~+/=-]+"), keep("${1}${2}")),
+            // `Authorization: Bearer <token>` (also a kubeconfig's bearer token on the
+            // wire): a header's value is always a credential, whatever its shape.
+            (
+                r(r#"(?i)\b(authorization["']?\s*[:=]\s*["']?bearer)(\s+)[A-Za-z0-9._~+/=-]+"#),
+                keep("${1}${2}"),
+            ),
+            // A bare `Bearer <token>`: only a token-like word (one with a digit, or at
+            // least 16 characters), so prose such as "a Bearer header" stays readable.
+            (
+                r(r"(?i)\b(bearer)(\s+)(?:[A-Za-z0-9._~+/=-]*[0-9][A-Za-z0-9._~+/=-]*|[A-Za-z0-9._~+/=-]{16,})"),
+                keep("${1}${2}"),
+            ),
             // Kubernetes bootstrap tokens (`abcdef.0123456789abcdef`).
             (r(r"\b[a-z0-9]{6}\.[a-z0-9]{16}\b"), MASK.to_string()),
             // 1Password session variables and service-account tokens.
@@ -876,6 +886,59 @@ mod tests {
             scrub_patterns("Authorization: Bearer abc.def-123"),
             "Authorization: Bearer ********"
         );
+    }
+
+    #[test]
+    fn authorization_bearer_header_is_always_masked() {
+        assert_eq!(
+            scrub_patterns("Authorization: Bearer abc.def"),
+            "Authorization: Bearer ********"
+        );
+    }
+
+    #[test]
+    fn authorization_bearer_in_json_is_masked() {
+        assert_eq!(
+            scrub_patterns(r#"{"Authorization": "Bearer abc"}"#),
+            r#"{"Authorization": "Bearer ********"}"#
+        );
+    }
+
+    #[test]
+    fn bare_bearer_before_a_word_with_a_digit_is_masked() {
+        assert_eq!(
+            scrub_patterns("sent Bearer abc1 ok"),
+            "sent Bearer ******** ok"
+        );
+    }
+
+    #[test]
+    fn bare_bearer_before_a_long_token_is_masked() {
+        assert_eq!(
+            scrub_patterns("sent Bearer abcdefghijklmnop ok"),
+            "sent Bearer ******** ok"
+        );
+    }
+
+    #[test]
+    fn bearer_before_a_plain_word_is_kept() {
+        assert_eq!(scrub_patterns("a Bearer header."), "a Bearer header.");
+    }
+
+    #[test]
+    fn a_bearer_token_in_prose_is_kept() {
+        assert_eq!(scrub_patterns("a Bearer token"), "a Bearer token");
+    }
+
+    #[test]
+    fn the_bearer_of_in_prose_is_kept() {
+        assert_eq!(scrub_patterns("the bearer of news"), "the bearer of news");
+    }
+
+    #[test]
+    fn config_guidance_naming_a_bearer_header_is_unchanged() {
+        let text = "Ask for the URL only, never an OpenRouter key or Bearer header. Staging uses its own vault.";
+        assert_eq!(scrub_patterns(text), text);
     }
 
     #[test]

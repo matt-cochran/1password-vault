@@ -773,10 +773,14 @@ fn propose_doc<R: Accounted>(
             propose_call(&fixed, parses)
         }
     };
-    let res = parsed.and_then(|intent| proposal(project, r, &intent));
+    let res = parsed.and_then(|intent| proposal(project, r, &intent, &call.inv));
     match res {
         Ok(mut doc) => {
-            if let Some(next) = write_next(args) {
+            // A generated configuration's proposal already names its generator route
+            // (#184): never the `--write` that would be refused.
+            if doc.get("generated").is_none()
+                && let Some(next) = write_next(args)
+            {
                 doc["next"] = next;
             }
             call.document(doc.to_string().as_bytes(), Ok(()))
@@ -799,6 +803,7 @@ fn proposal<R: Accounted>(
     project: &std::path::Path,
     r: &R,
     intent: &crate::domain::intent::Intent,
+    inv: &Invocation,
 ) -> Result<Value, Error> {
     use crate::app::propose::{key, setup, target};
     use crate::domain::intent::Intent;
@@ -808,7 +813,7 @@ fn proposal<R: Accounted>(
     };
     match intent {
         Intent::Key { .. } | Intent::Env { .. } | Intent::Retire { .. } | Intent::Target { .. } => {
-            let (text, ids, rules) = contract_for_proposal(project, r)?;
+            let (text, ids, rules, generated) = contract_for_proposal(project, r)?;
             let base = rules.as_ref().and_then(|s| s.contract());
             let proposal = if matches!(intent, Intent::Target { .. }) {
                 target::propose(&text, &ids, base, intent)
@@ -816,7 +821,14 @@ fn proposal<R: Accounted>(
                 key::propose(&text, &ids, base, intent)
             }
             .map_err(proposal_refused)?;
-            to_doc(&proposal).map(unwritten)
+            let mut doc = to_doc(&proposal).map(unwritten)?;
+            // FR-52 (#184): the diff goes into the generator, then the structure: the
+            // same `next` `opv propose` prints on the command line.
+            if let Some(source) = generated {
+                doc["generated"] = json!(true);
+                doc["next"] = crate::app::propose::generated_next(source, &proposal, inv);
+            }
+            Ok(doc)
         }
         Intent::Setup {
             from_item,
@@ -961,6 +973,8 @@ fn structure_proposal<R: Accounted>(
 /// The contract and its bindings as `opv propose` reads them (the configuration's text with
 /// its ids, split), and the committed default-branch contract whose relaxations a proposal
 /// lists first (none readable: `None`).
+/// The last part is the configuration's source when it is generated (FR-52).
+#[allow(clippy::type_complexity)]
 fn contract_for_proposal<R: Accounted>(
     project: &std::path::Path,
     r: &R,
@@ -969,6 +983,7 @@ fn contract_for_proposal<R: Accounted>(
         String,
         crate::config::bindings::Bindings,
         Option<crate::app::rule_source::RuleSource>,
+        Option<crate::cause::ConfigSource>,
     ),
     Error,
 > {
@@ -980,7 +995,8 @@ fn contract_for_proposal<R: Accounted>(
     let (contract, ids) = crate::config::bindings::split(&snap.text);
     let repo = config_store::repo_root(project).unwrap_or(project);
     let rules = crate::app::rule_source::rule_source(r, repo, &working).ok();
-    Ok((contract, ids, rules))
+    let generated = crate::app::bootstrap::is_generated(&snap.text).then(|| found.cause_source());
+    Ok((contract, ids, rules, generated))
 }
 
 /// One line of printable text, short enough to repeat in a re-run.

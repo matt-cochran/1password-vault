@@ -36,7 +36,7 @@ git rm secrets.toml                                     # opv never deletes it f
 
 #### Reading and changing it
 
-- `opv config export` prints the configuration as TOML, the contract with its ids filled in (from `secrets.bindings.toml` or the manifest's `opv-bindings` block); `--json` as JSON. `opv config export <env> --json` still prints that environment's config-kind values.
+- `opv config export` prints the contract as TOML, without its 1Password ids; `--json` as JSON. `--with-ids` fills the ids in from `secrets.bindings.toml` or the manifest's `opv-bindings` block, for debugging only. `opv config export <env> --json` still prints that environment's config-kind values as `{product: {KEY: value}}`, every product's (source-only products left out), or only one with `--product <p>`.
 - `opv config edit` opens `$VISUAL` or `$EDITOR` (default `vi`) on a temporary copy (mode 0600, removed afterwards), validates it, shows the diff and asks once. It saves only when nobody changed the configuration since it was opened; otherwise it refuses and re-opens on the new version. It works on a `secrets.toml` too.
 - `opv config check --file <path>` compares a committed copy with the manifest: the contract block with the file, then the `opv-bindings` block with the file's `secrets.bindings.toml`; exit 2 with a diff when they differ. Teams that want pull-request review keep a copy and run it in CI; 1Password's item history records every change either way.
 

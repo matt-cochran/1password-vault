@@ -116,6 +116,89 @@ fn a_name_both_declared_and_read_is_declared() {
     assert_eq!(state_of(&report, "API_KEY"), Some(NeedState::Declared));
 }
 
+// --- names delivered by a target's template ------------------------------------------------
+
+/// A contract that declares `web/API_KEY` in `prod` and delivers it to a Fly target as
+/// `E2E__WEB__API_KEY`.
+const DELIVERED: &str = "[environments.prod]\n\
+boundaries.web = { vault_id = \"vprod000000000000000000001\", item_id = \"web\" }\n\n\
+[environments.prod.targets.fly]\n\
+fly.app = \"e2e-app-prod\"\n\
+fly.secret_name = \"E2E__{PRODUCT}__{KEY}\"\n\n\
+[products.web]\n\
+boundary = \"web\"\n\n\
+[products.web.keys.API_KEY]\n\
+kind = \"secret\"\n\
+environments = [\"prod\"]\n";
+
+#[test]
+fn a_name_delivered_by_a_target_template_is_declared() {
+    let dir = repo();
+    write(
+        dir.path(),
+        "src/lib.rs",
+        "fn read() { let _ = std::env::var(\"E2E__WEB__API_KEY\"); }\n",
+    );
+    let report = report(dir.path(), DELIVERED);
+    let row = report.rows.iter().find(|r| r.files == ["src/lib.rs:1"]);
+    assert_eq!(
+        row.map(|r| (r.state, r.product.as_deref(), r.name.as_str())),
+        Some((NeedState::Declared, Some("web"), "API_KEY"))
+    );
+}
+
+#[test]
+fn a_key_read_only_by_its_delivered_name_is_observed() {
+    let dir = repo();
+    write(
+        dir.path(),
+        "src/lib.rs",
+        "fn read() { let _ = std::env::var(\"E2E__WEB__API_KEY\"); }\n",
+    );
+    let report = report(dir.path(), DELIVERED);
+    assert!(
+        !report
+            .rows
+            .iter()
+            .any(|r| r.state == NeedState::DeclaredUnobserved)
+    );
+}
+
+#[test]
+fn a_name_matching_no_template_stays_undeclared() {
+    let dir = repo();
+    write(
+        dir.path(),
+        "src/lib.rs",
+        "fn read() { let _ = std::env::var(\"E2E__API__API_KEY\"); }\n",
+    );
+    let report = report(dir.path(), DELIVERED);
+    assert_eq!(
+        state_of(&report, "E2E__API__API_KEY"),
+        Some(NeedState::Undeclared)
+    );
+}
+
+#[test]
+fn the_gate_passes_when_the_default_branch_delivers_the_name() {
+    let dir = repo();
+    write(
+        dir.path(),
+        "src/lib.rs",
+        "fn read() { let _ = std::env::var(\"E2E__WEB__API_KEY\"); }\n",
+    );
+    let current = fleet(DECLARED);
+    let base = fleet(DELIVERED);
+    let report = needs(
+        &runner(),
+        dir.path(),
+        &crate::scan::WorkTree,
+        &current,
+        None,
+    );
+    assert!(gate(&report, Some(&base), &current).is_ok());
+}
+
 // --- ignore annotations --------------------------------------------------------------------
 
 #[test]

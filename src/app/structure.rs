@@ -455,19 +455,32 @@ pub struct Scope {
 /// the manifest's own project), and its account (`OP_ACCOUNT`, else the `.opv` pointer,
 /// else the only account op knows; a manifest's, when it was found in one). No account, or
 /// several and none chosen, is `account_required`: opv never uses op's default for a write.
-pub fn scope(start: &Path, r: &dyn CommandRunner) -> Result<Scope, Error> {
-    scope_as(start, r, &invoked("propose structure"))
+/// A `project` given (`--project`) names the project instead: a file configuration's new
+/// vault titles, or the manifest looked up.
+pub fn scope(start: &Path, r: &dyn CommandRunner, project: Option<&str>) -> Result<Scope, Error> {
+    scope_named(start, r, &invoked("propose structure"), project)
 }
 
 /// [`scope`] for the opv command `command` (an MCP tool names its command itself, L8:
 /// its refusal is the CLI's word for word).
 pub fn scope_as(start: &Path, r: &dyn CommandRunner, command: &str) -> Result<Scope, Error> {
+    scope_named(start, r, command, None)
+}
+
+/// [`scope_as`] with the project name `project` when one is given (`--project`); without
+/// it, the repository's name, else the directory's.
+pub fn scope_named(
+    start: &Path,
+    r: &dyn CommandRunner,
+    command: &str,
+    project: Option<&str>,
+) -> Result<Scope, Error> {
     use crate::config_store;
     let Some(path) = config_store::walk_up(start, "secrets.toml") else {
-        return manifest_scope(start, r, command);
+        return manifest_scope(start, r, command, project);
     };
     let project = config_store::default_project(
-        None,
+        project,
         config_store::git_repo(r).as_deref(),
         path.parent().unwrap_or(start),
     )?;
@@ -493,16 +506,19 @@ fn invoked(default: &str) -> String {
 /// The project and 1Password account of the checkout at `start`, resolved like [`scope`]
 /// but without needing a local `secrets.toml` (a configuration may be kept in 1Password),
 /// for the opv command `command` (an MCP tool names its command itself).
+/// A `project` given (`--project`) is the project name instead.
 pub fn binding_as(
     start: &Path,
     r: &dyn CommandRunner,
     command: &str,
+    project: Option<&str>,
 ) -> Result<(String, String), Error> {
     use crate::config_store;
     let dir = config_store::walk_up(start, "secrets.toml")
         .and_then(|p| p.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| start.to_path_buf());
-    let project = config_store::default_project(None, config_store::git_repo(r).as_deref(), &dir)?;
+    let project =
+        config_store::default_project(project, config_store::git_repo(r).as_deref(), &dir)?;
     let given = config_store::account_env().or_else(|| config_store::pointer_account(start));
     let account = config_store::pick_account(r, given)?.ok_or_else(|| no_account(command))?;
     Ok((project, account))
@@ -512,13 +528,20 @@ pub fn binding_as(
 /// project is its own and whose account is the one it was found in (else chosen as for a
 /// file). With no configuration at all, the lookup's own cause says so (05.02: never
 /// `opv bootstrap`).
-fn manifest_scope(start: &Path, r: &dyn CommandRunner, command: &str) -> Result<Scope, Error> {
+fn manifest_scope(
+    start: &Path,
+    r: &dyn CommandRunner,
+    command: &str,
+    project: Option<&str>,
+) -> Result<Scope, Error> {
     use crate::cause::ConfigSource;
     use crate::config_store::{self, ConfigStore, Found, Request};
     let req = Request {
         start: start.to_path_buf(),
         config: None,
-        project: config_store::project_env(),
+        project: project
+            .map(str::to_string)
+            .or_else(config_store::project_env),
         manifest_only: true,
         account: config_store::account_env(),
     };
