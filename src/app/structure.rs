@@ -606,6 +606,28 @@ pub fn apply_at(
     plan_id: &str,
     authorize: &mut dyn FnMut(&Plan) -> Result<(), Error>,
 ) -> Result<Applied, Error> {
+    apply_on(
+        r,
+        at,
+        project,
+        account,
+        plan_id,
+        crate::host::Host::detect(),
+        authorize,
+    )
+}
+
+/// [`apply_at`] with the person's own-session check judged by `host` (the host the caller
+/// was given, as `opv apply`'s is), never by this process's variables.
+pub fn apply_on(
+    r: &dyn CommandRunner,
+    at: &ConfigAt,
+    project: &str,
+    account: &str,
+    plan_id: &str,
+    host: crate::host::Host,
+    authorize: &mut dyn FnMut(&Plan) -> Result<(), Error>,
+) -> Result<Applied, Error> {
     // C2: an id that is not a structural plan id names no plan at all.
     if !is_plan_id(plan_id) {
         return Err(Cause::PlanUnknown {
@@ -621,7 +643,7 @@ pub fn apply_at(
     }
     // A person's own session first (#157): a signed-out or non-interactive run is refused
     // before anything is authorized or written.
-    super::tidy::require_person(r, "the structural apply")?;
+    super::tidy::require_person_on(r, "the structural apply", host)?;
     authorize(&p)?;
     // Writes may start from here: any failure says what was created, and its step reads
     // what remains (X4, X20), never this apply again.

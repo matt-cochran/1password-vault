@@ -110,7 +110,11 @@ pub(crate) enum Identity {
 /// The identity from the environment and `op whoami` (the existing probe; only its
 /// `user_type` is parsed). A token or CI decides without a call.
 pub(crate) fn identity(r: &dyn CommandRunner) -> Identity {
-    let host = Host::detect();
+    identity_on(r, Host::detect())
+}
+
+/// [`identity`] judged by `host` (the caller's injected host) instead of this process's.
+pub(crate) fn identity_on(r: &dyn CommandRunner, host: Host) -> Identity {
     // A service account, Connect, CI or a run under deploy credentials never tidies.
     if host.op_credential.is_some() || host.ci {
         return Identity::ReadOnly;
@@ -118,7 +122,7 @@ pub(crate) fn identity(r: &dyn CommandRunner) -> Identity {
     if r.deploy_signed_in() {
         return Identity::DeployCredentials;
     }
-    match onepassword::diagnose(r, &Host::detect) {
+    match onepassword::diagnose(r, &|| host) {
         Ok(Session::SignedIn(IdentityType::User)) => Identity::Person,
         Ok(Session::SignedIn(IdentityType::ServiceAccount)) => Identity::ReadOnly,
         // Audit 04.19: a whoami without a user type observed nobody in particular; it is
@@ -145,11 +149,21 @@ fn own_command(what: &str) -> crate::cause::CommandId {
 /// `op whoami` cannot tell, 1Password stays read-only (FR-11, SR-5; requirements FR-23's
 /// `init` acceptance). Nothing is written; the error names `opv login`.
 pub(crate) fn require_person(r: &dyn CommandRunner, what: &str) -> Result<(), Error> {
+    require_person_on(r, what, Host::detect())
+}
+
+/// [`require_person`] judged by `host`: a command given a host (`opv apply`'s person at a
+/// terminal) is refused or let through by that host, never by this process's variables.
+pub(crate) fn require_person_on(
+    r: &dyn CommandRunner,
+    what: &str,
+    host: Host,
+) -> Result<(), Error> {
     use crate::cause::{Cause, NoTerminal, Principal};
-    match identity(r) {
+    match identity_on(r, host) {
         Identity::Person => Ok(()),
         // #157: `opv login` refuses here too, so the step is a person's own terminal.
-        Identity::ReadOnly if Host::detect().ci && Host::detect().op_credential.is_none() => {
+        Identity::ReadOnly if host.ci && host.op_credential.is_none() => {
             Err(Cause::NeedsTerminal {
                 why: NoTerminal::Ci,
             }
@@ -159,7 +173,7 @@ pub(crate) fn require_person(r: &dyn CommandRunner, what: &str) -> Result<(), Er
         // the command in their own session (`own_session_required`, exit 7).
         Identity::ReadOnly => Err(Cause::NeedsOwnSession {
             command: own_command(what),
-            identity: match Host::detect().op_credential {
+            identity: match host.op_credential {
                 Some(c) => Principal::ShellToken {
                     var: crate::cause::VarName::new(c.var()),
                 },
@@ -183,13 +197,11 @@ pub(crate) fn require_person(r: &dyn CommandRunner, what: &str) -> Result<(), Er
             // not a policy refusal: in a person's terminal opv signs them in at op's own
             // prompt and runs the command again, which checks once more that a person is
             // signed in. Elsewhere the step names the project's account.
-            match onepassword::diagnose(r, &Host::detect) {
+            match onepassword::diagnose(r, &|| host) {
                 Ok(Session::NotSignedIn) => return Err(not_signed_in(what)),
                 // #157: no account on this machine is added first (`opv login --add`).
                 Ok(s @ (Session::NoAccount | Session::AccountAbsent(_))) => {
-                    if let Some(e) =
-                        onepassword::session_error(s, &Host::detect(), Some(what), None)
-                    {
+                    if let Some(e) = onepassword::session_error(s, &host, Some(what), None) {
                         return Err(e);
                     }
                 }

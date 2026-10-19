@@ -111,10 +111,23 @@ pub fn run(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
+    run_on(fleet, env_name, keys, r, crate::host::Host::detect(), out)
+}
+
+/// [`run`] with the person's own-session check judged by `host` (the host `opv apply` was
+/// given), never by this process's variables.
+pub fn run_on(
+    fleet: &crate::domain::Fleet,
+    env_name: &str,
+    keys: &[String],
+    r: &dyn CommandRunner,
+    host: crate::host::Host,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
     let env = fleet.environment(env_name)?;
     // Everything is checked before anything is written.
     let chosen = plan(fleet, env_name, keys)?;
-    super::tidy::require_person(r, "opv apply")?;
+    super::tidy::require_person_on(r, "opv apply", host)?;
     // Never over a value: what 1Password holds now, read fresh.
     let read = super::tidy::read(fleet, env_name, r)?;
     for (product, key, _) in &chosen {
