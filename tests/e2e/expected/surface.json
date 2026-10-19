@@ -39,6 +39,7 @@
       "flags": [
         "generate",
         "json",
+        "project",
         "rebind"
       ],
       "name": "apply"
@@ -366,6 +367,7 @@
       "args": [],
       "flags": [
         "json",
+        "project",
         "rebind",
         "write"
       ],
@@ -401,6 +403,7 @@
         "kubernetes-namespace",
         "kubernetes-secrets-dir",
         "products",
+        "project",
         "provider",
         "role",
         "write"

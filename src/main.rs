@@ -809,6 +809,10 @@ enum Cmd {
         /// Generate this key's value, as `opv propose generate` proposed (repeatable).
         #[arg(long, value_name = "ENV:PRODUCT/KEY")]
         generate: Vec<String>,
+        /// Project name for new vault and item titles; defaults to the repository's name.
+        /// The plan id covers it, so it must be the one the proposal was made with.
+        #[arg(long, value_name = "NAME")]
+        project: Option<String>,
         /// Print what was done as one JSON document; the plan and the question go to
         /// stderr.
         #[arg(long)]
@@ -1334,6 +1338,10 @@ enum ProposeCmd {
         /// (op://<vault>/<item>).
         #[arg(long, value_name = "OP_REF")]
         deploy_credentials: Option<String>,
+        /// Project name for its state vault's title, carried to the next step; defaults
+        /// to the repository's name.
+        #[arg(long, value_name = "NAME")]
+        project: Option<String>,
         #[command(flatten)]
         out: ProposeOut,
     },
@@ -1394,6 +1402,9 @@ enum ProposeCmd {
         /// Give this environment new vaults and items in the selected account (repeatable).
         #[arg(long, value_name = "ENV")]
         rebind: Vec<String>,
+        /// Project name for new vault and item titles; defaults to the repository's name.
+        #[arg(long, value_name = "NAME")]
+        project: Option<String>,
         #[command(flatten)]
         out: ProposeOut,
     },
@@ -2651,6 +2662,7 @@ fn run(
         plan_id,
         rebind,
         generate,
+        project,
         json,
     } = &cli.cmd
     {
@@ -2661,6 +2673,7 @@ fn run(
             plan_id.as_deref(),
             rebind,
             generate,
+            project.as_deref(),
             *json,
             out,
         )
@@ -3350,7 +3363,20 @@ impl ProposeCmd {
 /// assistant is handed it; `None` for every other command.
 fn person_only(cmd: &Cmd) -> Option<opv::cause::Cmd> {
     let (command, args) = match cmd {
-        Cmd::Apply { plan_id, .. } => (vec!["apply"], plan_id.iter().cloned().collect()),
+        Cmd::Apply {
+            plan_id, project, ..
+        } => (
+            vec!["apply"],
+            plan_id
+                .iter()
+                .cloned()
+                .chain(
+                    project
+                        .iter()
+                        .flat_map(|p| ["--project".to_string(), p.clone()]),
+                )
+                .collect(),
+        ),
         Cmd::Set { key, env, .. } => (vec!["set"], vec![key.clone(), "--env".into(), env.clone()]),
         _ => return None,
     };
@@ -3366,6 +3392,8 @@ struct ProposeReq {
     intent: opv::domain::intent::Intent,
     /// A person's rule parameters (`propose key --rule`).
     extras: opv::app::propose::key::Extras,
+    /// The project name `--project` gave (`propose target`, `propose structure`).
+    project: Option<String>,
     write: bool,
     json: bool,
 }
@@ -3424,6 +3452,7 @@ fn propose_request(
         return Ok(ProposeReq {
             intent: intent::parse(&text)?,
             extras: Default::default(),
+            project: None,
             write: p.write,
             json: p.json,
         });
@@ -3435,6 +3464,7 @@ fn propose_request(
         }
     };
     let mut extras = opv::app::propose::key::Extras::default();
+    let mut project = None;
     match cmd {
         ProposeCmd::Key {
             key,
@@ -3498,8 +3528,10 @@ fn propose_request(
             products,
             role,
             deploy_credentials,
+            project: named,
             ..
         } => {
+            project = named.clone();
             put("kind", json!("target"));
             put("env", json!(env));
             put("name", json!(name));
@@ -3541,7 +3573,12 @@ fn propose_request(
             put("project", json!(project));
             put("account", json!(account));
         }
-        ProposeCmd::Structure { rebind, .. } => {
+        ProposeCmd::Structure {
+            rebind,
+            project: named,
+            ..
+        } => {
+            project = named.clone();
             put("kind", json!("structure"));
             put("rebind", json!(rebind));
         }
@@ -3555,6 +3592,7 @@ fn propose_request(
     Ok(ProposeReq {
         intent: intent::parse(&Value::Object(doc).to_string())?,
         extras,
+        project,
         write: out.write,
         json: p.json || out.json,
     })
@@ -3567,10 +3605,16 @@ fn write_step() -> String {
     format!("opv {}", words.join(" "))
 }
 
-/// `opv apply [<plan_id>]` with the `--rebind` and `--generate` a structural proposal
-/// needs to be recomputed as it was proposed.
-fn apply_step(plan_id: &str, rebind: &[String], generate: &[(String, Vec<String>)]) -> String {
+/// `opv apply [<plan_id>]` with the `--rebind`, `--generate` and `--project` a structural
+/// proposal needs to be recomputed as it was proposed.
+fn apply_step(
+    plan_id: &str,
+    rebind: &[String],
+    generate: &[(String, Vec<String>)],
+    project: Option<&str>,
+) -> String {
     let mut c = format!("opv apply {}", shell_word(plan_id));
+    c.push_str(&project_flag(project));
     for env in rebind {
         c.push_str(&format!(" --rebind {}", shell_word(env)));
     }
@@ -3583,6 +3627,11 @@ fn apply_step(plan_id: &str, rebind: &[String], generate: &[(String, Vec<String>
         }
     }
     c
+}
+
+/// ` --project <name>` when one was given, else nothing.
+fn project_flag(project: Option<&str>) -> String {
+    project.map_or_else(String::new, |p| format!(" --project {}", shell_word(p)))
 }
 
 /// Print a proposal document (`--json`) or its text lines, then its `Next:` step: the
@@ -3737,7 +3786,7 @@ fn run_propose_early(
                 _ => unreachable!("matched structure or generate"),
             };
             // Read the project's own 1Password account, never op's default.
-            let scope = structure_scope(cli.config.as_deref(), here, r)?;
+            let scope = structure_scope(cli.config.as_deref(), here, r, req.project.as_deref())?;
             r.use_account(Some(scope.account.clone()));
             let p = ps::propose_structure_at(
                 r,
@@ -3759,7 +3808,7 @@ fn run_propose_early(
                 }
                 .into()
             })?;
-            let next = apply_step(&p.plan_id, &rebind, &generate);
+            let next = apply_step(&p.plan_id, &rebind, &generate, req.project.as_deref());
             print_proposal(doc, &lines, &next, true, req.json, out)
         }
         _ => unreachable!("called for setup, structure and generate"),
@@ -3777,23 +3826,22 @@ fn run_propose_contract(
     use opv::app::propose::{key, target};
     use opv::domain::intent::Intent;
     let store = found.store();
+    // `--project` (propose target) is checked as `access` checks it, and rides along to
+    // the person's next step.
+    if let Some(p) = &req.project {
+        config_store::default_project(Some(p), None, &std::env::current_dir().unwrap_or_default())?;
+    }
     // The contract with its ids filled in, to validate the proposal; a write starts from
     // the contract alone (D-G: no edit writes an id).
     let snap = store.read(r)?;
-    let base_for_write = if req.write {
+    // FR-52: a generated configuration is never edited; its generator is.
+    let generated = opv::app::bootstrap::is_generated(&snap.text);
+    let base_for_write = if req.write && !generated {
         Some(store.read_for_write(r)?)
     } else {
         None
     };
     let working = store.parse(&snap.text)?;
-    // FR-52: a generated configuration is never edited; its generator is.
-    if req.write && opv::app::bootstrap::is_generated(&snap.text) {
-        return Err(opv::cause::Cause::ConfigNotEditable {
-            source: found.cause_source(),
-            reason: opv::cause::NotEditable::Generated { generator: None },
-        }
-        .into());
-    }
     let (contract, ids) = opv::config::bindings::split(&snap.text);
     // The default branch's contract: its relaxations are listed first (default 2).
     let repo = config_store::git_toplevel(r)
@@ -3807,6 +3855,15 @@ fn run_propose_contract(
         _ => key::propose_with(&contract, &ids, base, &req.intent, &req.extras),
     }
     .map_err(proposal_refused)?;
+    // FR-52 (#184): the proposal was valid, so the refusal names the edit to make in the
+    // generator (the same diff the read-only proposal prints) and the structure after it.
+    if req.write && generated {
+        if !req.json {
+            writeln!(out, "{}", proposal.render_text().trim_end_matches('\n'))
+                .map_err(write_err)?;
+        }
+        return Err(opv::app::propose::generated_refusal(found.cause_source(), &proposal).into());
+    }
     if req.write {
         match found {
             config_store::Found::File { store, .. } => {
@@ -3829,9 +3886,30 @@ fn run_propose_contract(
         .into()
     })?;
     doc["written"] = serde_json::json!(req.write.then(|| store.describe()));
+    // A read-only proposal on a generated configuration never steps to the `--write` that
+    // would be refused: the diff goes into the generator, then the structure (#184).
+    if generated {
+        let next = opv::app::propose::generated_next(
+            found.cause_source(),
+            &proposal,
+            &opv::error::invocation(),
+        );
+        if req.json {
+            doc["generated"] = serde_json::json!(true);
+            doc["next"] = next;
+            return writeln!(out, "{doc}").map_err(write_err);
+        }
+        lines.push(opv::app::propose::GENERATED_ROUTE.to_string());
+        let command = next["command"].as_str().unwrap_or("none").to_string();
+        for l in &lines {
+            writeln!(out, "{}", l.trim_end_matches('\n')).map_err(write_err)?;
+        }
+        return writeln!(out, "Next: {command}").map_err(write_err);
+    }
     match &req.intent {
         Intent::Key { .. } | Intent::Env { .. } | Intent::Target { .. } if req.write => {
-            print_proposal(doc, &lines, "opv apply", true, req.json, out)
+            let next = format!("opv apply{}", project_flag(req.project.as_deref()));
+            print_proposal(doc, &lines, &next, true, req.json, out)
         }
         // Retirement continues with what still reads the key (`needs`), before it is pruned.
         Intent::Retire { .. } if req.write => {
@@ -3848,16 +3926,17 @@ fn structure_scope(
     config: Option<&std::path::Path>,
     here: &std::path::Path,
     r: &ProcessRunner,
+    project: Option<&str>,
 ) -> Result<opv::app::structure::Scope, Error> {
     let Some(path) = config else {
-        return opv::app::structure::scope(here, r);
+        return opv::app::structure::scope(here, r, project);
     };
     let start = path
         .parent()
         .filter(|d| !d.as_os_str().is_empty())
         .map_or_else(|| here.to_path_buf(), |d| here.join(d));
     let command = opv::error::invocation().command.join(" ");
-    let (project, account) = opv::app::structure::binding_as(&start, r, &command)?;
+    let (project, account) = opv::app::structure::binding_as(&start, r, &command, project)?;
     Ok(opv::app::structure::Scope {
         config: opv::app::structure::ConfigAt::File(path.to_path_buf()),
         project,
@@ -3897,6 +3976,7 @@ fn run_apply(
     plan_id: Option<&str>,
     rebind: &[String],
     generate: &[String],
+    project: Option<&str>,
     json: bool,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
@@ -3919,7 +3999,7 @@ fn run_apply(
             None => grouped.push((env.to_string(), vec![key.to_string()])),
         }
     }
-    let scope = structure_scope(config, here, r)?;
+    let scope = structure_scope(config, here, r, project)?;
     r.use_account(Some(scope.account.clone()));
     let opts = opv::app::apply::ApplyOpts {
         rebind: rebind.to_vec(),
