@@ -186,7 +186,11 @@ jobs:
     name: Publish release
     needs: resolve
     if: startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true
-    runs-on: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    # npm trusted publishing (OIDC) requires a GitHub-hosted runner (#195).
+    runs-on: ubuntu-latest
+    env:
+      # Publish the retained bytes as they are: no npm lifecycle scripts run here.
+      NPM_CONFIG_IGNORE_SCRIPTS: 'true'
     permissions:
       contents: write
       id-token: write
@@ -221,7 +225,11 @@ jobs:
     name: Publish npm packages
     needs: resolve
     if: startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true && vars.NPM_PUBLISH == 'true'
-    runs-on: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    # npm trusted publishing (OIDC) requires a GitHub-hosted runner (#195).
+    runs-on: ubuntu-latest
+    env:
+      # Publish the retained bytes as they are: no npm lifecycle scripts run here.
+      NPM_CONFIG_IGNORE_SCRIPTS: 'true'
     permissions:
       contents: read
       id-token: write
