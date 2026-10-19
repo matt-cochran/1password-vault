@@ -1,0 +1,93 @@
+import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { join, relative, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+type Run = { id: number; run_attempt: number; status: string; conclusion: string; event: string; head_branch: string; head_sha: string; path: string; head_repository: { full_name: string } };
+export type Manifest = { schema: 1; repository: string; workflow: 'release.yml'; tree: string; source_sha: string; run_id: number; run_attempt: number; files: Record<string, string> };
+const sha = /^[a-f0-9]{40}$/;
+const digest = /^[a-f0-9]{64}$/;
+const targets = ['x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl', 'x86_64-apple-darwin', 'aarch64-apple-darwin', 'x86_64-pc-windows-msvc.exe', 'aarch64-pc-windows-msvc.exe'];
+function command(args: string[]): string { return execFileSync(args[0], args.slice(1), { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 }).trim(); }
+function api(path: string): any { return JSON.parse(command(['gh', 'api', path])); }
+function files(root: string, dir = root): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const name of readdirSync(dir).sort()) {
+    const file = join(dir, name);
+    const stat = lstatSync(file);
+    if (stat.isSymbolicLink()) throw new Error('Release artifacts may not contain symlinks');
+    if (stat.isDirectory()) Object.assign(result, files(root, file));
+    else {
+      const key = relative(root, file).replaceAll('\\', '/');
+      if (key === 'manifest.json') continue;
+      if (!/^(dist|npm)\/[A-Za-z0-9_.-]+$/.test(key)) throw new Error('Unexpected release artifact path');
+      result[key] = createHash('sha256').update(readFileSync(file)).digest('hex');
+    }
+  }
+  return result;
+}
+export function validate(manifest: Manifest, run: Run, repository: string, tree: string, actual: Record<string, string>): void {
+  if (run.status !== 'completed' || run.conclusion !== 'success' || run.head_repository?.full_name !== repository
+      || run.path !== '.github/workflows/release.yml' || run.head_branch !== 'staging'
+      || !['push', 'workflow_dispatch'].includes(run.event)) throw new Error('Untrusted staging release run');
+  if (manifest.schema !== 1 || manifest.repository !== repository || manifest.workflow !== 'release.yml'
+      || manifest.tree !== tree || !sha.test(tree) || manifest.source_sha !== run.head_sha || !sha.test(manifest.source_sha)
+      || manifest.run_id !== run.id || manifest.run_attempt !== run.run_attempt) throw new Error('Release provenance mismatch');
+  for (const [name, hash] of Object.entries(manifest.files)) {
+    if (!/^(dist|npm)\/[A-Za-z0-9_.-]+$/.test(name) || !digest.test(hash)) throw new Error('Invalid release file declaration');
+  }
+  if (JSON.stringify(Object.entries(manifest.files).sort()) !== JSON.stringify(Object.entries(actual).sort())) throw new Error('Release artifact checksum mismatch');
+  for (const target of targets) if (!manifest.files[`dist/opv-${target}`]) throw new Error('Missing platform binary');
+  if (!manifest.files['dist/opv'] || !manifest.files['dist/SHA256SUMS']) throw new Error('Missing release aliases or checksums');
+  if (Object.keys(manifest.files).filter(p => p.startsWith('npm/') && p.endsWith('.tgz')).length !== 7) throw new Error('Expected all seven staged npm tarballs');
+}
+function output(name: string, value: string): void { if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `${name}=${value}\n`); }
+export function main(): void {
+  const [mode, directory] = process.argv.slice(2);
+  if (!directory) throw new Error('Usage: release-assets.ts record|resolve|verify DIRECTORY');
+  const root = resolve(directory);
+  const repository = process.env.GITHUB_REPOSITORY!;
+  const tree = command(['git', 'rev-parse', 'HEAD^{tree}']);
+  if (!sha.test(tree)) throw new Error('Invalid source tree');
+  if (mode === 'record') {
+    if (process.env.GITHUB_REF !== 'refs/heads/staging') throw new Error('Release candidates are built only on staging');
+    const manifest: Manifest = { schema: 1, repository, workflow: 'release.yml', tree,
+      source_sha: command(['git', 'rev-parse', 'HEAD']), run_id: Number(process.env.GITHUB_RUN_ID), run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT), files: files(root) };
+    // Validate the record against the expected successful completion before upload.
+    validate(manifest, { id: manifest.run_id, run_attempt: manifest.run_attempt, status: 'completed', conclusion: 'success', event: process.env.GITHUB_EVENT_NAME!, head_branch: 'staging', head_sha: manifest.source_sha, path: '.github/workflows/release.yml', head_repository: { full_name: repository } }, repository, tree, manifest.files);
+    writeFileSync(join(root, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
+    output('artifact', `opv-release-${tree}-${manifest.run_attempt}`);
+    return;
+  }
+  if (mode === 'verify') {
+    const manifest: Manifest = JSON.parse(readFileSync(join(root, 'manifest.json'), 'utf8'));
+    const run: Run = api(`repos/${repository}/actions/runs/${manifest.run_id}`);
+    validate(manifest, run, repository, tree, files(root));
+    if (api(`repos/${repository}/git/commits/${manifest.source_sha}`).tree.sha !== tree) throw new Error('Staging commit tree mismatch');
+    output('run-id', String(run.id));
+    output('artifact', `opv-release-${tree}-${run.run_attempt}`);
+    return;
+  }
+  if (mode !== 'resolve') throw new Error('Unknown release asset mode');
+  if (existsSync(root)) throw new Error('Use a fresh release candidate directory');
+  for (let page = 1; page <= 10; page++) {
+    const runs: Run[] = api(`repos/${repository}/actions/workflows/release.yml/runs?status=success&per_page=100&page=${page}`).workflow_runs;
+    for (const run of runs) {
+      if (run.id === Number(process.env.GITHUB_RUN_ID) || run.head_branch !== 'staging' || run.head_repository?.full_name !== repository) continue;
+      const name = `opv-release-${tree}-${run.run_attempt}`;
+      const artifacts = api(`repos/${repository}/actions/runs/${run.id}/artifacts?per_page=100`).artifacts;
+      if (!artifacts.some((a: any) => a.name === name && !a.expired)) continue;
+      mkdirSync(root, { recursive: true });
+      command(['gh', 'run', 'download', String(run.id), '--repo', repository, '--name', name, '--dir', root]);
+      const manifest: Manifest = JSON.parse(readFileSync(join(root, 'manifest.json'), 'utf8'));
+      validate(manifest, run, repository, tree, files(root));
+      if (api(`repos/${repository}/git/commits/${manifest.source_sha}`).tree.sha !== tree) throw new Error('Staging commit tree mismatch');
+      output('run-id', String(run.id)); output('artifact', name);
+      return;
+    }
+    if (runs.length < 100) break;
+  }
+  throw new Error('No successful retained staging release matches this complete source tree. Build and validate staging first; production never rebuilds or retests.');
+}
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();

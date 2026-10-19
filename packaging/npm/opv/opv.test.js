@@ -5,7 +5,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { setup, run } = require('./_harness.js');
+const { setup, run, sha256 } = require('./_harness.js');
+
+const REPAIR = 'node "$(npm root -g)/@matthew-cochran/opv/install.js"';
 
 const unix = { skip: process.platform === 'win32' ? 'POSIX shell fixture' : false };
 
@@ -46,11 +48,12 @@ test('wrapper falls back to the bundled binary when the canonical version differ
   assert.equal(fs.readFileSync(marker, 'utf8'), 'hello');
 });
 
-test('wrapper prints the install hint once when scripts were ignored', unix, () => {
+test('wrapper prints the hint once when another method installed an older copy', unix, () => {
   const h = setup();
+  writeCanonical(h, '9.9.9', path.join(h.root, 'unused'));
   const first = wrapper(h, ['one']);
   const second = wrapper(h, ['two']);
-  const hits = `${first.stderr}${second.stderr}`.split('npm rebuild -g @matthew-cochran/opv --allow-scripts=@matthew-cochran/opv').length - 1;
+  const hits = `${first.stderr}${second.stderr}`.split(REPAIR).length - 1;
   assert.equal(hits, 1);
 });
 
@@ -73,6 +76,114 @@ test('wrapper hint says the canonical copy is stale when versions differ', unix,
   const h = setup();
   writeCanonical(h, '9.9.9', path.join(h.root, 'unused'));
   assert.match(wrapper(h, ['x']).stderr, /is 9\.9\.9, not 1\.2\.3/);
+});
+
+// A platform binary that records its arguments in `marker` when it runs.
+function writeBundled(h, marker) {
+  const file = path.join(h.platformDir, 'bin', h.exe);
+  fs.writeFileSync(file, `#!/bin/sh\nprintf '%s' "$*" > "${marker}"\n`);
+  fs.chmodSync(file, 0o755);
+}
+
+// A canonical binary placed by `manager` for `version`, with a matching installed-by record.
+function writeRecorded(h, manager, version) {
+  const body = `#!/bin/sh\necho "opv ${version}"\n`;
+  fs.writeFileSync(h.target, body);
+  fs.chmodSync(h.target, 0o755);
+  fs.mkdirSync(path.dirname(h.record), { recursive: true });
+  fs.writeFileSync(h.record, `${manager} ${version} ${sha256(Buffer.from(body))}\n`);
+  return body;
+}
+
+const bundledBody = '#!/bin/sh\necho "opv 1.2.3"\n';
+
+test('the shim installs a missing canonical binary', unix, () => {
+  const h = setup({ binary: bundledBody });
+  wrapper(h, ['x']);
+  assert.equal(fs.readFileSync(h.target, 'utf8'), bundledBody);
+});
+
+test('the shim records npm as the installer after a repair', unix, () => {
+  const h = setup({ binary: bundledBody });
+  wrapper(h, ['x']);
+  assert.equal(
+    fs.readFileSync(h.record, 'utf8').trim(),
+    `npm 1.2.3 ${sha256(Buffer.from(bundledBody))}`,
+  );
+});
+
+test('the shim replaces a binary npm installed for an older version', unix, () => {
+  const h = setup({ binary: bundledBody });
+  writeRecorded(h, 'npm', '1.0.0');
+  wrapper(h, ['x']);
+  assert.equal(fs.readFileSync(h.target, 'utf8'), bundledBody);
+});
+
+test('the shim says it updated the canonical binary', unix, () => {
+  const h = setup({ binary: bundledBody });
+  writeRecorded(h, 'npm', '1.0.0');
+  assert.match(
+    wrapper(h, ['x']).stderr,
+    /^opv: updated ~\/\.local\/bin\/opv to 1\.2\.3 \(npm skipped its install script\)$/m,
+  );
+});
+
+test('the shim runs the repaired canonical binary', unix, () => {
+  const h = setup({ binary: bundledBody });
+  writeRecorded(h, 'npm', '1.0.0');
+  assert.equal(wrapper(h, ['x']).stdout, 'opv 1.2.3\n');
+});
+
+test('the shim leaves a binary another method installed', unix, () => {
+  const h = setup({ binary: bundledBody });
+  const body = writeRecorded(h, 'install.sh', '1.0.0');
+  wrapper(h, ['x']);
+  assert.equal(fs.readFileSync(h.target, 'utf8'), body);
+});
+
+test('the shim leaves a binary that no longer matches npm\'s record', unix, () => {
+  const h = setup({ binary: bundledBody });
+  writeRecorded(h, 'npm', '1.0.0');
+  const replaced = '#!/bin/sh\necho "opv 1.1.0"\n';
+  fs.writeFileSync(h.target, replaced);
+  wrapper(h, ['x']);
+  assert.equal(fs.readFileSync(h.target, 'utf8'), replaced);
+});
+
+test('the shim runs the platform binary when another method installed an older copy', unix, () => {
+  const h = setup();
+  writeRecorded(h, 'install.sh', '1.0.0');
+  const marker = path.join(h.root, 'bundled-ran');
+  writeBundled(h, marker);
+  wrapper(h, ['hello']);
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'hello');
+});
+
+test('the shim runs the platform binary when the canonical directory is unwritable', {
+  skip: process.platform === 'win32' || process.getuid() === 0 ? 'needs a non-root POSIX user' : false,
+}, () => {
+  const h = setup();
+  const marker = path.join(h.root, 'bundled-ran');
+  writeBundled(h, marker);
+  fs.chmodSync(path.dirname(h.target), 0o555);
+  try {
+    wrapper(h, ['hello']);
+  } finally {
+    fs.chmodSync(path.dirname(h.target), 0o755);
+  }
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'hello');
+});
+
+test('the shim does not run the canonical binary to read its version when installed-by matches', unix, () => {
+  const h = setup();
+  const probed = path.join(h.root, 'probed');
+  writeRecorded(h, 'npm', '1.2.3');
+  fs.writeFileSync(
+    h.target,
+    `#!/bin/sh\nif [ "$1" = "--version" ]; then : > "${probed}"; fi\n`,
+  );
+  wrapper(h, ['x']);
+  assert.equal(fs.existsSync(probed), false);
 });
 
 test('wrapper never uses a shell', () => {

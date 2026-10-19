@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-10-19
+
+### Fixed
+
+- An npm upgrade no longer leaves the old opv in place when npm skips install scripts. The `opv` command npm installs now updates `~/.local/bin/opv` itself (Windows: `%LOCALAPPDATA%\Programs\opv\opv.exe`) when that copy is missing or is the one npm installed for an earlier version, and says so once. It never overwrites a binary that `install.sh` or another method installed; then it runs npm's own copy and says how to update. `opv doctor` names the cause and the repair command, `node "$(npm root -g)/@matthew-cochran/opv/install.js"` (#193).
+
+### Internal
+
+- Releases are built once: the promotion to `staging` builds and tests every platform binary and npm package and keeps them with a manifest of their source tree and checksums; `main` and the version tag publish exactly those files and never rebuild (#191). The branch rules require `Build gate` and `gitflow-guard`.
+- CHANGELOG comparison links cover every release.
+
 ## [0.12.1] - 2026-10-19
 
 ### Fixed
@@ -576,7 +587,12 @@ Local development without a deployment target. Two deprecated forms are removed,
 - `secretctl` renamed to `opv` ([#4](https://github.com/matt-cochran/1password-vault/pull/4)).
 - Gitflow guard, CI on `dev`/`staging`/`main`, and Dependabot targeting `dev` ([#5](https://github.com/matt-cochran/1password-vault/pull/5)).
 
-[Unreleased]: https://github.com/matt-cochran/1password-vault/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/matt-cochran/1password-vault/compare/v0.12.2...HEAD
+[0.12.2]: https://github.com/matt-cochran/1password-vault/compare/v0.12.1...v0.12.2
+[0.12.1]: https://github.com/matt-cochran/1password-vault/compare/v0.12.0...v0.12.1
+[0.12.0]: https://github.com/matt-cochran/1password-vault/compare/v0.11.0...v0.12.0
+[0.11.0]: https://github.com/matt-cochran/1password-vault/compare/v0.10.1...v0.11.0
+[0.10.1]: https://github.com/matt-cochran/1password-vault/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/matt-cochran/1password-vault/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/matt-cochran/1password-vault/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/matt-cochran/1password-vault/compare/v0.7.0...v0.8.0
