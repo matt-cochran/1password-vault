@@ -170,3 +170,23 @@ fn a_revision_tree_reads_the_committed_text_not_the_working_tree() {
     let scan = Scan::collect(&runner(), dir.path(), &Revision("HEAD"), &patterns);
     assert_eq!(scan.observations[0].name.as_deref(), Some("COMMITTED_KEY"));
 }
+
+// --- a directory without git (`opv needs --scan`) ------------------------------------------
+
+#[test]
+fn a_dir_tree_lists_a_file_outside_any_git_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("svc")).unwrap();
+    write(&dir.path().join("svc"), "app.env", "API_KEY\n");
+    let patterns: Vec<&dyn Pattern> = vec![&Lines];
+    let scan = Scan::collect(&runner(), dir.path(), &DirTree, &patterns);
+    assert_eq!(scan.observations[0].file, "svc/app.env");
+}
+
+#[test]
+fn a_dir_tree_prunes_a_skipped_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("node_modules")).unwrap();
+    write(&dir.path().join("node_modules"), "dep.env", "DEP_KEY\n");
+    assert!(DirTree.files(&runner(), dir.path()).is_empty());
+}

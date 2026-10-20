@@ -895,6 +895,7 @@ fn input_kind(k: InputKind) -> &'static str {
         InputKind::SetupRecipe => "the setup recipe",
         InputKind::Receipt => "the delivery receipt",
         InputKind::DeployCredentials => "the deploy credentials item",
+        InputKind::NamesFile => "the names file",
     }
 }
 

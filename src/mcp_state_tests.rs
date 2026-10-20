@@ -175,7 +175,7 @@ fn the_needs_section_is_opv_needs_json() {
     let w = World::new();
     let repo = w.project().to_path_buf();
     let want = w.cli(&["needs"], |f, r, out| {
-        crate::app::needs::run(r, &repo, f, false, true, out)
+        crate::app::needs::run(r, &repo, f, &Default::default(), false, true, out)
     });
     assert_eq!(w.tool(json!({"section": "needs"})), want);
 }

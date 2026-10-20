@@ -239,10 +239,16 @@ version). Needs your own interactive terminal.";
 
 const CONFIG_CHECK_QUICK: &str = "\
 Examples:
-  opv config check --file secrets.toml   # exit 2 with a diff when the copy differs";
+  opv config check --file secrets.toml   # exit 2 with a diff when the copy differs
+  opv --config secrets.toml config check --file secrets.toml   # a file regenerated in place
+  opv config check --file out/secrets.toml   # a file project: the regenerated file loads and matches";
 
 const CONFIG_CHECK_MORE: &str = "\
-Compares a committed copy with the project's manifest (for review in CI). Changes nothing.";
+Manifest project: compares a committed copy with the project's manifest (for review in CI).
+File project (--config, or a secrets.toml found from here and no .opv): the regenerated file
+must load and its configuration must equal the committed one (the project's secrets.toml, or
+its copy at git HEAD when the file is that secrets.toml). Exit 0 when they match, 2 with a diff
+when they differ. Changes nothing.";
 
 const PROJECTS_QUICK: &str = "\
 Examples:
@@ -364,12 +370,18 @@ the link. Never reads a value.";
 const NEEDS_QUICK: &str = "\
 Examples:
   opv needs                    # undeclared, declared_unobserved, ambiguous, declared
+  opv needs dev --product api  # only what api needs in dev
+  opv needs --scan ../service  # scan a directory instead of the git tree
+  opv needs --names found.txt  # names an assistant found itself, one per line (- = stdin)
   opv needs --gate             # exit 2 when the code reads a name no contract declares
   opv needs --json             # the same as one document";
 
 const NEEDS_MORE: &str = "\
-Scans the files git knows (the working tree) for the names the code reads, and compares them
-with the contract. Reads no value and no 1Password item; prints names and file:line only.";
+Scans the files git knows (the working tree), or with --scan the files under a directory, for
+the names the code reads, and compares them with the contract; --names compares a list of
+names instead (reported without file:line). <ENV> and --product narrow the declared keys;
+names no product declares are always shown. Reads no value and no 1Password item; prints
+names and file:line only.";
 
 const CONTRACT_QUICK: &str = "\
 Examples:
@@ -648,6 +660,18 @@ enum Cmd {
     /// (names and file:line only, never a value).
     #[command(before_help = NEEDS_QUICK, after_help = NEEDS_MORE)]
     Needs {
+        /// Only the keys desired in this environment.
+        env: Option<String>,
+        /// Only this product's keys (names no product declares yet are kept).
+        #[arg(long)]
+        product: Option<String>,
+        /// Scan the files under this directory (without git) instead of the git tree.
+        #[arg(long, value_name = "DIR", conflicts_with = "names")]
+        scan: Option<PathBuf>,
+        /// Compare these names, one per line, instead of scanning (`-` reads standard
+        /// input): names an assistant found itself, reported with no file:line.
+        #[arg(long, value_name = "FILE")]
+        names: Option<PathBuf>,
         /// Fail (exit 2, `needs_undeclared`) when the code reads a name that neither this
         /// contract nor the default branch's declares.
         #[arg(long)]
@@ -1688,11 +1712,12 @@ enum ConfigCmd {
     /// confirmed; refuses (and re-opens) when someone changed it meanwhile.
     #[command(before_help = EDIT_QUICK, after_help = EDIT_MORE)]
     Edit,
-    /// Compare a committed copy with the project's manifest; exit 2 with a diff when they
-    /// differ (for review in CI).
+    /// Compare a committed copy with the project's manifest, or on a file project a
+    /// regenerated file with the committed one; exit 2 with a diff when they differ (for
+    /// review in CI).
     #[command(before_help = CONFIG_CHECK_QUICK, after_help = CONFIG_CHECK_MORE)]
     Check {
-        /// The committed copy.
+        /// The committed copy (manifest project) or the regenerated file (file project).
         #[arg(long, value_name = "PATH")]
         file: PathBuf,
     },
@@ -3295,6 +3320,7 @@ fn request(
 /// manifest is found without the `secrets.toml` walk-up (and without --config).
 fn run_config_manifest(cli: Cli, r: &ProcessRunner, out: &mut dyn Write) -> Result<(), Error> {
     let dir = std::env::current_dir().map_err(cwd_err)?;
+    let given_config = cli.config.clone();
     match cli.cmd {
         Cmd::Config(ConfigCmd::Import {
             file,
@@ -3317,6 +3343,10 @@ fn run_config_manifest(cli: Cli, r: &ProcessRunner, out: &mut dyn Write) -> Resu
             config_cmd::import(&args, &dir, r, out)
         }
         Cmd::Config(ConfigCmd::Check { file }) => {
+            // #178: a file project checks a regenerated file against its committed one.
+            if let Some(project) = file_project_for_check(given_config, &dir, &file) {
+                return config_cmd::check_file_project(&project, &file, r, out);
+            }
             let req = config_store::Request {
                 start: dir.clone(),
                 config: None,
@@ -3333,6 +3363,30 @@ fn run_config_manifest(cli: Cli, r: &ProcessRunner, out: &mut dyn Write) -> Resu
         }
         _ => unreachable!("called for config import and check only"),
     }
+}
+
+/// The file project `config check --file F` compares F with (#178), or `None` for a
+/// manifest project: the `--config` file when given; else, with no OPV_PROJECT and no
+/// `.opv` pointing at a manifest, the secrets.toml found from here when F is another file
+/// (a file regenerated elsewhere). F regenerated in place over that secrets.toml stays a
+/// manifest check unless --config names it.
+fn file_project_for_check(
+    given: Option<PathBuf>,
+    dir: &std::path::Path,
+    file: &std::path::Path,
+) -> Option<PathBuf> {
+    if given.is_some() {
+        return given;
+    }
+    if config_store::project_env().is_some() || config_store::find_dot_opv(dir).is_some() {
+        return None;
+    }
+    let found = config::discover(dir)?;
+    let same = match (std::fs::canonicalize(&found), std::fs::canonicalize(file)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => found == file,
+    };
+    (!same).then_some(found)
 }
 
 /// `opv config import` without `--file` and with no secrets.toml here or above (02.12).
@@ -4230,12 +4284,35 @@ fn repo_top(r: &dyn CommandRunner) -> PathBuf {
 /// branch's contract deciding which undeclared names are new (names and file:line only).
 fn run_needs(
     fleet: &opv::domain::Fleet,
+    options: &opv::app::needs::NeedsOptions,
     gate: bool,
     json: bool,
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    opv::app::needs::run(r, &repo_top(r), fleet, gate, json, out)
+    opv::app::needs::run(r, &repo_top(r), fleet, options, gate, json, out)
+}
+
+/// The library options for `opv needs` (#175): `--scan` and `--names` are exclusive (clap
+/// refuses both), the names file is read here (`-` = standard input), and without either
+/// the git tree is scanned.
+fn needs_options(
+    env: Option<String>,
+    product: Option<String>,
+    scan: Option<PathBuf>,
+    names: Option<&std::path::Path>,
+) -> Result<opv::app::needs::NeedsOptions, Error> {
+    use opv::app::needs::{NeedsInput, NeedsOptions, read_names};
+    let input = match (scan, names) {
+        (Some(dir), _) => NeedsInput::Scan(dir),
+        (None, Some(file)) => NeedsInput::Names(read_names(file)?),
+        (None, None) => NeedsInput::Git,
+    };
+    Ok(NeedsOptions {
+        env,
+        product,
+        input,
+    })
 }
 
 /// What `opv contract` was asked for.
@@ -4439,7 +4516,17 @@ fn run_other(
             });
             writeln!(out, "{doc}").map_err(write_err)
         }
-        Cmd::Needs { gate, json } => run_needs(&loaded?, gate, json, r, out),
+        Cmd::Needs {
+            env,
+            product,
+            scan,
+            names,
+            gate,
+            json,
+        } => {
+            let options = needs_options(env, product, scan, names.as_deref())?;
+            run_needs(&loaded?, &options, gate, json, r, out)
+        }
         // No --receipt (the surface golden has none): cells of vaults this session is not
         // a member of stay live-absent rather than read from a guessed file.
         Cmd::Inventory { env, product, json } => opv::app::inventory::run(
@@ -5904,5 +5991,91 @@ mod tests {
                 .unwrap()
                 .contains("Next: opv skill install")
         );
+    }
+
+    // --- 0.13 surface: `needs` inputs (#175) and `config check` (#178) ---------------------
+
+    /// The parsed `opv needs` arguments for `argv`, as the library options.
+    fn needs_of(argv: &[&str]) -> opv::app::needs::NeedsOptions {
+        match Cli::try_parse_from(argv).unwrap().cmd {
+            Cmd::Needs {
+                env,
+                product,
+                scan,
+                names,
+                ..
+            } => needs_options(env, product, scan, names.as_deref()).unwrap(),
+            _ => panic!("not opv needs"),
+        }
+    }
+
+    #[test]
+    fn needs_scan_and_names_are_mutually_exclusive() {
+        let e = Cli::try_parse_from(["opv", "needs", "--scan", "a", "--names", "b"])
+            .err()
+            .unwrap();
+        assert_eq!(e.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn needs_takes_the_environment_as_a_positional() {
+        assert_eq!(
+            needs_of(&["opv", "needs", "dev"]).env.as_deref(),
+            Some("dev")
+        );
+    }
+
+    #[test]
+    fn needs_product_reaches_the_library_options() {
+        let options = needs_of(&["opv", "needs", "--product", "api"]);
+        assert_eq!(options.product.as_deref(), Some("api"));
+    }
+
+    #[test]
+    fn needs_without_an_input_scans_the_git_tree() {
+        assert_eq!(
+            needs_of(&["opv", "needs"]).input,
+            opv::app::needs::NeedsInput::Git
+        );
+    }
+
+    #[test]
+    fn needs_scan_reaches_the_library_as_a_directory() {
+        assert_eq!(
+            needs_of(&["opv", "needs", "--scan", "../svc"]).input,
+            opv::app::needs::NeedsInput::Scan(PathBuf::from("../svc"))
+        );
+    }
+
+    #[test]
+    fn needs_names_reaches_the_library_as_the_files_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("found.txt");
+        std::fs::write(&file, "API_KEY\n").unwrap();
+        let path = file.to_str().unwrap();
+        assert_eq!(
+            needs_of(&["opv", "needs", "--names", path]).input,
+            opv::app::needs::NeedsInput::Names(vec!["API_KEY".into()])
+        );
+    }
+
+    #[test]
+    fn config_check_on_a_given_config_is_a_file_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("secrets.toml");
+        let found = file_project_for_check(
+            Some(project.clone()),
+            dir.path(),
+            &dir.path().join("out.toml"),
+        );
+        assert_eq!(found, Some(project));
+    }
+
+    #[test]
+    fn config_check_of_the_discovered_file_itself_stays_a_manifest_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("secrets.toml");
+        std::fs::write(&project, "").unwrap();
+        assert_eq!(file_project_for_check(None, dir.path(), &project), None);
     }
 }

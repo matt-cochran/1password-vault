@@ -279,3 +279,148 @@ fn the_canary_marker_never_appears_in_the_json_report() {
     let report = report(dir.path(), DECLARED);
     assert!(!serde_json::to_string(&report).unwrap().contains("S7MARKER"));
 }
+
+// --- options: environment, product and input (#175) ----------------------------------------
+
+/// Two products and two environments: `app` declares `API_KEY` (dev) and `PROD_ONLY`
+/// (prod); `web` declares `WEB_KEY` (dev).
+const TWO: &str = "[environments.dev]\n\
+boundaries.app = { vault_id = \"vdev0000000000000000000001\", item_id = \"app\" }\n\
+boundaries.web = { vault_id = \"vdev0000000000000000000001\", item_id = \"web\" }\n\n\
+[environments.prod]\n\
+boundaries.app = { vault_id = \"vprd0000000000000000000001\", item_id = \"app\" }\n\n\
+[products.app.keys.API_KEY]\n\
+kind = \"secret\"\n\
+environments = [\"dev\"]\n\n\
+[products.app.keys.PROD_ONLY]\n\
+kind = \"secret\"\n\
+environments = [\"prod\"]\n\n\
+[products.web.keys.WEB_KEY]\n\
+kind = \"secret\"\n\
+environments = [\"dev\"]\n";
+
+/// The report for `options` against [`TWO`], the git tree at `dir`.
+fn report_with(dir: &Path, options: &NeedsOptions) -> Result<NeedsReport, Error> {
+    needs_with(&runner(), dir, &fleet(TWO), None, options)
+}
+
+#[test]
+fn the_env_option_drops_a_key_not_desired_in_that_environment() {
+    let dir = repo();
+    let options = NeedsOptions {
+        env: Some("dev".into()),
+        ..NeedsOptions::default()
+    };
+    let report = report_with(dir.path(), &options).unwrap();
+    assert_eq!(state_of(&report, "PROD_ONLY"), None);
+}
+
+#[test]
+fn the_product_option_drops_another_products_key() {
+    let dir = repo();
+    let options = NeedsOptions {
+        product: Some("app".into()),
+        ..NeedsOptions::default()
+    };
+    let report = report_with(dir.path(), &options).unwrap();
+    assert_eq!(state_of(&report, "WEB_KEY"), None);
+}
+
+#[test]
+fn the_product_option_keeps_an_undeclared_name() {
+    let dir = repo();
+    write(dir.path(), ".env.example", "NEW_TOKEN=x\n");
+    let options = NeedsOptions {
+        product: Some("app".into()),
+        ..NeedsOptions::default()
+    };
+    let report = report_with(dir.path(), &options).unwrap();
+    assert_eq!(state_of(&report, "NEW_TOKEN"), Some(NeedState::Undeclared));
+}
+
+#[test]
+fn an_unknown_environment_is_refused_as_unknown_env() {
+    let dir = repo();
+    let options = NeedsOptions {
+        env: Some("staging".into()),
+        ..NeedsOptions::default()
+    };
+    let e = report_with(dir.path(), &options).unwrap_err();
+    assert_eq!(e.code_str(), "unknown_env");
+}
+
+#[test]
+fn an_unknown_product_is_refused_as_unknown_product() {
+    let dir = repo();
+    let options = NeedsOptions {
+        product: Some("api".into()),
+        ..NeedsOptions::default()
+    };
+    let e = report_with(dir.path(), &options).unwrap_err();
+    assert_eq!(e.code_str(), "unknown_product");
+}
+
+#[test]
+fn the_scan_input_reads_a_directory_outside_git() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "svc/.env.example", "API_KEY=x\n");
+    let options = NeedsOptions {
+        input: NeedsInput::Scan(dir.path().to_path_buf()),
+        ..NeedsOptions::default()
+    };
+    let elsewhere = repo();
+    let report = report_with(elsewhere.path(), &options).unwrap();
+    assert_eq!(state_of(&report, "API_KEY"), Some(NeedState::Declared));
+}
+
+#[test]
+fn a_given_name_the_contract_does_not_declare_is_undeclared() {
+    let dir = repo();
+    let options = NeedsOptions {
+        input: NeedsInput::Names(vec!["FOUND_BY_ASSISTANT".into()]),
+        ..NeedsOptions::default()
+    };
+    let report = report_with(dir.path(), &options).unwrap();
+    assert_eq!(
+        state_of(&report, "FOUND_BY_ASSISTANT"),
+        Some(NeedState::Undeclared)
+    );
+}
+
+#[test]
+fn a_given_name_carries_no_file_location() {
+    let dir = repo();
+    let options = NeedsOptions {
+        input: NeedsInput::Names(vec!["API_KEY".into()]),
+        ..NeedsOptions::default()
+    };
+    let report = report_with(dir.path(), &options).unwrap();
+    let row = report.rows.iter().find(|r| r.name == "API_KEY").unwrap();
+    assert!(row.files.is_empty());
+}
+
+#[test]
+fn a_given_name_outside_the_grammar_is_counted_as_skipped() {
+    let dir = repo();
+    let options = NeedsOptions {
+        input: NeedsInput::Names(vec!["not a name".into()]),
+        ..NeedsOptions::default()
+    };
+    let report = report_with(dir.path(), &options).unwrap();
+    assert_eq!(report.coverage.skipped_patterns, 1);
+}
+
+#[test]
+fn a_names_file_skips_blank_and_comment_lines() {
+    assert_eq!(
+        parse_names("# found in the README\n\n  API_KEY  \nDB_URL\n"),
+        vec!["API_KEY".to_string(), "DB_URL".to_string()]
+    );
+}
+
+#[test]
+fn a_missing_names_file_is_input_unreadable() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = read_names(&dir.path().join("absent.txt")).unwrap_err();
+    assert_eq!(e.code_str(), "input_unreadable");
+}

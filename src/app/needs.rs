@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
@@ -18,7 +18,7 @@ use crate::cause::Cause;
 use crate::domain::{Fleet, span_of};
 use crate::error::Error;
 use crate::runner::CommandRunner;
-use crate::scan::{Coverage, Kind, Observation, Pattern, Scan, Tree};
+use crate::scan::{Coverage, DirTree, Kind, Observation, Pattern, Scan, Tree, WorkTree};
 
 /// Every scanner pattern a `needs` scan runs: each language and manifest row.
 fn patterns() -> [&'static dyn Pattern; 9] {
@@ -33,6 +33,34 @@ fn patterns() -> [&'static dyn Pattern; 9] {
         &crate::scan::manifests::FlyToml,
         &crate::scan::manifests::GithubActions,
     ]
+}
+
+/// Where `opv needs` takes the names the code reads from (#175).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum NeedsInput {
+    /// The files git knows in the repository's working tree (the default).
+    #[default]
+    Git,
+    /// Every file under this directory, walked without git (`--scan <DIR>`); `file:line`
+    /// locations are relative to it.
+    Scan(PathBuf),
+    /// Names an assistant found itself (`--names <FILE>`): each is an observation with no
+    /// `file:line`, checked by the same name grammar and runtime list as a scan.
+    Names(Vec<String>),
+}
+
+/// What `opv needs` is asked for (#175): the environment and product that narrow the report,
+/// and where the observed names come from. The CLI and `opv_state` build it; the library
+/// validates `env` and `product` against the contract.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NeedsOptions {
+    /// Only keys desired in this environment (`opv needs <ENV>`).
+    pub env: Option<String>,
+    /// Only this product's keys (`--product`); undeclared and ambiguous rows, which no
+    /// product owns yet, are kept.
+    pub product: Option<String>,
+    /// Where the observed names come from.
+    pub input: NeedsInput,
 }
 
 /// How one name stands against the contract (design Part V, row `needs`). The order is the
@@ -106,6 +134,117 @@ pub fn needs(
     classify(runner, repo, tree, fleet, scan)
 }
 
+/// The report for `options` (#175): the scan its input names (the git tree at `repo`, a
+/// directory, or an assistant's names), classified against all of `fleet` so a key another
+/// product declares is never undeclared, then narrowed to `options.env` and
+/// `options.product`. An unknown environment or product is refused with the candidates.
+pub fn needs_with(
+    runner: &dyn CommandRunner,
+    repo: &Path,
+    fleet: &Fleet,
+    base: Option<&Fleet>,
+    options: &NeedsOptions,
+) -> Result<NeedsReport, Error> {
+    if let Some(env) = &options.env {
+        fleet.environment(env)?;
+    }
+    if let Some(product) = &options.product
+        && !fleet.products.contains_key(product)
+    {
+        return Err(super::undefined_product(
+            fleet,
+            product,
+            options.env.as_deref(),
+        ));
+    }
+    let report = match &options.input {
+        NeedsInput::Git => needs(runner, repo, &WorkTree, fleet, base),
+        NeedsInput::Scan(dir) => needs(runner, dir, &DirTree, fleet, base),
+        NeedsInput::Names(names) => classify(runner, repo, &WorkTree, fleet, scan_of_names(names)),
+    };
+    Ok(narrow(report, fleet, options))
+}
+
+/// The names in a `--names` file: one per line, surrounding space trimmed; blank lines and
+/// `#` comment lines are skipped. A name outside the grammar is kept here and counted as
+/// skipped by the classification, never echoed.
+pub fn parse_names(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Read a `--names <FILE>` input: the file at `path`, or standard input for `-`. An
+/// unreadable file is `input_unreadable`, naming the file, never its contents.
+pub fn read_names(path: &Path) -> Result<Vec<String>, Error> {
+    use std::io::Read;
+    let unreadable = |e: std::io::Error| -> Error {
+        Cause::InputUnreadable {
+            path: path.to_path_buf(),
+            kind: crate::cause::InputKind::NamesFile,
+            io: e.kind().into(),
+        }
+        .into()
+    };
+    let text = if path == Path::new("-") {
+        let mut text = String::new();
+        std::io::stdin()
+            .read_to_string(&mut text)
+            .map_err(unreadable)?;
+        text
+    } else {
+        std::fs::read_to_string(path).map_err(unreadable)?
+    };
+    Ok(parse_names(&text))
+}
+
+/// A scan made of names an assistant found itself: one observation per name with no
+/// `file:line`, kept or dropped by the scanner's own grammar and runtime list.
+fn scan_of_names(names: &[String]) -> Scan {
+    let mut scan = Scan::default();
+    for name in names {
+        if crate::scan::valid_name(name) && !crate::scan::runtime_name(name) {
+            scan.observations.push(Observation {
+                name: Some(name.clone()),
+                file: String::new(),
+                line: 0,
+                kind: Kind::Observed,
+            });
+        } else {
+            scan.coverage.skipped_patterns += 1;
+        }
+    }
+    scan
+}
+
+/// `report` narrowed to `options.product` (rows of other products go; rows no product owns
+/// stay) and `options.env` (a declared row goes when its key is not desired there).
+fn narrow(mut report: NeedsReport, fleet: &Fleet, options: &NeedsOptions) -> NeedsReport {
+    report.rows.retain(|row| {
+        let Some(owner) = &row.product else {
+            return true;
+        };
+        if options.product.as_ref().is_some_and(|p| p != owner) {
+            return false;
+        }
+        let declared = matches!(
+            row.state,
+            NeedState::Declared | NeedState::DeclaredUnobserved
+        );
+        match (&options.env, declared) {
+            (Some(env), true) => fleet
+                .products
+                .get(owner)
+                .and_then(|p| p.keys.get(&row.name))
+                .is_none_or(|spec| spec.is_desired_in(env)),
+            _ => true,
+        }
+    });
+    report
+}
+
 /// Classify a finished scan against `fleet`. Reads a file's line only to hash an annotation
 /// span, and never a dotenv line's right-hand side.
 fn classify(
@@ -140,9 +279,11 @@ fn classify(
     let mut observed: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut ambiguous: Vec<String> = Vec::new();
     for observation in &scan.observations {
-        let location = format!("{}:{}", observation.file, observation.line);
+        // A name an assistant found itself carries no `file:line`.
+        let location = (!observation.file.is_empty())
+            .then(|| format!("{}:{}", observation.file, observation.line));
         match observation.kind {
-            Kind::Ambiguous => ambiguous.push(location),
+            Kind::Ambiguous => ambiguous.extend(location),
             Kind::Observed => {
                 let Some(name) = &observation.name else {
                     continue;
@@ -152,8 +293,8 @@ fn classify(
                     None => delivered.get(name).cloned(),
                 };
                 match owner {
-                    Some(owner) => matched.entry(owner).or_default().push(location),
-                    None => observed.entry(name.clone()).or_default().push(location),
+                    Some(owner) => matched.entry(owner).or_default().extend(location),
+                    None => observed.entry(name.clone()).or_default().extend(location),
                 }
             }
         }
@@ -270,10 +411,12 @@ fn annotation_is_current(
     recorded: &str,
     texts: &mut BTreeMap<String, Option<String>>,
 ) -> bool {
+    // A name an assistant found itself has no source line to hash: its annotation stands.
     observations.iter().any(|observation| {
         observation.kind == Kind::Observed
             && observation.name.as_deref() == Some(name)
-            && observation_span(runner, repo, tree, observation, texts) == recorded
+            && (observation.file.is_empty()
+                || observation_span(runner, repo, tree, observation, texts) == recorded)
     })
 }
 
@@ -315,20 +458,22 @@ fn observation_span(
     span_of(&observation.file, line)
 }
 
-/// `opv needs [--gate]` for the repository top `repo`: the report against the contract, the
+/// `opv needs [<ENV>] [--product] [--scan|--names] [--gate]` for the repository top `repo`
+/// ([`NeedsOptions`]): the report against the contract, the
 /// default branch's deciding which undeclared names are new, printed as `--json` or text, then
 /// the gate when asked. The CLI and `opv_state` section `needs` both answer through here.
 pub fn run(
     r: &dyn CommandRunner,
     repo: &Path,
     fleet: &Fleet,
+    options: &NeedsOptions,
     gate_on: bool,
     json: bool,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     let source = crate::app::rule_source::rule_source(r, repo, fleet)?;
     let base = source.contract();
-    let report = needs(r, repo, &crate::scan::WorkTree, fleet, base);
+    let report = needs_with(r, repo, fleet, base, options)?;
     if json {
         let doc = serde_json::to_value(&report).map_err(|_| -> Error {
             Cause::Bug {
