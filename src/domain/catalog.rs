@@ -181,6 +181,23 @@ fn build() -> Vec<Shape> {
             "Comma-separated email addresses for alerts or an access list.",
             "RFC 5322 (addr-spec), comma-separated list",
         ),
+        entry(
+            "github_pat",
+            Rules {
+                // Classic `ghp_` + 36 base62, or fine-grained `github_pat_` + 22 base62,
+                // `_`, 59 base62.
+                regex: Some(
+                    "^(ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59})$".to_owned(),
+                ),
+                ..Rules::default()
+            },
+            Kind::Secret,
+            Source::Person,
+            Scope::Personal,
+            "GitHub Settings > Developer settings > Personal access tokens; classic ghp_ or \
+             fine-grained github_pat_.",
+            "GitHub Docs, managing your personal access tokens",
+        ),
     ]
 }
 
