@@ -53,11 +53,11 @@ pub fn run(
     json: bool,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    let document = gather(fleet, env, product, r, receipt)?;
+    let (document, _writers, locations) = read(fleet, env, product, r, receipt)?;
     let deliveries = delivery_rows(&scoped(fleet, env), product, r);
 
     if json {
-        let body = body(&document, &deliveries)?;
+        let body = body(&document, &deliveries, &locations)?;
         let rendered = serde_json::to_vec(&body)
             .map_err(|_| Cause::Bug {
                 site: "the inventory document serializes",
@@ -89,7 +89,7 @@ pub fn gather(
     r: &dyn CommandRunner,
     receipt: Option<&Path>,
 ) -> Result<Inventory, Error> {
-    read(fleet, env, product, r, receipt).map(|(document, _)| document)
+    read(fleet, env, product, r, receipt).map(|(document, _, _)| document)
 }
 
 /// [`gather`] and the [`Signals`] `opv next` ranks with: the cells whose delivery evidence
@@ -103,7 +103,7 @@ pub fn gather_for_next(
     r: &dyn CommandRunner,
     receipt: Option<&Path>,
 ) -> Result<(Inventory, Signals), Error> {
-    let (document, writers) = read(fleet, env, product, r, receipt)?;
+    let (document, writers, _) = read(fleet, env, product, r, receipt)?;
     let deliveries = delivery_rows(&scoped(fleet, env), product, r);
     let delivered = delivered_cells(fleet, &document, &deliveries);
     Ok((document, Signals { delivered, writers }))
@@ -156,14 +156,32 @@ fn writer_count(users: Option<&Value>) -> Option<usize> {
     )
 }
 
-/// The reads behind [`gather`]: the document, and each read vault's writer count.
+/// Where one key's value lives in 1Password (#174): the label of the section its field sits
+/// in, the label of the field itself, and an `op://<vault>/<item>` link to the item. Names
+/// and ids only: never a value, and never a field-level secret reference that `op` would
+/// resolve without its own access checks (SR-1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct KeyLocation {
+    /// The section label; `null` at the top level or in an unlabelled section.
+    section: Option<String>,
+    /// The field label 1Password holds the value under.
+    field: String,
+    /// `op://<vault>/<item>`: the item, not the field.
+    link: String,
+}
+
+/// The location of each key cell, keyed as `cells.states`: `(product, key, env)`.
+type KeyLocations = BTreeMap<(String, String, String), KeyLocation>;
+
+/// The reads behind [`gather`]: the document, each read vault's writer count, and where
+/// each key cell lives.
 fn read(
     fleet: &Fleet,
     env: Option<&str>,
     product: Option<&str>,
     r: &dyn CommandRunner,
     receipt: Option<&Path>,
-) -> Result<(Inventory, BTreeMap<String, usize>), Error> {
+) -> Result<(Inventory, BTreeMap<String, usize>, KeyLocations), Error> {
     if let Some(name) = env {
         fleet.environment(name)?;
     }
@@ -172,6 +190,7 @@ fn read(
 
     let source = committed_rules(r, &scoped);
     let mut cells = CellInputs::default();
+    let mut locations = KeyLocations::new();
     // Every needed boundary of every scoped environment, each once, and the vaults whose
     // capability must be observed before deciding whether the item can be read at all.
     let mut needs = Vec::new();
@@ -197,8 +216,8 @@ fn read(
         };
         cells.capabilities.insert(vault_id, capability);
     }
-    read_boundaries(&scoped, &source, r, &needs, &mut cells)?;
-    read_personal(&scoped, &source, r, &me, &mut cells);
+    read_boundaries(&scoped, &source, r, &needs, &mut cells, &mut locations)?;
+    read_personal(&scoped, &source, r, &me, &mut cells, &mut locations);
 
     let view = match receipt {
         Some(path) => Some(read_receipt(path)?),
@@ -209,7 +228,7 @@ fn read(
         document.keys.retain(|k| k.product == name);
         document.cells.retain(|c| c.product == name);
     }
-    Ok((document, writers))
+    Ok((document, writers, locations))
 }
 
 /// The committed-rule source, as `ready` reads it: `Manifest` when the contract is in
@@ -234,16 +253,37 @@ fn read_boundaries(
     r: &dyn CommandRunner,
     needs: &[(String, String, &crate::domain::Boundary)],
     cells: &mut CellInputs,
+    locations: &mut KeyLocations,
 ) -> Result<(), Error> {
     use crate::app::rule_source::RuleStatus;
     for (env_name, boundary_name, boundary) in needs {
+        let link = format!("op://{}/{}", boundary.vault_id, boundary.item_id);
+        let part = super::tidy::in_boundary(fleet, boundary_name);
+        // Every declared key starts at its conventional home (FR-43); a read below replaces
+        // the section and field with the ones the item actually holds. A shared key homes
+        // at its source (FR-45), so its location is recorded under that source.
+        for (product, declared) in &part.products {
+            for (key, spec) in &declared.keys {
+                if !spec.is_desired_in(env_name) || spec.personal {
+                    continue;
+                }
+                let (at_product, at_key) = spec.source().unwrap_or((product, key));
+                locations.insert(
+                    (product.clone(), key.clone(), env_name.clone()),
+                    KeyLocation {
+                        section: Some(at_product.to_string()),
+                        field: at_key.to_string(),
+                        link: link.clone(),
+                    },
+                );
+            }
+        }
         if cells.capabilities.get(&boundary.vault_id) == Some(&Capability::None) {
             continue;
         }
         let environment = fleet.environment(env_name)?;
         let item = onepassword::read_whole(r, environment, boundary)?;
         let (layout, _stamp) = onepassword_tidy::parse(item.raw())?;
-        let part = super::tidy::in_boundary(fleet, boundary_name);
         let found = convention::resolve(&layout, &part);
         for (product, declared) in &part.products {
             for (key, spec) in &declared.keys {
@@ -266,6 +306,18 @@ fn read_boundaries(
                 cells
                     .states
                     .insert((product.clone(), key.clone(), env_name.clone()), state);
+                let (at_product, at_key) = spec.source().unwrap_or((product, key));
+                if let Some(&i) = found.chosen.get(&(at_product.to_string(), at_key.to_string())) {
+                    let field = &layout.fields[i];
+                    locations.insert(
+                        (product.clone(), key.clone(), env_name.clone()),
+                        KeyLocation {
+                            section: field.section_label().map(str::to_string),
+                            field: field.label.clone(),
+                            link: link.clone(),
+                        },
+                    );
+                }
             }
         }
     }
@@ -283,6 +335,7 @@ fn read_personal(
     r: &dyn CommandRunner,
     me: &Option<String>,
     cells: &mut CellInputs,
+    locations: &mut KeyLocations,
 ) {
     use crate::app::rule_source::RuleStatus;
     use crate::domain::value_state::{ReadError, UnreadableCause};
@@ -293,8 +346,9 @@ fn read_personal(
             continue;
         }
         // The item's fields, `Ok(None)` when the item or its vault is not set up yet.
-        let read = match super::personal::locate(r, fleet, env_name, &project) {
+        let (read, link) = match super::personal::locate(r, fleet, env_name, &project) {
             Ok(Some(at)) => {
+                let link = format!("op://{}/{}", at.vault_id, at.item_id);
                 let users = onepassword_init::vault_users(r, &at.vault_id, &Host::detect)
                     .ok()
                     .flatten();
@@ -313,14 +367,17 @@ fn read_personal(
                         );
                     }
                 }
-                onepassword::read_whole(r, environment, &at)
-                    .and_then(|item| onepassword_tidy::parse(item.raw()).map(|(l, _)| l))
-                    .map(Some)
-                    .map_err(|_| ReadError::new(UnreadableCause::OpFailed))
+                (
+                    onepassword::read_whole(r, environment, &at)
+                        .and_then(|item| onepassword_tidy::parse(item.raw()).map(|(l, _)| l))
+                        .map(Some)
+                        .map_err(|_| ReadError::new(UnreadableCause::OpFailed)),
+                    Some(link),
+                )
             }
-            Ok(None) => Ok(None),
-            Err(e) if super::personal::not_set_up(&e) => Ok(None),
-            Err(_) => Err(ReadError::new(UnreadableCause::OpFailed)),
+            Ok(None) => (Ok(None), None),
+            Err(e) if super::personal::not_set_up(&e) => (Ok(None), None),
+            Err(_) => (Err(ReadError::new(UnreadableCause::OpFailed)), None),
         };
         let found = read
             .as_ref()
@@ -348,6 +405,33 @@ fn read_personal(
                 cells
                     .states
                     .insert((product.clone(), key.clone(), env_name.clone()), state);
+                if let Some(link) = &link {
+                    let (at_product, at_key) = spec.source().unwrap_or((product, key));
+                    let actual = found.as_ref().and_then(|found| {
+                        found
+                            .chosen
+                            .get(&(at_product.to_string(), at_key.to_string()))
+                            .and_then(|&i| {
+                                read.as_ref().ok().and_then(Option::as_ref).map(|layout| {
+                                    let field = &layout.fields[i];
+                                    (
+                                        field.section_label().map(str::to_string),
+                                        field.label.clone(),
+                                    )
+                                })
+                            })
+                    });
+                    let (section, field) = actual
+                        .unwrap_or_else(|| (Some(at_product.to_string()), at_key.to_string()));
+                    locations.insert(
+                        (product.clone(), key.clone(), env_name.clone()),
+                        KeyLocation {
+                            section,
+                            field,
+                            link: link.clone(),
+                        },
+                    );
+                }
             }
         }
     }
@@ -446,8 +530,13 @@ fn read_receipt(path: &Path) -> Result<ReceiptView, Error> {
     })
 }
 
-/// The schema-3 body: the document, the delivery rows and the typed `next`.
-fn body(document: &Inventory, deliveries: &[DeliveryRow]) -> Result<Value, Error> {
+/// The schema-3 body: the document (each key row with its 1Password location, #174), the
+/// delivery rows and the typed `next`.
+fn body(
+    document: &Inventory,
+    deliveries: &[DeliveryRow],
+    locations: &KeyLocations,
+) -> Result<Value, Error> {
     let serde_json::Value::Object(mut fields) =
         serde_json::to_value(document).map_err(|_| Cause::Bug {
             site: "the inventory document serializes",
@@ -468,6 +557,38 @@ fn body(document: &Inventory, deliveries: &[DeliveryRow]) -> Result<Value, Error
         "schema_version".into(),
         Value::from(crate::json::SCHEMA_VERSION),
     );
+    // Each key row names where its value lives: section, field and item link. The location
+    // of a shared key is looked up under its source (FR-45), as its value is.
+    if let Some(keys) = fields.get_mut("keys").and_then(Value::as_array_mut) {
+        for row in keys {
+            let product = row["product"].as_str().map(str::to_string);
+            let key = row["key"].as_str().map(str::to_string);
+            let (Some(product), Some(key)) = (product, key) else {
+                continue;
+            };
+            let Some(cell) = document
+                .cells
+                .iter()
+                .find(|c| c.product == product && c.key == key)
+            else {
+                continue;
+            };
+            let (at_product, at_key) = cell
+                .from
+                .as_deref()
+                .and_then(|from| from.split_once('/'))
+                .unwrap_or((cell.product.as_str(), cell.key.as_str()));
+            if let Some(location) = locations.get(&(
+                at_product.to_string(),
+                at_key.to_string(),
+                cell.env.clone(),
+            )) {
+                row["location"] = serde_json::to_value(location).map_err(|_| Cause::Bug {
+                    site: "a key location serializes",
+                })?;
+            }
+        }
+    }
     if let Some(command) = next_command(document) {
         fields.insert(
             "next".into(),
@@ -589,7 +710,8 @@ fn render(document: &Inventory, deliveries: &[DeliveryRow]) -> String {
     text.push_str(head_line.trim_end());
     text.push('\n');
     for (row, key) in document.keys.iter().enumerate() {
-        let mut line = format!("{:<label_width$}", labels[row]);
+        let marked = format!("{}{}", labels[row], key_marker(key));
+        let mut line = format!("{marked:<label_width$}");
         for (i, env) in document.environments.iter().enumerate() {
             let cell = by_cell
                 .get(&(key.product.as_str(), key.key.as_str(), env.env.as_str()))
@@ -636,6 +758,19 @@ fn render(document: &Inventory, deliveries: &[DeliveryRow]) -> String {
         text.push_str(&format!("next: {command}\n"));
     }
     text
+}
+
+/// The compact suffix a key's matrix label carries (#174): `!` when the key is immutable,
+/// `@` when it is a local file key, `!@` when it is both, and nothing when it is neither
+/// (so a key with no attribute renders exactly as it did before). The suffix is glued to the
+/// label and the unmarked width is used, so a marked key never widens an unmarked row.
+fn key_marker(key: &inventory::KeyRow) -> &'static str {
+    match (key.immutable, key.file.is_some()) {
+        (true, true) => "!@",
+        (true, false) => "!",
+        (false, true) => "@",
+        (false, false) => "",
+    }
 }
 
 /// The matrix entry of a key the contract does not declare for an environment: no cell, no
