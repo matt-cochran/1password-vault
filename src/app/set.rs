@@ -40,6 +40,11 @@ pub fn set(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
+    // An infrastructure key has no 1Password value to set (#206 §4.4): said first, from the
+    // configuration alone, so nobody is handed a command that cannot succeed.
+    if let Ok((product, name)) = resolve(fleet, key, env_name) {
+        super::import::refuse_not_stored(fleet, &product, &name, env_name)?;
+    }
     // An assistant is refused before anything, with the exact command for the person; then
     // a process without a terminal. Neither path calls the prompt (R60).
     refuse_if_agent(env, command(key, env_name))?;

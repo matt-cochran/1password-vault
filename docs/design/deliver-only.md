@@ -24,7 +24,7 @@ serial. CI gets no new 1Password capability; opv defines no roles.
 kind = "secret"
 source = "infrastructure"
 environments = ["staging", "prod"]
-rules = { regex = "^postgres(ql)?://" }
+rules = { regex = "postgres(ql)?://.+" }
 
 [products.api.keys.STRIPE_WEBHOOK_SECRET]
 kind = "secret"
@@ -32,6 +32,9 @@ source = "infrastructure"
 environments = ["staging", "prod"]
 rules = { prefix = "whsec_" }
 ```
+
+opv's `regex` rule is a full match (the value must match it whole), so the pattern spells out the
+rest of the value (`.+`) and needs no anchors.
 
 `ValueSource::Infrastructure` is a fourth value of the existing attribute, which answers "who or
 what produces the value" (`person`, `generated`, `derived`). Rejected names: `ci` names the courier
@@ -158,6 +161,22 @@ infrastructure keys are never stored", Next `opv propose key p/K --source infras
 apply archives the field. Two sources of truth would let a person edit 1Password and wrongly
 believe production changed. `propose structure` and tidy never create such a field; `opv set`,
 `opv import`, `opv open`, `propose generate` and `opv_import_local` refuse the key.
+
+Each value path decides from the configuration alone, before any prompt, read or write, and names
+the key only:
+
+| Path | Outcome |
+|---|---|
+| `opv set p/K` | `Guard::NotStored` (`policy_refused`, exit 6), before the agent and terminal checks, so nobody is handed a command that cannot succeed |
+| `opv import`, `opv_import_local` | a found value of p/K is planned `not_stored` (never checked against rules, never written); `--replace p/K` or `--rotate p/K` is `Guard::NotStored` |
+| `opv open p/K` | `Guard::NotStored`: there is no field to open; no call is made |
+| `propose generate`, `apply --generate` | `GenerateRefused{reason: Infrastructure}`, checked first (its shape rule may give a byte count) |
+| `propose structure`, its apply | no field is planned or added for p/K |
+| `propose attest`, `apply --attest` | `AttestRefused{reason: NotStored}`, before the target is reached |
+
+`Guard::NotStored` and `GenerateRefusal::Infrastructure` share Do "change p/K where infrastructure
+produces it and re-run the deploy job, which supplies it to opv sync; it has no 1Password field",
+Next `opv explain p/K --env E`.
 
 ## 5. Staleness, idempotency, concurrency, failures
 
