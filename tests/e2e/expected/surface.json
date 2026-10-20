@@ -704,6 +704,7 @@
                 "enum": [
                   "base64_bytes_32",
                   "email_list",
+                  "github_pat",
                   "hex_bytes_32",
                   "https_url",
                   "openai_key",

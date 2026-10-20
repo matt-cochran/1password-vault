@@ -400,8 +400,8 @@ fn mark_retired(
         return Err(Cause::ConfigNotEditable {
             source,
             reason: crate::cause::NotEditable::Generated {
-                generator: None,
-                diff: Some(crate::app::config_cmd::diff(&original, &edited)),
+                generator: crate::app::bootstrap::generated_by(&original).map(Into::into),
+                fragment: crate::app::propose::Fragment::between(&original, &edited, &ids).ok(),
             },
         }
         .into());
