@@ -90,6 +90,22 @@ fn a_production_tier_environment_yields_the_question() {
 }
 
 #[test]
+fn an_infrastructure_key_asks_no_value_question() {
+    let contract = DEV_PROD.replace(
+        "item_id = \"app\" }\n\n[products",
+        "item_id = \"app\" }\n\n[environments.prod.targets.web]\nfly.app = \"web-prod\"\nfly.secret_name = \"{KEY}\"\nstate_vault_id = \"s1\"\n\n[products",
+    );
+    let intent = key_intent(
+        r#"{"kind":"key","key":"HOOK_SECRET","product":"app","field_kind":"secret","source":"infrastructure","environments":["prod"]}"#,
+    );
+    let extras = Extras {
+        rules: vec!["prefix=whsec_".to_string()],
+    };
+    let proposal = propose_with(&contract, &Bindings::default(), None, &intent, &extras).unwrap();
+    assert!(proposal.questions.is_empty());
+}
+
+#[test]
 fn an_expiry_date_reaches_the_proposed_contract() {
     let intent = key_intent(
         r#"{"kind":"key","key":"NEW_KEY","product":"app","field_kind":"secret","expires":"2027-01-31"}"#,
