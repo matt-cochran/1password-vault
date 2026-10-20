@@ -49,7 +49,16 @@ pub struct Receipt {
     /// empty, so the `opv.delivery/1` schema is unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attested: Vec<String>,
+    /// The names of `bindings` whose value was supplied to `opv sync --supply-stdin` (#206,
+    /// `docs/design/deliver-only.md` §6.3), never stored in 1Password: sorted. Optional
+    /// and omitted when empty, like `attested`, so the `opv.delivery/1` schema is unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supplied: Vec<String>,
 }
+
+/// The `item_id` of a supplied binding's source (#206 §6.3): a 1Password item id is 26
+/// characters, so it never collides with this word.
+pub const SUPPLIED: &str = "supplied";
 
 /// Two or more receipts in one file share a full scope (FR-58).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,9 +137,26 @@ pub fn new_revision(random: [u8; 16]) -> String {
 }
 
 /// `"v1|<store_version>|<fingerprint>|<item_id>|<field>"`, or for a person's attestation
-/// (#201) `"a1|<store_version>|<fingerprint>|<item_id>|<field>|<attested_at>"`; `None` when
-/// any part is empty or contains `'|'` or a newline.
+/// (#201) `"a1|<store_version>|<fingerprint>|<item_id>|<field>|<attested_at>"`, or for a
+/// supplied value (#206 §6.2) `"s1|<store_version>|<fingerprint>|<product/KEY>|<serial>|
+/// <recorded_at>"`; `None` when any part is empty or contains `'|'` or a newline, or when a
+/// line is both attested and supplied, or supplied from anything but [`SUPPLIED`].
 pub fn encode_evidence(e: &Evidence) -> Option<String> {
+    if let Some(mark) = &e.supplied {
+        if e.attested_at.is_some()
+            || e.source.item_id != SUPPLIED
+            || !valid_part(&e.store_version)
+            || !valid_part(&e.fingerprint)
+            || !valid_part(&e.source.field)
+            || !valid_part(&mark.at)
+        {
+            return None;
+        }
+        return Some(format!(
+            "s1|{}|{}|{}|{}|{}",
+            e.store_version, e.fingerprint, e.source.field, mark.serial, mark.at
+        ));
+    }
     if !valid_part(&e.store_version)
         || !valid_part(&e.fingerprint)
         || !valid_part(&e.source.item_id)
@@ -153,6 +179,26 @@ pub fn encode_evidence(e: &Evidence) -> Option<String> {
 /// part count, empty part).
 pub fn decode_evidence(name: &str, line: &str) -> Option<Evidence> {
     let parts: Vec<&str> = line.split('|').collect();
+    if parts.iter().any(|p| p.is_empty()) {
+        return None;
+    }
+    if let (Some("s1"), 6) = (parts.first().copied(), parts.len()) {
+        let serial = parts[4].parse::<u64>().ok()?;
+        return Some(Evidence {
+            name: name.to_string(),
+            store_version: parts[1].to_string(),
+            fingerprint: parts[2].to_string(),
+            source: Source {
+                item_id: SUPPLIED.to_string(),
+                field: parts[3].to_string(),
+            },
+            attested_at: None,
+            supplied: Some(SuppliedMark {
+                serial,
+                at: parts[5].to_string(),
+            }),
+        });
+    }
     let attested_at = match (parts.first().copied(), parts.len()) {
         (Some("v1"), 5) => None,
         (Some("a1"), 6) => Some(parts[5].to_string()),
@@ -182,6 +228,10 @@ pub struct NameCheck {
     /// `verified` means unchanged since attested, not right. Omitted when false.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub attested: bool,
+    /// True when the name's value was supplied at sync (#206 §6.4): its `verified` means
+    /// unchanged on the target since supplied, not current. Omitted when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub supplied: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -194,6 +244,10 @@ pub struct Verification {
     /// the receipt's `attested`. Omitted when there are none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attested: Vec<String>,
+    /// The names the checked revision counts on a supplied value (#206): the receipt's
+    /// `supplied`. Omitted when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub supplied: Vec<String>,
 }
 
 /// What a read-only check sees now, per name.
@@ -219,6 +273,7 @@ pub fn verify(
             reason: Some("no delivery recorded".to_string()),
             names: Vec::new(),
             attested: Vec::new(),
+            supplied: Vec::new(),
         };
     };
 
@@ -229,6 +284,7 @@ pub fn verify(
             reason: Some(format!("recorded for another {field}")),
             names: Vec::new(),
             attested: Vec::new(),
+            supplied: Vec::new(),
         };
     }
 
@@ -241,6 +297,7 @@ pub fn verify(
             reason: Some("the binding set changed".to_string()),
             names: Vec::new(),
             attested: Vec::new(),
+            supplied: Vec::new(),
         };
     }
 
@@ -252,6 +309,9 @@ pub fn verify(
             attested: evidence
                 .iter()
                 .any(|e| e.name == binding.name && e.attested()),
+            supplied: evidence
+                .iter()
+                .any(|e| e.name == binding.name && e.supplied.is_some()),
         })
         .collect();
 
@@ -285,6 +345,7 @@ pub fn verify(
         reason,
         names,
         attested: receipt.attested.clone(),
+        supplied: receipt.supplied.clone(),
     }
 }
 
@@ -300,6 +361,11 @@ fn name_state(name: &str, evidence: &[Evidence], observed: &[Observed<'_>]) -> &
     };
     if listed != ev.store_version {
         return "drifted_on_target";
+    }
+    // #206 §6.4: a supplied value has no source to compare with; the target still holding
+    // the version opv recorded is all a check can see. Never `source_changed`.
+    if ev.supplied.is_some() {
+        return "verified";
     }
     let Some(fingerprint) = obs.fingerprint_now else {
         return "unverifiable";

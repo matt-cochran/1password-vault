@@ -402,7 +402,8 @@ Examples:
 
 const INVENTORY_MORE: &str = "\
 Each cell is a value state (set, absent, empty, placeholder, malformed, unreadable,
-not_wanted) and this session's access to the vault: W write, R read, - none, ? unknown.
+not_wanted, supplied) and this session's access to the vault: W write, R read, - none,
+? unknown. supplied: an infrastructure key, supplied at sync and never stored.
 Below the matrix: each environment's boundary ids and each placement's delivery state.
 Reads each 1Password item once; never prints a value, a length or a digest.";
 
@@ -1244,6 +1245,14 @@ struct SyncArgs {
     /// in name order, under one plan id.
     #[arg(long = "target", value_name = "NAME")]
     target: Vec<String>,
+    /// Take infrastructure keys' values from stdin (opv.supply/1); never stored.
+    #[arg(
+        long,
+        conflicts_with = "retire",
+        hide_short_help = true,
+        hide_long_help = true
+    )]
+    supply_stdin: bool,
 }
 
 impl From<SyncArgs> for sync::SyncOpts {
@@ -1260,6 +1269,7 @@ impl From<SyncArgs> for sync::SyncOpts {
             receipt: a.receipt,
             targets: a.target,
             retire: a.retire,
+            supply_stdin: a.supply_stdin,
         }
     }
 }
@@ -1312,10 +1322,11 @@ enum ProposeCmd {
         /// ENV=REASON (repeatable).
         #[arg(long, value_name = "ENV=REASON")]
         except: Vec<String>,
-        /// Who or what produces the value: person, generated or derived.
+        /// Who or what produces the value: person, generated, derived or infrastructure
+        /// (supplied at sync by the deploy job that produced it, never stored).
         #[arg(
             long,
-            value_parser = ["person", "generated", "derived"],
+            value_parser = ["person", "generated", "derived", "infrastructure"],
             hide_possible_values = true
         )]
         source: Option<String>,
@@ -1506,13 +1517,13 @@ enum CiCmd {
     #[command(before_help = CI_WORKFLOW_QUICK)]
     Workflow {
         /// Environment name from the configuration (for example prod).
-        #[arg(required_unless_present_any = ["on_change", "drift"])]
+        #[arg(required_unless_present_any = ["on_change", "drift", "supply_check"])]
         env: Option<String>,
         /// Target name whose provider setup step and sync command the workflow uses.
         #[arg(
             long,
             value_name = "NAME",
-            required_unless_present_any = ["on_change", "drift"],
+            required_unless_present_any = ["on_change", "drift", "supply_check"],
             conflicts_with_all = ["on_change", "drift"]
         )]
         target: Option<String>,
@@ -1528,6 +1539,18 @@ enum CiCmd {
         /// Print §2.5's nightly drift-check workflow for the same environments.
         #[arg(long, conflicts_with_all = ["on_change", "target", "github_env", "deploy"])]
         drift: bool,
+        /// Print the step that delivers the target's infrastructure values (source =
+        /// "infrastructure"), to paste into the job that produced them; never --rotate.
+        #[arg(long, conflicts_with_all = ["on_change", "drift", "github_env", "supply_check"])]
+        supply: bool,
+        /// Check a workflow file: refuse a ${{ }} expression other than github.* in a step
+        /// script that pipes into --supply-stdin (GitHub expands it into the logged script).
+        #[arg(
+            long,
+            value_name = "FILE",
+            conflicts_with_all = ["on_change", "drift", "target", "github_env", "deploy", "env"]
+        )]
+        supply_check: Option<PathBuf>,
         /// Minutes between change checks (`--on-change` only); a divisor of 60, at most 59.
         #[arg(
             long,
@@ -1547,7 +1570,9 @@ Examples:
   opv ci workflow prod --target web --deploy            # let the job deploy after syncing
   opv ci workflow --on-change                           # the change workflow, every 15 minutes
   opv ci workflow --on-change --every 30                # ... on a 30-minute cron
-  opv ci workflow --drift                               # the nightly drift check";
+  opv ci workflow --drift                               # the nightly drift check
+  opv ci workflow prod --target web --supply            # the step that delivers infrastructure values
+  opv ci workflow --supply-check .github/workflows/apply.yml   # check that step's script";
 
 /// `--every <minutes>`: a divisor of 60 (so the cron repeats every hour), at most 59.
 fn every_minutes(s: &str) -> Result<u8, String> {
@@ -2688,6 +2713,8 @@ fn run(
         Budget::starting_now(std::time::Duration::from_secs(cli.timeout)),
         cli.verbose,
     );
+    // #206 (S12): a supply must reach EOF within the same run budget.
+    let supply_deadline = std::time::Instant::now() + std::time::Duration::from_secs(cli.timeout);
     // FR-40, NR-7: the account recorded for this checkout (.opv) or OP_ACCOUNT; a manifest
     // found in another account replaces it below. Never op's default when one is known.
     // FR-40, NR-7: one order everywhere (OP_ACCOUNT, else .opv), resolved to an account ID;
@@ -2695,6 +2722,19 @@ fn run(
     let here = std::env::current_dir().unwrap_or_default();
     // `apply` and `set` are a person's own: an assistant or a run without a terminal is
     // turned away before any account, configuration or 1Password call.
+    // #206 (R1): an assistant never hands opv a value, so `--supply-stdin` is refused from
+    // one before any account, configuration or 1Password call.
+    if let Cmd::Sync(a) = &cli.cmd
+        && a.supply_stdin
+    {
+        opv::host::refuse_if_agent(
+            &opv::host::ProcessEnv,
+            opv::cause::Cmd {
+                command: vec!["sync".into()],
+                args: vec![a.env.clone(), "--supply-stdin".into()],
+            },
+        )?;
+    }
     if let Some(cmd) = person_only(&cli.cmd) {
         opv::host::refuse_if_agent(&opv::host::ProcessEnv, cmd)?;
         if !opv::host::HostEnv::interactive(&opv::host::ProcessEnv) {
@@ -3080,7 +3120,32 @@ fn run(
         let fleet = loaded?;
         return opv::app::changed::run(&fleet, env, product.as_deref(), target, runner, *json, out);
     }
+    // #206: the supply is read from standard input within the run budget (S12), then
+    // admitted by the sync for its scope before any 1Password read.
+    if matches!(&cmd, Cmd::Sync(a) if a.supply_stdin) {
+        let Cmd::Sync(a) = cmd else {
+            unreachable!("matched just above")
+        };
+        let fleet = loaded?;
+        let env = a.env.clone();
+        let raw = read_supply(supply_deadline)?;
+        return sync::run_supplying(&fleet, &env, runner, out, &a.into(), raw)
+            .map_err(|e| e.in_env(&env))
+            .map(|()| 0);
+    }
     run_other(cmd, loaded, source.as_deref(), runner, out).map(|()| 0)
+}
+
+/// The supply on standard input (#206 §3): refused before a byte is read when standard
+/// input is a terminal; otherwise read until EOF, within `deadline`.
+fn read_supply(deadline: std::time::Instant) -> Result<opv::app::deliver_only::RawSupply, Error> {
+    use opv::app::deliver_only::{Limits, read, stdin_until};
+    use std::io::IsTerminal as _;
+    let limits = Limits::new(deadline);
+    if std::io::stdin().is_terminal() {
+        return read(&mut std::io::empty(), true, &limits);
+    }
+    read(&mut stdin_until(deadline), false, &limits)
 }
 
 /// `opv run <env> --confirm <env>` with the run's `--product` and `--role`: the person's
@@ -4655,8 +4720,25 @@ fn run_other(
             on_change,
             drift,
             every,
+            supply,
+            supply_check,
         }) => {
-            if on_change {
+            if let Some(path) = supply_check {
+                opv::app::ci_workflow::run_supply_check(&path, out)
+            } else if supply {
+                match (env.as_deref(), target.as_deref()) {
+                    (Some(env), Some(target)) => {
+                        opv::app::ci_workflow::run_supply(&loaded?, env, target, deploy, out)
+                    }
+                    _ => Err(opv::cause::Cause::Usage {
+                        problem: opv::cause::UsageProblem::NeedsFlag {
+                            flag: "--supply".into(),
+                            needs: "an environment and --target".into(),
+                        },
+                    }
+                    .into()),
+                }
+            } else if on_change {
                 opv::app::ci_workflow::run_on_change(&loaded?, every, out)
             } else if drift {
                 opv::app::ci_workflow::run_drift(&loaded?, out)

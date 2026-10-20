@@ -69,6 +69,11 @@ pub enum KeyState {
     /// A shared key (FR-45) whose source has a finding: the finding is reported once, on
     /// the source's row, which also blocks the sync. Not counted as a finding of its own.
     SourceBlocked,
+    /// An infrastructure key (#206, `docs/design/deliver-only.md` §6.1) with no value this
+    /// run: its value is supplied at sync by the deploy job that produced it, never stored.
+    /// Not blocking and never `Missing`; never staged or pruned. Its target state comes
+    /// from the store's version alone ([`TargetState::AsSupplied`], [`TargetState::Unrecorded`]).
+    SuppliedAtSync,
 }
 
 /// The per-key rule gate (H1, design row `rule-gate`): `agent` says the caller is an
@@ -125,6 +130,12 @@ pub enum TargetState {
     /// The environment's target does not deliver this key's product (source-only, FR-47,
     /// or outside the target's products, FR-48): read and checked, never written there.
     NotDelivered,
+    /// A supplied name (#206 §6.1) the store lists at the version its `s1` evidence line
+    /// recorded: unchanged on the target since it was supplied.
+    AsSupplied,
+    /// A supplied name the store lists with no `s1` evidence line: opv cannot vouch for
+    /// what the target holds (first adoption, or a line an older opv dropped).
+    Unrecorded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -535,6 +546,18 @@ pub fn build_with_gate(
                 }
                 (Lifecycle::Active, _) | (Lifecycle::Retiring, false) => outcome,
                 (Lifecycle::Retiring, true) | (Lifecycle::Retired, _) => Ok(None),
+            };
+
+            // #206 §6.1: an infrastructure key with no field this run (no supply) is
+            // supplied at sync: never `Missing`, never staged or pruned.
+            let supplied_at_sync = spec.value_source
+                == Some(crate::domain::model::ValueSource::Infrastructure)
+                && field.is_none()
+                && matches!(outcome, Err(KeyState::Missing));
+            let outcome = if supplied_at_sync {
+                Err(KeyState::SuppliedAtSync)
+            } else {
+                outcome
             };
 
             let mut row = Row {

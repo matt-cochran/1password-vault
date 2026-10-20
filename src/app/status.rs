@@ -212,14 +212,26 @@ fn drift_error(parts: &[StatusPart<'_>], env_name: &str, fail_on_drift: bool) ->
         return None;
     }
     let (target, names) = parts.iter().find_map(|p| {
-        let drift = &p.pinned.as_ref()?.drift;
+        let drift = match &p.pinned {
+            Some(pinned) => pinned.drift.to_vec(),
+            // #206 §6.4: a name supplied at sync that the target now lists at another
+            // version than its `s1` line recorded.
+            None => p
+                .plan
+                .rows
+                .iter()
+                .filter(|r| r.state == crate::domain::KeyState::SuppliedAtSync)
+                .map(|r| p.t.env_name(&r.product, &r.key))
+                .filter(|n| p.plan.drift.contains(n))
+                .collect(),
+        };
         (!drift.is_empty()).then_some((p.name.as_str(), drift))
     })?;
     Some(
         Cause::TargetDrift {
             env: EnvName::new(env_name),
             target: TargetName::new(target),
-            names: names.clone(),
+            names,
         }
         .into(),
     )

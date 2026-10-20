@@ -201,6 +201,9 @@ pub fn remote_profile<'a>(
     Ok(r)
 }
 
+/// One key a run selected, with its declaration.
+type Selected<'a> = (&'a String, &'a KeySpec);
+
 fn launch(
     fleet: &Fleet,
     env_name: &str,
@@ -232,7 +235,19 @@ fn launch(
     };
 
     let selection = super::delivery_preview::select(env_name, env, product, prod, role)?;
-    let selected: Vec<(&String, &KeySpec)> = selection.delivered;
+    // #206 §6.4: an infrastructure key's value is supplied at sync to the target and never
+    // stored, so a run has nothing to inject: it says so, once per key, and goes on.
+    let (supplied, selected): (Vec<Selected<'_>>, Vec<Selected<'_>>) = selection
+        .delivered
+        .into_iter()
+        .partition(|(_, spec)| super::deliver_only::is_infrastructure(spec));
+    for (key, _) in &supplied {
+        runner.note(&format!(
+            "{} is not injected: its value is supplied at sync by the deploy job that \
+             produced it and never stored in 1Password",
+            crate::domain::key_label(product, key)
+        ));
+    }
     // FR-55: a personal key's value is in the person's own item. Locate it before the read
     // and before `op run`, so a missing personal item stops the run and names the keys.
     let personal_env = if selected
@@ -501,6 +516,37 @@ mod tests {
 
     fn env_of(r: &FakeRunner) -> Vec<(String, String)> {
         r.calls.borrow()[0].env.clone()
+    }
+
+    /// #206: prod with a Fly target, api delivering an infrastructure key and a stored one.
+    fn infra_fleet() -> Fleet {
+        crate::config::parse(
+            "[environments.prod]\nboundaries.api = { vault_id = \"v1\", item_id = \"i1\" }\n\
+             [environments.prod.targets.web]\nfly.app = \"web-prod\"\nfly.secret_name = \"{KEY}\"\nstate_vault_id = \"s1\"\n\
+             [products.api.keys.DATABASE_URL]\nkind = \"secret\"\nsource = \"infrastructure\"\n\
+             environments = [\"prod\"]\nrules = { regex = \"postgres(ql)?://.+\" }\n\
+             [products.api.keys.TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]\n",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_run_never_injects_an_infrastructure_key() {
+        let r = FakeRunner::new([Output::success(Vec::new())]);
+        run(&infra_fleet(), "prod", "api", &cmd(&["app"]), &r).unwrap();
+        assert!(!env_of(&r).iter().any(|(k, _)| k == "DATABASE_URL"));
+    }
+
+    #[test]
+    fn a_run_names_the_infrastructure_key_it_leaves_out() {
+        let r = FakeRunner::new([Output::success(Vec::new())]);
+        run(&infra_fleet(), "prod", "api", &cmd(&["app"]), &r).unwrap();
+        assert!(
+            r.notes
+                .borrow()
+                .iter()
+                .any(|n| n.starts_with("api/DATABASE_URL is not injected"))
+        );
     }
 
     #[test]
