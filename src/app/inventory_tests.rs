@@ -159,6 +159,29 @@ fn a_missing_key_is_the_persons_set_command() {
     );
 }
 
+/// A key row missing its value carries its own `opv set`, not only the document's.
+#[test]
+fn a_missing_keys_row_carries_its_own_set_command() {
+    let (op, fleet, _) = world();
+    let doc = json_document(&op, &fleet);
+    assert_eq!(
+        key_row_of(&doc, "api", "DATABASE_URL")["next"],
+        json!({
+            "kind": "enter_value",
+            "actor": "person",
+            "command": "opv set api/DATABASE_URL --env dev"
+        })
+    );
+}
+
+/// A key row needing nothing carries `next: null`, not an omitted field.
+#[test]
+fn a_set_keys_row_without_delivery_carries_no_next_step() {
+    let (op, fleet, _) = world();
+    let doc = json_document(&op, &fleet);
+    assert_eq!(key_row_of(&doc, "api", "OPENAI_API_KEY")["next"], Value::Null);
+}
+
 /// A placement whose delivery item carries a receipt shows `delivered`.
 #[test]
 fn a_delivery_item_with_a_receipt_is_delivered() {

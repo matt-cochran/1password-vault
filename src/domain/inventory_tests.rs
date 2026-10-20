@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use super::{CellInputs, ReceiptUse, ReceiptView, build};
+use super::{CellInputs, DeliveryState, ReceiptUse, ReceiptView, attach_next, build};
 use crate::config;
 use crate::domain::Fleet;
 use crate::domain::capability::Capability;
@@ -74,7 +74,12 @@ const GOLDEN: &str = r#"{
         "prod": "present"
       },
       "lifecycle": "retiring",
-      "expires": "2030-01-01"
+      "expires": "2030-01-01",
+      "next": {
+        "kind": "enter_value",
+        "actor": "person",
+        "command": "opv set api/DATABASE_URL --env prod"
+      }
     },
     {
       "product": "api",
@@ -86,7 +91,12 @@ const GOLDEN: &str = r#"{
         "prod": "present"
       },
       "lifecycle": "active",
-      "expires": null
+      "expires": null,
+      "next": {
+        "kind": "enter_value",
+        "actor": "person",
+        "command": "opv set api/STRIPE_KEY --env prod"
+      }
     }
   ],
   "cells": [
@@ -370,6 +380,167 @@ fn a_key_reports_its_roles() {
 fn a_local_file_key_reports_its_path() {
     let fleet = fleet_with_key_attributes(r#"file = "tls/private-key""#);
     assert_eq!(key_row(&fleet, "api", "API_KEY")["file"], "tls/private-key");
+}
+
+/// One `dev` environment with product `api`, its only key `API_KEY` carrying `state`.
+fn inventory_with_cell(state: ValueState) -> (Fleet, super::Inventory) {
+    let fleet = fleet_with_key_attributes("");
+    let cells = CellInputs {
+        states: BTreeMap::from([(at("api", "API_KEY", "dev"), state)]),
+        capabilities: BTreeMap::from([("vdev".to_string(), Capability::Write)]),
+        ..CellInputs::default()
+    };
+    let inventory = build(&fleet, &cells, None);
+    (fleet, inventory)
+}
+
+/// The `next` value of the `product`/`key` row in `inventory`.
+fn row_next(inventory: &super::Inventory, product: &str, key: &str) -> serde_json::Value {
+    let row = inventory
+        .keys
+        .iter()
+        .find(|k| k.product == product && k.key == key)
+        .expect("the key is declared");
+    serde_json::to_value(row).expect("the row serializes")["next"].clone()
+}
+
+/// A `set` key with `delivery` in `dev`, as the key row reports its next step.
+fn next_with_delivery(delivery: DeliveryState) -> serde_json::Value {
+    let (fleet, mut inventory) = inventory_with_cell(ValueState::Set);
+    inventory.keys[0]
+        .delivery
+        .insert("dev/web".into(), delivery);
+    attach_next(&fleet, &mut inventory);
+    row_next(&inventory, "api", "API_KEY")
+}
+
+#[test]
+fn an_absent_key_row_carries_the_persons_set_command() {
+    let (_, inventory) = inventory_with_cell(ValueState::Absent);
+    assert_eq!(
+        row_next(&inventory, "api", "API_KEY"),
+        serde_json::json!({
+            "kind": "enter_value",
+            "actor": "person",
+            "command": "opv set api/API_KEY --env dev"
+        })
+    );
+}
+
+#[test]
+fn an_empty_key_row_carries_the_persons_set_command() {
+    let (_, inventory) = inventory_with_cell(ValueState::Empty);
+    assert_eq!(
+        row_next(&inventory, "api", "API_KEY"),
+        serde_json::json!({
+            "kind": "enter_value",
+            "actor": "person",
+            "command": "opv set api/API_KEY --env dev"
+        })
+    );
+}
+
+#[test]
+fn a_placeholder_key_row_carries_the_persons_set_command() {
+    let (_, inventory) = inventory_with_cell(ValueState::Placeholder);
+    assert_eq!(
+        row_next(&inventory, "api", "API_KEY"),
+        serde_json::json!({
+            "kind": "enter_value",
+            "actor": "person",
+            "command": "opv set api/API_KEY --env dev"
+        })
+    );
+}
+
+#[test]
+fn a_malformed_key_row_carries_the_persons_set_command() {
+    let (_, inventory) = inventory_with_cell(ValueState::Malformed {
+        rule: "prefix".into(),
+    });
+    assert_eq!(
+        row_next(&inventory, "api", "API_KEY"),
+        serde_json::json!({
+            "kind": "enter_value",
+            "actor": "person",
+            "command": "opv set api/API_KEY --env dev"
+        })
+    );
+}
+
+#[test]
+fn a_set_key_row_without_delivery_carries_no_next_step() {
+    let (_, inventory) = inventory_with_cell(ValueState::Set);
+    assert_eq!(row_next(&inventory, "api", "API_KEY"), serde_json::Value::Null);
+}
+
+#[test]
+fn a_delivered_key_row_carries_no_next_step() {
+    assert_eq!(next_with_delivery(DeliveryState::Delivered), serde_json::Value::Null);
+}
+
+#[test]
+fn a_not_delivered_key_row_carries_the_sync_command() {
+    assert_eq!(
+        next_with_delivery(DeliveryState::NotDelivered),
+        serde_json::json!({"kind": "run", "actor": "ci", "command": "opv sync dev"})
+    );
+}
+
+#[test]
+fn an_unreadable_key_row_with_a_not_delivered_target_carries_the_sync_command() {
+    let (fleet, mut inventory) = inventory_with_cell(ValueState::Unreadable {
+        cause: UnreadableCause::NoAccess,
+    });
+    inventory.keys[0]
+        .delivery
+        .insert("dev/web".into(), DeliveryState::NotDelivered);
+    attach_next(&fleet, &mut inventory);
+    assert_eq!(
+        row_next(&inventory, "api", "API_KEY"),
+        serde_json::json!({"kind": "run", "actor": "ci", "command": "opv sync dev"})
+    );
+}
+
+#[test]
+fn a_stale_key_row_carries_the_sync_command() {
+    assert_eq!(
+        next_with_delivery(DeliveryState::Stale),
+        serde_json::json!({"kind": "run", "actor": "ci", "command": "opv sync dev"})
+    );
+}
+
+#[test]
+fn a_key_rows_most_urgent_action_is_its_value_before_its_sync() {
+    let fleet = fleet();
+    let cells = CellInputs {
+        states: BTreeMap::from([
+            (at("api", "STRIPE_KEY", "dev"), ValueState::Absent),
+            (at("api", "STRIPE_KEY", "prod"), ValueState::Set),
+        ]),
+        capabilities: BTreeMap::from([
+            ("vdev".to_string(), Capability::Write),
+            ("vprod".to_string(), Capability::Write),
+        ]),
+        ..CellInputs::default()
+    };
+    let mut inventory = build(&fleet, &cells, None);
+    inventory
+        .keys
+        .iter_mut()
+        .find(|k| k.product == "api" && k.key == "STRIPE_KEY")
+        .expect("the key is declared")
+        .delivery
+        .insert("prod/fly".into(), DeliveryState::Stale);
+    attach_next(&fleet, &mut inventory);
+    assert_eq!(
+        row_next(&inventory, "api", "STRIPE_KEY"),
+        serde_json::json!({
+            "kind": "enter_value",
+            "actor": "person",
+            "command": "opv set api/STRIPE_KEY --env dev"
+        })
+    );
 }
 
 /// A key reports the name each target that delivers it renders for it.

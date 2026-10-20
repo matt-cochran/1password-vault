@@ -61,6 +61,8 @@ pub fn run(
     let placements = placement_reads(&scoped, product, r);
     let deliveries = delivery_rows(&placements);
     key_deliveries(&scoped, &mut document, &placements, &versions);
+    // Each key row's own next step, now that its delivery evidence is known (#174).
+    inventory::attach_next(&scoped, &mut document);
 
     if json {
         let body = body(&document, &deliveries, &locations)?;

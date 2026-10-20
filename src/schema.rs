@@ -775,6 +775,13 @@ fn documents() -> Value {
         "delivery verify": "{environment, placements: [{product, target, revision, state, reason, names: [{name, state, attested?, supplied?}], attested?, supplied?, deployed, receipt_revision?}]}: every placement of the product, each with its target and state; --target narrows to one placement; a receipt kept from sync --receipt must be the current delivery; attested (a name's flag, the placement's list from its receipt) marks a name counted on a person's attestation, not proven (docs/attestation.md); supplied marks a name whose value was supplied at sync: its verified means unchanged on the target since supplied, not current, and it is never source_changed",
         "changed": "{environment, changed, placements: [{product, target, state (unchanged|changed|no_record), items?: [{item_id, recorded, current?}]}], next, do}: each placement's recorded source versions against the item's current version (item IDs and version numbers only, never a value); exit 10 when something changed, with ok true",
         "schema": "this document",
+        "inventory": [
+            "environments: [{env, tier, boundaries: {name: {vault_id, item_id} or null}}]",
+            "keys: [{product, key, kind, source, presence, lifecycle, expires, attributes, delivery, location, next}]",
+            "cells: [{product, key, env, boundary, state, capability, from_receipt?, from?, personal?}]",
+            "deliveries: [{environment, target, product, state}]",
+            "next: {kind, actor, command} or null: the most urgent action on that key, never a value; the document's own next is the first action",
+        ],
         "skill install": "{written: [{target, path}], kept: [{target, path, reason}]}",
         "skill status": "{copies: [{scope, target, path, version, edited, current}]}",
     })
@@ -930,6 +937,22 @@ mod tests {
             .map(|e| (e["tool"].as_str().unwrap(), e["cli"].as_str().unwrap()))
             .collect();
         assert_eq!(tools.as_slice(), MCP_TOOLS);
+    }
+
+    /// #174: the inventory document is described with its key row's own next step.
+    #[test]
+    fn schema_documents_the_inventory_document_and_its_key_next() {
+        let doc = describe(&clap::Command::new("opv"), "test");
+        assert_eq!(
+            doc["documents"]["inventory"],
+            json!([
+                "environments: [{env, tier, boundaries: {name: {vault_id, item_id} or null}}]",
+                "keys: [{product, key, kind, source, presence, lifecycle, expires, attributes, delivery, location, next}]",
+                "cells: [{product, key, env, boundary, state, capability, from_receipt?, from?, personal?}]",
+                "deliveries: [{environment, target, product, state}]",
+                "next: {kind, actor, command} or null: the most urgent action on that key, never a value; the document's own next is the first action",
+            ])
+        );
     }
 
     /// #201 decision 2: the schema documents `unknown` among the row `target_state` values.
