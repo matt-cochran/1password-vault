@@ -6,8 +6,8 @@
 #   S=... REPO=... CANARY=... FLY_APP=... bash steps/ci-shell.sh
 #
 # Paste when asked:
-#   OP_SERVICE_ACCOUNT_TOKEN  the canary CI service account (preflight P6)
-#   FLY_API_TOKEN             the app-scoped, short-lived deploy token (preflight P5)
+#   OP_SERVICE_ACCOUNT_TOKEN  the canary CI service account (preflight P8)
+#   FLY_API_TOKEN             the deploy token scoped to the throwaway app only (preflight P6)
 set -u
 : "${S:?}" "${REPO:?}" "${CANARY:?}" "${FLY_APP:?}"
 exec env -i HOME="$S/cihome" PATH="$S/rel:$S/tools:/usr/bin:/bin" TERM="${TERM:-xterm}" \

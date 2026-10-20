@@ -1,5 +1,5 @@
-# A4-V11f (CI-like): drift on the Fly leg. LIVE WRITE: re-stages one canary name with the
-# literal "tampered", then opv restores the canary (both staged, no deploy). Rollback: T2.
+# A4-V11f (CI-like): drift on the Fly leg. LIVE WRITE on the throwaway app only: re-stages one
+# canary name with the literal "tampered", then opv restores the canary. Rollback: T2.
 source "$(dirname "$0")/lib.sh"; ci_only; guard_app
 say "A4-V11f"
 printf 'OPVCANARY__JOURNEEZE__LOG_LEVEL=tampered\n' | flysafe secrets import --stage
