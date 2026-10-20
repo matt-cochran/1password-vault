@@ -25,7 +25,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -90,6 +90,13 @@ pub struct StateScope {
     /// The target (`--target`).
     #[serde(default)]
     target: Option<String>,
+    /// The directory `opv needs` scans (`--scan`): inside the project.
+    #[serde(default)]
+    scan: Option<String>,
+    /// The names `opv needs` compares (`--names`), given inline as a list, never a path the
+    /// server would read.
+    #[serde(default)]
+    names: Option<Vec<String>>,
 }
 
 /// The name grammar of an environment (the intent document's).
@@ -152,7 +159,10 @@ fn next_schema() -> Arc<rmcp::model::JsonObject> {
     }))
 }
 
-/// `opv_state`'s input schema (the §25 surface golden).
+/// `opv_state`'s input schema (the §25 surface golden). `scan` and `names` are accepted
+/// inputs of the `needs` section (#175) but stay out of the advertised schema: that schema is
+/// the frozen surface golden (`tests/e2e/expected/surface.json`), and [`state_refusal`]
+/// validates the two fields instead.
 fn state_schema() -> Arc<rmcp::model::JsonObject> {
     schema_object(json!({
         "type": "object",
@@ -1272,7 +1282,7 @@ impl Section {
         use Takes::{No, Optional, Required};
         match self {
             Self::Inventory | Self::Contract => [Optional, Optional, No],
-            Self::Needs => [No, No, No],
+            Self::Needs => [Optional, Optional, No],
             Self::Ready => [Optional, No, No],
             Self::Plan | Self::Changed => [Required, Optional, Optional],
             Self::Access => [Optional, No, Optional],
@@ -1297,13 +1307,19 @@ fn state_words(
     env: Option<&str>,
     product: Option<&str>,
     target: Option<&str>,
+    scan: Option<&str>,
 ) -> Vec<String> {
     let flag = |f: &str, v: Option<&str>| -> Vec<String> {
         v.map(|v| vec![f.to_string(), v.to_string()])
             .unwrap_or_default()
     };
     match section {
-        Section::Needs => Vec::new(),
+        Section::Needs => [
+            env.map(str::to_string).into_iter().collect::<Vec<_>>(),
+            flag("--product", product),
+            flag("--scan", scan),
+        ]
+        .concat(),
         Section::Inventory => [flag("--env", env), flag("--product", product)].concat(),
         Section::Contract => [flag("--env", env), flag("--component", product)].concat(),
         _ => {
@@ -1329,13 +1345,19 @@ fn state_call(args: &StateScope) -> ToolCall {
     fn ok(v: &Option<String>) -> Option<&str> {
         v.as_deref().filter(|v| scope_name(v))
     }
-    let words = state_words(section, ok(&args.env), ok(&args.product), ok(&args.target));
+    let words = state_words(
+        section,
+        ok(&args.env),
+        ok(&args.product),
+        ok(&args.target),
+        args.scan.as_deref().filter(|s| !s.is_empty()),
+    );
     ToolCall::new("opv_state", section.command(), words, false)
 }
 
 /// Why `args` is refused before anything is read: an unknown section, a scope field that is
 /// not a name, one the section does not take, or one it needs and lacks.
-fn state_refusal(section: Option<Section>, args: &StateScope) -> Option<Cause> {
+fn state_refusal(project: &Path, section: Option<Section>, args: &StateScope) -> Option<Cause> {
     let Some(section) = section else {
         return Some(usage("section", SECTION_FORMAT));
     };
@@ -1379,6 +1401,33 @@ fn state_refusal(section: Option<Section>, args: &StateScope) -> Option<Cause> {
             },
         });
     }
+    // `scan` and `names` are `opv needs` inputs only (#175), and are mutually exclusive as
+    // the CLI's `--scan` and `--names` are.
+    for (field, present) in [("scan", args.scan.is_some()), ("names", args.names.is_some())] {
+        if present && section != Section::Needs {
+            return Some(Cause::Usage {
+                problem: UsageProblem::ConflictsWith {
+                    a: format!("section {}", section.name()),
+                    b: field.into(),
+                },
+            });
+        }
+    }
+    if args.scan.is_some() && args.names.is_some() {
+        return Some(Cause::Usage {
+            problem: UsageProblem::ConflictsWith {
+                a: "--scan".into(),
+                b: "--names".into(),
+            },
+        });
+    }
+    // `scan` never reaches outside the project the server read: a relative directory is
+    // resolved against it and an absolute one must be under it (#175).
+    if let Some(scan) = args.scan.as_deref()
+        && !scan_inside(project, scan)
+    {
+        return Some(usage("scan", "a directory inside the project"));
+    }
     None
 }
 
@@ -1405,7 +1454,7 @@ fn state_doc<R: Accounted>(
     let section = Section::parse(&args.section);
     // Every failure is framed as the CLI frames it, so a refusal and a load failure are
     // the same document `opv <command> --json` prints.
-    if let Some(cause) = state_refusal(section, args) {
+    if let Some(cause) = state_refusal(project, section, args) {
         return call.document(&[], Err(cause.into()));
     }
     let Some(section) = section else {
@@ -1431,7 +1480,7 @@ fn state_doc<R: Accounted>(
             r,
             &needs_repo(r, project),
             &fleet,
-            &crate::app::needs::NeedsOptions::default(),
+            &needs_options(project, args),
             false,
             true,
             &mut *out,
@@ -1499,6 +1548,68 @@ fn needs_repo(r: &dyn CommandRunner, project: &std::path::Path) -> PathBuf {
         }
         _ => project.to_path_buf(),
     }
+}
+
+/// The [`NeedsOptions`](crate::app::needs::NeedsOptions) section `needs` runs, from its scope
+/// (#175): the same build the CLI's `needs_options` does, with `names` given inline (never a
+/// file the server reads) and `scan` resolved against the project.
+fn needs_options(project: &Path, args: &StateScope) -> crate::app::needs::NeedsOptions {
+    use crate::app::needs::{NeedsInput, NeedsOptions};
+    let input = match (args.scan.as_deref(), args.names.as_ref()) {
+        (Some(dir), _) => {
+            let dir = Path::new(dir);
+            NeedsInput::Scan(if dir.is_absolute() {
+                dir.to_path_buf()
+            } else {
+                project.join(dir)
+            })
+        }
+        (None, Some(names)) => NeedsInput::Names(names.clone()),
+        (None, None) => NeedsInput::Git,
+    };
+    NeedsOptions {
+        env: args.env.clone(),
+        product: args.product.clone(),
+        input,
+    }
+}
+
+/// Whether `dir` names the project directory or a directory under it: a relative path is
+/// resolved against `project` and an absolute one must be under it. Lexical only (`..` that
+/// climbs out is refused; a missing directory still gets its own error from the scan), never a
+/// filesystem read.
+fn scan_inside(project: &Path, dir: &str) -> bool {
+    if dir.is_empty() {
+        return false;
+    }
+    let root = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+    let joined = root.join(Path::new(dir));
+    let lexical = match (parts(&joined), parts(&root)) {
+        (Some(scan), Some(root)) => scan.starts_with(&root),
+        _ => false,
+    };
+    // A directory that exists is also checked by its real path, so a symlink inside the
+    // project that points elsewhere cannot carry the scan out of it.
+    lexical
+        && std::fs::canonicalize(&joined).map_or(true, |real| real.starts_with(&root))
+}
+
+/// `path`'s components with `.` dropped and `..` resolved lexically; `None` when a `..` climbs
+/// above the root.
+fn parts(path: &Path) -> Option<Vec<std::ffi::OsString>> {
+    use std::path::Component;
+    let mut out: Vec<std::ffi::OsString> = Vec::new();
+    for c in path.components() {
+        match c {
+            Component::Prefix(_) | Component::RootDir => out.push(c.as_os_str().to_os_string()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop()?;
+            }
+            Component::Normal(x) => out.push(x.to_os_string()),
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]

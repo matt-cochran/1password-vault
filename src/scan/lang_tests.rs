@@ -278,6 +278,37 @@ fn cpp_static_getenv_reads_are_observed_with_file_and_line() {
     );
 }
 
+// --- secrets directory ---------------------------------------------------------------------
+
+/// A Rust app reading the file a `local.secrets_dir_env` key is delivered as (#136): the
+/// directory variable is `APP_SECRETS_DIR` and the key `MIGRATE_PEM` is the file
+/// `db/migrate-pem`, never a variable.
+const SECRETS_DIR_RUST: &str = concat!(
+    "use std::path::Path;\n",
+    "\n",
+    "fn pem() -> std::io::Result<String> {\n",
+    "    let dir = std::env::var(\"APP_SECRETS_DIR\").expect(\"APP_SECRETS_DIR\");\n",
+    "    std::fs::read_to_string(Path::new(&dir).join(\"db/migrate-pem\"))\n",
+    "}\n",
+);
+
+#[test]
+fn the_needs_scanner_reports_a_file_under_the_secrets_directory_with_its_key_name() {
+    let file = "src/db.rs";
+    let pattern = SecretsDir::new("APP_SECRETS_DIR", [("db/migrate-pem", "MIGRATE_PEM")]);
+    assert_eq!(
+        pattern.scan(file, SECRETS_DIR_RUST),
+        vec![observed("MIGRATE_PEM", file, 5)]
+    );
+}
+
+#[test]
+fn the_needs_scanner_ignores_a_read_that_is_not_a_declared_file() {
+    let file = "src/db.rs";
+    let pattern = SecretsDir::new("APP_SECRETS_DIR", [("db/other", "OTHER_KEY")]);
+    assert_eq!(pattern.scan(file, SECRETS_DIR_RUST), Vec::new());
+}
+
 // --- coverage ------------------------------------------------------------------------------
 
 /// A fixed in-test tree: the files and text a scan reads, with no git and no disk.

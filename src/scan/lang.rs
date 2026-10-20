@@ -7,6 +7,7 @@
 //! [`Kind::Ambiguous`] with no name. A pattern never reads a value: it sees text, never the
 //! environment, and an [`Observation`] carries a name, a file and a line, never a value.
 
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -253,6 +254,99 @@ impl Pattern for C {
 fn c_calls() -> &'static [Call] {
     static CALLS: OnceLock<Vec<Call>> = OnceLock::new();
     CALLS.get_or_init(|| vec![call(r#"\b(?:secure_)?getenv\s*\(\s*([^)]*)\)"#, false)])
+}
+
+/// Reads of files under a product's declared secrets directory (#136, #175): the app is
+/// handed the directory in `local.secrets_dir_env` (say `APP_SECRETS_DIR`), and a key with
+/// `file = "db/migrate-pem"` is delivered there as a file, never as a variable. A read of
+/// `<secrets_dir_env>/<file>` is therefore an observation of the key that file delivers, by
+/// name; nothing here reads a value.
+///
+/// The contract builds it ([`SecretsDir::new`]): the variable naming the directory, and each
+/// declared `file` path mapped to the key it delivers.
+pub struct SecretsDir {
+    /// One `(variable, file path -> key)` group per product that declares
+    /// `local.secrets_dir_env`.
+    groups: Vec<(String, BTreeMap<String, String>)>,
+}
+
+impl SecretsDir {
+    /// The reads of files under `dir_env`: `files` maps each declared `file` path to the key
+    /// delivered there.
+    pub fn new<S, K>(dir_env: impl Into<String>, files: impl IntoIterator<Item = (S, K)>) -> Self
+    where
+        S: Into<String>,
+        K: Into<String>,
+    {
+        let files = files
+            .into_iter()
+            .map(|(path, key)| (path.into(), key.into()))
+            .collect();
+        Self {
+            groups: vec![(dir_env.into(), files)],
+        }
+    }
+}
+
+impl Pattern for SecretsDir {
+    fn language(&self) -> &'static str {
+        "secrets_dir"
+    }
+
+    fn applies(&self, path: &str) -> bool {
+        code_file(path)
+    }
+
+    fn scan(&self, path: &str, text: &str) -> Vec<Observation> {
+        let mut found: Vec<(usize, Observation)> = Vec::new();
+        for (dir_env, files) in &self.groups {
+            // The app reads these files where it has the directory variable; without it the
+            // same path literal names some other file.
+            if !text.contains(dir_env.as_str()) {
+                continue;
+            }
+            for (file, key) in files {
+                for offset in quoted(text, file) {
+                    found.push((
+                        offset,
+                        Observation {
+                            name: Some(key.clone()),
+                            file: path.to_string(),
+                            line: line_of(text, offset),
+                            kind: Kind::Observed,
+                        },
+                    ));
+                }
+            }
+        }
+        found.sort_by_key(|(offset, _)| *offset);
+        found.dedup_by(|a, b| a.1 == b.1);
+        found
+            .into_iter()
+            .map(|(_, observation)| observation)
+            .collect()
+    }
+}
+
+/// The byte offsets where `needle` sits inside a plain quoted literal (`"..."` or `'...'`).
+fn quoted(text: &str, needle: &str) -> Vec<usize> {
+    let mut at = Vec::new();
+    for quote in ['"', '\''] {
+        let wrapped = format!("{quote}{needle}{quote}");
+        at.extend(text.match_indices(&wrapped).map(|(offset, _)| offset + 1));
+    }
+    at
+}
+
+/// Whether a secrets-directory read can be in `path`: the languages the scanner reads, plus
+/// shell and the extensionless Ruby scripts.
+fn code_file(path: &str) -> bool {
+    const EXT: &[&str] = &[
+        ".rs", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".go", ".rb", ".c", ".h",
+        ".cc", ".cpp", ".hpp", ".sh", ".bash",
+    ];
+    EXT.iter().any(|ext| path.ends_with(ext))
+        || matches!(file_name(path), "Rakefile" | "Gemfile")
 }
 
 #[cfg(test)]
