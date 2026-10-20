@@ -1,0 +1,530 @@
+# consistency_chain: application × environment consistency, from a new key to its retirement (#179)
+
+## 1. person: opv apply
+1. create vault "e2e-app-app-dev" and item "e2e-app · app · dev values" for boundary app in dev
+2. create vault "e2e-app-app-staging" and item "e2e-app · app · staging values" for boundary app in staging
+3. create state vault "e2e-app-staging-gh-state" for target gh in staging
+4. create vault "e2e-app-app-prod" and item "e2e-app · app · prod values" for boundary app in prod
+5. create state vault "e2e-app-prod-gh-state" for target gh in prod
+6. create delivery item "opv · delivery · app · gh" for app on target gh in prod
+7. create delivery item "opv · delivery · app · gh" for app on target gh in staging
+8. add empty secret field app/API_KEY to the app item in dev
+9. add empty secret field app/OLD_KEY to the app item in dev
+10. add empty secret field app/API_KEY to the app item in prod
+11. add empty secret field app/OLD_KEY to the app item in prod
+12. add empty secret field app/API_KEY to the app item in staging
+13. add empty secret field app/OLD_KEY to the app item in staging
+plan_id: sp-e4fefbcdd445ffe1
+Apply this plan? [y/N] y
+applied sp-e4fefbcdd445ffe1: 13 step(s), 7 created, 6 field(s) added
+
+## 2. person: opv import dev --from dev.env --confirm dev
+exit: 0
+stdout:
+dev: 2 found · 2 written · 0 need a decision
+  app/API_KEY                      import (written)  (from API_KEY)
+  app/OLD_KEY                      import (written)  (from OLD_KEY)
+Next: opv ready dev
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 3. person: opv import staging --from staging.env --confirm staging
+exit: 0
+stdout:
+staging: 2 found · 2 written · 0 need a decision
+  app/API_KEY                      import (written)  (from API_KEY)
+  app/OLD_KEY                      import (written)  (from OLD_KEY)
+Next: opv ready staging
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 4. person: opv import prod --from prod.env --confirm prod
+exit: 0
+stdout:
+prod: 2 found · 2 written · 0 need a decision
+  app/API_KEY                      import (written)  (from API_KEY)
+  app/OLD_KEY                      import (written)  (from OLD_KEY)
+Next: opv ready prod
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 5. ci: opv sync staging
+exit: 0
+stdout:
+staging/gh: delivery: app revision drv-<id>
+staging/gh: written: app/API_KEY (API_KEY), app/OLD_KEY (OLD_KEY)
+staging/gh: summary: written 2 · unchanged 0 · held 0 · deployed no · pending 0 · pruned 0 · kept 0 · skipped 0
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 6. ci: opv sync prod --confirm prod
+exit: 0
+stdout:
+prod/gh: delivery: app revision drv-<id>
+prod/gh: written: app/API_KEY (API_KEY), app/OLD_KEY (OLD_KEY)
+prod/gh: summary: written 2 · unchanged 0 · held 0 · deployed no · pending 0 · pruned 0 · kept 0 · skipped 0
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 7. developer: add app/NEW_KEY to secrets.toml
+[products.app.keys.NEW_KEY]
+kind = "secret"
+
+## 8. person: opv apply
+1. add empty secret field app/NEW_KEY to the app item in dev
+2. add empty secret field app/NEW_KEY to the app item in prod
+3. add empty secret field app/NEW_KEY to the app item in staging
+plan_id: sp-0e3d5df7f5416b5d
+Apply this plan? [y/N] y
+applied sp-0e3d5df7f5416b5d: 3 step(s), 0 created, 3 field(s) added
+
+## 9. person: opv import dev --from dev.env --confirm dev
+exit: 0
+stdout:
+dev: 1 found · 1 written · 0 need a decision
+  app/NEW_KEY                      import (written)  (from NEW_KEY)
+Next: opv ready dev
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 10. ci: opv ready --json
+exit: 0
+stdout:
+{"schema_version":3,"ok":true,"receipt_id":"rcpt-<id>","opv_version":"<version>","config":{"source":"<SCENARIO>/project/secrets.toml"},"account":{"account_id":"AE2EDEVACCOUNT000000000001","by":"pointer"},"matrix":[{"environment":"dev","title":"dev","product":"app","target":null,"target_name":null,"keys":3,"saved":3,"findings":0,"delivered":true},{"environment":"staging","title":"staging","product":"app","target":"GitHub","target_name":"gh","keys":3,"saved":2,"findings":1,"delivered":true},{"environment":"prod","title":"prod","product":"app","target":"GitHub","target_name":"gh","keys":3,"saved":2,"findings":1,"delivered":true}],"targets":[{"environment":"staging","name":"gh","provider":"GitHub","locator":"repos e2e-org/e2e-app environment staging","state":"ready","evidence_write":"not_verified"},{"environment":"prod","name":"gh","provider":"GitHub","locator":"repos e2e-org/e2e-app environment production","state":"ready","evidence_write":"not_verified"}],"findings":[{"code":"shared_sign_in_address","scope":{"account":"AE2EDEVACCOUNT000000000001"},"blocking":false,"actor":"owner","effect":"none","prerequisite":"opv account list","verify":"opv account list --json"},{"code":"key_empty","scope":{"environment":"staging","target":"gh","product":"app","key":"NEW_KEY"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv open app/NEW_KEY --env staging","verify":"opv status staging --target gh --product app"},{"code":"key_empty","scope":{"environment":"prod","target":"gh","product":"app","key":"NEW_KEY"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv open app/NEW_KEY --env prod","verify":"opv status prod --target gh --product app"}],"next":{"kind":"apply","actor":"person","command":"opv open app/NEW_KEY --env staging"},"do":null}
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 11. ci: opv ready staging --gate
+exit: 8
+stdout:
+stderr:
+using <SCENARIO>/project/secrets.toml
+opv: environment staging is not ready to promote: 3 keys: app/API_KEY (not_delivered), app/NEW_KEY (empty), app/OLD_KEY (not_delivered)
+Do: re-deliver app/API_KEY to environment staging: its source item changed after the last delivery (a value edit, or a retirement's archive by opv apply rp-…), so the delivery evidence is out of date until a sync records it again
+Next: opv sync staging
+
+## 12. person: opv propose env qa --tier shared --write
+exit: 0
+stdout:
+relaxations: none
+diff:
+ [environments.dev]
+ tier = "local"
+ order = 1
+ boundaries.app = {}
+ 
+ [environments.staging]
+ tier = "shared"
+ order = 2
+ boundaries.app = {}
+ 
+ [environments.staging.targets.gh]
+ github.repo = "e2e-org/e2e-app"
+ github.environment = "staging"
+ delivery_items = {}
+ 
+ [environments.prod]
+ tier = "production"
+ order = 3
+ boundaries.app = {}
+ 
+ [environments.prod.targets.gh]
+ github.repo = "e2e-org/e2e-app"
+ github.environment = "production"
+ delivery_items = {}
+ 
++[environments.qa]
++tier = "shared"
++boundaries.app = {}
++
+ [products.app.keys.API_KEY]
+ kind = "secret"
+ 
+ [products.app.keys.OLD_KEY]
+ kind = "secret"
+ 
+ [products.app.keys.NEW_KEY]
+ kind = "secret"
+plan_id: d74172a50b71c1355121a2405bf09f0ecc0587182eedb81c5450304a1ac771ad
+written: <SCENARIO>/project/secrets.toml
+Next: opv apply
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 13. person: opv apply
+1. create vault "e2e-app-app-qa" and item "e2e-app · app · qa values" for boundary app in qa
+2. add empty secret field app/API_KEY to the app item in qa
+3. add empty secret field app/NEW_KEY to the app item in qa
+4. add empty secret field app/OLD_KEY to the app item in qa
+plan_id: sp-a60b8ae79f635dc6
+Apply this plan? [y/N] y
+applied sp-a60b8ae79f635dc6: 4 step(s), 1 created, 3 field(s) added
+
+## 14. ci: opv inventory --json
+exit: 0
+stdout:
+{"schema_version":3,"ok":true,"environments":[{"env":"dev","tier":"local","boundaries":{"app":{"vault_id":"vsim0000000000000000000001","item_id":"isim0000000000000000000002"}}},{"env":"prod","tier":"production","boundaries":{"app":{"vault_id":"vsim0000000000000000000006","item_id":"isim0000000000000000000007"}}},{"env":"qa","tier":"shared","boundaries":{"app":{"vault_id":"vsim0000000000000000000011","item_id":"isim0000000000000000000012"}}},{"env":"staging","tier":"shared","boundaries":{"app":{"vault_id":"vsim0000000000000000000003","item_id":"isim0000000000000000000004"}}}],"keys":[{"product":"app","key":"API_KEY","kind":"secret","source":null,"presence":{"dev":"present","prod":"present","qa":"present","staging":"present"},"lifecycle":"active","expires":null,"targets":{"prod/gh":"API_KEY","staging/gh":"API_KEY"},"delivery":{"prod/gh":"stale","staging/gh":"stale"},"location":{"section":"app","field":"API_KEY","link":"op://vsim0000000000000000000001/isim0000000000000000000002"}},{"product":"app","key":"NEW_KEY","kind":"secret","source":null,"presence":{"dev":"present","prod":"present","qa":"present","staging":"present"},"lifecycle":"active","expires":null,"targets":{"prod/gh":"NEW_KEY","staging/gh":"NEW_KEY"},"delivery":{"prod/gh":"not_delivered","staging/gh":"not_delivered"},"location":{"section":"app","field":"NEW_KEY","link":"op://vsim0000000000000000000001/isim0000000000000000000002"}},{"product":"app","key":"OLD_KEY","kind":"secret","source":null,"presence":{"dev":"present","prod":"present","qa":"present","staging":"present"},"lifecycle":"active","expires":null,"targets":{"prod/gh":"OLD_KEY","staging/gh":"OLD_KEY"},"delivery":{"prod/gh":"stale","staging/gh":"stale"},"location":{"section":"app","field":"OLD_KEY","link":"op://vsim0000000000000000000001/isim0000000000000000000002"}}],"cells":[{"product":"app","key":"API_KEY","env":"dev","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"API_KEY","env":"prod","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"API_KEY","env":"qa","boundary":"app","state":{"state":"empty"},"capability":"write","from_receipt":null},{"product":"app","key":"API_KEY","env":"staging","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"NEW_KEY","env":"dev","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"NEW_KEY","env":"prod","boundary":"app","state":{"state":"empty"},"capability":"write","from_receipt":null},{"product":"app","key":"NEW_KEY","env":"qa","boundary":"app","state":{"state":"empty"},"capability":"write","from_receipt":null},{"product":"app","key":"NEW_KEY","env":"staging","boundary":"app","state":{"state":"empty"},"capability":"write","from_receipt":null},{"product":"app","key":"OLD_KEY","env":"dev","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"OLD_KEY","env":"prod","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"OLD_KEY","env":"qa","boundary":"app","state":{"state":"empty"},"capability":"write","from_receipt":null},{"product":"app","key":"OLD_KEY","env":"staging","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null}],"deliveries":[{"environment":"prod","target":"gh","product":"app","state":"delivered"},{"environment":"staging","target":"gh","product":"app","state":"delivered"}],"next":{"kind":"enter_value","actor":"person","command":"opv set app/API_KEY --env qa"},"do":null}
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 15. developer: add app/PARTIAL_KEY for dev and staging only
+[products.app.keys.PARTIAL_KEY]
+kind = "config"
+environments = ["dev", "staging"]
+
+## 16. ci: opv ready --json
+exit: 0
+stdout:
+{"schema_version":3,"ok":true,"receipt_id":"rcpt-<id>","opv_version":"<version>","config":{"source":"<SCENARIO>/project/secrets.toml"},"account":{"account_id":"AE2EDEVACCOUNT000000000001","by":"pointer"},"matrix":[{"environment":"dev","title":"dev","product":"app","target":null,"target_name":null,"keys":4,"saved":3,"findings":1,"delivered":true},{"environment":"staging","title":"staging","product":"app","target":"GitHub","target_name":"gh","keys":4,"saved":2,"findings":2,"delivered":true},{"environment":"prod","title":"prod","product":"app","target":"GitHub","target_name":"gh","keys":3,"saved":2,"findings":1,"delivered":true},{"environment":"qa","title":"qa","product":"app","target":null,"target_name":null,"keys":3,"saved":0,"findings":3,"delivered":true}],"targets":[{"environment":"staging","name":"gh","provider":"GitHub","locator":"repos e2e-org/e2e-app environment staging","state":"ready","evidence_write":"not_verified"},{"environment":"prod","name":"gh","provider":"GitHub","locator":"repos e2e-org/e2e-app environment production","state":"ready","evidence_write":"not_verified"}],"findings":[{"code":"shared_sign_in_address","scope":{"account":"AE2EDEVACCOUNT000000000001"},"blocking":false,"actor":"owner","effect":"none","prerequisite":"opv account list","verify":"opv account list --json"},{"code":"key_missing","scope":{"environment":"dev","product":"app","key":"PARTIAL_KEY"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv open app/PARTIAL_KEY --env dev","verify":"opv status dev --product app"},{"code":"key_empty","scope":{"environment":"staging","target":"gh","product":"app","key":"NEW_KEY"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv open app/NEW_KEY --env staging","verify":"opv status staging --target gh --product app"},{"code":"key_missing","scope":{"environment":"staging","target":"gh","product":"app","key":"PARTIAL_KEY"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv open app/PARTIAL_KEY --env staging","verify":"opv status staging --target gh --product app"},{"code":"key_empty","scope":{"environment":"prod","target":"gh","product":"app","key":"NEW_KEY"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv open app/NEW_KEY --env prod","verify":"opv status prod --target gh --product app"},{"code":"key_empty","scope":{"environment":"qa","product":"app","key":"API_KEY"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv open app/API_KEY --env qa","verify":"opv status qa --product app"},{"code":"key_empty","scope":{"environment":"qa","product":"app","key":"NEW_KEY"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv open app/NEW_KEY --env qa","verify":"opv status qa --product app"},{"code":"key_empty","scope":{"environment":"qa","product":"app","key":"OLD_KEY"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv open app/OLD_KEY --env qa","verify":"opv status qa --product app"},{"code":"environment_gap","scope":{"environment":"prod","product":"app","key":"PARTIAL_KEY"},"blocking":false,"actor":"owner","effect":"writes_config","prerequisite":"opv propose key app/PARTIAL_KEY --env prod","verify":"opv ready --json"},{"code":"environment_gap","scope":{"environment":"qa","product":"app","key":"PARTIAL_KEY"},"blocking":false,"actor":"owner","effect":"writes_config","prerequisite":"opv propose key app/PARTIAL_KEY --env qa","verify":"opv ready --json"}],"next":{"kind":"apply","actor":"person","command":"opv open app/PARTIAL_KEY --env dev"},"do":null}
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 17. person: opv apply
+1. add empty config field app/PARTIAL_KEY to the app item in dev
+2. add empty config field app/PARTIAL_KEY to the app item in staging
+plan_id: sp-e1f42494c0a78495
+Apply this plan? [y/N] y
+applied sp-e1f42494c0a78495: 2 step(s), 0 created, 2 field(s) added
+
+## 18. person: opv import dev --from dev.env --confirm dev
+exit: 0
+stdout:
+dev: 1 found · 1 written · 0 need a decision
+  app/PARTIAL_KEY                  import (written)  (from PARTIAL_KEY)
+Next: opv ready dev
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 19. person: opv import staging --from staging.env --confirm staging
+exit: 0
+stdout:
+staging: 2 found · 2 written · 0 need a decision
+  app/NEW_KEY                      import (written)  (from NEW_KEY)
+  app/PARTIAL_KEY                  import (written)  (from PARTIAL_KEY)
+Next: opv ready staging
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 20. person: opv import prod --from prod.env --confirm prod
+exit: 0
+stdout:
+prod: 1 found · 1 written · 0 need a decision
+  app/NEW_KEY                      import (written)  (from NEW_KEY)
+Next: opv ready prod
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 21. ci: opv sync staging
+exit: 0
+stdout:
+staging/gh: delivery: app revision drv-<id>
+staging/gh: written: app/NEW_KEY (NEW_KEY), app/PARTIAL_KEY (PARTIAL_KEY)
+staging/gh: summary: written 2 · unchanged 0 · held 0 · deployed no · pending 0 · pruned 0 · kept 0 · skipped 0
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 22. ci: opv sync prod --confirm prod
+exit: 0
+stdout:
+prod/gh: delivery: app revision drv-<id>
+prod/gh: written: app/NEW_KEY (NEW_KEY)
+prod/gh: summary: written 1 · unchanged 0 · held 0 · deployed no · pending 0 · pruned 0 · kept 0 · skipped 0
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 23. ci: opv ready staging --gate
+exit: 0
+stdout:
+ready: 0 blocking · 1 finding · receipt rcpt-<id>
+PRODUCT  staging
+app      4/4
+Targets:
+  staging gh GitHub · repos e2e-org/e2e-app environment staging ready
+Needs attention:
+  [owner] shared_sign_in_address AE2EDEVACCOUNT000000000001 → opv account list
+Next (owner): opv account list
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 24. person: opv propose retire app/OLD_KEY --write
+exit: 0
+stdout:
+relaxations: none
+diff:
+ [environments.dev]
+ tier = "local"
+ order = 1
+ boundaries.app = {}
+ 
+ [environments.staging]
+ tier = "shared"
+ order = 2
+ boundaries.app = {}
+ 
+ [environments.staging.targets.gh]
+ github.repo = "e2e-org/e2e-app"
+ github.environment = "staging"
+ delivery_items = {}
+ 
+ [environments.prod]
+ tier = "production"
+ order = 3
+ boundaries.app = {}
+ 
+ [environments.prod.targets.gh]
+ github.repo = "e2e-org/e2e-app"
+ github.environment = "production"
+ delivery_items = {}
+ 
+ [environments.qa]
+ tier = "shared"
+ boundaries.app = {}
+ 
+ [products.app.keys.API_KEY]
+ kind = "secret"
+ 
+ [products.app.keys.OLD_KEY]
+ kind = "secret"
++lifecycle = "retiring"
+ 
+ [products.app.keys.NEW_KEY]
+ kind = "secret"
+ 
+ [products.app.keys.PARTIAL_KEY]
+ kind = "config"
+ environments = ["dev", "staging"]
+plan_id: 89c435e7206c88cdae4ea92e1901cad0acdc18c635a4e8887d9d54ebcdb5ecca
+written: <SCENARIO>/project/secrets.toml
+Next: opv needs
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 25. person: opv propose env perf --tier shared --write
+exit: 0
+stdout:
+relaxations: none
+diff:
+ [environments.dev]
+ tier = "local"
+ order = 1
+ boundaries.app = {}
+ 
+ [environments.staging]
+ tier = "shared"
+ order = 2
+ boundaries.app = {}
+ 
+ [environments.staging.targets.gh]
+ github.repo = "e2e-org/e2e-app"
+ github.environment = "staging"
+ delivery_items = {}
+ 
+ [environments.prod]
+ tier = "production"
+ order = 3
+ boundaries.app = {}
+ 
+ [environments.prod.targets.gh]
+ github.repo = "e2e-org/e2e-app"
+ github.environment = "production"
+ delivery_items = {}
+ 
+ [environments.qa]
+ tier = "shared"
+ boundaries.app = {}
+ 
++[environments.perf]
++tier = "shared"
++boundaries.app = {}
++
+ [products.app.keys.API_KEY]
+ kind = "secret"
+ 
+ [products.app.keys.OLD_KEY]
+ kind = "secret"
+ lifecycle = "retiring"
+ 
+ [products.app.keys.NEW_KEY]
+ kind = "secret"
+ 
+ [products.app.keys.PARTIAL_KEY]
+ kind = "config"
+ environments = ["dev", "staging"]
+plan_id: 0918e390f0761c8d740f5241481ce4a4f531abd7e066aa4bc0acfaec4eab82d9
+written: <SCENARIO>/project/secrets.toml
+Next: opv apply
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 26. person: opv apply
+1. create vault "e2e-app-app-perf" and item "e2e-app · app · perf values" for boundary app in perf
+2. add empty secret field app/API_KEY to the app item in perf
+3. add empty secret field app/NEW_KEY to the app item in perf
+plan_id: sp-6ad4c23614f79a52
+Apply this plan? [y/N] y
+applied sp-6ad4c23614f79a52: 3 step(s), 1 created, 2 field(s) added
+
+## 27. ci: opv ready perf --json
+exit: 0
+stdout:
+{"schema_version":3,"ok":true,"receipt_id":"rcpt-<id>","opv_version":"<version>","config":{"source":"<SCENARIO>/project/secrets.toml"},"account":{"account_id":"AE2EDEVACCOUNT000000000001","by":"pointer"},"matrix":[{"environment":"perf","title":"perf","product":"app","target":null,"target_name":null,"keys":3,"saved":0,"findings":2,"delivered":true}],"targets":[],"findings":[{"code":"shared_sign_in_address","scope":{"account":"AE2EDEVACCOUNT000000000001"},"blocking":false,"actor":"owner","effect":"none","prerequisite":"opv account list","verify":"opv account list --json"},{"code":"key_empty","scope":{"environment":"perf","product":"app","key":"API_KEY"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv open app/API_KEY --env perf","verify":"opv status perf --product app"},{"code":"key_empty","scope":{"environment":"perf","product":"app","key":"NEW_KEY"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv open app/NEW_KEY --env perf","verify":"opv status perf --product app"},{"code":"environment_gap","scope":{"environment":"perf","product":"app","key":"PARTIAL_KEY"},"blocking":false,"actor":"owner","effect":"writes_config","prerequisite":"opv propose key app/PARTIAL_KEY --env perf","verify":"opv ready --json"}],"next":{"kind":"apply","actor":"person","command":"opv open app/API_KEY --env perf"},"do":null}
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 28. ci: opv inventory --json
+exit: 0
+stdout:
+{"schema_version":3,"ok":true,"environments":[{"env":"dev","tier":"local","boundaries":{"app":{"vault_id":"vsim0000000000000000000001","item_id":"isim0000000000000000000002"}}},{"env":"perf","tier":"shared","boundaries":{"app":{"vault_id":"vsim0000000000000000000013","item_id":"isim0000000000000000000014"}}},{"env":"prod","tier":"production","boundaries":{"app":{"vault_id":"vsim0000000000000000000006","item_id":"isim0000000000000000000007"}}},{"env":"qa","tier":"shared","boundaries":{"app":{"vault_id":"vsim0000000000000000000011","item_id":"isim0000000000000000000012"}}},{"env":"staging","tier":"shared","boundaries":{"app":{"vault_id":"vsim0000000000000000000003","item_id":"isim0000000000000000000004"}}}],"keys":[{"product":"app","key":"API_KEY","kind":"secret","source":null,"presence":{"dev":"present","perf":"present","prod":"present","qa":"present","staging":"present"},"lifecycle":"active","expires":null,"targets":{"prod/gh":"API_KEY","staging/gh":"API_KEY"},"delivery":{"prod/gh":"delivered","staging/gh":"delivered"},"location":{"section":"app","field":"API_KEY","link":"op://vsim0000000000000000000001/isim0000000000000000000002"}},{"product":"app","key":"NEW_KEY","kind":"secret","source":null,"presence":{"dev":"present","perf":"present","prod":"present","qa":"present","staging":"present"},"lifecycle":"active","expires":null,"targets":{"prod/gh":"NEW_KEY","staging/gh":"NEW_KEY"},"delivery":{"prod/gh":"delivered","staging/gh":"delivered"},"location":{"section":"app","field":"NEW_KEY","link":"op://vsim0000000000000000000001/isim0000000000000000000002"}},{"product":"app","key":"OLD_KEY","kind":"secret","source":null,"presence":{"dev":"present","perf":"present","prod":"present","qa":"present","staging":"present"},"lifecycle":"retiring","expires":null,"targets":{"prod/gh":"OLD_KEY","staging/gh":"OLD_KEY"},"delivery":{"prod/gh":"delivered","staging/gh":"delivered"},"location":{"section":"app","field":"OLD_KEY","link":"op://vsim0000000000000000000001/isim0000000000000000000002"}},{"product":"app","key":"PARTIAL_KEY","kind":"config","source":null,"presence":{"dev":"present","perf":"absent","prod":"absent","qa":"absent","staging":"present"},"lifecycle":"active","expires":null,"targets":{"staging/gh":"PARTIAL_KEY"},"location":{"section":"app","field":"PARTIAL_KEY","link":"op://vsim0000000000000000000001/isim0000000000000000000002"}}],"cells":[{"product":"app","key":"API_KEY","env":"dev","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"API_KEY","env":"perf","boundary":"app","state":{"state":"empty"},"capability":"write","from_receipt":null},{"product":"app","key":"API_KEY","env":"prod","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"API_KEY","env":"qa","boundary":"app","state":{"state":"empty"},"capability":"write","from_receipt":null},{"product":"app","key":"API_KEY","env":"staging","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"NEW_KEY","env":"dev","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"NEW_KEY","env":"perf","boundary":"app","state":{"state":"empty"},"capability":"write","from_receipt":null},{"product":"app","key":"NEW_KEY","env":"prod","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"NEW_KEY","env":"qa","boundary":"app","state":{"state":"empty"},"capability":"write","from_receipt":null},{"product":"app","key":"NEW_KEY","env":"staging","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"OLD_KEY","env":"dev","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"OLD_KEY","env":"prod","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"OLD_KEY","env":"qa","boundary":"app","state":{"state":"empty"},"capability":"write","from_receipt":null},{"product":"app","key":"OLD_KEY","env":"staging","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"PARTIAL_KEY","env":"dev","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"PARTIAL_KEY","env":"staging","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null}],"deliveries":[{"environment":"prod","target":"gh","product":"app","state":"delivered"},{"environment":"staging","target":"gh","product":"app","state":"delivered"}],"next":{"kind":"enter_value","actor":"person","command":"opv set app/API_KEY --env perf"},"do":null}
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 29. ci: opv sync prod --prune --retire --confirm prod --json
+exit: 6
+stdout:
+{"schema_version":3,"ok":false,"exit_code":6,"next":{"kind":"run","actor":"assistant","command":"opv plan staging"},"do":"retire it from staging first: opv sync staging --prune --retire","error":{"code":"policy_refused","category":"policy","message":"opv prunes app/OLD_KEY from production environment prod only after every local and shared environment; staging still holds it","subject":{"guard":{"guard":"retire_out_of_order","product":"app","key":"OLD_KEY","env":"prod","first":"staging"}},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":"retire it from staging first: opv sync staging --prune --retire","next":{"kind":"run","actor":"assistant","command":"opv plan staging"}}}
+stderr:
+using <SCENARIO>/project/secrets.toml
+opv: opv prunes app/OLD_KEY from production environment prod only after every local and shared environment; staging still holds it
+Do: retire it from staging first: opv sync staging --prune --retire
+Next: opv plan staging
+
+## 30. ci: opv sync staging --prune --retire
+exit: 0
+stdout:
+retire: staging: app/OLD_KEY no longer read at HEAD; released to the prune
+staging/gh: delivery: app revision drv-<id>
+staging/gh: unchanged: app/PARTIAL_KEY (PARTIAL_KEY)
+staging/gh: will prune: app/OLD_KEY (OLD_KEY)
+staging/gh: pruned: app/OLD_KEY (OLD_KEY)
+staging/gh: summary: written 0 · unchanged 1 · held 0 · deployed no · pending 0 · pruned 1 · kept 0 · skipped 1
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 31. ci: opv ready --json
+exit: 0
+stdout:
+{"schema_version":3,"ok":true,"receipt_id":"rcpt-<id>","opv_version":"<version>","config":{"source":"<SCENARIO>/project/secrets.toml"},"account":{"account_id":"AE2EDEVACCOUNT000000000001","by":"pointer"},"matrix":[{"environment":"dev","title":"dev","product":"app","target":null,"target_name":null,"keys":4,"saved":4,"findings":0,"delivered":true},{"environment":"staging","title":"staging","product":"app","target":"GitHub","target_name":"gh","keys":4,"saved":3,"findings":0,"delivered":true},{"environment":"prod","title":"prod","product":"app","target":"GitHub","target_name":"gh","keys":3,"saved":3,"findings":0,"delivered":true},{"environment":"perf","title":"perf","product":"app","target":null,"target_name":null,"keys":3,"saved":0,"findings":2,"delivered":true},{"environment":"qa","title":"qa","product":"app","target":null,"target_name":null,"keys":3,"saved":0,"findings":3,"delivered":true}],"targets":[{"environment":"staging","name":"gh","provider":"GitHub","locator":"repos e2e-org/e2e-app environment staging","state":"ready","evidence_write":"not_verified"},{"environment":"prod","name":"gh","provider":"GitHub","locator":"repos e2e-org/e2e-app environment production","state":"ready","evidence_write":"not_verified"}],"findings":[{"code":"shared_sign_in_address","scope":{"account":"AE2EDEVACCOUNT000000000001"},"blocking":false,"actor":"owner","effect":"none","prerequisite":"opv account list","verify":"opv account list --json"},{"code":"key_empty","scope":{"environment":"perf","product":"app","key":"API_KEY"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv open app/API_KEY --env perf","verify":"opv status perf --product app"},{"code":"key_empty","scope":{"environment":"perf","product":"app","key":"NEW_KEY"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv open app/NEW_KEY --env perf","verify":"opv status perf --product app"},{"code":"key_empty","scope":{"environment":"qa","product":"app","key":"API_KEY"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv open app/API_KEY --env qa","verify":"opv status qa --product app"},{"code":"key_empty","scope":{"environment":"qa","product":"app","key":"NEW_KEY"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv open app/NEW_KEY --env qa","verify":"opv status qa --product app"},{"code":"key_empty","scope":{"environment":"qa","product":"app","key":"OLD_KEY"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv open app/OLD_KEY --env qa","verify":"opv status qa --product app"},{"code":"retirement_incomplete","scope":{"environment":"prod","product":"app","key":"OLD_KEY"},"blocking":false,"actor":"ci","effect":"writes_target","prerequisite":"opv sync prod --prune --retire","verify":"opv ready --json","message":"the retirement of app/OLD_KEY is not finished; remaining: prune from prod (opv sync prod --prune --retire); then a person archives its 1Password fields and marks it retired (opv apply rp-6206eaad2e8b5562)"},{"code":"environment_gap","scope":{"environment":"perf","product":"app","key":"PARTIAL_KEY"},"blocking":false,"actor":"owner","effect":"writes_config","prerequisite":"opv propose key app/PARTIAL_KEY --env perf","verify":"opv ready --json"},{"code":"environment_gap","scope":{"environment":"prod","product":"app","key":"PARTIAL_KEY"},"blocking":false,"actor":"owner","effect":"writes_config","prerequisite":"opv propose key app/PARTIAL_KEY --env prod","verify":"opv ready --json"},{"code":"environment_gap","scope":{"environment":"qa","product":"app","key":"PARTIAL_KEY"},"blocking":false,"actor":"owner","effect":"writes_config","prerequisite":"opv propose key app/PARTIAL_KEY --env qa","verify":"opv ready --json"}],"next":{"kind":"apply","actor":"person","command":"opv open app/API_KEY --env perf"},"do":null}
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 32. ci: opv sync prod --prune --retire --confirm prod
+exit: 0
+stdout:
+retire: prod: app/OLD_KEY no longer read at HEAD; released to the prune
+prod/gh: delivery: app revision drv-<id>
+prod/gh: will prune: app/OLD_KEY (OLD_KEY)
+prod/gh: pruned: app/OLD_KEY (OLD_KEY)
+prod/gh: summary: written 0 · unchanged 0 · held 0 · deployed no · pending 0 · pruned 1 · kept 0 · skipped 1
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 33. ci: opv ready --json
+exit: 0
+stdout:
+{"schema_version":3,"ok":true,"receipt_id":"rcpt-<id>","opv_version":"<version>","config":{"source":"<SCENARIO>/project/secrets.toml"},"account":{"account_id":"AE2EDEVACCOUNT000000000001","by":"pointer"},"matrix":[{"environment":"dev","title":"dev","product":"app","target":null,"target_name":null,"keys":4,"saved":4,"findings":0,"delivered":true},{"environment":"staging","title":"staging","product":"app","target":"GitHub","target_name":"gh","keys":4,"saved":3,"findings":0,"delivered":true},{"environment":"prod","title":"prod","product":"app","target":"GitHub","target_name":"gh","keys":3,"saved":2,"findings":0,"delivered":true},{"environment":"perf","title":"perf","product":"app","target":null,"target_name":null,"keys":3,"saved":0,"findings":2,"delivered":true},{"environment":"qa","title":"qa","product":"app","target":null,"target_name":null,"keys":3,"saved":0,"findings":3,"delivered":true}],"targets":[{"environment":"staging","name":"gh","provider":"GitHub","locator":"repos e2e-org/e2e-app environment staging","state":"ready","evidence_write":"not_verified"},{"environment":"prod","name":"gh","provider":"GitHub","locator":"repos e2e-org/e2e-app environment production","state":"ready","evidence_write":"not_verified"}],"findings":[{"code":"shared_sign_in_address","scope":{"account":"AE2EDEVACCOUNT000000000001"},"blocking":false,"actor":"owner","effect":"none","prerequisite":"opv account list","verify":"opv account list --json"},{"code":"key_empty","scope":{"environment":"perf","product":"app","key":"API_KEY"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv open app/API_KEY --env perf","verify":"opv status perf --product app"},{"code":"key_empty","scope":{"environment":"perf","product":"app","key":"NEW_KEY"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv open app/NEW_KEY --env perf","verify":"opv status perf --product app"},{"code":"key_empty","scope":{"environment":"qa","product":"app","key":"API_KEY"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv open app/API_KEY --env qa","verify":"opv status qa --product app"},{"code":"key_empty","scope":{"environment":"qa","product":"app","key":"NEW_KEY"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv open app/NEW_KEY --env qa","verify":"opv status qa --product app"},{"code":"key_empty","scope":{"environment":"qa","product":"app","key":"OLD_KEY"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv open app/OLD_KEY --env qa","verify":"opv status qa --product app"},{"code":"retirement_incomplete","scope":{"product":"app","key":"OLD_KEY"},"blocking":false,"actor":"owner","effect":"writes_1password","prerequisite":"opv apply rp-6206eaad2e8b5562","verify":"opv ready --json","message":"the retirement of app/OLD_KEY is not finished; remaining: a person archives its 1Password fields and marks it retired (opv apply rp-6206eaad2e8b5562)"},{"code":"environment_gap","scope":{"environment":"perf","product":"app","key":"PARTIAL_KEY"},"blocking":false,"actor":"owner","effect":"writes_config","prerequisite":"opv propose key app/PARTIAL_KEY --env perf","verify":"opv ready --json"},{"code":"environment_gap","scope":{"environment":"prod","product":"app","key":"PARTIAL_KEY"},"blocking":false,"actor":"owner","effect":"writes_config","prerequisite":"opv propose key app/PARTIAL_KEY --env prod","verify":"opv ready --json"},{"code":"environment_gap","scope":{"environment":"qa","product":"app","key":"PARTIAL_KEY"},"blocking":false,"actor":"owner","effect":"writes_config","prerequisite":"opv propose key app/PARTIAL_KEY --env qa","verify":"opv ready --json"}],"next":{"kind":"apply","actor":"person","command":"opv open app/API_KEY --env perf"},"do":null}
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 34. ci: opv apply rp-6206eaad2e8b5562 --json
+exit: 6
+stdout:
+{"schema_version":3,"ok":false,"exit_code":6,"next":{"kind":"apply","actor":"person","command":"opv apply rp-6206eaad2e8b5562"},"do":"run it in your own terminal","error":{"code":"terminal_required","category":"policy","message":"this step needs a person at a terminal, and there is none","subject":{"why":"no_tty"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":true,"do":"run it in your own terminal","next":{"kind":"apply","actor":"person","command":"opv apply rp-6206eaad2e8b5562"}}}
+stderr:
+opv: this step needs a person at a terminal, and there is none
+Do: run it in your own terminal
+Next: opv apply rp-6206eaad2e8b5562
+
+## 35. person: opv apply rp-6206eaad2e8b5562
+1. move the fields of app/OLD_KEY in the app item of dev to section "archived · <date> · retired app/OLD_KEY"
+2. move the fields of app/OLD_KEY in the app item of perf to section "archived · <date> · retired app/OLD_KEY"
+3. move the fields of app/OLD_KEY in the app item of qa to section "archived · <date> · retired app/OLD_KEY"
+4. move the fields of app/OLD_KEY in the app item of staging to section "archived · <date> · retired app/OLD_KEY"
+5. move the fields of app/OLD_KEY in the app item of prod to section "archived · <date> · retired app/OLD_KEY"
+6. mark app/OLD_KEY lifecycle = "retired" in the contract
+plan_id: rp-6206eaad2e8b5562
+dev: moved 1 field(s) of app/OLD_KEY to "archived · <date> · retired app/OLD_KEY"
+perf: no field of app/OLD_KEY left to archive
+qa: moved 1 field(s) of app/OLD_KEY to "archived · <date> · retired app/OLD_KEY"
+staging: moved 1 field(s) of app/OLD_KEY to "archived · <date> · retired app/OLD_KEY"
+prod: moved 1 field(s) of app/OLD_KEY to "archived · <date> · retired app/OLD_KEY"
+app/OLD_KEY: lifecycle = "retired" (its declaration is kept)
+Apply this plan? [y/N] y
+applied rp-6206eaad2e8b5562: archived in ["dev", "qa", "staging", "prod"], already archived in ["perf"], retired: true, resync: ["opv sync staging", "opv sync prod"]
+
+## 36. ci: opv inventory --json
+exit: 0
+stdout:
+{"schema_version":3,"ok":true,"environments":[{"env":"dev","tier":"local","boundaries":{"app":{"vault_id":"vsim0000000000000000000001","item_id":"isim0000000000000000000002"}}},{"env":"perf","tier":"shared","boundaries":{"app":{"vault_id":"vsim0000000000000000000013","item_id":"isim0000000000000000000014"}}},{"env":"prod","tier":"production","boundaries":{"app":{"vault_id":"vsim0000000000000000000006","item_id":"isim0000000000000000000007"}}},{"env":"qa","tier":"shared","boundaries":{"app":{"vault_id":"vsim0000000000000000000011","item_id":"isim0000000000000000000012"}}},{"env":"staging","tier":"shared","boundaries":{"app":{"vault_id":"vsim0000000000000000000003","item_id":"isim0000000000000000000004"}}}],"keys":[{"product":"app","key":"API_KEY","kind":"secret","source":null,"presence":{"dev":"present","perf":"present","prod":"present","qa":"present","staging":"present"},"lifecycle":"active","expires":null,"targets":{"prod/gh":"API_KEY","staging/gh":"API_KEY"},"delivery":{"prod/gh":"stale","staging/gh":"stale"},"location":{"section":"app","field":"API_KEY","link":"op://vsim0000000000000000000001/isim0000000000000000000002"}},{"product":"app","key":"NEW_KEY","kind":"secret","source":null,"presence":{"dev":"present","perf":"present","prod":"present","qa":"present","staging":"present"},"lifecycle":"active","expires":null,"targets":{"prod/gh":"NEW_KEY","staging/gh":"NEW_KEY"},"delivery":{"prod/gh":"stale","staging/gh":"stale"},"location":{"section":"app","field":"NEW_KEY","link":"op://vsim0000000000000000000001/isim0000000000000000000002"}},{"product":"app","key":"OLD_KEY","kind":"secret","source":null,"presence":{"dev":"present","perf":"present","prod":"present","qa":"present","staging":"present"},"lifecycle":"retired","expires":null},{"product":"app","key":"PARTIAL_KEY","kind":"config","source":null,"presence":{"dev":"present","perf":"absent","prod":"absent","qa":"absent","staging":"present"},"lifecycle":"active","expires":null,"targets":{"staging/gh":"PARTIAL_KEY"},"location":{"section":"app","field":"PARTIAL_KEY","link":"op://vsim0000000000000000000001/isim0000000000000000000002"}}],"cells":[{"product":"app","key":"API_KEY","env":"dev","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"API_KEY","env":"perf","boundary":"app","state":{"state":"empty"},"capability":"write","from_receipt":null},{"product":"app","key":"API_KEY","env":"prod","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"API_KEY","env":"qa","boundary":"app","state":{"state":"empty"},"capability":"write","from_receipt":null},{"product":"app","key":"API_KEY","env":"staging","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"NEW_KEY","env":"dev","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"NEW_KEY","env":"perf","boundary":"app","state":{"state":"empty"},"capability":"write","from_receipt":null},{"product":"app","key":"NEW_KEY","env":"prod","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"NEW_KEY","env":"qa","boundary":"app","state":{"state":"empty"},"capability":"write","from_receipt":null},{"product":"app","key":"NEW_KEY","env":"staging","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"PARTIAL_KEY","env":"dev","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"app","key":"PARTIAL_KEY","env":"staging","boundary":"app","state":{"state":"set"},"capability":"write","from_receipt":null}],"deliveries":[{"environment":"prod","target":"gh","product":"app","state":"delivered"},{"environment":"staging","target":"gh","product":"app","state":"delivered"}],"next":{"kind":"enter_value","actor":"person","command":"opv set app/API_KEY --env perf"},"do":null}
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 37. ci: opv ready --json
+exit: 0
+stdout:
+{"schema_version":3,"ok":true,"receipt_id":"rcpt-<id>","opv_version":"<version>","config":{"source":"<SCENARIO>/project/secrets.toml"},"account":{"account_id":"AE2EDEVACCOUNT000000000001","by":"pointer"},"matrix":[{"environment":"dev","title":"dev","product":"app","target":null,"target_name":null,"keys":3,"saved":3,"findings":0,"delivered":true},{"environment":"staging","title":"staging","product":"app","target":"GitHub","target_name":"gh","keys":3,"saved":3,"findings":0,"delivered":true},{"environment":"prod","title":"prod","product":"app","target":"GitHub","target_name":"gh","keys":2,"saved":2,"findings":0,"delivered":true},{"environment":"perf","title":"perf","product":"app","target":null,"target_name":null,"keys":2,"saved":0,"findings":2,"delivered":true},{"environment":"qa","title":"qa","product":"app","target":null,"target_name":null,"keys":2,"saved":0,"findings":2,"delivered":true}],"targets":[{"environment":"staging","name":"gh","provider":"GitHub","locator":"repos e2e-org/e2e-app environment staging","state":"ready","evidence_write":"not_verified"},{"environment":"prod","name":"gh","provider":"GitHub","locator":"repos e2e-org/e2e-app environment production","state":"ready","evidence_write":"not_verified"}],"findings":[{"code":"shared_sign_in_address","scope":{"account":"AE2EDEVACCOUNT000000000001"},"blocking":false,"actor":"owner","effect":"none","prerequisite":"opv account list","verify":"opv account list --json"},{"code":"key_empty","scope":{"environment":"perf","product":"app","key":"API_KEY"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv open app/API_KEY --env perf","verify":"opv status perf --product app"},{"code":"key_empty","scope":{"environment":"perf","product":"app","key":"NEW_KEY"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv open app/NEW_KEY --env perf","verify":"opv status perf --product app"},{"code":"key_empty","scope":{"environment":"qa","product":"app","key":"API_KEY"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv open app/API_KEY --env qa","verify":"opv status qa --product app"},{"code":"key_empty","scope":{"environment":"qa","product":"app","key":"NEW_KEY"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv open app/NEW_KEY --env qa","verify":"opv status qa --product app"},{"code":"environment_gap","scope":{"environment":"perf","product":"app","key":"PARTIAL_KEY"},"blocking":false,"actor":"owner","effect":"writes_config","prerequisite":"opv propose key app/PARTIAL_KEY --env perf","verify":"opv ready --json"},{"code":"environment_gap","scope":{"environment":"prod","product":"app","key":"PARTIAL_KEY"},"blocking":false,"actor":"owner","effect":"writes_config","prerequisite":"opv propose key app/PARTIAL_KEY --env prod","verify":"opv ready --json"},{"code":"environment_gap","scope":{"environment":"qa","product":"app","key":"PARTIAL_KEY"},"blocking":false,"actor":"owner","effect":"writes_config","prerequisite":"opv propose key app/PARTIAL_KEY --env qa","verify":"opv ready --json"}],"next":{"kind":"apply","actor":"person","command":"opv open app/API_KEY --env perf"},"do":null}
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 38. ci: opv ready staging --gate
+exit: 8
+stdout:
+stderr:
+using <SCENARIO>/project/secrets.toml
+opv: environment staging is not ready to promote: 3 keys: app/API_KEY (not_delivered), app/NEW_KEY (not_delivered), app/PARTIAL_KEY (not_delivered)
+Do: re-deliver app/API_KEY to environment staging: its source item changed after the last delivery (a value edit, or a retirement's archive by opv apply rp-…), so the delivery evidence is out of date until a sync records it again
+Next: opv sync staging
+
+## 39. ci: opv ready prod --gate
+exit: 8
+stdout:
+stderr:
+using <SCENARIO>/project/secrets.toml
+opv: environment prod is not ready to promote: 2 keys: app/API_KEY (not_delivered), app/NEW_KEY (not_delivered)
+Do: re-deliver app/API_KEY to environment prod: its source item changed after the last delivery (a value edit, or a retirement's archive by opv apply rp-…), so the delivery evidence is out of date until a sync records it again
+Next: opv sync prod
+
+## 40. ci: opv sync staging
+exit: 0
+stdout:
+staging/gh: delivery: app revision drv-<id>
+staging/gh: unchanged: app/PARTIAL_KEY (PARTIAL_KEY)
+staging/gh: summary: written 0 · unchanged 1 · held 0 · deployed no · pending 0 · pruned 0 · kept 0 · skipped 0
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 41. ci: opv sync prod --confirm prod
+exit: 0
+stdout:
+prod/gh: delivery: app revision drv-<id>
+prod/gh: summary: written 0 · unchanged 0 · held 0 · deployed no · pending 0 · pruned 0 · kept 0 · skipped 0
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 42. ci: opv ready staging --gate
+exit: 0
+stdout:
+ready: 0 blocking · 1 finding · receipt rcpt-<id>
+PRODUCT  staging
+app      3/3
+Targets:
+  staging gh GitHub · repos e2e-org/e2e-app environment staging ready
+Needs attention:
+  [owner] shared_sign_in_address AE2EDEVACCOUNT000000000001 → opv account list
+Next (owner): opv account list
+stderr:
+using <SCENARIO>/project/secrets.toml
+
+## 43. ci: opv ready prod --gate
+exit: 0
+stdout:
+ready: 0 blocking · 2 findings · receipt rcpt-<id>
+PRODUCT  prod
+app      2/2
+Targets:
+  prod gh GitHub · repos e2e-org/e2e-app environment production ready
+Needs attention:
+  [owner] shared_sign_in_address AE2EDEVACCOUNT000000000001 → opv account list
+  [owner] environment_gap prod app/PARTIAL_KEY → opv propose key app/PARTIAL_KEY --env prod
+Next (owner): opv account list
+stderr:
+using <SCENARIO>/project/secrets.toml
