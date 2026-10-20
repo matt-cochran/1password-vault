@@ -369,9 +369,209 @@ fn check_order(
 }
 
 /// The step that finishes a retirement once no target holds the key: a person archives its
-/// 1Password fields and marks it `retired` (owner decision on #179: never CI).
-fn archive_step(product: &str, key: &str) -> String {
-    format!("opv propose retire {}", key_label(product, key))
+/// 1Password fields and marks it `retired` (owner decision on #179: never CI), by the
+/// exact `opv apply <plan_id>` of its [`archive_plan`].
+pub fn archive_step(fleet: &Fleet, product: &str, key: &str) -> String {
+    format!("opv apply {}", archive_plan(fleet, product, key).plan_id)
+}
+
+/// Today's UTC date, `YYYY-MM-DD`: the date in an archived section's name.
+pub fn today() -> String {
+    crate::app::tidy::today()
+}
+
+/// The prefix of a retirement's plan id: `rp-` and 16 lowercase hex digits (64 bits), as a
+/// structural plan's `sp-`. `opv apply` tells the two apart by it.
+pub const PLAN_ID_PREFIX: &str = "rp-";
+
+/// One boundary item a retirement's archive edits, by name and public id only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ArchiveItem {
+    pub environment: String,
+    pub boundary: String,
+    #[serde(skip)]
+    pub(crate) ids: crate::domain::Boundary,
+}
+
+/// The person's last step of retiring `product/key` (#179): move its fields in every
+/// boundary item that holds it into an archived section
+/// ([`crate::domain::convention::archived_section`]), then mark it `retired`. Names and
+/// public ids only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ArchivePlan {
+    pub plan_id: String,
+    pub product: String,
+    pub key: String,
+    /// One per boundary item, each non-production tier before production, then by name;
+    /// an item two environments share is listed once.
+    pub items: Vec<ArchiveItem>,
+}
+
+/// The archive plan of `product/key`: every environment that declares it, whose boundary
+/// for the product is bound. A shared (`from`) or personal key has no field of its own in a
+/// team item, so its plan only marks it. The plan id is content-addressed over the key and
+/// the items, so a contract change makes an old id stale.
+pub fn archive_plan(fleet: &Fleet, product: &str, key: &str) -> ArchivePlan {
+    let own_field = fleet
+        .products
+        .get(product)
+        .and_then(|p| p.keys.get(key))
+        .filter(|spec| spec.from.is_none() && !spec.personal);
+    let boundary = fleet.boundary_of(product).to_string();
+    let mut envs: Vec<(&String, &crate::domain::Environment)> = fleet
+        .environments
+        .iter()
+        .filter(|(name, _)| own_field.is_some_and(|spec| spec.is_desired_in(name)))
+        .collect();
+    envs.sort_by_key(|(name, e)| (tier_rank(e.tier), (*name).clone()));
+    let mut items: Vec<ArchiveItem> = Vec::new();
+    for (name, env) in envs {
+        let Some(Some(b)) = env.boundaries.get(&boundary) else {
+            continue;
+        };
+        if items.iter().any(|i| i.ids == *b) {
+            continue;
+        }
+        items.push(ArchiveItem {
+            environment: name.clone(),
+            boundary: boundary.clone(),
+            ids: b.clone(),
+        });
+    }
+    let mut hasher = sha2::Sha256::new();
+    use sha2::Digest;
+    hasher.update(format!("retire\n{}\n", key_label(product, key)).as_bytes());
+    for i in &items {
+        hasher.update(
+            format!(
+                "{}\t{}\t{}\t{}\n",
+                i.environment, i.boundary, i.ids.vault_id, i.ids.item_id
+            )
+            .as_bytes(),
+        );
+    }
+    let digest = hex::encode(hasher.finalize());
+    ArchivePlan {
+        plan_id: format!("{PLAN_ID_PREFIX}{}", &digest[..16]),
+        product: product.to_string(),
+        key: key.to_string(),
+        items,
+    }
+}
+
+/// The archive plan of every `retiring` key, by product then key.
+pub fn archive_plans(fleet: &Fleet) -> Vec<ArchivePlan> {
+    fleet
+        .products
+        .iter()
+        .flat_map(|(p, prod)| {
+            prod.keys
+                .iter()
+                .filter(|(_, spec)| spec.lifecycle == Lifecycle::Retiring)
+                .map(move |(k, _)| (p, k))
+        })
+        .map(|(p, k)| archive_plan(fleet, p, k))
+        .collect()
+}
+
+/// The environments, in the order a retirement prunes them, where a target still holds
+/// `product/key` (its name is listed on the target): the prunes left before a person may
+/// archive. A target this session cannot read counts as holding it (an archive is never
+/// made on a guess) and is noted.
+pub fn still_held(fleet: &Fleet, product: &str, key: &str, r: &dyn CommandRunner) -> Vec<String> {
+    let Some(spec) = fleet.products.get(product).and_then(|p| p.keys.get(key)) else {
+        return Vec::new();
+    };
+    let mut envs: Vec<(&String, &crate::domain::Environment)> = fleet
+        .environments
+        .iter()
+        .filter(|(name, _)| spec.listed_in(name))
+        .collect();
+    envs.sort_by_key(|(name, e)| (tier_rank(e.tier), (*name).clone()));
+    let mut holding = Vec::new();
+    for (name, env) in envs {
+        let held = env
+            .targets
+            .keys()
+            .filter(|target| fleet.delivers(name, target, product))
+            .any(|target| {
+                let wanted = fleet.target_name(name, target, product, key);
+                match crate::app::open_target(fleet, name, target, r)
+                    .and_then(|(_, ports)| ports.store().list())
+                {
+                    Ok(listed) => listed.iter().any(|e| e.name == wanted),
+                    Err(_) => {
+                        r.note(&format!(
+                            "retire: could not read {name}/{target} to see whether it still holds {}; counted as holding it",
+                            key_label(product, key)
+                        ));
+                        true
+                    }
+                }
+            });
+        if held {
+            holding.push(name.clone());
+        }
+    }
+    holding
+}
+
+/// What archiving one boundary item did: how many of the key's fields it moved (0 when
+/// every one was already archived, and no edit was made).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Archived {
+    pub moved: usize,
+}
+
+/// Archive `product/key`'s fields in one boundary item (#179): one fresh read, then at most
+/// one `op item edit` that moves every field the convention resolves to the key (its chosen
+/// field and any duplicate) into `section`. A field already in an archived section is never
+/// claimed by a key, so a re-run moves nothing and edits nothing. An item that is the
+/// project's manifest, or that holds something a whole-item edit is not proven to keep
+/// (I4), is never rewritten. Never reads, prints or changes a value.
+pub fn archive_item(
+    fleet: &Fleet,
+    r: &dyn CommandRunner,
+    product: &str,
+    key: &str,
+    item: &ArchiveItem,
+    section: &str,
+) -> Result<Archived, Error> {
+    use crate::adapters::{onepassword, onepassword_tidy};
+    let env = fleet.environment(&item.environment)?;
+    let read = onepassword::read_whole_fresh(r, env, &item.ids)?;
+    if crate::app::tidy::is_manifest(read.raw()) {
+        return Err(Cause::Guard {
+            guard: Guard::ArchiveNotRewritable {
+                env: EnvName::new(&item.environment),
+                holds: "the project's manifest".into(),
+            },
+        }
+        .into());
+    }
+    let (layout, _) = onepassword_tidy::parse(read.raw())?;
+    let part = crate::app::tidy::in_boundary(fleet, &item.boundary);
+    let res = crate::domain::convention::resolve(&layout, &part);
+    let id = (product.to_string(), key.to_string());
+    let mut indices: Vec<usize> = res.chosen.get(&id).copied().into_iter().collect();
+    indices.extend(res.duplicates.get(&id).into_iter().flatten().copied());
+    indices.sort_unstable();
+    if indices.is_empty() {
+        return Ok(Archived { moved: 0 });
+    }
+    if let Some(what) = onepassword_tidy::unprovable(read.raw()) {
+        return Err(Cause::Guard {
+            guard: Guard::ArchiveNotRewritable {
+                env: EnvName::new(&item.environment),
+                holds: what.into(),
+            },
+        }
+        .into());
+    }
+    onepassword::archive_fields(r, env, &item.ids, &read, &indices, section)?;
+    Ok(Archived {
+        moved: indices.len(),
+    })
 }
 
 /// Whether a row's target still holds its secret: anything but `absent` (a staged store
@@ -421,7 +621,7 @@ pub fn findings(fleet: &Fleet, envs: &[EnvInput]) -> Vec<Finding> {
                 .collect();
             steps.push(format!(
                 "a person archives its 1Password fields and marks it retired ({})",
-                archive_step(product, key)
+                archive_step(fleet, product, key)
             ));
             let (actor, effect, prerequisite) = match holding.first() {
                 Some(env) => (
@@ -429,7 +629,11 @@ pub fn findings(fleet: &Fleet, envs: &[EnvInput]) -> Vec<Finding> {
                     "writes_target",
                     format!("opv sync {env} --prune --retire"),
                 ),
-                None => ("owner", "writes_1password", archive_step(product, key)),
+                None => (
+                    "owner",
+                    "writes_1password",
+                    archive_step(fleet, product, key),
+                ),
             };
             out.push(Finding {
                 code: "retirement_incomplete".into(),

@@ -634,4 +634,41 @@ mod prune_step {
         let f = findings(&retiring(), &envs).remove(0);
         assert!(!f.blocking);
     }
+
+    #[test]
+    fn a_retirement_pruned_everywhere_names_the_apply_of_its_plan() {
+        let envs = [env_holding("staging", false), env_holding("prod", false)];
+        let f = findings(&retiring(), &envs).remove(0);
+        assert_eq!(
+            f.prerequisite,
+            format!(
+                "opv apply {}",
+                archive_plan(&retiring(), "allumata", "OLD_KEY").plan_id
+            )
+        );
+    }
+
+    #[test]
+    fn a_retired_key_has_no_unfinished_retirement() {
+        let retired = fleet_with(&RETIRING.replace("\"retiring\"", "\"retired\""));
+        let envs = [env_holding("staging", false), env_holding("prod", false)];
+        assert!(findings(&retired, &envs).is_empty());
+    }
+
+    #[test]
+    fn a_retirement_plan_id_changes_with_the_items_it_edits() {
+        let mut moved = retiring();
+        moved
+            .environments
+            .get_mut("prod")
+            .unwrap()
+            .boundaries
+            .values_mut()
+            .flatten()
+            .for_each(|b| b.item_id = "another".into());
+        assert_ne!(
+            archive_plan(&moved, "allumata", "OLD_KEY").plan_id,
+            archive_plan(&retiring(), "allumata", "OLD_KEY").plan_id
+        );
+    }
 }

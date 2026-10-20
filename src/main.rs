@@ -4209,6 +4209,25 @@ fn run_apply(
     json: bool,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
+    // #179: a retirement's plan id (`rp-…`, named by `ready`) archives and marks the key.
+    if let Some(id) = plan_id.filter(|id| id.starts_with(opv::app::retire::PLAN_ID_PREFIX)) {
+        if let Some(flag) = [
+            (!rebind.is_empty(), "--rebind"),
+            (!generate.is_empty(), "--generate"),
+        ]
+        .into_iter()
+        .find_map(|(given, flag)| given.then_some(flag))
+        {
+            return Err(opv::cause::Cause::Usage {
+                problem: opv::cause::UsageProblem::ConflictsWith {
+                    a: flag.into(),
+                    b: "a retirement plan id".into(),
+                },
+            }
+            .into());
+        }
+        return run_apply_retire(r, config, here, id, project, json, out);
+    }
     let mut grouped: Vec<(String, Vec<String>)> = Vec::new();
     for g in generate {
         let (env, key) = g
@@ -4276,6 +4295,65 @@ fn run_apply(
         applied.created.len(),
         applied.fields_added.len(),
         applied.generated.len()
+    )
+    .map_err(write_err)?;
+    writeln!(out, "Next: opv ready").map_err(write_err)
+}
+
+/// `opv apply rp-…` (#179): a retirement's last step, recomputed, shown, confirmed on this
+/// terminal and run: archive the key's 1Password fields, then mark it retired.
+fn run_apply_retire(
+    r: &ProcessRunner,
+    config: Option<&std::path::Path>,
+    here: &std::path::Path,
+    plan_id: &str,
+    project: Option<&str>,
+    json: bool,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let scope = structure_scope(config, here, r, project)?;
+    r.use_account(Some(scope.account.clone()));
+    let mut confirm = |_: &opv::app::retire::ArchivePlan| {
+        let _ = write!(io::stderr(), "Apply this plan? [y/N] ");
+        let _ = io::stderr().flush();
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer).is_ok()
+            && matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+    };
+    let mut still_held = |fleet: &opv::domain::Fleet, product: &str, key: &str| {
+        opv::app::retire::still_held(fleet, product, key, r)
+    };
+    let mut stderr = io::stderr();
+    let shown: &mut dyn Write = if json { &mut stderr } else { out };
+    let applied = opv::app::apply::apply_retire(
+        r,
+        &opv::host::ProcessEnv,
+        &scope.config,
+        plan_id,
+        &opv::app::retire::today(),
+        &mut still_held,
+        &mut confirm,
+        shown,
+    )?;
+    if json {
+        let doc = serde_json::to_value(&applied).map_err(|_| -> Error {
+            opv::cause::Cause::Bug {
+                site: "apply: the retirement result did not serialize",
+            }
+            .into()
+        })?;
+        return writeln!(out, "{doc}").map_err(write_err);
+    }
+    if !applied.confirmed {
+        return writeln!(out, "Nothing was applied.").map_err(write_err);
+    }
+    writeln!(
+        out,
+        "applied {}: {}/{} archived in {} item(s), retired",
+        applied.plan_id,
+        applied.product,
+        applied.key,
+        applied.archived.len() + applied.already_archived.len()
     )
     .map_err(write_err)?;
     writeln!(out, "Next: opv ready").map_err(write_err)

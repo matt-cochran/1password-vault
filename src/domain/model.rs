@@ -173,9 +173,13 @@ impl KeySpec {
             .is_none_or(|list| list.iter().any(|e| e == env))
     }
 
-    /// Whether the key is present (not `except`ed) in `env`.
+    /// Whether the key is present (not `except`ed) in `env`. A `retired` key (#179) is
+    /// wanted nowhere: it keeps its declaration, but no field is created for it, nothing
+    /// delivers it and no check asks for its value.
     pub fn is_desired_in(&self, env: &str) -> bool {
-        crate::domain::presence::present_in(self, env) == crate::domain::presence::Presence::Present
+        self.lifecycle != Lifecycle::Retired
+            && crate::domain::presence::present_in(self, env)
+                == crate::domain::presence::Presence::Present
     }
 
     /// Whether this key's rules give a generate recipe: the pure part of

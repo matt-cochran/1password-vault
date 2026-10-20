@@ -1572,6 +1572,21 @@ pub enum Guard {
         env: EnvName,
         first: EnvName,
     },
+    /// A person's archive of `product/key`'s 1Password fields (#179, `opv apply rp-…`) runs
+    /// only once no target holds the key: `holding` still do, in the order they are pruned
+    /// (`opv sync <env> --prune --retire`, which CI may run). Names only; never a value.
+    RetireNotPruned {
+        product: ProductName,
+        key: KeyName,
+        holding: Vec<EnvName>,
+    },
+    /// The boundary item of `env` holds `holds` (an attachment, a one-time password, a
+    /// field type opv does not fully understand), which a whole-item edit is not proven to
+    /// keep (I4), so a retirement's archive does not rewrite it. Names only.
+    ArchiveNotRewritable {
+        env: EnvName,
+        holds: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]

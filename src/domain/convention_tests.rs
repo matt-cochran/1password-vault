@@ -508,6 +508,38 @@ fn kept_fields_are_never_read() {
     assert!(fields.iter().all(|f| f.section != KEPT_SECTION));
 }
 
+/// #179: a retirement's archived field is never claimed by its key, so a tidy leaves it
+/// in its archived section.
+#[test]
+fn an_archived_field_is_never_claimed() {
+    let archived = "archived · 2026-10-19 · retired api/LOG_LEVEL";
+    let l = with(&[(archived, "LOG_LEVEL", "STRING", "d")], "LOG_LEVEL");
+    assert!(
+        !resolve(&l, &fleet())
+            .chosen
+            .contains_key(&("api".to_string(), "LOG_LEVEL".to_string()))
+    );
+}
+
+/// #179: a `retired` key is wanted nowhere, so a tidy creates no field for it.
+#[test]
+fn a_retired_key_gets_no_new_field() {
+    let mut f = fleet();
+    f.products
+        .get_mut("api")
+        .unwrap()
+        .keys
+        .get_mut("LOG_LEVEL")
+        .unwrap()
+        .lifecycle = crate::domain::Lifecycle::Retired;
+    let p = plan(&with(&[], "LOG_LEVEL"), &f, "dev", DATE);
+    assert!(
+        !p.changes
+            .iter()
+            .any(|c| matches!(c, Change::CreatedField(n) if n == "api/LOG_LEVEL"))
+    );
+}
+
 #[test]
 fn the_summary_names_keys_never_values() {
     let l = with(
