@@ -1,6 +1,6 @@
 # Using opv
 
-Every command and flag, what each prints, the JSON contract and the exit codes. 0.12.0 has one interface: you inspect what is, propose a contract change, apply it as a person, and deliver with CI or your own terminal. There are no aliases and no deprecation period; [Migrating from 0.11](#migrating-from-011) maps what changed. `opv <command> --help` shows the same for the version you run, and `opv schema` prints it as JSON. Where the configuration comes from and what it holds is in [configuration](configuration.md); retries, exit 9, `Next:`/`Do:` and interruptions are in [how opv handles failures](how-opv-handles-failures.md).
+Every command and flag, what each prints, the JSON contract and the exit codes. Since 0.12.0 opv has one interface: you inspect what is, propose a contract change, apply it as a person, and deliver with CI or your own terminal. There are no aliases and no deprecation period; [Migrating from 0.11](#migrating-from-011) maps what changed, and [What's new in 0.13.0](#whats-new-in-0130) lists what 0.13.0 adds. `opv <command> --help` shows the same for the version you run, and `opv schema` prints it as JSON. Where the configuration comes from and what it holds is in [configuration](configuration.md); retries, exit 9, `Next:`/`Do:` and interruptions are in [how opv handles failures](how-opv-handles-failures.md).
 
 ## Commands
 
@@ -9,8 +9,8 @@ deliver with CI or your own terminal. The grouping is who runs a command.
 
 | Group | Command | Who | What it does |
 |---|---|---|---|
-| inspect | `opv inventory [--env <e>] [--product <p>] [--json]` | anyone | the matrix: keys × environments, each cell a value state ([States](#states)) and this session's capability on its vault (`write`/`read`/`none`/`unknown`), with ids, source, presence, tier and delivery state per target; a deployed tier this session cannot read comes from the CI receipt, with its age |
-| inspect | `opv needs [<env>] [--product] [--scan <dir> \| --names <file>] [--gate]` | anyone, CI | code ↔ contract: `undeclared`, `declared_unobserved`, `ambiguous`, `declared`, with the scanner's coverage; `--gate` fails on a new undeclared name |
+| inspect | `opv inventory [--env <e>] [--product <p>] [--json]` | anyone | the matrix: keys × environments, each cell a value state ([States](#states)) and this session's capability on its vault (`write`/`read`/`none`/`unknown`); each key row with its declared attributes, where it lives in 1Password, its delivery state per target and its own next step ([below](#the-inventory-opv-inventory)) |
+| inspect | `opv needs [<env>] [--product <p>] [--scan <dir> \| --names <file\|->] [--gate]` | anyone, CI | code ↔ contract: `undeclared` (with a suggested declaration), `declared_unobserved`, `ambiguous`, `computed`, `declared` (with its value state), and the scanner's coverage; `--gate` fails on a new undeclared name ([below](#code-and-contract-opv-needs-and-opv-contract)) |
 | inspect | `opv contract [--env <e>] [--component <c>] [--schema] [--check <file>] [--relaxations [--base <ref>]]` | anyone, CI | the contract as data and its JSON Schema; `--check` fails on a stale committed copy; `--relaxations` lists the relaxations against the default branch |
 | inspect | `opv ready [<env>] [--gate] [--save <file>] [--json]` | anyone, CI | findings, receipts and gates; `--gate` fails unless every present key is `set` with delivery evidence at its item version ([below](#readiness-opv-ready)) |
 | inspect | `opv next` | anyone | one action this session can take, then the queue, then what waits on others, by vault |
@@ -20,14 +20,14 @@ deliver with CI or your own terminal. The grouping is who runs a command.
 | inspect | `opv history <env> [--target <t>] [--json]` | anyone | what opv last wrote to the target |
 | inspect | `opv access [<env>] [--target <t>] [--project <p>] [--json]` | anyone | who can read and write each vault, and the owner's command to create a reader |
 | inspect | `opv doctor [--env <e> [--product <p>] [--target <t>]] [--settings] [--json]` | anyone | setup problems; it names a production-tier vault this session can read and a production platform login |
-| propose | `opv propose key <[p/]KEY> --kind … [--env …] [--except <env>=<reason>] [--source …] [--shape <name>] [--rule <NAME[=VALUE]>] [--personal] [--from <p/KEY>] [--guidance …] [--allow-same-value] [--immutable] [--expires <date>]` | anyone | a new or changed key: the contract diff and plan |
+| propose | `opv propose key <[p/]KEY> --kind … [--env …] [--except <env>=<reason>] [--source person\|generated\|derived\|infrastructure] [--shape <name>] [--rule <NAME[=VALUE]>] [--personal] [--from <p/KEY>] [--guidance …] [--allow-same-value] [--immutable] [--expires <date>]` | anyone | a new or changed key: the contract diff and plan |
 | propose | `opv propose env <env> [--tier local\|shared\|production]` | anyone | a new environment, inheriting every `all` key |
 | propose | `opv propose target <env> <name> --<provider options> [--products …] [--role …] [--deploy-credentials <op://…>] [--project <p>]` | anyone | a new target |
-| propose | `opv propose retire <[p/]KEY>` | anyone | retirement in order: `needs` at the deployed revision, prune from targets, archive the fields |
-| propose | `opv propose setup [--from-item <env> [--vault <t>] [--item <t>]] [--names-from <.env> [--config-key K]… [--secret-key K]…] [--file \| --project <p>] [--account <a>]` | anyone | first setup: the contract from an existing item or a `.env`'s names, and every boundary, item, state vault and field |
+| propose | `opv propose retire <[p/]KEY>` | anyone | marks the key `retiring`; CI then prunes it with `opv sync <env> --prune --retire` and a person archives it with `opv apply rp-<id>` ([retiring a key](#retiring-a-key)) |
+| propose | `opv propose setup [--from-item <env> [--vault <t>] [--item <t>]] [--names-from <.env> [--config-key K]… [--secret-key K]…] [--file \| --project <p>] [--account <a>]` | anyone | first setup: the contract from an existing item or a `.env`'s names (each present in every environment), and every boundary, item, state vault and field |
 | propose | `opv propose structure [--rebind <env>]… [--project <p>]` | anyone | the structure the contract declares, or new ids for an environment |
 | propose | `opv propose generate <env> <p/KEY>…` | anyone | generated values for rule-backed keys |
-| propose | `opv propose --intent <file.json>` | anyone | the categorical intent document, the same as MCP `opv_propose` |
+| propose | `opv propose --intent <file.json>` | anyone | the categorical intent document, the same as MCP `opv_propose`; its `extend` kind adds an environment to every explicit-list key ([below](#extend-an-environment-to-every-key-the-extend-intent)) |
 | propose | any `opv propose …` with `--write` | anyone (CLI only) | also writes the contract diff into the repository's contract file. Without `--write`, and always over MCP, a proposal writes nothing |
 | apply | `opv apply [<plan_id>] [--project <p>] [--attest <env>:<target>:<product/KEY>]…` | **person, in a terminal** | recompute the plan from the contract on disk and the actual state, refuse a stale `<plan_id>`, show it, confirm, and run it in one process |
 | person | `opv set <[p/]KEY> --env <e>` | **person, in a terminal** | masked entry of one value |
@@ -36,9 +36,9 @@ deliver with CI or your own terminal. The grouping is who runs a command.
 | person | `opv run <env> [--product <p>] [--role <r>] [--preview] [--remote <profile>] [--confirm <env>] -- <cmd>` | person | run with the keys injected; `op run` masks exact values |
 | person | `opv setup`, `opv login [<env>]`, `opv account list\|use`, `opv ui`, `opv config edit` | person | onboarding, sign-in and browsing; `opv ui` actions run the other commands |
 | deliver | `opv changed <env> [--product <p>] [--target <t>] [--json]` | CI, person | did a source item change since the last sync (exit 10) |
-| deliver | `opv sync <env> [--deploy] [--prune] [--rotate <product/KEY>] [--prune-immutable <product/KEY>] [--expect-plan <id>] [--confirm <env>] [--product <p>] [--target <t>] [--receipt <file>] [--json]` | CI, person | delivery, opv as the courier |
+| deliver | `opv sync <env> [--deploy] [--prune [--retire]] [--rotate <product/KEY>] [--prune-immutable <product/KEY>] [--expect-plan <id>] [--confirm <env>] [--product <p>] [--target <t>] [--receipt <file>] [--supply-stdin] [--json]` | CI, person | delivery, opv as the courier; `--retire` is a retirement's prune step, `--supply-stdin` takes [infrastructure values](#infrastructure-values---supply-stdin) on stdin (CI only) |
 | deliver | `opv delivery verify <env> [--product <p>] [--target <t>] [--receipt <file>] [--json]` | CI, person | does every placement still hold what opv delivered |
-| deliver | `opv ci workflow <env> --target <t> [--github-env <e>] [--deploy]`, `… --on-change [--every <m>]`, `… --drift` | person | ready-to-commit workflows, including the `needs`, `contract --check`, `ready --gate` and `opv/relaxations` checks |
+| deliver | `opv ci workflow <env> --target <t> [--github-env <e>] [--deploy]`, `… --on-change [--every <m>]`, `… --drift`, `opv ci workflow <env> --target <t> --supply [--deploy]`, `opv ci workflow --supply-check <file>` | person | ready-to-commit workflows, including the `needs`, `contract --check`, `ready --gate` and `opv/relaxations` checks; `--supply` prints the step that delivers infrastructure values and `--supply-check` guards it in pull requests |
 | admin | `opv access <env> --create --github <owner/repo> [--github-env <e>] [--secret-name <n>]`, `opv target credentials <env> --target <t> [--create]` | person | CI and deploy identities |
 | admin | `opv target list [--env <env>] [--json]`, `opv vault locate <vault ID> [--json]`, `opv projects [--account <a>] [--long] [--json]` | anyone | targets, the account a vault lives in, and projects in 1Password |
 | admin | `opv config export [<env>] [--toml\|--json] [--with-ids] [--product <p>]`, `opv config import --vault <v> [--file <f>] …`, `opv config check --file <f>`, `opv config edit` | person | the manifest mirror; `config edit` needs your own terminal |
@@ -48,7 +48,7 @@ Hidden internal commands (`remote-send`, `remote-receive`, `local-delivery`) are
 
 "Who" is who may run it, not what is permitted: the CLI has no permission model of its own. A command named **person** needs your own terminal and refuses CI or agent mode. A read that opens an item may also tidy its 1Password layout once when a person runs it signed in with their own session (missing sections and empty fields, labels, duplicates; nothing is deleted, [store layout](configuration.md#store-layout)); a service account, Connect, CI or a run under `deploy_credentials` never writes to 1Password.
 
-`plan` and `sync` also take `--rotate <product/KEY>` for immutable keys; `sync` additionally takes `--prune-immutable <product/KEY>` (all repeatable, shown by `--help`, not `-h`; [below](#status-plan-and-sync)).
+`plan` and `sync` also take `--rotate <product/KEY>` for immutable keys; `sync` additionally takes `--prune-immutable <product/KEY>` (all repeatable, shown by `--help`, not `-h`; [below](#status-plan-and-sync)). `sync --receipt <file>` and `sync --supply-stdin` are intentionally left out of `opv sync --help`: `--receipt` belongs to the CI recipes ([delivery receipts](#delivery-receipts-opv-sync---receipt-and-opv-delivery-verify)), and `--supply-stdin` is written into a deploy job by `opv ci workflow --supply`, never typed. `opv schema` lists both.
 
 ### Global options and environment
 
@@ -109,6 +109,7 @@ The count lines count the rows per target. `status` and `plan` exit 8 when a key
 | | `failed` | fails a rule; the rule and the reason follow: `failed enum (expected one of: debug, info)` |
 | | `skipped` | not required in this environment |
 | | `blocked by source` | shares another key's value and that key has a finding; fixed with it and not counted again ([Shared keys](#shared-keys)) |
+| | `supplied at sync` | an [infrastructure key](#infrastructure-values---supply-stdin): its value is supplied to `sync --supply-stdin` by the deploy job and never stored in 1Password, so it is never `missing` (JSON `supplied_at_sync`) |
 | ON TARGET | `new` | not on the target yet; the next sync writes it |
 | | `same` | on the target with the same value (Azure, Kubernetes; GitHub variables) |
 | | `changed` | on the target with another value; the next sync writes it |
@@ -117,6 +118,10 @@ The count lines count the rows per target. `status` and `plan` exit 8 when a key
 | | `held` | immutable and already set; replace it with `--rotate` |
 | | `extra` | on the target but not wanted in this environment; removed only with `--prune` (sync prints `extra, not pruned`) |
 | | `drift` | the app is bound to something other than what opv last wrote |
+| | `as supplied` | an infrastructure key the target still holds at the version opv recorded when it was supplied (JSON `as_supplied`) |
+| | `drifted` | an infrastructure key the target holds at another version than the one supplied: changed outside opv; re-run the deploy job that produces it |
+| | `not recorded` | an infrastructure key the target lists with no delivery evidence (JSON `not_recorded`); only a supplying run with `--rotate` may write it |
+| | `absent` | an infrastructure key the target does not hold yet |
 | | `n/a` | not delivered to the target (config keys, except GitHub variables, and skipped keys that are not on the target) |
 
 `missing` and `failed` are findings. In `status` and `plan` their rows come first, so a 40-key fleet with one problem shows it on the first table line. The JSON `state` and `target_state` fields keep their own spellings (below).
@@ -361,6 +366,19 @@ Nothing is deleted by default. `--prune` unsets only names that the template pro
 
 Known limitation: Fly hides an unset name as soon as `flyctl secrets unset --stage` runs, before any deploy. A run interrupted between that unset and the deploy (Ctrl-C, CI cancel, lost network, or a run without `--deploy`) leaves the name on the machines, and the next run cannot see it, so it neither reports nor deploys it. Any later deploy finishes the removal: run `opv sync <env> --deploy` again (it deploys when anything else changed or is pending), or `flyctl secrets deploy --app <app>`, which always deploys.
 
+`--prune --retire` is the prune step of a [retirement](#retiring-a-key): it also removes keys marked `retiring`, in tier order, and never writes 1Password.
+
+### Infrastructure values: `--supply-stdin`
+
+A key declared `source = "infrastructure"` ([configuration](configuration.md#infrastructure-values-source--infrastructure)) holds a value that infrastructure produces (a database URL from Terraform, a webhook signing secret). The deploy job that produced it pipes it to `opv sync <env> --supply-stdin` as one or more `opv.supply/1` documents, and opv delivers it through the same staged sync, rules and delivery evidence as any other key. **The value is never stored in 1Password**; CI gets no new 1Password permission. The full guide, with the document format, serials, adoption and the failure modes, is [Supplying infrastructure-generated values](infra-generated-values.md).
+
+- **Generated, not typed.** `opv ci workflow <env> --target <t> --supply [--deploy]` prints the step to paste into the job that ran `terraform apply` (one `jq` mapping per infrastructure key the target delivers, never `--rotate`), then a pull-request job that runs `opv ci workflow --supply-check <workflow file>`. That check refuses a `${{ … }}` expression other than `github.*` in the script of a step that pipes into `--supply-stdin` (GitHub writes the expanded script to the job log), naming the line and column (exit 2).
+- **Who may supply.** `--supply-stdin` is refused from an AI assistant and when standard input is a terminal, before anything is read; it conflicts with `--retire`. The stream is limited to 1 MiB and 256 names and must end within `--timeout`. A run must supply every infrastructure key in its scope (environment, `--product`, `--target`).
+- **Staged targets only.** Fly and GitHub targets deliver infrastructure keys; a Kubernetes or Azure target delivering one is refused at load.
+- **Without a supply,** `sync` holds every infrastructure name and never writes it; `plan` and `status` show the 1Password column as `supplied at sync` and the target column as `as supplied`, `drifted`, `not recorded` or `absent` ([States](#states)). `status --fail-on-drift` exits 8 on a `drifted` name.
+- **Evidence.** A supplied name's delivery evidence is an `s1` line in the placement's delivery item: the target's version, a keyed fingerprint of the delivered value, the key, the producer's serial and the time, never the value. A supplied name left without its `s1` line fails the run (`delivery_unverified`, exit 8).
+- **Value paths refuse it.** `opv set`, `opv open` and `opv import --replace`/`--rotate` of an infrastructure key are refused (`policy_refused`, exit 6); `opv import` reports a found value as `not_stored`; `opv propose generate` and an attestation refuse it; `opv run` leaves it out with one note naming it.
+
 ### Shared keys
 
 A key declared with `from = "<product>/<KEY>"` ([configuration](configuration.md#shared-keys-from)) has a row of its own in `status` and `plan` (and in `inventory`), with the source under it:
@@ -413,7 +431,13 @@ dev[local]: core=vDEV.../iDEV...
 next: opv set api/OPENAI_API_KEY --env dev
 ```
 
-`run <env> [--product <p>] [--role <r>] -- <cmd>` starts a command with the keys as environment variables under their plain names, through `op run`, with no `.env` file. It first removes every key name declared in the configuration from the inherited environment, so another product's keys never leak in. opv's options go before `--`; `run` exits with the command's own exit code. The local guide, with Docker Compose, editors, product switching and WSL, is [local-development.md](local-development.md).
+`run <env> [--product <p>] [--role <r>] -- <cmd>` starts a command with the keys as environment variables under their plain names, through `op run`, with no `.env` file. It first removes every key name declared in the configuration from the inherited environment, so another product's keys never leak in. opv's options go before `--`; `run` exits with the command's own exit code. The local guide, with Docker Compose, editors, product switching and WSL, is [local-development.md](local-development.md). An [infrastructure key](#infrastructure-values---supply-stdin) is never injected: its value is not in 1Password, and `run` prints one note naming it.
+
+**File keys.** A key with `file` is written to a fresh private directory on a RAM-backed `$XDG_RUNTIME_DIR` (0700, files 0400) and removed when the app exits. Which platforms support it and which limits opv enforces (same user, root, ptrace, inherited descriptors, swap, core dumps, hard links, reboot) are in [platforms and limits](design/local-delivery.md#platforms-and-limits). Since 0.13.0:
+
+- A runtime directory other users can write (a group or other write bit without the sticky bit, such as WSLg's `/mnt/wslg/runtime-dir` at 0777) is refused before the directory is made or any file written: `ram_dir_unavailable` (exit 6) with `why` `writable_by_others`. On WSL, enable systemd in `/etc/wsl.conf` so logind provides `/run/user/<uid>`. 0700 and 1777 pass.
+- The private directory is opened once and every file is created relative to that handle, so renaming or replacing the entry afterwards cannot redirect a write.
+- Before the app starts, every inherited descriptor above 2 is marked close-on-exec, so a descriptor `op run` passed down does not reach the app; stdin, stdout and stderr still pass (so `op run` keeps masking). The remote receiver (`--remote`) does the same.
 
 ### Process roles: `--role`
 
@@ -448,7 +472,7 @@ all clear: nothing pending
 
 - A failing check has its fix under it as `  fix: ...`; `doctor` then exits with the first failing check as the error, and its `Do:`/`Next:` lines are that check's fix. An older tool is a `warn` line with the upgrade command (exit code unchanged).
 - `--env <env>` checks only what that environment needs (a run-only environment needs no target CLI) and reads its item once, by IDs, checking the keys as `opv inventory` does: a key missing or failing a rule is a `FAIL  item:` line naming it, with `Next: opv inventory --env <env> --product <p>` (exit 8). `--product` limits that to one product. Without `--env` no item is read.
-- `--settings` also looks for likely-wrong values across every environment you can read (the same secret in two environments, a placeholder, stray whitespace, `localhost` where it deploys, a test key in production): one `warn  settings:` line listing each, with `fix: opv open <key> --env <env>`. It reads every environment's item; values are compared, never shown. A warning never changes the exit code. `opv ready` reports the same findings. See [settings health](configuration.md#settings-health-likely-wrong-values).
+- `--settings` also looks for likely-wrong values across every environment you can read (the same secret in two environments, a placeholder in a secret or a config key, a very weak secret, stray whitespace, `localhost` where it deploys, a test key in production): one `warn  settings:` line listing each, with `fix: opv open <key> --env <env>`. It reads every environment's item; values are compared, never shown. A warning never changes the exit code. `opv ready` reports the same findings. See [settings health](configuration.md#settings-health-likely-wrong-values).
 - `doctor` never writes 1Password, whoever runs it, so an assistant can rely on it in a person's session. When an item is not laid out the way opv expects, it reads it as it is and says so once, naming `opv config export <env>`, the explicit repair (a signed-in person runs it; one verified edit, nothing deleted).
 - With `deploy_credentials`, a failed sign-in is one `FAIL deploy credentials` line; the other checks still run.
 - `--json` prints `{schema_version, ok, config_source, checks: [{name, status: ok|warn|fail|skip, detail, next, do}], next, do}`; the top-level `next` and `do` are the first failing check's, or `null`.
@@ -518,7 +542,7 @@ opv delivery verify prod --receipt api.receipt.json      # is the receipt I kept
   - The evidence (each name's store version and a keyed fingerprint of its 1Password value) stays in the state item and is compared in memory. Fly digests included, it is never printed, logged or written to a file.
   - Give the state vault only to identities that can also read the values.
 - **Least privilege.** A target's deploy identity reads the boundary vaults that target's products need and writes only its own state vault. `opv access <env> --target <name>` prints its exact `op service-account create … --vault <boundary>:read_items --vault <state>:read_items,write_items` command, which you run yourself (1Password shows the token once).
-- **Receipt file**: `{"schema": "opv.delivery/1", "deliveries": [{"revision", "scope": {"account_id", "environment", "product", "target", "provider", "locator"}, "bindings": [{"name", "source": {"item_id", "field"}}], "delivered_at", "plan_id", "opv_version"}]}`. A receipt is selected by its full scope, in any order; two with the same full scope are refused (`input_invalid`, naming the file). `opv delivery verify --json` returns `{schema_version, environment, placements: [{product, target, revision, state, reason, names: [{name, state}], deployed, receipt_revision?}]}`.
+- **Receipt file**: `{"schema": "opv.delivery/1", "deliveries": [{"revision", "scope": {"account_id", "environment", "product", "target", "provider", "locator"}, "bindings": [{"name", "source": {"item_id", "field"}}], "attested"?, "supplied"?, "delivered_at", "plan_id", "opv_version"}]}`. `attested` lists the names a person [attested](attestation.md) and `supplied` the names whose value was supplied to `sync --supply-stdin` ([infrastructure values](#infrastructure-values---supply-stdin)); each is omitted when empty, so the schema id is unchanged. A supplied binding's source is `{"item_id": "supplied", "field": "<product/KEY>"}`, and `delivery verify` marks the name `"supplied": true`: `verified` then means unchanged on the target since it was supplied, never current with its producer, and it never reports `source_changed` for it. A receipt is selected by its full scope, in any order; two with the same full scope are refused (`input_invalid`, naming the file). `opv delivery verify --json` returns `{schema_version, environment, placements: [{product, target, revision, state, reason, names: [{name, state}], deployed, receipt_revision?}]}`.
 - **Capability check**: an installed opv supports this when `opv schema` lists the command `delivery verify`.
 
 The four kinds of evidence are kept apart:
@@ -548,15 +572,76 @@ Next (owner): opv open api/STRIPE_KEY --env staging
 
 Each target in `targets` is `ready` (every vault and item it needs could be opened) or `grants_missing`, and carries `evidence_write: "not_verified"`: an open state vault does not show that the identity can write delivery evidence there. The read-only CI reader never can; a target's deploy identity (`opv access <env> --target <name>`) can. A sync that records evidence, checked with `opv delivery verify`, is the proof.
 
-`opv ready --gate` turns the receipt into a promotion gate: it fails unless every present key is `set` with delivery evidence at its item version, and no relaxation is unaccepted. A key whose `expires` date is within 30 days is an advisory finding, not a failure. Without `--gate`, the exit code is unchanged.
+`opv ready --gate` turns the receipt into a promotion gate: it fails unless every present key is `set` with delivery evidence at its item version, and no relaxation is unaccepted. A present infrastructure key passes only when it is `as supplied` on every target; otherwise the gate fails with reason `supplied_not_delivered` (absent or not recorded) or `supplied_drifted`, and the step is to run the deploy job that produces it. A key whose `expires` date is within 30 days is an advisory finding, not a failure. Without `--gate`, the exit code is unchanged. [examples/ci-change-detection](../examples/ci-change-detection/) has a promotion chain, `opv-promotion.yml`: a `dev` job syncs and runs `opv ready dev --gate`, and `staging` and `prod` each need the tier before them, so a change reaches production only through green gates. It never runs `opv apply` and never writes 1Password.
+
+Non-blocking findings that never change the exit code, with or without `--gate`:
+
+| `code` | When | Step |
+|---|---|---|
+| `environment_gap` | a key's explicit `environments` list leaves a declared environment out with no `except` ([presence](configuration.md#presence-every-environment-minus-except)); one finding per product, key and environment | `opv propose key <product/KEY> --env <env>`, or declare an `except` with its reason; the [`extend` intent](#extend-an-environment-to-every-key-the-extend-intent) closes every gap of one environment at once |
+| `retirement_incomplete` | a key is `retiring` and its retirement is not finished; the message names the remaining steps in order | `opv sync <env> --prune --retire` (actor `ci`) while a target still holds it, then a person's `opv apply rp-<id>` ([retiring a key](#retiring-a-key)) |
+| `expires_soon` | a key's `expires` date is within 30 days | rotate it |
+| [settings health](configuration.md#settings-health-likely-wrong-values) | a likely-wrong value: the same secret in two environments or under two keys, a placeholder (`changeme`, `<your key>`, … in a secret or a config key), `low_entropy` (a secret of at least 8 characters with very low entropy for its length), stray whitespace, a local address where it deploys, a test or live key in the wrong tier | `opv open <key> --env <env>` |
 
 ## The inventory: `opv inventory`
 
-`opv inventory [--env <e>] [--product <p>] [--json]` is the matrix: every declared key against every environment. Each cell is `<state>/<access>`: the value state ([States](#states): `set`, `absent`, `empty`, `placeholder`, `malformed(<rule>)`, `unreadable(<cause>)`, `not_wanted`) and this session's access to the key's vault (`W` write, `R` read, `-` none, `?` unknown). Each column is headed `<env>[<tier>]`. Below the matrix, one line per environment names its boundaries' vault and item ids (or `unbound`), one `delivery <env>/<target>/<product>: <state>` line per recorded delivery item (`delivered`, `not_delivered`, `not_recorded`, `unreadable`), and `next: opv set <product>/<KEY> --env <env>` for the first wanted key with no value. It reads each item once, by IDs, and only from vaults this session is a member of; it never prints a value, a length or a digest, and exits 0. `--env` and `--product` narrow the document. `--json` prints one schema-3 document with `environments` (`env`, `tier`, `boundaries`), `keys` (`product`, `key`, `kind`, `source`, `presence` per environment, `lifecycle`, `expires`), `cells` (`product`, `key`, `env`, `boundary`, `state`, `capability`, `from_receipt`), `deliveries` and a typed `next`. The CLI takes no receipt file: a cell of a vault this session cannot read is not filled from a CI receipt.
+`opv inventory [--env <e>] [--product <p>] [--json]` is the matrix: every declared key against every environment. Each cell is `<state>/<access>`: the value state ([States](#states): `set`, `absent`, `empty`, `placeholder`, `malformed(<rule>)`, `unreadable(<cause>)`, `not_wanted`, and `supplied` for an [infrastructure key](#infrastructure-values---supply-stdin), whose value is never in 1Password) and this session's access to the key's vault (`W` write, `R` read, `-` none, `?` unknown); `-` alone is an environment the key is not declared for. Each column is headed `<env>[<tier>]`, and a key's label carries a marker: `!` immutable, `@` a local file key, `!@` both.
+
+```text
+$ opv inventory --env prod
+key                  prod[production]
+api/OPENAI_API_KEY   set/R
+api/SIGNING_KEY!     set/R
+web/TLS_PRIVATE_KEY@  absent/R
+prod[production]: core=vPRD.../iPRD...
+delivery api/OPENAI_API_KEY: delivered=prod/web stale=prod/p-overflow
+delivery api/SIGNING_KEY: attested=prod/web
+next: opv set web/TLS_PRIVATE_KEY --env prod
+```
+
+Below the matrix, one line per environment names its boundaries' vault and item ids (or `unbound`); one `delivery <product>/<KEY>:` line per key that a target delivers groups that key's targets by delivery state; and `next: opv set <product>/<KEY> --env <env>` names the first wanted key with no value. The delivery state of a key's name on one target (`<env>/<target>`) comes from that placement's evidence line for the name, never from a value:
+
+| Delivery state | Meaning |
+|---|---|
+| `delivered` | opv wrote or proved the name and nothing newer is known |
+| `attested` | a person [attested](attestation.md) it: unchanged since attested, not proven |
+| `supplied` | it holds a value supplied to `sync --supply-stdin` ([infrastructure values](#infrastructure-values---supply-stdin)) |
+| `stale` | the evidence is older than what it should vouch for: another source field, another store version than the target lists, or a source item edited since the last sync |
+| `not_delivered` | no evidence line for the name (no delivery item, or a line opv cannot read as evidence) |
+| `unreadable` | the placement's delivery item could not be read: neither delivered nor not delivered |
+
+It reads each item once, by IDs, and only from vaults this session is a member of, and each placement's delivery item once; it never prints a value, a length or a digest, and exits 0. `--env` and `--product` narrow the document. The CLI takes no receipt file: a cell of a vault this session cannot read is not filled from a CI receipt.
+
+`--json` prints one schema-3 document (`opv schema` lists it as `documents.inventory`):
+
+- `environments`: `env`, `tier`, `boundaries` (`{vault_id, item_id}` or `null` while unbound).
+- `keys`: `product`, `key`, `kind`, `source`, `presence` per environment, `lifecycle`, `expires`; the declared attributes `immutable`, `allow_same_value`, `rules` (the rule names only, never a parameter), `guidance`, `roles`, `file` and `targets` (`"<env>/<target>"` → the name that target delivers it under), each omitted while unset; `delivery` (`"<env>/<target>"` → delivery state); `location`, where the value lives in 1Password: `section` (`null` at the top level), `field` and `link` (`op://<vault>/<item>`, the item, never a field reference `op` would resolve); and `next`, the key's own most urgent step as `{kind, actor, command}` (a value to enter, `opv set …`, before a missing or stale delivery, `opv sync <env>` for `ci` on a shared or production tier), or `null` when it needs nothing.
+- `cells`: `product`, `key`, `env`, `boundary`, `state`, `capability`, `from_receipt`, and `from` (a shared key) and `personal` when set.
+- `deliveries`: one `{environment, target, product, state}` per placement (`delivered`, `not_delivered`, `not_recorded`, `unreadable`).
+- `next`: the document's first action.
 
 ## Code and contract: `opv needs` and `opv contract`
 
-`opv needs [<env>] [--product <p>] [--scan <dir> | --names <file>] [--gate]` scans the code for the environment names it reads and compares them with the contract (`--scan` walks a directory without git; `--names` takes names an assistant found itself, one per line, `-` for standard input, reported without file:line; `<env>` and `--product` narrow the declared keys): each name is `undeclared`, `declared_unobserved`, `ambiguous` or `declared`, with the scanner's coverage (files, languages, skipped patterns). `--gate` exits 8 on a new `undeclared` name, so a pull request cannot add a key the contract does not declare. It is for anyone and CI, and prints names only.
+`opv needs [<env>] [--product <p>] [--scan <dir> | --names <file|->] [--gate] [--json]` scans the code for the environment names it reads and compares them with the contract. It reads the files git knows by default; `--scan <dir>` walks a directory without git (locations relative to it); `--names <file>` takes names an assistant found itself, one per line (`-` reads standard input; blank and `#` lines skipped), reported without `file:line`. `--scan` and `--names` exclude each other. `<env>` keeps only the keys desired in that environment and `--product` only that product's keys; names no product declares yet are always kept. The scanner reads Rust, TypeScript and JavaScript, Python and Go, plus `.env` files, Compose files, Kubernetes manifests, `fly.toml` and GitHub Actions workflows. A name outside the key grammar, or a runtime variable such as `PATH`, is counted under the coverage's skipped patterns, never echoed.
+
+```text
+$ opv needs dev --product api
+needs: 1 undeclared · 1 declared_unobserved · 0 ambiguous · 0 computed · 1 declared
+undeclared NEW_TOKEN - src/a.py:2
+declared_unobserved API_TOKEN api -
+declared DATABASE_URL api src/a.py:3
+coverage: 1 files · python · 0 skipped patterns
+```
+
+| State | Meaning | JSON adds |
+|---|---|---|
+| `undeclared` | the code reads it; the contract declares it nowhere and no current `ignore` hides it | `suggested`: `{product, key, kind}`, the declaration that would make it part of the contract (the kind from the name, secret when unsure), for `--product` or the project's one delivered product; absent when no product can be named |
+| `declared_unobserved` | the contract declares it; the scanner never saw it read | |
+| `ambiguous` | the name the code reads could belong to several products (each declares it, or a target delivers one of theirs under it) | `candidates`: those products, sorted |
+| `computed` | a read whose name the scanner could not resolve (a variable where a literal name would be); by `file:line` only | |
+| `declared` | the contract declares it and the code reads it, under its own name or the name a target delivers it under | `value_state`: the value state in `<env>` (else the first environment that wants it), classified as `opv inventory` does, never a value |
+
+`--gate` exits 2 (`needs_undeclared`) when the code reads a name that neither this contract nor the default branch's declares, so a pull request cannot add a key the contract does not declare. It is for anyone and CI, and prints names and `file:line` only. Over MCP, `opv_state` section `needs` takes `env`, `product`, `scan` (a directory inside the project; a path or link that leads out of it is refused) and `names` (an inline list, never a file the server reads), with the same rules ([MCP](mcp.md)).
 
 `opv contract [--env <e>] [--component <c>] [--schema] [--check <file>] [--relaxations [--base <ref>]]` prints the contract as data: per component and environment, the name, kind, shape name, required state (contract × presence) and the contract digest. An environment lists only the keys declared for it: a key whose explicit `environments` list leaves the environment out is not in that environment's contract, and an `except`ed key is listed with `required: false`. `--schema` prints the JSON Schema it validates against; `--check <file>` exits 2 when a committed copy is stale; `--relaxations` lists the relaxations against the default branch (an `except` of a production-tier environment, `allow_same_value`, a removed shape, narrowed presence, `secret` → `config`), which CI posts as the separate `opv/relaxations` check until review accepts them. No id, rule parameter or value appears.
 
@@ -574,11 +659,16 @@ The configuration changes one way: anyone proposes, a person applies. `opv propo
 
 ### `opv propose key`, `env`, `target` and `retire`
 
-`opv propose key <[p/]KEY>` declares or changes one key: `--kind secret|config`, `--env` (repeatable), `--except <env>=<reason>` for a production-tier environment the key is not wanted in, `--source person|generated|derived`, `--shape <name>` from the catalog (a shape name only, never a rule), `--rule <NAME[=VALUE]>`, `--personal`, `--from <p/KEY>`, `--guidance`, `--allow-same-value`, `--immutable` and `--expires <date>`. A `--rule` counts in the contract only once it is committed on the default branch; a hand-edited or branch-only rule shows `rules_pending_review` and is not evaluated for MCP or agent-mode callers. Each production-tier environment the key is wanted in is asked as a categorical choice: a value, or `except`.
+`opv propose key <[p/]KEY>` declares or changes one key: `--kind secret|config`, `--env` (repeatable), `--except <env>=<reason>` for a production-tier environment the key is not wanted in, `--source person|generated|derived|infrastructure` (`infrastructure`: [supplied at sync](#infrastructure-values---supply-stdin), never stored), `--shape <name>` from the catalog (a shape name only, never a rule; 0.13.0 adds `github_pat`, a classic `ghp_` or fine-grained `github_pat_` token), `--rule <NAME[=VALUE]>`, `--personal`, `--from <p/KEY>`, `--guidance`, `--allow-same-value`, `--immutable` and `--expires <date>`. A `--rule` counts in the contract only once it is committed on the default branch; a hand-edited or branch-only rule shows `rules_pending_review` and is not evaluated for MCP or agent-mode callers. Each production-tier environment the key is wanted in is asked as a categorical choice: a value, or `except`.
 
-`opv propose env <env> [--tier local|shared|production]` declares an environment, inheriting every `all` key. `opv propose target <env> <name> --<provider options> [--products <p>]… [--role <r>]… [--deploy-credentials <op://…>]` declares a target. `opv propose retire <[p/]KEY>` retires a key in order: `needs` at the deployed revision first, then prune from the targets, then archive the fields. `opv propose target … --project <p>` carries the project name to the next step, where the target's state vault is named.
+`opv propose env <env> [--tier local|shared|production]` declares an environment, inheriting every `all` key. `opv propose target <env> <name> --<provider options> [--products <p>]… [--role <r>]… [--deploy-credentials <op://…>]` declares a target. `opv propose retire <[p/]KEY>` starts a key's [retirement](#retiring-a-key) by marking it `retiring`. `opv propose target … --project <p>` carries the project name to the next step, where the target's state vault is named.
 
-A generated configuration (its first line starts with `# generated`) is never edited; its generator is. Without `--write` the proposal still prints its diff, says to make it in the generator, and its `Next:` (and `--json` `next`, also over MCP, with `"generated": true`) is `opv propose structure`; `--write` is refused with `config_not_editable`, after the same diff is printed (in `--json`, as the error's `subject.reason.diff`). Once the generator emits the change, `opv propose structure` then `opv apply` creates what it declares and returns the ids for the generator to record (`generator_ids`).
+A generated configuration (its first line starts with `# generated`) is never edited; its generator is. On such a file, `opv propose key|env|target|retire` (and MCP `opv_propose`) returns what the generator must emit instead of a whole-file diff:
+
+- `generated_by`: the tool the first line names (`# generated by <tool>`, or `# GENERATED by <tool> from <input> — do not edit`), `null` when it names none.
+- `fragment`: only the declarations the proposal adds or changes, validated: `toml` (what the generator emits), `json` (the same as JSON), `removed` (the dotted paths it removes, when any) and `load_error` (`{code, message}`, the error the file would raise once the fragment is merged into it, never a value; `null` when it loads). A key or target change that would not load still returns its fragment with that error, so the generator's author sees it.
+
+The text form prints `generated_by:`, the fragment under `fragment:`, any `removed:` paths and `load_error:` (or `none`); `--json` keeps `diff` for compatibility. Its `Next:` (and `--json` `next`, also over MCP) is `opv propose structure`, and none while the fragment would not load. `--write` is refused with `config_not_editable`; the refusal carries the fragment and the generator, not a diff (in `--json`, the error's `subject.reason.fragment` and `subject.reason.generated_by`). Once the generator emits the fragment, `opv propose structure` then `opv apply` creates what it declares and returns the ids for the generator to record (`generator_ids`). In CI, `opv config check --file <regenerated file>` checks the generator's output ([configuration commands](#configuration-commands)).
 
 ```sh
 opv propose key api/STRIPE_KEY --kind secret --shape stripe_secret --env prod --env staging
@@ -588,9 +678,28 @@ opv propose target staging site --fly-app site-staging
 opv apply 3f9c0a1b2c3d4e5f                                       # a person reviews and runs it
 ```
 
+### Retiring a key
+
+Retirement is split by who may write what: CI prunes targets, which only reads 1Password; a person archives the 1Password fields. The key is never deleted from the contract: it ends as `lifecycle = "retired"`.
+
+1. **Propose.** `opv propose retire <[p/]KEY>` marks the key `retiring` in the contract (a reviewed change, like any proposal). From then on a plain `sync` never adds it back to a target that no longer holds it.
+2. **Prune, in tier order.** CI (or a person) runs `opv sync <env> --prune --retire` per environment: every local and shared environment before production. `--retire` needs `--prune` and conflicts with `--expect-plan` and `--supply-stdin`. Before the first write it refuses while the code at `HEAD` (the revision CI deploys) still reads the key (`retire_still_read`, naming the files), refuses a production environment while a local or shared environment's target still holds the key (`policy_refused`), and on an environment with `confirm_env = true` needs `--confirm <env>` as any sync does (`confirm_required`). It writes targets only, never 1Password.
+3. **Archive, as a person.** Once no target holds the key, `opv ready` names the command: `opv apply rp-<id>`. In your own terminal it shows the plan, confirms once, and in each boundary item moves the key's fields, with their values, into a section `archived · <date> · retired <product>/<KEY>` (1Password archives items, not fields), then marks the key `lifecycle = "retired"`. It refuses under CI or agent mode, an unknown id (`plan_unknown`), and a key a target still holds (`policy_refused`, naming the `opv sync <env> --prune --retire` steps left in tier order). A generated configuration is never edited: the `retired` mark is refused there and goes to its generator.
+
+Each step is resumable: progress is the targets' own state, so re-running a step that stopped part-way finishes it, and an item already archived is skipped. Until the retirement is finished, `opv ready` lists a non-blocking `retirement_incomplete` finding naming the remaining steps in order ([readiness](#readiness-opv-ready)). A retired key is wanted nowhere: no field is created or delivered for it, and receipts still mint after it leaves the binding set.
+
+```sh
+opv propose retire api/OLD_KEY --write           # the contract marks it retiring; review and merge
+opv sync staging --prune --retire                # CI, each non-production environment first
+opv sync prod --prune --retire --confirm prod    # then production
+opv ready                                        # names: opv apply rp-<id>
+```
+
 ### `opv propose setup`, `structure` and `generate`
 
 `opv propose setup` builds the first contract: `--from-item <env> [--vault <t>] [--item <t>]` reads names and types from an existing item, and `--names-from <.env> [--config-key K]… [--secret-key K]…` takes names only from a `.env` (never values); `--file` or `--project <p>` and `--account <a>` choose where the contract and account come from. The plan includes every boundary, item, state vault and field.
+
+`--names-from` declares its keys in the environment `local` (tier `local`), and since 0.13.0 each key it declares carries no `environments` list, so it is present in every environment, now and in any environment added later ([presence](configuration.md#presence-every-environment-minus-except)); an `except` takes it out of one.
 
 `opv propose structure [--rebind <env>]… [--project <p>]` plans the structure the contract declares (missing vaults, items, state vaults and empty fields) or new ids for an environment, and ends with the `opv apply` that runs it. It is also the one-time move that reads inline ids from `secrets.toml` and writes them to `secrets.bindings.toml`: a `secrets.toml` that still carries inline ids is refused at load by every command with `config_invalid`, naming the field, and `opv propose structure` then `opv apply` is the only path that reads them, only to move them.
 
@@ -598,7 +707,17 @@ opv apply 3f9c0a1b2c3d4e5f                                       # a person revi
 
 ### The intent document: `opv propose --intent <file.json>`
 
-`opv propose --intent <file.json>` takes the categorical intent document, the same as the MCP tool `opv_propose`: names checked by grammar, enumerated attributes, catalog shape names with no parameters, references, and optional screened guidance. Free text that looks like a value is refused `value_in_text_field` before anything is written; a value never enters the document.
+`opv propose --intent <file.json>` takes the categorical intent document, the same as the MCP tool `opv_propose`: names checked by grammar, enumerated attributes, catalog shape names with no parameters, references, and optional screened guidance. Free text that looks like a value is refused `value_in_text_field` before anything is written; a value never enters the document. Its `kind` is one of `key`, `env`, `target`, `retire`, `setup`, `structure`, `generate`, `attest` and `extend`.
+
+### Extend an environment to every key: the `extend` intent
+
+A key with an explicit `environments` list is not inherited by a new environment, and `opv ready` reports each such gap as `environment_gap`. One proposal closes them all:
+
+```json
+{"kind": "extend", "env": "qa", "product": "api"}
+```
+
+It adds `env` to every key of `product` (or, without `product`, of the whole project) that lists its environments explicitly; a key with no list is present everywhere already and is left untouched. The result is an ordinary proposal, a contract diff and a plan id, which a person reviews and applies; it writes no value. It is the same as MCP `opv_propose` with `kind: extend`.
 
 ## Writing values: `opv set` and `opv import`
 
@@ -662,7 +781,7 @@ opv delivery verify prod --product p --json   # each placement's own state vault
 | `opv config export <env> --json [--product P]` | that environment's config-kind values, `{product: {KEY: value}}`: every product, or only `P` |
 | `opv config import --vault V [--file F] [--project P] [--path D]...` | save a `secrets.toml` as the project manifest; never deletes the file |
 | `opv config edit` | edit in `$VISUAL`/`$EDITOR`, validate, diff, confirm, save unless changed meanwhile |
-| `opv config check --file F` | exit 2 with a diff when a committed copy differs from the manifest; on a file project (`--config`, or a secrets.toml found from here and no `.opv`), F is a regenerated file that must load and equal the committed one (exit 0 equal, 2 with a diff) |
+| `opv config check --file F` | exit 2 with a diff (`copies_differ`) when a committed copy differs from the manifest. On a file project (`--config`, or a `secrets.toml` found from here and no `.opv`), F is a regenerated file: it must load (with the project's `secrets.bindings.toml`, since a generator writes the contract only) and its configuration must equal the committed one, the project's `secrets.toml` or, when F is that file regenerated in place, its copy at git `HEAD`. Equal prints one line (exit 0); different prints a diff and exits 2 with `regenerated_file_differs`; a file that does not load is its load error, never a diff. A generator that merged a proposal's [fragment](#opv-propose-key-env-target-and-retire) passes |
 
 Details, discovery and the review trade-off: [configuration in 1Password](configuration.md#configuration-in-1password). Declaring keys, environments and targets is `opv propose`: [configuration](configuration.md#start-from-an-existing-item-opv-init).
 
@@ -1026,6 +1145,25 @@ There is no `--expect-plan` here: CI has no one to review a plan, so the job syn
 
 Rate limits: a cold whole-item read costs about 2 requests, so a fleet sync costs a handful per environment. 1Password Families service accounts allow 1,000 requests per hour per token and 1,000 per day for the account. `OP_CACHE=false` makes the cost the worst case, since `op` caches by default on Linux and macOS.
 
+## What's new in 0.13.0
+
+0.13.0 adds to the 0.12 interface; nothing is renamed or removed, and `schema_version` stays `3` (every change adds a field). Two things need a step when you upgrade:
+
+- **Pin 0.13.0 everywhere before committing `source = "infrastructure"`.** An older opv refuses a configuration that declares one ([infrastructure values](infra-generated-values.md#before-you-start-every-opv-must-be-0130-or-later)).
+- **A file key on a runtime directory other users can write is now refused** (`ram_dir_unavailable`, `why` `writable_by_others`), such as WSLg's `/mnt/wslg/runtime-dir`; enable systemd in WSL ([file keys](#local-development-opv-run)).
+
+| Area | What changed |
+|---|---|
+| [`opv inventory`](#the-inventory-opv-inventory) | each key row carries its declared attributes (`immutable`, `allow_same_value`, rule names, `guidance`, `roles`, `file`, target names), its 1Password `location` (section, field, item link), its delivery state per target (`delivered`, `attested`, `supplied`, `stale`, `not_delivered`, `unreadable`) and its own `next`; the text marks immutable (`!`) and file (`@`) keys; `opv schema` lists `documents.inventory` |
+| [`opv needs`](#code-and-contract-opv-needs-and-opv-contract) | `<env>`, `--product`, `--scan <dir>` and `--names <file\|->`; a declared row's value state, an undeclared row's suggested declaration, `ambiguous` (several products) apart from `computed` (an unresolved name); MCP `opv_state` `needs` takes the same inputs |
+| [`opv propose setup --names-from`](#opv-propose-setup-structure-and-generate) | the keys it declares are present in every environment |
+| [`extend` intent](#extend-an-environment-to-every-key-the-extend-intent) | one proposal adds an environment to every explicit-list key; `opv ready` reports each gap as a non-blocking `environment_gap` |
+| [retirement](#retiring-a-key) | `opv propose retire`, then CI's `opv sync <env> --prune --retire` in tier order, then a person's `opv apply rp-<id>`, which archives the fields and marks the key `retired`; `retirement_incomplete` in `opv ready`; a dev → staging → prod promotion recipe gated on `opv ready <env> --gate` |
+| [settings health](#readiness-opv-ready) | a placeholder in a config key is reported too; a `low_entropy` advisory for very weak secrets; a `github_pat` catalog shape |
+| [generated configurations](#opv-propose-key-env-target-and-retire) | a proposal returns `generated_by` and a validated `fragment` (`toml`, `json`, `removed`, `load_error`); the `--write` refusal carries `subject.reason.fragment` and `subject.reason.generated_by` instead of a diff; [`opv config check --file`](#configuration-commands) on a file project, with its own code `regenerated_file_differs` |
+| [infrastructure values](#infrastructure-values---supply-stdin) | `source = "infrastructure"`: the deploy job supplies the value to `opv sync <env> --supply-stdin` and it is never stored in 1Password; `opv ci workflow --supply` and `--supply-check`; the value state `supplied`; `supplied at sync`, `as supplied`, `drifted` and `not recorded` in `plan` and `status`; `s1` evidence; receipts list `supplied` names. Guide: [Supplying infrastructure-generated values](infra-generated-values.md) |
+| [local delivery](#local-development-opv-run) | the runtime-directory mode check, race-safe writes through a directory handle, and inherited descriptors closed before the app starts; the [platform matrix and limits](design/local-delivery.md#platforms-and-limits) |
+
 ## Migrating from 0.11
 
 0.12.0 replaces the plan/approve/apply commands and the MCP tool set with one interface. There are no aliases: update scripts and assistant settings when you upgrade.
@@ -1103,5 +1241,7 @@ What changes in use, in short:
 - No multiline values (a `pem_private_key` transform turns a PEM key into one line). `--json` documents hold names, states and counts only, except `config export <env>`, which prints config-kind values by design.
 - Settings health findings (`opv ready`, `opv doctor --settings`, `opv ui`) never contain a value, but by design they state facts about one: that a secret equals another (across environments or keys), is a known placeholder, starts or ends with whitespace, points at `localhost`, or is a Stripe-style test or live key. Treat `ready --json` output like the configuration (fine for CI logs you trust, not for public ones), or skip it there. `opv history` never shows a Fly version, which is a digest of the value.
 - In CI a release reads each item once, by vault ID and item ID.
+- An [infrastructure value](#infrastructure-values---supply-stdin) reaches opv only on the standard input of `sync --supply-stdin`, is registered with the scrubber as it is parsed, goes to the target on stdin like any other value and is never written to 1Password, a file or a log. An entry that is not a declared key is reported by position (`document 2, entry 3`), never quoted. The `s1` evidence holds the target's version, a keyed fingerprint and the producer's serial.
+- `opv run` file keys live on a RAM-backed runtime directory that other users cannot write, are written through a directory handle, and the app inherits no descriptor above 2 from opv's delivery step; what opv cannot enforce (same user, root, swap) is listed in [platforms and limits](design/local-delivery.md#platforms-and-limits). [Security](security.md) has the whole model.
 
 See [SECURITY.md](../SECURITY.md) to report a vulnerability.
