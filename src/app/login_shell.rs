@@ -221,13 +221,138 @@ pub fn sign_in_kind(vars: &[(String, SecretValue)]) -> SignInKind {
 
 /// The whole `--shell` login after main's §5.5 refusals: sign in (§5.4), then build the
 /// lines (§5.2). Never writes them: main does, with [`write_lines`] (§5.6, FMECA H2).
+///
+/// A live shell session for the account (`shell_session`, a vault list under it, FMECA H3)
+/// is reused with no prompt; its lines are printed again.
 pub fn run(
     req: ShellLogin<'_>,
     backend: &mut dyn Backend,
     ui: &mut dyn Interaction,
 ) -> Result<ShellEmit, Error> {
-    let _ = (req, backend, ui);
-    todo!("session-shell")
+    let host = crate::host::Host::detect();
+    let runner = crate::runner::ProcessRunner::default();
+    let live = |account: Option<&str>| {
+        live_vars(
+            super::doctor_session::shell_session(&host, &runner, account),
+            account,
+            &|name| std::env::var(name).ok(),
+        )
+    };
+    run_with(req, backend, ui, &live)
+}
+
+/// The live shell session's variables for `account` (§5.2): the variable `session` names,
+/// read through `lookup`, with the generic `OP_SESSION` beside it when no account selects
+/// it ([`session_vars`]). `None` for an expired or missing session, or a name or value
+/// outside op's session charset (§5.3), which then goes on to the sign-in.
+///
+/// [`session_vars`]: super::setup_runtime::session_vars
+pub fn live_vars(
+    session: Option<super::doctor_session::ShellSession>,
+    account: Option<&str>,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Option<SessionVars> {
+    let super::doctor_session::ShellSession::Live { var } = session? else {
+        return None;
+    };
+    let value = Zeroizing::new(lookup(&var)?);
+    if !session_name(&var) || !session_token(&value) {
+        return None;
+    }
+    Some(super::setup_runtime::session_vars(
+        account,
+        var,
+        SecretValue::new(value.to_string()),
+    ))
+}
+
+/// §5.3: `^OP_SESSION(_[A-Za-z0-9_]+)?$`.
+fn session_name(name: &str) -> bool {
+    match name.strip_prefix("OP_SESSION") {
+        Some("") => true,
+        Some(rest) => {
+            rest.len() > 1
+                && rest.starts_with('_')
+                && rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }
+        None => false,
+    }
+}
+
+/// §5.3: `[A-Za-z0-9._/+=-]+`, the charset `session_assignment` accepts.
+fn session_token(token: &str) -> bool {
+    !token.is_empty()
+        && token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._/+=-".contains(c))
+}
+
+/// One session's variables, name and value.
+pub type SessionVars = Vec<(String, SecretValue)>;
+
+/// The live-session check of [`run_with`]: the account in, the live session's variables out.
+pub type LiveCheck<'a> = dyn Fn(Option<&str>) -> Option<SessionVars> + 'a;
+
+/// [`run`] with the live-session check `live` (the account in, its variables out) given.
+pub fn run_with(
+    req: ShellLogin<'_>,
+    backend: &mut dyn Backend,
+    ui: &mut dyn Interaction,
+    live: &LiveCheck<'_>,
+) -> Result<ShellEmit, Error> {
+    // H4 refuses PowerShell (and a shell with no syntax) before any prompt or op call.
+    export_lines(req.shell, &[])?;
+    let account = super::login::login_account(req.fleet, req.fallback, req.env, backend, ui)?;
+    if let Some(vars) = live(account.as_deref()) {
+        // The shell's own session works: nothing to sign in to; `.opv` records the account
+        // as any successful login does (H2).
+        if let Some((start, uuid)) = req.record {
+            super::login::record_chosen(start, uuid, backend, ui)?;
+        }
+        let lines = export_lines(req.shell, &vars)?;
+        ui.show("Already signed in in this shell; no sign-in needed. The opv function is set again for the same session.")?;
+        return Ok(ShellEmit { lines });
+    }
+    super::login::signed_in_as(account.as_deref(), req.record, backend, ui)?;
+    // FMECA H2: each value is a `SecretValue`, already masked in anything opv writes
+    // through the guard (`--verbose`, error excerpts, panics); only `write_lines` carries it.
+    let vars = backend.take_session();
+    match sign_in_kind(&vars) {
+        SignInKind::App => {
+            ui.show(
+                "The 1Password app integration is on: commands in this terminal already reuse \
+                 its unlock. Nothing to set.",
+            )?;
+            Ok(ShellEmit {
+                lines: Zeroizing::new(String::new()),
+            })
+        }
+        SignInKind::Token => {
+            let lines = export_lines(req.shell, &vars)?;
+            let label = account
+                .as_deref()
+                .map_or_else(|| "1Password".to_string(), |a| backend.account_label(a));
+            let refresh = refresh_command(req.shell, refresh_account(&req, account.as_deref()));
+            ui.show(&format!(
+                "Signed in to {label} in this shell. The session ends after 30 minutes idle; \
+                 run {refresh} again then."
+            ))?;
+            Ok(ShellEmit { lines })
+        }
+    }
+}
+
+/// §5.2: `<refresh>` names the account only when it did not come from `.opv` (recorded now,
+/// or already) or the configuration's `account` setting.
+fn refresh_account<'a>(req: &ShellLogin<'_>, account: Option<&'a str>) -> Option<&'a str> {
+    let account = account?;
+    if req.record.is_some() || req.fleet.is_some() {
+        return None;
+    }
+    let here = std::env::current_dir().unwrap_or_default();
+    let known = crate::config_store::pointer_account(&here).as_deref() == Some(account)
+        || crate::config_store::account_env().as_deref() == Some(account);
+    (!known).then_some(account)
 }
 
 /// §5.6: the one write of the session, to the raw stdout lock `out`, then a flush. A failed

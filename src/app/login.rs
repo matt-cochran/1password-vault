@@ -114,17 +114,7 @@ pub fn run_recording(
     backend: &mut dyn Backend,
     ui: &mut dyn Interaction,
 ) -> Result<i32, Error> {
-    // The account chosen for this login (`opv login --account`, the menu) when the
-    // configuration names none. An empty account is no account (H3): op is never asked
-    // about `--account ""`.
-    let account = account_or(fleet, fallback, env, ui)?
-        .or_else(|| backend.current_account())
-        .filter(|a| !a.trim().is_empty());
-    backend.use_account(account.as_deref());
-    prepare(account.as_deref(), backend, ui)?;
-    if let Some((start, uuid)) = record {
-        record_chosen(start, uuid, backend, ui)?;
-    }
+    let account = sign_in_recording(fleet, fallback, env, record, backend, ui)?;
     if command.is_empty() {
         let label = account.as_deref().map(|a| backend.account_label(a));
         let scope = match (env, &label) {
@@ -136,6 +126,54 @@ pub fn run_recording(
         ui.show(&banner(&scope, account.as_deref()))?;
     }
     backend.child(command)
+}
+
+/// The first half of [`run_recording`] (#203): sign in for `env` and record `record`'s
+/// account once that succeeded, without opening a terminal. Returns the account signed in
+/// to; the session stays in `backend` ([`Backend::take_session`]).
+pub fn sign_in_recording(
+    fleet: Option<&Fleet>,
+    fallback: Option<&str>,
+    env: Option<&str>,
+    record: Option<(&std::path::Path, &str)>,
+    backend: &mut dyn Backend,
+    ui: &mut dyn Interaction,
+) -> Result<Option<String>, Error> {
+    let account = login_account(fleet, fallback, env, backend, ui)?;
+    signed_in_as(account.as_deref(), record, backend, ui)?;
+    Ok(account)
+}
+
+/// The account this login signs in to, selected on `backend` for every later call. The
+/// account chosen for this login (`opv login --account`, the menu) when the configuration
+/// names none. An empty account is no account (H3): op is never asked about `--account ""`.
+pub(crate) fn login_account(
+    fleet: Option<&Fleet>,
+    fallback: Option<&str>,
+    env: Option<&str>,
+    backend: &mut dyn Backend,
+    ui: &mut dyn Interaction,
+) -> Result<Option<String>, Error> {
+    let account = account_or(fleet, fallback, env, ui)?
+        .or_else(|| backend.current_account())
+        .filter(|a| !a.trim().is_empty());
+    backend.use_account(account.as_deref());
+    Ok(account)
+}
+
+/// Sign in to `account` (op's prompt only when no session works), then record `record`'s
+/// account (H2: only after the sign-in succeeded).
+pub(crate) fn signed_in_as(
+    account: Option<&str>,
+    record: Option<(&std::path::Path, &str)>,
+    backend: &mut dyn Backend,
+    ui: &mut dyn Interaction,
+) -> Result<(), Error> {
+    prepare(account, backend, ui)?;
+    if let Some((start, uuid)) = record {
+        record_chosen(start, uuid, backend, ui)?;
+    }
+    Ok(())
 }
 
 /// The signed-in terminal's banner. With an account, it says the terminal sets
