@@ -60,11 +60,18 @@ pub fn propose(
     // approved structural plan records the missing ids (the same trial a declaration uses).
     let fleet = trial(&config::bindings::merge(contract_text, bindings))?;
     let proposed = target_text(contract_text, &fleet, &spec(intent)?)?;
-    // A proposal that would not load is refused before anything is written.
-    let proposed_fleet = trial(&config::bindings::merge(&proposed, bindings))?;
+    // A proposal that would not load is refused before anything is written; on a generated
+    // configuration its fragment carries the error instead (#178).
+    let mut refused = None;
+    let proposed_fleet = super::validated(
+        contract_text,
+        trial(&config::bindings::merge(&proposed, bindings)),
+        &mut refused,
+    )?;
     let diff = crate::app::config_cmd::diff(contract_text, &proposed);
     let relaxations = base
-        .map(|base| relaxation::relaxations(base, &proposed_fleet))
+        .zip(proposed_fleet.as_ref())
+        .map(|(base, proposed)| relaxation::relaxations(base, proposed))
         .unwrap_or_default();
     Ok(Proposal {
         kind: "target",
@@ -72,7 +79,7 @@ pub fn propose(
         diff,
         questions: Vec::new(),
         plan_id: plan_id("target", &proposed),
-        for_generator: super::for_generator(contract_text, &proposed, bindings)?,
+        for_generator: super::for_generator(contract_text, &proposed, bindings, refused.as_ref())?,
         contract_after: proposed,
     })
 }

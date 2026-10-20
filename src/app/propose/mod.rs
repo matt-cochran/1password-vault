@@ -12,6 +12,7 @@ pub mod target;
 
 use serde::Serialize;
 
+pub use crate::cause::{Fragment, LoadError};
 use crate::config::bindings::Bindings;
 use crate::domain::relaxation::{Relaxation, RelaxationKind};
 use crate::error::Error;
@@ -64,32 +65,6 @@ pub struct ForGenerator {
     pub fragment: Fragment,
 }
 
-/// A declaration fragment (#178): only the declarations a proposal adds or changes, not a
-/// whole-file diff. A table both texts hold appears only as the parent of what changed in
-/// it; any other value that differs appears whole (an array is one value). Names and rules
-/// only, never an id (the contract holds none) or a value.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Fragment {
-    /// The fragment as TOML: what the generator emits, merged into the file it writes.
-    pub toml: String,
-    /// The same fragment as JSON (the TOML's tables as objects).
-    pub json: serde_json::Value,
-    /// Dotted paths of the declarations the proposal removes (absent when none).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub removed: Vec<String>,
-    /// The error the configuration would raise once the fragment is merged into it, as the
-    /// loader reports it; `null` when it loads.
-    pub load_error: Option<LoadError>,
-}
-
-/// A load error by its stable cause code and message (the cause's first line): names and
-/// rules only, never a value.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct LoadError {
-    pub code: &'static str,
-    pub message: String,
-}
-
 impl Fragment {
     /// The fragment that takes `before` to `after` (both contract texts, no ids), judged by
     /// merging it into `before` with `bindings` and loading the result as it will load once
@@ -113,19 +88,53 @@ impl Fragment {
 }
 
 /// The [`ForGenerator`] of a proposal that takes `contract_text` to `proposed`: `None` when
-/// `contract_text` is not generated (opv edits it itself).
+/// `contract_text` is not generated (opv edits it itself). `refused`: the error the
+/// proposal's own validation raised for `proposed`, which the fragment then carries as its
+/// load error (the error the generated file would raise once the generator emits it).
 pub fn for_generator(
     contract_text: &str,
     proposed: &str,
     bindings: &Bindings,
+    refused: Option<&Error>,
 ) -> Result<Option<ForGenerator>, Error> {
     if !crate::app::bootstrap::is_generated(contract_text) {
         return Ok(None);
     }
+    let mut fragment = Fragment::between(contract_text, proposed, bindings)?;
+    if let Some(e) = refused {
+        fragment.load_error = Some(load_error_of(e));
+    }
     Ok(Some(ForGenerator {
         generated_by: crate::app::bootstrap::generated_by(contract_text),
-        fragment: Fragment::between(contract_text, proposed, bindings)?,
+        fragment,
     }))
+}
+
+/// The validation of a proposed contract on `contract_text`: `Ok(Some(fleet))` when it
+/// loads; on a generated configuration, `Ok(None)` and the error kept in `refused` for the
+/// fragment (#178: the generator's author sees the error its file would raise); on a
+/// hand-written one, the error itself (opv never writes a file that would not load).
+pub fn validated<T>(
+    contract_text: &str,
+    loaded: Result<T, Error>,
+    refused: &mut Option<Error>,
+) -> Result<Option<T>, Error> {
+    match loaded {
+        Ok(v) => Ok(Some(v)),
+        Err(e) if crate::app::bootstrap::is_generated(contract_text) => {
+            *refused = Some(e);
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// A load error as a fragment reports it: its stable code and its message.
+fn load_error_of(e: &Error) -> LoadError {
+    LoadError {
+        code: e.code_str(),
+        message: e.text(),
+    }
 }
 
 fn bug(site: &'static str) -> Error {
@@ -235,10 +244,7 @@ fn load_error(
             crate::app::structure::trial_text(&crate::config::bindings::merge(&text, bindings))
         })
         .and_then(|text| crate::config::parse(&text));
-    loaded.err().map(|e| LoadError {
-        code: e.code_str(),
-        message: e.text(),
-    })
+    loaded.err().as_ref().map(load_error_of)
 }
 
 /// A dotted path from [`dotted`] back into its keys.
@@ -334,9 +340,10 @@ impl ForGenerator {
 
 /// FR-52 (#184): opv never edits a generated configuration (one whose first line starts
 /// with `# generated`); its generator is, which the refusal names when the first line does
-/// (#178). The refusal a `--write` of `proposal` meets on
-/// the configuration `source`: it carries the proposal's diff, the edit to make in the
-/// generator, and steps to `opv propose structure` once the generator emits it.
+/// (#178). The refusal a `--write` of `proposal` meets on the configuration `source`: it
+/// carries the proposal's declaration fragment, what the generator must emit instead (with
+/// the error the file would raise), and steps to `opv propose structure` once the
+/// generator emits it.
 pub fn generated_refusal(
     source: crate::cause::ConfigSource,
     proposal: &Proposal,
@@ -350,7 +357,7 @@ pub fn generated_refusal(
                 .and_then(|g| g.generated_by.clone())
                 .or_else(|| crate::app::bootstrap::generated_by(&proposal.contract_after))
                 .map(std::path::PathBuf::from),
-            diff: Some(proposal.diff.clone()),
+            fragment: proposal.for_generator.as_ref().map(|g| g.fragment.clone()),
         },
     }
 }

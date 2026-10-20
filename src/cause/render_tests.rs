@@ -3649,7 +3649,7 @@ fn a22_a_generated_config_without_a_known_generator_names_none() {
         source: file_source(),
         reason: NotEditable::Generated {
             generator: None,
-            diff: None,
+            fragment: None,
         },
     };
     assert!(c.message().ends_with("it is generated"));
@@ -3973,7 +3973,7 @@ fn a_generated_configuration_names_no_opv_command_as_next() {
         source: file_source(),
         reason: NotEditable::Generated {
             generator: None,
-            diff: None,
+            fragment: None,
         },
     };
     let inv = Invocation {
@@ -3984,13 +3984,23 @@ fn a_generated_configuration_names_no_opv_command_as_next() {
     assert_eq!(c.step(&inv).1, Next::None(NoNext::NothingToRun));
 }
 
-/// #184: a refused `propose … --write` on a generated configuration, with its diff.
+/// #178: the fragment of `opv propose env staging`, with `load_error`.
+fn staging_fragment(load_error: Option<LoadError>) -> Fragment {
+    Fragment {
+        toml: "[environments.staging]\n".into(),
+        json: serde_json::json!({"environments": {"staging": {}}}),
+        removed: Vec::new(),
+        load_error,
+    }
+}
+
+/// #184: a refused `propose … --write` on a generated configuration, with its fragment.
 fn generated_proposal_refused() -> Cause {
     Cause::ConfigNotEditable {
         source: file_source(),
         reason: NotEditable::Generated {
             generator: None,
-            diff: Some("+[environments.staging]\n".into()),
+            fragment: Some(staging_fragment(None)),
         },
     }
 }
@@ -4039,14 +4049,80 @@ fn a_refused_generated_proposal_keeps_the_project_flag() {
     );
 }
 
-/// #184: the refusal's document carries the diff to make in the generator.
+/// #178: the refusal's document carries the fragment the generator must emit, not a diff.
 #[test]
-fn a_refused_generated_proposal_carries_its_diff() {
+fn a_refused_generated_proposal_carries_its_fragment() {
     let doc = crate::error::document(&generated_proposal_refused().into(), &inv(), false);
     assert_eq!(
-        doc["subject"]["reason"]["diff"],
-        serde_json::json!("+[environments.staging]\n")
+        doc["subject"]["reason"]["fragment"]["toml"],
+        serde_json::json!("[environments.staging]\n")
     );
+}
+
+/// #178: the refusal names its generator on the wire as `generated_by`.
+#[test]
+fn a_refused_generated_proposal_names_its_generator_as_generated_by() {
+    let c = Cause::ConfigNotEditable {
+        source: file_source(),
+        reason: NotEditable::Generated {
+            generator: Some(PathBuf::from("fleet_secrets.py")),
+            fragment: Some(staging_fragment(None)),
+        },
+    };
+    let doc = crate::error::document(&c.into(), &inv(), false);
+    assert_eq!(
+        doc["subject"]["reason"]["generated_by"],
+        serde_json::json!("fleet_secrets.py")
+    );
+}
+
+/// #178: the refusal's text shows the fragment, indented under its message.
+#[test]
+fn a_refused_generated_proposals_text_shows_its_fragment() {
+    let text = render_text(
+        &generated_proposal_refused(),
+        None,
+        &inv(),
+        false,
+        false,
+        false,
+    );
+    assert!(text.contains("  fragment:\n    [environments.staging]\n  load_error: none\n"));
+}
+
+/// #178: the refusal's Do says to have the generator emit the fragment.
+#[test]
+fn a_refused_generated_proposals_do_is_to_emit_the_fragment() {
+    let c = Cause::ConfigNotEditable {
+        source: file_source(),
+        reason: NotEditable::Generated {
+            generator: Some(PathBuf::from("fleet_secrets.py")),
+            fragment: Some(staging_fragment(None)),
+        },
+    };
+    assert!(
+        c.plan(&inv())
+            .do_text
+            .unwrap()
+            .starts_with("have fleet_secrets.py emit the proposal's fragment")
+    );
+}
+
+/// #178: a fragment the file would not load with steps to no command: the proposal
+/// changes first.
+#[test]
+fn a_refused_generated_proposal_that_would_not_load_names_no_command_as_next() {
+    let c = Cause::ConfigNotEditable {
+        source: file_source(),
+        reason: NotEditable::Generated {
+            generator: None,
+            fragment: Some(staging_fragment(Some(LoadError {
+                code: "config_invalid",
+                message: "the configuration is invalid".into(),
+            }))),
+        },
+    };
+    assert_eq!(c.step(&inv()).1, Next::None(NoNext::NothingToRun));
 }
 
 /// D (snapshot review): an invalid proposal (retry never) names no command, never the

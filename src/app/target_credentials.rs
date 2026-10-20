@@ -207,8 +207,8 @@ pub(crate) fn recordable(config: &Path, env: &str, name: &str) -> Result<(), Err
         return Err(Cause::ConfigNotEditable {
             source: file_source(config),
             reason: NotEditable::Generated {
-                generator: None,
-                diff: None,
+                generator: super::bootstrap::generated_by(&text).map(PathBuf::from),
+                fragment: None,
             },
         }
         .into());
@@ -442,8 +442,8 @@ fn store(path: &Path) -> Result<Declaring, Error> {
                 given_by: GivenBy::Discovered,
             },
             reason: NotEditable::Generated {
-                generator: None,
-                diff: None,
+                generator: crate::app::bootstrap::generated_by(&text).map(PathBuf::from),
+                fragment: None,
             },
         }
         .into());

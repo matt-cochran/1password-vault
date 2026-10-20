@@ -146,11 +146,18 @@ pub fn propose_with(
     };
     let proposed = doc.to_string();
     // The same validation as a hand-written file: a proposal that would not load is refused
-    // before anything is written.
-    let proposed_fleet = config::parse(&config::bindings::merge(&proposed, bindings))?;
+    // before anything is written. On a generated configuration it is not refused: its
+    // fragment carries the error the generated file would raise (#178).
+    let mut refused = None;
+    let proposed_fleet = super::validated(
+        contract_text,
+        config::parse(&config::bindings::merge(&proposed, bindings)),
+        &mut refused,
+    )?;
     let diff = crate::app::config_cmd::diff(contract_text, &proposed);
     let relaxations = base
-        .map(|base| relaxation::relaxations(base, &proposed_fleet))
+        .zip(proposed_fleet.as_ref())
+        .map(|(base, proposed)| relaxation::relaxations(base, proposed))
         .unwrap_or_default();
     Ok(Proposal {
         kind,
@@ -158,7 +165,7 @@ pub fn propose_with(
         diff,
         questions,
         plan_id: plan_id(kind, &proposed),
-        for_generator: super::for_generator(contract_text, &proposed, bindings)?,
+        for_generator: super::for_generator(contract_text, &proposed, bindings, refused.as_ref())?,
         contract_after: proposed,
     })
 }
