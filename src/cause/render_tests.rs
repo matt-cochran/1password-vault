@@ -209,6 +209,14 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             vec!["cfg/copy.toml", "man-shop"],
         ),
         (
+            RegeneratedFileDiffers {
+                file: PathBuf::from("cfg/regenerated.toml"),
+                committed: PathBuf::from("cfg/secrets.toml"),
+                in_place: false,
+            },
+            vec!["cfg/regenerated.toml", "cfg/secrets.toml"],
+        ),
+        (
             BindingsUnapplied {
                 environments: vec![EnvName::new("env-prod")],
             },
@@ -926,6 +934,7 @@ fn ordinal(c: &Cause) -> usize {
         StateVaultTooWide { .. } => 6,
         ConfigNotEditable { .. } => 7,
         CopiesDiffer { .. } => 8,
+        RegeneratedFileDiffers { .. } => 83,
         BindingsUnapplied { .. } => 49,
         ManifestNotFound { .. } => 9,
         ManifestAmbiguous { .. } => 10,
@@ -1005,7 +1014,7 @@ fn ordinal(c: &Cause) -> usize {
     }
 }
 
-const VARIANTS: usize = 83;
+const VARIANTS: usize = 84;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()

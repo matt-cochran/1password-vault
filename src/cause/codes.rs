@@ -107,6 +107,9 @@ pub fn meaning(code: &str) -> &'static str {
         "copies_differ" => {
             "a committed secrets.toml and the manifest differ; a person picks which is right"
         }
+        "regenerated_file_differs" => {
+            "a file project's regenerated configuration file differs from the committed copy; a person picks which is right"
+        }
         "bindings_unapplied" => {
             "the committed secrets.bindings.toml is not the one the last opv apply wrote; a person runs opv apply"
         }
@@ -507,6 +510,11 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
         CopiesDiffer {
             file: PathBuf::from("cfg/copy.toml"),
             manifest: "man-shop".into(),
+        },
+        RegeneratedFileDiffers {
+            file: PathBuf::from("cfg/regenerated.toml"),
+            committed: PathBuf::from("cfg/secrets.toml"),
+            in_place: false,
         },
         BindingsUnapplied {
             environments: vec![EnvName::new("env-prod")],

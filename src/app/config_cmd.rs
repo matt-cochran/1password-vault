@@ -382,9 +382,10 @@ pub fn check_file_project(
     );
     line(out, format!("--- {label}\n+++ {}", file.display()))?;
     out.write_all(diff(&a, &b).as_bytes()).map_err(write_err)?;
-    Err(Cause::CopiesDiffer {
+    Err(Cause::RegeneratedFileDiffers {
         file: file.to_path_buf(),
-        manifest: label,
+        committed: project.to_path_buf(),
+        in_place,
     }
     .into())
 }

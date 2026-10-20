@@ -660,6 +660,16 @@ fn name_listing(k: NameKind, inv: &Invocation) -> Next {
     }
 }
 
+/// The committed configuration a regenerated file is compared with: its path, or the path
+/// of the file itself with `(HEAD)` when it was regenerated in place (#178).
+fn committed_label(committed: &std::path::Path, in_place: bool) -> String {
+    if in_place {
+        format!("{} (HEAD)", committed.display())
+    } else {
+        committed.display().to_string()
+    }
+}
+
 fn source_words(s: &ConfigSource) -> String {
     match s {
         ConfigSource::File { path, given_by } => match given_by {
@@ -1612,6 +1622,15 @@ impl Cause {
             CopiesDiffer { file, manifest } => format!(
                 "{} and the 1Password manifest {manifest} differ",
                 file.display()
+            ),
+            RegeneratedFileDiffers {
+                file,
+                committed,
+                in_place,
+            } => format!(
+                "{} and the committed configuration {} differ",
+                file.display(),
+                committed_label(committed, *in_place)
             ),
             ManifestNotFound { project, account } => match account {
                 Some(a) => format!("no 1Password manifest for project {project} in account {a}"),
@@ -2889,6 +2908,21 @@ impl Cause {
                         "decide which is right: update {} (opv config export --toml > {}) or the manifest {manifest} (opv config edit)",
                         file.display(),
                         shell_word(&file.display().to_string())
+                    ),
+                )),
+                Next::None(NoNext::PersonPicksDirection),
+            ),
+            RegeneratedFileDiffers {
+                file,
+                committed,
+                in_place,
+            } => plan(
+                Some((
+                    Action::Inspect,
+                    format!(
+                        "decide which is right: update {} or the committed configuration {}",
+                        file.display(),
+                        committed_label(committed, *in_place)
                     ),
                 )),
                 Next::None(NoNext::PersonPicksDirection),
