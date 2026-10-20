@@ -313,8 +313,14 @@ pub fn apply_retire(
             .map_err(|e| partial(&done, e))?
             .moved;
         if moved == 0 {
-            writeln!(out, "{}: {label} already archived", item.environment)
-                .map_err(crate::app::write_err)?;
+            // Already archived, or never held here (an environment added while the key
+            // was retiring gets no field of it).
+            writeln!(
+                out,
+                "{}: no field of {label} left to archive",
+                item.environment
+            )
+            .map_err(crate::app::write_err)?;
             applied.already_archived.push(item.environment.clone());
         } else {
             writeln!(

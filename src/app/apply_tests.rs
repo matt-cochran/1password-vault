@@ -892,6 +892,21 @@ fn a_retirement_that_edited_nothing_names_no_sync() {
     assert!(run_retire(&op, &path).unwrap().resync.is_empty());
 }
 
+/// #179: an item with no field of the key (archived earlier, or never given one) says so,
+/// never that it archived something.
+#[test]
+fn an_item_without_the_keys_field_says_nothing_is_left_to_archive() {
+    let (_d, path, op, _, _) =
+        retiring_world_with("", "archived · 2026-01-02 · retired app/OLD_KEY");
+    let mut out = Vec::new();
+    run_retire_on(&op, &tty(), &path, &[], &mut out).unwrap();
+    assert!(
+        String::from_utf8(out)
+            .unwrap()
+            .contains("dev: no field of app/OLD_KEY left to archive")
+    );
+}
+
 #[test]
 fn a_retirement_marks_the_key_retired() {
     let (_d, path, op, _, _) = retiring_world();
