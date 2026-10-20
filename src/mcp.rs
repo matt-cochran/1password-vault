@@ -855,6 +855,10 @@ fn proposal<R: Accounted>(
             account,
             ..
         } => {
+            // The project's contract: `from_item` records into it, and `names_from` proposes
+            // only the names it does not declare yet (#176).
+            let contract = config_store::walk_up(project, "secrets.toml")
+                .unwrap_or_else(|| project.join("secrets.toml"));
             let proposed = match (from_item, names_from) {
                 (Some(env), _) => {
                     // FR-40, NR-7: the item is read in one chosen account, never op's default.
@@ -884,15 +888,14 @@ fn proposal<R: Accounted>(
                             )
                         }
                     };
-                    let contract = config_store::walk_up(project, "secrets.toml")
-                        .unwrap_or_else(|| project.join("secrets.toml"));
                     setup::from_item(r, env.as_str(), Some(&vault), Some(&item), Some(&contract))?
                 }
-                (None, Some(file)) => setup::from_names(
+                (None, Some(file)) => setup::from_names_in(
                     &project.join(file),
                     setup::NAMES_ENV,
                     config_key,
                     secret_key,
+                    contract.is_file().then_some(contract.as_path()),
                 )?,
                 (None, None) => {
                     return Err(Cause::Usage {

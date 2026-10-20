@@ -61,3 +61,70 @@ fn needs_scan_reports_ruby_and_c_reads() {
     }
     assert!(!run.stdout.contains(MARK) && !run.stderr.contains(MARK));
 }
+
+// --- #176: names-only setup into an existing contract -----------------------------------------
+
+/// A contract that already declares `ALPHA` in its `local` environment (tier `shared`, so a
+/// re-proposed table would show).
+const EXISTING: &str = r#"[environments.local]
+tier = "shared"
+boundaries.app = {}
+
+[products.app.keys.ALPHA]
+kind = "secret"
+"#;
+
+/// The keys a contract diff declares (`+[products.<p>.keys.<KEY>]`), in order.
+fn declared(diff: &str) -> Vec<String> {
+    diff.lines()
+        .filter_map(|l| l.strip_prefix("+[products."))
+        .filter_map(|l| l.split_once(".keys.").map(|(_, k)| k))
+        .map(|k| k.trim_end_matches(']').to_string())
+        .collect()
+}
+
+fn names_scenario() -> Scenario {
+    Scenario::new()
+        .marked()
+        .file("project/secrets.toml", EXISTING)
+        .file("project/secrets.bindings.toml", "")
+        .dotenv(".env", &["ALPHA", "BETA"])
+}
+
+fn assert_only_beta(doc: &Value) {
+    let diff = doc["proposal"]["diff"]
+        .as_str()
+        .or_else(|| doc["diff"].as_str())
+        .unwrap_or_else(|| panic!("no diff: {doc}"));
+    assert_eq!(declared(diff), ["BETA"], "{diff}");
+    assert!(!diff.contains("+[environments.local]"), "{diff}");
+    assert!(!diff.contains("-tier"), "{diff}");
+    assert!(
+        !doc.to_string().contains(MARK),
+        "a value reached the proposal"
+    );
+}
+
+#[test]
+fn setup_names_into_an_existing_contract_proposes_only_undeclared_names() {
+    let s = names_scenario();
+    let run = s.opv(&[
+        "propose".into(),
+        "setup".into(),
+        "--names-from".into(),
+        ".env".into(),
+        "--json".into(),
+    ]);
+    assert_eq!(run.code, Some(0), "{}{}", run.stdout, run.stderr);
+    assert_only_beta(&document(&run.stdout));
+}
+
+#[test]
+fn opv_propose_setup_names_into_an_existing_contract_proposes_only_undeclared_names() {
+    let s = names_scenario();
+    let answer = s.mcp(
+        "opv_propose",
+        &json!({"kind": "setup", "names_from": ".env"}),
+    );
+    assert_only_beta(&answer);
+}

@@ -3902,11 +3902,14 @@ fn run_propose_early(
                         Some(&path),
                     )?
                 }
-                (None, Some(names)) => setup::from_names(
+                // #176: into the project's existing contract, only the names it does not
+                // declare yet are proposed and its environment table is kept.
+                (None, Some(names)) => setup::from_names_in(
                     std::path::Path::new(names),
                     setup::NAMES_ENV,
                     config_key,
                     secret_key,
+                    path.is_file().then_some(path.as_path()),
                 )?,
                 (None, None) => {
                     return Err(opv::cause::Cause::Usage {
