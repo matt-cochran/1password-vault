@@ -118,14 +118,45 @@ pub struct Inputs<'a> {
     pub session_vars: Vec<String>,
 }
 
-/// The names of the `OP_SESSION_*` variables set in this process's environment (#142).
+/// The names of the `OP_SESSION_*` variables set in this process's environment (#142),
+/// sorted. Only names that [`is_session_var`] accepts.
 pub fn session_var_names() -> Vec<String> {
     let mut names: Vec<String> = std::env::vars_os()
         .filter_map(|(k, _)| k.into_string().ok())
-        .filter(|k| k == "OP_SESSION" || k.starts_with("OP_SESSION_"))
+        .filter(|k| is_session_var(k))
         .collect();
     names.sort();
     names
+}
+
+/// op's own variables that share the `OP_SESSION_` prefix but hold no session (FMECA L6:
+/// `OP_SESSION_DELEGATION_ENABLED` is in op 2.40's strings).
+const NOT_SESSION_VARS: &[&str] = &["OP_SESSION_DELEGATION_ENABLED"];
+
+/// True when `name` is a variable op reads a CLI session from: the bare `OP_SESSION` or
+/// `OP_SESSION_<shorthand or user ID>` (#203, FMECA M3, L6). By name only.
+pub fn is_session_var(name: &str) -> bool {
+    match name.strip_prefix("OP_SESSION") {
+        Some("") => true,
+        Some(rest) => rest.len() > 1 && rest.starts_with('_') && !NOT_SESSION_VARS.contains(&name),
+        None => false,
+    }
+}
+
+/// The listed account `var` holds a session for: op suffixes the variable with the account's
+/// shorthand or user ID (matched ignoring case, as op lists them). `None` for the bare
+/// `OP_SESSION`, which names no account, and for a suffix no listed account has (#142,
+/// FMECA M3). By name only; a value is never read.
+pub fn session_var_owner<'a>(var: &str, listed: &'a [Account]) -> Option<&'a Account> {
+    let name = var.strip_prefix("OP_SESSION_")?;
+    if name.is_empty() {
+        return None;
+    }
+    listed.iter().find(|a| {
+        [&a.shorthand, &a.user_uuid, &a.account_uuid]
+            .iter()
+            .any(|f| !f.is_empty() && f.eq_ignore_ascii_case(name))
+    })
 }
 
 /// The selected account: its ID, how it was chosen and where that choice came from.
@@ -414,13 +445,7 @@ fn session_var_findings(
         .filter_map(|var| {
             // The bare `OP_SESSION` (an `op signin` without an account) names no account:
             // stale here, since opv names accounts.
-            let name = var.strip_prefix("OP_SESSION_").unwrap_or("");
-            let owner = listed.iter().find(|a| {
-                [&a.shorthand, &a.user_uuid, &a.account_uuid]
-                    .iter()
-                    .any(|f| !f.is_empty() && f.eq_ignore_ascii_case(name))
-            });
-            match owner {
+            match session_var_owner(var, listed) {
                 Some(a) if Some(a.account_uuid.as_str()) == selected => None,
                 Some(a) => Some(Finding {
                     code: "session_for_other_account".into(),

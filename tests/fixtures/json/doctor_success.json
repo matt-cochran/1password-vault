@@ -28,6 +28,16 @@
       "do": null
     },
     {
+      "name": "op app integration",
+      "target": null,
+      "status": "ok",
+      "detail": "unavailable (no graphical session); sign in once per shell: eval \"$(opv login --shell)\"",
+      "next": null,
+      "do": null,
+      "state": "unavailable",
+      "reason": "headless"
+    },
+    {
       "name": "item",
       "target": null,
       "status": "ok",
