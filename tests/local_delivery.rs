@@ -303,3 +303,91 @@ fn the_compose_docs_state_the_same_user_limit_as_the_accepted_residual() {
         "{doc}"
     );
 }
+
+// --- #136 A2: a role-scoped step is handed only its role's keys -------------------------
+//
+// The canaries stand in for the values `op run` resolved (the repo's S7MARKER pattern,
+// never a real credential). Both roles' file values are placed in the step's own
+// environment, as a run that resolved every reference would give it, so the step's
+// filtering — not just `opv run`'s selection — is what keeps the other role's value out of
+// the app and the private directory.
+
+/// The `serve` role's canary value.
+const SERVE_CANARY: &str = "S7MARKER-serve-136";
+/// The `migrate` role's canary value.
+const MIGRATE_CANARY: &str = "S7MARKER-migrate-136";
+
+/// The step's arguments for a `--role serve` run: one file key, delivered only as a file.
+const SERVE_STEP_ARGS: &[&str] = &[
+    "--key",
+    "SERVE_FILE",
+    "--file",
+    "SERVE_FILE=serve/secret",
+    "--dir-env",
+    "APP_SECRETS_DIR",
+    "--declared-only",
+];
+
+/// A private tmpfs `$XDG_RUNTIME_DIR`, so parallel tests never sweep each other's
+/// `opv-run.*` directories; `None` where the machine has no tmpfs to put one on.
+fn private_runtime() -> Option<tempfile::TempDir> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::Builder::new().tempdir_in("/dev/shm").ok()?;
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).ok()?;
+    let st = rustix::fs::statfs(dir.path()).ok()?;
+    #[allow(clippy::unnecessary_cast)]
+    let magic = (st.f_type as u64) & 0xffff_ffff;
+    (magic == 0x0102_1994).then_some(dir)
+}
+
+/// The delivery step for `args` under a private RAM directory, with both roles' file canaries
+/// in its environment: both streams, so a refusal is visible too.
+fn role_step(args: &[&str], script: &str) -> Option<(Option<i32>, String, String)> {
+    let runtime = private_runtime()?;
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_opv"));
+    cmd.arg("local-delivery")
+        .args(args)
+        .args(["--", "sh", "-c", script])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .env("SERVE_FILE", SERVE_CANARY)
+        .env("MIGRATE_FILE", MIGRATE_CANARY);
+    let out = cmd.output().unwrap();
+    Some((
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    ))
+}
+
+#[test]
+fn a_serve_step_never_hands_the_migrate_value_to_its_child() {
+    let Some((_, out, _)) = role_step(SERVE_STEP_ARGS, "env") else {
+        return;
+    };
+    assert!(!out.contains(MIGRATE_CANARY), "{out}");
+}
+
+#[test]
+fn a_serve_step_writes_only_its_own_value_into_the_directory() {
+    let Some((_, out, _)) = role_step(
+        SERVE_STEP_ARGS,
+        r#"find "$APP_SECRETS_DIR" -type f -exec cat {} +"#,
+    ) else {
+        return;
+    };
+    assert_eq!(out.trim(), SERVE_CANARY, "{out}");
+}
+
+#[test]
+fn a_serve_step_never_puts_a_value_in_its_command_line() {
+    let Some((_, out, _)) = role_step(SERVE_STEP_ARGS, r#"tr '\0' ' ' < /proc/$PPID/cmdline"#)
+    else {
+        return;
+    };
+    assert!(
+        !out.contains(SERVE_CANARY) && !out.contains(MIGRATE_CANARY),
+        "{out}"
+    );
+}
