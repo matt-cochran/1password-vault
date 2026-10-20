@@ -263,6 +263,7 @@ fn source_word(source: SourceKind) -> &'static str {
         SourceKind::Person => "person",
         SourceKind::Generated => "generated",
         SourceKind::Derived => "derived",
+        SourceKind::Infrastructure => "infrastructure",
     }
 }
 

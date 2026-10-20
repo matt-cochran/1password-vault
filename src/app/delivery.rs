@@ -33,8 +33,8 @@ use crate::cause::{
     Scope as InScope, System, TargetName, Unverified, Upstream, UsageProblem,
 };
 use crate::domain::delivery::{
-    BindingRef, Evidence, Observed, Receipt, SCHEMA, Scope, Source, Verification, decode_evidence,
-    encode_evidence, new_revision, select,
+    BindingRef, Evidence, Observed, Receipt, SCHEMA, SUPPLIED, Scope, Source, Verification,
+    decode_evidence, encode_evidence, new_revision, select,
 };
 use crate::domain::ledger::{Ledger, hmac_hex, random_key};
 use crate::domain::plan::StoreEntry;
@@ -92,6 +92,16 @@ pub fn bindings(
             _ => true,
         })
         .map(|(k, s)| {
+            // #206 §6.3: a supplied value has no 1Password field; its source names it.
+            if super::deliver_only::is_infrastructure(s) {
+                return Ok(BindingRef {
+                    name: t.env_name(product, k),
+                    source: Source {
+                        item_id: SUPPLIED.to_string(),
+                        field: key_label(product, k),
+                    },
+                });
+            }
             let (sp, sk) = s.source().unwrap_or((product, k));
             Ok(BindingRef {
                 name: t.env_name(product, k),
@@ -418,57 +428,145 @@ pub struct NotMinted {
     pub reason: String,
 }
 
+/// What [`record`] did with one name this run supplied (#206, `docs/design/deliver-only.md`
+/// §5.4, S1, S9): any outcome but [`SuppliedOutcome::Recorded`] fails the run, since the
+/// target may hold the value but opv cannot vouch for it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuppliedOutcome {
+    /// Its `s1` evidence line is in the placement's delivery item.
+    Recorded,
+    NotRecorded(NotRecordedWhy),
+}
+
+/// Why a supplied name got no `s1` evidence line (#206 §5.4).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotRecordedWhy {
+    /// The target lists no version for it.
+    Unlisted,
+    /// The target lists a version the evidence line cannot hold.
+    Unencodable,
+    /// The placement has no delivery item.
+    NoItem,
+    /// The delivery item could not be read or written.
+    Failed,
+    /// Another run recorded a higher serial for it meanwhile (S9): that newer line is kept.
+    NewerSerial { recorded: u64 },
+}
+
 /// What [`record`] did, for the sync report.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Recorded {
     pub minted: Vec<Receipt>,
     pub not_minted: Vec<NotMinted>,
+    /// Per target name this run supplied (#206): whether its `s1` line was recorded.
+    #[serde(skip)]
+    pub supplied: BTreeMap<String, SuppliedOutcome>,
 }
 
-/// After a confirmed sync of target `target` of `env_name`, for each product in scope
-/// (FR-58, D11):
-/// - each name of its binding set this run wrote (`written`) or proved identical
-///   (`identical`), with its store version in `listed`, gets a fresh evidence line in the
-///   placement's delivery item: these lines are the ledger `plan` judges by;
-/// - once every name of the binding set was confirmed so, a revision is minted (an
-///   unchanged binding set and evidence keep their revision) and the placement's
-///   `source versions` field records each source item's version (C2).
-///
-/// A placement without a recorded delivery item gets nothing (`opv bootstrap` creates it).
-/// Only that placement's own item is read and written.
-#[allow(clippy::too_many_arguments)]
-pub fn record(
-    fleet: &Fleet,
-    env_name: &str,
-    target: &str,
-    only: Option<&str>,
-    written: &BTreeSet<String>,
-    identical: &BTreeSet<String>,
-    listed: &[StoreEntry],
-    source_versions: &BTreeMap<String, u64>,
-    plan_id: &str,
-    r: &dyn CommandRunner,
-) -> Result<Recorded, Error> {
-    let env = fleet.environment(env_name)?;
-    let account = account_id(r)?;
-    let values = values_by_field(fleet, env_name, r)?;
-    let version_of = |name: &str| {
-        listed
+/// What a supplying sync hands [`record`] (#206): the admitted supply and the run's
+/// `--rotate` keys, which also override a newer serial recorded meanwhile (S9).
+#[derive(Debug, Clone, Copy)]
+pub struct Supplying<'a> {
+    pub supply: &'a super::deliver_only::Supply,
+    pub rotate: &'a BTreeSet<(String, String)>,
+}
+
+/// The evidence of one placement as computed from one reading of its delivery item.
+struct Computed {
+    key: Zeroizing<String>,
+    evidence: Vec<Evidence>,
+    attested: Vec<String>,
+    why: Vec<String>,
+    supplied: BTreeMap<String, SuppliedOutcome>,
+}
+
+/// What [`record`] takes for one placement besides the reading of its item.
+struct RecordInput<'a> {
+    fleet: &'a Fleet,
+    env_name: &'a str,
+    set: &'a [BindingRef],
+    written: &'a BTreeSet<String>,
+    identical: &'a BTreeSet<String>,
+    listed: &'a [StoreEntry],
+    values: &'a BTreeMap<String, SecretValue>,
+    supplying: Option<Supplying<'a>>,
+    at: &'a str,
+}
+
+impl RecordInput<'_> {
+    fn version_of(&self, name: &str) -> Option<String> {
+        self.listed
             .iter()
             .find(|e| e.name == name)
             .and_then(|e| e.version.clone())
-    };
-    let mut out = Recorded::default();
-    for product in products_in_scope(fleet, env_name, target, only)? {
-        let set = held_bindings(fleet, env_name, target, &product, listed)?;
-        let unconfirmed: Vec<&str> = set
+    }
+
+    /// The supplied value of `binding` this run (#206), when it is supplied at sync and
+    /// this run supplies it.
+    fn supplied(&self, b: &BindingRef) -> Option<&super::deliver_only::Supplied> {
+        if b.source.item_id != SUPPLIED {
+            return None;
+        }
+        let (p, k) = b.source.field.split_once('/')?;
+        self.supplying?.supply.get(p, k)
+    }
+
+    /// Whether this run's `--rotate` names supplied `s`.
+    fn rotated(&self, s: &super::deliver_only::Supplied) -> bool {
+        self.supplying
+            .is_some_and(|x| x.rotate.contains(&(s.product.clone(), s.key.clone())))
+    }
+
+    /// The value delivered for a supplied `s` (#206 §4.2): the supplied value after the
+    /// key's rules (`transform`, `ensure_prefix`), exactly as the plan staged and the
+    /// ledger compares it.
+    fn delivered(&self, s: &super::deliver_only::Supplied) -> SecretValue {
+        let checked = self.fleet.environment(self.env_name).ok().and_then(|env| {
+            let spec = self.fleet.products.get(&s.product)?.keys.get(&s.key)?;
+            rules::check(&s.product, &s.key, spec, self.env_name, env, &s.value)
+                .ok()
+                .flatten()
+        });
+        checked.unwrap_or_else(|| SecretValue::new(s.value.expose().to_string()))
+    }
+
+    /// Whether `b` is supplied at sync but not by this run, and `state` holds its `s1` line
+    /// at the version the store lists now (#206 §6.2): its line is carried verbatim and it
+    /// counts as confirmed.
+    fn carried(&self, b: &BindingRef, state: &StateItem) -> bool {
+        b.source.item_id == SUPPLIED
+            && self.supplied(b).is_none()
+            && !self.written.contains(&b.name)
+            && state.evidence.iter().any(|e| {
+                e.name == b.name
+                    && e.supplied.is_some()
+                    && Some(e.store_version.as_str()) == self.version_of(&b.name).as_deref()
+            })
+    }
+
+    /// Why the placement gets no revision before its item is read: names this run neither
+    /// wrote, proved identical nor carried (`carried`), supplied names this run did not
+    /// supply, and names the target lists no version for.
+    fn reasons(&self, carried: &BTreeSet<&str>) -> Vec<String> {
+        let mut unconfirmed = Vec::new();
+        let mut not_supplied = Vec::new();
+        for b in self.set.iter().filter(|b| {
+            !self.written.contains(&b.name)
+                && !self.identical.contains(&b.name)
+                && !carried.contains(b.name.as_str())
+        }) {
+            if b.source.item_id == SUPPLIED && self.supplied(b).is_none() {
+                not_supplied.push(b.name.as_str());
+            } else {
+                unconfirmed.push(b.name.as_str());
+            }
+        }
+        let unlisted: Vec<&str> = self
+            .set
             .iter()
-            .filter(|b| !written.contains(&b.name) && !identical.contains(&b.name))
-            .map(|b| b.name.as_str())
-            .collect();
-        let unlisted: Vec<&str> = set
-            .iter()
-            .filter(|b| version_of(&b.name).is_none())
+            .filter(|b| self.version_of(&b.name).is_none())
             .map(|b| b.name.as_str())
             .collect();
         let mut why = Vec::new();
@@ -478,70 +576,154 @@ pub fn record(
                 unconfirmed.join(", ")
             ));
         }
+        if !not_supplied.is_empty() {
+            why.push(format!(
+                "supplied at sync, not supplied by this run: {}",
+                not_supplied.join(", ")
+            ));
+        }
         if !unlisted.is_empty() {
             why.push(format!(
                 "the target lists no version for: {}",
                 unlisted.join(", ")
             ));
         }
-        let Some(state) = read_state(fleet, env_name, target, &product, r)? else {
-            why.push(format!(
-                "no delivery item is recorded for {product} on {}; opv apply creates it",
-                super::placement(env_name, target)
-            ));
-            out.not_minted.push(NotMinted {
-                product,
-                reason: why.join("; "),
-            });
-            continue;
-        };
+        why
+    }
+
+    /// The evidence of the placement from one reading `state` of its delivery item: each
+    /// confirmed name's fresh line, every other line of the binding set kept as read.
+    fn compute(&self, state: &StateItem) -> Computed {
         let key = state
             .key
             .clone()
             .unwrap_or_else(|| Zeroizing::new(random_key()));
+        let mut supplied: BTreeMap<String, SuppliedOutcome> = BTreeMap::new();
+        let carried: BTreeSet<&str> = self
+            .set
+            .iter()
+            .filter(|b| self.carried(b, state))
+            .map(|b| b.name.as_str())
+            .collect();
+        let confirmed = |b: &BindingRef| {
+            self.written.contains(&b.name)
+                || self.identical.contains(&b.name)
+                || carried.contains(b.name.as_str())
+        };
+        let mut why = self.reasons(&carried);
         // Keep the lines of names still in the binding set; replace each confirmed one.
         let mut evidence: BTreeMap<String, Evidence> = state
             .evidence
             .iter()
-            .filter(|e| set.iter().any(|b| b.name == e.name))
+            .filter(|e| self.set.iter().any(|b| b.name == e.name))
             .map(|e| (e.name.clone(), e.clone()))
             .collect();
         let mut unread = false;
         let mut unrecordable: Vec<&str> = Vec::new();
-        for b in set
+        for b in self
+            .set
             .iter()
-            .filter(|b| !unconfirmed.contains(&b.name.as_str()))
+            .filter(|b| confirmed(b) && !carried.contains(b.name.as_str()))
         {
-            let (Some(version), Some(value)) = (version_of(&b.name), values.get(&b.source.field))
-            else {
-                unread |= !values.contains_key(&b.source.field);
+            let this_run = self.supplied(b);
+            let delivered = this_run.map(|s| self.delivered(s));
+            let value = match (&delivered, this_run) {
+                (Some(v), _) => Some(v),
+                (None, None) if b.source.item_id == SUPPLIED => None,
+                (None, _) => self.values.get(&b.source.field),
+            };
+            let Some(version) = self.version_of(&b.name) else {
+                if this_run.is_some() {
+                    supplied.insert(
+                        b.name.clone(),
+                        SuppliedOutcome::NotRecorded(NotRecordedWhy::Unlisted),
+                    );
+                }
+                unread |= value.is_none();
+                continue;
+            };
+            let Some(value) = value else {
+                unread = true;
                 continue;
             };
             let fingerprint = hmac_hex(key.as_bytes(), value.expose().as_bytes());
-            // #201: a name this sync did not write keeps a person's attestation while its
-            // line still says the same version and value; a write records ordinary evidence.
-            let attested_at = evidence
-                .get(&b.name)
-                .filter(|e| {
-                    !written.contains(&b.name)
-                        && e.store_version == version
-                        && e.fingerprint == fingerprint
-                        && e.source == b.source
-                })
-                .and_then(|e| e.attested_at.clone());
-            let line = Evidence {
-                name: b.name.clone(),
-                store_version: version,
-                fingerprint,
-                source: b.source.clone(),
-                attested_at,
-                supplied: None,
+            let old = evidence.get(&b.name);
+            let line = match this_run {
+                Some(s) => {
+                    // S9: another run recorded a newer serial since this run planned: its
+                    // line is kept and this name is not recorded. `--rotate` overrides it.
+                    if let Some(recorded) = old
+                        .filter(|_| !self.rotated(s))
+                        .and_then(|e| e.supplied.as_ref())
+                        .map(|m| m.serial)
+                        .filter(|r| *r > s.serial)
+                    {
+                        supplied.insert(
+                            b.name.clone(),
+                            SuppliedOutcome::NotRecorded(NotRecordedWhy::NewerSerial { recorded }),
+                        );
+                        why.push(format!("a newer serial is recorded for: {}", b.name));
+                        continue;
+                    }
+                    // §5.2: the same value at the same version and serial keeps its line.
+                    let same = old.filter(|e| {
+                        !self.written.contains(&b.name)
+                            && e.store_version == version
+                            && e.fingerprint == fingerprint
+                            && e.source == b.source
+                            && e.supplied.as_ref().is_some_and(|m| m.serial == s.serial)
+                    });
+                    match same {
+                        Some(e) => e.clone(),
+                        None => Evidence {
+                            name: b.name.clone(),
+                            store_version: version,
+                            fingerprint,
+                            source: b.source.clone(),
+                            attested_at: None,
+                            supplied: Some(crate::domain::delivery::SuppliedMark {
+                                serial: s.serial,
+                                at: self.at.to_string(),
+                            }),
+                        },
+                    }
+                }
+                None => {
+                    // #201: a name this sync did not write keeps a person's attestation
+                    // while its line still says the same version and value; a write records
+                    // ordinary evidence.
+                    let attested_at = old
+                        .filter(|e| {
+                            !self.written.contains(&b.name)
+                                && e.store_version == version
+                                && e.fingerprint == fingerprint
+                                && e.source == b.source
+                        })
+                        .and_then(|e| e.attested_at.clone());
+                    Evidence {
+                        name: b.name.clone(),
+                        store_version: version,
+                        fingerprint,
+                        source: b.source.clone(),
+                        attested_at,
+                        supplied: None,
+                    }
+                }
             };
             // A store version the evidence line cannot hold (empty, or with `|`) is never
             // recorded: the name stays unconfirmed, so no revision vouches for it.
             if encode_evidence(&line).is_none() {
                 unrecordable.push(b.name.as_str());
+                if this_run.is_some() {
+                    supplied.insert(
+                        b.name.clone(),
+                        SuppliedOutcome::NotRecorded(NotRecordedWhy::Unencodable),
+                    );
+                }
                 continue;
+            }
+            if this_run.is_some() {
+                supplied.insert(b.name.clone(), SuppliedOutcome::Recorded);
             }
             evidence.insert(b.name.clone(), line);
         }
@@ -560,7 +742,118 @@ pub fn record(
             .filter(|e| e.attested())
             .map(|e| e.name.clone())
             .collect();
-        let evidence: Vec<Evidence> = evidence.into_values().collect();
+        Computed {
+            key,
+            evidence: evidence.into_values().collect(),
+            attested,
+            why,
+            supplied,
+        }
+    }
+}
+
+/// After a confirmed sync of target `target` of `env_name`, for each product in scope
+/// (FR-58, D11):
+/// - each name of its binding set this run wrote (`written`) or proved identical
+///   (`identical`), with its store version in `listed`, gets a fresh evidence line in the
+///   placement's delivery item: these lines are the ledger `plan` judges by. A name this
+///   run supplied (#206, `supplying`) gets an `s1` line from its supplied value; a supplied
+///   name this run did not supply keeps its `s1` line verbatim while the store still lists
+///   that version (carried), which counts as confirmed;
+/// - once every name of the binding set was confirmed so, a revision is minted (an
+///   unchanged binding set and evidence keep their revision) and the placement's
+///   `source versions` field records each source item's version (C2; supplied names have
+///   no source item).
+///
+/// A placement whose binding set holds a supplied name reads its delivery item again just
+/// before writing (#206 §5.3): a change since is recomputed from the fresh reading, and a
+/// second change fails with `item_changed`.
+///
+/// A placement without a recorded delivery item gets nothing (`opv bootstrap` creates it).
+/// Only that placement's own item is read and written.
+#[allow(clippy::too_many_arguments)]
+pub fn record(
+    fleet: &Fleet,
+    env_name: &str,
+    target: &str,
+    only: Option<&str>,
+    written: &BTreeSet<String>,
+    identical: &BTreeSet<String>,
+    listed: &[StoreEntry],
+    source_versions: &BTreeMap<String, u64>,
+    plan_id: &str,
+    supplying: Option<Supplying<'_>>,
+    r: &dyn CommandRunner,
+) -> Result<Recorded, Error> {
+    let env = fleet.environment(env_name)?;
+    let account = account_id(r)?;
+    let values = values_by_field(fleet, env_name, r)?;
+    let now = crate::domain::provenance::utc_now();
+    let mut out = Recorded::default();
+    for product in products_in_scope(fleet, env_name, target, only)? {
+        // A `retiring` key a retirement already pruned from this target (#179) leaves the
+        // binding set, the same set `delivery verify` checks (`held_bindings`).
+        let set = held_bindings(fleet, env_name, target, &product, listed)?;
+        let input = RecordInput {
+            fleet,
+            env_name,
+            set: &set,
+            written,
+            identical,
+            listed,
+            values: &values,
+            supplying,
+            at: &now,
+        };
+        let supplied_here: Vec<&BindingRef> =
+            set.iter().filter(|b| input.supplied(b).is_some()).collect();
+        let Some(mut state) = read_state(fleet, env_name, target, &product, r)? else {
+            let mut why = input.reasons(&BTreeSet::new());
+            why.push(format!(
+                "no delivery item is recorded for {product} on {}; opv apply creates it",
+                super::placement(env_name, target)
+            ));
+            for b in &supplied_here {
+                out.supplied.insert(
+                    b.name.clone(),
+                    SuppliedOutcome::NotRecorded(NotRecordedWhy::NoItem),
+                );
+            }
+            out.not_minted.push(NotMinted {
+                product,
+                reason: why.join("; "),
+            });
+            continue;
+        };
+        let mut computed = input.compute(&state);
+        // #206 §5.3: re-read, recompute, write, or `item_changed`.
+        if set.iter().any(|b| b.source.item_id == SUPPLIED) {
+            let fresh = read_state(fleet, env_name, target, &product, r)?
+                .ok_or_else(|| changed_before_write(&state.at))?;
+            if fresh.raw != state.raw {
+                computed = input.compute(&fresh);
+                let again = read_state(fleet, env_name, target, &product, r)?
+                    .ok_or_else(|| changed_before_write(&fresh.at))?;
+                if again.raw != fresh.raw {
+                    return Err(changed_before_write(&fresh.at));
+                }
+                state = fresh;
+            }
+        }
+        let Computed {
+            key,
+            evidence,
+            attested,
+            why,
+            supplied,
+        } = computed;
+        out.supplied.extend(supplied);
+        // #206 §6.3: the names of the set supplied at sync (sorted).
+        let supplied_names: Vec<String> = set
+            .iter()
+            .filter(|b| b.source.item_id == SUPPLIED)
+            .map(|b| b.name.clone())
+            .collect();
         let this_scope = scope(fleet, env_name, target, &product, &account)?;
         let receipt = if why.is_empty() {
             // Unchanged binding set and evidence: the same delivery, the same revision.
@@ -568,6 +861,7 @@ pub fn record(
                 rec.scope == this_scope
                     && rec.bindings == set
                     && rec.attested == attested
+                    && rec.supplied == supplied_names
                     && lines(&state.evidence) == lines(&evidence)
             });
             Some(match unchanged {
@@ -580,10 +874,11 @@ pub fn record(
                         revision: new_revision(bytes),
                         scope: this_scope,
                         bindings: set.clone(),
-                        delivered_at: crate::domain::provenance::utc_now(),
+                        delivered_at: now.clone(),
                         plan_id: Some(plan_id.to_string()),
                         opv_version: env!("CARGO_PKG_VERSION").into(),
                         attested,
+                        supplied: supplied_names,
                     }
                 }
             })
@@ -613,6 +908,17 @@ pub fn record(
         }
     }
     Ok(out)
+}
+
+/// The delivery item at `at` changed between opv's readings of it (#206 §5.3).
+fn changed_before_write(at: &Boundary) -> Error {
+    Cause::ChangedBeforeWrite {
+        object: crate::cause::StoreObject::Item {
+            vault: crate::cause::VaultId::new(at.vault_id.as_str()),
+            item: crate::cause::ItemId::new(at.item_id.as_str()),
+        },
+    }
+    .into()
 }
 
 /// One name a person attests on a placement (#201): its binding, the target's current

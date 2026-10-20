@@ -317,6 +317,7 @@ impl Snapshot {
                 ValueState::Malformed { rule } => ("failing_rule", Some(rule)),
                 ValueState::Unreadable { .. } => ("unreadable", None),
                 ValueState::NotWanted { .. } => ("skipped", None),
+                ValueState::Supplied => ("supplied_at_sync", None),
             };
             self.cells.insert(
                 (c.env, c.product, c.key),

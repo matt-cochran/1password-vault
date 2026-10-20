@@ -481,6 +481,254 @@ fn relaxations_job() -> String {
     s
 }
 
+// --- #206: deliver-only infrastructure values ---------------------------------------------
+
+/// The infrastructure keys target `target` of `env` delivers (#206, §2.3): its supplied
+/// bindings, as `(product/KEY, name on the target)`, sorted by key.
+fn supplied_keys(fleet: &Fleet, env: &str, target: &str) -> Result<Vec<(String, String)>, Error> {
+    let mut out = Vec::new();
+    for product in fleet.products.keys() {
+        for b in super::delivery::bindings(fleet, env, target, product)? {
+            if b.source.item_id == crate::domain::delivery::SUPPLIED {
+                out.push((b.source.field, b.name));
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// The output name a key's jq mapping reads, as a placeholder for the producer's own
+/// output: `api/DATABASE_URL` reads `.database_url`.
+fn output_name(label: &str) -> String {
+    label
+        .rsplit('/')
+        .next()
+        .unwrap_or(label)
+        .to_ascii_lowercase()
+}
+
+/// Print the step that delivers target `target`'s infrastructure values (#206, §8.1), to
+/// paste into the job that produced them (the Terraform apply job), never a job of its own
+/// and with no concurrency group: `set -euo pipefail`, one jq mapping per key whose error
+/// is a fixed message (S4), and the supplying sync. It never adds `--rotate` (S5). It is
+/// followed by the pull-request job that checks the workflow file with `--supply-check`.
+pub fn run_supply(
+    fleet: &Fleet,
+    env: &str,
+    target: &str,
+    deploy: bool,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let (e, _) = super::target(fleet, env, target)?;
+    let keys = supplied_keys(fleet, env, target)?;
+    if keys.is_empty() {
+        return Err(Cause::Usage {
+            problem: UsageProblem::EntryFormat {
+                flag: "--supply".into(),
+                entry: target.to_string(),
+                format: "a target that delivers an infrastructure key (source = \"infrastructure\")",
+            },
+        }
+        .into());
+    }
+    out.write_all(supply_step(env, target, &keys, deploy, e.confirm_env).as_bytes())
+        .map_err(write_err)
+}
+
+/// The text of [`run_supply`].
+fn supply_step(
+    env: &str,
+    target: &str,
+    keys: &[(String, String)],
+    deploy: bool,
+    confirm: bool,
+) -> String {
+    let mut s = String::new();
+    s.push_str(&format!(
+        "# opv: deliver {target}'s infrastructure values ({env}). Paste this step into the job\n"
+    ));
+    s.push_str(
+        "# that produced them (the job that runs terraform apply), after that step, in the\n",
+    );
+    s.push_str(
+        "# job's own concurrency group. The job needs opv, the 1Password CLI and the target's\n",
+    );
+    s.push_str(&format!(
+        "# CLI: see opv ci workflow {env} --target {target} for those steps.\n"
+    ));
+    s.push_str("# Map each output below to your producer's own output name.\n");
+    s.push_str("# Never put ${{ ... }} in the script: GitHub expands it into the logged script.\n");
+    s.push_str("# Pass values through the step's env: instead (checked by opv ci workflow --supply-check).\n");
+    s.push_str(&format!(
+        "      - name: Deliver infrastructure values to {target} through opv\n"
+    ));
+    s.push_str("        env:\n");
+    s.push_str("          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}\n");
+    s.push_str("        run: |\n");
+    s.push_str("          set -euo pipefail\n");
+    s.push_str(
+        "          # the producer's own serial (Terraform's state serial), never a CI counter\n",
+    );
+    s.push_str("          serial=$(terraform state pull | jq -e '.serial')\n");
+    s.push_str(&format!(
+        "          terraform output -json | jq -ce --argjson s \"$serial\" '{{schema: \"opv.supply/1\", env: \"{env}\", serial: $s, values: {{\n"
+    ));
+    let last = keys.len().saturating_sub(1);
+    for (i, (label, _)) in keys.iter().enumerate() {
+        let o = output_name(label);
+        let sep = if i == last { "}}'" } else { "," };
+        s.push_str(&format!(
+            "            \"{label}\": (.{o}.value | strings // error(\"{o} missing\")){sep}\n"
+        ));
+    }
+    let deploy = if deploy { " --deploy" } else { "" };
+    let confirm = if confirm {
+        format!(" --confirm {env}")
+    } else {
+        String::new()
+    };
+    s.push_str(&format!(
+        "            | opv sync {env} --target {target} --supply-stdin{deploy} --receipt {target}.receipt.json{confirm}\n"
+    ));
+    s.push_str(&format!(
+        "          opv delivery verify {env} --target {target} --receipt {target}.receipt.json\n"
+    ));
+    s.push('\n');
+    s.push_str(
+        "# And this job, in a workflow that runs on pull_request, to keep the step value-safe:\n",
+    );
+    s.push_str("  opv-supply-check:\n");
+    s.push_str("    if: github.event_name == 'pull_request'\n");
+    s.push_str("    runs-on: ubuntu-latest\n");
+    s.push_str("    env:\n");
+    s.push_str(&format!(
+        "      OPV_VERSION: v{}   # pin the release you tested; bump it deliberately\n",
+        env!("CARGO_PKG_VERSION")
+    ));
+    s.push_str("    steps:\n");
+    s.push_str("      - uses: actions/checkout@v4\n");
+    s.push_str(&install_opv());
+    s.push_str("      - name: Fail on an expression in a step that pipes into --supply-stdin\n");
+    s.push_str("        run: opv ci workflow --supply-check .github/workflows/apply.yml\n");
+    s
+}
+
+/// `opv ci workflow --supply-check <file>` (#206 §8.1, S4): refuse a workflow file in which
+/// a step whose `run:` script pipes into `--supply-stdin` uses a `${{ … }}` expression other
+/// than `github.*` in that script, since GitHub expands it into the step's logged script.
+/// The step's `env:` is not its script and may use any expression. Read-only; prints one
+/// line when the file passes.
+pub fn run_supply_check(path: &std::path::Path, out: &mut dyn Write) -> Result<(), Error> {
+    let text = std::fs::read_to_string(path).map_err(|e| -> Error {
+        Cause::InputUnreadable {
+            path: path.to_path_buf(),
+            kind: crate::cause::InputKind::Workflow,
+            io: e.kind().into(),
+        }
+        .into()
+    })?;
+    if let Some((line, col)) = expression_in_supply_step(&text) {
+        return Err(Cause::InputInvalid {
+            path: path.to_path_buf(),
+            kind: crate::cause::InputKind::Workflow,
+            at: Some(crate::cause::Location { line, col }),
+            field: "the run: script of a step that pipes into --supply-stdin".into(),
+            rule: crate::cause::FieldRule::Supply {
+                supply: crate::cause::SupplyRule::ExpressionInSupplyStep { line },
+            },
+        }
+        .into());
+    }
+    writeln!(
+        out,
+        "{}: no step that pipes into --supply-stdin expands a ${{{{ }}}} expression other than github.*",
+        path.display()
+    )
+    .map_err(write_err)
+}
+
+/// One `run:` script of a workflow file: its lines with their 1-based line numbers.
+struct Script {
+    lines: Vec<(u32, String)>,
+}
+
+/// Every `run:` script of `text`: an inline `run: <command>`, or a block scalar (`run: |`
+/// or `run: >`, with chomping or indentation indicators) whose lines are indented deeper
+/// than the key. A YAML-shaped scan: no YAML parser, so a script is what GitHub runs.
+fn scripts(text: &str) -> Vec<Script> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim_start();
+        let body = trimmed.strip_prefix("- ").map_or(trimmed, str::trim_start);
+        let Some(rest) = body.strip_prefix("run:") else {
+            i += 1;
+            continue;
+        };
+        let key_indent = line.len() - body.len();
+        let rest = rest.trim();
+        let number = |n: usize| u32::try_from(n + 1).unwrap_or(u32::MAX);
+        if rest.starts_with('|') || rest.starts_with('>') {
+            let mut script = Script { lines: Vec::new() };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                let indent = l.len() - l.trim_start().len();
+                if !l.trim().is_empty() && indent <= key_indent {
+                    break;
+                }
+                script.lines.push((number(j), l.to_string()));
+                j += 1;
+            }
+            out.push(script);
+            i = j;
+        } else {
+            out.push(Script {
+                lines: vec![(number(i), line.to_string())],
+            });
+            i += 1;
+        }
+    }
+    out
+}
+
+/// The line and column of the first `${{ … }}` expression other than `github.*` in a `run:`
+/// script of `text` that pipes into `--supply-stdin`, or `None`.
+fn expression_in_supply_step(text: &str) -> Option<(u32, u32)> {
+    for script in scripts(text) {
+        if !script
+            .lines
+            .iter()
+            .any(|(_, l)| l.contains("--supply-stdin"))
+        {
+            continue;
+        }
+        for (n, l) in &script.lines {
+            let mut from = 0;
+            while let Some(at) = l[from..].find("${{") {
+                let start = from + at;
+                let inner_start = start + 3;
+                let end = l[inner_start..]
+                    .find("}}")
+                    .map_or(l.len(), |e| inner_start + e);
+                let expr = l[inner_start..end].trim();
+                if !expr.starts_with("github.") {
+                    let col = u32::try_from(start + 1).unwrap_or(u32::MAX);
+                    return Some((*n, col));
+                }
+                from = end.min(l.len());
+                if from == l.len() {
+                    break;
+                }
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 #[path = "ci_workflow_tests.rs"]
 mod tests;

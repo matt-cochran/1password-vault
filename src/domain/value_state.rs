@@ -89,6 +89,10 @@ pub enum ValueState {
         /// The declared reason the key is not wanted here.
         reason: String,
     },
+    /// An infrastructure key (#206, `docs/design/deliver-only.md`): its value is supplied at
+    /// sync by the deploy job that produced it and never stored, so there is no value to
+    /// read. The 8th value state.
+    Supplied,
 }
 
 /// Classify one value.

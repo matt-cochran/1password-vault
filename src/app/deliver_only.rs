@@ -1029,6 +1029,8 @@ pub fn refusal(
                 return refuse(SupplyRefusal::Unproven);
             }
             (TargetState::WouldChange | TargetState::Unknown, Some(_)) => {}
+            // Only a row without a supplied value has these states; a supplied row never.
+            (TargetState::AsSupplied | TargetState::Unrecorded, Some(_)) => {}
         }
     }
     None

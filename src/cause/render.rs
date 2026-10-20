@@ -4120,6 +4120,18 @@ impl Cause {
                     )),
                     Next::Run(cmd(&["sync"], &[env.as_str()])),
                 ),
+                // #206 §6.4: an infrastructure key is never stored: nothing to fill; only
+                // the deploy job that produces it can supply it again.
+                Some((product, key, reason))
+                    if *reason == "supplied_not_delivered" || *reason == "supplied_drifted" =>
+                {
+                    plan(
+                        inspect(format!(
+                            "run the deploy job that produces {product}/{key} for environment {env}: its value is supplied at sync, never stored"
+                        )),
+                        Next::Check(cmd(&["plan"], &[env.as_str()])),
+                    )
+                }
                 Some((product, key, _)) => plan(
                     Some((
                         Action::FillValue {

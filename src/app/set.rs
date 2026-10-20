@@ -166,6 +166,7 @@ fn state_text(state: &ValueState) -> String {
         ValueState::Absent => "absent".to_string(),
         ValueState::Unreadable { cause } => format!("unreadable{{{}}}", unreadable_text(cause)),
         ValueState::NotWanted { reason } => format!("not_wanted{{{reason}}}"),
+        ValueState::Supplied => "supplied".to_string(),
     }
 }
 

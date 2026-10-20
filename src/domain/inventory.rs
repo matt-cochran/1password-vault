@@ -238,6 +238,12 @@ pub fn build(fleet: &Fleet, cells: &CellInputs, receipt: Option<&ReceiptView>) -
                 };
                 let (state, from_receipt) = match here {
                     Presence::NotWanted { reason } => (ValueState::NotWanted { reason }, None),
+                    // #206: supplied at sync, never stored: nothing in 1Password to read.
+                    _ if spec.value_source
+                        == Some(crate::domain::model::ValueSource::Infrastructure) =>
+                    {
+                        (ValueState::Supplied, None)
+                    }
                     _ if capability == Capability::None => match receipt {
                         Some(r) => match r.states.get(&at()) {
                             Some(state) => (

@@ -75,6 +75,8 @@ pub enum SourceKind {
     Person,
     Generated,
     Derived,
+    /// Produced by infrastructure and supplied at sync, never stored (#206).
+    Infrastructure,
 }
 
 /// An environment's tier (design §2.2).
@@ -761,7 +763,7 @@ pub fn json_schema() -> serde_json::Value {
                 "type": "object",
                 "additionalProperties": guidance()
             },
-            "source": { "enum": ["person", "generated", "derived"] },
+            "source": { "enum": ["person", "generated", "derived", "infrastructure"] },
             "shape": { "enum": catalog::names() },
             "from": { "type": "string" },
             "personal": { "type": "boolean" },

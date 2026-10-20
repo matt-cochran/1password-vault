@@ -644,12 +644,12 @@ pub fn plan(layout: &Layout, fleet: &Fleet, env_name: &str, date: &str) -> TidyP
         let home = product.clone();
         // A shared key (FR-45) never gets a field: its source's field holds the value.
         // A personal key (FR-55) never gets a field in the team item: its value is each
-        // person's own.
-        for (key, spec) in prod
-            .keys
-            .iter()
-            .filter(|(_, s)| s.from.is_none() && !s.personal)
-        {
+        // person's own. An infrastructure key (#206) is never stored: it never gets one.
+        for (key, spec) in prod.keys.iter().filter(|(_, s)| {
+            s.from.is_none()
+                && !s.personal
+                && s.value_source != Some(crate::domain::model::ValueSource::Infrastructure)
+        }) {
             let name = key_label(product, key);
             let id = (product.clone(), key.clone());
             let here = spec.is_desired_in(env_name);

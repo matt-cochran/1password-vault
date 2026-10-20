@@ -1520,9 +1520,20 @@ pub(crate) fn gate_keys(
             KeyState::RuleFailed("nonempty", _) => Some("empty"),
             KeyState::RuleFailed(..) | KeyState::WrongKind => Some("malformed"),
             KeyState::SourceBlocked => None,
+            // #206 §6.4: supplied at sync, never stored: no 1Password value to judge, but
+            // every target of the tier must hold it as supplied.
+            KeyState::SuppliedAtSync => match row.target {
+                TargetState::AsSupplied | TargetState::NotDelivered => None,
+                TargetState::Unknown => Some("supplied_drifted"),
+                _ => Some("supplied_not_delivered"),
+            },
         };
         if let Some(reason) = reason {
             out.push((row.product.clone(), row.key.clone(), reason));
+            continue;
+        }
+        // A supplied name has no source item whose version could be newer (#206).
+        if row.state == KeyState::SuppliedAtSync {
             continue;
         }
         let source = fleet

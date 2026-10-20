@@ -652,6 +652,7 @@ fn state_word(state: &ValueState) -> String {
             format!("unreadable({cause})")
         }
         ValueState::NotWanted { .. } => "not_wanted".into(),
+        ValueState::Supplied => "supplied".into(),
     }
 }
 
