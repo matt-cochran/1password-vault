@@ -128,3 +128,43 @@ fn opv_propose_setup_names_into_an_existing_contract_proposes_only_undeclared_na
     );
     assert_only_beta(&answer);
 }
+
+// --- #179: an extend intent on the command line -----------------------------------------------
+
+/// `web`'s keys gain `dev` where they list their environments without it (`OTEL_RESOURCE`).
+fn extend_intent() -> Value {
+    json!({"kind": "extend", "env": "dev", "product": "web"})
+}
+
+#[test]
+fn propose_intent_extend_returns_the_diff_and_plan_id_opv_propose_returns() {
+    let s = Scenario::new()
+        .marked()
+        .file("project/intent.json", &extend_intent().to_string());
+    let run = s.opv(&[
+        "propose".into(),
+        "--intent".into(),
+        "intent.json".into(),
+        "--json".into(),
+    ]);
+    assert_eq!(run.code, Some(0), "{}{}", run.stdout, run.stderr);
+    let cli = document(&run.stdout);
+    let diff = cli["diff"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no diff: {cli}"));
+    assert!(
+        diff.contains("OTEL_RESOURCE") || diff.contains("\"dev\""),
+        "{diff}"
+    );
+    assert!(
+        cli["plan_id"].as_str().is_some_and(|id| !id.is_empty()),
+        "no plan id: {cli}"
+    );
+    let mcp = s.mcp("opv_propose", &extend_intent());
+    // The step to write differs only in how each surface spells the intent file.
+    let without_next = |mut d: Value| {
+        d.as_object_mut().map(|o| o.remove("next"));
+        d
+    };
+    assert_eq!(without_next(mcp), without_next(cli));
+}
