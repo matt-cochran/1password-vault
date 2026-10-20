@@ -162,6 +162,7 @@ pub(crate) fn read_and_plan(
         rotate,
         prune_immutable,
         &ledgers,
+        false,
     )?;
     plan.tidy = read.changes;
     plan.tidy_error = read.tidy_error;
@@ -194,6 +195,7 @@ pub(crate) fn read_and_plan_versioned(
     ports: Option<&Ports<'_>>,
     rotate: &BTreeSet<(String, String)>,
     prune_immutable: &BTreeSet<(String, String)>,
+    retiring_prune: bool,
 ) -> Result<VersionedPlan, Error> {
     let read = tidy::read(fleet, env_name, r)?;
     let ledgers = placement_ledgers(fleet, env_name, target, ports, r);
@@ -206,6 +208,7 @@ pub(crate) fn read_and_plan_versioned(
         rotate,
         prune_immutable,
         &ledgers,
+        retiring_prune,
     )?;
     plan.tidy = read.changes;
     plan.tidy_error = read.tidy_error;
@@ -295,6 +298,7 @@ pub(crate) fn plan_item(
         rotate,
         prune_immutable,
         &[],
+        false,
     )
 }
 
@@ -329,6 +333,7 @@ pub(crate) fn plan_item_with(
     rotate: &BTreeSet<(String, String)>,
     prune_immutable: &BTreeSet<(String, String)>,
     ledgers: &[crate::domain::ledger::Ledger],
+    retiring_prune: bool,
 ) -> Result<(SyncPlan, Vec<StoreEntry>), Error> {
     let store: Option<&dyn Store> = ports.map(Ports::store);
     let mut on_target = match store {
@@ -388,7 +393,7 @@ pub(crate) fn plan_item_with(
                 .as_ref()
                 .map(|c| c as &plan::CurrentCheck<'_>)
                 .or(by_ledger.as_ref().map(|c| c as &plan::CurrentCheck<'_>)),
-            retiring_prune: false,
+            retiring_prune,
         },
     );
     let mut p = p;

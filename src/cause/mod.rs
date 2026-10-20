@@ -1369,6 +1369,15 @@ pub enum Guard {
         kind: &'static str,
         why: String,
     },
+    /// A retirement prunes `product/key` from production environment `env` only once no
+    /// local or shared environment holds it (#179, design Part V, row `retire`): `first`
+    /// still does, so it is pruned there first. Names only; never a value.
+    RetireOutOfOrder {
+        product: ProductName,
+        key: KeyName,
+        env: EnvName,
+        first: EnvName,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]

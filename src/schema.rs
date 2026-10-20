@@ -444,9 +444,11 @@ pub const ALSO_WRITES_1PASSWORD: [&str; 0] = [];
 
 /// What a flag adds to its command's effect: (command, long flag, effect). Every one of
 /// these needs the user's yes for the run.
-pub const FLAG_EFFECTS: [(&str, &str, &str); 15] = [
+pub const FLAG_EFFECTS: [(&str, &str, &str); 16] = [
     ("sync", "deploy", "deploys"),
     ("sync", "prune", "deletes"),
+    // #179: with --prune, also unsets the keys marked retiring (targets only).
+    ("sync", "retire", "deletes_retiring"),
     ("sync", "rotate", "replaces_immutable"),
     ("sync", "prune-immutable", "deletes_immutable"),
     ("sync", "confirm", "confirms_guarded_environment"),

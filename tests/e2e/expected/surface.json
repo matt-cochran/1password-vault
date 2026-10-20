@@ -511,6 +511,7 @@
         "prune",
         "prune-immutable",
         "receipt",
+        "retire",
         "rotate",
         "target"
       ],

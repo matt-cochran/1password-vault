@@ -1867,6 +1867,14 @@ impl Cause {
                 self::Guard::NoChannel { target, kind, why } => {
                     format!("target {target} has no {kind} channel: {why}")
                 }
+                self::Guard::RetireOutOfOrder {
+                    product,
+                    key,
+                    env,
+                    first,
+                } => format!(
+                    "opv prunes {product}/{key} from production environment {env} only after every local and shared environment; {first} still holds it"
+                ),
             },
             MountUnreadable {
                 workload,
@@ -3487,6 +3495,14 @@ impl Cause {
                         )),
                         None => help_of(inv),
                     },
+                ),
+                // The prune of the earlier environment is a write: it is named in the Do,
+                // and the Next is its read (X4).
+                self::Guard::RetireOutOfOrder { first, .. } => plan(
+                    inspect(format!(
+                        "retire it from {first} first: opv sync {first} --prune --retire"
+                    )),
+                    Next::Check(cmd(&["plan"], &[first.as_str()])),
                 ),
             },
             MountUnreadable { env, target, .. } => plan(

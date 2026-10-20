@@ -35,10 +35,10 @@ use sha2::{Digest, Sha256};
 
 use super::{
     JsonPart, KeyNames, Prefixed, check_product, ci_summary, compare, findings_error, is_blocking,
-    managed_names, open_target, placement, plan_id_of, plan_item, plural, preflight, print_extras,
-    print_legend, print_rows, product_names, read_and_plan_versioned, read_item_fields,
-    resolve_targets, rows_item_url, scope_plan, target_cell, target_runners, target_word,
-    unmanaged_on_target, write_err, write_json,
+    managed_names, open_target, placement, plan_id_of, plan_item_with, plural, preflight,
+    print_extras, print_legend, print_rows, product_names, read_and_plan_versioned,
+    read_item_fields, resolve_targets, rows_item_url, scope_plan, target_cell, target_runners,
+    target_word, unmanaged_on_target, write_err, write_json,
 };
 use crate::cause::{
     Cause, Closest, Cmd, EnvName, KeyName, NameKind, PlanId, PlanScope, ProductKey, ProductName,
@@ -84,6 +84,11 @@ pub struct SyncOpts {
     /// `--target <name>` (repeatable, FR-56): the targets to sync. Empty: every target of
     /// the environment, in name order.
     pub targets: Vec<String>,
+    /// `--retire` (#179, design Part V, row `retire`): the retirement's prune step for this
+    /// environment. Every `retiring` key is released to `--prune` (which it needs), after
+    /// the needs check at `HEAD` and the tier order ([`super::retire::prune`]). Never
+    /// writes 1Password.
+    pub retire: bool,
 }
 
 impl SyncOpts {
@@ -100,6 +105,9 @@ impl SyncOpts {
         }
         if self.prune {
             args.push("--prune".into());
+        }
+        if self.retire {
+            args.push("--retire".into());
         }
         for k in &self.rotate {
             args.extend(["--rotate".into(), k.clone()]);
@@ -229,6 +237,24 @@ fn partial(e: Error, done: &[String], scope: PlanScope) -> Error {
 }
 
 pub fn run(
+    fleet: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+    opts: &SyncOpts,
+) -> Result<(), Error> {
+    // `--retire` runs the retirement's checks first (#179): the needs check at `HEAD` and
+    // the tier order, then this same sync with every `retiring` key released to the prune.
+    if opts.retire {
+        super::retire::check_flags(opts)?;
+        let readers = super::retire::Readers::at_head(r, fleet);
+        return super::retire::prune(fleet, env_name, r, out, opts, &readers);
+    }
+    deliver(fleet, env_name, r, out, opts)
+}
+
+/// [`run`] after any retirement check: the sync itself.
+pub(crate) fn deliver(
     fleet: &Fleet,
     env_name: &str,
     r: &dyn CommandRunner,
@@ -743,6 +769,8 @@ impl Report {
             expect_plan: None,
             receipt: None,
             targets: opts.targets.clone(),
+            // A retirement's prune is done; what is left is a plain deploy.
+            retire: false,
         };
         Some(step_text(&o.command(env_name)))
     }
@@ -912,6 +940,7 @@ fn prepare_staged(
         Some(ports),
         c.rotate,
         c.prune_immutable,
+        c.opts.retire,
     )?;
     let mut plan = c.scoped(plan);
     // A target that delivers config itself (FR-46): its rows get their state first, so a
@@ -1294,7 +1323,7 @@ fn prepare_pinned(c: &Ctx<'_>, ports: &Ports<'_>, out: &mut dyn Write) -> Result
     let target = Some(c.target);
     refuse_blocking(
         &c.scoped(
-            plan_item(
+            plan_item_with(
                 fleet,
                 env_name,
                 target,
@@ -1302,6 +1331,8 @@ fn prepare_pinned(c: &Ctx<'_>, ports: &Ports<'_>, out: &mut dyn Write) -> Result
                 None,
                 c.rotate,
                 c.prune_immutable,
+                &[],
+                opts.retire,
             )?
             .0,
         ),
@@ -1310,7 +1341,7 @@ fn prepare_pinned(c: &Ctx<'_>, ports: &Ports<'_>, out: &mut dyn Write) -> Result
     .map_err(|e| c.refusal(e))?;
     // The target's state, read-only, before its first read (NR-23, NR-25).
     let skip_deploy = preflight::run(c.at(), c.t, c.r, out, opts.json)?;
-    let (plan, listed) = plan_item(
+    let (plan, listed) = plan_item_with(
         fleet,
         env_name,
         target,
@@ -1318,6 +1349,8 @@ fn prepare_pinned(c: &Ctx<'_>, ports: &Ports<'_>, out: &mut dyn Write) -> Result
         Some(ports),
         c.rotate,
         c.prune_immutable,
+        &[],
+        opts.retire,
     )?;
     let plan = c.scoped(plan);
     refuse_blocking(&plan, env_name).map_err(|e| c.refusal(e))?;
@@ -2491,8 +2524,16 @@ fn plan_part<'f>(
     };
     preflight::read(at, t, r)?;
     let none = BTreeSet::new();
-    let (mut plan, on_target, item_version, _) =
-        read_and_plan_versioned(fleet, env_name, Some(name), r, Some(&ports), rotate, &none)?;
+    let (mut plan, on_target, item_version, _) = read_and_plan_versioned(
+        fleet,
+        env_name,
+        Some(name),
+        r,
+        Some(&ports),
+        rotate,
+        &none,
+        false,
+    )?;
     let scope = match product {
         Some(p) => {
             let names = product_names(fleet, env_name, name, p)?;

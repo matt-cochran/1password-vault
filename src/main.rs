@@ -1203,6 +1203,11 @@ struct SyncArgs {
     /// are never pruned unless named with --prune-immutable.
     #[arg(long)]
     prune: bool,
+    /// Retirement's prune step: with --prune, also unset every key marked retiring, once
+    /// the code at HEAD no longer reads it and no local or shared environment still holds
+    /// it. Never writes 1Password.
+    #[arg(long)]
+    retire: bool,
     /// The environment's name again; required when it sets confirm_env = true.
     #[arg(long, value_name = "ENV")]
     confirm: Option<String>,
@@ -1254,6 +1259,7 @@ impl From<SyncArgs> for sync::SyncOpts {
             expect_plan: a.expect_plan,
             receipt: a.receipt,
             targets: a.target,
+            retire: a.retire,
         }
     }
 }
