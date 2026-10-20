@@ -972,6 +972,29 @@
               "keys"
             ],
             "type": "object"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "extend"
+                ]
+              },
+              "env": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]*$"
+              },
+              "product": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]*$"
+              }
+            },
+            "required": [
+              "kind",
+              "env"
+            ],
+            "additionalProperties": false
           }
         ],
         "title": "opv intent document",
