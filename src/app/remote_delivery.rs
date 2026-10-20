@@ -784,9 +784,11 @@ fn deliver(mut input: Box<dyn Read + Send>) -> Result<i32, Error> {
         sweep(&runtime, DIR_PREFIX);
         let private = PrivateDir::create(&runtime, DIR_PREFIX)
             .map_err(|e| super::local_delivery::private_dir_failed(&runtime, &e))?;
+        let open = super::local_delivery::OpenDir::open_private(private.path())
+            .map_err(|e| super::local_delivery::private_dir_failed(private.path(), &e))?;
         for (key, rel) in &header.files {
             let i = header.keys.iter().position(|k| k == key).expect("checked");
-            super::local_delivery::write_file(private.path(), rel, &values[i])
+            super::local_delivery::write_file(&open, rel, &values[i])
                 .map_err(|e| super::local_delivery::private_dir_failed(private.path(), &e))?;
         }
         dir = Some(private);
@@ -802,6 +804,8 @@ fn deliver(mut input: Box<dyn Read + Send>) -> Result<i32, Error> {
         let _ = signal_hook::flag::register(sig, Arc::clone(&signalled));
     }
     let _ = writeln!(io::stderr(), "{DELIVERED}");
+    // As in the local step: inherited descriptors stop here (stdio still passes).
+    crate::hardening::cloexec_inherited();
     use std::os::unix::process::CommandExt;
     let mut child = std::process::Command::new(&header.command[0])
         .args(&header.command[1..])
