@@ -77,6 +77,16 @@ fn names_declare_every_name() {
 }
 
 #[test]
+fn names_declare_keys_that_are_present_in_every_environment() {
+    let (_dir, path) = env_file("ALPHA=one\n");
+    let p = from_names(&path, NAMES_ENV, &[], &[]).unwrap();
+    let fleet = crate::config::parse(&p.proposal.contract_after).unwrap();
+    assert!(fleet.products[NAMES_PRODUCT].keys["ALPHA"]
+        .environments
+        .is_none());
+}
+
+#[test]
 fn names_declare_an_environment_of_tier_local() {
     let (_dir, path) = env_file("ALPHA=one\n");
     let p = from_names(&path, NAMES_ENV, &[], &[]).unwrap();
@@ -109,6 +119,16 @@ fn a_dotenv_value_never_reaches_the_serialized_proposal() {
 }
 
 // Against an existing contract -------------------------------------------------------------
+
+#[test]
+fn names_added_to_an_existing_contract_are_present_in_every_environment() {
+    let (_dir, path, toml) = env_with_contract("BETA=two\n", EXISTING_CONTRACT);
+    let p = from_names_in(&path, "dev", &[], &[], Some(&toml)).unwrap();
+    let fleet = crate::config::parse(&p.proposal.contract_after).unwrap();
+    assert!(fleet.products[NAMES_PRODUCT].keys["BETA"]
+        .environments
+        .is_none());
+}
 
 #[test]
 fn names_against_an_existing_contract_add_only_undeclared_keys() {

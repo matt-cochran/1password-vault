@@ -82,8 +82,10 @@ pub fn from_names(
 /// [`from_names`] against the contract at `file_target` when the project already has one: an
 /// `[environments.<env>]` table it already has is kept as it is (its tier included) and a
 /// name it already declares is left out, so only undeclared names are proposed. A fresh
-/// setup (`file_target` absent) declares a new environment of tier `local`. The proposal's
-/// [`SetupProposal::next`] is the person's value import, `opv import <env> --from <file>`.
+/// setup (`file_target` absent) declares a new environment of tier `local`. Every proposed
+/// name is declared for every environment by default (#179 B8), never for a one-environment
+/// list. The proposal's [`SetupProposal::next`] is the person's value import,
+/// `opv import <env> --from <file>`.
 pub fn from_names_in(
     path: &Path,
     env: &str,
@@ -123,8 +125,9 @@ fn names_steps_in(imported: &init::Imported, added: &[String], new_env: bool) ->
 
 /// The contract for a names-only proposal against `base`: the `[environments.<env>]` table
 /// (a fresh one of tier `local`, or the one `base` already has) plus one table per name the
-/// contract does not already declare. Returns the merged text, the names added, and whether
-/// the environment table was new.
+/// contract does not already declare, each present in every environment by default
+/// (#179 B8). Returns the merged text, the names added, and whether the environment table
+/// was new.
 fn names_contract_in(
     env: &str,
     imported: &init::Imported,
@@ -149,7 +152,9 @@ fn names_contract_in(
         doc.declare_boundary(env, NAMES_PRODUCT)?;
     }
     let new_env = !exists;
-    let environments = vec![env.to_string()];
+    // #179 B8: a name read from a `.env` is declared for every environment: no
+    // `environments` list at all, so the key is present everywhere by default.
+    let environments: &[String] = &[];
     let mut added = Vec::new();
     for (name, kind) in &imported.kinds {
         if doc.has_key(NAMES_PRODUCT, name) {
@@ -160,7 +165,7 @@ fn names_contract_in(
             name,
             &crate::config_edit::NewKey {
                 kind: kind_word(*kind),
-                environments: &environments,
+                environments,
                 rules: &[],
                 guidance: None,
                 immutable: false,
