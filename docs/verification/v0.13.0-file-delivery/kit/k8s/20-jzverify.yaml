@@ -1,0 +1,43 @@
+# The serve consumer, with an fsGroup so the mounted files are readable (§6.6), and a
+# sidecar that must not get the mount (§6.3, FM-08). The expectations ConfigMap
+# (jzverify-expect, created in A4-V2 from the run's expect.txt) holds digests and the
+# hex-encoded prefix only, never a value.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jzverify
+  namespace: jzverify
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: jzverify}
+  template:
+    metadata:
+      labels: {app: jzverify}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      volumes:
+        - name: expect
+          configMap: {name: jzverify-expect}
+      containers:
+        - name: journeeze
+          image: opv-verify-136:0.13.0
+          imagePullPolicy: Never
+          args: ["loop", "serve", "30"]
+          volumeMounts:
+            - {name: expect, mountPath: /etc/opv-verify, readOnly: true}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+        - name: sidecar
+          image: opv-verify-136:0.13.0
+          imagePullPolicy: Never
+          command: ["sleep", "infinity"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
