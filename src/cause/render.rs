@@ -1364,13 +1364,23 @@ fn supply_refused(env: &EnvName, entry: &SupplyEntry, reason: &SupplyRefusal) ->
     let producer = |text: String| plan(inspect(text), Next::None(NoNext::NothingToRun));
     let decide = |text: String| plan(inspect(text), Next::None(NoNext::PersonPicksDirection));
     match reason {
-        SupplyRefusal::Undeclared { closest } => decide(match closest {
-            Some(c) => format!(
-                "declare the key with source = \"infrastructure\", or fix the producer's name (the closest infrastructure key is {c})"
-            ),
-            None => "declare the key with source = \"infrastructure\", or fix the producer's name"
-                .to_string(),
-        }),
+        // S11: the supplied name is not echoed (a mapping bug can put a value there), so
+        // the proposal names the key as the form the person fills in.
+        SupplyRefusal::Undeclared { closest } => plan(
+            inspect(match closest {
+                Some(c) => format!(
+                    "declare the key with source = \"infrastructure\", or fix the producer's name (the closest infrastructure key is {c})"
+                ),
+                None => {
+                    "declare the key with source = \"infrastructure\", or fix the producer's name"
+                        .to_string()
+                }
+            }),
+            Next::Check(cmd(
+                &["propose", "key"],
+                &["<product>/<KEY>", "--source", "infrastructure"],
+            )),
+        ),
         SupplyRefusal::NotOptedIn => plan(
             inspect(format!(
                 "{what} comes from 1Password; only an infrastructure key takes a supplied value"
