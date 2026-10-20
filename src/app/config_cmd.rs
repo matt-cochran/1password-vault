@@ -421,8 +421,12 @@ fn committed_at_head(path: &Path, r: &dyn CommandRunner) -> Result<String, Error
     }
 }
 
-/// A line diff of `a` to `b`: `-` removed, `+` added, ` ` kept (longest common
-/// subsequence; configurations are small).
+/// The number of unchanged lines kept on each side of a change in [`diff`].
+const DIFF_CONTEXT: usize = 3;
+
+/// A line diff of `a` to `b` as unified-style hunks: only changed lines plus
+/// [`DIFF_CONTEXT`] lines of context around each change, each hunk under an
+/// `@@ -l,n +l,n @@` header (longest common subsequence; configurations are small).
 pub fn diff(a: &str, b: &str) -> String {
     let x: Vec<&str> = a.lines().collect();
     let y: Vec<&str> = b.lines().collect();
@@ -437,19 +441,70 @@ pub fn diff(a: &str, b: &str) -> String {
             };
         }
     }
-    let mut s = String::new();
+    // 0 keeps a line, 1 removes one from `a`, 2 adds one from `b`.
+    let mut ops: Vec<(u8, &str)> = Vec::new();
     let (mut i, mut j) = (0, 0);
     while i < n || j < m {
         if i < n && j < m && x[i] == y[j] {
-            s.push_str(&format!(" {}\n", x[i]));
+            ops.push((0, x[i]));
             i += 1;
             j += 1;
         } else if i < n && (j == m || lcs[i + 1][j] >= lcs[i][j + 1]) {
-            s.push_str(&format!("-{}\n", x[i]));
+            ops.push((1, x[i]));
             i += 1;
         } else {
-            s.push_str(&format!("+{}\n", y[j]));
+            ops.push((2, y[j]));
             j += 1;
+        }
+    }
+    // How many lines each side has before an op, so a hunk's `@@` numbers read off its ends.
+    let mut a_before = vec![0usize; ops.len() + 1];
+    let mut b_before = vec![0usize; ops.len() + 1];
+    for (k, (kind, _)) in ops.iter().enumerate() {
+        a_before[k + 1] = a_before[k] + if *kind == 2 { 0 } else { 1 };
+        b_before[k + 1] = b_before[k] + if *kind == 1 { 0 } else { 1 };
+    }
+    let changes: Vec<usize> = ops
+        .iter()
+        .enumerate()
+        .filter(|(_, (kind, _))| *kind != 0)
+        .map(|(k, _)| k)
+        .collect();
+    let mut s = String::new();
+    let mut g = 0;
+    while g < changes.len() {
+        let first = changes[g];
+        let mut last = first;
+        // Adjacent changes, and changes no more than two context bands apart, share a hunk.
+        while g + 1 < changes.len() && changes[g + 1] - last <= 2 * DIFF_CONTEXT + 1 {
+            g += 1;
+            last = changes[g];
+        }
+        g += 1;
+        let start = first.saturating_sub(DIFF_CONTEXT);
+        let end = (last + DIFF_CONTEXT).min(ops.len() - 1);
+        let a_count = a_before[end + 1] - a_before[start];
+        let b_count = b_before[end + 1] - b_before[start];
+        let a_start = if a_count == 0 {
+            a_before[start]
+        } else {
+            a_before[start] + 1
+        };
+        let b_start = if b_count == 0 {
+            b_before[start]
+        } else {
+            b_before[start] + 1
+        };
+        s.push_str(&format!(
+            "@@ -{a_start},{a_count} +{b_start},{b_count} @@\n"
+        ));
+        for (kind, text) in &ops[start..=end] {
+            let marker = match kind {
+                0 => ' ',
+                1 => '-',
+                _ => '+',
+            };
+            s.push_str(&format!("{marker}{text}\n"));
         }
     }
     s
