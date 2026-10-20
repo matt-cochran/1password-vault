@@ -1,17 +1,17 @@
-# A5-F4 (by proxy): when does a changed secret reach the file? `fly secrets deploy` is NOT
-# run: it would restart the running fleet. Instead, on machine A only: stage v2, then
-# (a) nothing, (b) machine restart, (c) machine update with the same --file-secret flags.
-# LIVE WRITE: re-stages OPVCANARY_A5_FILE; restarts/updates machine A only. Rollback: T1, T2.
+# A5-F4: does `fly secrets deploy` rewrite the file? Answered literally: stage v2, run
+# `fly secrets deploy`, probe both machines. The boot id shows whether each machine restarted.
+# LIVE WRITE on the throwaway app only: re-stages the canary and deploys it. Rollback: T2.
 source "$(dirname "$0")/lib.sh"; guard_app
-id=$(head -1 "$S/a5/machines")
-say "A5-F4 stage v2"
+idA=$(cat "$S/a5/machine-a"); idB=$(cat "$S/a5/machine-b")
+say "A5-F4 stage v2, then secrets deploy"
 flysafe secrets import --stage < "$CANARY/a5/import-v2"
-probe "$id" f4a-no-action;  a5_versions "$E/a5/f4a-no-action.txt" | tee "$E/a5/f4a.txt"
-say "A5-F4 restart machine A"
-flysafe machine restart "$id"
-sleep 10; probe "$id" f4b-restart; a5_versions "$E/a5/f4b-restart.txt" | tee "$E/a5/f4b.txt"
-say "A5-F4 update machine A with the same file flags"
-mapfile -t fs < <(a5_file_secret_flags)
-flysafe machine update "$id" "${fs[@]}" --skip-health-checks -y
-sleep 10; probe "$id" f4c-update; a5_versions "$E/a5/f4c-update.txt" | tee "$E/a5/f4c.txt"
-echo "RECORD A5-F4: which of (a) none, (b) restart, (c) update moved the file to v2. [UNSURE: all three; a literal secrets-deploy answer needs a separate owner decision]"
+probe "$idA" f4-before-a >/dev/null; probe "$idB" f4-before-b >/dev/null
+flysafe secrets deploy
+sleep 15
+for m in a b; do
+  id=$(cat "$S/a5/machine-$m")
+  probe "$id" "f4-after-$m" >/dev/null
+  echo "machine $m: $(a5_versions "$E/a5/f4-after-$m.txt" | paste -sd' ') boot_id_changed=$([ "$(grep -o 'boot_id=.*' "$E/a5/f4-before-$m.txt")" = "$(grep -o 'boot_id=.*' "$E/a5/f4-after-$m.txt")" ] && echo no || echo yes)"
+done | tee "$E/a5/f4.txt"
+check A5-F4 deploy_machine_rewritten $(grep '^machine a:' "$E/a5/f4.txt" | grep -q '=v2' && echo 1 || echo 0) "the [[files]] machine shows v2 after secrets deploy"
+echo "RECORD A5-F4: per machine, the version at each path and whether it rebooted. Machine B (machine run) shows whether secrets deploy also reaches machines it didn't create."

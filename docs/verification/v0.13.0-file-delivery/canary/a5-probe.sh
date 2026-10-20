@@ -2,7 +2,7 @@
 # Prints metadata and digests only: never the file's content, never the environment.
 for p in /dev/shm/opvcanary/a5-file /run/opvcanary/a5-file /opt/opvcanary/a5-file; do
   if [ -e "$p" ]; then
-    echo "$p: present $(stat -c 'mode=%a owner=%U:%G size=%s' "$p") sha256=$(sha256sum "$p" | cut -d' ' -f1)"
+    echo "$p: present $(stat -c 'mode=%a owner=%U:%G size=%s inode=%i mtime=%Y' "$p") sha256=$(sha256sum "$p" | cut -d' ' -f1)"
     echo "$p: fs=$(df -T "$p" | awk 'NR==2{print $2}') mountpoint=$(df -T "$p" | awk 'NR==2{print $7}') dir=$(stat -c 'mode=%a owner=%U:%G' "$(dirname "$p")")"
   else
     echo "$p: absent"
