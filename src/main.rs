@@ -3569,8 +3569,8 @@ struct ProposeReq {
 
 impl ProposeReq {
     /// Whether the proposal reads the configuration where it lives (a file or a manifest):
-    /// `key`, `env`, `target` and `retire`. `setup` needs none, and `structure` and
-    /// `generate` read the local contract file.
+    /// `key`, `env`, `target`, `retire`, `extend` (#179) and `attest`. `setup` needs none,
+    /// and `structure` and `generate` read the local contract file.
     fn needs_config(&self) -> bool {
         use opv::domain::intent::Intent;
         matches!(
@@ -3579,6 +3579,7 @@ impl ProposeReq {
                 | Intent::Env { .. }
                 | Intent::Target { .. }
                 | Intent::Retire { .. }
+                | Intent::Extend { .. }
                 | Intent::Attest { .. }
         )
     }
@@ -3902,11 +3903,14 @@ fn run_propose_early(
                         Some(&path),
                     )?
                 }
-                (None, Some(names)) => setup::from_names(
+                // #176: into the project's existing contract, only the names it does not
+                // declare yet are proposed and its environment table is kept.
+                (None, Some(names)) => setup::from_names_in(
                     std::path::Path::new(names),
                     setup::NAMES_ENV,
                     config_key,
                     secret_key,
+                    path.is_file().then_some(path.as_path()),
                 )?,
                 (None, None) => {
                     return Err(opv::cause::Cause::Usage {
@@ -4080,7 +4084,9 @@ fn run_propose_contract(
         return writeln!(out, "Next: {command}").map_err(write_err);
     }
     match &req.intent {
-        Intent::Key { .. } | Intent::Env { .. } | Intent::Target { .. } if req.write => {
+        Intent::Key { .. } | Intent::Env { .. } | Intent::Target { .. } | Intent::Extend { .. }
+            if req.write =>
+        {
             let next = format!("opv apply{}", project_flag(req.project.as_deref()));
             print_proposal(doc, &lines, &next, true, req.json, out)
         }

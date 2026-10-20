@@ -21,19 +21,45 @@ use crate::error::Error;
 use crate::runner::CommandRunner;
 use crate::scan::{Coverage, DirTree, Kind, Observation, Pattern, Scan, Tree, WorkTree};
 
-/// Every scanner pattern a `needs` scan runs: each language and manifest row.
-fn patterns() -> [&'static dyn Pattern; 9] {
-    [
-        &crate::scan::lang::Rust,
-        &crate::scan::lang::TypeScript,
-        &crate::scan::lang::Python,
-        &crate::scan::lang::Go,
-        &crate::scan::manifests::DotEnv,
-        &crate::scan::manifests::Compose,
-        &crate::scan::manifests::K8sManifest,
-        &crate::scan::manifests::FlyToml,
-        &crate::scan::manifests::GithubActions,
-    ]
+/// Every scanner pattern a `needs` scan runs (#175): each language and manifest row, plus
+/// the reads of files under each product's declared secrets directory, built from `fleet`
+/// (one group per product with `local.secrets_dir_env`, each key's `file` path mapped to
+/// the key). The secrets-directory row is left out when no product declares one.
+fn patterns(fleet: &Fleet) -> Vec<Box<dyn Pattern>> {
+    let mut patterns: Vec<Box<dyn Pattern>> = vec![
+        Box::new(crate::scan::lang::Rust),
+        Box::new(crate::scan::lang::TypeScript),
+        Box::new(crate::scan::lang::Python),
+        Box::new(crate::scan::lang::Go),
+        Box::new(crate::scan::lang::Ruby),
+        Box::new(crate::scan::lang::C),
+        Box::new(crate::scan::manifests::DotEnv),
+        Box::new(crate::scan::manifests::Compose),
+        Box::new(crate::scan::manifests::K8sManifest),
+        Box::new(crate::scan::manifests::FlyToml),
+        Box::new(crate::scan::manifests::GithubActions),
+    ];
+    let groups = fleet.products.values().filter_map(|product| {
+        let dir_env = product.local.as_ref()?.secrets_dir_env.clone()?;
+        let files: BTreeMap<String, String> = product
+            .keys
+            .iter()
+            .filter_map(|(key, spec)| spec.file.clone().map(|file| (file, key.clone())))
+            .collect();
+        Some((dir_env, files))
+    });
+    let secrets_dir = crate::scan::lang::SecretsDir::from_groups(groups);
+    if !secrets_dir.is_empty() {
+        patterns.push(Box::new(secrets_dir));
+    }
+    patterns
+}
+
+/// Walk `tree` over `repo` with every pattern [`patterns`] builds from `fleet`.
+fn collect(runner: &dyn CommandRunner, repo: &Path, tree: &dyn Tree, fleet: &Fleet) -> Scan {
+    let patterns = patterns(fleet);
+    let refs: Vec<&dyn Pattern> = patterns.iter().map(|p| p.as_ref()).collect();
+    Scan::collect(runner, repo, tree, &refs)
 }
 
 /// Where `opv needs` takes the names the code reads from (#175).
@@ -183,7 +209,7 @@ pub fn needs(
     base: Option<&Fleet>,
 ) -> NeedsReport {
     let _ = base;
-    let scan = Scan::collect(runner, repo, tree, &patterns());
+    let scan = collect(runner, repo, tree, fleet);
     classify(runner, repo, tree, fleet, scan, &ValueStates::new(), None)
 }
 
@@ -218,7 +244,7 @@ pub fn needs_with(
             repo,
             &WorkTree,
             fleet,
-            Scan::collect(runner, repo, &WorkTree, &patterns()),
+            collect(runner, repo, &WorkTree, fleet),
             &states,
             options.product.as_deref(),
         ),
@@ -227,7 +253,7 @@ pub fn needs_with(
             dir,
             &DirTree,
             fleet,
-            Scan::collect(runner, dir, &DirTree, &patterns()),
+            collect(runner, dir, &DirTree, fleet),
             &states,
             options.product.as_deref(),
         ),

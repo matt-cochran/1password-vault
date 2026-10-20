@@ -286,6 +286,21 @@ impl SecretsDir {
             groups: vec![(dir_env.into(), files)],
         }
     }
+
+    /// The reads of files under several directories at once: one `(variable, file path ->
+    /// key)` group per product that declares `local.secrets_dir_env`.
+    pub fn from_groups(
+        groups: impl IntoIterator<Item = (String, BTreeMap<String, String>)>,
+    ) -> Self {
+        Self {
+            groups: groups.into_iter().collect(),
+        }
+    }
+
+    /// Whether no product declares a secrets directory with a `file` key.
+    pub fn is_empty(&self) -> bool {
+        self.groups.iter().all(|(_, files)| files.is_empty())
+    }
 }
 
 impl Pattern for SecretsDir {

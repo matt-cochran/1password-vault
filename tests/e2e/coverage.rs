@@ -1473,6 +1473,33 @@ mod text_cases {
         )
     }
 
+    /// #178: a file project whose generator wrote a configuration that differs from the
+    /// committed `secrets.toml` (one key's guidance changed): the check names both files and
+    /// leaves the direction to the person.
+    pub fn regenerated_file_differs() -> Case {
+        let committed = std::fs::read_to_string(Path::new(ROOT).join("tests/e2e/app/secrets.toml"))
+            .expect("app contract");
+        let regenerated = committed.replacen(
+            "guidance = \"the service's own API key\"",
+            "guidance = \"regenerated\"",
+            1,
+        );
+        assert_ne!(regenerated, committed, "the regenerated file must differ");
+        case(
+            Scenario::new()
+                .marked()
+                .file("project/generated/secrets.toml", &regenerated),
+            &[
+                "--config",
+                "secrets.toml",
+                "config",
+                "check",
+                "--file",
+                "generated/secrets.toml",
+            ],
+        )
+    }
+
     pub fn manifest_exists() -> Case {
         case(
             Scenario::new().var("OP_ACCOUNT", DEV_ACCOUNT),
@@ -2180,6 +2207,7 @@ scenarios! {
         needs_own_session => NeedsOwnSession,
         create_outcome_unknown => CreateOutcomeUnknown,
         copies_differ => CopiesDiffer,
+        regenerated_file_differs => RegeneratedFileDiffers,
         remote_unreachable => RemoteUnreachable,
         remote_disconnected => RemoteDisconnected,
         manifest_exists => ManifestExists,
