@@ -132,3 +132,12 @@ Stopping: further mitigation adds surface, not safety.
    function.
 5. **`script(1)` for the PTY:** agree. Linux CI only; macOS's `script` flags differ.
 6. **Function form (new):** see decision 1.
+
+## Owner decisions (2026-10-20)
+
+The owner approved the design with these choices:
+
+- **H4:** `opv login --shell` emits a non-exported shell variable and an `opv` shell function that hands the session to opv alone. Assistants, scripts and editors started from that shell never inherit it. Plain `op` in that shell is not signed in.
+- **H5:** `--shell=powershell` is not in 0.14; it stays refused with `choice_required`. Windows users rely on desktop-app reuse. Revisit with a verified `op.exe` recording.
+- **Medium findings:** M1–M9 are fixed in 0.14 (rework lane `session-fmeca-fixes`). M10 (`set -x` tracing the eval) is accepted as a documented residual.
+- **§11:** Q2, no `OP_ACCOUNT` export. Q3, Linux with a display counts as `Available` only when a `1password` process is running (M2). Q4, no `opv logout --shell` for now. Q5, the e2e tests use `script(1)` for a terminal.
