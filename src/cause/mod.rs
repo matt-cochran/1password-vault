@@ -822,6 +822,13 @@ pub enum Cause {
         stdout: crate::app::desktop_integration::StdoutKind,
         shell: crate::host::Shell,
     },
+    /// `opv login --shell` was asked for one shell's syntax while another shell runs it
+    /// (#203, FMECA M5): a shell that cannot parse the lines can print them, session and
+    /// all, in its error, so opv refuses before any sign-in. `running` is the parent process.
+    ShellMismatch {
+        requested: crate::host::Shell,
+        running: crate::host::Shell,
+    },
     NeedsConfirm {
         env: EnvName,
     },
@@ -1926,6 +1933,7 @@ impl Cause {
             NeedsTerminal { .. } => "terminal_required",
             PersonOnly { .. } => "person_only",
             ShellEvalRequired { .. } => "shell_eval_required",
+            ShellMismatch { .. } => "shell_mismatch",
             NeedsConfirm { .. } => "confirm_required",
             ConfirmMismatch { .. } => "confirm_mismatch",
             ValuesNeeded { .. } => "findings",
@@ -1985,6 +1993,7 @@ impl Cause {
             | KeyNotDeclared { .. }
             | Ambiguous { .. }
             | ChoiceRequired { .. }
+            | ShellMismatch { .. }
             | NothingInScope { .. }
             | Usage { .. }
             | AlreadyDeclared { .. }
@@ -2088,6 +2097,7 @@ impl Cause {
             | KeyNotDeclared { .. }
             | Ambiguous { .. }
             | ChoiceRequired { .. }
+            | ShellMismatch { .. }
             | NothingInScope { .. }
             | Usage { .. }
             | AlreadyDeclared { .. }

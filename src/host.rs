@@ -377,6 +377,25 @@ pub enum Platform {
     Other,
 }
 
+/// The shell a program path or name is (`/usr/bin/fish`, `bash`, `pwsh.exe`), by its base
+/// name; `None` for a program opv does not know as a shell with a syntax of its own.
+pub fn shell_named(program: &str) -> Option<Shell> {
+    let base = program
+        .trim()
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let base = base.strip_suffix(".exe").unwrap_or(&base);
+    // A login shell's `comm` starts with `-` (`-bash`).
+    match base.strip_prefix('-').unwrap_or(base) {
+        "fish" => Some(Shell::Fish),
+        "pwsh" | "powershell" => Some(Shell::PowerShell),
+        "bash" | "zsh" | "sh" | "dash" | "ksh" | "mksh" | "ash" => Some(Shell::Posix),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Shell {
@@ -699,19 +718,11 @@ impl Host {
         };
         // An empty `$SHELL` counts as unset.
         let named = env.shell().filter(|s| !s.trim().is_empty()).map(|s| {
-            let base = s
-                .rsplit(['/', '\\'])
-                .next()
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            let base = base.strip_suffix(".exe").unwrap_or(&base).to_string();
-            match base.as_str() {
-                "fish" => Shell::Fish,
-                "pwsh" | "powershell" => Shell::PowerShell,
-                "bash" | "zsh" | "sh" | "dash" | "ksh" => Shell::Posix,
-                _ if platform == Platform::Windows => Shell::PowerShell,
-                _ => Shell::Other,
-            }
+            shell_named(&s).unwrap_or(if platform == Platform::Windows {
+                Shell::PowerShell
+            } else {
+                Shell::Other
+            })
         });
         let shell = named.unwrap_or(match platform {
             Platform::Windows => Shell::PowerShell,

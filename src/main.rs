@@ -1129,7 +1129,8 @@ enum Cmd {
 /// `--shell` of `opv login` (#203, session-reuse §5.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 enum ShellArg {
-    /// The shell named by $SHELL (PowerShell on Windows).
+    /// The shell running opv (its parent process), else the one $SHELL names (PowerShell on
+    /// Windows).
     Auto,
     /// bash, zsh, sh: `eval "$(opv login --shell)"`.
     #[value(alias = "bash", alias = "zsh", alias = "sh")]
@@ -1142,14 +1143,14 @@ enum ShellArg {
 }
 
 impl ShellArg {
-    /// The shell to print for; `Auto` is the detected one (it may be `Shell::Other`).
-    fn to_shell(self, detected: opv::host::Shell) -> opv::host::Shell {
+    /// The shell asked for by name; `None` for `Auto`, which the running shell decides.
+    fn requested(self) -> Option<opv::host::Shell> {
         use opv::host::Shell;
         match self {
-            ShellArg::Auto => detected,
-            ShellArg::Posix => Shell::Posix,
-            ShellArg::Fish => Shell::Fish,
-            ShellArg::PowerShell => Shell::PowerShell,
+            ShellArg::Auto => None,
+            ShellArg::Posix => Some(Shell::Posix),
+            ShellArg::Fish => Some(Shell::Fish),
+            ShellArg::PowerShell => Some(Shell::PowerShell),
         }
     }
 }
@@ -5086,16 +5087,21 @@ fn help(topic: &[String], out: &mut dyn Write) -> Result<(), Error> {
 /// process ([`opv::runner::use_op_session`]).
 /// The `opv login --shell` refusals after `require_terminal` (CI, no terminal, a
 /// service-account or Connect credential), in session-reuse §5.5's order: an assistant,
-/// stdout that is not a pipe, then a shell opv has no syntax for. Returns the shell.
+/// stdout that is not a pipe, another shell's syntax than the running one's (FMECA M5),
+/// then a shell opv has no syntax for. Returns the shell.
 fn login_shell_preflight(arg: ShellArg, account: Option<&str>) -> Result<opv::host::Shell, Error> {
     use opv::app::login_shell;
     use opv::host::Shell;
-    let shell = arg.to_shell(opv::host::Host::detect().shell);
+    // FMECA M5: the running shell (the parent process) decides `Auto`, ahead of `$SHELL`.
+    let running = login_shell::parent_shell();
+    let shell =
+        login_shell::chosen_shell(arg.requested(), running, opv::host::Host::detect().shell);
     opv::host::refuse_if_agent(
         &opv::host::ProcessEnv,
         opv::cause::Cmd::login_shell(shell, account),
     )?;
     login_shell::check_stdout(login_shell::stdout_kind(), shell)?;
+    login_shell::check_shell(shell, running)?;
     // PowerShell is withheld until the owner decides (FMECA H5): script-block logging
     // would record the evaluated session.
     if matches!(shell, Shell::Other | Shell::PowerShell) {

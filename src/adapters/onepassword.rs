@@ -51,7 +51,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 use super::onepassword_diagnose::{Facts, locate_owner};
 use super::onepassword_diagnose_items::diagnose_item_call;
-use crate::app::desktop_integration::{DesktopIntegration, NoIntegration};
+use crate::app::desktop_integration::DesktopIntegration;
+use crate::app::doctor_session::host_integration;
 use crate::cause::{
     AccountId, AccountRef, AccountSource, Cause, CredentialProblem, CredentialRef, DiagnoseContext,
     DottedPath, EnvName, ExitClass, FieldName, FieldType, GrantModel, IoKind, ItemId, Location,
@@ -530,26 +531,6 @@ fn accounts_in_app(host: &Host) -> bool {
     host.op_is_windows_exe() || matches!(host.platform, Platform::MacOs | Platform::Windows)
 }
 
-/// The desktop app integration as far as the host alone tells (session-reuse §3.2 steps
-/// 1-4; no probe): `NotApplicable` under CI or a non-interactive credential, `Unavailable`
-/// for the Linux `op` in WSL, `Available` where op talks to the app (macOS, Windows, WSL
-/// with `op.exe`). `None` where the host alone cannot tell (Linux: whether the app runs is
-/// the detection lane's `/proc` check), which keeps today's wording there.
-///
-/// The same rules as `doctor_session::classify_static`, restricted to what [`Host`] holds
-/// in this lane; the integration step may route this through it once that lands.
-pub fn static_integration(host: &Host) -> Option<DesktopIntegration> {
-    if host.ci || host.op_credential.is_some() {
-        return Some(DesktopIntegration::NotApplicable);
-    }
-    if host.platform == Platform::Wsl && !host.op_is_windows_exe() {
-        return Some(DesktopIntegration::Unavailable {
-            reason: NoIntegration::WslLinuxOp,
-        });
-    }
-    accounts_in_app(host).then_some(DesktopIntegration::Available)
-}
-
 /// The names of the shell's `OP_SESSION*` variables (values are never read). In this
 /// crate's unit tests, none: no test depends on the developer's shell (as `Host::detect`).
 fn shell_session_vars() -> Vec<String> {
@@ -557,9 +538,6 @@ fn shell_session_vars() -> Vec<String> {
         Vec::new()
     } else {
         crate::app::account::session_var_names()
-            .into_iter()
-            .filter(|v| crate::runner::is_session_var(v))
-            .collect()
     }
 }
 
@@ -574,7 +552,7 @@ fn session_cause(
     session_cause_with(
         session,
         host,
-        static_integration(host),
+        host_integration(host),
         &shell_session_vars(),
         ctx,
         seen,
@@ -2322,7 +2300,7 @@ mod tests {
         session_cause_with(
             Session::NotSignedIn,
             host,
-            static_integration(host),
+            host_integration(host),
             &vars,
             &ctx,
             None,
@@ -2430,22 +2408,26 @@ mod tests {
         assert_eq!(state_of(&c), SessionState::SignedOut);
     }
 
+    /// The seam to doctor's detection: the host's integration comes from
+    /// `classify_static`, so Linux without a graphical session is `Unavailable`, as doctor says.
     #[test]
-    fn the_static_integration_follows_the_host() {
+    fn the_host_integration_follows_doctors_static_classification() {
         assert_eq!(
             [
-                static_integration(&wsl_linux_op()),
-                static_integration(&wsl_windows_op()),
-                static_integration(&macos()),
-                static_integration(&linux()),
+                host_integration(&wsl_linux_op()),
+                host_integration(&wsl_windows_op()),
+                host_integration(&macos()),
+                host_integration(&linux()),
             ],
             [
                 Some(DesktopIntegration::Unavailable {
-                    reason: NoIntegration::WslLinuxOp
+                    reason: crate::app::desktop_integration::NoIntegration::WslLinuxOp
                 }),
                 Some(DesktopIntegration::Available),
                 Some(DesktopIntegration::Available),
-                None,
+                Some(DesktopIntegration::Unavailable {
+                    reason: crate::app::desktop_integration::NoIntegration::Headless
+                }),
             ]
         );
     }

@@ -616,6 +616,13 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             vec!["pipe", "the terminal"],
         ),
         (
+            ShellMismatch {
+                requested: crate::host::Shell::Posix,
+                running: crate::host::Shell::Fish,
+            },
+            vec!["fish", "POSIX"],
+        ),
+        (
             NeedsConfirm {
                 env: EnvName::new("env-prod"),
             },
@@ -993,6 +1000,7 @@ fn ordinal(c: &Cause) -> usize {
         NeedsTerminal { .. } => 43,
         PersonOnly { .. } => 77,
         ShellEvalRequired { .. } => 84,
+        ShellMismatch { .. } => 85,
         NeedsConfirm { .. } => 44,
         ConfirmMismatch { .. } => 45,
         ValuesNeeded { .. } => 46,
@@ -1032,7 +1040,7 @@ fn ordinal(c: &Cause) -> usize {
     }
 }
 
-const VARIANTS: usize = 85;
+const VARIANTS: usize = 86;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
@@ -4623,4 +4631,14 @@ fn an_expired_shell_session_is_refreshed_by_the_eval_line() {
     assert_eq!(next_in(&c, &inv()), "opv login --shell=fish | source");
     assert_eq!(c.exit_code(), 6);
     assert_eq!(c.code(), "shell_eval_required");
+}
+
+/// #203, FMECA M5: a mismatched shell's Next is the login in the running shell's own syntax.
+#[test]
+fn a_shell_mismatch_hands_back_the_running_shells_login() {
+    let c = Cause::ShellMismatch {
+        requested: crate::host::Shell::Posix,
+        running: crate::host::Shell::Fish,
+    };
+    assert_eq!(next_in(&c, &inv()), "opv login --shell=fish | source");
 }

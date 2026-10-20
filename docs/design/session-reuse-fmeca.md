@@ -140,4 +140,53 @@ The owner approved the design with these choices:
 - **H4:** `opv login --shell` emits a non-exported shell variable and an `opv` shell function that hands the session to opv alone. Assistants, scripts and editors started from that shell never inherit it. Plain `op` in that shell is not signed in.
 - **H5:** `--shell=powershell` is not in 0.14; it stays refused with `choice_required`. Windows users rely on desktop-app reuse. Revisit with a verified `op.exe` recording.
 - **Medium findings:** M1–M9 are fixed in 0.14 (rework lane `session-fmeca-fixes`). M10 (`set -x` tracing the eval) is accepted as a documented residual.
+- **M7 (moot under H4):** the session lives only in a non-exported variable that the `opv` function passes to opv, so an assistant or MCP server started from the shell never holds a session that a refresh would have to reach. `login_shell_tests::a_child_of_the_shell_does_not_inherit_the_opv_function` pins this.
 - **§11:** Q2, no `OP_ACCOUNT` export. Q3, Linux with a display counts as `Available` only when a `1password` process is running (M2). Q4, no `opv logout --shell` for now. Q5, the e2e tests use `script(1)` for a terminal.
+
+## Canary channels
+
+M8: every place the e2e canary scan (`session-reuse.md` §8.3) must look for `SESSION_CANARY`. The
+`session-e2e` lane builds the scan from this list. The one allowed appearance is the
+`opv login --shell` capture in S2. In eval cases the shell consumes the lines, so the canary
+appears nowhere.
+
+1. **`opv login --shell`'s own stdout.** It may appear only in S2's capture pipe. In every refusal
+   (S7, the M1 and M5 cases below) stdout is empty.
+2. **The stdout of every other command** run in the signed-in shell, in text and `--json`:
+   - S1's `opv check dev` and `opv inventory --json`;
+   - S3's `opv check dev --json` (the expired document and its `next`);
+   - S4's in-command sign-in;
+   - S8's `opv run dev -- env` (the app's own output, with and without `[products.<p>.local]`);
+   - S10's `opv login -- opv check dev`;
+   - S11's `opv doctor` and `opv doctor --json`;
+   - `opv account list --json`.
+3. **Every stderr, `--verbose` included,** on success and on every failure path. That covers S3/S4
+   expiry, S7 refusals and the `note (…)` lines before a sign-in.
+4. **MCP responses.** Every tool result, error document and `next` text from `opv mcp`, in two
+   cases:
+   - started with the environment of a shell that ran the eval (no session: H4);
+   - started through the `opv` function, so it holds `OP_SESSION_<id>`.
+
+   Under the second, a 1Password write must still be refused (`credential_in_environment`), and
+   the refusal must name the variable without its value.
+5. **`TMPDIR` inside the temp root.** Point `TMPDIR` (and the RAM-dir fallback) into the test's root,
+   so the files `local-delivery` and the private RAM folder write are scanned too. Without that,
+   they land outside the scan.
+6. **Every file under the temp root.** That means HOME, the XDG config, state and cache dirs, the
+   project, `.opv`, receipts and `$GITHUB_STEP_SUMMARY` / `$GITHUB_ENV` when they are set. History
+   needs care: `script -c 'sh …'` writes none, so that check proves nothing. Use an interactive
+   bash with `HISTFILE` in the root and `history -a`, or drop the history claim.
+7. **The `script` typescript** of every PTY case.
+8. **The sim's logs.** The argv log must never hold the value. For each non-`op` call (`flyctl`,
+   `gh`, `az`, `kubectl`) and for the app's child, the environment log must hold no `OP_SESSION*`
+   name and no value (M6, H1).
+9. **M1: a pipe to another reader.** Run `opv login --shell | cat`, `| tee <root>/f` and a named
+   FIFO. Each must be refused with `shell_eval_required`, with the canary absent from the
+   typescript, `f` and the FIFO reader's output, and no `op signin` in the log.
+10. **M5: the wrong shell's syntax.** Run `--shell=fish` under bash, `--shell=posix` under fish,
+    and the same under pwsh where it is installed. Each must be refused with `shell_mismatch`
+    before any `op signin`, with the canary absent from the shell's own stderr and from the
+    typescript. A positive control is needed too: the matching syntax evaluates cleanly.
+
+The sim's fidelity is not a channel, but S8 and S6b are only as good as the H1 `op run -- env`
+recording and the #167 recording, so the scan's verdict on those cases depends on them.

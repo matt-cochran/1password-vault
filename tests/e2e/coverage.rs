@@ -49,6 +49,13 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "ShellEvalRequired",
         "opv login --shell lands with the session-shell lane; its S7 scenario comes with it",
     ),
+    // #203, FMECA M5: raised by `opv login --shell` before any sign-in when the parent
+    // process is a shell other than the one asked for. It needs a terminal and a fish or
+    // pwsh parent; the session-e2e lane's script(1) scenario replaces this line.
+    (
+        "ShellMismatch",
+        "needs a terminal under a real fish or pwsh parent; session-e2e's script(1) scenario",
+    ),
     // Reached by 0.11.0's explicit repair `opv tidy`, removed in 0.12.0 (a tidy proposal is
     // deferred: it has no planner); a person's read that tidies reports a conflict
     // as a note and goes on (src/app/tidy.rs), and opv-sim changes nothing between two reads.

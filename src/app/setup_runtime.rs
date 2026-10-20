@@ -267,6 +267,32 @@ impl Backend for Runtime {
     fn take_session(&mut self) -> Vec<(String, SecretValue)> {
         std::mem::take(&mut self.session)
     }
+    fn app_answers(&self) -> bool {
+        // This runtime's own session is left out, and each inherited `OP_SESSION*` is
+        // emptied (op reads an empty one as unset, as doctor's probe does).
+        let inherited = super::account::session_var_names();
+        let mut env: Vec<(&str, &str)> = self
+            .environment()
+            .into_iter()
+            .filter(|(k, _)| !super::account::is_session_var(k))
+            .collect();
+        env.extend(inherited.iter().map(|n| (n.as_str(), "")));
+        let call = Call {
+            program: "op",
+            args: &["whoami", "--format", "json"],
+            stdin: None,
+            env: &env,
+            limit: None,
+        };
+        match self.runner.probe(&call, crate::runner::PROBE_TIMEOUT) {
+            Ok(o) if o.status == 0 => true,
+            _ => {
+                // The probe's failure is the answer; its stderr never attaches elsewhere.
+                let _ = crate::runner::take_failure_excerpt();
+                false
+            }
+        }
+    }
     fn probe(&self, args: &[&str]) -> Result<Output, Error> {
         let env = self.environment();
         let call = Call {
