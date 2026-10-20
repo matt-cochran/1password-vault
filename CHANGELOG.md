@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-20
+
+0.14.0 keeps you signed in to 1Password across opv commands without putting the session where anything else can read it. It also closes a leak: `opv run` could hand the 1Password CLI's session or service-account token to the app.
+
+### Security
+
+- **`opv run` no longer passes 1Password credentials to the app** ([GHSA-96pq-fxvx-w6xq](https://github.com/matt-cochran/1password-vault/security/advisories/GHSA-96pq-fxvx-w6xq)). For a product without a `[products.<p>.local]` section, earlier versions ran `op run -- <command>` directly, and `op run` passed every `OP_*` variable from your shell to the app: an `OP_SESSION_*` session, `OP_SERVICE_ACCOUNT_TOKEN` or `OP_CONNECT_TOKEN`. Every local `opv run` now starts the app through opv's delivery step, which removes all of them. opv also stops passing `OP_SESSION*` to the other tools it starts (flyctl, gh, az, kubectl, and the `opv config edit` editor). On an earlier version, add a `[products.<p>.local]` section (even an empty one) to each product, and rotate any token that was present when an app was started this way.
+
+### Upgrade note
+
+- **A script run under `opv run` that calls `op` itself** (for example `opv run -- ./deploy.sh` that uses `op read`) no longer receives your shell's session or `OP_SERVICE_ACCOUNT_TOKEN`. That includes CI. Call `op` outside `opv run`, or rely on the 1Password desktop app integration.
+
+### Added
+
+- **Sign in once per terminal (#203).** With the 1Password desktop app integration, opv reuses the app's unlock across commands and holds nothing itself. Without it (WSL with the Linux `op`, or headless), `eval "$(opv login --shell)"` or `opv login --shell=fish | source` signs this shell in once:
+  - The session goes into a non-exported variable and an `opv` shell function that passes it to opv alone. Plain `op`, assistants, scripts and editors started from that shell never see it, and the token never touches disk.
+  - `--shell` writes only to its own shell's pipe. `| cat`, `| tee`, a file or a terminal is refused (`shell_eval_required`), and so is syntax for a different shell than the one running (`shell_mismatch`), before any sign-in.
+  - A live session is reused with no prompt. An expired one names the same line as its Next.
+  - PowerShell is not supported yet.
+  - `opv doctor` reports whether the app integration is on and whether this shell holds a live session.
+  - An assistant hands `opv login --shell` to the person and never runs it.
+- **MCP `opv_state` `delivery_preview` takes a `role`** (like `opv run --preview --role`), so a role-scoped product answers instead of refusing with `choice_required`.
+
+### Changed
+
+- **Sign-in errors agree across commands.** `inventory` and `next` report an expired shell session as `expired` with the refresh line, as `ready` and `access` already did. Where `op` talks to the 1Password desktop app (macOS, Windows, WSL with `op.exe`), a signed-out reply with no shell session reads as the app being locked (`app_locked`).
+- **`opv config check` and `opv config edit` print unified hunks** with three lines of context, instead of every line of both files. A proposal's contract diff is unchanged: it is still the whole file, because an assistant writes the proposed file from it.
+
+### Fixed
+
+- **The npm release no longer needs re-runs when npm is slow to list a package.** The platform packages publish back to back, one window of up to 90 minutes waits for npm's integrity to match the released bytes, and then the main package publishes. A duplicate-publish refusal for a version npm has not listed yet waits instead of failing, and a timeout says re-running is safe. In 0.13.0, npm took 2 to 56 minutes to list each package.
+
+### Internal
+
+- **#136 live-check kit:** `docs/verification/v0.13.0-file-delivery.md` holds the runbook and canary tooling for the remaining file-delivery checks. They run on a throwaway Fly app with canary secrets only.
+- **Design records:** `docs/design/session-reuse.md` and its DESIGN-FMECA review, with the owner's decisions.
+
 ## [0.13.0] - 2026-10-20
 
 0.13.0 keeps an application's keys consistent across every environment, lets infrastructure-generated values reach targets without being stored in 1Password, and gives an assistant a fuller picture of the application, still without ever seeing a value.
@@ -23,6 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- MCP `opv_state`'s `needs` section accepts a scan directory inside the project on macOS, where the project's path and its real path differ (`/var` and `/private/var`).
 - `opv propose structure` / `opv apply` planned no boundary for a key present in every environment by default, so a setup from a `.env` failed with `boundary_missing`; a new environment's proposal now also declares the boundaries of the keys it inherits (#210).
 - `opv propose setup --names-from` against an existing contract proposes only the keys it does not declare yet (#176).
 - Local file delivery refuses a runtime directory others can write to without the sticky bit (`ram_dir_unavailable`, `writable_by_others`), writes through a handle on its private directory so a renamed entry cannot redirect a write, and closes descriptors inherited from `op run` before the app starts (#136).
@@ -635,7 +673,8 @@ Local development without a deployment target. Two deprecated forms are removed,
 - `secretctl` renamed to `opv` ([#4](https://github.com/matt-cochran/1password-vault/pull/4)).
 - Gitflow guard, CI on `dev`/`staging`/`main`, and Dependabot targeting `dev` ([#5](https://github.com/matt-cochran/1password-vault/pull/5)).
 
-[Unreleased]: https://github.com/matt-cochran/1password-vault/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/matt-cochran/1password-vault/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/matt-cochran/1password-vault/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/matt-cochran/1password-vault/compare/v0.12.3...v0.13.0
 [0.12.3]: https://github.com/matt-cochran/1password-vault/compare/v0.12.2...v0.12.3
 [0.12.2]: https://github.com/matt-cochran/1password-vault/compare/v0.12.1...v0.12.2

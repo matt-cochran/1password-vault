@@ -47,6 +47,12 @@ pub struct Facts {
     /// The 1Password app holds the accounts op sees (macOS, Windows, op.exe from WSL): an
     /// account is added there, never with `opv login --add` (audit 04.07).
     pub in_app: bool,
+    /// The names of the shell's `OP_SESSION*` variables (never a value): a signed-out
+    /// reply under one for the call's account is an expired shell session (§4.3).
+    pub session_vars: Vec<String>,
+    /// The desktop app integration as far as the host alone tells (§4.3): a signed-out
+    /// reply where op talks to the app is the app locked.
+    pub integration: Option<crate::app::desktop_integration::DesktopIntegration>,
 }
 
 /// The outcome of looking for a vault in the machine's other accounts ([`search_vault`]).
@@ -152,6 +158,8 @@ impl Facts {
             env_overrides,
             pointer,
             in_app: crate::app::account::app_holds_accounts_here(),
+            session_vars: super::onepassword::shell_session_vars(),
+            integration: crate::app::doctor_session::host_integration(&crate::host::Host::detect()),
             ..Self::default()
         }
     }
@@ -352,7 +360,8 @@ fn service_account_rejected(seen: Observed) -> Cause {
 }
 
 /// No session for the account (cases 05–07, 11–12); a live session for another account
-/// (#160) is named when the probe found one.
+/// (#160) is named when the probe found one; otherwise the state is
+/// [`signed_out_state`](crate::app::signin::signed_out_state)'s, as every command decides it.
 fn not_signed_in(seen: &Observed, ctx: &DiagnoseContext, facts: &Facts) -> Cause {
     let account = ctx
         .account
@@ -362,7 +371,12 @@ fn not_signed_in(seen: &Observed, ctx: &DiagnoseContext, facts: &Facts) -> Cause
         (Some(asked), Some(live)) if asked != live => {
             SessionState::OtherAccount { live: live.clone() }
         }
-        _ => SessionState::SignedOut,
+        // The same decision as a session opv found missing itself (§4.3).
+        _ => crate::app::signin::signed_out_state(
+            account.as_ref().map(AccountId::as_str),
+            &facts.session_vars,
+            facts.integration,
+        ),
     };
     Cause::NotSignedIn {
         system: System::OnePassword,

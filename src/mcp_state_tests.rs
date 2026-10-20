@@ -47,6 +47,28 @@ kind = "config"
 environments = ["dev", "prod"]
 "#;
 
+/// [`CONTRACT`] plus two role-scoped dev keys and the target roles the load needs (#136).
+fn role_contract() -> String {
+    format!(
+        "{}\n{}",
+        CONTRACT.replace(
+            "state_vault_id = \"vshr0000000000000000000002\"",
+            "state_vault_id = \"vshr0000000000000000000002\"\nroles = [\"serve\", \"migrate\"]",
+        ),
+        r#"
+[products.app.keys.SERVE_TOKEN]
+kind = "secret"
+environments = ["dev"]
+roles = ["serve"]
+
+[products.app.keys.MIGRATE_URL]
+kind = "secret"
+environments = ["dev"]
+roles = ["migrate"]
+"#
+    )
+}
+
 /// An environment's `app` item, both fields set to marked values.
 fn app_item(env: &str) -> Value {
     json!({
@@ -97,6 +119,15 @@ pub(super) struct World {
 
 impl World {
     pub(super) fn new() -> Self {
+        Self::with_contract(CONTRACT)
+    }
+
+    /// A world whose `app` product declares role-scoped keys (`serve` and `migrate`).
+    pub(super) fn role() -> Self {
+        Self::with_contract(&role_contract())
+    }
+
+    fn with_contract(contract: &str) -> Self {
         let op = FakeOp::default();
         let item = op.insert("vdev0000000000000000000001", app_item("dev"));
         let prod = op.insert("vshr0000000000000000000002", app_item("prod"));
@@ -104,7 +135,7 @@ impl World {
         let dir = tempfile::Builder::new().prefix("myapp-").tempdir().unwrap();
         write_split(
             &dir.path().join("secrets.toml"),
-            &CONTRACT.replace("ITEM", &item).replace("PROD", &prod),
+            &contract.replace("ITEM", &item).replace("PROD", &prod),
         )
         .unwrap();
         // The project's account, as a person's `.opv` pointer records it (in the temp
@@ -321,6 +352,61 @@ fn the_delivery_preview_section_is_opv_run_preview_json() {
 }
 
 #[test]
+fn the_delivery_preview_section_with_a_role_is_opv_run_preview_json() {
+    let w = World::role();
+    let fleet = w.fleet();
+    let mut out = Vec::new();
+    crate::app::delivery_preview::preview_for(
+        &fleet,
+        "dev",
+        None,
+        Some("serve"),
+        None,
+        true,
+        &w.r,
+        &mut out,
+    )
+    .unwrap();
+    let want: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(
+        w.tool(json!({"section": "delivery_preview", "env": "dev", "role": "serve"})),
+        want
+    );
+}
+
+#[test]
+fn the_delivery_preview_with_a_role_serves_only_its_names() {
+    let w = World::role();
+    let doc = w.tool(json!({"section": "delivery_preview", "env": "dev", "role": "serve"}));
+    let mut names: Vec<&str> = doc["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k["key"].as_str().unwrap())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, ["API_KEY", "LOG_LEVEL", "SERVE_TOKEN"]);
+}
+
+#[test]
+fn the_delivery_preview_without_a_role_is_refused() {
+    let w = World::role();
+    assert_eq!(
+        w.tool(json!({"section": "delivery_preview", "env": "dev"}))["error"]["code"],
+        "choice_required"
+    );
+}
+
+#[test]
+fn the_delivery_preview_without_a_role_names_the_roles() {
+    let w = World::role();
+    assert_eq!(
+        w.tool(json!({"section": "delivery_preview", "env": "dev"}))["error"]["subject"]["candidates"],
+        json!(["migrate", "serve"])
+    );
+}
+
+#[test]
 fn the_history_section_is_opv_history_json() {
     let w = World::new();
     let want = w.cli(&["history", "prod", "--target", "web"], |f, r, out| {
@@ -487,6 +573,16 @@ canary! {
     the_status_section_answers_no_value: {"section": "status", "env": "dev"},
 }
 
+#[test]
+fn the_role_scoped_delivery_preview_answers_no_value() {
+    let w = World::role();
+    assert!(
+        !w.tool(json!({"section": "delivery_preview", "env": "dev", "role": "serve"}))
+            .to_string()
+            .contains(MARKER)
+    );
+}
+
 // The surface ---------------------------------------------------------------------------------
 
 /// The registered tool names.
@@ -514,6 +610,11 @@ fn the_six_read_tools_and_the_structure_plan_are_gone() {
         !removed.iter().any(|r| names.iter().any(|n| n == r)),
         "{names:?}"
     );
+}
+
+#[test]
+fn opv_state_documents_the_role_input() {
+    assert!(state_schema()["properties"].get("role").is_some());
 }
 
 #[test]

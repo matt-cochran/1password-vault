@@ -322,7 +322,8 @@ pub fn check(
         out,
         format!("--- {}\n+++ {}", found.store().describe(), file.display()),
     )?;
-    out.write_all(diff(&a, &b).as_bytes()).map_err(write_err)?;
+    out.write_all(diff_hunks(&a, &b).as_bytes())
+        .map_err(write_err)?;
     // 03.07: either copy may be the intended one (in a PR the committed copy often is); the
     // person picks the direction. Not "keys are missing".
     let manifest = match found.cause_source() {
@@ -381,7 +382,8 @@ pub fn check_file_project(
         regenerated.replace("\r\n", "\n"),
     );
     line(out, format!("--- {label}\n+++ {}", file.display()))?;
-    out.write_all(diff(&a, &b).as_bytes()).map_err(write_err)?;
+    out.write_all(diff_hunks(&a, &b).as_bytes())
+        .map_err(write_err)?;
     Err(Cause::RegeneratedFileDiffers {
         file: file.to_path_buf(),
         committed: project.to_path_buf(),
@@ -421,9 +423,12 @@ fn committed_at_head(path: &Path, r: &dyn CommandRunner) -> Result<String, Error
     }
 }
 
-/// A line diff of `a` to `b`: `-` removed, `+` added, ` ` kept (longest common
-/// subsequence; configurations are small).
-pub fn diff(a: &str, b: &str) -> String {
+/// The number of unchanged lines kept on each side of a change in [`diff_hunks`].
+const DIFF_CONTEXT: usize = 3;
+
+/// The line operations from `a` to `b`: 0 keeps a line, 1 removes one from `a`, 2 adds one
+/// from `b` (longest common subsequence; configurations are small).
+fn line_ops<'t>(a: &'t str, b: &'t str) -> Vec<(u8, &'t str)> {
     let x: Vec<&str> = a.lines().collect();
     let y: Vec<&str> = b.lines().collect();
     let (n, m) = (x.len(), y.len());
@@ -437,19 +442,95 @@ pub fn diff(a: &str, b: &str) -> String {
             };
         }
     }
-    let mut s = String::new();
+    let mut ops: Vec<(u8, &str)> = Vec::new();
     let (mut i, mut j) = (0, 0);
     while i < n || j < m {
         if i < n && j < m && x[i] == y[j] {
-            s.push_str(&format!(" {}\n", x[i]));
+            ops.push((0, x[i]));
             i += 1;
             j += 1;
         } else if i < n && (j == m || lcs[i + 1][j] >= lcs[i][j + 1]) {
-            s.push_str(&format!("-{}\n", x[i]));
+            ops.push((1, x[i]));
             i += 1;
         } else {
-            s.push_str(&format!("+{}\n", y[j]));
+            ops.push((2, y[j]));
             j += 1;
+        }
+    }
+    ops
+}
+
+/// A whole-file line diff of `a` to `b`: every line, marked `-` removed, `+` added or ` `
+/// kept. A proposal's contract diff is this form, because an assistant writes the proposed
+/// file from it (docs/mcp.md, design §6.1 step 4): it must never be shortened to hunks.
+pub fn diff(a: &str, b: &str) -> String {
+    let mut s = String::new();
+    for (kind, line) in line_ops(a, b) {
+        let mark = match kind {
+            1 => '-',
+            2 => '+',
+            _ => ' ',
+        };
+        s.push(mark);
+        s.push_str(line);
+        s.push('\n');
+    }
+    s
+}
+
+/// A line diff of `a` to `b` as unified-style hunks for a person to read (`config check`,
+/// `config edit`): only changed lines plus [`DIFF_CONTEXT`] lines of context around each
+/// change, each hunk under an `@@ -l,n +l,n @@` header.
+pub fn diff_hunks(a: &str, b: &str) -> String {
+    let ops = line_ops(a, b);
+    // How many lines each side has before an op, so a hunk's `@@` numbers read off its ends.
+    let mut a_before = vec![0usize; ops.len() + 1];
+    let mut b_before = vec![0usize; ops.len() + 1];
+    for (k, (kind, _)) in ops.iter().enumerate() {
+        a_before[k + 1] = a_before[k] + if *kind == 2 { 0 } else { 1 };
+        b_before[k + 1] = b_before[k] + if *kind == 1 { 0 } else { 1 };
+    }
+    let changes: Vec<usize> = ops
+        .iter()
+        .enumerate()
+        .filter(|(_, (kind, _))| *kind != 0)
+        .map(|(k, _)| k)
+        .collect();
+    let mut s = String::new();
+    let mut g = 0;
+    while g < changes.len() {
+        let first = changes[g];
+        let mut last = first;
+        // Adjacent changes, and changes no more than two context bands apart, share a hunk.
+        while g + 1 < changes.len() && changes[g + 1] - last <= 2 * DIFF_CONTEXT + 1 {
+            g += 1;
+            last = changes[g];
+        }
+        g += 1;
+        let start = first.saturating_sub(DIFF_CONTEXT);
+        let end = (last + DIFF_CONTEXT).min(ops.len() - 1);
+        let a_count = a_before[end + 1] - a_before[start];
+        let b_count = b_before[end + 1] - b_before[start];
+        let a_start = if a_count == 0 {
+            a_before[start]
+        } else {
+            a_before[start] + 1
+        };
+        let b_start = if b_count == 0 {
+            b_before[start]
+        } else {
+            b_before[start] + 1
+        };
+        s.push_str(&format!(
+            "@@ -{a_start},{a_count} +{b_start},{b_count} @@\n"
+        ));
+        for (kind, text) in &ops[start..=end] {
+            let marker = match kind {
+                0 => ' ',
+                1 => '-',
+                _ => '+',
+            };
+            s.push_str(&format!("{marker}{text}\n"));
         }
     }
     s
@@ -492,7 +573,7 @@ pub fn edit(
             }
             return Err(e);
         }
-        out.write_all(diff(&base.text, &edited).as_bytes())
+        out.write_all(diff_hunks(&base.text, &edited).as_bytes())
             .map_err(write_err)?;
         if !ui.confirm(&format!("Save to {}?", s.describe()))? {
             return line(out, "not saved");
@@ -517,6 +598,21 @@ fn fix_of(e: &Error) -> Option<String> {
     super::own_step(e).0
 }
 
+/// The editor's process for `path`, given the names in the environment it inherits. FMECA
+/// M6: the editor (and its plugins, language servers, terminals) never gets the shell's
+/// 1Password session.
+fn editor_command<'a>(
+    program: &str,
+    words: impl Iterator<Item = &'a str>,
+    path: &std::path::Path,
+    inherited: impl Iterator<Item = String>,
+) -> std::process::Command {
+    let mut editor = std::process::Command::new(program);
+    editor.args(words).arg(path);
+    crate::runner::strip_session_vars(&mut editor, program, inherited);
+    editor
+}
+
 /// `config edit` in a terminal: `$VISUAL`, else `$EDITOR`, else `vi`, on a temporary copy
 /// (mode 0600, removed afterwards; it holds no secret), and a `[y/N]` prompt.
 pub struct TerminalUi;
@@ -535,19 +631,21 @@ impl EditUi for TerminalUi {
         let mut words = editor.split_whitespace();
         let program = words.next().unwrap_or("vi").to_string();
         let tmp = TempCopy::create(text)?;
-        let status = std::process::Command::new(&program)
-            .args(words)
-            .arg(&tmp.path)
-            .status()
-            .map_err(|e| -> Error {
-                Cause::ChildStartFailed {
-                    program: program.clone(),
-                    workdir: None,
-                    io: e.kind().into(),
-                    remote: None,
-                }
-                .into()
-            })?;
+        let mut editor = editor_command(
+            &program,
+            words,
+            &tmp.path,
+            std::env::vars_os().filter_map(|(k, _)| k.into_string().ok()),
+        );
+        let status = editor.status().map_err(|e| -> Error {
+            Cause::ChildStartFailed {
+                program: program.clone(),
+                workdir: None,
+                io: e.kind().into(),
+                remote: None,
+            }
+            .into()
+        })?;
         if !status.success() {
             // The editor quit without success (`:cq`, a crash): the person's edit is
             // abandoned and nothing is saved.

@@ -178,7 +178,7 @@ impl Scenario {
         s
     }
 
-    fn install(&self) {
+    pub(crate) fn install(&self) {
         if self.installed.replace(true) {
             return;
         }
@@ -398,6 +398,9 @@ impl Scenario {
             .env("OPV_SIM_WORLD", self.path("world"))
             // Doctor's core-dump check reads this, not the host's `fs.suid_dumpable`.
             .env("OPV_TEST_SUID_DUMPABLE", "0")
+            // The 1Password app integration is off on every runner, so a sign-in message
+            // never depends on the host (macOS and Windows would read "the app is locked").
+            .env("OP_BIOMETRIC_UNLOCK_ENABLED", "false")
             .stdin(Stdio::null());
         for (k, v) in &self.env {
             c.env(k, v);
@@ -516,7 +519,13 @@ impl Scenario {
             &format!(r#""opv_version":"{}""#, env!("CARGO_PKG_VERSION")),
             r#""opv_version":"<version>""#,
         );
-        s.replace(" (op in WSL does not see the Windows app's accounts)", "")
+        let s = s.replace(" (op in WSL does not see the Windows app's accounts)", "");
+        // Doctor's app-integration row reads the host (WSL, a display; #203).
+        let s = re(r"(?m)^(ok|warn|skip) +op app integration: [^\n]*\n")
+            .replace_all(&s, "<host app-integration check>\n");
+        re(r#"\{"name":"op app integration"[^}]*\}"#)
+            .replace_all(&s, r#"{"name":"op app integration","host":true}"#)
+            .into_owned()
     }
 }
 
@@ -2522,6 +2531,13 @@ fn reached() -> BTreeSet<String> {
             out.insert(variant.to_string());
         }
     }
+    // `opv login --shell` has no `--json`: its refusals are read off the text its snapshot
+    // holds (session-reuse §8.2, scenarios/session_reuse.rs).
+    for (name, variant, says) in crate::scenarios::session_reuse::REACHED {
+        if committed(name).contains(says) {
+            out.insert(variant.to_string());
+        }
+    }
     out
 }
 
@@ -2592,6 +2608,7 @@ fn every_scenario_snapshot_belongs_to_a_scenario() {
         .chain(CORE.iter().copied())
         .chain(crate::scenarios::assistant::SNAPSHOTS.iter().copied())
         .chain(crate::scenarios::consistency::SNAPSHOTS.iter().copied())
+        .chain(crate::scenarios::session_reuse::SNAPSHOTS.iter().copied())
         .collect();
     let orphans: Vec<String> = std::fs::read_dir(scenario_snapshots())
         .map(|d| {

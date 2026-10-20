@@ -609,6 +609,20 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             vec!["opv access prod", "CLAUDECODE"],
         ),
         (
+            ShellEvalRequired {
+                stdout: crate::app::desktop_integration::StdoutKind::Terminal,
+                shell: crate::host::Shell::Fish,
+            },
+            vec!["pipe", "the terminal"],
+        ),
+        (
+            ShellMismatch {
+                requested: crate::host::Shell::Posix,
+                running: crate::host::Shell::Fish,
+            },
+            vec!["fish", "POSIX"],
+        ),
+        (
             NeedsConfirm {
                 env: EnvName::new("env-prod"),
             },
@@ -985,6 +999,8 @@ fn ordinal(c: &Cause) -> usize {
         Unrecognized { .. } => 42,
         NeedsTerminal { .. } => 43,
         PersonOnly { .. } => 77,
+        ShellEvalRequired { .. } => 84,
+        ShellMismatch { .. } => 85,
         NeedsConfirm { .. } => 44,
         ConfirmMismatch { .. } => 45,
         ValuesNeeded { .. } => 46,
@@ -1024,7 +1040,7 @@ fn ordinal(c: &Cause) -> usize {
     }
 }
 
-const VARIANTS: usize = 84;
+const VARIANTS: usize = 86;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
@@ -2720,6 +2736,23 @@ fn a11_a_choice_among_several_lists_them() {
         candidates: vec!["web".into(), "worker".into()],
     };
     assert_eq!(next_in(&c, &inv()), "opv target list");
+}
+
+/// #203 (session-reuse §5.5): `opv login --shell` with PowerShell or a shell opv has no
+/// syntax for hands back the login in the explicit POSIX syntax, with the account given.
+#[test]
+fn a_shell_choice_hands_back_the_posix_login() {
+    let c = Cause::ChoiceRequired {
+        flag: "--shell".into(),
+        candidates: vec!["posix".into(), "fish".into()],
+    };
+    let inv = cli(&["opv", "login", "--shell=powershell"]);
+    assert_eq!(next_in(&c, &inv), r#"eval "$(opv login --shell=posix)""#);
+    let inv = cli(&["opv", "login", "--shell", "--account", "acme"]);
+    assert_eq!(
+        next_in(&c, &inv),
+        r#"eval "$(opv login --shell=posix --account acme)""#
+    );
 }
 
 /// A11: the one candidate keeps the child command's placeholder.
@@ -4596,4 +4629,33 @@ fn an_import_refused_for_its_tier_is_a_persons_step() {
         file: PathBuf::from("local.env"),
     };
     assert!(c.human_required(&inv()));
+}
+
+/// #203 (session-reuse §4.3): an expired shell session's Next is the shell's refresh line,
+/// and `shell_eval_required` hands back the same login inside the eval.
+#[test]
+fn an_expired_shell_session_is_refreshed_by_the_eval_line() {
+    let c = Cause::NotSignedIn {
+        system: System::OnePassword,
+        account: Some(AccountId::new("ACC-6AIN")),
+        state: SessionState::Expired,
+    };
+    assert_eq!(next_in(&c, &inv()), "eval \"$(opv login --shell)\"");
+    let c = Cause::ShellEvalRequired {
+        stdout: crate::app::desktop_integration::StdoutKind::Terminal,
+        shell: crate::host::Shell::Fish,
+    };
+    assert_eq!(next_in(&c, &inv()), "opv login --shell=fish | source");
+    assert_eq!(c.exit_code(), 6);
+    assert_eq!(c.code(), "shell_eval_required");
+}
+
+/// #203, FMECA M5: a mismatched shell's Next is the login in the running shell's own syntax.
+#[test]
+fn a_shell_mismatch_hands_back_the_running_shells_login() {
+    let c = Cause::ShellMismatch {
+        requested: crate::host::Shell::Posix,
+        running: crate::host::Shell::Fish,
+    };
+    assert_eq!(next_in(&c, &inv()), "opv login --shell=fish | source");
 }

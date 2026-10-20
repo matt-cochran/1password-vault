@@ -17,11 +17,140 @@ use std::io;
 use std::time::Duration;
 
 use crate::adapters::onepassword;
+use crate::adapters::onepassword_manifest::Account;
+use crate::app::desktop_integration::{DesktopIntegration, SignInKind};
 use crate::domain::{Fleet, ItemRef};
 use crate::error::Error;
 use crate::host::Host;
 use crate::provider::{CredentialField, DeployLogin};
 use crate::runner::{Call, CommandRunner, CreateOutcome, Outcome, Output};
+
+/// How an `op` call for an account stays signed in across commands (session-reuse §2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReusePath {
+    /// op asks the 1Password desktop app; nothing is carried.
+    App,
+    /// The shell exports `var` (`opv login --shell`), and op reads it.
+    Shell { var: String },
+    /// Neither: a sign-in lasts for one opv command.
+    PerCommand,
+}
+
+impl ReusePath {
+    /// `self`, with the app taking over where no shell variable decides: a host whose
+    /// static integration (§3.2 steps 1-4) leaves the app possible is [`ReusePath::App`].
+    pub fn with_integration(self, integration: Option<DesktopIntegration>) -> Self {
+        match (self, integration) {
+            (
+                ReusePath::PerCommand,
+                Some(DesktopIntegration::Active | DesktopIntegration::Available),
+            ) => ReusePath::App,
+            (p, _) => p,
+        }
+    }
+}
+
+/// Which shell session variable among `vars` (names only, never a value) op would use for
+/// `account` (FMECA M3). op names it `OP_SESSION_<shorthand or user UUID>`, so the owner
+/// is found in `listed` (`op account list`), as `account::session_var_findings` does.
+/// With no listing, a variable named after `account` itself, or the only one there is.
+/// [`ReusePath::Shell`] when one belongs to the account; [`ReusePath::PerCommand`]
+/// otherwise (see [`ReusePath::with_integration`] for the app).
+pub fn reuse_path(account: Option<&str>, vars: &[String], listed: &[Account]) -> ReusePath {
+    let vars: Vec<&String> = vars
+        .iter()
+        .filter(|v| super::account::is_session_var(v))
+        .collect();
+    let suffix = |v: &str| v.strip_prefix("OP_SESSION_").unwrap_or("").to_string();
+    let owner = |v: &str| super::account::session_var_owner(v, listed);
+    let found = if listed.is_empty() {
+        account
+            .and_then(|a| {
+                vars.iter()
+                    .find(|v| !suffix(v).is_empty() && suffix(v).eq_ignore_ascii_case(a))
+                    .copied()
+            })
+            .or_else(|| (vars.len() == 1).then(|| vars[0]))
+    } else {
+        // The selected account's UUID, or op's default (the only one listed) without one.
+        let selected = match account {
+            Some(a) => crate::adapters::onepassword_manifest::resolve(listed, a).ok(),
+            None if listed.len() == 1 => Some(listed[0].account_uuid.clone()),
+            None => None,
+        };
+        selected.and_then(|uuid| {
+            vars.iter()
+                .find(|v| owner(v).is_some_and(|a| a.account_uuid == uuid))
+                .copied()
+        })
+    };
+    match found {
+        Some(var) => ReusePath::Shell { var: var.clone() },
+        None => ReusePath::PerCommand,
+    }
+}
+
+/// The state of a session op reported signed out (session-reuse §4.3, FMECA M3): the one
+/// decision every command makes, whether opv found the session missing itself or read op's
+/// signed-out reply. `Expired` when the shell exports a session for `account`
+/// ([`ReusePath::Shell`]): the person refreshes that shell; `AppLocked` where op talks to
+/// the desktop app; `SignedOut` otherwise. `shell_vars` are names only, never values.
+pub fn signed_out_state(
+    account: Option<&str>,
+    shell_vars: &[String],
+    integration: Option<DesktopIntegration>,
+) -> crate::cause::SessionState {
+    use crate::cause::SessionState;
+    match reuse_path(account, shell_vars, &[]).with_integration(integration) {
+        ReusePath::Shell { .. } => SessionState::Expired,
+        ReusePath::App => SessionState::AppLocked,
+        ReusePath::PerCommand => SessionState::SignedOut,
+    }
+}
+
+/// What `sign_in_here` (main.rs) says before an in-command sign-in (§4.1). `kind` is the
+/// sign-in's own answer when known (V1); before it, the host's static integration decides.
+/// `expired` is the shell's session variable for the account when there is one
+/// ([`ReusePath::Shell`]): its name (never its value) is said with the refresh (§4.3, S4).
+pub fn sign_in_notice(kind: Option<SignInKind>, host: &Host, expired: Option<&str>) -> String {
+    const APP: &str = "You are not signed in to 1Password. Approve 1Password's prompt. This \
+                       terminal then stays signed in while the 1Password app keeps it authorized.";
+    let integration = super::doctor_session::host_integration(host);
+    let app_possible = matches!(
+        integration,
+        Some(DesktopIntegration::Active | DesktopIntegration::Available)
+    );
+    match (kind, expired) {
+        (Some(SignInKind::App), _) => APP.to_string(),
+        // A shell variable decides before the app does (`ReusePath::with_integration`).
+        (None, None) if app_possible => {
+            "You are not signed in to 1Password. Approve 1Password's prompt, \
+             or enter your password there; it goes only to 1Password. With the 1Password app's \
+             CLI integration on, this terminal then stays signed in while the app keeps it \
+             authorized; without it, this sign-in lasts for this command only."
+                .to_string()
+        }
+        _ => {
+            let opening = match expired {
+                Some(var) => format!("This shell's 1Password session ({var}) expired."),
+                None => "You are not signed in to 1Password.".to_string(),
+            };
+            let base = format!(
+                "{opening} Sign in to go on; your password goes only to 1Password's prompt. \
+                 This sign-in lasts for this command only"
+            );
+            // FMECA H5: no `--shell=powershell` in 0.14, so PowerShell gets no refresh line.
+            if host.shell == crate::host::Shell::PowerShell {
+                format!("{base}.")
+            } else {
+                format!(
+                    "{base}: to stay signed in across commands in this shell, run {}",
+                    crate::app::login_shell::refresh_command(host.shell, None)
+                )
+            }
+        }
+    }
+}
 
 /// The run's runner, for one environment: its 1Password account on `op` calls and, once
 /// signed in, its deploy identity on the target CLI's calls.

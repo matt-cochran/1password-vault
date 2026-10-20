@@ -258,6 +258,8 @@ struct Row {
     /// A failed call's scrubbed stderr excerpt (`  az said: …`), printed under the line in
     /// text output only, never in `--json` (M2, NR-31).
     excerpt: Option<String>,
+    /// The session rows' JSON `state` and `reason` (#203, design §3.3); `None` elsewhere.
+    session: Option<(&'static str, Option<&'static str>)>,
 }
 
 impl Row {
@@ -347,7 +349,24 @@ impl Report {
             act: None,
             fix,
             excerpt: None,
+            session: None,
         });
+    }
+
+    /// The desktop-integration and shell-session rows (#203, design §3.3): never a failure.
+    fn session(&mut self, rows: Vec<super::doctor_session::DoctorRow>) {
+        use super::doctor_session::RowStatus;
+        for row in rows {
+            let state = match row.status {
+                RowStatus::Ok => State::Ok,
+                RowStatus::Warn => State::Warn,
+                RowStatus::Skip => State::Skip,
+            };
+            self.row(row.name, state, row.text, row.fix);
+            if let Some(last) = self.rows.last_mut() {
+                last.session = Some((row.state, row.reason));
+            }
+        }
     }
 
     /// Whether the check `name` that runs once (not a target's) passed.
@@ -408,6 +427,9 @@ fn run_on_with(
         );
     } else if op_present {
         report.push("op auth", op_auth(r, host, scope.env).map(Check::Ok));
+        let account = (fleet.as_ref().zip(scope.env))
+            .and_then(|(f, e)| f.environment(e).ok()?.account.as_deref());
+        report.session(super::doctor_session::doctor_rows(&host(), r, account));
     } else {
         // One failure per cause: the op line already says why (review #12).
         report.skip("op auth", "op not available (see the op line above)".into());
@@ -577,21 +599,27 @@ fn print_text(report: &Report, out: &mut dyn Write, err: &mut dyn Write) -> Resu
 /// `detail` is the first line of the check's text (names, versions and commands only);
 /// a check with something to do has `do` (the action only a person can take, or null)
 /// and `next` (a command that runs as typed), both null otherwise; the top-level pair is
-/// the first failing check's.
+/// the first failing check's. The #203 session rows also carry `state` and `reason`
+/// (design §3.3).
 fn print_json(report: &Report, source: Option<&str>, out: &mut dyn Write) -> Result<(), Error> {
     let checks: Vec<serde_json::Value> = report
         .rows
         .iter()
         .map(|row| {
             let (act, next) = row.step();
-            serde_json::json!({
+            let mut check = serde_json::json!({
                 "name": row.name,
                 "target": row.target,
                 "status": row.state.json(),
                 "detail": row.text.lines().next().unwrap_or(""),
                 "next": next,
                 "do": act,
-            })
+            });
+            if let Some((state, reason)) = row.session {
+                check["state"] = state.into();
+                check["reason"] = reason.into();
+            }
+            check
         })
         .collect();
     // The first failure's own step (its cause's).
@@ -1391,6 +1419,10 @@ mod tests {
     /// agent skill.
     const CHECK_LINES: usize = if cfg!(windows) { 7 } else { 8 };
 
+    /// #203: the `op app integration` row after `op auth` whenever op is present (on these
+    /// headless Linux hosts, `unavailable`, with no op call; no shell session is set).
+    const SESSION_ROWS: usize = 1;
+
     /// Doctor scoped to environments without a target (`doctor --env dev`), on Linux.
     #[cfg(not(windows))]
     fn doctor_local_only(r: &FakeRunner) -> (Result<(), Error>, String) {
@@ -1457,7 +1489,7 @@ mod tests {
         let (res, out) = doctor(Ok(fleet()), &r);
         res.unwrap();
         let lines = checks(&out);
-        assert_eq!(lines.len(), CHECK_LINES, "{out}");
+        assert_eq!(lines.len(), CHECK_LINES + SESSION_ROWS, "{out}");
         assert!(
             lines[0].starts_with("ok") && lines[0].contains("config"),
             "{out}"
@@ -1468,11 +1500,11 @@ mod tests {
         );
         assert!(lines[2].contains("SERVICE_ACCOUNT"), "{out}");
         assert!(
-            lines[3].contains("flyctl") && lines[3].contains("v0.4.112"),
+            lines[4].contains("flyctl") && lines[4].contains("v0.4.112"),
             "{out}"
         );
         assert!(
-            lines[4].starts_with("ok") && lines[4].contains("fly auth"),
+            lines[5].starts_with("ok") && lines[5].contains("fly auth"),
             "{out}"
         );
         assert_eq!(
@@ -1543,7 +1575,7 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("\n  fix: opv login\n"), "{out}");
-        assert_eq!(lines.len(), CHECK_LINES, "{out}");
+        assert_eq!(lines.len(), CHECK_LINES + SESSION_ROWS, "{out}");
         // Doctor and the read path share one classification: whoami, then account list;
         // doctor then asks the 1Password app once.
         assert_eq!(
@@ -1583,7 +1615,7 @@ mod tests {
             matches!(&res, Err(e) if e.code_str() == "dependency_missing"),
             "{res:?}"
         );
-        assert!(out.lines().nth(3).unwrap().starts_with("FAIL"), "{out}");
+        assert!(out.lines().nth(4).unwrap().starts_with("FAIL"), "{out}");
     }
 
     /// A configuration that breaks a field rule (`bogus` is no environment field).
@@ -1600,7 +1632,7 @@ mod tests {
         let e = res.unwrap_err();
         assert_eq!(e.exit_code(), 2, "{e}");
         let lines = checks(&out);
-        assert_eq!(lines.len(), CHECK_LINES, "{out}");
+        assert_eq!(lines.len(), CHECK_LINES + SESSION_ROWS, "{out}");
         assert!(
             lines[0].starts_with("FAIL") && lines[0].contains("bogus"),
             "{out}"
@@ -1629,7 +1661,7 @@ mod tests {
         let e = res.unwrap_err();
         assert_eq!(e.exit_code(), 7, "{e}");
         assert!(
-            out.lines().nth(4).unwrap().starts_with("FAIL  fly auth"),
+            out.lines().nth(5).unwrap().starts_with("FAIL  fly auth"),
             "{out}"
         );
         assert_no_values(&out);
@@ -1685,12 +1717,12 @@ mod tests {
             res.unwrap();
             let lines = checks(&out);
             assert_eq!(lines[1].starts_with("warn  op:"), warn_op, "{out}");
-            assert_eq!(lines[3].starts_with("warn  flyctl:"), warn_fly, "{out}");
+            assert_eq!(lines[4].starts_with("warn  flyctl:"), warn_fly, "{out}");
             if warn_op {
                 assert!(lines[1].contains("2.40.0"), "{out}");
             }
             if warn_fly {
-                assert!(lines[3].contains("0.4.112"), "{out}");
+                assert!(lines[4].contains("0.4.112"), "{out}");
             }
         }
     }
@@ -1702,7 +1734,7 @@ mod tests {
         let r = FakeRunner::new(g);
         let (res, out) = doctor(Ok(fleet()), &r);
         res.unwrap();
-        assert!(checks(&out)[3].starts_with("ok    flyctl:"), "{out}");
+        assert!(checks(&out)[4].starts_with("ok    flyctl:"), "{out}");
     }
 
     #[test]
@@ -1712,7 +1744,7 @@ mod tests {
         let r = FakeRunner::new(g);
         let (res, out) = doctor(Ok(fleet()), &r);
         res.unwrap();
-        assert!(checks(&out)[3].starts_with("warn  flyctl:"), "{out}");
+        assert!(checks(&out)[4].starts_with("warn  flyctl:"), "{out}");
     }
 
     #[test]
@@ -2479,6 +2511,23 @@ mod tests {
         serde_json::from_str(out).unwrap()
     }
 
+    /// #203 (design §3.3): the app-integration row after `op auth`, with its `state` and
+    /// `reason`; never a failure, and no `op` call on a headless Linux host.
+    #[test]
+    fn json_has_the_app_integration_row_with_state_and_reason() {
+        let (res, out, _) = doctor_scoped(complete_item(), true);
+        res.unwrap();
+        let doc = json_doc(&out);
+        let checks = doc["checks"].as_array().unwrap();
+        let at = |name: &str| checks.iter().position(|c| c["name"] == name).unwrap();
+        assert_eq!(at("op app integration"), at("op auth") + 1);
+        let row = &checks[at("op app integration")];
+        assert_eq!(row["status"], "ok");
+        assert_eq!(row["state"], "unavailable");
+        assert_eq!(row["reason"], "headless");
+        assert!(checks[at("op auth")].get("state").is_none());
+    }
+
     /// P18: one JSON document, schema 1, one entry per check.
     #[test]
     fn json_lists_every_check_with_its_status() {
@@ -2494,7 +2543,7 @@ mod tests {
                     c["status"].as_str().unwrap().to_string(),
                 )
             })
-            .take(4)
+            .take(5)
             .collect();
         assert_eq!(
             (doc["schema_version"].as_u64(), checks),
@@ -2504,6 +2553,7 @@ mod tests {
                     ("config", "ok"),
                     ("op", "ok"),
                     ("op auth", "ok"),
+                    ("op app integration", "ok"),
                     ("item", "ok")
                 ]
                 .map(|(a, b)| (a.to_string(), b.to_string()))

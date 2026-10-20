@@ -1,0 +1,16 @@
+# The §5 recipe (tests/fixtures/compose/recipe.yml), with the kit's image and command.
+# A4-V15 copies this file next to the run's expect.txt (./expect.txt), because under
+# `environment = "declared_only"` no extra variable reaches compose's interpolation.
+services:
+  serve:
+    image: opv-verify-136:0.13.0
+    command: ["check", "serve"]
+    user: "${OPV_UID:?run this under opv run}:${OPV_GID:?run this under opv run}"
+    # LOG_LEVEL (a config key, which opv run delivers as a variable) is added to the §5
+    # recipe so the consumer can compare it. Never run `docker compose config` under opv:
+    # it prints interpolated values (§5.3).
+    environment: {JZ_VAULT_DIR: /run/secrets/journeeze, OPV_VERIFY_EXPECT: /etc/opv-verify/expect, LOG_LEVEL: "${LOG_LEVEL:-}"}
+    volumes:
+      - {type: bind, source: "${OPV_SECRETS_DIR:?run this under opv run}", target: /run/secrets/journeeze, read_only: true}
+      - {type: bind, source: ./expect.txt, target: /etc/opv-verify/expect, read_only: true}
+    logging: {driver: none}
