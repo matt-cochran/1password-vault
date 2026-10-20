@@ -137,10 +137,31 @@ pub fn propose_with(
             doc.set_key_lifecycle(&product, key.as_str(), "retiring")?;
             "retire"
         }
+        Intent::Extend { env, product } => {
+            crate::app::environment(&fleet, env.as_str())?;
+            if let Some(p) = product
+                && !fleet.products.contains_key(p.as_str())
+            {
+                return Err(crate::app::undefined_product(
+                    &fleet,
+                    p.as_str(),
+                    Some(env.as_str()),
+                ));
+            }
+            // A product reaching `env` needs its boundary there, as a new key does: the
+            // proposal declares it (no ids: the apply records them) for each changed
+            // product, and an already-declared boundary is left as it is.
+            let changed =
+                doc.extend_environment(product.as_ref().map(|p| p.as_str()), env.as_str());
+            for product in &changed {
+                doc.declare_boundary(env.as_str(), &fleet.boundary_of(product))?;
+            }
+            "extend"
+        }
         _ => {
             return Err(usage(UsageProblem::ValueFormat {
                 flag: "kind".into(),
-                format: "key, env or retire",
+                format: "key, env, retire or extend",
             }));
         }
     };

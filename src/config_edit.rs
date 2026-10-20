@@ -224,6 +224,52 @@ impl ConfigDoc {
         Ok(())
     }
 
+    /// Bulk extend (#179 B4): add `env` to the `environments` list of every key that declares
+    /// one, in `product` (or in every product when `product` is `None`). A key with no list
+    /// is already present in every environment and is left untouched; a key that already
+    /// lists `env` is unchanged. Returns the products at least one of whose keys changed, so
+    /// the caller can declare their boundary in `env`.
+    pub fn extend_environment(&mut self, product: Option<&str>, env: &str) -> Vec<String> {
+        let products: Vec<String> = match product {
+            Some(p) => vec![p.to_string()],
+            None => self
+                .doc
+                .get("products")
+                .and_then(Item::as_table_like)
+                .map(|t| t.iter().map(|(k, _)| k.to_string()).collect())
+                .unwrap_or_default(),
+        };
+        let mut changed: Vec<String> = Vec::new();
+        for product in products {
+            let keys = keys_path(&product);
+            let names: Vec<String> = match self.table_at(&keys) {
+                Some(t) => t.iter().map(|(k, _)| k.to_string()).collect(),
+                None => continue,
+            };
+            for key in names {
+                let mut path = keys_path(&product);
+                path.push(&key);
+                let Some(item) = self
+                    .table_at_mut(&path)
+                    .and_then(|t| t.get_mut("environments"))
+                else {
+                    continue;
+                };
+                let Some(array) = item.as_array_mut() else {
+                    continue;
+                };
+                if array.iter().any(|v| v.as_str() == Some(env)) {
+                    continue;
+                }
+                array.push(env);
+                if !changed.contains(&product) {
+                    changed.push(product.clone());
+                }
+            }
+        }
+        changed
+    }
+
     /// Declare `boundaries.<boundary> = {}` (no ids yet: an apply records them) in the
     /// declared environment `env`, unless it already declares that boundary. True when the
     /// text changed.
