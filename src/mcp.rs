@@ -749,7 +749,7 @@ fn without_value_fields(args: &rmcp::model::JsonObject) -> (rmcp::model::JsonObj
 /// ([`propose_words`]), the step is the intent document itself, `opv propose --intent`.
 fn write_next(args: &rmcp::model::JsonObject) -> Option<Value> {
     let kind = args.get("kind").and_then(Value::as_str)?;
-    if !["key", "env", "target", "retire", "setup"].contains(&kind) {
+    if !["key", "env", "target", "retire", "setup", "extend"].contains(&kind) {
         return None;
     }
     let command = match propose_words(args) {
@@ -822,7 +822,11 @@ fn proposal<R: Accounted>(
         doc
     };
     match intent {
-        Intent::Key { .. } | Intent::Env { .. } | Intent::Retire { .. } | Intent::Target { .. } => {
+        Intent::Key { .. }
+        | Intent::Env { .. }
+        | Intent::Retire { .. }
+        | Intent::Target { .. }
+        | Intent::Extend { .. } => {
             let (text, ids, rules, generated) = contract_for_proposal(project, r)?;
             let base = rules.as_ref().and_then(|s| s.contract());
             let proposal = if matches!(intent, Intent::Target { .. }) {

@@ -253,6 +253,14 @@ pub enum Intent {
         /// `product/KEY` each; at least one.
         keys: Vec<KeyRef>,
     },
+    /// Bulk extend (#179 B4): add `env` to every key of `product` (or of the whole project)
+    /// that lists its environments explicitly. A key with no list is present everywhere
+    /// already and is left untouched.
+    Extend {
+        env: EnvName,
+        #[serde(default)]
+        product: Option<ProductName>,
+    },
 }
 
 /// Parse the one JSON intent document (design §25.2). An unknown field is refused before
@@ -316,6 +324,7 @@ fn allowed_fields(kind: &str) -> Option<&'static [&'static str]> {
         "structure" => &["kind", "rebind", "guidance"],
         "generate" => &["kind", "env", "keys", "guidance"],
         "attest" => &["kind", "env", "target", "keys"],
+        "extend" => &["kind", "env", "product"],
         _ => return None,
     })
 }
@@ -463,6 +472,12 @@ fn validate(intent: &Intent) -> Result<(), Error> {
             check_env("env", env)?;
             if let Some(g) = guidance {
                 screen("guidance", &g.text)?;
+            }
+        }
+        Intent::Extend { env, product } => {
+            check_env("env", env)?;
+            if let Some(p) = product {
+                check_product("product", p)?;
             }
         }
         Intent::Attest { env, target, keys } => {
@@ -835,6 +850,14 @@ pub fn json_schema() -> serde_json::Value {
         }),
         serde_json::json!(["kind", "env", "target", "keys"]),
     );
+    let extend_kind = object(
+        serde_json::json!({
+            "kind": { "enum": ["extend"] },
+            "env": env(),
+            "product": product()
+        }),
+        serde_json::json!(["kind", "env"]),
+    );
 
     serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -848,7 +871,8 @@ pub fn json_schema() -> serde_json::Value {
             setup_kind,
             structure_kind,
             generate_kind,
-            attest_kind
+            attest_kind,
+            extend_kind
         ]
     })
 }
