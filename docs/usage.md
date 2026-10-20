@@ -753,6 +753,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `needs_undeclared` | 2 | after_fix | no | the code reads names the contract declares nowhere and the default branch does not declare either |
 | `no_target` | 2 | never | no | the environment has no deployment target (run-only) |
 | `nothing_in_scope` | 2 | never | no | nothing in the environment matches the scope the command was given |
+| `regenerated_file_differs` | 2 | never | no | a file project's regenerated configuration file differs from the committed copy; a person picks which is right |
 | `retire_still_read` | 2 | after_fix | no | the deployed code still reads a key a person asked to retire, or no receipt records the deployed revision |
 | `source_only` | 2 | never | no | the product is source-only: it holds shared values for other products' keys and is never run, checked or planned on its own |
 | `state_vault_missing` | 2 | after_fix | yes | a target's state vault for its delivery evidence is not bound yet; a person runs opv apply |
