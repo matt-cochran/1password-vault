@@ -292,6 +292,9 @@ impl Scenario {
             // Doctor's core-dump check reads this, not the host's `fs.suid_dumpable`: the
             // warning count in the summary line must not depend on the builder.
             .env("OPV_TEST_SUID_DUMPABLE", "0")
+            // The 1Password app integration is off on every runner, so a sign-in message
+            // never depends on the host.
+            .env("OP_BIOMETRIC_UNLOCK_ENABLED", "false")
             .envs(self.call_limit.iter().flat_map(|scope| {
                 [
                     ("OPV_TEST_CALL_LIMIT", CALL_LIMIT_SECS),

@@ -398,6 +398,9 @@ impl Scenario {
             .env("OPV_SIM_WORLD", self.path("world"))
             // Doctor's core-dump check reads this, not the host's `fs.suid_dumpable`.
             .env("OPV_TEST_SUID_DUMPABLE", "0")
+            // The 1Password app integration is off on every runner, so a sign-in message
+            // never depends on the host (macOS and Windows would read "the app is locked").
+            .env("OP_BIOMETRIC_UNLOCK_ENABLED", "false")
             .stdin(Stdio::null());
         for (k, v) in &self.env {
             c.env(k, v);

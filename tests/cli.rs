@@ -1343,6 +1343,7 @@ JSON"#,
     let child = Command::new(env!("CARGO_BIN_EXE_opv"))
         .args(["--config", cfg.to_str().unwrap(), "status", "prod"])
         .env_clear()
+        .env("OP_BIOMETRIC_UNLOCK_ENABLED", "false")
         .env("PATH", bin.path())
         .env("XDG_RUNTIME_DIR", runtime.path())
         .env("OP_SERVICE_ACCOUNT_TOKEN", "dummy-not-a-token")
