@@ -1599,7 +1599,10 @@ fn an_undeclared_name_points_at_proposing_an_infrastructure_key() {
     let e = admit_web(&doc("prod", 1, &format!(r#""api/NOPE": "{DB}""#))).unwrap_err();
     assert_eq!(
         e.next_text(),
-        Some("opv propose key '<product>/<KEY>' --source infrastructure".to_string())
+        Some(format!(
+            "opv propose key {} --source infrastructure",
+            crate::error::shell_word("<product>/<KEY>")
+        ))
     );
 }
 
