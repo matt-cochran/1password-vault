@@ -671,4 +671,32 @@ mod prune_step {
             archive_plan(&retiring(), "allumata", "OLD_KEY").plan_id
         );
     }
+
+    /// #179: an archive that edited both items leaves a CI sync per delivered environment,
+    /// shared before production.
+    #[test]
+    fn an_archive_names_the_ci_sync_of_each_environment_it_delivers() {
+        assert_eq!(
+            resync_after_archive(&retiring(), &["istg".to_string(), "iprd".to_string()]),
+            ["opv sync staging", "opv sync prod"]
+        );
+    }
+
+    /// #179: an environment whose item the archive left alone needs no new delivery.
+    #[test]
+    fn an_archive_that_edited_no_item_of_an_environment_leaves_it_no_sync() {
+        assert_eq!(
+            resync_after_archive(&retiring(), &["istg".to_string()]),
+            ["opv sync staging"]
+        );
+    }
+
+    /// #179: a guarded environment's sync carries its confirmation.
+    #[test]
+    fn an_archives_sync_of_a_guarded_environment_confirms_it() {
+        assert_eq!(
+            resync_after_archive(&guarded(), &["iprd".to_string()]),
+            ["opv sync prod --confirm prod"]
+        );
+    }
 }

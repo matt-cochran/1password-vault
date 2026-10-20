@@ -4495,6 +4495,25 @@ fn a_gate_failure_fill_is_the_persons_next() {
     );
 }
 
+/// #179: a gate refused on stale delivery evidence says a retirement's archive is one cause
+/// and a sync records the delivery again, never that the value is missing.
+#[test]
+fn a_stale_delivery_gate_names_the_archive_as_a_cause() {
+    let c = Cause::GateFailed {
+        env: EnvName::new("staging"),
+        keys: vec![(
+            ProductName::new("app"),
+            KeyName::new("API_KEY"),
+            "not_delivered",
+        )],
+    };
+    assert!(
+        c.do_text(&inv())
+            .unwrap_or_default()
+            .contains("a retirement's archive by opv apply rp-")
+    );
+}
+
 #[test]
 fn an_import_refused_for_its_tier_is_a_persons_step() {
     let c = Cause::ImportTierRefused {

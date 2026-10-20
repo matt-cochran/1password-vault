@@ -4122,7 +4122,7 @@ impl Cause {
             GateFailed { env, keys } => match keys.first() {
                 Some((product, key, reason)) if *reason == "not_delivered" => plan(
                     inspect(format!(
-                        "re-deliver {product}/{key} to environment {env}: its delivery evidence is older than the source item"
+                        "re-deliver {product}/{key} to environment {env}: its source item changed after the last delivery (a value edit, or a retirement's archive by opv apply rp-…), so the delivery evidence is out of date until a sync records it again"
                     )),
                     Next::Run(cmd(&["sync"], &[env.as_str()])),
                 ),

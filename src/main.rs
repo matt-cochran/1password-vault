@@ -4421,6 +4421,19 @@ fn run_apply_retire(
         applied.archived.len() + applied.already_archived.len()
     )
     .map_err(write_err)?;
+    // #179: the archive edited the source items; each environment they deliver to has
+    // delivery evidence older than its source until CI delivers again.
+    if !applied.resync.is_empty() {
+        writeln!(
+            out,
+            "The archive edited the source items, so these environments' delivery evidence \
+             is older than their source until CI delivers again:"
+        )
+        .map_err(write_err)?;
+        for command in &applied.resync {
+            writeln!(out, "Next (CI): {command}").map_err(write_err)?;
+        }
+    }
     writeln!(out, "Next: opv ready").map_err(write_err)
 }
 
