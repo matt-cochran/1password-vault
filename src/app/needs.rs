@@ -8,13 +8,14 @@
 //! hashes the file and the NAME, never the right-hand side, so no part of a value can reach
 //! the span.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
 use crate::cause::Cause;
+use crate::domain::value_state::ValueState;
 use crate::domain::{Fleet, span_of};
 use crate::error::Error;
 use crate::runner::CommandRunner;
@@ -73,8 +74,10 @@ pub enum NeedState {
     Undeclared,
     /// The contract declares it; the scanner never observed it.
     DeclaredUnobserved,
-    /// A computed-name observation the scanner could not resolve; by `file:line`.
+    /// Several products could own the observed name; its candidates are in the row.
     Ambiguous,
+    /// A computed-name observation the scanner could not resolve; by `file:line`.
+    Computed,
     /// The contract declares it and the scanner observed it.
     Declared,
 }
@@ -86,6 +89,7 @@ impl NeedState {
             NeedState::Undeclared => "undeclared",
             NeedState::DeclaredUnobserved => "declared_unobserved",
             NeedState::Ambiguous => "ambiguous",
+            NeedState::Computed => "computed",
             NeedState::Declared => "declared",
         }
     }
@@ -95,7 +99,7 @@ impl NeedState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NeedRow {
     /// The undeclared name as observed, or the declared key (also when the code reads it
-    /// under a name a target delivers it as); empty for an [`NeedState::Ambiguous`] row,
+    /// under a name a target delivers it as); empty for a [`NeedState::Computed`] row,
     /// whose location is in `files`.
     pub name: String,
     /// How the name stands against the contract.
@@ -109,6 +113,55 @@ pub struct NeedRow {
     /// carries the annotated span, so the annotation is stale and the name shows again.
     #[serde(default)]
     pub annotation_stale: bool,
+    /// The declared key's value state, classified exactly as `opv inventory` classifies it
+    /// (never a value); absent for rows that declare no key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value_state: Option<ValueState>,
+    /// For an [`NeedState::Ambiguous`] row, each product that could own the name, sorted;
+    /// empty for every other state.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<String>,
+    /// For an [`NeedState::Undeclared`] row, the declaration that would make the name part
+    /// of the contract, validated against the load rules; absent when no product is named.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggested: Option<SuggestedDeclaration>,
+}
+
+/// A declaration an undeclared name would take: the product it belongs to, the key, and the
+/// field `kind`. Names and a word only, never a value. Its TOML, merged into the contract,
+/// loads ([`SuggestedDeclaration::toml`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SuggestedDeclaration {
+    pub product: String,
+    pub key: String,
+    /// `secret` or `config`, from [`crate::domain::kind_guess::kind_for_name`].
+    pub kind: String,
+}
+
+impl SuggestedDeclaration {
+    /// The TOML fragment that declares this key in `fleet`'s languages, scoped to the
+    /// environments whose boundary the product is bound in, so the merged document loads.
+    pub fn toml(&self, fleet: &Fleet) -> String {
+        let mut environments: Vec<&str> = fleet
+            .environments
+            .keys()
+            .filter(|env| fleet.boundary(env, &self.product).is_ok())
+            .map(String::as_str)
+            .collect();
+        environments.sort_unstable();
+        let mut text = format!(
+            "[products.{}.keys.{}]\nkind = \"{}\"\n",
+            self.product, self.key, self.kind
+        );
+        if !environments.is_empty() {
+            let list: Vec<String> = environments
+                .iter()
+                .map(|env| format!("\"{env}\""))
+                .collect();
+            text.push_str(&format!("environments = [{}]\n", list.join(", ")));
+        }
+        text
+    }
 }
 
 /// The result of `opv needs`: one row per observed or declared name, and the scan's
@@ -131,7 +184,7 @@ pub fn needs(
 ) -> NeedsReport {
     let _ = base;
     let scan = Scan::collect(runner, repo, tree, &patterns());
-    classify(runner, repo, tree, fleet, scan)
+    classify(runner, repo, tree, fleet, scan, &ValueStates::new(), None)
 }
 
 /// The report for `options` (#175): the scan its input names (the git tree at `repo`, a
@@ -157,12 +210,64 @@ pub fn needs_with(
             options.env.as_deref(),
         ));
     }
+    let _ = base;
+    let states = value_states(runner, fleet, options.env.as_deref());
     let report = match &options.input {
-        NeedsInput::Git => needs(runner, repo, &WorkTree, fleet, base),
-        NeedsInput::Scan(dir) => needs(runner, dir, &DirTree, fleet, base),
-        NeedsInput::Names(names) => classify(runner, repo, &WorkTree, fleet, scan_of_names(names)),
+        NeedsInput::Git => classify(
+            runner,
+            repo,
+            &WorkTree,
+            fleet,
+            Scan::collect(runner, repo, &WorkTree, &patterns()),
+            &states,
+            options.product.as_deref(),
+        ),
+        NeedsInput::Scan(dir) => classify(
+            runner,
+            dir,
+            &DirTree,
+            fleet,
+            Scan::collect(runner, dir, &DirTree, &patterns()),
+            &states,
+            options.product.as_deref(),
+        ),
+        NeedsInput::Names(names) => classify(
+            runner,
+            repo,
+            &WorkTree,
+            fleet,
+            scan_of_names(names),
+            &states,
+            options.product.as_deref(),
+        ),
     };
     Ok(narrow(report, fleet, options))
+}
+
+/// The value state of each declared key, read exactly as `opv inventory` reads it. The
+/// report is by `(product, key)`: from `env` when given, else the first environment that
+/// desires the key. Never a value, and a failed inventory read yields no state rather than
+/// failing the needs report — a row simply carries none.
+type ValueStates = BTreeMap<(String, String), ValueState>;
+
+fn value_states(runner: &dyn CommandRunner, fleet: &Fleet, env: Option<&str>) -> ValueStates {
+    let Ok(document) = crate::app::inventory::gather(fleet, env, None, runner, None) else {
+        return ValueStates::new();
+    };
+    let mut by_env: BTreeMap<(String, String, String), ValueState> = BTreeMap::new();
+    for cell in document.cells {
+        by_env
+            .entry((cell.product, cell.key, cell.env))
+            .or_insert(cell.state);
+    }
+    let mut states = ValueStates::new();
+    for ((product, key, cell_env), state) in by_env {
+        if env.is_some_and(|env| env != cell_env) {
+            continue;
+        }
+        states.entry((product, key)).or_insert(state);
+    }
+    states
 }
 
 /// The names in a `--names` file: one per line, surrounding space trimmed; blank lines and
@@ -253,16 +358,19 @@ fn classify(
     tree: &dyn Tree,
     fleet: &Fleet,
     scan: Scan,
+    states: &ValueStates,
+    suggest_product: Option<&str>,
 ) -> NeedsReport {
-    // key -> the first product that declares it (products iterate sorted).
-    let mut declared: BTreeMap<String, String> = BTreeMap::new();
+    // key -> every product that declares it (products iterate sorted).
+    let mut declared: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     // name -> the first product that carries an ignore annotation for it, with its span.
     let mut ignores: BTreeMap<String, (String, String)> = BTreeMap::new();
     for (product, p) in &fleet.products {
         for key in p.keys.keys() {
             declared
                 .entry(key.clone())
-                .or_insert_with(|| product.clone());
+                .or_default()
+                .insert(product.clone());
         }
         for (name, annotation) in &p.ignore {
             ignores
@@ -271,30 +379,55 @@ fn classify(
         }
     }
 
-    // name -> (key, product) for every name a declared key is delivered under on a target.
+    // name -> every (key, product) a declared key is delivered under on a target.
     let delivered = delivered_names(fleet);
 
     // (key, product) -> where the code reads the key, under its own name or a delivered one.
     let mut matched: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
     let mut observed: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut ambiguous: Vec<String> = Vec::new();
+    // name -> every product that could own it, and the locations that read it.
+    let mut ambiguous: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
+    // A name read under several owners is not "no code reads it"; it gets no
+    // DeclaredUnobserved row per candidate.
+    let mut ambiguous_keys: BTreeSet<String> = BTreeSet::new();
+    let mut computed: Vec<String> = Vec::new();
     for observation in &scan.observations {
         // A name an assistant found itself carries no `file:line`.
         let location = (!observation.file.is_empty())
             .then(|| format!("{}:{}", observation.file, observation.line));
         match observation.kind {
-            Kind::Ambiguous => ambiguous.extend(location),
+            Kind::Ambiguous => computed.extend(location),
             Kind::Observed => {
                 let Some(name) = &observation.name else {
                     continue;
                 };
-                let owner = match declared.get(name) {
-                    Some(product) => Some((name.clone(), product.clone())),
-                    None => delivered.get(name).cloned(),
-                };
-                match owner {
-                    Some(owner) => matched.entry(owner).or_default().extend(location),
-                    None => observed.entry(name.clone()).or_default().extend(location),
+                let mut candidates: BTreeSet<String> = BTreeSet::new();
+                if let Some(products) = declared.get(name) {
+                    candidates.extend(products.iter().cloned());
+                }
+                if let Some(owners) = delivered.get(name) {
+                    candidates.extend(owners.iter().map(|(_, product)| product.clone()));
+                }
+                match candidates.len() {
+                    0 => observed.entry(name.clone()).or_default().extend(location),
+                    1 => {
+                        let product = candidates.into_iter().next().expect("one candidate");
+                        let key = match declared.get(name) {
+                            Some(_) => name.clone(),
+                            None => delivered
+                                .get(name)
+                                .and_then(|owners| owners.first())
+                                .map(|(key, _)| key.clone())
+                                .unwrap_or_else(|| name.clone()),
+                        };
+                        matched.entry((key, product)).or_default().extend(location);
+                    }
+                    _ => {
+                        let mut files = Vec::new();
+                        files.extend(location);
+                        ambiguous_keys.insert(name.clone());
+                        ambiguous.push((name.clone(), files, candidates.into_iter().collect()));
+                    }
                 }
             }
         }
@@ -310,11 +443,17 @@ fn classify(
             files: files.clone(),
             product: Some(product.clone()),
             annotation_stale: false,
+            value_state: states.get(&(product.clone(), key.clone())).cloned(),
+            candidates: Vec::new(),
+            suggested: None,
         });
     }
 
+    let product = suggest_product
+        .map(str::to_string)
+        .or_else(|| delivered_product(fleet));
     for (name, files) in &observed {
-        if let Some((product, span)) = ignores.get(name) {
+        if let Some((annotation_product, span)) = ignores.get(name) {
             if annotation_is_current(
                 runner,
                 repo,
@@ -330,8 +469,15 @@ fn classify(
                 name: name.clone(),
                 state: NeedState::Undeclared,
                 files: files.clone(),
-                product: Some(product.clone()),
+                product: Some(annotation_product.clone()),
                 annotation_stale: true,
+                value_state: None,
+                candidates: Vec::new(),
+                suggested: product.as_ref().map(|product| SuggestedDeclaration {
+                    product: product.clone(),
+                    key: name.clone(),
+                    kind: kind_word(crate::domain::kind_guess::kind_for_name(name)).to_string(),
+                }),
             });
             continue;
         }
@@ -341,28 +487,60 @@ fn classify(
             files: files.clone(),
             product: None,
             annotation_stale: false,
+            value_state: None,
+            candidates: Vec::new(),
+            suggested: product.as_ref().map(|product| SuggestedDeclaration {
+                product: product.clone(),
+                key: name.clone(),
+                kind: kind_word(crate::domain::kind_guess::kind_for_name(name)).to_string(),
+            }),
         });
     }
 
-    for (name, product) in &declared {
-        if !matched.keys().any(|(key, _)| key == name) {
+    for (name, products) in &declared {
+        if ambiguous_keys.contains(name) {
+            continue;
+        }
+        for product in products {
+            if matched.contains_key(&(name.clone(), product.clone())) {
+                continue;
+            }
             rows.push(NeedRow {
                 name: name.clone(),
                 state: NeedState::DeclaredUnobserved,
                 files: Vec::new(),
                 product: Some(product.clone()),
                 annotation_stale: false,
+                value_state: None,
+                candidates: Vec::new(),
+                suggested: None,
             });
         }
     }
 
-    for location in ambiguous {
+    for (name, files, candidates) in ambiguous {
+        rows.push(NeedRow {
+            name,
+            state: NeedState::Ambiguous,
+            files,
+            product: None,
+            annotation_stale: false,
+            value_state: None,
+            candidates,
+            suggested: None,
+        });
+    }
+
+    for location in computed {
         rows.push(NeedRow {
             name: String::new(),
-            state: NeedState::Ambiguous,
+            state: NeedState::Computed,
             files: vec![location],
             product: None,
             annotation_stale: false,
+            value_state: None,
+            candidates: Vec::new(),
+            suggested: None,
         });
     }
 
@@ -373,13 +551,20 @@ fn classify(
     }
 }
 
-/// Every name a declared key of `fleet` is delivered under on a target: name -> (key,
-/// product), rendered by each target's own name template exactly as a sync renders it, for
-/// every environment the key is desired in and every target that delivers its product.
-/// Products iterate sorted, so a name two products render belongs to the first, as a plain
-/// key two products declare does.
-fn delivered_names(fleet: &Fleet) -> BTreeMap<String, (String, String)> {
-    let mut names: BTreeMap<String, (String, String)> = BTreeMap::new();
+/// The word for a [`crate::domain::Kind`].
+fn kind_word(kind: crate::domain::Kind) -> &'static str {
+    match kind {
+        crate::domain::Kind::Secret => "secret",
+        crate::domain::Kind::Config => "config",
+    }
+}
+
+/// Every name a declared key of `fleet` is delivered under on a target: name -> every
+/// (key, product) that renders it, by each target's own name template exactly as a sync
+/// renders it, for every environment the key is desired in and every target that delivers
+/// its product. A name two products render lists both, so it is seen as ambiguous.
+fn delivered_names(fleet: &Fleet) -> BTreeMap<String, Vec<(String, String)>> {
+    let mut names: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     for (product, p) in &fleet.products {
         for (env_name, env) in &fleet.environments {
             for target in env.targets.keys() {
@@ -390,9 +575,13 @@ fn delivered_names(fleet: &Fleet) -> BTreeMap<String, (String, String)> {
                     if !spec.is_desired_in(env_name) {
                         continue;
                     }
-                    names
+                    let owners = names
                         .entry(fleet.target_name(env_name, target, product, key))
-                        .or_insert_with(|| (key.clone(), product.clone()));
+                        .or_default();
+                    let owner = (key.clone(), product.clone());
+                    if !owners.contains(&owner) {
+                        owners.push(owner);
+                    }
                 }
             }
         }
@@ -539,10 +728,11 @@ pub fn render_text(report: &NeedsReport, out: &mut dyn Write) -> Result<(), Erro
     let count = |state: NeedState| report.rows.iter().filter(|r| r.state == state).count();
     writeln!(
         out,
-        "needs: {} undeclared · {} declared_unobserved · {} ambiguous · {} declared",
+        "needs: {} undeclared · {} declared_unobserved · {} ambiguous · {} computed · {} declared",
         count(NeedState::Undeclared),
         count(NeedState::DeclaredUnobserved),
         count(NeedState::Ambiguous),
+        count(NeedState::Computed),
         count(NeedState::Declared),
     )
     .map_err(super::write_err)?;
