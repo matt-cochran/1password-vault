@@ -921,6 +921,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `policy_refused` | 6 | never | no | opv refused the operation (a value too large, a name opv does not manage, a credential given as an option, ...) |
 | `private_dir_failed` | 6 | after_fix | no | opv could not make its private folder |
 | `ram_dir_unavailable` | 6 | after_fix | no | a private RAM-backed folder is needed (Azure deploy credentials, a file opv run delivers) and none is usable; nothing was read or changed |
+| `shell_eval_required` | 6 | after_fix | yes | opv login --shell prints a 1Password session only to a pipe; run it inside the shell's eval |
 | `stale_plan` | 6 | never | no | the plan changed since it was reviewed (the item, the target or the configuration); nothing was changed |
 | `terminal_required` | 6 | never | yes | the command needs the person's own interactive terminal |
 | `account_ambiguous` | 7 | after_fix | yes | an email or sign-in address names several 1Password accounts; a person picks one by its account ID |

@@ -609,6 +609,13 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             vec!["opv access prod", "CLAUDECODE"],
         ),
         (
+            ShellEvalRequired {
+                stdout: crate::app::desktop_integration::StdoutKind::Terminal,
+                shell: crate::host::Shell::Fish,
+            },
+            vec!["pipe", "the terminal"],
+        ),
+        (
             NeedsConfirm {
                 env: EnvName::new("env-prod"),
             },
@@ -985,6 +992,7 @@ fn ordinal(c: &Cause) -> usize {
         Unrecognized { .. } => 42,
         NeedsTerminal { .. } => 43,
         PersonOnly { .. } => 77,
+        ShellEvalRequired { .. } => 84,
         NeedsConfirm { .. } => 44,
         ConfirmMismatch { .. } => 45,
         ValuesNeeded { .. } => 46,
@@ -1024,7 +1032,7 @@ fn ordinal(c: &Cause) -> usize {
     }
 }
 
-const VARIANTS: usize = 84;
+const VARIANTS: usize = 85;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
@@ -4596,4 +4604,23 @@ fn an_import_refused_for_its_tier_is_a_persons_step() {
         file: PathBuf::from("local.env"),
     };
     assert!(c.human_required(&inv()));
+}
+
+/// #203 (session-reuse §4.3): an expired shell session's Next is the shell's refresh line,
+/// and `shell_eval_required` hands back the same login inside the eval.
+#[test]
+fn an_expired_shell_session_is_refreshed_by_the_eval_line() {
+    let c = Cause::NotSignedIn {
+        system: System::OnePassword,
+        account: Some(AccountId::new("ACC-6AIN")),
+        state: SessionState::Expired,
+    };
+    assert_eq!(next_in(&c, &inv()), "eval \"$(opv login --shell)\"");
+    let c = Cause::ShellEvalRequired {
+        stdout: crate::app::desktop_integration::StdoutKind::Terminal,
+        shell: crate::host::Shell::Fish,
+    };
+    assert_eq!(next_in(&c, &inv()), "opv login --shell=fish | source");
+    assert_eq!(c.exit_code(), 6);
+    assert_eq!(c.code(), "shell_eval_required");
 }

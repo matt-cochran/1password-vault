@@ -42,6 +42,13 @@ pub(crate) const MARK: &str = "S7MARKER";
 
 /// The variants no end-to-end run can reach, and why. Keep it short: prefer a scenario.
 const UNREACHABLE: &[(&str, &str)] = &[
+    // #203: raised by `opv login --shell` when stdout is not a pipe (src/app/login_shell.rs).
+    // The session-shell lane of 0.14.0 adds its scenario (session-reuse §8.2 S7) and this
+    // line goes.
+    (
+        "ShellEvalRequired",
+        "opv login --shell lands with the session-shell lane; its S7 scenario comes with it",
+    ),
     // Reached by 0.11.0's explicit repair `opv tidy`, removed in 0.12.0 (a tidy proposal is
     // deferred: it has no planner); a person's read that tidies reports a conflict
     // as a note and goes on (src/app/tidy.rs), and opv-sim changes nothing between two reads.
