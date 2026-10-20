@@ -161,3 +161,161 @@ fn go_computed_env_names_are_ambiguous() {
     );
     assert_eq!(got, vec![ambiguous(file, 7), ambiguous(file, 8)]);
 }
+
+// --- Ruby ----------------------------------------------------------------------------------
+
+/// Ruby reads: `ENV['X']`, `ENV["X"]` and `ENV.fetch('X'[, default])`, one per line.
+const RUBY_OBSERVED: &str = concat!(
+    "# frozen_string_literal: true\n",
+    "\n",
+    "database_url = ENV[\"DATABASE_URL\"]\n",
+    "cache_dir = ENV['CACHE_DIR']\n",
+    "api_key = ENV.fetch(\"API_KEY\")\n",
+    "debug = ENV.fetch('DEBUG', \"false\")\n",
+);
+
+/// Ruby computed names: a variable or call where a literal name would be.
+const RUBY_COMPUTED: &str = concat!(
+    "# frozen_string_literal: true\n",
+    "\n",
+    "key = \"DATABASE_URL\"\n",
+    "a = ENV[key]\n",
+    "b = ENV.fetch(name)\n",
+    "c = ENV.fetch(build_name, \"default\")\n",
+);
+
+#[test]
+fn ruby_static_env_reads_are_observed_with_file_and_line() {
+    let file = "app.rb";
+    let got = Ruby.scan(file, RUBY_OBSERVED);
+    assert_eq!(
+        got,
+        vec![
+            observed("DATABASE_URL", file, 3),
+            observed("CACHE_DIR", file, 4),
+            observed("API_KEY", file, 5),
+            observed("DEBUG", file, 6),
+        ]
+    );
+}
+
+#[test]
+fn ruby_computed_env_names_are_ambiguous() {
+    let file = "app.rb";
+    let got = Ruby.scan(file, RUBY_COMPUTED);
+    assert_eq!(
+        got,
+        vec![ambiguous(file, 4), ambiguous(file, 5), ambiguous(file, 6)]
+    );
+}
+
+// --- C/C++ ---------------------------------------------------------------------------------
+
+/// C reads: `getenv("X")` and `secure_getenv("X")`, one per line.
+const C_OBSERVED: &str = concat!(
+    "#include <stdlib.h>\n",
+    "\n",
+    "int main(void) {\n",
+    "    const char *a = getenv(\"DATABASE_URL\");\n",
+    "    const char *b = secure_getenv(\"CACHE_DIR\");\n",
+    "    return a == 0 || b == 0;\n",
+    "}\n",
+);
+
+/// C computed names: a variable or call where a literal name would be.
+const C_COMPUTED: &str = concat!(
+    "#include <stdlib.h>\n",
+    "\n",
+    "int main(void) {\n",
+    "    const char *key = \"DATABASE_URL\";\n",
+    "    const char *a = getenv(key);\n",
+    "    const char *b = getenv(build_name());\n",
+    "    return a == 0 || b == 0;\n",
+    "}\n",
+);
+
+/// C++ reads: the qualified `std::getenv` and `secure_getenv`.
+const CPP_OBSERVED: &str = concat!(
+    "#include <cstdlib>\n",
+    "\n",
+    "int main() {\n",
+    "    const char *a = std::getenv(\"DATABASE_URL\");\n",
+    "    const char *b = secure_getenv(\"CACHE_DIR\");\n",
+    "    return a == nullptr || b == nullptr;\n",
+    "}\n",
+);
+
+#[test]
+fn c_static_getenv_reads_are_observed_with_file_and_line() {
+    let file = "app.c";
+    let got = C.scan(file, C_OBSERVED);
+    assert_eq!(
+        got,
+        vec![
+            observed("DATABASE_URL", file, 4),
+            observed("CACHE_DIR", file, 5)
+        ]
+    );
+}
+
+#[test]
+fn c_computed_getenv_names_are_ambiguous() {
+    let file = "app.c";
+    let got = C.scan(file, C_COMPUTED);
+    assert_eq!(got, vec![ambiguous(file, 5), ambiguous(file, 6)]);
+}
+
+#[test]
+fn cpp_static_getenv_reads_are_observed_with_file_and_line() {
+    let file = "app.cpp";
+    let got = C.scan(file, CPP_OBSERVED);
+    assert_eq!(
+        got,
+        vec![
+            observed("DATABASE_URL", file, 4),
+            observed("CACHE_DIR", file, 5)
+        ]
+    );
+}
+
+// --- coverage ------------------------------------------------------------------------------
+
+/// A fixed in-test tree: the files and text a scan reads, with no git and no disk.
+struct FixedTree(&'static [(&'static str, &'static str)]);
+
+impl crate::scan::Tree for FixedTree {
+    fn files(
+        &self,
+        _runner: &dyn crate::runner::CommandRunner,
+        _repo: &std::path::Path,
+    ) -> Vec<String> {
+        self.0.iter().map(|(path, _)| (*path).to_string()).collect()
+    }
+
+    fn read(
+        &self,
+        _runner: &dyn crate::runner::CommandRunner,
+        _repo: &std::path::Path,
+        path: &str,
+    ) -> Option<String> {
+        self.0
+            .iter()
+            .find(|(candidate, _)| *candidate == path)
+            .map(|(_, text)| (*text).to_string())
+    }
+}
+
+#[test]
+fn coverage_names_ruby_and_c_when_both_are_scanned() {
+    let tree = FixedTree(&[
+        ("app.rb", "x = ENV[\"DATABASE_URL\"]\n"),
+        ("app.c", "char *x = getenv(\"CACHE_DIR\");\n"),
+    ]);
+    let runner = crate::runner::ProcessRunner::default();
+    let patterns: Vec<&dyn Pattern> = vec![&Ruby, &C];
+    let scan = crate::scan::Scan::collect(&runner, std::path::Path::new("."), &tree, &patterns);
+    assert_eq!(
+        scan.coverage.languages,
+        vec!["c".to_string(), "ruby".to_string()]
+    );
+}

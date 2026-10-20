@@ -1,5 +1,6 @@
 //! Language scanner patterns (design Part V, row `scan-lang`): Rust, TypeScript/JavaScript,
-//! Python and Go. Each pattern reads one language's source text and returns names only.
+//! Python, Go, Ruby and C/C++. Each pattern reads one language's source text and returns names
+//! only.
 //!
 //! A statically read literal name is [`Kind::Observed`] with its `file:line`; the same call
 //! with a computed argument (a variable, concatenation, template or f-string) is
@@ -195,6 +196,63 @@ fn go_calls() -> &'static [Call] {
             false,
         )]
     })
+}
+
+/// Ruby: `ENV['X']`, `ENV["X"]`, `ENV.fetch('X'[, default])`, in a `.rb` file or a
+/// `Rakefile`/`Gemfile`.
+pub struct Ruby;
+
+impl Pattern for Ruby {
+    fn language(&self) -> &'static str {
+        "ruby"
+    }
+
+    fn applies(&self, path: &str) -> bool {
+        path.ends_with(".rb") || matches!(file_name(path), "Rakefile" | "Gemfile")
+    }
+
+    fn scan(&self, path: &str, text: &str) -> Vec<Observation> {
+        scan_with(path, text, ruby_calls())
+    }
+}
+
+/// The final path component: `a/b/Rakefile` is `Rakefile`.
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+fn ruby_calls() -> &'static [Call] {
+    static CALLS: OnceLock<Vec<Call>> = OnceLock::new();
+    CALLS.get_or_init(|| {
+        vec![
+            call(r#"\bENV\s*\[\s*([^\]]*)\]"#, false),
+            call(r#"\bENV\.fetch\s*\(\s*([^,)]*)"#, false),
+        ]
+    })
+}
+
+/// C/C++: `getenv("X")`, `secure_getenv("X")`, including the qualified `std::getenv`.
+pub struct C;
+
+impl Pattern for C {
+    fn language(&self) -> &'static str {
+        "c"
+    }
+
+    fn applies(&self, path: &str) -> bool {
+        [".c", ".h", ".cc", ".cpp", ".hpp"]
+            .iter()
+            .any(|ext| path.ends_with(ext))
+    }
+
+    fn scan(&self, path: &str, text: &str) -> Vec<Observation> {
+        scan_with(path, text, c_calls())
+    }
+}
+
+fn c_calls() -> &'static [Call] {
+    static CALLS: OnceLock<Vec<Call>> = OnceLock::new();
+    CALLS.get_or_init(|| vec![call(r#"\b(?:secure_)?getenv\s*\(\s*([^)]*)\)"#, false)])
 }
 
 #[cfg(test)]
