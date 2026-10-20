@@ -1143,7 +1143,7 @@ fn run_staged(
             c,
             &written,
             &identical,
-            &list_b,
+            &without_pruned(&list_b, &plan.prune, opts.prune),
             &source_versions,
             &mut report,
             out,
@@ -1352,6 +1352,18 @@ fn refuse_unrecordable(
         }
     }
     Ok(())
+}
+
+/// `listing` without the names this run prunes (`pruning`: the run removes `prune`): the
+/// target holds them only until the prune that follows the recording, so they leave the
+/// binding set the delivery is recorded against (#179: a retiring key a retirement's prune
+/// removes, `delivery::held_bindings`, is never reported "not confirmed by this sync").
+fn without_pruned(listing: &[StoreEntry], prune: &[String], pruning: bool) -> Vec<StoreEntry> {
+    listing
+        .iter()
+        .filter(|e| !pruning || !prune.contains(&e.name))
+        .cloned()
+        .collect()
 }
 
 /// #106, FR-58: on target `c` (its own state vault, scope naming the target), a delivery
@@ -1733,12 +1745,13 @@ fn run_pinned(
                 }),
             }
         }
-        // A pinned target never delivers an infrastructure key (#206 §2.2).
+        // A pinned target never delivers an infrastructure key (#206 §2.2). It prunes only
+        // with `--deploy` too.
         let _ = record_delivery(
             c,
             &confirmed,
             &identical,
-            &after,
+            &without_pruned(&after, &plan.prune, opts.prune && opts.deploy),
             &source_versions,
             &mut report,
             out,
@@ -3105,6 +3118,36 @@ mod tests {
 
     fn f() -> Fleet {
         fleet()
+    }
+
+    fn listed(names: &[&str]) -> Vec<StoreEntry> {
+        names
+            .iter()
+            .map(|n| StoreEntry {
+                name: n.to_string(),
+                version: Some("1".into()),
+                pending: false,
+                stamp: None,
+            })
+            .collect()
+    }
+
+    fn names(entries: &[StoreEntry]) -> Vec<&str> {
+        entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    /// #179: a name this run prunes is not recorded as held.
+    #[test]
+    fn a_name_this_run_prunes_leaves_the_recorded_listing() {
+        let kept = without_pruned(&listed(&["API_KEY", "OLD_KEY"]), &["OLD_KEY".into()], true);
+        assert_eq!(names(&kept), ["API_KEY"]);
+    }
+
+    /// A run that keeps the names it would prune (no `--prune`) records them as listed.
+    #[test]
+    fn a_name_kept_without_prune_stays_in_the_recorded_listing() {
+        let kept = without_pruned(&listed(&["API_KEY", "OLD_KEY"]), &["OLD_KEY".into()], false);
+        assert_eq!(names(&kept), ["API_KEY", "OLD_KEY"]);
     }
     fn opts() -> SyncOpts {
         SyncOpts::default()
