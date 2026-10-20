@@ -66,10 +66,10 @@ fn promotion_jobs(text: &str) -> Vec<(String, Option<String>)> {
             if !name.is_empty() && !name.contains(char::is_whitespace) {
                 jobs.push((name.to_string(), None));
             }
-        } else if let Some(rest) = line.strip_prefix("    needs:") {
-            if let Some((_, need)) = jobs.last_mut() {
-                *need = Some(rest.trim().to_string());
-            }
+        } else if let Some(rest) = line.strip_prefix("    needs:")
+            && let Some((_, need)) = jobs.last_mut()
+        {
+            *need = Some(rest.trim().to_string());
         }
     }
     jobs
@@ -117,8 +117,12 @@ fn promotion_chain_never_runs_opv_apply() {
 fn every_promotion_job_gates_after_its_sync() {
     let text = promotion();
     assert!(["dev", "staging", "prod"].iter().all(|env| {
-        let sync = text.find(&format!("opv sync {env} ")).expect("the job syncs");
-        let gate = text.find(&format!("opv ready {env} --gate")).expect("the job gates");
+        let sync = text
+            .find(&format!("opv sync {env} "))
+            .expect("the job syncs");
+        let gate = text
+            .find(&format!("opv ready {env} --gate"))
+            .expect("the job gates");
         sync < gate
     }));
 }

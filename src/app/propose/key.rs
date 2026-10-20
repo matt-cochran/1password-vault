@@ -154,7 +154,7 @@ pub fn propose_with(
             let changed =
                 doc.extend_environment(product.as_ref().map(|p| p.as_str()), env.as_str());
             for product in &changed {
-                doc.declare_boundary(env.as_str(), &fleet.boundary_of(product))?;
+                doc.declare_boundary(env.as_str(), fleet.boundary_of(product))?;
             }
             "extend"
         }

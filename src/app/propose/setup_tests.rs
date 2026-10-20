@@ -81,9 +81,11 @@ fn names_declare_keys_that_are_present_in_every_environment() {
     let (_dir, path) = env_file("ALPHA=one\n");
     let p = from_names(&path, NAMES_ENV, &[], &[]).unwrap();
     let fleet = crate::config::parse(&p.proposal.contract_after).unwrap();
-    assert!(fleet.products[NAMES_PRODUCT].keys["ALPHA"]
-        .environments
-        .is_none());
+    assert!(
+        fleet.products[NAMES_PRODUCT].keys["ALPHA"]
+            .environments
+            .is_none()
+    );
 }
 
 #[test]
@@ -125,9 +127,11 @@ fn names_added_to_an_existing_contract_are_present_in_every_environment() {
     let (_dir, path, toml) = env_with_contract("BETA=two\n", EXISTING_CONTRACT);
     let p = from_names_in(&path, "dev", &[], &[], Some(&toml)).unwrap();
     let fleet = crate::config::parse(&p.proposal.contract_after).unwrap();
-    assert!(fleet.products[NAMES_PRODUCT].keys["BETA"]
-        .environments
-        .is_none());
+    assert!(
+        fleet.products[NAMES_PRODUCT].keys["BETA"]
+            .environments
+            .is_none()
+    );
 }
 
 #[test]
