@@ -190,6 +190,16 @@ fn survey(
             ));
         }
     }
+    // An infrastructure key is never attested (#206 §4.3): there is no 1Password value to
+    // vouch for. Refused from the configuration, before the target is reached.
+    if let Some((p, k)) = wanted.iter().find(|(p, k)| {
+        fleet.products[p.as_str()]
+            .keys
+            .get(k.as_str())
+            .is_some_and(super::deliver_only::is_infrastructure)
+    }) {
+        return Err(refused(p, k, env_name, target, AttestRefusal::NotStored));
+    }
     // The target is reached with its own deploy identity, read-only.
     let signed_in = signin::open_targeted(fleet, env_name, Some(target), r, Reach::Target)?;
     let r: &dyn CommandRunner = &signed_in;
@@ -216,6 +226,7 @@ fn survey(
         &none,
         &none,
         &ledgers,
+        false,
     )?;
     let values = delivery::values_of(fleet, env_name, r)?;
     let hides_versions = t.provider().versions_reveal_values();

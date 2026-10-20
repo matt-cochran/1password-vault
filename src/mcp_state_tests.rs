@@ -175,9 +175,75 @@ fn the_needs_section_is_opv_needs_json() {
     let w = World::new();
     let repo = w.project().to_path_buf();
     let want = w.cli(&["needs"], |f, r, out| {
-        crate::app::needs::run(r, &repo, f, false, true, out)
+        crate::app::needs::run(r, &repo, f, &Default::default(), false, true, out)
     });
     assert_eq!(w.tool(json!({"section": "needs"})), want);
+}
+
+#[test]
+fn the_needs_section_takes_the_env_and_product_narrowing() {
+    let w = World::new();
+    let repo = w.project().to_path_buf();
+    let options = crate::app::needs::NeedsOptions {
+        env: Some("dev".into()),
+        product: Some("app".into()),
+        input: crate::app::needs::NeedsInput::Git,
+    };
+    let want = w.cli(&["needs", "dev", "--product", "app"], |f, r, out| {
+        crate::app::needs::run(r, &repo, f, &options, false, true, out)
+    });
+    assert_eq!(
+        w.tool(json!({"section": "needs", "env": "dev", "product": "app"})),
+        want
+    );
+}
+
+#[test]
+fn the_needs_section_scans_the_directory_it_is_given() {
+    let w = World::new();
+    let repo = w.project().to_path_buf();
+    let src = w.project().join("src");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::write(
+        src.join("app.rs"),
+        "fn main() {\n    let _ = std::env::var(\"API_KEY\");\n}\n",
+    )
+    .unwrap();
+    let dir = src.to_str().unwrap();
+    let options = crate::app::needs::NeedsOptions {
+        input: crate::app::needs::NeedsInput::Scan(src.clone()),
+        ..Default::default()
+    };
+    let want = w.cli(&["needs", "--scan", dir], |f, r, out| {
+        crate::app::needs::run(r, &repo, f, &options, false, true, out)
+    });
+    assert_eq!(w.tool(json!({"section": "needs", "scan": dir})), want);
+}
+
+#[test]
+fn the_needs_section_uses_the_names_it_is_given_inline() {
+    let w = World::new();
+    let repo = w.project().to_path_buf();
+    let names = vec![
+        "API_KEY".to_string(),
+        "LOG_LEVEL".to_string(),
+        "SOMETHING_ELSE".to_string(),
+    ];
+    let options = crate::app::needs::NeedsOptions {
+        input: crate::app::needs::NeedsInput::Names(names.clone()),
+        ..Default::default()
+    };
+    let want = w.cli(&["needs"], |f, r, out| {
+        crate::app::needs::run(r, &repo, f, &options, false, true, out)
+    });
+    assert_eq!(w.tool(json!({"section": "needs", "names": names})), want);
+}
+
+#[test]
+fn the_needs_names_are_given_inline_as_a_list_and_not_a_file() {
+    let parsed =
+        serde_json::from_value::<StateScope>(json!({"section": "needs", "names": "/etc/passwd"}));
+    assert!(parsed.is_err());
 }
 
 #[test]
@@ -341,7 +407,30 @@ fn a_section_that_needs_env_is_refused_without_it() {
 fn a_scope_the_section_does_not_take_is_refused() {
     let w = World::new();
     assert_eq!(
-        w.tool(json!({"section": "needs", "env": "dev"}))["error"]["code"],
+        w.tool(json!({"section": "needs", "target": "web"}))["error"]["code"],
+        "usage"
+    );
+}
+
+#[test]
+fn the_needs_section_refuses_a_scan_outside_the_project() {
+    let w = World::new();
+    let outside = tempfile::tempdir().unwrap();
+    let scan = outside.path().to_str().unwrap();
+    assert_eq!(
+        w.tool(json!({"section": "needs", "scan": scan}))["error"]["code"],
+        "usage"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_needs_section_refuses_a_scan_through_a_symlink_out_of_the_project() {
+    let w = World::new();
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), w.project().join("escape")).unwrap();
+    assert_eq!(
+        w.tool(json!({"section": "needs", "scan": "escape"}))["error"]["code"],
         "usage"
     );
 }

@@ -35,10 +35,10 @@ use sha2::{Digest, Sha256};
 
 use super::{
     JsonPart, KeyNames, Prefixed, check_product, ci_summary, compare, findings_error, is_blocking,
-    managed_names, open_target, placement, plan_id_of, plan_item, plural, preflight, print_extras,
-    print_legend, print_rows, product_names, read_and_plan_versioned, read_item_fields,
-    resolve_targets, rows_item_url, scope_plan, target_cell, target_runners, target_word,
-    unmanaged_on_target, write_err, write_json,
+    managed_names, open_target, placement, plan_id_of, plan_item_with, plural, preflight,
+    print_extras, print_legend, print_rows, product_names, read_and_plan_versioned,
+    read_item_fields, resolve_targets, rows_item_url, scope_plan, target_cell, target_runners,
+    target_word, unmanaged_on_target, write_err, write_json,
 };
 use crate::cause::{
     Cause, Closest, Cmd, EnvName, KeyName, NameKind, PlanId, PlanScope, ProductKey, ProductName,
@@ -84,6 +84,15 @@ pub struct SyncOpts {
     /// `--target <name>` (repeatable, FR-56): the targets to sync. Empty: every target of
     /// the environment, in name order.
     pub targets: Vec<String>,
+    /// `--retire` (#179, design Part V, row `retire`): the retirement's prune step for this
+    /// environment. Every `retiring` key is released to `--prune` (which it needs), after
+    /// the needs check at `HEAD` and the tier order ([`super::retire::prune`]). Never
+    /// writes 1Password.
+    pub retire: bool,
+    /// `--supply-stdin` (#206, `docs/design/deliver-only.md`): this run takes the values of
+    /// its infrastructure keys from standard input ([`run_supplying`]); the values are never
+    /// written to 1Password.
+    pub supply_stdin: bool,
 }
 
 impl SyncOpts {
@@ -101,6 +110,9 @@ impl SyncOpts {
         if self.prune {
             args.push("--prune".into());
         }
+        if self.retire {
+            args.push("--retire".into());
+        }
         for k in &self.rotate {
             args.extend(["--rotate".into(), k.clone()]);
         }
@@ -115,6 +127,9 @@ impl SyncOpts {
         }
         if let Some(id) = &self.expect_plan {
             args.extend(["--expect-plan".into(), id.clone()]);
+        }
+        if self.supply_stdin {
+            args.push("--supply-stdin".into());
         }
         args.extend(config_flag());
         Cmd {
@@ -228,12 +243,67 @@ fn partial(e: Error, done: &[String], scope: PlanScope) -> Error {
     )
 }
 
+/// `opv sync <env> --supply-stdin` (#206, `docs/design/deliver-only.md`): the sync of
+/// [`run`] whose infrastructure keys take their values from `raw`, the supply read from
+/// standard input. The supply is admitted for the run's scope (its environment, its
+/// `--product` and its selected targets) before any 1Password read; nothing of it is ever
+/// written to 1Password. `--retire` is refused: a retirement prunes, it never supplies.
+pub fn run_supplying(
+    fleet: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+    opts: &SyncOpts,
+    raw: super::deliver_only::RawSupply,
+) -> Result<(), Error> {
+    if opts.retire {
+        return Err(Cause::Usage {
+            problem: UsageProblem::ConflictsWith {
+                a: "--supply-stdin".into(),
+                b: "--retire".into(),
+            },
+        }
+        .into());
+    }
+    deliver_with(fleet, env_name, r, out, opts, Some(raw))
+}
+
 pub fn run(
     fleet: &Fleet,
     env_name: &str,
     r: &dyn CommandRunner,
     out: &mut dyn Write,
     opts: &SyncOpts,
+) -> Result<(), Error> {
+    // `--retire` runs the retirement's checks first (#179): the needs check at `HEAD` and
+    // the tier order, then this same sync with every `retiring` key released to the prune.
+    if opts.retire {
+        super::retire::check_flags(opts)?;
+        let readers = super::retire::Readers::at_head(r, fleet);
+        return super::retire::prune(fleet, env_name, r, out, opts, &readers);
+    }
+    deliver(fleet, env_name, r, out, opts)
+}
+
+/// [`run`] after any retirement check: the sync itself.
+pub(crate) fn deliver(
+    fleet: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+    opts: &SyncOpts,
+) -> Result<(), Error> {
+    deliver_with(fleet, env_name, r, out, opts, None)
+}
+
+/// [`deliver`], supplying the infrastructure keys from `raw` when given (#206).
+fn deliver_with(
+    fleet: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+    opts: &SyncOpts,
+    raw: Option<super::deliver_only::RawSupply>,
 ) -> Result<(), Error> {
     // Every check below happens before any subprocess call, except the confirm_env guard
     // for a missing --confirm: it gates the first write, so one run reports blocking keys
@@ -258,6 +328,24 @@ pub fn run(
         super::delivery::check_receipt_path(path)?;
     }
     let names = resolve_targets(fleet, env_name, &opts.targets, "plan")?;
+    // #206 §3, §4.1: the supply is admitted for this run's scope before the first 1Password
+    // read (the sign-in below reads the targets' deploy credentials).
+    let supply = match raw {
+        Some(raw) => {
+            let rotate = parse_rotate(fleet, env_name, &opts.rotate)?;
+            Some(super::deliver_only::admit(
+                fleet,
+                &super::deliver_only::Scope {
+                    env: env_name,
+                    targets: &names,
+                    product: opts.product.as_deref(),
+                    rotate: &rotate,
+                },
+                raw,
+            )?)
+        }
+        None => None,
+    };
     let runners = target_runners(fleet, env_name, &names, r)?;
     let mut opened = Vec::new();
     for (name, signed) in names.iter().zip(&runners) {
@@ -290,6 +378,7 @@ pub fn run(
             names: KeyNames::new(fleet, env_name, target)?,
             confirm_missing: guard.missing,
             receipts: &receipts,
+            supply: supply.as_ref(),
         };
         targets.push((c, ports));
     }
@@ -440,6 +529,10 @@ fn write_run_json(
         "next": next,
         "plan_id": plan_id,
     });
+    // #206: the names this run supplied, with --supply-stdin only.
+    if opts.supply_stdin {
+        doc["supplied"] = serde_json::json!(refs(|r| &r.supplied));
+    }
     // #106: the receipts minted on each target (FR-58).
     if reports.iter().any(|r| r.delivery.is_some()) {
         let minted: Vec<serde_json::Value> = both()
@@ -454,6 +547,10 @@ fn write_run_json(
                 // #201: the names this revision counts on a person's attestation.
                 if !m.attested.is_empty() {
                     v["attested"] = serde_json::json!(m.attested);
+                }
+                // #206: the names this revision counts on a supplied value.
+                if !m.supplied.is_empty() {
+                    v["supplied"] = serde_json::json!(m.supplied);
                 }
                 v
             })
@@ -521,6 +618,8 @@ struct Ctx<'a> {
     confirm_missing: bool,
     /// The delivery receipts this run minted so far, on every target (#106, FR-58).
     receipts: &'a std::cell::RefCell<Vec<crate::domain::delivery::Receipt>>,
+    /// The admitted supply of `--supply-stdin` (#206), when this run supplies values.
+    supply: Option<&'a super::deliver_only::Supply>,
 }
 
 impl Ctx<'_> {
@@ -645,6 +744,8 @@ struct Report {
     earlier: Vec<String>,
     /// Delivery receipts minted (or not) after the confirmed writes (#106).
     delivery: Option<super::delivery::Recorded>,
+    /// The target names this run supplied (#206), `--supply-stdin` only.
+    supplied: Vec<String>,
 }
 
 impl Report {
@@ -743,6 +844,10 @@ impl Report {
             expect_plan: None,
             receipt: None,
             targets: opts.targets.clone(),
+            // A retirement's prune is done; what is left is a plain deploy.
+            retire: false,
+            // A value is supplied by the job that produced it, never by a follow-up step.
+            supply_stdin: false,
         };
         Some(step_text(&o.command(env_name)))
     }
@@ -904,16 +1009,37 @@ fn prepare_staged(
     store: &dyn StagedStore,
 ) -> Result<Planned, Error> {
     let (fleet, env_name, t) = (c.fleet, c.env_name, c.t);
-    let (plan, list_a, item_version, source_versions) = read_and_plan_versioned(
+    // #206 §6.1: read → refuse a stored infrastructure key → append the supplied values →
+    // plan → the supply's refusals (rules, target state, serial) → the blocking rows.
+    let read = super::tidy::read(fleet, env_name, c.r)?;
+    super::deliver_only::refuse_stored(fleet, env_name, &read.fields).map_err(|e| c.refusal(e))?;
+    let mut fields = read.fields;
+    if let Some(supply) = c.supply {
+        fields.extend(super::deliver_only::item_fields(fleet, supply));
+    }
+    let ledgers = super::placement_ledgers(fleet, env_name, Some(c.target), Some(ports), c.r);
+    let (mut plan, list_a) = plan_item_with(
         fleet,
         env_name,
         Some(c.target),
-        c.r,
+        fields,
         Some(ports),
         c.rotate,
         c.prune_immutable,
+        &ledgers,
+        c.opts.retire,
     )?;
+    plan.tidy = read.changes;
+    plan.tidy_error = read.tidy_error;
+    let (item_version, source_versions) = (read.version, read.item_versions);
     let mut plan = c.scoped(plan);
+    if let Some(supply) = c.supply {
+        let name_of = |p: &str, k: &str| t.env_name(p, k);
+        if let Some(e) = super::deliver_only::refusal(&plan, supply, &ledgers, c.rotate, &name_of) {
+            return Err(c.refusal(e));
+        }
+        refuse_unrecordable(c, &plan, supply).map_err(|e| c.refusal(e))?;
+    }
     // A target that delivers config itself (FR-46): its rows get their state first, so a
     // refused or concealed config key blocks like any other finding.
     let var_plan = match store.variables() {
@@ -983,6 +1109,14 @@ fn run_staged(
         skipped: skipped_names(c, &plan)?,
         held: held_names(c, &plan)?,
         plan_id,
+        supplied: c.supply.map_or_else(Vec::new, |supply| {
+            plan.rows
+                .iter()
+                .filter(|r| r.target != TargetState::NotDelivered)
+                .filter(|r| supply.get(&r.product, &r.key).is_some())
+                .map(|r| t.env_name(&r.product, &r.key))
+                .collect()
+        }),
         ..Report::default()
     };
     // Writes this run completed, named when a later step fails (NR-10).
@@ -997,7 +1131,7 @@ fn run_staged(
     };
     // #106, FR-58, D11: what this run wrote (confirmed above) or the plan proved identical,
     // recorded as each placement's evidence lines, which are also its version ledger.
-    {
+    let unverified = {
         let written: BTreeSet<String> = batch.iter().map(|(n, _)| n.clone()).collect();
         let identical: BTreeSet<String> = plan
             .rows
@@ -1009,11 +1143,26 @@ fn run_staged(
             c,
             &written,
             &identical,
-            &list_b,
+            &without_pruned(&list_b, &plan.prune, opts.prune),
             &source_versions,
             &mut report,
             out,
-        )?;
+        )?
+    };
+    // #206 S5: a rotation of a supplied value is said, with the producer's serial.
+    if let Some(supply) = c.supply
+        && !opts.json
+    {
+        for (p, k) in c.rotate {
+            if let Some(s) = supply.get(p, k)
+                && batch.iter().any(|(n, _)| *n == t.env_name(p, k))
+            {
+                p_line(
+                    out,
+                    format!("rotated {} at serial {}", key_label(p, k), s.serial),
+                )?;
+            }
+        }
     }
     for (name, _) in &batch {
         let (a, b) = (digest(&list_a, name), digest(&list_b, name));
@@ -1075,7 +1224,7 @@ fn run_staged(
         if opts.deploy {
             p(out, live_line(label))?;
         }
-        return Ok(report);
+        return finish_supplied(c, report, unverified, &done);
     }
 
     // Managed names still staged from an earlier run (e.g. a sync without --deploy, or a
@@ -1142,12 +1291,86 @@ fn run_staged(
             report.pending = waiting;
         }
     }
-    Ok(report)
+    finish_supplied(c, report, unverified, &done)
+}
+
+/// The end of a staged target's run (#206 §5.4, S1, S9): the writes, prunes and deploy
+/// stand, but a supplied name this run left without an `s1` evidence line fails the run
+/// (`delivery_unverified`, exit 8), and a newer serial recorded meanwhile fails it as
+/// `Stale`, each after the writes it already made.
+fn finish_supplied(
+    c: &Ctx<'_>,
+    report: Report,
+    unverified: Option<Error>,
+    done: &[String],
+) -> Result<Report, Error> {
+    match unverified {
+        None => Ok(report),
+        Some(e) => {
+            let mut done = done.to_vec();
+            if done.is_empty() {
+                done.push(format!("delivered to {}", placement(c.env_name, c.target)));
+            }
+            Err(partial(e, &done, c.opts.scope(c.env_name)))
+        }
+    }
+}
+
+/// A supplying run refuses before any write when a placement it supplies on this target has
+/// no state vault or no delivery item (#206 §5.4): nothing could record the supplied
+/// names' evidence, so the run could only end unverified.
+fn refuse_unrecordable(
+    c: &Ctx<'_>,
+    plan: &SyncPlan,
+    supply: &super::deliver_only::Supply,
+) -> Result<(), Error> {
+    let products: BTreeSet<&str> = plan
+        .rows
+        .iter()
+        .filter(|r| r.target != TargetState::NotDelivered)
+        .filter(|r| supply.get(&r.product, &r.key).is_some())
+        .map(|r| r.product.as_str())
+        .collect();
+    let Some(target) = c
+        .fleet
+        .environments
+        .get(c.env_name)
+        .and_then(|e| e.targets.get(c.target))
+    else {
+        return Ok(());
+    };
+    for product in products {
+        c.fleet.state_vault(c.env_name, target)?;
+        if !target.delivery_items.contains_key(product) {
+            return Err(Cause::DeliveryUnverified {
+                env: EnvName::new(c.env_name),
+                target: TargetName::new(c.target),
+                product: ProductName::new(product),
+                state: crate::cause::Unverified::NotRecorded,
+            }
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// `listing` without the names this run prunes (`pruning`: the run removes `prune`): the
+/// target holds them only until the prune that follows the recording, so they leave the
+/// binding set the delivery is recorded against (#179: a retiring key a retirement's prune
+/// removes, `delivery::held_bindings`, is never reported "not confirmed by this sync").
+fn without_pruned(listing: &[StoreEntry], prune: &[String], pruning: bool) -> Vec<StoreEntry> {
+    listing
+        .iter()
+        .filter(|e| !pruning || !prune.contains(&e.name))
+        .cloned()
+        .collect()
 }
 
 /// #106, FR-58: on target `c` (its own state vault, scope naming the target), a delivery
 /// revision per product in scope whose every name this run wrote (`written`, confirmed by the provider) or the plan proved identical, at
 /// the versions in `listing`. Never fails the sync: what it could not record is reported.
+/// A supplying run (#206 S1, S9) gets back the error its unrecorded supplied names make,
+/// for [`finish_supplied`] to return once the run's writes are done.
 fn record_delivery(
     c: &Ctx<'_>,
     written: &BTreeSet<String>,
@@ -1156,7 +1379,7 @@ fn record_delivery(
     source_versions: &BTreeMap<String, u64>,
     report: &mut Report,
     out: &mut dyn Write,
-) -> Result<(), Error> {
+) -> Result<Option<Error>, Error> {
     let (fleet, env_name, opts) = (c.fleet, c.env_name, c.opts);
     let recorded = super::delivery::record(
         fleet,
@@ -1168,8 +1391,22 @@ fn record_delivery(
         listing,
         source_versions,
         &report.plan_id,
+        c.supply.map(|supply| super::delivery::Supplying {
+            supply,
+            rotate: c.rotate,
+        }),
         c.r,
     );
+    // #206 §5.3: a delivery item that changed twice while a supplying run recorded it
+    // fails that run as `item_changed`, after its writes.
+    let changed = c.supply.is_some()
+        && matches!(
+            recorded.as_ref().err().and_then(Error::cause).map(|c| c.0),
+            Some(Cause::ChangedBeforeWrite { .. })
+        );
+    let mut unverified = c
+        .supply
+        .and_then(|supply| supplied_unrecorded(c, supply, recorded.as_ref().ok()));
     match recorded {
         Ok(rec) => {
             // The file holds every receipt this run minted so far, on every target, so a
@@ -1213,6 +1450,7 @@ fn record_delivery(
             }
             report.delivery = Some(rec);
         }
+        Err(e) if changed => unverified = Some(e),
         Err(e) => c.r.note(&format!(
             "delivery evidence for {} was not recorded ({}); the target holds what this \
              sync wrote, but opv delivery verify cannot vouch for it until a sync records it",
@@ -1220,7 +1458,72 @@ fn record_delivery(
             error_words(&e)
         )),
     }
-    Ok(())
+    Ok(unverified)
+}
+
+/// The failure of a supplying run on target `c` (#206 §5.4, S1, S9), if any: a newer serial
+/// recorded meanwhile is `Stale` (both serials named); any other supplied name this target
+/// delivers without an `s1` line after `record` (`rec`; `None`: it failed) is
+/// `delivery_unverified`.
+fn supplied_unrecorded(
+    c: &Ctx<'_>,
+    supply: &super::deliver_only::Supply,
+    rec: Option<&super::delivery::Recorded>,
+) -> Option<Error> {
+    use super::delivery::{NotRecordedWhy, SuppliedOutcome};
+    let target = c
+        .fleet
+        .environments
+        .get(c.env_name)?
+        .targets
+        .get(c.target)?;
+    for (p, k) in supply.names() {
+        if c.opts.product.as_deref().is_some_and(|only| only != p) {
+            continue;
+        }
+        let in_set = super::delivery::bindings(c.fleet, c.env_name, c.target, p)
+            .ok()?
+            .iter()
+            .any(|b| b.source.field == key_label(p, k));
+        if !in_set {
+            continue;
+        }
+        let name = target.config.env_name(p, k);
+        let outcome = rec.and_then(|r| r.supplied.get(&name));
+        match outcome {
+            Some(SuppliedOutcome::Recorded) => {}
+            Some(SuppliedOutcome::NotRecorded(NotRecordedWhy::NewerSerial { recorded })) => {
+                return Some(
+                    Cause::Guard {
+                        guard: crate::cause::Guard::SupplyRefused {
+                            env: EnvName::new(c.env_name),
+                            entry: crate::cause::SupplyEntry::Named {
+                                product: ProductName::new(p),
+                                key: KeyName::new(k),
+                            },
+                            reason: crate::cause::SupplyRefusal::Stale {
+                                recorded: *recorded,
+                                supplied: supply.get(p, k).map_or(0, |s| s.serial),
+                            },
+                        },
+                    }
+                    .into(),
+                );
+            }
+            _ => {
+                return Some(
+                    Cause::DeliveryUnverified {
+                        env: EnvName::new(c.env_name),
+                        target: TargetName::new(c.target),
+                        product: ProductName::new(p),
+                        state: crate::cause::Unverified::NotRecorded,
+                    }
+                    .into(),
+                );
+            }
+        }
+    }
+    None
 }
 
 /// The first line of `e` in words (never a code slug, 01.19): the cause's message for a
@@ -1289,12 +1592,14 @@ fn print_held(
 fn prepare_pinned(c: &Ctx<'_>, ports: &Ports<'_>, out: &mut dyn Write) -> Result<Planned, Error> {
     let (fleet, env_name, opts) = (c.fleet, c.env_name, c.opts);
     let (fields, item_version, source_versions) = read_item_fields(fleet, env_name, c.r)?;
+    // #206 §4.4: an infrastructure key is never stored, whichever target this is.
+    super::deliver_only::refuse_stored(fleet, env_name, &fields).map_err(|e| c.refusal(e))?;
     // Blocking rows refuse before any call to the target.
     let copy = fields.iter().map(copy_field).collect();
     let target = Some(c.target);
     refuse_blocking(
         &c.scoped(
-            plan_item(
+            plan_item_with(
                 fleet,
                 env_name,
                 target,
@@ -1302,6 +1607,8 @@ fn prepare_pinned(c: &Ctx<'_>, ports: &Ports<'_>, out: &mut dyn Write) -> Result
                 None,
                 c.rotate,
                 c.prune_immutable,
+                &[],
+                opts.retire,
             )?
             .0,
         ),
@@ -1310,7 +1617,7 @@ fn prepare_pinned(c: &Ctx<'_>, ports: &Ports<'_>, out: &mut dyn Write) -> Result
     .map_err(|e| c.refusal(e))?;
     // The target's state, read-only, before its first read (NR-23, NR-25).
     let skip_deploy = preflight::run(c.at(), c.t, c.r, out, opts.json)?;
-    let (plan, listed) = plan_item(
+    let (plan, listed) = plan_item_with(
         fleet,
         env_name,
         target,
@@ -1318,6 +1625,8 @@ fn prepare_pinned(c: &Ctx<'_>, ports: &Ports<'_>, out: &mut dyn Write) -> Result
         Some(ports),
         c.rotate,
         c.prune_immutable,
+        &[],
+        opts.retire,
     )?;
     let plan = c.scoped(plan);
     refuse_blocking(&plan, env_name).map_err(|e| c.refusal(e))?;
@@ -1436,11 +1745,13 @@ fn run_pinned(
                 }),
             }
         }
-        record_delivery(
+        // A pinned target never delivers an infrastructure key (#206 §2.2). It prunes only
+        // with `--deploy` too.
+        let _ = record_delivery(
             c,
             &confirmed,
             &identical,
-            &after,
+            &without_pruned(&after, &plan.prune, opts.prune && opts.deploy),
             &source_versions,
             &mut report,
             out,
@@ -2491,8 +2802,16 @@ fn plan_part<'f>(
     };
     preflight::read(at, t, r)?;
     let none = BTreeSet::new();
-    let (mut plan, on_target, item_version, _) =
-        read_and_plan_versioned(fleet, env_name, Some(name), r, Some(&ports), rotate, &none)?;
+    let (mut plan, on_target, item_version, _) = read_and_plan_versioned(
+        fleet,
+        env_name,
+        Some(name),
+        r,
+        Some(&ports),
+        rotate,
+        &none,
+        false,
+    )?;
     let scope = match product {
         Some(p) => {
             let names = product_names(fleet, env_name, name, p)?;
@@ -2730,7 +3049,9 @@ fn parse_rotate(
     let mut set = BTreeSet::new();
     for e in entries {
         let (product, key, spec) = declared_key(fleet, "--rotate", e)?;
-        if !spec.immutable {
+        // #206 §4.3: a supplied value the target holds without evidence is written only
+        // when rotated, immutable or not.
+        if !spec.immutable && !super::deliver_only::is_infrastructure(spec) {
             return Err(key_ref_refused(
                 "--rotate",
                 e,
@@ -2797,6 +3118,36 @@ mod tests {
 
     fn f() -> Fleet {
         fleet()
+    }
+
+    fn listed(names: &[&str]) -> Vec<StoreEntry> {
+        names
+            .iter()
+            .map(|n| StoreEntry {
+                name: n.to_string(),
+                version: Some("1".into()),
+                pending: false,
+                stamp: None,
+            })
+            .collect()
+    }
+
+    fn names(entries: &[StoreEntry]) -> Vec<&str> {
+        entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    /// #179: a name this run prunes is not recorded as held.
+    #[test]
+    fn a_name_this_run_prunes_leaves_the_recorded_listing() {
+        let kept = without_pruned(&listed(&["API_KEY", "OLD_KEY"]), &["OLD_KEY".into()], true);
+        assert_eq!(names(&kept), ["API_KEY"]);
+    }
+
+    /// A run that keeps the names it would prune (no `--prune`) records them as listed.
+    #[test]
+    fn a_name_kept_without_prune_stays_in_the_recorded_listing() {
+        let kept = without_pruned(&listed(&["API_KEY", "OLD_KEY"]), &["OLD_KEY".into()], false);
+        assert_eq!(names(&kept), ["API_KEY", "OLD_KEY"]);
     }
     fn opts() -> SyncOpts {
         SyncOpts::default()
@@ -4199,3 +4550,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "supply_tests.rs"]
+mod supply_tests;

@@ -647,6 +647,8 @@ fn the_schema_lists_every_row_field_in_order() {
         form: Some("file".to_string()),
         path: Some("/app/config".into()),
         attested: true,
+        value_state: Some("supplied"),
+        supplied: true,
         ..super::JsonRow::new(&row, Some("NAME".into()), Some("present"), None)
     };
     let v = serde_json::to_value(&full).unwrap();

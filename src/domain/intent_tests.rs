@@ -52,6 +52,19 @@ fn a_generate_intent_parses() {
     );
 }
 
+/// #179 B4: bulk extend names one environment and, optionally, one product.
+#[test]
+fn an_extend_intent_parses() {
+    assert!(parse(r#"{"kind":"extend","env":"prod","product":"app"}"#).is_ok());
+}
+
+/// #179 B4: the environment to extend is required, so a bare kind is refused.
+#[test]
+fn an_extend_intent_without_an_environment_is_refused() {
+    let e = parse(r#"{"kind":"extend"}"#).unwrap_err();
+    assert_eq!(e.code_str(), "config_invalid");
+}
+
 /// `propose tidy` is deferred past 0.12.0 (no planner): `tidy` is not a kind.
 #[test]
 fn a_tidy_intent_is_refused() {
@@ -157,7 +170,7 @@ fn a_multi_line_guidance_is_refused() {
 // --- the schema -----------------------------------------------------------------
 
 #[test]
-fn the_schema_lists_the_eight_kinds() {
+fn the_schema_lists_the_nine_kinds() {
     let schema = json_schema();
     let kinds: BTreeSet<String> = schema["oneOf"]
         .as_array()
@@ -181,6 +194,7 @@ fn the_schema_lists_the_eight_kinds() {
             "structure".to_string(),
             "generate".to_string(),
             "attest".to_string(),
+            "extend".to_string(),
         ])
     );
 }

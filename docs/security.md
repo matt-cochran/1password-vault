@@ -14,7 +14,7 @@ an entropy figure and a comparison with a guess.
 
 What may cross the boundary is a **value state**: a closed set of words that describes a
 value without carrying any of it — `absent`, `empty`, `placeholder`, `malformed`, `set`,
-`unreadable` and `not_wanted`.
+`unreadable`, `not_wanted` and `supplied` (an infrastructure value, below).
 
 ## The honest limit
 
@@ -72,6 +72,68 @@ application through the child process's environment or a private tmpfs file.
 reaches any other channel. What a tool does with a value after opv hands it over
 correctly is out of scope; opv's scrubber still masks a value a tool echoes back, as
 best-effort defence.
+
+## Values opv never stores: infrastructure values
+
+From 0.13.0 a key declared `source = "infrastructure"` holds a value that infrastructure
+produces, such as a database URL from Terraform or a webhook signing secret. It is
+delivered, never stored ([the guide](infra-generated-values.md)):
+
+- **Never in 1Password.** opv keeps no 1Password field for the key. `opv set`, `opv open`,
+  `opv import --replace` or `--rotate`, `opv propose generate` and an attestation refuse it,
+  `opv import` reports a found value as `not_stored`, and a field that already exists for
+  it refuses every sync until a person archives it. CI gets no new 1Password permission:
+  the deploy identity reads the boundary vaults and writes the state vault, as before, and
+  CI never writes a value to 1Password.
+- **Standard input only.** The deploy job that produced the value pipes it to
+  `opv sync <env> --supply-stdin`. A terminal on standard input is refused before a byte is
+  read, and so is a run from an AI assistant: an assistant proposes the key, the deploy job
+  supplies the value. The generated step (`opv ci workflow --supply`) moves values through
+  a pipe, never argv, environment variables or files, and `opv ci workflow --supply-check`
+  refuses a `${{ … }}` expression in that step's script, which GitHub would expand into the
+  logged script.
+- **Scrubbed as it is read.** Each value is registered with opv's scrubber as a secret while
+  the stream is parsed, and must be at least 8 bytes so the scrubber can mask it. A parse
+  error is reported by line and column, never quoting the input, and an entry that is not
+  a declared key is reported by position (`document 2, entry 3`), because a mapping bug can
+  put a value where a name belongs.
+- **Evidence without the value.** The placement's delivery item records an `s1` line: the
+  target's version, a keyed fingerprint of the value, the key, the producer's serial and
+  the time. A lower serial, or the same serial with a different value, is refused unless the
+  run names the key with `--rotate`, so an old value cannot be replayed by accident.
+
+The residual is the producer itself: the Terraform state, the provider's console and the
+job that runs them hold the value, and opv does not protect them.
+
+## Attestation: evidence without a proof
+
+From 0.12.3 a person may attest that a staged target (Fly) already holds 1Password's value
+of a held immutable key that no sync can prove ([attesting a held immutable
+key](attestation.md)). opv records the evidence at the target's current version without
+writing the target. It is a person's `opv apply` in their own terminal, refused under CI
+and agent mode, and every surface marks the name `attested`, never proven: receipts list it
+under `attested`. opv cannot check an attestation; a wrong one is caught only when the app
+fails, so attest only when you know where the target's value came from, and rotate
+otherwise. An infrastructure key cannot be attested: there is no 1Password value to vouch
+for.
+
+## Local delivery hardening
+
+`opv run` writes a file key to a fresh private directory on a RAM-backed
+`$XDG_RUNTIME_DIR`. From 0.13.0:
+
+- a runtime directory that other users can write (a group or other write bit without the
+  sticky bit, such as WSLg's 0777 `/mnt/wslg/runtime-dir`) is refused before anything is
+  written: `ram_dir_unavailable`, `why` `writable_by_others`;
+- the private directory is opened once and checked through that handle, and every file is
+  created relative to it (`O_NOFOLLOW`, `O_EXCL`), so renaming the entry afterwards cannot
+  redirect a write;
+- before the app starts, every descriptor above 2 is marked close-on-exec, so a descriptor
+  inherited from `op run` does not reach the app.
+
+What opv cannot enforce, such as another process of the same user, root and swap, is listed
+with the code behind each claim in [platforms and
+limits](design/local-delivery.md#platforms-and-limits).
 
 ## Harness guard rules
 

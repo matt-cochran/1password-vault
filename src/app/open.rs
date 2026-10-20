@@ -100,6 +100,9 @@ pub fn run_as(
         format!("{product}/{target}")
     };
     let (product, key, env_name) = explain::locate(fleet, &resolved, env)?;
+    // An infrastructure key has no field to open (#206 §4.4): the refusal says where its
+    // value comes from, before any call.
+    super::import::refuse_not_stored(fleet, &product, &key, env_name)?;
     // A shared key (FR-45) has no field of its own: open its source's field.
     let (product, key) = match fleet.products[&product].keys[&key].source() {
         Some((p, k)) => (p.to_string(), k.to_string()),
@@ -186,6 +189,29 @@ mod tests {
         )
         .unwrap();
         (text_of(&out), r)
+    }
+
+    /// #206 §4.4: an infrastructure key has no field to open; the refusal comes before any
+    /// call, so not even the account probe runs.
+    #[test]
+    fn an_infrastructure_key_is_refused_as_having_no_field() {
+        let fleet = fleet_with(
+            "[products.allumata.keys.DATABASE_URL]\nkind = \"secret\"\n\
+             source = \"infrastructure\"\nenvironments = [\"prod\"]\n\
+             rules = { regex = \"postgres(ql)?://.+\" }\n",
+        );
+        let r = FakeRunner::new(Vec::<Output>::new());
+        let e = run(
+            &fleet,
+            "allumata/DATABASE_URL",
+            Some("prod"),
+            XDG,
+            &r,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        let doc = crate::error::document(&e, &crate::error::invocation(), false);
+        assert_eq!(doc["subject"]["guard"]["guard"], "not_stored");
     }
 
     #[test]

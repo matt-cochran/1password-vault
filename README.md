@@ -38,6 +38,25 @@ flowchart LR
 
 Copy the ready-made workflows: [examples/ci-change-detection](examples/ci-change-detection/).
 
+### One application, one set of keys
+
+An application is its set of keys, and that set is the same everywhere: the code reads `OPENAI_API_KEY` in development and in production alike. A key declared without `environments` is present in every environment, and a new environment inherits it, so growing from one environment to three does not quietly change the contract. To leave a key out of one environment, say so with a reason:
+
+```toml
+[products.api.keys.OPENAI_API_KEY]
+kind = "secret"
+# no environments: present in every environment
+except = { staging = "we have no staging OpenAI account" }
+```
+
+Naming the wanted environments explicitly (`environments = ["prod"]`) is the other way. If such a list leaves an environment out without an `except`, opv treats it as a likely mistake: the configuration still loads, and `opv ready` reports a non-blocking `environment_gap` naming the key and the environment.
+
+What differs between environments is not the contract but how much a mistake costs. Every environment has a tier: `local` (your machine, no deployment target), `shared` (a team environment; the default unless the name says production) or `production` (guarded: a sync or deploy asks you to type the environment's name first). The tier decides what opv may do without asking, never how a key is named or typed.
+
+Promotion from one environment to the next is a gate. `opv ready --gate` fails unless every present key is `set` with delivery evidence at its current item version, so a value typed in 1Password has to reach its platform before the environment is ready.
+
+Removal is a state, never a deletion. `opv propose retire` marks a key `retiring`; CI confirms with `opv needs` that the deployed revision no longer reads it and prunes it from the targets; a person archives its 1Password fields; and the key's `lifecycle` ends `retired`. A retired key keeps its history, and no value opv does not manage is ever touched. [Configuration](docs/configuration.md) has the details.
+
 ## Quick start
 
 Install with npm, on macOS, Linux, WSL or Windows ([other ways](docs/install.md)):

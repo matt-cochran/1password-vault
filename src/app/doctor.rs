@@ -666,7 +666,8 @@ fn item_check(fleet: &Fleet, env_name: &str, r: &dyn CommandRunner, report: &mut
             KeyState::Ready
             | KeyState::Skipped
             | KeyState::SourceBlocked
-            | KeyState::RulesPendingReview => continue,
+            | KeyState::RulesPendingReview
+            | KeyState::SuppliedAtSync => continue,
         };
         blocking.push(format!("{} ({word})", key_label(&row.product, &row.key)));
         rows.push(ValueRow {

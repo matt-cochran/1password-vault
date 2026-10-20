@@ -193,6 +193,239 @@ pub fn apply_at(
     })
 }
 
+/// What a retirement's apply did (#179, `opv apply rp-…`). Names only, never a value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RetireApplied {
+    /// The plan id the person reviewed and ran.
+    pub plan_id: String,
+    /// True when the person confirmed; false when they declined, and nothing was run.
+    pub confirmed: bool,
+    pub product: String,
+    pub key: String,
+    /// The archived section the fields went to.
+    pub section: String,
+    /// The environments whose boundary item had fields moved this run.
+    pub archived: Vec<String>,
+    /// The environments whose boundary item held no field of the key outside an archived
+    /// section: already archived, nothing edited.
+    pub already_archived: Vec<String>,
+    /// True when the contract now marks the key `lifecycle = "retired"`.
+    pub retired: bool,
+    /// The CI syncs the archive leaves (`retire::resync_after_archive`): each environment
+    /// delivered from an item this run edited, whose delivery evidence is now older than
+    /// its source until CI delivers again. Empty when nothing was edited.
+    pub resync: Vec<String>,
+}
+
+/// `opv apply rp-…` (#179): the person's last step of a retirement. A person's own terminal
+/// only: agent mode and a missing terminal are refused before anything is read. Then, in
+/// order: the plan id must be the [`retire::archive_plan`] of a key marked `retiring`
+/// (else `plan_unknown`); no target may still hold the key (`still_held`, the prunes CI may
+/// run; else `policy_refused` naming them); the plan is shown and confirmed once; each
+/// boundary item's fields of the key move to the archived section dated `date` (one edit
+/// per item, an item already archived is skipped); last, the contract marks the key
+/// `lifecycle = "retired"` (its declaration is kept). A generated configuration is never
+/// edited (FR-52): its generator gets the diff. A failure after an item was archived is
+/// `Partial`, naming what was done; re-running the same command resumes. Never reads into
+/// output, prints or keeps a value.
+///
+/// [`retire::archive_plan`]: crate::app::retire::archive_plan
+#[allow(clippy::too_many_arguments)]
+pub fn apply_retire(
+    r: &dyn CommandRunner,
+    env: &dyn crate::host::HostEnv,
+    at: &ConfigAt,
+    plan_id: &str,
+    date: &str,
+    still_held: &mut dyn FnMut(&crate::domain::Fleet, &str, &str) -> Vec<String>,
+    confirm: &mut dyn FnMut(&crate::app::retire::ArchivePlan) -> bool,
+    out: &mut dyn Write,
+) -> Result<RetireApplied, Error> {
+    use crate::app::retire;
+    use crate::cause::{EnvName, Guard, KeyName, PlanScope, ProductName};
+    crate::host::refuse_if_agent(env, apply_cmd(Some(plan_id)))?;
+    if !env.interactive() {
+        return Err(Cause::NeedsTerminal {
+            why: NoTerminal::NoTty,
+        }
+        .into());
+    }
+    let fleet = load_fleet(r, at)?;
+    let Some(plan) = retire::archive_plans(&fleet)
+        .into_iter()
+        .find(|p| p.plan_id == plan_id)
+    else {
+        return Err(Cause::PlanUnknown {
+            plan: plan_id.to_string(),
+            scope: Some(PlanScope::Retire),
+        }
+        .into());
+    };
+    let holding = still_held(&fleet, &plan.product, &plan.key);
+    if !holding.is_empty() {
+        return Err(Cause::Guard {
+            guard: Guard::RetireNotPruned {
+                product: ProductName::new(&plan.product),
+                key: KeyName::new(&plan.key),
+                holding: holding.iter().map(EnvName::new).collect(),
+            },
+        }
+        .into());
+    }
+    let label = crate::domain::key_label(&plan.product, &plan.key);
+    let section = crate::domain::convention::archived_section(date, &plan.product, &plan.key);
+    for line in describe_retire(&plan, &section) {
+        writeln!(out, "{line}").map_err(crate::app::write_err)?;
+    }
+    let mut applied = RetireApplied {
+        plan_id: plan.plan_id.clone(),
+        confirmed: false,
+        product: plan.product.clone(),
+        key: plan.key.clone(),
+        section: section.clone(),
+        archived: Vec::new(),
+        already_archived: Vec::new(),
+        retired: false,
+        resync: Vec::new(),
+    };
+    if !confirm(&plan) {
+        return Ok(applied);
+    }
+    applied.confirmed = true;
+    // A failure after an item was archived keeps its cause inside `Partial`, naming what
+    // was done; its step reads what remains (`ready`), which names this same command.
+    let partial = |done: &[String], e: Error| -> Error {
+        if done.is_empty() {
+            return e;
+        }
+        let Error::Catalog(cause, upstream) = e;
+        let cause = Cause::Partial {
+            done: done.to_vec(),
+            scope: Some(PlanScope::Retire),
+            then: cause,
+        };
+        Error::Catalog(Box::new(cause), upstream)
+    };
+    let mut done: Vec<String> = Vec::new();
+    let mut edited: Vec<String> = Vec::new();
+    for item in &plan.items {
+        let moved = retire::archive_item(&fleet, r, &plan.product, &plan.key, item, &section)
+            .map_err(|e| partial(&done, e))?
+            .moved;
+        if moved == 0 {
+            // Already archived, or never held here (an environment added while the key
+            // was retiring gets no field of it).
+            writeln!(
+                out,
+                "{}: no field of {label} left to archive",
+                item.environment
+            )
+            .map_err(crate::app::write_err)?;
+            applied.already_archived.push(item.environment.clone());
+        } else {
+            writeln!(
+                out,
+                "{}: moved {moved} field(s) of {label} to {section:?}",
+                item.environment
+            )
+            .map_err(crate::app::write_err)?;
+            done.push(format!("{label} archived in {}", item.environment));
+            applied.archived.push(item.environment.clone());
+            edited.push(item.ids.item_id.clone());
+        }
+    }
+    mark_retired(r, at, &plan.product, &plan.key).map_err(|e| partial(&done, e))?;
+    writeln!(
+        out,
+        "{label}: lifecycle = \"retired\" (its declaration is kept)"
+    )
+    .map_err(crate::app::write_err)?;
+    applied.retired = true;
+    applied.resync = retire::resync_after_archive(&fleet, &edited);
+    Ok(applied)
+}
+
+/// One line per step of a retirement's apply, plus the plan id: names only.
+pub fn describe_retire(plan: &crate::app::retire::ArchivePlan, section: &str) -> Vec<String> {
+    let label = crate::domain::key_label(&plan.product, &plan.key);
+    let mut out: Vec<String> = plan
+        .items
+        .iter()
+        .enumerate()
+        .map(|(n, i)| {
+            format!(
+                "{}. move the fields of {label} in the {} item of {} to section {section:?}",
+                n + 1,
+                i.boundary,
+                i.environment
+            )
+        })
+        .collect();
+    out.push(format!(
+        "{}. mark {label} lifecycle = \"retired\" in the contract",
+        out.len() + 1
+    ));
+    out.push(format!("plan_id: {}", plan.plan_id));
+    out
+}
+
+/// The configuration at `at`, loaded as every command loads it.
+fn load_fleet(r: &dyn CommandRunner, at: &ConfigAt) -> Result<crate::domain::Fleet, Error> {
+    match at {
+        ConfigAt::File(contract_path) => crate::config::load(contract_path),
+        ConfigAt::Manifest(m) => manifest_fleet(r, at, m),
+    }
+}
+
+/// Mark `product/key` `lifecycle = "retired"` in the contract at `at` (its declaration is
+/// kept), unless it already is. The edited contract must load. A generated configuration
+/// is never edited (FR-52): the refusal carries the diff for its generator.
+fn mark_retired(
+    r: &dyn CommandRunner,
+    at: &ConfigAt,
+    product: &str,
+    key: &str,
+) -> Result<(), Error> {
+    use crate::config::bindings;
+    let merged = at.read_for_write(r)?;
+    let (merged_contract, ids) = bindings::split(&merged);
+    let original = match at {
+        ConfigAt::File(path) => std::fs::read_to_string(path).map_err(|e| unreadable(path, &e))?,
+        ConfigAt::Manifest(_) => merged_contract,
+    };
+    let mut doc = crate::config_edit::ConfigDoc::parse(&original)?;
+    doc.set_key_lifecycle(product, key, "retired")?;
+    let edited = doc.to_string();
+    if edited == original {
+        return Ok(());
+    }
+    crate::config::parse(&bindings::merge(&edited, &ids))?;
+    if crate::app::bootstrap::is_generated(&original) {
+        let source = match at {
+            ConfigAt::File(path) => crate::cause::ConfigSource::File {
+                path: path.clone(),
+                given_by: GivenBy::Discovered,
+            },
+            ConfigAt::Manifest(m) => {
+                use crate::config_store::ConfigStore;
+                m.cause_source()
+            }
+        };
+        return Err(Cause::ConfigNotEditable {
+            source,
+            reason: crate::cause::NotEditable::Generated {
+                generator: crate::app::bootstrap::generated_by(&original).map(Into::into),
+                fragment: crate::app::propose::Fragment::between(&original, &edited, &ids).ok(),
+            },
+        }
+        .into());
+    }
+    match at {
+        ConfigAt::File(path) => crate::config_edit::replace(path, &original, &edited),
+        ConfigAt::Manifest(m) => m.write_bindings(r, Some(&edited), &ids),
+    }
+}
+
 /// Write the move's or rebind's contract and bindings to `at`: a file's contract and
 /// sibling, or a manifest's contract block and `opv-bindings` block in one verified edit.
 fn move_ids(r: &dyn CommandRunner, at: &ConfigAt, p: &StructureProposal) -> Result<(), Error> {

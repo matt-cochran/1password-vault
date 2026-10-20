@@ -5,7 +5,7 @@ permissions: {contents: read}
 jobs:
   drift:
     runs-on: ubuntu-latest
-    strategy: {fail-fast: false, matrix: {env: [prod, staging]}}
+    strategy: {fail-fast: false, matrix: {env: [dev, prod, staging]}}
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/install-opv

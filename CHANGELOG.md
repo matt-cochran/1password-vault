@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-20
+
+0.13.0 keeps an application's keys consistent across every environment, lets infrastructure-generated values reach targets without being stored in 1Password, and gives an assistant a fuller picture of the application, still without ever seeing a value.
+
+### Added
+
+- **Infrastructure values (#206).** A key declared `source = "infrastructure"` is supplied by the deploy job that produces it, as an `opv.supply/1` document on `opv sync <env> --supply-stdin`, and is never stored in 1Password. opv validates it against the key's rules and delivers it through the normal plan and sync path, with `s1` delivery evidence and receipts that list it as `supplied`. CI still never writes a value to 1Password. `opv ci workflow --supply` prints the step for the producing job, and `--supply-check` refuses a step that would expand a value into the job log. The plan, `status`, `ready --gate` and `delivery verify` show such keys as supplied at sync, as supplied, drifted or not recorded. `opv set`, `opv import`, `opv open`, `opv propose structure`, `generate` and attestation all refuse or skip them. Guide: [Supplying infrastructure-generated values](docs/infra-generated-values.md).
+- **Retiring a key, end to end (#179).** After `opv propose retire`, CI runs `opv sync <env> --prune --retire` in tier order (production only after shared and local environments are clean, respecting `confirm_env`, and never while the deployed code still reads the key). Then a person's `opv apply rp-<id>` moves the key's fields into an `archived · <date> · retired <product>/<KEY>` section of each item, never deleting a value, and marks the key `lifecycle = "retired"`. `ready` shows a `retirement_incomplete` finding with the remaining steps.
+- **Consistency across environments (#179).** `ready` reports a non-blocking `environment_gap` for a key whose explicit `environments` list leaves out an environment without an `except`. A new `extend` proposal adds an environment to every explicit-list key of a product or the project. `opv propose setup --names-from` declares keys for every environment. `examples/ci-change-detection` gains a dev → staging → prod promotion recipe gated by `opv ready --gate`.
+- **Inventory (#174).** Each key row carries its declared attributes (immutable, allow_same_value, rule names, guidance, roles, file, delivered names), where it lives in 1Password (section, field, item link), its delivery state on each target (delivered, attested, supplied, stale, not delivered, unreadable) and its own next step. `opv schema` documents the inventory.
+- **Needs (#175).** `opv needs [<env>] [--product] [--scan <dir> | --names <file>]`, also over MCP; Ruby and C/C++ reads and files under a declared secrets directory are scanned. Declared rows carry their value state, undeclared rows a suggested declaration that loads, and `ambiguous` names its candidate products (a computed name is `computed`).
+- **Generated configurations (#178).** On a generated configuration, a proposal returns the fragment the generator must emit (TOML, JSON, removed paths and the load error it would raise) and `generated_by`. The `--write` refusal carries the same fragment. `opv config check --file` confirms a regenerated file project (`regenerated_file_differs` when it does not match).
+- **Signals (#177).** A placeholder in a config key is warned like one in a secret; a `low_entropy` advisory for secrets; an opt-in `github_pat` shape.
+
+### Fixed
+
+- `opv propose structure` / `opv apply` planned no boundary for a key present in every environment by default, so a setup from a `.env` failed with `boundary_missing`; a new environment's proposal now also declares the boundaries of the keys it inherits (#210).
+- `opv propose setup --names-from` against an existing contract proposes only the keys it does not declare yet (#176).
+- Local file delivery refuses a runtime directory others can write to without the sticky bit (`ram_dir_unavailable`, `writable_by_others`), writes through a handle on its private directory so a renamed entry cannot redirect a write, and closes descriptors inherited from `op run` before the app starts (#136).
+- `opv explain` says an infrastructure key is supplied at sync and never stored, with its recorded serial.
+- The release waits up to 15 minutes for npm to serve each platform package before publishing the main package.
+
+### Internal
+
+- Local-delivery lifecycle tests (signals, SIGKILL sweep, failed launches) and a canary sweep across every output channel of role-scoped delivery (#136); the platform matrix and limits are documented in `docs/design/local-delivery.md`.
+- A chained opv-sim scenario covers add, inherit, gap, retire and gate (#179).
+- A lib test's outer `opv run` no longer leaks into later tests' sign-in steps, so plain `cargo test` passes as nextest does.
+
 ## [0.12.3] - 2026-10-19
 
 ### Added
@@ -607,7 +635,8 @@ Local development without a deployment target. Two deprecated forms are removed,
 - `secretctl` renamed to `opv` ([#4](https://github.com/matt-cochran/1password-vault/pull/4)).
 - Gitflow guard, CI on `dev`/`staging`/`main`, and Dependabot targeting `dev` ([#5](https://github.com/matt-cochran/1password-vault/pull/5)).
 
-[Unreleased]: https://github.com/matt-cochran/1password-vault/compare/v0.12.3...HEAD
+[Unreleased]: https://github.com/matt-cochran/1password-vault/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/matt-cochran/1password-vault/compare/v0.12.3...v0.13.0
 [0.12.3]: https://github.com/matt-cochran/1password-vault/compare/v0.12.2...v0.12.3
 [0.12.2]: https://github.com/matt-cochran/1password-vault/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/matt-cochran/1password-vault/compare/v0.12.0...v0.12.1

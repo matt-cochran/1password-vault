@@ -446,6 +446,9 @@ pub enum PlanScope {
         target: TargetName,
         keys: Vec<ProductKey>,
     },
+    /// The person's last step of a retirement (#179, `opv apply rp-…`): archive the key's
+    /// 1Password fields and mark it `retired`. `ready` names what remains and the plan id.
+    Retire,
 }
 
 impl PlanScope {

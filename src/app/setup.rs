@@ -621,9 +621,14 @@ fn config_compatible(path: &Path, expected: &str, recipe_path: &Path) -> Result<
                 path: path.to_path_buf(),
                 given_by: GivenBy::Discovered,
             },
+            // The tool the file's first line names, else the recipe that generates it.
             reason: NotEditable::Generated {
-                generator: Some(recipe_path.to_path_buf()),
-                diff: None,
+                generator: std::fs::read_to_string(path)
+                    .ok()
+                    .and_then(|text| crate::app::bootstrap::generated_by(&text))
+                    .map(PathBuf::from)
+                    .or_else(|| Some(recipe_path.to_path_buf())),
+                fragment: None,
             },
         }
         .into());

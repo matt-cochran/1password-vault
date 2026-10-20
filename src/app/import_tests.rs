@@ -610,3 +610,114 @@ fn an_import_confirmed_for_its_environment_writes() {
     .unwrap();
     assert_eq!(value_of(&op, &fleet, "OPENAI_API_KEY"), MARK_NEW);
 }
+
+// Infrastructure keys (#206 §4.4) ----------------------------------------------------------
+
+/// The infrastructure value's canary in the source file.
+const MARK_INFRA: &str = "postgresql://S7MARKER-import-0001@db.example/app";
+
+/// dev with a Fly target delivering api: api/DATABASE_URL is an infrastructure key (no
+/// field in 1Password), api/API_TOKEN an ordinary one (empty). The source file holds both.
+fn infrastructure_world() -> (FakeOp, Fleet, tempfile::TempDir) {
+    let op = FakeOp::default();
+    let id = op.insert(
+        "vdev0000000000000000000001",
+        serde_json::json!({
+            "title": "myapp · dev values", "category": "SECURE_NOTE",
+            "sections": [{"id": "api", "label": "api"}],
+            "fields": [
+                {"id": "fa", "section": {"id": "api", "label": "api"}, "type": "CONCEALED", "label": "API_TOKEN", "value": ""}
+            ]
+        }),
+    );
+    let fleet = crate::config::parse(&format!(
+        "[environments.dev]\n\
+         boundaries.api = {{ vault_id = \"vdev0000000000000000000001\", item_id = \"{id}\" }}\n\
+         [environments.dev.targets.web]\nfly.app = \"web-dev\"\nfly.secret_name = \"{{KEY}}\"\n\
+         products = [\"api\"]\nstate_vault_id = \"sdev\"\n\
+         [products.api.keys.API_TOKEN]\nkind = \"secret\"\nenvironments = [\"dev\"]\n\
+         [products.api.keys.DATABASE_URL]\nkind = \"secret\"\nsource = \"infrastructure\"\n\
+         environments = [\"dev\"]\nrules = {{ regex = \"postgres(ql)?://.+\" }}\n"
+    ))
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let env_file = dir.path().join("dev.env");
+    std::fs::write(
+        &env_file,
+        format!("API_TOKEN={MARK_API}\nDATABASE_URL={MARK_INFRA}\n"),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&env_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    (op, fleet, dir)
+}
+
+/// The `--json` plan of an import of the infrastructure world (`--dry-run`).
+fn infrastructure_plan(op: &FakeOp, fleet: &Fleet, dir: &tempfile::TempDir) -> serde_json::Value {
+    let mut out = Vec::new();
+    let opts = Opts {
+        json: true,
+        ..opts(dir, true, &[])
+    };
+    run(fleet, "dev", &opts, op, &mut out).unwrap();
+    serde_json::from_slice(&out).unwrap()
+}
+
+#[test]
+fn a_found_infrastructure_value_is_planned_not_stored() {
+    let (op, fleet, dir) = infrastructure_world();
+    let plan = infrastructure_plan(&op, &fleet, &dir);
+    let row = plan["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["key"] == "DATABASE_URL")
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(row["action"], "not_stored");
+}
+
+#[test]
+fn a_found_infrastructure_value_is_never_written_to_1password() {
+    let (op, fleet, dir) = infrastructure_world();
+    run(&fleet, "dev", &opts(&dir, false, &[]), &op, &mut Vec::new()).unwrap();
+    let id = boundary_item(&fleet, "api");
+    assert_eq!(field_in(&op, &id, "DATABASE_URL"), "");
+}
+
+#[test]
+fn replacing_an_infrastructure_key_is_refused_as_not_stored() {
+    let (op, fleet, dir) = infrastructure_world();
+    let opts = opts(&dir, false, &["api/DATABASE_URL"]);
+    let e = run(&fleet, "dev", &opts, &op, &mut Vec::new()).unwrap_err();
+    let doc = crate::error::document(&e, &crate::error::invocation(), false);
+    assert_eq!(doc["subject"]["guard"]["guard"], "not_stored");
+}
+
+/// T13 (core half, value paths): neither the refusal of an infrastructure key nor the
+/// plan that reports one shows its value, in text, `--json`, or `Debug`.
+#[test]
+fn no_infrastructure_refusal_or_plan_shows_the_value() {
+    let (op, fleet, dir) = infrastructure_world();
+    let refused = run(
+        &fleet,
+        "dev",
+        &opts(&dir, false, &["api/DATABASE_URL"]),
+        &op,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    let mut text = Vec::new();
+    run(&fleet, "dev", &opts(&dir, true, &[]), &op, &mut text).unwrap();
+    let shown = format!(
+        "{}\n{}\n{refused:?}\n{}\n{}",
+        crate::error::report(&refused),
+        crate::error::document(&refused, &crate::error::invocation(), true),
+        String::from_utf8(text).unwrap(),
+        infrastructure_plan(&op, &fleet, &dir),
+    );
+    assert!(!shown.contains("S7MARKER"), "{shown}");
+}

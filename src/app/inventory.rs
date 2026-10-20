@@ -19,7 +19,10 @@ use crate::cause::{Cause, FieldRule, InputKind, LocalOp, Location};
 use crate::domain::Fleet;
 use crate::domain::capability::{self, Capability, UnknownSource};
 use crate::domain::convention;
-use crate::domain::inventory::{self, CellInputs, Inventory, PresenceView, ReceiptView};
+use crate::domain::inventory::{
+    self, CellInputs, DeliveryState, EvidenceUnreadable, Inventory, PlacementEvidence,
+    PresenceView, ReceiptView,
+};
 use crate::domain::presence::present_in;
 use crate::domain::rules;
 use crate::domain::value_state::{ValueState, classify};
@@ -53,11 +56,16 @@ pub fn run(
     json: bool,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    let document = gather(fleet, env, product, r, receipt)?;
-    let deliveries = delivery_rows(&scoped(fleet, env), product, r);
+    let (mut document, _writers, locations, versions) = read(fleet, env, product, r, receipt)?;
+    let scoped = scoped(fleet, env);
+    let placements = placement_reads(&scoped, product, r);
+    let deliveries = delivery_rows(&placements);
+    key_deliveries(&scoped, &mut document, &placements, &versions);
+    // Each key row's own next step, now that its delivery evidence is known (#174).
+    inventory::attach_next(&scoped, &mut document);
 
     if json {
-        let body = body(&document, &deliveries)?;
+        let body = body(&document, &deliveries, &locations)?;
         let rendered = serde_json::to_vec(&body)
             .map_err(|_| Cause::Bug {
                 site: "the inventory document serializes",
@@ -65,7 +73,7 @@ pub fn run(
             .map(|bytes| crate::json::finish(&bytes, Ok(()), false))?;
         return out.write_all(&rendered).map_err(super::write_err);
     }
-    let text = render(&document, &deliveries);
+    let text = render(&document);
     out.write_all(text.as_bytes()).map_err(super::write_err)
 }
 
@@ -89,7 +97,7 @@ pub fn gather(
     r: &dyn CommandRunner,
     receipt: Option<&Path>,
 ) -> Result<Inventory, Error> {
-    read(fleet, env, product, r, receipt).map(|(document, _)| document)
+    read(fleet, env, product, r, receipt).map(|(document, _, _, _)| document)
 }
 
 /// [`gather`] and the [`Signals`] `opv next` ranks with: the cells whose delivery evidence
@@ -103,8 +111,8 @@ pub fn gather_for_next(
     r: &dyn CommandRunner,
     receipt: Option<&Path>,
 ) -> Result<(Inventory, Signals), Error> {
-    let (document, writers) = read(fleet, env, product, r, receipt)?;
-    let deliveries = delivery_rows(&scoped(fleet, env), product, r);
+    let (document, writers, _, _) = read(fleet, env, product, r, receipt)?;
+    let deliveries = delivery_rows(&placement_reads(&scoped(fleet, env), product, r));
     let delivered = delivered_cells(fleet, &document, &deliveries);
     Ok((document, Signals { delivered, writers }))
 }
@@ -156,14 +164,43 @@ fn writer_count(users: Option<&Value>) -> Option<usize> {
     )
 }
 
-/// The reads behind [`gather`]: the document, and each read vault's writer count.
+/// Where one key's value lives in 1Password (#174): the label of the section its field sits
+/// in, the label of the field itself, and an `op://<vault>/<item>` link to the item. Names
+/// and ids only: never a value, and never a field-level secret reference that `op` would
+/// resolve without its own access checks (SR-1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct KeyLocation {
+    /// The section label; `null` at the top level or in an unlabelled section.
+    section: Option<String>,
+    /// The field label 1Password holds the value under.
+    field: String,
+    /// `op://<vault>/<item>`: the item, not the field.
+    link: String,
+}
+
+/// The location of each key cell, keyed as `cells.states`: `(product, key, env)`.
+type KeyLocations = BTreeMap<(String, String, String), KeyLocation>;
+
+/// Each boundary item's version as this session read it: item id → version.
+type ItemVersions = BTreeMap<String, u64>;
+
+/// The reads behind [`gather`]: the document, each read vault's writer count, where each
+/// key cell lives, and each read boundary item's version.
 fn read(
     fleet: &Fleet,
     env: Option<&str>,
     product: Option<&str>,
     r: &dyn CommandRunner,
     receipt: Option<&Path>,
-) -> Result<(Inventory, BTreeMap<String, usize>), Error> {
+) -> Result<
+    (
+        Inventory,
+        BTreeMap<String, usize>,
+        KeyLocations,
+        ItemVersions,
+    ),
+    Error,
+> {
     if let Some(name) = env {
         fleet.environment(name)?;
     }
@@ -172,6 +209,8 @@ fn read(
 
     let source = committed_rules(r, &scoped);
     let mut cells = CellInputs::default();
+    let mut locations = KeyLocations::new();
+    let mut versions = ItemVersions::new();
     // Every needed boundary of every scoped environment, each once, and the vaults whose
     // capability must be observed before deciding whether the item can be read at all.
     let mut needs = Vec::new();
@@ -197,8 +236,16 @@ fn read(
         };
         cells.capabilities.insert(vault_id, capability);
     }
-    read_boundaries(&scoped, &source, r, &needs, &mut cells)?;
-    read_personal(&scoped, &source, r, &me, &mut cells);
+    read_boundaries(
+        &scoped,
+        &source,
+        r,
+        &needs,
+        &mut cells,
+        &mut locations,
+        &mut versions,
+    )?;
+    read_personal(&scoped, &source, r, &me, &mut cells, &mut locations);
 
     let view = match receipt {
         Some(path) => Some(read_receipt(path)?),
@@ -209,7 +256,7 @@ fn read(
         document.keys.retain(|k| k.product == name);
         document.cells.retain(|c| c.product == name);
     }
-    Ok((document, writers))
+    Ok((document, writers, locations, versions))
 }
 
 /// The committed-rule source, as `ready` reads it: `Manifest` when the contract is in
@@ -234,16 +281,45 @@ fn read_boundaries(
     r: &dyn CommandRunner,
     needs: &[(String, String, &crate::domain::Boundary)],
     cells: &mut CellInputs,
+    locations: &mut KeyLocations,
+    versions: &mut ItemVersions,
 ) -> Result<(), Error> {
     use crate::app::rule_source::RuleStatus;
     for (env_name, boundary_name, boundary) in needs {
+        let link = format!("op://{}/{}", boundary.vault_id, boundary.item_id);
+        let part = super::tidy::in_boundary(fleet, boundary_name);
+        // Every declared key starts at its conventional home (FR-43); a read below replaces
+        // the section and field with the ones the item actually holds. A shared key homes
+        // at its source (FR-45), so its location is recorded under that source.
+        for (product, declared) in &part.products {
+            for (key, spec) in &declared.keys {
+                if !spec.is_desired_in(env_name) || spec.personal {
+                    continue;
+                }
+                let (at_product, at_key) = spec.source().unwrap_or((product, key));
+                locations.insert(
+                    (product.clone(), key.clone(), env_name.clone()),
+                    KeyLocation {
+                        section: Some(at_product.to_string()),
+                        field: at_key.to_string(),
+                        link: link.clone(),
+                    },
+                );
+            }
+        }
         if cells.capabilities.get(&boundary.vault_id) == Some(&Capability::None) {
             continue;
         }
         let environment = fleet.environment(env_name)?;
         let item = onepassword::read_whole(r, environment, boundary)?;
+        // The item's version (value-free): a delivery recorded before it is stale (#174).
+        if let Some(version) = serde_json::from_slice::<Value>(item.raw())
+            .ok()
+            .and_then(|doc| doc["version"].as_u64())
+        {
+            versions.insert(boundary.item_id.clone(), version);
+        }
         let (layout, _stamp) = onepassword_tidy::parse(item.raw())?;
-        let part = super::tidy::in_boundary(fleet, boundary_name);
         let found = convention::resolve(&layout, &part);
         for (product, declared) in &part.products {
             for (key, spec) in &declared.keys {
@@ -266,6 +342,21 @@ fn read_boundaries(
                 cells
                     .states
                     .insert((product.clone(), key.clone(), env_name.clone()), state);
+                let (at_product, at_key) = spec.source().unwrap_or((product, key));
+                if let Some(&i) = found
+                    .chosen
+                    .get(&(at_product.to_string(), at_key.to_string()))
+                {
+                    let field = &layout.fields[i];
+                    locations.insert(
+                        (product.clone(), key.clone(), env_name.clone()),
+                        KeyLocation {
+                            section: field.section_label().map(str::to_string),
+                            field: field.label.clone(),
+                            link: link.clone(),
+                        },
+                    );
+                }
             }
         }
     }
@@ -283,6 +374,7 @@ fn read_personal(
     r: &dyn CommandRunner,
     me: &Option<String>,
     cells: &mut CellInputs,
+    locations: &mut KeyLocations,
 ) {
     use crate::app::rule_source::RuleStatus;
     use crate::domain::value_state::{ReadError, UnreadableCause};
@@ -293,8 +385,9 @@ fn read_personal(
             continue;
         }
         // The item's fields, `Ok(None)` when the item or its vault is not set up yet.
-        let read = match super::personal::locate(r, fleet, env_name, &project) {
+        let (read, link) = match super::personal::locate(r, fleet, env_name, &project) {
             Ok(Some(at)) => {
+                let link = format!("op://{}/{}", at.vault_id, at.item_id);
                 let users = onepassword_init::vault_users(r, &at.vault_id, &Host::detect)
                     .ok()
                     .flatten();
@@ -313,14 +406,17 @@ fn read_personal(
                         );
                     }
                 }
-                onepassword::read_whole(r, environment, &at)
-                    .and_then(|item| onepassword_tidy::parse(item.raw()).map(|(l, _)| l))
-                    .map(Some)
-                    .map_err(|_| ReadError::new(UnreadableCause::OpFailed))
+                (
+                    onepassword::read_whole(r, environment, &at)
+                        .and_then(|item| onepassword_tidy::parse(item.raw()).map(|(l, _)| l))
+                        .map(Some)
+                        .map_err(|_| ReadError::new(UnreadableCause::OpFailed)),
+                    Some(link),
+                )
             }
-            Ok(None) => Ok(None),
-            Err(e) if super::personal::not_set_up(&e) => Ok(None),
-            Err(_) => Err(ReadError::new(UnreadableCause::OpFailed)),
+            Ok(None) => (Ok(None), None),
+            Err(e) if super::personal::not_set_up(&e) => (Ok(None), None),
+            Err(_) => (Err(ReadError::new(UnreadableCause::OpFailed)), None),
         };
         let found = read
             .as_ref()
@@ -348,26 +444,69 @@ fn read_personal(
                 cells
                     .states
                     .insert((product.clone(), key.clone(), env_name.clone()), state);
+                if let Some(link) = &link {
+                    let (at_product, at_key) = spec.source().unwrap_or((product, key));
+                    let actual = found.as_ref().and_then(|found| {
+                        found
+                            .chosen
+                            .get(&(at_product.to_string(), at_key.to_string()))
+                            .and_then(|&i| {
+                                read.as_ref().ok().and_then(Option::as_ref).map(|layout| {
+                                    let field = &layout.fields[i];
+                                    (
+                                        field.section_label().map(str::to_string),
+                                        field.label.clone(),
+                                    )
+                                })
+                            })
+                    });
+                    let (section, field) = actual
+                        .unwrap_or_else(|| (Some(at_product.to_string()), at_key.to_string()));
+                    locations.insert(
+                        (product.clone(), key.clone(), env_name.clone()),
+                        KeyLocation {
+                            section,
+                            field,
+                            link: link.clone(),
+                        },
+                    );
+                }
             }
         }
     }
 }
 
-/// One row per placement with a recorded delivery item: its state comes from
-/// [`super::delivery::read_state`], never from a value.
-fn delivery_rows(fleet: &Fleet, product: Option<&str>, r: &dyn CommandRunner) -> Vec<DeliveryRow> {
-    let mut rows = Vec::new();
+/// One placement's delivery item as read once: whether it carries a receipt and its
+/// evidence; `Ok(None)` when no item is recorded; `Err` when the read failed.
+struct PlacementRead {
+    environment: String,
+    target: String,
+    product: String,
+    read: Result<Option<(bool, PlacementEvidence)>, EvidenceUnreadable>,
+}
+
+/// Read the delivery item of every placement that delivers a product in scope, once each,
+/// through [`super::delivery::read_state`]. A failed read is noted and kept as
+/// [`EvidenceUnreadable`]: it can only render as `unreadable`.
+fn placement_reads(
+    fleet: &Fleet,
+    product: Option<&str>,
+    r: &dyn CommandRunner,
+) -> Vec<PlacementRead> {
+    let mut reads = Vec::new();
     for (env_name, environment) in &fleet.environments {
         for (target, t) in &environment.targets {
-            for placement in t.delivery_items.keys() {
-                if product.is_some_and(|p| p != placement) {
+            for placement in fleet.products.keys() {
+                if product.is_some_and(|p| p != placement)
+                    || !(fleet.delivers(env_name, target, placement)
+                        || t.delivery_items.contains_key(placement))
+                {
                     continue;
                 }
-                let state = match super::delivery::read_state(fleet, env_name, target, placement, r)
+                let read = match super::delivery::read_state(fleet, env_name, target, placement, r)
                 {
-                    Ok(Some(item)) if item.has_receipt() => "delivered",
-                    Ok(Some(_)) => "not_delivered",
-                    Ok(None) => "not_recorded",
+                    Ok(Some(item)) => Ok(Some((item.has_receipt(), item.evidence()))),
+                    Ok(None) => Ok(None),
                     Err(e) => {
                         let why = e.to_string();
                         r.note(&format!(
@@ -375,19 +514,86 @@ fn delivery_rows(fleet: &Fleet, product: Option<&str>, r: &dyn CommandRunner) ->
                              be read ({}); its state shows as unreadable",
                             why.lines().next().unwrap_or_default()
                         ));
-                        "unreadable"
+                        Err(EvidenceUnreadable::new())
                     }
                 };
-                rows.push(DeliveryRow {
+                reads.push(PlacementRead {
                     environment: env_name.clone(),
                     target: target.clone(),
                     product: placement.clone(),
-                    state,
+                    read,
                 });
             }
         }
     }
-    rows
+    reads
+}
+
+/// One row per placement with a recorded delivery item: its state comes from
+/// [`super::delivery::read_state`], never from a value.
+fn delivery_rows(placements: &[PlacementRead]) -> Vec<DeliveryRow> {
+    placements
+        .iter()
+        .filter(|p| !matches!(p.read, Ok(None)))
+        .map(|p| DeliveryRow {
+            environment: p.environment.clone(),
+            target: p.target.clone(),
+            product: p.product.clone(),
+            state: match &p.read {
+                Ok(Some((true, _))) => "delivered",
+                Ok(Some((false, _))) => "not_delivered",
+                Ok(None) => "not_recorded",
+                Err(_) => "unreadable",
+            },
+        })
+        .collect()
+}
+
+/// Fill each key row's `delivery` (#174): for every placement that delivers the key's
+/// product, the state of the key's store name there ([`inventory::delivery_state`]), from
+/// that placement's evidence line for the name. A name outside the placement's binding set
+/// (personal, skipped by a mode or a role, retired, not a store-bound config) gets none.
+/// The target is not listed here, so a store version is not compared.
+fn key_deliveries(
+    fleet: &Fleet,
+    document: &mut Inventory,
+    placements: &[PlacementRead],
+    versions: &ItemVersions,
+) {
+    for placement in placements {
+        // The binding set names each delivered key and the field it is bound to now; a set
+        // that cannot be built (an unbound boundary) leaves the source unjudged.
+        let bindings = super::delivery::bindings(
+            fleet,
+            &placement.environment,
+            &placement.target,
+            &placement.product,
+        )
+        .ok();
+        let read = match &placement.read {
+            Ok(evidence) => Ok(evidence.as_ref().map(|(_, e)| e)),
+            Err(e) => Err(e),
+        };
+        let column = format!("{}/{}", placement.environment, placement.target);
+        for row in document
+            .keys
+            .iter_mut()
+            .filter(|k| k.product == placement.product)
+        {
+            let Some(name) = row.targets.get(&column) else {
+                continue;
+            };
+            let expected = match &bindings {
+                Some(set) => match set.iter().find(|b| &b.name == name) {
+                    Some(binding) => Some(&binding.source),
+                    None => continue,
+                },
+                None => None,
+            };
+            let state = inventory::delivery_state(read, name, expected, versions, None);
+            row.delivery.insert(column.clone(), state);
+        }
+    }
 }
 
 /// The newest saved receipt: its value states, its `generated_at` and its age. Accepts the
@@ -446,8 +652,13 @@ fn read_receipt(path: &Path) -> Result<ReceiptView, Error> {
     })
 }
 
-/// The schema-3 body: the document, the delivery rows and the typed `next`.
-fn body(document: &Inventory, deliveries: &[DeliveryRow]) -> Result<Value, Error> {
+/// The schema-3 body: the document (each key row with its 1Password location, #174), the
+/// delivery rows and the typed `next`.
+fn body(
+    document: &Inventory,
+    deliveries: &[DeliveryRow],
+    locations: &KeyLocations,
+) -> Result<Value, Error> {
     let serde_json::Value::Object(mut fields) =
         serde_json::to_value(document).map_err(|_| Cause::Bug {
             site: "the inventory document serializes",
@@ -468,6 +679,36 @@ fn body(document: &Inventory, deliveries: &[DeliveryRow]) -> Result<Value, Error
         "schema_version".into(),
         Value::from(crate::json::SCHEMA_VERSION),
     );
+    // Each key row names where its value lives: section, field and item link. The location
+    // of a shared key is looked up under its source (FR-45), as its value is.
+    if let Some(keys) = fields.get_mut("keys").and_then(Value::as_array_mut) {
+        for row in keys {
+            let product = row["product"].as_str().map(str::to_string);
+            let key = row["key"].as_str().map(str::to_string);
+            let (Some(product), Some(key)) = (product, key) else {
+                continue;
+            };
+            let Some(cell) = document
+                .cells
+                .iter()
+                .find(|c| c.product == product && c.key == key)
+            else {
+                continue;
+            };
+            let (at_product, at_key) = cell
+                .from
+                .as_deref()
+                .and_then(|from| from.split_once('/'))
+                .unwrap_or((cell.product.as_str(), cell.key.as_str()));
+            if let Some(location) =
+                locations.get(&(at_product.to_string(), at_key.to_string(), cell.env.clone()))
+            {
+                row["location"] = serde_json::to_value(location).map_err(|_| Cause::Bug {
+                    site: "a key location serializes",
+                })?;
+            }
+        }
+    }
     if let Some(command) = next_command(document) {
         fields.insert(
             "next".into(),
@@ -530,6 +771,7 @@ fn state_word(state: &ValueState) -> String {
             format!("unreadable({cause})")
         }
         ValueState::NotWanted { .. } => "not_wanted".into(),
+        ValueState::Supplied => "supplied".into(),
     }
 }
 
@@ -551,9 +793,10 @@ fn tier_word(tier: crate::domain::Tier) -> &'static str {
 }
 
 /// The compact matrix: one row per key, one column per environment, each cell the state
-/// word and the capability letter. Below it, the boundary ids, the delivery rows, the
-/// receipt used (if any) and the typed next as a command.
-fn render(document: &Inventory, deliveries: &[DeliveryRow]) -> String {
+/// word and the capability letter. Below it, the boundary ids, each key's delivery state
+/// per target (grouped by state, so a row never widens), the receipt used (if any) and the
+/// typed next as a command.
+fn render(document: &Inventory) -> String {
     let mut text = String::new();
     let labels: Vec<String> = document
         .keys
@@ -589,7 +832,8 @@ fn render(document: &Inventory, deliveries: &[DeliveryRow]) -> String {
     text.push_str(head_line.trim_end());
     text.push('\n');
     for (row, key) in document.keys.iter().enumerate() {
-        let mut line = format!("{:<label_width$}", labels[row]);
+        let marked = format!("{}{}", labels[row], key_marker(key));
+        let mut line = format!("{marked:<label_width$}");
         for (i, env) in document.environments.iter().enumerate() {
             let cell = by_cell
                 .get(&(key.product.as_str(), key.key.as_str(), env.env.as_str()))
@@ -615,11 +859,10 @@ fn render(document: &Inventory, deliveries: &[DeliveryRow]) -> String {
             ids.join(" ")
         ));
     }
-    for row in deliveries {
-        text.push_str(&format!(
-            "delivery {}/{}/{}: {}\n",
-            row.environment, row.target, row.product, row.state
-        ));
+    for key in &document.keys {
+        if let Some(line) = delivery_line(key) {
+            text.push_str(&line);
+        }
     }
     if let Some(cell) = document.cells.iter().find(|c| c.from_receipt.is_some())
         && let Some(use_) = &cell.from_receipt
@@ -636,6 +879,42 @@ fn render(document: &Inventory, deliveries: &[DeliveryRow]) -> String {
         text.push_str(&format!("next: {command}\n"));
     }
     text
+}
+
+/// A key's delivery states as one compact line (#174): `delivery <product>/<KEY>:` then,
+/// per state in a fixed order, `<state>=<env>/<target>,…`. `None` when no target delivers
+/// the key.
+fn delivery_line(key: &inventory::KeyRow) -> Option<String> {
+    if key.delivery.is_empty() {
+        return None;
+    }
+    let mut by_state: BTreeMap<DeliveryState, Vec<&str>> = BTreeMap::new();
+    for (column, state) in &key.delivery {
+        by_state.entry(*state).or_default().push(column);
+    }
+    let groups: Vec<String> = by_state
+        .iter()
+        .map(|(state, columns)| format!("{}={}", state.word(), columns.join(",")))
+        .collect();
+    Some(format!(
+        "delivery {}/{}: {}\n",
+        key.product,
+        key.key,
+        groups.join(" ")
+    ))
+}
+
+/// The compact suffix a key's matrix label carries (#174): `!` when the key is immutable,
+/// `@` when it is a local file key, `!@` when it is both, and nothing when it is neither
+/// (so a key with no attribute renders exactly as it did before). The suffix is glued to the
+/// label and the unmarked width is used, so a marked key never widens an unmarked row.
+fn key_marker(key: &inventory::KeyRow) -> &'static str {
+    match (key.immutable, key.file.is_some()) {
+        (true, true) => "!@",
+        (true, false) => "!",
+        (false, true) => "@",
+        (false, false) => "",
+    }
 }
 
 /// The matrix entry of a key the contract does not declare for an environment: no cell, no

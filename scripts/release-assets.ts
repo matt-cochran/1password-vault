@@ -76,7 +76,8 @@ export type TarballWait = {
 // Poll until the registry serves the published tarball, then stop. A bounded wall clock
 // (injectable so tests never sleep) guarantees we fail rather than wait forever.
 export async function waitForTarball(url: string, wait: TarballWait): Promise<void> {
-  const timeoutMs = wait.timeoutMs ?? 300_000;
+  // 15 minutes: npm took over 5 minutes to serve a 0.12.3 platform tarball.
+  const timeoutMs = wait.timeoutMs ?? 900_000;
   const intervalMs = wait.intervalMs ?? 5_000;
   const deadline = wait.now() + timeoutMs;
   for (;;) {

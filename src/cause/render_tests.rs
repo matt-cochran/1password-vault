@@ -209,6 +209,14 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             vec!["cfg/copy.toml", "man-shop"],
         ),
         (
+            RegeneratedFileDiffers {
+                file: PathBuf::from("cfg/regenerated.toml"),
+                committed: PathBuf::from("cfg/secrets.toml"),
+                in_place: false,
+            },
+            vec!["cfg/regenerated.toml", "cfg/secrets.toml"],
+        ),
+        (
             BindingsUnapplied {
                 environments: vec![EnvName::new("env-prod")],
             },
@@ -440,6 +448,27 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                 },
             },
             vec!["tgt-web", "config", "set fly.config"],
+        ),
+        (
+            Guard {
+                guard: super::super::Guard::RetireOutOfOrder {
+                    product: ProductName::new("prod-api"),
+                    key: KeyName::new("OLD_KEY"),
+                    env: EnvName::new("env-prod"),
+                    first: EnvName::new("env-dev"),
+                },
+            },
+            vec!["prod-api", "OLD_KEY", "env-prod", "env-dev"],
+        ),
+        (
+            Guard {
+                guard: super::super::Guard::NotStored {
+                    product: ProductName::new("prod-api"),
+                    key: KeyName::new("NEON_URL"),
+                    env: EnvName::new("env-prod"),
+                },
+            },
+            vec!["prod-api", "NEON_URL", "env-prod"],
         ),
         (
             CreateOutcomeUnknown {
@@ -915,6 +944,7 @@ fn ordinal(c: &Cause) -> usize {
         StateVaultTooWide { .. } => 6,
         ConfigNotEditable { .. } => 7,
         CopiesDiffer { .. } => 8,
+        RegeneratedFileDiffers { .. } => 83,
         BindingsUnapplied { .. } => 49,
         ManifestNotFound { .. } => 9,
         ManifestAmbiguous { .. } => 10,
@@ -994,7 +1024,7 @@ fn ordinal(c: &Cause) -> usize {
     }
 }
 
-const VARIANTS: usize = 83;
+const VARIANTS: usize = 84;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
@@ -2764,6 +2794,80 @@ fn a13_a_superseded_delivery_names_the_later_receipt() {
     assert!(d.contains("/tmp/receipt.json"), "{d}");
 }
 
+/// #206 (R1): an assistant's `opv sync <env> --supply-stdin`.
+fn assistant_supply() -> Cause {
+    Cause::PersonOnly {
+        command: Cmd {
+            command: vec!["sync".into()],
+            args: vec!["prod".into(), "--supply-stdin".into()],
+        },
+        marker: AgentMarker::ClaudeCode,
+    }
+}
+
+#[test]
+fn an_assistants_supply_is_never_sent_to_a_terminal() {
+    assert!(
+        !assistant_supply()
+            .do_text(&inv())
+            .unwrap_or_default()
+            .contains("terminal")
+    );
+}
+
+#[test]
+fn an_assistants_supply_is_sent_to_the_deploy_workflow() {
+    assert!(
+        assistant_supply()
+            .do_text(&inv())
+            .unwrap_or_default()
+            .starts_with(
+                "it runs in the approved deploy workflow (CI), from the job that produced the value"
+            )
+    );
+}
+
+#[test]
+fn an_assistants_supply_message_names_the_deploy_workflow() {
+    assert!(
+        assistant_supply()
+            .message()
+            .contains("runs only in the approved deploy workflow (CI)")
+    );
+}
+
+#[test]
+fn an_assistants_supply_steps_to_the_environments_plan() {
+    assert_eq!(next_in(&assistant_supply(), &inv()), "opv plan prod");
+}
+
+/// #206 §5.4: a supplying run's unrecorded supplied name sends the person to the deploy job.
+#[test]
+fn an_unrecorded_supplied_name_says_to_re_run_the_deploy_job() {
+    let i = invoked(&["sync"], &["prod", "--target", "web", "--supply-stdin"]);
+    assert_eq!(
+        unverified(Unverified::NotRecorded).do_text(&i).as_deref(),
+        Some("re-run the deploy job; the target may hold the value but opv cannot vouch for it")
+    );
+}
+
+/// #206 §5.4: its Next stays the scoped read.
+#[test]
+fn an_unrecorded_supplied_name_still_steps_to_the_scoped_plan() {
+    let i = invoked(&["sync"], &["prod", "--target", "web", "--supply-stdin"]);
+    assert_eq!(
+        next_in(&unverified(Unverified::NotRecorded), &i),
+        "opv plan prod --target web"
+    );
+}
+
+/// 01.06: without a supply, an unrecorded delivery keeps no Do.
+#[test]
+fn an_unrecorded_delivery_without_a_supply_has_no_do() {
+    let i = invoked(&["sync"], &["prod", "--target", "web"]);
+    assert_eq!(unverified(Unverified::NotRecorded).do_text(&i), None);
+}
+
 /// A13: a delivery from another account steps to signing in to it.
 #[test]
 fn a13_another_account_steps_to_signing_in_to_it() {
@@ -3340,6 +3444,30 @@ fn f1_a_refused_setup_falls_back_to_its_help() {
     assert_eq!(next_under(&c, &inv, &under_ci()), "opv setup --help");
 }
 
+/// #179: CI's refused `opv apply rp-…` hands the same apply to the person, never another
+/// command's read.
+#[test]
+fn a_retirement_apply_refused_under_ci_is_handed_to_the_person() {
+    let c = Cause::NeedsTerminal {
+        why: NoTerminal::NoTty,
+    };
+    let inv = cli(&["opv", "apply", "rp-40618f09aa949b63"]);
+    assert_eq!(
+        next_under(&c, &inv, &under_ci()),
+        "opv apply rp-40618f09aa949b63"
+    );
+}
+
+/// #179: the handed-over apply is the person's step, not CI's.
+#[test]
+fn a_retirement_apply_refused_under_ci_is_a_persons_step() {
+    let c = Cause::NeedsTerminal {
+        why: NoTerminal::NoTty,
+    };
+    let inv = cli(&["opv", "apply", "rp-40618f09aa949b63"]);
+    assert!(c.human_required_in(&inv, &under_ci()));
+}
+
 /// E1: a kube context that needs a credential refresh never steps back to the same read
 /// when this run has no terminal.
 #[test]
@@ -3443,6 +3571,45 @@ fn f2_a_byte_count_out_of_range_steps_to_config_edit() {
         next_in(&c, &cli(&["opv", "apply", "--generate", "prod:web/TOKEN"])),
         "opv config edit"
     );
+}
+
+/// #206 §4.4: an infrastructure key steps to explaining where its value comes from.
+#[test]
+fn an_infrastructure_key_generate_refusal_steps_to_explain() {
+    let c = generate_refused(GenerateRefusal::Infrastructure);
+    assert_eq!(
+        next_in(&c, &cli(&["opv", "apply", "--generate", "prod:web/TOKEN"])),
+        "opv explain web/TOKEN --env prod"
+    );
+}
+
+/// #206 §4.4: a value path refused for an infrastructure key steps to explaining it.
+#[test]
+fn a_not_stored_key_steps_to_explain() {
+    let c = Cause::Guard {
+        guard: Guard::NotStored {
+            product: ProductName::new("web"),
+            key: KeyName::new("NEON_URL"),
+            env: EnvName::new("prod"),
+        },
+    };
+    assert_eq!(
+        next_in(&c, &cli(&["opv", "set", "web/NEON_URL", "--env", "prod"])),
+        "opv explain web/NEON_URL --env prod"
+    );
+}
+
+/// #206 §4.4: a value path refused for an infrastructure key is a policy refusal.
+#[test]
+fn a_not_stored_key_is_policy_refused_with_exit_6() {
+    let c = Cause::Guard {
+        guard: Guard::NotStored {
+            product: ProductName::new("web"),
+            key: KeyName::new("NEON_URL"),
+            env: EnvName::new("prod"),
+        },
+    };
+    assert_eq!((c.code(), c.exit_code()), ("policy_refused", 6));
 }
 
 /// F2 (R64): a field that already holds a value steps to the reviewed rotation plan.
@@ -3649,7 +3816,7 @@ fn a22_a_generated_config_without_a_known_generator_names_none() {
         source: file_source(),
         reason: NotEditable::Generated {
             generator: None,
-            diff: None,
+            fragment: None,
         },
     };
     assert!(c.message().ends_with("it is generated"));
@@ -3973,7 +4140,7 @@ fn a_generated_configuration_names_no_opv_command_as_next() {
         source: file_source(),
         reason: NotEditable::Generated {
             generator: None,
-            diff: None,
+            fragment: None,
         },
     };
     let inv = Invocation {
@@ -3984,13 +4151,23 @@ fn a_generated_configuration_names_no_opv_command_as_next() {
     assert_eq!(c.step(&inv).1, Next::None(NoNext::NothingToRun));
 }
 
-/// #184: a refused `propose … --write` on a generated configuration, with its diff.
+/// #178: the fragment of `opv propose env staging`, with `load_error`.
+fn staging_fragment(load_error: Option<LoadError>) -> Fragment {
+    Fragment {
+        toml: "[environments.staging]\n".into(),
+        json: serde_json::json!({"environments": {"staging": {}}}),
+        removed: Vec::new(),
+        load_error,
+    }
+}
+
+/// #184: a refused `propose … --write` on a generated configuration, with its fragment.
 fn generated_proposal_refused() -> Cause {
     Cause::ConfigNotEditable {
         source: file_source(),
         reason: NotEditable::Generated {
             generator: None,
-            diff: Some("+[environments.staging]\n".into()),
+            fragment: Some(staging_fragment(None)),
         },
     }
 }
@@ -4039,14 +4216,80 @@ fn a_refused_generated_proposal_keeps_the_project_flag() {
     );
 }
 
-/// #184: the refusal's document carries the diff to make in the generator.
+/// #178: the refusal's document carries the fragment the generator must emit, not a diff.
 #[test]
-fn a_refused_generated_proposal_carries_its_diff() {
+fn a_refused_generated_proposal_carries_its_fragment() {
     let doc = crate::error::document(&generated_proposal_refused().into(), &inv(), false);
     assert_eq!(
-        doc["subject"]["reason"]["diff"],
-        serde_json::json!("+[environments.staging]\n")
+        doc["subject"]["reason"]["fragment"]["toml"],
+        serde_json::json!("[environments.staging]\n")
     );
+}
+
+/// #178: the refusal names its generator on the wire as `generated_by`.
+#[test]
+fn a_refused_generated_proposal_names_its_generator_as_generated_by() {
+    let c = Cause::ConfigNotEditable {
+        source: file_source(),
+        reason: NotEditable::Generated {
+            generator: Some(PathBuf::from("fleet_secrets.py")),
+            fragment: Some(staging_fragment(None)),
+        },
+    };
+    let doc = crate::error::document(&c.into(), &inv(), false);
+    assert_eq!(
+        doc["subject"]["reason"]["generated_by"],
+        serde_json::json!("fleet_secrets.py")
+    );
+}
+
+/// #178: the refusal's text shows the fragment, indented under its message.
+#[test]
+fn a_refused_generated_proposals_text_shows_its_fragment() {
+    let text = render_text(
+        &generated_proposal_refused(),
+        None,
+        &inv(),
+        false,
+        false,
+        false,
+    );
+    assert!(text.contains("  fragment:\n    [environments.staging]\n  load_error: none\n"));
+}
+
+/// #178: the refusal's Do says to have the generator emit the fragment.
+#[test]
+fn a_refused_generated_proposals_do_is_to_emit_the_fragment() {
+    let c = Cause::ConfigNotEditable {
+        source: file_source(),
+        reason: NotEditable::Generated {
+            generator: Some(PathBuf::from("fleet_secrets.py")),
+            fragment: Some(staging_fragment(None)),
+        },
+    };
+    assert!(
+        c.plan(&inv())
+            .do_text
+            .unwrap()
+            .starts_with("have fleet_secrets.py emit the proposal's fragment")
+    );
+}
+
+/// #178: a fragment the file would not load with steps to no command: the proposal
+/// changes first.
+#[test]
+fn a_refused_generated_proposal_that_would_not_load_names_no_command_as_next() {
+    let c = Cause::ConfigNotEditable {
+        source: file_source(),
+        reason: NotEditable::Generated {
+            generator: None,
+            fragment: Some(staging_fragment(Some(LoadError {
+                code: "config_invalid",
+                message: "the configuration is invalid".into(),
+            }))),
+        },
+    };
+    assert_eq!(c.step(&inv()).1, Next::None(NoNext::NothingToRun));
 }
 
 /// D (snapshot review): an invalid proposal (retry never) names no command, never the
@@ -4323,6 +4566,25 @@ fn a_gate_failure_fill_is_the_persons_next() {
     assert_eq!(
         next_kind_actor(&c.step(&inv()).1).1,
         crate::json::NextActor::Person
+    );
+}
+
+/// #179: a gate refused on stale delivery evidence says a retirement's archive is one cause
+/// and a sync records the delivery again, never that the value is missing.
+#[test]
+fn a_stale_delivery_gate_names_the_archive_as_a_cause() {
+    let c = Cause::GateFailed {
+        env: EnvName::new("staging"),
+        keys: vec![(
+            ProductName::new("app"),
+            KeyName::new("API_KEY"),
+            "not_delivered",
+        )],
+    };
+    assert!(
+        c.do_text(&inv())
+            .unwrap_or_default()
+            .contains("a retirement's archive by opv apply rp-")
     );
 }
 

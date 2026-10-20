@@ -239,10 +239,16 @@ version). Needs your own interactive terminal.";
 
 const CONFIG_CHECK_QUICK: &str = "\
 Examples:
-  opv config check --file secrets.toml   # exit 2 with a diff when the copy differs";
+  opv config check --file secrets.toml   # exit 2 with a diff when the copy differs
+  opv --config secrets.toml config check --file secrets.toml   # a file regenerated in place
+  opv config check --file out/secrets.toml   # a file project: the regenerated file loads and matches";
 
 const CONFIG_CHECK_MORE: &str = "\
-Compares a committed copy with the project's manifest (for review in CI). Changes nothing.";
+Manifest project: compares a committed copy with the project's manifest (for review in CI).
+File project (--config, or a secrets.toml found from here and no .opv): the regenerated file
+must load and its configuration must equal the committed one (the project's secrets.toml, or
+its copy at git HEAD when the file is that secrets.toml). Exit 0 when they match, 2 with a diff
+when they differ. Changes nothing.";
 
 const PROJECTS_QUICK: &str = "\
 Examples:
@@ -364,12 +370,18 @@ the link. Never reads a value.";
 const NEEDS_QUICK: &str = "\
 Examples:
   opv needs                    # undeclared, declared_unobserved, ambiguous, declared
+  opv needs dev --product api  # only what api needs in dev
+  opv needs --scan ../service  # scan a directory instead of the git tree
+  opv needs --names found.txt  # names an assistant found itself, one per line (- = stdin)
   opv needs --gate             # exit 2 when the code reads a name no contract declares
   opv needs --json             # the same as one document";
 
 const NEEDS_MORE: &str = "\
-Scans the files git knows (the working tree) for the names the code reads, and compares them
-with the contract. Reads no value and no 1Password item; prints names and file:line only.";
+Scans the files git knows (the working tree), or with --scan the files under a directory, for
+the names the code reads, and compares them with the contract; --names compares a list of
+names instead (reported without file:line). <ENV> and --product narrow the declared keys;
+names no product declares are always shown. Reads no value and no 1Password item; prints
+names and file:line only.";
 
 const CONTRACT_QUICK: &str = "\
 Examples:
@@ -390,7 +402,8 @@ Examples:
 
 const INVENTORY_MORE: &str = "\
 Each cell is a value state (set, absent, empty, placeholder, malformed, unreadable,
-not_wanted) and this session's access to the vault: W write, R read, - none, ? unknown.
+not_wanted, supplied) and this session's access to the vault: W write, R read, - none,
+? unknown. supplied: an infrastructure key, supplied at sync and never stored.
 Below the matrix: each environment's boundary ids and each placement's delivery state.
 Reads each 1Password item once; never prints a value, a length or a digest.";
 
@@ -648,6 +661,18 @@ enum Cmd {
     /// (names and file:line only, never a value).
     #[command(before_help = NEEDS_QUICK, after_help = NEEDS_MORE)]
     Needs {
+        /// Only the keys desired in this environment.
+        env: Option<String>,
+        /// Only this product's keys (names no product declares yet are kept).
+        #[arg(long)]
+        product: Option<String>,
+        /// Scan the files under this directory (without git) instead of the git tree.
+        #[arg(long, value_name = "DIR", conflicts_with = "names")]
+        scan: Option<PathBuf>,
+        /// Compare these names, one per line, instead of scanning (`-` reads standard
+        /// input): names an assistant found itself, reported with no file:line.
+        #[arg(long, value_name = "FILE")]
+        names: Option<PathBuf>,
         /// Fail (exit 2, `needs_undeclared`) when the code reads a name that neither this
         /// contract nor the default branch's declares.
         #[arg(long)]
@@ -1179,6 +1204,11 @@ struct SyncArgs {
     /// are never pruned unless named with --prune-immutable.
     #[arg(long)]
     prune: bool,
+    /// Retirement's prune step: with --prune, also unset every key marked retiring, once
+    /// the code at HEAD no longer reads it and no local or shared environment still holds
+    /// it. Never writes 1Password.
+    #[arg(long)]
+    retire: bool,
     /// The environment's name again; required when it sets confirm_env = true.
     #[arg(long, value_name = "ENV")]
     confirm: Option<String>,
@@ -1215,6 +1245,14 @@ struct SyncArgs {
     /// in name order, under one plan id.
     #[arg(long = "target", value_name = "NAME")]
     target: Vec<String>,
+    /// Take infrastructure keys' values from stdin (opv.supply/1); never stored.
+    #[arg(
+        long,
+        conflicts_with = "retire",
+        hide_short_help = true,
+        hide_long_help = true
+    )]
+    supply_stdin: bool,
 }
 
 impl From<SyncArgs> for sync::SyncOpts {
@@ -1230,6 +1268,8 @@ impl From<SyncArgs> for sync::SyncOpts {
             expect_plan: a.expect_plan,
             receipt: a.receipt,
             targets: a.target,
+            retire: a.retire,
+            supply_stdin: a.supply_stdin,
         }
     }
 }
@@ -1282,10 +1322,11 @@ enum ProposeCmd {
         /// ENV=REASON (repeatable).
         #[arg(long, value_name = "ENV=REASON")]
         except: Vec<String>,
-        /// Who or what produces the value: person, generated or derived.
+        /// Who or what produces the value: person, generated, derived or infrastructure
+        /// (supplied at sync by the deploy job that produced it, never stored).
         #[arg(
             long,
-            value_parser = ["person", "generated", "derived"],
+            value_parser = ["person", "generated", "derived", "infrastructure"],
             hide_possible_values = true
         )]
         source: Option<String>,
@@ -1476,13 +1517,13 @@ enum CiCmd {
     #[command(before_help = CI_WORKFLOW_QUICK)]
     Workflow {
         /// Environment name from the configuration (for example prod).
-        #[arg(required_unless_present_any = ["on_change", "drift"])]
+        #[arg(required_unless_present_any = ["on_change", "drift", "supply_check"])]
         env: Option<String>,
         /// Target name whose provider setup step and sync command the workflow uses.
         #[arg(
             long,
             value_name = "NAME",
-            required_unless_present_any = ["on_change", "drift"],
+            required_unless_present_any = ["on_change", "drift", "supply_check"],
             conflicts_with_all = ["on_change", "drift"]
         )]
         target: Option<String>,
@@ -1498,6 +1539,18 @@ enum CiCmd {
         /// Print §2.5's nightly drift-check workflow for the same environments.
         #[arg(long, conflicts_with_all = ["on_change", "target", "github_env", "deploy"])]
         drift: bool,
+        /// Print the step that delivers the target's infrastructure values (source =
+        /// "infrastructure"), to paste into the job that produced them; never --rotate.
+        #[arg(long, conflicts_with_all = ["on_change", "drift", "github_env", "supply_check"])]
+        supply: bool,
+        /// Check a workflow file: refuse a ${{ }} expression other than github.* in a step
+        /// script that pipes into --supply-stdin (GitHub expands it into the logged script).
+        #[arg(
+            long,
+            value_name = "FILE",
+            conflicts_with_all = ["on_change", "drift", "target", "github_env", "deploy", "env"]
+        )]
+        supply_check: Option<PathBuf>,
         /// Minutes between change checks (`--on-change` only); a divisor of 60, at most 59.
         #[arg(
             long,
@@ -1517,7 +1570,9 @@ Examples:
   opv ci workflow prod --target web --deploy            # let the job deploy after syncing
   opv ci workflow --on-change                           # the change workflow, every 15 minutes
   opv ci workflow --on-change --every 30                # ... on a 30-minute cron
-  opv ci workflow --drift                               # the nightly drift check";
+  opv ci workflow --drift                               # the nightly drift check
+  opv ci workflow prod --target web --supply            # the step that delivers infrastructure values
+  opv ci workflow --supply-check .github/workflows/apply.yml   # check that step's script";
 
 /// `--every <minutes>`: a divisor of 60 (so the cron repeats every hour), at most 59.
 fn every_minutes(s: &str) -> Result<u8, String> {
@@ -1688,11 +1743,12 @@ enum ConfigCmd {
     /// confirmed; refuses (and re-opens) when someone changed it meanwhile.
     #[command(before_help = EDIT_QUICK, after_help = EDIT_MORE)]
     Edit,
-    /// Compare a committed copy with the project's manifest; exit 2 with a diff when they
-    /// differ (for review in CI).
+    /// Compare a committed copy with the project's manifest, or on a file project a
+    /// regenerated file with the committed one; exit 2 with a diff when they differ (for
+    /// review in CI).
     #[command(before_help = CONFIG_CHECK_QUICK, after_help = CONFIG_CHECK_MORE)]
     Check {
-        /// The committed copy.
+        /// The committed copy (manifest project) or the regenerated file (file project).
         #[arg(long, value_name = "PATH")]
         file: PathBuf,
     },
@@ -2657,6 +2713,8 @@ fn run(
         Budget::starting_now(std::time::Duration::from_secs(cli.timeout)),
         cli.verbose,
     );
+    // #206 (S12): a supply must reach EOF within the same run budget.
+    let supply_deadline = std::time::Instant::now() + std::time::Duration::from_secs(cli.timeout);
     // FR-40, NR-7: the account recorded for this checkout (.opv) or OP_ACCOUNT; a manifest
     // found in another account replaces it below. Never op's default when one is known.
     // FR-40, NR-7: one order everywhere (OP_ACCOUNT, else .opv), resolved to an account ID;
@@ -2664,6 +2722,19 @@ fn run(
     let here = std::env::current_dir().unwrap_or_default();
     // `apply` and `set` are a person's own: an assistant or a run without a terminal is
     // turned away before any account, configuration or 1Password call.
+    // #206 (R1): an assistant never hands opv a value, so `--supply-stdin` is refused from
+    // one before any account, configuration or 1Password call.
+    if let Cmd::Sync(a) = &cli.cmd
+        && a.supply_stdin
+    {
+        opv::host::refuse_if_agent(
+            &opv::host::ProcessEnv,
+            opv::cause::Cmd {
+                command: vec!["sync".into()],
+                args: vec![a.env.clone(), "--supply-stdin".into()],
+            },
+        )?;
+    }
     if let Some(cmd) = person_only(&cli.cmd) {
         opv::host::refuse_if_agent(&opv::host::ProcessEnv, cmd)?;
         if !opv::host::HostEnv::interactive(&opv::host::ProcessEnv) {
@@ -3049,7 +3120,32 @@ fn run(
         let fleet = loaded?;
         return opv::app::changed::run(&fleet, env, product.as_deref(), target, runner, *json, out);
     }
+    // #206: the supply is read from standard input within the run budget (S12), then
+    // admitted by the sync for its scope before any 1Password read.
+    if matches!(&cmd, Cmd::Sync(a) if a.supply_stdin) {
+        let Cmd::Sync(a) = cmd else {
+            unreachable!("matched just above")
+        };
+        let fleet = loaded?;
+        let env = a.env.clone();
+        let raw = read_supply(supply_deadline)?;
+        return sync::run_supplying(&fleet, &env, runner, out, &a.into(), raw)
+            .map_err(|e| e.in_env(&env))
+            .map(|()| 0);
+    }
     run_other(cmd, loaded, source.as_deref(), runner, out).map(|()| 0)
+}
+
+/// The supply on standard input (#206 §3): refused before a byte is read when standard
+/// input is a terminal; otherwise read until EOF, within `deadline`.
+fn read_supply(deadline: std::time::Instant) -> Result<opv::app::deliver_only::RawSupply, Error> {
+    use opv::app::deliver_only::{Limits, read, stdin_until};
+    use std::io::IsTerminal as _;
+    let limits = Limits::new(deadline);
+    if std::io::stdin().is_terminal() {
+        return read(&mut std::io::empty(), true, &limits);
+    }
+    read(&mut stdin_until(deadline), false, &limits)
 }
 
 /// `opv run <env> --confirm <env>` with the run's `--product` and `--role`: the person's
@@ -3295,6 +3391,7 @@ fn request(
 /// manifest is found without the `secrets.toml` walk-up (and without --config).
 fn run_config_manifest(cli: Cli, r: &ProcessRunner, out: &mut dyn Write) -> Result<(), Error> {
     let dir = std::env::current_dir().map_err(cwd_err)?;
+    let given_config = cli.config.clone();
     match cli.cmd {
         Cmd::Config(ConfigCmd::Import {
             file,
@@ -3317,6 +3414,10 @@ fn run_config_manifest(cli: Cli, r: &ProcessRunner, out: &mut dyn Write) -> Resu
             config_cmd::import(&args, &dir, r, out)
         }
         Cmd::Config(ConfigCmd::Check { file }) => {
+            // #178: a file project checks a regenerated file against its committed one.
+            if let Some(project) = file_project_for_check(given_config, &dir, &file) {
+                return config_cmd::check_file_project(&project, &file, r, out);
+            }
             let req = config_store::Request {
                 start: dir.clone(),
                 config: None,
@@ -3333,6 +3434,30 @@ fn run_config_manifest(cli: Cli, r: &ProcessRunner, out: &mut dyn Write) -> Resu
         }
         _ => unreachable!("called for config import and check only"),
     }
+}
+
+/// The file project `config check --file F` compares F with (#178), or `None` for a
+/// manifest project: the `--config` file when given; else, with no OPV_PROJECT and no
+/// `.opv` pointing at a manifest, the secrets.toml found from here when F is another file
+/// (a file regenerated elsewhere). F regenerated in place over that secrets.toml stays a
+/// manifest check unless --config names it.
+fn file_project_for_check(
+    given: Option<PathBuf>,
+    dir: &std::path::Path,
+    file: &std::path::Path,
+) -> Option<PathBuf> {
+    if given.is_some() {
+        return given;
+    }
+    if config_store::project_env().is_some() || config_store::find_dot_opv(dir).is_some() {
+        return None;
+    }
+    let found = config::discover(dir)?;
+    let same = match (std::fs::canonicalize(&found), std::fs::canonicalize(file)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => found == file,
+    };
+    (!same).then_some(found)
 }
 
 /// `opv config import` without `--file` and with no secrets.toml here or above (02.12).
@@ -3444,8 +3569,8 @@ struct ProposeReq {
 
 impl ProposeReq {
     /// Whether the proposal reads the configuration where it lives (a file or a manifest):
-    /// `key`, `env`, `target` and `retire`. `setup` needs none, and `structure` and
-    /// `generate` read the local contract file.
+    /// `key`, `env`, `target`, `retire`, `extend` (#179) and `attest`. `setup` needs none,
+    /// and `structure` and `generate` read the local contract file.
     fn needs_config(&self) -> bool {
         use opv::domain::intent::Intent;
         matches!(
@@ -3454,6 +3579,7 @@ impl ProposeReq {
                 | Intent::Env { .. }
                 | Intent::Target { .. }
                 | Intent::Retire { .. }
+                | Intent::Extend { .. }
                 | Intent::Attest { .. }
         )
     }
@@ -3777,11 +3903,14 @@ fn run_propose_early(
                         Some(&path),
                     )?
                 }
-                (None, Some(names)) => setup::from_names(
+                // #176: into the project's existing contract, only the names it does not
+                // declare yet are proposed and its environment table is kept.
+                (None, Some(names)) => setup::from_names_in(
                     std::path::Path::new(names),
                     setup::NAMES_ENV,
                     config_key,
                     secret_key,
+                    path.is_file().then_some(path.as_path()),
                 )?,
                 (None, None) => {
                     return Err(opv::cause::Cause::Usage {
@@ -3955,7 +4084,9 @@ fn run_propose_contract(
         return writeln!(out, "Next: {command}").map_err(write_err);
     }
     match &req.intent {
-        Intent::Key { .. } | Intent::Env { .. } | Intent::Target { .. } if req.write => {
+        Intent::Key { .. } | Intent::Env { .. } | Intent::Target { .. } | Intent::Extend { .. }
+            if req.write =>
+        {
             let next = format!("opv apply{}", project_flag(req.project.as_deref()));
             print_proposal(doc, &lines, &next, true, req.json, out)
         }
@@ -4149,6 +4280,25 @@ fn run_apply(
     json: bool,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
+    // #179: a retirement's plan id (`rp-…`, named by `ready`) archives and marks the key.
+    if let Some(id) = plan_id.filter(|id| id.starts_with(opv::app::retire::PLAN_ID_PREFIX)) {
+        if let Some(flag) = [
+            (!rebind.is_empty(), "--rebind"),
+            (!generate.is_empty(), "--generate"),
+        ]
+        .into_iter()
+        .find_map(|(given, flag)| given.then_some(flag))
+        {
+            return Err(opv::cause::Cause::Usage {
+                problem: opv::cause::UsageProblem::ConflictsWith {
+                    a: flag.into(),
+                    b: "a retirement plan id".into(),
+                },
+            }
+            .into());
+        }
+        return run_apply_retire(r, config, here, id, project, json, out);
+    }
     let mut grouped: Vec<(String, Vec<String>)> = Vec::new();
     for g in generate {
         let (env, key) = g
@@ -4221,6 +4371,78 @@ fn run_apply(
     writeln!(out, "Next: opv ready").map_err(write_err)
 }
 
+/// `opv apply rp-…` (#179): a retirement's last step, recomputed, shown, confirmed on this
+/// terminal and run: archive the key's 1Password fields, then mark it retired.
+fn run_apply_retire(
+    r: &ProcessRunner,
+    config: Option<&std::path::Path>,
+    here: &std::path::Path,
+    plan_id: &str,
+    project: Option<&str>,
+    json: bool,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let scope = structure_scope(config, here, r, project)?;
+    r.use_account(Some(scope.account.clone()));
+    let mut confirm = |_: &opv::app::retire::ArchivePlan| {
+        let _ = write!(io::stderr(), "Apply this plan? [y/N] ");
+        let _ = io::stderr().flush();
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer).is_ok()
+            && matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+    };
+    let mut still_held = |fleet: &opv::domain::Fleet, product: &str, key: &str| {
+        opv::app::retire::still_held(fleet, product, key, r)
+    };
+    let mut stderr = io::stderr();
+    let shown: &mut dyn Write = if json { &mut stderr } else { out };
+    let applied = opv::app::apply::apply_retire(
+        r,
+        &opv::host::ProcessEnv,
+        &scope.config,
+        plan_id,
+        &opv::app::retire::today(),
+        &mut still_held,
+        &mut confirm,
+        shown,
+    )?;
+    if json {
+        let doc = serde_json::to_value(&applied).map_err(|_| -> Error {
+            opv::cause::Cause::Bug {
+                site: "apply: the retirement result did not serialize",
+            }
+            .into()
+        })?;
+        return writeln!(out, "{doc}").map_err(write_err);
+    }
+    if !applied.confirmed {
+        return writeln!(out, "Nothing was applied.").map_err(write_err);
+    }
+    writeln!(
+        out,
+        "applied {}: {}/{} archived in {} item(s), retired",
+        applied.plan_id,
+        applied.product,
+        applied.key,
+        applied.archived.len() + applied.already_archived.len()
+    )
+    .map_err(write_err)?;
+    // #179: the archive edited the source items; each environment they deliver to has
+    // delivery evidence older than its source until CI delivers again.
+    if !applied.resync.is_empty() {
+        writeln!(
+            out,
+            "The archive edited the source items, so these environments' delivery evidence \
+             is older than their source until CI delivers again:"
+        )
+        .map_err(write_err)?;
+        for command in &applied.resync {
+            writeln!(out, "Next (CI): {command}").map_err(write_err)?;
+        }
+    }
+    writeln!(out, "Next: opv ready").map_err(write_err)
+}
+
 /// The repository top this checkout's `git` names, else the current directory.
 fn repo_top(r: &dyn CommandRunner) -> PathBuf {
     config_store::git_toplevel(r).unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
@@ -4230,12 +4452,35 @@ fn repo_top(r: &dyn CommandRunner) -> PathBuf {
 /// branch's contract deciding which undeclared names are new (names and file:line only).
 fn run_needs(
     fleet: &opv::domain::Fleet,
+    options: &opv::app::needs::NeedsOptions,
     gate: bool,
     json: bool,
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    opv::app::needs::run(r, &repo_top(r), fleet, gate, json, out)
+    opv::app::needs::run(r, &repo_top(r), fleet, options, gate, json, out)
+}
+
+/// The library options for `opv needs` (#175): `--scan` and `--names` are exclusive (clap
+/// refuses both), the names file is read here (`-` = standard input), and without either
+/// the git tree is scanned.
+fn needs_options(
+    env: Option<String>,
+    product: Option<String>,
+    scan: Option<PathBuf>,
+    names: Option<&std::path::Path>,
+) -> Result<opv::app::needs::NeedsOptions, Error> {
+    use opv::app::needs::{NeedsInput, NeedsOptions, read_names};
+    let input = match (scan, names) {
+        (Some(dir), _) => NeedsInput::Scan(dir),
+        (None, Some(file)) => NeedsInput::Names(read_names(file)?),
+        (None, None) => NeedsInput::Git,
+    };
+    Ok(NeedsOptions {
+        env,
+        product,
+        input,
+    })
 }
 
 /// What `opv contract` was asked for.
@@ -4439,7 +4684,17 @@ fn run_other(
             });
             writeln!(out, "{doc}").map_err(write_err)
         }
-        Cmd::Needs { gate, json } => run_needs(&loaded?, gate, json, r, out),
+        Cmd::Needs {
+            env,
+            product,
+            scan,
+            names,
+            gate,
+            json,
+        } => {
+            let options = needs_options(env, product, scan, names.as_deref())?;
+            run_needs(&loaded?, &options, gate, json, r, out)
+        }
         // No --receipt (the surface golden has none): cells of vaults this session is not
         // a member of stay live-absent rather than read from a guessed file.
         Cmd::Inventory { env, product, json } => opv::app::inventory::run(
@@ -4562,8 +4817,25 @@ fn run_other(
             on_change,
             drift,
             every,
+            supply,
+            supply_check,
         }) => {
-            if on_change {
+            if let Some(path) = supply_check {
+                opv::app::ci_workflow::run_supply_check(&path, out)
+            } else if supply {
+                match (env.as_deref(), target.as_deref()) {
+                    (Some(env), Some(target)) => {
+                        opv::app::ci_workflow::run_supply(&loaded?, env, target, deploy, out)
+                    }
+                    _ => Err(opv::cause::Cause::Usage {
+                        problem: opv::cause::UsageProblem::NeedsFlag {
+                            flag: "--supply".into(),
+                            needs: "an environment and --target".into(),
+                        },
+                    }
+                    .into()),
+                }
+            } else if on_change {
                 opv::app::ci_workflow::run_on_change(&loaded?, every, out)
             } else if drift {
                 opv::app::ci_workflow::run_drift(&loaded?, out)
@@ -5904,5 +6176,91 @@ mod tests {
                 .unwrap()
                 .contains("Next: opv skill install")
         );
+    }
+
+    // --- 0.13 surface: `needs` inputs (#175) and `config check` (#178) ---------------------
+
+    /// The parsed `opv needs` arguments for `argv`, as the library options.
+    fn needs_of(argv: &[&str]) -> opv::app::needs::NeedsOptions {
+        match Cli::try_parse_from(argv).unwrap().cmd {
+            Cmd::Needs {
+                env,
+                product,
+                scan,
+                names,
+                ..
+            } => needs_options(env, product, scan, names.as_deref()).unwrap(),
+            _ => panic!("not opv needs"),
+        }
+    }
+
+    #[test]
+    fn needs_scan_and_names_are_mutually_exclusive() {
+        let e = Cli::try_parse_from(["opv", "needs", "--scan", "a", "--names", "b"])
+            .err()
+            .unwrap();
+        assert_eq!(e.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn needs_takes_the_environment_as_a_positional() {
+        assert_eq!(
+            needs_of(&["opv", "needs", "dev"]).env.as_deref(),
+            Some("dev")
+        );
+    }
+
+    #[test]
+    fn needs_product_reaches_the_library_options() {
+        let options = needs_of(&["opv", "needs", "--product", "api"]);
+        assert_eq!(options.product.as_deref(), Some("api"));
+    }
+
+    #[test]
+    fn needs_without_an_input_scans_the_git_tree() {
+        assert_eq!(
+            needs_of(&["opv", "needs"]).input,
+            opv::app::needs::NeedsInput::Git
+        );
+    }
+
+    #[test]
+    fn needs_scan_reaches_the_library_as_a_directory() {
+        assert_eq!(
+            needs_of(&["opv", "needs", "--scan", "../svc"]).input,
+            opv::app::needs::NeedsInput::Scan(PathBuf::from("../svc"))
+        );
+    }
+
+    #[test]
+    fn needs_names_reaches_the_library_as_the_files_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("found.txt");
+        std::fs::write(&file, "API_KEY\n").unwrap();
+        let path = file.to_str().unwrap();
+        assert_eq!(
+            needs_of(&["opv", "needs", "--names", path]).input,
+            opv::app::needs::NeedsInput::Names(vec!["API_KEY".into()])
+        );
+    }
+
+    #[test]
+    fn config_check_on_a_given_config_is_a_file_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("secrets.toml");
+        let found = file_project_for_check(
+            Some(project.clone()),
+            dir.path(),
+            &dir.path().join("out.toml"),
+        );
+        assert_eq!(found, Some(project));
+    }
+
+    #[test]
+    fn config_check_of_the_discovered_file_itself_stays_a_manifest_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("secrets.toml");
+        std::fs::write(&project, "").unwrap();
+        assert_eq!(file_project_for_check(None, dir.path(), &project), None);
     }
 }

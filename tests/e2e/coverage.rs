@@ -105,21 +105,15 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "SourceChanged",
         "a successful result (exit 10), never an error document",
     ),
-    // `app::retire::retire` (the ordered retirement that refuses while deployed code still
-    // reads the key) has no caller outside its tests: `opv propose retire` only marks the key
-    // `retiring` in the contract (scenarios/flow_propose_retire.snap), and `opv apply` runs no
-    // retirement step yet.
-    (
-        "RetireStillRead",
-        "no command runs the retirement yet: propose retire only marks the key retiring, apply runs no retire step",
-    ),
-    // `structure::apply` refuses an id that is not a structural plan id, but its only caller
-    // is `opv apply` (src/app/apply.rs), which passes the id it just recomputed (a different
-    // given id is `plan_changed` first). `opv apply` also refuses a run with no terminal before
-    // it reads anything, and the harness gives opv none (scenarios/apply_needs_terminal.snap).
+    // An unknown plan id reaches `PlanUnknown` only inside `opv apply` (a structural
+    // `sp-…` the run did not recompute, or a retirement `rp-…` no `retiring` key has,
+    // src/app/apply.rs `apply_retire`), and `opv apply` refuses a run with no terminal before
+    // it reads anything: the harness gives opv none (scenarios/apply_needs_terminal.snap), and
+    // no MCP tool applies. Reached by src/app/apply_tests.rs
+    // (`an_unknown_retirement_plan_id_is_refused`).
     (
         "PlanUnknown",
-        "only opv apply reaches the structural apply, with its own recomputed id, and only at a terminal",
+        "only opv apply reaches it, and only at a person's terminal, which the harness never gives",
     ),
 ];
 
@@ -325,6 +319,26 @@ impl Scenario {
                 .success();
             assert!(ok, "git {args:?}");
         }
+        self
+    }
+
+    /// The project's git checkout with everything staged committed, so `HEAD` holds it
+    /// (the revision CI deploys: what a retirement's needs check scans).
+    fn committed(self) -> Self {
+        let ok = Command::new("git")
+            .args(["commit", "-qm", "the app"])
+            .current_dir(self.path("project"))
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", self.path("home"))
+            .env("GIT_AUTHOR_NAME", "e2e")
+            .env("GIT_AUTHOR_EMAIL", "e2e@example.test")
+            .env("GIT_COMMITTER_NAME", "e2e")
+            .env("GIT_COMMITTER_EMAIL", "e2e@example.test")
+            .status()
+            .expect("git commit")
+            .success();
+        assert!(ok, "git commit");
         self
     }
 
@@ -1328,6 +1342,26 @@ mod cases {
         )
     }
 
+    /// #179: a retiring key the code at `HEAD` still reads: the retirement's prune
+    /// (`opv sync <env> --prune --retire`) refuses before any write, naming the file.
+    pub fn retire_still_read() -> Case {
+        case(
+            Scenario::new()
+                .marked()
+                .config(|t| {
+                    t.replacen(
+                        "[products.web.keys.API_KEY]\n",
+                        "[products.web.keys.API_KEY]\nlifecycle = \"retiring\"\n",
+                        1,
+                    )
+                })
+                .git_checkout()
+                .tracked("src/main.rs", READS_UNDECLARED)
+                .committed(),
+            &["sync", "prod", "--prune", "--retire", "--confirm", "prod"],
+        )
+    }
+
     /// A committed contract copy that is not the current contract document.
     pub fn contract_stale() -> Case {
         case(
@@ -1436,6 +1470,33 @@ mod text_cases {
                     )
                 }),
             &["config", "check", "--file", "secrets.toml"],
+        )
+    }
+
+    /// #178: a file project whose generator wrote a configuration that differs from the
+    /// committed `secrets.toml` (one key's guidance changed): the check names both files and
+    /// leaves the direction to the person.
+    pub fn regenerated_file_differs() -> Case {
+        let committed = std::fs::read_to_string(Path::new(ROOT).join("tests/e2e/app/secrets.toml"))
+            .expect("app contract");
+        let regenerated = committed.replacen(
+            "guidance = \"the service's own API key\"",
+            "guidance = \"regenerated\"",
+            1,
+        );
+        assert_ne!(regenerated, committed, "the regenerated file must differ");
+        case(
+            Scenario::new()
+                .marked()
+                .file("project/generated/secrets.toml", &regenerated),
+            &[
+                "--config",
+                "secrets.toml",
+                "config",
+                "check",
+                "--file",
+                "generated/secrets.toml",
+            ],
         )
     }
 
@@ -2137,6 +2198,7 @@ scenarios! {
         set_needs_terminal => NeedsTerminal,
         set_person_only => PersonOnly,
         needs_undeclared => NeedsUndeclared,
+        retire_still_read => RetireStillRead,
         contract_stale => ContractStale,
         value_in_text_field => ValueInTextField,
     ],
@@ -2145,6 +2207,7 @@ scenarios! {
         needs_own_session => NeedsOwnSession,
         create_outcome_unknown => CreateOutcomeUnknown,
         copies_differ => CopiesDiffer,
+        regenerated_file_differs => RegeneratedFileDiffers,
         remote_unreachable => RemoteUnreachable,
         remote_disconnected => RemoteDisconnected,
         manifest_exists => ManifestExists,
@@ -2528,6 +2591,7 @@ fn every_scenario_snapshot_belongs_to_a_scenario() {
         .chain(FLOWS.iter().copied())
         .chain(CORE.iter().copied())
         .chain(crate::scenarios::assistant::SNAPSHOTS.iter().copied())
+        .chain(crate::scenarios::consistency::SNAPSHOTS.iter().copied())
         .collect();
     let orphans: Vec<String> = std::fs::read_dir(scenario_snapshots())
         .map(|d| {

@@ -1,0 +1,86 @@
+# .github/workflows/opv-promotion.yml
+# Promote one change through dev, then staging, then prod. Each tier syncs, then
+# `opv ready <env> --gate` must pass before the next tier's job (which needs it) runs.
+# 1Password is read-only here: the recipe never runs `opv apply`
+# and no job writes a value to 1Password.
+name: "opv: promote dev to staging to prod"
+on:
+  push: {branches: [main], paths: [secrets.toml]}
+  workflow_dispatch:
+permissions: {contents: read}
+concurrency: {group: opv-promotion, cancel-in-progress: false}
+jobs:
+  dev:
+    runs-on: ubuntu-latest
+    environment: dev
+    env:
+      OP_SERVICE_ACCOUNT_TOKEN: "${{ secrets.OPV_DEPLOY_TOKEN }}"
+      OP_CACHE: "false"
+      OPV_VERSION: v0.13.0   # pin the release you tested; bump it deliberately
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the 1Password CLI
+        uses: 1password/install-cli-action@v1
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@1.6
+      - name: Install opv
+        run: |
+          base=https://github.com/matt-cochran/1password-vault/releases/download/$OPV_VERSION
+          curl -fsSLO "$base/opv-x86_64-unknown-linux-musl"
+          curl -fsSLO "$base/SHA256SUMS"
+          sha256sum -c SHA256SUMS --ignore-missing
+          install -m 0755 opv-x86_64-unknown-linux-musl /usr/local/bin/opv
+      - name: Promote dev
+        run: opv sync dev --deploy --confirm dev
+      - name: Fail unless dev is delivered and ready before the next tier
+        run: opv ready dev --gate
+  staging:
+    needs: dev
+    runs-on: ubuntu-latest
+    environment: staging
+    env:
+      OP_SERVICE_ACCOUNT_TOKEN: "${{ secrets.OPV_DEPLOY_TOKEN }}"
+      OP_CACHE: "false"
+      OPV_VERSION: v0.13.0   # pin the release you tested; bump it deliberately
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the 1Password CLI
+        uses: 1password/install-cli-action@v1
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@1.6
+      - name: Install opv
+        run: |
+          base=https://github.com/matt-cochran/1password-vault/releases/download/$OPV_VERSION
+          curl -fsSLO "$base/opv-x86_64-unknown-linux-musl"
+          curl -fsSLO "$base/SHA256SUMS"
+          sha256sum -c SHA256SUMS --ignore-missing
+          install -m 0755 opv-x86_64-unknown-linux-musl /usr/local/bin/opv
+      - name: Promote staging
+        run: opv sync staging --deploy --confirm staging
+      - name: Fail unless staging is delivered and ready before the next tier
+        run: opv ready staging --gate
+  prod:
+    needs: staging
+    runs-on: ubuntu-latest
+    environment: prod
+    env:
+      OP_SERVICE_ACCOUNT_TOKEN: "${{ secrets.OPV_DEPLOY_TOKEN }}"
+      OP_CACHE: "false"
+      OPV_VERSION: v0.13.0   # pin the release you tested; bump it deliberately
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the 1Password CLI
+        uses: 1password/install-cli-action@v1
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@1.6
+      - name: Install opv
+        run: |
+          base=https://github.com/matt-cochran/1password-vault/releases/download/$OPV_VERSION
+          curl -fsSLO "$base/opv-x86_64-unknown-linux-musl"
+          curl -fsSLO "$base/SHA256SUMS"
+          sha256sum -c SHA256SUMS --ignore-missing
+          install -m 0755 opv-x86_64-unknown-linux-musl /usr/local/bin/opv
+      - name: Promote prod
+        run: opv sync prod --deploy --confirm prod
+      - name: Fail unless prod is delivered and ready before the next tier
+        run: opv ready prod --gate

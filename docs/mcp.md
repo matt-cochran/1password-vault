@@ -8,9 +8,9 @@ value in 1Password or at opv's masked prompt.
 
 | Tool | Writes | Input | Returns |
 |---|---|---|---|
-| `opv_state` | nothing | `section`: `inventory`, `needs`, `contract`, `ready`, `plan`, `changed`, `access`, `delivery_preview`, `history`, `status`; optional `env`, `product`, `target` | the same document as the CLI command of that name |
+| `opv_state` | nothing | `section`: `inventory`, `needs`, `contract`, `ready`, `plan`, `changed`, `access`, `delivery_preview`, `history`, `status`; optional `env`, `product`, `target`; for `needs` only, `scan` or `names` (below) | the same document as the CLI command of that name |
 | `opv_next` | nothing | optional `env` | one action this session can take, the queue, and what waits on others |
-| `opv_propose` | nothing (pure) | the intent document: `kind` (`key`, `env`, `target`, `retire`, `setup`, `structure`, `generate`, `attest`), names (grammar-checked), enumerated attributes, **catalog shape names only (no rule parameters)**, references, optional guidance (screened, stored `assistant_written`) | the contract diff and the plan with its `plan_id`, which only a person's `opv apply` runs |
+| `opv_propose` | nothing (pure) | the intent document: `kind` (`key`, `env`, `target`, `retire`, `setup`, `structure`, `generate`, `attest`, `extend`), names (grammar-checked), enumerated attributes, **catalog shape names only (no rule parameters)**, references, optional guidance (screened, stored `assistant_written`) | the contract diff and the plan with its `plan_id`, which only a person's `opv apply` runs |
 | `opv_import_local` | the local vault only | `env` (must be tier `local`), a file path | per key `imported` / `skipped: already set` / `skipped: empty`; values tagged `assistant_imported` |
 | `opv_explain` | nothing | a key or a `plan_id` | the explanation, including every place the key is delivered |
 
@@ -25,6 +25,24 @@ as the CLI command of that name (`opv inventory`, `opv needs`, `opv contract`, `
 returns the same document as `opv explain`. No tool accepts or returns a secret value, an
 arbitrary command, an executable, or an approval boolean. Successful responses are built
 field by field from checked identifiers; raw upstream JSON is never returned.
+
+`opv_state` section `needs` takes the CLI's `opv needs` inputs (0.13.0): `env` and `product`
+narrow the declared keys; `scan` is a directory to scan instead of the git tree, which must
+be inside the project (a relative path is resolved against it, and a path or symbolic link
+that leads out of it is refused with `usage`); `names` is the list of names the assistant
+found itself, given inline, never a file the server reads. `scan` and `names` exclude each
+other and are refused for any other section. They are accepted inputs that the advertised
+input schema leaves out, so the frozen tool surface is unchanged. The rows are those of
+[`opv needs`](usage.md#code-and-contract-opv-needs-and-opv-contract): a declared row's value
+state, an undeclared row's suggested declaration, and `ambiguous` with its candidate products.
+
+`opv_propose` with `kind: extend` (`env`, optional `product`) adds the environment to every key
+that lists its environments explicitly ([the `extend`
+intent](usage.md#extend-an-environment-to-every-key-the-extend-intent)). On a generated
+configuration a proposal also returns `generated_by` and the declaration `fragment` its
+generator must emit ([generated configurations](usage.md#opv-propose-key-env-target-and-retire)).
+No tool supplies an [infrastructure value](usage.md#infrastructure-values---supply-stdin):
+`opv sync --supply-stdin` refuses an assistant, and the deploy job supplies it.
 
 ### Errors
 
@@ -88,6 +106,89 @@ and every document carries a typed `next`: `{kind, actor, command}`.
 Never accept a value in text. If a person pastes a value into the chat, stop, do not repeat
 it, treat it as exposed, and tell them to run `opv set <KEY> --env <env>` instead (P-6).
 That makes the rotation plan the next action.
+
+## Walkthrough: from no configuration to every environment ready
+
+This is the whole flow in the order the [assistant e2e
+scenario](../tests/e2e/scenarios/assistant.rs) runs it: an assistant that has only the five
+tools, a person at their own terminal, and CI. Each step names the tool or command, its
+actor, and what the assistant reports back. No step ever handles a value.
+
+1. **Assistant — `opv_state` `needs`.** A repository with no configuration answers the
+   `config_not_found` error, whose typed `next` is the setup proposal. The assistant reports
+   that no contract exists yet and that setup comes first.
+2. **Assistant — `opv_propose` `setup`.** `{"kind": "setup", "names_from": ".env"}` reads
+   the `.env`'s names only and answers the contract diff and the `structure_steps` it plans
+   (`boundary app`, `item app`, `field app/API_KEY secret`, …), declaring each key in the
+   environment `local` (tier `local`). The assistant writes the diff into the repository's
+   `secrets.toml` for the pull request to review and reports the names and kinds it declared.
+3. **Assistant — `opv_propose` `env`, `key` and `target`.** It proposes `{"kind": "env",
+   "env": "prod", "tier": "production"}`, one `{"kind": "key", "product": "app", "key":
+   "API_KEY", "field_kind": "secret", "environments": ["local", "prod"]}` per observed
+   name, and `{"kind": "target", "env": "prod", "name": "gh", "options":
+   {"github-repo": "…", "github-environment": "production"}}`. Each answers a diff and a
+   plan; the assistant writes each diff and reports the environment, keys and target it
+   declared.
+4. **Assistant — `opv_state` `needs`, then `opv_propose` `structure`.** `needs` reports every
+   declared name the code reads, each `undeclared` name with its suggested declaration and
+   each `ambiguous` name with its candidate products; when the git tree is not enough the
+   assistant passes `scan` (a directory inside the project) or `names` (the list it found,
+   inline), which exclude each other and are refused for any other section.
+   `{"kind": "structure"}` answers the vaults, items, state vaults and empty fields still
+   missing and a `plan_id`. The assistant hands that `plan_id` to the person and waits.
+5. **Person — `opv apply <plan_id>`.** In their own terminal (the assistant never runs it),
+   it shows the plan once and creates each boundary's vault and item, the state vault, the
+   delivery item, the empty fields and the bindings, then records the apply. The assistant
+   reads the result back with `opv_state` and reports what now exists.
+6. **Assistant — `opv_import_local`.** For the `local` tier only, `{"env": "local", "file":
+   ".env"}` writes the file's values straight to the local vault and answers per key
+   `imported` or `skipped` (already set, empty); the values are tagged `assistant_imported`.
+   The assistant reports those actions.
+7. **Person — `opv import prod --from prod.env --confirm prod`.** The values the person holds
+   in a file go into the `prod` item. The assistant reports the per-key imported or skipped
+   actions; it never reads a value.
+8. **Assistant — `opv_state` `inventory` (`env: prod`).** The matrix names the one value only
+   the person can provide as `empty` with capability `write`. Each key row also carries its
+   per-target `delivery` state (`delivered`, `attested`, `supplied`, `stale`, `not_delivered`,
+   `unreadable`) and its own `next` `{kind, actor, command}`, so the assistant reports that
+   key's next step rather than guessing.
+9. **Person — `opv set <KEY> --env prod`, or the 1Password app.** The assistant hands over
+   the typed `next` command or the finding's `prerequisite` verbatim and waits; it never sees
+   the value.
+10. **CI — `opv sync prod --confirm prod`.** CI delivers the values; the assistant never runs
+    a sync. An infrastructure key (`source = "infrastructure"`) has no field for anyone to
+    fill: only the deploy job supplies it with `opv sync <env> --supply-stdin`, which refuses
+    an assistant, so it stays out of the assistant's hands by design.
+11. **Assistant — `opv_explain`.** `{"key": "app/API_KEY", "env": "prod"}` lists every
+    place the key is delivered, so the assistant can report where the key now lives without a
+    value.
+12. **Assistant and CI — `opv_next` or `opv_state` `ready`, until ready.** After each person
+    step the assistant calls `opv_next` (or `opv_state` `ready`) and reports the one action it
+    names and that action's actor: a `person` action is handed over verbatim, a `ci` action is
+    left to CI, and an `assistant` action is run. It repeats until the receipt has no blocking
+    finding; then CI runs `opv ready <env> --gate` for each environment and `opv ready --gate`.
+
+### The 0.13.0 additions this flow uses
+
+- **`needs` with `names` or `scan`** (step 4). The scanner reads the git tree by default;
+  `scan` walks a directory inside the project instead, and `names` takes the list the
+  assistant found itself, inline. They exclude each other and are refused for any section but
+  `needs`. The rows are a declared row's value state, an undeclared row's suggested
+  declaration, and `ambiguous` with its candidate products.
+- **The `extend` intent and `environment_gap`.** A key whose explicit `environments` list
+  leaves a declared environment out is not wanted there, and `opv_state` `ready` (or
+  `opv_next`) reports a non-blocking `environment_gap` finding for each one, naming the key
+  and the environment. One `opv_propose` intent closes them all: `{"kind": "extend", "env":
+  "qa"}`, with an optional `product`, adds the environment to every explicit-list key. It is
+  an ordinary proposal — the assistant reports the diff and plan, and a person applies it; it
+  writes no value ([the extend intent](usage.md#extend-an-environment-to-every-key-the-extend-intent)).
+- **`inventory` per-key delivery and `next`** (step 8). Each key row carries its `delivery`
+  state per target and its own `next`, so the assistant reads the key's next step from the
+  inventory instead of inferring it.
+- **Infrastructure (`supplied`) keys** (step 10). A key declared `source =
+  "infrastructure"` is never stored in 1Password: its value state is `supplied`, the deploy
+  job pipes it to `opv sync --supply-stdin`, and the tool refuses an assistant. The assistant
+  reports such a key as out of its hands and leaves it to CI.
 
 ## Authorization and its limits
 

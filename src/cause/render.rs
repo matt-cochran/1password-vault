@@ -88,6 +88,17 @@ fn inv_cmd(inv: &Invocation) -> Cmd {
     }
 }
 
+/// Whether `inv` is a supplying sync (`opv sync <env> --supply-stdin`, #206): its values
+/// come from the deploy job that runs it, never from a person or 1Password.
+fn supplying(inv: &Invocation) -> bool {
+    supplying_cmd(&inv_cmd(inv))
+}
+
+/// Whether `c` is a supplying sync (`opv sync <env> --supply-stdin`, #206).
+fn supplying_cmd(c: &Cmd) -> bool {
+    c.command == ["sync"] && c.args.iter().any(|a| a == "--supply-stdin")
+}
+
 fn carries_person_only_flag(c: &Cmd) -> bool {
     c.args.iter().any(|a| {
         PERSON_ONLY_FLAGS
@@ -154,6 +165,8 @@ fn scope_read(scope: &PlanScope) -> Next {
             command: vec!["apply".into()],
             args: scope.attest_args(),
         }),
+        // #179: `ready` lists what remains of a retirement and names its plan id.
+        PlanScope::Retire => Next::Check(cmd(&["ready"], &[])),
         PlanScope::Sync {
             env,
             targets,
@@ -660,6 +673,16 @@ fn name_listing(k: NameKind, inv: &Invocation) -> Next {
     }
 }
 
+/// The committed configuration a regenerated file is compared with: its path, or the path
+/// of the file itself with `(HEAD)` when it was regenerated in place (#178).
+fn committed_label(committed: &std::path::Path, in_place: bool) -> String {
+    if in_place {
+        format!("{} (HEAD)", committed.display())
+    } else {
+        committed.display().to_string()
+    }
+}
+
 fn source_words(s: &ConfigSource) -> String {
     match s {
         ConfigSource::File { path, given_by } => match given_by {
@@ -895,6 +918,9 @@ fn input_kind(k: InputKind) -> &'static str {
         InputKind::SetupRecipe => "the setup recipe",
         InputKind::Receipt => "the delivery receipt",
         InputKind::DeployCredentials => "the deploy credentials item",
+        InputKind::NamesFile => "the names file",
+        InputKind::Supply => "the supply",
+        InputKind::Workflow => "the workflow file",
     }
 }
 
@@ -975,6 +1001,61 @@ fn rule_words(field: &str, rule: &FieldRule) -> (String, String) {
             format!("rename {field} or {other}"),
         ),
         FieldRule::Check { check } => (check.problem(field), check.fix(field)),
+        FieldRule::Supply { supply } => supply_rule_words(field, supply),
+    }
+}
+
+/// What is wrong with a supply stream or a supplying workflow step, and the fix (#206 §4.1,
+/// §8.1). `field` is a position (`document 2`) or a step, never input text.
+fn supply_rule_words(field: &str, rule: &SupplyRule) -> (String, String) {
+    match rule {
+        SupplyRule::StdinIsTerminal => (
+            "standard input is a terminal; opv reads a supply only from a pipe".to_string(),
+            "pipe the producer's opv.supply/1 documents into opv".to_string(),
+        ),
+        SupplyRule::NotJson { .. } => (
+            format!("{field} is not valid JSON"),
+            "make the producer print whole opv.supply/1 JSON documents".to_string(),
+        ),
+        SupplyRule::UnknownField => (
+            format!("{field} has a field opv.supply/1 does not define"),
+            format!("print only schema, env, serial and values in {field}"),
+        ),
+        SupplyRule::WrongSchema => (
+            format!("{field} is not an opv.supply/1 document"),
+            format!("set schema to \"opv.supply/1\" in {field}"),
+        ),
+        SupplyRule::TooLarge { limit } => (
+            format!("the supply is larger than {limit} bytes"),
+            format!("supply at most {limit} bytes"),
+        ),
+        SupplyRule::TooManyNames { limit } => (
+            format!("the supply names more than {limit} values"),
+            format!("supply at most {limit} values in one run"),
+        ),
+        SupplyRule::MissingSerial => (
+            format!("{field} has no serial (a whole number from the producer's own object)"),
+            format!("add the producer's serial to {field}"),
+        ),
+        SupplyRule::NoValues => (
+            format!("{field} supplies no values"),
+            format!("put at least one <product>/<KEY> value in {field}"),
+        ),
+        SupplyRule::NoDocuments => (
+            "the supply holds no document".to_string(),
+            "make the producer print at least one opv.supply/1 document".to_string(),
+        ),
+        SupplyRule::Timeout => (
+            "the supply did not end within the run budget".to_string(),
+            "make the producer close its output when it has printed its documents".to_string(),
+        ),
+        SupplyRule::ExpressionInSupplyStep { line } => (
+            format!(
+                "{field} expands a ${{{{ … }}}} expression on line {line}, in a step that pipes into --supply-stdin"
+            ),
+            "pass the value through the step's env: and use only github.* expressions in its script"
+                .to_string(),
+        ),
     }
 }
 
@@ -1123,6 +1204,9 @@ fn ram_dir_words(w: &RamDir) -> String {
         RamDir::Unset => "none is configured".into(),
         RamDir::NotAbsolute => "the configured folder is not an absolute path".into(),
         RamDir::NotOwned => "the configured folder is not owned by you".into(),
+        RamDir::WritableByOthers => {
+            "other users can write to the configured folder (no sticky bit)".into()
+        }
         RamDir::NotTmpfs => "the configured folder is not held in memory (tmpfs)".into(),
         RamDir::NoneOnPlatform { os } => format!("{os} has none"),
     }
@@ -1266,6 +1350,121 @@ fn attest_refused(
             )),
             plan_of,
         ),
+        AttestRefusal::NotStored => plan(
+            inspect(format!(
+                "no attestation is needed for {pk}: the deploy job supplies it to opv sync"
+            )),
+            plan_of,
+        ),
+    }
+}
+
+/// `p/K`, or `document D, entry I` for a supplied name that is not a declared key (S11).
+fn supply_entry_words(entry: &SupplyEntry) -> String {
+    match entry {
+        SupplyEntry::Named { product, key } => format!("{product}/{key}"),
+        SupplyEntry::Position { document, index } => format!("document {document}, entry {index}"),
+    }
+}
+
+/// The step after a refused supply (#206 §4.1, §4.4, §5.1): the producer's to fix, or a
+/// read that shows where the key stands. Never a step that handles the value.
+fn supply_refused(env: &EnvName, entry: &SupplyEntry, reason: &SupplyRefusal) -> Plan {
+    let what = supply_entry_words(entry);
+    let explain = Next::Check(cmd(&["explain"], &[what.as_str(), "--env", env.as_str()]));
+    let producer = |text: String| plan(inspect(text), Next::None(NoNext::NothingToRun));
+    let decide = |text: String| plan(inspect(text), Next::None(NoNext::PersonPicksDirection));
+    match reason {
+        // S11: the supplied name is not echoed (a mapping bug can put a value there), so
+        // the proposal names the key as the form the person fills in.
+        SupplyRefusal::Undeclared { closest } => plan(
+            inspect(match closest {
+                Some(c) => format!(
+                    "declare the key with source = \"infrastructure\", or fix the producer's name (the closest infrastructure key is {c})"
+                ),
+                None => {
+                    "declare the key with source = \"infrastructure\", or fix the producer's name"
+                        .to_string()
+                }
+            }),
+            Next::Check(cmd(
+                &["propose", "key"],
+                &["<product>/<KEY>", "--source", "infrastructure"],
+            )),
+        ),
+        SupplyRefusal::NotOptedIn => plan(
+            inspect(format!(
+                "{what} comes from 1Password; only an infrastructure key takes a supplied value"
+            )),
+            explain,
+        ),
+        SupplyRefusal::NotInEnvironment => plan(
+            inspect(format!(
+                "{what} is not present in {env}; leave it out of this supply"
+            )),
+            explain,
+        ),
+        SupplyRefusal::OutOfScope { targets, product } => {
+            let mut args = vec![env.as_str()];
+            if let [t] = targets.as_slice() {
+                args.extend(["--target", t.as_str()]);
+            }
+            if let Some(p) = product {
+                args.extend(["--product", p.as_str()]);
+            }
+            plan(
+                inspect(format!(
+                    "{what} is not delivered by the selected targets or product; leave it out of this supply"
+                )),
+                Next::Check(cmd(&["plan"], &args)),
+            )
+        }
+        SupplyRefusal::NotSupplied { .. } => plan(
+            inspect(
+                "supply every infrastructure key in scope, or narrow the run with --product or --target",
+            ),
+            Next::Check(cmd(&["plan"], &[env.as_str()])),
+        ),
+        SupplyRefusal::Duplicate => producer(format!("supply {what} once")),
+        SupplyRefusal::WrongEnvironment { document_env } => producer(match document_env {
+            Some(e) => format!(
+                "this document was produced for {e}; pipe only {env}'s documents into this sync"
+            ),
+            None => format!("this document was produced for another environment than {env}"),
+        }),
+        SupplyRefusal::Empty
+        | SupplyRefusal::TooShort
+        | SupplyRefusal::Placeholder
+        | SupplyRefusal::NotAString => producer(format!(
+            "the producer gave no usable value for {what}; check the producer"
+        )),
+        SupplyRefusal::RotateWithoutValue => {
+            producer(format!("supply {what} in the same run to rotate it"))
+        }
+        SupplyRefusal::RuleFailed { rule } => producer(format!(
+            "the supplied value of {what} fails rule {rule}; check the producer"
+        )),
+        SupplyRefusal::Stored { boundary } => plan(
+            inspect(format!(
+                "archive field {what} in boundary {boundary} of {env}: infrastructure keys are never stored"
+            )),
+            Next::Check(cmd(
+                &["propose", "key"],
+                &[what.as_str(), "--source", "infrastructure"],
+            )),
+        ),
+        SupplyRefusal::Unproven => decide(format!(
+            "the target holds {what} without delivery evidence; rotate it once (--rotate {what}) with the producer's current value"
+        )),
+        SupplyRefusal::ImmutableDiffers => decide(format!(
+            "{what} is immutable and the target holds another value; rotate it (--rotate {what}) only if it must change"
+        )),
+        SupplyRefusal::Stale { .. } => decide(format!(
+            "re-run the producer for a current value of {what}, or rotate it (--rotate {what}) after a producer reset"
+        )),
+        SupplyRefusal::SerialReused { .. } => decide(format!(
+            "make the producer give a new serial with a new value of {what}, or rotate it (--rotate {what}) after a producer reset"
+        )),
     }
 }
 
@@ -1317,7 +1516,21 @@ fn generate_refused(
             )),
             Next::Check(cmd(&["plan"], &[env.as_str(), "--rotate", pk.as_str()])),
         ),
+        GenerateRefusal::Infrastructure => not_stored(product, key, env),
     }
+}
+
+/// The step for an infrastructure key a value path refuses (#206 §4.4): the value is
+/// changed at its producer and reaches the target through the deploy job, never through
+/// 1Password; `opv explain` shows where it stands.
+fn not_stored(product: &ProductName, key: &KeyName, env: &EnvName) -> Plan {
+    let pk = format!("{product}/{key}");
+    plan(
+        inspect(format!(
+            "change {pk} where infrastructure produces it and re-run the deploy job, which supplies it to opv sync; it has no 1Password field"
+        )),
+        Next::Check(cmd(&["explain"], &[pk.as_str(), "--env", env.as_str()])),
+    )
 }
 
 fn inspect(text: impl Into<String>) -> Option<(Action, String)> {
@@ -1449,6 +1662,15 @@ impl Cause {
             CopiesDiffer { file, manifest } => format!(
                 "{} and the 1Password manifest {manifest} differ",
                 file.display()
+            ),
+            RegeneratedFileDiffers {
+                file,
+                committed,
+                in_place,
+            } => format!(
+                "{} and the committed configuration {} differ",
+                file.display(),
+                committed_label(committed, *in_place)
             ),
             ManifestNotFound { project, account } => match account {
                 Some(a) => format!("no 1Password manifest for project {project} in account {a}"),
@@ -1844,6 +2066,14 @@ impl Cause {
                     "opv does not record an attestation of {product}/{key} on {env}/{target}: {}",
                     reason.words()
                 ),
+                self::Guard::SupplyRefused { env, entry, reason } => format!(
+                    "opv refuses the supplied value of {} for environment {env}: {}",
+                    supply_entry_words(entry),
+                    reason.words()
+                ),
+                self::Guard::NotStored { product, key, env } => format!(
+                    "{product}/{key} has no 1Password value in environment {env}: its value comes from infrastructure, and the deploy job supplies it to opv sync"
+                ),
                 self::Guard::RemoteProfileRefuses {
                     profile,
                     asked,
@@ -1866,6 +2096,30 @@ impl Cause {
                 self::Guard::NoChannel { target, kind, why } => {
                     format!("target {target} has no {kind} channel: {why}")
                 }
+                self::Guard::RetireOutOfOrder {
+                    product,
+                    key,
+                    env,
+                    first,
+                } => format!(
+                    "opv prunes {product}/{key} from production environment {env} only after every local and shared environment; {first} still holds it"
+                ),
+                self::Guard::RetireNotPruned {
+                    product,
+                    key,
+                    holding,
+                } => format!(
+                    "opv archives the 1Password fields of {product}/{key} only once no target holds it; {} still {}",
+                    list_of(holding),
+                    if holding.len() == 1 {
+                        "holds it"
+                    } else {
+                        "hold it"
+                    }
+                ),
+                self::Guard::ArchiveNotRewritable { env, holds } => format!(
+                    "the 1Password item of environment {env} holds {holds}, which opv cannot prove a rewrite keeps, so opv did not archive the field there"
+                ),
             },
             MountUnreadable {
                 workload,
@@ -2067,6 +2321,12 @@ impl Cause {
                     "this step needs a person at a terminal, and this is a CI run".into()
                 }
             },
+            // #206 (R1): a supply comes from the deploy job, never from an assistant.
+            PersonOnly { command, marker } if supplying_cmd(command) => format!(
+                "{} runs only in the approved deploy workflow (CI), from the job that produced the value; this shell looks like an assistant ({})",
+                cmd_text(command),
+                marker.label()
+            ),
             PersonOnly { command, marker } => format!(
                 "{} runs only in a person's terminal; this shell looks like an assistant ({})",
                 cmd_text(command),
@@ -2125,6 +2385,9 @@ impl Cause {
                 }
                 Some(PlanScope::Attest { env, target, .. }) => {
                     format!("no attestation plan {plan} is known for {env}/{target}")
+                }
+                Some(PlanScope::Retire) => {
+                    format!("no retirement plan {plan} is known for a key marked retiring")
                 }
                 None => format!("no plan {plan} is known"),
             },
@@ -2417,7 +2680,13 @@ impl Cause {
                 p.next = check;
             }
         }
-        if let Some((why, shown)) = refusal(&p.next, inv, sit) {
+        // `opv apply` refused for want of a person (no terminal, an assistant, CI) hands the
+        // same apply to the person: CI or an assistant only relays it, so the situation that
+        // refused the run never turns it into another command's read (#179: CI's refused
+        // `opv apply rp-…` named `opv propose structure`, which is no step of a retirement).
+        let persons_own = matches!(self, Cause::NeedsTerminal { .. } | Cause::PersonOnly { .. })
+            && matches!(&p.next, Next::Handoff(c) if c.command == ["apply"]);
+        if !persons_own && let Some((why, shown)) = refusal(&p.next, inv, sit) {
             p = self.refused(p, why, &shown, inv, sit);
         }
         p
@@ -2649,12 +2918,17 @@ impl Cause {
             }
             ConfigNotEditable { source, reason } => {
                 let next = match reason {
-                    // FR-52 (#184): a refused proposal's diff goes into the generator; once
-                    // it emits the configuration, the structure is proposed and applied, and
-                    // apply returns the ids (`generator_ids`) for the generator to record.
-                    NotEditable::Generated { diff: Some(_), .. } => {
-                        Next::Run(cmd(&["propose", "structure"], &[]))
-                    }
+                    // FR-52 (#184, #178): a refused proposal's fragment is what the generator
+                    // emits; once it does, the structure is proposed and applied, and apply
+                    // returns the ids (`generator_ids`) for the generator to record.
+                    NotEditable::Generated {
+                        fragment: Some(Fragment {
+                            load_error: None, ..
+                        }),
+                        ..
+                    } => Next::Run(cmd(&["propose", "structure"], &[])),
+                    // A fragment the file would not load with: the proposal changes first,
+                    // which no fixed opv command does.
                     // The fix is in the generator's input, outside opv; its configuration is
                     // generated again from there (retry never: no opv command makes progress).
                     NotEditable::Generated { .. } => Next::None(NoNext::NothingToRun),
@@ -2662,14 +2936,25 @@ impl Cause {
                 };
                 plan(
                     inspect(match reason {
-                    NotEditable::Generated { generator, diff } => {
+                    NotEditable::Generated { generator, fragment } => {
                         let input = generator.as_ref().map_or_else(
                             || "its generator's input".to_string(),
                             |g| g.display().to_string(),
                         );
-                        match diff {
+                        let generator = generator.as_ref().map_or_else(
+                            || "its generator".to_string(),
+                            |g| g.display().to_string(),
+                        );
+                        match fragment {
+                            Some(Fragment {
+                                load_error: Some(e),
+                                ..
+                            }) => format!(
+                                "change the proposal first: with its fragment the configuration would not load ({}); then have {generator} emit the fragment, propose the structure, and opv apply returns the ids for the generator to record",
+                                e.code
+                            ),
                             Some(_) => format!(
-                                "make the proposal's diff in {input} instead and generate the configuration again; then propose its structure, and opv apply returns the ids for the generator to record"
+                                "have {generator} emit the proposal's fragment and generate the configuration again; then propose its structure, and opv apply returns the ids for the generator to record"
                             ),
                             None => format!(
                                 "change {input} instead, and generate the configuration again"
@@ -2697,6 +2982,21 @@ impl Cause {
                         "decide which is right: update {} (opv config export --toml > {}) or the manifest {manifest} (opv config edit)",
                         file.display(),
                         shell_word(&file.display().to_string())
+                    ),
+                )),
+                Next::None(NoNext::PersonPicksDirection),
+            ),
+            RegeneratedFileDiffers {
+                file,
+                committed,
+                in_place,
+            } => plan(
+                Some((
+                    Action::Inspect,
+                    format!(
+                        "decide which is right: update {} or the committed configuration {}",
+                        file.display(),
+                        committed_label(committed, *in_place)
                     ),
                 )),
                 Next::None(NoNext::PersonPicksDirection),
@@ -3451,6 +3751,10 @@ impl Cause {
                     target,
                     reason,
                 } => attest_refused(product, key, env, target, *reason),
+                self::Guard::SupplyRefused { env, entry, reason } => {
+                    supply_refused(env, entry, reason)
+                }
+                self::Guard::NotStored { product, key, env } => not_stored(product, key, env),
                 self::Guard::RemoteProfileRefuses {
                     profile, allowed, ..
                 } => plan(
@@ -3486,6 +3790,38 @@ impl Cause {
                         )),
                         None => help_of(inv),
                     },
+                ),
+                // The prune of the earlier environment is a write: it is named in the Do,
+                // and the Next is its read (X4).
+                self::Guard::RetireOutOfOrder { first, .. } => plan(
+                    inspect(format!(
+                        "retire it from {first} first: opv sync {first} --prune --retire"
+                    )),
+                    Next::Check(cmd(&["plan"], &[first.as_str()])),
+                ),
+                // #179: the prunes are CI's (or a person's) delivery commands, named in the
+                // Do in tier order; the Next is the read of the first one (X4).
+                self::Guard::RetireNotPruned { holding, .. } => {
+                    let steps: Vec<String> = holding
+                        .iter()
+                        .map(|env| format!("opv sync {env} --prune --retire"))
+                        .collect();
+                    plan(
+                        inspect(format!(
+                            "prune it first (CI may run these): {}",
+                            steps.join("; then ")
+                        )),
+                        match holding.first() {
+                            Some(first) => Next::Check(cmd(&["plan"], &[first.as_str()])),
+                            None => Next::Check(cmd(&["ready"], &[])),
+                        },
+                    )
+                }
+                self::Guard::ArchiveNotRewritable { env, .. } => plan(
+                    inspect(format!(
+                        "in 1Password, move the field into a section whose name starts with \"archived · \" in the item of {env}, then run opv apply again"
+                    )),
+                    Next::Check(cmd(&["ready"], &[])),
                 ),
             },
             MountUnreadable { env, target, .. } => plan(
@@ -3758,6 +4094,19 @@ impl Cause {
                 inspect("run it in your own terminal"),
                 Next::Handoff(inv_cmd(inv)),
             ),
+            // #206 (R1): not a person's terminal either: the deploy job that produced the
+            // value pipes it in. The read shows what the environment's sync would change.
+            PersonOnly { command, .. } if supplying_cmd(command) => plan(
+                inspect(
+                    "it runs in the approved deploy workflow (CI), from the job that produced the value; generate that step with opv ci workflow <env> --target <target> --supply",
+                ),
+                match command.args.first() {
+                    Some(env) if !env.starts_with('-') => {
+                        Next::Check(cmd(&["plan"], &[env.as_str()]))
+                    }
+                    _ => Next::None(NoNext::NothingToRun),
+                },
+            ),
             PersonOnly { command, .. } => plan(
                 inspect("run it in your own terminal"),
                 Next::Handoff(command.clone()),
@@ -3813,10 +4162,22 @@ impl Cause {
             GateFailed { env, keys } => match keys.first() {
                 Some((product, key, reason)) if *reason == "not_delivered" => plan(
                     inspect(format!(
-                        "re-deliver {product}/{key} to environment {env}: its delivery evidence is older than the source item"
+                        "re-deliver {product}/{key} to environment {env}: its source item changed after the last delivery (a value edit, or a retirement's archive by opv apply rp-…), so the delivery evidence is out of date until a sync records it again"
                     )),
                     Next::Run(cmd(&["sync"], &[env.as_str()])),
                 ),
+                // #206 §6.4: an infrastructure key is never stored: nothing to fill; only
+                // the deploy job that produces it can supply it again.
+                Some((product, key, reason))
+                    if *reason == "supplied_not_delivered" || *reason == "supplied_drifted" =>
+                {
+                    plan(
+                        inspect(format!(
+                            "run the deploy job that produces {product}/{key} for environment {env}: its value is supplied at sync, never stored"
+                        )),
+                        Next::Check(cmd(&["plan"], &[env.as_str()])),
+                    )
+                }
                 Some((product, key, _)) => plan(
                     Some((
                         Action::FillValue {
@@ -3874,6 +4235,32 @@ impl Cause {
                     inspect(format!(
                         "in 1Password, open {} and {fix}",
                         input_words(InputKind::DeployCredentials, path)
+                    )),
+                    Next::Rerun,
+                )
+            }
+            InputInvalid {
+                kind: InputKind::Supply,
+                field,
+                rule,
+                ..
+            } => {
+                // The stream comes from a producer step: its author fixes the producer.
+                let (_, fix) = rule_words(field, rule);
+                plan(inspect(fix), Next::None(NoNext::NothingToRun))
+            }
+            InputInvalid {
+                path,
+                kind: InputKind::Workflow,
+                at,
+                field,
+                rule,
+            } => {
+                let (_, fix) = rule_words(field, rule);
+                plan(
+                    Some((
+                        Action::EditInput { path: path.clone() },
+                        format!("edit {}{}: {fix}", path.display(), at_words(at)),
                     )),
                     Next::Rerun,
                 )
@@ -3953,6 +4340,9 @@ impl Cause {
                     RamDir::NotOwned => {
                         format!("set XDG_RUNTIME_DIR on {host} to a runtime folder you own")
                     }
+                    RamDir::WritableByOthers => format!(
+                        "set XDG_RUNTIME_DIR on {host} to a runtime folder only you can write to (mode 0700); on WSL, enable systemd in /etc/wsl.conf"
+                    ),
                     RamDir::NotTmpfs => {
                         format!("set XDG_RUNTIME_DIR on {host} to a tmpfs folder")
                     }
@@ -3983,6 +4373,9 @@ impl Cause {
                     RamDir::NotOwned => {
                         format!("set XDG_RUNTIME_DIR on {host} to a runtime folder you own")
                     }
+                    RamDir::WritableByOthers => format!(
+                        "set XDG_RUNTIME_DIR on {host} to a runtime folder only you can write to (mode 0700); on WSL, enable systemd in /etc/wsl.conf"
+                    ),
                     RamDir::NotTmpfs => {
                         format!("set XDG_RUNTIME_DIR on {host} to a tmpfs folder")
                     }
@@ -4106,6 +4499,15 @@ impl Cause {
                 product: _,
                 state,
             } => match state {
+                // #206 §5.4 (S1): a supplying run that left a supplied name without
+                // evidence. Only the deploy job holds the value, so it is the one to re-run;
+                // Next stays the read.
+                Unverified::NotRecorded if supplying(inv) => plan(
+                    inspect(
+                        "re-run the deploy job; the target may hold the value but opv cannot vouch for it",
+                    ),
+                    Next::Check(cmd(&["plan"], &[env.as_str(), "--target", target.as_str()])),
+                ),
                 // 01.06: a delivery never made is a scoped plan away.
                 Unverified::NotRecorded => plan(
                     None,
@@ -4477,6 +4879,17 @@ pub fn render_text(
     colour: bool,
 ) -> String {
     let mut s = format!("opv: {}\n", cause.message());
+    // #178: a refused proposal on a generated configuration shows the fragment its
+    // generator must emit, and the error the file would raise with it.
+    if let Cause::ConfigNotEditable {
+        reason: NotEditable::Generated {
+            fragment: Some(f), ..
+        },
+        ..
+    } = cause
+    {
+        s.push_str(&fragment_lines(f));
+    }
     if let Some(seen) = cause.observed() {
         s.push_str("  ");
         s.push_str(&evidence::checked_line(seen, cause_account(cause)));
@@ -4502,6 +4915,23 @@ pub fn render_text(
         (_, None) => "none".to_string(),
     };
     s.push_str(&format!("Next: {next}\n"));
+    s
+}
+
+/// A refused proposal's fragment as text: `fragment:` and its TOML indented, the removed
+/// paths, and its load error (or `none`).
+fn fragment_lines(f: &Fragment) -> String {
+    let mut s = String::from("  fragment:\n");
+    for line in f.toml.lines() {
+        s.push_str(&format!("    {line}\n"));
+    }
+    for path in &f.removed {
+        s.push_str(&format!("  removed: {path}\n"));
+    }
+    match &f.load_error {
+        Some(e) => s.push_str(&format!("  load_error: {}: {}\n", e.code, e.message)),
+        None => s.push_str("  load_error: none\n"),
+    }
     s
 }
 

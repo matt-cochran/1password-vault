@@ -22,6 +22,9 @@ use crate::domain::plan::{KeyState, Row, StoreEntry, SyncPlan, TargetState};
 /// Hex digits of a plan id.
 pub const PLAN_ID_LEN: usize = 8;
 
+/// The route of an infrastructure key's name (#206 §6.1): supplied at sync, never stored.
+pub const SUPPLIED_ROUTE: &str = "supplied";
+
 /// The inputs of a plan id besides the plan itself.
 pub struct PlanIdInput<'a> {
     pub env: &'a str,
@@ -79,7 +82,20 @@ pub fn plan_id(input: &PlanIdInput<'_>, plan: &SyncPlan) -> String {
     // (exit 9) still matches. Only a boolean per name goes in, never a value.
     let listed: BTreeMap<&str, &StoreEntry> =
         input.listed.iter().map(|e| (e.name.as_str(), e)).collect();
+    // #206 §6.1: a supplied name enters with route `supplied` and without its write bit, so
+    // a value-free `opv plan` and `sync --supply-stdin --expect-plan` derive the same id and
+    // the id carries no equality bit about a supplied value.
+    let supplied = |r: &Row| (input.routes)(&r.product, &r.key).as_deref() == Some(SUPPLIED_ROUTE);
+    let supplied_names: BTreeSet<String> = plan
+        .rows
+        .iter()
+        .filter(|r| supplied(r))
+        .filter_map(|r| (input.name_of)(&r.product, &r.key))
+        .collect();
     let converging = |r: &Row| -> Option<String> {
+        if supplied(r) {
+            return None;
+        }
         if r.state != KeyState::Ready
             || matches!(r.target, TargetState::Absent | TargetState::WouldChange)
         {
@@ -103,6 +119,7 @@ pub fn plan_id(input: &PlanIdInput<'_>, plan: &SyncPlan) -> String {
         .stage
         .iter()
         .map(|(n, _)| n.clone())
+        .filter(|n| !supplied_names.contains(n))
         .chain(plan.rows.iter().filter_map(converging))
         .collect();
     put("rows");
@@ -118,6 +135,10 @@ pub fn plan_id(input: &PlanIdInput<'_>, plan: &SyncPlan) -> String {
             Kind::Secret => "secret",
             Kind::Config => "config",
         });
+        if supplied(r) {
+            put(SUPPLIED_ROUTE);
+            continue;
+        }
         put(match &r.state {
             KeyState::Missing => "missing",
             KeyState::WrongKind => "wrong-kind",
@@ -126,6 +147,7 @@ pub fn plan_id(input: &PlanIdInput<'_>, plan: &SyncPlan) -> String {
             KeyState::Skipped => "skipped",
             KeyState::SourceBlocked => "source-blocked",
             KeyState::RulesPendingReview => "rules-pending-review",
+            KeyState::SuppliedAtSync => SUPPLIED_ROUTE,
         });
         let applies = r.kind == Kind::Secret
             && r.state == KeyState::Ready
@@ -137,6 +159,7 @@ pub fn plan_id(input: &PlanIdInput<'_>, plan: &SyncPlan) -> String {
             TargetState::WouldChange => "would-change",
             TargetState::Unknown => "unknown",
             TargetState::NotDelivered => "not-delivered",
+            TargetState::AsSupplied | TargetState::Unrecorded => SUPPLIED_ROUTE,
         });
     }
     let mut sorted = |label: &str, names: Vec<String>| {
@@ -154,6 +177,7 @@ pub fn plan_id(input: &PlanIdInput<'_>, plan: &SyncPlan) -> String {
         plan.held_immutable
             .iter()
             .filter(|(p, k)| !converged.contains(&(p.as_str(), k.as_str())))
+            .filter(|(p, k)| (input.routes)(p, k).as_deref() != Some(SUPPLIED_ROUTE))
             .map(|(p, k)| format!("{p}/{k}"))
             .collect(),
     );

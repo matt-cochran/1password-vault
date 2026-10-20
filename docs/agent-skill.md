@@ -50,6 +50,15 @@ Connect credentials. If a tool is missing in this version, say so; use `opv prop
 person's `opv apply` on the CLI instead and never work around it. Details: `opv guide agent`,
 section "Optional MCP server".
 
+The whole flow, from a repository with no configuration to `opv ready --gate` passing in
+every environment, is written out step by step in the [MCP
+walkthrough](mcp.md#walkthrough-from-no-configuration-to-every-environment-ready). In
+outline: `opv_state` `needs` shows the names the code reads; `opv_propose` `setup`, `env`,
+`key`, `target` and `structure` return diffs and a `plan_id`; the user runs `opv apply
+<plan_id>` in their terminal and enters values with `opv set` or in 1Password; you re-read
+`opv_next` (or `opv_state` `ready`) after each step until CI can run `opv sync` and `opv
+ready --gate`. You never handle a value.
+
 ## CLI or MCP
 
 Every MCP tool has the same command on the CLI. Without an MCP client, run the same flow:
