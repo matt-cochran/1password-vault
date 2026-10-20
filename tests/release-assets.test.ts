@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { findRetainedCandidate, npmPublishAction, orderNpmTarballs, validate, waitForTarball, type Manifest } from '../scripts/release-assets.ts';
+import { findRetainedCandidate, npmPublishAction, orderNpmTarballs, publishNpmTarballs, validate, waitForIntegrity, type Manifest } from '../scripts/release-assets.ts';
 const repository = 'matt-cochran/1password-vault';
 const tree = 'a'.repeat(40);
 const actual: Record<string, string> = {};
@@ -76,29 +76,6 @@ test('every platform tarball precedes the main package regardless of file name o
   assert.ok(ordered.slice(0, -1).every((pkg) => pkg.name !== '@matthew-cochran/opv') && ordered.at(-1)?.name === '@matthew-cochran/opv');
 });
 
-test('a tarball URL that answers 200 after polling resolves', async () => {
-  const clock = fakeClock();
-  let attempts = 0;
-  await assert.doesNotReject(waitForTarball('https://registry.npmjs.org/@matthew-cochran/opv/-/opv-1.2.3.tgz', {
-    fetch: async () => ({ status: (attempts += 1) < 3 ? 404 : 200 }),
-    now: clock.now,
-    sleep: clock.sleep,
-    timeoutMs: 1000,
-    intervalMs: 100,
-  }));
-});
-
-test('a tarball URL that never answers 200 rejects after the timeout', async () => {
-  const clock = fakeClock();
-  await assert.rejects(waitForTarball('https://registry.npmjs.org/@matthew-cochran/opv/-/opv-1.2.3.tgz', {
-    fetch: async () => ({ status: 404 }),
-    now: clock.now,
-    sleep: clock.sleep,
-    timeoutMs: 500,
-    intervalMs: 100,
-  }), /not served within 500ms/);
-});
-
 test('an unpublished package is published', () => {
   assert.equal(npmPublishAction(undefined, 'sha512-retained', '@matthew-cochran/opv@1.2.3'), 'publish');
 });
@@ -109,4 +86,76 @@ test('an already published identical integrity is skipped', () => {
 
 test('published bytes that differ are refused', () => {
   assert.throws(() => npmPublishAction('sha512-published', 'sha512-retained', '@matthew-cochran/opv@1.2.3'), /Published npm bytes differ for @matthew-cochran\/opv@1\.2\.3/);
+});
+
+test('no registry wait happens between platform publishes', async () => {
+  const events: string[] = [];
+  const clock = fakeClock();
+  const released = new Set<string>();
+  let listed = false;
+  const packages = [...platforms.map((platform) => tarball(`opv-${platform}.tgz`, `@matthew-cochran/opv-${platform}`)),
+    tarball('opv-main.tgz', '@matthew-cochran/opv')];
+  await publishNpmTarballs(packages, {
+    integrity: async (pkg) => (listed && released.has(pkg.name) ? pkg.integrity : undefined),
+    publish: async (pkg) => { released.add(pkg.name); events.push(`publish:${pkg.name}`); },
+    now: clock.now,
+    sleep: async (milliseconds) => { events.push('sleep'); listed = true; await clock.sleep(milliseconds); },
+  });
+  const firstWait = events.indexOf('sleep');
+  assert.ok(firstWait > 0 && events.slice(0, firstWait).every((event) => event.startsWith('publish:@matthew-cochran/opv-')));
+});
+
+test('the registry wait resolves once npm lists the retained integrity', async () => {
+  const clock = fakeClock();
+  const pkg = tarball('opv-linux-x64.tgz', '@matthew-cochran/opv-linux-x64');
+  let listed: string | undefined;
+  await assert.doesNotReject(waitForIntegrity([pkg], {
+    integrity: async () => listed,
+    publish: async () => {},
+    now: clock.now,
+    sleep: async (milliseconds) => { listed = pkg.integrity; await clock.sleep(milliseconds); },
+    timeoutMs: 1000,
+    intervalMs: 100,
+  }));
+});
+
+test('the registry wait refuses an integrity that differs from the retained bytes', async () => {
+  const clock = fakeClock();
+  const pkg = tarball('opv-linux-x64.tgz', '@matthew-cochran/opv-linux-x64');
+  await assert.rejects(waitForIntegrity([pkg], {
+    integrity: async () => 'sha512-published',
+    publish: async () => {},
+    now: clock.now,
+    sleep: clock.sleep,
+    timeoutMs: 1000,
+    intervalMs: 100,
+  }), /Published npm bytes differ for @matthew-cochran\/opv-linux-x64@1\.2\.3/);
+});
+
+test('a duplicate-publish refusal for an unlisted version waits instead of failing', async () => {
+  const clock = fakeClock();
+  const pkg = tarball('opv-linux-x64.tgz', '@matthew-cochran/opv-linux-x64');
+  let listed: string | undefined;
+  const refusal = Object.assign(new Error('npm error code E403'), { code: 'E403' });
+  await assert.doesNotReject(publishNpmTarballs([pkg], {
+    integrity: async () => listed,
+    publish: async () => { throw refusal; },
+    now: clock.now,
+    sleep: async (milliseconds) => { listed = pkg.integrity; await clock.sleep(milliseconds); },
+    timeoutMs: 1000,
+    intervalMs: 100,
+  }));
+});
+
+test('a registry wait timeout names the packages and says re-running the job is safe', async () => {
+  const clock = fakeClock();
+  const pkg = tarball('opv-darwin-arm64.tgz', '@matthew-cochran/opv-darwin-arm64');
+  await assert.rejects(waitForIntegrity([pkg], {
+    integrity: async () => undefined,
+    publish: async () => {},
+    now: clock.now,
+    sleep: clock.sleep,
+    timeoutMs: 500,
+    intervalMs: 100,
+  }), /npm did not list @matthew-cochran\/opv-darwin-arm64@1\.2\.3 within 500ms; the job is safe to re-run/);
 });
