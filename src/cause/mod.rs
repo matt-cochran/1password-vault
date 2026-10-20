@@ -1001,6 +1001,9 @@ pub enum GenerateRefusal {
     Shared { from: String },
     /// Its field already holds a value; generate never replaces one.
     HasValue,
+    /// An infrastructure key (#206): the deploy job supplies its value to `opv sync`, and
+    /// it is never stored in 1Password.
+    Infrastructure,
 }
 
 /// Why opv does not record a person's attestation of a key (#201): each reason has its own
@@ -1206,6 +1209,9 @@ impl GenerateRefusal {
             }
             GenerateRefusal::HasValue => {
                 "its field already holds a value, and opv apply never replaces one (rotation is a reviewed step)"
+            }
+            GenerateRefusal::Infrastructure => {
+                "its value comes from infrastructure: the deploy job supplies it to opv sync, and it is never stored in 1Password"
             }
         }
     }
@@ -1548,6 +1554,14 @@ pub enum Guard {
         target: TargetName,
     },
     Declined,
+    /// `product/key` is an infrastructure key (#206, `docs/design/deliver-only.md` §4.4):
+    /// its value is supplied to `opv sync` by the deploy job and never stored, so opv keeps
+    /// no 1Password field for it to set, import, open or attest. Names only.
+    NotStored {
+        product: ProductName,
+        key: KeyName,
+        env: EnvName,
+    },
     /// opv refuses a value supplied to `opv sync --supply-stdin`, or the target state it
     /// would be written over (#206, `docs/design/deliver-only.md` §4, §5.1).
     SupplyRefused {

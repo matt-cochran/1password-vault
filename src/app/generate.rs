@@ -43,7 +43,7 @@ impl Recipe {
 
 /// Why opv does not generate `product/key` in `env`, as the catalog's guard (R64). Each
 /// reason is said apart (05.11): a provider-issued key, a personal one, a shared one, a
-/// byte count out of range, a field that already holds a value.
+/// byte count out of range, a field that already holds a value, an infrastructure key.
 fn refused(product: &str, key: &str, env: &str, reason: GenerateRefusal) -> Error {
     Cause::Guard {
         guard: Guard::GenerateRefused {
@@ -60,6 +60,11 @@ fn refused(product: &str, key: &str, env: &str, reason: GenerateRefusal) -> Erro
 pub fn recipe(product: &str, key: &str, env: &str, spec: &KeySpec) -> Result<Recipe, Error> {
     let r = &spec.rules;
     let refuse = |reason: GenerateRefusal| Err(refused(product, key, env, reason));
+    // An infrastructure key is never stored (#206 §4.4), whatever its rules say: said
+    // first, since its shape rule may well give a byte count.
+    if super::deliver_only::is_infrastructure(spec) {
+        return refuse(GenerateRefusal::Infrastructure);
+    }
     if r.prefix.is_some() || r.ensure_prefix.is_some() || r.prefix_by_mode.is_some() {
         return refuse(GenerateRefusal::ProviderIssued);
     }

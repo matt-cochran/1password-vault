@@ -260,3 +260,12 @@ fn a_failed_random_source_is_opvs_own_local_io() {
     // F2: the OS random source is local I/O, never a missing tool.
     assert_eq!(random_source_failed().code_str(), "local_io_failed");
 }
+
+/// #206 §4.4: an infrastructure key is never generated, even when its shape rule gives a
+/// byte count.
+#[test]
+fn an_infrastructure_key_is_refused_as_infrastructure() {
+    let s = session_key_with(|s| s.value_source = Some(crate::domain::ValueSource::Infrastructure));
+    let e = recipe("api", "SESSION_KEY", "dev", &s).unwrap_err();
+    assert_eq!(why_of(&e), GenerateRefusal::Infrastructure.words());
+}

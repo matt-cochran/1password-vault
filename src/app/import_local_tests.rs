@@ -294,3 +294,36 @@ fn the_gate_counts_a_tagged_value_in_a_local_tier_environment() {
     );
     assert!(keys.is_empty(), "{keys:?}");
 }
+
+// Infrastructure keys (#206 §4.4) ----------------------------------------------------------
+
+/// The local world with api/DATABASE_URL, an infrastructure key (set in memory: a local
+/// environment has no target to supply it), found in the file beside the others.
+#[test]
+fn a_found_infrastructure_value_is_reported_not_stored() {
+    let (op, mut fleet, dir) = local_world();
+    let mut spec = fleet.products["api"].keys["OPENAI_API_KEY"].clone();
+    spec.value_source = Some(crate::domain::ValueSource::Infrastructure);
+    spec.rules = Default::default();
+    fleet
+        .products
+        .get_mut("api")
+        .unwrap()
+        .keys
+        .insert("DATABASE_URL".into(), spec);
+    let file = dir.path().join("dev.env");
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    text.push_str("DATABASE_URL=postgresql://S7MARKER-local-0001@db.example/app\n");
+    std::fs::write(&file, text).unwrap();
+    let mut out = Vec::new();
+    import_local_json(&fleet, "dev", &file, &op, &mut out).unwrap();
+    let doc: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let action = doc["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["key"] == "DATABASE_URL")
+        .map(|r| r["action"].clone())
+        .unwrap_or_default();
+    assert_eq!(action, "not_stored");
+}

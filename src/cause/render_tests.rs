@@ -453,6 +453,16 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             vec!["prod-api", "OLD_KEY", "env-prod", "env-dev"],
         ),
         (
+            Guard {
+                guard: super::super::Guard::NotStored {
+                    product: ProductName::new("prod-api"),
+                    key: KeyName::new("NEON_URL"),
+                    env: EnvName::new("env-prod"),
+                },
+            },
+            vec!["prod-api", "NEON_URL", "env-prod"],
+        ),
+        (
             CreateOutcomeUnknown {
                 system: System::OnePassword,
                 kind: CreateKind::ServiceAccount,
@@ -3454,6 +3464,45 @@ fn f2_a_byte_count_out_of_range_steps_to_config_edit() {
         next_in(&c, &cli(&["opv", "apply", "--generate", "prod:web/TOKEN"])),
         "opv config edit"
     );
+}
+
+/// #206 §4.4: an infrastructure key steps to explaining where its value comes from.
+#[test]
+fn an_infrastructure_key_generate_refusal_steps_to_explain() {
+    let c = generate_refused(GenerateRefusal::Infrastructure);
+    assert_eq!(
+        next_in(&c, &cli(&["opv", "apply", "--generate", "prod:web/TOKEN"])),
+        "opv explain web/TOKEN --env prod"
+    );
+}
+
+/// #206 §4.4: a value path refused for an infrastructure key steps to explaining it.
+#[test]
+fn a_not_stored_key_steps_to_explain() {
+    let c = Cause::Guard {
+        guard: Guard::NotStored {
+            product: ProductName::new("web"),
+            key: KeyName::new("NEON_URL"),
+            env: EnvName::new("prod"),
+        },
+    };
+    assert_eq!(
+        next_in(&c, &cli(&["opv", "set", "web/NEON_URL", "--env", "prod"])),
+        "opv explain web/NEON_URL --env prod"
+    );
+}
+
+/// #206 §4.4: a value path refused for an infrastructure key is a policy refusal.
+#[test]
+fn a_not_stored_key_is_policy_refused_with_exit_6() {
+    let c = Cause::Guard {
+        guard: Guard::NotStored {
+            product: ProductName::new("web"),
+            key: KeyName::new("NEON_URL"),
+            env: EnvName::new("prod"),
+        },
+    };
+    assert_eq!((c.code(), c.exit_code()), ("policy_refused", 6));
 }
 
 /// F2 (R64): a field that already holds a value steps to the reviewed rotation plan.

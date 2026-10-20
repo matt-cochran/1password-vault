@@ -1485,7 +1485,21 @@ fn generate_refused(
             )),
             Next::Check(cmd(&["plan"], &[env.as_str(), "--rotate", pk.as_str()])),
         ),
+        GenerateRefusal::Infrastructure => not_stored(product, key, env),
     }
+}
+
+/// The step for an infrastructure key a value path refuses (#206 §4.4): the value is
+/// changed at its producer and reaches the target through the deploy job, never through
+/// 1Password; `opv explain` shows where it stands.
+fn not_stored(product: &ProductName, key: &KeyName, env: &EnvName) -> Plan {
+    let pk = format!("{product}/{key}");
+    plan(
+        inspect(format!(
+            "change {pk} where infrastructure produces it and re-run the deploy job, which supplies it to opv sync; it has no 1Password field"
+        )),
+        Next::Check(cmd(&["explain"], &[pk.as_str(), "--env", env.as_str()])),
+    )
 }
 
 fn inspect(text: impl Into<String>) -> Option<(Action, String)> {
@@ -2016,6 +2030,9 @@ impl Cause {
                     "opv refuses the supplied value of {} for environment {env}: {}",
                     supply_entry_words(entry),
                     reason.words()
+                ),
+                self::Guard::NotStored { product, key, env } => format!(
+                    "{product}/{key} has no 1Password value in environment {env}: its value comes from infrastructure, and the deploy job supplies it to opv sync"
                 ),
                 self::Guard::RemoteProfileRefuses {
                     profile,
@@ -3670,6 +3687,7 @@ impl Cause {
                 self::Guard::SupplyRefused { env, entry, reason } => {
                     supply_refused(env, entry, reason)
                 }
+                self::Guard::NotStored { product, key, env } => not_stored(product, key, env),
                 self::Guard::RemoteProfileRefuses {
                     profile, allowed, ..
                 } => plan(
