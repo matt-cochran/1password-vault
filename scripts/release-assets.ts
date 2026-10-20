@@ -73,10 +73,10 @@ function readNpmTarballs(directory: string): NpmTarball[] {
     return { file, path, name: metadata.name, version: metadata.version, integrity: `sha512-${createHash('sha512').update(readFileSync(path)).digest('base64')}` };
   });
 }
-// npm can take well over 15 minutes to list a freshly published version (0.13.0's
-// darwin-arm64 was published at 13:21 and listed at 13:36), so one 45-minute window
-// covers every tarball in a single waiting pass after all publishes are done.
-const npmListTimeoutMs = 2_700_000;
+// npm's listing delay varies widely: for 0.13.0 it took 2 to 56 minutes from `npm publish`
+// returning to the version being listed (darwin-x64: published 13:38, listed 14:34). One
+// 90-minute window covers every tarball in a single waiting pass after all publishes are done.
+const npmListTimeoutMs = 5_400_000;
 function npmLabel(pkg: NpmTarball): string { return `${pkg.name}@${pkg.version}`; }
 export type NpmPublishDeps = {
   integrity: (pkg: NpmTarball) => Promise<string | undefined>;
