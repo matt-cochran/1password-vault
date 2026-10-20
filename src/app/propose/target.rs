@@ -72,6 +72,7 @@ pub fn propose(
         diff,
         questions: Vec::new(),
         plan_id: plan_id("target", &proposed),
+        for_generator: super::for_generator(contract_text, &proposed, bindings)?,
         contract_after: proposed,
     })
 }

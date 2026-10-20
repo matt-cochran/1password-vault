@@ -158,6 +158,7 @@ pub fn propose_with(
         diff,
         questions,
         plan_id: plan_id(kind, &proposed),
+        for_generator: super::for_generator(contract_text, &proposed, bindings)?,
         contract_after: proposed,
     })
 }
