@@ -543,6 +543,59 @@ fn diff_marks_removed_and_added_lines() {
     assert_eq!(diff("a\nb\nc\n", "a\nx\nc\n"), " a\n-b\n+x\n c\n");
 }
 
+#[test]
+fn a_proposal_diff_keeps_every_line_of_the_file() {
+    let a = numbered_file(40);
+    let b = a.replace("line 20\n", "line 20 changed\n");
+    assert_eq!(diff(&a, &b).lines().count(), 41);
+}
+
+#[test]
+fn diff_hunks_marks_removed_and_added_lines_under_a_header() {
+    assert_eq!(
+        diff_hunks("a\nb\nc\n", "a\nx\nc\n"),
+        "@@ -1,3 +1,3 @@\n a\n-b\n+x\n c\n"
+    );
+}
+
+/// A file of `n` numbered lines ("line 1".."line n"), one per line.
+fn numbered_file(n: usize) -> String {
+    (1..=n).map(|i| format!("line {i}\n")).collect()
+}
+
+#[test]
+fn diff_hunks_of_identical_text_is_empty() {
+    assert_eq!(diff_hunks(&numbered_file(40), &numbered_file(40)), "");
+}
+
+#[test]
+fn diff_hunks_prints_one_hunk_of_three_context_lines_each_side() {
+    let a = numbered_file(40);
+    let b = a.replace("line 20\n", "line 20 changed\n");
+    assert_eq!(
+        diff_hunks(&a, &b),
+        "@@ -17,7 +17,7 @@\n line 17\n line 18\n line 19\n-line 20\n+line 20 changed\n line 21\n line 22\n line 23\n"
+    );
+}
+
+#[test]
+fn diff_hunks_prints_two_hunks_when_changes_are_more_than_six_lines_apart() {
+    let a = numbered_file(40);
+    let b = a
+        .replace("line 5\n", "line 5 changed\n")
+        .replace("line 20\n", "line 20 changed\n");
+    assert_eq!(diff_hunks(&a, &b).matches("@@ ").count(), 2);
+}
+
+#[test]
+fn diff_hunks_merges_changes_six_lines_apart_into_one_hunk() {
+    let a = numbered_file(40);
+    let b = a
+        .replace("line 5\n", "line 5 changed\n")
+        .replace("line 12\n", "line 12 changed\n");
+    assert_eq!(diff_hunks(&a, &b).matches("@@ ").count(), 1);
+}
+
 // --- projects and status --all ---
 
 #[test]
@@ -1080,4 +1133,22 @@ fn a_file_regenerated_in_place_outside_git_is_config_unreadable() {
     let file = dir.path().join("secrets.toml");
     let e = check_file_project(&file, &file, &op, &mut Vec::new()).unwrap_err();
     assert_eq!(e.code_str(), "config_unreadable");
+}
+
+/// FMECA M6: `config edit`'s editor never inherits the shell's 1Password session.
+#[test]
+fn the_editor_never_inherits_a_1password_session() {
+    let inherited = ["OP_SESSION_acct", "OP_SESSION", "EDITOR"].map(String::from);
+    let cmd = editor_command(
+        "code",
+        ["--wait"].into_iter(),
+        std::path::Path::new("/tmp/x.toml"),
+        inherited.into_iter(),
+    );
+    let removed: Vec<String> = cmd
+        .get_envs()
+        .filter(|(_, v)| v.is_none())
+        .map(|(k, _)| k.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(removed, ["OP_SESSION", "OP_SESSION_acct"]);
 }

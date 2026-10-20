@@ -71,8 +71,10 @@ impl Runtime {
             command
         };
         let args: Vec<_> = command[1..].iter().map(String::as_str).collect();
+        // The one child that keeps the session: handing it on is `opv login -- <cmd>`'s
+        // purpose (session-reuse §6, FMECA M6).
         self.runner
-            .run_inherited(&command[0], &args, &self.environment())
+            .run_signed_in_child(&command[0], &args, &self.environment())
             .map_err(|e| {
                 Cause::ChildStartFailed {
                     program: command[0].clone(),
@@ -261,6 +263,35 @@ impl Backend for Runtime {
     }
     fn child(&self, command: &[String]) -> Result<i32, Error> {
         self.spawn_child(command)
+    }
+    fn take_session(&mut self) -> Vec<(String, SecretValue)> {
+        std::mem::take(&mut self.session)
+    }
+    fn app_answers(&self) -> bool {
+        // This runtime's own session is left out, and each inherited `OP_SESSION*` is
+        // emptied (op reads an empty one as unset, as doctor's probe does).
+        let inherited = super::account::session_var_names();
+        let mut env: Vec<(&str, &str)> = self
+            .environment()
+            .into_iter()
+            .filter(|(k, _)| !super::account::is_session_var(k))
+            .collect();
+        env.extend(inherited.iter().map(|n| (n.as_str(), "")));
+        let call = Call {
+            program: "op",
+            args: &["whoami", "--format", "json"],
+            stdin: None,
+            env: &env,
+            limit: None,
+        };
+        match self.runner.probe(&call, crate::runner::PROBE_TIMEOUT) {
+            Ok(o) if o.status == 0 => true,
+            _ => {
+                // The probe's failure is the answer; its stderr never attaches elsewhere.
+                let _ = crate::runner::take_failure_excerpt();
+                false
+            }
+        }
     }
     fn probe(&self, args: &[&str]) -> Result<Output, Error> {
         let env = self.environment();

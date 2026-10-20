@@ -629,7 +629,14 @@ fn cmd(args: &[&str]) -> Vec<String> {
 fn run_passes_product_scoped_references_for_desired_keys() {
     let r = FakeRunner::new([Output::success(Vec::new())]);
     run::run_for(&simple(), "prod", Some("app"), None, &cmd(&["env"]), &r).unwrap();
-    let env = r.calls.borrow()[0].env.clone();
+    // The step's own variable (the person's run, X25) is not a reference; it never
+    // reaches the app.
+    let env: Vec<_> = r.calls.borrow()[0]
+        .env
+        .iter()
+        .filter(|(k, _)| k != crate::app::local_delivery::OUTER_VAR)
+        .cloned()
+        .collect();
     assert_eq!(
         env,
         vec![
@@ -661,5 +668,14 @@ fn run_execs_op_run_with_the_command() {
         &r,
     )
     .unwrap();
-    assert_eq!(argvs(&r), vec!["op run -- env -0"]);
+    // FMECA H1: `op run` starts the delivery step (this opv binary), which starts the app.
+    let a = argvs(&r);
+    assert!(
+        a.len() == 1
+            && a[0].starts_with("op run -- ")
+            && a[0].ends_with(
+                " local-delivery --key DATABASE_URL --key JWT_KEY --key LOG_LEVEL -- env -0"
+            ),
+        "{a:?}"
+    );
 }

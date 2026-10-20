@@ -292,6 +292,9 @@ impl Scenario {
             // Doctor's core-dump check reads this, not the host's `fs.suid_dumpable`: the
             // warning count in the summary line must not depend on the builder.
             .env("OPV_TEST_SUID_DUMPABLE", "0")
+            // The 1Password app integration is off on every runner, so a sign-in message
+            // never depends on the host.
+            .env("OP_BIOMETRIC_UNLOCK_ENABLED", "false")
             .envs(self.call_limit.iter().flat_map(|scope| {
                 [
                     ("OPV_TEST_CALL_LIMIT", CALL_LIMIT_SECS),
@@ -374,6 +377,10 @@ impl Scenario {
         let s = s.replace(" (op in WSL does not see the Windows app's accounts)", "");
         // Doctor's core-dump check reads the host's `fs.suid_dumpable`.
         let s = core_dump_text_re().replace_all(&s, "<host core-dump check>\n");
+        // Doctor's app-integration row reads the host (WSL, a display; #203).
+        let s = app_integration_text_re().replace_all(&s, "<host app-integration check>\n");
+        let s = app_integration_json_re()
+            .replace_all(&s, r#"{"name":"op app integration","host":true}"#);
         core_dump_json_re()
             .replace_all(&s, r#"{"name":"core dumps","host":true}"#)
             .into_owned()
@@ -456,6 +463,20 @@ fn core_dump_text_re() -> &'static regex::Regex {
 fn core_dump_json_re() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     RE.get_or_init(|| regex::Regex::new(r#"\{"name":"core dumps"[^}]*\}"#).expect("regex"))
+}
+
+/// Doctor's `op app integration` row in text (#203): it depends on the host.
+fn app_integration_text_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"(?m)^(ok|warn|skip) +op app integration: [^\n]*\n").expect("regex")
+    })
+}
+
+/// Doctor's `op app integration` row in a JSON document.
+fn app_integration_json_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r#"\{"name":"op app integration"[^}]*\}"#).expect("regex"))
 }
 
 /// The detected platform in a JSON document.

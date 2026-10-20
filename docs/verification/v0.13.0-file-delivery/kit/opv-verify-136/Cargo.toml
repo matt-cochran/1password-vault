@@ -1,0 +1,17 @@
+[package]
+name = "opv-verify-136"
+version = "0.13.0"
+edition = "2021"
+publish = false
+
+# Standalone: not a member of opv's workspace.
+[workspace]
+
+[dependencies]
+# Journeeze's real reader, pinned to the commit §4.6 cites (crates/jz_secrets is unchanged
+# through journeeze-saas f7772b2). Replace /srv/journeeze-saas with the path of a local
+# journeeze-saas checkout before building (preflight P9); the rev is what matters.
+jz_secrets = { git = "file:///srv/journeeze-saas", rev = "ced358d84a8e7f5489478144f9240f88cdb075a6" }
+jz_core = { git = "file:///srv/journeeze-saas", rev = "ced358d84a8e7f5489478144f9240f88cdb075a6" }
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+sha2 = "0.10"

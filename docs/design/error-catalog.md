@@ -165,6 +165,8 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 | Variant | Fields | Code | Retry | Do | Next |
 |---|---|---|---|---|---|
 | `NeedsTerminal` | command: Invocation; why: NoTty / Ci | terminal_required | never | "run it in your own terminal" | the exact command, as a handoff [R60] |
+| `ShellEvalRequired` | stdout: Pipe / Terminal / File / Other; shell | **shell_eval_required** | after_fix | "run it inside your shell's eval, which hands it a pipe" | a handoff: the shell's refresh line, `eval "$(opv login --shell)"` (#203, `session-reuse.md` §5.5) |
+| `ShellMismatch` | requested; running (the parent process's shell) | **shell_mismatch** | never | "ask for this shell's own syntax" | a handoff: the running shell's refresh line, or none under PowerShell (#203, FMECA M5) |
 | `NeedsConfirm` | env; command: Invocation | confirm_required | never | "make sure <env> is the environment you mean (agents: ask the user)" | a handoff: the same command plus `--confirm <env>` [R61] |
 | `ConfirmMismatch` | given; env | confirm_mismatch | never | "check which environment you meant" | `opv plan <env>` [R62] |
 | `ValuesNeeded` | env; rows: Vec<{product, key, target, state}> | findings / keys_blocking | after_fix | per state: "fill in <product/KEY> in 1Password" | `opv open <first blocking> --env <env>`; never a sync [R63] |
@@ -201,7 +203,7 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 
 ### 4.11 Codes
 
-- **New:** config_source_mismatch, config_unreadable, config_not_editable, copies_differ, regenerated_file_differs, unknown_target, unknown_role, unknown_profile, ambiguous_name, choice_required, nothing_in_scope, already_declared, target_not_signed_in, own_session_required, credential_rejected, resource_not_found, create_outcome_unknown, budget_spent, concurrent_edit, tool_unusable, unexpected_output, unrecognized_failure, declined, file_too_open, input_invalid, approval_used, plan_unknown, private_dir_failed, remote_unreachable, remote_version_mismatch, child_start_failed, delivery_unverified, target_drift, source_changed, mount_unreadable, internal_error.
+- **New:** config_source_mismatch, config_unreadable, config_not_editable, copies_differ, regenerated_file_differs, unknown_target, unknown_role, unknown_profile, ambiguous_name, choice_required, nothing_in_scope, already_declared, target_not_signed_in, own_session_required, credential_rejected, resource_not_found, create_outcome_unknown, budget_spent, concurrent_edit, tool_unusable, unexpected_output, unrecognized_failure, declined, file_too_open, input_invalid, approval_used, plan_unknown, private_dir_failed, remote_unreachable, remote_version_mismatch, child_start_failed, delivery_unverified, target_drift, source_changed, mount_unreadable, shell_eval_required and shell_mismatch (0.14.0, #203), internal_error.
 - **Removed:** source_error, target_error, auth_required, desktop_app_unavailable (now a `NotSignedIn` state), op_unexpected (now `unrecognized_failure`), duplicate_scope (now `input_invalid`), credential_rejected for op's prompt (now `NotSignedIn`), and the MCP-only codes.
 - **Exit 70 (internal error)** is new; it follows `EX_SOFTWARE`.
 

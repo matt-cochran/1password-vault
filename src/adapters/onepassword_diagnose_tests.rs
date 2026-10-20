@@ -209,6 +209,32 @@ fn recording_07_signed_out_item_get_is_not_signed_in() {
     assert_eq!(cause.code(), "op_not_signed_in");
 }
 
+/// #203 (session-reuse §4.3): op's signed-out reply under a shell session variable for the
+/// call's account is `expired`, the same decision as a session opv finds missing itself, so
+/// `inventory` and `next` say what `ready` and `access` say.
+#[test]
+fn recording_06_signed_out_under_a_shell_session_is_expired() {
+    let state = |facts: &Facts| match diagnosed(
+        "06-signed-out-vault-list",
+        &format!("vault list --account {A} --format json"),
+        person(),
+        &in_account(A),
+        facts,
+    ) {
+        crate::cause::Cause::NotSignedIn { state, .. } => state,
+        other => panic!("{other:?}"),
+    };
+    let shell = Facts {
+        session_vars: vec![format!("OP_SESSION_{A}")],
+        ..Facts::default()
+    };
+    assert_eq!(state(&shell), crate::cause::SessionState::Expired);
+    assert_eq!(
+        state(&Facts::default()),
+        crate::cause::SessionState::SignedOut
+    );
+}
+
 #[test]
 fn recording_08_vault_not_in_the_selected_account_is_ids_not_in_account() {
     let cause = diagnosed(

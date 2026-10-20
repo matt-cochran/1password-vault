@@ -348,17 +348,15 @@ fn launch(
         &crate::error::invocation(),
     );
 
-    // #136, #137: a product with `[products.<p>.local]` runs its app through opv's local
-    // delivery step, as `op run`'s child: it keeps only what the product declares and
-    // writes `file` keys to a private RAM directory (names and paths only in argv).
+    // Every local run starts its app through opv's local delivery step, as `op run`'s
+    // child (FMECA H1): `op run` passes its whole environment on, 1Password sessions
+    // included, and the step removes every `OP_*` before the app starts. With
+    // `[products.<p>.local]` the step also keeps only what the product declares and writes
+    // `file` keys to a private RAM directory (#136, #137; names and paths only in argv).
     let delivery = match (remote, &to) {
         // #139: the remote step carries the profile and the names; the command is pinned.
-        (Some((name, r)), _) => Some(remote_args(name, r, prod, &selected, &outer)?),
-        (None, _) => prod
-            .local
-            .as_ref()
-            .map(|l| delivery_args(l, &selected))
-            .transpose()?,
+        (Some((name, r)), _) => remote_args(name, r, prod, &selected, &outer)?,
+        (None, _) => delivery_args(prod.local.as_ref(), &selected)?,
     };
     let outer_json = serde_json::to_string(&outer).map_err(|_| -> Error {
         Cause::Bug {
@@ -366,13 +364,11 @@ fn launch(
         }
         .into()
     })?;
-    if remote.is_none() && delivery.is_some() && outer.is_valid() {
+    if remote.is_none() && outer.is_valid() {
         env_pairs.push((OUTER_VAR, outer_json.as_str()));
     }
     let mut args: Vec<&str> = vec!["run", "--"];
-    if let Some(d) = &delivery {
-        args.extend(d.iter().map(String::as_str));
-    }
+    args.extend(delivery.iter().map(String::as_str));
     if let Launch::Local(command) = to {
         args.extend(command.iter().map(String::as_str));
     }
@@ -463,23 +459,30 @@ fn remote_args(
 /// The local delivery step's command line before the app's (#136, #137): this opv binary,
 /// `local-delivery`, the selected key names, the environment mode, the directory variable
 /// and each file key's path, then `--`. Names and paths only, never a value.
+///
+/// FMECA H1: every local run has one. Without `[products.<p>.local]` (`local` is `None`)
+/// the step passes the environment through with no files, and removes only `OP_*`.
 fn delivery_args(
-    local: &crate::domain::model::Local,
+    local: Option<&crate::domain::model::Local>,
     selected: &[(&String, &KeySpec)],
 ) -> Result<Vec<String>, Error> {
     let exe = own_binary()?;
     let mut a = vec![exe, "local-delivery".to_string()];
     for (key, spec) in selected {
         a.extend(["--key".to_string(), (*key).clone()]);
-        if let Some(path) = &spec.file {
+        // A `file` key is delivered as a file only where the product has a `local` section
+        // (its directory variable lives there); otherwise it stays a variable, as before.
+        if let (Some(_), Some(path)) = (local, &spec.file) {
             a.extend(["--file".to_string(), format!("{key}={path}")]);
         }
     }
-    if local.environment == crate::domain::model::LocalEnvironment::DeclaredOnly {
-        a.push("--declared-only".to_string());
-    }
-    if let Some(v) = &local.secrets_dir_env {
-        a.extend(["--dir-env".to_string(), v.clone()]);
+    if let Some(local) = local {
+        if local.environment == crate::domain::model::LocalEnvironment::DeclaredOnly {
+            a.push("--declared-only".to_string());
+        }
+        if let Some(v) = &local.secrets_dir_env {
+            a.extend(["--dir-env".to_string(), v.clone()]);
+        }
     }
     a.push("--".to_string());
     Ok(a)
@@ -557,7 +560,12 @@ mod tests {
         let calls = r.calls.borrow();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].program, "op");
-        assert_eq!(calls[0].args, vec!["run", "--", "env", "-0"]);
+        let a = &calls[0].args;
+        assert_eq!(
+            (&a[..2], a[3].as_str()),
+            (&["run".to_string(), "--".to_string()][..], "local-delivery")
+        );
+        assert_eq!(&a[a.len() - 3..], ["--", "env", "-0"]);
         assert!(calls[0].inherited && calls[0].stdin.is_none());
     }
 
@@ -613,11 +621,59 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_product_without_local_runs_its_command_directly() {
+    fn plain_args() -> Vec<String> {
         let r = FakeRunner::new([Output::success(Vec::new())]);
         run(&fleet(), "prod", "allumata", &cmd(&["app"]), &r).unwrap();
-        assert_eq!(r.calls.borrow()[0].args, ["run", "--", "app"]);
+        r.calls.borrow()[0].args.clone()
+    }
+
+    /// FMECA H1: `op run` passes its environment, sessions included, to its child, so a
+    /// product without `[products.<p>.local]` runs through the step too.
+    #[test]
+    fn a_product_without_local_runs_through_the_delivery_step() {
+        assert_eq!(plain_args()[3], "local-delivery");
+    }
+
+    /// Without a `local` section the step only passes through: no declared-only mode, no
+    /// directory, no files.
+    #[test]
+    fn a_product_without_local_runs_the_step_in_pass_through() {
+        let a = plain_args();
+        assert!(
+            !a.iter()
+                .any(|x| ["--declared-only", "--dir-env", "--file"].contains(&x.as_str())),
+            "{a:?}"
+        );
+    }
+
+    #[test]
+    fn a_product_without_local_still_ends_with_the_apps_command() {
+        let a = plain_args();
+        assert_eq!(&a[a.len() - 2..], ["--", "app"]);
+    }
+
+    /// A `file` key of a product with no `local` section is delivered by a target, not
+    /// here: locally it stays a variable, as in 0.13.
+    #[test]
+    fn a_file_key_without_local_stays_a_variable() {
+        let text = crate::config::merged_text("tests/fixtures/secrets.toml").replace(
+            "guidance = \"OpenAI platform / API keys\"",
+            "guidance = \"OpenAI platform / API keys\"\nfile = \"openai/api-key\"",
+        );
+        let fl = crate::config::parse(&text).unwrap();
+        let r = FakeRunner::new([Output::success(Vec::new())]);
+        run(&fl, "prod", "allumata", &cmd(&["app"]), &r).unwrap();
+        assert!(!r.calls.borrow()[0].args.contains(&"--file".to_string()));
+        assert!(env_of(&r).iter().any(|(k, _)| k == "OPENAI_API_KEY"));
+    }
+
+    /// The step names the person's run in its errors (X25) for a product without `local`
+    /// as well.
+    #[test]
+    fn a_product_without_local_hands_the_step_the_persons_run() {
+        let r = FakeRunner::new([Output::success(Vec::new())]);
+        run(&fleet(), "prod", "allumata", &cmd(&["app"]), &r).unwrap();
+        assert!(env_of(&r).iter().any(|(k, _)| k == OUTER_VAR));
     }
 
     #[test]
@@ -635,6 +691,7 @@ mod tests {
         )));
         assert!(
             env.iter()
+                .filter(|(k, _)| k != OUTER_VAR)
                 .all(|(k, v)| !k.starts_with("FLEET__") && v.starts_with("op://"))
         );
     }
@@ -699,8 +756,12 @@ mod tests {
         );
         let r = FakeRunner::new([Output::success(Vec::new())]);
         run(&fl, "dev", "allumata", &cmd(&["env"]), &r).unwrap();
+        let env: Vec<_> = env_of(&r)
+            .into_iter()
+            .filter(|(k, _)| k != OUTER_VAR)
+            .collect();
         assert_eq!(
-            env_of(&r),
+            env,
             vec![(
                 "DEV_KEY".to_string(),
                 "op://vdev/idev/allumata/DEV_KEY".to_string()
@@ -801,7 +862,14 @@ environments = ["ci"]
     fn run_without_product_uses_the_only_non_source_only_product() {
         let r = FakeRunner::new([Output::success(Vec::new())]);
         run_for(&source_only_fleet(), "ci", None, None, &cmd(&["env"]), &r).unwrap();
-        assert_eq!(argvs(&r), vec!["op run -- env"]);
+        // FMECA H1: through the delivery step (this opv binary), with the one product's key.
+        let a = argvs(&r);
+        assert!(
+            a.len() == 1
+                && a[0].starts_with("op run -- ")
+                && a[0].ends_with(" local-delivery --key TOKEN -- env"),
+            "{a:?}"
+        );
     }
 
     fn guarded() -> Fleet {

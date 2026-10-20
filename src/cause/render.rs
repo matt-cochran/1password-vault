@@ -43,6 +43,10 @@ fn vendor(program: &str, args: &[&str]) -> Next {
 /// A trailing `--` marks where the person's own child command goes (`opv run … --
 /// <command>`): it renders as `-- <command>`, never as a child's words (design §6.1).
 pub fn cmd_text(c: &Cmd) -> String {
+    // #203: `opv login --shell` only ever runs inside the shell's eval (session-reuse §5.2).
+    if let Some((shell, account)) = c.as_login_shell() {
+        return crate::app::login_shell::refresh_command(shell, account);
+    }
     let argv = c.to_argv();
     let (words, child) = match argv.split_last() {
         Some((last, rest)) if last == "--" => (rest, true),
@@ -64,6 +68,28 @@ fn vendor_text(v: &VendorCmd) -> String {
         .chain(v.args.iter().map(|w| shell_word(w)))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// What fd 1 was, for [`Cause::ShellEvalRequired`].
+fn stdout_words(k: crate::app::desktop_integration::StdoutKind) -> &'static str {
+    use crate::app::desktop_integration::StdoutKind;
+    match k {
+        StdoutKind::Pipe => "a pipe",
+        StdoutKind::Terminal => "the terminal",
+        StdoutKind::File => "a file",
+        StdoutKind::Other => "not a pipe",
+    }
+}
+
+/// A shell, for [`Cause::ShellMismatch`].
+fn shell_words(s: crate::host::Shell) -> &'static str {
+    use crate::host::Shell;
+    match s {
+        Shell::Posix => "a POSIX shell (bash, zsh, sh)",
+        Shell::Fish => "fish",
+        Shell::PowerShell => "PowerShell",
+        Shell::Other => "another shell",
+    }
 }
 
 /// The invocation as typed (`Rerun`): every flag kept, the child command never rendered.
@@ -551,11 +577,31 @@ fn flag_listing(flag: &str, inv: &Invocation) -> Next {
         "--account" => Next::Check(cmd(&["account", "list"], &[])),
         "--env" | "--product" | "--key" => Next::Check(cmd(&["contract"], &[])),
         "--role" | "--remote" => Next::Check(cmd(&["config", "export"], &[])),
+        // `opv login --shell` with no syntax for the shell, or PowerShell (withheld, FMECA
+        // H5): the login again in the explicit POSIX syntax, with the account given.
+        "--shell" => Next::Handoff(Cmd::login_shell(
+            crate::host::Shell::Other,
+            given_account(inv),
+        )),
         _ => match inv_env(inv) {
             Some(env) => Next::Check(cmd(&["status"], &[env])),
             None => Next::Check(cmd(&["contract"], &[])),
         },
     }
+}
+
+/// The `--account` the invocation gave (`--account <id>` or `--account=<id>`), if any.
+fn given_account(inv: &Invocation) -> Option<&str> {
+    let mut args = inv.args.iter().map(String::as_str);
+    while let Some(a) = args.next() {
+        if a == "--account" {
+            return args.next();
+        }
+        if let Some(v) = a.strip_prefix("--account=") {
+            return Some(v);
+        }
+    }
+    None
 }
 
 /// The subscription of an Azure resource, from its scope (`subscription <id>`).
@@ -2332,6 +2378,15 @@ impl Cause {
                 cmd_text(command),
                 marker.label()
             ),
+            ShellEvalRequired { stdout, .. } => format!(
+                "this prints a 1Password session for your shell to evaluate, so it only writes to a pipe; stdout here is {}",
+                stdout_words(*stdout)
+            ),
+            ShellMismatch { requested, running } => format!(
+                "this shell is {} but the session lines asked for are for {}; a shell that cannot read them can print them, session and all, in its error, so nothing was signed in",
+                shell_words(*running),
+                shell_words(*requested)
+            ),
             NeedsConfirm { env } => {
                 format!("changing environment {env} needs a person's confirmation")
             }
@@ -3218,7 +3273,16 @@ impl Cause {
                         format!("sign in to {}{acct}{how}", system.label()),
                     )
                 };
-                let next = if *system == System::OnePassword {
+                let next = if *system == System::OnePassword
+                    && *state == SessionState::Expired
+                    && inv.command.first().map(String::as_str) != Some("login")
+                {
+                    // #203 (session-reuse §4.3): only a shell's exported session expires;
+                    // the person signs that shell in again.
+                    // The account comes from `.opv` or the environment, as at the first
+                    // sign-in (§5.4), so the refresh names none.
+                    Next::Handoff(Cmd::login_shell(crate::host::Host::detect().shell, None))
+                } else if *system == System::OnePassword {
                     // #167: under `opv login` itself, `opv login` again loops; the step is
                     // op's own sign-in, which a person runs in their own terminal.
                     if inv.command.first().map(String::as_str) == Some("login") {
@@ -4111,6 +4175,23 @@ impl Cause {
                 inspect("run it in your own terminal"),
                 Next::Handoff(command.clone()),
             ),
+            // #203 (session-reuse §5.5): the same login, inside the shell's eval.
+            ShellEvalRequired { shell, .. } => plan(
+                inspect("run it inside your shell's eval, which hands it a pipe"),
+                Next::Handoff(Cmd::login_shell(*shell, None)),
+            ),
+            // FMECA M5: the same login in the running shell's own syntax; PowerShell's is
+            // withheld (H5), so there is nothing to run there.
+            ShellMismatch { running, .. } => match running {
+                crate::host::Shell::Posix | crate::host::Shell::Fish => plan(
+                    inspect("ask for this shell's own syntax"),
+                    Next::Handoff(Cmd::login_shell(*running, None)),
+                ),
+                _ => plan(
+                    inspect("sign in from bash, zsh, sh or fish; this shell has no opv login --shell"),
+                    Next::None(NoNext::NothingToRun),
+                ),
+            },
             NeedsConfirm { env } => {
                 let mut c = inv_cmd(inv);
                 c.args.push("--confirm".into());
