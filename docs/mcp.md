@@ -8,9 +8,9 @@ value in 1Password or at opv's masked prompt.
 
 | Tool | Writes | Input | Returns |
 |---|---|---|---|
-| `opv_state` | nothing | `section`: `inventory`, `needs`, `contract`, `ready`, `plan`, `changed`, `access`, `delivery_preview`, `history`, `status`; optional `env`, `product`, `target` | the same document as the CLI command of that name |
+| `opv_state` | nothing | `section`: `inventory`, `needs`, `contract`, `ready`, `plan`, `changed`, `access`, `delivery_preview`, `history`, `status`; optional `env`, `product`, `target`; for `needs` only, `scan` or `names` (below) | the same document as the CLI command of that name |
 | `opv_next` | nothing | optional `env` | one action this session can take, the queue, and what waits on others |
-| `opv_propose` | nothing (pure) | the intent document: `kind` (`key`, `env`, `target`, `retire`, `setup`, `structure`, `generate`, `attest`), names (grammar-checked), enumerated attributes, **catalog shape names only (no rule parameters)**, references, optional guidance (screened, stored `assistant_written`) | the contract diff and the plan with its `plan_id`, which only a person's `opv apply` runs |
+| `opv_propose` | nothing (pure) | the intent document: `kind` (`key`, `env`, `target`, `retire`, `setup`, `structure`, `generate`, `attest`, `extend`), names (grammar-checked), enumerated attributes, **catalog shape names only (no rule parameters)**, references, optional guidance (screened, stored `assistant_written`) | the contract diff and the plan with its `plan_id`, which only a person's `opv apply` runs |
 | `opv_import_local` | the local vault only | `env` (must be tier `local`), a file path | per key `imported` / `skipped: already set` / `skipped: empty`; values tagged `assistant_imported` |
 | `opv_explain` | nothing | a key or a `plan_id` | the explanation, including every place the key is delivered |
 
@@ -25,6 +25,24 @@ as the CLI command of that name (`opv inventory`, `opv needs`, `opv contract`, `
 returns the same document as `opv explain`. No tool accepts or returns a secret value, an
 arbitrary command, an executable, or an approval boolean. Successful responses are built
 field by field from checked identifiers; raw upstream JSON is never returned.
+
+`opv_state` section `needs` takes the CLI's `opv needs` inputs (0.13.0): `env` and `product`
+narrow the declared keys; `scan` is a directory to scan instead of the git tree, which must
+be inside the project (a relative path is resolved against it, and a path or symbolic link
+that leads out of it is refused with `usage`); `names` is the list of names the assistant
+found itself, given inline, never a file the server reads. `scan` and `names` exclude each
+other and are refused for any other section. They are accepted inputs that the advertised
+input schema leaves out, so the frozen tool surface is unchanged. The rows are those of
+[`opv needs`](usage.md#code-and-contract-opv-needs-and-opv-contract): a declared row's value
+state, an undeclared row's suggested declaration, and `ambiguous` with its candidate products.
+
+`opv_propose` with `kind: extend` (`env`, optional `product`) adds the environment to every key
+that lists its environments explicitly ([the `extend`
+intent](usage.md#extend-an-environment-to-every-key-the-extend-intent)). On a generated
+configuration a proposal also returns `generated_by` and the declaration `fragment` its
+generator must emit ([generated configurations](usage.md#opv-propose-key-env-target-and-retire)).
+No tool supplies an [infrastructure value](usage.md#infrastructure-values---supply-stdin):
+`opv sync --supply-stdin` refuses an assistant, and the deploy job supplies it.
 
 ### Errors
 

@@ -190,7 +190,7 @@ kind = "secret"
 environments = ["prod"]         # only prod
 ```
 
-In an environment a key is excepted from its state is `not_wanted` and its plan row is skipped. An explicit `environments` list that leaves out an environment without an `except` is a likely mistake: the configuration still loads, and `opv ready` reports a non-blocking `environment_gap` finding naming the key and the environment, each with its own next step (`opv propose key <product>/<KEY> --env <env>`, or an `except`). It is a readiness finding, visible in the ready receipt's inventory matrix and `next`, not a warning printed on every command. An empty reason, an environment that is not declared, or an `except` for an environment the `environments` list already names is refused at load with `config_invalid`.
+In an environment a key is excepted from its state is `not_wanted` and its plan row is skipped. An explicit `environments` list that leaves out an environment without an `except` is a likely mistake: the configuration still loads, and `opv ready` reports a non-blocking `environment_gap` finding naming the key and the environment, each with its own next step (`opv propose key <product>/<KEY> --env <env>`, or an `except`). It is a readiness finding, visible in the ready receipt's inventory matrix and `next`, not a warning printed on every command. The [`extend` intent](usage.md#extend-an-environment-to-every-key-the-extend-intent) adds one environment to every explicit-list key in one proposal. An empty reason, an environment that is not declared, or an `except` for an environment the `environments` list already names is refused at load with `config_invalid`.
 
 #### Key attributes: `source`, `expires` and `lifecycle`
 
@@ -216,7 +216,7 @@ source = "derived"              # the only source allowed with from
 
 - `source` is who or what produces the value: `person` (someone fetches it), `generated` (opv makes it from the key's byte-count rule) or `derived` (another key's value, named by `from`). `derived` requires `from`; `from` requires `derived`; `generated` requires a `base64_bytes` or `hex_bytes` rule. Any other combination is refused at load, naming the key.
 - `expires` is a calendar date written as a quoted string (`expires = "2026-06-30"`). An unquoted date or an impossible day is refused at load. Within 30 days of the date `opv ready` reports an advisory `expires_soon` finding; it never blocks a gate.
-- `lifecycle` is `active` (the default), `retiring` or `retired`. `opv propose retire` marks a key `retiring`. CI then runs `opv sync <env> --prune --retire` in tier order (every non-production environment before production) to remove it from the targets; a person finishes with `opv apply rp-<id>` (the id `opv ready` names), which archives the key's 1Password fields into an `archived · <date> · retired <product>/<KEY>` section and marks it `retired`. The key stays declared as `lifecycle = "retired"`: removal is a state, never a deletion.
+- `lifecycle` is `active` (the default), `retiring` or `retired`. `opv propose retire` marks a key `retiring`. CI then runs `opv sync <env> --prune --retire` in tier order (every non-production environment before production) to remove it from the targets; a person finishes with `opv apply rp-<id>` (the id `opv ready` names), which archives the key's 1Password fields into an `archived · <date> · retired <product>/<KEY>` section and marks it `retired`. The key stays declared as `lifecycle = "retired"`: removal is a state, never a deletion. The steps and their refusals: [retiring a key](usage.md#retiring-a-key).
 
 #### Infrastructure values: `source = "infrastructure"`
 
@@ -249,7 +249,7 @@ target, a pinned target (Kubernetes, Azure) delivering it, and no shape rule (`p
 `ensure_prefix`, `prefix_by_mode`, `regex`, `enum`, `base64_bytes`, `hex_bytes`, `https_url` or
 `email_list`) — a mis-mapped value must fail its rule. `immutable` is allowed. Every opv pin
 (workflows, teammates) must be 0.13.0 or later before the attribute is committed: an older opv
-refuses the configuration.
+refuses the configuration. The deploy job, the supply document and adoption: [Supplying infrastructure-generated values](infra-generated-values.md); the commands: [usage](usage.md#infrastructure-values---supply-stdin).
 
 #### Ignoring an observed name: `[products.<p>.ignore]`
 
@@ -294,7 +294,7 @@ rules = { enum = ["debug", "info", "warn"] }
 
 ### Local delivery: `[products.<p>.local]` and `file`
 
-Optional, for `opv run` only (targets ignore both). `environment = "declared_only"` gives the app only the product's declared keys and a fixed set of basics; `secrets_dir_env = "<VAR>"` names the variable that points at a private RAM directory holding every key with `file = "<relative/path>"` (as a file, not a variable). Paths are relative, at most four `/`-separated parts, each matching `^[a-z0-9]+(-[a-z0-9]+)*$` (lower-case letters and digits, `-` only between them: no uppercase, `.`, `_`, empty part, or leading/trailing `-`), unique, and never inside another key's path; `secrets_dir_env` must be a plain variable name, not `PATH`, `HOME`, `XDG_CONFIG_HOME`, `OP_*` or one of the product's keys, and needs at least one `file` key. Recipes for secret-store apps and Cloudflare Workers: [local development](local-development.md#only-the-declared-keys-or-keys-as-files-productsplocal); guarantees and limits: [design](design/local-delivery.md).
+Optional, for `opv run` only (targets ignore both). `environment = "declared_only"` gives the app only the product's declared keys and a fixed set of basics; `secrets_dir_env = "<VAR>"` names the variable that points at a private RAM directory holding every key with `file = "<relative/path>"` (as a file, not a variable). Paths are relative, at most four `/`-separated parts, each matching `^[a-z0-9]+(-[a-z0-9]+)*$` (lower-case letters and digits, `-` only between them: no uppercase, `.`, `_`, empty part, or leading/trailing `-`), unique, and never inside another key's path; `secrets_dir_env` must be a plain variable name, not `PATH`, `HOME`, `XDG_CONFIG_HOME`, `OP_*` or one of the product's keys, and needs at least one `file` key. Recipes for secret-store apps and Cloudflare Workers: [local development](local-development.md#only-the-declared-keys-or-keys-as-files-productsplocal); guarantees and limits: [platforms and limits](design/local-delivery.md#platforms-and-limits).
 
 ### Remote development: `[products.<p>.remotes.<name>]`
 
