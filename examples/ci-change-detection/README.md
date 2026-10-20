@@ -7,15 +7,16 @@ checks for drift.
 
 | File | What it is |
 |---|---|
-| [secrets.toml](secrets.toml) | the configuration: two `fly` environments, `staging` and `prod`, one product |
+| [secrets.toml](secrets.toml) | the configuration: three `fly` environments, `dev`, `staging` and `prod`, one product |
 | [.github/workflows/opv-sync-on-change.yml](.github/workflows/opv-sync-on-change.yml) | detect a change, sync staging, plan-then-sync prod |
 | [.github/workflows/opv-drift.yml](.github/workflows/opv-drift.yml) | nightly `status --fail-on-drift` and `delivery verify` |
+| [.github/workflows/opv-promotion.yml](.github/workflows/opv-promotion.yml) | promote dev, then staging, then prod, each tier gated on `opv ready <env> --gate` |
 | [.github/workflows/opv-pr.yml](.github/workflows/opv-pr.yml) | pull request: `needs --gate`, `contract --check`, `ready --gate`, and the `opv/relaxations` status |
 | [.github/actions/install-opv/action.yml](.github/actions/install-opv/action.yml) | install the 1Password CLI and opv, checksum-verified |
 
-All three workflow files are exactly what `opv ci workflow --on-change`, `opv ci workflow
---drift` and `opv ci workflow prod --target app` print for this configuration, so regenerate
-them instead of editing by hand:
+All three generated workflow files are exactly what `opv ci workflow --on-change`, `opv ci
+workflow --drift` and `opv ci workflow prod --target app` print for this configuration, so
+regenerate them instead of editing by hand:
 
 ```sh
 opv ci workflow --on-change              > .github/workflows/opv-sync-on-change.yml
@@ -23,7 +24,15 @@ opv ci workflow --drift                  > .github/workflows/opv-drift.yml
 opv ci workflow prod --target app        > .github/workflows/opv-pr.yml
 ```
 
-## What the three workflows do
+## What the workflows do
+
+**`opv-promotion.yml`** promotes one change through the tiers: a `dev` job runs
+`opv ready dev --gate` and, only if the gate passes, `opv sync dev --deploy`. A `staging`
+job `needs: dev`, gates on `opv ready staging --gate` and promotes; a `prod` job
+`needs: staging`, gates on `opv ready prod --gate` and promotes. A tier never runs after
+an earlier tier failed, and a failing gate stops the chain. The recipe is hand-written (not
+printed by `opv ci workflow`), reads 1Password with the deployer token, never runs
+`opv apply` and never writes a value to 1Password.
 
 **`opv-sync-on-change.yml`** runs every 15 minutes, on a push that edits `secrets.toml`, or
 by hand. Its `detect` job runs `opv changed <env> --json` for each environment:
