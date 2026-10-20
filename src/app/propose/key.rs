@@ -130,6 +130,21 @@ pub fn propose_with(
         }
         Intent::Env { env, tier } => {
             doc.add_environment(env.as_str(), &environment_text(env.as_str(), *tier))?;
+            // A new environment inherits every key with no `environments` list (#179,
+            // presence): each product such a team key needs (its own, and a `from` source's)
+            // gets its boundary declared there, as a new key's does (no ids: the apply
+            // records them), so the proposal loads.
+            for (product, p) in &fleet.products {
+                for spec in p.keys.values() {
+                    if spec.personal || !spec.is_desired_in(env.as_str()) {
+                        continue;
+                    }
+                    let source = spec.source().map(|(sp, _)| sp);
+                    for needer in std::iter::once(product.as_str()).chain(source) {
+                        doc.declare_boundary(env.as_str(), fleet.boundary_of(needer))?;
+                    }
+                }
+            }
             "env"
         }
         Intent::Retire { key, product, .. } => {
