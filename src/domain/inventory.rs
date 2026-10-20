@@ -17,6 +17,7 @@ use super::capability::{Capability, UnknownSource};
 use super::model::{Fleet, KeySpec, Kind, Lifecycle, Rules, Tier, ValueSource};
 use super::presence::{Presence, present_in};
 use super::value_state::ValueState;
+use crate::json::{NextActor, NextKind};
 
 /// The live inputs the builder folds into an [`Inventory`]: what session read for each cell
 /// and what it can do with each vault. Names, states and capabilities only — never a value.
@@ -131,6 +132,18 @@ pub struct KeyRow {
     /// the name, never from a value. Empty until the caller reads the evidence.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub delivery: BTreeMap<String, DeliveryState>,
+    /// The most urgent action on this key (schema-3 `{kind, actor, command}`, as the
+    /// document-level `next`), or `null` when its value and delivery need nothing. Names,
+    /// a state word and a command only, never a value (SR-1).
+    pub next: Option<KeyNext>,
+}
+
+/// One key row's own next step, in the same typed shape as the document-level `next`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct KeyNext {
+    pub kind: NextKind,
+    pub actor: NextActor,
+    pub command: Option<String>,
 }
 
 /// The delivery state of one key's name on one target (#174), from the placement's
@@ -490,15 +503,108 @@ pub fn build(fleet: &Fleet, cells: &CellInputs, receipt: Option<&ReceiptView>) -
                 file: spec.file.clone(),
                 targets: target_names(fleet, product, key, spec),
                 delivery: BTreeMap::new(),
+                next: None,
             });
         }
     }
 
-    Inventory {
+    let mut document = Inventory {
         environments,
         keys,
         cells: matrix,
+    };
+    attach_next(fleet, &mut document);
+    document
+}
+
+/// Fill each key row's `next` from its cells and delivery states: the most urgent action
+/// on that key, or `None` when it needs nothing. `build` calls this once the cells exist;
+/// the caller calls it again after reading delivery evidence (`delivery` is empty until
+/// then). The order is [`next::next`](crate::app::next)'s: a value to enter (absent, empty,
+/// placeholder, malformed) before a stale or missing delivery (`opv sync`), and a personal
+/// key's own item is never a `opv set` (FR-55).
+pub fn attach_next(fleet: &Fleet, document: &mut Inventory) {
+    let nexts: Vec<Option<KeyNext>> = document
+        .keys
+        .iter()
+        .map(|row| next_for_key(fleet, document, row))
+        .collect();
+    for (row, next) in document.keys.iter_mut().zip(nexts) {
+        row.next = next;
     }
+}
+
+/// The most urgent action on one key row: its lowest-ranked cell's action, in the
+/// inventory's stable cell order for equal ranks.
+fn next_for_key(fleet: &Fleet, document: &Inventory, row: &KeyRow) -> Option<KeyNext> {
+    let mut best: Option<(u8, KeyNext)> = None;
+    for cell in document
+        .cells
+        .iter()
+        .filter(|c| c.product == row.product && c.key == row.key)
+    {
+        let candidate = match &cell.state {
+            ValueState::Absent if !cell.personal => Some((2, enter_value(cell))),
+            ValueState::Empty if !cell.personal => Some((3, enter_value(cell))),
+            ValueState::Placeholder if !cell.personal => Some((4, enter_value(cell))),
+            ValueState::Malformed { .. } if !cell.personal => Some((5, enter_value(cell))),
+            // #174: any cell whose delivery is missing or stale needs `opv sync`, whether
+            // or not this session can read its value (CI can). A `not_wanted` key is never
+            // delivered here, so it never asks for a sync.
+            ValueState::NotWanted { .. } => None,
+            _ => sync_for_cell(fleet, row, cell),
+        };
+        if let Some((rank, action)) = candidate
+            && best.as_ref().is_none_or(|(best_rank, _)| rank < *best_rank)
+        {
+            best = Some((rank, action));
+        }
+    }
+    best.map(|(_, action)| action)
+}
+
+/// The person's `opv set` for a cell whose value must be entered (a shared key at its
+/// source, FR-45).
+fn enter_value(cell: &Cell) -> KeyNext {
+    let label = cell
+        .from
+        .clone()
+        .unwrap_or_else(|| format!("{}/{}", cell.product, cell.key));
+    KeyNext {
+        kind: NextKind::EnterValue,
+        actor: NextActor::Person,
+        command: Some(format!("opv set {label} --env {}", cell.env)),
+    }
+}
+
+/// `opv sync <env>` for a `set` cell whose delivery is missing or stale, when it has a
+/// delivering target. `None` when the key's delivery there is current (or unreadable, which
+/// is not known to be stale).
+fn sync_for_cell(fleet: &Fleet, row: &KeyRow, cell: &Cell) -> Option<(u8, KeyNext)> {
+    let prefix = format!("{}/", cell.env);
+    let needs_sync = row.delivery.iter().any(|(column, state)| {
+        column.starts_with(&prefix)
+            && matches!(state, DeliveryState::NotDelivered | DeliveryState::Stale)
+    });
+    if !needs_sync {
+        return None;
+    }
+    let tier = fleet
+        .environments
+        .get(&cell.env)
+        .map_or(Tier::Shared, |e| e.tier);
+    let actor = match tier {
+        Tier::Local => NextActor::Person,
+        Tier::Shared | Tier::Production => NextActor::Ci,
+    };
+    Some((
+        6,
+        KeyNext {
+            kind: NextKind::Run,
+            actor,
+            command: Some(format!("opv sync {}", cell.env)),
+        },
+    ))
 }
 
 /// The names of the validation rules `rules` declares, in a fixed order, and never their
