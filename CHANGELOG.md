@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Sign-in errors agree across commands.** `inventory` and `next` report an expired shell session as `expired` with the refresh line, as `ready` and `access` already did. Where `op` talks to the 1Password desktop app (macOS, Windows, WSL with `op.exe`), a signed-out reply with no shell session reads as the app being locked (`app_locked`).
 - **`opv config check` and `opv config edit` print unified hunks** with three lines of context, instead of every line of both files. A proposal's contract diff is unchanged: it is still the whole file, because an assistant writes the proposed file from it.
 
 ### Fixed
