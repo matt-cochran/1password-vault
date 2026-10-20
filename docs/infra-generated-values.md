@@ -230,6 +230,8 @@ delivers, followed by a pull-request job (section 4). For the configuration abov
       - name: Deliver infrastructure values to web through opv
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          OP_CACHE: "false"
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
           set -euo pipefail
           # the producer's own serial (Terraform's state serial), never a CI counter
@@ -248,9 +250,12 @@ Adapt it to your job:
 
 - **Output names.** The generator guesses `.database_url` from `api/DATABASE_URL`. Change each
   to your Terraform output's real name.
-- **Tokens.** The job also needs the target's token (`FLY_API_TOKEN` for Fly, a GitHub token
-  for a GitHub target) and the CLIs; `opv ci workflow prod --target web` shows those steps.
-  Use the environment's existing deploy service account for `OP_SERVICE_ACCOUNT_TOKEN`.
+- **Tokens.** The step passes the target's token through its `env:` (`FLY_API_TOKEN` for
+  Fly, `GH_TOKEN` for a GitHub target) from the secret of the same name, which the job that
+  applies the infrastructure usually holds already; when the target's `deploy_credentials` are
+  recorded, opv signs in with those instead. Use the environment's existing deploy service
+  account for `OP_SERVICE_ACCOUNT_TOKEN`. The job also needs opv, the 1Password CLI and the
+  target's CLI; `opv ci workflow prod --target web` shows those steps.
 - **Working directory.** Add `-chdir=<dir>` to both `terraform` calls when the stack is not
   at the job's working directory.
 

@@ -520,7 +520,7 @@ pub fn run_supply(
     deploy: bool,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    let (e, _) = super::target(fleet, env, target)?;
+    let (e, t) = super::target(fleet, env, target)?;
     let keys = supplied_keys(fleet, env, target)?;
     if keys.is_empty() {
         return Err(Cause::Usage {
@@ -532,18 +532,33 @@ pub fn run_supply(
         }
         .into());
     }
-    out.write_all(supply_step(env, target, &keys, deploy, e.confirm_env).as_bytes())
+    let step = SupplyStep {
+        env,
+        target,
+        keys: &keys,
+        deploy,
+        confirm: e.confirm_env,
+        credential: t.provider().credential_vars().first().copied(),
+    };
+    out.write_all(supply_step(&step).as_bytes())
         .map_err(write_err)
 }
 
-/// The text of [`run_supply`].
-fn supply_step(
-    env: &str,
-    target: &str,
-    keys: &[(String, String)],
+/// What [`supply_step`] prints for: the target, its supplied keys and the sync's flags.
+struct SupplyStep<'a> {
+    env: &'a str,
+    target: &'a str,
+    keys: &'a [(String, String)],
     deploy: bool,
     confirm: bool,
-) -> String {
+    /// The provider's deploy-token variable (`FLY_API_TOKEN`), passed through the step's
+    /// `env:` from the secret of the same name, or `None` for a provider that has none.
+    credential: Option<&'a str>,
+}
+
+/// The text of [`run_supply`].
+fn supply_step(step: &SupplyStep<'_>) -> String {
+    let (env, target, keys) = (step.env, step.target, step.keys);
     let mut s = String::new();
     s.push_str(&format!(
         "# opv: deliver {target}'s infrastructure values ({env}). Paste this step into the job\n"
@@ -565,6 +580,12 @@ fn supply_step(
     ));
     s.push_str("        env:\n");
     s.push_str("          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}\n");
+    s.push_str("          OP_CACHE: \"false\"\n");
+    // The target's own token, as the job that applies the infrastructure already holds it.
+    // opv signs in with the target's recorded deploy credentials instead when it has them.
+    if let Some(var) = step.credential {
+        s.push_str(&format!("          {var}: ${{{{ secrets.{var} }}}}\n"));
+    }
     s.push_str("        run: |\n");
     s.push_str("          set -euo pipefail\n");
     s.push_str(
@@ -577,19 +598,22 @@ fn supply_step(
     let last = keys.len().saturating_sub(1);
     for (i, (label, _)) in keys.iter().enumerate() {
         let o = output_name(label);
-        let sep = if i == last { "}}'" } else { "," };
+        // The last mapping closes the jq program and ends the line with the pipe, so the
+        // pipeline into opv is one command: a line that starts with `|` is a syntax error,
+        // run after the producer has already printed its document to the log.
+        let sep = if i == last { "}}' |" } else { "," };
         s.push_str(&format!(
             "            \"{label}\": (.{o}.value | strings // error(\"{o} missing\")){sep}\n"
         ));
     }
-    let deploy = if deploy { " --deploy" } else { "" };
-    let confirm = if confirm {
+    let deploy = if step.deploy { " --deploy" } else { "" };
+    let confirm = if step.confirm {
         format!(" --confirm {env}")
     } else {
         String::new()
     };
     s.push_str(&format!(
-        "            | opv sync {env} --target {target} --supply-stdin{deploy} --receipt {target}.receipt.json{confirm}\n"
+        "            opv sync {env} --target {target} --supply-stdin{deploy} --receipt {target}.receipt.json{confirm}\n"
     ));
     s.push_str(&format!(
         "          opv delivery verify {env} --target {target} --receipt {target}.receipt.json\n"

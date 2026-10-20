@@ -531,10 +531,266 @@ fn supply_step_fails_on_a_failed_producer() {
 }
 
 #[test]
-fn supply_step_pipes_into_the_supplying_sync() {
+fn supply_step_ends_the_jq_program_with_the_pipe_into_the_supplying_sync() {
     assert!(supply_step_text(true).contains(
-        "| opv sync prod --target web --supply-stdin --deploy --receipt web.receipt.json --confirm prod"
+        "missing\"))}}' |\n            opv sync prod --target web --supply-stdin --deploy --receipt web.receipt.json --confirm prod\n"
     ));
+}
+
+#[test]
+fn supply_step_has_no_line_that_starts_with_a_pipe() {
+    assert!(
+        !supply_step_text(true)
+            .lines()
+            .any(|l| l.trim_start().starts_with('|'))
+    );
+}
+
+#[test]
+fn supply_step_passes_the_targets_token_through_its_env() {
+    assert!(
+        supply_step_text(false).contains("          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}\n")
+    );
+}
+
+#[test]
+fn supply_step_keeps_the_service_account_token_in_its_env() {
+    assert!(
+        supply_step_text(false).contains(
+            "          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}\n"
+        )
+    );
+}
+
+#[test]
+fn supply_check_job_pins_the_running_crate_version() {
+    assert!(
+        supply_step_text(false)
+            .contains(&format!("OPV_VERSION: v{}   #", env!("CARGO_PKG_VERSION")))
+    );
+}
+
+#[test]
+fn supply_step_for_a_provider_without_a_token_variable_passes_none() {
+    let keys = [("api/DATABASE_URL".to_string(), "DATABASE_URL".to_string())];
+    let text = supply_step(&SupplyStep {
+        env: "prod",
+        target: "web",
+        keys: &keys,
+        deploy: false,
+        confirm: false,
+        credential: None,
+    });
+    // Only the service-account token: no provider token line.
+    assert_eq!(text.matches(": ${{ secrets.").count(), 1);
+}
+
+/// The fenced block of `docs/infra-generated-values.md` that follows `after`.
+fn guide_block(after: &str, fence: &str) -> String {
+    let guide = std::fs::read_to_string("docs/infra-generated-values.md").unwrap();
+    let rest = &guide[guide.find(after).unwrap()..];
+    let open = format!("```{fence}\n");
+    let body = &rest[rest.find(&open).unwrap() + open.len()..];
+    body[..body.find("```").unwrap()].to_string()
+}
+
+#[test]
+fn the_guides_supply_step_equals_the_generated_step() {
+    let text = supply_step_text(true);
+    let step = &text[..text.find("\n# And this job").unwrap()];
+    assert_eq!(guide_block("For the configuration above:", "yaml"), step);
+}
+
+#[test]
+fn the_guides_supply_check_job_equals_the_generated_job() {
+    let text = supply_step_text(true);
+    let job = &text[text.find("  opv-supply-check:").unwrap()..];
+    assert_eq!(
+        guide_block("point it at the file that holds the step:", "yaml")
+            .replace("v0.13.0", &format!("v{}", env!("CARGO_PKG_VERSION"))),
+        job
+    );
+}
+
+// --- every generated script is valid bash, and the supply step logs no value -------------
+
+/// The body of every `run:` script in `yaml`, as bash runs it: a block scalar dedented, an
+/// inline command after `run:`, each `${{ … }}` replaced by a word as GitHub would.
+fn run_scripts(yaml: &str) -> Vec<String> {
+    scripts(yaml)
+        .into_iter()
+        .map(|sc| {
+            let body: Vec<&str> = if sc.lines.len() == 1 && sc.lines[0].1.contains("run:") {
+                let l = &sc.lines[0].1;
+                vec![&l[l.find("run:").unwrap() + 4..]]
+            } else {
+                sc.lines.iter().map(|(_, l)| l.as_str()).collect()
+            };
+            let pad = body
+                .iter()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| l.len() - l.trim_start().len())
+                .min()
+                .unwrap_or(0);
+            let mut text: String = body
+                .iter()
+                .map(|l| format!("{}\n", l.get(pad..).unwrap_or("")))
+                .collect();
+            while let Some(at) = text.find("${{") {
+                let end = text[at..].find("}}").map_or(text.len(), |e| at + e + 2);
+                text.replace_range(at..end, "EXPR");
+            }
+            text
+        })
+        .collect()
+}
+
+/// Whether every `run:` script of `yaml` passes `bash -n`, and there is at least one.
+#[cfg(unix)]
+fn every_script_parses(yaml: &str) -> bool {
+    let all = run_scripts(yaml);
+    !all.is_empty()
+        && all.iter().all(|script| {
+            std::process::Command::new("bash")
+                .args(["-n", "-c", script])
+                .output()
+                .is_ok_and(|o| o.status.success())
+        })
+}
+
+#[cfg(unix)]
+#[test]
+fn the_supply_step_and_its_check_job_pass_bash_n() {
+    assert!(every_script_parses(&supply_step_text(true)));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_supply_step_without_deploy_passes_bash_n() {
+    assert!(every_script_parses(&supply_step_text(false)));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_sync_workflow_passes_bash_n() {
+    assert!(every_script_parses(&fly_workflow(Some("production"), true)));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_pr_workflow_passes_bash_n() {
+    assert!(every_script_parses(&fixture_run("prod", "portfolio")));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_change_workflow_passes_bash_n() {
+    assert!(every_script_parses(&fly_change(true, 15)));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_drift_workflow_passes_bash_n() {
+    let mut out = Vec::new();
+    run_drift(&fixture_fleet(), &mut out).unwrap();
+    assert!(every_script_parses(&text_of(&out)));
+}
+
+/// The canary the stub producer puts in every value; it must never reach the step's log.
+const CANARY: &str = "S7MARKER";
+
+/// What running the generated supply step printed, and what the stub `opv sync` read.
+#[cfg(unix)]
+struct SupplyRun {
+    status: std::process::ExitStatus,
+    log: String,
+    piped: String,
+}
+
+/// Run the generated supply step (without the check job) under bash with a stub
+/// `terraform` whose outputs hold [`CANARY`], the real `jq`, and a stub `opv` that reads
+/// its stdin into a file. `None` when `jq` is not installed.
+#[cfg(unix)]
+fn run_supply_step() -> Option<SupplyRun> {
+    use std::os::unix::fs::PermissionsExt;
+    if std::process::Command::new("jq")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipped: jq is not installed");
+        return None;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let piped = dir.path().join("piped");
+    let stub = |name: &str, body: &str| {
+        let path = bin.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    stub(
+        "terraform",
+        &format!(
+            "case \"$1\" in\n  state) echo '{{\"serial\": 7}}' ;;\n  output) echo '{{\"database_url\": \
+             {{\"value\": \"postgres://u:{CANARY}@db/x\"}}, \"stripe_webhook_secret\": \
+             {{\"value\": \"whsec_{CANARY}\"}}}}' ;;\nesac\n"
+        ),
+    );
+    stub(
+        "opv",
+        &format!(
+            "if [ \"$1\" = sync ]; then cat > '{}'; fi\nexit 0\n",
+            piped.display()
+        ),
+    );
+    let text = supply_step_text(true);
+    let step = text.split("\n  opv-supply-check:").next().unwrap();
+    let script = run_scripts(step).into_iter().next().unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = std::process::Command::new("bash")
+        .args(["-c", &script])
+        .env("PATH", path)
+        .output()
+        .unwrap();
+    Some(SupplyRun {
+        status: out.status,
+        log: format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+        piped: std::fs::read_to_string(&piped).unwrap_or_default(),
+    })
+}
+
+#[cfg(unix)]
+#[test]
+fn the_supply_step_runs_to_success() {
+    if let Some(run) = run_supply_step() {
+        assert!(run.status.success(), "{}", run.log);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_supply_step_logs_no_value() {
+    if let Some(run) = run_supply_step() {
+        assert!(!run.log.contains(CANARY));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_supply_step_pipes_the_values_into_opv_sync() {
+    if let Some(run) = run_supply_step() {
+        assert!(run.piped.contains(&format!("whsec_{CANARY}")));
+    }
 }
 
 #[test]
