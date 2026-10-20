@@ -716,8 +716,16 @@ exit $rc"#,
              exit $LASTEXITCODE\n",
         ) {
             // H5: withheld; refused before any sign-in, nothing printed.
+            // pwsh reports a native command's exit through `| Out-String` unreliably (1 on
+            // GitHub's runners), so the refusal is checked by its text and its empty capture.
             Some(t) => {
-                assert_eq!(t.code, Some(2), "{}", t.typescript);
+                assert!(
+                    t.code != Some(0)
+                        && t.typescript
+                            .contains("this command needs --shell, one of posix, fish"),
+                    "{}",
+                    t.typescript
+                );
                 assert_eq!(lab.out("capture.pwsh"), "");
             }
             None => skip("s2 powershell", "pwsh is not installed (command -v pwsh)"),

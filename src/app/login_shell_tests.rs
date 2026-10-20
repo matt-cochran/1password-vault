@@ -255,7 +255,7 @@ fn write_lines_maps_a_broken_pipe_to_terminal_lost() {
     ));
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn pipe_pair() -> [std::os::fd::RawFd; 2] {
     let mut fds = [0; 2];
     if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
@@ -282,6 +282,8 @@ fn regular_file_stdout_is_not_a_pipe() {
 
 /// M1: a FIFO whose read end the parent does not hold (`opv ... | cat`) is not `Pipe`.
 #[cfg(unix)]
+// Only Linux and WSL can see which process holds a pipe (/proc); elsewhere a FIFO is a pipe.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_pipe_the_parent_does_not_hold_is_not_a_pipe() {
     let fds = pipe_pair();
