@@ -1,0 +1,104 @@
+# opv login --shell refusals (bash under script(1))
+## usage_shell_value: o="$(opv login --shell=dev)"; rc=$?; printf '%s' "$o" > "$R/out/usage_shell_value.stdout"; exit $rc
+exit: 2
+opv: invalid value 'dev' for '--shell[=<SHELL>]'
+Do: in your own terminal: opv login --help
+Next: opv login --help
+
+## usage_with_command: o="$(opv login --shell -- opv inventory)"; rc=$?; printf '%s' "$o" > "$R/out/usage_with_command.stdout"; exit $rc
+exit: 2
+opv: the argument '--shell[=<SHELL>]' cannot be used with '[COMMAND]...'
+Do: in your own terminal: opv login --help
+Next: opv login --help
+
+## ci: o="$(CI=true opv login --shell)"; rc=$?; printf '%s' "$o" > "$R/out/ci.stdout"; exit $rc
+exit: 6
+opv: this step needs a person at a terminal, and this is a CI run
+Do: run it in your own terminal; outside CI, in your own terminal: eval "$(opv login --shell)"
+Next: opv login --help
+
+## github_actions: o="$(GITHUB_ACTIONS=true opv login --shell)"; rc=$?; printf '%s' "$o" > "$R/out/github_actions.stdout"; exit $rc
+exit: 6
+opv: this step needs a person at a terminal, and this is a CI run
+Do: run it in your own terminal; outside CI, in your own terminal: eval "$(opv login --shell)"
+Next: opv login --help
+
+## no_tty: o="$(opv login --shell </dev/null)"; rc=$?; printf '%s' "$o" > "$R/out/no_tty.stdout"; exit $rc
+exit: 6
+opv: this step needs a person at a terminal, and there is none
+Do: run it in your own terminal
+Next: eval "$(opv login --shell)"
+
+## service_account: o="$(OP_SERVICE_ACCOUNT_TOKEN=ops_e2e_not_a_token opv login --shell)"; rc=$?; printf '%s' "$o" > "$R/out/service_account.stdout"; exit $rc
+exit: 7
+opv: opv login must be used in your own session, not as the token in OP_SERVICE_ACCOUNT_TOKEN
+Do: run it in your own terminal, signed in as yourself, without OP_SERVICE_ACCOUNT_TOKEN
+Next: eval "$(opv login --shell)"
+
+## agent: o="$(CLAUDECODE=1 opv login --shell)"; rc=$?; printf '%s' "$o" > "$R/out/agent.stdout"; exit $rc
+exit: 6
+opv: eval "$(opv login --shell)" runs only in a person's terminal; this shell looks like an assistant (CLAUDECODE)
+Do: run it in your own terminal
+Next: eval "$(opv login --shell)"
+
+## stdout_terminal: opv login --shell; exit $?
+exit: 6
+opv: this prints a 1Password session for your shell to evaluate, so it only writes to a pipe; stdout here is the terminal
+Do: run it inside your shell's eval, which hands it a pipe
+Next: eval "$(opv login --shell)"
+
+## stdout_file: opv login --shell > "$R/out/stdout_file.stdout"; exit $?
+exit: 6
+opv: this prints a 1Password session for your shell to evaluate, so it only writes to a pipe; stdout here is a file
+Do: run it inside your shell's eval, which hands it a pipe
+Next: eval "$(opv login --shell)"
+
+## m1_cat: opv login --shell | cat; exit ${PIPESTATUS[0]}
+exit: 6
+opv: this prints a 1Password session for your shell to evaluate, so it only writes to a pipe; stdout here is not a pipe
+Do: run it inside your shell's eval, which hands it a pipe
+Next: eval "$(opv login --shell)"
+
+## m1_tee: opv login --shell | tee "$R/out/m1_tee.stdout"; exit ${PIPESTATUS[0]}
+exit: 6
+opv: this prints a 1Password session for your shell to evaluate, so it only writes to a pipe; stdout here is not a pipe
+Do: run it inside your shell's eval, which hands it a pipe
+Next: eval "$(opv login --shell)"
+
+## m1_fifo: mkfifo "$R/out/m1.fifo"; cat "$R/out/m1.fifo" > "$R/out/m1_fifo.stdout" &
+opv login --shell > "$R/out/m1.fifo"; rc=$?; wait; exit $rc
+exit: 6
+opv: this prints a 1Password session for your shell to evaluate, so it only writes to a pipe; stdout here is not a pipe
+Do: run it inside your shell's eval, which hands it a pipe
+Next: eval "$(opv login --shell)"
+
+## m1_process_substitution: opv login --shell > >(cat > "$R/out/m1_process_substitution.stdout"); rc=$?; wait; exit $rc
+exit: 6
+opv: this prints a 1Password session for your shell to evaluate, so it only writes to a pipe; stdout here is not a pipe
+Do: run it inside your shell's eval, which hands it a pipe
+Next: eval "$(opv login --shell)"
+
+## m5_fish_under_bash: o="$(opv login --shell=fish)"; rc=$?; printf '%s' "$o" > "$R/out/m5_fish_under_bash.stdout"; exit $rc
+exit: 2
+opv: this shell is a POSIX shell (bash, zsh, sh) but the session lines asked for are for fish; a shell that cannot read them can print them, session and all, in its error, so nothing was signed in
+Do: ask for this shell's own syntax
+Next: eval "$(opv login --shell)"
+
+## m5_powershell_under_bash: o="$(opv login --shell=powershell)"; rc=$?; printf '%s' "$o" > "$R/out/m5_powershell_under_bash.stdout"; exit $rc
+exit: 2
+opv: this shell is a POSIX shell (bash, zsh, sh) but the session lines asked for are for PowerShell; a shell that cannot read them can print them, session and all, in its error, so nothing was signed in
+Do: ask for this shell's own syntax
+Next: eval "$(opv login --shell)"
+
+## choice_powershell: SHELL=/bin/bash python3 -c 'import subprocess,sys; p=subprocess.run(["opv","login","--shell=powershell"], stdout=subprocess.PIPE); open(sys.argv[1],"wb").write(p.stdout); sys.exit(p.returncode)' "$R/out/choice_powershell.stdout"; exit $?
+exit: 2
+opv: this command needs --shell, one of posix, fish
+Do: pick one of posix, fish and pass it with --shell
+Next: opv contract
+
+## choice_unknown_shell: SHELL=/usr/bin/e2e-no-such-shell python3 -c 'import subprocess,sys; p=subprocess.run(["opv","login","--shell"], stdout=subprocess.PIPE); open(sys.argv[1],"wb").write(p.stdout); sys.exit(p.returncode)' "$R/out/choice_unknown_shell.stdout"; exit $?
+exit: 2
+opv: this command needs --shell, one of posix, fish
+Do: pick one of posix, fish and pass it with --shell
+Next: opv contract
+
