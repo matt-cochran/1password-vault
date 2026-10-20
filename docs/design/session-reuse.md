@@ -1,6 +1,7 @@
 # Session reuse across commands (#203)
 
-Status: draft for 0.14.0 (cpm line v0140), 2026-10-20, before the DESIGN-FMECA review. Built on
+Status: draft for 0.14.0 (cpm line v0140), 2026-10-20, revised after the DESIGN-FMECA review
+(`session-reuse-fmeca.md`: fixes for H1-H3 applied here; H4 and H5 wait for the owner). Built on
 opv 0.13.0. The owner chose the direction on 2026-10-20; this document specifies it.
 
 ## 1. The decision
@@ -26,8 +27,8 @@ pipe.
 | `opv login --shell` | essential | the only way to carry a session without a holder process |
 | stdout-is-a-pipe guard | essential | stops the token reaching a screen, scrollback or file |
 | `DesktopIntegration` detection | useful | doctor's report and the right wording; reuse itself works without it |
-| `OP_SESSION_*` stripped from non-`op` children | useful | narrows `/proc` exposure; cheap |
-| "already live" short-circuit | useful | fewer prompts and fewer token emissions |
+| `OP_SESSION_*` stripped from non-`op` children, and `opv run`'s app always behind the delivery step | essential | the app and target CLIs never get the person's session (FMECA H1) |
+| "already live" short-circuit | useful | fewer prompts and fewer token emissions; decided by a vault list, never `whoami` (FMECA H3) |
 
 ## 2. The three paths
 
@@ -96,11 +97,16 @@ its existing single `wake`, and adds no prompt of its own.
 
 | Finding | Row | JSON `state` |
 |---|---|---|
-| `whoami` succeeds under it | `ok    op shell session: live in this shell (<var>)` | `live` |
-| `whoami` fails under it | `warn  op shell session: expired (30 minutes idle)` + `fix: <refresh>` | `expired` |
+| `op vault list` succeeds under it | `ok    op shell session: live in this shell (<var>)` | `live` |
+| `op vault list` fails as signed out under it | `warn  op shell session: expired or signed out` + `fix: <refresh>` | `expired` |
 | an agent marker is also set | `warn  op shell session: an assistant started from this shell inherits it` | `inherited_by_assistant` |
 
 The variable name is printed. The value never is.
+
+Liveness is `op vault list --format json` under the variable, never `whoami`: #167 found live that
+a stale `OP_SESSION_*` can leave `whoami` naming the account while the vault list says no one is
+signed in (`setup.rs`, the same rule). `shell_session` (§7.2) is the one check; doctor and §5.2's
+"already live" both call it (FMECA H3).
 
 ## 4. Reuse and expiry
 
@@ -158,7 +164,13 @@ stdout carries one line per session variable and nothing else. op's variable nam
 |---|---|---|
 | posix | `export OP_SESSION_<id>=<token>` | `eval "$(opv login --shell)"` |
 | fish | `set -gx OP_SESSION_<id> <token>` | `opv login --shell=fish \| source` |
-| powershell | `$env:OP_SESSION_<id> = '<token>'` | `opv login --shell=powershell \| Out-String \| Invoke-Expression` |
+| powershell (withheld, FMECA H5) | `$env:OP_SESSION_<id> = '<token>'` | `opv login --shell=powershell \| Out-String \| Invoke-Expression` |
+
+**PowerShell is withheld pending the owner's decision (FMECA H5, §11 Q1).** With script-block
+logging (event 4104) on, `Invoke-Expression` writes the token's line to the event log, which
+breaks the fixed "never in logs" rule. Native Windows op probably prints `$env:` lines, which
+`session_assignment` rejects today. The lanes build `posix` and `fish`. `--shell=powershell` is
+`choice_required` until the owner decides.
 
 `<refresh>` carries `--account <id>` when the account did not come from `.opv` or the
 environment's `account` setting.
@@ -168,8 +180,18 @@ Everything for the person goes to stderr through `LoginConsole`, which already w
 then.` Under `SignInKind::App`, stdout is empty, the exit is 0, and stderr says: `The 1Password app
 integration is on: commands in this terminal already reuse its unlock. Nothing to set.`
 
-When the shell already holds a live session for the account (`whoami` succeeds under it), stdout
-is empty, there is no prompt and the exit is 0: `Already signed in in this shell.`
+When the shell already holds a live session for the account (`shell_session` is `Live`: a vault
+list succeeds under it, §3.3), stdout is empty, there is no prompt and the exit is 0: `Already
+signed in in this shell.` `Expired` goes on to the sign-in. A `whoami` that succeeds is never
+enough (FMECA H3).
+
+**Owner decision pending (FMECA H4).** The lines above export the session, so every process the
+person starts from that shell inherits it: an assistant's own shell can `op read` any secret with no
+prompt, and an install script can harvest it. The review recommends emitting a non-exported shell
+variable plus an `opv` shell function that passes it to opv alone. The function is
+`opv() { OP_SESSION_<id>="$__opv_session_<id>" command opv "$@"; }`, and fish has the same with
+`set -g` and `function opv`. The trade-off is that plain `op` and scripts in that shell are no longer
+signed in. `export_lines`' signature is the same either way; only its text changes.
 
 ### 5.3 Quoting
 
@@ -199,7 +221,7 @@ the `eval` gets an empty string. The cause goes to stderr.
 
 | Situation | Cause code | Exit |
 |---|---|---|
-| `--json`, `--shell` with `-- <cmd>`, `--shell=<unknown>`, `--shell dev` | `usage` (clap; login has no `--json`) | 2 |
+| `--json`, `--shell` with `-- <cmd>`, `--shell=<unknown>` such as `--shell=dev` (`--shell dev` is valid: auto shell, env `dev`; FMECA L7) | `usage` (clap; login has no `--json`) | 2 |
 | `CI` or `GITHUB_ACTIONS` | `terminal_required` (`ci`) | 6 |
 | stdin or stderr is not a terminal | `terminal_required` (`no_tty`) | 6 |
 | a service-account or Connect credential is set | `own_session_required` | 7 |
@@ -218,8 +240,14 @@ pipelines all hand opv a pipe (inferred, covered by §8).
   `SecretValue`.
 - It is registered with the scrubber (`scrub::register_credentials_from`) before anything else
   runs, so `--verbose`, error excerpts and panics mask it.
-- It is written once, by `login_shell::emit`, to the stdout handle, in a `Zeroizing` buffer, then
-  flushed. A failed write is `terminal_lost`, and nothing is retried.
+- It is written once, in a `Zeroizing` buffer, then flushed. `login_shell::run` never writes it:
+  it returns the lines (`ShellEmit`, §7.4), and main's `Cmd::Login { shell: Some(_) }` arm
+  writes them to the raw stdout lock (`PipeSafe`'s inner handle), not through `OutputGuard`. The
+  guard would mask them: `scrub.rs`'s `OP_SESSION_\w*=` rule, plus the registered token, mean the
+  shell would `eval` `********` (FMECA H2). This is the only write that bypasses the guard. main
+  checks `stdout_kind()` again right before it, and every other byte of the command still goes
+  through the guard. A failed write, including EPIPE, which `PipeSafe` otherwise swallows, is
+  `terminal_lost`, and nothing is retried.
 - It never goes to argv (op gets it only through a child's environment), a file, `history`,
   receipts or the MCP server.
 
@@ -227,13 +255,13 @@ pipelines all hand opv a pipe (inferred, covered by §8).
 
 | Property | Status | How |
 |---|---|---|
-| Shell history | enforced | The typed line holds no token. A bare `opv login --shell` is refused (stdout is a terminal), so the token never reaches scrollback. `set -x`, `fish_trace` and `Set-PSDebug -Trace` echo the evaluated line to stderr: out of scope, documented. |
+| Shell history | enforced | The typed line holds no token. A bare `opv login --shell` is refused (stdout is a terminal). A pipe to another reader (`\| cat`, `\| tee`) still passes `S_ISFIFO`: FMECA M1. `set -x`, `fish_trace` and `Set-PSDebug -Trace` echo the evaluated line to stderr: out of scope, documented. |
 | Never on disk, argv, logs or stderr from opv | enforced | §5.6, plus the canary scan (§8). |
-| `/proc/<pid>/environ` | out of scope, mitigated | The same user and root can read any child's environment, as with today's subshell and op's own `eval $(op signin)`. Mitigation: opv now removes `OP_SESSION*` from every non-`op` child it starts (`flyctl`, `gh`, `az`, `kubectl`), on top of the app strip. Children the person starts from the shell (editors, build tools) inherit it: documented. |
+| `/proc/<pid>/environ` | out of scope, mitigated | The same user and root can read any child's environment, as with today's subshell and op's own `eval $(op signin)`. Mitigation: opv now removes `OP_SESSION*` from every non-`op` child it starts (`flyctl`, `gh`, `az`, `kubectl`), on top of the app strip. Children the person starts from the shell (editors, build tools, assistants) inherit it: owner decision H4 (§5.2). |
 | Token lifetime | mitigated | op's 30-minute idle expiry. opv adds no lifetime and cannot shorten it. The variable dies with the shell. `op signout --account <id>` ends it early. A refresh while the session is live prints nothing (§5.2). |
-| Inheritance into `opv run` children | enforced | `op run` needs it. The delivery step removes every `OP_*` before the app starts (`local_delivery.rs`, existing, with or without `declared_only`). `opv login -- <cmd>` passes it on by design. |
+| Inheritance into `opv run` children | enforced (changed, FMECA H1) | `op run` needs it, and `op run` passes its shell environment to its child. Today only a product with `[products.<p>.local]` runs its app through the delivery step (`run.rs`, `delivery_args`). Otherwise the app gets `OP_SESSION_*` straight from `op run`: the shell's, or opv's in-command session (`add_op_session`). From 0.14 every local `opv run` puts the `local-delivery` step between `op run` and the app. Without a `local` section it runs in inherit mode with no files, and it removes every `OP_*` (`local_delivery::child_env`). `opv login -- <cmd>` passes the session on by design. |
 | Assistants started from the shell | mitigated | MCP refuses 1Password writes while `OP_SESSION*` is set (#133, `credential_in_environment`). Doctor warns (§3.3). An assistant's own shell can still run `op`: documented. |
-| PowerShell logging | out of scope | Script-block logging (event 4104) or `Start-Transcript` can record the `Invoke-Expression` text. Documented; owner question 1. |
+| PowerShell logging | withheld (FMECA H5) | Script-block logging (event 4104) records the `Invoke-Expression` text, which puts the token in a log. `--shell=powershell` waits for owner question 1. |
 | Canary scan in tests | enforced | §8.3. A test fails on any leak. |
 
 ## 7. Interfaces for the parallel lanes
@@ -245,8 +273,8 @@ bodies, keeping the signatures. Each lane edits only the files listed for it.
 |---|---|
 | `session-cli-surface` | `src/main.rs` (flag, wiring, help text), `src/app/mod.rs` (three `pub mod` lines), `src/app/desktop_integration.rs` (new, types only), stub `src/app/doctor_session.rs` and `src/app/login_shell.rs`, `src/cause/{mod,codes,render}.rs` |
 | `session-desktop-detect` | `src/host.rs`, `src/app/doctor_session.rs`, two call lines in `src/app/doctor.rs` |
-| `session-desktop-reuse` | `src/app/signin.rs`, `session_cause` in `src/adapters/onepassword.rs`, `command_for` in `src/runner.rs`, the `eprintln!` in `sign_in_here` (main.rs) |
-| `session-shell` | `src/app/login_shell.rs`, `src/app/login.rs`, `Backend` in `src/app/setup.rs`, its impl in `src/app/setup_runtime.rs` |
+| `session-desktop-reuse` | `src/app/signin.rs`, `session_cause` in `src/adapters/onepassword.rs`, `command_for` in `src/runner.rs`, the `eprintln!` in `sign_in_here` (main.rs), and (FMECA H1) `delivery_args` and its caller in `src/app/run.rs` |
+| `session-shell` | `src/app/login_shell.rs`, `src/app/login.rs`, `Backend` in `src/app/setup.rs`, its impl in `src/app/setup_runtime.rs`, and (FMECA H2) the raw stdout write in main's `Cmd::Login` arm |
 
 ### 7.1 `session-cli-surface`
 
@@ -301,6 +329,8 @@ pub fn op_session_vars() -> Vec<String>; // names only, sorted
 pub fn detect(host: &Host, r: &dyn CommandRunner) -> DesktopIntegration;   // §3.2
 pub fn classify_static(host: &Host) -> Option<DesktopIntegration>;          // steps 1-4, pure
 pub enum ShellSession { Live { var: String }, Expired { var: String } }
+/// FMECA H3: decided by `op vault list --format json` under the variable (the #167 rule),
+/// never by `whoami`. The one liveness check: doctor and `login_shell::run` both call it.
 pub fn shell_session(host: &Host, r: &dyn CommandRunner, account: Option<&str>) -> Option<ShellSession>;
 pub fn rows(integration: DesktopIntegration, shell: Option<&ShellSession>, host: &Host) -> Vec<DoctorRow>;
 pub struct DoctorRow { pub name: &'static str, pub status: RowStatus, pub text: String,
@@ -325,6 +355,11 @@ pub enum ReusePath { App, Shell { var: String }, PerCommand }
 account. It returns `AppLocked` for `Available`/`Active` hosts beyond today's `op.exe` case.
 `command_for` removes `OP_SESSION` and `OP_SESSION_*` when `program != "op"`.
 
+FMECA H1, `src/app/run.rs`: `delivery_args(local: Option<&Local>, selected)`. With `None` it emits
+`<opv> local-delivery --key <k>... --`, with no `--declared-only`, `--dir-env` or `--file`. The local
+`opv run` path always calls it, so `op run`'s child is always the step, which removes every `OP_*`.
+The remote path (`remote_args`) is unchanged; it already passes no `OP_*`.
+
 ### 7.4 `session-shell`
 
 ```rust
@@ -341,8 +376,10 @@ pub fn check_stdout(kind: StdoutKind, shell: Shell) -> Result<(), Error>;
 pub fn export_lines(shell: Shell, vars: &[(String, SecretValue)]) -> Result<Zeroizing<String>, Error>;
 pub fn refresh_command(shell: Shell, account: Option<&str>) -> String;
 pub fn sign_in_kind(vars: &[(String, SecretValue)]) -> SignInKind; // empty: App
-pub fn run(req: ShellLogin<'_>, backend: &mut dyn Backend, ui: &mut dyn Interaction,
-           out: &mut dyn std::io::Write) -> Result<i32, Error>;
+/// FMECA H2: what main writes, unguarded, to the raw stdout lock. Empty for App/already live.
+pub struct ShellEmit { pub lines: Zeroizing<String> }
+pub fn run(req: ShellLogin<'_>, backend: &mut dyn Backend, ui: &mut dyn Interaction)
+           -> Result<ShellEmit, Error>; // no `out`: it never touches the guarded writer
 
 // src/app/login.rs: run_recording split; the subshell path calls both halves
 pub fn sign_in_recording(fleet: Option<&Fleet>, fallback: Option<&str>, env: Option<&str>,
@@ -363,8 +400,10 @@ trait Backend { fn take_session(&mut self) -> Vec<(String, SecretValue)> { Vec::
   without prompting. Later calls need that variable with that value. `"expired": true` answers
   with the signed-out recording (05/06/07).
 - The call log records, for each call, argv and the **names** of the `OP_*` variables it got.
-- `RECORD.md` gains two owner recordings: `whoami` under the app integration (macOS or Windows), and
-  an expired token's `whoami` and `vault list`.
+- `RECORD.md` gains three owner recordings: `whoami` under the app integration (macOS or
+  Windows), an expired token's `whoami` and `vault list`, and the variable **names**
+  `op run -- env` passes to its child under a CLI session. The sim's `op run` must pass
+  `OP_SESSION_*` through as real op does (H1).
 
 ### 8.2 End-to-end (`tests/e2e/scenarios/session_reuse.rs`, Linux)
 
@@ -380,7 +419,9 @@ the PTY, and `$(…)` gives opv a pipe, exactly as a person's shell does.
 | S5 app integration on | `--shell` stdout empty, exit 0; two commands, no `op signin` |
 | S6 already live | stdout empty, no `op signin` |
 | S7 refusals (§5.5, one each) | the code and exit listed; stdout empty; a `> file` target stays empty |
-| S8 `opv run dev -- env` after eval | no `OP_*` in the app's output; no `OP_SESSION*` name on any non-`op` call |
+| S8 `opv run dev -- env` after eval, for a product **with and without** `[products.<p>.local]` | no `OP_*` in the app's output; no `OP_SESSION*` name on any non-`op` call (H1) |
+| S1b eval, then `opv check dev` | the session works: the emitted line is not masked (H2) |
+| S6b a stale variable whose `whoami` still succeeds but whose vault list is signed out (#167) | `--shell` signs in and prints a new line; doctor says `expired` (H3) |
 | S9 `.opv` | `--account X --shell` records X only after success; `--no-record` leaves it |
 | S10 `opv login -- opv check dev` | unchanged (regression) |
 | S11 `opv doctor --json` per world state | `op_app_integration` and `op_shell_session` as §3.3 |
@@ -440,7 +481,8 @@ matrix cell scans for it as well.
 
 1. **PowerShell.** Ship `--shell=powershell` given script-block logging (§6)? Proposed: ship it
    with a stderr warning when the ScriptBlockLogging policy key is set. Native Windows usually has
-   the app.
+   the app. *FMECA (H5): don't ship it in 0.14. Withheld until you decide.*
+6. **Exported variable or `opv` function (FMECA H4).** See §5.2. *FMECA: the function.*
 2. **`OP_ACCOUNT`.** Export it too? Proposed: no. opv sets it per call, and exporting it changes
    plain `op` in that shell (the banner's `op signout --all` conflict).
 3. **Linux desktop app.** `app_holds_accounts` excludes Linux today. Proposed: detection treats
