@@ -1101,16 +1101,46 @@ impl From<std::io::ErrorKind> for IoKind {
     }
 }
 
+/// A declaration fragment (#178): only the declarations a proposal adds to or changes in
+/// a generated configuration, not a whole-file diff; what its generator must emit. A table
+/// both texts hold appears only as the parent of what changed in it; any other value that
+/// differs appears whole (an array is one value). Names and rules only, never an id (the
+/// contract holds none) or a value.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Fragment {
+    /// The fragment as TOML: what the generator emits, merged into the file it writes.
+    pub toml: String,
+    /// The same fragment as JSON (the TOML's tables as objects).
+    pub json: serde_json::Value,
+    /// Dotted paths of the declarations the proposal removes (absent when none).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub removed: Vec<String>,
+    /// The error the configuration would raise once the fragment is merged into it, as
+    /// the loader reports it; `null` when it loads.
+    pub load_error: Option<LoadError>,
+}
+
+/// A load error by its stable cause code and message (the cause's first line): names and
+/// rules only, never a value.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LoadError {
+    pub code: &'static str,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum NotEditable {
-    /// Generated from `generator`, when opv knows what generates it (A22). `diff`: the
-    /// contract diff of a refused `propose … --write` (FR-52), the edit to make in the
-    /// generator instead; names and rules only, never a value or an id.
+    /// Generated from `generator`, when opv knows what generates it (A22, #178: the tool
+    /// the first line names; on the wire `generated_by`). `fragment`: the declaration
+    /// fragment of a refused `propose … --write` (FR-52), what the generator must emit
+    /// instead, with the error the file would raise; names and rules only, never a value
+    /// or an id.
     Generated {
+        #[serde(rename = "generated_by")]
         generator: Option<PathBuf>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        diff: Option<String>,
+        fragment: Option<Fragment>,
     },
     UnsupportedLayout {
         section: String,

@@ -220,6 +220,7 @@ fn assemble(
             questions: Vec::new(),
             plan_id: plan_id(&contract),
             contract_after: contract,
+            for_generator: None,
         },
         structure_steps,
         bindings_after: None,

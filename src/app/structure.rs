@@ -66,6 +66,10 @@ pub struct Plan {
     /// The configuration file is generated: apply records nothing in it and returns the
     /// IDs for its generator instead (FR-52).
     pub generated: bool,
+    /// The generator a generated configuration's first line names (#178); absent when the
+    /// file is not generated or its header names none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generated_by: Option<String>,
 }
 
 impl Plan {
@@ -145,6 +149,7 @@ pub fn plan(
         delivery_items,
         fields,
         generated,
+        generated_by: bootstrap::generated_by(text),
     })
 }
 

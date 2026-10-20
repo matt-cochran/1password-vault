@@ -2658,12 +2658,17 @@ impl Cause {
             }
             ConfigNotEditable { source, reason } => {
                 let next = match reason {
-                    // FR-52 (#184): a refused proposal's diff goes into the generator; once
-                    // it emits the configuration, the structure is proposed and applied, and
-                    // apply returns the ids (`generator_ids`) for the generator to record.
-                    NotEditable::Generated { diff: Some(_), .. } => {
-                        Next::Run(cmd(&["propose", "structure"], &[]))
-                    }
+                    // FR-52 (#184, #178): a refused proposal's fragment is what the generator
+                    // emits; once it does, the structure is proposed and applied, and apply
+                    // returns the ids (`generator_ids`) for the generator to record.
+                    NotEditable::Generated {
+                        fragment: Some(Fragment {
+                            load_error: None, ..
+                        }),
+                        ..
+                    } => Next::Run(cmd(&["propose", "structure"], &[])),
+                    // A fragment the file would not load with: the proposal changes first,
+                    // which no fixed opv command does.
                     // The fix is in the generator's input, outside opv; its configuration is
                     // generated again from there (retry never: no opv command makes progress).
                     NotEditable::Generated { .. } => Next::None(NoNext::NothingToRun),
@@ -2671,14 +2676,25 @@ impl Cause {
                 };
                 plan(
                     inspect(match reason {
-                    NotEditable::Generated { generator, diff } => {
+                    NotEditable::Generated { generator, fragment } => {
                         let input = generator.as_ref().map_or_else(
                             || "its generator's input".to_string(),
                             |g| g.display().to_string(),
                         );
-                        match diff {
+                        let generator = generator.as_ref().map_or_else(
+                            || "its generator".to_string(),
+                            |g| g.display().to_string(),
+                        );
+                        match fragment {
+                            Some(Fragment {
+                                load_error: Some(e),
+                                ..
+                            }) => format!(
+                                "change the proposal first: with its fragment the configuration would not load ({}); then have {generator} emit the fragment, propose the structure, and opv apply returns the ids for the generator to record",
+                                e.code
+                            ),
                             Some(_) => format!(
-                                "make the proposal's diff in {input} instead and generate the configuration again; then propose its structure, and opv apply returns the ids for the generator to record"
+                                "have {generator} emit the proposal's fragment and generate the configuration again; then propose its structure, and opv apply returns the ids for the generator to record"
                             ),
                             None => format!(
                                 "change {input} instead, and generate the configuration again"
@@ -4494,6 +4510,17 @@ pub fn render_text(
     colour: bool,
 ) -> String {
     let mut s = format!("opv: {}\n", cause.message());
+    // #178: a refused proposal on a generated configuration shows the fragment its
+    // generator must emit, and the error the file would raise with it.
+    if let Cause::ConfigNotEditable {
+        reason: NotEditable::Generated {
+            fragment: Some(f), ..
+        },
+        ..
+    } = cause
+    {
+        s.push_str(&fragment_lines(f));
+    }
     if let Some(seen) = cause.observed() {
         s.push_str("  ");
         s.push_str(&evidence::checked_line(seen, cause_account(cause)));
@@ -4519,6 +4546,23 @@ pub fn render_text(
         (_, None) => "none".to_string(),
     };
     s.push_str(&format!("Next: {next}\n"));
+    s
+}
+
+/// A refused proposal's fragment as text: `fragment:` and its TOML indented, the removed
+/// paths, and its load error (or `none`).
+fn fragment_lines(f: &Fragment) -> String {
+    let mut s = String::from("  fragment:\n");
+    for line in f.toml.lines() {
+        s.push_str(&format!("    {line}\n"));
+    }
+    for path in &f.removed {
+        s.push_str(&format!("  removed: {path}\n"));
+    }
+    match &f.load_error {
+        Some(e) => s.push_str(&format!("  load_error: {}: {}\n", e.code, e.message)),
+        None => s.push_str("  load_error: none\n"),
+    }
     s
 }
 
