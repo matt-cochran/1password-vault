@@ -145,6 +145,22 @@ fn an_env_proposal_adds_the_environment_with_its_tier() {
     );
 }
 
+/// #179: a new environment inherits every key with no list, so its products' boundaries are
+/// declared there and the proposal loads.
+#[test]
+fn an_env_proposal_declares_the_boundary_of_an_inherited_key() {
+    let intent = key_intent(r#"{"kind":"env","env":"qa","tier":"shared"}"#);
+    let proposal = propose(DEV_PROD, &Bindings::default(), None, &intent).unwrap();
+    assert_eq!(
+        added(&proposal.diff),
+        vec![
+            "[environments.qa]",
+            "tier = \"shared\"",
+            "boundaries.app = {}"
+        ]
+    );
+}
+
 #[test]
 fn a_retire_proposal_marks_the_key_retiring() {
     let intent = key_intent(r#"{"kind":"retire","key":"EXISTING_KEY","product":"app"}"#);

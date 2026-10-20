@@ -2653,7 +2653,13 @@ impl Cause {
                 p.next = check;
             }
         }
-        if let Some((why, shown)) = refusal(&p.next, inv, sit) {
+        // `opv apply` refused for want of a person (no terminal, an assistant, CI) hands the
+        // same apply to the person: CI or an assistant only relays it, so the situation that
+        // refused the run never turns it into another command's read (#179: CI's refused
+        // `opv apply rp-…` named `opv propose structure`, which is no step of a retirement).
+        let persons_own = matches!(self, Cause::NeedsTerminal { .. } | Cause::PersonOnly { .. })
+            && matches!(&p.next, Next::Handoff(c) if c.command == ["apply"]);
+        if !persons_own && let Some((why, shown)) = refusal(&p.next, inv, sit) {
             p = self.refused(p, why, &shown, inv, sit);
         }
         p
@@ -4116,7 +4122,7 @@ impl Cause {
             GateFailed { env, keys } => match keys.first() {
                 Some((product, key, reason)) if *reason == "not_delivered" => plan(
                     inspect(format!(
-                        "re-deliver {product}/{key} to environment {env}: its delivery evidence is older than the source item"
+                        "re-deliver {product}/{key} to environment {env}: its source item changed after the last delivery (a value edit, or a retirement's archive by opv apply rp-…), so the delivery evidence is out of date until a sync records it again"
                     )),
                     Next::Run(cmd(&["sync"], &[env.as_str()])),
                 ),

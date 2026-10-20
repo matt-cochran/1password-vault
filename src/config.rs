@@ -1690,7 +1690,7 @@ fn check_personal(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
     for (product, p) in &fleet.products {
         for (key, spec) in &p.keys {
             if spec.personal
-                && let Some(env) = spec.envs_in(fleet).into_iter().find(|e| {
+                && let Some(env) = spec.envs_wanted_in(fleet).into_iter().find(|e| {
                     fleet
                         .environments
                         .get(e)
@@ -2710,7 +2710,8 @@ pub(crate) mod testing {
 
     /// `text` with `boundaries.<product> = { vault_id = "v<product>", item_id =
     /// "i<product>" }` added under each `[environments.<env>]` header, for every product with
-    /// a key declared for that environment. Names only.
+    /// a team key wanted in that environment (its presence, `except` and lifecycle applied).
+    /// Names only.
     pub(crate) fn bounded(text: &str) -> String {
         let doc: toml::Table = toml::from_str(text).expect("test document parses");
         let mut needs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -2718,12 +2719,15 @@ pub(crate) mod testing {
         for (product, p) in products.into_iter().flatten() {
             let keys = p.get("keys").and_then(toml::Value::as_table);
             for spec in keys.into_iter().flat_map(|k| k.values()) {
-                let envs = spec.get("environments").and_then(toml::Value::as_array);
-                for env in envs.into_iter().flatten().filter_map(toml::Value::as_str) {
-                    needs
-                        .entry(env.to_string())
-                        .or_default()
-                        .insert(product.clone());
+                let spec: crate::domain::KeySpec = spec.clone().try_into().expect("a key spec");
+                let envs = doc.get("environments").and_then(toml::Value::as_table);
+                for env in envs.into_iter().flat_map(|e| e.keys()) {
+                    if spec.is_desired_in(env) && !spec.personal {
+                        needs
+                            .entry(env.to_string())
+                            .or_default()
+                            .insert(product.clone());
+                    }
                 }
             }
         }

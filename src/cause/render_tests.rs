@@ -3370,6 +3370,30 @@ fn f1_a_refused_setup_falls_back_to_its_help() {
     assert_eq!(next_under(&c, &inv, &under_ci()), "opv setup --help");
 }
 
+/// #179: CI's refused `opv apply rp-…` hands the same apply to the person, never another
+/// command's read.
+#[test]
+fn a_retirement_apply_refused_under_ci_is_handed_to_the_person() {
+    let c = Cause::NeedsTerminal {
+        why: NoTerminal::NoTty,
+    };
+    let inv = cli(&["opv", "apply", "rp-40618f09aa949b63"]);
+    assert_eq!(
+        next_under(&c, &inv, &under_ci()),
+        "opv apply rp-40618f09aa949b63"
+    );
+}
+
+/// #179: the handed-over apply is the person's step, not CI's.
+#[test]
+fn a_retirement_apply_refused_under_ci_is_a_persons_step() {
+    let c = Cause::NeedsTerminal {
+        why: NoTerminal::NoTty,
+    };
+    let inv = cli(&["opv", "apply", "rp-40618f09aa949b63"]);
+    assert!(c.human_required_in(&inv, &under_ci()));
+}
+
 /// E1: a kube context that needs a credential refresh never steps back to the same read
 /// when this run has no terminal.
 #[test]
@@ -4468,6 +4492,25 @@ fn a_gate_failure_fill_is_the_persons_next() {
     assert_eq!(
         next_kind_actor(&c.step(&inv()).1).1,
         crate::json::NextActor::Person
+    );
+}
+
+/// #179: a gate refused on stale delivery evidence says a retirement's archive is one cause
+/// and a sync records the delivery again, never that the value is missing.
+#[test]
+fn a_stale_delivery_gate_names_the_archive_as_a_cause() {
+    let c = Cause::GateFailed {
+        env: EnvName::new("staging"),
+        keys: vec![(
+            ProductName::new("app"),
+            KeyName::new("API_KEY"),
+            "not_delivered",
+        )],
+    };
+    assert!(
+        c.do_text(&inv())
+            .unwrap_or_default()
+            .contains("a retirement's archive by opv apply rp-")
     );
 }
 

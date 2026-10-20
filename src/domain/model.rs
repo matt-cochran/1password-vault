@@ -165,6 +165,16 @@ impl KeySpec {
             .collect()
     }
 
+    /// Every environment of `fleet` this key is wanted in ([`Self::is_desired_in`]): its
+    /// presence there, `except` and a `retired` lifecycle applied (#179). In [`Self::envs_in`]'s
+    /// order: the explicit list's, else the fleet's.
+    pub fn envs_wanted_in(&self, fleet: &Fleet) -> Vec<String> {
+        self.envs_in(fleet)
+            .into_iter()
+            .filter(|env| self.is_desired_in(env))
+            .collect()
+    }
+
     /// Whether this key's explicit list (or its absence, which covers every environment)
     /// covers `env`. `except` is ignored: see [`crate::domain::presence::present_in`].
     pub fn listed_in(&self, env: &str) -> bool {
@@ -177,9 +187,12 @@ impl KeySpec {
     /// wanted nowhere: it keeps its declaration, but no field is created for it, nothing
     /// delivers it and no check asks for its value.
     pub fn is_desired_in(&self, env: &str) -> bool {
-        self.lifecycle != Lifecycle::Retired
-            && crate::domain::presence::present_in(self, env)
-                == crate::domain::presence::Presence::Present
+        crate::domain::presence::wanted(
+            self.environments.as_deref(),
+            self.except.get(env).map(String::as_str),
+            self.lifecycle,
+            env,
+        )
     }
 
     /// Whether this key's rules give a generate recipe: the pure part of

@@ -538,12 +538,20 @@ pub fn build_with_gate(
             // resumes with the environments that still hold it. Additive: nothing active
             // is affected.
             let in_store = spec.kind == Kind::Secret || config_as_secret;
+            // A `retiring` key with no field here (an environment added after the
+            // retirement began never gets one, `app::skeleton`) is not asked for: nothing
+            // holds it, so there is nothing to fill, deliver or prune.
+            let has_field = match source {
+                None => field.is_some(),
+                Some((sp, sk)) => by_name.contains_key(&(sp, sk)),
+            };
             let outcome = match (spec.lifecycle, opts.retiring_prune) {
                 (Lifecycle::Retiring, false)
                     if in_store && target_name.is_some() && target_entry.is_none() =>
                 {
                     Ok(None)
                 }
+                (Lifecycle::Retiring, false) if !has_field && target_entry.is_none() => Ok(None),
                 (Lifecycle::Active, _) | (Lifecycle::Retiring, false) => outcome,
                 (Lifecycle::Retiring, true) | (Lifecycle::Retired, _) => Ok(None),
             };

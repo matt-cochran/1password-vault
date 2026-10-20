@@ -474,6 +474,17 @@ pub fn build(fleet: &Fleet, cells: &CellInputs, receipt: Option<&ReceiptView>) -
                     },
                     _ => (live(), None),
                 };
+                // #179: a `retired` key has no value left to hold (its fields are archived),
+                // and a `retiring` key is never asked for where it has no field: neither
+                // gets a cell a reader would rank or fill.
+                let gone = match spec.lifecycle {
+                    Lifecycle::Retired => true,
+                    Lifecycle::Retiring => state == ValueState::Absent,
+                    Lifecycle::Active => false,
+                };
+                if gone {
+                    continue;
+                }
 
                 matrix.push(Cell {
                     product: product.clone(),

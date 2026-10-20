@@ -474,6 +474,38 @@ pub fn archive_plans(fleet: &Fleet) -> Vec<ArchivePlan> {
         .collect()
 }
 
+/// The CI syncs a retirement's archive leaves to run (#179): every environment with a target
+/// that delivers a product whose boundary item is one of `edited` (the item ids the archive
+/// moved fields in), in tier order then by name. The archive changed those items, so their
+/// delivery evidence is older than the source until a sync records it again; this never
+/// fakes that evidence. `--confirm <env>` where the environment asks for it.
+pub fn resync_after_archive(fleet: &Fleet, edited: &[String]) -> Vec<String> {
+    let mut envs: Vec<(&String, &crate::domain::Environment)> = fleet
+        .environments
+        .iter()
+        .filter(|(name, env)| {
+            env.targets.keys().any(|target| {
+                fleet.products.keys().any(|product| {
+                    fleet.delivers(name, target, product)
+                        && fleet
+                            .boundary(name, product)
+                            .is_ok_and(|b| edited.contains(&b.item_id))
+                })
+            })
+        })
+        .collect();
+    envs.sort_by_key(|(name, e)| (tier_rank(e.tier), (*name).clone()));
+    envs.into_iter()
+        .map(|(name, env)| {
+            if env.confirm_env {
+                format!("opv sync {name} --confirm {name}")
+            } else {
+                format!("opv sync {name}")
+            }
+        })
+        .collect()
+}
+
 /// The environments, in the order a retirement prunes them, where a target still holds
 /// `product/key` (its name is listed on the target): the prunes left before a person may
 /// archive. A target this session cannot read counts as holding it (an archive is never
@@ -583,6 +615,19 @@ fn holds(row: &crate::domain::Row) -> bool {
             row.target,
             TargetState::Present | TargetState::WouldChange | TargetState::Unknown
         )
+}
+
+/// [`findings`] for a `ready` that read only `only` (when given). That read sees no other
+/// environment's target, so it cannot know a retirement's remaining steps: it lists only
+/// the prune `only` itself still needs, never a remaining-steps list built from one
+/// environment (which said only the person's archive was left while other environments
+/// still held the key).
+pub fn findings_scoped(fleet: &Fleet, envs: &[EnvInput], only: Option<&str>) -> Vec<Finding> {
+    let mut out = findings(fleet, envs);
+    if let Some(only) = only {
+        out.retain(|f| f.scope.environment.as_deref() == Some(only));
+    }
+    out
 }
 
 /// `ready`'s `retirement_incomplete` findings (#179): one per `retiring` key, naming the

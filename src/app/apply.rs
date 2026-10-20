@@ -211,6 +211,10 @@ pub struct RetireApplied {
     pub already_archived: Vec<String>,
     /// True when the contract now marks the key `lifecycle = "retired"`.
     pub retired: bool,
+    /// The CI syncs the archive leaves (`retire::resync_after_archive`): each environment
+    /// delivered from an item this run edited, whose delivery evidence is now older than
+    /// its source until CI delivers again. Empty when nothing was edited.
+    pub resync: Vec<String>,
 }
 
 /// `opv apply rp-…` (#179): the person's last step of a retirement. A person's own terminal
@@ -282,6 +286,7 @@ pub fn apply_retire(
         archived: Vec::new(),
         already_archived: Vec::new(),
         retired: false,
+        resync: Vec::new(),
     };
     if !confirm(&plan) {
         return Ok(applied);
@@ -302,13 +307,20 @@ pub fn apply_retire(
         Error::Catalog(Box::new(cause), upstream)
     };
     let mut done: Vec<String> = Vec::new();
+    let mut edited: Vec<String> = Vec::new();
     for item in &plan.items {
         let moved = retire::archive_item(&fleet, r, &plan.product, &plan.key, item, &section)
             .map_err(|e| partial(&done, e))?
             .moved;
         if moved == 0 {
-            writeln!(out, "{}: {label} already archived", item.environment)
-                .map_err(crate::app::write_err)?;
+            // Already archived, or never held here (an environment added while the key
+            // was retiring gets no field of it).
+            writeln!(
+                out,
+                "{}: no field of {label} left to archive",
+                item.environment
+            )
+            .map_err(crate::app::write_err)?;
             applied.already_archived.push(item.environment.clone());
         } else {
             writeln!(
@@ -319,6 +331,7 @@ pub fn apply_retire(
             .map_err(crate::app::write_err)?;
             done.push(format!("{label} archived in {}", item.environment));
             applied.archived.push(item.environment.clone());
+            edited.push(item.ids.item_id.clone());
         }
     }
     mark_retired(r, at, &plan.product, &plan.key).map_err(|e| partial(&done, e))?;
@@ -328,6 +341,7 @@ pub fn apply_retire(
     )
     .map_err(crate::app::write_err)?;
     applied.retired = true;
+    applied.resync = retire::resync_after_archive(&fleet, &edited);
     Ok(applied)
 }
 

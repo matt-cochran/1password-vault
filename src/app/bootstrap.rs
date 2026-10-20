@@ -28,7 +28,7 @@ use crate::cause::{
     AccountId, Cause, CreateKind, DiagnoseContext, DottedPath, EnvName, FieldRule, NameKind,
     Observed, Refind, ResourceKind, ResourceName, ResourceRef, System, Upstream,
 };
-use crate::domain::naming;
+use crate::domain::{Lifecycle, naming, presence};
 use crate::error::Error;
 use crate::host::Host;
 use crate::runner::{Call, CommandRunner, CreateOutcome, PROBE_TIMEOUT};
@@ -111,8 +111,31 @@ fn boundary_of(doc: &DocumentMut, product: &str) -> String {
         .to_string()
 }
 
+/// Whether the raw declaration `k` is wanted in `env`, by the one presence rule the loaded
+/// fleet applies ([`presence::wanted`]): no `environments` list means every environment but
+/// the ones its `except` names, and a `retired` key is wanted nowhere (#179). A `retiring`
+/// key still counts: its boundary holds the field its retirement archives.
+fn wanted_in(k: &dyn toml_edit::TableLike, env: &str) -> bool {
+    let list: Option<Vec<String>> = k.get("environments").and_then(Item::as_array).map(|a| {
+        a.iter()
+            .filter_map(|e| e.as_str().map(str::to_string))
+            .collect()
+    });
+    let except = k
+        .get("except")
+        .and_then(Item::as_table_like)
+        .and_then(|t| t.get(env))
+        .map(|reason| reason.as_str().unwrap_or_default());
+    let lifecycle = match k.get("lifecycle").and_then(Item::as_str) {
+        Some("retired") => Lifecycle::Retired,
+        Some("retiring") => Lifecycle::Retiring,
+        _ => Lifecycle::Active,
+    };
+    presence::wanted(list.as_deref(), except, lifecycle, env)
+}
+
 /// The boundaries `env` needs, each with the products it holds there (FR-57): the boundary
-/// of every product with a team (non-personal) key desired in `env`, and of every product
+/// of every product with a team (non-personal) key wanted in `env` ([`wanted_in`]), and of every product
 /// such a key reads with `from`.
 fn needed_boundaries(doc: &DocumentMut, env: &str) -> BTreeMap<String, BTreeSet<String>> {
     let mut needed: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -130,11 +153,7 @@ fn needed_boundaries(doc: &DocumentMut, env: &str) -> BTreeMap<String, BTreeSet<
         for (_, k) in keys.iter() {
             let Some(k) = k.as_table_like() else { continue };
             let personal = k.get("personal").and_then(Item::as_bool).unwrap_or(false);
-            let desired = k
-                .get("environments")
-                .and_then(Item::as_array)
-                .is_some_and(|a| a.iter().any(|e| e.as_str() == Some(env)));
-            if personal || !desired {
+            if personal || !wanted_in(k, env) {
                 continue;
             }
             let source = str_at(k, "from")

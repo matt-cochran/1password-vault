@@ -871,6 +871,42 @@ fn an_already_archived_field_is_skipped() {
     assert_eq!(op.count(&["op", "item", "edit"]), 0);
 }
 
+/// #179: the archive edited prod's item, which a target delivers: the result names CI's
+/// sync of prod, whose delivery evidence is now older than its source.
+#[test]
+fn a_retirement_names_the_ci_sync_its_archive_leaves() {
+    let (_d, path, op, _, _) = retiring_world_with(
+        "[environments.prod.targets.gh]\ngithub.repo = \"o/r\"\ngithub.environment = \"production\"\n\n",
+        "app",
+    );
+    assert_eq!(run_retire(&op, &path).unwrap().resync, ["opv sync prod"]);
+}
+
+/// #179: an archive that edited nothing leaves no sync to run.
+#[test]
+fn a_retirement_that_edited_nothing_names_no_sync() {
+    let (_d, path, op, _, _) = retiring_world_with(
+        "[environments.prod.targets.gh]\ngithub.repo = \"o/r\"\ngithub.environment = \"production\"\n\n",
+        "archived · 2026-01-02 · retired app/OLD_KEY",
+    );
+    assert!(run_retire(&op, &path).unwrap().resync.is_empty());
+}
+
+/// #179: an item with no field of the key (archived earlier, or never given one) says so,
+/// never that it archived something.
+#[test]
+fn an_item_without_the_keys_field_says_nothing_is_left_to_archive() {
+    let (_d, path, op, _, _) =
+        retiring_world_with("", "archived · 2026-01-02 · retired app/OLD_KEY");
+    let mut out = Vec::new();
+    run_retire_on(&op, &tty(), &path, &[], &mut out).unwrap();
+    assert!(
+        String::from_utf8(out)
+            .unwrap()
+            .contains("dev: no field of app/OLD_KEY left to archive")
+    );
+}
+
 #[test]
 fn a_retirement_marks_the_key_retired() {
     let (_d, path, op, _, _) = retiring_world();

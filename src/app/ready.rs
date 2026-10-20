@@ -1294,7 +1294,7 @@ pub fn run_at(
     {
         return Err(cause.into());
     }
-    let retirement = super::retire::findings(fleet, &envs);
+    let retirement = super::retire::findings_scoped(fleet, &envs, only);
     let revision = if save.is_some() {
         git_revision(r)
     } else {
