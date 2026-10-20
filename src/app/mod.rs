@@ -32,7 +32,9 @@ mod core_acceptance_tests;
 pub mod deliver_only;
 pub mod delivery;
 pub mod delivery_preview;
+pub mod desktop_integration;
 pub mod doctor;
+pub mod doctor_session;
 pub mod explain;
 #[cfg(test)]
 #[path = "flows_acceptance_tests.rs"]
@@ -55,6 +57,7 @@ mod ledger_tests;
 pub mod local;
 pub mod local_delivery;
 pub mod login;
+pub mod login_shell;
 pub mod masked;
 pub mod mcp_install;
 pub mod needs;
