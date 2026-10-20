@@ -124,9 +124,10 @@ pub struct KeySpec {
     #[serde(default)]
     pub roles: Option<Vec<String>>,
     /// Key attribute (Part V, `key-attrs`): who or what produces the value
-    /// (`source = "person" | "generated" | "derived"`). Absent: not declared. `derived`
-    /// requires `from`; `generated` requires a generate recipe
-    /// ([`KeySpec::has_generate_recipe`]). Validated at load: see `crate::config`.
+    /// (`source = "person" | "generated" | "derived" | "infrastructure"`). Absent: not
+    /// declared. `derived` requires `from`; `generated` requires a generate recipe
+    /// ([`KeySpec::has_generate_recipe`]); `infrastructure` has the load refusals of
+    /// `docs/design/deliver-only.md` §2.2. Validated at load: see `crate::config`.
     #[serde(default, rename = "source")]
     pub value_source: Option<ValueSource>,
     /// Key attribute (Part V, `key-attrs`): the calendar date the value should be rotated by
@@ -207,6 +208,10 @@ pub enum ValueSource {
     Generated,
     /// Another key's value, named by `from`.
     Derived,
+    /// Produced by infrastructure (Terraform, a provider's API) and supplied to
+    /// `opv sync --supply-stdin` by the job that made it; never stored in 1Password
+    /// (#206, `docs/design/deliver-only.md`). Validated at load: see `crate::config`.
+    Infrastructure,
 }
 
 /// Key attribute (Part V, `key-attrs`): where a key is in its life. Absent: `active`.

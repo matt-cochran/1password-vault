@@ -896,6 +896,8 @@ fn input_kind(k: InputKind) -> &'static str {
         InputKind::Receipt => "the delivery receipt",
         InputKind::DeployCredentials => "the deploy credentials item",
         InputKind::NamesFile => "the names file",
+        InputKind::Supply => "the supply",
+        InputKind::Workflow => "the workflow file",
     }
 }
 
@@ -976,6 +978,61 @@ fn rule_words(field: &str, rule: &FieldRule) -> (String, String) {
             format!("rename {field} or {other}"),
         ),
         FieldRule::Check { check } => (check.problem(field), check.fix(field)),
+        FieldRule::Supply { supply } => supply_rule_words(field, supply),
+    }
+}
+
+/// What is wrong with a supply stream or a supplying workflow step, and the fix (#206 §4.1,
+/// §8.1). `field` is a position (`document 2`) or a step, never input text.
+fn supply_rule_words(field: &str, rule: &SupplyRule) -> (String, String) {
+    match rule {
+        SupplyRule::StdinIsTerminal => (
+            "standard input is a terminal; opv reads a supply only from a pipe".to_string(),
+            "pipe the producer's opv.supply/1 documents into opv".to_string(),
+        ),
+        SupplyRule::NotJson { .. } => (
+            format!("{field} is not valid JSON"),
+            "make the producer print whole opv.supply/1 JSON documents".to_string(),
+        ),
+        SupplyRule::UnknownField => (
+            format!("{field} has a field opv.supply/1 does not define"),
+            format!("print only schema, env, serial and values in {field}"),
+        ),
+        SupplyRule::WrongSchema => (
+            format!("{field} is not an opv.supply/1 document"),
+            format!("set schema to \"opv.supply/1\" in {field}"),
+        ),
+        SupplyRule::TooLarge { limit } => (
+            format!("the supply is larger than {limit} bytes"),
+            format!("supply at most {limit} bytes"),
+        ),
+        SupplyRule::TooManyNames { limit } => (
+            format!("the supply names more than {limit} values"),
+            format!("supply at most {limit} values in one run"),
+        ),
+        SupplyRule::MissingSerial => (
+            format!("{field} has no serial (a whole number from the producer's own object)"),
+            format!("add the producer's serial to {field}"),
+        ),
+        SupplyRule::NoValues => (
+            format!("{field} supplies no values"),
+            format!("put at least one <product>/<KEY> value in {field}"),
+        ),
+        SupplyRule::NoDocuments => (
+            "the supply holds no document".to_string(),
+            "make the producer print at least one opv.supply/1 document".to_string(),
+        ),
+        SupplyRule::Timeout => (
+            "the supply did not end within the run budget".to_string(),
+            "make the producer close its output when it has printed its documents".to_string(),
+        ),
+        SupplyRule::ExpressionInSupplyStep { line } => (
+            format!(
+                "{field} expands a ${{{{ … }}}} expression on line {line}, in a step that pipes into --supply-stdin"
+            ),
+            "pass the value through the step's env: and use only github.* expressions in its script"
+                .to_string(),
+        ),
     }
 }
 
@@ -1267,6 +1324,111 @@ fn attest_refused(
             )),
             plan_of,
         ),
+        AttestRefusal::NotStored => plan(
+            inspect(format!(
+                "no attestation is needed for {pk}: the deploy job supplies it to opv sync"
+            )),
+            plan_of,
+        ),
+    }
+}
+
+/// `p/K`, or `document D, entry I` for a supplied name that is not a declared key (S11).
+fn supply_entry_words(entry: &SupplyEntry) -> String {
+    match entry {
+        SupplyEntry::Named { product, key } => format!("{product}/{key}"),
+        SupplyEntry::Position { document, index } => format!("document {document}, entry {index}"),
+    }
+}
+
+/// The step after a refused supply (#206 §4.1, §4.4, §5.1): the producer's to fix, or a
+/// read that shows where the key stands. Never a step that handles the value.
+fn supply_refused(env: &EnvName, entry: &SupplyEntry, reason: &SupplyRefusal) -> Plan {
+    let what = supply_entry_words(entry);
+    let explain = Next::Check(cmd(&["explain"], &[what.as_str(), "--env", env.as_str()]));
+    let producer = |text: String| plan(inspect(text), Next::None(NoNext::NothingToRun));
+    let decide = |text: String| plan(inspect(text), Next::None(NoNext::PersonPicksDirection));
+    match reason {
+        SupplyRefusal::Undeclared { closest } => decide(match closest {
+            Some(c) => format!(
+                "declare the key with source = \"infrastructure\", or fix the producer's name (the closest infrastructure key is {c})"
+            ),
+            None => "declare the key with source = \"infrastructure\", or fix the producer's name"
+                .to_string(),
+        }),
+        SupplyRefusal::NotOptedIn => plan(
+            inspect(format!(
+                "{what} comes from 1Password; only an infrastructure key takes a supplied value"
+            )),
+            explain,
+        ),
+        SupplyRefusal::NotInEnvironment => plan(
+            inspect(format!(
+                "{what} is not present in {env}; leave it out of this supply"
+            )),
+            explain,
+        ),
+        SupplyRefusal::OutOfScope { targets, product } => {
+            let mut args = vec![env.as_str()];
+            if let [t] = targets.as_slice() {
+                args.extend(["--target", t.as_str()]);
+            }
+            if let Some(p) = product {
+                args.extend(["--product", p.as_str()]);
+            }
+            plan(
+                inspect(format!(
+                    "{what} is not delivered by the selected targets or product; leave it out of this supply"
+                )),
+                Next::Check(cmd(&["plan"], &args)),
+            )
+        }
+        SupplyRefusal::NotSupplied { .. } => plan(
+            inspect(
+                "supply every infrastructure key in scope, or narrow the run with --product or --target",
+            ),
+            Next::Check(cmd(&["plan"], &[env.as_str()])),
+        ),
+        SupplyRefusal::Duplicate => producer(format!("supply {what} once")),
+        SupplyRefusal::WrongEnvironment { document_env } => producer(match document_env {
+            Some(e) => format!(
+                "this document was produced for {e}; pipe only {env}'s documents into this sync"
+            ),
+            None => format!("this document was produced for another environment than {env}"),
+        }),
+        SupplyRefusal::Empty
+        | SupplyRefusal::TooShort
+        | SupplyRefusal::Placeholder
+        | SupplyRefusal::NotAString => producer(format!(
+            "the producer gave no usable value for {what}; check the producer"
+        )),
+        SupplyRefusal::RotateWithoutValue => {
+            producer(format!("supply {what} in the same run to rotate it"))
+        }
+        SupplyRefusal::RuleFailed { rule } => producer(format!(
+            "the supplied value of {what} fails rule {rule}; check the producer"
+        )),
+        SupplyRefusal::Stored { boundary } => plan(
+            inspect(format!(
+                "archive field {what} in boundary {boundary} of {env}: infrastructure keys are never stored"
+            )),
+            Next::Check(cmd(
+                &["propose", "key"],
+                &[what.as_str(), "--source", "infrastructure"],
+            )),
+        ),
+        SupplyRefusal::Unproven => decide(format!(
+            "the target holds {what} without delivery evidence; rotate it once (--rotate {what}) with the producer's current value"
+        )),
+        SupplyRefusal::ImmutableDiffers => decide(format!(
+            "{what} is immutable and the target holds another value; rotate it (--rotate {what}) only if it must change"
+        )),
+        SupplyRefusal::Stale { .. } => decide(format!(
+            "re-run the producer for a current value of {what}, or rotate it (--rotate {what}) after a producer reset"
+        )),
+        SupplyRefusal::SerialReused { .. } => decide(format!(
+            "make the producer give a new serial with a new value of {what}, or rotate it (--rotate {what}) after a producer reset"
+        )),
     }
 }
 
@@ -1843,6 +2005,11 @@ impl Cause {
                     reason,
                 } => format!(
                     "opv does not record an attestation of {product}/{key} on {env}/{target}: {}",
+                    reason.words()
+                ),
+                self::Guard::SupplyRefused { env, entry, reason } => format!(
+                    "opv refuses the supplied value of {} for environment {env}: {}",
+                    supply_entry_words(entry),
                     reason.words()
                 ),
                 self::Guard::RemoteProfileRefuses {
@@ -3476,6 +3643,9 @@ impl Cause {
                     target,
                     reason,
                 } => attest_refused(product, key, env, target, *reason),
+                self::Guard::SupplyRefused { env, entry, reason } => {
+                    supply_refused(env, entry, reason)
+                }
                 self::Guard::RemoteProfileRefuses {
                     profile, allowed, ..
                 } => plan(
@@ -3907,6 +4077,32 @@ impl Cause {
                     inspect(format!(
                         "in 1Password, open {} and {fix}",
                         input_words(InputKind::DeployCredentials, path)
+                    )),
+                    Next::Rerun,
+                )
+            }
+            InputInvalid {
+                kind: InputKind::Supply,
+                field,
+                rule,
+                ..
+            } => {
+                // The stream comes from a producer step: its author fixes the producer.
+                let (_, fix) = rule_words(field, rule);
+                plan(inspect(fix), Next::None(NoNext::NothingToRun))
+            }
+            InputInvalid {
+                path,
+                kind: InputKind::Workflow,
+                at,
+                field,
+                rule,
+            } => {
+                let (_, fix) = rule_words(field, rule);
+                plan(
+                    Some((
+                        Action::EditInput { path: path.clone() },
+                        format!("edit {}{}: {fix}", path.display(), at_words(at)),
                     )),
                     Next::Rerun,
                 )

@@ -27,6 +27,8 @@ pub struct Ledger {
     entries: BTreeMap<String, (String, String)>,
     /// Names whose line is a person's attestation (#201), not opv's own evidence.
     attested: std::collections::BTreeSet<String>,
+    /// name → the producer's serial, for a name whose line records a supplied value (#206).
+    supplied: BTreeMap<String, u64>,
 }
 
 impl fmt::Debug for Ledger {
@@ -83,7 +85,21 @@ impl Ledger {
                 .filter(|e| e.attested())
                 .map(|e| e.name.clone())
                 .collect(),
+            supplied: evidence
+                .iter()
+                .filter(|e| !e.store_version.is_empty() && !e.fingerprint.is_empty())
+                .filter_map(|e| e.supplied.as_ref().map(|m| (e.name.clone(), m.serial)))
+                .collect(),
         }
+    }
+
+    /// For a name whose line records a supplied value (#206, `docs/design/deliver-only.md`
+    /// §6.2): the store version opv recorded and the producer's serial. `None`: no line, or
+    /// a line of a 1Password value.
+    pub fn supplied(&self, name: &str) -> Option<(&str, u64)> {
+        let serial = *self.supplied.get(name)?;
+        let (version, _) = self.entries.get(name)?;
+        Some((version.as_str(), serial))
     }
 
     /// Whether `name`'s line is a person's attestation at the store's version `version_now`

@@ -1367,6 +1367,7 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
         read_from: Default::default(),
     };
     check_scopes(&fleet, doc)?;
+    check_infrastructure(&fleet, doc)?;
     check_boundaries(&fleet, doc)?;
     check_target_roles(&fleet, doc)?;
     check_file_mounts(&fleet, doc)?;
@@ -2221,6 +2222,114 @@ fn validate_key(
             },
         ));
     }
+    if spec.value_source == Some(ValueSource::Infrastructure) {
+        validate_infrastructure(spec, environments, &invalid, &|f| dotted(&path(&[f])))?;
+    }
+    Ok(())
+}
+
+/// A key with `source = "infrastructure"` (#206, `docs/design/deliver-only.md` §2.2): its
+/// value is supplied to `opv sync --supply-stdin` and never stored, so everything that
+/// would read, store or compare a 1Password value is refused here, its scope is written
+/// down, and a shape rule makes a mis-mapped value fail. `from` is refused by the generic
+/// `source`/`from` check; a consumer's `from`, a source-only product and a pinned target
+/// are fleet-wide ([`check_shared`], [`check_infrastructure`]).
+fn validate_infrastructure(
+    spec: &KeySpec,
+    environments: &BTreeMap<String, Environment>,
+    invalid: &dyn Fn(&[&str], FieldRule) -> Error,
+    field: &dyn Fn(&str) -> DottedPath,
+) -> Result<(), Error> {
+    let conflicts = |other: &str| FieldRule::ConflictsWith {
+        field: field(other),
+    };
+    // GitHub refuses concealed config, and a short config value would escape the output
+    // guard (S3): every supplied value is a secret.
+    if spec.kind == crate::domain::Kind::Config {
+        return Err(invalid(&["source"], conflicts("kind")));
+    }
+    if spec.personal {
+        return Err(invalid(&["source"], conflicts("personal")));
+    }
+    if spec.allow_same_value {
+        return Err(invalid(&["allow_same_value"], conflicts("source")));
+    }
+    let Some(envs) = &spec.environments else {
+        return Err(invalid(&["environments"], FieldRule::Missing));
+    };
+    if envs.iter().any(|e| {
+        environments
+            .get(e)
+            .is_some_and(|env| env.targets.is_empty() && spec.is_desired_in(e))
+    }) {
+        return Err(invalid(
+            &["environments"],
+            FieldRule::Type {
+                expected: "infrastructure only in environments with targets",
+            },
+        ));
+    }
+    let r = &spec.rules;
+    let shaped = r.prefix.is_some()
+        || r.ensure_prefix.is_some()
+        || r.prefix_by_mode.is_some()
+        || r.regex.is_some()
+        || r.r#enum.is_some()
+        || r.base64_bytes.is_some()
+        || r.hex_bytes.is_some()
+        || r.https_url
+        || r.email_list;
+    if !shaped {
+        return Err(invalid(
+            &["source"],
+            FieldRule::Type {
+                expected: "infrastructure only with a shape rule (prefix, ensure_prefix, \
+                           prefix_by_mode, regex, enum, base64_bytes, hex_bytes, https_url or \
+                           email_list)",
+            },
+        ));
+    }
+    Ok(())
+}
+
+/// Infrastructure keys across the fleet (#206, §2.2): never in a source-only product (it is
+/// never delivered), and only where every target delivering the product in a present
+/// environment stages values: a pinned target (one with a runtime subject) binds one
+/// version read back from its store, which a supplied value never has (§10). The words
+/// name no provider (FR-37).
+fn check_infrastructure(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
+    for (product, p) in &fleet.products {
+        for (key, spec) in &p.keys {
+            if spec.value_source != Some(ValueSource::Infrastructure) {
+                continue;
+            }
+            let at = ["products", product, "keys", key, "source"];
+            if p.source_only {
+                return Err(doc.invalid(
+                    &at,
+                    FieldRule::ConflictsWith {
+                        field: dotted(&["products", product, "source_only"]),
+                    },
+                ));
+            }
+            let pinned = fleet.environments.iter().any(|(env_name, env)| {
+                spec.is_desired_in(env_name)
+                    && env.targets.iter().any(|(t, target)| {
+                        fleet.delivers(env_name, t, product)
+                            && target.config.runtime_subject().is_some()
+                    })
+            });
+            if pinned {
+                return Err(doc.invalid(
+                    &at,
+                    FieldRule::Type {
+                        expected: "infrastructure only where every target delivering it \
+                                   stages values (never a pinned target)",
+                    },
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2302,6 +2411,13 @@ fn check_shared(
                 )));
             };
             let source = key_label(sp, sk);
+            // An infrastructure key has no 1Password field to read (#206, §2.2): declare a
+            // second infrastructure key instead.
+            if src.value_source == Some(ValueSource::Infrastructure) {
+                return Err(err(FieldRule::ConflictsWith {
+                    field: dotted(&["products", sp, "keys", sk, "source"]),
+                }));
+            }
             if let Some((tp, tk)) = src.source() {
                 return Err(err(check(
                     if (tp, tk) == (product.as_str(), key.as_str()) {

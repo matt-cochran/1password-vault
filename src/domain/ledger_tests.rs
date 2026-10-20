@@ -40,6 +40,7 @@ fn evidence(name: &str, store_version: &str, fingerprint: &str) -> Evidence {
             field: "field".into(),
         },
         attested_at: None,
+        supplied: None,
     }
 }
 
