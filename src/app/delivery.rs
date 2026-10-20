@@ -38,7 +38,7 @@ use crate::domain::delivery::{
 };
 use crate::domain::ledger::{Ledger, hmac_hex, random_key};
 use crate::domain::plan::StoreEntry;
-use crate::domain::{Boundary, Fleet, Kind, SecretValue, key_label, rules};
+use crate::domain::{Boundary, Fleet, Kind, Lifecycle, SecretValue, key_label, rules};
 use crate::error::Error;
 use crate::runner::CommandRunner;
 
@@ -83,6 +83,8 @@ pub fn bindings(
                 && !s.personal
         })
         .filter(|(_, s)| rules::applies(s, env_name, env, product))
+        // A `retired` key is delivered nowhere (design Part V, row `retire`).
+        .filter(|(_, s)| s.lifecycle != Lifecycle::Retired)
         // Target roles (M3, delivery-transports §4.4): a key whose roles miss the target's
         // is not desired there, so it is not part of the target's binding set.
         .filter(|(_, s)| match (&s.roles, served) {
@@ -102,6 +104,21 @@ pub fn bindings(
         .collect::<Result<_, Error>>()?;
     out.sort();
     Ok(out)
+}
+
+/// The target names of `product`'s `retiring` keys on target `target` of `env_name`.
+fn retiring_names(fleet: &Fleet, env_name: &str, target: &str, product: &str) -> BTreeSet<String> {
+    fleet
+        .products
+        .get(product)
+        .map(|p| {
+            p.keys
+                .iter()
+                .filter(|(_, s)| s.lifecycle == Lifecycle::Retiring)
+                .map(|(k, _)| fleet.target_name(env_name, target, product, k))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The products target `target` of `env_name` delivers that have at least one binding, or
@@ -426,7 +443,13 @@ pub fn record(
     };
     let mut out = Recorded::default();
     for product in products_in_scope(fleet, env_name, target, only)? {
-        let set = bindings(fleet, env_name, target, &product)?;
+        // A `retiring` key a retirement already pruned from this target (#179) is no longer
+        // delivered here: it leaves the binding set, so the rest still mint a revision.
+        let retiring = retiring_names(fleet, env_name, target, &product);
+        let set: Vec<BindingRef> = bindings(fleet, env_name, target, &product)?
+            .into_iter()
+            .filter(|b| !retiring.contains(&b.name) || listed.iter().any(|e| e.name == b.name))
+            .collect();
         let unconfirmed: Vec<&str> = set
             .iter()
             .filter(|b| !written.contains(&b.name) && !identical.contains(&b.name))

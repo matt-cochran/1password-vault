@@ -131,6 +131,7 @@ fn history_part(
         &none,
         &none,
         &ledgers,
+        false,
     )?;
     // Secrets only: config keys travel as variables, which the stores do not version. A key
     // this target never delivers (another target's product, source-only) or a mode skips is

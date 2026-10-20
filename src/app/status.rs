@@ -711,6 +711,7 @@ pub(crate) fn env_rows_keeping(
         &none,
         &none,
         &ledgers,
+        false,
     )?;
     plan.tidy = read.changes;
     plan.tidy_error = read.tidy_error;

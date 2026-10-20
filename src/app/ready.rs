@@ -121,6 +121,9 @@ pub struct Inputs<'a> {
     /// Settings health (#92), computed by the caller from the values it read: non-blocking
     /// findings after the readiness ones.
     pub health: Vec<crate::domain::health::HealthFinding>,
+    /// Unfinished retirements (#179, [`super::retire::findings`]): non-blocking findings
+    /// after each row's own.
+    pub retirement: Vec<Finding>,
 }
 
 /// `config` of the receipt: where the configuration was read from.
@@ -778,6 +781,7 @@ fn build_findings(inputs: &Inputs<'_>, agent: bool) -> Vec<Finding> {
         let Ok(rows) = &env.rows else { continue };
         row_findings(&mut out, inputs, env, None, rows);
     }
+    out.extend(inputs.retirement.iter().cloned());
     // Settings health (#92): likely-wrong values, never blocking. The scope is the first
     // environment named (in configured order), where `opv open` takes the person to fix it.
     // Cross-tier warnings (the same value across environments, or under two keys) are for a
@@ -1251,6 +1255,7 @@ pub fn run_at(
     {
         return Err(cause.into());
     }
+    let retirement = super::retire::findings(fleet, &envs);
     let revision = if save.is_some() {
         git_revision(r)
     } else {
@@ -1263,6 +1268,7 @@ pub fn run_at(
             envs,
             personal,
             health,
+            retirement,
         },
         env!("CARGO_PKG_VERSION"),
         if save.is_some() { generated_at } else { "" },

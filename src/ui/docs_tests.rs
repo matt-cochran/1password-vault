@@ -125,6 +125,7 @@ mod documents_round_trip {
             }],
             personal: Default::default(),
             health: Vec::new(),
+            retirement: Vec::new(),
         };
         let receipt = crate::app::ready::receipt(&inputs, "0.10.0");
         let doc: ReadyDoc = parse(&framed(&receipt)).unwrap();

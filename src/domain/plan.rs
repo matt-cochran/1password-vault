@@ -519,11 +519,20 @@ pub fn build_with_gate(
             };
             // Lifecycle (design Part V, rows `retire` and `retire-guard`): `retired` is
             // delivered nowhere, exactly like an undeclared key, so a target that still
-            // holds it prunes it. A `retiring` key is delivered (staged and kept) like an
-            // `active` one, so a plain `--prune` never removes it; only retire's prune step
-            // sets `retiring_prune`, which releases it to the prune list. Additive: nothing
-            // active is affected.
+            // holds it prunes it. A `retiring` key is kept and refreshed where a target
+            // still holds it, so a plain `--prune` never removes it; only retire's prune
+            // step sets `retiring_prune`, which releases it to the prune list. It is never
+            // added to a target that no longer holds it (#179): the prune a retirement
+            // made is its progress, so a later plain sync does not undo it, and a re-run
+            // resumes with the environments that still hold it. Additive: nothing active
+            // is affected.
+            let in_store = spec.kind == Kind::Secret || config_as_secret;
             let outcome = match (spec.lifecycle, opts.retiring_prune) {
+                (Lifecycle::Retiring, false)
+                    if in_store && target_name.is_some() && target_entry.is_none() =>
+                {
+                    Ok(None)
+                }
                 (Lifecycle::Active, _) | (Lifecycle::Retiring, false) => outcome,
                 (Lifecycle::Retiring, true) | (Lifecycle::Retired, _) => Ok(None),
             };
@@ -1381,7 +1390,25 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
     }
 
     #[test]
-    fn a_retiring_key_is_staged_like_an_active_key() {
+    fn a_retiring_key_a_target_still_holds_is_staged_like_an_active_key() {
+        let leaving = TWO_KEYS.replace(
+            "[products.p.keys.BOTH]\nkind = \"secret\"",
+            "[products.p.keys.BOTH]\nkind = \"secret\"\nlifecycle = \"retiring\"",
+        );
+        let fleet = config::parse(&leaving).unwrap();
+        let p = build(
+            &fleet,
+            "prod",
+            vec![secret("p", "BOTH", "v")],
+            &[fly_secret("FLEET__P__BOTH", None)],
+            &no_rotate(),
+            &none,
+        );
+        assert_eq!(p.stage.len(), 1);
+    }
+
+    #[test]
+    fn a_retiring_key_is_never_added_to_a_target_that_no_longer_holds_it() {
         let leaving = TWO_KEYS.replace(
             "[products.p.keys.BOTH]\nkind = \"secret\"",
             "[products.p.keys.BOTH]\nkind = \"secret\"\nlifecycle = \"retiring\"",
@@ -1395,7 +1422,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
             &no_rotate(),
             &none,
         );
-        assert_eq!(p.stage.len(), 1);
+        assert!(p.stage.is_empty());
     }
 
     #[test]

@@ -176,6 +176,7 @@ fn inputs<'a>(report: &'a account::Report, envs: Vec<EnvInput>) -> Inputs<'a> {
         envs,
         personal: Default::default(),
         health: Vec::new(),
+        retirement: Vec::new(),
     }
 }
 
@@ -861,6 +862,7 @@ fn the_grid_shows_an_environments_display_name() {
             envs: vec![env],
             personal: Default::default(),
             health: Vec::new(),
+            retirement: Vec::new(),
         },
         "t",
     );
@@ -882,6 +884,7 @@ fn an_environment_for_another_audience_is_not_a_blocking_problem() {
             envs: vec![env],
             personal: Default::default(),
             health: Vec::new(),
+            retirement: Vec::new(),
         },
         "t",
     );
@@ -913,6 +916,7 @@ fn a_missing_personal_key_is_named_as_yours() {
             envs: vec![env],
             personal: [("api".to_string(), "OPENAI_API_KEY".to_string())].into(),
             health: Vec::new(),
+            retirement: Vec::new(),
         },
         "t",
     );
@@ -945,6 +949,7 @@ fn personal_receipt(state: KeyState) -> Receipt {
             envs: vec![env],
             personal: [("api".to_string(), "OPENAI_API_KEY".to_string())].into(),
             health: Vec::new(),
+            retirement: Vec::new(),
         },
         "t",
     )

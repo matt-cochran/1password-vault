@@ -442,6 +442,17 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             vec!["tgt-web", "config", "set fly.config"],
         ),
         (
+            Guard {
+                guard: super::super::Guard::RetireOutOfOrder {
+                    product: ProductName::new("prod-api"),
+                    key: KeyName::new("OLD_KEY"),
+                    env: EnvName::new("env-prod"),
+                    first: EnvName::new("env-dev"),
+                },
+            },
+            vec!["prod-api", "OLD_KEY", "env-prod", "env-dev"],
+        ),
+        (
             CreateOutcomeUnknown {
                 system: System::OnePassword,
                 kind: CreateKind::ServiceAccount,

@@ -216,6 +216,7 @@ fn survey(
         &none,
         &none,
         &ledgers,
+        false,
     )?;
     let values = delivery::values_of(fleet, env_name, r)?;
     let hides_versions = t.provider().versions_reveal_values();
