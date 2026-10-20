@@ -13,5 +13,6 @@ mod scenarios {
     pub mod issues;
     pub mod k8s_files;
     pub mod live_audit;
+    pub mod session_reuse;
     pub mod wiring;
 }

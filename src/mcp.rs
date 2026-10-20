@@ -90,6 +90,9 @@ pub struct StateScope {
     /// The target (`--target`).
     #[serde(default)]
     target: Option<String>,
+    /// The process role (`--role`) of `delivery_preview`, as `opv run --role` takes it.
+    #[serde(default)]
+    role: Option<String>,
     /// The directory `opv needs` scans (`--scan`): inside the project.
     #[serde(default)]
     scan: Option<String>,
@@ -101,6 +104,10 @@ pub struct StateScope {
 
 /// The name grammar of an environment (the intent document's).
 const ENV_PATTERN: &str = "^[a-z][a-z0-9-]*$";
+
+/// The grammar of a process role name (#136): `^[a-z0-9-]{1,32}$`, so a shell never has to
+/// quote it.
+const ROLE_PATTERN: &str = "^[a-z0-9-]{1,32}$";
 
 /// The grammar of a key reference, `[product/]KEY`.
 const KEY_REF_PATTERN: &str = "^([a-z][a-z0-9-]*/)?[A-Z][A-Z0-9_]*$";
@@ -170,7 +177,8 @@ fn state_schema() -> Arc<rmcp::model::JsonObject> {
             "section": { "enum": SECTIONS.map(|(name, _)| name) },
             "env": { "type": "string", "pattern": ENV_PATTERN },
             "product": { "type": "string", "pattern": ENV_PATTERN },
-            "target": { "type": "string", "pattern": ENV_PATTERN }
+            "target": { "type": "string", "pattern": ENV_PATTERN },
+            "role": { "type": "string", "pattern": ROLE_PATTERN }
         },
         "required": ["section"],
         "additionalProperties": false
@@ -523,8 +531,7 @@ fn credential_in_environment(vars: impl Iterator<Item = (String, String)>) -> Op
     vars.filter(|(_, v)| !v.is_empty())
         .map(|(k, _)| k)
         .find(|k| {
-            k == "OP_SESSION"
-                || k.starts_with("OP_SESSION_")
+            crate::app::account::is_session_var(k)
                 || [
                     "OP_SERVICE_ACCOUNT_TOKEN",
                     "OP_CONNECT_HOST",
@@ -1300,6 +1307,14 @@ impl Section {
     }
 }
 
+/// A process role name (#136): `^[a-z0-9-]{1,32}$`.
+fn role_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 32
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
 /// A scope name: the golden's grammar ([`ENV_PATTERN`]), at most 64 bytes.
 fn scope_name(s: &str) -> bool {
     s.len() <= 64
@@ -1314,6 +1329,7 @@ fn state_words(
     env: Option<&str>,
     product: Option<&str>,
     target: Option<&str>,
+    role: Option<&str>,
     scan: Option<&str>,
 ) -> Vec<String> {
     let flag = |f: &str, v: Option<&str>| -> Vec<String> {
@@ -1333,10 +1349,16 @@ fn state_words(
             let preview = (section == Section::DeliveryPreview).then(|| "--preview".to_string());
             let positional: Vec<String> =
                 env.map(str::to_string).into_iter().chain(preview).collect();
+            let role = if section == Section::DeliveryPreview {
+                flag("--role", role)
+            } else {
+                Vec::new()
+            };
             [
                 positional,
                 flag("--target", target),
                 flag("--product", product),
+                role,
             ]
             .concat()
         }
@@ -1357,6 +1379,7 @@ fn state_call(args: &StateScope) -> ToolCall {
         ok(&args.env),
         ok(&args.product),
         ok(&args.target),
+        args.role.as_deref().filter(|r| role_name(r)),
         args.scan.as_deref().filter(|s| !s.is_empty()),
     );
     ToolCall::new("opv_state", section.command(), words, false)
@@ -1398,6 +1421,24 @@ fn state_refusal(project: &Path, section: Option<Section>, args: &StateScope) ->
                 });
             }
             _ => {}
+        }
+    }
+    // `role` is `opv run`'s input only, and its grammar is a process role's, not a scope
+    // name's.
+    if let Some(role) = args.role.as_deref() {
+        if !role_name(role) {
+            return Some(usage(
+                "role",
+                "a process role: lowercase letters, digits and '-', 1 to 32",
+            ));
+        }
+        if section != Section::DeliveryPreview {
+            return Some(Cause::Usage {
+                problem: UsageProblem::ConflictsWith {
+                    a: format!("section {}", section.name()),
+                    b: "role".into(),
+                },
+            });
         }
     }
     if args.target.is_some() && args.env.is_none() {
@@ -1523,7 +1564,12 @@ fn state_doc<R: Accounted>(
         Section::DeliveryPreview => {
             // `opv run --preview --json` prints the builder's document as it is (no frame).
             return match crate::app::delivery_preview::build_for(
-                &fleet, required, product, None, None, r,
+                &fleet,
+                required,
+                product,
+                args.role.as_deref(),
+                None,
+                r,
             ) {
                 Ok(doc) => doc,
                 Err(e) => call.document(&[], Err(e)),
@@ -1674,6 +1720,13 @@ mod tests {
     fn a_bare_op_session_refuses_the_structural_apply() {
         let found = credential_in_environment(vars(&[("OP_SESSION", "x")]));
         assert_eq!(found.as_deref(), Some("OP_SESSION"));
+    }
+
+    /// FMECA L6: op's delegation setting shares the prefix but holds no session.
+    #[test]
+    fn the_delegation_setting_does_not_refuse_the_structural_apply() {
+        let found = credential_in_environment(vars(&[("OP_SESSION_DELEGATION_ENABLED", "true")]));
+        assert_eq!(found, None);
     }
 
     #[test]

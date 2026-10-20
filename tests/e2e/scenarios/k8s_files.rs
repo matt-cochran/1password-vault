@@ -134,6 +134,7 @@ impl Scenario {
             .args(args)
             .current_dir(self.project())
             .env_clear()
+            .env("OP_BIOMETRIC_UNLOCK_ENABLED", "false")
             .env("PATH", format!("{}:/usr/bin:/bin", self.bin().display()))
             .env("HOME", self.root.path().join("home"))
             .env("OPV_NO_SKILL", "1")

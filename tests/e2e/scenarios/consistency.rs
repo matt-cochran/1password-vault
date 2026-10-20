@@ -250,6 +250,7 @@ fn git(s: &Scenario, args: &[&str]) {
         .args(args)
         .current_dir(s.path("project"))
         .env_clear()
+        .env("OP_BIOMETRIC_UNLOCK_ENABLED", "false")
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", s.path("home"))
         .env("GIT_AUTHOR_NAME", "e2e")

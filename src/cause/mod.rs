@@ -187,6 +187,57 @@ pub struct Cmd {
     pub args: Vec<String>,
 }
 
+impl Cmd {
+    /// `opv login --shell[=<shell>] [--account <id>]` (#203, session-reuse §5): the command
+    /// `refuse_if_agent` hands to the person (`Cmd::LoginShell` in design §7.1), and the
+    /// Next of an expired shell session. Its text ([`render::cmd_text`]) is the shell's eval
+    /// form, [`crate::app::login_shell::refresh_command`].
+    pub fn login_shell(shell: crate::host::Shell, account: Option<&str>) -> Cmd {
+        use crate::host::Shell;
+        let flag = match shell {
+            Shell::Posix => "--shell",
+            Shell::Fish => "--shell=fish",
+            Shell::PowerShell => "--shell=powershell",
+            // No syntax for this shell: the explicit POSIX form.
+            Shell::Other => "--shell=posix",
+        };
+        let mut args = vec![flag.to_string()];
+        if let Some(a) = account {
+            args.push("--account".into());
+            args.push(a.to_string());
+        }
+        Cmd {
+            command: vec!["login".into()],
+            args,
+        }
+    }
+
+    /// The shell and account of a [`Cmd::login_shell`] command; `None` for any other
+    /// command. `--shell=posix` reads back as [`Shell::Other`](crate::host::Shell::Other),
+    /// whose refresh line names `posix` explicitly.
+    pub fn as_login_shell(&self) -> Option<(crate::host::Shell, Option<&str>)> {
+        use crate::host::Shell;
+        if self.command != ["login"] {
+            return None;
+        }
+        let mut shell = None;
+        let mut account = None;
+        let mut args = self.args.iter();
+        while let Some(a) = args.next() {
+            match a.as_str() {
+                "--shell" => shell = Some(Shell::Posix),
+                "--shell=posix" => shell = Some(Shell::Other),
+                "--shell=fish" => shell = Some(Shell::Fish),
+                "--shell=powershell" => shell = Some(Shell::PowerShell),
+                "--account" => account = Some(args.next()?.as_str()),
+                // An environment, `--add`, a child command: not a refresh line.
+                _ => return None,
+            }
+        }
+        shell.map(|s| (s, account))
+    }
+}
+
 /// A vendor command a step names (a sign-in, an install, a pinned connectivity check).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct VendorCmd {
@@ -764,6 +815,19 @@ pub enum Cause {
     PersonOnly {
         command: Cmd,
         marker: crate::host::AgentMarker,
+    },
+    /// `opv login --shell` prints a 1Password session for the shell to evaluate, so it
+    /// writes only to a pipe (#203, session-reuse §5.5); `stdout` is what fd 1 was.
+    ShellEvalRequired {
+        stdout: crate::app::desktop_integration::StdoutKind,
+        shell: crate::host::Shell,
+    },
+    /// `opv login --shell` was asked for one shell's syntax while another shell runs it
+    /// (#203, FMECA M5): a shell that cannot parse the lines can print them, session and
+    /// all, in its error, so opv refuses before any sign-in. `running` is the parent process.
+    ShellMismatch {
+        requested: crate::host::Shell,
+        running: crate::host::Shell,
     },
     NeedsConfirm {
         env: EnvName,
@@ -1868,6 +1932,8 @@ impl Cause {
             Unrecognized { .. } => "unrecognized_failure",
             NeedsTerminal { .. } => "terminal_required",
             PersonOnly { .. } => "person_only",
+            ShellEvalRequired { .. } => "shell_eval_required",
+            ShellMismatch { .. } => "shell_mismatch",
             NeedsConfirm { .. } => "confirm_required",
             ConfirmMismatch { .. } => "confirm_mismatch",
             ValuesNeeded { .. } => "findings",
@@ -1927,6 +1993,7 @@ impl Cause {
             | KeyNotDeclared { .. }
             | Ambiguous { .. }
             | ChoiceRequired { .. }
+            | ShellMismatch { .. }
             | NothingInScope { .. }
             | Usage { .. }
             | AlreadyDeclared { .. }
@@ -1973,6 +2040,7 @@ impl Cause {
             | MountUnreadable { .. }
             | NeedsTerminal { .. }
             | PersonOnly { .. }
+            | ShellEvalRequired { .. }
             | NeedsConfirm { .. }
             | ConfirmMismatch { .. }
             | LocalFileTooOpen { .. }
@@ -2029,6 +2097,7 @@ impl Cause {
             | KeyNotDeclared { .. }
             | Ambiguous { .. }
             | ChoiceRequired { .. }
+            | ShellMismatch { .. }
             | NothingInScope { .. }
             | Usage { .. }
             | AlreadyDeclared { .. }

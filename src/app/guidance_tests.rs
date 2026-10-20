@@ -183,6 +183,8 @@ fn doctor_expired(p: P) {
     assert_eq!(e.exit_code(), 7, "{p:?}: {t}");
     let want = match p {
         P::Ci => "FAIL  op auth: the service account token in OP_SERVICE_ACCOUNT_TOKEN",
+        // #203 §4.3: where op talks to the 1Password app, not signed in is the locked app.
+        P::MacOs | P::WindowsPowerShell => "FAIL  op auth: the 1Password app is locked",
         _ => "FAIL  op auth: you are not signed in to 1Password",
     };
     assert!(t.contains(want), "{t}");

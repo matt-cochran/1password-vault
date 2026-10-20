@@ -120,6 +120,17 @@ pub trait HostEnv {
     fn mcp(&self) -> bool {
         false
     }
+    /// The names of the `OP_SESSION*` variables in the environment, sorted (#203). Names
+    /// only; implementations never read a value. Default none.
+    fn session_var_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// True when a process of the 1Password desktop app is running for this machine (#203,
+    /// FMECA M2): on Linux, a `/proc/<pid>/comm` that reads `1password`. Called only for a
+    /// Linux host with a graphical session. Default false.
+    fn desktop_app_running(&self) -> bool {
+        false
+    }
     /// The marker that puts this caller in agent mode, if any.
     ///
     /// Agent mode is presentation only, never a security control (R1, review M2): the
@@ -200,6 +211,41 @@ impl HostEnv for ProcessEnv {
     fn mcp(&self) -> bool {
         MCP_MODE.load(Ordering::Relaxed)
     }
+
+    fn session_var_names(&self) -> Vec<String> {
+        crate::app::account::session_var_names()
+    }
+
+    fn desktop_app_running(&self) -> bool {
+        desktop_app_in_proc(std::path::Path::new("/proc"))
+    }
+}
+
+/// Go's `strconv.ParseBool`, which op uses for its boolean variables (FMECA L1).
+fn go_parse_bool(v: &str) -> Option<bool> {
+    match v {
+        "1" | "t" | "T" | "TRUE" | "true" | "True" => Some(true),
+        "0" | "f" | "F" | "FALSE" | "false" | "False" => Some(false),
+        _ => None,
+    }
+}
+
+/// The 1Password desktop app's process name on Linux (`/proc/<pid>/comm`).
+const DESKTOP_APP_COMM: &str = "1password";
+
+/// True when some `<proc>/<pid>/comm` is the 1Password app's (FMECA M2). Reads only the
+/// process names; unreadable entries are skipped, and no `/proc` is no app.
+fn desktop_app_in_proc(proc: &std::path::Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(proc) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        e.file_name()
+            .to_str()
+            .is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()))
+            && std::fs::read_to_string(e.path().join("comm"))
+                .is_ok_and(|c| c.trim_end() == DESKTOP_APP_COMM)
+    })
 }
 
 /// A fixed environment for tests.
@@ -217,6 +263,8 @@ pub struct FakeEnv {
     pub tty: bool,
     /// This process is the MCP server.
     pub mcp: bool,
+    /// The 1Password desktop app is running (FMECA M2).
+    pub desktop_app: bool,
 }
 
 #[cfg(any(test, feature = "fake"))]
@@ -266,6 +314,12 @@ impl FakeEnv {
         self.mcp = true;
         self
     }
+
+    /// The 1Password desktop app is running.
+    pub fn desktop_app(mut self) -> Self {
+        self.desktop_app = true;
+        self
+    }
 }
 
 #[cfg(any(test, feature = "fake"))]
@@ -297,6 +351,20 @@ impl HostEnv for FakeEnv {
     fn mcp(&self) -> bool {
         self.mcp
     }
+    fn session_var_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .set
+            .iter()
+            .map(|(n, _)| n.clone())
+            .filter(|n| crate::app::account::is_session_var(n))
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+    fn desktop_app_running(&self) -> bool {
+        self.desktop_app
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -309,7 +377,27 @@ pub enum Platform {
     Other,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The shell a program path or name is (`/usr/bin/fish`, `bash`, `pwsh.exe`), by its base
+/// name; `None` for a program opv does not know as a shell with a syntax of its own.
+pub fn shell_named(program: &str) -> Option<Shell> {
+    let base = program
+        .trim()
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let base = base.strip_suffix(".exe").unwrap_or(&base);
+    // A login shell's `comm` starts with `-` (`-bash`).
+    match base.strip_prefix('-').unwrap_or(base) {
+        "fish" => Some(Shell::Fish),
+        "pwsh" | "powershell" => Some(Shell::PowerShell),
+        "bash" | "zsh" | "sh" | "dash" | "ksh" | "mksh" | "ash" => Some(Shell::Posix),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Shell {
     /// bash, zsh, sh and other POSIX shells: `$(...)` command substitution.
     Posix,
@@ -572,6 +660,15 @@ pub struct Host {
     tokens: u64,
     /// The `op` found on `PATH` is a Windows executable (WSL with `op.exe`).
     op_windows_exe: bool,
+    /// `OP_BIOMETRIC_UNLOCK_ENABLED`, parsed as Go's `ParseBool` (#203, FMECA L1).
+    op_biometric: Option<bool>,
+    /// `DISPLAY` or `WAYLAND_DISPLAY` is set and non-empty.
+    graphical: bool,
+    /// Some `OP_SESSION*` is set and non-empty (by name; the value is never kept).
+    op_session: bool,
+    /// The 1Password desktop app is running (FMECA M2); looked for only on a Linux host
+    /// with a graphical session, false elsewhere.
+    desktop_app: bool,
 }
 
 impl Host {
@@ -621,19 +718,11 @@ impl Host {
         };
         // An empty `$SHELL` counts as unset.
         let named = env.shell().filter(|s| !s.trim().is_empty()).map(|s| {
-            let base = s
-                .rsplit(['/', '\\'])
-                .next()
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            let base = base.strip_suffix(".exe").unwrap_or(&base).to_string();
-            match base.as_str() {
-                "fish" => Shell::Fish,
-                "pwsh" | "powershell" => Shell::PowerShell,
-                "bash" | "zsh" | "sh" | "dash" | "ksh" => Shell::Posix,
-                _ if platform == Platform::Windows => Shell::PowerShell,
-                _ => Shell::Other,
-            }
+            shell_named(&s).unwrap_or(if platform == Platform::Windows {
+                Shell::PowerShell
+            } else {
+                Shell::Other
+            })
         });
         let shell = named.unwrap_or(match platform {
             Platform::Windows => Shell::PowerShell,
@@ -652,6 +741,17 @@ impl Host {
             .filter(|(_, n)| env.is_set(n))
             .fold(0, |bits, (i, _)| bits | 1 << i);
         let op_windows_exe = platform == Platform::Wsl && env.op_is_windows_exe();
+        let op_biometric = env
+            .flag("OP_BIOMETRIC_UNLOCK_ENABLED")
+            .and_then(|v| go_parse_bool(v.trim()));
+        let graphical = env.is_set("DISPLAY") || env.is_set("WAYLAND_DISPLAY");
+        let op_session = env.session_var_names().iter().any(|n| env.is_set(n));
+        // Only where §3.2 asks: a Linux desktop a person signs in on (FMECA M2).
+        let desktop_app = matches!(platform, Platform::Linux | Platform::Other)
+            && graphical
+            && !ci
+            && op_credential.is_none()
+            && env.desktop_app_running();
         Host {
             platform,
             shell,
@@ -661,7 +761,36 @@ impl Host {
             agent_mode: env.agent_mode(),
             tokens,
             op_windows_exe,
+            op_biometric,
+            graphical,
+            op_session,
+            desktop_app,
         }
+    }
+
+    /// `OP_BIOMETRIC_UNLOCK_ENABLED` (#203, design §3.2 step 2): `Some(false)` for a false
+    /// value (`false`, `0`, `f`, `FALSE`, `False`, `F`), `Some(true)` for a true one, `None`
+    /// when unset or anything else (op is Go; FMECA L1).
+    pub fn op_biometric_override(&self) -> Option<bool> {
+        self.op_biometric
+    }
+
+    /// `DISPLAY` or `WAYLAND_DISPLAY` is set and non-empty (design §3.2 step 4, I3).
+    pub fn graphical_session(&self) -> bool {
+        self.graphical
+    }
+
+    /// Some `OP_SESSION` / `OP_SESSION_*` is set and non-empty, by name only (design §3.3).
+    /// The names themselves are [`crate::app::account::session_var_names`].
+    pub fn op_session_in_env(&self) -> bool {
+        self.op_session
+    }
+
+    /// A 1Password desktop app process is running (FMECA M2). Only ever true on a Linux
+    /// host with a graphical session, outside CI and without a service-account or Connect
+    /// credential: elsewhere it is not looked for.
+    pub fn desktop_app_running(&self) -> bool {
+        self.desktop_app
     }
 
     /// The marker that puts this caller in agent mode, if any. Presentation only, never

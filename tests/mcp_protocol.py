@@ -71,7 +71,7 @@ with tempfile.TemporaryDirectory() as directory:
         # (design §25.2), scoped by env, product and target.
         state_tool = next(t for t in tools if t['name'] == 'opv_state')
         assert set(state_tool['inputSchema']['properties']) == {
-            'section', 'env', 'product', 'target'}, state_tool
+            'section', 'env', 'product', 'target', 'role'}, state_tool
         assert state_tool['inputSchema']['properties']['section']['enum'] == [
             'inventory', 'needs', 'contract', 'ready', 'plan', 'changed', 'access',
             'delivery_preview', 'history', 'status'], state_tool

@@ -118,14 +118,18 @@ const LOGIN_QUICK: &str = "\
 Examples:
   opv login prod                             # signed-in terminal for prod; type exit to leave
   opv login                                  # the one account all environments use, or choose
-  opv login prod -- opv ready prod           # one signed-in command, then back";
+  opv login prod -- opv ready prod           # one signed-in command, then back
+  eval \"$(opv login --shell)\"                # sign this shell in; later commands reuse it";
 
 const LOGIN_MORE: &str = "\
 Signs in to the account the environment uses (its `account` setting). Without an
 environment: the one account every environment uses, or a choice when they differ. With a
-command after --, runs it signed in and returns its exit code. No token is printed and
-nothing needs eval. Needs your own interactive terminal (an AI assistant hands this command
-to the user).";
+command after --, runs it signed in and returns its exit code. With --shell, prints only
+the shell's session lines, for your shell to evaluate, and only into a pipe:
+  eval \"$(opv login --shell)\"                                      # bash, zsh, sh
+  opv login --shell=fish | source                                  # fish
+The session lives only in that shell and ends after 30 minutes idle. Needs your own
+interactive terminal (an AI assistant hands this command to the user).";
 
 const DOCTOR_QUICK: &str = "\
 Examples:
@@ -631,6 +635,18 @@ enum Cmd {
         /// into another account, such as opv vault locate).
         #[arg(long, requires = "account")]
         no_record: bool,
+        /// Print the session as assignment lines for this shell to evaluate (only into a
+        /// pipe): `eval "$(opv login --shell)"`. Without a value, the shell from $SHELL.
+        #[arg(
+            long,
+            require_equals = true,
+            num_args = 0..=1,
+            default_missing_value = "auto",
+            conflicts_with = "command",
+            value_name = "SHELL",
+            value_enum
+        )]
+        shell: Option<ShellArg>,
         /// Command and arguments to run signed in, after `--`; without one, opens a
         /// signed-in terminal.
         #[arg(value_name = "COMMAND", last = true)]
@@ -1108,6 +1124,35 @@ enum Cmd {
     /// Install the opv agent skill where coding agents look, and report installed copies.
     #[command(subcommand)]
     Skill(SkillCmd),
+}
+
+/// `--shell` of `opv login` (#203, session-reuse §5.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum ShellArg {
+    /// The shell running opv (its parent process), else the one $SHELL names (PowerShell on
+    /// Windows).
+    Auto,
+    /// bash, zsh, sh: `eval "$(opv login --shell)"`.
+    #[value(alias = "bash", alias = "zsh", alias = "sh")]
+    Posix,
+    /// fish: `opv login --shell=fish | source`.
+    Fish,
+    /// PowerShell: withheld for now (script-block logging would record the session).
+    #[value(name = "powershell", alias = "pwsh")]
+    PowerShell,
+}
+
+impl ShellArg {
+    /// The shell asked for by name; `None` for `Auto`, which the running shell decides.
+    fn requested(self) -> Option<opv::host::Shell> {
+        use opv::host::Shell;
+        match self {
+            ShellArg::Auto => None,
+            ShellArg::Posix => Some(Shell::Posix),
+            ShellArg::Fish => Some(Shell::Fish),
+            ShellArg::PowerShell => Some(Shell::PowerShell),
+        }
+    }
 }
 
 /// Guides embedded in the binary (A10).
@@ -2607,10 +2652,17 @@ fn run(
         account,
         add,
         no_record,
+        shell,
     } = &cli.cmd
     {
-        use opv::app::{login, setup_runtime};
+        use opv::app::{login, login_shell, setup_runtime};
         setup_runtime::Console::require_terminal("login")?;
+        // #203 (session-reuse §5.5): `--shell` refuses, in this order, before any prompt
+        // and any op call; each refusal prints nothing on stdout.
+        let shell = match shell {
+            Some(arg) => Some(login_shell_preflight(*arg, account.as_deref())?),
+            None => None,
+        };
         let here = std::env::current_dir().unwrap_or_default();
         let probe = ProcessRunner::new(
             Budget::starting_now(std::time::Duration::from_secs(cli.timeout)),
@@ -2629,6 +2681,20 @@ fn run(
         )?;
         // #153: this login only, in the chosen account, whatever the project records.
         if *no_record {
+            if let Some(shell) = shell {
+                let emit = login_shell::run(
+                    login_shell::ShellLogin {
+                        fleet: None,
+                        fallback: chosen.as_deref(),
+                        env: None,
+                        record: None,
+                        shell,
+                    },
+                    &mut runtime,
+                    &mut setup_runtime::LoginConsole,
+                )?;
+                return emit_shell_lines(&emit, shell);
+            }
             return login::run_or(
                 None,
                 chosen.as_deref(),
@@ -2677,6 +2743,20 @@ fn run(
             .as_deref()
             .filter(|_| login::records(&here, true))
             .map(|uuid| (here.as_path(), uuid));
+        if let Some(shell) = shell {
+            let emit = login_shell::run(
+                login_shell::ShellLogin {
+                    fleet: fleet.as_ref(),
+                    fallback: fallback.as_deref(),
+                    env: env.as_deref(),
+                    record,
+                    shell,
+                },
+                &mut runtime,
+                &mut setup_runtime::LoginConsole,
+            )?;
+            return emit_shell_lines(&emit, shell);
+        }
         return login::run_recording(
             fleet.as_ref(),
             fallback.as_deref(),
@@ -5005,6 +5085,48 @@ fn help(topic: &[String], out: &mut dyn Write) -> Result<(), Error> {
 /// a terminal to do it (no TTY, CI, a service account or Connect) or the sign-in failed,
 /// so the original error stands. The password goes only to op; the session stays in this
 /// process ([`opv::runner::use_op_session`]).
+/// The `opv login --shell` refusals after `require_terminal` (CI, no terminal, a
+/// service-account or Connect credential), in session-reuse §5.5's order: an assistant,
+/// stdout that is not a pipe, another shell's syntax than the running one's (FMECA M5),
+/// then a shell opv has no syntax for. Returns the shell.
+fn login_shell_preflight(arg: ShellArg, account: Option<&str>) -> Result<opv::host::Shell, Error> {
+    use opv::app::login_shell;
+    use opv::host::Shell;
+    // FMECA M5: the running shell (the parent process) decides `Auto`, ahead of `$SHELL`.
+    let running = login_shell::parent_shell();
+    let shell =
+        login_shell::chosen_shell(arg.requested(), running, opv::host::Host::detect().shell);
+    opv::host::refuse_if_agent(
+        &opv::host::ProcessEnv,
+        opv::cause::Cmd::login_shell(shell, account),
+    )?;
+    login_shell::check_stdout(login_shell::stdout_kind(), shell)?;
+    login_shell::check_shell(shell, running)?;
+    // PowerShell is withheld until the owner decides (FMECA H5): script-block logging
+    // would record the evaluated session.
+    if matches!(shell, Shell::Other | Shell::PowerShell) {
+        return Err(opv::cause::Cause::ChoiceRequired {
+            flag: "--shell".into(),
+            candidates: vec!["posix".into(), "fish".into()],
+        }
+        .into());
+    }
+    Ok(shell)
+}
+
+/// The one write that bypasses the output guard (session-reuse §5.6, FMECA H2): the guard's
+/// `OP_SESSION_*=` rule would mask the lines the shell evaluates. Stdout is checked again
+/// right before it, and the lines go to the raw stdout lock.
+fn emit_shell_lines(
+    emit: &opv::app::login_shell::ShellEmit,
+    shell: opv::host::Shell,
+) -> Result<i32, Error> {
+    use opv::app::login_shell;
+    login_shell::check_stdout(login_shell::stdout_kind(), shell)?;
+    login_shell::write_lines(emit, &mut io::stdout().lock())?;
+    Ok(0)
+}
+
 fn sign_in_here() -> Result<bool, Error> {
     use opv::app::setup::Backend as _;
     use opv::app::setup_runtime::{Console, Runtime};
@@ -5015,10 +5137,19 @@ fn sign_in_here() -> Result<bool, Error> {
     // The account of the op call that found no session (0.9.0), else the selected one.
     let account =
         opv::runner::signed_out_account().or_else(|| config_store::selected_account(&here));
+    // An expired shell session is named (by its variable, never its value) with the
+    // refresh (session-reuse §4.3, S4).
+    let expired = match opv::app::signin::reuse_path(
+        account.as_deref(),
+        &opv::app::account::session_var_names(),
+        &[],
+    ) {
+        opv::app::signin::ReusePath::Shell { var } => Some(var),
+        _ => None,
+    };
     eprintln!(
-        "You are not signed in to 1Password. Sign in to go on; your password goes only to \
-         1Password's prompt. This sign-in lasts for this command only: to keep one across \
-         several commands, run them inside `opv login` (#203)."
+        "{}",
+        opv::app::signin::sign_in_notice(None, &opv::host::Host::detect(), expired.as_deref())
     );
     let command = std::env::args().nth(1).unwrap_or_else(|| "opv".into());
     let mut runtime = Runtime::with_account(account.as_deref()).for_command(&command);
@@ -5459,6 +5590,43 @@ mod tests {
             })
             .collect();
         assert_eq!(parsed, [true, true, true]);
+    }
+
+    /// #203 (session-reuse §5.1): `--shell` takes its value only with `=`, so `--shell dev`
+    /// is the environment `dev`; it never runs a child.
+    #[test]
+    fn login_shell_takes_its_value_only_with_equals() {
+        let shell_of = |args: &[&str]| {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Cmd::Login { env, shell, .. } = cli.cmd else {
+                panic!("not login")
+            };
+            (env, shell)
+        };
+        assert_eq!(
+            shell_of(&["opv", "login", "--shell", "dev"]),
+            (Some("dev".into()), Some(ShellArg::Auto))
+        );
+        assert_eq!(
+            shell_of(&["opv", "login", "--shell=zsh"]),
+            (None, Some(ShellArg::Posix))
+        );
+        assert_eq!(
+            shell_of(&["opv", "login", "dev", "--shell=pwsh"]),
+            (Some("dev".into()), Some(ShellArg::PowerShell))
+        );
+        assert_eq!(
+            shell_of(&["opv", "login", "--shell=fish"]),
+            (None, Some(ShellArg::Fish))
+        );
+        assert_eq!(shell_of(&["opv", "login"]), (None, None));
+        for bad in [
+            &["opv", "login", "--shell=nu"][..],
+            &["opv", "login", "--shell", "--", "opv", "check", "dev"],
+        ] {
+            let e = Cli::try_parse_from(bad).err().expect("refused");
+            assert_eq!(e.exit_code(), 2, "{bad:?}");
+        }
     }
 
     #[test]

@@ -1,0 +1,32 @@
+# No fsGroup: opv must refuse to sync here (A4-V12, mount_unreadable, exit 6).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jzverify-nofsgroup
+  namespace: jzverify
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: jzverify-nofsgroup}
+  template:
+    metadata:
+      labels: {app: jzverify-nofsgroup}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {type: RuntimeDefault}
+      volumes:
+        - name: expect
+          configMap: {name: jzverify-expect}
+      containers:
+        - name: journeeze
+          image: opv-verify-136:0.13.0
+          imagePullPolicy: Never
+          args: ["loop", "serve", "30"]
+          volumeMounts:
+            - {name: expect, mountPath: /etc/opv-verify, readOnly: true}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}

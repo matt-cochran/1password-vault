@@ -226,6 +226,12 @@ pub fn meaning(code: &str) -> &'static str {
         "person_only" => {
             "a person-only command was called from an assistant; it runs only in a person's terminal"
         }
+        "shell_eval_required" => {
+            "opv login --shell prints a 1Password session only to a pipe; run it inside the shell's eval"
+        }
+        "shell_mismatch" => {
+            "opv login --shell was asked for another shell's syntax than the shell running it; nothing was signed in"
+        }
         "confirm_required" => "the environment sets confirm_env; a person passes --confirm <env>",
         "confirm_mismatch" => "--confirm names another environment",
         "findings" => {
@@ -764,6 +770,14 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
         PersonOnly {
             command: check_cmd(),
             marker: AgentMarker::ClaudeCode,
+        },
+        ShellEvalRequired {
+            stdout: crate::app::desktop_integration::StdoutKind::Terminal,
+            shell: Shell::Posix,
+        },
+        ShellMismatch {
+            requested: Shell::Posix,
+            running: Shell::Fish,
         },
         NeedsConfirm {
             env: EnvName::new("env-prod"),
