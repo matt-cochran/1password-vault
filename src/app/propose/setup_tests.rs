@@ -31,6 +31,25 @@ fn declared(diff: &str) -> Vec<String> {
         .collect()
 }
 
+/// A private `.env` and an existing `secrets.toml` in a fresh directory: the setup a person
+/// runs against a project that already has a contract.
+fn env_with_contract(dotenv: &str, contract: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let (dir, env) = env_file(dotenv);
+    let toml = dir.path().join("secrets.toml");
+    std::fs::write(&toml, contract).unwrap();
+    (dir, env, toml)
+}
+
+/// An existing contract: `dev` of tier shared with one declared secret, no ids (D-G).
+const EXISTING_CONTRACT: &str = r#"[environments.dev]
+tier = "shared"
+boundaries.app = {}
+
+[products.app.keys.ALPHA]
+kind = "secret"
+environments = ["dev"]
+"#;
+
 /// A `FakeOp` holding one item built by [`testutil::item_json`] (an `op item get` reply).
 fn op_with_item(fields: &[Field]) -> FakeOp {
     let op = FakeOp::default();
@@ -55,6 +74,18 @@ fn names_declare_every_name() {
     let (_dir, path) = env_file("ALPHA=one\nBETA=two\n");
     let p = from_names(&path, "dev", &[], &[]).unwrap();
     assert_eq!(declared(&p.proposal.diff), ["ALPHA", "BETA"]);
+}
+
+#[test]
+fn names_declare_keys_that_are_present_in_every_environment() {
+    let (_dir, path) = env_file("ALPHA=one\n");
+    let p = from_names(&path, NAMES_ENV, &[], &[]).unwrap();
+    let fleet = crate::config::parse(&p.proposal.contract_after).unwrap();
+    assert!(
+        fleet.products[NAMES_PRODUCT].keys["ALPHA"]
+            .environments
+            .is_none()
+    );
 }
 
 #[test]
@@ -86,6 +117,68 @@ fn a_name_in_both_lists_is_refused() {
 fn a_dotenv_value_never_reaches_the_serialized_proposal() {
     let (_dir, path) = env_file("LEAK_CHECK=S7MARKER\n");
     let p = from_names(&path, "dev", &[], &[]).unwrap();
+    assert!(!serde_json::to_string(&p).unwrap().contains("S7MARKER"));
+}
+
+// Against an existing contract -------------------------------------------------------------
+
+#[test]
+fn names_added_to_an_existing_contract_are_present_in_every_environment() {
+    let (_dir, path, toml) = env_with_contract("BETA=two\n", EXISTING_CONTRACT);
+    let p = from_names_in(&path, "dev", &[], &[], Some(&toml)).unwrap();
+    let fleet = crate::config::parse(&p.proposal.contract_after).unwrap();
+    assert!(
+        fleet.products[NAMES_PRODUCT].keys["BETA"]
+            .environments
+            .is_none()
+    );
+}
+
+#[test]
+fn names_against_an_existing_contract_add_only_undeclared_keys() {
+    let (_dir, path, toml) = env_with_contract("ALPHA=one\nBETA=two\n", EXISTING_CONTRACT);
+    let p = from_names_in(&path, "dev", &[], &[], Some(&toml)).unwrap();
+    assert_eq!(declared(&p.proposal.diff), ["BETA"]);
+}
+
+#[test]
+fn names_against_an_existing_contract_never_re_propose_its_environment_table() {
+    let (_dir, path, toml) = env_with_contract("BETA=two\n", EXISTING_CONTRACT);
+    let p = from_names_in(&path, "dev", &[], &[], Some(&toml)).unwrap();
+    assert!(!p.proposal.diff.contains("+[environments.dev]"));
+}
+
+#[test]
+fn names_into_a_named_environment_keep_its_tier() {
+    let (_dir, path, toml) = env_with_contract("BETA=two\n", EXISTING_CONTRACT);
+    let p = from_names_in(&path, "dev", &[], &[], Some(&toml)).unwrap();
+    let fleet = crate::config::parse(&p.proposal.contract_after).unwrap();
+    assert_eq!(fleet.environments["dev"].tier, crate::domain::Tier::Shared);
+}
+
+#[test]
+fn names_into_a_fresh_setup_declare_the_named_environment() {
+    let (_dir, path) = env_file("BETA=two\n");
+    let p = from_names_in(&path, "staging", &[], &[], None).unwrap();
+    let fleet = crate::config::parse(&p.proposal.contract_after).unwrap();
+    assert!(fleet.environments.contains_key("staging"));
+}
+
+#[test]
+fn a_names_proposal_names_the_value_import_step() {
+    let (_dir, path, _toml) = env_with_contract("BETA=two\n", EXISTING_CONTRACT);
+    let p = from_names_in(&path, "dev", &[], &[], None).unwrap();
+    assert!(
+        p.next
+            .as_deref()
+            .is_some_and(|s| s.starts_with("opv import dev --from "))
+    );
+}
+
+#[test]
+fn an_existing_contracts_names_proposal_never_carries_a_dotenv_value() {
+    let (_dir, path, toml) = env_with_contract("LEAK_CHECK=S7MARKER\n", EXISTING_CONTRACT);
+    let p = from_names_in(&path, "dev", &[], &[], Some(&toml)).unwrap();
     assert!(!serde_json::to_string(&p).unwrap().contains("S7MARKER"));
 }
 

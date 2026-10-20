@@ -73,6 +73,7 @@ fn state_word(r: &Row) -> String {
         KeyState::Skipped => "skipped".into(),
         KeyState::SourceBlocked => "blocked by source".into(),
         KeyState::RulesPendingReview => "rules pending review".into(),
+        KeyState::SuppliedAtSync => "supplied at sync".into(),
     }
 }
 

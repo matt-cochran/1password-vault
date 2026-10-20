@@ -5,6 +5,8 @@
 //!   reads them (section, label and type only; never a value).
 //! - [`from_names`]: the NAMES in a `.env` file, each kind decided by
 //!   [`crate::domain::kind_guess`] unless `--config-key` / `--secret-key` overrides it.
+//!   [`from_names_in`] takes the existing contract as well, so a project that already has
+//!   one is proposed only the names and the environment it lacks.
 //!
 //! Pure: a proposal reads no file it was not given and writes nothing. The contract carries
 //! no 1Password id (D-G): ids go to `secrets.bindings.toml`, which the apply step writes.
@@ -39,6 +41,11 @@ pub struct SetupProposal {
     /// The `secrets.bindings.toml` text an apply writes: the existing item's ids
     /// (`--from-item`); `None` when nothing exists yet (`--names-from`).
     pub bindings_after: Option<String>,
+    /// The person's next step after the names are declared: the value import
+    /// `opv import <env> --from <file>`, which moves the values a names-only proposal never
+    /// read. `None` for an item proposal (its values ride the item apply).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
 }
 
 /// Propose the contract `opv init <env> --vault <vault> --item <item>` would write for an
@@ -69,32 +76,96 @@ pub fn from_names(
     config_keys: &[String],
     secret_keys: &[String],
 ) -> Result<SetupProposal, Error> {
+    from_names_in(path, env, config_keys, secret_keys, None)
+}
+
+/// [`from_names`] against the contract at `file_target` when the project already has one: an
+/// `[environments.<env>]` table it already has is kept as it is (its tier included) and a
+/// name it already declares is left out, so only undeclared names are proposed. A fresh
+/// setup (`file_target` absent) declares a new environment of tier `local`. Every proposed
+/// name is declared for every environment by default (#179 B8), never for a one-environment
+/// list. The proposal's [`SetupProposal::next`] is the person's value import,
+/// `opv import <env> --from <file>`.
+pub fn from_names_in(
+    path: &Path,
+    env: &str,
+    config_keys: &[String],
+    secret_keys: &[String],
+    file_target: Option<&Path>,
+) -> Result<SetupProposal, Error> {
     check_env(env)?;
     let imported = init::read_from(&FromFile {
         path: path.to_path_buf(),
         config: config_keys.to_vec(),
         secret: secret_keys.to_vec(),
     })?;
-    let contract = names_contract(env, &imported)?;
-    build(contract, names_steps(&imported), None)
+    let base = read_base(file_target)?;
+    let (contract, added, new_env) = names_contract_in(env, &imported, &base)?;
+    let mut proposal = assemble(contract, names_steps_in(&imported, &added, new_env), &base)?;
+    proposal.next = Some(value_import_step(env, path));
+    Ok(proposal)
 }
 
-/// The contract for a names-only proposal: one environment declaring the product's
-/// boundary (without an id yet), then one table per key with its kind.
-fn names_contract(env: &str, imported: &init::Imported) -> Result<String, Error> {
-    // A `.env` holds a developer's own values: the environment is of tier `local`, the one
+/// The structure an apply creates for a names-only proposal: the boundary and item when the
+/// environment is new, then one field per name the proposal actually added.
+fn names_steps_in(imported: &init::Imported, added: &[String], new_env: bool) -> Vec<String> {
+    let mut steps = Vec::new();
+    if new_env {
+        steps.push(format!("boundary {NAMES_PRODUCT}"));
+        steps.push(format!("item {NAMES_PRODUCT}"));
+    }
+    for name in added {
+        steps.push(format!(
+            "field {NAMES_PRODUCT}/{name} {}",
+            kind_word(imported.kinds[name])
+        ));
+    }
+    steps
+}
+
+/// The contract for a names-only proposal against `base`: the `[environments.<env>]` table
+/// (a fresh one of tier `local`, or the one `base` already has) plus one table per name the
+/// contract does not already declare, each present in every environment by default
+/// (#179 B8). Returns the merged text, the names added, and whether the environment table
+/// was new.
+fn names_contract_in(
+    env: &str,
+    imported: &init::Imported,
+    base: &str,
+) -> Result<(String, Vec<String>, bool), Error> {
+    // A `.env` holds a developer's own values: a new environment is of tier `local`, the one
     // tier the assistant's write-only import (`opv_import_local`) may fill (design §6.1).
     let seed =
         format!("[environments.{env}]\ntier = \"local\"\nboundaries.{NAMES_PRODUCT} = {{}}\n");
-    let mut doc = ConfigDoc::parse(&seed)?;
-    let environments = vec![env.to_string()];
+    let fresh = base.trim().is_empty();
+    let mut doc = if fresh {
+        ConfigDoc::parse(&seed)?
+    } else {
+        ConfigDoc::parse(base)?
+    };
+    let exists = !fresh && doc.environments().iter().any(|e| e == env);
+    if !fresh && !exists {
+        doc.add_environment(env, &seed)?;
+    } else if !fresh {
+        // The environment is the contract's: keep its tier and make sure its boundary is
+        // there, never rewrite it.
+        doc.declare_boundary(env, NAMES_PRODUCT)?;
+    }
+    let new_env = !exists;
+    // #179 B8: a name read from a `.env` is declared for every environment: no
+    // `environments` list at all, so the key is present everywhere by default.
+    let environments: &[String] = &[];
+    let mut added = Vec::new();
     for (name, kind) in &imported.kinds {
+        if doc.has_key(NAMES_PRODUCT, name) {
+            continue;
+        }
         doc.add_key(
             NAMES_PRODUCT,
             name,
             &crate::config_edit::NewKey {
                 kind: kind_word(*kind),
-                environments: &environments,
+                environments,
                 rules: &[],
                 guidance: None,
                 immutable: false,
@@ -108,20 +179,17 @@ fn names_contract(env: &str, imported: &init::Imported) -> Result<String, Error>
                 lifecycle: None,
             },
         )?;
+        added.push(name.clone());
     }
-    Ok(doc.to_string())
+    Ok((doc.to_string(), added, new_env))
 }
 
-/// The structure a names-only proposal creates: the boundary, the item and each field.
-fn names_steps(imported: &init::Imported) -> Vec<String> {
-    let mut steps = vec![
-        format!("boundary {NAMES_PRODUCT}"),
-        format!("item {NAMES_PRODUCT}"),
-    ];
-    for (name, kind) in &imported.kinds {
-        steps.push(format!("field {NAMES_PRODUCT}/{name} {}", kind_word(*kind)));
-    }
-    steps
+/// The person's value import after a names-only proposal: `opv import <env> --from <file>`.
+fn value_import_step(env: &str, path: &Path) -> String {
+    crate::cause::render::cmd_text(&crate::cause::Cmd {
+        command: vec!["import".into()],
+        args: vec![env.to_string(), "--from".into(), path.display().to_string()],
+    })
 }
 
 /// Write the proposed contract to `path` (`opv propose setup --write`), replacing what the
@@ -138,19 +206,30 @@ fn build(
     file_target: Option<&Path>,
 ) -> Result<SetupProposal, Error> {
     let base = read_base(file_target)?;
+    assemble(contract, structure_steps, &base)
+}
+
+/// Assemble the proposal against an already-read `base` contract text.
+fn assemble(
+    contract: String,
+    structure_steps: Vec<String>,
+    base: &str,
+) -> Result<SetupProposal, Error> {
     // The plan id mirrors `propose key`: lowercase hex SHA-256 of the kind and the proposed
     // contract text (the environment is already in the text).
     Ok(SetupProposal {
         proposal: Proposal {
             kind: "setup",
             relaxations: Vec::new(),
-            diff: config_cmd::diff(&base, &contract),
+            diff: config_cmd::diff(base, &contract),
             questions: Vec::new(),
             plan_id: plan_id(&contract),
             contract_after: contract,
+            for_generator: None,
         },
         structure_steps,
         bindings_after: None,
+        next: None,
     })
 }
 

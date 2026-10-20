@@ -66,6 +66,8 @@
         "every",
         "github-env",
         "on-change",
+        "supply",
+        "supply-check",
         "target"
       ],
       "name": "ci workflow"
@@ -238,10 +240,15 @@
       "name": "mcp serve"
     },
     {
-      "args": [],
+      "args": [
+        "env"
+      ],
       "flags": [
         "gate",
-        "json"
+        "json",
+        "names",
+        "product",
+        "scan"
       ],
       "name": "needs"
     },
@@ -506,7 +513,9 @@
         "prune",
         "prune-immutable",
         "receipt",
+        "retire",
         "rotate",
+        "supply-stdin",
         "target"
       ],
       "name": "sync"
@@ -698,6 +707,7 @@
                 "enum": [
                   "base64_bytes_32",
                   "email_list",
+                  "github_pat",
                   "hex_bytes_32",
                   "https_url",
                   "openai_key",
@@ -710,7 +720,8 @@
                 "enum": [
                   "person",
                   "generated",
-                  "derived"
+                  "derived",
+                  "infrastructure"
                 ]
               }
             },
@@ -965,6 +976,29 @@
               "keys"
             ],
             "type": "object"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "extend"
+                ]
+              },
+              "env": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]*$"
+              },
+              "product": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]*$"
+              }
+            },
+            "required": [
+              "kind",
+              "env"
+            ],
+            "additionalProperties": false
           }
         ],
         "title": "opv intent document",

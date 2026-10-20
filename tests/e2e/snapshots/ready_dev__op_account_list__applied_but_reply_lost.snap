@@ -2,12 +2,13 @@
 
 ## text exit: 0
 ## text stdout
-ready: 0 blocking · 1 finding · receipt rcpt-<id>
+ready: 0 blocking · 2 findings · receipt rcpt-<id>
 PRODUCT  Local development
 shared   2/2
 web      8/8
 Needs attention:
   [owner] discovery_unavailable  → opv doctor
+  [owner] environment_gap dev web/OTEL_RESOURCE → opv propose key web/OTEL_RESOURCE --env dev
 Next (owner): opv doctor
 
 ## text stderr
@@ -15,7 +16,7 @@ using <SCENARIO>/project/secrets.toml
 
 ## json exit: 0
 ## json stdout
-{"schema_version":3,"ok":true,"receipt_id":"rcpt-<id>","opv_version":"<version>","config":{"source":"<SCENARIO>/project/secrets.toml"},"account":null,"matrix":[{"environment":"dev","title":"Local development","product":"shared","target":null,"target_name":null,"keys":2,"saved":2,"findings":0,"delivered":true},{"environment":"dev","title":"Local development","product":"web","target":null,"target_name":null,"keys":8,"saved":8,"findings":0,"delivered":true}],"targets":[],"findings":[{"code":"discovery_unavailable","scope":{},"blocking":false,"actor":"owner","effect":"none","prerequisite":"opv doctor","verify":"opv account list --json"}],"next":{"kind":"apply","actor":"person","command":"opv doctor"},"do":null}
+{"schema_version":3,"ok":true,"receipt_id":"rcpt-<id>","opv_version":"<version>","config":{"source":"<SCENARIO>/project/secrets.toml"},"account":null,"matrix":[{"environment":"dev","title":"Local development","product":"shared","target":null,"target_name":null,"keys":2,"saved":2,"findings":0,"delivered":true},{"environment":"dev","title":"Local development","product":"web","target":null,"target_name":null,"keys":8,"saved":8,"findings":0,"delivered":true}],"targets":[],"findings":[{"code":"discovery_unavailable","scope":{},"blocking":false,"actor":"owner","effect":"none","prerequisite":"opv doctor","verify":"opv account list --json"},{"code":"environment_gap","scope":{"environment":"dev","product":"web","key":"OTEL_RESOURCE"},"blocking":false,"actor":"owner","effect":"writes_config","prerequisite":"opv propose key web/OTEL_RESOURCE --env dev","verify":"opv ready --json"}],"next":{"kind":"apply","actor":"person","command":"opv doctor"},"do":null}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml

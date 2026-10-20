@@ -203,6 +203,30 @@ fn email_list_maps_to_its_rules_and_suggestion() {
     );
 }
 
+#[test]
+fn github_pat_maps_to_its_rules_and_suggestion() {
+    assert_eq!(
+        lookup("github_pat"),
+        Some(&Shape {
+            name: "github_pat",
+            rules: Rules {
+                regex: Some(
+                    "^(ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59})$".to_owned()
+                ),
+                ..Rules::default()
+            },
+            kind: Kind::Secret,
+            source: Source::Person,
+            scope: Scope::Personal,
+            guidance: "GitHub Settings > Developer settings > Personal access tokens; classic ghp_ or fine-grained github_pat_.",
+            dated: Dated {
+                date: "2026-10-18",
+                source: "GitHub Docs, managing your personal access tokens",
+            },
+        })
+    );
+}
+
 // --- Catalog-wide properties ---------------------------------------------------
 
 #[test]
@@ -227,6 +251,7 @@ fn names_cover_every_documented_shape() {
         "base64_bytes_32",
         "hex_bytes_32",
         "email_list",
+        "github_pat",
     ];
     assert!(documented.iter().all(|name| lookup(name).is_some()));
 }

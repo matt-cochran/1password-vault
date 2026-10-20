@@ -9,8 +9,9 @@ concurrency: {group: opv-sync, cancel-in-progress: false}
 jobs:
   detect:
     runs-on: ubuntu-latest
-    strategy: {matrix: {env: [prod, staging]}}
+    strategy: {matrix: {env: [dev, prod, staging]}}
     outputs:
+      dev: ${{ steps.c.outputs.dev }}
       prod: ${{ steps.c.outputs.prod }}
       staging: ${{ steps.c.outputs.staging }}
     steps:
@@ -33,6 +34,19 @@ jobs:
             10) echo "$ENV=yes" >> "$GITHUB_OUTPUT" ;;
             *)  exit "$rc" ;;
           esac
+  sync-dev:
+    needs: detect
+    if: needs.detect.outputs.dev == 'yes' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-opv
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@1.6
+      - env:
+          OP_SERVICE_ACCOUNT_TOKEN: "${{ secrets.OPV_DEPLOY_TOKEN }}"
+        run: opv sync dev --deploy
   plan-prod:
     needs: detect
     if: needs.detect.outputs.prod == 'yes' || github.event_name == 'push'

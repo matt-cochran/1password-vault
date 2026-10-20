@@ -746,3 +746,30 @@ fn a_checkout_without_a_file_never_steps_to_bootstrap() {
     let e = scope(dir.path(), &FakeOp::default(), None).unwrap_err();
     assert!(!e.next_text().unwrap_or_default().contains("bootstrap"));
 }
+
+// Infrastructure keys (#206 §4.4) ----------------------------------------------------------
+
+/// [`FLEET`] with web/NEON_URL, an infrastructure key in prod, which target `web` delivers.
+fn infrastructure_workspace() -> (tempfile::TempDir, PathBuf, FakeOp) {
+    workspace_with(&format!(
+        "{FLEET}\n[products.web.keys.NEON_URL]\nkind = \"secret\"\nsource = \"infrastructure\"\n\
+         environments = [\"prod\"]\nrules = {{ regex = \"postgres(ql)?://.+\" }}\n"
+    ))
+}
+
+fn has_neon_url(fields: &[FieldStep]) -> bool {
+    fields.iter().any(|f| f.key == "NEON_URL")
+}
+
+#[test]
+fn the_plan_never_gives_an_infrastructure_key_a_field() {
+    let (_d, path, op) = infrastructure_workspace();
+    assert!(!has_neon_url(&plan_of(&path, &op).fields));
+}
+
+#[test]
+fn apply_never_adds_a_field_for_an_infrastructure_key() {
+    let (_d, path, op) = infrastructure_workspace();
+    let applied = apply_reviewed(&path, &op).unwrap();
+    assert!(!has_neon_url(&applied.fields_added));
+}

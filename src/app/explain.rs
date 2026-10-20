@@ -24,6 +24,11 @@
 //! `plan_id`, FR-41) is the plan form: with `--env`, the environment's plan is recomputed
 //! the way `plan` computes it and each step is explained; a different id is `stale_plan`.
 //!
+//! An infrastructure key (#206, `source = "infrastructure"`) has no field: its source reads
+//! "supplied at sync; never stored in 1Password", it names no boundary, reference, inspect
+//! or open command, and each delivery names the producer's recorded serial and when it was
+//! recorded (design §6.4). Never a value or a fingerprint.
+//!
 //! The target form names the target's provider and locator, its products, its deploy
 //! credentials (or `none`), its state vault ID and its deploy service account.
 //!
@@ -37,12 +42,17 @@ use super::{kind_label, suggest, sync, write_err};
 use crate::adapters::onepassword;
 use crate::cause::{Cause, Closest, EnvName, NameKind, PlanId, PlanScope};
 use crate::domain::access_plan::{ci_account, deploy_account};
-use crate::domain::delivery::decode_evidence;
+use crate::domain::delivery::{Evidence, SuppliedMark, decode_evidence};
 use crate::domain::model::{KeySpec, Kind, OneOrMany, Rules, key_label};
 use crate::domain::provenance::PLAN_ID_LEN;
 use crate::domain::{Fleet, naming, rules};
 use crate::error::Error;
 use crate::runner::{Budget, CommandRunner, ProcessRunner};
+
+/// The `source` of an infrastructure key (#206 §6.4).
+const SUPPLIED_SOURCE: &str = "supplied at sync; never stored in 1Password";
+/// The `field` of an infrastructure key: it has none.
+const SUPPLIED_FIELD: &str = "no field";
 
 /// The key `explain` was asked about, resolved against the configuration.
 ///
@@ -312,8 +322,8 @@ fn environment<'a>(
         }
         None => {
             let mut names = fleet.environments.keys();
-            // The key is declared for one environment only: that one, no question.
-            let declared = t.spec.envs_in(fleet);
+            // The key is wanted in one environment only: that one, no question.
+            let declared = t.spec.envs_wanted_in(fleet);
             let sole: Option<&'a str> = match declared.as_slice() {
                 [one] => fleet
                     .environments
@@ -329,7 +339,7 @@ fn environment<'a>(
                 _ => {
                     return Err(Cause::ChoiceRequired {
                         flag: "--env".into(),
-                        candidates: t.spec.envs_in(fleet),
+                        candidates: t.spec.envs_wanted_in(fleet),
                     }
                     .into());
                 }
@@ -359,7 +369,11 @@ fn explain_in(
 ) -> Result<(), Error> {
     let env = super::environment(fleet, env_name)?;
     let (product, key, spec) = (t.product, t.key, t.spec);
+    // #206 §6.4: an infrastructure key has no 1Password field, boundary item or reference;
+    // the deploy job supplies it at sync.
+    let supplied = super::deliver_only::is_infrastructure(spec);
     let field = match spec.kind {
+        _ if supplied => SUPPLIED_FIELD,
         Kind::Secret => "concealed field",
         Kind::Config => "text field",
     };
@@ -372,6 +386,7 @@ fn explain_in(
         .map(|(p, k)| (p, k, &fleet.products[p].keys[k]));
     let field_label = source.map_or_else(|| label.clone(), |(p, k, _)| key_label(p, k));
     let source_field = match source {
+        _ if supplied => SUPPLIED_SOURCE.to_string(),
         Some(_) => format!("from {field_label}"),
         None => "own field".to_string(),
     };
@@ -383,7 +398,7 @@ fn explain_in(
     // The boundary item holding the field (FR-57): the source's, for a shared key. Personal
     // keys (FR-55) live in each person's own item, never in a boundary.
     let boundary_name = fleet.boundary_of(source.map_or(product, |(p, _, _)| p));
-    let item = if spec.personal {
+    let item = if spec.personal || supplied {
         None
     } else {
         Some(fleet.boundary(env_name, source.map_or(product, |(p, _, _)| p))?)
@@ -432,7 +447,7 @@ fn explain_in(
     }
     // FR-59: the CI reader reads every boundary the environment records; a personal key
     // lives outside them.
-    let ci = (!spec.personal).then(|| ci_account(project, env_name));
+    let ci = (!spec.personal && !supplied).then(|| ci_account(project, env_name));
     // FR-22, G31: every environment the key is desired in, every target that delivers its
     // product, and the delivery item recording it. Names only.
     let deliveries = delivered_to(fleet, product, key, spec, r);
@@ -462,14 +477,22 @@ fn explain_in(
             "targets": targets,
             "delivered_to": deliveries
                 .iter()
-                .map(|d| serde_json::json!({
-                    "environment": d.environment,
-                    "target": d.target,
-                    "product": d.product,
-                    "item": naming::delivery_item(d.product, d.target),
-                    "item_id": d.item,
-                    "records": d.records,
-                }))
+                .map(|d| {
+                    let mut row = serde_json::json!({
+                        "environment": d.environment,
+                        "target": d.target,
+                        "product": d.product,
+                        "item": naming::delivery_item(d.product, d.target),
+                        "item_id": d.item,
+                        "records": d.records,
+                    });
+                    // #206 §6.4: a supplied name's serial and when it was recorded.
+                    if let Some(m) = &d.supplied {
+                        row["serial"] = serde_json::json!(m.serial);
+                        row["recorded_at"] = serde_json::json!(m.at);
+                    }
+                    row
+                })
                 .collect::<Vec<_>>(),
             "rules": rules,
             "immutable": spec.immutable,
@@ -486,6 +509,9 @@ fn explain_in(
                 &b.vault_id,
                 env.account.as_deref()
             ));
+        }
+        if supplied {
+            doc["supplied_at_sync"] = serde_json::json!(true);
         }
         if let Some(ci) = &ci {
             doc["readers"] = serde_json::json!({
@@ -570,8 +596,11 @@ fn explain_in(
             inspect_command(&b.item_id, &b.vault_id, env.account.as_deref()),
         ));
     }
-    // H1: the command that opens the item in 1Password, where the value is typed.
-    rows.push(("open".into(), format!("opv open {label} --env {env_name}")));
+    // H1: the command that opens the item in 1Password, where the value is typed. An
+    // infrastructure key has no field to open.
+    if !supplied {
+        rows.push(("open".into(), format!("opv open {label} --env {env_name}")));
+    }
     // One value column, however long a provider's label is (P4).
     let width = rows
         .iter()
@@ -590,8 +619,12 @@ fn explain_in(
         for d in &deliveries {
             let title = naming::delivery_item(d.product, d.target);
             let place = format!("{}/{}", d.environment, d.target);
+            // #206 §6.4: the producer's serial and when it was recorded, never a value.
+            let mark = d.supplied.as_ref().map_or_else(String::new, |m| {
+                format!(", serial {}, recorded {}", m.serial, m.at)
+            });
             match d.item {
-                Some(id) => lines.push(format!("    {place} {title} (item {id})")),
+                Some(id) => lines.push(format!("    {place} {title} (item {id}){mark}")),
                 None => lines.push(format!("    {place} {title} (no item recorded)")),
             }
         }
@@ -613,6 +646,8 @@ struct Delivery<'a> {
     item: Option<&'a str>,
     /// Whether that item's evidence names the key (read fresh, names only).
     records: bool,
+    /// For a supplied name (#206): the producer's serial and when its line was recorded.
+    supplied: Option<SuppliedMark>,
 }
 
 /// Every delivery of `product`/`key`, in environment then target name order: the
@@ -639,24 +674,25 @@ fn delivered_to<'a>(
                 .get(product)
                 .map(String::as_str);
             let rendered = fleet.target_name(env_name, target, product, key);
-            let records =
-                item.is_some_and(|id| delivery_records(fleet, env_name, target, id, &rendered, r));
+            let evidence =
+                item.and_then(|id| delivery_records(fleet, env_name, target, id, &rendered, r));
             out.push(Delivery {
                 environment: env_name.as_str(),
                 target: target.as_str(),
                 product,
                 item,
-                records,
+                records: evidence.is_some(),
+                supplied: evidence.and_then(|e| e.supplied),
             });
         }
     }
     out
 }
 
-/// Whether the delivery item `item_id` of `product` on `env_name`/`target` records
-/// `rendered`: its evidence field labels are the names opv wrote (the same read as
-/// `delivery::read_state`, names only, never a value). A read that fails is noted and reads
-/// as not recording, so the leak list still names the item (SR-1).
+/// The evidence line of the delivery item `item_id` of `product` on `env_name`/`target`
+/// that records `rendered`, or `None`: its evidence field labels are the names opv wrote
+/// (the same read as `delivery::read_state`, names only, never a value). A read that fails
+/// is noted and reads as not recording, so the leak list still names the item (SR-1).
 fn delivery_records(
     fleet: &Fleet,
     env_name: &str,
@@ -664,17 +700,12 @@ fn delivery_records(
     item_id: &str,
     rendered: &str,
     r: &dyn CommandRunner,
-) -> bool {
-    let Some(env) = fleet.environments.get(env_name) else {
-        return false;
-    };
-    let Some(vault_id) = env
+) -> Option<Evidence> {
+    let env = fleet.environments.get(env_name)?;
+    let vault_id = env
         .targets
         .get(target)
-        .and_then(|t| t.state_vault_id.clone())
-    else {
-        return false;
-    };
+        .and_then(|t| t.state_vault_id.clone())?;
     // The item's vault and ID, read fresh and by ID (FR-13: never a title lookup).
     let at = crate::domain::Boundary {
         vault_id,
@@ -689,18 +720,18 @@ fn delivery_records(
                 "the delivery item of {item_id} on {env_name}/{target} could not be read: \
                  {why}; its evidence shows as unknown"
             ));
-            return false;
+            return None;
         }
     };
-    let Ok(doc) = serde_json::from_slice::<serde_json::Value>(read.raw()) else {
-        return false;
-    };
-    doc["fields"].as_array().into_iter().flatten().any(|f| {
-        let (Some(label), Some(value)) = (f["label"].as_str(), f["value"].as_str()) else {
-            return false;
-        };
-        decode_evidence(label, value).is_some_and(|e| e.name == rendered)
-    })
+    let doc = serde_json::from_slice::<serde_json::Value>(read.raw()).ok()?;
+    doc["fields"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find_map(|f| {
+            let (label, value) = (f["label"].as_str()?, f["value"].as_str()?);
+            decode_evidence(label, value).filter(|e| e.name == rendered)
+        })
 }
 
 /// The environment of target `name` (FR-56): `--env` when given, otherwise the only

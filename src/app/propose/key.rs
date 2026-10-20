@@ -125,11 +125,30 @@ pub fn propose_with(
                     doc.declare_boundary(env, &boundary)?;
                 }
             }
-            questions = production_questions(&fleet, &named, &excluded);
+            // An infrastructure key has no stored value to ask for (#206): its scope is the
+            // `environments` list the loader requires, and the deploy job supplies it.
+            if *source != Some(SourceKind::Infrastructure) {
+                questions = production_questions(&fleet, &named, &excluded);
+            }
             "key"
         }
         Intent::Env { env, tier } => {
             doc.add_environment(env.as_str(), &environment_text(env.as_str(), *tier))?;
+            // A new environment inherits every key with no `environments` list (#179,
+            // presence): each product such a team key needs (its own, and a `from` source's)
+            // gets its boundary declared there, as a new key's does (no ids: the apply
+            // records them), so the proposal loads.
+            for (product, p) in &fleet.products {
+                for spec in p.keys.values() {
+                    if spec.personal || !spec.is_desired_in(env.as_str()) {
+                        continue;
+                    }
+                    let source = spec.source().map(|(sp, _)| sp);
+                    for needer in std::iter::once(product.as_str()).chain(source) {
+                        doc.declare_boundary(env.as_str(), fleet.boundary_of(needer))?;
+                    }
+                }
+            }
             "env"
         }
         Intent::Retire { key, product, .. } => {
@@ -137,20 +156,48 @@ pub fn propose_with(
             doc.set_key_lifecycle(&product, key.as_str(), "retiring")?;
             "retire"
         }
+        Intent::Extend { env, product } => {
+            crate::app::environment(&fleet, env.as_str())?;
+            if let Some(p) = product
+                && !fleet.products.contains_key(p.as_str())
+            {
+                return Err(crate::app::undefined_product(
+                    &fleet,
+                    p.as_str(),
+                    Some(env.as_str()),
+                ));
+            }
+            // A product reaching `env` needs its boundary there, as a new key does: the
+            // proposal declares it (no ids: the apply records them) for each changed
+            // product, and an already-declared boundary is left as it is.
+            let changed =
+                doc.extend_environment(product.as_ref().map(|p| p.as_str()), env.as_str());
+            for product in &changed {
+                doc.declare_boundary(env.as_str(), fleet.boundary_of(product))?;
+            }
+            "extend"
+        }
         _ => {
             return Err(usage(UsageProblem::ValueFormat {
                 flag: "kind".into(),
-                format: "key, env or retire",
+                format: "key, env, retire or extend",
             }));
         }
     };
     let proposed = doc.to_string();
     // The same validation as a hand-written file: a proposal that would not load is refused
-    // before anything is written.
-    let proposed_fleet = config::parse(&config::bindings::merge(&proposed, bindings))?;
+    // before anything is written. On a generated configuration it is not refused: its
+    // fragment carries the error the generated file would raise (#178).
+    let mut refused = None;
+    let proposed_fleet = super::validated(
+        contract_text,
+        config::parse(&config::bindings::merge(&proposed, bindings)),
+        &mut refused,
+    )?;
     let diff = crate::app::config_cmd::diff(contract_text, &proposed);
     let relaxations = base
-        .map(|base| relaxation::relaxations(base, &proposed_fleet))
+        .zip(proposed_fleet.as_ref())
+        .map(|(base, proposed)| relaxation::relaxations(base, proposed))
         .unwrap_or_default();
     Ok(Proposal {
         kind,
@@ -158,6 +205,7 @@ pub fn propose_with(
         diff,
         questions,
         plan_id: plan_id(kind, &proposed),
+        for_generator: super::for_generator(contract_text, &proposed, bindings, refused.as_ref())?,
         contract_after: proposed,
     })
 }
@@ -234,6 +282,7 @@ fn source_word(source: SourceKind) -> &'static str {
         SourceKind::Person => "person",
         SourceKind::Generated => "generated",
         SourceKind::Derived => "derived",
+        SourceKind::Infrastructure => "infrastructure",
     }
 }
 

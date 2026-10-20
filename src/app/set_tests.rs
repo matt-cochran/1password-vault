@@ -177,3 +177,45 @@ fn an_undeclared_key_is_refused() {
     .unwrap_err();
     assert_eq!(err.code_str(), "undeclared_key");
 }
+
+// Infrastructure keys (#206 §4.4) ----------------------------------------------------------
+
+/// prod with a Fly target delivering api, whose api/DATABASE_URL is an infrastructure key.
+fn infrastructure_fleet() -> Fleet {
+    crate::config::parse(
+        r#"[environments.prod]
+boundaries.api = { vault_id = "vprod", item_id = "iprodapi" }
+
+[environments.prod.targets.web]
+fly.app = "web-prod"
+fly.secret_name = "{KEY}"
+products = ["api"]
+state_vault_id = "sprod"
+
+[products.api.keys.DATABASE_URL]
+kind = "secret"
+source = "infrastructure"
+environments = ["prod"]
+rules = { regex = "postgres(ql)?://.+" }
+"#,
+    )
+    .unwrap()
+}
+
+#[test]
+fn an_infrastructure_key_is_refused_as_not_stored_before_prompting() {
+    let fleet = infrastructure_fleet();
+    let mut never = |_: &str| -> Result<Option<SecretValue>, Error> { panic!("prompted") };
+    let err = set(
+        &fleet,
+        &FakeEnv::new("linux").tty(),
+        "api/DATABASE_URL",
+        "prod",
+        &mut never,
+        &FakeOp::default(),
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    let doc = crate::error::document(&err, &crate::error::invocation(), false);
+    assert_eq!(doc["subject"]["guard"]["guard"], "not_stored");
+}

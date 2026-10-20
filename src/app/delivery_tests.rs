@@ -466,6 +466,20 @@ fn a_new_key_changes_the_binding_set() {
     assert_eq!(state_of(&doc, "api"), "not_delivered");
 }
 
+/// #179: a `retiring` key the target no longer holds (a retirement pruned it, or it was
+/// never there) is not in the binding set, so a later sync still mints the receipt.
+#[test]
+fn a_retiring_key_the_target_no_longer_holds_leaves_the_binding_set() {
+    let _person = crate::app::tidy::activate();
+    let (w, mut fleet) = world();
+    let api = fleet.products.get_mut("api").unwrap();
+    let mut spec = api.keys["TOKEN"].clone();
+    spec.lifecycle = crate::domain::Lifecycle::Retiring;
+    api.keys.insert("OLD_KEY".into(), spec);
+    sync_all(&w, &fleet).unwrap();
+    assert_eq!(state_of(&verify_doc(&w, &fleet), "api"), "verified");
+}
+
 #[test]
 fn the_binding_set_of_a_secrets_fly_target_includes_its_config_keys() {
     let fleet = crate::config::parse(

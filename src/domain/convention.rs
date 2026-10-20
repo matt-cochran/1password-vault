@@ -36,6 +36,21 @@ use crate::domain::secret::SecretValue;
 
 /// Section that keeps everything a tidy displaced or replaced (FR-43).
 pub const KEPT_SECTION: &str = "opv · kept";
+/// The start of every section a retirement archives a key's fields into (#179): see
+/// [`archived_section`]. Like [`KEPT_SECTION`], no declared key ever claims a field there,
+/// so a tidy never moves an archived field home and no plan reads it.
+pub const ARCHIVED_SECTION_PREFIX: &str = "archived · ";
+
+/// The section a person's `opv apply` of a retirement moves `product/key`'s fields into on
+/// `date` (`YYYY-MM-DD`): `archived · <date> · retired <product>/<KEY>`. 1Password has no
+/// field-level archive; the values stay in the item, out of every plan.
+pub fn archived_section(date: &str, product: &str, key: &str) -> String {
+    format!(
+        "{ARCHIVED_SECTION_PREFIX}{date} · retired {}",
+        key_label(product, key)
+    )
+}
+
 /// opv's own section, holding [`MARKER_FIELD`].
 pub const MARKER_SECTION: &str = "opv";
 /// Text field recording the convention version, for future migrations.
@@ -92,6 +107,9 @@ impl Found {
             || self.label.is_empty()
             || !VALUE_TYPES.contains(&self.ty.as_str())
             || self.section_label() == Some(KEPT_SECTION)
+            || self
+                .section_label()
+                .is_some_and(|l| l.starts_with(ARCHIVED_SECTION_PREFIX))
             || self.is_marker()
     }
 
@@ -626,12 +644,12 @@ pub fn plan(layout: &Layout, fleet: &Fleet, env_name: &str, date: &str) -> TidyP
         let home = product.clone();
         // A shared key (FR-45) never gets a field: its source's field holds the value.
         // A personal key (FR-55) never gets a field in the team item: its value is each
-        // person's own.
-        for (key, spec) in prod
-            .keys
-            .iter()
-            .filter(|(_, s)| s.from.is_none() && !s.personal)
-        {
+        // person's own. An infrastructure key (#206) is never stored: it never gets one.
+        for (key, spec) in prod.keys.iter().filter(|(_, s)| {
+            s.from.is_none()
+                && !s.personal
+                && s.value_source != Some(crate::domain::model::ValueSource::Infrastructure)
+        }) {
             let name = key_label(product, key);
             let id = (product.clone(), key.clone());
             let here = spec.is_desired_in(env_name);
