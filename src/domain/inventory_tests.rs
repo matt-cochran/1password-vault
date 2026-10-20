@@ -290,6 +290,114 @@ fn a_none_capability_vault_without_a_receipt_is_unreadable_never_absent() {
     assert!(matches!(cell.state, ValueState::Unreadable { .. }));
 }
 
+/// The JSON of the one key row `product`/`key` of `fleet`'s inventory, built with no
+/// live cell: the row's declared attributes are the outcome under test.
+fn key_row(fleet: &Fleet, product: &str, key: &str) -> serde_json::Value {
+    let document = build(fleet, &CellInputs::default(), None);
+    let row = document
+        .keys
+        .iter()
+        .find(|k| k.product == product && k.key == key)
+        .expect("the key is declared");
+    serde_json::to_value(row).expect("the row serializes")
+}
+
+/// One `dev` environment with the boundary `core` and product `api`, whose single secret
+/// key `API_KEY` is declared for `dev` with the extra `attributes` appended.
+fn fleet_with_key_attributes(attributes: &str) -> Fleet {
+    config::parse(&format!(
+        r#"[environments.dev]
+boundaries.core = {{ vault_id = "vdev", item_id = "idev" }}
+
+[products.api]
+boundary = "core"
+
+[products.api.keys.API_KEY]
+kind = "secret"
+environments = ["dev"]
+{attributes}
+"#
+    ))
+    .expect("the fleet loads")
+}
+
+/// A key declared `immutable` reports that attribute.
+#[test]
+fn an_immutable_key_reports_immutable() {
+    let fleet = fleet_with_key_attributes("immutable = true");
+    assert_eq!(key_row(&fleet, "api", "API_KEY")["immutable"], true);
+}
+
+/// A key declared `allow_same_value` reports that attribute.
+#[test]
+fn an_allow_same_value_key_reports_allow_same_value() {
+    let fleet = fleet_with_key_attributes("allow_same_value = true");
+    assert_eq!(key_row(&fleet, "api", "API_KEY")["allow_same_value"], true);
+}
+
+/// The rule names a key declares are reported; a rule's parameters never are.
+#[test]
+fn a_key_reports_the_names_of_its_rules_not_their_parameters() {
+    let fleet = fleet_with_key_attributes(r#"rules = { prefix = "sk_test_" }"#);
+    assert_eq!(
+        key_row(&fleet, "api", "API_KEY")["rules"],
+        serde_json::json!(["prefix"])
+    );
+}
+
+/// The guidance a key declares is reported.
+#[test]
+fn a_key_reports_its_guidance() {
+    let fleet = fleet_with_key_attributes(r#"guidance = "Stripe dashboard""#);
+    assert_eq!(
+        key_row(&fleet, "api", "API_KEY")["guidance"],
+        "Stripe dashboard"
+    );
+}
+
+/// The process roles a key declares are reported.
+#[test]
+fn a_key_reports_its_roles() {
+    let fleet = fleet_with_key_attributes(r#"roles = ["serve", "migrate"]"#);
+    assert_eq!(
+        key_row(&fleet, "api", "API_KEY")["roles"],
+        serde_json::json!(["serve", "migrate"])
+    );
+}
+
+/// A local file key reports the relative path it is delivered at.
+#[test]
+fn a_local_file_key_reports_its_path() {
+    let fleet = fleet_with_key_attributes(r#"file = "tls/private-key""#);
+    assert_eq!(key_row(&fleet, "api", "API_KEY")["file"], "tls/private-key");
+}
+
+/// A key reports the name each target that delivers it renders for it.
+#[test]
+fn a_key_reports_its_delivered_name_on_each_target() {
+    let fleet = config::parse(
+        r#"[environments.dev]
+boundaries.core = { vault_id = "vdev", item_id = "idev" }
+
+[environments.dev.targets.web]
+fly.app = "web-dev"
+fly.secret_name = "SVC_{KEY}"
+
+[products.api]
+boundary = "core"
+
+[products.api.keys.API_KEY]
+kind = "secret"
+environments = ["dev"]
+"#,
+    )
+    .expect("the fleet loads");
+    assert_eq!(
+        key_row(&fleet, "api", "API_KEY")["targets"],
+        serde_json::json!({"dev/web": "SVC_API_KEY"})
+    );
+}
+
 /// A key whose explicit `environments` list leaves an environment out (no `except`) is not
 /// declared there: it has no cell to read, rank or fill.
 #[test]

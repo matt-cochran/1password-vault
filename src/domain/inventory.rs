@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use super::capability::{Capability, UnknownSource};
-use super::model::{Fleet, Kind, Lifecycle, Tier, ValueSource};
+use super::model::{Fleet, KeySpec, Kind, Lifecycle, Rules, Tier, ValueSource};
 use super::presence::{Presence, present_in};
 use super::value_state::ValueState;
 
@@ -90,6 +90,10 @@ pub struct EnvironmentColumn {
 }
 
 /// One key row: the key's attributes. `presence` is per environment, from the contract.
+/// The declared attributes added below (immutable, allow_same_value, `rules` names,
+/// guidance, roles, file and the target names) are omitted while unset, so a key that
+/// declares none renders exactly as before. Names only: a rule's parameter, guidance text
+/// and a target name are never a value (SR-1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct KeyRow {
     pub product: String,
@@ -99,6 +103,29 @@ pub struct KeyRow {
     pub presence: BTreeMap<String, PresenceView>,
     pub lifecycle: String,
     pub expires: Option<String>,
+    /// Staged only when absent on the target unless explicitly rotated (FR-16).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub immutable: bool,
+    /// The same value in several environments is intended (#92).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub allow_same_value: bool,
+    /// The names of the validation rules the key declares (`prefix`, `regex`, `enum`, …),
+    /// never a rule's parameters ([`rule_names`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<String>,
+    /// The declared guidance for a person (FR-15): a provider and where the value lives.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub guidance: String,
+    /// The process roles the key is delivered to under `opv run` (#136); `None`: every role.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub roles: Option<Vec<String>>,
+    /// A local file key's relative path (#136); `None`: delivered as a variable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// Each target that delivers this key, as `"<env>/<target>"` → the name the target
+    /// delivers it under ([`Fleet::target_name`], [`target_names`]). Names only.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub targets: BTreeMap<String, String>,
 }
 
 /// One cell of the matrix: the state of one key in one environment, the capability on the
@@ -247,6 +274,13 @@ pub fn build(fleet: &Fleet, cells: &CellInputs, receipt: Option<&ReceiptView>) -
                 presence,
                 lifecycle: lifecycle_word(spec.lifecycle).to_string(),
                 expires: spec.expires.map(|d| d.to_string()),
+                immutable: spec.immutable,
+                allow_same_value: spec.allow_same_value,
+                rules: rule_names(&spec.rules),
+                guidance: spec.guidance.clone(),
+                roles: spec.roles.clone(),
+                file: spec.file.clone(),
+                targets: target_names(fleet, product, key, spec),
             });
         }
     }
@@ -256,6 +290,59 @@ pub fn build(fleet: &Fleet, cells: &CellInputs, receipt: Option<&ReceiptView>) -
         keys,
         cells: matrix,
     }
+}
+
+/// The names of the validation rules `rules` declares, in a fixed order, and never their
+/// parameters (#174): a parameter such as `prefix` could hold a value-shaped string, so
+/// only the rule's name is reported (SR-1).
+fn rule_names(rules: &Rules) -> Vec<String> {
+    let mut names = Vec::new();
+    for (set, name) in [
+        (rules.prefix.is_some(), "prefix"),
+        (rules.not_prefix.is_some(), "not_prefix"),
+        (rules.ensure_prefix.is_some(), "ensure_prefix"),
+        (rules.regex.is_some(), "regex"),
+        (rules.r#enum.is_some(), "enum"),
+        (rules.base64_bytes.is_some(), "base64_bytes"),
+        (rules.hex_bytes.is_some(), "hex_bytes"),
+        (rules.email_list, "email_list"),
+        (rules.https_url, "https_url"),
+        (rules.prefix_by_mode.is_some(), "prefix_by_mode"),
+        (!rules.refuse_in.is_empty(), "refuse_in"),
+        (rules.transform.is_some(), "transform"),
+    ] {
+        if set {
+            names.push(name.to_string());
+        }
+    }
+    names
+}
+
+/// Every target of `fleet` that delivers `product`'s `key`, as `"<env>/<target>"` → the
+/// name the target renders for it ([`Fleet::target_name`]): for every environment the key
+/// is wanted in and every target that delivers the product. Names only, never a value.
+fn target_names(
+    fleet: &Fleet,
+    product: &str,
+    key: &str,
+    spec: &KeySpec,
+) -> BTreeMap<String, String> {
+    let mut targets = BTreeMap::new();
+    for (env, e) in &fleet.environments {
+        if !spec.is_desired_in(env) {
+            continue;
+        }
+        for target in e.targets.keys() {
+            if !fleet.delivers(env, target, product) {
+                continue;
+            }
+            targets.insert(
+                format!("{env}/{target}"),
+                fleet.target_name(env, target, product, key),
+            );
+        }
+    }
+    targets
 }
 
 /// The document's word for a key kind.
