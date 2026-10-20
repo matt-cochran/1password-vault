@@ -471,12 +471,18 @@ fn a_malformed_key_row_carries_the_persons_set_command() {
 #[test]
 fn a_set_key_row_without_delivery_carries_no_next_step() {
     let (_, inventory) = inventory_with_cell(ValueState::Set);
-    assert_eq!(row_next(&inventory, "api", "API_KEY"), serde_json::Value::Null);
+    assert_eq!(
+        row_next(&inventory, "api", "API_KEY"),
+        serde_json::Value::Null
+    );
 }
 
 #[test]
 fn a_delivered_key_row_carries_no_next_step() {
-    assert_eq!(next_with_delivery(DeliveryState::Delivered), serde_json::Value::Null);
+    assert_eq!(
+        next_with_delivery(DeliveryState::Delivered),
+        serde_json::Value::Null
+    );
 }
 
 #[test]

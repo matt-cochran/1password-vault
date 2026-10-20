@@ -179,7 +179,10 @@ fn a_missing_keys_row_carries_its_own_set_command() {
 fn a_set_keys_row_without_delivery_carries_no_next_step() {
     let (op, fleet, _) = world();
     let doc = json_document(&op, &fleet);
-    assert_eq!(key_row_of(&doc, "api", "OPENAI_API_KEY")["next"], Value::Null);
+    assert_eq!(
+        key_row_of(&doc, "api", "OPENAI_API_KEY")["next"],
+        Value::Null
+    );
 }
 
 /// A placement whose delivery item carries a receipt shows `delivered`.
