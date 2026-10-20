@@ -312,8 +312,8 @@ fn environment<'a>(
         }
         None => {
             let mut names = fleet.environments.keys();
-            // The key is declared for one environment only: that one, no question.
-            let declared = t.spec.envs_in(fleet);
+            // The key is wanted in one environment only: that one, no question.
+            let declared = t.spec.envs_wanted_in(fleet);
             let sole: Option<&'a str> = match declared.as_slice() {
                 [one] => fleet
                     .environments
@@ -329,7 +329,7 @@ fn environment<'a>(
                 _ => {
                     return Err(Cause::ChoiceRequired {
                         flag: "--env".into(),
-                        candidates: t.spec.envs_in(fleet),
+                        candidates: t.spec.envs_wanted_in(fleet),
                     }
                     .into());
                 }

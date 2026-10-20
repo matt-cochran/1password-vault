@@ -116,6 +116,45 @@ fn a_from_source_needs_its_boundary() {
     assert_eq!(boundary_names(FROM, "prod"), ["shared", "worker"]);
 }
 
+/// #179: three environments and keys declared by presence (no `environments` list): `API_KEY`
+/// everywhere, `NO_STAGING` everywhere but `staging` (`except`), `GONE` retired, `GOING`
+/// retiring.
+fn presence_fleet(keys: &str) -> String {
+    format!("[environments.dev]\n\n[environments.staging]\n\n[environments.prod]\n\n{keys}")
+}
+
+#[test]
+fn a_key_without_an_environments_list_needs_its_boundary_in_every_environment() {
+    let text = presence_fleet("[products.api.keys.API_KEY]\nkind = \"secret\"\n");
+    let needed: Vec<Vec<String>> = ["dev", "staging", "prod"]
+        .iter()
+        .map(|env| boundary_names(&text, env))
+        .collect();
+    assert_eq!(needed, vec![vec!["api".to_string()]; 3]);
+}
+
+#[test]
+fn an_except_environment_needs_no_boundary_for_that_key() {
+    let text = presence_fleet(
+        "[products.api.keys.NO_STAGING]\nkind = \"secret\"\nexcept = { staging = \"no staging account\" }\n",
+    );
+    assert_eq!(boundary_names(&text, "staging"), Vec::<String>::new());
+}
+
+#[test]
+fn a_retired_key_needs_no_boundary() {
+    let text =
+        presence_fleet("[products.api.keys.GONE]\nkind = \"secret\"\nlifecycle = \"retired\"\n");
+    assert_eq!(boundary_names(&text, "dev"), Vec::<String>::new());
+}
+
+#[test]
+fn a_retiring_key_still_needs_its_boundary() {
+    let text =
+        presence_fleet("[products.api.keys.GOING]\nkind = \"secret\"\nlifecycle = \"retiring\"\n");
+    assert_eq!(boundary_names(&text, "prod"), ["api"]);
+}
+
 #[test]
 fn a_recorded_boundary_in_the_selected_account_is_ok() {
     assert!(matches!(

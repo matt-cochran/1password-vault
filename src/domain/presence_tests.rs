@@ -123,3 +123,45 @@ fn a_plan_skips_a_not_wanted_key() {
     let plan = plan::build(&fleet, "dev", Vec::new(), &[], &BTreeSet::new(), &|_| None);
     assert!(plan.rows.iter().all(|r| r.key != "SECRET"));
 }
+
+#[test]
+fn presence_of_parts_is_present_in_of_the_same_key() {
+    let k = key(None, &[("staging", "no staging account")]);
+    assert_eq!(
+        presence::presence_of(None, Some("no staging account"), "staging"),
+        presence::present_in(&k, "staging")
+    );
+}
+
+#[test]
+fn a_retired_key_is_wanted_nowhere() {
+    assert!(!presence::wanted(
+        None,
+        None,
+        crate::domain::model::Lifecycle::Retired,
+        "dev"
+    ));
+}
+
+#[test]
+fn a_retiring_key_without_a_list_is_still_wanted_everywhere() {
+    assert!(presence::wanted(
+        None,
+        None,
+        crate::domain::model::Lifecycle::Retiring,
+        "prod"
+    ));
+}
+
+#[test]
+fn the_environments_a_key_is_wanted_in_leave_out_its_except() {
+    let fleet = parse(&crate::config::testing::bounded(
+        "[environments.dev]\n[environments.staging]\n[environments.prod]\n\
+         [products.api.keys.K]\nkind = \"secret\"\nexcept = { staging = \"none there\" }\n",
+    ))
+    .unwrap();
+    assert_eq!(
+        fleet.products["api"].keys["K"].envs_wanted_in(&fleet),
+        ["dev", "prod"]
+    );
+}
