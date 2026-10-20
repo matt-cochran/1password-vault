@@ -29,6 +29,7 @@ pub mod contract;
 #[cfg(test)]
 #[path = "core_acceptance_tests.rs"]
 mod core_acceptance_tests;
+pub mod deliver_only;
 pub mod delivery;
 pub mod delivery_preview;
 pub mod doctor;
@@ -162,6 +163,7 @@ pub(crate) fn read_and_plan(
         rotate,
         prune_immutable,
         &ledgers,
+        false,
     )?;
     plan.tidy = read.changes;
     plan.tidy_error = read.tidy_error;
@@ -194,6 +196,7 @@ pub(crate) fn read_and_plan_versioned(
     ports: Option<&Ports<'_>>,
     rotate: &BTreeSet<(String, String)>,
     prune_immutable: &BTreeSet<(String, String)>,
+    retiring_prune: bool,
 ) -> Result<VersionedPlan, Error> {
     let read = tidy::read(fleet, env_name, r)?;
     let ledgers = placement_ledgers(fleet, env_name, target, ports, r);
@@ -206,6 +209,7 @@ pub(crate) fn read_and_plan_versioned(
         rotate,
         prune_immutable,
         &ledgers,
+        retiring_prune,
     )?;
     plan.tidy = read.changes;
     plan.tidy_error = read.tidy_error;
@@ -249,6 +253,9 @@ pub(crate) fn plan_id_of(
     let routes = |p: &str, k: &str| -> Option<String> {
         let t = fleet.environments.get(env_name)?.targets.get(target)?;
         let spec = fleet.products.get(p)?.keys.get(k)?;
+        if deliver_only::is_infrastructure(spec) {
+            return Some(crate::domain::provenance::SUPPLIED_ROUTE.to_string());
+        }
         if let Some(path) = &spec.file
             && matches!(t.config.channels().files, FileCapability::Native { .. })
         {
@@ -295,6 +302,7 @@ pub(crate) fn plan_item(
         rotate,
         prune_immutable,
         &[],
+        false,
     )
 }
 
@@ -329,6 +337,7 @@ pub(crate) fn plan_item_with(
     rotate: &BTreeSet<(String, String)>,
     prune_immutable: &BTreeSet<(String, String)>,
     ledgers: &[crate::domain::ledger::Ledger],
+    retiring_prune: bool,
 ) -> Result<(SyncPlan, Vec<StoreEntry>), Error> {
     let store: Option<&dyn Store> = ports.map(Ports::store);
     let mut on_target = match store {
@@ -388,7 +397,7 @@ pub(crate) fn plan_item_with(
                 .as_ref()
                 .map(|c| c as &plan::CurrentCheck<'_>)
                 .or(by_ledger.as_ref().map(|c| c as &plan::CurrentCheck<'_>)),
-            retiring_prune: false,
+            retiring_prune,
         },
     );
     let mut p = p;
@@ -425,6 +434,9 @@ pub(crate) fn plan_item_with(
             p.attested = attested;
         }
     }
+    if let (None, Some(t)) = (pinned, target) {
+        supplied_target_states(fleet, env_name, t, &mut p, &on_target, ledgers);
+    }
     if let Some(e) = failed.into_inner() {
         return Err(e);
     }
@@ -436,6 +448,57 @@ pub(crate) fn plan_item_with(
         }
     }
     Ok((p, on_target))
+}
+
+/// The target state of each name supplied at sync that this run has no value for (#206,
+/// `docs/design/deliver-only.md` §6.1), from the store's version alone: `as supplied` at
+/// the version its `s1` evidence line recorded, drifted (unknown, and in `plan.drift`) at
+/// another, `not recorded` when listed without an `s1` line. Absent stays absent.
+pub(crate) fn supplied_target_states(
+    fleet: &Fleet,
+    env_name: &str,
+    target: &str,
+    plan: &mut SyncPlan,
+    listed: &[StoreEntry],
+    ledgers: &[crate::domain::ledger::Ledger],
+) {
+    let Some(tc) = fleet
+        .environments
+        .get(env_name)
+        .and_then(|e| e.targets.get(target))
+    else {
+        return;
+    };
+    let mut drifted = Vec::new();
+    for row in plan
+        .rows
+        .iter_mut()
+        .filter(|r| r.state == KeyState::SuppliedAtSync)
+    {
+        if matches!(row.target, TargetState::Absent | TargetState::NotDelivered) {
+            continue;
+        }
+        let name = tc.config.env_name(&row.product, &row.key);
+        let Some(entry) = listed.iter().find(|e| e.name == name) else {
+            row.target = TargetState::Absent;
+            continue;
+        };
+        row.target = match ledgers.iter().find_map(|l| l.supplied(&name)) {
+            Some((version, _)) if entry.version.as_deref() == Some(version) => {
+                TargetState::AsSupplied
+            }
+            Some(_) => {
+                drifted.push(name);
+                TargetState::Unknown
+            }
+            None => TargetState::Unrecorded,
+        };
+    }
+    for name in drifted {
+        if !plan.drift.contains(&name) {
+            plan.drift.push(name);
+        }
+    }
 }
 
 /// Exact, constant-time compare of a stored value with the desired one (FR-31, SR-1).
@@ -889,6 +952,14 @@ pub(crate) struct JsonRow {
     /// not proven. Absent otherwise.
     #[serde(skip_serializing_if = "is_false")]
     attested: bool,
+    /// `supplied` for an infrastructure key whose value is supplied at sync (#206,
+    /// `docs/design/deliver-only.md` §6.1): the 8th value state. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value_state: Option<&'static str>,
+    /// True for an infrastructure key whose value is supplied at sync, never stored (#206).
+    /// Absent otherwise.
+    #[serde(skip_serializing_if = "is_false")]
+    supplied: bool,
 }
 
 /// Serialize a `false` boolean field only when true (`rotate`).
@@ -929,6 +1000,8 @@ impl JsonRow {
             shared_from: json_source(r),
             rotate: false,
             attested: false,
+            value_state: (r.state == KeyState::SuppliedAtSync).then_some("supplied"),
+            supplied: r.state == KeyState::SuppliedAtSync,
         }
     }
 }
@@ -1022,6 +1095,7 @@ fn json_state(s: &KeyState) -> &'static str {
         KeyState::Skipped => "skipped",
         KeyState::SourceBlocked => "source_blocked",
         KeyState::RulesPendingReview => "rules_pending_review",
+        KeyState::SuppliedAtSync => "supplied_at_sync",
     }
 }
 
@@ -1054,6 +1128,9 @@ fn json_target(kind: Kind, target: TargetState) -> Option<&'static str> {
         (_, TargetState::Absent) => Some("absent"),
         (_, TargetState::WouldChange) => Some("would_change"),
         (_, TargetState::Present) => Some("present"),
+        // #206 §6.1: a supplied name, judged by its version alone.
+        (_, TargetState::AsSupplied) => Some("as_supplied"),
+        (_, TargetState::Unrecorded) => Some("not_recorded"),
     }
 }
 
@@ -1098,6 +1175,7 @@ pub(crate) fn state_label(s: &KeyState) -> String {
         KeyState::Skipped => "skipped".into(),
         KeyState::SourceBlocked => "blocked by source".into(),
         KeyState::RulesPendingReview => "rules pending review".into(),
+        KeyState::SuppliedAtSync => "supplied at sync".into(),
     }
 }
 
@@ -1124,6 +1202,11 @@ pub(crate) fn target_word(r: &Row, held: bool, binding: Option<&PinnedRow>) -> &
     match (r.kind, r.target, &r.state) {
         // Read and checked here, never written to this target (FR-47, FR-48).
         (_, TargetState::NotDelivered, _) => "n/a",
+        // #206 §6.1: a name supplied at sync, judged by the store's version alone.
+        (_, TargetState::AsSupplied, _) => "as supplied",
+        (_, TargetState::Unrecorded, _) => "not recorded",
+        (_, TargetState::Absent, KeyState::SuppliedAtSync) => "absent",
+        (_, _, KeyState::SuppliedAtSync) => "drifted",
         // Config has a target state only where the target delivers it itself (FR-46).
         (Kind::Config, TargetState::Unknown, _) | (Kind::Config, _, KeyState::Skipped) => "n/a",
         (Kind::Config, TargetState::Absent, _) => "new",

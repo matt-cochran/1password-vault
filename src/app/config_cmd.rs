@@ -336,6 +336,91 @@ pub fn check(
     .into())
 }
 
+/// `config check --file <path>` on a file project (#178): the regenerated file at `file`
+/// must load, and the configuration it loads must equal the committed one: the project's
+/// configuration file `project`, or, when `file` is that same file (regenerated in place),
+/// its copy at git `HEAD`. Equal prints one line (exit 0); different prints a diff of the
+/// two texts and is `copies_differ` (exit 2). Names, ids and rules only, never a value.
+pub fn check_file_project(
+    project: &Path,
+    file: &Path,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let regenerated = fs::read_to_string(file).map_err(|e| unreadable_file(file, &e))?;
+    // Loads first: a file that is not a configuration is never printed as a diff (C1). A
+    // generator writes the contract only; its ids are the project's, beside the project file.
+    let mut head = config::parse_at(
+        &config::with_bindings(&regenerated, project)?,
+        config::Source::File(file),
+    )?;
+    let in_place = same_path(project, file);
+    let (committed, label) = if in_place {
+        (
+            committed_at_head(project, r)?,
+            format!("{} (HEAD)", project.display()),
+        )
+    } else {
+        (
+            fs::read_to_string(project).map_err(|e| unreadable_file(project, &e))?,
+            project.display().to_string(),
+        )
+    };
+    let base = config::parse_at(
+        &config::with_bindings(&committed, project)?,
+        config::Source::File(project),
+    )?;
+    // Where each was read from is wording only (FR-44), never a difference.
+    head.read_from = base.read_from.clone();
+    head.origin = base.origin;
+    if head == base {
+        return line(out, format!("{} is equivalent to {label}", file.display()));
+    }
+    let (a, b) = (
+        committed.replace("\r\n", "\n"),
+        regenerated.replace("\r\n", "\n"),
+    );
+    line(out, format!("--- {label}\n+++ {}", file.display()))?;
+    out.write_all(diff(&a, &b).as_bytes()).map_err(write_err)?;
+    Err(Cause::RegeneratedFileDiffers {
+        file: file.to_path_buf(),
+        committed: project.to_path_buf(),
+        in_place,
+    }
+    .into())
+}
+
+/// Whether `a` and `b` name the same file (canonical paths; the paths as given when either
+/// cannot be resolved).
+fn same_path(a: &Path, b: &Path) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// The text of `path` as committed at git `HEAD`: the committed side of a file regenerated
+/// in place. Not committed (or not in git) is `config_unreadable` for that path.
+fn committed_at_head(path: &Path, r: &dyn CommandRunner) -> Result<String, Error> {
+    use crate::runner::{Call, PROBE_TIMEOUT};
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
+    let dir = dir.unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    let spec = format!("HEAD:./{name}");
+    let dir_text = dir.to_str().unwrap_or(".");
+    let missing = || unreadable_file(path, &std::io::Error::from(std::io::ErrorKind::NotFound));
+    match r.probe(
+        &Call::new("git", &["-C", dir_text, "show", spec.as_str()]),
+        PROBE_TIMEOUT,
+    ) {
+        Ok(o) if o.status == 0 => String::from_utf8(o.stdout.to_vec()).map_err(|_| missing()),
+        _ => Err(missing()),
+    }
+}
+
 /// A line diff of `a` to `b`: `-` removed, `+` added, ` ` kept (longest common
 /// subsequence; configurations are small).
 pub fn diff(a: &str, b: &str) -> String {

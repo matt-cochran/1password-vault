@@ -15,6 +15,56 @@ pub fn harden() {
     windows();
 }
 
+/// Mark every descriptor above stdio close-on-exec, so a descriptor this process inherited
+/// without `FD_CLOEXEC` (from `op run`, or whoever started it) does not reach a program it
+/// starts. Nothing is closed: this process keeps every descriptor it uses, and stdin,
+/// stdout and stderr still pass. Linux: `close_range(3, ~0, CLOSE_RANGE_CLOEXEC)`, falling
+/// back to each entry of `/proc/self/fd` (kernels before 5.11); other Unix: each entry of
+/// `/dev/fd`. Best effort; never fails. Windows handles are not inherited unless marked.
+pub fn cloexec_inherited() {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: a plain syscall with integer arguments; it only sets flags.
+        let r = unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                3u32,
+                u32::MAX,
+                libc::CLOSE_RANGE_CLOEXEC,
+            )
+        };
+        if r == 0 {
+            return;
+        }
+        cloexec_listed("/proc/self/fd");
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    cloexec_listed("/dev/fd");
+}
+
+/// Set `FD_CLOEXEC` on each descriptor above 2 listed in `dir`.
+#[cfg(unix)]
+fn cloexec_listed(dir: &str) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let fds: Vec<i32> = entries
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse().ok())
+        .filter(|fd| *fd > 2)
+        .collect();
+    for fd in fds {
+        // SAFETY: fcntl on a descriptor number; one that was closed meanwhile (the
+        // listing's own) fails with EBADF, which is ignored.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags >= 0 {
+                libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+            }
+        }
+    }
+}
+
 /// Linux: non-dumpable and a zero soft core limit (hard untouched).
 #[cfg(target_os = "linux")]
 fn linux() {

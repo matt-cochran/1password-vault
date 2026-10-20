@@ -49,16 +49,18 @@ pub struct HealthFinding {
 pub const SAME_ACROSS: &str = "same_value_across_environments";
 pub const SAME_UNDER_TWO: &str = "same_value_under_two_keys";
 pub const PLACEHOLDER: &str = "placeholder_value";
+pub const LOW_ENTROPY: &str = "low_entropy";
 pub const WHITESPACE: &str = "whitespace_around_value";
 pub const LOCAL_ADDRESS: &str = "local_address_in_deployed_environment";
 pub const TEST_KEY: &str = "test_key_in_production";
 pub const LIVE_KEY: &str = "live_key_outside_production";
 
 /// The codes, in the order findings are reported.
-const ORDER: [&str; 7] = [
+const ORDER: [&str; 8] = [
     SAME_ACROSS,
     SAME_UNDER_TWO,
     PLACEHOLDER,
+    LOW_ENTROPY,
     WHITESPACE,
     LOCAL_ADDRESS,
     TEST_KEY,
@@ -230,14 +232,35 @@ fn per_value(env: &EnvValues<'_>, f: &ItemField, spec: &KeySpec, out: &mut Vec<H
     let value = f.value.expose();
     let name = label(&f.section, &f.label);
     let here = || vec![env.name.to_string()];
-    if spec.kind == Kind::Secret && is_placeholder(value) {
+    // A placeholder is a strong, fixed signal for any kind: a config key left as
+    // `changeme` is as wrong as a secret left that way.
+    if is_placeholder(value) {
         out.push(finding(
             PLACEHOLDER,
             here(),
             f,
             None,
             format!(
-                "{name} in {} looks like a placeholder, not a real secret; set the real value",
+                "{name} in {} looks like a placeholder, not a real value; set the real value",
+                env.name
+            ),
+        ));
+    }
+    // A secret that is not a placeholder, long enough to judge, and of very low entropy for
+    // its length is advisory ([`LOW_ENTROPY`]); it never blocks a gate.
+    if spec.kind == Kind::Secret
+        && !is_placeholder(value)
+        && value.chars().count() >= LOW_ENTROPY_MIN_CHARS
+        && entropy_bits_per_char(value) < LOW_ENTROPY_THRESHOLD_BITS_PER_CHAR
+    {
+        out.push(finding(
+            LOW_ENTROPY,
+            here(),
+            f,
+            None,
+            format!(
+                "{name} in {} is a very weak secret (low entropy for its length); set a \
+                 longer, mixed value",
                 env.name
             ),
         ));
@@ -304,6 +327,38 @@ fn per_value(env: &EnvValues<'_>, f: &ItemField, spec: &KeySpec, out: &mut Vec<H
             ),
         ));
     }
+}
+
+/// The fewest characters a secret must have before the low-entropy check judges it. Below
+/// this a value is too short for its character mix to say anything.
+const LOW_ENTROPY_MIN_CHARS: usize = 8;
+
+/// Shannon entropy, in bits per character, below which a secret is "very low entropy for
+/// its length" ([`LOW_ENTROPY`]). Fixed in code, never configurable (review L4): a generated
+/// secret sits near 4–6 bits per character, while a repeated or near-repeated run sits far
+/// below this.
+const LOW_ENTROPY_THRESHOLD_BITS_PER_CHAR: f64 = 2.0;
+
+/// Shannon entropy of `value` in bits per character, `-Σ p·log2 p` over its characters.
+/// Reads the value in place: nothing is copied, formatted or retained.
+fn entropy_bits_per_char(value: &str) -> f64 {
+    let mut counts: BTreeMap<char, usize> = BTreeMap::new();
+    let mut n = 0usize;
+    for c in value.chars() {
+        *counts.entry(c).or_insert(0) += 1;
+        n += 1;
+    }
+    if n == 0 {
+        return 0.0;
+    }
+    let total = n as f64;
+    -counts
+        .values()
+        .map(|&count| {
+            let p = count as f64 / total;
+            p * p.log2()
+        })
+        .sum::<f64>()
 }
 
 /// A known placeholder: a stock word, a run of x, `<…>`, or `your…here`.

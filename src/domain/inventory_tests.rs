@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use super::{CellInputs, ReceiptUse, ReceiptView, build};
+use super::{CellInputs, DeliveryState, ReceiptUse, ReceiptView, attach_next, build};
 use crate::config;
 use crate::domain::Fleet;
 use crate::domain::capability::Capability;
@@ -74,7 +74,12 @@ const GOLDEN: &str = r#"{
         "prod": "present"
       },
       "lifecycle": "retiring",
-      "expires": "2030-01-01"
+      "expires": "2030-01-01",
+      "next": {
+        "kind": "enter_value",
+        "actor": "person",
+        "command": "opv set api/DATABASE_URL --env prod"
+      }
     },
     {
       "product": "api",
@@ -86,7 +91,12 @@ const GOLDEN: &str = r#"{
         "prod": "present"
       },
       "lifecycle": "active",
-      "expires": null
+      "expires": null,
+      "next": {
+        "kind": "enter_value",
+        "actor": "person",
+        "command": "opv set api/STRIPE_KEY --env prod"
+      }
     }
   ],
   "cells": [
@@ -290,6 +300,281 @@ fn a_none_capability_vault_without_a_receipt_is_unreadable_never_absent() {
     assert!(matches!(cell.state, ValueState::Unreadable { .. }));
 }
 
+/// The JSON of the one key row `product`/`key` of `fleet`'s inventory, built with no
+/// live cell: the row's declared attributes are the outcome under test.
+fn key_row(fleet: &Fleet, product: &str, key: &str) -> serde_json::Value {
+    let document = build(fleet, &CellInputs::default(), None);
+    let row = document
+        .keys
+        .iter()
+        .find(|k| k.product == product && k.key == key)
+        .expect("the key is declared");
+    serde_json::to_value(row).expect("the row serializes")
+}
+
+/// One `dev` environment with the boundary `core` and product `api`, whose single secret
+/// key `API_KEY` is declared for `dev` with the extra `attributes` appended.
+fn fleet_with_key_attributes(attributes: &str) -> Fleet {
+    config::parse(&format!(
+        r#"[environments.dev]
+boundaries.core = {{ vault_id = "vdev", item_id = "idev" }}
+
+[products.api]
+boundary = "core"
+
+[products.api.keys.API_KEY]
+kind = "secret"
+environments = ["dev"]
+{attributes}
+"#
+    ))
+    .expect("the fleet loads")
+}
+
+/// A key declared `immutable` reports that attribute.
+#[test]
+fn an_immutable_key_reports_immutable() {
+    let fleet = fleet_with_key_attributes("immutable = true");
+    assert_eq!(key_row(&fleet, "api", "API_KEY")["immutable"], true);
+}
+
+/// A key declared `allow_same_value` reports that attribute.
+#[test]
+fn an_allow_same_value_key_reports_allow_same_value() {
+    let fleet = fleet_with_key_attributes("allow_same_value = true");
+    assert_eq!(key_row(&fleet, "api", "API_KEY")["allow_same_value"], true);
+}
+
+/// The rule names a key declares are reported; a rule's parameters never are.
+#[test]
+fn a_key_reports_the_names_of_its_rules_not_their_parameters() {
+    let fleet = fleet_with_key_attributes(r#"rules = { prefix = "sk_test_" }"#);
+    assert_eq!(
+        key_row(&fleet, "api", "API_KEY")["rules"],
+        serde_json::json!(["prefix"])
+    );
+}
+
+/// The guidance a key declares is reported.
+#[test]
+fn a_key_reports_its_guidance() {
+    let fleet = fleet_with_key_attributes(r#"guidance = "Stripe dashboard""#);
+    assert_eq!(
+        key_row(&fleet, "api", "API_KEY")["guidance"],
+        "Stripe dashboard"
+    );
+}
+
+/// The process roles a key declares are reported.
+#[test]
+fn a_key_reports_its_roles() {
+    let fleet = fleet_with_key_attributes(r#"roles = ["serve", "migrate"]"#);
+    assert_eq!(
+        key_row(&fleet, "api", "API_KEY")["roles"],
+        serde_json::json!(["serve", "migrate"])
+    );
+}
+
+/// A local file key reports the relative path it is delivered at.
+#[test]
+fn a_local_file_key_reports_its_path() {
+    let fleet = fleet_with_key_attributes(r#"file = "tls/private-key""#);
+    assert_eq!(key_row(&fleet, "api", "API_KEY")["file"], "tls/private-key");
+}
+
+/// One `dev` environment with product `api`, its only key `API_KEY` carrying `state`.
+fn inventory_with_cell(state: ValueState) -> (Fleet, super::Inventory) {
+    let fleet = fleet_with_key_attributes("");
+    let cells = CellInputs {
+        states: BTreeMap::from([(at("api", "API_KEY", "dev"), state)]),
+        capabilities: BTreeMap::from([("vdev".to_string(), Capability::Write)]),
+        ..CellInputs::default()
+    };
+    let inventory = build(&fleet, &cells, None);
+    (fleet, inventory)
+}
+
+/// The `next` value of the `product`/`key` row in `inventory`.
+fn row_next(inventory: &super::Inventory, product: &str, key: &str) -> serde_json::Value {
+    let row = inventory
+        .keys
+        .iter()
+        .find(|k| k.product == product && k.key == key)
+        .expect("the key is declared");
+    serde_json::to_value(row).expect("the row serializes")["next"].clone()
+}
+
+/// A `set` key with `delivery` in `dev`, as the key row reports its next step.
+fn next_with_delivery(delivery: DeliveryState) -> serde_json::Value {
+    let (fleet, mut inventory) = inventory_with_cell(ValueState::Set);
+    inventory.keys[0]
+        .delivery
+        .insert("dev/web".into(), delivery);
+    attach_next(&fleet, &mut inventory);
+    row_next(&inventory, "api", "API_KEY")
+}
+
+#[test]
+fn an_absent_key_row_carries_the_persons_set_command() {
+    let (_, inventory) = inventory_with_cell(ValueState::Absent);
+    assert_eq!(
+        row_next(&inventory, "api", "API_KEY"),
+        serde_json::json!({
+            "kind": "enter_value",
+            "actor": "person",
+            "command": "opv set api/API_KEY --env dev"
+        })
+    );
+}
+
+#[test]
+fn an_empty_key_row_carries_the_persons_set_command() {
+    let (_, inventory) = inventory_with_cell(ValueState::Empty);
+    assert_eq!(
+        row_next(&inventory, "api", "API_KEY"),
+        serde_json::json!({
+            "kind": "enter_value",
+            "actor": "person",
+            "command": "opv set api/API_KEY --env dev"
+        })
+    );
+}
+
+#[test]
+fn a_placeholder_key_row_carries_the_persons_set_command() {
+    let (_, inventory) = inventory_with_cell(ValueState::Placeholder);
+    assert_eq!(
+        row_next(&inventory, "api", "API_KEY"),
+        serde_json::json!({
+            "kind": "enter_value",
+            "actor": "person",
+            "command": "opv set api/API_KEY --env dev"
+        })
+    );
+}
+
+#[test]
+fn a_malformed_key_row_carries_the_persons_set_command() {
+    let (_, inventory) = inventory_with_cell(ValueState::Malformed {
+        rule: "prefix".into(),
+    });
+    assert_eq!(
+        row_next(&inventory, "api", "API_KEY"),
+        serde_json::json!({
+            "kind": "enter_value",
+            "actor": "person",
+            "command": "opv set api/API_KEY --env dev"
+        })
+    );
+}
+
+#[test]
+fn a_set_key_row_without_delivery_carries_no_next_step() {
+    let (_, inventory) = inventory_with_cell(ValueState::Set);
+    assert_eq!(
+        row_next(&inventory, "api", "API_KEY"),
+        serde_json::Value::Null
+    );
+}
+
+#[test]
+fn a_delivered_key_row_carries_no_next_step() {
+    assert_eq!(
+        next_with_delivery(DeliveryState::Delivered),
+        serde_json::Value::Null
+    );
+}
+
+#[test]
+fn a_not_delivered_key_row_carries_the_sync_command() {
+    assert_eq!(
+        next_with_delivery(DeliveryState::NotDelivered),
+        serde_json::json!({"kind": "run", "actor": "ci", "command": "opv sync dev"})
+    );
+}
+
+#[test]
+fn an_unreadable_key_row_with_a_not_delivered_target_carries_the_sync_command() {
+    let (fleet, mut inventory) = inventory_with_cell(ValueState::Unreadable {
+        cause: UnreadableCause::NoAccess,
+    });
+    inventory.keys[0]
+        .delivery
+        .insert("dev/web".into(), DeliveryState::NotDelivered);
+    attach_next(&fleet, &mut inventory);
+    assert_eq!(
+        row_next(&inventory, "api", "API_KEY"),
+        serde_json::json!({"kind": "run", "actor": "ci", "command": "opv sync dev"})
+    );
+}
+
+#[test]
+fn a_stale_key_row_carries_the_sync_command() {
+    assert_eq!(
+        next_with_delivery(DeliveryState::Stale),
+        serde_json::json!({"kind": "run", "actor": "ci", "command": "opv sync dev"})
+    );
+}
+
+#[test]
+fn a_key_rows_most_urgent_action_is_its_value_before_its_sync() {
+    let fleet = fleet();
+    let cells = CellInputs {
+        states: BTreeMap::from([
+            (at("api", "STRIPE_KEY", "dev"), ValueState::Absent),
+            (at("api", "STRIPE_KEY", "prod"), ValueState::Set),
+        ]),
+        capabilities: BTreeMap::from([
+            ("vdev".to_string(), Capability::Write),
+            ("vprod".to_string(), Capability::Write),
+        ]),
+        ..CellInputs::default()
+    };
+    let mut inventory = build(&fleet, &cells, None);
+    inventory
+        .keys
+        .iter_mut()
+        .find(|k| k.product == "api" && k.key == "STRIPE_KEY")
+        .expect("the key is declared")
+        .delivery
+        .insert("prod/fly".into(), DeliveryState::Stale);
+    attach_next(&fleet, &mut inventory);
+    assert_eq!(
+        row_next(&inventory, "api", "STRIPE_KEY"),
+        serde_json::json!({
+            "kind": "enter_value",
+            "actor": "person",
+            "command": "opv set api/STRIPE_KEY --env dev"
+        })
+    );
+}
+
+/// A key reports the name each target that delivers it renders for it.
+#[test]
+fn a_key_reports_its_delivered_name_on_each_target() {
+    let fleet = config::parse(
+        r#"[environments.dev]
+boundaries.core = { vault_id = "vdev", item_id = "idev" }
+
+[environments.dev.targets.web]
+fly.app = "web-dev"
+fly.secret_name = "SVC_{KEY}"
+
+[products.api]
+boundary = "core"
+
+[products.api.keys.API_KEY]
+kind = "secret"
+environments = ["dev"]
+"#,
+    )
+    .expect("the fleet loads");
+    assert_eq!(
+        key_row(&fleet, "api", "API_KEY")["targets"],
+        serde_json::json!({"dev/web": "SVC_API_KEY"})
+    );
+}
+
 /// A key whose explicit `environments` list leaves an environment out (no `except`) is not
 /// declared there: it has no cell to read, rank or fill.
 #[test]
@@ -320,4 +605,198 @@ kind = "secret"
             .iter()
             .any(|c| c.key == "OTEL" && c.env == "dev")
     );
+}
+
+/// #179: `fleet()`'s `DATABASE_URL` is `retiring`; `dev` has no field of it.
+#[test]
+fn a_retiring_key_without_a_field_has_no_cell_to_fill() {
+    let cells = CellInputs {
+        states: BTreeMap::from([(at("api", "DATABASE_URL", "dev"), ValueState::Absent)]),
+        capabilities: BTreeMap::from([("vdev".to_string(), Capability::Write)]),
+        ..CellInputs::default()
+    };
+    let inventory = build(&fleet(), &cells, None);
+    assert!(
+        !inventory
+            .cells
+            .iter()
+            .any(|c| c.key == "DATABASE_URL" && c.env == "dev")
+    );
+}
+
+/// #179: a `retired` key's fields are archived; nothing is left to hold or fill.
+#[test]
+fn a_retired_key_has_no_cell() {
+    let fleet = config::parse(
+        r#"[environments.dev]
+boundaries.core = { vault_id = "vdev", item_id = "idev" }
+
+[products.api]
+boundary = "core"
+
+[products.api.keys.KEEP]
+kind = "secret"
+
+[products.api.keys.OLD]
+kind = "secret"
+lifecycle = "retired"
+"#,
+    )
+    .expect("the fleet loads");
+    let inventory = build(&fleet, &CellInputs::default(), None);
+    assert!(!inventory.cells.iter().any(|c| c.key == "OLD"));
+}
+
+/// Delivery state per key per target (#174): one placement's evidence line for `API_KEY`,
+/// bound to `core/API_KEY` in item `icore` at store version `3`, recorded when `icore` was at
+/// version `5`.
+mod delivery {
+    use std::collections::BTreeMap;
+
+    use crate::domain::delivery::{Evidence, Source, SuppliedMark};
+    use crate::domain::inventory::{
+        DeliveryState, EvidenceUnreadable, PlacementEvidence, delivery_state,
+    };
+
+    fn source() -> Source {
+        Source {
+            item_id: "icore".into(),
+            field: "core/API_KEY".into(),
+        }
+    }
+
+    fn line(attested: bool, supplied: bool) -> Evidence {
+        Evidence {
+            name: "API_KEY".into(),
+            store_version: "3".into(),
+            fingerprint: "f".into(),
+            source: source(),
+            attested_at: attested.then(|| "2026-10-18T00:00:00Z".into()),
+            supplied: supplied.then(|| SuppliedMark {
+                serial: 1,
+                at: "2026-10-18T00:00:00Z".into(),
+            }),
+        }
+    }
+
+    fn evidence(e: Evidence) -> PlacementEvidence {
+        PlacementEvidence::new(&[e], Some("v1|icore|5\n"))
+    }
+
+    fn versions(current: u64) -> BTreeMap<String, u64> {
+        BTreeMap::from([("icore".to_string(), current)])
+    }
+
+    fn state_of(e: &PlacementEvidence, current: u64) -> DeliveryState {
+        delivery_state(
+            Ok(Some(e)),
+            "API_KEY",
+            Some(&source()),
+            &versions(current),
+            None,
+        )
+    }
+
+    #[test]
+    fn a_v1_line_is_delivered() {
+        assert_eq!(
+            state_of(&evidence(line(false, false)), 5),
+            DeliveryState::Delivered
+        );
+    }
+
+    #[test]
+    fn an_a1_line_is_attested() {
+        assert_eq!(
+            state_of(&evidence(line(true, false)), 5),
+            DeliveryState::Attested
+        );
+    }
+
+    #[test]
+    fn a_supplied_line_is_supplied() {
+        assert_eq!(
+            state_of(&evidence(line(false, true)), 5),
+            DeliveryState::Supplied
+        );
+    }
+
+    #[test]
+    fn a_name_without_a_line_is_not_delivered() {
+        assert_eq!(
+            state_of(&PlacementEvidence::default(), 5),
+            DeliveryState::NotDelivered
+        );
+    }
+
+    #[test]
+    fn a_placement_without_a_delivery_item_is_not_delivered() {
+        let state = delivery_state(Ok(None), "API_KEY", Some(&source()), &versions(5), None);
+        assert_eq!(state, DeliveryState::NotDelivered);
+    }
+
+    /// A line in a format this opv does not read (a later tag) is never counted as proven:
+    /// `decode_evidence` drops it, so the name has no line.
+    #[test]
+    fn an_unknown_evidence_tag_is_not_delivered() {
+        let lines: Vec<Evidence> =
+            crate::domain::delivery::decode_evidence("API_KEY", "z9|3|f|icore|core/API_KEY")
+                .into_iter()
+                .collect();
+        let e = PlacementEvidence::new(&lines, None);
+        assert_eq!(state_of(&e, 5), DeliveryState::NotDelivered);
+    }
+
+    #[test]
+    fn a_line_recorded_before_the_source_item_changed_is_stale() {
+        assert_eq!(
+            state_of(&evidence(line(false, false)), 6),
+            DeliveryState::Stale
+        );
+    }
+
+    #[test]
+    fn a_line_for_another_source_field_is_stale() {
+        let moved = Source {
+            item_id: "icore".into(),
+            field: "core/OTHER".into(),
+        };
+        let e = evidence(line(false, false));
+        let state = delivery_state(Ok(Some(&e)), "API_KEY", Some(&moved), &versions(5), None);
+        assert_eq!(state, DeliveryState::Stale);
+    }
+
+    #[test]
+    fn a_line_at_an_older_store_version_than_listed_is_stale() {
+        let e = evidence(line(false, false));
+        let state = delivery_state(
+            Ok(Some(&e)),
+            "API_KEY",
+            Some(&source()),
+            &versions(5),
+            Some("4"),
+        );
+        assert_eq!(state, DeliveryState::Stale);
+    }
+
+    #[test]
+    fn an_unreadable_delivery_item_is_unreadable() {
+        let e = EvidenceUnreadable::new();
+        let state = delivery_state(Err(&e), "API_KEY", Some(&source()), &versions(5), None);
+        assert_eq!(state, DeliveryState::Unreadable);
+    }
+
+    /// A source item this session could not read has no current version: not judged stale.
+    #[test]
+    fn an_unknown_source_version_is_not_judged_stale() {
+        let e = evidence(line(false, false));
+        let state = delivery_state(
+            Ok(Some(&e)),
+            "API_KEY",
+            Some(&source()),
+            &BTreeMap::new(),
+            None,
+        );
+        assert_eq!(state, DeliveryState::Delivered);
+    }
 }

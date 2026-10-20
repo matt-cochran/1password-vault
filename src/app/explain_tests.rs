@@ -612,3 +612,129 @@ kind = "secret"
     let text = explain_text(&f, &Asked::Key("api/TOKEN"), Some("dev"), "myapp");
     assert_eq!(row(&text, "held in"), "dev, prod");
 }
+
+// --- #206 §6.4: an infrastructure key is supplied at sync, never stored ---------------------
+
+/// The serial and time the supplied line records.
+const SUPPLIED_LINE: &str = "s1|v7|S7MARKERFINGERPRINT|api/DATABASE_URL|4182|2026-10-01T12:00:00Z";
+
+/// A `FakeOp` holding `api`'s delivery item on `web`, whose evidence records a supplied
+/// `DATABASE_URL`, and the ID it was stored under.
+fn op_with_supplied_line() -> (FakeOp, String) {
+    let op = FakeOp::default();
+    let id = op.insert(
+        "vshr0000000000000000000002",
+        serde_json::json!({
+            "title": "opv · delivery · api · web",
+            "category": "SECURE_NOTE",
+            "fields": [{"id": "e1", "type": "STRING", "label": "DATABASE_URL", "value": SUPPLIED_LINE}],
+        }),
+    );
+    (op, id)
+}
+
+/// prod with a Fly target `web` delivering `api`'s infrastructure key `DATABASE_URL`, its
+/// delivery item recorded as `item_id`.
+fn infrastructure_fleet(item_id: &str) -> Fleet {
+    config::parse(&format!(
+        "[environments.prod]\n\
+         boundaries.api = {{ vault_id = \"vshr0000000000000000000002\", item_id = \"iprd\" }}\n\
+         [environments.prod.targets.web]\n\
+         fly.app = \"web-prod\"\n\
+         fly.secret_name = \"{{KEY}}\"\n\
+         state_vault_id = \"vshr0000000000000000000002\"\n\
+         delivery_items = {{ api = \"{item_id}\" }}\n\
+         [products.api.keys.DATABASE_URL]\n\
+         kind = \"secret\"\n\
+         source = \"infrastructure\"\n\
+         environments = [\"prod\"]\n\
+         rules = {{ regex = \"postgres(ql)?://.+\" }}\n"
+    ))
+    .unwrap()
+}
+
+fn infrastructure_text() -> String {
+    let (op, id) = op_with_supplied_line();
+    explain_text_with(
+        &op,
+        &infrastructure_fleet(&id),
+        &Asked::Key("api/DATABASE_URL"),
+        Some("prod"),
+        "myproj",
+    )
+}
+
+fn infrastructure_json() -> Value {
+    let (op, id) = op_with_supplied_line();
+    explain_json_with(
+        &op,
+        &infrastructure_fleet(&id),
+        &Asked::Key("api/DATABASE_URL"),
+        Some("prod"),
+        "myproj",
+    )
+}
+
+#[test]
+fn an_infrastructure_key_is_supplied_at_sync_and_never_stored() {
+    assert_eq!(
+        row(&infrastructure_text(), "source"),
+        "supplied at sync; never stored in 1Password"
+    );
+}
+
+#[test]
+fn an_infrastructure_key_names_no_1password_reference() {
+    assert!(!infrastructure_text().contains("op://"));
+}
+
+#[test]
+fn an_infrastructure_key_offers_no_open_command() {
+    assert!(!infrastructure_text().contains("opv open"));
+}
+
+#[test]
+fn an_infrastructure_key_names_its_recorded_serial_and_time() {
+    assert!(
+        delivered_lines(&infrastructure_text())[0]
+            .ends_with(", serial 4182, recorded 2026-10-01T12:00:00Z")
+    );
+}
+
+#[test]
+fn an_infrastructure_key_text_never_shows_its_fingerprint() {
+    assert!(!infrastructure_text().contains("S7MARKER"));
+}
+
+#[test]
+fn an_infrastructure_key_json_carries_the_recorded_serial() {
+    assert_eq!(infrastructure_json()["delivered_to"][0]["serial"], 4182);
+}
+
+#[test]
+fn an_infrastructure_key_json_says_it_is_supplied_at_sync() {
+    assert_eq!(infrastructure_json()["supplied_at_sync"], true);
+}
+
+#[test]
+fn an_infrastructure_key_json_names_no_boundary() {
+    assert!(infrastructure_json()["boundary"].is_null());
+}
+
+#[test]
+fn an_infrastructure_key_json_never_shows_its_fingerprint() {
+    assert!(!infrastructure_json().to_string().contains("S7MARKER"));
+}
+
+#[test]
+fn a_stored_key_json_carries_no_supplied_at_sync() {
+    let (op, id) = op_with_delivery_item("not a real value");
+    let doc = explain_json_with(
+        &op,
+        &fleet_with_delivery_item(&id),
+        &Asked::Key("allumata/OPENAI_API_KEY"),
+        Some("prod"),
+        "myproj",
+    );
+    assert!(doc.get("supplied_at_sync").is_none());
+}

@@ -32,8 +32,8 @@ impl From<Cause> for Error {
 /// The invocation an error renders its steps against: the process's own command line (one
 /// place, until every entry point passes its own).
 pub fn invocation() -> Invocation {
-    if let Some(outer) = OUTER_INVOCATION.get() {
-        return outer.clone();
+    if let Some(outer) = outer_invocation() {
+        return outer;
     }
     Invocation::from_cli(&std::env::args().collect::<Vec<_>>())
 }
@@ -41,11 +41,34 @@ pub fn invocation() -> Invocation {
 /// The person's `opv run` an internal step (`local-delivery`, `remote-send`,
 /// `remote-receive`) serves, set once by that step (design §6.1, X25): its errors render
 /// their steps against it, never against the hidden command itself.
+#[cfg(not(test))]
 static OUTER_INVOCATION: std::sync::OnceLock<Invocation> = std::sync::OnceLock::new();
+
+// A lib test runs on its own thread in a shared process: a delivery test's outer run must
+// not leak into the next test's rendered steps.
+#[cfg(test)]
+thread_local! {
+    static OUTER_INVOCATION: std::cell::OnceCell<Invocation> = const { std::cell::OnceCell::new() };
+}
+
+#[cfg(not(test))]
+fn outer_invocation() -> Option<Invocation> {
+    OUTER_INVOCATION.get().cloned()
+}
+
+#[cfg(test)]
+fn outer_invocation() -> Option<Invocation> {
+    OUTER_INVOCATION.with(|outer| outer.get().cloned())
+}
 
 /// Set the invocation an internal step's errors render against (see [`invocation`]).
 pub fn set_outer_invocation(inv: Invocation) {
+    #[cfg(not(test))]
     let _ = OUTER_INVOCATION.set(inv);
+    #[cfg(test)]
+    OUTER_INVOCATION.with(|outer| {
+        let _ = outer.set(inv);
+    });
 }
 
 impl Error {

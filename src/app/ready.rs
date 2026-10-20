@@ -121,6 +121,9 @@ pub struct Inputs<'a> {
     /// Settings health (#92), computed by the caller from the values it read: non-blocking
     /// findings after the readiness ones.
     pub health: Vec<crate::domain::health::HealthFinding>,
+    /// Unfinished retirements (#179, [`super::retire::findings`]): non-blocking findings
+    /// after each row's own.
+    pub retirement: Vec<Finding>,
 }
 
 /// `config` of the receipt: where the configuration was read from.
@@ -270,7 +273,7 @@ pub struct Receipt {
 /// `receipt_id`, which binds the receipt to `(config.source, account, matrix, findings)`
 /// and holds no value.
 pub fn receipt(inputs: &Inputs<'_>, opv_version: &str) -> Receipt {
-    receipt_with(inputs, opv_version, "", BTreeMap::new(), None)
+    receipt_with(inputs, opv_version, "", BTreeMap::new(), None, &[])
 }
 
 /// [`receipt`] with the clock, item versions and git revision the `--save` receipt records
@@ -283,6 +286,7 @@ fn receipt_with(
     generated_at: &str,
     item_versions: BTreeMap<String, u64>,
     revision: Option<String>,
+    gaps: &[(String, String, String)],
 ) -> Receipt {
     let config = ConfigRef {
         source: inputs.config_source.clone(),
@@ -293,7 +297,11 @@ fn receipt_with(
     });
     let matrix = build_matrix(inputs);
     let targets = build_targets(inputs);
-    let findings = build_findings(inputs, crate::host::Host::detect().agent_mode().is_some());
+    let findings = build_findings(
+        inputs,
+        gaps,
+        crate::host::Host::detect().agent_mode().is_some(),
+    );
     let next = findings
         .iter()
         .find(|f| f.blocking)
@@ -661,7 +669,11 @@ fn row_findings(
 /// then each row's own finding. A `SourceBlocked` row produces none (its source's does).
 /// `agent` is true on assistant surfaces (MCP or a marker): cross-tier health warnings are
 /// hidden there, while a person at a terminal and CI still see them.
-fn build_findings(inputs: &Inputs<'_>, agent: bool) -> Vec<Finding> {
+fn build_findings(
+    inputs: &Inputs<'_>,
+    gaps: &[(String, String, String)],
+    agent: bool,
+) -> Vec<Finding> {
     let mut out = Vec::new();
     let selected = inputs
         .account
@@ -778,6 +790,7 @@ fn build_findings(inputs: &Inputs<'_>, agent: bool) -> Vec<Finding> {
         let Ok(rows) = &env.rows else { continue };
         row_findings(&mut out, inputs, env, None, rows);
     }
+    out.extend(inputs.retirement.iter().cloned());
     // Settings health (#92): likely-wrong values, never blocking. The scope is the first
     // environment named (in configured order), where `opv open` takes the person to fix it.
     // Cross-tier warnings (the same value across environments, or under two keys) are for a
@@ -813,7 +826,37 @@ fn build_findings(inputs: &Inputs<'_>, agent: bool) -> Vec<Finding> {
         debug_assert!(!finding.blocking, "a health finding never blocks");
         out.push(finding);
     }
+    // #179: a key whose explicit `environments` list leaves a declared environment out
+    // with no `except`. Advisory: the configuration loads and readiness never fails on one;
+    // the person adds the environment or declares an `except`. One finding per
+    // (product, key, environment), in the caller's deterministic order.
+    for (product, key, env) in gaps {
+        out.push(environment_gap_finding(product, key, env));
+    }
     out
+}
+
+/// The `environment_gap` finding (#179): a declared environment an explicit `environments`
+/// list leaves out with no `except`. Non-blocking; the step proposes adding the environment
+/// to the key (`opv propose key <product/KEY> --env <env>`), or the person declares an
+/// `except` with a reason instead. Names and codes only, never a value.
+fn environment_gap_finding(product: &str, key: &str, env: &str) -> Finding {
+    Finding {
+        code: "environment_gap".into(),
+        scope: Scope {
+            environment: Some(env.to_string()),
+            product: Some(product.to_string()),
+            key: Some(key.to_string()),
+            ..Scope::default()
+        },
+        blocking: false,
+        actor: "owner".into(),
+        effect: "writes_config".into(),
+        prerequisite: format!("opv propose key {} --env {env}", key_label(product, key)),
+        verify: VERIFY.into(),
+        message: None,
+        act: None,
+    }
 }
 
 /// Render `r` for a person: the counts line, the product × environment grid, the findings
@@ -1251,11 +1294,20 @@ pub fn run_at(
     {
         return Err(cause.into());
     }
+    let retirement = super::retire::findings_scoped(fleet, &envs, only);
     let revision = if save.is_some() {
         git_revision(r)
     } else {
         None
     };
+    // #179: a key with an explicit `environments` list that leaves a declared environment
+    // out without an `except`. Sorted by (product, key, environment) for a deterministic
+    // receipt; scoped by `only` when the caller named one environment.
+    let mut gaps = crate::domain::presence::gaps(fleet);
+    if let Some(o) = only {
+        gaps.retain(|(_, _, env)| env == o);
+    }
+    gaps.sort();
     let doc = receipt_with(
         &Inputs {
             config_source: config_source.map(str::to_string),
@@ -1263,6 +1315,7 @@ pub fn run_at(
             envs,
             personal,
             health,
+            retirement,
         },
         env!("CARGO_PKG_VERSION"),
         if save.is_some() { generated_at } else { "" },
@@ -1272,6 +1325,7 @@ pub fn run_at(
             BTreeMap::new()
         },
         revision,
+        &gaps,
     );
     // The receipt is plain data: failing to serialize it is opv's own bug.
     let bug = |_| {
@@ -1466,9 +1520,20 @@ pub(crate) fn gate_keys(
             KeyState::RuleFailed("nonempty", _) => Some("empty"),
             KeyState::RuleFailed(..) | KeyState::WrongKind => Some("malformed"),
             KeyState::SourceBlocked => None,
+            // #206 §6.4: supplied at sync, never stored: no 1Password value to judge, but
+            // every target of the tier must hold it as supplied.
+            KeyState::SuppliedAtSync => match row.target {
+                TargetState::AsSupplied | TargetState::NotDelivered => None,
+                TargetState::Unknown => Some("supplied_drifted"),
+                _ => Some("supplied_not_delivered"),
+            },
         };
         if let Some(reason) = reason {
             out.push((row.product.clone(), row.key.clone(), reason));
+            continue;
+        }
+        // A supplied name has no source item whose version could be newer (#206).
+        if row.state == KeyState::SuppliedAtSync {
             continue;
         }
         let source = fleet

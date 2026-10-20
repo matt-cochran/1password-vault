@@ -237,7 +237,7 @@ impl Snapshot {
                         immutable: k.immutable,
                         from: k.from.clone(),
                         guidance: k.guidance.clone(),
-                        environments: k.envs_in(fleet),
+                        environments: k.envs_wanted_in(fleet),
                     })
                     .collect(),
             })
@@ -317,6 +317,7 @@ impl Snapshot {
                 ValueState::Malformed { rule } => ("failing_rule", Some(rule)),
                 ValueState::Unreadable { .. } => ("unreadable", None),
                 ValueState::NotWanted { .. } => ("skipped", None),
+                ValueState::Supplied => ("supplied_at_sync", None),
             };
             self.cells.insert(
                 (c.env, c.product, c.key),

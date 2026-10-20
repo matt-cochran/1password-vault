@@ -549,3 +549,20 @@ fn recording_over_a_line_written_since_the_plan_is_refused_as_changed() {
         "{wrote:?}"
     );
 }
+
+/// #206 §4.3: an infrastructure key is never attested; there is no 1Password value to
+/// vouch for.
+#[test]
+fn an_infrastructure_key_is_refused_as_not_stored() {
+    let (w, mut fleet) = held_on_fly();
+    let token = fleet
+        .products
+        .get_mut("api")
+        .unwrap()
+        .keys
+        .get_mut("TOKEN")
+        .unwrap();
+    token.value_source = Some(crate::domain::ValueSource::Infrastructure);
+    let e = propose(&w, &fleet, "api/TOKEN").unwrap_err();
+    assert_eq!(reason(&e), Some(AttestRefusal::NotStored));
+}

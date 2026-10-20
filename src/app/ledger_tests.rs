@@ -72,6 +72,7 @@ fn record(op: &FakeOp, fleet: &Fleet, version: &str) {
         &listed(version),
         &source_versions,
         "plan",
+        None,
         op,
     )
     .unwrap();

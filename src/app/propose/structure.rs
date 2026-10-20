@@ -200,6 +200,8 @@ fn structure_without_id<S: serde::Serializer>(
         delivery_items: &'a [structure::DeliveryStep],
         fields: &'a [structure::FieldStep],
         generated: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        generated_by: Option<&'a str>,
     }
     // Every field is named, so a new one in the plan fails to compile here.
     let structure::Plan {
@@ -210,6 +212,7 @@ fn structure_without_id<S: serde::Serializer>(
         delivery_items,
         fields,
         generated,
+        generated_by,
     } = plan;
     Shown {
         project,
@@ -218,6 +221,7 @@ fn structure_without_id<S: serde::Serializer>(
         delivery_items,
         fields,
         generated: *generated,
+        generated_by: generated_by.as_deref(),
     }
     .serialize(s)
 }

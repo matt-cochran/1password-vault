@@ -444,9 +444,11 @@ pub const ALSO_WRITES_1PASSWORD: [&str; 0] = [];
 
 /// What a flag adds to its command's effect: (command, long flag, effect). Every one of
 /// these needs the user's yes for the run.
-pub const FLAG_EFFECTS: [(&str, &str, &str); 15] = [
+pub const FLAG_EFFECTS: [(&str, &str, &str); 16] = [
     ("sync", "deploy", "deploys"),
     ("sync", "prune", "deletes"),
+    // #179: with --prune, also unsets the keys marked retiring (targets only).
+    ("sync", "retire", "deletes_retiring"),
     ("sync", "rotate", "replaces_immutable"),
     ("sync", "prune-immutable", "deletes_immutable"),
     ("sync", "confirm", "confirms_guarded_environment"),
@@ -504,10 +506,16 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
         "mcp_tools": MCP_TOOLS.iter().map(|(tool, cli)| json!({"tool": tool, "cli": cli})).collect::<Vec<_>>(),
         "exit_codes": exit_codes(),
         "error_codes": error_codes(),
+        // #206 (docs/design/deliver-only.md): values supplied at sync, never stored.
+        "capabilities": ["supplied_values/1"],
+        "inputs": {
+            "opv.supply/1": "what opv sync <env> --supply-stdin reads: one or more JSON documents back to back, each {schema: \"opv.supply/1\", env: <the sync's environment>, serial: <a whole number from the producer's own object>, values: {\"<product>/<KEY>\": \"<value>\"}} with no other field; values are non-empty strings of at least 8 bytes for declared infrastructure keys (source = \"infrastructure\"); at most 1 MiB and 256 names in all; every infrastructure key in the run's scope is supplied; never written to 1Password",
+        },
         "states": {
-            "row_state": ["saved", "missing", "failing_rule", "skipped", "source_blocked"],
+            "row_state": ["saved", "missing", "failing_rule", "skipped", "source_blocked", "supplied_at_sync"],
             "row_kind": ["secret", "config"],
-            "row_target_state": ["present", "absent", "would_change", "unknown", null],
+            "row_target_state": ["present", "absent", "would_change", "unknown", "as_supplied", "not_recorded", null],
+            "value_state": ["set", "absent", "empty", "placeholder", "malformed", "unreadable", "not_wanted", "supplied"],
             "row_action": ["would_stage", "would_prune", "held", null],
             "row_binding": ["current", "stale", "unbound"],
             "doctor_status": ["ok", "warn", "fail", "skip"],
@@ -517,7 +525,7 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
                 "created_section", "renamed_section", "created_field", "made_concealed",
                 "renamed_field", "moved_field", "kept_duplicate", "normalized_value"
             ],
-            "text_on_target": ["new", "same", "changed", "unknown", "pending", "held", "attested", "rotate", "extra", "drift", "n/a"],
+            "text_on_target": ["new", "same", "changed", "unknown", "pending", "held", "attested", "rotate", "extra", "drift", "n/a", "as supplied", "not recorded", "drifted", "absent"],
         },
         "documents": documents(),
     })
@@ -687,7 +695,9 @@ fn documents() -> Value {
         "chain?",
         "open_url?",
         "shared_from?",
-        "attested? (true: present only through a person's attestation, not proven; docs/attestation.md)"
+        "attested? (true: present only through a person's attestation, not proven; docs/attestation.md)",
+        "value_state? (supplied: an infrastructure key whose value is supplied at sync, never stored)",
+        "supplied? (true: an infrastructure key whose value is supplied at sync by the deploy job that produced it)"
     ]);
     let key_ref = json!(["target", "product", "key", "target_name"]);
     json!({
@@ -717,15 +727,18 @@ fn documents() -> Value {
             "environment", "product", "targets: [{target, provider, deployed, revision}]",
             "written", "unchanged", "held", "deployed", "deploy_reason", "deployed_names",
             "pending", "pruned", "kept", "skipped", "written_names", "plan_id",
-            "delivery? ({minted: [{target, product, revision, attested?}], not_minted: [{target, product, reason}]})"
+            "supplied? (with --supply-stdin: the names this run supplied, as key references)",
+            "delivery? ({minted: [{target, product, revision, attested?, supplied?}], not_minted: [{target, product, reason}]})"
         ],
         "doctor": ["config_source", "checks: [{name, status, detail, next, do}]"],
         "explain": [
             "environment", "product", "key", "kind", "field", "source", "personal",
             "boundary: {name, vault_id, item_id}", "environments",
             "targets: [{name, provider, rendered_name, details: [{label, value}]}]",
-            "delivered_to: [{environment, target, product, item, item_id, records}]",
-            "rules", "immutable", "guidance", "required_here", "shared_from", "shared_by",
+            "delivered_to: [{environment, target, product, item, item_id, records, serial?, recorded_at?}] (serial and recorded_at: an infrastructure key's recorded supply)",
+            "rules", "immutable", "guidance", "required_here",
+            "supplied_at_sync? (true for an infrastructure key: supplied at sync, never stored in 1Password; it then has no boundary, reference, inspect or readers)",
+            "shared_from", "shared_by",
             "reference", "inspect", "readers: {deploy: [service account], ci}",
             "explain --target: {environment, target, provider, locator, products, deploy_credentials, state_vault_id, deploy_account}"
         ],
@@ -750,7 +763,7 @@ fn documents() -> Value {
             "notes"
         ],
         "open": ["environment", "product", "key", "section", "field", "open_url"],
-        "propose": "{kind, relaxations [{product, key, env?, kind, reason}], diff, questions [{env, ask}], plan_id, written, generated?}: the contract diff (names and rules, never a value or an id); generated: true when the configuration is generated, so the diff goes into its generator and next is opv propose structure; propose setup adds structure_steps and bindings_after; propose structure and generate print {plan_id, steps [{step, ...}], structure, contract_after, bindings_after}",
+        "propose": "{kind, relaxations [{product, key, env?, kind, reason}], diff, questions [{env, ask}], plan_id, written, generated?, generated_by?, fragment? {toml, json, removed?, load_error {code, message}|null}}: the contract diff (names and rules, never a value or an id); generated: true when the configuration is generated, so the change goes into its generator and next is opv propose structure; generated_by names the generator its first line names (null when none) and fragment holds only the declarations the generator must emit, with the error the file would raise once merged; propose setup adds structure_steps and bindings_after; propose structure and generate print {plan_id, steps [{step, ...}], structure, contract_after, bindings_after}",
         "apply": "{plan_id, confirmed, steps_run, created, fields_added, generated [{environment, product, key}], record_written, config_written}: names and public ids only",
         "set": "{key, environment, state}: the key's value state after the entry (a word, never the value)",
         "import": "{environment, applied, rows [{found, product, key, action, rule}], writes, decisions_needed, next}: per key imported or skipped, names only, never a value",
@@ -761,9 +774,16 @@ fn documents() -> Value {
         "account list": "{discovery (ok|unavailable|op_missing|credential: a service account or Connect decides the account), platform, cli_accounts_only, selected ({account_id, by (flag|env|pointer|manifest|only), source} or null), accounts [{account_id, user_id, email, address, shorthand, source, signed_in (true|false|null), selected}], findings [{code (no_accounts|selected_account_absent|account_ambiguous|selected_signed_out|discovery_unavailable|op_missing), human_required, message, next}], next}: account metadata only, never a credential, session or field value",
         "account use": "{account_id, path}: the .opv file written",
         "config export": "with <ENV>: the config-kind values, always {product: {KEY: value}}, every product (source-only products and products with no config value left out) or only --product's; with --json and no <ENV>: the configuration itself (IDs, names, kinds, rules); no frame on success",
-        "delivery verify": "{environment, placements: [{product, target, revision, state, reason, names: [{name, state, attested?}], attested?, deployed, receipt_revision?}]}: every placement of the product, each with its target and state; --target narrows to one placement; a receipt kept from sync --receipt must be the current delivery; attested (a name's flag, the placement's list from its receipt) marks a name counted on a person's attestation, not proven (docs/attestation.md)",
+        "delivery verify": "{environment, placements: [{product, target, revision, state, reason, names: [{name, state, attested?, supplied?}], attested?, supplied?, deployed, receipt_revision?}]}: every placement of the product, each with its target and state; --target narrows to one placement; a receipt kept from sync --receipt must be the current delivery; attested (a name's flag, the placement's list from its receipt) marks a name counted on a person's attestation, not proven (docs/attestation.md); supplied marks a name whose value was supplied at sync: its verified means unchanged on the target since supplied, not current, and it is never source_changed",
         "changed": "{environment, changed, placements: [{product, target, state (unchanged|changed|no_record), items?: [{item_id, recorded, current?}]}], next, do}: each placement's recorded source versions against the item's current version (item IDs and version numbers only, never a value); exit 10 when something changed, with ok true",
         "schema": "this document",
+        "inventory": [
+            "environments: [{env, tier, boundaries: {name: {vault_id, item_id} or null}}]",
+            "keys: [{product, key, kind, source, presence, lifecycle, expires, attributes, delivery, location, next}]",
+            "cells: [{product, key, env, boundary, state, capability, from_receipt?, from?, personal?}]",
+            "deliveries: [{environment, target, product, state}]",
+            "next: {kind, actor, command} or null: the most urgent action on that key, never a value; the document's own next is the first action",
+        ],
         "skill install": "{written: [{target, path}], kept: [{target, path, reason}]}",
         "skill status": "{copies: [{scope, target, path, version, edited, current}]}",
     })
@@ -919,6 +939,22 @@ mod tests {
             .map(|e| (e["tool"].as_str().unwrap(), e["cli"].as_str().unwrap()))
             .collect();
         assert_eq!(tools.as_slice(), MCP_TOOLS);
+    }
+
+    /// #174: the inventory document is described with its key row's own next step.
+    #[test]
+    fn schema_documents_the_inventory_document_and_its_key_next() {
+        let doc = describe(&clap::Command::new("opv"), "test");
+        assert_eq!(
+            doc["documents"]["inventory"],
+            json!([
+                "environments: [{env, tier, boundaries: {name: {vault_id, item_id} or null}}]",
+                "keys: [{product, key, kind, source, presence, lifecycle, expires, attributes, delivery, location, next}]",
+                "cells: [{product, key, env, boundary, state, capability, from_receipt?, from?, personal?}]",
+                "deliveries: [{environment, target, product, state}]",
+                "next: {kind, actor, command} or null: the most urgent action on that key, never a value; the document's own next is the first action",
+            ])
+        );
     }
 
     /// #201 decision 2: the schema documents `unknown` among the row `target_state` values.

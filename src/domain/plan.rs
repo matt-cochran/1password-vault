@@ -69,6 +69,11 @@ pub enum KeyState {
     /// A shared key (FR-45) whose source has a finding: the finding is reported once, on
     /// the source's row, which also blocks the sync. Not counted as a finding of its own.
     SourceBlocked,
+    /// An infrastructure key (#206, `docs/design/deliver-only.md` §6.1) with no value this
+    /// run: its value is supplied at sync by the deploy job that produced it, never stored.
+    /// Not blocking and never `Missing`; never staged or pruned. Its target state comes
+    /// from the store's version alone ([`TargetState::AsSupplied`], [`TargetState::Unrecorded`]).
+    SuppliedAtSync,
 }
 
 /// The per-key rule gate (H1, design row `rule-gate`): `agent` says the caller is an
@@ -125,6 +130,12 @@ pub enum TargetState {
     /// The environment's target does not deliver this key's product (source-only, FR-47,
     /// or outside the target's products, FR-48): read and checked, never written there.
     NotDelivered,
+    /// A supplied name (#206 §6.1) the store lists at the version its `s1` evidence line
+    /// recorded: unchanged on the target since it was supplied.
+    AsSupplied,
+    /// A supplied name the store lists with no `s1` evidence line: opv cannot vouch for
+    /// what the target holds (first adoption, or a line an older opv dropped).
+    Unrecorded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -519,13 +530,42 @@ pub fn build_with_gate(
             };
             // Lifecycle (design Part V, rows `retire` and `retire-guard`): `retired` is
             // delivered nowhere, exactly like an undeclared key, so a target that still
-            // holds it prunes it. A `retiring` key is delivered (staged and kept) like an
-            // `active` one, so a plain `--prune` never removes it; only retire's prune step
-            // sets `retiring_prune`, which releases it to the prune list. Additive: nothing
-            // active is affected.
+            // holds it prunes it. A `retiring` key is kept and refreshed where a target
+            // still holds it, so a plain `--prune` never removes it; only retire's prune
+            // step sets `retiring_prune`, which releases it to the prune list. It is never
+            // added to a target that no longer holds it (#179): the prune a retirement
+            // made is its progress, so a later plain sync does not undo it, and a re-run
+            // resumes with the environments that still hold it. Additive: nothing active
+            // is affected.
+            let in_store = spec.kind == Kind::Secret || config_as_secret;
+            // A `retiring` key with no field here (an environment added after the
+            // retirement began never gets one, `app::skeleton`) is not asked for: nothing
+            // holds it, so there is nothing to fill, deliver or prune.
+            let has_field = match source {
+                None => field.is_some(),
+                Some((sp, sk)) => by_name.contains_key(&(sp, sk)),
+            };
             let outcome = match (spec.lifecycle, opts.retiring_prune) {
+                (Lifecycle::Retiring, false)
+                    if in_store && target_name.is_some() && target_entry.is_none() =>
+                {
+                    Ok(None)
+                }
+                (Lifecycle::Retiring, false) if !has_field && target_entry.is_none() => Ok(None),
                 (Lifecycle::Active, _) | (Lifecycle::Retiring, false) => outcome,
                 (Lifecycle::Retiring, true) | (Lifecycle::Retired, _) => Ok(None),
+            };
+
+            // #206 §6.1: an infrastructure key with no field this run (no supply) is
+            // supplied at sync: never `Missing`, never staged or pruned.
+            let supplied_at_sync = spec.value_source
+                == Some(crate::domain::model::ValueSource::Infrastructure)
+                && field.is_none()
+                && matches!(outcome, Err(KeyState::Missing));
+            let outcome = if supplied_at_sync {
+                Err(KeyState::SuppliedAtSync)
+            } else {
+                outcome
             };
 
             let mut row = Row {
@@ -1381,7 +1421,25 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
     }
 
     #[test]
-    fn a_retiring_key_is_staged_like_an_active_key() {
+    fn a_retiring_key_a_target_still_holds_is_staged_like_an_active_key() {
+        let leaving = TWO_KEYS.replace(
+            "[products.p.keys.BOTH]\nkind = \"secret\"",
+            "[products.p.keys.BOTH]\nkind = \"secret\"\nlifecycle = \"retiring\"",
+        );
+        let fleet = config::parse(&leaving).unwrap();
+        let p = build(
+            &fleet,
+            "prod",
+            vec![secret("p", "BOTH", "v")],
+            &[fly_secret("FLEET__P__BOTH", None)],
+            &no_rotate(),
+            &none,
+        );
+        assert_eq!(p.stage.len(), 1);
+    }
+
+    #[test]
+    fn a_retiring_key_is_never_added_to_a_target_that_no_longer_holds_it() {
         let leaving = TWO_KEYS.replace(
             "[products.p.keys.BOTH]\nkind = \"secret\"",
             "[products.p.keys.BOTH]\nkind = \"secret\"\nlifecycle = \"retiring\"",
@@ -1395,7 +1453,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
             &no_rotate(),
             &none,
         );
-        assert_eq!(p.stage.len(), 1);
+        assert!(p.stage.is_empty());
     }
 
     #[test]

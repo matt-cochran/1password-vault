@@ -42,6 +42,9 @@ pub enum Action {
     NotApplicable,
     /// `--skip` names the key: it would be imported, and the person left it out (#94).
     Skipped,
+    /// An infrastructure key (#206 §4.4): its value is supplied to `opv sync` by the deploy
+    /// job and never stored in 1Password, so a found value is never written.
+    NotStored,
 }
 
 impl Action {
@@ -59,6 +62,7 @@ impl Action {
             Action::NotDeclared => "not_declared",
             Action::NotApplicable => "not_applicable",
             Action::Skipped => "skipped",
+            Action::NotStored => "not_stored",
         }
     }
 }
@@ -195,6 +199,17 @@ pub fn plan(
     let mut writes: Vec<(String, String, SecretValue)> = Vec::new();
     for ((product, key), entries) in &groups {
         let spec = &fleet.products[product].keys[key];
+        // An infrastructure key is never stored (#206 §4.4): its found value is not even
+        // checked against the rules, only reported by name.
+        if spec.value_source == Some(crate::domain::ValueSource::Infrastructure) {
+            rows.push(AdoptRow {
+                found: entries.iter().map(|(n, _)| (*n).to_string()).collect(),
+                product: Some(product.clone()),
+                key: Some(key.clone()),
+                action: Action::NotStored,
+            });
+            continue;
+        }
 
         // Normalise every found value with the destination key's rules (FR-53). An empty
         // found value is skipped, never compared with the current one nor written (R3).

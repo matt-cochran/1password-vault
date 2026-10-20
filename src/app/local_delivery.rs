@@ -229,14 +229,38 @@ pub fn runtime_dir_support() -> Result<std::path::PathBuf, RamDir> {
     if !runtime.is_absolute() {
         return Err(RamDir::NotAbsolute);
     }
+    runtime_dir_at(&runtime)?;
+    Ok(runtime)
+}
+
+/// The checks on the runtime directory itself: a directory owned by the user (not a link),
+/// that no other user can rename entries in, on tmpfs or ramfs.
+pub(crate) fn runtime_dir_at(runtime: &Path) -> Result<(), RamDir> {
     use crate::ramdir::{owned_dir, ram_backed};
-    if !owned_dir(&runtime) {
+    if !owned_dir(runtime) {
         return Err(RamDir::NotOwned);
     }
-    if !ram_backed(&runtime).unwrap_or(false) {
+    if writable_by_others(runtime) {
+        return Err(RamDir::WritableByOthers);
+    }
+    if !ram_backed(runtime).unwrap_or(false) {
         return Err(RamDir::NotTmpfs);
     }
-    Ok(runtime)
+    Ok(())
+}
+
+/// Whether users other than the owner can rename or replace entries in `dir`: group- or
+/// other-writable without the sticky bit (WSLg's `/mnt/wslg/runtime-dir` is 0777). With
+/// the sticky bit (1777) only an entry's owner can rename it.
+#[cfg(unix)]
+fn writable_by_others(dir: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(dir).map_or(true, |m| m.mode() & 0o022 != 0 && m.mode() & 0o1000 == 0)
+}
+
+#[cfg(not(unix))]
+fn writable_by_others(_dir: &Path) -> bool {
+    false
 }
 
 /// Why [`runtime_dir_support`] found no folder, in the preview's words.
@@ -247,6 +271,9 @@ pub fn ram_dir_reason(why: &RamDir) -> String {
         }
         RamDir::NotAbsolute => "$XDG_RUNTIME_DIR is not an absolute path".into(),
         RamDir::NotOwned => "$XDG_RUNTIME_DIR is not a directory owned by this user".into(),
+        RamDir::WritableByOthers => {
+            "$XDG_RUNTIME_DIR is writable by other users without the sticky bit".into()
+        }
         RamDir::NotTmpfs => "$XDG_RUNTIME_DIR is not on tmpfs or ramfs (RAM-backed)".into(),
         RamDir::NoneOnPlatform { os } => format!("{os} has no RAM-backed runtime directory"),
     }
@@ -261,27 +288,99 @@ pub(crate) fn private_dir_failed(dir: &Path, e: &std::io::Error) -> Error {
     .into()
 }
 
-/// Write `value` to `dir/<rel>`: each directory component created inside `dir` (0700),
-/// the file created exclusively with mode 0400, never through a link.
-pub(crate) fn write_file(dir: &Path, rel: &str, value: &[u8]) -> std::io::Result<()> {
-    let mut at = dir.to_path_buf();
+/// The private directory, opened once right after it is made and checked through the open
+/// handle (a directory, owned by the user, no group or other access). Every file is then
+/// created relative to this handle, so renaming or replacing the directory's entry in the
+/// runtime directory afterwards cannot redirect a write.
+#[cfg(unix)]
+pub(crate) struct OpenDir(std::os::fd::OwnedFd);
+
+#[cfg(not(unix))]
+pub(crate) struct OpenDir(std::path::PathBuf);
+
+impl OpenDir {
+    /// Open `path` (never through a link) and check it is private.
+    #[cfg(unix)]
+    pub(crate) fn open_private(path: &Path) -> std::io::Result<Self> {
+        use rustix::fs::{Mode, OFlags};
+        let fd = rustix::fs::open(
+            path,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        let st = rustix::fs::fstat(&fd)?;
+        #[allow(clippy::unnecessary_cast)] // `mode_t` is u16 on macOS
+        let mode = st.st_mode as u32;
+        let is_dir = mode & 0o170_000 == 0o040_000;
+        if !is_dir || st.st_uid != rustix::process::geteuid().as_raw() || mode & 0o077 != 0 {
+            return Err(std::io::ErrorKind::PermissionDenied.into());
+        }
+        Ok(Self(fd))
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn open_private(path: &Path) -> std::io::Result<Self> {
+        Ok(Self(path.to_path_buf()))
+    }
+}
+
+/// Write `value` to `<dir>/<rel>`: each directory component created inside `dir` (0700),
+/// the file created exclusively with mode 0400, never through a link. Every step is
+/// relative to an open directory handle (`mkdirat`, `openat` with `O_NOFOLLOW`), never a
+/// path looked up again.
+#[cfg(unix)]
+pub(crate) fn write_file(dir: &OpenDir, rel: &str, value: &[u8]) -> std::io::Result<()> {
+    use rustix::fs::{Mode, OFlags};
+    use std::os::fd::AsFd as _;
+    let parts: Vec<&str> = rel.split('/').collect();
+    let mut owned: Option<std::os::fd::OwnedFd> = None;
+    for part in &parts[..parts.len() - 1] {
+        let at = owned.as_ref().map_or(dir.0.as_fd(), |f| f.as_fd());
+        match rustix::fs::mkdirat(at, *part, Mode::from_raw_mode(0o700)) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+            Err(e) => return Err(e.into()),
+        }
+        // A component that exists as anything but a real directory (a planted link)
+        // refuses: `O_NOFOLLOW` with `O_DIRECTORY` fails on a link and on a file.
+        let next = rustix::fs::openat(
+            at,
+            *part,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|e| -> std::io::Error {
+            if e == rustix::io::Errno::LOOP || e == rustix::io::Errno::NOTDIR {
+                std::io::ErrorKind::AlreadyExists.into()
+            } else {
+                e.into()
+            }
+        })?;
+        owned = Some(next);
+    }
+    let at = owned.as_ref().map_or(dir.0.as_fd(), |f| f.as_fd());
+    let fd = rustix::fs::openat(
+        at,
+        parts[parts.len() - 1],
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o400),
+    )?;
+    let mut f = std::fs::File::from(fd);
+    f.write_all(value)?;
+    f.sync_all()
+}
+
+/// Off unix file delivery is refused before any directory is made
+/// ([`runtime_dir_support`]); this path-based write is never reached there.
+#[cfg(not(unix))]
+pub(crate) fn write_file(dir: &OpenDir, rel: &str, value: &[u8]) -> std::io::Result<()> {
+    let mut at = dir.0.clone();
     let parts: Vec<&str> = rel.split('/').collect();
     for part in &parts[..parts.len() - 1] {
         at.push(part);
-        #[cfg(unix)]
-        let b = {
-            use std::os::unix::fs::DirBuilderExt;
-            let mut b = std::fs::DirBuilder::new();
-            b.mode(0o700);
-            b
-        };
-        #[cfg(not(unix))]
-        let b = std::fs::DirBuilder::new();
-        match b.create(&at) {
+        match std::fs::DirBuilder::new().create(&at) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let m = std::fs::symlink_metadata(&at)?;
-                if !m.file_type().is_dir() {
+                if !std::fs::symlink_metadata(&at)?.file_type().is_dir() {
                     return Err(std::io::ErrorKind::AlreadyExists.into());
                 }
             }
@@ -289,14 +388,10 @@ pub(crate) fn write_file(dir: &Path, rel: &str, value: &[u8]) -> std::io::Result
         }
     }
     at.push(parts[parts.len() - 1]);
-    let mut o = std::fs::OpenOptions::new();
-    o.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        o.mode(0o400).custom_flags(libc::O_NOFOLLOW);
-    }
-    let mut f = o.open(&at)?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&at)?;
     f.write_all(value)?;
     f.sync_all()
 }
@@ -324,6 +419,8 @@ pub fn run(d: &Delivery) -> Result<i32, Error> {
         sweep(&runtime, DIR_PREFIX);
         let private = PrivateDir::create(&runtime, DIR_PREFIX)
             .map_err(|e| private_dir_failed(&runtime, &e))?;
+        let open = OpenDir::open_private(private.path())
+            .map_err(|e| private_dir_failed(private.path(), &e))?;
         let values: BTreeMap<&str, &str> = inherited
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -336,7 +433,7 @@ pub fn run(d: &Delivery) -> Result<i32, Error> {
                 }
                 .into());
             };
-            write_file(private.path(), rel, value.as_bytes())
+            write_file(&open, rel, value.as_bytes())
                 .map_err(|e| private_dir_failed(private.path(), &e))?;
         }
         dir = Some(private);
@@ -345,6 +442,10 @@ pub fn run(d: &Delivery) -> Result<i32, Error> {
         .as_ref()
         .and_then(|p| p.path().to_str().map(str::to_string));
     let env = Zeroizing::new(child_env(d, &inherited, dir_text.as_deref()));
+    // Descriptors this step inherited from `op run` stop at the app: everything above
+    // stdio is marked close-on-exec (opv's own are already). stdio passes on purpose, so
+    // `op run` keeps masking the app's output.
+    crate::hardening::cloexec_inherited();
     let status = std::process::Command::new(&d.command[0])
         .args(&d.command[1..])
         .env_clear()

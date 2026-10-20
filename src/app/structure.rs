@@ -66,6 +66,10 @@ pub struct Plan {
     /// The configuration file is generated: apply records nothing in it and returns the
     /// IDs for its generator instead (FR-52).
     pub generated: bool,
+    /// The generator a generated configuration's first line names (#178); absent when the
+    /// file is not generated or its header names none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generated_by: Option<String>,
 }
 
 impl Plan {
@@ -145,6 +149,7 @@ pub fn plan(
         delivery_items,
         fields,
         generated,
+        generated_by: bootstrap::generated_by(text),
     })
 }
 
@@ -289,6 +294,7 @@ fn field_steps(
             } else {
                 super::skeleton::missing_fields(&part, env, b, env_name, r)?.1
             };
+            let fields = stored_only(&part, fields);
             out.extend(fields.into_iter().map(|(product, key, kind)| FieldStep {
                 environment: env_name.clone(),
                 boundary: name.clone(),
@@ -300,6 +306,21 @@ fn field_steps(
     }
     out.sort();
     Ok(out)
+}
+
+/// `fields` without any infrastructure key (#206 §4.4): its value is supplied to
+/// `opv sync` and never stored, so the plan and its apply never give it a 1Password field.
+fn stored_only(fleet: &Fleet, fields: Vec<super::skeleton::Field>) -> Vec<super::skeleton::Field> {
+    fields
+        .into_iter()
+        .filter(|(product, key, _)| {
+            !fleet
+                .products
+                .get(product)
+                .and_then(|p| p.keys.get(key))
+                .is_some_and(super::deliver_only::is_infrastructure)
+        })
+        .collect()
 }
 
 /// SHA-256 over the plan's scope and every step, length-prefixed (like the sync plan id,
@@ -906,6 +927,7 @@ fn add_fields(
         for (name, b) in super::tidy::boundaries_needed(fleet, env_name)? {
             let part = super::tidy::in_boundary(fleet, &name);
             let (item, missing) = super::skeleton::missing_fields(&part, env, b, env_name, r)?;
+            let missing = stored_only(&part, missing);
             if missing.is_empty() {
                 continue;
             }

@@ -276,14 +276,22 @@ fn your_key_here_is_a_placeholder() {
 }
 
 #[test]
-fn a_config_word_is_not_a_placeholder() {
-    assert!(
+fn a_config_placeholder_is_found() {
+    assert_eq!(
         codes(&[(
             "dev",
             false,
-            vec![field("PUBLIC_URL", Kind::Config, "none")]
-        )])
-        .is_empty()
+            vec![field("PUBLIC_URL", Kind::Config, "changeme")]
+        )]),
+        [PLACEHOLDER]
+    );
+}
+
+#[test]
+fn a_secret_with_very_low_entropy_is_found() {
+    assert_eq!(
+        codes(&[("dev", false, vec![secret("STRIPE_KEY", "aaaaaaaa")])]),
+        [LOW_ENTROPY]
     );
 }
 

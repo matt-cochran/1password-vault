@@ -89,8 +89,9 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 | `ConfigInvalid` | source: ConfigSource; at: Location{line, col}; field: DottedPath; rule: FieldRule | config_invalid | after_fix | built from (field, rule) (§4.12) | rerun [R04–R08, R12] |
 | `RecordMissing` | what: Boundary{env, product} / StateVault{env, target}; source | boundary_missing / state_vault_missing | after_fix | — | file: `opv bootstrap`; manifest: `opv structure plan` [R09, R10] |
 | `StateVaultTooWide` | env; target; vault; shared_with; source; at | state_vault_wider_than_values | after_fix | "delete state_vault_id from [environments.E.targets.T]" | `opv bootstrap` [R11] |
-| `ConfigNotEditable` | source; reason: Generated{path, diff?} / UnsupportedLayout{section} / ManifestItemAsBoundary{env, boundary}; pending_ids | **config_not_editable** | never | per reason | `opv config edit` [R15]; Generated: none, or `opv propose structure` when a refused proposal carries its diff (#184) |
+| `ConfigNotEditable` | source; reason: Generated{generated_by, fragment?{toml, json, removed?, load_error}} / UnsupportedLayout{section} / ManifestItemAsBoundary{env, boundary}; pending_ids | **config_not_editable** | never | per reason | `opv config edit` [R15]; Generated: none; a refused proposal carries its declaration fragment, not a diff (#184, #178): Do is to have the generator emit it, Next `opv propose structure`, then `opv apply`; none while its `load_error` is set (the proposal changes first) |
 | `CopiesDiffer` | file; manifest | **copies_differ** | never | "update the file (opv config export --toml > <file>) or the manifest (opv config edit)" | none: the person picks the direction [R16] |
+| `RegeneratedFileDiffers` | file; committed; in_place: bool | **regenerated_file_differs** | never | "decide which is right: update <file> or the committed configuration <committed>" | none: the person picks the direction (#178) |
 | `ManifestProblem` | state: NotFound{project, from} / Ambiguous{candidates, reason} / Exists{title, local_file} | manifest_not_found / manifest_ambiguous / manifest_exists | per state | per state | `opv projects`; `opv config check --file <f>`; `opv config edit` [R17–R19] |
 | `InventoryIncomplete` | unlisted: Vec<(Account, Cause)> | inventory_incomplete | after_fix | "sign in to account <id>" | `opv login --account <id> --no-record -- <rerun>` [R20] |
 
@@ -130,8 +131,10 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 | Variant | Fields | Code | Retry | Do | Next |
 |---|---|---|---|---|---|
 | `TargetRefused` | system; subject; serving: Option<Revision>; why: Validation / Quota / Unhealthy{new_revision} / NoRevision | update_refused / target_unhealthy | after_fix | per why (authorization goes to `MissingRight`) | `opv doctor --env E --target T` [R45, R47, R48] |
-| `Guard` | guard: Guard (ValueTooLarge{key, limit, store} / NotManagedByOpv{name, store} / CredentialAsOption{option} / ProviderHidesValues{provider} / ImmutableWithoutRotate{key} / GenerateRefused{key, reason} / AttestRefused{product, key, env, target, reason} / RemoteProfileRefuses{profile, asked, allowed} / MountPathInUse{workload, container, path, volume} / …) | policy_refused | never | per guard | per guard [R46, R64, R79] |
-| `Guard::AttestRefused` (#201) | product; key; env; target; reason: NotDelivered / NotImmutable / NotOnTarget / ComparedDirectly / NotHeld / Proven / AlreadyAttested / Differs / Drifted / NotRecorded | policy_refused (guard `attest_refused`) | never | NotDelivered: "attest only a key target T delivers"; NotImmutable, NotOnTarget: "let opv sync write P/K: the write records its evidence"; ComparedDirectly, NotHeld: "no attestation is needed for P/K"; Proven: "nothing to attest"; AlreadyAttested: "nothing to attest: P/K is already attested (attested, not proven)"; Differs, Drifted: "rotate P/K so opv writes 1Password's value; never attest a value known to differ"; NotRecorded: "run opv sync for E/T first" | NotDelivered: `opv explain <p/K> --env <e>`; Proven, AlreadyAttested: `opv delivery verify <e> --target <t> --product <p>`; Differs, Drifted: `opv plan <e> --target <t> --rotate <p/K>`; otherwise `opv plan <e> --target <t>`. Never the attestation itself. A guard, not a new code, so agents keep one code for opv's refusals (`docs/attestation.md`) |
+| `Guard` | guard: Guard (ValueTooLarge{key, limit, store} / NotManagedByOpv{name, store} / CredentialAsOption{option} / ProviderHidesValues{provider} / ImmutableWithoutRotate{key} / GenerateRefused{key, reason} / NotStored{product, key, env} / AttestRefused{product, key, env, target, reason} / SupplyRefused{env, entry, reason} / RemoteProfileRefuses{profile, asked, allowed} / MountPathInUse{workload, container, path, volume} / …) | policy_refused | never | per guard | per guard [R46, R64, R79] |
+| `Guard::AttestRefused` (#201) | product; key; env; target; reason: NotDelivered / NotImmutable / NotOnTarget / ComparedDirectly / NotHeld / Proven / AlreadyAttested / Differs / Drifted / NotRecorded / NotStored | policy_refused (guard `attest_refused`) | never | NotDelivered: "attest only a key target T delivers"; NotImmutable, NotOnTarget: "let opv sync write P/K: the write records its evidence"; ComparedDirectly, NotHeld: "no attestation is needed for P/K"; Proven: "nothing to attest"; AlreadyAttested: "nothing to attest: P/K is already attested (attested, not proven)"; Differs, Drifted: "rotate P/K so opv writes 1Password's value; never attest a value known to differ"; NotRecorded: "run opv sync for E/T first"; NotStored (#206): "no attestation is needed for P/K: the deploy job supplies it to opv sync" | NotDelivered: `opv explain <p/K> --env <e>`; Proven, AlreadyAttested: `opv delivery verify <e> --target <t> --product <p>`; Differs, Drifted: `opv plan <e> --target <t> --rotate <p/K>`; otherwise `opv plan <e> --target <t>`. Never the attestation itself. A guard, not a new code, so agents keep one code for opv's refusals (`docs/attestation.md`) |
+| `Guard::SupplyRefused` (#206) | env; entry: Named{product, key} (a declared key only) / Position{document, index}; reason: Undeclared{closest} / NotOptedIn / NotInEnvironment / OutOfScope{targets, product} / NotSupplied{keys} / Duplicate / WrongEnvironment{document_env} / Empty / TooShort / Placeholder / NotAString / RotateWithoutValue / RuleFailed{rule} / Stored{boundary} / Unproven / ImmutableDiffers / Stale{recorded, supplied} / SerialReused{serial} | policy_refused (guard `supply_refused`) | never | Undeclared: "declare the key with source = \"infrastructure\", or fix the producer's name" (with the closest infrastructure key); NotOptedIn: "P/K comes from 1Password; only an infrastructure key takes a supplied value"; NotInEnvironment, OutOfScope: "leave it out of this supply"; NotSupplied: "supply every infrastructure key in scope, or narrow the run with --product or --target"; Duplicate: "supply P/K once"; WrongEnvironment: "this document was produced for <env>"; Empty, TooShort, Placeholder, NotAString: "the producer gave no usable value for P/K"; RotateWithoutValue: "supply P/K in the same run to rotate it"; RuleFailed: "the supplied value of P/K fails rule <rule>; check the producer"; Stored: "archive field P/K in boundary B of E: infrastructure keys are never stored"; Unproven, ImmutableDiffers, Stale, SerialReused: the producer's fix, or one `--rotate P/K` | NotOptedIn, NotInEnvironment: `opv explain <p/K> --env <e>`; OutOfScope, NotSupplied: `opv plan <e> [--target <t>] [--product <p>]`; Stored: `opv propose key <p/K> --source infrastructure`; Undeclared and the target-state reasons: a person picks; otherwise none. Never a value, and an input name only when it is a declared key (`docs/design/deliver-only.md` §3, §4) |
+| `Guard::NotStored` (#206) | product; key; env | policy_refused (guard `not_stored`) | never | "change P/K where infrastructure produces it and re-run the deploy job, which supplies it to opv sync; it has no 1Password field" | `opv explain <p/K> --env <e>`. Raised from the configuration alone, before any prompt or 1Password call, by `opv set`, `opv import --replace/--rotate` and `opv open` (`docs/design/deliver-only.md` §4.4); `generate` refuses with `GenerateRefused{reason: Infrastructure}` (same Do and Next), `attest` with `AttestRefused{reason: NotStored}`, and `import` plans a found value `not_stored` without writing it |
 | `MountUnreadable` | workload; container; run_as: Option<u32>; why: NoFsGroup / RunAsUnknown; env; target | **mount_unreadable** | after_fix | "set spec.template.spec.securityContext.fsGroup (any group, for example 10001), or runAsUser: 0. Nothing was written." | `opv plan <env> --target <t>` (K5/K6 wire it) |
 
 ### 4.6 Outcomes, availability and budgets
@@ -168,6 +171,8 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 | `Declined` | prompt; command | **declined** | safe | — | rerun (exit 0) [R65] |
 | `LocalFileTooOpen` | path; kind; mode; want | **file_too_open** | after_fix | `chmod 600 <path>` | rerun [R66] |
 | `InputInvalid` | path; kind: Dotenv / Recipe / Receipt; at; field; rule | **input_invalid** | after_fix | "edit <path> at line L: <rule>" | rerun [R67, R68, R83] |
+| `InputInvalid` (kind Supply, #206) | path `<stdin>`; at (NotJson); field: `standard input` / `document N`; rule: Supply{StdinIsTerminal / NotJson{line, col} / UnknownField / WrongSchema / TooLarge{limit} / TooManyNames{limit} / MissingSerial / NoValues / NoDocuments / Timeout} | **input_invalid** (exit 2) | after_fix | the producer's fix, e.g. "add the producer's serial to document N"; positions only, never serde's text | none |
+| `InputInvalid` (kind Workflow, #206) | path; at; field; rule: Supply{ExpressionInSupplyStep{line}} | **input_invalid** | after_fix | "edit <path>: pass the value through the step's env: and use only github.* expressions in its script" | rerun |
 
 ### 4.9 Approvals and plans (exit 6)
 
@@ -182,7 +187,7 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 
 | Variant | Fields | Code | Exit | Retry | Do | Next |
 |---|---|---|---|---|---|---|
-| `RamDirUnavailable` | host: Local / Remote{profile, user, host}; why: Unset / NotAbsolute / NotOwned / NotTmpfs / NoneOnPlatform{os}; purpose | ram_dir_unavailable | 6 | after_fix | per why and host | `opv run <env> --product <p> [--remote <r>] --preview` [R74] |
+| `RamDirUnavailable` | host: Local / Remote{profile, user, host}; why: Unset / NotAbsolute / NotOwned / WritableByOthers / NotTmpfs / NoneOnPlatform{os}; purpose | ram_dir_unavailable | 6 | after_fix | per why and host | `opv run <env> --product <p> [--remote <r>] --preview` [R74] |
 | `PrivateDirFailed` | dir; io | **private_dir_failed** | 6 | after_fix | "check free space and permissions in <dir>" | rerun [R75] |
 | `RemoteUnreachable` | profile; user; host; port | **remote_unreachable** | 5 | after_fix | "check the connection and that the host presents the key pinned in profile <p>" | the same pinned check opv uses: `ssh -F none -o StrictHostKeyChecking=yes -o UserKnownHostsFile=<pinned file> -p <port> <user>@<host> true`. Only an exit 255 *before* the receiver's handshake is this cause; after the handshake, 255 is the remote app's own exit [R77] |
 | `RemoteVersionMismatch` | profile; local_version; remote_protocol | **remote_version_mismatch** | 3 | after_fix | "install opv <version> on <host> at <opv path>" | rerun [R78] |
@@ -196,7 +201,7 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 
 ### 4.11 Codes
 
-- **New:** config_source_mismatch, config_unreadable, config_not_editable, copies_differ, unknown_target, unknown_role, unknown_profile, ambiguous_name, choice_required, nothing_in_scope, already_declared, target_not_signed_in, own_session_required, credential_rejected, resource_not_found, create_outcome_unknown, budget_spent, concurrent_edit, tool_unusable, unexpected_output, unrecognized_failure, declined, file_too_open, input_invalid, approval_used, plan_unknown, private_dir_failed, remote_unreachable, remote_version_mismatch, child_start_failed, delivery_unverified, target_drift, source_changed, mount_unreadable, internal_error.
+- **New:** config_source_mismatch, config_unreadable, config_not_editable, copies_differ, regenerated_file_differs, unknown_target, unknown_role, unknown_profile, ambiguous_name, choice_required, nothing_in_scope, already_declared, target_not_signed_in, own_session_required, credential_rejected, resource_not_found, create_outcome_unknown, budget_spent, concurrent_edit, tool_unusable, unexpected_output, unrecognized_failure, declined, file_too_open, input_invalid, approval_used, plan_unknown, private_dir_failed, remote_unreachable, remote_version_mismatch, child_start_failed, delivery_unverified, target_drift, source_changed, mount_unreadable, internal_error.
 - **Removed:** source_error, target_error, auth_required, desktop_app_unavailable (now a `NotSignedIn` state), op_unexpected (now `unrecognized_failure`), duplicate_scope (now `input_invalid`), credential_rejected for op's prompt (now `NotSignedIn`), and the MCP-only codes.
 - **Exit 70 (internal error)** is new; it follows `EX_SOFTWARE`.
 
@@ -218,6 +223,16 @@ Under FR-60 (one way only) nothing keeps the old names. The `--json` `schema_ver
 - `NoEnvironment`;
 - `ModeUnmapped{env, mode, allowed}`, checked at load;
 - `Collision{rendered, other}`.
+
+### 4.13 Ready findings (not causes)
+
+`ready`'s findings are codes, not `Cause` variants: each carries `code`, `scope`, `blocking`, `actor`, `effect`, one `prerequisite` and one `verify` (design `accounts-and-readiness.md` §4). A finding code that is not a `Cause` is documented here, so the catalog stays the one place every code is named.
+
+| Code | Fields | Blocking | Actor | Effect | Prerequisite | Verify |
+|---|---|---|---|---|---|---|
+| `environment_gap` (#179) | environment; product; key | never | owner | `writes_config` | `opv propose key <product/KEY> --env <env>` | `opv ready --json` |
+
+`environment_gap` names a declared environment an explicit `environments` list leaves out with no `except` (presence, `src/domain/presence.rs`). The configuration still loads and readiness never fails on it; several gaps are grouped into `ready`'s one counts line, while `--json` lists one finding per (product, key, environment).
 
 ## 5. Diagnosis: one strategy per external system
 
@@ -268,7 +283,7 @@ pub enum Next {
     Check(Command),                // a read that answers "did it happen?"
     Handoff(Command),              // only a person runs it (approve, --confirm, login)
     Vendor(VendorCommand),         // a typed vendor command (flyctl auth login, ssh -p …)
-    None(NoNextReason),            // CopiesDiffer: the person picks the direction
+    None(NoNextReason),            // CopiesDiffer, RegeneratedFileDiffers: the person picks the direction
 }
 pub enum Action { /* typed, rendered from a table: Grant{…}, FillValue{…}, Unset{var}, Chmod{…}, … */ }
 ```

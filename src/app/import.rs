@@ -150,6 +150,33 @@ fn pairs(
         .collect()
 }
 
+/// Refuse a value path (`set`, `import --replace`, `open`) for `product/key` in `env_name`
+/// when it is an infrastructure key (#206 §4.4): the deploy job supplies its value to
+/// `opv sync`, and opv keeps no 1Password field for it. Names only, from the configuration.
+pub(crate) fn refuse_not_stored(
+    fleet: &Fleet,
+    product: &str,
+    key: &str,
+    env_name: &str,
+) -> Result<(), Error> {
+    let infrastructure = fleet
+        .products
+        .get(product)
+        .and_then(|p| p.keys.get(key))
+        .is_some_and(super::deliver_only::is_infrastructure);
+    if !infrastructure {
+        return Ok(());
+    }
+    Err(Cause::Guard {
+        guard: Guard::NotStored {
+            product: crate::cause::ProductName::new(product),
+            key: crate::cause::KeyName::new(key),
+            env: EnvName::new(env_name),
+        },
+    }
+    .into())
+}
+
 /// The found values: the dotenv file, or what the target can read back. A target that
 /// cannot show values (Fly secrets, GitHub secrets) is refused with the manual way.
 fn read_source(
@@ -239,6 +266,11 @@ pub fn run_tagged(
     let replace = pairs(fleet, &opts.replace, "--replace")?;
     let rotate = pairs(fleet, &opts.rotate, "--rotate")?;
     let skip = pairs(fleet, &opts.skip, "--skip")?;
+    // Asking to replace or rotate an infrastructure key is refused by name (#206 §4.4); a
+    // found value of one is only ever planned `not_stored`.
+    for (p, k) in replace.iter().chain(&rotate) {
+        refuse_not_stored(fleet, p, k, env_name)?;
+    }
     let plan = plan_skipping(
         fleet,
         env_name,
@@ -602,6 +634,10 @@ fn print(out: &mut dyn Write, env_name: &str, opts: &Opts, plan: &AdoptPlan) -> 
             Action::NotDeclared => "not declared: ignored".to_string(),
             Action::NotApplicable => "not required in this environment: ignored".to_string(),
             Action::Skipped => "skipped (--skip): not imported".to_string(),
+            Action::NotStored => {
+                "infrastructure key: never stored in 1Password; the deploy job supplies it to opv sync"
+                    .to_string()
+            }
         };
         writeln!(
             out,

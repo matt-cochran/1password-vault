@@ -190,7 +190,7 @@ kind = "secret"
 environments = ["prod"]         # only prod
 ```
 
-In an environment a key is excepted from its state is `not_wanted` and its plan row is skipped. An explicit `environments` list that leaves out an environment without an `except` is a likely mistake: the configuration still loads and `environment_gap` warns, naming the key and the environment. An empty reason, an environment that is not declared, or an `except` for an environment the `environments` list already names is refused at load with `config_invalid`.
+In an environment a key is excepted from its state is `not_wanted` and its plan row is skipped. An explicit `environments` list that leaves out an environment without an `except` is a likely mistake: the configuration still loads, and `opv ready` reports a non-blocking `environment_gap` finding naming the key and the environment, each with its own next step (`opv propose key <product>/<KEY> --env <env>`, or an `except`). It is a readiness finding, visible in the ready receipt's inventory matrix and `next`, not a warning printed on every command. The [`extend` intent](usage.md#extend-an-environment-to-every-key-the-extend-intent) adds one environment to every explicit-list key in one proposal. An empty reason, an environment that is not declared, or an `except` for an environment the `environments` list already names is refused at load with `config_invalid`.
 
 #### Key attributes: `source`, `expires` and `lifecycle`
 
@@ -198,7 +198,7 @@ In an environment a key is excepted from its state is `not_wanted` and its plan 
 [products.api.keys.STRIPE_SECRET_KEY]
 kind = "secret"
 environments = ["prod"]
-source = "person"               # person | generated | derived
+source = "person"               # person | generated | derived | infrastructure
 expires = "2026-06-30"          # a quoted "YYYY-MM-DD" date
 lifecycle = "active"            # active | retiring | retired
 
@@ -216,7 +216,40 @@ source = "derived"              # the only source allowed with from
 
 - `source` is who or what produces the value: `person` (someone fetches it), `generated` (opv makes it from the key's byte-count rule) or `derived` (another key's value, named by `from`). `derived` requires `from`; `from` requires `derived`; `generated` requires a `base64_bytes` or `hex_bytes` rule. Any other combination is refused at load, naming the key.
 - `expires` is a calendar date written as a quoted string (`expires = "2026-06-30"`). An unquoted date or an impossible day is refused at load. Within 30 days of the date `opv ready` reports an advisory `expires_soon` finding; it never blocks a gate.
-- `lifecycle` is `active` (the default), `retiring` or `retired`. A `retiring` key is on its way out; `opv propose retire` marks it, prunes it from the shared tiers before production, then archives its fields and marks it `retired`. Removal is a state, never a deletion.
+- `lifecycle` is `active` (the default), `retiring` or `retired`. `opv propose retire` marks a key `retiring`. CI then runs `opv sync <env> --prune --retire` in tier order (every non-production environment before production) to remove it from the targets; a person finishes with `opv apply rp-<id>` (the id `opv ready` names), which archives the key's 1Password fields into an `archived · <date> · retired <product>/<KEY>` section and marks it `retired`. The key stays declared as `lifecycle = "retired"`: removal is a state, never a deletion. The steps and their refusals: [retiring a key](usage.md#retiring-a-key).
+
+#### Infrastructure values: `source = "infrastructure"`
+
+```toml
+[products.api.keys.DATABASE_URL]
+kind = "secret"
+source = "infrastructure"
+environments = ["staging", "prod"]
+rules = { regex = "postgres(ql)?://.+" }    # a full match: the whole value must match
+```
+
+Some values are produced by infrastructure, not by people: the database URL Terraform creates, a
+webhook signing secret a provider issues. Such a key's value is supplied to `opv sync <env>
+--supply-stdin` by the deploy job that produced it, and **is never stored in 1Password**. opv
+keeps no 1Password field for it:
+
+- `opv set`, `opv open`, and `opv import --replace` or `--rotate` of the key are refused
+  (`policy_refused`, guard `not_stored`); `opv explain <product/KEY> --env <env>` shows where it
+  stands. Change the value where infrastructure produces it and re-run the deploy job.
+- `opv import` (and an assistant's local import) reports a found value as `not_stored` and never
+  writes it.
+- `opv propose structure` never adds a field for it; `opv propose generate` refuses it; an
+  attestation refuses it, since there is no 1Password value to vouch for.
+- A 1Password field that already exists for it is refused at sync; `opv propose key
+  <product/KEY> --source infrastructure` archives it.
+
+Refused at load: `from` (and any key whose `from` names it), `kind = "config"`, `personal`,
+`allow_same_value`, a source-only product, no `environments` or an environment without a
+target, a pinned target (Kubernetes, Azure) delivering it, and no shape rule (`prefix`,
+`ensure_prefix`, `prefix_by_mode`, `regex`, `enum`, `base64_bytes`, `hex_bytes`, `https_url` or
+`email_list`) — a mis-mapped value must fail its rule. `immutable` is allowed. Every opv pin
+(workflows, teammates) must be 0.13.0 or later before the attribute is committed: an older opv
+refuses the configuration. The deploy job, the supply document and adoption: [Supplying infrastructure-generated values](infra-generated-values.md); the commands: [usage](usage.md#infrastructure-values---supply-stdin).
 
 #### Ignoring an observed name: `[products.<p>.ignore]`
 
@@ -261,7 +294,7 @@ rules = { enum = ["debug", "info", "warn"] }
 
 ### Local delivery: `[products.<p>.local]` and `file`
 
-Optional, for `opv run` only (targets ignore both). `environment = "declared_only"` gives the app only the product's declared keys and a fixed set of basics; `secrets_dir_env = "<VAR>"` names the variable that points at a private RAM directory holding every key with `file = "<relative/path>"` (as a file, not a variable). Paths are relative, at most four `/`-separated parts, each matching `^[a-z0-9]+(-[a-z0-9]+)*$` (lower-case letters and digits, `-` only between them: no uppercase, `.`, `_`, empty part, or leading/trailing `-`), unique, and never inside another key's path; `secrets_dir_env` must be a plain variable name, not `PATH`, `HOME`, `XDG_CONFIG_HOME`, `OP_*` or one of the product's keys, and needs at least one `file` key. Recipes for secret-store apps and Cloudflare Workers: [local development](local-development.md#only-the-declared-keys-or-keys-as-files-productsplocal); guarantees and limits: [design](design/local-delivery.md).
+Optional, for `opv run` only (targets ignore both). `environment = "declared_only"` gives the app only the product's declared keys and a fixed set of basics; `secrets_dir_env = "<VAR>"` names the variable that points at a private RAM directory holding every key with `file = "<relative/path>"` (as a file, not a variable). Paths are relative, at most four `/`-separated parts, each matching `^[a-z0-9]+(-[a-z0-9]+)*$` (lower-case letters and digits, `-` only between them: no uppercase, `.`, `_`, empty part, or leading/trailing `-`), unique, and never inside another key's path; `secrets_dir_env` must be a plain variable name, not `PATH`, `HOME`, `XDG_CONFIG_HOME`, `OP_*` or one of the product's keys, and needs at least one `file` key. Recipes for secret-store apps and Cloudflare Workers: [local development](local-development.md#only-the-declared-keys-or-keys-as-files-productsplocal); guarantees and limits: [platforms and limits](design/local-delivery.md#platforms-and-limits).
 
 ### Remote development: `[products.<p>.remotes.<name>]`
 
@@ -772,7 +805,7 @@ opv propose env staging --tier shared
 opv apply
 ```
 
-Adds one `[environments.<env>]` to the existing configuration (found like every other command's: `--config`, `OPV_CONFIG`, the nearest `secrets.toml`, or the project's manifest in 1Password) instead of writing a new one, with `opv propose key`'s validation, atomic write and concurrency refusal. `--tier local|shared|production` sets the [tier](#environment-tier-local-shared-or-production); the default is `shared`, or `production` when the name says production. A new environment inherits every key whose `environments` list is absent and every key that lists it; keys with an explicit list that omits it are not declared there, and an `environment_gap` warns about a key that looks left out by mistake. It writes no target; add one with `opv propose target`. It prints the keys left out and the fields not declared, each with the command that includes or declares one. It refuses an environment that already exists and never changes anything else.
+Adds one `[environments.<env>]` to the existing configuration (found like every other command's: `--config`, `OPV_CONFIG`, the nearest `secrets.toml`, or the project's manifest in 1Password) instead of writing a new one, with `opv propose key`'s validation, atomic write and concurrency refusal. `--tier local|shared|production` sets the [tier](#environment-tier-local-shared-or-production); the default is `shared`, or `production` when the name says production. A new environment inherits every key whose `environments` list is absent and every key that lists it; keys with an explicit list that omits it are not declared there, and `opv ready` reports a non-blocking `environment_gap` finding about a key that looks left out by mistake. It writes no target; add one with `opv propose target`. It prints the keys left out and the fields not declared, each with the command that includes or declares one. It refuses an environment that already exists and never changes anything else.
 
 <a id="declare-a-key-opv-add"></a>
 

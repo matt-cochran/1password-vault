@@ -1,11 +1,13 @@
 //! Language scanner patterns (design Part V, row `scan-lang`): Rust, TypeScript/JavaScript,
-//! Python and Go. Each pattern reads one language's source text and returns names only.
+//! Python, Go, Ruby and C/C++. Each pattern reads one language's source text and returns names
+//! only.
 //!
 //! A statically read literal name is [`Kind::Observed`] with its `file:line`; the same call
 //! with a computed argument (a variable, concatenation, template or f-string) is
 //! [`Kind::Ambiguous`] with no name. A pattern never reads a value: it sees text, never the
 //! environment, and an [`Observation`] carries a name, a file and a line, never a value.
 
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -195,6 +197,170 @@ fn go_calls() -> &'static [Call] {
             false,
         )]
     })
+}
+
+/// Ruby: `ENV['X']`, `ENV["X"]`, `ENV.fetch('X'[, default])`, in a `.rb` file or a
+/// `Rakefile`/`Gemfile`.
+pub struct Ruby;
+
+impl Pattern for Ruby {
+    fn language(&self) -> &'static str {
+        "ruby"
+    }
+
+    fn applies(&self, path: &str) -> bool {
+        path.ends_with(".rb") || matches!(file_name(path), "Rakefile" | "Gemfile")
+    }
+
+    fn scan(&self, path: &str, text: &str) -> Vec<Observation> {
+        scan_with(path, text, ruby_calls())
+    }
+}
+
+/// The final path component: `a/b/Rakefile` is `Rakefile`.
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+fn ruby_calls() -> &'static [Call] {
+    static CALLS: OnceLock<Vec<Call>> = OnceLock::new();
+    CALLS.get_or_init(|| {
+        vec![
+            call(r#"\bENV\s*\[\s*([^\]]*)\]"#, false),
+            call(r#"\bENV\.fetch\s*\(\s*([^,)]*)"#, false),
+        ]
+    })
+}
+
+/// C/C++: `getenv("X")`, `secure_getenv("X")`, including the qualified `std::getenv`.
+pub struct C;
+
+impl Pattern for C {
+    fn language(&self) -> &'static str {
+        "c"
+    }
+
+    fn applies(&self, path: &str) -> bool {
+        [".c", ".h", ".cc", ".cpp", ".hpp"]
+            .iter()
+            .any(|ext| path.ends_with(ext))
+    }
+
+    fn scan(&self, path: &str, text: &str) -> Vec<Observation> {
+        scan_with(path, text, c_calls())
+    }
+}
+
+fn c_calls() -> &'static [Call] {
+    static CALLS: OnceLock<Vec<Call>> = OnceLock::new();
+    CALLS.get_or_init(|| vec![call(r#"\b(?:secure_)?getenv\s*\(\s*([^)]*)\)"#, false)])
+}
+
+/// Reads of files under a product's declared secrets directory (#136, #175): the app is
+/// handed the directory in `local.secrets_dir_env` (say `APP_SECRETS_DIR`), and a key with
+/// `file = "db/migrate-pem"` is delivered there as a file, never as a variable. A read of
+/// `<secrets_dir_env>/<file>` is therefore an observation of the key that file delivers, by
+/// name; nothing here reads a value.
+///
+/// The contract builds it ([`SecretsDir::new`]): the variable naming the directory, and each
+/// declared `file` path mapped to the key it delivers.
+pub struct SecretsDir {
+    /// One `(variable, file path -> key)` group per product that declares
+    /// `local.secrets_dir_env`.
+    groups: Vec<(String, BTreeMap<String, String>)>,
+}
+
+impl SecretsDir {
+    /// The reads of files under `dir_env`: `files` maps each declared `file` path to the key
+    /// delivered there.
+    pub fn new<S, K>(dir_env: impl Into<String>, files: impl IntoIterator<Item = (S, K)>) -> Self
+    where
+        S: Into<String>,
+        K: Into<String>,
+    {
+        let files = files
+            .into_iter()
+            .map(|(path, key)| (path.into(), key.into()))
+            .collect();
+        Self {
+            groups: vec![(dir_env.into(), files)],
+        }
+    }
+
+    /// The reads of files under several directories at once: one `(variable, file path ->
+    /// key)` group per product that declares `local.secrets_dir_env`.
+    pub fn from_groups(
+        groups: impl IntoIterator<Item = (String, BTreeMap<String, String>)>,
+    ) -> Self {
+        Self {
+            groups: groups.into_iter().collect(),
+        }
+    }
+
+    /// Whether no product declares a secrets directory with a `file` key.
+    pub fn is_empty(&self) -> bool {
+        self.groups.iter().all(|(_, files)| files.is_empty())
+    }
+}
+
+impl Pattern for SecretsDir {
+    fn language(&self) -> &'static str {
+        "secrets_dir"
+    }
+
+    fn applies(&self, path: &str) -> bool {
+        code_file(path)
+    }
+
+    fn scan(&self, path: &str, text: &str) -> Vec<Observation> {
+        let mut found: Vec<(usize, Observation)> = Vec::new();
+        for (dir_env, files) in &self.groups {
+            // The app reads these files where it has the directory variable; without it the
+            // same path literal names some other file.
+            if !text.contains(dir_env.as_str()) {
+                continue;
+            }
+            for (file, key) in files {
+                for offset in quoted(text, file) {
+                    found.push((
+                        offset,
+                        Observation {
+                            name: Some(key.clone()),
+                            file: path.to_string(),
+                            line: line_of(text, offset),
+                            kind: Kind::Observed,
+                        },
+                    ));
+                }
+            }
+        }
+        found.sort_by_key(|(offset, _)| *offset);
+        found.dedup_by(|a, b| a.1 == b.1);
+        found
+            .into_iter()
+            .map(|(_, observation)| observation)
+            .collect()
+    }
+}
+
+/// The byte offsets where `needle` sits inside a plain quoted literal (`"..."` or `'...'`).
+fn quoted(text: &str, needle: &str) -> Vec<usize> {
+    let mut at = Vec::new();
+    for quote in ['"', '\''] {
+        let wrapped = format!("{quote}{needle}{quote}");
+        at.extend(text.match_indices(&wrapped).map(|(offset, _)| offset + 1));
+    }
+    at
+}
+
+/// Whether a secrets-directory read can be in `path`: the languages the scanner reads, plus
+/// shell and the extensionless Ruby scripts.
+fn code_file(path: &str) -> bool {
+    const EXT: &[&str] = &[
+        ".rs", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".go", ".rb", ".c", ".h",
+        ".cc", ".cpp", ".hpp", ".sh", ".bash",
+    ];
+    EXT.iter().any(|ext| path.ends_with(ext)) || matches!(file_name(path), "Rakefile" | "Gemfile")
 }
 
 #[cfg(test)]
