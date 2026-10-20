@@ -94,11 +94,11 @@ Next: eval "$(opv login --shell)"
 exit: 2
 opv: this command needs --shell, one of posix, fish
 Do: pick one of posix, fish and pass it with --shell
-Next: opv contract
+Next: eval "$(opv login --shell=posix)"
 
 ## choice_unknown_shell: SHELL=/usr/bin/e2e-no-such-shell python3 -c 'import subprocess,sys; p=subprocess.run(["opv","login","--shell"], stdout=subprocess.PIPE); open(sys.argv[1],"wb").write(p.stdout); sys.exit(p.returncode)' "$R/out/choice_unknown_shell.stdout"; exit $?
 exit: 2
 opv: this command needs --shell, one of posix, fish
 Do: pick one of posix, fish and pass it with --shell
-Next: opv contract
+Next: eval "$(opv login --shell=posix)"
 

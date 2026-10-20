@@ -90,9 +90,29 @@ pub fn reuse_path(account: Option<&str>, vars: &[String], listed: &[Account]) ->
     }
 }
 
+/// The state of a session op reported signed out (session-reuse §4.3, FMECA M3): the one
+/// decision every command makes, whether opv found the session missing itself or read op's
+/// signed-out reply. `Expired` when the shell exports a session for `account`
+/// ([`ReusePath::Shell`]): the person refreshes that shell; `AppLocked` where op talks to
+/// the desktop app; `SignedOut` otherwise. `shell_vars` are names only, never values.
+pub fn signed_out_state(
+    account: Option<&str>,
+    shell_vars: &[String],
+    integration: Option<DesktopIntegration>,
+) -> crate::cause::SessionState {
+    use crate::cause::SessionState;
+    match reuse_path(account, shell_vars, &[]).with_integration(integration) {
+        ReusePath::Shell { .. } => SessionState::Expired,
+        ReusePath::App => SessionState::AppLocked,
+        ReusePath::PerCommand => SessionState::SignedOut,
+    }
+}
+
 /// What `sign_in_here` (main.rs) says before an in-command sign-in (§4.1). `kind` is the
 /// sign-in's own answer when known (V1); before it, the host's static integration decides.
-pub fn sign_in_notice(kind: Option<SignInKind>, host: &Host) -> String {
+/// `expired` is the shell's session variable for the account when there is one
+/// ([`ReusePath::Shell`]): its name (never its value) is said with the refresh (§4.3, S4).
+pub fn sign_in_notice(kind: Option<SignInKind>, host: &Host, expired: Option<&str>) -> String {
     const APP: &str = "You are not signed in to 1Password. Approve 1Password's prompt. This \
                        terminal then stays signed in while the 1Password app keeps it authorized.";
     let integration = super::doctor_session::host_integration(host);
@@ -100,16 +120,25 @@ pub fn sign_in_notice(kind: Option<SignInKind>, host: &Host) -> String {
         integration,
         Some(DesktopIntegration::Active | DesktopIntegration::Available)
     );
-    match kind {
-        Some(SignInKind::App) => APP.to_string(),
-        None if app_possible => "You are not signed in to 1Password. Approve 1Password's prompt, \
+    match (kind, expired) {
+        (Some(SignInKind::App), _) => APP.to_string(),
+        // A shell variable decides before the app does (`ReusePath::with_integration`).
+        (None, None) if app_possible => {
+            "You are not signed in to 1Password. Approve 1Password's prompt, \
              or enter your password there; it goes only to 1Password. With the 1Password app's \
              CLI integration on, this terminal then stays signed in while the app keeps it \
              authorized; without it, this sign-in lasts for this command only."
-            .to_string(),
+                .to_string()
+        }
         _ => {
-            let base = "You are not signed in to 1Password. Sign in to go on; your password \
-                        goes only to 1Password's prompt. This sign-in lasts for this command only";
+            let opening = match expired {
+                Some(var) => format!("This shell's 1Password session ({var}) expired."),
+                None => "You are not signed in to 1Password.".to_string(),
+            };
+            let base = format!(
+                "{opening} Sign in to go on; your password goes only to 1Password's prompt. \
+                 This sign-in lasts for this command only"
+            );
             // FMECA H5: no `--shell=powershell` in 0.14, so PowerShell gets no refresh line.
             if host.shell == crate::host::Shell::PowerShell {
                 format!("{base}.")

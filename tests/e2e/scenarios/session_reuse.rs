@@ -736,8 +736,8 @@ exit $rc"#,
 
     // --- S3, S4: an expired session ---------------------------------------------------------
 
-    /// An expired shell session as `opv ready` and `opv access` report it (session-reuse
-    /// §4.3): `expired`, the refresh as the step.
+    /// An expired shell session as every command reports it (session-reuse §4.3):
+    /// `expired`, the refresh as the step.
     fn assert_expired_with_the_refresh(name: &str, doc: &Value) {
         assert_eq!(doc["error"]["code"], "op_not_signed_in", "{name}: {doc}");
         assert_eq!(
@@ -751,8 +751,9 @@ exit $rc"#,
     }
 
     /// Channels 2 and 3 (S3): an expired session under `--json` (stdout and stderr files,
-    /// so no prompt) is `op_not_signed_in`; where opv classifies it (`ready`, `access`) it
-    /// is `expired` with the refresh as the step. `--verbose` included.
+    /// so no prompt) is `op_not_signed_in`, `expired`, with the refresh as the step, in
+    /// every command: those that check the session first (`ready`, `access`) and those that
+    /// read op's signed-out reply (`inventory`, `next`). `--verbose` included.
     #[test]
     fn s3_an_expired_session_under_json_names_the_refresh() {
         let lab = Lab::new(Mode::Token);
@@ -776,15 +777,9 @@ opv --verbose ready dev --json > "$R/out/verbose.json" 2> "$R/out/verbose.err"; 
         }
         assert_expired_with_the_refresh("ready", &lab.doc("ready.json"));
         assert_expired_with_the_refresh("access", &lab.doc("access.json"));
+        assert_expired_with_the_refresh("inventory", &lab.doc("inventory.json"));
+        assert_expired_with_the_refresh("next", &lab.doc("next.json"));
         assert_expired_with_the_refresh("ready --verbose", &lab.doc("verbose.json"));
-        // `inventory` and `next` diagnose op's own signed-out reply (state `signed_out`, a
-        // per-command login as the step): reported to the owner, not pinned here.
-        for c in ["inventory", "next"] {
-            assert_eq!(
-                lab.doc(&format!("{c}.json"))["error"]["code"],
-                "op_not_signed_in"
-            );
-        }
         // No prompt without a terminal on stderr: the sign-in stays the eval's one.
         assert_eq!(lab.signins(), 1, "{:?}", lab.op_log());
         for c in ["ready", "access", "inventory", "next", "verbose"] {
@@ -801,7 +796,8 @@ opv --verbose ready dev --json > "$R/out/verbose.json" 2> "$R/out/verbose.err"; 
     }
 
     /// Channels 2 and 3 (S4): an expired session at the terminal signs in once inside the
-    /// command, which then goes on; stderr names the refresh. `--verbose` included.
+    /// command, which then goes on; stderr names the session variable (never its value) and
+    /// the refresh. `--verbose` included.
     #[test]
     fn s4_an_expired_session_at_the_terminal_signs_in_once_in_the_command() {
         let lab = Lab::new(Mode::Token);
@@ -819,6 +815,20 @@ opv --verbose inventory > "$R/out/s4-verbose.out"; echo "verbose=$?""#,
             t.typescript.contains(
                 r#"to stay signed in across commands in this shell, run eval "$(opv login --shell)""#
             ),
+            "{}",
+            t.typescript
+        );
+        // The variable is named, twice (one notice per command), by name only.
+        let named = t
+            .typescript
+            .matches("This shell's 1Password session (OP_SESSION_")
+            .count();
+        assert_eq!(named, 2, "{}", t.typescript);
+        assert!(
+            t.typescript
+                .lines()
+                .filter(|l| l.contains("This shell's 1Password session ("))
+                .all(|l| l.contains(") expired.") && !l.contains('=')),
             "{}",
             t.typescript
         );

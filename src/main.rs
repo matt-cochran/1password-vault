@@ -5137,9 +5137,19 @@ fn sign_in_here() -> Result<bool, Error> {
     // The account of the op call that found no session (0.9.0), else the selected one.
     let account =
         opv::runner::signed_out_account().or_else(|| config_store::selected_account(&here));
+    // An expired shell session is named (by its variable, never its value) with the
+    // refresh (session-reuse §4.3, S4).
+    let expired = match opv::app::signin::reuse_path(
+        account.as_deref(),
+        &opv::app::account::session_var_names(),
+        &[],
+    ) {
+        opv::app::signin::ReusePath::Shell { var } => Some(var),
+        _ => None,
+    };
     eprintln!(
         "{}",
-        opv::app::signin::sign_in_notice(None, &opv::host::Host::detect())
+        opv::app::signin::sign_in_notice(None, &opv::host::Host::detect(), expired.as_deref())
     );
     let command = std::env::args().nth(1).unwrap_or_else(|| "opv".into());
     let mut runtime = Runtime::with_account(account.as_deref()).for_command(&command);

@@ -2738,6 +2738,23 @@ fn a11_a_choice_among_several_lists_them() {
     assert_eq!(next_in(&c, &inv()), "opv target list");
 }
 
+/// #203 (session-reuse §5.5): `opv login --shell` with PowerShell or a shell opv has no
+/// syntax for hands back the login in the explicit POSIX syntax, with the account given.
+#[test]
+fn a_shell_choice_hands_back_the_posix_login() {
+    let c = Cause::ChoiceRequired {
+        flag: "--shell".into(),
+        candidates: vec!["posix".into(), "fish".into()],
+    };
+    let inv = cli(&["opv", "login", "--shell=powershell"]);
+    assert_eq!(next_in(&c, &inv), r#"eval "$(opv login --shell=posix)""#);
+    let inv = cli(&["opv", "login", "--shell", "--account", "acme"]);
+    assert_eq!(
+        next_in(&c, &inv),
+        r#"eval "$(opv login --shell=posix --account acme)""#
+    );
+}
+
 /// A11: the one candidate keeps the child command's placeholder.
 #[test]
 fn a11_the_one_candidate_keeps_the_child_placeholder() {

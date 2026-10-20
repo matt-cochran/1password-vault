@@ -577,11 +577,31 @@ fn flag_listing(flag: &str, inv: &Invocation) -> Next {
         "--account" => Next::Check(cmd(&["account", "list"], &[])),
         "--env" | "--product" | "--key" => Next::Check(cmd(&["contract"], &[])),
         "--role" | "--remote" => Next::Check(cmd(&["config", "export"], &[])),
+        // `opv login --shell` with no syntax for the shell, or PowerShell (withheld, FMECA
+        // H5): the login again in the explicit POSIX syntax, with the account given.
+        "--shell" => Next::Handoff(Cmd::login_shell(
+            crate::host::Shell::Other,
+            given_account(inv),
+        )),
         _ => match inv_env(inv) {
             Some(env) => Next::Check(cmd(&["status"], &[env])),
             None => Next::Check(cmd(&["contract"], &[])),
         },
     }
+}
+
+/// The `--account` the invocation gave (`--account <id>` or `--account=<id>`), if any.
+fn given_account(inv: &Invocation) -> Option<&str> {
+    let mut args = inv.args.iter().map(String::as_str);
+    while let Some(a) = args.next() {
+        if a == "--account" {
+            return args.next();
+        }
+        if let Some(v) = a.strip_prefix("--account=") {
+            return Some(v);
+        }
+    }
+    None
 }
 
 /// The subscription of an Azure resource, from its scope (`subscription <id>`).
