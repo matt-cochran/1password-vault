@@ -2,11 +2,14 @@
 
 use zeroize::Zeroizing;
 
+#[cfg(unix)]
+use super::stdout_kind;
 use super::{
-    ShellEmit, account_vars, check_shell, chosen_shell, export_lines, sign_in_kind, stdout_kind,
-    write_lines,
+    ShellEmit, account_vars, check_shell, chosen_shell, export_lines, sign_in_kind, write_lines,
 };
-use crate::app::desktop_integration::{SignInKind, StdoutKind};
+use crate::app::desktop_integration::SignInKind;
+#[cfg(unix)]
+use crate::app::desktop_integration::StdoutKind;
 use crate::cause::{Cause, NoTerminal};
 use crate::domain::SecretValue;
 use crate::host::Shell;

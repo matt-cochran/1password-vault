@@ -57,7 +57,7 @@ use crate::cause::{
     AccountId, AccountRef, AccountSource, Cause, CredentialProblem, CredentialRef, DiagnoseContext,
     DottedPath, EnvName, ExitClass, FieldName, FieldType, GrantModel, IoKind, ItemId, Location,
     NamedBy, NotFoundState, Observed, Principal, ResourceKind, ResourceName, ResourceRef, Right,
-    SessionState, System, TargetName, Unanswered, Unusable, Upstream, VarName, VaultId,
+    System, TargetName, Unanswered, Unusable, Upstream, VarName, VaultId,
 };
 use crate::domain::model::{Boundary, Environment, Kind};
 use crate::domain::plan::ItemField;
@@ -533,7 +533,7 @@ fn accounts_in_app(host: &Host) -> bool {
 
 /// The names of the shell's `OP_SESSION*` variables (values are never read). In this
 /// crate's unit tests, none: no test depends on the developer's shell (as `Host::detect`).
-fn shell_session_vars() -> Vec<String> {
+pub(crate) fn shell_session_vars() -> Vec<String> {
     if cfg!(test) {
         Vec::new()
     } else {
@@ -588,20 +588,15 @@ fn session_cause_with(
             problem: CredentialProblem::Unreadable,
             seen: seen.cloned()?,
         }),
-        Session::NotSignedIn => {
-            use crate::app::signin::{ReusePath, reuse_path};
-            let account = ctx.account.as_ref().map(|a| a.as_str());
-            let path = reuse_path(account, shell_vars, &[]).with_integration(integration);
-            Some(Cause::NotSignedIn {
-                system: System::OnePassword,
-                account: ctx.account.clone(),
-                state: match path {
-                    ReusePath::Shell { .. } => SessionState::Expired,
-                    ReusePath::App => SessionState::AppLocked,
-                    ReusePath::PerCommand => SessionState::SignedOut,
-                },
-            })
-        }
+        Session::NotSignedIn => Some(Cause::NotSignedIn {
+            system: System::OnePassword,
+            account: ctx.account.clone(),
+            state: crate::app::signin::signed_out_state(
+                ctx.account.as_ref().map(|a| a.as_str()),
+                shell_vars,
+                integration,
+            ),
+        }),
         Session::AccountAbsent(cause) => Some(*cause),
         // No account at all is on this machine, so any account will do (the `Any` form);
         // an account the caller selected but op does not know keeps its id.
@@ -2308,7 +2303,7 @@ mod tests {
         .unwrap()
     }
 
-    fn state_of(c: &Cause) -> SessionState {
+    fn state_of(c: &Cause) -> crate::cause::SessionState {
         match c {
             Cause::NotSignedIn { state, .. } => state.clone(),
             other => panic!("not a sign-in cause: {other:?}"),
@@ -2342,7 +2337,7 @@ mod tests {
     #[test]
     fn a_shell_session_that_fails_is_expired() {
         let c = not_signed_in(&wsl_linux_op(), &["OP_SESSION_work"], Some("work"));
-        assert_eq!(state_of(&c), SessionState::Expired);
+        assert_eq!(state_of(&c), crate::cause::SessionState::Expired);
     }
 
     /// Expired: Next refreshes the shell, never a per-command `opv login`.
@@ -2356,14 +2351,14 @@ mod tests {
     #[test]
     fn a_shell_session_is_expired_before_the_app_is_locked() {
         let c = not_signed_in(&macos(), &["OP_SESSION_work"], Some("work"));
-        assert_eq!(state_of(&c), SessionState::Expired);
+        assert_eq!(state_of(&c), crate::cause::SessionState::Expired);
     }
 
     /// FMECA L6: op's delegation setting is not a session.
     #[test]
     fn the_delegation_setting_is_no_shell_session() {
         let c = not_signed_in(&wsl_linux_op(), &["OP_SESSION_DELEGATION_ENABLED"], None);
-        assert_eq!(state_of(&c), SessionState::SignedOut);
+        assert_eq!(state_of(&c), crate::cause::SessionState::SignedOut);
     }
 
     /// FMECA M3: another account's session is not this account's.
@@ -2374,14 +2369,14 @@ mod tests {
             &["OP_SESSION_home", "OP_SESSION_other"],
             Some("work"),
         );
-        assert_eq!(state_of(&c), SessionState::SignedOut);
+        assert_eq!(state_of(&c), crate::cause::SessionState::SignedOut);
     }
 
     /// Beyond op.exe: where op talks to the desktop app (macOS here), it is locked.
     #[test]
     fn on_a_desktop_app_host_not_signed_in_is_the_locked_app() {
         let c = not_signed_in(&macos(), &[], Some("work"));
-        assert_eq!(state_of(&c), SessionState::AppLocked);
+        assert_eq!(state_of(&c), crate::cause::SessionState::AppLocked);
     }
 
     /// App locked: Next runs the command again under a sign-in, which raises the app's
@@ -2405,7 +2400,7 @@ mod tests {
     #[test]
     fn the_linux_op_in_wsl_without_a_session_is_signed_out() {
         let c = not_signed_in(&wsl_linux_op(), &[], Some("work"));
-        assert_eq!(state_of(&c), SessionState::SignedOut);
+        assert_eq!(state_of(&c), crate::cause::SessionState::SignedOut);
     }
 
     /// The seam to doctor's detection: the host's integration comes from

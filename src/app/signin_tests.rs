@@ -487,7 +487,7 @@ fn wsl_linux_op() -> Host {
 /// §4.1: under the app, never "for this command only".
 #[test]
 fn an_app_sign_in_says_the_terminal_stays_signed_in() {
-    let n = sign_in_notice(Some(SignInKind::App), &wsl_linux_op());
+    let n = sign_in_notice(Some(SignInKind::App), &wsl_linux_op(), None);
     assert!(
         n.contains("stays signed in while the 1Password app keeps it authorized")
             && !n.contains("this command only"),
@@ -498,7 +498,7 @@ fn an_app_sign_in_says_the_terminal_stays_signed_in() {
 /// WSL with the Linux op: the sign-in is per command, and the shell refresh is named.
 #[test]
 fn a_per_command_sign_in_names_the_shell_refresh() {
-    let n = sign_in_notice(None, &wsl_linux_op());
+    let n = sign_in_notice(None, &wsl_linux_op(), None);
     assert!(
         n.contains("this command only") && n.contains("eval \"$(opv login --shell)\""),
         "{n}"
@@ -511,6 +511,7 @@ fn an_undecided_app_host_names_both_outcomes() {
     let n = sign_in_notice(
         None,
         &Host::from_env(&FakeEnv::new("macos").shell("/bin/zsh")),
+        None,
     );
     assert!(
         n.contains("Approve 1Password's prompt") && n.contains("this command only"),
@@ -526,6 +527,49 @@ fn a_powershell_sign_in_offers_no_shell_refresh() {
             .var("WSL_DISTRO_NAME")
             .shell("/usr/bin/pwsh"),
     );
-    let n = sign_in_notice(None, &host);
+    let n = sign_in_notice(None, &host, None);
     assert!(!n.contains("opv login --shell"), "{n}");
+}
+
+/// §4.3, S4: an expired shell session is named by its variable, with the refresh, even on
+/// a host where the app may serve op (the shell's variable decides first).
+#[test]
+fn an_expired_shell_session_names_its_variable_and_the_refresh() {
+    for host in [
+        wsl_linux_op(),
+        Host::from_env(&FakeEnv::new("macos").shell("/bin/zsh")),
+    ] {
+        let n = sign_in_notice(None, &host, Some("OP_SESSION_ABC"));
+        assert!(
+            n.contains("This shell's 1Password session (OP_SESSION_ABC) expired")
+                && n.contains("this command only")
+                && n.contains("eval \"$(opv login --shell)\""),
+            "{n}"
+        );
+    }
+}
+
+/// The shared signed-out decision (§4.3): a shell variable for the account is `expired`,
+/// the app where op talks to it is `app_locked`, else `signed_out`.
+#[test]
+fn signed_out_state_is_one_decision() {
+    use crate::app::desktop_integration::DesktopIntegration;
+    use crate::cause::SessionState;
+    let vars = vec!["OP_SESSION_abc".to_string()];
+    assert_eq!(
+        signed_out_state(Some("abc"), &vars, None),
+        SessionState::Expired
+    );
+    assert_eq!(
+        signed_out_state(Some("abc"), &vars, Some(DesktopIntegration::Available)),
+        SessionState::Expired
+    );
+    assert_eq!(
+        signed_out_state(Some("abc"), &[], Some(DesktopIntegration::Available)),
+        SessionState::AppLocked
+    );
+    assert_eq!(
+        signed_out_state(Some("abc"), &[], None),
+        SessionState::SignedOut
+    );
 }
