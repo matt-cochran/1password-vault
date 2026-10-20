@@ -66,26 +66,6 @@ export function npmPublishAction(existing: string | undefined, expected: string,
   if (existing !== expected) throw new Error(`Published npm bytes differ for ${label}`);
   return 'skip';
 }
-export type TarballWait = {
-  fetch: (url: string) => Promise<{ status: number }>;
-  now: () => number;
-  sleep: (milliseconds: number) => Promise<void>;
-  timeoutMs?: number;
-  intervalMs?: number;
-};
-// Poll until the registry serves the published tarball, then stop. A bounded wall clock
-// (injectable so tests never sleep) guarantees we fail rather than wait forever.
-export async function waitForTarball(url: string, wait: TarballWait): Promise<void> {
-  // 15 minutes: npm took over 5 minutes to serve a 0.12.3 platform tarball.
-  const timeoutMs = wait.timeoutMs ?? 900_000;
-  const intervalMs = wait.intervalMs ?? 5_000;
-  const deadline = wait.now() + timeoutMs;
-  for (;;) {
-    if ((await wait.fetch(url)).status === 200) return;
-    if (wait.now() >= deadline) throw new Error(`npm tarball was not served within ${timeoutMs}ms: ${url}`);
-    await wait.sleep(intervalMs);
-  }
-}
 function readNpmTarballs(directory: string): NpmTarball[] {
   return readdirSync(directory).filter((name) => name.endsWith('.tgz')).map((file) => {
     const path = join(directory, file);
@@ -93,30 +73,102 @@ function readNpmTarballs(directory: string): NpmTarball[] {
     return { file, path, name: metadata.name, version: metadata.version, integrity: `sha512-${createHash('sha512').update(readFileSync(path)).digest('base64')}` };
   });
 }
-function registryTarballUrl(pkg: NpmTarball): string {
-  const short = pkg.name.split('/').pop()!;
-  return `https://registry.npmjs.org/${pkg.name}/-/${short}-${pkg.version}.tgz`;
+// npm can take well over 15 minutes to list a freshly published version (0.13.0's
+// darwin-arm64 was published at 13:21 and listed at 13:36), so one 45-minute window
+// covers every tarball in a single waiting pass after all publishes are done.
+const npmListTimeoutMs = 2_700_000;
+function npmLabel(pkg: NpmTarball): string { return `${pkg.name}@${pkg.version}`; }
+export type NpmPublishDeps = {
+  integrity: (pkg: NpmTarball) => Promise<string | undefined>;
+  publish: (pkg: NpmTarball) => Promise<void>;
+  now: () => number;
+  sleep: (milliseconds: number) => Promise<void>;
+  timeoutMs?: number;
+  intervalMs?: number;
+  log?: (message: string) => void;
+};
+function duplicatePublishRefusal(error: unknown): boolean {
+  const failure = error as { code?: unknown; message?: unknown; stdout?: unknown; stderr?: unknown };
+  return failure?.code === 'E403'
+    || /(^|[^A-Za-z])E403([^A-Za-z]|$)/.test(String(failure?.message ?? ''))
+    || /You cannot publish over/.test(`${failure?.stdout ?? ''}\n${failure?.stderr ?? ''}`);
 }
-async function publishNpmTarball(pkg: NpmTarball): Promise<void> {
-  let existing: string | undefined;
+// Poll the registry metadata together until every retained tarball's bytes are listed.
+// A mismatch is a hard refusal; unlisted versions are retried inside one bounded window.
+export async function waitForIntegrity(packages: NpmTarball[], deps: NpmPublishDeps): Promise<void> {
+  const timeoutMs = deps.timeoutMs ?? npmListTimeoutMs;
+  const intervalMs = deps.intervalMs ?? 5_000;
+  const deadline = deps.now() + timeoutMs;
+  let pending = packages;
+  for (;;) {
+    const unlisted: NpmTarball[] = [];
+    const mismatched: NpmTarball[] = [];
+    for (const pkg of pending) {
+      const listed = await deps.integrity(pkg);
+      if (listed === pkg.integrity) continue;
+      (listed === undefined ? unlisted : mismatched).push(pkg);
+    }
+    if (mismatched.length > 0) throw new Error(`Published npm bytes differ for ${mismatched.map(npmLabel).join(', ')}`);
+    pending = unlisted;
+    if (pending.length === 0) return;
+    if (deps.now() >= deadline) throw new Error(`npm did not list ${pending.map(npmLabel).join(', ')} within ${timeoutMs}ms; the job is safe to re-run`);
+    await deps.sleep(intervalMs);
+  }
+}
+// A version npm refuses to republish (E403) but has not listed yet is pending, not failed:
+// wait for the listing instead of aborting the release. Returns whether a listing is owed.
+async function publishNpmPackage(pkg: NpmTarball, deps: NpmPublishDeps): Promise<boolean> {
+  const existing = await deps.integrity(pkg);
+  if (npmPublishAction(existing, pkg.integrity, npmLabel(pkg)) === 'skip') {
+    deps.log?.(`Already published identical retained bytes: ${npmLabel(pkg)}`);
+    return false;
+  }
   try {
-    existing = JSON.parse(command(['npm', 'view', `${pkg.name}@${pkg.version}`, 'dist.integrity', '--json']));
+    await deps.publish(pkg);
+  } catch (error) {
+    if (!duplicatePublishRefusal(error)) throw error;
+    deps.log?.(`npm already has ${npmLabel(pkg)} but has not listed it; waiting for the registry listing`);
+  }
+  return true;
+}
+// Publish every platform package back to back, then confirm all of their bytes together;
+// only then publish the main package that depends on them.
+export async function publishNpmTarballs(packages: NpmTarball[], deps: NpmPublishDeps): Promise<void> {
+  const ordered = orderNpmTarballs(packages);
+  const platforms = ordered.filter((pkg) => pkg.name !== npmMainPackage);
+  const mainPackages = ordered.filter((pkg) => pkg.name === npmMainPackage);
+  const pending: NpmTarball[] = [];
+  for (const pkg of platforms) if (await publishNpmPackage(pkg, deps)) pending.push(pkg);
+  await waitForIntegrity(pending, deps);
+  for (const pkg of mainPackages) if (await publishNpmPackage(pkg, deps)) await waitForIntegrity([pkg], deps);
+}
+async function lookupNpmIntegrity(pkg: NpmTarball): Promise<string | undefined> {
+  try {
+    return JSON.parse(command(['npm', 'view', `${pkg.name}@${pkg.version}`, 'dist.integrity', '--json']));
   } catch (error) {
     let response: any;
-    try { response = JSON.parse(String((error as { stdout?: unknown }).stdout)); } catch { throw new Error(`Cannot verify existing npm release ${pkg.name}@${pkg.version}`); }
-    if (response.error?.code !== 'E404') throw new Error('npm lookup failed; refusing a blind publication');
+    try { response = JSON.parse(String((error as { stdout?: unknown }).stdout)); } catch { throw new Error(`Cannot verify existing npm release ${npmLabel(pkg)}`); }
+    if (response.error?.code === 'E404') return undefined;
+    throw new Error('npm lookup failed; refusing a blind publication');
   }
-  if (npmPublishAction(existing, pkg.integrity, `${pkg.name}@${pkg.version}`) === 'skip') {
-    console.log(`Already published identical retained bytes: ${pkg.name}@${pkg.version}`);
-    return;
+}
+// stderr is captured (and echoed) so a duplicate-publish refusal is visible to the caller.
+async function publishNpmPackageForReal(pkg: NpmTarball): Promise<void> {
+  try {
+    execFileSync('npm', ['publish', pkg.path, '--provenance', '--access', 'public'], { stdio: ['ignore', 'inherit', 'pipe'] });
+  } catch (error) {
+    process.stderr.write(String((error as { stderr?: unknown }).stderr ?? ''));
+    throw error;
   }
-  execFileSync('npm', ['publish', pkg.path, '--provenance', '--access', 'public'], { stdio: 'inherit' });
-  await waitForTarball(registryTarballUrl(pkg), {
-    fetch: (url: string) => fetch(url, { method: 'HEAD' }),
+}
+function npmPublishDeps(): NpmPublishDeps {
+  return {
+    integrity: lookupNpmIntegrity,
+    publish: publishNpmPackageForReal,
     now: () => Date.now(),
     sleep: (milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)),
-  });
-  console.log(`Served ${pkg.name}@${pkg.version}`);
+    log: (message: string) => console.log(message),
+  };
 }
 function output(name: string, value: string): void { if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `${name}=${value}\n`); }
 // Scan successful staging runs for a retained candidate of the current tree, the same way resolve does.
@@ -165,7 +217,7 @@ export async function main(): Promise<void> {
     return;
   }
   if (mode === 'publish') {
-    for (const pkg of orderNpmTarballs(readNpmTarballs(join(root, 'npm')))) await publishNpmTarball(pkg);
+    await publishNpmTarballs(readNpmTarballs(join(root, 'npm')), npmPublishDeps());
     return;
   }
   if (mode === 'check') {
