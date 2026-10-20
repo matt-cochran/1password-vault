@@ -1594,10 +1594,13 @@ fn scan_inside(project: &Path, dir: &str) -> bool {
     }
     let root = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
     let joined = root.join(Path::new(dir));
-    let lexical = match (parts(&joined), parts(&root)) {
-        (Some(scan), Some(root)) => scan.starts_with(&root),
+    let under = |base: &Path| match (parts(&base.join(Path::new(dir))), parts(base)) {
+        (Some(scan), Some(base)) => scan.starts_with(&base),
         _ => false,
     };
+    // An absolute `dir` may name the project by the path it was given or by its real path:
+    // on macOS a temp directory under `/var` is really under `/private/var`.
+    let lexical = under(project) || under(&root);
     // A directory that exists is also checked by its real path, so a symlink inside the
     // project that points elsewhere cannot carry the scan out of it.
     lexical && std::fs::canonicalize(&joined).map_or(true, |real| real.starts_with(&root))
@@ -1634,6 +1637,24 @@ mod tests {
         };
         assert!(r.write(&Call::new("op", &["item", "edit"])).is_err());
         assert!(r.inner.calls.borrow().is_empty());
+    }
+
+    /// A project reached through a symlink (macOS's `/var` is `/private/var`) takes an
+    /// absolute scan by either spelling, and still refuses one beside it.
+    #[cfg(unix)]
+    #[test]
+    fn a_scan_names_the_project_by_its_given_or_real_path() {
+        let real = tempfile::tempdir().unwrap();
+        std::fs::create_dir(real.path().join("src")).unwrap();
+        let links = tempfile::tempdir().unwrap();
+        let project = links.path().join("project");
+        std::os::unix::fs::symlink(real.path(), &project).unwrap();
+        let given = project.join("src");
+        let actual = std::fs::canonicalize(real.path()).unwrap().join("src");
+        assert!(scan_inside(&project, given.to_str().unwrap()));
+        assert!(scan_inside(&project, actual.to_str().unwrap()));
+        assert!(scan_inside(&project, "src"));
+        assert!(!scan_inside(&project, links.path().to_str().unwrap()));
     }
     fn vars(pairs: &[(&str, &str)]) -> impl Iterator<Item = (String, String)> {
         pairs

@@ -616,6 +616,8 @@ fn the_guides_supply_check_job_equals_the_generated_job() {
 
 /// The body of every `run:` script in `yaml`, as bash runs it: a block scalar dedented, an
 /// inline command after `run:`, each `${{ … }}` replaced by a word as GitHub would.
+/// Only the unix tests use it: they hand the scripts to bash.
+#[cfg(unix)]
 fn run_scripts(yaml: &str) -> Vec<String> {
     scripts(yaml)
         .into_iter()
@@ -697,6 +699,7 @@ fn the_drift_workflow_passes_bash_n() {
 }
 
 /// The canary the stub producer puts in every value; it must never reach the step's log.
+#[cfg(unix)]
 const CANARY: &str = "S7MARKER";
 
 /// What running the generated supply step printed, and what the stub `opv sync` read.
