@@ -2794,6 +2794,53 @@ fn a13_a_superseded_delivery_names_the_later_receipt() {
     assert!(d.contains("/tmp/receipt.json"), "{d}");
 }
 
+/// #206 (R1): an assistant's `opv sync <env> --supply-stdin`.
+fn assistant_supply() -> Cause {
+    Cause::PersonOnly {
+        command: Cmd {
+            command: vec!["sync".into()],
+            args: vec!["prod".into(), "--supply-stdin".into()],
+        },
+        marker: AgentMarker::ClaudeCode,
+    }
+}
+
+#[test]
+fn an_assistants_supply_is_never_sent_to_a_terminal() {
+    assert!(
+        !assistant_supply()
+            .do_text(&inv())
+            .unwrap_or_default()
+            .contains("terminal")
+    );
+}
+
+#[test]
+fn an_assistants_supply_is_sent_to_the_deploy_workflow() {
+    assert!(
+        assistant_supply()
+            .do_text(&inv())
+            .unwrap_or_default()
+            .starts_with(
+                "it runs in the approved deploy workflow (CI), from the job that produced the value"
+            )
+    );
+}
+
+#[test]
+fn an_assistants_supply_message_names_the_deploy_workflow() {
+    assert!(
+        assistant_supply()
+            .message()
+            .contains("runs only in the approved deploy workflow (CI)")
+    );
+}
+
+#[test]
+fn an_assistants_supply_steps_to_the_environments_plan() {
+    assert_eq!(next_in(&assistant_supply(), &inv()), "opv plan prod");
+}
+
 /// #206 §5.4: a supplying run's unrecorded supplied name sends the person to the deploy job.
 #[test]
 fn an_unrecorded_supplied_name_says_to_re_run_the_deploy_job() {

@@ -91,7 +91,12 @@ fn inv_cmd(inv: &Invocation) -> Cmd {
 /// Whether `inv` is a supplying sync (`opv sync <env> --supply-stdin`, #206): its values
 /// come from the deploy job that runs it, never from a person or 1Password.
 fn supplying(inv: &Invocation) -> bool {
-    inv.command == ["sync"] && inv.args.iter().any(|a| a == "--supply-stdin")
+    supplying_cmd(&inv_cmd(inv))
+}
+
+/// Whether `c` is a supplying sync (`opv sync <env> --supply-stdin`, #206).
+fn supplying_cmd(c: &Cmd) -> bool {
+    c.command == ["sync"] && c.args.iter().any(|a| a == "--supply-stdin")
 }
 
 fn carries_person_only_flag(c: &Cmd) -> bool {
@@ -2316,6 +2321,12 @@ impl Cause {
                     "this step needs a person at a terminal, and this is a CI run".into()
                 }
             },
+            // #206 (R1): a supply comes from the deploy job, never from an assistant.
+            PersonOnly { command, marker } if supplying_cmd(command) => format!(
+                "{} runs only in the approved deploy workflow (CI), from the job that produced the value; this shell looks like an assistant ({})",
+                cmd_text(command),
+                marker.label()
+            ),
             PersonOnly { command, marker } => format!(
                 "{} runs only in a person's terminal; this shell looks like an assistant ({})",
                 cmd_text(command),
@@ -4076,6 +4087,19 @@ impl Cause {
             NeedsTerminal { why: _ } => plan(
                 inspect("run it in your own terminal"),
                 Next::Handoff(inv_cmd(inv)),
+            ),
+            // #206 (R1): not a person's terminal either: the deploy job that produced the
+            // value pipes it in. The read shows what the environment's sync would change.
+            PersonOnly { command, .. } if supplying_cmd(command) => plan(
+                inspect(
+                    "it runs in the approved deploy workflow (CI), from the job that produced the value; generate that step with opv ci workflow <env> --target <target> --supply",
+                ),
+                match command.args.first() {
+                    Some(env) if !env.starts_with('-') => {
+                        Next::Check(cmd(&["plan"], &[env.as_str()]))
+                    }
+                    _ => Next::None(NoNext::NothingToRun),
+                },
             ),
             PersonOnly { command, .. } => plan(
                 inspect("run it in your own terminal"),
