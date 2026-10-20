@@ -55,6 +55,7 @@ fn evidence(name: &str) -> Evidence {
         fingerprint: FP.into(),
         source: source(),
         attested_at: None,
+        supplied: None,
     }
 }
 

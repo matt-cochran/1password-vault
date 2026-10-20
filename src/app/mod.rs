@@ -29,6 +29,7 @@ pub mod contract;
 #[cfg(test)]
 #[path = "core_acceptance_tests.rs"]
 mod core_acceptance_tests;
+pub mod deliver_only;
 pub mod delivery;
 pub mod delivery_preview;
 pub mod doctor;

@@ -501,6 +501,7 @@ pub fn record(
                 fingerprint,
                 source: b.source.clone(),
                 attested_at,
+                supplied: None,
             };
             // A store version the evidence line cannot hold (empty, or with `|`) is never
             // recorded: the name stays unconfirmed, so no revision vouches for it.
@@ -697,6 +698,7 @@ pub(crate) fn record_attestation(
             fingerprint: n.fingerprint.clone(),
             source: n.binding.source.clone(),
             attested_at: Some(at.to_string()),
+            supplied: None,
         };
         if encode_evidence(&line).is_none() {
             return Err(Cause::Bug {

@@ -272,6 +272,7 @@ fn source_word(source: ValueSource) -> &'static str {
         ValueSource::Person => "person",
         ValueSource::Generated => "generated",
         ValueSource::Derived => "derived",
+        ValueSource::Infrastructure => "infrastructure",
     }
 }
 

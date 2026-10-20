@@ -331,6 +331,42 @@ pub enum FieldRule {
     Check {
         check: ConfigCheck,
     },
+    /// A problem with the stream `opv sync --supply-stdin` reads, or with a workflow step
+    /// that feeds it (#206, `docs/design/deliver-only.md` §4.1, §8.1). Never the input's
+    /// own text: a supply holds values.
+    Supply {
+        supply: SupplyRule,
+    },
+}
+
+/// What is wrong with a supply stream (#206 §3, §4.1), or with a workflow step that pipes
+/// into `--supply-stdin` (§8.1). Each carries positions and limits only, never input text.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "check", rename_all = "snake_case")]
+pub enum SupplyRule {
+    /// Standard input is a terminal: refused before a byte is read.
+    StdinIsTerminal,
+    /// The document is not JSON at this line and column of the stream.
+    NotJson { line: u32, col: u32 },
+    /// The document has a field `opv.supply/1` does not define.
+    UnknownField,
+    /// `schema` is missing or is not `opv.supply/1`.
+    WrongSchema,
+    /// The stream is larger than `limit` bytes.
+    TooLarge { limit: u64 },
+    /// The stream names more than `limit` values.
+    TooManyNames { limit: u64 },
+    /// `serial` is missing or is not a whole number.
+    MissingSerial,
+    /// `values` is missing or empty.
+    NoValues,
+    /// The stream holds no document.
+    NoDocuments,
+    /// The stream did not end within the run budget.
+    Timeout,
+    /// A step that pipes into `--supply-stdin` uses a `${{ … }}` expression other than
+    /// `github.*` on this line: it is expanded into the step's logged script.
+    ExpressionInSupplyStep { line: u32 },
 }
 
 /// What a `NotFound` resource's state is.
@@ -994,6 +1030,8 @@ pub enum AttestRefusal {
     Drifted,
     /// The placement has no delivery item or evidence key yet: no sync recorded it.
     NotRecorded,
+    /// An infrastructure key (#206): there is no 1Password value to attest.
+    NotStored,
 }
 
 impl AttestRefusal {
@@ -1027,6 +1065,125 @@ impl AttestRefusal {
             }
             AttestRefusal::NotRecorded => {
                 "no sync has recorded this placement's delivery item and evidence key yet"
+            }
+            AttestRefusal::NotStored => {
+                "its value comes from infrastructure and is never stored in 1Password"
+            }
+        }
+    }
+}
+
+/// The entry of a supply a refusal is about (#206 §3): by name only when the name is a
+/// declared key (S11), otherwise by position, since a mapping bug can put a value where a
+/// name belongs. Positions count from 1.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "by", rename_all = "snake_case")]
+pub enum SupplyEntry {
+    Named { product: ProductName, key: KeyName },
+    Position { document: u32, index: u32 },
+}
+
+/// Why opv refuses a supplied value (#206 §4.1 to §5.1): each reason has its own step.
+/// Names in it are declared keys and environments only, never input text.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum SupplyRefusal {
+    /// The name is not a declared key in `<product>/<KEY>` form; `closest` is the nearest
+    /// infrastructure key, when one is close.
+    Undeclared { closest: Option<String> },
+    /// The key is declared, but its value comes from 1Password.
+    NotOptedIn,
+    /// The key is not present in the sync's environment.
+    NotInEnvironment,
+    /// The key is not delivered by the selected targets or product.
+    OutOfScope {
+        targets: Vec<TargetName>,
+        product: Option<ProductName>,
+    },
+    /// The run leaves these infrastructure keys in its scope unsupplied (`p/K` each).
+    NotSupplied { keys: Vec<String> },
+    /// The name is supplied more than once.
+    Duplicate,
+    /// The document was produced for another environment: `document_env` when it names a
+    /// declared environment, else `None`.
+    WrongEnvironment { document_env: Option<EnvName> },
+    /// The value is an empty string.
+    Empty,
+    /// The value is shorter than the output guard can mask (8 bytes).
+    TooShort,
+    /// The value is a known placeholder.
+    Placeholder,
+    /// The value is not a JSON string (or holds a NUL byte).
+    NotAString,
+    /// `--rotate` names an infrastructure key this run does not supply.
+    RotateWithoutValue,
+    /// The supplied value fails the key's rule `rule`.
+    RuleFailed { rule: String },
+    /// The key has a field in 1Password: infrastructure keys are never stored. `boundary`
+    /// is the boundary holding it.
+    Stored { boundary: String },
+    /// The target lists the name without delivery evidence: only a rotation may write it.
+    Unproven,
+    /// The key is immutable and the target holds another value.
+    ImmutableDiffers,
+    /// The supplied serial is older than the recorded one.
+    Stale { recorded: u64, supplied: u64 },
+    /// The serial was already recorded with another value.
+    SerialReused { serial: u64 },
+}
+
+impl SupplyRefusal {
+    /// The reason in words.
+    pub fn words(&self) -> String {
+        match self {
+            SupplyRefusal::Undeclared { .. } => {
+                "the name is not a declared key in <product>/<KEY> form".to_string()
+            }
+            SupplyRefusal::NotOptedIn => {
+                "its value comes from 1Password; only an infrastructure key takes a supplied value"
+                    .to_string()
+            }
+            SupplyRefusal::NotInEnvironment => "it is not present in this environment".to_string(),
+            SupplyRefusal::OutOfScope { .. } => {
+                "the selected targets or product do not deliver it".to_string()
+            }
+            SupplyRefusal::NotSupplied { keys } => format!(
+                "this run supplies no value for {} in its scope",
+                keys.join(", ")
+            ),
+            SupplyRefusal::Duplicate => "it is supplied more than once".to_string(),
+            SupplyRefusal::WrongEnvironment { document_env } => match document_env {
+                Some(e) => format!("the document was produced for environment {e}"),
+                None => "the document was produced for another environment".to_string(),
+            },
+            SupplyRefusal::Empty => "the supplied value is empty".to_string(),
+            SupplyRefusal::TooShort => {
+                "the supplied value is shorter than 8 bytes, too short to mask in output"
+                    .to_string()
+            }
+            SupplyRefusal::Placeholder => "the supplied value is a placeholder".to_string(),
+            SupplyRefusal::NotAString => "the supplied value is not a usable string".to_string(),
+            SupplyRefusal::RotateWithoutValue => {
+                "--rotate names it, but this run does not supply it".to_string()
+            }
+            SupplyRefusal::RuleFailed { rule } => {
+                format!("the supplied value fails rule {rule}")
+            }
+            SupplyRefusal::Stored { boundary } => format!(
+                "it has a field in 1Password (boundary {boundary}); infrastructure keys are never stored"
+            ),
+            SupplyRefusal::Unproven => {
+                "the target lists it without delivery evidence, so only a rotation may write it"
+                    .to_string()
+            }
+            SupplyRefusal::ImmutableDiffers => {
+                "it is immutable and the target holds another value".to_string()
+            }
+            SupplyRefusal::Stale { recorded, supplied } => format!(
+                "the supplied serial {supplied} is older than the recorded serial {recorded}"
+            ),
+            SupplyRefusal::SerialReused { serial } => {
+                format!("serial {serial} was already recorded with another value")
             }
         }
     }
@@ -1361,6 +1518,13 @@ pub enum Guard {
         target: TargetName,
     },
     Declined,
+    /// opv refuses a value supplied to `opv sync --supply-stdin`, or the target state it
+    /// would be written over (#206, `docs/design/deliver-only.md` §4, §5.1).
+    SupplyRefused {
+        env: EnvName,
+        entry: SupplyEntry,
+        reason: SupplyRefusal,
+    },
     /// A key's kind has no channel on the target (design §1.3, §1.5): `sync` refuses it
     /// (`policy_refused`, exit 6, retry never) unless the target declares
     /// `config = "none"`.
@@ -1436,6 +1600,10 @@ pub enum InputKind {
     DeployCredentials,
     /// The file of names an assistant found itself (`opv needs --names <FILE>`, #175).
     NamesFile,
+    /// The `opv.supply/1` stream `opv sync --supply-stdin` reads (#206; `path`: `<stdin>`).
+    Supply,
+    /// A workflow file whose step pipes into `--supply-stdin` (#206 §8.1).
+    Workflow,
 }
 
 /// What an in-memory folder was needed for (R74).

@@ -92,6 +92,18 @@ pub struct Evidence {
     /// before 0.12.3 does not read, so it drops the line and holds the name again rather
     /// than count it as proven. `None`: a line opv's own write or proof recorded (`v1`).
     pub attested_at: Option<String>,
+    /// For a name whose value was supplied to `opv sync --supply-stdin` (#206): the
+    /// producer's serial and when the line was recorded. `None`: a 1Password value.
+    pub supplied: Option<SuppliedMark>,
+}
+
+/// The value-free memory of a supplied name (#206, `docs/design/deliver-only.md` §6.2): the
+/// producer's serial (the staleness high-water mark) and when the line was recorded
+/// (RFC 3339 UTC).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuppliedMark {
+    pub serial: u64,
+    pub at: String,
 }
 
 impl Evidence {
@@ -158,6 +170,7 @@ pub fn decode_evidence(name: &str, line: &str) -> Option<Evidence> {
             field: parts[4].to_string(),
         },
         attested_at,
+        supplied: None,
     })
 }
 
