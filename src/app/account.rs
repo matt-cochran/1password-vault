@@ -159,6 +159,15 @@ pub fn session_var_owner<'a>(var: &str, listed: &'a [Account]) -> Option<&'a Acc
     })
 }
 
+/// The `OP_SESSION_<id>` variable op names for `account`: its shorthand, else its user ID,
+/// the names [`session_var_owner`] maps back to it (FMECA M4). `None` when it has neither.
+pub fn session_var_name(account: &Account) -> Option<String> {
+    [&account.shorthand, &account.user_uuid]
+        .into_iter()
+        .find(|f| !f.is_empty())
+        .map(|f| format!("OP_SESSION_{f}"))
+}
+
 /// The selected account: its ID, how it was chosen and where that choice came from.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Selected {

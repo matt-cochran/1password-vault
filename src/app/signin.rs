@@ -59,17 +59,10 @@ impl ReusePath {
 pub fn reuse_path(account: Option<&str>, vars: &[String], listed: &[Account]) -> ReusePath {
     let vars: Vec<&String> = vars
         .iter()
-        .filter(|v| crate::runner::is_session_var(v))
+        .filter(|v| super::account::is_session_var(v))
         .collect();
     let suffix = |v: &str| v.strip_prefix("OP_SESSION_").unwrap_or("").to_string();
-    let owner = |v: &str| {
-        let name = suffix(v);
-        listed.iter().find(|a| {
-            [&a.shorthand, &a.user_uuid, &a.account_uuid]
-                .iter()
-                .any(|f| !f.is_empty() && f.eq_ignore_ascii_case(&name))
-        })
-    };
+    let owner = |v: &str| super::account::session_var_owner(v, listed);
     let found = if listed.is_empty() {
         account
             .and_then(|a| {
@@ -102,7 +95,7 @@ pub fn reuse_path(account: Option<&str>, vars: &[String], listed: &[Account]) ->
 pub fn sign_in_notice(kind: Option<SignInKind>, host: &Host) -> String {
     const APP: &str = "You are not signed in to 1Password. Approve 1Password's prompt. This \
                        terminal then stays signed in while the 1Password app keeps it authorized.";
-    let integration = onepassword::static_integration(host);
+    let integration = super::doctor_session::host_integration(host);
     let app_possible = matches!(
         integration,
         Some(DesktopIntegration::Active | DesktopIntegration::Available)

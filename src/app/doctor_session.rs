@@ -76,6 +76,17 @@ pub fn classify_static(host: &Host) -> Option<DesktopIntegration> {
     }
 }
 
+/// The integration as far as the host alone tells, for the sign-in wording and the expiry
+/// cause (§4.1, §4.3), which never probe: [`classify_static`], and where it leaves the answer
+/// to the probe, `Available` on the hosts whose `op` talks to the app (macOS, Windows, WSL
+/// with `op.exe`). `None` on Linux with the app running, where only the probe can tell.
+pub fn host_integration(host: &Host) -> Option<DesktopIntegration> {
+    classify_static(host).or_else(|| {
+        super::account::app_holds_accounts(host.platform, host.op_is_windows_exe())
+            .then_some(DesktopIntegration::Available)
+    })
+}
+
 /// §3.2 steps 5-7: `op whoami --format json` with each of `vars` emptied, so only the app
 /// can answer (I1). Exit status and the presence of `user_type` only (O2); the identity is
 /// never kept. Emptying stands in for removing: op reads an empty `OP_SESSION_*` as unset

@@ -157,8 +157,10 @@ opv login [<env>] [--account <id>] [--add] [--no-record] --shell[=posix|fish|pow
 
 ### 5.2 Output per shell
 
-stdout carries one line per session variable and nothing else. op's variable name is kept
-(`session_vars`): `OP_SESSION_<id>` with an account; both it and `OP_SESSION` without one.
+stdout carries one line per session variable and nothing else. op's variable name is kept:
+`OP_SESSION_<id>` only, never the bare `OP_SESSION`, which opv's own #142 check calls stale (FMECA
+M4). A bare one alone is named after the account's shorthand or user ID
+(`account::session_var_name`).
 
 | Shell | Line | How the person runs it (`<refresh>`) |
 |---|---|---|
@@ -227,6 +229,7 @@ the `eval` gets an empty string. The cause goes to stderr.
 | a service-account or Connect credential is set | `own_session_required` | 7 |
 | an agent marker (`refuse_if_agent`, `Cmd::LoginShell`) | `person_only` | 6 |
 | stdout is a terminal, a regular file, or anything but a pipe | `shell_eval_required` (new) | 6 |
+| the parent process is a shell other than the one asked for (`/proc/<ppid>/comm`, Linux and WSL; FMECA M5) | `shell_mismatch` (new) | 2 |
 | no value, and `$SHELL` is `Shell::Other` | `choice_required` (`--shell`, `posix`/`fish`/`powershell`) | 2 |
 
 `shell_eval_required` reads "this prints a 1Password session for your shell to evaluate, so it

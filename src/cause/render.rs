@@ -81,6 +81,17 @@ fn stdout_words(k: crate::app::desktop_integration::StdoutKind) -> &'static str 
     }
 }
 
+/// A shell, for [`Cause::ShellMismatch`].
+fn shell_words(s: crate::host::Shell) -> &'static str {
+    use crate::host::Shell;
+    match s {
+        Shell::Posix => "a POSIX shell (bash, zsh, sh)",
+        Shell::Fish => "fish",
+        Shell::PowerShell => "PowerShell",
+        Shell::Other => "another shell",
+    }
+}
+
 /// The invocation as typed (`Rerun`): every flag kept, the child command never rendered.
 pub fn rerun_text(inv: &Invocation) -> String {
     match &inv.origin {
@@ -2351,6 +2362,11 @@ impl Cause {
                 "this prints a 1Password session for your shell to evaluate, so it only writes to a pipe; stdout here is {}",
                 stdout_words(*stdout)
             ),
+            ShellMismatch { requested, running } => format!(
+                "this shell is {} but the session lines asked for are for {}; a shell that cannot read them can print them, session and all, in its error, so nothing was signed in",
+                shell_words(*running),
+                shell_words(*requested)
+            ),
             NeedsConfirm { env } => {
                 format!("changing environment {env} needs a person's confirmation")
             }
@@ -4144,6 +4160,18 @@ impl Cause {
                 inspect("run it inside your shell's eval, which hands it a pipe"),
                 Next::Handoff(Cmd::login_shell(*shell, None)),
             ),
+            // FMECA M5: the same login in the running shell's own syntax; PowerShell's is
+            // withheld (H5), so there is nothing to run there.
+            ShellMismatch { running, .. } => match running {
+                crate::host::Shell::Posix | crate::host::Shell::Fish => plan(
+                    inspect("ask for this shell's own syntax"),
+                    Next::Handoff(Cmd::login_shell(*running, None)),
+                ),
+                _ => plan(
+                    inspect("sign in from bash, zsh, sh or fish; this shell has no opv login --shell"),
+                    Next::None(NoNext::NothingToRun),
+                ),
+            },
             NeedsConfirm { env } => {
                 let mut c = inv_cmd(inv);
                 c.args.push("--confirm".into());

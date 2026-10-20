@@ -64,6 +64,12 @@ pub trait Backend {
         }
         .into())
     }
+    /// FMECA M9 (§3.2's probe): whether `op whoami` answers with every `OP_SESSION*`
+    /// removed, so only the 1Password app can have answered it. Never prompts.
+    fn app_answers(&self) -> bool {
+        self.probe(&["whoami", "--format", "json"])
+            .is_ok_and(|o| o.status == 0)
+    }
     /// #203 (`opv login --shell`): the session variables this backend's own sign-in
     /// produced, moved out of it; empty when no sign-in printed one (the app holds the
     /// session, or none was needed).

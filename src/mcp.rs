@@ -531,8 +531,7 @@ fn credential_in_environment(vars: impl Iterator<Item = (String, String)>) -> Op
     vars.filter(|(_, v)| !v.is_empty())
         .map(|(k, _)| k)
         .find(|k| {
-            k == "OP_SESSION"
-                || k.starts_with("OP_SESSION_")
+            crate::app::account::is_session_var(k)
                 || [
                     "OP_SERVICE_ACCOUNT_TOKEN",
                     "OP_CONNECT_HOST",
@@ -1721,6 +1720,13 @@ mod tests {
     fn a_bare_op_session_refuses_the_structural_apply() {
         let found = credential_in_environment(vars(&[("OP_SESSION", "x")]));
         assert_eq!(found.as_deref(), Some("OP_SESSION"));
+    }
+
+    /// FMECA L6: op's delegation setting shares the prefix but holds no session.
+    #[test]
+    fn the_delegation_setting_does_not_refuse_the_structural_apply() {
+        let found = credential_in_environment(vars(&[("OP_SESSION_DELEGATION_ENABLED", "true")]));
+        assert_eq!(found, None);
     }
 
     #[test]

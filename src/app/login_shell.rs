@@ -123,6 +123,42 @@ pub fn check_stdout(kind: StdoutKind, shell: Shell) -> Result<(), Error> {
     }
 }
 
+/// FMECA M5: the shell running this command, from its parent process (`/proc/<ppid>/comm`
+/// on Linux and WSL; the parent M1 finds holding the pipe). `None` where there is no `/proc`
+/// or the parent is no shell opv knows (`sudo`, `script`, a test harness): `$SHELL` decides.
+pub fn parent_shell() -> Option<Shell> {
+    #[cfg(target_os = "linux")]
+    {
+        let ppid = std::os::unix::process::parent_id();
+        let comm = std::fs::read_to_string(format!("/proc/{ppid}/comm")).ok()?;
+        crate::host::shell_named(&comm)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// The shell to print for: the one asked for, else the running one ([`parent_shell`]),
+/// else `$SHELL`'s (`fallback`).
+pub fn chosen_shell(requested: Option<Shell>, running: Option<Shell>, fallback: Shell) -> Shell {
+    requested.or(running).unwrap_or(fallback)
+}
+
+/// FMECA M5: lines for one shell evaluated by another can come back in its parse error,
+/// session and all (pwsh and fish print the offending line). With the running shell known,
+/// any other syntax is `shell_mismatch`, before any prompt or sign-in.
+pub fn check_shell(shell: Shell, running: Option<Shell>) -> Result<(), Error> {
+    match running {
+        Some(running) if running != shell => Err(Cause::ShellMismatch {
+            requested: shell,
+            running,
+        }
+        .into()),
+        _ => Ok(()),
+    }
+}
+
 /// §5.2, §5.3: one assignment line per session variable, for `shell`.
 pub fn export_lines(
     shell: Shell,
@@ -210,13 +246,70 @@ pub fn refresh_command(shell: Shell, account: Option<&str>) -> String {
     }
 }
 
-/// V1: what one successful `op signin` produced. No variables: the app holds it.
-pub fn sign_in_kind(vars: &[(String, SecretValue)]) -> SignInKind {
-    if vars.is_empty() {
-        SignInKind::App
-    } else {
-        SignInKind::Token
+/// V1: what one successful `op signin` produced. No variables is the app holding the
+/// session only when `app_answers`: op answered with every session variable removed
+/// ([`Backend::app_answers`], FMECA M9). Otherwise op printed no session opv can read, and
+/// "Nothing to set" would leave every later command prompting: a `Bug`.
+///
+/// [`Backend::app_answers`]: super::setup::Backend::app_answers
+pub fn sign_in_kind(
+    vars: &[(String, SecretValue)],
+    app_answers: bool,
+) -> Result<SignInKind, Error> {
+    match (vars.is_empty(), app_answers) {
+        (false, _) => Ok(SignInKind::Token),
+        (true, true) => Ok(SignInKind::App),
+        (true, false) => Err(Cause::Bug {
+            site: "op signin gave no session",
+        }
+        .into()),
     }
+}
+
+/// FMECA M4: the variables `--shell` prints, each `OP_SESSION_<id>`, never the bare
+/// `OP_SESSION` opv's own #142 check calls stale. A bare one alone is renamed to `owner()`,
+/// the account's own variable ([`owner_var`]), asked only then.
+pub fn account_vars(
+    vars: SessionVars,
+    owner: impl FnOnce() -> Result<String, Error>,
+) -> Result<SessionVars, Error> {
+    let (bare, named): (SessionVars, SessionVars) =
+        vars.into_iter().partition(|(name, _)| name == "OP_SESSION");
+    if !named.is_empty() || bare.is_empty() {
+        return Ok(named);
+    }
+    let name = owner()?;
+    Ok(bare
+        .into_iter()
+        .map(|(_, value)| (name.clone(), value))
+        .collect())
+}
+
+/// The `OP_SESSION_<id>` variable of `account` (the only listed one when `None`), named as
+/// `account::session_var_owner` maps it back (`account::session_var_name`). No single
+/// account: `choice_required` for `--account`, with the listed accounts.
+fn owner_var(account: Option<&str>, backend: &dyn Backend) -> Result<String, Error> {
+    use crate::adapters::onepassword_manifest::{self as manifest, Account};
+    let listed: Vec<Account> = backend
+        .call(&["account", "list", "--format", "json"], None)
+        .ok()
+        .filter(|o| o.status == 0)
+        .and_then(|o| serde_json::from_slice(&o.stdout).ok())
+        .unwrap_or_default();
+    let uuid = match account {
+        Some(a) => manifest::resolve(&listed, a).ok(),
+        None if listed.len() == 1 => Some(listed[0].account_uuid.clone()),
+        None => None,
+    };
+    uuid.and_then(|u| listed.iter().find(|a| a.account_uuid == u))
+        .and_then(super::account::session_var_name)
+        .ok_or_else(|| {
+            Cause::ChoiceRequired {
+                flag: "--account".into(),
+                candidates: listed.iter().map(|a| a.account_uuid.clone()).collect(),
+            }
+            .into()
+        })
 }
 
 /// The whole `--shell` login after main's §5.5 refusals: sign in (§5.4), then build the
@@ -234,36 +327,31 @@ pub fn run(
     let live = |account: Option<&str>| {
         live_vars(
             super::doctor_session::shell_session(&host, &runner, account),
-            account,
             &|name| std::env::var(name).ok(),
         )
     };
     run_with(req, backend, ui, &live)
 }
 
-/// The live shell session's variables for `account` (§5.2): the variable `session` names,
-/// read through `lookup`, with the generic `OP_SESSION` beside it when no account selects
-/// it ([`session_vars`]). `None` for an expired or missing session, or a name or value
-/// outside op's session charset (§5.3), which then goes on to the sign-in.
-///
-/// [`session_vars`]: super::setup_runtime::session_vars
+/// The live shell session's variable (§5.2): the one `session` names, read through
+/// `lookup`, and only it. `None` for an expired or missing session, the bare `OP_SESSION`
+/// (FMECA M4: it names no account, and opv's #142 check calls it stale), or a name or value
+/// outside op's session charset (§5.3); each goes on to the sign-in.
 pub fn live_vars(
     session: Option<super::doctor_session::ShellSession>,
-    account: Option<&str>,
     lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Option<SessionVars> {
     let super::doctor_session::ShellSession::Live { var } = session? else {
         return None;
     };
-    let value = Zeroizing::new(lookup(&var)?);
-    if !session_name(&var) || !session_token(&value) {
+    if var == "OP_SESSION" || !session_name(&var) {
         return None;
     }
-    Some(super::setup_runtime::session_vars(
-        account,
-        var,
-        SecretValue::new(value.to_string()),
-    ))
+    let value = Zeroizing::new(lookup(&var)?);
+    if !session_token(&value) {
+        return None;
+    }
+    Some(vec![(var, SecretValue::new(value.to_string()))])
 }
 
 /// §5.3: `^OP_SESSION(_[A-Za-z0-9_]+)?$`.
@@ -317,7 +405,9 @@ pub fn run_with(
     // FMECA H2: each value is a `SecretValue`, already masked in anything opv writes
     // through the guard (`--verbose`, error excerpts, panics); only `write_lines` carries it.
     let vars = backend.take_session();
-    match sign_in_kind(&vars) {
+    // FMECA M9: no variables is the app only when op answers without any (§3.2's probe).
+    let app_answers = vars.is_empty() && backend.app_answers();
+    match sign_in_kind(&vars, app_answers)? {
         SignInKind::App => {
             ui.show(
                 "The 1Password app integration is on: commands in this terminal already reuse \
@@ -328,6 +418,8 @@ pub fn run_with(
             })
         }
         SignInKind::Token => {
+            // FMECA M4: only `OP_SESSION_<id>`; the bare one is never printed.
+            let vars = account_vars(vars, || owner_var(account.as_deref(), backend))?;
             let lines = export_lines(req.shell, &vars)?;
             let label = account
                 .as_deref()

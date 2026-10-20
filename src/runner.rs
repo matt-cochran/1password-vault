@@ -1635,13 +1635,6 @@ fn add_op_session(cmd: &mut Command, program: &str) {
     }
 }
 
-/// Whether `name` is a 1Password CLI session variable: `OP_SESSION` or `OP_SESSION_<id>`.
-/// `OP_SESSION_DELEGATION_ENABLED` is a setting of op's, not a session (FMECA L6).
-pub fn is_session_var(name: &str) -> bool {
-    name == "OP_SESSION"
-        || (name.starts_with("OP_SESSION_") && name != "OP_SESSION_DELEGATION_ENABLED")
-}
-
 /// FMECA M6: a child that is not `op` gets no 1Password session, neither one inherited from
 /// the shell (`opv login --shell`, `eval $(op signin)`) nor one set on `cmd` itself. Applied
 /// after every other variable, so it wins. `op` keeps its session: it needs it.
@@ -1668,8 +1661,10 @@ pub(crate) fn strip_session_vars(
         .filter(|(_, v)| v.is_some())
         .filter_map(|(k, _)| k.to_str().map(str::to_string))
         .collect();
-    let names: std::collections::BTreeSet<String> =
-        inherited.chain(set).filter(|k| is_session_var(k)).collect();
+    let names: std::collections::BTreeSet<String> = inherited
+        .chain(set)
+        .filter(|k| crate::app::account::is_session_var(k))
+        .collect();
     for name in names {
         cmd.env_remove(name);
     }
@@ -2812,17 +2807,6 @@ mod tests {
             .map(|(k, _)| k.to_string_lossy().into_owned())
             .collect();
         assert_eq!(removed, ["OP_SESSION_acct"]);
-    }
-
-    #[test]
-    fn the_delegation_setting_is_not_a_session() {
-        assert!(
-            is_session_var("OP_SESSION")
-                && is_session_var("OP_SESSION_ABC")
-                && !is_session_var("OP_SESSION_DELEGATION_ENABLED")
-                && !is_session_var("OP_SESSIONS")
-                && !is_session_var("OP_ACCOUNT")
-        );
     }
 
     /// The names of the variables an inherited child of `ProcessRunner` saw, by running

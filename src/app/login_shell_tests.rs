@@ -2,7 +2,10 @@
 
 use zeroize::Zeroizing;
 
-use super::{ShellEmit, export_lines, sign_in_kind, stdout_kind, write_lines};
+use super::{
+    ShellEmit, account_vars, check_shell, chosen_shell, export_lines, sign_in_kind, stdout_kind,
+    write_lines,
+};
 use crate::app::desktop_integration::{SignInKind, StdoutKind};
 use crate::cause::{Cause, NoTerminal};
 use crate::domain::SecretValue;
@@ -47,6 +50,25 @@ fn posix_lines_do_not_export_the_session() {
     assert!(!String::from_utf8_lossy(&out.stdout).contains("UNIQ7"));
 }
 
+/// FMECA M7 (moot under H4): a process started from the shell, such as an assistant and
+/// the MCP server it runs, inherits neither the session nor the `opv` function, so it never
+/// holds a session a refresh would have to reach.
+#[cfg(unix)]
+#[test]
+fn a_child_of_the_shell_does_not_inherit_the_opv_function() {
+    let lines = export_lines(Shell::Posix, &vars(&[("OP_SESSION_UNIQ7", "tok")])).unwrap();
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "{}\nsh -c 'command -v opv || echo none'",
+            lines.as_str()
+        ))
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "none");
+}
+
 /// §5.3: quoting via `shell_word_for` survives the shell's `eval`.
 #[cfg(unix)]
 #[test]
@@ -82,19 +104,90 @@ fn export_lines_refuses_powershell() {
     assert_eq!(e.cause().map(|(c, _)| c.code()), Some("choice_required"));
 }
 
-/// V1: nothing printed means the app integration holds the session.
+/// V1, FMECA M9: nothing printed, and op answers with no session variable: the app.
 #[test]
-fn sign_in_kind_is_app_when_nothing_was_printed() {
-    assert_eq!(sign_in_kind(&[]), SignInKind::App);
+fn sign_in_kind_is_app_when_nothing_was_printed_and_op_answers() {
+    assert_eq!(sign_in_kind(&[], true).unwrap(), SignInKind::App);
+}
+
+/// FMECA M9: nothing printed and op does not answer without a variable is never the app.
+#[test]
+fn sign_in_kind_without_a_session_or_the_app_is_a_bug() {
+    let e = sign_in_kind(&[], false).unwrap_err();
+    assert_eq!(e.cause().map(|(c, _)| c.code()), Some("internal_error"));
 }
 
 /// V1: a printed assignment means a CLI session token.
 #[test]
 fn sign_in_kind_is_token_when_a_session_was_printed() {
     assert_eq!(
-        sign_in_kind(&vars(&[("OP_SESSION_ABC", "tok")])),
+        sign_in_kind(&vars(&[("OP_SESSION_ABC", "tok")]), false).unwrap(),
         SignInKind::Token
     );
+}
+
+/// FMECA M4: the bare `OP_SESSION` beside the account's own variable is dropped.
+#[test]
+fn account_vars_drops_the_bare_variable() {
+    let kept = account_vars(
+        vars(&[("OP_SESSION", "tok"), ("OP_SESSION_ABC", "tok")]),
+        || panic!("no owner needed"),
+    )
+    .unwrap();
+    let names: Vec<_> = kept.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["OP_SESSION_ABC"]);
+}
+
+/// FMECA M4: a bare `OP_SESSION` alone is printed under its account's own name.
+#[test]
+fn account_vars_names_a_lone_bare_variable_after_its_account() {
+    let kept = account_vars(vars(&[("OP_SESSION", "tok")]), || {
+        Ok("OP_SESSION_ABC".into())
+    })
+    .unwrap();
+    assert_eq!(kept[0].0, "OP_SESSION_ABC");
+}
+
+/// FMECA M4: the name `--shell` gives a session is one opv's #142 check maps back to the
+/// account, so doctor never calls it stale.
+#[test]
+fn the_session_var_name_maps_back_to_its_account() {
+    let a: crate::adapters::onepassword_manifest::Account =
+        serde_json::from_str(r#"{"account_uuid":"ACC1","user_uuid":"USER1"}"#).unwrap();
+    let name = crate::app::account::session_var_name(&a).unwrap();
+    let listed = [a];
+    assert_eq!(
+        crate::app::account::session_var_owner(&name, &listed).map(|o| o.account_uuid.as_str()),
+        Some("ACC1")
+    );
+}
+
+/// FMECA M5: fish lines asked for in bash are refused, naming both shells.
+#[test]
+fn fish_syntax_in_a_posix_shell_is_a_shell_mismatch() {
+    let e = check_shell(Shell::Fish, Some(Shell::Posix)).unwrap_err();
+    assert_eq!(e.cause().map(|(c, _)| c.code()), Some("shell_mismatch"));
+}
+
+/// FMECA M5: with the running shell unknown (no `/proc`, a wrapper), the request stands.
+#[test]
+fn an_unknown_running_shell_leaves_the_request_alone() {
+    assert!(check_shell(Shell::Fish, None).is_ok());
+}
+
+/// FMECA M5: `--shell` with no value follows the running shell, not the login `$SHELL`.
+#[test]
+fn auto_takes_the_running_shell_over_dollar_shell() {
+    assert_eq!(
+        chosen_shell(None, Some(Shell::Fish), Shell::Posix),
+        Shell::Fish
+    );
+}
+
+/// FMECA M5: a login shell's `comm` (`-bash`) is still recognised.
+#[test]
+fn a_login_shell_comm_is_recognised() {
+    assert_eq!(crate::host::shell_named("-bash\n"), Some(Shell::Posix));
 }
 
 #[derive(Default)]
@@ -257,6 +350,8 @@ mod run {
         sign_ins: Vec<Option<String>>,
         calls: RefCell<Vec<String>>,
         account: Option<String>,
+        /// FMECA M9: `op whoami` with no session variable fails (no app holds a session).
+        no_app: bool,
     }
 
     impl Fake {
@@ -285,6 +380,13 @@ mod run {
                     stdout: Zeroizing::new(Vec::new()),
                 },
                 Some(&"account") => Output::success(br#"[{"url":"x"}]"#.to_vec()),
+                Some(&"whoami") if self.signed_in && !self.no_app => {
+                    Output::success(b"{}".to_vec())
+                }
+                Some(&"whoami") => Output {
+                    status: 1,
+                    stdout: Zeroizing::new(Vec::new()),
+                },
                 _ => panic!("unexpected op call {args:?}"),
             })
         }
@@ -614,15 +716,52 @@ mod run {
         assert!(b.sign_ins.is_empty());
     }
 
-    /// Canary: in the default-account case both variables carry the token, still only in
-    /// the lines.
+    /// FMECA M4: without an account, op's sign-in gives both variables; only the account's
+    /// own goes to the shell, so opv's #142 check never calls the result stale.
+    #[test]
+    fn a_sign_in_without_an_account_prints_no_bare_session() {
+        let mut b = Fake::signed_out_with(&[("OP_SESSION", "tok"), ("OP_SESSION_UNIQ7", "tok")]);
+        let emit = run_with(
+            req(None, None, Shell::Posix),
+            &mut b,
+            &mut Ui::default(),
+            &not_live,
+        )
+        .unwrap();
+        assert!(
+            !emit.lines.contains(" OP_SESSION="),
+            "{}",
+            emit.lines.as_str()
+        );
+    }
+
+    /// FMECA M9: a sign-in that printed nothing while op does not answer without a session
+    /// variable is an internal error, never "Nothing to set".
+    #[test]
+    fn an_empty_sign_in_the_app_does_not_confirm_is_an_error() {
+        let mut b = Fake {
+            no_app: true,
+            ..Fake::signed_out_with(&[])
+        };
+        let e = run_with(
+            req(Some(ACCT), None, Shell::Posix),
+            &mut b,
+            &mut Ui::default(),
+            &not_live,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(e.cause().map(|(c, _)| c.code()), Some("internal_error"));
+    }
+
+    /// Canary: the token appears only in the lines, once.
     #[test]
     fn the_token_appears_only_in_the_lines() {
         let canary = "OnlyHereCanary3b8d";
         let mut b = Fake::signed_out_with(&[("OP_SESSION", canary), ("OP_SESSION_UNIQ7", canary)]);
         let mut ui = Ui::default();
         let emit = run_with(req(None, None, Shell::Posix), &mut b, &mut ui, &not_live).unwrap();
-        assert_eq!(emit.lines.matches(canary).count(), 2);
+        assert_eq!(emit.lines.matches(canary).count(), 1);
         assert_hidden(canary, &ui, None);
         assert!(b.take_session().is_empty(), "the session left the backend");
     }
@@ -638,7 +777,6 @@ mod run {
             Some(ShellSession::Live {
                 var: "OP_SESSION_UNIQ7".into(),
             }),
-            Some(ACCT),
             &lookup,
         )
         .unwrap();
@@ -647,19 +785,14 @@ mod run {
         assert_eq!(vars[0].1.expose(), "tok.A/b+c=-_");
     }
 
-    /// Without an account, the generic `OP_SESSION` goes with it, as after a sign-in.
+    /// FMECA M4: a live bare `OP_SESSION` names no account; it goes on to the sign-in.
     #[test]
-    fn live_vars_without_an_account_adds_the_generic_variable() {
-        let vars = live_vars(
-            Some(ShellSession::Live {
-                var: "OP_SESSION_UNIQ7".into(),
-            }),
-            None,
-            &lookup,
-        )
-        .unwrap();
-        let names: Vec<_> = vars.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(names, ["OP_SESSION", "OP_SESSION_UNIQ7"]);
+    fn live_vars_never_reuses_the_bare_variable() {
+        let any = |_: &str| Some("tok".to_string());
+        let bare = Some(ShellSession::Live {
+            var: "OP_SESSION".into(),
+        });
+        assert!(live_vars(bare, &any).is_none());
     }
 
     /// FMECA H3: an expired session goes on to the sign-in.
@@ -668,8 +801,8 @@ mod run {
         let expired = ShellSession::Expired {
             var: "OP_SESSION_UNIQ7".into(),
         };
-        assert!(live_vars(Some(expired), Some(ACCT), &lookup).is_none());
-        assert!(live_vars(None, Some(ACCT), &lookup).is_none());
+        assert!(live_vars(Some(expired), &lookup).is_none());
+        assert!(live_vars(None, &lookup).is_none());
     }
 
     /// §5.3: a value outside op's charset is never printed for a shell to evaluate.
@@ -681,11 +814,11 @@ mod run {
                 var: "OP_SESSION_UNIQ7".into(),
             })
         };
-        assert!(live_vars(live(), Some(ACCT), &bad).is_none());
+        assert!(live_vars(live(), &bad).is_none());
         let named = |_: &str| Some("tok".to_string());
         let odd = Some(ShellSession::Live {
             var: "OP_SESSION_$(x)".into(),
         });
-        assert!(live_vars(odd, Some(ACCT), &named).is_none());
+        assert!(live_vars(odd, &named).is_none());
     }
 }
