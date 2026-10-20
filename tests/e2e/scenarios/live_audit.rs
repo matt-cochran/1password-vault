@@ -131,6 +131,7 @@ impl Scenario {
         let mut c = Command::new(env!("CARGO_BIN_EXE_opv"));
         c.current_dir(cwd)
             .env_clear()
+            .env("OP_BIOMETRIC_UNLOCK_ENABLED", "false")
             .env("PATH", format!("{}:/usr/bin:/bin", self.bin().display()))
             .env("HOME", self.root.path().join("home"))
             .env("OPV_NO_SKILL", "1")
