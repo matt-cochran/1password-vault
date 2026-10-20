@@ -1676,8 +1676,13 @@ pub enum RamDir {
     Unset,
     NotAbsolute,
     NotOwned,
+    /// Group- or other-writable without the sticky bit (WSLg's `/mnt/wslg/runtime-dir`
+    /// is 0777): another user could rename or replace an entry in it.
+    WritableByOthers,
     NotTmpfs,
-    NoneOnPlatform { os: &'static str },
+    NoneOnPlatform {
+        os: &'static str,
+    },
 }
 
 /// When a remote session ended.

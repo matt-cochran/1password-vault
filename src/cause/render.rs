@@ -1183,6 +1183,9 @@ fn ram_dir_words(w: &RamDir) -> String {
         RamDir::Unset => "none is configured".into(),
         RamDir::NotAbsolute => "the configured folder is not an absolute path".into(),
         RamDir::NotOwned => "the configured folder is not owned by you".into(),
+        RamDir::WritableByOthers => {
+            "other users can write to the configured folder (no sticky bit)".into()
+        }
         RamDir::NotTmpfs => "the configured folder is not held in memory (tmpfs)".into(),
         RamDir::NoneOnPlatform { os } => format!("{os} has none"),
     }
@@ -4227,6 +4230,9 @@ impl Cause {
                     RamDir::NotOwned => {
                         format!("set XDG_RUNTIME_DIR on {host} to a runtime folder you own")
                     }
+                    RamDir::WritableByOthers => format!(
+                        "set XDG_RUNTIME_DIR on {host} to a runtime folder only you can write to (mode 0700); on WSL, enable systemd in /etc/wsl.conf"
+                    ),
                     RamDir::NotTmpfs => {
                         format!("set XDG_RUNTIME_DIR on {host} to a tmpfs folder")
                     }
@@ -4257,6 +4263,9 @@ impl Cause {
                     RamDir::NotOwned => {
                         format!("set XDG_RUNTIME_DIR on {host} to a runtime folder you own")
                     }
+                    RamDir::WritableByOthers => format!(
+                        "set XDG_RUNTIME_DIR on {host} to a runtime folder only you can write to (mode 0700); on WSL, enable systemd in /etc/wsl.conf"
+                    ),
                     RamDir::NotTmpfs => {
                         format!("set XDG_RUNTIME_DIR on {host} to a tmpfs folder")
                     }

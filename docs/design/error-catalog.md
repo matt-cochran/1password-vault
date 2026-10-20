@@ -185,7 +185,7 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 
 | Variant | Fields | Code | Exit | Retry | Do | Next |
 |---|---|---|---|---|---|---|
-| `RamDirUnavailable` | host: Local / Remote{profile, user, host}; why: Unset / NotAbsolute / NotOwned / NotTmpfs / NoneOnPlatform{os}; purpose | ram_dir_unavailable | 6 | after_fix | per why and host | `opv run <env> --product <p> [--remote <r>] --preview` [R74] |
+| `RamDirUnavailable` | host: Local / Remote{profile, user, host}; why: Unset / NotAbsolute / NotOwned / WritableByOthers / NotTmpfs / NoneOnPlatform{os}; purpose | ram_dir_unavailable | 6 | after_fix | per why and host | `opv run <env> --product <p> [--remote <r>] --preview` [R74] |
 | `PrivateDirFailed` | dir; io | **private_dir_failed** | 6 | after_fix | "check free space and permissions in <dir>" | rerun [R75] |
 | `RemoteUnreachable` | profile; user; host; port | **remote_unreachable** | 5 | after_fix | "check the connection and that the host presents the key pinned in profile <p>" | the same pinned check opv uses: `ssh -F none -o StrictHostKeyChecking=yes -o UserKnownHostsFile=<pinned file> -p <port> <user>@<host> true`. Only an exit 255 *before* the receiver's handshake is this cause; after the handshake, 255 is the remote app's own exit [R77] |
 | `RemoteVersionMismatch` | profile; local_version; remote_protocol | **remote_version_mismatch** | 3 | after_fix | "install opv <version> on <host> at <opv path>" | rerun [R78] |
