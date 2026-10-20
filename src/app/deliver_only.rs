@@ -813,9 +813,10 @@ pub fn admit(fleet: &Fleet, scope: &Scope<'_>, raw: RawSupply) -> Result<Supply,
                 .as_ref()
                 .filter(|e| fleet.environments.contains_key(e.as_str()))
                 .map(|e| EnvName::new(e.as_str()));
+            // Entries count from 1, as everywhere else: the document's first.
             return Err(refused(
                 env,
-                position(d, 0),
+                position(d, 1),
                 SupplyRefusal::WrongEnvironment { document_env },
             ));
         }

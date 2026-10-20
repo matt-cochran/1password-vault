@@ -88,6 +88,17 @@ fn inv_cmd(inv: &Invocation) -> Cmd {
     }
 }
 
+/// Whether `inv` is a supplying sync (`opv sync <env> --supply-stdin`, #206): its values
+/// come from the deploy job that runs it, never from a person or 1Password.
+fn supplying(inv: &Invocation) -> bool {
+    supplying_cmd(&inv_cmd(inv))
+}
+
+/// Whether `c` is a supplying sync (`opv sync <env> --supply-stdin`, #206).
+fn supplying_cmd(c: &Cmd) -> bool {
+    c.command == ["sync"] && c.args.iter().any(|a| a == "--supply-stdin")
+}
+
 fn carries_person_only_flag(c: &Cmd) -> bool {
     c.args.iter().any(|a| {
         PERSON_ONLY_FLAGS
@@ -1364,13 +1375,23 @@ fn supply_refused(env: &EnvName, entry: &SupplyEntry, reason: &SupplyRefusal) ->
     let producer = |text: String| plan(inspect(text), Next::None(NoNext::NothingToRun));
     let decide = |text: String| plan(inspect(text), Next::None(NoNext::PersonPicksDirection));
     match reason {
-        SupplyRefusal::Undeclared { closest } => decide(match closest {
-            Some(c) => format!(
-                "declare the key with source = \"infrastructure\", or fix the producer's name (the closest infrastructure key is {c})"
-            ),
-            None => "declare the key with source = \"infrastructure\", or fix the producer's name"
-                .to_string(),
-        }),
+        // S11: the supplied name is not echoed (a mapping bug can put a value there), so
+        // the proposal names the key as the form the person fills in.
+        SupplyRefusal::Undeclared { closest } => plan(
+            inspect(match closest {
+                Some(c) => format!(
+                    "declare the key with source = \"infrastructure\", or fix the producer's name (the closest infrastructure key is {c})"
+                ),
+                None => {
+                    "declare the key with source = \"infrastructure\", or fix the producer's name"
+                        .to_string()
+                }
+            }),
+            Next::Check(cmd(
+                &["propose", "key"],
+                &["<product>/<KEY>", "--source", "infrastructure"],
+            )),
+        ),
         SupplyRefusal::NotOptedIn => plan(
             inspect(format!(
                 "{what} comes from 1Password; only an infrastructure key takes a supplied value"
@@ -2300,6 +2321,12 @@ impl Cause {
                     "this step needs a person at a terminal, and this is a CI run".into()
                 }
             },
+            // #206 (R1): a supply comes from the deploy job, never from an assistant.
+            PersonOnly { command, marker } if supplying_cmd(command) => format!(
+                "{} runs only in the approved deploy workflow (CI), from the job that produced the value; this shell looks like an assistant ({})",
+                cmd_text(command),
+                marker.label()
+            ),
             PersonOnly { command, marker } => format!(
                 "{} runs only in a person's terminal; this shell looks like an assistant ({})",
                 cmd_text(command),
@@ -4067,6 +4094,19 @@ impl Cause {
                 inspect("run it in your own terminal"),
                 Next::Handoff(inv_cmd(inv)),
             ),
+            // #206 (R1): not a person's terminal either: the deploy job that produced the
+            // value pipes it in. The read shows what the environment's sync would change.
+            PersonOnly { command, .. } if supplying_cmd(command) => plan(
+                inspect(
+                    "it runs in the approved deploy workflow (CI), from the job that produced the value; generate that step with opv ci workflow <env> --target <target> --supply",
+                ),
+                match command.args.first() {
+                    Some(env) if !env.starts_with('-') => {
+                        Next::Check(cmd(&["plan"], &[env.as_str()]))
+                    }
+                    _ => Next::None(NoNext::NothingToRun),
+                },
+            ),
             PersonOnly { command, .. } => plan(
                 inspect("run it in your own terminal"),
                 Next::Handoff(command.clone()),
@@ -4459,6 +4499,15 @@ impl Cause {
                 product: _,
                 state,
             } => match state {
+                // #206 §5.4 (S1): a supplying run that left a supplied name without
+                // evidence. Only the deploy job holds the value, so it is the one to re-run;
+                // Next stays the read.
+                Unverified::NotRecorded if supplying(inv) => plan(
+                    inspect(
+                        "re-run the deploy job; the target may hold the value but opv cannot vouch for it",
+                    ),
+                    Next::Check(cmd(&["plan"], &[env.as_str(), "--target", target.as_str()])),
+                ),
                 // 01.06: a delivery never made is a scoped plan away.
                 Unverified::NotRecorded => plan(
                     None,

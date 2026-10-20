@@ -125,7 +125,11 @@ pub fn propose_with(
                     doc.declare_boundary(env, &boundary)?;
                 }
             }
-            questions = production_questions(&fleet, &named, &excluded);
+            // An infrastructure key has no stored value to ask for (#206): its scope is the
+            // `environments` list the loader requires, and the deploy job supplies it.
+            if *source != Some(SourceKind::Infrastructure) {
+                questions = production_questions(&fleet, &named, &excluded);
+            }
             "key"
         }
         Intent::Env { env, tier } => {

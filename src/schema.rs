@@ -735,8 +735,10 @@ fn documents() -> Value {
             "environment", "product", "key", "kind", "field", "source", "personal",
             "boundary: {name, vault_id, item_id}", "environments",
             "targets: [{name, provider, rendered_name, details: [{label, value}]}]",
-            "delivered_to: [{environment, target, product, item, item_id, records}]",
-            "rules", "immutable", "guidance", "required_here", "shared_from", "shared_by",
+            "delivered_to: [{environment, target, product, item, item_id, records, serial?, recorded_at?}] (serial and recorded_at: an infrastructure key's recorded supply)",
+            "rules", "immutable", "guidance", "required_here",
+            "supplied_at_sync? (true for an infrastructure key: supplied at sync, never stored in 1Password; it then has no boundary, reference, inspect or readers)",
+            "shared_from", "shared_by",
             "reference", "inspect", "readers: {deploy: [service account], ci}",
             "explain --target: {environment, target, provider, locator, products, deploy_credentials, state_vault_id, deploy_account}"
         ],

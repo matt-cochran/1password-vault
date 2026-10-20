@@ -125,9 +125,18 @@ document then entry order.
 | `Empty`, `TooShort`, `Placeholder`, `NotAString` | "the producer gave no usable value for p/K" | none |
 | `RotateWithoutValue` | "supply p/K in the same run to rotate it" | none |
 
-Stream problems use `InputInvalid` (code `input_invalid`, exit 8) with `kind: Supply`,
+Stream problems use `InputInvalid` (code `input_invalid`, exit 2) with `kind: Supply`,
 `path: <stdin>` and rules `StdinIsTerminal`, `NotJson{line, col}`, `UnknownField`, `WrongSchema`,
 `TooLarge{limit}`, `MissingSerial`, `NoValues`, `NoDocuments`, `Timeout`.
+
+**Accepted deviation (0.13.0).** This section first gave stream problems exit 8. They ship with
+exit 2, the error catalog's convention for every `input_invalid` (a malformed input file, a bad
+`--receipt`): the input is the caller's to fix, and exit 8 stays reserved for a check that
+found the world in an unwanted state (`delivery_unverified`, `target_drift`). Scripts tell the
+two apart by `code`, not by exit status alone.
+
+Positions count from 1: `document 1, entry 1` is the first entry of the first document. A
+`WrongEnvironment` refusal concerns the whole document and names its first entry.
 
 ### 4.2 Rules
 

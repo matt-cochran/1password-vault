@@ -2794,6 +2794,80 @@ fn a13_a_superseded_delivery_names_the_later_receipt() {
     assert!(d.contains("/tmp/receipt.json"), "{d}");
 }
 
+/// #206 (R1): an assistant's `opv sync <env> --supply-stdin`.
+fn assistant_supply() -> Cause {
+    Cause::PersonOnly {
+        command: Cmd {
+            command: vec!["sync".into()],
+            args: vec!["prod".into(), "--supply-stdin".into()],
+        },
+        marker: AgentMarker::ClaudeCode,
+    }
+}
+
+#[test]
+fn an_assistants_supply_is_never_sent_to_a_terminal() {
+    assert!(
+        !assistant_supply()
+            .do_text(&inv())
+            .unwrap_or_default()
+            .contains("terminal")
+    );
+}
+
+#[test]
+fn an_assistants_supply_is_sent_to_the_deploy_workflow() {
+    assert!(
+        assistant_supply()
+            .do_text(&inv())
+            .unwrap_or_default()
+            .starts_with(
+                "it runs in the approved deploy workflow (CI), from the job that produced the value"
+            )
+    );
+}
+
+#[test]
+fn an_assistants_supply_message_names_the_deploy_workflow() {
+    assert!(
+        assistant_supply()
+            .message()
+            .contains("runs only in the approved deploy workflow (CI)")
+    );
+}
+
+#[test]
+fn an_assistants_supply_steps_to_the_environments_plan() {
+    assert_eq!(next_in(&assistant_supply(), &inv()), "opv plan prod");
+}
+
+/// #206 §5.4: a supplying run's unrecorded supplied name sends the person to the deploy job.
+#[test]
+fn an_unrecorded_supplied_name_says_to_re_run_the_deploy_job() {
+    let i = invoked(&["sync"], &["prod", "--target", "web", "--supply-stdin"]);
+    assert_eq!(
+        unverified(Unverified::NotRecorded).do_text(&i).as_deref(),
+        Some("re-run the deploy job; the target may hold the value but opv cannot vouch for it")
+    );
+}
+
+/// #206 §5.4: its Next stays the scoped read.
+#[test]
+fn an_unrecorded_supplied_name_still_steps_to_the_scoped_plan() {
+    let i = invoked(&["sync"], &["prod", "--target", "web", "--supply-stdin"]);
+    assert_eq!(
+        next_in(&unverified(Unverified::NotRecorded), &i),
+        "opv plan prod --target web"
+    );
+}
+
+/// 01.06: without a supply, an unrecorded delivery keeps no Do.
+#[test]
+fn an_unrecorded_delivery_without_a_supply_has_no_do() {
+    let i = invoked(&["sync"], &["prod", "--target", "web"]);
+    assert_eq!(unverified(Unverified::NotRecorded).do_text(&i), None);
+}
+
 /// A13: a delivery from another account steps to signing in to it.
 #[test]
 fn a13_another_account_steps_to_signing_in_to_it() {
