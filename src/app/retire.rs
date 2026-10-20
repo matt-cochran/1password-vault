@@ -617,6 +617,19 @@ fn holds(row: &crate::domain::Row) -> bool {
         )
 }
 
+/// [`findings`] for a `ready` that read only `only` (when given). That read sees no other
+/// environment's target, so it cannot know a retirement's remaining steps: it lists only
+/// the prune `only` itself still needs, never a remaining-steps list built from one
+/// environment (which said only the person's archive was left while other environments
+/// still held the key).
+pub fn findings_scoped(fleet: &Fleet, envs: &[EnvInput], only: Option<&str>) -> Vec<Finding> {
+    let mut out = findings(fleet, envs);
+    if let Some(only) = only {
+        out.retain(|f| f.scope.environment.as_deref() == Some(only));
+    }
+    out
+}
+
 /// `ready`'s `retirement_incomplete` findings (#179): one per `retiring` key, naming the
 /// steps that remain in order. Each environment whose target still holds the key
 /// ([`holds`]) is pruned first, local and shared before production, by

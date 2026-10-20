@@ -595,6 +595,25 @@ mod prune_step {
         }
     }
 
+    /// #179: a `ready` of one environment that no longer holds the key cannot tell what
+    /// remains elsewhere, so it lists no remaining-steps finding.
+    #[test]
+    fn a_scoped_ready_of_an_environment_not_holding_the_key_lists_no_retirement() {
+        let envs = [env_holding("staging", false)];
+        assert!(findings_scoped(&retiring(), &envs, Some("staging")).is_empty());
+    }
+
+    /// #179: a `ready` of one environment that still holds the key names its prune.
+    #[test]
+    fn a_scoped_ready_of_an_environment_holding_the_key_names_its_prune() {
+        let envs = [env_holding("staging", true)];
+        let prerequisites: Vec<String> = findings_scoped(&retiring(), &envs, Some("staging"))
+            .into_iter()
+            .map(|f| f.prerequisite)
+            .collect();
+        assert_eq!(prerequisites, ["opv sync staging --prune --retire"]);
+    }
+
     #[test]
     fn ready_lists_an_unfinished_retirement() {
         let envs = [env_holding("staging", false), env_holding("prod", true)];
