@@ -91,6 +91,7 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 | `StateVaultTooWide` | env; target; vault; shared_with; source; at | state_vault_wider_than_values | after_fix | "delete state_vault_id from [environments.E.targets.T]" | `opv bootstrap` [R11] |
 | `ConfigNotEditable` | source; reason: Generated{generated_by, fragment?{toml, json, removed?, load_error}} / UnsupportedLayout{section} / ManifestItemAsBoundary{env, boundary}; pending_ids | **config_not_editable** | never | per reason | `opv config edit` [R15]; Generated: none; a refused proposal carries its declaration fragment, not a diff (#184, #178): Do is to have the generator emit it, Next `opv propose structure`, then `opv apply`; none while its `load_error` is set (the proposal changes first) |
 | `CopiesDiffer` | file; manifest | **copies_differ** | never | "update the file (opv config export --toml > <file>) or the manifest (opv config edit)" | none: the person picks the direction [R16] |
+| `RegeneratedFileDiffers` | file; committed; in_place: bool | **regenerated_file_differs** | never | "decide which is right: update <file> or the committed configuration <committed>" | none: the person picks the direction (#178) |
 | `ManifestProblem` | state: NotFound{project, from} / Ambiguous{candidates, reason} / Exists{title, local_file} | manifest_not_found / manifest_ambiguous / manifest_exists | per state | per state | `opv projects`; `opv config check --file <f>`; `opv config edit` [R17–R19] |
 | `InventoryIncomplete` | unlisted: Vec<(Account, Cause)> | inventory_incomplete | after_fix | "sign in to account <id>" | `opv login --account <id> --no-record -- <rerun>` [R20] |
 
@@ -200,7 +201,7 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 
 ### 4.11 Codes
 
-- **New:** config_source_mismatch, config_unreadable, config_not_editable, copies_differ, unknown_target, unknown_role, unknown_profile, ambiguous_name, choice_required, nothing_in_scope, already_declared, target_not_signed_in, own_session_required, credential_rejected, resource_not_found, create_outcome_unknown, budget_spent, concurrent_edit, tool_unusable, unexpected_output, unrecognized_failure, declined, file_too_open, input_invalid, approval_used, plan_unknown, private_dir_failed, remote_unreachable, remote_version_mismatch, child_start_failed, delivery_unverified, target_drift, source_changed, mount_unreadable, internal_error.
+- **New:** config_source_mismatch, config_unreadable, config_not_editable, copies_differ, regenerated_file_differs, unknown_target, unknown_role, unknown_profile, ambiguous_name, choice_required, nothing_in_scope, already_declared, target_not_signed_in, own_session_required, credential_rejected, resource_not_found, create_outcome_unknown, budget_spent, concurrent_edit, tool_unusable, unexpected_output, unrecognized_failure, declined, file_too_open, input_invalid, approval_used, plan_unknown, private_dir_failed, remote_unreachable, remote_version_mismatch, child_start_failed, delivery_unverified, target_drift, source_changed, mount_unreadable, internal_error.
 - **Removed:** source_error, target_error, auth_required, desktop_app_unavailable (now a `NotSignedIn` state), op_unexpected (now `unrecognized_failure`), duplicate_scope (now `input_invalid`), credential_rejected for op's prompt (now `NotSignedIn`), and the MCP-only codes.
 - **Exit 70 (internal error)** is new; it follows `EX_SOFTWARE`.
 
@@ -282,7 +283,7 @@ pub enum Next {
     Check(Command),                // a read that answers "did it happen?"
     Handoff(Command),              // only a person runs it (approve, --confirm, login)
     Vendor(VendorCommand),         // a typed vendor command (flyctl auth login, ssh -p …)
-    None(NoNextReason),            // CopiesDiffer: the person picks the direction
+    None(NoNextReason),            // CopiesDiffer, RegeneratedFileDiffers: the person picks the direction
 }
 pub enum Action { /* typed, rendered from a table: Grant{…}, FillValue{…}, Unset{var}, Chmod{…}, … */ }
 ```

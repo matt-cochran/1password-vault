@@ -493,6 +493,14 @@ pub enum Cause {
         file: PathBuf,
         manifest: String,
     },
+    /// A file project's regenerated configuration file differs from the committed copy
+    /// (#178). `file` is the regenerated file; `committed` is the committed configuration
+    /// it was compared with, whose `git HEAD` copy is the committed side when `in_place`.
+    RegeneratedFileDiffers {
+        file: PathBuf,
+        committed: PathBuf,
+        in_place: bool,
+    },
     /// The committed `secrets.bindings.toml` is not the one the last `opv apply` wrote
     /// (D-G); the apply record holds only digests, so the environments named here are the
     /// ones in the bindings file. A person runs `opv apply`.
@@ -1780,6 +1788,7 @@ impl Cause {
             StateVaultTooWide { .. } => "state_vault_wider_than_values",
             ConfigNotEditable { .. } => "config_not_editable",
             CopiesDiffer { .. } => "copies_differ",
+            RegeneratedFileDiffers { .. } => "regenerated_file_differs",
             BindingsUnapplied { .. } => "bindings_unapplied",
             ManifestNotFound { .. } => "manifest_not_found",
             ManifestAmbiguous { .. } => "manifest_ambiguous",
@@ -1909,6 +1918,7 @@ impl Cause {
             | StateVaultTooWide { .. }
             | ConfigNotEditable { .. }
             | CopiesDiffer { .. }
+            | RegeneratedFileDiffers { .. }
             | BindingsUnapplied { .. }
             | ManifestNotFound { .. }
             | ManifestAmbiguous { .. }
@@ -2025,6 +2035,7 @@ impl Cause {
             | ConfigSourceMismatch { .. }
             | ConfigNotEditable { .. }
             | CopiesDiffer { .. }
+            | RegeneratedFileDiffers { .. }
             | ManifestExists { .. }
             | NeedsOwnSession { .. }
             | Guard { .. }
