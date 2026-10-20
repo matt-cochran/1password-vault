@@ -1020,6 +1020,10 @@
             "pattern": "^[a-z][a-z0-9-]*$",
             "type": "string"
           },
+          "role": {
+            "pattern": "^[a-z0-9-]{1,32}$",
+            "type": "string"
+          },
           "section": {
             "enum": [
               "inventory",
