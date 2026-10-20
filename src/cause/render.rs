@@ -154,6 +154,8 @@ fn scope_read(scope: &PlanScope) -> Next {
             command: vec!["apply".into()],
             args: scope.attest_args(),
         }),
+        // #179: `ready` lists what remains of a retirement and names its plan id.
+        PlanScope::Retire => Next::Check(cmd(&["ready"], &[])),
         PlanScope::Sync {
             env,
             targets,
@@ -1875,6 +1877,22 @@ impl Cause {
                 } => format!(
                     "opv prunes {product}/{key} from production environment {env} only after every local and shared environment; {first} still holds it"
                 ),
+                self::Guard::RetireNotPruned {
+                    product,
+                    key,
+                    holding,
+                } => format!(
+                    "opv archives the 1Password fields of {product}/{key} only once no target holds it; {} still {}",
+                    list_of(holding),
+                    if holding.len() == 1 {
+                        "holds it"
+                    } else {
+                        "hold it"
+                    }
+                ),
+                self::Guard::ArchiveNotRewritable { env, holds } => format!(
+                    "the 1Password item of environment {env} holds {holds}, which opv cannot prove a rewrite keeps, so opv did not archive the field there"
+                ),
             },
             MountUnreadable {
                 workload,
@@ -2134,6 +2152,9 @@ impl Cause {
                 }
                 Some(PlanScope::Attest { env, target, .. }) => {
                     format!("no attestation plan {plan} is known for {env}/{target}")
+                }
+                Some(PlanScope::Retire) => {
+                    format!("no retirement plan {plan} is known for a key marked retiring")
                 }
                 None => format!("no plan {plan} is known"),
             },
@@ -3503,6 +3524,30 @@ impl Cause {
                         "retire it from {first} first: opv sync {first} --prune --retire"
                     )),
                     Next::Check(cmd(&["plan"], &[first.as_str()])),
+                ),
+                // #179: the prunes are CI's (or a person's) delivery commands, named in the
+                // Do in tier order; the Next is the read of the first one (X4).
+                self::Guard::RetireNotPruned { holding, .. } => {
+                    let steps: Vec<String> = holding
+                        .iter()
+                        .map(|env| format!("opv sync {env} --prune --retire"))
+                        .collect();
+                    plan(
+                        inspect(format!(
+                            "prune it first (CI may run these): {}",
+                            steps.join("; then ")
+                        )),
+                        match holding.first() {
+                            Some(first) => Next::Check(cmd(&["plan"], &[first.as_str()])),
+                            None => Next::Check(cmd(&["ready"], &[])),
+                        },
+                    )
+                }
+                self::Guard::ArchiveNotRewritable { env, .. } => plan(
+                    inspect(format!(
+                        "in 1Password, move the field into a section whose name starts with \"archived · \" in the item of {env}, then run opv apply again"
+                    )),
+                    Next::Check(cmd(&["ready"], &[])),
                 ),
             },
             MountUnreadable { env, target, .. } => plan(

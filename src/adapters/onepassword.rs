@@ -1209,6 +1209,122 @@ fn write_skeleton_on(
     }
 }
 
+/// Move the fields at `indices` (positions in the item's `fields` list, in the order the
+/// tolerant parse lists them) into the section labelled `section`, created when the item has
+/// none (#179: a retirement's archive; 1Password has no field-level archive). Each field
+/// keeps its id, label, type and value; only its section changes. Every other field and
+/// section is sent back unchanged. Exactly one `op item edit` call with the whole item on
+/// stdin, or none when `indices` is empty. Never deletes a field or a value. Returns the
+/// version of the item as written, when the edit printed one (I5).
+pub fn archive_fields(
+    r: &dyn CommandRunner,
+    env: &Environment,
+    b: &Boundary,
+    item: &Item,
+    indices: &[usize],
+    section: &str,
+) -> Result<Option<u64>, Error> {
+    archive_fields_on(r, env, b, item, indices, section, &Host::detect)
+}
+
+fn archive_fields_on(
+    r: &dyn CommandRunner,
+    env: &Environment,
+    b: &Boundary,
+    item: &Item,
+    indices: &[usize],
+    section: &str,
+    host: &dyn Fn() -> Host,
+) -> Result<Option<u64>, Error> {
+    if indices.is_empty() {
+        return Ok(None);
+    }
+    let mut doc = WipeOnDrop(serde_json::from_slice(&item.raw).map_err(|e| json_error(&e))?);
+    move_to_section(&mut doc.0, indices, section)?;
+    let template = serialize_exact(&doc.0)?;
+    drop(doc);
+
+    let args = [
+        "item",
+        "edit",
+        b.item_id.as_str(),
+        "--vault",
+        b.vault_id.as_str(),
+        "--format",
+        "json",
+    ];
+    // A write (NR-2): never retried. One atomic edit, so an unknown outcome leaves the
+    // item either untouched or with every field moved; a re-run moves only what is left.
+    let call = Call::new(OP, &args).with_stdin(Some(&template));
+    match r.write(&call).map_err(|e| op_spawn_error(r, &e, host))? {
+        Outcome::Done(o) => Ok(item_version(&o.stdout)),
+        Outcome::Refused(_)
+        | Outcome::Unknown {
+            status: Some(_), ..
+        } => Err(failed_write(r, env, b, host, &call)),
+        Outcome::Unknown { .. } => Err(unfinished_write(env, b, &call)),
+    }
+}
+
+/// Put the fields at `indices` in the section labelled `label` (the first section with that
+/// label, else a new one), dropping each one's derived `reference` (`op` recomputes it).
+/// Values are never read or changed here.
+fn move_to_section(doc: &mut Value, indices: &[usize], label: &str) -> Result<(), Error> {
+    let bug = |site: &'static str| Error::from(Cause::Bug { site });
+    let obj = doc
+        .as_object_mut()
+        .ok_or_else(|| bug("archive: an item checked when read is not an object"))?;
+    let str_at = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_owned);
+    let sections: Vec<(String, String)> = obj
+        .get("sections")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|s| Some((str_at(s, "id")?, str_at(s, "label").unwrap_or_default())))
+        .collect();
+    let id = match sections.iter().find(|(_, l)| l == label) {
+        Some((id, _)) => id.clone(),
+        None => {
+            let base: String = label
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() {
+                        c.to_ascii_lowercase()
+                    } else {
+                        '_'
+                    }
+                })
+                .collect::<String>()
+                .split('_')
+                .filter(|p| !p.is_empty())
+                .collect::<Vec<_>>()
+                .join("_");
+            let id = unique(base, |c| sections.iter().any(|(i, _)| i == c));
+            obj.entry("sections")
+                .or_insert_with(|| Value::Array(Vec::new()))
+                .as_array_mut()
+                .ok_or_else(|| {
+                    bug("archive: an item checked when read has sections of another type")
+                })?
+                .push(json!({"id": id, "label": label}));
+            id
+        }
+    };
+    let fields = obj
+        .get_mut("fields")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| bug("archive: an item checked when read has no fields"))?;
+    for &i in indices {
+        let f = fields
+            .get_mut(i)
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| bug("archive: a field to move is not in the item"))?;
+        f.insert("section".into(), json!({"id": id, "label": label}));
+        f.remove("reference");
+    }
+    Ok(())
+}
+
 /// The ` --account <id>` suffix for an `op` command when the environment knows its
 /// account (I6); empty otherwise, so `op`'s own default is used.
 pub(crate) fn account_suffix(account: Option<&str>) -> String {
@@ -2653,6 +2769,53 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    // ---------- archive_fields (#179) ----------
+
+    const ARCHIVE: &str = "archived · 2026-10-19 · retired allumata/OPENAI_API_KEY";
+
+    /// Archive `OPENAI_API_KEY` (field 1 of [`allumata_item`]) and return the template sent.
+    fn archived_template() -> Value {
+        let item = read(allumata_item());
+        let r = FakeRunner::new([Output::success(allumata_item())]);
+        archive_fields(&r, &test_env(), &test_at(), &item, &[1], ARCHIVE).unwrap();
+        edit_stdin(&r)
+    }
+
+    #[test]
+    fn archive_moves_the_field_with_its_value_into_the_named_section() {
+        let tpl = archived_template();
+        assert_eq!(
+            tpl_field(&tpl, ARCHIVE, "OPENAI_API_KEY")["value"],
+            "sk-FIXTURE-openai"
+        );
+    }
+
+    #[test]
+    fn archive_keeps_every_field_of_the_item() {
+        let original: Value = serde_json::from_slice(&allumata_item()).unwrap();
+        let tpl = archived_template();
+        assert_eq!(
+            tpl["fields"].as_array().unwrap().len(),
+            original["fields"].as_array().unwrap().len()
+        );
+    }
+
+    #[test]
+    fn archive_never_puts_a_value_in_argv() {
+        let item = read(allumata_item());
+        let r = FakeRunner::new([Output::success(allumata_item())]);
+        archive_fields(&r, &test_env(), &test_at(), &item, &[1], ARCHIVE).unwrap();
+        assert!(!r.argv_contains("sk-FIXTURE"));
+    }
+
+    #[test]
+    fn archive_with_nothing_to_move_calls_nothing() {
+        let item = read(allumata_item());
+        let r = FakeRunner::new(Vec::<Output>::new());
+        archive_fields(&r, &test_env(), &test_at(), &item, &[], ARCHIVE).unwrap();
+        assert!(r.calls.borrow().is_empty());
     }
 
     // ---------- unsectioned fields (FR-20 removed) ----------

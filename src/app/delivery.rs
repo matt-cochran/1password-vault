@@ -121,6 +121,23 @@ fn retiring_names(fleet: &Fleet, env_name: &str, target: &str, product: &str) ->
         .unwrap_or_default()
 }
 
+/// [`bindings`] as the target `listed` holds them: a `retiring` key a retirement already
+/// pruned from this target (#179) is no longer delivered here, so it leaves the binding set
+/// that is recorded and verified, and the rest still mint (and keep) a revision.
+fn held_bindings(
+    fleet: &Fleet,
+    env_name: &str,
+    target: &str,
+    product: &str,
+    listed: &[StoreEntry],
+) -> Result<Vec<BindingRef>, Error> {
+    let retiring = retiring_names(fleet, env_name, target, product);
+    Ok(bindings(fleet, env_name, target, product)?
+        .into_iter()
+        .filter(|b| !retiring.contains(&b.name) || listed.iter().any(|e| e.name == b.name))
+        .collect())
+}
+
 /// The products target `target` of `env_name` delivers that have at least one binding, or
 /// `only`.
 fn products_in_scope(
@@ -443,13 +460,7 @@ pub fn record(
     };
     let mut out = Recorded::default();
     for product in products_in_scope(fleet, env_name, target, only)? {
-        // A `retiring` key a retirement already pruned from this target (#179) is no longer
-        // delivered here: it leaves the binding set, so the rest still mint a revision.
-        let retiring = retiring_names(fleet, env_name, target, &product);
-        let set: Vec<BindingRef> = bindings(fleet, env_name, target, &product)?
-            .into_iter()
-            .filter(|b| !retiring.contains(&b.name) || listed.iter().any(|e| e.name == b.name))
-            .collect();
+        let set = held_bindings(fleet, env_name, target, &product, listed)?;
         let unconfirmed: Vec<&str> = set
             .iter()
             .filter(|b| !written.contains(&b.name) && !identical.contains(&b.name))
@@ -981,7 +992,7 @@ fn verify_target(
     let account = account_id(r)?;
     let mut checks = Vec::new();
     for product in products_in_scope(fleet, env_name, target, only)? {
-        let expected = bindings(fleet, env_name, target, &product)?;
+        let expected = held_bindings(fleet, env_name, target, &product, &listed)?;
         let this_scope = scope(fleet, env_name, target, &product, &account)?;
         let state = read_state(fleet, env_name, target, &product, r)?;
         let fingerprints: BTreeMap<String, String> =

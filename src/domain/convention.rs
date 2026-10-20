@@ -36,6 +36,21 @@ use crate::domain::secret::SecretValue;
 
 /// Section that keeps everything a tidy displaced or replaced (FR-43).
 pub const KEPT_SECTION: &str = "opv · kept";
+/// The start of every section a retirement archives a key's fields into (#179): see
+/// [`archived_section`]. Like [`KEPT_SECTION`], no declared key ever claims a field there,
+/// so a tidy never moves an archived field home and no plan reads it.
+pub const ARCHIVED_SECTION_PREFIX: &str = "archived · ";
+
+/// The section a person's `opv apply` of a retirement moves `product/key`'s fields into on
+/// `date` (`YYYY-MM-DD`): `archived · <date> · retired <product>/<KEY>`. 1Password has no
+/// field-level archive; the values stay in the item, out of every plan.
+pub fn archived_section(date: &str, product: &str, key: &str) -> String {
+    format!(
+        "{ARCHIVED_SECTION_PREFIX}{date} · retired {}",
+        key_label(product, key)
+    )
+}
+
 /// opv's own section, holding [`MARKER_FIELD`].
 pub const MARKER_SECTION: &str = "opv";
 /// Text field recording the convention version, for future migrations.
@@ -92,6 +107,9 @@ impl Found {
             || self.label.is_empty()
             || !VALUE_TYPES.contains(&self.ty.as_str())
             || self.section_label() == Some(KEPT_SECTION)
+            || self
+                .section_label()
+                .is_some_and(|l| l.starts_with(ARCHIVED_SECTION_PREFIX))
             || self.is_marker()
     }
 
