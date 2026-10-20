@@ -3370,6 +3370,30 @@ fn f1_a_refused_setup_falls_back_to_its_help() {
     assert_eq!(next_under(&c, &inv, &under_ci()), "opv setup --help");
 }
 
+/// #179: CI's refused `opv apply rp-…` hands the same apply to the person, never another
+/// command's read.
+#[test]
+fn a_retirement_apply_refused_under_ci_is_handed_to_the_person() {
+    let c = Cause::NeedsTerminal {
+        why: NoTerminal::NoTty,
+    };
+    let inv = cli(&["opv", "apply", "rp-40618f09aa949b63"]);
+    assert_eq!(
+        next_under(&c, &inv, &under_ci()),
+        "opv apply rp-40618f09aa949b63"
+    );
+}
+
+/// #179: the handed-over apply is the person's step, not CI's.
+#[test]
+fn a_retirement_apply_refused_under_ci_is_a_persons_step() {
+    let c = Cause::NeedsTerminal {
+        why: NoTerminal::NoTty,
+    };
+    let inv = cli(&["opv", "apply", "rp-40618f09aa949b63"]);
+    assert!(c.human_required_in(&inv, &under_ci()));
+}
+
 /// E1: a kube context that needs a credential refresh never steps back to the same read
 /// when this run has no terminal.
 #[test]
