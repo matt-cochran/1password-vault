@@ -429,3 +429,157 @@ kind = "secret"
             .any(|c| c.key == "OTEL" && c.env == "dev")
     );
 }
+
+/// Delivery state per key per target (#174): one placement's evidence line for `API_KEY`,
+/// bound to `core/API_KEY` in item `icore` at store version `3`, recorded when `icore` was at
+/// version `5`.
+mod delivery {
+    use std::collections::BTreeMap;
+
+    use crate::domain::delivery::{Evidence, Source, SuppliedMark};
+    use crate::domain::inventory::{
+        DeliveryState, EvidenceUnreadable, PlacementEvidence, delivery_state,
+    };
+
+    fn source() -> Source {
+        Source {
+            item_id: "icore".into(),
+            field: "core/API_KEY".into(),
+        }
+    }
+
+    fn line(attested: bool, supplied: bool) -> Evidence {
+        Evidence {
+            name: "API_KEY".into(),
+            store_version: "3".into(),
+            fingerprint: "f".into(),
+            source: source(),
+            attested_at: attested.then(|| "2026-10-18T00:00:00Z".into()),
+            supplied: supplied.then(|| SuppliedMark {
+                serial: 1,
+                at: "2026-10-18T00:00:00Z".into(),
+            }),
+        }
+    }
+
+    fn evidence(e: Evidence) -> PlacementEvidence {
+        PlacementEvidence::new(&[e], Some("v1|icore|5\n"))
+    }
+
+    fn versions(current: u64) -> BTreeMap<String, u64> {
+        BTreeMap::from([("icore".to_string(), current)])
+    }
+
+    fn state_of(e: &PlacementEvidence, current: u64) -> DeliveryState {
+        delivery_state(
+            Ok(Some(e)),
+            "API_KEY",
+            Some(&source()),
+            &versions(current),
+            None,
+        )
+    }
+
+    #[test]
+    fn a_v1_line_is_delivered() {
+        assert_eq!(
+            state_of(&evidence(line(false, false)), 5),
+            DeliveryState::Delivered
+        );
+    }
+
+    #[test]
+    fn an_a1_line_is_attested() {
+        assert_eq!(
+            state_of(&evidence(line(true, false)), 5),
+            DeliveryState::Attested
+        );
+    }
+
+    #[test]
+    fn a_supplied_line_is_supplied() {
+        assert_eq!(
+            state_of(&evidence(line(false, true)), 5),
+            DeliveryState::Supplied
+        );
+    }
+
+    #[test]
+    fn a_name_without_a_line_is_not_delivered() {
+        assert_eq!(
+            state_of(&PlacementEvidence::default(), 5),
+            DeliveryState::NotDelivered
+        );
+    }
+
+    #[test]
+    fn a_placement_without_a_delivery_item_is_not_delivered() {
+        let state = delivery_state(Ok(None), "API_KEY", Some(&source()), &versions(5), None);
+        assert_eq!(state, DeliveryState::NotDelivered);
+    }
+
+    /// A line in a format this opv does not read (a later tag) is never counted as proven:
+    /// `decode_evidence` drops it, so the name has no line.
+    #[test]
+    fn an_unknown_evidence_tag_is_not_delivered() {
+        let lines: Vec<Evidence> =
+            crate::domain::delivery::decode_evidence("API_KEY", "z9|3|f|icore|core/API_KEY")
+                .into_iter()
+                .collect();
+        let e = PlacementEvidence::new(&lines, None);
+        assert_eq!(state_of(&e, 5), DeliveryState::NotDelivered);
+    }
+
+    #[test]
+    fn a_line_recorded_before_the_source_item_changed_is_stale() {
+        assert_eq!(
+            state_of(&evidence(line(false, false)), 6),
+            DeliveryState::Stale
+        );
+    }
+
+    #[test]
+    fn a_line_for_another_source_field_is_stale() {
+        let moved = Source {
+            item_id: "icore".into(),
+            field: "core/OTHER".into(),
+        };
+        let e = evidence(line(false, false));
+        let state = delivery_state(Ok(Some(&e)), "API_KEY", Some(&moved), &versions(5), None);
+        assert_eq!(state, DeliveryState::Stale);
+    }
+
+    #[test]
+    fn a_line_at_an_older_store_version_than_listed_is_stale() {
+        let e = evidence(line(false, false));
+        let state = delivery_state(
+            Ok(Some(&e)),
+            "API_KEY",
+            Some(&source()),
+            &versions(5),
+            Some("4"),
+        );
+        assert_eq!(state, DeliveryState::Stale);
+    }
+
+    #[test]
+    fn an_unreadable_delivery_item_is_unreadable() {
+        let e = EvidenceUnreadable::new();
+        let state = delivery_state(Err(&e), "API_KEY", Some(&source()), &versions(5), None);
+        assert_eq!(state, DeliveryState::Unreadable);
+    }
+
+    /// A source item this session could not read has no current version: not judged stale.
+    #[test]
+    fn an_unknown_source_version_is_not_judged_stale() {
+        let e = evidence(line(false, false));
+        let state = delivery_state(
+            Ok(Some(&e)),
+            "API_KEY",
+            Some(&source()),
+            &BTreeMap::new(),
+            None,
+        );
+        assert_eq!(state, DeliveryState::Delivered);
+    }
+}

@@ -126,6 +126,208 @@ pub struct KeyRow {
     /// delivers it under ([`Fleet::target_name`], [`target_names`]). Names only.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub targets: BTreeMap<String, String>,
+    /// Each target that delivers this key, as `"<env>/<target>"` → the delivery state of the
+    /// key's name there ([`delivery_state`], #174): from that placement's evidence line for
+    /// the name, never from a value. Empty until the caller reads the evidence.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub delivery: BTreeMap<String, DeliveryState>,
+}
+
+/// The delivery state of one key's name on one target (#174), from the placement's
+/// evidence line for that name. A closed set of words; never a value, version or digest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryState {
+    /// opv wrote or proved the name (a `v1` line) and nothing newer is known.
+    Delivered,
+    /// A person attested the name (an `a1` line, #201): unchanged since attested, not proven.
+    Attested,
+    /// The name holds a value supplied to `opv sync --supply-stdin` (#206), not a 1Password one.
+    Supplied,
+    /// No evidence line for the name (no delivery item, or a line opv cannot read as
+    /// evidence: another format tag is never counted as proven).
+    NotDelivered,
+    /// The line is older than what it should vouch for: another source field, another store
+    /// version than the target lists, or a source item edited since the last sync.
+    Stale,
+    /// The placement's delivery item could not be read: neither delivered nor not delivered.
+    Unreadable,
+}
+
+impl DeliveryState {
+    /// The document's word for the state, as JSON serializes it.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Delivered => "delivered",
+            Self::Attested => "attested",
+            Self::Supplied => "supplied",
+            Self::NotDelivered => "not_delivered",
+            Self::Stale => "stale",
+            Self::Unreadable => "unreadable",
+        }
+    }
+}
+
+/// A placement's delivery item that could not be read. Like
+/// [`super::value_state::ReadError`], it has no conversion to a [`DeliveryState`], to
+/// [`PlacementEvidence`] or to an `Option`, so a failed read can only become
+/// [`DeliveryState::Unreadable`] through [`delivery_state`], never `delivered` or
+/// `not_delivered` (the compile-fail doctests below prove it).
+///
+/// ```
+/// use opv::domain::inventory::{DeliveryState, EvidenceUnreadable, delivery_state};
+/// let e = EvidenceUnreadable::new();
+/// let state = delivery_state(Err(&e), "API_KEY", None, &Default::default(), None);
+/// assert_eq!(state, DeliveryState::Unreadable);
+/// ```
+///
+/// ```compile_fail
+/// use opv::domain::inventory::{DeliveryState, EvidenceUnreadable};
+/// let _s: DeliveryState = EvidenceUnreadable::new().into();
+/// ```
+///
+/// ```compile_fail
+/// use opv::domain::inventory::{EvidenceUnreadable, PlacementEvidence};
+/// let _o: Option<PlacementEvidence> = EvidenceUnreadable::new().into();
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EvidenceUnreadable {
+    _read_failed: (),
+}
+
+impl EvidenceUnreadable {
+    /// A delivery item read that failed.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// How one evidence line was recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceKind {
+    /// opv's own write or proof (`v1`).
+    Proven,
+    /// A person's attestation (`a1`, #201).
+    Attested,
+    /// A supplied value (#206).
+    Supplied,
+}
+
+/// One name's evidence line as the inventory needs it: how it was recorded, the 1Password
+/// field it vouches for and the store version it was recorded at. Not serializable: the
+/// store version never leaves memory (SR-1).
+#[derive(Clone, PartialEq, Eq)]
+pub struct EvidenceLine {
+    pub kind: EvidenceKind,
+    pub source: super::delivery::Source,
+    pub store_version: String,
+}
+
+impl std::fmt::Debug for EvidenceLine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EvidenceLine")
+            .field("kind", &self.kind)
+            .finish()
+    }
+}
+
+impl From<&super::delivery::Evidence> for EvidenceLine {
+    fn from(e: &super::delivery::Evidence) -> Self {
+        let kind = if e.supplied.is_some() {
+            EvidenceKind::Supplied
+        } else if e.attested() {
+            EvidenceKind::Attested
+        } else {
+            EvidenceKind::Proven
+        };
+        Self {
+            kind,
+            source: e.source.clone(),
+            store_version: e.store_version.clone(),
+        }
+    }
+}
+
+/// A placement's delivery item as read: each name's evidence line and the source item
+/// versions its last full sync recorded (item id → version, the `source versions` field).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlacementEvidence {
+    pub lines: BTreeMap<String, EvidenceLine>,
+    pub source_versions: BTreeMap<String, u64>,
+}
+
+impl PlacementEvidence {
+    /// The evidence of a delivery item: its decoded `evidence` lines and its `source
+    /// versions` text (`v1|<item id>|<version>` per line; any other line is skipped).
+    pub fn new(evidence: &[super::delivery::Evidence], source_versions: Option<&str>) -> Self {
+        let mut versions = BTreeMap::new();
+        for line in source_versions.unwrap_or_default().lines() {
+            let mut parts = line.split('|');
+            if parts.next() != Some("v1") {
+                continue;
+            }
+            if let (Some(id), Some(Ok(version)), None) = (
+                parts.next(),
+                parts.next().map(str::parse::<u64>),
+                parts.next(),
+            ) {
+                versions.insert(id.to_string(), version);
+            }
+        }
+        Self {
+            lines: evidence
+                .iter()
+                .map(|e| (e.name.clone(), EvidenceLine::from(e)))
+                .collect(),
+            source_versions: versions,
+        }
+    }
+}
+
+/// The delivery state of the store name `name` on one placement (#174).
+///
+/// `placement` is the read of the placement's delivery item: `Err` when it failed
+/// (`unreadable`), `Ok(None)` when no delivery item is recorded (`not_delivered`).
+/// `expected` is the 1Password field the name is bound to now; `current_versions` is each
+/// source item's version as this session read it (item id → version); `listed_version` is
+/// the store's version of the name, when the target was listed. Then, in order: no line is
+/// `not_delivered`; a line for another field, at another store version than listed, or
+/// recorded before its source item's current version is `stale`; otherwise the line's own
+/// kind (`delivered`, `attested`, `supplied`). Anything not known is not judged.
+pub fn delivery_state(
+    placement: Result<Option<&PlacementEvidence>, &EvidenceUnreadable>,
+    name: &str,
+    expected: Option<&super::delivery::Source>,
+    current_versions: &BTreeMap<String, u64>,
+    listed_version: Option<&str>,
+) -> DeliveryState {
+    let evidence = match placement {
+        Err(_) => return DeliveryState::Unreadable,
+        Ok(None) => return DeliveryState::NotDelivered,
+        Ok(Some(evidence)) => evidence,
+    };
+    let Some(line) = evidence.lines.get(name) else {
+        return DeliveryState::NotDelivered;
+    };
+    if expected.is_some_and(|source| *source != line.source) {
+        return DeliveryState::Stale;
+    }
+    if listed_version.is_some_and(|listed| listed != line.store_version) {
+        return DeliveryState::Stale;
+    }
+    let item = &line.source.item_id;
+    if let (Some(recorded), Some(current)) = (
+        evidence.source_versions.get(item),
+        current_versions.get(item),
+    ) && recorded < current
+    {
+        return DeliveryState::Stale;
+    }
+    match line.kind {
+        EvidenceKind::Proven => DeliveryState::Delivered,
+        EvidenceKind::Attested => DeliveryState::Attested,
+        EvidenceKind::Supplied => DeliveryState::Supplied,
+    }
 }
 
 /// One cell of the matrix: the state of one key in one environment, the capability on the
@@ -281,6 +483,7 @@ pub fn build(fleet: &Fleet, cells: &CellInputs, receipt: Option<&ReceiptView>) -
                 roles: spec.roles.clone(),
                 file: spec.file.clone(),
                 targets: target_names(fleet, product, key, spec),
+                delivery: BTreeMap::new(),
             });
         }
     }

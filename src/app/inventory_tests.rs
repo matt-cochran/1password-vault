@@ -512,3 +512,149 @@ fn a_key_with_neither_marker_renders_as_without_markers() {
         row_line(&marker_text(false), "api/PLAIN_KEY")
     );
 }
+
+/// Delivery state per key per target (#174): a prod boundary `web` with `DATABASE_URL` and
+/// `API_KEY`, a Fly target `site` delivering both under their own names, and that
+/// placement's delivery item holding `lines` (label → evidence line) and the source item
+/// version its last sync recorded (`1`, the boundary's version when inserted). Values, the
+/// evidence key and fingerprints carry [`MARK`]. `item` overrides the recorded delivery item
+/// id (one that does not exist cannot be read).
+fn delivery_world(lines: &[(&str, &str)], item: Option<&str>) -> (FakeOp, Fleet, String) {
+    let op = FakeOp::default();
+    for (id, name) in [("vweb", "iweb"), ("sweb", "dweb")] {
+        op.vaults.borrow_mut().push((id.into(), name.into()));
+    }
+    let boundary = op.insert(
+        "vweb",
+        json!({"title": "web", "fields": [
+            {"id": "f-db", "section": {"id": "s-web", "label": "web"},
+             "label": "DATABASE_URL", "type": "CONCEALED", "value": MARK},
+            {"id": "f-api", "section": {"id": "s-web", "label": "web"},
+             "label": "API_KEY", "type": "CONCEALED", "value": MARK}
+        ]}),
+    );
+    let mut fields = vec![
+        json!({"id": "evidence-key", "label": "evidence key", "value": MARK}),
+        json!({"id": "source-versions", "label": "source versions",
+               "value": format!("v1|{boundary}|1\n")}),
+    ];
+    for (label, line) in lines {
+        let line = line.replace("{item}", &boundary);
+        fields.push(json!({"id": label, "label": label, "type": "CONCEALED", "value": line}));
+    }
+    let delivery = op.insert("sweb", json!({"title": "web", "fields": fields}));
+    op.vault_users.borrow_mut().insert("vweb".into(), json!([]));
+    let fleet = crate::config::parse(&format!(
+        r#"
+[environments.prod]
+boundaries.web = {{ vault_id = "vweb", item_id = "{boundary}" }}
+
+[environments.prod.targets.site]
+fly.app = "web-prod"
+fly.secret_name = "{{KEY}}"
+state_vault_id = "sweb"
+delivery_items = {{ web = "{}" }}
+
+[products.web.keys.DATABASE_URL]
+kind = "secret"
+environments = ["prod"]
+
+[products.web.keys.API_KEY]
+kind = "secret"
+environments = ["prod"]
+"#,
+        item.unwrap_or(&delivery)
+    ))
+    .unwrap();
+    (op, fleet, boundary)
+}
+
+/// A `v1` line for `DATABASE_URL`, its fingerprint the canary.
+const PROVEN: (&str, &str) = (
+    "DATABASE_URL",
+    "v1|3|S7MARKER-inventory|{item}|web/DATABASE_URL",
+);
+
+/// The delivery state `doc` reports for `web/<key>` on `prod/site`.
+fn delivery_of(doc: &Value, key: &str) -> Value {
+    key_row_of(doc, "web", key)["delivery"]["prod/site"].clone()
+}
+
+#[test]
+fn a_proven_line_reports_the_key_delivered_on_its_target() {
+    let (op, fleet, _) = delivery_world(&[PROVEN], None);
+    assert_eq!(
+        delivery_of(&json_document(&op, &fleet), "DATABASE_URL"),
+        "delivered"
+    );
+}
+
+#[test]
+fn an_attested_line_reports_the_key_attested() {
+    let attested = (
+        "DATABASE_URL",
+        "a1|3|f|{item}|web/DATABASE_URL|2026-10-18T00:00:00Z",
+    );
+    let (op, fleet, _) = delivery_world(&[attested], None);
+    assert_eq!(
+        delivery_of(&json_document(&op, &fleet), "DATABASE_URL"),
+        "attested"
+    );
+}
+
+/// The state is per key: the placement's other name, with no line, is not delivered.
+#[test]
+fn a_key_without_a_line_on_a_delivered_placement_is_not_delivered() {
+    let (op, fleet, _) = delivery_world(&[PROVEN], None);
+    assert_eq!(
+        delivery_of(&json_document(&op, &fleet), "API_KEY"),
+        "not_delivered"
+    );
+}
+
+#[test]
+fn a_source_item_edited_since_the_sync_reports_the_key_stale() {
+    let (op, fleet, boundary) = delivery_world(&[PROVEN], None);
+    op.bump(&boundary);
+    assert_eq!(
+        delivery_of(&json_document(&op, &fleet), "DATABASE_URL"),
+        "stale"
+    );
+}
+
+#[test]
+fn an_unreadable_delivery_item_reports_the_key_unreadable() {
+    let (op, fleet, _) = delivery_world(&[PROVEN], Some("imissing"));
+    assert_eq!(
+        delivery_of(&json_document(&op, &fleet), "DATABASE_URL"),
+        "unreadable"
+    );
+}
+
+/// The text form groups a key's targets by state on one line below the matrix.
+#[test]
+fn the_text_form_names_each_keys_delivery_state_per_target() {
+    let (op, fleet, _) = delivery_world(&[PROVEN], None);
+    let mut out = Vec::new();
+    run(&fleet, None, None, &op, None, false, &mut out).unwrap();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("delivery web/DATABASE_URL: delivered=prod/site\n"));
+}
+
+/// No value, evidence key or fingerprint reaches the JSON delivery states.
+#[test]
+fn the_json_delivery_states_carry_no_value_or_evidence() {
+    let (op, fleet, _) = delivery_world(&[PROVEN], None);
+    let mut out = Vec::new();
+    run(&fleet, None, None, &op, None, true, &mut out).unwrap();
+    assert!(!String::from_utf8_lossy(&out).contains(MARK));
+}
+
+/// No value, evidence key or fingerprint reaches the text delivery lines.
+#[test]
+fn the_text_delivery_states_carry_no_value_or_evidence() {
+    let (op, fleet, _) = delivery_world(&[PROVEN], None);
+    let mut out = Vec::new();
+    run(&fleet, None, None, &op, None, false, &mut out).unwrap();
+    assert!(!String::from_utf8_lossy(&out).contains(MARK));
+}

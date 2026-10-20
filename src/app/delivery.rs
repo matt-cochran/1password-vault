@@ -306,6 +306,15 @@ impl StateItem {
     pub(crate) fn has_receipt(&self) -> bool {
         self.receipt.is_some()
     }
+
+    /// The item's evidence lines and `source versions` text, for the inventory's per-key
+    /// delivery state (#174). Stays in memory: never printed (SR-1).
+    pub(crate) fn evidence(&self) -> crate::domain::inventory::PlacementEvidence {
+        crate::domain::inventory::PlacementEvidence::new(
+            &self.evidence,
+            self.source_versions.as_deref(),
+        )
+    }
 }
 
 /// Where the delivery item of `product` on target `target` is: the target's state vault and
