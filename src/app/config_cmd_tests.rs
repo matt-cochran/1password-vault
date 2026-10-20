@@ -1134,3 +1134,21 @@ fn a_file_regenerated_in_place_outside_git_is_config_unreadable() {
     let e = check_file_project(&file, &file, &op, &mut Vec::new()).unwrap_err();
     assert_eq!(e.code_str(), "config_unreadable");
 }
+
+/// FMECA M6: `config edit`'s editor never inherits the shell's 1Password session.
+#[test]
+fn the_editor_never_inherits_a_1password_session() {
+    let inherited = ["OP_SESSION_acct", "OP_SESSION", "EDITOR"].map(String::from);
+    let cmd = editor_command(
+        "code",
+        ["--wait"].into_iter(),
+        std::path::Path::new("/tmp/x.toml"),
+        inherited.into_iter(),
+    );
+    let removed: Vec<String> = cmd
+        .get_envs()
+        .filter(|(_, v)| v.is_none())
+        .map(|(k, _)| k.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(removed, ["OP_SESSION", "OP_SESSION_acct"]);
+}

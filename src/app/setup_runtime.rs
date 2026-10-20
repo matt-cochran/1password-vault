@@ -71,8 +71,10 @@ impl Runtime {
             command
         };
         let args: Vec<_> = command[1..].iter().map(String::as_str).collect();
+        // The one child that keeps the session: handing it on is `opv login -- <cmd>`'s
+        // purpose (session-reuse §6, FMECA M6).
         self.runner
-            .run_inherited(&command[0], &args, &self.environment())
+            .run_signed_in_child(&command[0], &args, &self.environment())
             .map_err(|e| {
                 Cause::ChildStartFailed {
                     program: command[0].clone(),

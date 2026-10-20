@@ -391,3 +391,124 @@ fn a_serve_step_never_puts_a_value_in_its_command_line() {
         "{out}"
     );
 }
+
+/// S8 (#203, FMECA H1): the whole `opv run`, with a fake `op` that passes its environment
+/// to its child as `op run` does (`op run --help`). A product with `[products.<p>.local]`
+/// and one without both start their app through the delivery step, so the app never sees
+/// the shell's 1Password session. The canary is a fake session value.
+mod s8_run {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::Path;
+    use std::process::Command;
+
+    const CANARY: &str = "S8CANARYsessionvalue";
+
+    /// Like `op run`: the item read is empty, the identity a service account, and `run`
+    /// execs the command after `--` with the environment it was given.
+    const FAKE_OP: &str = "#!/bin/sh\ncase \"$1\" in\n  item) echo '{\"fields\":[]}'; exit 0 ;;\n  whoami) echo '{\"user_type\":\"SERVICE_ACCOUNT\"}'; exit 0 ;;\n  account) echo '[]'; exit 0 ;;\nesac\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n";
+
+    const BINDINGS: &str = "environments.dev.boundaries.plain.vault_id = \"v1\"\n\
+        environments.dev.boundaries.plain.item_id = \"i1\"\n\
+        environments.dev.boundaries.web.vault_id = \"v1\"\n\
+        environments.dev.boundaries.web.item_id = \"i2\"\n";
+
+    const CONFIG: &str = "[environments.dev]\n\
+        boundaries.plain = {}\n\
+        boundaries.web = {}\n\
+        [products.plain.keys.API_TOKEN]\nkind = \"secret\"\n\
+        [products.web.local]\nenvironment = \"inherit\"\n\
+        [products.web.keys.API_TOKEN]\nkind = \"secret\"\n";
+
+    /// The fake `op`'s directory, written once per test binary before any test here spawns
+    /// it (a write racing another thread's fork can make its exec fail with ETXTBSY).
+    fn fake_bin() -> &'static Path {
+        static BIN: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        BIN.get_or_init(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let op = dir.path().join("op");
+            std::fs::write(&op, FAKE_OP).unwrap();
+            std::fs::set_permissions(&op, std::fs::Permissions::from_mode(0o755)).unwrap();
+            dir
+        })
+        .path()
+    }
+
+    /// What `opv run dev --product <product> -- env` printed (the app's environment).
+    fn app_env(product: &str) -> String {
+        let bin = fake_bin();
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("secrets.toml");
+        std::fs::write(&config, CONFIG).unwrap();
+        std::fs::write(root.path().join("secrets.bindings.toml"), BINDINGS).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+            .args(["--config", config.to_str().unwrap()])
+            .args(["run", "dev", "--product", product, "--", "env"])
+            .env_clear()
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("HOME", root.path())
+            .env("OP_SESSION_canaryacct", CANARY)
+            .env("OP_SESSION", CANARY)
+            .current_dir(root.path())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        stdout
+    }
+
+    fn assert_no_session(env: &str) {
+        assert!(!env.contains(CANARY), "the app saw the session value");
+        let names: Vec<&str> = env.lines().filter_map(|l| l.split('=').next()).collect();
+        assert!(
+            !names.iter().any(|n| n.starts_with("OP_SESSION")),
+            "{names:?}"
+        );
+    }
+
+    /// The app still gets its key (here the unresolved reference the fake leaves).
+    fn assert_key_delivered(env: &str) {
+        assert!(
+            env.lines().any(|l| l.starts_with("API_TOKEN=op://")),
+            "{env}"
+        );
+    }
+
+    #[test]
+    fn an_app_without_a_local_section_never_sees_the_session() {
+        let env = app_env("plain");
+        assert_no_session(&env);
+        assert_key_delivered(&env);
+    }
+
+    #[test]
+    fn an_app_with_a_local_section_never_sees_the_session() {
+        let env = app_env("web");
+        assert_no_session(&env);
+        assert_key_delivered(&env);
+    }
+
+    /// The step's own variable (the person's run, X25) stops at the step too.
+    #[test]
+    fn an_app_without_a_local_section_never_sees_the_steps_variable() {
+        assert!(!app_env("plain").contains("OPV_RUN_OUTER"));
+    }
+
+    /// The canary itself reached `op run` (the sim passes it on), so the absence above
+    /// is the step's doing, not the harness's.
+    #[test]
+    fn the_fake_op_run_passes_the_session_on() {
+        let out = Command::new(fake_bin().join("op"))
+            .args(["run", "--", "env"])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("OP_SESSION_canaryacct", CANARY)
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&out.stdout).contains(CANARY));
+    }
+}

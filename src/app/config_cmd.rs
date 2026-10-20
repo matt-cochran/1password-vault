@@ -598,6 +598,21 @@ fn fix_of(e: &Error) -> Option<String> {
     super::own_step(e).0
 }
 
+/// The editor's process for `path`, given the names in the environment it inherits. FMECA
+/// M6: the editor (and its plugins, language servers, terminals) never gets the shell's
+/// 1Password session.
+fn editor_command<'a>(
+    program: &str,
+    words: impl Iterator<Item = &'a str>,
+    path: &std::path::Path,
+    inherited: impl Iterator<Item = String>,
+) -> std::process::Command {
+    let mut editor = std::process::Command::new(program);
+    editor.args(words).arg(path);
+    crate::runner::strip_session_vars(&mut editor, program, inherited);
+    editor
+}
+
 /// `config edit` in a terminal: `$VISUAL`, else `$EDITOR`, else `vi`, on a temporary copy
 /// (mode 0600, removed afterwards; it holds no secret), and a `[y/N]` prompt.
 pub struct TerminalUi;
@@ -616,19 +631,21 @@ impl EditUi for TerminalUi {
         let mut words = editor.split_whitespace();
         let program = words.next().unwrap_or("vi").to_string();
         let tmp = TempCopy::create(text)?;
-        let status = std::process::Command::new(&program)
-            .args(words)
-            .arg(&tmp.path)
-            .status()
-            .map_err(|e| -> Error {
-                Cause::ChildStartFailed {
-                    program: program.clone(),
-                    workdir: None,
-                    io: e.kind().into(),
-                    remote: None,
-                }
-                .into()
-            })?;
+        let mut editor = editor_command(
+            &program,
+            words,
+            &tmp.path,
+            std::env::vars_os().filter_map(|(k, _)| k.into_string().ok()),
+        );
+        let status = editor.status().map_err(|e| -> Error {
+            Cause::ChildStartFailed {
+                program: program.clone(),
+                workdir: None,
+                io: e.kind().into(),
+                remote: None,
+            }
+            .into()
+        })?;
         if !status.success() {
             // The editor quit without success (`:cq`, a crash): the person's edit is
             // abandoned and nothing is saved.
