@@ -307,7 +307,10 @@ fn read_boundaries(
                     .states
                     .insert((product.clone(), key.clone(), env_name.clone()), state);
                 let (at_product, at_key) = spec.source().unwrap_or((product, key));
-                if let Some(&i) = found.chosen.get(&(at_product.to_string(), at_key.to_string())) {
+                if let Some(&i) = found
+                    .chosen
+                    .get(&(at_product.to_string(), at_key.to_string()))
+                {
                     let field = &layout.fields[i];
                     locations.insert(
                         (product.clone(), key.clone(), env_name.clone()),
@@ -578,11 +581,9 @@ fn body(
                 .as_deref()
                 .and_then(|from| from.split_once('/'))
                 .unwrap_or((cell.product.as_str(), cell.key.as_str()));
-            if let Some(location) = locations.get(&(
-                at_product.to_string(),
-                at_key.to_string(),
-                cell.env.clone(),
-            )) {
+            if let Some(location) =
+                locations.get(&(at_product.to_string(), at_key.to_string(), cell.env.clone()))
+            {
                 row["location"] = serde_json::to_value(location).map_err(|_| Cause::Bug {
                     site: "a key location serializes",
                 })?;

@@ -1403,7 +1403,10 @@ fn state_refusal(project: &Path, section: Option<Section>, args: &StateScope) ->
     }
     // `scan` and `names` are `opv needs` inputs only (#175), and are mutually exclusive as
     // the CLI's `--scan` and `--names` are.
-    for (field, present) in [("scan", args.scan.is_some()), ("names", args.names.is_some())] {
+    for (field, present) in [
+        ("scan", args.scan.is_some()),
+        ("names", args.names.is_some()),
+    ] {
         if present && section != Section::Needs {
             return Some(Cause::Usage {
                 problem: UsageProblem::ConflictsWith {
@@ -1590,8 +1593,7 @@ fn scan_inside(project: &Path, dir: &str) -> bool {
     };
     // A directory that exists is also checked by its real path, so a symlink inside the
     // project that points elsewhere cannot carry the scan out of it.
-    lexical
-        && std::fs::canonicalize(&joined).map_or(true, |real| real.starts_with(&root))
+    lexical && std::fs::canonicalize(&joined).map_or(true, |real| real.starts_with(&root))
 }
 
 /// `path`'s components with `.` dropped and `..` resolved lexically; `None` when a `..` climbs

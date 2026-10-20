@@ -345,8 +345,7 @@ fn code_file(path: &str) -> bool {
         ".rs", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".go", ".rb", ".c", ".h",
         ".cc", ".cpp", ".hpp", ".sh", ".bash",
     ];
-    EXT.iter().any(|ext| path.ends_with(ext))
-        || matches!(file_name(path), "Rakefile" | "Gemfile")
+    EXT.iter().any(|ext| path.ends_with(ext)) || matches!(file_name(path), "Rakefile" | "Gemfile")
 }
 
 #[cfg(test)]
