@@ -51,6 +51,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use super::onepassword_diagnose::{Facts, locate_owner};
 use super::onepassword_diagnose_items::diagnose_item_call;
+use crate::app::desktop_integration::{DesktopIntegration, NoIntegration};
 use crate::cause::{
     AccountId, AccountRef, AccountSource, Cause, CredentialProblem, CredentialRef, DiagnoseContext,
     DottedPath, EnvName, ExitClass, FieldName, FieldType, GrantModel, IoKind, ItemId, Location,
@@ -529,11 +530,71 @@ fn accounts_in_app(host: &Host) -> bool {
     host.op_is_windows_exe() || matches!(host.platform, Platform::MacOs | Platform::Windows)
 }
 
+/// The desktop app integration as far as the host alone tells (session-reuse §3.2 steps
+/// 1-4; no probe): `NotApplicable` under CI or a non-interactive credential, `Unavailable`
+/// for the Linux `op` in WSL, `Available` where op talks to the app (macOS, Windows, WSL
+/// with `op.exe`). `None` where the host alone cannot tell (Linux: whether the app runs is
+/// the detection lane's `/proc` check), which keeps today's wording there.
+///
+/// The same rules as `doctor_session::classify_static`, restricted to what [`Host`] holds
+/// in this lane; the integration step may route this through it once that lands.
+pub fn static_integration(host: &Host) -> Option<DesktopIntegration> {
+    if host.ci || host.op_credential.is_some() {
+        return Some(DesktopIntegration::NotApplicable);
+    }
+    if host.platform == Platform::Wsl && !host.op_is_windows_exe() {
+        return Some(DesktopIntegration::Unavailable {
+            reason: NoIntegration::WslLinuxOp,
+        });
+    }
+    accounts_in_app(host).then_some(DesktopIntegration::Available)
+}
+
+/// The names of the shell's `OP_SESSION*` variables (values are never read). In this
+/// crate's unit tests, none: no test depends on the developer's shell (as `Host::detect`).
+fn shell_session_vars() -> Vec<String> {
+    if cfg!(test) {
+        Vec::new()
+    } else {
+        crate::app::account::session_var_names()
+            .into_iter()
+            .filter(|v| crate::runner::is_session_var(v))
+            .collect()
+    }
+}
+
 /// The cause for a session [`diagnose`] found unusable; `None` for `SignedIn` / `Unknown`.
 /// `seen` is the failed call the session explains (a rejected credential's evidence).
 fn session_cause(
     session: Session,
     host: &Host,
+    ctx: &DiagnoseContext,
+    seen: Option<&Observed>,
+) -> Option<Cause> {
+    session_cause_with(
+        session,
+        host,
+        static_integration(host),
+        &shell_session_vars(),
+        ctx,
+        seen,
+    )
+}
+
+/// [`session_cause`] with the host's static integration and the shell's session
+/// variable names given (tests). Not signed in is (session-reuse §4.3, FMECA M3):
+/// - `Expired` when the shell exports a session for the call's account ([`ReusePath::Shell`]):
+///   the person refreshes that shell;
+/// - `AppLocked` where op talks to the desktop app (`Active` / `Available`): the app is
+///   locked, closed or its CLI integration is off;
+/// - `SignedOut` otherwise.
+///
+/// [`ReusePath::Shell`]: crate::app::signin::ReusePath::Shell
+fn session_cause_with(
+    session: Session,
+    host: &Host,
+    integration: Option<DesktopIntegration>,
+    shell_vars: &[String],
     ctx: &DiagnoseContext,
     seen: Option<&Observed>,
 ) -> Option<Cause> {
@@ -549,17 +610,20 @@ fn session_cause(
             problem: CredentialProblem::Unreadable,
             seen: seen.cloned()?,
         }),
-        // With op.exe, op's sessions are the Windows app's: not signed in means it is
-        // locked (or its CLI integration is off).
-        Session::NotSignedIn => Some(Cause::NotSignedIn {
-            system: System::OnePassword,
-            account: ctx.account.clone(),
-            state: if host.op_is_windows_exe() {
-                SessionState::AppLocked
-            } else {
-                SessionState::SignedOut
-            },
-        }),
+        Session::NotSignedIn => {
+            use crate::app::signin::{ReusePath, reuse_path};
+            let account = ctx.account.as_ref().map(|a| a.as_str());
+            let path = reuse_path(account, shell_vars, &[]).with_integration(integration);
+            Some(Cause::NotSignedIn {
+                system: System::OnePassword,
+                account: ctx.account.clone(),
+                state: match path {
+                    ReusePath::Shell { .. } => SessionState::Expired,
+                    ReusePath::App => SessionState::AppLocked,
+                    ReusePath::PerCommand => SessionState::SignedOut,
+                },
+            })
+        }
         Session::AccountAbsent(cause) => Some(*cause),
         // No account at all is on this machine, so any account will do (the `Any` form);
         // an account the caller selected but op does not know keeps its id.
@@ -2246,6 +2310,144 @@ mod tests {
         );
         let e = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err();
         assert_ne!(e.code_str(), "item_not_found");
+    }
+
+    /// #203 §4.3: not signed in, under `opv <command>` from the CLI.
+    fn not_signed_in(host: &Host, vars: &[&str], account: Option<&str>) -> Cause {
+        let vars: Vec<String> = vars.iter().map(|v| v.to_string()).collect();
+        let ctx = DiagnoseContext {
+            account: account.map(AccountId::new),
+            ..DiagnoseContext::default()
+        };
+        session_cause_with(
+            Session::NotSignedIn,
+            host,
+            static_integration(host),
+            &vars,
+            &ctx,
+            None,
+        )
+        .unwrap()
+    }
+
+    fn state_of(c: &Cause) -> SessionState {
+        match c {
+            Cause::NotSignedIn { state, .. } => state.clone(),
+            other => panic!("not a sign-in cause: {other:?}"),
+        }
+    }
+
+    fn next_of(c: &Cause) -> String {
+        let inv = crate::cause::Invocation {
+            origin: crate::cause::Origin::Cli,
+            command: vec!["check".into()],
+            args: vec!["prod".into()],
+            has_child: false,
+        };
+        let (_, next) = c.step(&inv);
+        crate::cause::render::next_text(&next, &inv).unwrap_or_default()
+    }
+
+    fn wsl_linux_op() -> Host {
+        Host::from_env(
+            &FakeEnv::new("linux")
+                .var("WSL_DISTRO_NAME")
+                .shell("/bin/bash"),
+        )
+    }
+
+    fn macos() -> Host {
+        Host::from_env(&FakeEnv::new("macos").shell("/bin/zsh"))
+    }
+
+    /// A shell that exports a session for the account: it expired.
+    #[test]
+    fn a_shell_session_that_fails_is_expired() {
+        let c = not_signed_in(&wsl_linux_op(), &["OP_SESSION_work"], Some("work"));
+        assert_eq!(state_of(&c), SessionState::Expired);
+    }
+
+    /// Expired: Next refreshes the shell, never a per-command `opv login`.
+    #[test]
+    fn an_expired_shell_session_steps_to_the_shell_refresh() {
+        let c = not_signed_in(&wsl_linux_op(), &["OP_SESSION_work"], Some("work"));
+        assert_eq!(next_of(&c), "eval \"$(opv login --shell)\"");
+    }
+
+    /// The shell's session decides even where the app could serve op: op reads it first.
+    #[test]
+    fn a_shell_session_is_expired_before_the_app_is_locked() {
+        let c = not_signed_in(&macos(), &["OP_SESSION_work"], Some("work"));
+        assert_eq!(state_of(&c), SessionState::Expired);
+    }
+
+    /// FMECA L6: op's delegation setting is not a session.
+    #[test]
+    fn the_delegation_setting_is_no_shell_session() {
+        let c = not_signed_in(&wsl_linux_op(), &["OP_SESSION_DELEGATION_ENABLED"], None);
+        assert_eq!(state_of(&c), SessionState::SignedOut);
+    }
+
+    /// FMECA M3: another account's session is not this account's.
+    #[test]
+    fn another_accounts_shell_session_is_not_expired() {
+        let c = not_signed_in(
+            &wsl_linux_op(),
+            &["OP_SESSION_home", "OP_SESSION_other"],
+            Some("work"),
+        );
+        assert_eq!(state_of(&c), SessionState::SignedOut);
+    }
+
+    /// Beyond op.exe: where op talks to the desktop app (macOS here), it is locked.
+    #[test]
+    fn on_a_desktop_app_host_not_signed_in_is_the_locked_app() {
+        let c = not_signed_in(&macos(), &[], Some("work"));
+        assert_eq!(state_of(&c), SessionState::AppLocked);
+    }
+
+    /// App locked: Next runs the command again under a sign-in, which raises the app's
+    /// prompt; never the shell refresh, which the app path does not need.
+    #[test]
+    fn a_locked_app_steps_to_the_same_command_under_a_sign_in() {
+        let c = not_signed_in(&macos(), &[], Some("work"));
+        assert_eq!(next_of(&c), "opv login --account work -- opv check prod");
+    }
+
+    /// App locked: the Do is the app's, never a password prompt.
+    #[test]
+    fn a_locked_app_says_to_unlock_it() {
+        let c = not_signed_in(&macos(), &[], Some("work"));
+        let inv = crate::error::invocation();
+        let d = c.do_text(&inv).unwrap_or_default();
+        assert!(d.contains("unlock the 1Password app"), "{d}");
+    }
+
+    /// WSL with the Linux op and no shell session: signed out, as in 0.13.
+    #[test]
+    fn the_linux_op_in_wsl_without_a_session_is_signed_out() {
+        let c = not_signed_in(&wsl_linux_op(), &[], Some("work"));
+        assert_eq!(state_of(&c), SessionState::SignedOut);
+    }
+
+    #[test]
+    fn the_static_integration_follows_the_host() {
+        assert_eq!(
+            [
+                static_integration(&wsl_linux_op()),
+                static_integration(&wsl_windows_op()),
+                static_integration(&macos()),
+                static_integration(&linux()),
+            ],
+            [
+                Some(DesktopIntegration::Unavailable {
+                    reason: NoIntegration::WslLinuxOp
+                }),
+                Some(DesktopIntegration::Available),
+                Some(DesktopIntegration::Available),
+                None,
+            ]
+        );
     }
 
     /// In WSL with the Windows `op.exe`, a signed-out session is the locked app.

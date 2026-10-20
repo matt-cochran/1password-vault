@@ -1197,13 +1197,18 @@ fn expired_session_is_auth_with_signin_command() {
         h.reset();
         let r = h.run(cmd);
         assert_eq!(r.code, 7, "{cmd:?}: {}", r.all());
+        // #203 §4.3: the shell's exported session expired; Next refreshes that shell.
         assert!(
             r.stderr
-                .starts_with("opv: you are not signed in to 1Password"),
+                .starts_with("opv: your session for 1Password has expired"),
             "{cmd:?}: {}",
             r.stderr
         );
-        assert!(r.stderr.contains("\nNext: opv login"), "{}", r.stderr);
+        assert!(
+            r.stderr.contains("\nNext: opv login --shell"),
+            "{}",
+            r.stderr
+        );
         assert!(!r.stderr.contains("to see why"), "{}", r.stderr);
         assert!(!r.stderr.contains("expired-dummy-session"), "{}", r.stderr);
         assert_clean_output(cmd, &r);
@@ -1214,17 +1219,46 @@ fn expired_session_is_auth_with_signin_command() {
         );
         assert_eq!(h.fly_calls("import"), 0);
     }
-    // fish users get the same command: `opv login` needs no shell syntax (FR-40).
+    // fish users get their shell's form; the Next line itself holds no shell syntax.
     h.set("SHELL", "/usr/bin/fish");
     h.reset();
     let r = h.run(&["status", "prod"]);
     assert_eq!(r.code, 7, "{}", r.all());
-    assert!(r.stderr.contains("\nNext: opv login"), "{}", r.stderr);
+    assert!(
+        r.stderr.contains("\nNext: opv login --shell=fish"),
+        "{}",
+        r.stderr
+    );
     assert!(
         !r.stderr.contains("$(") && !r.stderr.contains("eval"),
         "{}",
         r.stderr
     );
+}
+
+/// FMECA M6 (#203): a shell's exported 1Password session reaches `op`, which needs it,
+/// and never `flyctl`. The canary is a fake session value.
+#[test]
+fn a_shell_session_reaches_op_and_never_flyctl() {
+    const CANARY: &str = "S8CANARYshellsession";
+    let mut h = Harness::new(&good_item());
+    h.set("OP_SESSION_my_team", CANARY)
+        .set("OP_SESSION", CANARY);
+    let r = h.run(&["status", "prod"]);
+    assert_no_marker("status output", &r.all());
+    assert!(!r.all().contains(CANARY), "{}", r.all());
+    let calls = h.calls();
+    let (op, fly): (Vec<&Call>, Vec<&Call>) = calls.iter().partition(|c| c.prog == "op");
+    assert!(!fly.is_empty(), "status called no flyctl");
+    assert!(op.iter().all(|c| c.env.contains(CANARY)));
+    for c in fly {
+        assert!(
+            !c.env.contains(CANARY),
+            "flyctl {:?} got the session",
+            c.argv
+        );
+        assert!(!c.env.contains("OP_SESSION"), "flyctl {:?}", c.argv);
+    }
 }
 
 /// FR-26, 04.07: no account on this machine (Linux) → the account to add at op's prompt,

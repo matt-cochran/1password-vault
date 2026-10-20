@@ -1635,6 +1635,46 @@ fn add_op_session(cmd: &mut Command, program: &str) {
     }
 }
 
+/// Whether `name` is a 1Password CLI session variable: `OP_SESSION` or `OP_SESSION_<id>`.
+/// `OP_SESSION_DELEGATION_ENABLED` is a setting of op's, not a session (FMECA L6).
+pub fn is_session_var(name: &str) -> bool {
+    name == "OP_SESSION"
+        || (name.starts_with("OP_SESSION_") && name != "OP_SESSION_DELEGATION_ENABLED")
+}
+
+/// FMECA M6: a child that is not `op` gets no 1Password session, neither one inherited from
+/// the shell (`opv login --shell`, `eval $(op signin)`) nor one set on `cmd` itself. Applied
+/// after every other variable, so it wins. `op` keeps its session: it needs it.
+pub fn strip_op_session(cmd: &mut Command, program: &str) {
+    strip_session_vars(
+        cmd,
+        program,
+        std::env::vars_os().filter_map(|(k, _)| k.into_string().ok()),
+    );
+}
+
+/// [`strip_op_session`] with the inherited variable names given (tests: no test sets a
+/// process-wide variable).
+pub(crate) fn strip_session_vars(
+    cmd: &mut Command,
+    program: &str,
+    inherited: impl Iterator<Item = String>,
+) {
+    if program == "op" {
+        return;
+    }
+    let set: Vec<String> = cmd
+        .get_envs()
+        .filter(|(_, v)| v.is_some())
+        .filter_map(|(k, _)| k.to_str().map(str::to_string))
+        .collect();
+    let names: std::collections::BTreeSet<String> =
+        inherited.chain(set).filter(|k| is_session_var(k)).collect();
+    for name in names {
+        cmd.env_remove(name);
+    }
+}
+
 /// The process for a captured call: argv as given, the program's [`pinned_env`] then the
 /// call's own env on top of the inherited environment, stdin `/dev/null` unless the call
 /// sends some (NR-11), stdout piped, stderr piped into memory (SR-1, NR-31).
@@ -1643,14 +1683,15 @@ fn command_for(call: &Call) -> Command {
     cmd.args(with_account(call.program, call.args, call.env))
         .envs(pinned_env(call.program).iter().copied());
     add_op_session(&mut cmd, call.program);
-    cmd.envs(call.env.iter().copied())
-        .stdin(if call.stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.envs(call.env.iter().copied());
+    strip_op_session(&mut cmd, call.program);
+    cmd.stdin(if call.stdin.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    })
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
     cmd
 }
 
@@ -1875,6 +1916,46 @@ impl CommandRunner for ProcessRunner {
         env: &[(&str, &str)],
         remove: &[String],
     ) -> io::Result<i32> {
+        self.inherited(program, args, env, remove, ChildSession::Strip)
+    }
+
+    fn run_inherited(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> io::Result<i32> {
+        self.inherited(program, args, env, &[], ChildSession::Strip)
+    }
+}
+
+/// Whether an inherited child that is not `op` may keep a 1Password session (FMECA M6).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChildSession {
+    /// Every `OP_SESSION*` is removed ([`strip_op_session`]).
+    Strip,
+    /// `opv login -- <cmd>`: handing the session to the child is the command's purpose.
+    Keep,
+}
+
+impl ProcessRunner {
+    /// `opv login -- <cmd>` (`setup_runtime::spawn_child`): [`CommandRunner::run_inherited`]
+    /// that passes the session on, by design (session-reuse §6). Nothing else uses it.
+    pub fn run_signed_in_child(
+        &self,
+        program: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> io::Result<i32> {
+        self.inherited(program, args, env, &[], ChildSession::Keep)
+    }
+
+    /// One inherited child: `remove` dropped from the inherited environment, opv's own
+    /// session on an `op` child, `env` on top, then (unless `session` keeps it) every
+    /// `OP_SESSION*` off a child that is not `op`.
+    fn inherited(
+        &self,
+        program: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+        remove: &[String],
+        session: ChildSession,
+    ) -> io::Result<i32> {
         let held = lock(&self.account).clone();
         let env = &self.with_default_account(program, env, &held);
         let mut cmd = Command::new(program);
@@ -1882,25 +1963,12 @@ impl CommandRunner for ProcessRunner {
             cmd.env_remove(key);
         }
         add_op_session(&mut cmd, program);
+        cmd.args(with_account(program, args, env))
+            .envs(env.iter().copied());
+        if session == ChildSession::Strip {
+            strip_op_session(&mut cmd, program);
+        }
         let status = cmd
-            .args(with_account(program, args, env))
-            .envs(env.iter().copied())
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status();
-        observe_inherited(&Call::new(program, args), env, &status);
-        Ok(exit_code(status?))
-    }
-
-    fn run_inherited(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> io::Result<i32> {
-        let held = lock(&self.account).clone();
-        let env = &self.with_default_account(program, env, &held);
-        let mut cmd = Command::new(program);
-        add_op_session(&mut cmd, program);
-        let status = cmd
-            .args(with_account(program, args, env))
-            .envs(env.iter().copied())
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
@@ -2700,6 +2768,114 @@ mod tests {
         let seen = (has("op"), has("flyctl"));
         use_op_session(Vec::new());
         assert_eq!(seen, (true, false));
+    }
+
+    /// FMECA M6: a captured call of another CLI carries no session, even one set on it.
+    #[test]
+    fn a_captured_call_of_another_cli_has_no_session() {
+        let env = [("OP_SESSION_acct", "canary"), ("OP_SESSION", "canary")];
+        let call = Call {
+            env: &env,
+            ..Call::new("flyctl", &[])
+        };
+        let removed: Vec<_> = command_for(&call)
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(removed, ["OP_SESSION", "OP_SESSION_acct"]);
+    }
+
+    /// `op` itself keeps the session it is given.
+    #[test]
+    fn a_captured_op_call_keeps_its_session() {
+        let env = [("OP_SESSION_acct", "canary")];
+        let call = Call {
+            env: &env,
+            ..Call::new("op", &[])
+        };
+        assert!(
+            command_for(&call)
+                .get_envs()
+                .any(|(k, v)| k == "OP_SESSION_acct" && v.is_some())
+        );
+    }
+
+    /// An inherited session (the shell's `opv login --shell`) is removed from another CLI.
+    #[test]
+    fn an_inherited_session_is_removed_from_another_cli() {
+        let mut cmd = Command::new("gh");
+        let inherited = ["OP_SESSION_acct", "PATH", "OP_SESSION_DELEGATION_ENABLED"];
+        strip_session_vars(&mut cmd, "gh", inherited.iter().map(|s| s.to_string()));
+        let removed: Vec<_> = cmd
+            .get_envs()
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(removed, ["OP_SESSION_acct"]);
+    }
+
+    #[test]
+    fn the_delegation_setting_is_not_a_session() {
+        assert!(
+            is_session_var("OP_SESSION")
+                && is_session_var("OP_SESSION_ABC")
+                && !is_session_var("OP_SESSION_DELEGATION_ENABLED")
+                && !is_session_var("OP_SESSIONS")
+                && !is_session_var("OP_ACCOUNT")
+        );
+    }
+
+    /// The names of the variables an inherited child of `ProcessRunner` saw, by running
+    /// `sh -c env` through `spawn` (names only; the canary value is compared, not printed).
+    #[cfg(unix)]
+    fn inherited_env_of(
+        spawn: impl FnOnce(&ProcessRunner, &[&str], &[(&str, &str)]) -> io::Result<i32>,
+    ) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("env");
+        let out_s = out.to_str().unwrap().to_string();
+        let script = "env > \"$0\"";
+        let env = [
+            ("OP_SESSION_canary", "S8CANARYsession"),
+            ("OP_SESSION", "S8CANARYsession"),
+            ("OP_SESSION_DELEGATION_ENABLED", "true"),
+        ];
+        let code = spawn(&ProcessRunner::default(), &["-c", script, &out_s], &env).unwrap();
+        assert_eq!(code, 0);
+        std::fs::read_to_string(out).unwrap()
+    }
+
+    /// FMECA M6: `run_inherited` (flyctl's deploy, `gh`) starts a CLI without a session.
+    #[cfg(unix)]
+    #[test]
+    fn an_inherited_cli_child_gets_no_session() {
+        let seen = inherited_env_of(|r, a, e| r.run_inherited("sh", a, e));
+        assert!(
+            !seen.contains("S8CANARYsession") && !seen.contains("OP_SESSION_canary="),
+            "a session reached the child"
+        );
+        assert!(seen.contains("OP_SESSION_DELEGATION_ENABLED=true"));
+    }
+
+    /// FMECA M6: `run_inherited_clean` (the path `opv run` and fly use) likewise.
+    #[cfg(unix)]
+    #[test]
+    fn a_clean_inherited_cli_child_gets_no_session() {
+        let seen = inherited_env_of(|r, a, e| {
+            r.run_inherited_clean("sh", a, e, &["SOME_DECLARED_KEY".to_string()])
+        });
+        assert!(
+            !seen.contains("S8CANARYsession"),
+            "a session reached the child"
+        );
+    }
+
+    /// `opv login -- <cmd>` hands its session on: that is the command's purpose.
+    #[cfg(unix)]
+    #[test]
+    fn the_login_child_keeps_its_session() {
+        let seen = inherited_env_of(|r, a, e| r.run_signed_in_child("sh", a, e));
+        assert!(seen.contains("OP_SESSION_canary=S8CANARYsession"));
     }
 
     #[test]

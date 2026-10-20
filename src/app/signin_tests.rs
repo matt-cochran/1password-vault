@@ -374,3 +374,158 @@ fn a_target_write_through_the_environment_runner_counts_as_started() {
     let _ = er.write(&crate::runner::Call::new("flyctl", &["secrets", "import"]));
     assert!(er.writes_started());
 }
+
+// #203 §2, §4, FMECA M3: which carrier an `op` call uses, and the sign-in wording.
+
+fn names(v: &[&str]) -> Vec<String> {
+    v.iter().map(|s| s.to_string()).collect()
+}
+
+fn listed_account(uuid: &str, shorthand: &str, user: &str, email: &str) -> Account {
+    Account {
+        account_uuid: uuid.into(),
+        url: "my.1password.com".into(),
+        email: email.into(),
+        user_uuid: user.into(),
+        shorthand: shorthand.into(),
+    }
+}
+
+fn shell(var: &str) -> ReusePath {
+    ReusePath::Shell { var: var.into() }
+}
+
+#[test]
+fn no_session_variable_is_per_command() {
+    assert_eq!(reuse_path(Some("work"), &[], &[]), ReusePath::PerCommand);
+}
+
+/// M3: with no listing, the only variable there is.
+#[test]
+fn the_only_session_variable_without_a_listing_is_the_shells() {
+    assert_eq!(
+        reuse_path(Some("work"), &names(&["OP_SESSION_ABCUSER"]), &[]),
+        shell("OP_SESSION_ABCUSER")
+    );
+}
+
+/// Without a listing, several variables decide only by the account's own name.
+#[test]
+fn several_variables_without_a_listing_pick_the_accounts_name() {
+    let vars = names(&["OP_SESSION_home", "OP_SESSION_work"]);
+    assert_eq!(
+        reuse_path(Some("WORK"), &vars, &[]),
+        shell("OP_SESSION_work")
+    );
+    assert_eq!(reuse_path(Some("acme"), &vars, &[]), ReusePath::PerCommand);
+}
+
+/// S3/S4: two accounts; op names each variable by the user UUID, matched via the listing.
+#[test]
+fn with_two_accounts_the_listing_names_the_owner() {
+    let listed = [
+        listed_account("ACCHOME", "home", "USERHOME", "me@home.example"),
+        listed_account("ACCWORK", "work", "USERWORK", "me@work.example"),
+    ];
+    let vars = names(&["OP_SESSION_USERHOME", "OP_SESSION_USERWORK"]);
+    assert_eq!(
+        reuse_path(Some("me@work.example"), &vars, &listed),
+        shell("OP_SESSION_USERWORK")
+    );
+    assert_eq!(
+        reuse_path(Some("ACCHOME"), &vars, &listed),
+        shell("OP_SESSION_USERHOME")
+    );
+}
+
+/// With a listing, another account's only variable is not this account's.
+#[test]
+fn another_accounts_variable_with_a_listing_is_per_command() {
+    let listed = [
+        listed_account("ACCHOME", "home", "USERHOME", "me@home.example"),
+        listed_account("ACCWORK", "work", "USERWORK", "me@work.example"),
+    ];
+    assert_eq!(
+        reuse_path(Some("work"), &names(&["OP_SESSION_USERHOME"]), &listed),
+        ReusePath::PerCommand
+    );
+}
+
+/// L6: `OP_SESSION_DELEGATION_ENABLED` is a setting, never the shell's session.
+#[test]
+fn the_delegation_setting_is_no_session_variable() {
+    assert_eq!(
+        reuse_path(None, &names(&["OP_SESSION_DELEGATION_ENABLED"]), &[]),
+        ReusePath::PerCommand
+    );
+}
+
+#[test]
+fn the_app_takes_over_only_where_no_shell_variable_decides() {
+    let app = Some(DesktopIntegration::Available);
+    assert_eq!(ReusePath::PerCommand.with_integration(app), ReusePath::App);
+    assert_eq!(
+        shell("OP_SESSION_x").with_integration(app),
+        shell("OP_SESSION_x")
+    );
+    assert_eq!(
+        ReusePath::PerCommand.with_integration(Some(DesktopIntegration::Unavailable {
+            reason: crate::app::desktop_integration::NoIntegration::WslLinuxOp
+        })),
+        ReusePath::PerCommand
+    );
+}
+
+fn wsl_linux_op() -> Host {
+    Host::from_env(
+        &FakeEnv::new("linux")
+            .var("WSL_DISTRO_NAME")
+            .shell("/bin/bash"),
+    )
+}
+
+/// §4.1: under the app, never "for this command only".
+#[test]
+fn an_app_sign_in_says_the_terminal_stays_signed_in() {
+    let n = sign_in_notice(Some(SignInKind::App), &wsl_linux_op());
+    assert!(
+        n.contains("stays signed in while the 1Password app keeps it authorized")
+            && !n.contains("this command only"),
+        "{n}"
+    );
+}
+
+/// WSL with the Linux op: the sign-in is per command, and the shell refresh is named.
+#[test]
+fn a_per_command_sign_in_names_the_shell_refresh() {
+    let n = sign_in_notice(None, &wsl_linux_op());
+    assert!(
+        n.contains("this command only") && n.contains("eval \"$(opv login --shell)\""),
+        "{n}"
+    );
+}
+
+/// Before the sign-in, on a host where the app may serve op, both outcomes are named.
+#[test]
+fn an_undecided_app_host_names_both_outcomes() {
+    let n = sign_in_notice(
+        None,
+        &Host::from_env(&FakeEnv::new("macos").shell("/bin/zsh")),
+    );
+    assert!(
+        n.contains("Approve 1Password's prompt") && n.contains("this command only"),
+        "{n}"
+    );
+}
+
+/// FMECA H5: no `--shell=powershell` in 0.14, so no refresh line is offered for it.
+#[test]
+fn a_powershell_sign_in_offers_no_shell_refresh() {
+    let host = Host::from_env(
+        &FakeEnv::new("linux")
+            .var("WSL_DISTRO_NAME")
+            .shell("/usr/bin/pwsh"),
+    );
+    let n = sign_in_notice(None, &host);
+    assert!(!n.contains("opv login --shell"), "{n}");
+}
