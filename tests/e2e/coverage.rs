@@ -523,7 +523,13 @@ impl Scenario {
             &format!(r#""opv_version":"{}""#, env!("CARGO_PKG_VERSION")),
             r#""opv_version":"<version>""#,
         );
-        s.replace(" (op in WSL does not see the Windows app's accounts)", "")
+        let s = s.replace(" (op in WSL does not see the Windows app's accounts)", "");
+        // Doctor's app-integration row reads the host (WSL, a display; #203).
+        let s = re(r"(?m)^(ok|warn|skip) +op app integration: [^\n]*\n")
+            .replace_all(&s, "<host app-integration check>\n");
+        re(r#"\{"name":"op app integration"[^}]*\}"#)
+            .replace_all(&s, r#"{"name":"op app integration","host":true}"#)
+            .into_owned()
     }
 }
 

@@ -18,13 +18,15 @@ pub enum DesktopIntegration {
     Unknown,
 }
 
-/// Why the app integration cannot work on this host (design §3.2 steps 2-4).
+/// Why the app integration cannot work on this host (design §3.2 steps 2-4, FMECA M2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NoIntegration {
     WslLinuxOp,
     Headless,
     DisabledByEnv,
+    /// Linux with a graphical session but no 1Password app running (FMECA M2).
+    NoApp,
 }
 
 /// What one successful `op signin` produced (V1).
