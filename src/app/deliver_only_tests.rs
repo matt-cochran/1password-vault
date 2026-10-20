@@ -632,6 +632,24 @@ fn a_document_for_another_environment_names_it() {
 }
 
 #[test]
+fn a_document_for_another_environment_is_numbered_from_one() {
+    let text = api_doc(1).replace("\"env\": \"prod\"", "\"env\": \"staging\"");
+    assert_eq!(
+        entry(&admit_web(&text).unwrap_err()),
+        Some(SupplyEntry::Position {
+            document: 1,
+            index: 1
+        })
+    );
+}
+
+#[test]
+fn a_document_for_another_environment_never_shows_entry_0() {
+    let text = api_doc(1).replace("\"env\": \"prod\"", "\"env\": \"staging\"");
+    assert!(!shown(&admit_web(&text).unwrap_err()).contains("entry 0"));
+}
+
+#[test]
 fn a_document_for_an_undeclared_environment_names_none() {
     let text = api_doc(1).replace("\"env\": \"prod\"", "\"env\": \"production\"");
     assert_eq!(
@@ -1574,6 +1592,21 @@ fn a_supply_refusal_names_the_entry_and_the_reason() {
 fn an_undeclared_name_is_shown_by_position() {
     let e = admit_web(&doc("prod", 1, &format!(r#""api/NOPE": "{DB}""#))).unwrap_err();
     assert!(e.text().contains("document 1, entry 1"));
+}
+
+#[test]
+fn an_undeclared_name_points_at_proposing_an_infrastructure_key() {
+    let e = admit_web(&doc("prod", 1, &format!(r#""api/NOPE": "{DB}""#))).unwrap_err();
+    assert_eq!(
+        e.next_text(),
+        Some("opv propose key '<product>/<KEY>' --source infrastructure".to_string())
+    );
+}
+
+#[test]
+fn an_undeclared_name_is_not_left_to_the_person_to_pick() {
+    let e = admit_web(&doc("prod", 1, &format!(r#""api/NOPE": "{DB}""#))).unwrap_err();
+    assert!(!shown(&e).contains("you decide which copy is right"));
 }
 
 #[test]
