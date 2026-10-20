@@ -64,6 +64,12 @@ pub trait Backend {
         }
         .into())
     }
+    /// #203 (`opv login --shell`): the session variables this backend's own sign-in
+    /// produced, moved out of it; empty when no sign-in printed one (the app holds the
+    /// session, or none was needed).
+    fn take_session(&mut self) -> Vec<(String, SecretValue)> {
+        Vec::new()
+    }
 }
 pub trait Interaction {
     fn show(&mut self, message: &str) -> Result<(), Error>;

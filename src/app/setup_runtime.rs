@@ -264,6 +264,9 @@ impl Backend for Runtime {
     fn child(&self, command: &[String]) -> Result<i32, Error> {
         self.spawn_child(command)
     }
+    fn take_session(&mut self) -> Vec<(String, SecretValue)> {
+        std::mem::take(&mut self.session)
+    }
     fn probe(&self, args: &[&str]) -> Result<Output, Error> {
         let env = self.environment();
         let call = Call {
