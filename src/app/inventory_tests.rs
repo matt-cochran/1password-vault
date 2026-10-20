@@ -366,3 +366,149 @@ fn an_empty_cell_in_a_writable_vault_is_the_persons_set_command() {
         Some("opv set api/OPENAI_API_KEY --env dev".to_string())
     );
 }
+
+// --- #174: where each key lives in 1Password, and the compact text markers ---------------
+
+/// The JSON document `opv inventory --json` renders for `op` and `fleet`.
+fn json_document(op: &FakeOp, fleet: &Fleet) -> Value {
+    let mut out = Vec::new();
+    run(fleet, None, None, op, None, true, &mut out).unwrap();
+    serde_json::from_slice(&out).unwrap()
+}
+
+/// The rendered JSON key row of `product`/`key`.
+fn key_row_of(doc: &Value, product: &str, key: &str) -> Value {
+    doc["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["product"] == product && k["key"] == key)
+        .expect("the key is declared")
+        .clone()
+}
+
+/// A key's row names the section its field sits in.
+#[test]
+fn a_key_row_reports_the_section_that_holds_its_field() {
+    let (op, fleet, _) = world();
+    let doc = json_document(&op, &fleet);
+    assert_eq!(
+        key_row_of(&doc, "api", "OPENAI_API_KEY")["location"]["section"],
+        "api"
+    );
+}
+
+/// A key's row names the field label 1Password holds the value under.
+#[test]
+fn a_key_row_reports_the_field_label_holding_its_value() {
+    let (op, fleet, _) = world();
+    let doc = json_document(&op, &fleet);
+    assert_eq!(
+        key_row_of(&doc, "api", "OPENAI_API_KEY")["location"]["field"],
+        "OPENAI_API_KEY"
+    );
+}
+
+/// A key's row links to the boundary item that holds it, never to the field.
+#[test]
+fn a_key_row_reports_the_item_link_for_its_boundary() {
+    let (op, fleet, id) = world();
+    let doc = json_document(&op, &fleet);
+    assert_eq!(
+        key_row_of(&doc, "api", "OPENAI_API_KEY")["location"]["link"],
+        format!("op://{VAULT}/{id}")
+    );
+}
+
+/// The boundary item `marker_fleet`'s three keys share: all present, each under `api`.
+fn marker_item(op: &FakeOp) -> String {
+    op.insert(
+        VAULT,
+        json!({
+            "title": "api",
+            "category": "LOGIN",
+            "fields": [
+                {"id": "f-plain", "section": {"id": "s-api", "label": "api"},
+                 "label": "PLAIN_KEY", "type": "CONCEALED", "value": MARK},
+                {"id": "f-signing", "section": {"id": "s-api", "label": "api"},
+                 "label": "SIGNING_KEY", "type": "CONCEALED", "value": MARK},
+                {"id": "f-tls", "section": {"id": "s-api", "label": "api"},
+                 "label": "TLS_KEY", "type": "CONCEALED", "value": MARK}
+            ]
+        }),
+    )
+}
+
+/// One dev environment with product `api` and three keys in boundary `core`. With `markers`,
+/// `SIGNING_KEY` is `immutable` and `TLS_KEY` is a local file key; without, neither declares
+/// an attribute (the same row labels, so the two matrices align).
+fn marker_fleet(id: &str, markers: bool) -> Fleet {
+    let signing = if markers { "\nimmutable = true" } else { "" };
+    let tls = if markers {
+        "\nfile = \"tls/private-key\""
+    } else {
+        ""
+    };
+    crate::config::parse(&format!(
+        r#"
+[environments.dev]
+boundaries.core = {{ vault_id = "{VAULT}", item_id = "{id}" }}
+
+[products.api]
+boundary = "core"
+
+[products.api.keys.PLAIN_KEY]
+kind = "secret"
+environments = ["dev"]
+
+[products.api.keys.SIGNING_KEY]
+kind = "secret"
+environments = ["dev"]{signing}
+
+[products.api.keys.TLS_KEY]
+kind = "secret"
+environments = ["dev"]{tls}
+"#
+    ))
+    .unwrap()
+}
+
+/// The text matrix for a three-key `marker_fleet`, with or without the attribute markers.
+fn marker_text(markers: bool) -> String {
+    let op = FakeOp::default();
+    let id = marker_item(&op);
+    op.vault_users.borrow_mut().insert(VAULT.into(), json!([]));
+    let fleet = marker_fleet(&id, markers);
+    let mut out = Vec::new();
+    run(&fleet, None, None, &op, None, false, &mut out).unwrap();
+    String::from_utf8(out).unwrap()
+}
+
+/// The row labelled `label` in a text matrix.
+fn row_line(text: &str, label: &str) -> String {
+    text.lines()
+        .find(|line| line.starts_with(label))
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// An immutable key carries a compact suffix in the text matrix.
+#[test]
+fn an_immutable_key_is_marked_in_the_text_matrix() {
+    assert!(row_line(&marker_text(true), "api/SIGNING_KEY").starts_with("api/SIGNING_KEY!"));
+}
+
+/// A file key carries a compact suffix in the text matrix.
+#[test]
+fn a_file_key_is_marked_in_the_text_matrix() {
+    assert!(row_line(&marker_text(true), "api/TLS_KEY").starts_with("api/TLS_KEY@"));
+}
+
+/// A key with neither attribute renders exactly as it does when no key has a marker.
+#[test]
+fn a_key_with_neither_marker_renders_as_without_markers() {
+    assert_eq!(
+        row_line(&marker_text(true), "api/PLAIN_KEY"),
+        row_line(&marker_text(false), "api/PLAIN_KEY")
+    );
+}
