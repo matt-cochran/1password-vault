@@ -429,3 +429,43 @@ kind = "secret"
             .any(|c| c.key == "OTEL" && c.env == "dev")
     );
 }
+
+/// #179: `fleet()`'s `DATABASE_URL` is `retiring`; `dev` has no field of it.
+#[test]
+fn a_retiring_key_without_a_field_has_no_cell_to_fill() {
+    let cells = CellInputs {
+        states: BTreeMap::from([(at("api", "DATABASE_URL", "dev"), ValueState::Absent)]),
+        capabilities: BTreeMap::from([("vdev".to_string(), Capability::Write)]),
+        ..CellInputs::default()
+    };
+    let inventory = build(&fleet(), &cells, None);
+    assert!(
+        !inventory
+            .cells
+            .iter()
+            .any(|c| c.key == "DATABASE_URL" && c.env == "dev")
+    );
+}
+
+/// #179: a `retired` key's fields are archived; nothing is left to hold or fill.
+#[test]
+fn a_retired_key_has_no_cell() {
+    let fleet = config::parse(
+        r#"[environments.dev]
+boundaries.core = { vault_id = "vdev", item_id = "idev" }
+
+[products.api]
+boundary = "core"
+
+[products.api.keys.KEEP]
+kind = "secret"
+
+[products.api.keys.OLD]
+kind = "secret"
+lifecycle = "retired"
+"#,
+    )
+    .expect("the fleet loads");
+    let inventory = build(&fleet, &CellInputs::default(), None);
+    assert!(!inventory.cells.iter().any(|c| c.key == "OLD"));
+}

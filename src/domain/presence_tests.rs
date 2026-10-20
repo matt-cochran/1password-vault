@@ -165,3 +165,20 @@ fn the_environments_a_key_is_wanted_in_leave_out_its_except() {
         ["dev", "prod"]
     );
 }
+
+/// #179: an environment that never had a `retiring` key's field is not asked for it.
+#[test]
+fn a_retiring_key_without_a_field_is_not_asked_for() {
+    let text = "[environments.qa]\n\
+                [products.api.keys.OLD]\n\
+                kind = \"secret\"\n\
+                lifecycle = \"retiring\"\n";
+    let fleet = parse(&crate::config::testing::bounded(text)).expect("the config loads");
+    let plan = plan::build(&fleet, "qa", Vec::new(), &[], &BTreeSet::new(), &|_| None);
+    assert!(
+        plan.rows
+            .iter()
+            .filter(|r| r.key == "OLD")
+            .all(|r| r.state == crate::domain::KeyState::Skipped)
+    );
+}

@@ -6,7 +6,7 @@
 //! touched, whatever their kind or value.
 
 use crate::adapters::{onepassword, onepassword_tidy};
-use crate::domain::{Fleet, Kind, convention};
+use crate::domain::{Fleet, Kind, Lifecycle, convention};
 use crate::error::Error;
 use crate::runner::CommandRunner;
 
@@ -79,6 +79,9 @@ pub(crate) fn missing_fields(
                 // FR-55: a personal key's field lives in each person's own item.
                 .filter(|(_, spec)| !spec.personal)
                 .filter(|(_, spec)| spec.is_desired_in(env_name))
+                // #179: a `retiring` key is on its way out: it keeps the field it has, and
+                // never gets a new one where it has none.
+                .filter(|(_, spec)| spec.lifecycle != Lifecycle::Retiring)
                 .map(move |(key, spec)| (product.clone(), key.clone(), spec.kind))
         })
         .filter(|(product, key, _)| !found.contains_key(&(product.clone(), key.clone())))
@@ -87,7 +90,7 @@ pub(crate) fn missing_fields(
 }
 
 /// Every key of `fleet`'s products that gets a field of its own in `env_name`'s boundary
-/// items: no shared (`from`) and no personal key (FR-45, FR-55).
+/// items: no shared (`from`), no personal (FR-45, FR-55) and no `retiring` key (#179).
 pub(crate) fn declared_fields(fleet: &Fleet, env_name: &str) -> Vec<(String, String, Kind)> {
     fleet
         .products
@@ -97,6 +100,8 @@ pub(crate) fn declared_fields(fleet: &Fleet, env_name: &str) -> Vec<(String, Str
                 .iter()
                 .filter(|(_, spec)| spec.from.is_none() && !spec.personal)
                 .filter(|(_, spec)| spec.is_desired_in(env_name))
+                // #179: a new boundary item has no field yet, so a `retiring` key gets none.
+                .filter(|(_, spec)| spec.lifecycle != Lifecycle::Retiring)
                 .map(move |(key, spec)| (product.clone(), key.clone(), spec.kind))
         })
         .collect()
@@ -117,6 +122,21 @@ mod tests {
         assert!(
             e.to_string().contains(&format!("boundaries.{name} ")),
             "{e}"
+        );
+    }
+
+    /// #179: a new boundary item gets no field for a `retiring` key.
+    #[test]
+    fn a_retiring_key_gets_no_new_field() {
+        let f = crate::config::parse(&crate::config::testing::bounded(
+            "[environments.qa]\n\
+             [products.api.keys.KEEP]\nkind = \"secret\"\n\
+             [products.api.keys.OLD]\nkind = \"secret\"\nlifecycle = \"retiring\"\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            declared_fields(&f, "qa"),
+            vec![("api".to_string(), "KEEP".to_string(), Kind::Secret)]
         );
     }
 }
