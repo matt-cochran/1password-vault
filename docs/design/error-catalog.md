@@ -219,6 +219,16 @@ Under FR-60 (one way only) nothing keeps the old names. The `--json` `schema_ver
 - `ModeUnmapped{env, mode, allowed}`, checked at load;
 - `Collision{rendered, other}`.
 
+### 4.13 Ready findings (not causes)
+
+`ready`'s findings are codes, not `Cause` variants: each carries `code`, `scope`, `blocking`, `actor`, `effect`, one `prerequisite` and one `verify` (design `accounts-and-readiness.md` §4). A finding code that is not a `Cause` is documented here, so the catalog stays the one place every code is named.
+
+| Code | Fields | Blocking | Actor | Effect | Prerequisite | Verify |
+|---|---|---|---|---|---|---|
+| `environment_gap` (#179) | environment; product; key | never | owner | `writes_config` | `opv propose key <product/KEY> --env <env>` | `opv ready --json` |
+
+`environment_gap` names a declared environment an explicit `environments` list leaves out with no `except` (presence, `src/domain/presence.rs`). The configuration still loads and readiness never fails on it; several gaps are grouped into `ready`'s one counts line, while `--json` lists one finding per (product, key, environment).
+
 ## 5. Diagnosis: one strategy per external system
 
 ```rust

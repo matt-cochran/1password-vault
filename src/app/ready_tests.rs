@@ -1894,3 +1894,115 @@ fn gate_fails_a_placeholder_config_value() {
         vec![("app".into(), "LOG_LEVEL".into(), "placeholder")]
     );
 }
+
+// #179 B1: environment gaps -----------------------------------------------------------
+
+/// The vault the gap scenarios read their boundaries from.
+const GAP_VAULT: &str = "vdev0000000000000000000001";
+
+/// A readable boundary item holding one concealed `app/DATABASE_URL`.
+fn gap_secret_item() -> serde_json::Value {
+    gated_fields("DATABASE_URL", "S7MARKER-gap")
+}
+
+/// The fleet and fake `op` for one `app/DATABASE_URL` whose explicit list names `prod` only,
+/// leaving the declared run-only `dev` out with no `except`.
+fn gap_fleet() -> (
+    crate::domain::model::Fleet,
+    crate::adapters::fake_op::FakeOp,
+) {
+    use crate::adapters::fake_op::FakeOp;
+    let op = FakeOp::default();
+    let prod_id = op.insert(GAP_VAULT, gap_secret_item());
+    let fleet = crate::config::parse(&format!(
+        "[environments.dev]\n\
+         [environments.prod]\n\
+         boundaries.app = {{ vault_id = \"{GAP_VAULT}\", item_id = \"{prod_id}\" }}\n\
+         [products.app.keys.DATABASE_URL]\nkind = \"secret\"\nenvironments = [\"prod\"]\n"
+    ))
+    .unwrap();
+    (fleet, op)
+}
+
+/// `opv ready --json` for one `app/DATABASE_URL` whose explicit list names `prod` only,
+/// leaving the declared run-only `dev` out with no `except`.
+fn ready_with_one_environment_gap() -> serde_json::Value {
+    let (fleet, op) = gap_fleet();
+    let mut out = Vec::new();
+    run(&fleet, None, None, &op, true, None, false, &mut out).unwrap();
+    serde_json::from_slice(&out).unwrap()
+}
+
+/// The first `environment_gap` finding of a ready document.
+fn environment_gap(doc: &serde_json::Value) -> &serde_json::Value {
+    doc["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "environment_gap")
+        .expect("an environment_gap finding")
+}
+
+/// The three `(product, key, environment)` gaps of one key listing `prod` only, with `dev`,
+/// `staging` and `qa` declared and left out.
+fn three_environment_gaps() -> Vec<(String, String, String)> {
+    ["dev", "staging", "qa"]
+        .into_iter()
+        .map(|env| ("app".into(), "DATABASE_URL".into(), env.into()))
+        .collect()
+}
+
+#[test]
+fn ready_json_lists_an_environment_gap_for_each_left_out_environment() {
+    let doc = ready_with_one_environment_gap();
+    let found: Vec<(&str, &str, &str)> = doc["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["code"] == "environment_gap")
+        .map(|f| {
+            (
+                f["scope"]["environment"].as_str().unwrap(),
+                f["scope"]["product"].as_str().unwrap(),
+                f["scope"]["key"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(found, vec![("dev", "app", "DATABASE_URL")]);
+}
+
+#[test]
+fn an_environment_gap_finding_does_not_block_readiness() {
+    let doc = ready_with_one_environment_gap();
+    assert_eq!(environment_gap(&doc)["blocking"], false);
+}
+
+#[test]
+fn an_environment_gap_next_proposes_the_key_for_that_environment() {
+    let doc = ready_with_one_environment_gap();
+    assert_eq!(
+        environment_gap(&doc)["prerequisite"],
+        "opv propose key app/DATABASE_URL --env dev"
+    );
+}
+
+#[test]
+fn ready_exit_code_is_unchanged_by_environment_gaps() {
+    let (fleet, op) = gap_fleet();
+    let res = run(&fleet, None, None, &op, true, None, false, &mut Vec::new());
+    assert!(res.is_ok());
+}
+
+#[test]
+fn ready_text_groups_environment_gaps_into_one_count_line() {
+    let report = account_report();
+    let r = receipt_with(
+        &inputs(&report, vec![env("prod", None, Vec::new())]),
+        "0.6.0",
+        "",
+        BTreeMap::new(),
+        None,
+        &three_environment_gaps(),
+    );
+    assert!(text(&r).starts_with("ready: 0 blocking · 3 findings · receipt rcpt-"));
+}
