@@ -88,6 +88,12 @@ fn inv_cmd(inv: &Invocation) -> Cmd {
     }
 }
 
+/// Whether `inv` is a supplying sync (`opv sync <env> --supply-stdin`, #206): its values
+/// come from the deploy job that runs it, never from a person or 1Password.
+fn supplying(inv: &Invocation) -> bool {
+    inv.command == ["sync"] && inv.args.iter().any(|a| a == "--supply-stdin")
+}
+
 fn carries_person_only_flag(c: &Cmd) -> bool {
     c.args.iter().any(|a| {
         PERSON_ONLY_FLAGS
@@ -4463,6 +4469,15 @@ impl Cause {
                 product: _,
                 state,
             } => match state {
+                // #206 §5.4 (S1): a supplying run that left a supplied name without
+                // evidence. Only the deploy job holds the value, so it is the one to re-run;
+                // Next stays the read.
+                Unverified::NotRecorded if supplying(inv) => plan(
+                    inspect(
+                        "re-run the deploy job; the target may hold the value but opv cannot vouch for it",
+                    ),
+                    Next::Check(cmd(&["plan"], &[env.as_str(), "--target", target.as_str()])),
+                ),
                 // 01.06: a delivery never made is a scoped plan away.
                 Unverified::NotRecorded => plan(
                     None,
