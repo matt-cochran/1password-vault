@@ -401,8 +401,7 @@ fn the_delivery_preview_without_a_role_is_refused() {
 fn the_delivery_preview_without_a_role_names_the_roles() {
     let w = World::role();
     assert_eq!(
-        w.tool(json!({"section": "delivery_preview", "env": "dev"}))["error"]["subject"]
-            ["candidates"],
+        w.tool(json!({"section": "delivery_preview", "env": "dev"}))["error"]["subject"]["candidates"],
         json!(["migrate", "serve"])
     );
 }
@@ -577,10 +576,11 @@ canary! {
 #[test]
 fn the_role_scoped_delivery_preview_answers_no_value() {
     let w = World::role();
-    assert!(!w
-        .tool(json!({"section": "delivery_preview", "env": "dev", "role": "serve"}))
-        .to_string()
-        .contains(MARKER));
+    assert!(
+        !w.tool(json!({"section": "delivery_preview", "env": "dev", "role": "serve"}))
+            .to_string()
+            .contains(MARKER)
+    );
 }
 
 // The surface ---------------------------------------------------------------------------------

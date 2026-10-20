@@ -540,8 +540,20 @@ fn edit_works_on_a_file_too() {
 
 #[test]
 fn diff_marks_removed_and_added_lines() {
+    assert_eq!(diff("a\nb\nc\n", "a\nx\nc\n"), " a\n-b\n+x\n c\n");
+}
+
+#[test]
+fn a_proposal_diff_keeps_every_line_of_the_file() {
+    let a = numbered_file(40);
+    let b = a.replace("line 20\n", "line 20 changed\n");
+    assert_eq!(diff(&a, &b).lines().count(), 41);
+}
+
+#[test]
+fn diff_hunks_marks_removed_and_added_lines_under_a_header() {
     assert_eq!(
-        diff("a\nb\nc\n", "a\nx\nc\n"),
+        diff_hunks("a\nb\nc\n", "a\nx\nc\n"),
         "@@ -1,3 +1,3 @@\n a\n-b\n+x\n c\n"
     );
 }
@@ -552,36 +564,36 @@ fn numbered_file(n: usize) -> String {
 }
 
 #[test]
-fn diff_of_identical_text_is_empty() {
-    assert_eq!(diff(&numbered_file(40), &numbered_file(40)), "");
+fn diff_hunks_of_identical_text_is_empty() {
+    assert_eq!(diff_hunks(&numbered_file(40), &numbered_file(40)), "");
 }
 
 #[test]
-fn diff_prints_one_hunk_of_three_context_lines_each_side() {
+fn diff_hunks_prints_one_hunk_of_three_context_lines_each_side() {
     let a = numbered_file(40);
     let b = a.replace("line 20\n", "line 20 changed\n");
     assert_eq!(
-        diff(&a, &b),
+        diff_hunks(&a, &b),
         "@@ -17,7 +17,7 @@\n line 17\n line 18\n line 19\n-line 20\n+line 20 changed\n line 21\n line 22\n line 23\n"
     );
 }
 
 #[test]
-fn diff_prints_two_hunks_when_changes_are_more_than_six_lines_apart() {
+fn diff_hunks_prints_two_hunks_when_changes_are_more_than_six_lines_apart() {
     let a = numbered_file(40);
     let b = a
         .replace("line 5\n", "line 5 changed\n")
         .replace("line 20\n", "line 20 changed\n");
-    assert_eq!(diff(&a, &b).matches("@@ ").count(), 2);
+    assert_eq!(diff_hunks(&a, &b).matches("@@ ").count(), 2);
 }
 
 #[test]
-fn diff_merges_changes_six_lines_apart_into_one_hunk() {
+fn diff_hunks_merges_changes_six_lines_apart_into_one_hunk() {
     let a = numbered_file(40);
     let b = a
         .replace("line 5\n", "line 5 changed\n")
         .replace("line 12\n", "line 12 changed\n");
-    assert_eq!(diff(&a, &b).matches("@@ ").count(), 1);
+    assert_eq!(diff_hunks(&a, &b).matches("@@ ").count(), 1);
 }
 
 // --- projects and status --all ---

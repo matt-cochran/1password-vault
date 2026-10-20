@@ -322,7 +322,8 @@ pub fn check(
         out,
         format!("--- {}\n+++ {}", found.store().describe(), file.display()),
     )?;
-    out.write_all(diff(&a, &b).as_bytes()).map_err(write_err)?;
+    out.write_all(diff_hunks(&a, &b).as_bytes())
+        .map_err(write_err)?;
     // 03.07: either copy may be the intended one (in a PR the committed copy often is); the
     // person picks the direction. Not "keys are missing".
     let manifest = match found.cause_source() {
@@ -381,7 +382,8 @@ pub fn check_file_project(
         regenerated.replace("\r\n", "\n"),
     );
     line(out, format!("--- {label}\n+++ {}", file.display()))?;
-    out.write_all(diff(&a, &b).as_bytes()).map_err(write_err)?;
+    out.write_all(diff_hunks(&a, &b).as_bytes())
+        .map_err(write_err)?;
     Err(Cause::RegeneratedFileDiffers {
         file: file.to_path_buf(),
         committed: project.to_path_buf(),
@@ -421,13 +423,12 @@ fn committed_at_head(path: &Path, r: &dyn CommandRunner) -> Result<String, Error
     }
 }
 
-/// The number of unchanged lines kept on each side of a change in [`diff`].
+/// The number of unchanged lines kept on each side of a change in [`diff_hunks`].
 const DIFF_CONTEXT: usize = 3;
 
-/// A line diff of `a` to `b` as unified-style hunks: only changed lines plus
-/// [`DIFF_CONTEXT`] lines of context around each change, each hunk under an
-/// `@@ -l,n +l,n @@` header (longest common subsequence; configurations are small).
-pub fn diff(a: &str, b: &str) -> String {
+/// The line operations from `a` to `b`: 0 keeps a line, 1 removes one from `a`, 2 adds one
+/// from `b` (longest common subsequence; configurations are small).
+fn line_ops<'t>(a: &'t str, b: &'t str) -> Vec<(u8, &'t str)> {
     let x: Vec<&str> = a.lines().collect();
     let y: Vec<&str> = b.lines().collect();
     let (n, m) = (x.len(), y.len());
@@ -441,7 +442,6 @@ pub fn diff(a: &str, b: &str) -> String {
             };
         }
     }
-    // 0 keeps a line, 1 removes one from `a`, 2 adds one from `b`.
     let mut ops: Vec<(u8, &str)> = Vec::new();
     let (mut i, mut j) = (0, 0);
     while i < n || j < m {
@@ -457,6 +457,32 @@ pub fn diff(a: &str, b: &str) -> String {
             j += 1;
         }
     }
+    ops
+}
+
+/// A whole-file line diff of `a` to `b`: every line, marked `-` removed, `+` added or ` `
+/// kept. A proposal's contract diff is this form, because an assistant writes the proposed
+/// file from it (docs/mcp.md, design §6.1 step 4): it must never be shortened to hunks.
+pub fn diff(a: &str, b: &str) -> String {
+    let mut s = String::new();
+    for (kind, line) in line_ops(a, b) {
+        let mark = match kind {
+            1 => '-',
+            2 => '+',
+            _ => ' ',
+        };
+        s.push(mark);
+        s.push_str(line);
+        s.push('\n');
+    }
+    s
+}
+
+/// A line diff of `a` to `b` as unified-style hunks for a person to read (`config check`,
+/// `config edit`): only changed lines plus [`DIFF_CONTEXT`] lines of context around each
+/// change, each hunk under an `@@ -l,n +l,n @@` header.
+pub fn diff_hunks(a: &str, b: &str) -> String {
+    let ops = line_ops(a, b);
     // How many lines each side has before an op, so a hunk's `@@` numbers read off its ends.
     let mut a_before = vec![0usize; ops.len() + 1];
     let mut b_before = vec![0usize; ops.len() + 1];
@@ -547,7 +573,7 @@ pub fn edit(
             }
             return Err(e);
         }
-        out.write_all(diff(&base.text, &edited).as_bytes())
+        out.write_all(diff_hunks(&base.text, &edited).as_bytes())
             .map_err(write_err)?;
         if !ui.confirm(&format!("Save to {}?", s.describe()))? {
             return line(out, "not saved");
