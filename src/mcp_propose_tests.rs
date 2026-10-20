@@ -273,11 +273,13 @@ fn opv_propose_structure_equals_the_librarys_proposal() {
 #[test]
 fn opv_propose_setup_from_names_equals_the_librarys_proposal() {
     let w = World::new();
-    let want = crate::app::propose::setup::from_names(
+    // #176: into the project's existing contract, as `opv propose setup --names-from` does.
+    let want = crate::app::propose::setup::from_names_in(
         &w.project().join("dev.env"),
         crate::app::propose::setup::NAMES_ENV,
         &[],
         &[],
+        Some(&w.contract()),
     )
     .unwrap();
     assert_eq!(
