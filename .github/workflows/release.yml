@@ -95,7 +95,7 @@ jobs:
     - name: Install ziglang
       if: contains(matrix.target, 'linux-musl')
       run: python3 -m pip install --user --break-system-packages ziglang==0.16.0
-    - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe
+    - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283
       if: contains(matrix.target, 'linux-musl')
       with:
         tool: cargo-zigbuild@0.23.4
