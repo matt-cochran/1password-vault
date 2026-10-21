@@ -4476,7 +4476,9 @@ fn refused_secret_file(path: &str) -> Cause {
 #[test]
 fn secret_file_refusal_do_names_the_path() {
     let c = refused_secret_file("/home/me/.secrets");
-    let d = c.do_text(&set_from_file_inv("/home/me/.secrets")).unwrap_or_default();
+    let d = c
+        .do_text(&set_from_file_inv("/home/me/.secrets"))
+        .unwrap_or_default();
     assert!(d.contains("/home/me/.secrets"), "{d}");
 }
 
