@@ -192,7 +192,7 @@ impl Scenario {
         self.root.path().join(sub)
     }
 
-    fn faults(self, faults: &str) -> Self {
+    pub(crate) fn faults(self, faults: &str) -> Self {
         std::fs::write(self.path("world/faults.toml"), faults).expect("faults");
         self
     }
@@ -214,7 +214,7 @@ impl Scenario {
 
     /// The project's `secrets.toml`, edited as one text with its ids filled in; the ids of
     /// the edited text go back to `secrets.bindings.toml` (D-G).
-    fn config(self, edit: impl FnOnce(String) -> String) -> Self {
+    pub(crate) fn config(self, edit: impl FnOnce(String) -> String) -> Self {
         let p = self.path("project/secrets.toml");
         let text = opv::config::read_merged(&p).expect("config");
         opv::config::bindings::write_split(&p, &edit(text)).expect("config");
