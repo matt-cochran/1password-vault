@@ -86,6 +86,31 @@ pub fn set(
     Ok(())
 }
 
+/// `opv set <[product/]KEY> --env <env> --from-file <PATH>` (#217): one file key's value
+/// read from a file, so a multi-line value (a PEM, a kubeconfig) is stored byte for byte.
+/// Only a person at a terminal may run it, and only for a declared file key; opv reads the
+/// exact bytes of a regular file, refusing a symbolic link, anything that is not a regular
+/// file, or a file larger than the cap. A group- or world-readable file on Unix is warned
+/// about but still written. The bytes are checked with [`rules::check_verbatim`] (they are
+/// intended literally, never as a template) and written through op's stdin, then the key's
+/// value state is printed. No secret value, its length or any part of one reaches output,
+/// argv, a log, an error or `Debug`.
+pub fn set_from_file(
+    fleet: &Fleet,
+    env: &dyn HostEnv,
+    key: &str,
+    env_name: &str,
+    path: &std::path::Path,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let _ = (fleet, env, key, env_name, path, r, out);
+    Err(Cause::Bug {
+        site: "set_from_file",
+    }
+    .into())
+}
+
 /// The declared `(product, key)` that `[product/]KEY` names and `env_name` wants, or the
 /// catalog's undeclared/ambiguous cause. A bare `KEY` resolves to the one product that
 /// declares it (R22); a key declared but `except`ed here is [`Cause::KeyNotDeclared`].

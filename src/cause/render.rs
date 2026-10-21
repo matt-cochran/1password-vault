@@ -967,6 +967,7 @@ fn input_kind(k: InputKind) -> &'static str {
         InputKind::NamesFile => "the names file",
         InputKind::Supply => "the supply",
         InputKind::Workflow => "the workflow file",
+        InputKind::SecretFile => "the secret file",
     }
 }
 
@@ -1048,6 +1049,26 @@ fn rule_words(field: &str, rule: &FieldRule) -> (String, String) {
         ),
         FieldRule::Check { check } => (check.problem(field), check.fix(field)),
         FieldRule::Supply { supply } => supply_rule_words(field, supply),
+        FieldRule::SecretFile { problem } => secret_file_rule_words(problem),
+    }
+}
+
+/// What is wrong with the secret file `opv set --from-file` reads, and its fix. These are
+/// properties of the path: no byte, length or part of the file's value is described.
+fn secret_file_rule_words(problem: &SecretFileRule) -> (String, String) {
+    match problem {
+        SecretFileRule::NotRegular => (
+            "it is not a regular file".to_string(),
+            "pass --from-file a regular file".to_string(),
+        ),
+        SecretFileRule::Symlink => (
+            "it is a symbolic link".to_string(),
+            "pass --from-file the file itself, not a symbolic link".to_string(),
+        ),
+        SecretFileRule::TooLarge { limit } => (
+            format!("it is larger than {limit} bytes"),
+            format!("pass --from-file a file of at most {limit} bytes"),
+        ),
     }
 }
 
@@ -4360,6 +4381,25 @@ impl Cause {
                     Some((
                         Action::EditInput { path: path.clone() },
                         format!("edit {}{}: {fix}", path.display(), at_words(at)),
+                    )),
+                    Next::Rerun,
+                )
+            }
+            InputInvalid {
+                path,
+                kind: InputKind::SecretFile,
+                field,
+                rule,
+                ..
+            } => {
+                // A secret file holds values, so only a person replaces it: opv never edits
+                // it, reads a symbolic link or reads past the cap. The Do names the path;
+                // not a byte, nor the length, of the file is described.
+                let (_, fix) = rule_words(field, rule);
+                plan(
+                    Some((
+                        Action::EditInput { path: path.clone() },
+                        format!("replace {}: {fix}", path.display()),
                     )),
                     Next::Rerun,
                 )

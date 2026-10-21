@@ -4445,6 +4445,49 @@ fn l5_invalid_setup_recipe_needs_no_person() {
     assert!(!c.human_required(&inv()));
 }
 
+/// The invocation a person typed for `opv set --from-file <path>`.
+fn set_from_file_inv(path: &str) -> Invocation {
+    Invocation {
+        command: vec!["set".into()],
+        args: vec![
+            "prod-api/OPENAI_API_KEY".into(),
+            "--env".into(),
+            "prod".into(),
+            "--from-file".into(),
+            path.into(),
+        ],
+        ..inv()
+    }
+}
+
+fn refused_secret_file(path: &str) -> Cause {
+    Cause::InputInvalid {
+        path: PathBuf::from(path),
+        kind: InputKind::SecretFile,
+        at: None,
+        field: String::new(),
+        rule: FieldRule::SecretFile {
+            problem: SecretFileRule::Symlink,
+        },
+    }
+}
+
+/// A refused secret file names the path in its Do, never a byte of the file.
+#[test]
+fn secret_file_refusal_do_names_the_path() {
+    let c = refused_secret_file("/home/me/.secrets");
+    let d = c.do_text(&set_from_file_inv("/home/me/.secrets")).unwrap_or_default();
+    assert!(d.contains("/home/me/.secrets"), "{d}");
+}
+
+/// A refused secret file names the path in its Next, never a byte of the file.
+#[test]
+fn secret_file_refusal_next_names_the_path() {
+    let c = refused_secret_file("/home/me/.secrets");
+    let n = next_in(&c, &set_from_file_inv("/home/me/.secrets"));
+    assert!(n.contains("/home/me/.secrets"), "{n}");
+}
+
 // ---- L10: an overview fills the environment a cause never knew -----------------------
 
 fn unrecognized_without_env() -> Cause {
