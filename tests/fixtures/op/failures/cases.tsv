@@ -14,3 +14,5 @@ case	exit	command
 13-b-signin-with-a-session-live	interactive	op signin --account <ACCOUNT_1> (with OP_SESSION_<ACCOUNT_2> set)
 14-vault-in-other-account	1	op vault get <VAULT_B> --account <ACCOUNT_2> --format json 
 15-vault-user-list-in-other-account	1	op vault user list <VAULT_B> --account <ACCOUNT_2> --format json 
+16-item-field-missing	1	op read 'op://<VAULT>/<ITEM>/source versions' (service account; the delivery item has no such field before the first sync)
+17-service-account-deleted	1	op read <ref> with OP_SERVICE_ACCOUNT_TOKEN of a service account deleted in 1Password

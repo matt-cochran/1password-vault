@@ -1,0 +1,21 @@
+2026-10-21T02:31:26Z app[870650a032d368] iad [info]2026-10-21T02:31:26.997157373 [01M5E4R5JX7R3WDRDQ7D00QDE1:main] Running Firecracker v1.14.4
+2026-10-21T02:31:26Z app[870650a032d368] iad [info]2026-10-21T02:31:26.997326124 [01M5E4R5JX7R3WDRDQ7D00QDE1:main] Listening on API socket ("/fc.sock").
+2026-10-21T02:31:27Z app[870650a032d368] iad [info] INFO Starting init (commit: 6172d83)...
+2026-10-21T02:31:27Z app[870650a032d368] iad [info] INFO Writing file: /dev/shm/opvcanary/a5-file
+2026-10-21T02:31:27Z app[870650a032d368] iad [info] INFO Writing file: /run/opvcanary/a5-file
+2026-10-21T02:31:27Z app[870650a032d368] iad [info] INFO Writing file: /opt/opvcanary/a5-file
+2026-10-21T02:31:27Z app[870650a032d368] iad [info] INFO chowning file, /dev/shm/opvcanary/a5-file, to 0:0
+2026-10-21T02:31:27Z app[870650a032d368] iad [info]ERROR Error: an unhandled error occurred: ENOENT: No such file or directory
+2026-10-21T02:31:27Z app[870650a032d368] iad [info][    0.849703] reboot: Restarting system
+2026-10-21T02:31:28Z app[870650a032d368] iad [warn]Virtual machine exited abruptly
+2026-10-21T02:32:03Z app[870650a032d368] iad [info]2026-10-21T02:32:03.263824258 [01M5E4R5JX7R3WDRDQ7D00QDE1:main] Running Firecracker v1.14.4
+2026-10-21T02:32:03Z app[870650a032d368] iad [info]2026-10-21T02:32:03.264064680 [01M5E4R5JX7R3WDRDQ7D00QDE1:main] Listening on API socket ("/fc.sock").
+2026-10-21T02:32:04Z app[870650a032d368] iad [info] INFO Starting init (commit: 6172d83)...
+2026-10-21T02:32:04Z app[870650a032d368] iad [info] INFO Writing file: /dev/shm/opvcanary/a5-file
+2026-10-21T02:32:04Z app[870650a032d368] iad [info] INFO Writing file: /run/opvcanary/a5-file
+2026-10-21T02:32:04Z app[870650a032d368] iad [info] INFO Writing file: /opt/opvcanary/a5-file
+2026-10-21T02:32:04Z app[870650a032d368] iad [info] INFO chowning file, /dev/shm/opvcanary/a5-file, to 0:0
+2026-10-21T02:32:04Z app[870650a032d368] iad [info]ERROR Error: an unhandled error occurred: ENOENT: No such file or directory
+2026-10-21T02:32:04Z app[870650a032d368] iad [info][    0.832837] reboot: Restarting system
+2026-10-21T02:32:04Z app[870650a032d368] iad [warn]Virtual machine exited abruptly
+2026-10-21T02:32:04Z runner[870650a032d368] iad [info]machine has reached its max restart count of 10

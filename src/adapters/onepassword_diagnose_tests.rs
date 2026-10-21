@@ -156,6 +156,16 @@ fn case_15() -> Cause {
     )
 }
 
+fn case_17() -> Cause {
+    diagnosed(
+        "17-service-account-deleted",
+        "whoami",
+        service_account_token(),
+        &DiagnoseContext::default(),
+        &Facts::default(),
+    )
+}
+
 // --- one test per recorded case --------------------------------------------------------------
 
 #[test]
@@ -294,6 +304,34 @@ fn recording_14_vault_of_other_account_is_ids_not_in_account() {
 #[test]
 fn recording_15_vault_user_list_of_other_account_is_ids_not_in_account() {
     assert_eq!(case_15().code(), "ids_not_in_account");
+}
+
+#[test]
+fn recording_17_deleted_service_account_is_credential_rejected() {
+    assert_eq!(case_17().code(), "credential_rejected");
+}
+
+#[test]
+fn recording_17_deleted_service_account_is_an_authentication_cause() {
+    assert_eq!(case_17().exit_code(), 7);
+}
+
+#[test]
+fn recording_17_deleted_service_account_names_the_service_account_token() {
+    assert!(matches!(
+        case_17(),
+        Cause::CredentialRejected {
+            credential: CredentialRef::ServiceAccountToken { var },
+            ..
+        } if var.as_str() == "OP_SERVICE_ACCOUNT_TOKEN"
+    ));
+}
+
+#[test]
+fn recording_17_deleted_service_account_do_replaces_the_token() {
+    let inv = crate::cause::Invocation::from_cli(&["opv".to_string(), "whoami".into()]);
+    let do_text = case_17().do_text(&inv).unwrap_or_default();
+    assert!(do_text.contains("replace the service account token"));
 }
 
 // --- one test per rule -----------------------------------------------------------------------
