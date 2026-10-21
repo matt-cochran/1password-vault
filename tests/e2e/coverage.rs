@@ -85,18 +85,6 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "SecretNotStored",
         "no recording of `op service-account create`",
     ),
-    // Drift is a pinned binding whose version differs from the store's current one. The only
-    // pinned target opv-sim models is plain Kubernetes, whose store takes the current version
-    // from the Deployment's own binding (src/adapters/kubernetes/store.rs `read`), so the two
-    // never differ. Where they can (Azure Key Vault through External Secrets,
-    // src/adapters/azure/keyvault.rs, src/adapters/kubernetes/external.rs, or the K5 volume
-    // bindings) opv-sim models nothing; reached by src/app/azure_tests.rs. The flag's other
-    // side, a target with nothing pinned exiting 0, is scenarios/changed.rs. Drop this when a
-    // scenario or the K5 bindings make it reachable.
-    (
-        "TargetDrift",
-        "drift needs a pinned store opv-sim does not model (Azure Key Vault/ESO)",
-    ),
     // A result, not a failure: `opv changed` reports it as `ok: true` with exit 10 in its
     // own document (src/app/changed.rs), never as an error, so no error snapshot exists. Its
     // states are snapshotted as successful results in scenarios/changed.rs
@@ -2042,6 +2030,16 @@ fn mcp_answer(snap: &str) -> Option<Value> {
     one_document(body)
 }
 
+/// Every `--json` document a snapshot holds: the unlabelled `json stdout` run and any run a
+/// scenario labels by case (`<case> --json stdout`, fixes_0141).
+fn json_documents(snap: &str) -> Vec<Value> {
+    sections(snap)
+        .into_iter()
+        .filter(|(h, _)| h == "json stdout" || h.ends_with(" --json stdout"))
+        .filter_map(|(_, body)| one_document(&body))
+        .collect()
+}
+
 fn committed(name: &str) -> String {
     std::fs::read_to_string(snapshot_path(name)).unwrap_or_default()
 }
@@ -2517,10 +2515,7 @@ fn reached() -> BTreeSet<String> {
     }
     for p in snaps {
         let snap = std::fs::read_to_string(&p).unwrap_or_default();
-        for doc in [json_document(&snap), mcp_answer(&snap)]
-            .into_iter()
-            .flatten()
-        {
+        for doc in json_documents(&snap).into_iter().chain(mcp_answer(&snap)) {
             if let Some(e) = doc.get("error").filter(|e| e.is_object()) {
                 shown(e, &mut out);
             }
