@@ -184,6 +184,7 @@ pub fn diagnose_with(seen: Observed, stderr: &str, ctx: &DiagnoseContext, facts:
     match reading(stderr) {
         Some(Reading::AccountNotOnMachine) => account_not_on_machine(&seen, stderr, ctx, facts),
         Some(Reading::ServiceAccountTokenRejected) => service_account_rejected(seen),
+        Some(Reading::ServiceAccountDeleted) => service_account_rejected(seen),
         Some(Reading::AllAndAccount) if facts.overridden_by(OP_ACCOUNT) => {
             Cause::CredentialRejected {
                 system: System::OnePassword,
@@ -213,6 +214,9 @@ enum Reading {
     AccountNotOnMachine,
     /// `failed to DecodeSACredentials: …`, exit 9 (case 03).
     ServiceAccountTokenRejected,
+    /// `(403) Forbidden (Service Account Deleted): …` (case 17): the token is syntactically
+    /// fine, but the service account it belongs to no longer exists.
+    ServiceAccountDeleted,
     /// `You can't use both the '--all' and '--account' flags at the same time.` (case 04).
     AllAndAccount,
     /// `no active session found for account <id>` / `You are not currently signed in`
@@ -234,6 +238,10 @@ const PHRASES: &[(Reading, &[&str])] = &[
     (
         Reading::ServiceAccountTokenRejected,
         &["failed to DecodeSACredentials"],
+    ),
+    (
+        Reading::ServiceAccountDeleted,
+        &["Forbidden (Service Account Deleted)"],
     ),
     (
         Reading::AllAndAccount,
@@ -345,7 +353,8 @@ fn account_not_on_machine(
     }
 }
 
-/// An unreadable service-account token (case 03): the token the runner saw in effect.
+/// A service-account token op rejected (case 03) or whose service account was deleted
+/// (case 17): the token the runner saw in effect.
 fn service_account_rejected(seen: Observed) -> Cause {
     let var = match seen.principal() {
         Principal::ShellToken { var } => var.clone(),

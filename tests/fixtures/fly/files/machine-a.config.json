@@ -1,0 +1,39 @@
+{
+  "env": {
+    "FLY_PROCESS_GROUP": "app",
+    "PRIMARY_REGION": "iad"
+  },
+  "init": {
+    "cmd": [
+      "sleep",
+      "86400"
+    ]
+  },
+  "guest": {
+    "cpu_kind": "shared",
+    "cpus": 1,
+    "memory_mb": 256
+  },
+  "metadata": {
+    "fly_flyctl_version": "0.4.120",
+    "fly_platform_version": "v2",
+    "fly_process_group": "app",
+    "fly_release_id": "rel_95o6zrge7x9j2g08",
+    "fly_release_version": "2"
+  },
+  "image": "docker-hub-mirror.fly.io/library/debian@sha256:918311b7b6c4c6f68b232ba516584925f6c78ad82b6fd534b98979df6438e483",
+  "files": [
+    {
+      "guest_path": "/run/opvcanary/a5-file",
+      "secret_name": "OPVCANARY_A5_FILE"
+    },
+    {
+      "guest_path": "/opt/opvcanary/a5-file",
+      "secret_name": "OPVCANARY_A5_FILE"
+    }
+  ],
+  "restart": {
+    "policy": "on-failure",
+    "max_retries": 10
+  }
+}

@@ -348,6 +348,8 @@ impl Cluster {
             .unwrap()
             .parse()
             .unwrap();
+        // A replace carries the whole object: opv's annotations travel with it (#219).
+        d["metadata"]["annotations"] = new["metadata"]["annotations"].clone();
         let template_changed = new["spec"]["template"] != d["spec"]["template"];
         let mut generation = d["metadata"]["generation"].as_u64().unwrap();
         if template_changed {
@@ -669,4 +671,112 @@ fn second_sync_writes_no_new_version() {
     sync(&c).unwrap();
     let after: BTreeSet<String> = c.secrets.borrow().keys().cloned().collect();
     assert_eq!(after, before);
+}
+
+// #219: a reference opv deployed and someone later replaced or removed is drift; a name
+// opv never deployed is pending deploy.
+
+/// The managed env of the Deployment's container, edited by hand (`kubectl set env`).
+fn edit_env(c: &Cluster, f: impl FnOnce(&mut Vec<Value>)) {
+    let mut d = c.deployment.borrow_mut();
+    let env = d["spec"]["template"]["spec"]["containers"][0]["env"]
+        .as_array_mut()
+        .unwrap();
+    f(env);
+}
+
+/// `opv status dev --fail-on-drift`: the result and its text.
+fn status_failing_on_drift(c: &Cluster) -> (Result<(), Error>, String) {
+    let mut out = Vec::new();
+    let res =
+        crate::app::status::run_targeted(&fleet(), "dev", &[], None, c, &mut out, false, true);
+    (res, String::from_utf8(out).unwrap())
+}
+
+#[test]
+fn deployed_reference_replaced_by_a_literal_value_is_drift() {
+    let (c, _) = reference();
+    edit_env(&c, |env| {
+        let e = env.iter_mut().find(|e| e["name"] == "NEW_KEY").unwrap();
+        *e = json!({"name": "NEW_KEY", "value": "tampered"});
+    });
+    let (res, out) = status_failing_on_drift(&c);
+    assert_eq!(res.map_err(|e| e.exit_code()), Err(8), "{out}");
+}
+
+#[test]
+fn status_names_a_replaced_deployed_reference_as_changed_outside_opv() {
+    let (c, _) = reference();
+    edit_env(&c, |env| {
+        let e = env.iter_mut().find(|e| e["name"] == "NEW_KEY").unwrap();
+        *e = json!({"name": "NEW_KEY", "value": "tampered"});
+    });
+    let (_, out) = status_failing_on_drift(&c);
+    assert!(
+        out.contains("changed outside opv since its last deploy"),
+        "{out}"
+    );
+}
+
+#[test]
+fn deployed_reference_that_was_removed_is_drift() {
+    let (c, _) = reference();
+    edit_env(&c, |env| env.retain(|e| e["name"] != "NEW_KEY"));
+    let (res, out) = status_failing_on_drift(&c);
+    assert_eq!(res.map_err(|e| e.exit_code()), Err(8), "{out}");
+}
+
+#[test]
+fn key_never_deployed_is_pending_deploy_not_drift() {
+    let c = Cluster::new();
+    // No managed name was ever bound on this Deployment.
+    edit_env(&c, |env| {
+        env.retain(|e| !DESIRED.iter().any(|(n, _)| e["name"] == *n) && e["name"] != CONFIG.0)
+    });
+    let opts = SyncOpts::default();
+    sync::run(&fleet(), "dev", &c, &mut Vec::new(), &opts).unwrap();
+    let (res, out) = status_failing_on_drift(&c);
+    assert!(
+        res.is_ok() && out.contains("pending deploy"),
+        "{res:?}\n{out}"
+    );
+}
+
+#[test]
+fn sync_names_a_replaced_deployed_reference_as_changed_outside_opv() {
+    let (c, _) = reference();
+    edit_env(&c, |env| {
+        let e = env.iter_mut().find(|e| e["name"] == "NEW_KEY").unwrap();
+        *e = json!({"name": "NEW_KEY", "value": "tampered"});
+    });
+    let mut out = Vec::new();
+    sync::run(&fleet(), "dev", &c, &mut out, &SyncOpts::default()).unwrap();
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        text.contains(
+            "dev/app: changed outside opv since its last deploy: app/NEW_KEY (NEW_KEY) (the next \
+             opv sync dev --deploy restores opv's wiring)"
+        ),
+        "{text}"
+    );
+}
+
+/// A Deployment opv deployed before #219 has no record of what it bound, so a hand change
+/// cannot be told from a name never deployed: it stays pending deploy.
+#[test]
+fn hand_change_on_a_deployment_deployed_before_the_record_is_pending_deploy() {
+    let (c, _) = reference();
+    c.deployment.borrow_mut()["metadata"]["annotations"]
+        .as_object_mut()
+        .unwrap()
+        .remove(super::runtime::BOUND_ANNOTATION);
+    edit_env(&c, |env| {
+        let e = env.iter_mut().find(|e| e["name"] == "NEW_KEY").unwrap();
+        *e = json!({"name": "NEW_KEY", "value": "tampered"});
+    });
+    let (res, out) = status_failing_on_drift(&c);
+    assert!(
+        res.is_ok() && out.contains("pending deploy"),
+        "{res:?}\n{out}"
+    );
 }

@@ -9,4 +9,6 @@ run "$OPV" doctor --env verify-fly
 run "$OPV" plan verify-fly > "$E/v4f-plan.txt"; cat "$E/v4f-plan.txt"
 run "$OPV" plan verify-fly --json > "$E/v4f-plan.json"
 jq -r '.plan_id // .data.plan_id // empty' "$E/v4f-plan.json" > "$E/plan-verify-fly.id"
-check A4-V4f plan_id $([ -s "$E/plan-verify-fly.id" ] && echo 1 || echo 0) "7 to stage: 6 serve secrets + LOG_LEVEL; file keys shown as file via the app"
+check A4-V4f plan_id $([ -s "$E/plan-verify-fly.id" ] && echo 1 || echo 0)
+n=$(declared_keys verify-fly serve | wc -l)
+check A4-V4f declared_to_stage $(grep -q "· $n to stage ·" "$E/v4f-plan.txt" && echo 1 || echo 0) "$n to stage: the manifest's serve keys for verify-fly, LOG_LEVEL included; file keys shown as file via the app"

@@ -280,13 +280,22 @@ impl<'a> KubeSecrets<'a> {
         let i = container_index(&d, self.t())?;
         let env = container_env(&d, i);
         let mounted = mounted_sources(&d, self.kind);
-        let map = env
+        let mut map: BTreeMap<String, String> = env
             .iter()
             .filter_map(|e| self.kind.bound_ref(e))
             .chain(mounted.iter().map(String::as_str))
             .filter_map(split_secret_name)
             .map(|(s, v)| (s.to_string(), v.to_string()))
             .collect();
+        // A reference opv's last deploy bound and someone replaced or removed since: its
+        // version is still the current one, so the change is drift, not a new value (#219).
+        // A recorded object of the other kind never names one of these stores' versions
+        // that `held` finds, and a deleted one reads as absent (pending deploy).
+        for object in super::runtime::recorded_bound(&d).into_values() {
+            if let Some((s, v)) = split_secret_name(&object) {
+                map.entry(s.to_string()).or_insert_with(|| v.to_string());
+            }
+        }
         Ok(self.bound.get_or_init(|| map))
     }
 

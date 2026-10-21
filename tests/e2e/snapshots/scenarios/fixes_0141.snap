@@ -1,0 +1,186 @@
+# fixes_0141: the opv 0.14.1 fixes through the real binary
+
+## #218 opv changed prod text exit: 10
+## #218 opv changed prod text stdout
+prod/fly web: no source versions recorded
+prod/gh web: no source versions recorded
+prod/k8s web: no source versions recorded
+Next: opv apply
+
+## #218 opv changed prod text stderr
+using <SCENARIO>/project/secrets.toml
+
+## #218 opv changed prod --json exit: 10
+## #218 opv changed prod --json stdout
+{"schema_version":3,"ok":true,"environment":"prod","changed":true,"placements":[{"product":"web","target":"fly","state":"no_record"},{"product":"web","target":"gh","state":"no_record"},{"product":"web","target":"k8s","state":"no_record"}],"next":{"kind":"run","actor":"assistant","command":"opv apply"},"do":"run opv apply to record delivery items"}
+
+## #218 opv changed prod --json stderr
+using <SCENARIO>/project/secrets.toml
+
+## #221 opv changed prod (deleted service account) text exit: 7
+## #221 opv changed prod (deleted service account) text stdout
+
+## #221 opv changed prod (deleted service account) text stderr
+using <SCENARIO>/project/secrets.toml
+opv: 1Password rejected the service account token in OP_SERVICE_ACCOUNT_TOKEN
+  checked: op item list --vault vE2ESHAREDPROD0000000000001 --format json as the token in OP_SERVICE_ACCOUNT_TOKEN (exit 1)
+--- 1Password CLI replied, exit 1 ---
+| [ERROR] 2026/10/20 22:42:16 (403) Forbidden (Service Account Deleted): The Service Account used in this integration has been deleted.
+--- (scrubbed) ---
+Do: replace the service account token in OP_SERVICE_ACCOUNT_TOKEN with a valid one
+Next: opv doctor
+
+## #221 opv changed prod (deleted service account) --json exit: 7
+## #221 opv changed prod (deleted service account) --json stdout
+{"schema_version":3,"ok":false,"exit_code":7,"next":{"kind":"run","actor":"assistant","command":"opv doctor"},"do":"replace the service account token in OP_SERVICE_ACCOUNT_TOKEN with a valid one","error":{"code":"credential_rejected","category":"auth","message":"1Password rejected the service account token in OP_SERVICE_ACCOUNT_TOKEN","subject":{"problem":{"problem":"rejected","needs":[]},"system":"one_password","credential":{"kind":"service_account_token","var":"OP_SERVICE_ACCOUNT_TOKEN"}},"evidence":{"checked":"op item list --vault vE2ESHAREDPROD0000000000001 --format json","account":null,"upstream":{"source":"one_password","tool":"1Password CLI","version":null,"exit":{"kind":"code","code":1},"said":["[ERROR] 2026/10/20 22:42:16 (403) Forbidden (Service Account Deleted): The Service Account used in this integration has been deleted."],"truncated":false,"removed_advice":false,"untrusted":true,"omitted":0}},"retry":"after_fix","human_required":true,"do":"replace the service account token in OP_SERVICE_ACCOUNT_TOKEN with a valid one","next":{"kind":"run","actor":"assistant","command":"opv doctor"}}}
+
+## #221 opv changed prod (deleted service account) --json stderr
+using <SCENARIO>/project/secrets.toml
+opv: 1Password rejected the service account token in OP_SERVICE_ACCOUNT_TOKEN
+  checked: op item list --vault vE2ESHAREDPROD0000000000001 --format json as the token in OP_SERVICE_ACCOUNT_TOKEN (exit 1)
+--- 1Password CLI replied, exit 1 ---
+| [ERROR] 2026/10/20 22:42:16 (403) Forbidden (Service Account Deleted): The Service Account used in this integration has been deleted.
+--- (scrubbed) ---
+Do: replace the service account token in OP_SERVICE_ACCOUNT_TOKEN with a valid one
+Next: opv doctor
+
+## #219 fly opv status prod --target fly --fail-on-drift text exit: 8
+## #219 fly opv status prod --target fly --fail-on-drift text stdout
+prod/fly: 10 keys · 9 saved · 1 skipped · 0 findings · 0 not yet on Fly
+TARGET  PRODUCT  KEY              KIND    STATE    ON TARGET
+fly     shared   DATABASE_URL     secret  saved    n/a
+fly     shared   FEATURE_FLAGS    config  saved    not delivered (no config channel)
+fly     web      API_KEY          secret  saved    unknown
+fly     web      DATABASE_URL     secret  saved    same
+    shared from shared/DATABASE_URL
+fly     web      LOG_LEVEL        config  saved    not delivered (no config channel)
+fly     web      MIGRATION_TOKEN  secret  skipped  extra
+fly     web      OTEL_RESOURCE    config  saved    not delivered (no config channel) · env
+fly     web      SESSION_SECRET   secret  saved    same
+fly     web      TLS_CERTIFICATE  secret  saved    same · env
+fly     web      TLS_PRIVATE_KEY  secret  saved    same · env
+unknown: Fly does not reveal stored values, so opv cannot compare them; sync stages them and compares digests (opv help states)
+changed outside opv since its last sync: E2E__WEB__API_KEY (set on the target by another tool or a person; the next sync writes 1Password's values back)
+warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
+prod/fly: warning: web/LOG_LEVEL not delivered (no config channel: set fly.config)
+prod/fly: warning: web/OTEL_RESOURCE not delivered (no config channel: set fly.config)
+prod/fly: note: web/OTEL_RESOURCE file via the app (env at boot, written to files by the app's shim)
+prod/fly: note: web/TLS_CERTIFICATE file via the app (env at boot, written to files by the app's shim)
+prod/fly: note: web/TLS_PRIVATE_KEY file via the app (env at boot, written to files by the app's shim)
+
+## #219 fly opv status prod --target fly --fail-on-drift text stderr
+using <SCENARIO>/project/secrets.toml
+opv: target fly in environment prod has 1 binding that no longer match 1Password: E2E__WEB__API_KEY
+Do: re-run the sync to restore 1Password's values
+Next: opv plan prod --target fly
+
+## #219 fly opv status prod --target fly --fail-on-drift --json exit: 8
+## #219 fly opv status prod --target fly --fail-on-drift --json stdout
+{"schema_version":3,"ok":false,"exit_code":8,"environment":"prod","product":null,"changes":"some","rows":[{"target":"fly","product":"shared","key":"DATABASE_URL","kind":"secret","channel":"secret","via":"Fly secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__SHARED__DATABASE_URL","target_state":"not_delivered","action":null},{"target":"fly","product":"shared","key":"FEATURE_FLAGS","kind":"config","channel":"config","state":"saved","rule":null,"reason":null,"target_name":"E2E__SHARED__FEATURE_FLAGS","target_state":"not_delivered","action":null},{"target":"fly","product":"web","key":"API_KEY","kind":"secret","channel":"secret","via":"Fly secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__API_KEY","target_state":"unknown","action":"would_stage"},{"target":"fly","product":"web","key":"DATABASE_URL","kind":"secret","channel":"secret","via":"Fly secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__DATABASE_URL","target_state":"present","action":null,"shared_from":"shared/DATABASE_URL"},{"target":"fly","product":"web","key":"LOG_LEVEL","kind":"config","channel":"config","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__LOG_LEVEL","target_state":null,"action":null},{"target":"fly","product":"web","key":"MIGRATION_TOKEN","kind":"secret","channel":"secret","via":"Fly secret","delivered_as":"env","state":"skipped","rule":null,"reason":null,"target_name":"E2E__WEB__MIGRATION_TOKEN","target_state":"unknown","action":"would_prune"},{"target":"fly","product":"web","key":"OTEL_RESOURCE","kind":"config","channel":"config","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__OTEL_RESOURCE","target_state":null,"action":null},{"target":"fly","product":"web","key":"SESSION_SECRET","kind":"secret","channel":"secret","via":"Fly secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__SESSION_SECRET","target_state":"present","action":null},{"target":"fly","product":"web","key":"TLS_CERTIFICATE","kind":"secret","channel":"secret","via":"Fly secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__TLS_CERTIFICATE","target_state":"present","action":null},{"target":"fly","product":"web","key":"TLS_PRIVATE_KEY","kind":"secret","channel":"secret","via":"Fly secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__TLS_PRIVATE_KEY","target_state":"present","action":null}],"extras":[],"unreferenced_sources":[{"product":"shared","key":"FEATURE_FLAGS"}],"drift":["E2E__WEB__API_KEY"],"stage":["E2E__WEB__API_KEY"],"held":[],"prune":["E2E__WEB__MIGRATION_TOKEN"],"totals":{"rows":10,"findings":0,"extras":0,"to_stage":1,"held":0,"to_prune":1},"next":{"kind":"run","actor":"assistant","command":"opv plan prod --target fly"},"do":"re-run the sync to restore 1Password's values","error":{"code":"target_drift","category":"findings","message":"target fly in environment prod has 1 binding that no longer match 1Password: E2E__WEB__API_KEY","subject":{"names":["E2E__WEB__API_KEY"],"env":"prod","target":"fly"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"re-run the sync to restore 1Password's values","next":{"kind":"run","actor":"assistant","command":"opv plan prod --target fly"}}}
+
+## #219 fly opv status prod --target fly --fail-on-drift --json stderr
+using <SCENARIO>/project/secrets.toml
+opv: target fly in environment prod has 1 binding that no longer match 1Password: E2E__WEB__API_KEY
+Do: re-run the sync to restore 1Password's values
+Next: opv plan prod --target fly
+
+## #219 k8s replaced by hand opv status prod --target k8s --fail-on-drift text exit: 8
+## #219 k8s replaced by hand opv status prod --target k8s --fail-on-drift text stdout
+prod/k8s: 10 keys · 9 saved · 1 skipped · 0 findings · 0 not yet on Kubernetes
+TARGET  PRODUCT  KEY              KIND    STATE    ON TARGET
+k8s     shared   DATABASE_URL     secret  saved    n/a
+k8s     shared   FEATURE_FLAGS    config  saved    via ConfigMap
+k8s     web      API_KEY          secret  saved    drift
+k8s     web      DATABASE_URL     secret  saved    same
+    shared from shared/DATABASE_URL
+k8s     web      LOG_LEVEL        config  saved    via ConfigMap
+k8s     web      MIGRATION_TOKEN  secret  skipped  n/a
+k8s     web      OTEL_RESOURCE    config  saved    via ConfigMap · file (verbatim)
+k8s     web      SESSION_SECRET   secret  saved    same
+k8s     web      TLS_CERTIFICATE  secret  saved    same · file (verbatim)
+k8s     web      TLS_PRIVATE_KEY  secret  saved    same · file (verbatim)
+warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
+prod/k8s: pending deploy (opv sync prod --deploy --target k8s): web/API_KEY (E2E__WEB__API_KEY)
+prod/k8s: changed outside opv since its last deploy: web/API_KEY (E2E__WEB__API_KEY) (the next opv sync prod --deploy restores opv's wiring)
+prod/k8s: chain: web/LOG_LEVEL (E2E__WEB__LOG_LEVEL) → configmap opv-e2e--web--log-level-<id> → env E2E__WEB__LOG_LEVEL
+prod/k8s: chain: web/OTEL_RESOURCE (E2E__WEB__OTEL_RESOURCE) → configmap opv-e2e--web--otel-resource-<id> → file /run/secrets/web/otel/resource
+prod/k8s: chain: web/TLS_CERTIFICATE (E2E__WEB__TLS_CERTIFICATE) → secret opv-e2e--web--tls-certificate-<id> → file /run/secrets/web/tls/certificate
+prod/k8s: chain: web/TLS_PRIVATE_KEY (E2E__WEB__TLS_PRIVATE_KEY) → secret opv-e2e--web--tls-private-key-<id> → file /run/secrets/web/tls/private-key
+prod/k8s: Kubernetes: last changed by opv <version> at <time> (plan <id>)
+
+## #219 k8s replaced by hand opv status prod --target k8s --fail-on-drift text stderr
+using <SCENARIO>/project/secrets.toml
+opv: target k8s in environment prod has 1 binding that no longer match 1Password: E2E__WEB__API_KEY
+Do: re-run the sync to restore 1Password's values
+Next: opv plan prod --target k8s
+
+## #219 k8s replaced by hand opv status prod --target k8s --fail-on-drift --json exit: 8
+## #219 k8s replaced by hand opv status prod --target k8s --fail-on-drift --json stdout
+{"schema_version":3,"ok":false,"exit_code":8,"environment":"prod","product":null,"changes":"some","rows":[{"target":"k8s","product":"shared","key":"DATABASE_URL","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__SHARED__DATABASE_URL","target_state":"not_delivered","action":null},{"target":"k8s","product":"shared","key":"FEATURE_FLAGS","kind":"config","channel":"config","via":"ConfigMap","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__SHARED__FEATURE_FLAGS","target_state":"not_delivered","action":null},{"target":"k8s","product":"web","key":"API_KEY","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__API_KEY","target_state":"present","action":null,"binding":"stale","pending_deploy":true,"drift":true},{"target":"k8s","product":"web","key":"DATABASE_URL","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__DATABASE_URL","target_state":"present","action":null,"binding":"current","pending_deploy":false,"drift":false,"shared_from":"shared/DATABASE_URL"},{"target":"k8s","product":"web","key":"LOG_LEVEL","kind":"config","channel":"config","via":"ConfigMap","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__LOG_LEVEL","target_state":null,"action":null,"binding":"current","pending_deploy":false,"drift":false,"chain":"E2E__WEB__LOG_LEVEL → configmap opv-e2e--web--log-level-<id> → env E2E__WEB__LOG_LEVEL"},{"target":"k8s","product":"web","key":"MIGRATION_TOKEN","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"env","state":"skipped","rule":null,"reason":null,"target_name":"E2E__WEB__MIGRATION_TOKEN","target_state":"absent","action":null},{"target":"k8s","product":"web","key":"OTEL_RESOURCE","kind":"config","channel":"config","via":"ConfigMap","delivered_as":"file","form":"verbatim","path":"otel/resource","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__OTEL_RESOURCE","target_state":null,"action":null,"binding":"current","pending_deploy":false,"drift":false,"chain":"E2E__WEB__OTEL_RESOURCE → configmap opv-e2e--web--otel-resource-<id> → file /run/secrets/web/otel/resource"},{"target":"k8s","product":"web","key":"SESSION_SECRET","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__SESSION_SECRET","target_state":"present","action":null,"binding":"current","pending_deploy":false,"drift":false},{"target":"k8s","product":"web","key":"TLS_CERTIFICATE","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"file","form":"verbatim","path":"tls/certificate","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__TLS_CERTIFICATE","target_state":"present","action":null,"binding":"current","pending_deploy":false,"drift":false,"chain":"E2E__WEB__TLS_CERTIFICATE → secret opv-e2e--web--tls-certificate-<id> → file /run/secrets/web/tls/certificate"},{"target":"k8s","product":"web","key":"TLS_PRIVATE_KEY","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"file","form":"verbatim","path":"tls/private-key","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__TLS_PRIVATE_KEY","target_state":"present","action":null,"binding":"current","pending_deploy":false,"drift":false,"chain":"E2E__WEB__TLS_PRIVATE_KEY → secret opv-e2e--web--tls-private-key-<id> → file /run/secrets/web/tls/private-key"}],"extras":[],"unreferenced_sources":[{"product":"shared","key":"FEATURE_FLAGS"}],"stage":[],"held":[],"prune":[],"totals":{"rows":10,"findings":0,"extras":0,"to_stage":0,"held":0,"to_prune":0},"provenance":{"opv_version":"<version>","written":"<time>","plan_id":"<id>"},"next":{"kind":"run","actor":"assistant","command":"opv plan prod --target k8s"},"do":"re-run the sync to restore 1Password's values","error":{"code":"target_drift","category":"findings","message":"target k8s in environment prod has 1 binding that no longer match 1Password: E2E__WEB__API_KEY","subject":{"names":["E2E__WEB__API_KEY"],"env":"prod","target":"k8s"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"re-run the sync to restore 1Password's values","next":{"kind":"run","actor":"assistant","command":"opv plan prod --target k8s"}}}
+
+## #219 k8s replaced by hand opv status prod --target k8s --fail-on-drift --json stderr
+using <SCENARIO>/project/secrets.toml
+opv: target k8s in environment prod has 1 binding that no longer match 1Password: E2E__WEB__API_KEY
+Do: re-run the sync to restore 1Password's values
+Next: opv plan prod --target k8s
+
+## #219 k8s never deployed opv status prod --target k8s --fail-on-drift text exit: 0
+## #219 k8s never deployed opv status prod --target k8s --fail-on-drift text stdout
+prod/k8s: 10 keys · 9 saved · 1 skipped · 0 findings · 5 not yet on Kubernetes
+TARGET  PRODUCT  KEY              KIND    STATE    ON TARGET
+k8s     shared   DATABASE_URL     secret  saved    n/a
+k8s     shared   FEATURE_FLAGS    config  saved    via ConfigMap
+k8s     web      API_KEY          secret  saved    new
+k8s     web      DATABASE_URL     secret  saved    new
+    shared from shared/DATABASE_URL
+k8s     web      LOG_LEVEL        config  saved    via ConfigMap
+k8s     web      MIGRATION_TOKEN  secret  skipped  n/a
+k8s     web      OTEL_RESOURCE    config  saved    via ConfigMap · file (verbatim)
+k8s     web      SESSION_SECRET   secret  saved    new
+k8s     web      TLS_CERTIFICATE  secret  saved    new · file (verbatim)
+k8s     web      TLS_PRIVATE_KEY  secret  saved    new · file (verbatim)
+warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
+prod/k8s: pending deploy (opv sync prod --deploy --target k8s): web/API_KEY (E2E__WEB__API_KEY), web/DATABASE_URL (E2E__WEB__DATABASE_URL), web/LOG_LEVEL (E2E__WEB__LOG_LEVEL), web/OTEL_RESOURCE (E2E__WEB__OTEL_RESOURCE), web/SESSION_SECRET (E2E__WEB__SESSION_SECRET), web/TLS_CERTIFICATE (E2E__WEB__TLS_CERTIFICATE), web/TLS_PRIVATE_KEY (E2E__WEB__TLS_PRIVATE_KEY)
+prod/k8s: Kubernetes: last changed by opv <version> at <time> (plan <id>)
+
+## #219 k8s never deployed opv status prod --target k8s --fail-on-drift text stderr
+using <SCENARIO>/project/secrets.toml
+
+## #219 k8s never deployed opv status prod --target k8s --fail-on-drift --json exit: 0
+## #219 k8s never deployed opv status prod --target k8s --fail-on-drift --json stdout
+{"schema_version":3,"ok":true,"environment":"prod","product":null,"changes":"some","rows":[{"target":"k8s","product":"shared","key":"DATABASE_URL","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__SHARED__DATABASE_URL","target_state":"not_delivered","action":null},{"target":"k8s","product":"shared","key":"FEATURE_FLAGS","kind":"config","channel":"config","via":"ConfigMap","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__SHARED__FEATURE_FLAGS","target_state":"not_delivered","action":null},{"target":"k8s","product":"web","key":"API_KEY","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__API_KEY","target_state":"absent","action":"would_stage","binding":"stale","pending_deploy":true,"drift":false},{"target":"k8s","product":"web","key":"DATABASE_URL","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__DATABASE_URL","target_state":"absent","action":"would_stage","binding":"unbound","pending_deploy":true,"drift":false,"shared_from":"shared/DATABASE_URL"},{"target":"k8s","product":"web","key":"LOG_LEVEL","kind":"config","channel":"config","via":"ConfigMap","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__LOG_LEVEL","target_state":null,"action":null,"binding":"unbound","pending_deploy":true,"drift":false},{"target":"k8s","product":"web","key":"MIGRATION_TOKEN","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"env","state":"skipped","rule":null,"reason":null,"target_name":"E2E__WEB__MIGRATION_TOKEN","target_state":"absent","action":null},{"target":"k8s","product":"web","key":"OTEL_RESOURCE","kind":"config","channel":"config","via":"ConfigMap","delivered_as":"file","form":"verbatim","path":"otel/resource","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__OTEL_RESOURCE","target_state":null,"action":null,"binding":"unbound","pending_deploy":true,"drift":false},{"target":"k8s","product":"web","key":"SESSION_SECRET","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"env","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__SESSION_SECRET","target_state":"absent","action":"would_stage","binding":"unbound","pending_deploy":true,"drift":false},{"target":"k8s","product":"web","key":"TLS_CERTIFICATE","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"file","form":"verbatim","path":"tls/certificate","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__TLS_CERTIFICATE","target_state":"absent","action":"would_stage","binding":"unbound","pending_deploy":true,"drift":false},{"target":"k8s","product":"web","key":"TLS_PRIVATE_KEY","kind":"secret","channel":"secret","via":"Kubernetes Secret","delivered_as":"file","form":"verbatim","path":"tls/private-key","state":"saved","rule":null,"reason":null,"target_name":"E2E__WEB__TLS_PRIVATE_KEY","target_state":"absent","action":"would_stage","binding":"unbound","pending_deploy":true,"drift":false}],"extras":[],"unreferenced_sources":[{"product":"shared","key":"FEATURE_FLAGS"}],"stage":["E2E__WEB__API_KEY","E2E__WEB__DATABASE_URL","E2E__WEB__SESSION_SECRET","E2E__WEB__TLS_CERTIFICATE","E2E__WEB__TLS_PRIVATE_KEY"],"held":[],"prune":[],"totals":{"rows":10,"findings":0,"extras":0,"to_stage":5,"held":0,"to_prune":0},"provenance":{"opv_version":"<version>","written":"<time>","plan_id":"<id>"},"next":{"kind":"none","actor":"person","command":null},"do":null}
+
+## #219 k8s never deployed opv status prod --target k8s --fail-on-drift --json stderr
+using <SCENARIO>/project/secrets.toml
+
+## #217 file key opv import dev --from local.env text exit: 0
+## #217 file key opv import dev --from local.env text stdout
+dev: 1 found · 1 written · 0 need a decision
+  web/TLS_CERTIFICATE              import (written)  (from TLS_CERTIFICATE)
+Next: opv ready dev
+
+## #217 file key opv import dev --from local.env text stderr
+using <SCENARIO>/project/secrets.toml
+
+## #217 file key opv import dev --from local.env --json exit: 0
+## #217 file key opv import dev --from local.env --json stdout
+{"schema_version":3,"ok":true,"environment":"dev","applied":true,"rows":[{"found":["TLS_CERTIFICATE"],"product":"web","key":"TLS_CERTIFICATE","action":"imported","rule":null}],"writes":1,"decisions_needed":0,"next":{"kind":"run","actor":"assistant","command":"opv ready dev"},"do":null}
+
+## #217 file key opv import dev --from local.env --json stderr
+using <SCENARIO>/project/secrets.toml
+
+## #217 non-file key opv import dev --from local.env text exit: 0
+## #217 non-file key opv import dev --from local.env text stdout
+dev: 1 found · 0 written · 0 need a decision
+  web/SESSION_SECRET               fails rule single_line: not imported  (from SESSION_SECRET)
+Next: opv ready dev
+
+## #217 non-file key opv import dev --from local.env text stderr
+using <SCENARIO>/project/secrets.toml
+
+## #217 non-file key opv import dev --from local.env --json exit: 0
+## #217 non-file key opv import dev --from local.env --json stdout
+{"schema_version":3,"ok":true,"environment":"dev","applied":true,"rows":[{"found":["SESSION_SECRET"],"product":"web","key":"SESSION_SECRET","action":"fails_rule","rule":"single_line"}],"writes":0,"decisions_needed":0,"next":{"kind":"run","actor":"assistant","command":"opv ready dev"},"do":null}
+
+## #217 non-file key opv import dev --from local.env --json stderr
+using <SCENARIO>/project/secrets.toml

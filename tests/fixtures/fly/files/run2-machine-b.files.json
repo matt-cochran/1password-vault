@@ -1,0 +1,1 @@
+[{"guest_path":"/dev/shm/opvcanary/a5-file","secret_name":"OPVCANARY_A5_FILE"},{"guest_path":"/opt/opvcanary/a5-file","secret_name":"OPVCANARY_A5_FILE"},{"guest_path":"/run/opvcanary/a5-file","secret_name":"OPVCANARY_A5_FILE"}]

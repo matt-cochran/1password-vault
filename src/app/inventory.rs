@@ -335,9 +335,17 @@ fn read_boundaries(
                     .as_ref()
                     .is_some_and(|s| s.status(fleet, product, key) == RuleStatus::Committed);
                 let state = classify(Ok(read), present_in(spec, env_name), committed, |v| {
-                    rules::check(product, key, spec, env_name, environment, v)
-                        .map(|_| ())
-                        .map_err(|f| f.rule)
+                    rules::check_verbatim(
+                        product,
+                        key,
+                        spec,
+                        env_name,
+                        environment,
+                        v,
+                        spec.file.is_some(),
+                    )
+                    .map(|_| ())
+                    .map_err(|f| f.rule)
                 });
                 cells
                     .states
@@ -437,9 +445,17 @@ fn read_personal(
                     .as_ref()
                     .is_some_and(|s| s.status(fleet, product, key) == RuleStatus::Committed);
                 let state = classify(field, present_in(spec, env_name), committed, |v| {
-                    rules::check(product, key, spec, env_name, environment, v)
-                        .map(|_| ())
-                        .map_err(|f| f.rule)
+                    rules::check_verbatim(
+                        product,
+                        key,
+                        spec,
+                        env_name,
+                        environment,
+                        v,
+                        spec.file.is_some(),
+                    )
+                    .map(|_| ())
+                    .map_err(|f| f.rule)
                 });
                 cells
                     .states

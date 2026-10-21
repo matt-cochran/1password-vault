@@ -47,6 +47,11 @@ kind = "secret"
 environments = ["dev", "prod"]
 rules = { prefix = "sk-" }
 
+[products.api.keys.TLS_CERT]
+kind = "secret"
+environments = ["dev", "prod"]
+file = "tls/private-key"
+
 [products.api.keys.ENSURED]
 kind = "secret"
 environments = ["dev", "prod"]
@@ -233,6 +238,37 @@ fn action_of(p: &AdoptPlan, product: &str, key: &str) -> Action {
         .find(|r| r.product.as_deref() == Some(product) && r.key.as_deref() == Some(key))
         .expect("a row for the key")
         .action
+}
+
+#[test]
+fn a_multiline_file_key_value_is_written_byte_for_byte() {
+    let multi = "-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----\n";
+    let p = plan(
+        &fleet(),
+        "dev",
+        &[],
+        &found(&[("FLEET__API__TLS_CERT", multi)]),
+        &none(),
+        &none(),
+    );
+    assert_eq!(writes(&p), vec![("api", "TLS_CERT", multi)]);
+}
+
+#[test]
+fn a_multiline_non_file_value_is_refused_single_line() {
+    let multi = "line one\nline two";
+    let p = plan(
+        &fleet(),
+        "dev",
+        &[],
+        &found(&[("FLEET__API__DATABASE_URL", multi)]),
+        &none(),
+        &none(),
+    );
+    assert_eq!(
+        action_of(&p, "api", "DATABASE_URL"),
+        Action::FailsRule("single_line")
+    );
 }
 
 #[test]
