@@ -1,1 +1,1 @@
-[ERROR] 2026/10/20 22:16:21 could not read secret 'op://uklhaom6vpmrvrhwssidz2veyi/mz7wtviltkwopo6zyifyp46fyy/source versions': item 'uklhaom6vpmrvrhwssidz2veyi/mz7wtviltkwopo6zyifyp46fyy' does not have a field 'source versions'
+[ERROR] 2026/10/20 22:16:21 could not read secret 'op://<VAULT>/<ITEM>/source versions': item '<VAULT>/<ITEM>' does not have a field 'source versions'

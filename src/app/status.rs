@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
-use super::sync::{drift_line, pinned_diff, pinned_want};
+use super::sync::{changed_outside_line, drift_line, pinned_diff, pinned_want};
 use super::tidy::Mode;
 use super::{
     JsonExtra, JsonPart, KeyNames, PinnedRow, Prefixed, check_product, ci_summary, count_line,
@@ -734,6 +734,9 @@ struct PinnedStatus {
     rows: BTreeMap<String, PinnedRow>,
     pending: Vec<String>,
     drift: Vec<String>,
+    /// The drift names whose deployed wiring was replaced or removed by hand (#219), so
+    /// they read "changed outside opv" rather than "an older secret version".
+    changed_outside: Vec<String>,
     env_routed: Vec<String>,
     runtime: String,
 }
@@ -756,7 +759,17 @@ impl PinnedStatus {
             ))?;
         }
         if !self.drift.is_empty() {
-            line(drift_line(env_name, &names.join(&self.drift)))?;
+            let (changed, older): (Vec<String>, Vec<String>) = self
+                .drift
+                .iter()
+                .cloned()
+                .partition(|n| self.changed_outside.contains(n));
+            if !changed.is_empty() {
+                line(changed_outside_line(env_name, &names.join(&changed)))?;
+            }
+            if !older.is_empty() {
+                line(drift_line(env_name, &names.join(&older)))?;
+            }
         }
         for (name, row) in &self.rows {
             if let Some(chain) = &row.chain {
@@ -830,6 +843,15 @@ fn pinned_status(
         rows,
         pending: pending.iter().map(|n| n.to_string()).collect(),
         drift: d.drift.iter().cloned().collect(),
+        changed_outside: d
+            .drift
+            .iter()
+            .filter(|n| {
+                matches!(snap.bindings.get(*n), Some(crate::domain::runtime::Binding::Pinned { version, .. })
+                    if version == crate::domain::runtime::CHANGED_OUTSIDE_OPV)
+            })
+            .cloned()
+            .collect(),
         env_routed: want.plain.keys().cloned().collect(),
         runtime: runtime.describe(),
     })
@@ -1175,8 +1197,8 @@ mod staged_drift_tests {
 
     use crate::adapters::fake_op::FakeOp;
     use crate::app::{delivery, testutil};
-    use crate::domain::plan::StoreEntry;
     use crate::domain::Fleet;
+    use crate::domain::plan::StoreEntry;
     use crate::error::Error;
     use crate::runner::{Call, CommandRunner, Outcome, Output};
 
@@ -1338,7 +1360,12 @@ mod staged_drift_tests {
         let (w, fleet) = world();
         record(&w, &fleet, "d1");
         w.fly.borrow_mut().insert(NAME.into(), "d2".into());
-        assert!(status(&w, &fleet, true).unwrap_err().to_string().contains(NAME));
+        assert!(
+            status(&w, &fleet, true)
+                .unwrap_err()
+                .to_string()
+                .contains(NAME)
+        );
     }
 
     #[test]

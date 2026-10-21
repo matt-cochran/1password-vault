@@ -705,9 +705,22 @@ fn deployed_reference_replaced_by_a_literal_value_is_drift() {
 }
 
 #[test]
+fn status_names_a_replaced_deployed_reference_as_changed_outside_opv() {
+    let (c, _) = reference();
+    edit_env(&c, |env| {
+        let e = env.iter_mut().find(|e| e["name"] == "NEW_KEY").unwrap();
+        *e = json!({"name": "NEW_KEY", "value": "tampered"});
+    });
+    let (_, out) = status_failing_on_drift(&c);
+    assert!(
+        out.contains("changed outside opv since its last deploy"),
+        "{out}"
+    );
+}
+
+#[test]
 fn deployed_reference_that_was_removed_is_drift() {
     let (c, _) = reference();
-    eprintln!("ANN {}", c.deployment.borrow()["metadata"]);
     edit_env(&c, |env| env.retain(|e| e["name"] != "NEW_KEY"));
     let (res, out) = status_failing_on_drift(&c);
     assert_eq!(res.map_err(|e| e.exit_code()), Err(8), "{out}");
