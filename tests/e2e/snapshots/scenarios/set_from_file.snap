@@ -1,0 +1,85 @@
+# set_from_file: `opv set --from-file` through the real binary
+
+## pem text exit: 0
+## pem text stdout
+set
+
+## pem text stderr
+using <SCENARIO>/project/secrets.toml
+
+## pem --json exit: 0
+## pem --json stdout
+{"schema_version":3,"ok":true,"key":"web/TLS_CERTIFICATE","environment":"dev","state":"set","next":{"kind":"none","actor":"person","command":null},"do":null}
+
+## pem --json stderr
+using <SCENARIO>/project/secrets.toml
+
+## plain key text exit: 2
+## plain key text stdout
+
+## plain key text stderr
+using <SCENARIO>/project/secrets.toml
+opv: this is done with opv set web/API_KEY --env dev instead
+Next: opv set web/API_KEY --env dev
+
+## plain key --json exit: 2
+## plain key --json stdout
+{"schema_version":3,"ok":false,"exit_code":2,"next":{"kind":"apply","actor":"person","command":"opv set web/API_KEY --env dev"},"do":null,"error":{"code":"usage","category":"config","message":"this is done with opv set web/API_KEY --env dev instead","subject":{"problem":{"problem":"use_instead","command":{"command":["set"],"args":["web/API_KEY","--env","dev"]}}},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":null,"next":{"kind":"apply","actor":"person","command":"opv set web/API_KEY --env dev"}}}
+
+## plain key --json stderr
+using <SCENARIO>/project/secrets.toml
+opv: this is done with opv set web/API_KEY --env dev instead
+Next: opv set web/API_KEY --env dev
+
+## symlink text exit: 2
+## symlink text stdout
+
+## symlink text stderr
+using <SCENARIO>/project/secrets.toml
+opv: the secret file <SCENARIO>/pem/link.pem: it is a symbolic link
+Do: replace <SCENARIO>/pem/link.pem: pass --from-file the file itself, not a symbolic link
+Next: opv set web/TLS_CERTIFICATE --env dev --from-file <SCENARIO>/pem/link.pem
+
+## symlink --json exit: 2
+## symlink --json stdout
+{"schema_version":3,"ok":false,"exit_code":2,"next":{"kind":"apply","actor":"person","command":"opv set web/TLS_CERTIFICATE --env dev --from-file <SCENARIO>/pem/link.pem"},"do":"replace <SCENARIO>/pem/link.pem: pass --from-file the file itself, not a symbolic link","error":{"code":"input_invalid","category":"config","message":"the secret file <SCENARIO>/pem/link.pem: it is a symbolic link","subject":{"rule":{"rule":"secret_file","problem":"symlink"},"path":"<SCENARIO>/pem/link.pem","kind":"secret_file","at":null,"field":"web/TLS_CERTIFICATE"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":true,"do":"replace <SCENARIO>/pem/link.pem: pass --from-file the file itself, not a symbolic link","next":{"kind":"apply","actor":"person","command":"opv set web/TLS_CERTIFICATE --env dev --from-file <SCENARIO>/pem/link.pem"}}}
+
+## symlink --json stderr
+using <SCENARIO>/project/secrets.toml
+opv: the secret file <SCENARIO>/pem/link.pem: it is a symbolic link
+Do: replace <SCENARIO>/pem/link.pem: pass --from-file the file itself, not a symbolic link
+Next: opv set web/TLS_CERTIFICATE --env dev --from-file <SCENARIO>/pem/link.pem
+
+## no terminal text exit: 6
+## no terminal text stdout
+
+## no terminal text stderr
+opv: this step needs a person at a terminal, and there is none
+Do: run it in your own terminal
+Next: opv set web/TLS_CERTIFICATE --env dev --from-file <SCENARIO>/pem/certificate.pem
+
+## no terminal --json exit: 6
+## no terminal --json stdout
+{"schema_version":3,"ok":false,"exit_code":6,"next":{"kind":"apply","actor":"person","command":"opv set web/TLS_CERTIFICATE --env dev --from-file <SCENARIO>/pem/certificate.pem"},"do":"run it in your own terminal","error":{"code":"terminal_required","category":"policy","message":"this step needs a person at a terminal, and there is none","subject":{"why":"no_tty"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":true,"do":"run it in your own terminal","next":{"kind":"apply","actor":"person","command":"opv set web/TLS_CERTIFICATE --env dev --from-file <SCENARIO>/pem/certificate.pem"}}}
+
+## no terminal --json stderr
+opv: this step needs a person at a terminal, and there is none
+Do: run it in your own terminal
+Next: opv set web/TLS_CERTIFICATE --env dev --from-file <SCENARIO>/pem/certificate.pem
+
+## agent mode text exit: 6
+## agent mode text stdout
+
+## agent mode text stderr
+opv: opv set web/TLS_CERTIFICATE --env dev --from-file '<PATH>' runs only in a person's terminal; this shell looks like an assistant (OPV_AGENT)
+Do: run it in your own terminal
+Next: opv set web/TLS_CERTIFICATE --env dev --from-file '<PATH>'
+
+## agent mode --json exit: 6
+## agent mode --json stdout
+{"schema_version":3,"ok":false,"exit_code":6,"next":{"kind":"apply","actor":"person","command":"opv set web/TLS_CERTIFICATE --env dev --from-file '<PATH>'"},"do":"run it in your own terminal","error":{"code":"person_only","category":"policy","message":"opv set web/TLS_CERTIFICATE --env dev --from-file '<PATH>' runs only in a person's terminal; this shell looks like an assistant (OPV_AGENT)","subject":{"marker":"opv_agent","command":{"command":["set"],"args":["web/TLS_CERTIFICATE","--env","dev","--from-file","<PATH>"]}},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":true,"do":"run it in your own terminal","next":{"kind":"apply","actor":"person","command":"opv set web/TLS_CERTIFICATE --env dev --from-file '<PATH>'"}}}
+
+## agent mode --json stderr
+opv: opv set web/TLS_CERTIFICATE --env dev --from-file '<PATH>' runs only in a person's terminal; this shell looks like an assistant (OPV_AGENT)
+Do: run it in your own terminal
+Next: opv set web/TLS_CERTIFICATE --env dev --from-file '<PATH>'
