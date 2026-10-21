@@ -8,15 +8,22 @@
 //! secret value, its length or any part of one ever reaches output, argv, a log, an error
 //! or `Debug`.
 
-use std::io::Write;
+use std::io::{Read, Write};
 
 use super::write_err;
-use crate::cause::{Cause, Cmd, EnvName, KeyName, NameKind, NoTerminal, ProductName};
+use crate::cause::{
+    Cause, Cmd, EnvName, FieldRule, InputKind, KeyName, NameKind, NoTerminal, ProductName,
+    SecretFileRule, UsageProblem,
+};
 use crate::domain::value_state::{ValueState, classify};
 use crate::domain::{Fleet, SecretValue, key_label, rules};
 use crate::error::Error;
 use crate::host::{HostEnv, refuse_if_agent};
 use crate::runner::CommandRunner;
+
+/// The largest value `opv set --from-file` reads from a file: 64 KiB. A larger file is
+/// refused by its size, never by its content.
+const FROM_FILE_MAX_BYTES: u64 = 65_536;
 
 /// The exact command a person is handed when an assistant calls `set`, and the command named
 /// by a read-back failure as the one to run again.
@@ -104,11 +111,162 @@ pub fn set_from_file(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    let _ = (fleet, env, key, env_name, path, r, out);
-    Err(Cause::Bug {
-        site: "set_from_file",
+    // The same order as `set`: an infrastructure key has no value to store, said from the
+    // configuration; then a person at a terminal, refused before the file is touched.
+    if let Ok((product, name)) = resolve(fleet, key, env_name) {
+        super::import::refuse_not_stored(fleet, &product, &name, env_name)?;
     }
-    .into())
+    let by = from_file_command(key, env_name);
+    refuse_if_agent(env, by.clone())?;
+    if !env.interactive() {
+        return Err(Cause::NeedsTerminal {
+            why: NoTerminal::NoTty,
+        }
+        .into());
+    }
+    let (product, name) = resolve(fleet, key, env_name)?;
+    let spec = &fleet.products[&product].keys[&name];
+    // D3: the verbatim form is only for a key declared with `file`; any other key keeps the
+    // masked entry of `set`, named without `--from-file`.
+    if spec.file.is_none() {
+        return Err(not_a_file_key(&product, &name, env_name));
+    }
+    let label = key_label(&product, &name);
+    let (entered, file_meta) = read_secret_file(path, &label)?;
+    // An empty file writes nothing, like an empty `set` entry.
+    if entered.expose().trim().is_empty() {
+        return Ok(());
+    }
+    let environment = fleet.environment(env_name)?;
+    // Verbatim: the exact bytes are the value, so the line-shape rules and any transform do
+    // not apply. A person runs this command, so every declared rule that still applies counts.
+    let state = classify(
+        Ok(Some(&entered)),
+        crate::domain::presence::present_in(spec, env_name),
+        true,
+        |v| {
+            rules::check_verbatim(&product, &name, spec, env_name, environment, v, true)
+                .map(|_| ())
+                .map_err(|f| f.rule)
+        },
+    );
+    super::import::write_values(fleet, environment, &[(product, name, entered)], &by, r)?;
+    // D2: a file other users can read is still written, then warned about.
+    if shared_with_others(&file_meta) {
+        writeln!(
+            out,
+            "warning: {} is readable by other users on this machine; opv stored it, but \
+             consider chmod 600 or deleting it",
+            path.display()
+        )
+        .map_err(write_err)?;
+    }
+    writeln!(out, "{}", state_text(&state)).map_err(write_err)?;
+    Ok(())
+}
+
+/// True when a group or other users can read the file (Unix mode bits); always false
+/// elsewhere, where opv has no mode to check.
+#[cfg(unix)]
+fn shared_with_others(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o077 != 0
+}
+
+#[cfg(not(unix))]
+fn shared_with_others(_meta: &std::fs::Metadata) -> bool {
+    false
+}
+
+/// The `opv set` command for the same key in its file form: the command an assistant is
+/// handed, and the one a read-back failure names. The `<PATH>` is a literal placeholder,
+/// never the person's real path.
+fn from_file_command(key: &str, env_name: &str) -> Cmd {
+    let mut cmd = command(key, env_name);
+    cmd.args.push("--from-file".into());
+    cmd.args.push("<PATH>".into());
+    cmd
+}
+
+/// The usage error for a key that is not declared with `file` (D3): the person uses the
+/// masked entry instead, named without `--from-file`.
+fn not_a_file_key(product: &str, name: &str, env_name: &str) -> Error {
+    Cause::Usage {
+        problem: UsageProblem::UseInstead {
+            command: Cmd {
+                command: vec!["set".into()],
+                args: vec![key_label(product, name), "--env".into(), env_name.into()],
+            },
+        },
+    }
+    .into()
+}
+
+/// The cause for a path `opv set --from-file` cannot read as one secret file. `rule` is a
+/// property of the path or its text, so the cause never carries a byte of the value.
+fn secret_file_cause(path: &std::path::Path, field: &str, rule: FieldRule) -> Error {
+    Cause::InputInvalid {
+        path: path.to_path_buf(),
+        kind: InputKind::SecretFile,
+        at: None,
+        field: field.to_string(),
+        rule,
+    }
+    .into()
+}
+
+/// [`secret_file_cause`] for a property of the path itself.
+fn file_problem(path: &std::path::Path, field: &str, problem: SecretFileRule) -> Error {
+    secret_file_cause(path, field, FieldRule::SecretFile { problem })
+}
+
+/// The exact bytes of the regular file at `path` as one secret value, plus the metadata the
+/// Unix readability warning reads. A symlink, anything that is not a regular file, an I/O
+/// error, a file larger than [`FROM_FILE_MAX_BYTES`], or bytes that are not UTF-8 are each
+/// refused with a cause naming `field`; no byte, length or part of the file reaches it.
+fn read_secret_file(
+    path: &std::path::Path,
+    field: &str,
+) -> Result<(SecretValue, std::fs::Metadata), Error> {
+    let not_regular = || file_problem(path, field, SecretFileRule::NotRegular);
+    // The link itself is looked at first: opv reads the file, never what a link points to.
+    let meta = std::fs::symlink_metadata(path).map_err(|_| not_regular())?;
+    if meta.file_type().is_symlink() {
+        return Err(file_problem(path, field, SecretFileRule::Symlink));
+    }
+    if !meta.is_file() {
+        return Err(not_regular());
+    }
+    let mut file = std::fs::File::open(path).map_err(|_| not_regular())?;
+    let opened = file.metadata().map_err(|_| not_regular())?;
+    if !opened.is_file() {
+        return Err(not_regular());
+    }
+    // Wiped on every path out, a refusal included.
+    let mut bytes = zeroize::Zeroizing::new(Vec::new());
+    std::io::Read::by_ref(&mut file)
+        .take(FROM_FILE_MAX_BYTES + 1)
+        .read_to_end(&mut *bytes)
+        .map_err(|_| not_regular())?;
+    if bytes.len() as u64 > FROM_FILE_MAX_BYTES {
+        return Err(file_problem(
+            path,
+            field,
+            SecretFileRule::TooLarge {
+                limit: FROM_FILE_MAX_BYTES,
+            },
+        ));
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|_| {
+        secret_file_cause(
+            path,
+            field,
+            FieldRule::Type {
+                expected: "UTF-8 text",
+            },
+        )
+    })?;
+    Ok((SecretValue::new(text.to_string()), opened))
 }
 
 /// The declared `(product, key)` that `[product/]KEY` names and `env_name` wants, or the
