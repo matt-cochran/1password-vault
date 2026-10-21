@@ -64,6 +64,16 @@ pub fn opener(env: &dyn HostEnv) -> Option<Opener> {
     }
 }
 
+/// The one line `opv open` adds for a file key (#217): pasting a multi-line value into the
+/// 1Password app turns its line breaks into spaces and drops a trailing newline, so name the
+/// verbatim store in `env`, the resolved environment.
+fn file_warning(label: &str, env: &str) -> String {
+    format!(
+        "pasting into the 1Password app turns line breaks into spaces and drops a trailing \
+         newline; store it exactly with opv set {label} --env {env} --from-file <PATH>"
+    )
+}
+
 /// `opv open`: print the key's place in 1Password and its item link, then open the link
 /// with `opener` unless it is `None`.
 pub fn run(
@@ -109,8 +119,16 @@ pub fn run_as(
         None => (product, key),
     };
     let url = item_url(fleet, env_name, &product, r)?;
+    let label = key_label(&product, &key);
+    // #217: the field a file key's value lives in is delivered verbatim, but pasting it into
+    // the 1Password app flattens it, so warn after the place and link and name the verbatim
+    // store. A key with no `file` is stored as a variable: no warning.
+    let warning = fleet.products[&product].keys[&key]
+        .file
+        .is_some()
+        .then(|| file_warning(&label, env_name));
     if json {
-        let doc = serde_json::json!({
+        let mut doc = serde_json::json!({
             "schema_version": crate::json::SCHEMA_VERSION,
             "environment": env_name,
             "product": Some(&product.to_string()),
@@ -119,15 +137,18 @@ pub fn run_as(
             "field": key,
             "open_url": url,
         });
+        if let Some(warning) = &warning {
+            doc["warning"] = serde_json::json!(warning);
+        }
         return writeln!(out, "{doc}").map_err(write_err);
     }
     let place = format!("section {product}, field {key}");
     let mut line = |s: String| writeln!(out, "{s}").map_err(write_err);
-    line(format!(
-        "{} in {env_name}: {place}",
-        key_label(&product, &key)
-    ))?;
+    line(format!("{label} in {env_name}: {place}"))?;
     line(format!("open: {url}"))?;
+    if let Some(warning) = warning {
+        line(warning)?;
+    }
     let Some(o) = opener else {
         return line("no desktop to open it on here: open the link above yourself".into());
     };
@@ -345,5 +366,89 @@ mod tests {
         .unwrap_err();
         // A person picks the environment (R23): never the first one named for them (X2).
         assert_eq!(e.code_str(), "choice_required");
+    }
+
+    /// The fixture fleet plus one file key, declared for prod.
+    fn file_fleet() -> Fleet {
+        fleet_with(
+            "[products.allumata.keys.PRIVATE_KEY]\nkind = \"secret\"\n\
+             environments = [\"prod\"]\nfile = \"tls/private-key\"\n",
+        )
+    }
+
+    /// A file key's value is delivered verbatim, so its open warns that the 1Password app's
+    /// paste flattens it and names the verbatim store (#217).
+    #[test]
+    fn a_file_key_open_warns_and_names_from_file() {
+        let r = FakeRunner::new(std::iter::once(Output::success(WHOAMI.to_vec())));
+        let mut out = Vec::new();
+        run(
+            &file_fleet(),
+            "allumata/PRIVATE_KEY",
+            Some("prod"),
+            None,
+            &r,
+            &mut out,
+        )
+        .unwrap();
+        assert!(
+            text_of(&out).contains(
+                "pasting into the 1Password app turns line breaks into spaces and drops a \
+                 trailing newline; store it exactly with opv set allumata/PRIVATE_KEY --env \
+                 prod --from-file <PATH>"
+            ),
+            "{}",
+            text_of(&out)
+        );
+    }
+
+    /// A key with no `file` is stored as a variable: its open carries no paste warning.
+    #[test]
+    fn a_non_file_key_open_prints_no_file_warning() {
+        let (out, _) = open_out(None, vec![]);
+        assert!(!out.contains("--from-file"), "{out}");
+    }
+
+    /// The JSON document carries the file warning too, as a `warning` string field.
+    #[test]
+    fn a_file_key_open_json_carries_the_warning() {
+        let r = FakeRunner::new(std::iter::once(Output::success(WHOAMI.to_vec())));
+        let mut out = Vec::new();
+        run_as(
+            &file_fleet(),
+            "allumata/PRIVATE_KEY",
+            Some("prod"),
+            None,
+            &r,
+            &mut out,
+            true,
+        )
+        .unwrap();
+        let doc: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert!(
+            doc["warning"]
+                .as_str()
+                .is_some_and(|w| w.contains("--from-file <PATH>")),
+            "{doc}"
+        );
+    }
+
+    /// A non-file key's JSON document has no `warning` field (only file keys gain one).
+    #[test]
+    fn a_non_file_key_open_json_has_no_warning() {
+        let r = FakeRunner::new(std::iter::once(Output::success(WHOAMI.to_vec())));
+        let mut out = Vec::new();
+        run_as(
+            &fleet(),
+            "allumata/OPENAI_API_KEY",
+            Some("prod"),
+            None,
+            &r,
+            &mut out,
+            true,
+        )
+        .unwrap();
+        let doc: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert!(doc.get("warning").is_none(), "{doc}");
     }
 }

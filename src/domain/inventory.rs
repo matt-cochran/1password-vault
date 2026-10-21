@@ -555,10 +555,12 @@ fn next_for_key(fleet: &Fleet, document: &Inventory, row: &KeyRow) -> Option<Key
         .filter(|c| c.product == row.product && c.key == row.key)
     {
         let candidate = match &cell.state {
-            ValueState::Absent if !cell.personal => Some((2, enter_value(cell))),
-            ValueState::Empty if !cell.personal => Some((3, enter_value(cell))),
-            ValueState::Placeholder if !cell.personal => Some((4, enter_value(cell))),
-            ValueState::Malformed { .. } if !cell.personal => Some((5, enter_value(cell))),
+            ValueState::Absent if !cell.personal => Some((2, enter_value(document, cell))),
+            ValueState::Empty if !cell.personal => Some((3, enter_value(document, cell))),
+            ValueState::Placeholder if !cell.personal => Some((4, enter_value(document, cell))),
+            ValueState::Malformed { .. } if !cell.personal => {
+                Some((5, enter_value(document, cell)))
+            }
             // #174: any cell whose delivery is missing or stale needs `opv sync`, whether
             // or not this session can read its value (CI can). A `not_wanted` key is never
             // delivered here, so it never asks for a sync.
@@ -576,16 +578,33 @@ fn next_for_key(fleet: &Fleet, document: &Inventory, row: &KeyRow) -> Option<Key
 
 /// The person's `opv set` for a cell whose value must be entered (a shared key at its
 /// source, FR-45).
-fn enter_value(cell: &Cell) -> KeyNext {
-    let label = cell
-        .from
-        .clone()
-        .unwrap_or_else(|| format!("{}/{}", cell.product, cell.key));
+fn enter_value(inventory: &Inventory, cell: &Cell) -> KeyNext {
     KeyNext {
         kind: NextKind::EnterValue,
         actor: NextActor::Person,
-        command: Some(format!("opv set {label} --env {}", cell.env)),
+        command: Some(set_command(inventory, cell)),
     }
+}
+
+/// The person's `opv set` command for a cell whose value must be entered: at the key's own
+/// field, or at a shared key's source (FR-45). A key declared with `file = "..."` (#217)
+/// gets `--from-file <PATH>`, the placeholder `opv set` reads the value from.
+pub fn set_command(inventory: &Inventory, cell: &Cell) -> String {
+    let (product, key) = cell
+        .from
+        .as_deref()
+        .and_then(|from| from.split_once('/'))
+        .unwrap_or((cell.product.as_str(), cell.key.as_str()));
+    let from_file = if inventory
+        .keys
+        .iter()
+        .any(|row| row.product == product && row.key == key && row.file.is_some())
+    {
+        " --from-file <PATH>"
+    } else {
+        ""
+    };
+    format!("opv set {product}/{key} --env {}{from_file}", cell.env)
 }
 
 /// `opv sync <env>` for a `set` cell whose delivery is missing or stale, when it has a

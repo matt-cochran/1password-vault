@@ -4,9 +4,9 @@ description: >-
   Linux runner. Pin `version` to the release you tested.
 inputs:
   version:
-    description: The opv release tag to install, for example v0.14.1.
+    description: The opv release tag to install, for example v0.15.0.
     required: false
-    default: v0.14.1
+    default: v0.15.0
 runs:
   using: composite
   steps:

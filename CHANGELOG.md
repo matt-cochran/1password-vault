@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-21
+
+0.15.0 lets a person store a file key's exact bytes.
+
+### Added
+
+- **`opv set <[p/]KEY> --env <env> --from-file <PATH>` (#217).** For a key declared with `file`, opv reads a regular file's exact bytes (line breaks and a trailing newline kept) and checks them with the verbatim rules. It refuses a symbolic link, a non-regular file, a file over 64 KiB and non-UTF-8 bytes (`input_invalid`); a key without `file` is a usage error, and the person uses plain `opv set` (`usage`). Only a person in their own terminal may run it: an assistant and a non-TTY process are refused. A file other users can read is written, then warned about (`warnings` in `--json`); the file stays on disk.
+- **The absent-file-key guidance names the verbatim store.** `opv next`, `opv inventory` and the `opv_next` MCP tool suggest `opv set <[p/]KEY> --env <env> --from-file <PATH>` for an absent file key, instead of the masked entry that would flatten it.
+- **`opv open` warns on a file key.** Pasting the value into the 1Password app turns line breaks into spaces and drops a trailing newline, so `opv open` says so and names the verbatim store (`warning` in `--json`).
+
+### Internal
+
+- The e2e coverage check reads labelled JSON sections, so `target_drift` counts as reached (it was listed as unreachable).
+- opv-sim e2e scenarios for `--from-file` run the real binary in a pseudo-terminal on Unix, and for the file-key guidance.
+
 ## [0.14.1] - 2026-10-21
 
 0.14.1 fixes four defects found by #136's live verification against real 1Password, Fly and Kubernetes.
@@ -697,7 +712,8 @@ Local development without a deployment target. Two deprecated forms are removed,
 - `secretctl` renamed to `opv` ([#4](https://github.com/matt-cochran/1password-vault/pull/4)).
 - Gitflow guard, CI on `dev`/`staging`/`main`, and Dependabot targeting `dev` ([#5](https://github.com/matt-cochran/1password-vault/pull/5)).
 
-[Unreleased]: https://github.com/matt-cochran/1password-vault/compare/v0.14.1...HEAD
+[Unreleased]: https://github.com/matt-cochran/1password-vault/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/matt-cochran/1password-vault/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/matt-cochran/1password-vault/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/matt-cochran/1password-vault/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/matt-cochran/1password-vault/compare/v0.12.3...v0.13.0

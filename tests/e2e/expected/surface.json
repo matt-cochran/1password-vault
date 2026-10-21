@@ -457,6 +457,7 @@
       ],
       "flags": [
         "env",
+        "from-file",
         "json"
       ],
       "name": "set"

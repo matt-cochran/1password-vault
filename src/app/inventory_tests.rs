@@ -437,6 +437,31 @@ fn an_empty_cell_in_a_writable_vault_is_the_persons_set_command() {
     );
 }
 
+/// A file key with no value is the person's `opv set ... --from-file <PATH>`.
+#[test]
+fn an_absent_file_key_is_the_persons_set_from_file_command() {
+    use crate::domain::inventory::{CellInputs, build};
+    use crate::domain::value_state::ValueState;
+    let fleet = marker_fleet("idev", true);
+    let at = |key: &str| ("api".to_string(), key.to_string(), "dev".to_string());
+    let cells = CellInputs {
+        states: std::collections::BTreeMap::from([
+            (at("PLAIN_KEY"), ValueState::Set),
+            (at("SIGNING_KEY"), ValueState::Set),
+            (at("TLS_KEY"), ValueState::Absent),
+        ]),
+        capabilities: std::collections::BTreeMap::from([(
+            VAULT.to_string(),
+            crate::domain::capability::Capability::Write,
+        )]),
+        ..CellInputs::default()
+    };
+    assert_eq!(
+        super::next_command(&build(&fleet, &cells, None)),
+        Some("opv set api/TLS_KEY --env dev --from-file <PATH>".to_string())
+    );
+}
+
 // --- #174: where each key lives in 1Password, and the compact text markers ---------------
 
 /// The JSON document `opv inventory --json` renders for `op` and `fleet`.

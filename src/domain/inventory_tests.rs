@@ -404,6 +404,25 @@ fn row_next(inventory: &super::Inventory, product: &str, key: &str) -> serde_jso
     serde_json::to_value(row).expect("the row serializes")["next"].clone()
 }
 
+/// A file key with no value asks the person to set it from the file (`--from-file`).
+#[test]
+fn an_absent_file_key_row_carries_the_persons_set_from_file_command() {
+    let fleet = fleet_with_key_attributes(r#"file = "tls/private-key""#);
+    let cells = CellInputs {
+        states: BTreeMap::from([(at("api", "API_KEY", "dev"), ValueState::Absent)]),
+        capabilities: BTreeMap::from([("vdev".to_string(), Capability::Write)]),
+        ..CellInputs::default()
+    };
+    assert_eq!(
+        row_next(&build(&fleet, &cells, None), "api", "API_KEY"),
+        serde_json::json!({
+            "kind": "enter_value",
+            "actor": "person",
+            "command": "opv set api/API_KEY --env dev --from-file <PATH>"
+        })
+    );
+}
+
 /// A `set` key with `delivery` in `dev`, as the key row reports its next step.
 fn next_with_delivery(delivery: DeliveryState) -> serde_json::Value {
     let (fleet, mut inventory) = inventory_with_cell(ValueState::Set);
