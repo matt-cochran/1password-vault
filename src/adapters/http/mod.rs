@@ -4,5 +4,6 @@
 //! plain types ([`model`]) before any call is made. The gRPC-Web codec, the `Store` and the
 //! catalog mappings are later lanes; nothing here is in [`crate::adapters::registry`].
 
+pub mod config;
 pub mod descriptor;
 pub mod model;
