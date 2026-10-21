@@ -31,7 +31,11 @@ prompts or in the 1Password app; ask before anything that writes (the schema's
 on message text.
 
 If the user pastes a value into the chat, stop, do not repeat it, treat it as exposed, and
-tell them to run `opv set <KEY> --env <env>` instead. Never accept a value in text.
+tell them to run `opv set <KEY> --env <env>` instead. Never accept a value in text. A key
+declared with `file = "<path>"` is filled from a file instead: the person runs
+`opv set <KEY> --env <env> --from-file <PATH>` in their own terminal, so its line breaks
+and trailing newline survive. You never read that file, never write it and never keep a
+copy of what is in it.
 
 ## The assistant proposes; a person applies; CI delivers
 
@@ -41,10 +45,11 @@ action, `opv_explain` explains a key or plan, and `opv_propose` prepares a chang
 the contract diff and a plan whose every step names its actor and a `plan_id`, and writes
 nothing. `opv_import_local` is the only writer, and only into an environment of tier `local`.
 A person runs `opv apply <plan_id>` in their own terminal (never run it yourself) to run the
-plan; `opv set <KEY> --env <env>` enters one value and `opv import <env> --from
-<file|target:NAME>` imports a file or a target. CI runs `opv sync`. Every document carries a
-typed `next` {kind, actor, command}: act only when `actor` is `assistant`, and hand an
-`actor: person` command to the user verbatim and wait. `stale_plan`: propose again.
+plan; `opv set <KEY> --env <env>` enters one value (a file key's person adds `--from-file
+<PATH>`) and `opv import <env> --from <file|target:NAME>` imports a file or a target.
+CI runs `opv sync`. Every document carries a typed `next` {kind, actor, command}: act
+only when `actor` is `assistant`, and hand an `actor: person` command to the user
+verbatim and wait. `stale_plan`: propose again.
 `own_session_required`: the user restarts the server without `op` session, service account or
 Connect credentials. If a tool is missing in this version, say so; use `opv propose` and a
 person's `opv apply` on the CLI instead and never work around it. Details: `opv guide agent`,
@@ -55,9 +60,9 @@ every environment, is written out step by step in the [MCP
 walkthrough](mcp.md#walkthrough-from-no-configuration-to-every-environment-ready). In
 outline: `opv_state` `needs` shows the names the code reads; `opv_propose` `setup`, `env`,
 `key`, `target` and `structure` return diffs and a `plan_id`; the user runs `opv apply
-<plan_id>` in their terminal and enters values with `opv set` or in 1Password; you re-read
-`opv_next` (or `opv_state` `ready`) after each step until CI can run `opv sync` and `opv
-ready --gate`. You never handle a value.
+<plan_id>` in their terminal and enters values with `opv set` (a file key's with
+`--from-file`) or in 1Password; you re-read `opv_next` (or `opv_state` `ready`) after each
+step until CI can run `opv sync` and `opv ready --gate`. You never handle a value.
 
 ## CLI or MCP
 
@@ -172,7 +177,9 @@ A `pending_revoke` finding means an old identity still reads the vault: once
   then `opv apply`.
 - **`key_missing`, `key_empty`, `key_failed_rule`**: the user fills or fixes the value in
   1Password; give them the finding's `prerequisite` (`opv open <key> --env <env>`), or they
-  run `opv set <KEY> --env <env>` at a masked prompt. Values that already exist elsewhere:
+  run `opv set <KEY> --env <env>` at a masked prompt. A file key (`file = "<path>"`) is the
+  person's `opv set <KEY> --env <env> --from-file <PATH>`, from a file they already hold:
+  hand it over and never read that file. Values that already exist elsewhere:
   the user runs `opv import <env> --from <file.env>`; `--dry-run` shows what would come in;
   `--replace` is the user's decision.
 - **Everything saved**: local runs use `opv run <env> --product <p> -- <command>`; deploys go

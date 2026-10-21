@@ -30,7 +30,7 @@ deliver with CI or your own terminal. The grouping is who runs a command.
 | propose | `opv propose --intent <file.json>` | anyone | the categorical intent document, the same as MCP `opv_propose`; its `extend` kind adds an environment to every explicit-list key ([below](#extend-an-environment-to-every-key-the-extend-intent)) |
 | propose | any `opv propose …` with `--write` | anyone (CLI only) | also writes the contract diff into the repository's contract file. Without `--write`, and always over MCP, a proposal writes nothing |
 | apply | `opv apply [<plan_id>] [--project <p>] [--attest <env>:<target>:<product/KEY>]…` | **person, in a terminal** | recompute the plan from the contract on disk and the actual state, refuse a stale `<plan_id>`, show it, confirm, and run it in one process |
-| person | `opv set <[p/]KEY> --env <e>` | **person, in a terminal** | masked entry of one value |
+| person | `opv set <[p/]KEY> --env <e> [--from-file <PATH>]` | **person, in a terminal** | masked entry of one value; a file key's exact bytes with `--from-file`, never a paste into the app |
 | person | `opv import <env> --from <file.env \| target:NAME> [--replace <p/KEY>]… [--rotate <p/KEY>]… [--skip <p/KEY>]… [--dry-run] [--confirm <env>]` | **person** | write-only import: per key `imported`, `skipped: already set` or `skipped: empty`; never "differs" |
 | person | `opv open <[p/]KEY> [--env <e>] [--print] [--json]` | person | the key's item in 1Password, where a value is typed |
 | person | `opv run <env> [--product <p>] [--role <r>] [--preview] [--remote <profile>] [--confirm <env>] -- <cmd>` | person | run with the keys injected; `op run` masks exact values |
@@ -420,7 +420,7 @@ It reads only the configuration (when that is a manifest, the manifest itself): 
 
 ## Local development: `opv run`
 
-Before a local run, `opv inventory --env <env> [--product <p>]` shows each key's value state in that environment, by name, without contacting a deployment target ([the inventory](#the-inventory-opv-inventory)); its last line is the `opv set` command for the first key with no value.
+Before a local run, `opv inventory --env <env> [--product <p>]` shows each key's value state in that environment, by name, without contacting a deployment target ([the inventory](#the-inventory-opv-inventory)); its last line is the `opv set` command for the first key with no value, naming `--from-file <PATH>` when that key is a file key.
 
 ```text
 $ opv inventory --env dev --product api
@@ -596,10 +596,10 @@ web/TLS_PRIVATE_KEY@  absent/R
 prod[production]: core=vPRD.../iPRD...
 delivery api/OPENAI_API_KEY: delivered=prod/web stale=prod/p-overflow
 delivery api/SIGNING_KEY: attested=prod/web
-next: opv set web/TLS_PRIVATE_KEY --env prod
+next: opv set web/TLS_PRIVATE_KEY --env prod --from-file <PATH>
 ```
 
-Below the matrix, one line per environment names its boundaries' vault and item ids (or `unbound`); one `delivery <product>/<KEY>:` line per key that a target delivers groups that key's targets by delivery state; and `next: opv set <product>/<KEY> --env <env>` names the first wanted key with no value. The delivery state of a key's name on one target (`<env>/<target>`) comes from that placement's evidence line for the name, never from a value:
+Below the matrix, one line per environment names its boundaries' vault and item ids (or `unbound`); one `delivery <product>/<KEY>:` line per key that a target delivers groups that key's targets by delivery state; and `next: opv set <product>/<KEY> --env <env>` names the first wanted key with no value (a file key gets `--from-file <PATH>`, the placeholder to replace with the file's path). The delivery state of a key's name on one target (`<env>/<target>`) comes from that placement's evidence line for the name, never from a value:
 
 | Delivery state | Meaning |
 |---|---|
@@ -647,7 +647,7 @@ coverage: 1 files · python · 0 skipped patterns
 
 ## One action: `opv next`
 
-`opv next [--json]` reads what `opv inventory` reads (every environment) and prints one action this session can take, chosen by a fixed priority: bind an unbound boundary (`opv apply`); then fill a key that is `absent`, `empty`, `placeholder` or `malformed`, in that order (`opv set <product>/<KEY> --env <env>`); then sync a `set` key whose delivery is not current (`opv sync <env>`, for CI on a shared or production tier, else for you). A key that no target of its environment delivers has nothing to sync, so it never asks for `opv sync`. The text is `next: <command>` (or `next: none`), then `then:` with the rest of this session's queue, then `waiting on others:` with the actions on vaults this session cannot write, grouped by vault id, then `findings:` (`single_writer`: a deployed vault with one writer). `--json` carries the same as `next` (`{kind, actor, command}`), `queue`, `waits_on` (`vault`, `actions`) and `findings`; each action names its `product`, `key`, `env` and `vault`. Read-only, names and commands only; the same state gives the same bytes.
+`opv next [--json]` reads what `opv inventory` reads (every environment) and prints one action this session can take, chosen by a fixed priority: bind an unbound boundary (`opv apply`); then fill a key that is `absent`, `empty`, `placeholder` or `malformed`, in that order (`opv set <product>/<KEY> --env <env>`, with `--from-file <PATH>` when the key is declared with `file`); then sync a `set` key whose delivery is not current (`opv sync <env>`, for CI on a shared or production tier, else for you). A key that no target of its environment delivers has nothing to sync, so it never asks for `opv sync`. The text is `next: <command>` (or `next: none`), then `then:` with the rest of this session's queue, then `waiting on others:` with the actions on vaults this session cannot write, grouped by vault id, then `findings:` (`single_writer`: a deployed vault with one writer). `--json` carries the same as `next` (`{kind, actor, command}`), `queue`, `waits_on` (`vault`, `actions`) and `findings`; each action names its `product`, `key`, `env` and `vault`. Read-only, names and commands only; the same state gives the same bytes.
 
 ## Changing the configuration: `opv propose` and `opv apply`
 
@@ -722,6 +722,14 @@ It adds `env` to every key of `product` (or, without `product`, of the whole pro
 ## Writing values: `opv set` and `opv import`
 
 Values are typed by a person, never proposed. `opv set <[p/]KEY> --env <e>` prompts for one value with masked entry and writes it to the key's field; it refuses a non-TTY and agent mode with a typed `next` (`kind: enter_value`, `actor: person`).
+
+A key declared with `file = "<path>"` is filled from a file instead, so its bytes are stored exactly:
+
+```sh
+opv set web/TLS_PRIVATE_KEY --env prod --from-file key.pem
+```
+
+`--from-file <PATH>` reads the file's own bytes, line breaks and trailing newline included. Only a file key is accepted: a key without `file` is refused and handed the masked form above. opv reads a regular file and nothing else, so a symbolic link (the file itself is read, never what a link points to), anything that is not a regular file, a file larger than 64 KiB, or text that is not UTF-8 is refused, naming the path and what is wrong with it; a file other users on the machine can read is still written, with a warning to `chmod 600` or delete it. The bytes are the value verbatim, so the line-shape rules, a declared `transform` and the value-shape rules (`regex`, `enum`, `base64_bytes`) do not apply, while the prefix rules, `nonempty`, `max_len` and `refuse_in` still do; an empty file writes nothing, like an empty entry. It prints the key's new value state as `opv set` does, needs your own interactive terminal, and deletes nothing: the file stays on disk until you remove it. Pasting a multi-line value into the 1Password app is the one path to avoid there — the app turns line breaks into spaces and drops a trailing newline — so `opv open` on a file key prints that warning with the `--from-file` command, and `opv next` names it for a file key that has no value ([security](security.md#filling-a-file-key-opv-set---from-file)).
 
 `opv import <env> --from <file.env|target:NAME>` is write-only: for each key it reports `imported`, `skipped: already set` or `skipped: empty`, and it never reports that a value differs. A set field is overwritten only when you name it with `--replace <p/KEY>`, an immutable key also needs `--rotate <p/KEY>`, and `--skip <p/KEY>` leaves a key out. `--dry-run` changes nothing; without it, values go from the file to 1Password, and the item is read back and checked. Writing into an environment with `confirm_env = true` or `tier = "production"` needs `--confirm <env>` (the environment's name again), as `opv sync` does; a `--confirm` naming another environment is refused. It needs your own session and never syncs, deploys, prunes or deletes the source.
 

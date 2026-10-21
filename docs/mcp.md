@@ -92,7 +92,8 @@ and every document carries a typed `next`: `{kind, actor, command}`.
    person's `opv import`.
 3. **A person applies.** `opv apply <plan_id>` shows the plan once and runs it in one
    process: structure, generated values, bindings and masked entry. `opv set <KEY> --env
-   <env>` enters one value at a masked prompt, and `opv import <env> --from
+   <env>` enters one value at a masked prompt (`--from-file <PATH>` for a key declared with
+   `file`, so its bytes are stored exactly), and `opv import <env> --from
    <file|target:NAME>` imports a file or a target into a deployed tier. These run in the
    person's own terminal.
 4. **CI delivers.** `opv changed`, `opv sync`, `opv ready --gate` and `opv needs --gate`
@@ -150,11 +151,14 @@ actor, and what the assistant reports back. No step ever handles a value.
 8. **Assistant — `opv_state` `inventory` (`env: prod`).** The matrix names the one value only
    the person can provide as `empty` with capability `write`. Each key row also carries its
    per-target `delivery` state (`delivered`, `attested`, `supplied`, `stale`, `not_delivered`,
-   `unreadable`) and its own `next` `{kind, actor, command}`, so the assistant reports that
-   key's next step rather than guessing.
-9. **Person — `opv set <KEY> --env prod`, or the 1Password app.** The assistant hands over
-   the typed `next` command or the finding's `prerequisite` verbatim and waits; it never sees
-   the value.
+   `unreadable`) and its own `next` `{kind, actor, command}` (a file key's command names
+   `--from-file <PATH>`), so the assistant reports that key's next step rather than guessing.
+9. **Person — `opv set <KEY> --env prod`, or the 1Password app.** A key declared with
+   `file = "<path>"` is the same command with `--from-file <PATH>`: the person points it at
+   their own file, which opv reads and leaves on disk, rather than pasting the value into
+   the app, which turns its line breaks into spaces and drops a trailing newline. The
+   assistant hands over the typed `next` command or the finding's `prerequisite` verbatim
+   and waits; it never sees the value and never reads that file.
 10. **CI — `opv sync prod --confirm prod`.** CI delivers the values; the assistant never runs
     a sync. An infrastructure key (`source = "infrastructure"`) has no field for anyone to
     fill: only the deploy job supplies it with `opv sync <env> --supply-stdin`, which refuses
