@@ -22,7 +22,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::domain::capability::Capability;
-use crate::domain::inventory::Inventory;
+use crate::domain::inventory::{Inventory, set_command};
 use crate::domain::model::Tier;
 use crate::domain::value_state::ValueState;
 use crate::json::{NextActor, NextKind};
@@ -203,7 +203,7 @@ pub fn next(inv: &Inventory, signals: &Signals) -> NextDoc {
                 Action {
                     kind: NextKind::EnterValue,
                     actor: NextActor::Person,
-                    command: format!("opv set {product}/{key} --env {}", cell.env),
+                    command: set_command(inv, cell),
                     product: Some(product.to_string()),
                     key: Some(key.to_string()),
                     env: Some(cell.env.clone()),

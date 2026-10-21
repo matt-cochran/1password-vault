@@ -8,6 +8,7 @@ mod scenarios {
     pub mod assistant;
     pub mod changed;
     pub mod consistency;
+    pub mod file_key_guidance;
     pub mod fixes_0141;
     pub mod infrastructure_values;
     pub mod issue_159;
@@ -15,5 +16,6 @@ mod scenarios {
     pub mod k8s_files;
     pub mod live_audit;
     pub mod session_reuse;
+    pub mod set_from_file;
     pub mod wiring;
 }

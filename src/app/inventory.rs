@@ -763,13 +763,7 @@ fn next_command(document: &Inventory) -> Option<String> {
         .filter_map(|cell| rank(cell).map(|r| (r, cell)))
         // `min_by_key` keeps the first of equal ranks: the inventory's stable order.
         .min_by_key(|(r, _)| *r)
-        .map(|(_, cell)| {
-            let label = cell
-                .from
-                .clone()
-                .unwrap_or_else(|| format!("{}/{}", cell.product, cell.key));
-            format!("opv set {label} --env {}", cell.env)
-        })
+        .map(|(_, cell)| inventory::set_command(document, cell))
 }
 
 fn state_word(state: &ValueState) -> String {

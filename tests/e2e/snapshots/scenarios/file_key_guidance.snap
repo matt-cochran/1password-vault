@@ -1,0 +1,79 @@
+# file_key_guidance: the file-key guidance through the real binary
+
+## opv next dev text exit: 0
+## opv next dev text stdout
+next: opv set web/API_KEY --env dev
+then:
+  opv set web/TLS_CERTIFICATE --env dev --from-file <PATH>
+findings:
+  single_writer: vault vE2EWEBDEV0000000000000001 (environment dev) has only one writer; a deployed tier needs a second writer to fix a value when the first is unavailable
+
+## opv next dev text stderr
+using <SCENARIO>/project/secrets.toml
+
+## opv next dev --json exit: 0
+## opv next dev --json stdout
+{"schema_version":3,"ok":true,"queue":[{"kind":"enter_value","actor":"person","command":"opv set web/TLS_CERTIFICATE --env dev --from-file <PATH>","product":"web","key":"TLS_CERTIFICATE","env":"dev","vault":"vE2EWEBDEV0000000000000001"}],"waits_on":[],"findings":[{"code":"single_writer","env":"dev","vault":"vE2EWEBDEV0000000000000001","message":"vault vE2EWEBDEV0000000000000001 (environment dev) has only one writer; a deployed tier needs a second writer to fix a value when the first is unavailable"}],"next":{"kind":"enter_value","actor":"person","command":"opv set web/API_KEY --env dev"},"do":null}
+
+## opv next dev --json stderr
+using <SCENARIO>/project/secrets.toml
+
+## opv inventory dev text exit: 0
+## opv inventory dev text stdout
+key                   dev[shared]
+shared/DATABASE_URL   unreadable(no_access)/-
+shared/FEATURE_FLAGS  unreadable(no_access)/-
+web/API_KEY           absent/W
+web/DATABASE_URL      unreadable(no_access)/-
+web/LOG_LEVEL         set/W
+web/MIGRATION_TOKEN   set/W
+web/OTEL_RESOURCE@    -
+web/PERSONAL_LLM_KEY  unreadable(no_access)/-
+web/SESSION_SECRET    set/W
+web/TLS_CERTIFICATE@  absent/W
+web/TLS_PRIVATE_KEY@  set/W
+dev[shared]: shared=vE2ESHAREDDEV00000000000001/iE2ESHAREDDEV00000000000001 web=vE2EWEBDEV0000000000000001/iE2EWEBDEV0000000000000001
+next: opv set web/API_KEY --env dev
+
+## opv inventory dev text stderr
+using <SCENARIO>/project/secrets.toml
+
+## opv inventory dev --json exit: 0
+## opv inventory dev --json stdout
+{"schema_version":3,"ok":true,"environments":[{"env":"dev","tier":"shared","boundaries":{"shared":{"vault_id":"vE2ESHAREDDEV00000000000001","item_id":"iE2ESHAREDDEV00000000000001"},"web":{"vault_id":"vE2EWEBDEV0000000000000001","item_id":"iE2EWEBDEV0000000000000001"}}}],"keys":[{"product":"shared","key":"DATABASE_URL","kind":"secret","source":null,"presence":{"dev":"present"},"lifecycle":"active","expires":null,"guidance":"the one connection string the fleet reads","next":null,"location":{"section":"shared","field":"DATABASE_URL","link":"op://vE2ESHAREDDEV00000000000001/iE2ESHAREDDEV00000000000001"}},{"product":"shared","key":"FEATURE_FLAGS","kind":"config","source":null,"presence":{"dev":"present"},"lifecycle":"active","expires":null,"rules":["enum"],"next":null,"location":{"section":"shared","field":"FEATURE_FLAGS","link":"op://vE2ESHAREDDEV00000000000001/iE2ESHAREDDEV00000000000001"}},{"product":"web","key":"API_KEY","kind":"secret","source":null,"presence":{"dev":"present"},"lifecycle":"active","expires":null,"guidance":"the service's own API key","next":{"kind":"enter_value","actor":"person","command":"opv set web/API_KEY --env dev"},"location":{"section":"web","field":"API_KEY","link":"op://vE2EWEBDEV0000000000000001/iE2EWEBDEV0000000000000001"}},{"product":"web","key":"DATABASE_URL","kind":"secret","source":null,"presence":{"dev":"present"},"lifecycle":"active","expires":null,"next":null,"location":{"section":"shared","field":"DATABASE_URL","link":"op://vE2ESHAREDDEV00000000000001/iE2ESHAREDDEV00000000000001"}},{"product":"web","key":"LOG_LEVEL","kind":"config","source":null,"presence":{"dev":"present"},"lifecycle":"active","expires":null,"rules":["enum"],"next":null,"location":{"section":"web","field":"LOG_LEVEL","link":"op://vE2EWEBDEV0000000000000001/iE2EWEBDEV0000000000000001"}},{"product":"web","key":"MIGRATION_TOKEN","kind":"secret","source":null,"presence":{"dev":"present"},"lifecycle":"active","expires":null,"roles":["migrate"],"next":null,"location":{"section":"web","field":"MIGRATION_TOKEN","link":"op://vE2EWEBDEV0000000000000001/iE2EWEBDEV0000000000000001"}},{"product":"web","key":"OTEL_RESOURCE","kind":"config","source":null,"presence":{"dev":"absent"},"lifecycle":"active","expires":null,"file":"otel/resource","next":null},{"product":"web","key":"PERSONAL_LLM_KEY","kind":"secret","source":null,"presence":{"dev":"present"},"lifecycle":"active","expires":null,"guidance":"your own key, billed to you","next":null,"location":{"section":"web","field":"PERSONAL_LLM_KEY","link":"op://vE2EPRIVATE000000000000001/iE2EPERSONAL00000000000001"}},{"product":"web","key":"SESSION_SECRET","kind":"secret","source":null,"presence":{"dev":"present"},"lifecycle":"active","expires":null,"roles":["serve"],"next":null,"location":{"section":"web","field":"SESSION_SECRET","link":"op://vE2EWEBDEV0000000000000001/iE2EWEBDEV0000000000000001"}},{"product":"web","key":"TLS_CERTIFICATE","kind":"secret","source":null,"presence":{"dev":"present"},"lifecycle":"active","expires":null,"file":"tls/certificate","next":{"kind":"enter_value","actor":"person","command":"opv set web/TLS_CERTIFICATE --env dev --from-file <PATH>"},"location":{"section":"web","field":"TLS_CERTIFICATE","link":"op://vE2EWEBDEV0000000000000001/iE2EWEBDEV0000000000000001"}},{"product":"web","key":"TLS_PRIVATE_KEY","kind":"secret","source":null,"presence":{"dev":"present"},"lifecycle":"active","expires":null,"file":"tls/private-key","next":null,"location":{"section":"web","field":"TLS_PRIVATE_KEY","link":"op://vE2EWEBDEV0000000000000001/iE2EWEBDEV0000000000000001"}}],"cells":[{"product":"shared","key":"DATABASE_URL","env":"dev","boundary":"shared","state":{"state":"unreadable","cause":"no_access"},"capability":"none","from_receipt":null},{"product":"shared","key":"FEATURE_FLAGS","env":"dev","boundary":"shared","state":{"state":"unreadable","cause":"no_access"},"capability":"none","from_receipt":null},{"product":"web","key":"API_KEY","env":"dev","boundary":"web","state":{"state":"absent"},"capability":"write","from_receipt":null},{"product":"web","key":"DATABASE_URL","env":"dev","boundary":"shared","state":{"state":"unreadable","cause":"no_access"},"capability":"none","from_receipt":null,"from":"shared/DATABASE_URL"},{"product":"web","key":"LOG_LEVEL","env":"dev","boundary":"web","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"web","key":"MIGRATION_TOKEN","env":"dev","boundary":"web","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"web","key":"PERSONAL_LLM_KEY","env":"dev","boundary":"web","state":{"state":"unreadable","cause":"no_access"},"capability":"none","from_receipt":null,"personal":true},{"product":"web","key":"SESSION_SECRET","env":"dev","boundary":"web","state":{"state":"set"},"capability":"write","from_receipt":null},{"product":"web","key":"TLS_CERTIFICATE","env":"dev","boundary":"web","state":{"state":"absent"},"capability":"write","from_receipt":null},{"product":"web","key":"TLS_PRIVATE_KEY","env":"dev","boundary":"web","state":{"state":"set"},"capability":"write","from_receipt":null}],"deliveries":[],"next":{"kind":"enter_value","actor":"person","command":"opv set web/API_KEY --env dev"},"do":null}
+
+## opv inventory dev --json stderr
+using <SCENARIO>/project/secrets.toml
+
+## opv open web/TLS_CERTIFICATE text exit: 0
+## opv open web/TLS_CERTIFICATE text stdout
+web/TLS_CERTIFICATE in dev: section web, field TLS_CERTIFICATE
+open: https://start.1password.com/open/i?a=AE2EDEVACCOUNT000000000001&v=vE2EWEBDEV0000000000000001&i=iE2EWEBDEV0000000000000001&h=e2e.1password.com
+pasting into the 1Password app turns line breaks into spaces and drops a trailing newline; store it exactly with opv set web/TLS_CERTIFICATE --env dev --from-file <PATH>
+no desktop to open it on here: open the link above yourself
+
+## opv open web/TLS_CERTIFICATE text stderr
+using <SCENARIO>/project/secrets.toml
+
+## opv open web/TLS_CERTIFICATE --json exit: 0
+## opv open web/TLS_CERTIFICATE --json stdout
+{"schema_version":3,"ok":true,"environment":"dev","product":"web","key":"TLS_CERTIFICATE","section":"web","field":"TLS_CERTIFICATE","open_url":"https://start.1password.com/open/i?a=AE2EDEVACCOUNT000000000001&v=vE2EWEBDEV0000000000000001&i=iE2EWEBDEV0000000000000001&h=e2e.1password.com","warning":"pasting into the 1Password app turns line breaks into spaces and drops a trailing newline; store it exactly with opv set web/TLS_CERTIFICATE --env dev --from-file <PATH>","next":{"kind":"none","actor":"person","command":null},"do":null}
+
+## opv open web/TLS_CERTIFICATE --json stderr
+using <SCENARIO>/project/secrets.toml
+
+## opv open web/API_KEY text exit: 0
+## opv open web/API_KEY text stdout
+web/API_KEY in dev: section web, field API_KEY
+open: https://start.1password.com/open/i?a=AE2EDEVACCOUNT000000000001&v=vE2EWEBDEV0000000000000001&i=iE2EWEBDEV0000000000000001&h=e2e.1password.com
+no desktop to open it on here: open the link above yourself
+
+## opv open web/API_KEY text stderr
+using <SCENARIO>/project/secrets.toml
+
+## opv open web/API_KEY --json exit: 0
+## opv open web/API_KEY --json stdout
+{"schema_version":3,"ok":true,"environment":"dev","product":"web","key":"API_KEY","section":"web","field":"API_KEY","open_url":"https://start.1password.com/open/i?a=AE2EDEVACCOUNT000000000001&v=vE2EWEBDEV0000000000000001&i=iE2EWEBDEV0000000000000001&h=e2e.1password.com","next":{"kind":"none","actor":"person","command":null},"do":null}
+
+## opv open web/API_KEY --json stderr
+using <SCENARIO>/project/secrets.toml
