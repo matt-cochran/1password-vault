@@ -131,8 +131,8 @@ fn opv_in_a_pty(s: &Scenario, args: &[String]) -> Run {
             &mut master,
             &mut slave,
             std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
         )
     };
     assert_eq!(made, 0, "openpty: {}", std::io::Error::last_os_error());
