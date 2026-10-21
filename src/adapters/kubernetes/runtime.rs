@@ -34,7 +34,7 @@ use super::{
     digest_hex, secret_name, split_secret_name, store_name, text, valid_label_value,
 };
 use crate::cause::{Cause, EnvName, Guard, OutputProblem, Refusal, StoreObject, System};
-use crate::domain::runtime::FileMount;
+use crate::domain::runtime::{CHANGED_OUTSIDE_OPV, FileMount};
 use crate::domain::{
     AccessFinding, Binding, Health, RawSpec, Revision, RuntimeChange, RuntimeSnapshot,
 };
@@ -60,6 +60,12 @@ pub const STUCK_REASONS: [&str; 4] = [
 const GENERATION_PATH: &str = "jsonpath={.metadata.generation}";
 const PODS_PATH: &str = r#"jsonpath={range .items[*]}{.metadata.name}{"\t"}{.metadata.ownerReferences[0].name}{"\t"}{range .status.initContainerStatuses[*]}{.state.waiting.reason}{" "}{end}{range .status.containerStatuses[*]}{.state.waiting.reason}{" "}{end}{"\n"}{end}"#;
 const REVISION_ANNOTATION: &str = "deployment.kubernetes.io/revision";
+/// The Deployment annotation listing, as sorted comma-separated `NAME=object` pairs, the
+/// managed env names opv's last deploy bound by reference (an env `valueFrom` or a file
+/// item) and the object each bound. Never a value (SR-1; an object's version id is
+/// random, never derived from the value, FR-38). It tells a reference opv deployed and someone later replaced or
+/// removed (drift) from a name opv never bound (pending deploy), #219.
+pub(crate) const BOUND_ANNOTATION: &str = "opv-bound";
 
 /// The operator rights opv needs, each with its fixed reason. Every one is required:
 /// `doctor` fails without it, and `sync` refuses before its first write without the ones
@@ -877,6 +883,45 @@ fn file_binding_of(
     })
 }
 
+/// Env name → object, as [`BOUND_ANNOTATION`] on `doc` records it (empty without it;
+/// malformed pairs are ignored).
+pub(crate) fn recorded_bound(doc: &Value) -> BTreeMap<String, String> {
+    doc.pointer("/metadata/annotations")
+        .and_then(|a| a.get(BOUND_ANNOTATION))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|pair| pair.trim().split_once('='))
+        .filter(|(n, o)| !n.is_empty() && !o.is_empty())
+        .map(|(n, o)| (n.to_string(), o.to_string()))
+        .collect()
+}
+
+/// Sets [`BOUND_ANNOTATION`] on `doc` to `names`, or removes it when there are none.
+fn record_bound(doc: &mut Value, names: &BTreeMap<String, String>) {
+    let Some(meta) = doc.get_mut("metadata").and_then(Value::as_object_mut) else {
+        return;
+    };
+    if names.is_empty() {
+        if let Some(notes) = meta.get_mut("annotations").and_then(Value::as_object_mut) {
+            notes.remove(BOUND_ANNOTATION);
+        }
+        return;
+    }
+    let joined = names
+        .iter()
+        .map(|(n, o)| format!("{n}={o}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    if let Some(notes) = meta
+        .entry("annotations")
+        .or_insert_with(|| Value::Object(Default::default()))
+        .as_object_mut()
+    {
+        notes.insert(BOUND_ANNOTATION.to_string(), Value::String(joined));
+    }
+}
+
 /// Replace the entry named `name` in `env`, or append it. Later duplicates of the name are
 /// dropped: Kubernetes lets the last one win, which would hide the new binding.
 fn upsert(env: &mut Vec<Value>, entry: Value) {
@@ -941,6 +986,24 @@ impl PinnedRuntime for KubeDeployment<'_> {
                 external.as_ref(),
             ) {
                 bindings.insert(name.clone(), b);
+            }
+        }
+        // A name opv's last deploy bound by reference that is now a plain value or gone was
+        // changed outside opv: drift, not a deploy opv never made (#219). A reference to
+        // another object stays `Other` (pending deploy).
+        for name in recorded_bound(&doc).into_keys() {
+            if !self.managed.contains(&name) {
+                continue;
+            }
+            if matches!(bindings.get(&name), None | Some(Binding::Plain { .. })) {
+                let store = store_name(&name);
+                bindings.insert(
+                    name,
+                    Binding::Pinned {
+                        store_name: store,
+                        version: CHANGED_OUTSIDE_OPV.to_string(),
+                    },
+                );
             }
         }
         // The revision is the generation the current spec produced (`apply` returns the
@@ -1025,6 +1088,15 @@ impl PinnedRuntime for KubeDeployment<'_> {
         if let Some(o) = doc.as_object_mut() {
             o.remove("status");
         }
+        // The names opv binds by reference after this deploy (#219): those it binds now,
+        // and those an earlier deploy bound that this one neither unbinds nor sets plain.
+        let bound: BTreeMap<String, String> = recorded_bound(&snapshot.spec.0)
+            .into_iter()
+            .filter(|(n, _)| !change.unbind.contains(n) && !change.set.contains_key(n))
+            .chain(secrets.iter().map(|(n, o)| (n.clone(), o.clone())))
+            .filter(|(n, _)| self.managed.contains(n))
+            .collect();
+        record_bound(&mut doc, &bound);
         // opv's provenance stamp on the Deployment (FR-42), beside any other annotation.
         if let Some(stamp) = &change.stamp
             && let Some(meta) = doc.get_mut("metadata").and_then(Value::as_object_mut)
@@ -1153,6 +1225,9 @@ impl PinnedRuntime for KubeDeployment<'_> {
     /// Through an ExternalSecret, a ConfigMap or a mounted file (design §6.7); a Secret
     /// bound as env is one hop, so it has no chain.
     fn chain(&self, name: &str, version: &str) -> Option<String> {
+        if version == CHANGED_OUTSIDE_OPV {
+            return None;
+        }
         let file = self
             .file_of(name)
             .map(|(dir, f)| format!("file {}/{}", files::render_dir(dir, &f.product), f.path));
@@ -1392,6 +1467,72 @@ mod tests {
         }))]);
         let snap = with_rt(&r, |rt| rt.bindings()).unwrap();
         assert!(!snap.bindings.contains_key("UNMANAGED"));
+    }
+
+    const DB_URL_BOUND: &str = "FLEET__API__DB_URL=opv-fleet--api--db-url-q3vz7kd2mx";
+
+    /// #219: the Deployment with `opv-bound` naming `names`, its env edited by `f`.
+    fn recorded(names: &str, f: impl FnOnce(&mut Vec<Value>)) -> RuntimeSnapshot {
+        let r = FakeRunner::new([json(&deployment_with(|d| {
+            d["metadata"]["annotations"][BOUND_ANNOTATION] = json!(names);
+            f(d["spec"]["template"]["spec"]["containers"][0]["env"]
+                .as_array_mut()
+                .unwrap());
+        }))]);
+        with_rt(&r, |rt| rt.bindings()).unwrap()
+    }
+
+    fn changed_outside_opv() -> Binding {
+        Binding::Pinned {
+            store_name: "fleet--api--db-url".into(),
+            version: CHANGED_OUTSIDE_OPV.into(),
+        }
+    }
+
+    #[test]
+    fn bindings_report_a_deployed_reference_replaced_by_a_value_as_changed_outside_opv() {
+        let snap = recorded(DB_URL_BOUND, |env| {
+            env[0] = json!({"name": "FLEET__API__DB_URL", "value": "tampered"});
+        });
+        assert_eq!(snap.bindings["FLEET__API__DB_URL"], changed_outside_opv());
+    }
+
+    #[test]
+    fn bindings_report_a_removed_deployed_reference_as_changed_outside_opv() {
+        let snap = recorded(DB_URL_BOUND, |env| {
+            env.retain(|e| e["name"] != "FLEET__API__DB_URL");
+        });
+        assert_eq!(snap.bindings["FLEET__API__DB_URL"], changed_outside_opv());
+    }
+
+    #[test]
+    fn bindings_leave_a_name_opv_never_bound_unbound() {
+        let snap = recorded("K7=opv-k7-h6tn4wbr5e", |env| {
+            env.retain(|e| e["name"] != "FLEET__API__DB_URL");
+        });
+        assert!(!snap.bindings.contains_key("FLEET__API__DB_URL"));
+    }
+
+    #[test]
+    fn apply_records_the_names_it_binds_by_reference() {
+        let r = FakeRunner::new([ok("6")]);
+        let mut c = change();
+        c.unbind.push("K7".into());
+        let snap = recorded("K7=opv-k7-h6tn4wbr5e,LOG_LEVEL=opv-log-level-a", |_| {});
+        with_rt(&r, |rt| rt.apply(&c, &snap)).unwrap();
+        assert_eq!(
+            sent(&r)["metadata"]["annotations"][BOUND_ANNOTATION],
+            "FLEET__API__DB_URL=opv-fleet--api--db-url-s7aw2ylfpc"
+        );
+    }
+
+    #[test]
+    fn chain_of_a_reference_changed_outside_opv_is_none() {
+        let r = FakeRunner::new([]);
+        assert_eq!(
+            with_rt(&r, |rt| rt.chain("LOG_LEVEL", CHANGED_OUTSIDE_OPV)),
+            None
+        );
     }
 
     #[test]

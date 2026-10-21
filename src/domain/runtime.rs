@@ -13,6 +13,11 @@ pub struct FileMount {
     pub path: String,
 }
 
+/// The [`Binding::Pinned`] version a runtime reports for a reference its last deploy bound
+/// and someone replaced or removed since: never a real version, so the name is drift as
+/// well as pending deploy, and reported as changed outside opv (#219).
+pub const CHANGED_OUTSIDE_OPV: &str = "(changed outside opv)";
+
 /// How a runtime binds one managed env name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Binding {
