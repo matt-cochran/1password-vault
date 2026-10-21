@@ -27,5 +27,5 @@ done
 probe "$idA" f1-probe-a; a5_versions "$E/a5/f1-probe-a.txt" | tee "$E/a5/f1-versions-a.txt"
 probe "$idB" f1-probe-b; a5_versions "$E/a5/f1-probe-b.txt" | tee "$E/a5/f1-versions-b.txt"
 check A5-F1 same_config $(cmp -s "$E/a5/f1-files-a.json" "$E/a5/f1-files-b.json" && [ -s "$E/a5/f1-files-a.json" ] && echo 1 || echo 0) "[[files]] and --file-secret give the same files entries"
-check A5-F1 same_result $(cmp -s "$E/a5/f1-versions-a.txt" "$E/a5/f1-versions-b.txt" && echo 1 || echo 0) "same paths present, same bytes"
+check A5-F1 same_result $(cmp -s "$E/a5/f1-versions-a.txt" "$E/a5/f1-versions-b.txt" && grep -q '=v1$' "$E/a5/f1-versions-a.txt" && ! grep -q '=unprobed$' "$E/a5/f1-versions-a.txt" "$E/a5/f1-versions-b.txt" && echo 1 || echo 0) "same paths present, same bytes; both machines probed"
 echo "RECORD A5-F1: both files entries; both version lists; any difference is the answer."

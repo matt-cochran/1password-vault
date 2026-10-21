@@ -84,6 +84,18 @@ sampled() {
   return $rc
 }
 
+# The keys the manifest declares for <env> and <role>, as product/KEY, one per line (config keys
+# included). Checks count these instead of a number written into the kit (run 256debcd: V4f/V5f
+# said 7 for verify-fly, while the manifest declares 7 serve secrets plus LOG_LEVEL, so 8).
+declared_keys() {
+  python3 -I -c 'import sys, tomllib
+m = tomllib.load(open(sys.argv[1], "rb"))
+for p, pv in m.get("products", {}).items():
+    for k, kv in pv.get("keys", {}).items():
+        if sys.argv[2] in kv.get("environments", []) and sys.argv[3] in kv.get("roles", []):
+            print(f"{p}/{k}")' "$PROJECT/secrets.toml" "$1" "$2"
+}
+
 # kind's admin context, for kit setup and for reads opv-ci has no right to (pod logs, exec).
 kadmin() { KUBECONFIG=$ADMIN_KUBECONFIG kubectl "$@"; }
 
@@ -92,14 +104,24 @@ kadmin() { KUBECONFIG=$ADMIN_KUBECONFIG kubectl "$@"; }
 # ENOENT (tmpfs mounted over it) and the VM reboots in a loop (#136 F2 finding).
 A5_PATHS=(/run/opvcanary/a5-file /opt/opvcanary/a5-file)
 a5_file_secret_flags() { for p in "${A5_PATHS[@]}"; do printf -- '--file-secret\n%s=OPVCANARY_A5_FILE\n' "$p"; done; }
+# A probe that did not run (no machine, or a machine that isn't running) is a failure, never
+# "absent": the file gets a PROBE FAILED line and a5_versions reports every path as unprobed.
+# (Run 256debcd: an exec on a stopped machine read as "absent", so F1 same_result and F3 ran
+# against nothing.)
 probe() {
-  local id=$1 label=$2 b64; mkdir -p "$E/a5"
+  local id=$1 label=$2 b64 rc; mkdir -p "$E/a5"
   b64=$(base64 -w0 < "$KIT/canary/a5-probe.sh")
-  flysafe machine exec "$id" "sh -c 'echo $b64 | base64 -d | sh'" | tee "$E/a5/$label.txt"
+  flysafe machine exec "$id" "sh -c 'echo $b64 | base64 -d | sh'" | tee "$E/a5/$label.txt"; rc=${PIPESTATUS[0]}
+  if [ "$rc" != 0 ] || ! grep -q '^uptime_s=.* boot_id=' "$E/a5/$label.txt"; then
+    echo "PROBE FAILED: machine '${id}' did not run the probe (exec exit $rc; not running?)" | tee -a "$E/a5/$label.txt"
+    return 1
+  fi
 }
-# Which canary version each path holds: v1, v2, absent or OTHER.
+probed() { ! grep -q '^PROBE FAILED' "$1"; }
+# Which canary version each path holds: v1, v2, absent, OTHER, or unprobed (the probe failed).
 a5_versions() {
   local f=$1 v1 v2; v1=$(awk '$1=="file-v1"{print $2}' "$CANARY/expect/a5.txt"); v2=$(awk '$1=="file-v2"{print $2}' "$CANARY/expect/a5.txt")
+  if ! probed "$f"; then for p in "${A5_PATHS[@]}"; do echo "$p=unprobed"; done; return; fi
   for p in "${A5_PATHS[@]}"; do
     line=$(grep -F "$p: present" "$f" || true)
     if [ -z "$line" ]; then echo "$p=absent"

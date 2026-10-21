@@ -1,0 +1,10 @@
+/dev/shm/opvcanary/a5-file: absent
+/run/opvcanary/a5-file: present mode=755 owner=root:root size=116 inode=131077 mtime=1792550232 sha256=3275eef65313d990a95016180d34b0c2365140e2f002e5564d00569d41cb8a57
+/run/opvcanary/a5-file: fs=- mountpoint=/ dir=mode=755 owner=root:root
+/opt/opvcanary/a5-file: present mode=755 owner=root:root size=116 inode=131080 mtime=1792550232 sha256=3275eef65313d990a95016180d34b0c2365140e2f002e5564d00569d41cb8a57
+/opt/opvcanary/a5-file: fs=- mountpoint=/ dir=mode=755 owner=root:root
+mount / fstype=overlay
+mount /dev/shm fstype=tmpfs
+env OPVCANARY_A5_FILE: absent
+sentinel: present
+uptime_s=11 boot_id=08fda323-2fcc-4499-a9b2-e1f73a26e882
