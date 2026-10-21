@@ -16,6 +16,31 @@ What may cross the boundary is a **value state**: a closed set of words that des
 value without carrying any of it — `absent`, `empty`, `placeholder`, `malformed`, `set`,
 `unreadable`, `not_wanted` and `supplied` (an infrastructure value, below).
 
+## Filling a file key: `opv set --from-file`
+
+A key declared with `file = "<path>"` holds bytes a paste cannot carry: a PEM's line
+breaks and its trailing newline. The person names a file and opv reads it
+(`opv set <[p/]KEY> --env <e> --from-file <PATH>`); the path is the only thing on the
+command line, and the value reaches `op` on stdin like every other write, so it is never
+in argv, a process list, a shell history, a log or an error.
+
+- **A regular file, read and never followed.** A symbolic link is refused before it is
+  followed, and so is anything that is not a regular file, a file larger than 64 KiB, and
+  bytes that are not UTF-8. Each refusal names the path and the property that failed, never
+  a byte or a length of the value.
+- **A shared file is a warning, not a refusal.** A file a group or other users can read is
+  still written, then named as readable by other users on the machine, with `chmod 600` or
+  deleting it suggested. A file anyone can read is the person's risk to accept, as a pasted
+  value would be.
+- **A person, in a terminal.** An assistant and a non-TTY process are refused before the
+  file is opened; an assistant hands the command over and never reads or writes the file
+  ([the agent skill](agent-skill.md)).
+- **The file stays.** opv does not write, rewrite, move or delete it, so removing the file
+  is the person's step once the value is in 1Password. Until then the value exists in two
+  places, and the file's mode and where it is stored are what protect the copy on disk.
+- **A file key only.** A key without `file` is refused and handed the masked `opv set`, so
+  this form never becomes a way to hand opv a value for an ordinary key.
+
 ## The honest limit
 
 opv can make its own surfaces incapable of emitting a value. It is not a sandbox, and it

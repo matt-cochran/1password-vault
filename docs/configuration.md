@@ -840,6 +840,8 @@ Always on, for every key (after a `pem_private_key` transform, see below): `none
 
 One exception: a key with `file = "<relative/path>"` delivered to a target that writes files to a filesystem the app reads is staged and delivered **verbatim**, so `single_line`, `no_surrounding_space` and `ensure_prefix` are skipped and the stored bytes are kept exactly (a PEM's trailing newline included); `nonempty`, `max_len` and the declared rules still apply. A declared `transform` runs first, so a `pem_private_key` file key is still delivered as one line. On a target without such a file channel the key is delivered as a variable, and the always-on rules apply as usual.
 
+Those bytes are stored from a file, not typed: `opv set <[p/]KEY> --env <e> --from-file <PATH>` reads the file's exact contents and writes them to the key's field. Do not paste a multi-line value into the 1Password app instead: the app turns its line breaks into spaces and drops a trailing newline, so a PEM would no longer parse. `--from-file` accepts only a key declared with `file`, reads a regular file (no symlink, at most 64 KiB) and leaves that file on disk for you to delete once the value is in 1Password; the reads, refusals and the readability warning are in [security](security.md#filling-a-file-key-opv-set---from-file).
+
 | Rule | Meaning |
 |---|---|
 | `prefix = "sk-"` | value starts with the prefix |
