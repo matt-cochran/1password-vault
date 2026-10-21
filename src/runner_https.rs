@@ -10,10 +10,10 @@
 //! Contract (SR-3, SR-8): no secret value ever reaches argv, an error, a log line or a
 //! `Debug`; header values travel in env pairs and the body on stdin, both zeroized on drop.
 //!
-//! The real attempt ([`real_attempt`]) is a stub: the `https-real` lane fills it in with
-//! `ureq` 3 over rustls and the platform verifier. The fake attempt is the `https` program
-//! spawned from `PATH` under the `fake` feature, selected only when `OPV_SIM_WORLD` is set
-//! (see [`crate::runner_https_sim`]).
+//! The real attempt ([`real_attempt`]) is `ureq` 3 over rustls with the operating system's
+//! trust store; it runs in process, never as a spawned program. The fake attempt is the
+//! `https` program spawned from `PATH` under the `fake` feature, selected only when
+//! `OPV_SIM_WORLD` is set (see [`crate::runner_https_sim`]).
 
 use std::io;
 use std::time::Duration;
@@ -21,7 +21,7 @@ use std::time::Duration;
 use zeroize::Zeroizing;
 
 use crate::domain::secret::SecretValue;
-use crate::runner::{Attempt, Call, Stderr};
+use crate::runner::{Attempt, Call, OUTPUT_CAP, Output, Stderr};
 
 /// The program name the runner gives an HTTPS call: the observation, the verbose line and
 /// the write tracking all key off it, exactly like a vendor CLI.
@@ -220,14 +220,177 @@ fn malformed(what: &str) -> io::Error {
     )
 }
 
-/// The real HTTPS attempt: a stub. The `https-real` lane fills it in with `ureq` 3 over
-/// rustls and the platform verifier. Until then every real call is refused before it starts
-/// ([`io::ErrorKind::Unsupported`]), never a spawn of a program named `https`.
-pub(crate) fn real_attempt(_call: &Call, _limit: Duration) -> io::Result<(Attempt, Stderr)> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "the real HTTPS attempt is not implemented yet",
+/// The content type every gRPC-Web request and reply carries (design §5.1).
+const GRPC_WEB: &str = "application/grpc-web+proto";
+
+/// The `User-Agent` opv sends: its own name and version, never ureq's default.
+const USER_AGENT: &str = concat!("opv/", env!("CARGO_PKG_VERSION"));
+
+/// The only env pairs the credentials may become headers (design §5): the item's token and
+/// Cloudflare Access pair. Every other env pair is dropped, so a stray variable can never
+/// travel to the target as a header. Lowercase keys here; matched case-insensitively.
+const ALLOWED_HEADERS: [(&str, &str); 3] = [
+    ("authorization", "Authorization"),
+    ("cf-access-client-id", "CF-Access-Client-Id"),
+    ("cf-access-client-secret", "CF-Access-Client-Secret"),
+];
+
+/// The real HTTPS attempt (design §4.3, §5): one in-process `ureq` 3 call over rustls with
+/// the platform verifier, its redirects off and the runner's deadline as its global budget.
+/// The reply is wrapped in the same length-prefixed envelope the fake attempt writes, so the
+/// runner decodes one shape. A redirect is returned, never followed, so the caller refuses it
+/// by status. A timeout is [`Attempt::TimedOut`]; a connect, TLS or IO failure is an
+/// [`io::Error`] with a fixed, value-free message. No header value or body byte reaches an
+/// error, a `Debug` or a log line (SR-3, SR-8).
+pub(crate) fn real_attempt(call: &Call, limit: Duration) -> io::Result<(Attempt, Stderr)> {
+    let url = target_url(call)?;
+    let mut builder = ureq::http::Request::builder()
+        .method(call.args[0])
+        .uri(&url);
+    for (name, value) in call.env {
+        if let Some(header) = allowlisted(name) {
+            builder = builder.header(header, *value);
+        }
+    }
+    let request = builder
+        .header("Content-Type", GRPC_WEB)
+        .header("Accept", GRPC_WEB)
+        .header("x-grpc-web", "1")
+        .body(call.stdin.unwrap_or_default())
+        .map_err(|_| invalid("the HTTPS request could not be built"))?;
+    let mut response = match agent(limit).run(request) {
+        Ok(response) => response,
+        Err(ureq::Error::Timeout(_)) => return Ok((Attempt::TimedOut, Stderr::default())),
+        Err(failure) => return Err(transport_error(&failure)),
+    };
+    let status = response.status().as_u16();
+    let content_type = header_value(response.headers(), "content-type");
+    let grpc_status = header_value(response.headers(), "grpc-status")
+        .and_then(|value| value.parse::<i32>().ok());
+    let grpc_message = header_value(response.headers(), "grpc-message");
+    let body = match response
+        .body_mut()
+        .with_config()
+        .limit(OUTPUT_CAP as u64)
+        .read_to_vec()
+    {
+        Ok(body) => Zeroizing::new(body),
+        Err(ureq::Error::Timeout(_)) => return Ok((Attempt::TimedOut, Stderr::default())),
+        Err(failure) => return Err(transport_error(&failure)),
+    };
+    let reply = HttpsReply {
+        status,
+        content_type,
+        grpc_status,
+        grpc_message,
+        body,
+    };
+    Ok((
+        Attempt::Exited(Output {
+            status: 0,
+            stdout: encode_reply(&reply),
+        }),
+        Stderr::default(),
     ))
+}
+
+/// The URL for `call`: argv is the method and the host-plus-path URI (design §5), so the URI
+/// checked elsewhere is the host connected to. A call without both is a value-free refusal,
+/// never an echo of any argv.
+fn target_url(call: &Call) -> io::Result<String> {
+    match call.args {
+        [_, uri, ..] => Ok(format!("{}://{uri}", scheme(uri))),
+        _ => Err(invalid("the HTTPS call needs a method and a URI")),
+    }
+}
+
+/// The canonical name of an allowlisted header, `None` for every other env pair.
+fn allowlisted(name: &str) -> Option<&'static str> {
+    ALLOWED_HEADERS
+        .iter()
+        .find(|(lower, _)| name.eq_ignore_ascii_case(lower))
+        .map(|(_, header)| *header)
+}
+
+/// The ureq agent for one attempt (design §4.3): no redirects (`max_redirects(0)`, so a 3xx
+/// is a reply the caller refuses by status), the runner's deadline as the global budget,
+/// `http_status_as_error(false)`, the operating system's trust store and the environment's
+/// proxy (`HTTPS_PROXY`/`NO_PROXY`). No bundled roots enter the tree.
+fn agent(limit: Duration) -> ureq::Agent {
+    let tls = ureq::tls::TlsConfig::builder()
+        .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+        .build();
+    ureq::Agent::config_builder()
+        .max_redirects(0)
+        .timeout_global(Some(limit))
+        .http_status_as_error(false)
+        .tls_config(tls)
+        .proxy(ureq::Proxy::try_from_env())
+        .user_agent(USER_AGENT)
+        .build()
+        .into()
+}
+
+/// One reply header as a `String`, `None` when absent or not UTF-8.
+fn header_value(headers: &ureq::http::HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+}
+
+/// A connect, TLS or IO failure as an [`io::Error`] with a fixed, value-free message. An
+/// empty operating-system trust store is its own fixed, non-retried refusal (design §4.3):
+/// the platform verifier says so when it loads no roots, in its own words.
+fn transport_error(failure: &ureq::Error) -> io::Error {
+    let text = failure.to_string();
+    if text.contains("No CA certificates were loaded from the system")
+        || text.contains("no root trust anchors were provided")
+    {
+        return io::Error::new(
+            io::ErrorKind::NotFound,
+            "no trusted root certificates on this system",
+        );
+    }
+    io::Error::other("the HTTPS call could not be completed")
+}
+
+/// A value-free refusal for a call opv cannot even build.
+fn invalid(what: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, what)
+}
+
+/// The scheme for `uri`: HTTPS, except that a unit test may reach a plain-TCP listener on
+/// the loopback interface (design §4.3). The exception is compiled only under `cfg(test)`,
+/// so no shipped build can send a target's credentials over an unsecured connection.
+#[cfg(test)]
+fn scheme(uri: &str) -> &'static str {
+    if is_loopback(uri) { "http" } else { "https" }
+}
+
+#[cfg(not(test))]
+fn scheme(_uri: &str) -> &'static str {
+    "https"
+}
+
+/// The test-only loopback hook: true for `localhost`, `127.0.0.0/8` and `::1`.
+#[cfg(test)]
+fn is_loopback(uri: &str) -> bool {
+    let authority = uri
+        .split_once("://")
+        .map_or(uri, |(_, rest)| rest)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("");
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let host = match host.strip_prefix('[') {
+        Some(bracketed) => bracketed.split(']').next().unwrap_or(bracketed),
+        None => host.split(':').next().unwrap_or(host),
+    };
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 #[cfg(test)]
@@ -283,5 +446,253 @@ mod tests {
         let encoded = encode_reply(&reply);
         let truncated = &encoded[..encoded.len() - 1];
         assert!(decode_reply(truncated).is_err());
+    }
+
+    // The real attempt is exercised against a plain-TCP listener on 127.0.0.1. That is only
+    // reachable through the test-only loopback hook in [`scheme`]; no shipped build can
+    // downgrade a real target to http (design §4.3). Every value is an obvious canary.
+    use std::io::{Read as _, Write as _};
+    use std::net::{TcpListener, TcpStream};
+
+    const CANARY: &str = "CANARY-NOT-A-SECRET-0123456789";
+    const OK_REPLY: &str = "HTTP/1.1 200 OK\r\ncontent-type: application/grpc-web+proto\r\ngrpc-status: 7\r\ngrpc-message: permission%20denied\r\ncontent-length: 3\r\n\r\nabc";
+    const REDIRECT_REPLY: &str = "HTTP/1.1 302 Found\r\nlocation: https://elsewhere.invalid/\r\ncontent-length: 0\r\n\r\n";
+
+    fn call<'a>(args: &'a [&'a str], env: &'a [(&'a str, &'a str)], body: &'a [u8]) -> Call<'a> {
+        Call {
+            program: PROGRAM,
+            args,
+            stdin: Some(body),
+            env,
+            limit: None,
+        }
+    }
+
+    /// Run one real attempt against the URI with `env` and `body`.
+    fn attempt(
+        uri: &str,
+        env: &[(&str, &str)],
+        body: &[u8],
+        limit: Duration,
+    ) -> io::Result<(Attempt, Stderr)> {
+        let args = ["POST", uri];
+        let call = call(&args, env, body);
+        real_attempt(&call, limit)
+    }
+
+    /// The decoded reply of an exited attempt.
+    fn reply_of(result: io::Result<(Attempt, Stderr)>) -> HttpsReply {
+        match result.expect("an attempt") {
+            (Attempt::Exited(o), _) => decode_reply(&o.stdout).expect("a reply envelope"),
+            _ => panic!("expected an exited attempt"),
+        }
+    }
+
+    /// One connection within `deadline`, so a broken attempt fails the test instead of
+    /// hanging it on a listener that is never reached.
+    fn accept_within(listener: &TcpListener, deadline: Duration) -> TcpStream {
+        listener.set_nonblocking(true).expect("a non-blocking listener");
+        let stop = std::time::Instant::now() + deadline;
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).expect("a blocking stream");
+                    return stream;
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    assert!(std::time::Instant::now() < stop, "the attempt never connected");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("accept failed: {e}"),
+            }
+        }
+    }
+
+    /// A listener that answers `reply` and hands back the request bytes it saw.
+    fn answering(reply: &'static str) -> (String, std::thread::JoinHandle<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
+        let port = listener.local_addr().expect("an address").port();
+        let uri = format!("127.0.0.1:{port}/portal.v1.PlatformConsoleService/List");
+        let handle = std::thread::spawn(move || {
+            let mut stream = accept_within(&listener, Duration::from_secs(10));
+            let request = read_request(&mut stream);
+            stream.write_all(reply.as_bytes()).expect("the reply");
+            let _ = stream.flush();
+            request
+        });
+        (uri, handle)
+    }
+
+    /// A listener that accepts and never answers: the caller must time out.
+    fn stalling() -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
+        let port = listener.local_addr().expect("an address").port();
+        let uri = format!("127.0.0.1:{port}/portal.v1.PlatformConsoleService/List");
+        let handle = std::thread::spawn(move || {
+            let mut stream = accept_within(&listener, Duration::from_secs(10));
+            let mut chunk = [0u8; 4096];
+            while matches!(stream.read(&mut chunk), Ok(n) if n > 0) {}
+        });
+        (uri, handle)
+    }
+
+    /// The whole request: headers and, when `content-length` says so, the body.
+    fn read_request(stream: &mut TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            if let Some(end) = request
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .map(|at| at + 4)
+                && request.len() >= end + content_length(&request[..end])
+            {
+                break;
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => request.extend_from_slice(&chunk[..n]),
+            }
+        }
+        request
+    }
+
+    fn content_length(head: &[u8]) -> usize {
+        for line in String::from_utf8_lossy(head).lines() {
+            if let Some((name, value)) = line.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                return value.trim().parse().unwrap_or(0);
+            }
+        }
+        0
+    }
+
+    /// True when `request` carries `name: value`, matched by name without regard to case.
+    fn has_header(request: &str, name: &str, value: &str) -> bool {
+        request.lines().any(|line| match line.split_once(':') {
+            Some((header, rest)) => header.eq_ignore_ascii_case(name) && rest.trim() == value,
+            None => false,
+        })
+    }
+
+    /// A loopback port nothing is listening on.
+    fn unused_port() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
+        listener.local_addr().expect("an address").port()
+    }
+
+    #[test]
+    fn https_attempt_sends_an_allowlisted_environment_pair_as_a_header() {
+        let (uri, server) = answering(OK_REPLY);
+        let _ = attempt(&uri, &[("Authorization", CANARY)], b"", Duration::from_secs(5));
+        let sent = String::from_utf8_lossy(&server.join().expect("the listener")).to_string();
+        assert!(sent.lines().any(|line| match line.split_once(':') {
+            Some((name, value)) => name.eq_ignore_ascii_case("authorization") && value.trim() == CANARY,
+            None => false,
+        }));
+    }
+
+    #[test]
+    fn https_attempt_drops_an_environment_pair_outside_the_allowlist() {
+        let (uri, server) = answering(OK_REPLY);
+        let _ = attempt(&uri, &[("X-Not-A-Header", CANARY)], b"", Duration::from_secs(5));
+        let sent = String::from_utf8_lossy(&server.join().expect("the listener")).to_string();
+        assert!(!sent.contains(CANARY));
+    }
+
+    #[test]
+    fn https_attempt_keeps_a_header_value_out_of_the_request_line() {
+        let (uri, server) = answering(OK_REPLY);
+        let _ = attempt(&uri, &[("Authorization", CANARY)], b"", Duration::from_secs(5));
+        let sent = String::from_utf8_lossy(&server.join().expect("the listener")).to_string();
+        assert!(!sent.lines().next().unwrap_or("").contains(CANARY));
+    }
+
+    #[test]
+    fn https_attempt_sends_the_stdin_body_as_the_request_body() {
+        let (uri, server) = answering(OK_REPLY);
+        let body = b"CANARY-NOT-A-SECRET-BODY";
+        let _ = attempt(&uri, &[], body, Duration::from_secs(5));
+        let sent = server.join().expect("the listener");
+        assert!(sent.windows(body.len()).any(|w| w == body));
+    }
+
+    #[test]
+    fn https_attempt_returns_a_redirect_status_without_following_it() {
+        let (uri, server) = answering(REDIRECT_REPLY);
+        let reply = reply_of(attempt(&uri, &[], b"", Duration::from_secs(5)));
+        let _ = server.join();
+        assert_eq!(reply.status, 302);
+    }
+
+    #[test]
+    fn https_attempt_fills_the_grpc_status_from_the_reply_headers() {
+        let (uri, server) = answering(OK_REPLY);
+        let reply = reply_of(attempt(&uri, &[], b"", Duration::from_secs(5)));
+        let _ = server.join();
+        assert_eq!(reply.grpc_status, Some(7));
+    }
+
+    #[test]
+    fn https_attempt_fills_the_body_from_the_reply() {
+        let (uri, server) = answering(OK_REPLY);
+        let reply = reply_of(attempt(&uri, &[], b"", Duration::from_secs(5)));
+        let _ = server.join();
+        assert_eq!(&reply.body[..], b"abc");
+    }
+
+    #[test]
+    fn https_attempt_fills_the_content_type_from_the_reply_headers() {
+        let (uri, server) = answering(OK_REPLY);
+        let reply = reply_of(attempt(&uri, &[], b"", Duration::from_secs(5)));
+        let _ = server.join();
+        assert_eq!(reply.content_type.as_deref(), Some(GRPC_WEB));
+    }
+
+    #[test]
+    fn https_attempt_fills_the_grpc_message_from_the_reply_headers() {
+        let (uri, server) = answering(OK_REPLY);
+        let reply = reply_of(attempt(&uri, &[], b"", Duration::from_secs(5)));
+        let _ = server.join();
+        assert_eq!(reply.grpc_message.as_deref(), Some("permission%20denied"));
+    }
+
+    #[test]
+    fn https_attempt_sends_the_grpc_web_content_type() {
+        let (uri, server) = answering(OK_REPLY);
+        let _ = attempt(&uri, &[], b"", Duration::from_secs(5));
+        let sent = String::from_utf8_lossy(&server.join().expect("the listener")).to_string();
+        assert!(has_header(&sent, "content-type", GRPC_WEB));
+    }
+
+    #[test]
+    fn https_attempt_marks_the_call_as_grpc_web() {
+        let (uri, server) = answering(OK_REPLY);
+        let _ = attempt(&uri, &[], b"", Duration::from_secs(5));
+        let sent = String::from_utf8_lossy(&server.join().expect("the listener")).to_string();
+        assert!(has_header(&sent, "x-grpc-web", "1"));
+    }
+
+    #[test]
+    fn https_attempt_identifies_itself_as_opv() {
+        let (uri, server) = answering(OK_REPLY);
+        let _ = attempt(&uri, &[], b"", Duration::from_secs(5));
+        let sent = String::from_utf8_lossy(&server.join().expect("the listener")).to_string();
+        assert!(has_header(&sent, "user-agent", USER_AGENT));
+    }
+
+    #[test]
+    fn https_attempt_reports_a_stalled_reply_as_a_timeout() {
+        let (uri, server) = stalling();
+        let result = attempt(&uri, &[], b"", Duration::from_millis(300));
+        let _ = server.join();
+        assert!(matches!(result, Ok((Attempt::TimedOut, _))));
+    }
+
+    #[test]
+    fn https_attempt_reports_a_connect_failure_as_an_error() {
+        let uri = format!("127.0.0.1:{}/portal.v1.PlatformConsoleService/List", unused_port());
+        assert!(attempt(&uri, &[], b"", Duration::from_secs(5)).is_err());
     }
 }
