@@ -5,4 +5,6 @@
 //! catalog mappings are later lanes; nothing here is in [`crate::adapters::registry`].
 
 pub mod descriptor;
+pub mod login;
 pub mod model;
+pub mod url;
