@@ -80,8 +80,12 @@ pub fn run(world: &mut World, args: &[String]) -> Reply {
     let rpc = args.get(1).map(|uri| rpc_path(uri)).unwrap_or_default();
     let authorization = authorization();
     let mut state = world.state();
+    // The store's configuration lives in `world.json`'s `http` section (the app world's
+    // shape); a world that writes those keys at the top level (a bare simulator fixture) is
+    // still read, so both shapes answer.
+    let doc = world.doc.get("http").unwrap_or(&world.doc);
     let reply = serve(
-        &world.doc,
+        doc,
         &mut state,
         method,
         rpc,
