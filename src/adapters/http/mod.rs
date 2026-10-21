@@ -10,4 +10,5 @@ pub mod grpc_decode;
 pub mod grpc_encode;
 pub mod login;
 pub mod model;
+pub mod propose;
 pub mod url;
