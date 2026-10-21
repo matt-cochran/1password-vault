@@ -214,16 +214,9 @@ fn drift_error(parts: &[StatusPart<'_>], env_name: &str, fail_on_drift: bool) ->
     let (target, names) = parts.iter().find_map(|p| {
         let drift = match &p.pinned {
             Some(pinned) => pinned.drift.to_vec(),
-            // #206 §6.4: a name supplied at sync that the target now lists at another
-            // version than its `s1` line recorded.
-            None => p
-                .plan
-                .rows
-                .iter()
-                .filter(|r| r.state == crate::domain::KeyState::SuppliedAtSync)
-                .map(|r| p.t.env_name(&r.product, &r.key))
-                .filter(|n| p.plan.drift.contains(n))
-                .collect(),
+            // A staged target's plan names every value changed outside opv since the last
+            // sync (FR-54), supplied at sync (#206) or not; each is drift.
+            None => p.plan.drift.clone(),
         };
         (!drift.is_empty()).then_some((p.name.as_str(), drift))
     })?;
@@ -1166,5 +1159,201 @@ mod tests {
             crate::app::testutil::next_of_error(&res.unwrap_err()),
             "opv open allumata/OPENAI_API_KEY --env prod"
         );
+    }
+}
+
+/// #219: on a staged target, a name the plan records as drift (changed outside opv
+/// since the last sync) is a `--fail-on-drift` finding even when it is not a name
+/// supplied at sync (#206). The world is the ledger's: one normal secret recorded at
+/// one store version and listed at another.
+#[cfg(test)]
+mod staged_drift_tests {
+    use std::cell::RefCell;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::io;
+    use std::time::Duration;
+
+    use crate::adapters::fake_op::FakeOp;
+    use crate::app::{delivery, testutil};
+    use crate::domain::plan::StoreEntry;
+    use crate::domain::Fleet;
+    use crate::error::Error;
+    use crate::runner::{Call, CommandRunner, Outcome, Output};
+
+    const NAME: &str = "FLEET__API__TOKEN";
+    const VALUES: &str = "vdev0000000000000000000001";
+    const STATE: &str = "vshr0000000000000000000002";
+
+    /// 1Password (the stateful fake) plus the digests one Fly app lists.
+    struct World {
+        op: FakeOp,
+        fly: RefCell<BTreeMap<String, String>>,
+    }
+
+    impl World {
+        /// The recorded reply for one `flyctl` call. `status` and `releases` are the
+        /// healthy-app fixtures the real preflight reads; only `secrets list` carries
+        /// the versions the ledger compares.
+        fn fly_output(&self, call: &Call) -> Output {
+            match call.args.first().copied() {
+                Some("secrets") => {
+                    let v: Vec<serde_json::Value> = self
+                        .fly
+                        .borrow()
+                        .iter()
+                        .map(|(n, d)| {
+                            serde_json::json!({"name": n, "digest": d, "status": "Deployed"})
+                        })
+                        .collect();
+                    Output::success(serde_json::to_vec(&v).unwrap())
+                }
+                Some("status") => testutil::fly_app_ok(),
+                Some("releases") => testutil::fly_releases("complete"),
+                _ => Output::success(Vec::new()),
+            }
+        }
+    }
+
+    impl CommandRunner for World {
+        fn read(&self, call: &Call, refused: &[i32]) -> io::Result<Outcome> {
+            if call.program == "flyctl" {
+                return Ok(Outcome::Done(self.fly_output(call)));
+            }
+            self.op.read(call, refused)
+        }
+
+        fn write(&self, call: &Call) -> io::Result<Outcome> {
+            if call.program == "flyctl" {
+                return Ok(Outcome::Done(self.fly_output(call)));
+            }
+            self.op.write(call)
+        }
+
+        fn probe(&self, call: &Call, limit: Duration) -> io::Result<Output> {
+            if call.program == "flyctl" {
+                return Ok(self.fly_output(call));
+            }
+            self.op.probe(call, limit)
+        }
+
+        fn pause(&self, _: Duration, _: &str) {}
+
+        fn note(&self, _: &str) {}
+
+        fn run_inherited(&self, _: &str, _: &[&str], _: &[(&str, &str)]) -> io::Result<i32> {
+            Err(io::ErrorKind::Unsupported.into())
+        }
+    }
+
+    /// dev on Fly app `a`, api/TOKEN in the values item, and api's delivery item recorded
+    /// in the state vault (as `opv bootstrap` leaves it).
+    fn world() -> (World, Fleet) {
+        let op = FakeOp::default();
+        let id = op.insert(
+            VALUES,
+            serde_json::json!({
+                "title": "t", "category": "SECURE_NOTE",
+                "sections": [{"id": "api", "label": "api"}],
+                "fields": [{"id": "f1", "section": {"id": "api", "label": "api"},
+                            "type": "CONCEALED", "label": "TOKEN",
+                            "value": "tok-FIXTUREVALUE-1"}]
+            }),
+        );
+        let state = op.insert(
+            STATE,
+            serde_json::json!({"title": "opv · delivery · api · app",
+                               "category": "SECURE_NOTE", "fields": []}),
+        );
+        let fleet = crate::config::parse(&format!(
+            "[environments.dev]\n\
+             boundaries.api = {{ vault_id = \"{VALUES}\", item_id = \"{id}\" }}\n\
+             [environments.dev.targets.app]\nfly.app = \"a\"\n\
+             fly.secret_name = \"FLEET__{{PRODUCT}}__{{KEY}}\"\n\
+             state_vault_id = \"{STATE}\"\ndelivery_items = {{ api = \"{state}\" }}\n\
+             [products.api.keys.TOKEN]\nkind = \"secret\"\nenvironments = [\"dev\"]\n"
+        ))
+        .unwrap();
+        (
+            World {
+                op,
+                fly: RefCell::default(),
+            },
+            fleet,
+        )
+    }
+
+    fn listed(version: &str) -> Vec<StoreEntry> {
+        vec![StoreEntry {
+            name: NAME.into(),
+            version: Some(version.into()),
+            pending: false,
+            stamp: None,
+        }]
+    }
+
+    /// A sync wrote NAME and recorded the store version it was listed at.
+    fn record(w: &World, fleet: &Fleet, version: &str) {
+        let written = BTreeSet::from([NAME.to_string()]);
+        let item = fleet.environments["dev"].boundaries["api"]
+            .as_ref()
+            .unwrap()
+            .item_id
+            .clone();
+        let source_versions = BTreeMap::from([(
+            item.clone(),
+            w.op.item(&item)["version"].as_u64().unwrap_or(0),
+        )]);
+        delivery::record(
+            fleet,
+            "dev",
+            "app",
+            None,
+            &written,
+            &BTreeSet::new(),
+            &listed(version),
+            &source_versions,
+            "plan",
+            None,
+            &w.op,
+        )
+        .unwrap();
+    }
+
+    /// `opv status dev --fail-on-drift` (`fail_on_drift`).
+    fn status(w: &World, fleet: &Fleet, fail_on_drift: bool) -> Result<(), Error> {
+        let mut out = Vec::new();
+        crate::app::status::run_targeted(fleet, "dev", &[], None, w, &mut out, false, fail_on_drift)
+    }
+
+    #[test]
+    fn status_fail_on_drift_exits_8_for_a_staged_name_changed_outside_opv() {
+        let (w, fleet) = world();
+        record(&w, &fleet, "d1");
+        w.fly.borrow_mut().insert(NAME.into(), "d2".into());
+        assert_eq!(status(&w, &fleet, true).unwrap_err().exit_code(), 8);
+    }
+
+    #[test]
+    fn status_fail_on_drift_names_a_staged_name_changed_outside_opv() {
+        let (w, fleet) = world();
+        record(&w, &fleet, "d1");
+        w.fly.borrow_mut().insert(NAME.into(), "d2".into());
+        assert!(status(&w, &fleet, true).unwrap_err().to_string().contains(NAME));
+    }
+
+    #[test]
+    fn status_without_fail_on_drift_is_ok_for_a_staged_name_changed_outside_opv() {
+        let (w, fleet) = world();
+        record(&w, &fleet, "d1");
+        w.fly.borrow_mut().insert(NAME.into(), "d2".into());
+        assert!(status(&w, &fleet, false).is_ok());
+    }
+
+    #[test]
+    fn status_fail_on_drift_is_ok_for_a_clean_staged_target() {
+        let (w, fleet) = world();
+        record(&w, &fleet, "d1");
+        w.fly.borrow_mut().insert(NAME.into(), "d1".into());
+        assert!(status(&w, &fleet, true).is_ok());
     }
 }
