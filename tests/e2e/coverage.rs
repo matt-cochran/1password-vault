@@ -73,12 +73,6 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "HandoffPipeContested",
         "Windows-only named pipe; Azure has no simulator",
     ),
-    // opv-sim's world changes only through opv's own calls, so nothing changes between two
-    // reads of one run (tidy's stamp, a file edited mid-run, a Deployment moved).
-    (
-        "ChangedBeforeWrite",
-        "nothing changes the simulated world between two reads of a run",
-    ),
     // Built only after `op service-account create` (src/app/access_create.rs), which opv-sim
     // does not model and nobody has recorded.
     (
@@ -2609,6 +2603,13 @@ fn every_scenario_snapshot_belongs_to_a_scenario() {
                 .copied(),
         )
         .chain(crate::scenarios::fixes_0141::SNAPSHOTS.iter().copied())
+        // The sibling `http_target_sync` lane declares its own `SNAPSHOTS` (expected:
+        // `["http_target_sync"]`); add it here when that module lands.
+        .chain(
+            crate::scenarios::http_target_faults::SNAPSHOTS
+                .iter()
+                .copied(),
+        )
         .chain(crate::scenarios::session_reuse::SNAPSHOTS.iter().copied())
         .chain(crate::scenarios::set_from_file::SNAPSHOTS.iter().copied())
         .collect();
