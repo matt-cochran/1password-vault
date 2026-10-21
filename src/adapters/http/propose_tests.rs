@@ -62,8 +62,7 @@ fn refuses_a_service_that_is_not_in_the_descriptor() {
 #[test]
 fn generated_section_parses_after_the_host_and_names_are_filled_in() {
     let text = generated().replace("<HOST>", "central.zonetico.com");
-    let document: toml::Table =
-        toml::from_str(&text).expect("the generated section is valid TOML");
+    let document: toml::Table = toml::from_str(&text).expect("the generated section is valid TOML");
     let mut section = document
         .get("http")
         .and_then(toml::Value::as_table)
@@ -76,5 +75,8 @@ fn generated_section_parses_after_the_host_and_names_are_filled_in() {
     );
     section.insert("names".to_string(), toml::Value::Table(names));
     let result = config::parse(&section, |_| Ok(DESCRIPTOR.to_vec()));
-    assert!(result.is_ok(), "the generated section did not load: {result:?}");
+    assert!(
+        result.is_ok(),
+        "the generated section did not load: {result:?}"
+    );
 }

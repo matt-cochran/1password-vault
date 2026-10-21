@@ -26,8 +26,8 @@ const COMMENT_DEPTH: usize = 3;
 /// `descriptor` (read from `descriptor_path`, which the section names), or why not. Never a
 /// value: a descriptor holds names, numbers and types only.
 pub fn section(descriptor: &[u8], descriptor_path: &str, service: &str) -> Result<String, String> {
-    let pool =
-        DescriptorPool::decode(descriptor).map_err(|e| format!("descriptor could not be read: {e}"))?;
+    let pool = DescriptorPool::decode(descriptor)
+        .map_err(|e| format!("descriptor could not be read: {e}"))?;
     let service = pool
         .get_service_by_name(service)
         .ok_or_else(|| format!("service `{service}` is not in the descriptor"))?;
@@ -35,11 +35,11 @@ pub fn section(descriptor: &[u8], descriptor_path: &str, service: &str) -> Resul
     let sha256 = hex::encode(Sha256::digest(descriptor));
     let mut out = String::new();
     out.push_str("http.host = \"<HOST>\"\n");
-    out.push_str(&format!("http.descriptor = {}\n", toml_str(descriptor_path)));
     out.push_str(&format!(
-        "http.descriptor_sha256 = {}\n",
-        toml_str(&sha256)
+        "http.descriptor = {}\n",
+        toml_str(descriptor_path)
     ));
+    out.push_str(&format!("http.descriptor_sha256 = {}\n", toml_str(&sha256)));
     out.push('\n');
 
     append_rpc_comments(&mut out, &service);
@@ -428,8 +428,7 @@ fn choose_list(service: &ServiceDescriptor) -> Option<MethodDescriptor> {
         let take = match &best {
             None => true,
             Some((best_score, best_method)) => {
-                score > *best_score
-                    || (score == *best_score && method.name() < best_method.name())
+                score > *best_score || (score == *best_score && method.name() < best_method.name())
             }
         };
         if take {
@@ -456,8 +455,7 @@ fn choose_put(service: &ServiceDescriptor) -> Option<MethodDescriptor> {
         let take = match &best {
             None => true,
             Some((best_score, best_method)) => {
-                score > *best_score
-                    || (score == *best_score && method.name() < best_method.name())
+                score > *best_score || (score == *best_score && method.name() < best_method.name())
             }
         };
         if take {

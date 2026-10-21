@@ -92,8 +92,8 @@ impl Provider for HttpProvider {
         let table: toml::Table = section.deserialize()?;
         let read: RefCell<Option<Vec<u8>>> = RefCell::new(None);
         let target = super::config::parse(&table, |path| {
-            let bytes = std::fs::read(path)
-                .map_err(|e| format!("descriptor could not be read: {e}"))?;
+            let bytes =
+                std::fs::read(path).map_err(|e| format!("descriptor could not be read: {e}"))?;
             *read.borrow_mut() = Some(bytes.clone());
             Ok(bytes)
         })
@@ -136,11 +136,21 @@ impl Provider for HttpProvider {
     fn init_section(&self, values: &BTreeMap<&str, String>) -> Option<String> {
         let descriptor = values.get("descriptor")?;
         let service = values.get("service")?;
-        let bytes = std::fs::read(descriptor).ok()?;
-        super::propose::section(&bytes, descriptor, service).ok()
+        // A generation failure stays visible: the section carries the reason as a comment
+        // (names only) and then fails the load rules, rather than silently disappearing.
+        let generated = std::fs::read(descriptor)
+            .map_err(|_| format!("cannot read the descriptor set {descriptor}"))
+            .and_then(|bytes| super::propose::section(&bytes, descriptor, service));
+        Some(
+            generated.unwrap_or_else(|why| {
+                format!("# opv could not generate this http section: {why}\n")
+            }),
+        )
     }
 
-    fn deploy_credential_fields(&self) -> Result<&'static [crate::provider::CredentialField], String> {
+    fn deploy_credential_fields(
+        &self,
+    ) -> Result<&'static [crate::provider::CredentialField], String> {
         Ok(super::login::FIELDS)
     }
 
@@ -279,7 +289,9 @@ impl TargetConfig for HttpConfig {
 fn provider_for(host: &str) -> &'static HttpProvider {
     static CACHE: OnceLock<Mutex<BTreeMap<String, &'static HttpProvider>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
-    let mut cache = cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(provider) = cache.get(host) {
         return provider;
     }
@@ -353,11 +365,10 @@ fn field_rule(rule: &str) -> FieldRule {
         "path not found in the entry message" => FieldRule::Type {
             expected: "a field path in the entry message",
         },
-        "items path not found in the reply message" | "reply path not found in the reply message" => {
-            FieldRule::Type {
-                expected: "a field path in the reply message",
-            }
-        }
+        "items path not found in the reply message"
+        | "reply path not found in the reply message" => FieldRule::Type {
+            expected: "a field path in the reply message",
+        },
         "status value is not a value of the status enum" => FieldRule::Type {
             expected: "a value of the status enum",
         },

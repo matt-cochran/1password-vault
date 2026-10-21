@@ -10,8 +10,8 @@ use zeroize::Zeroizing;
 
 use super::*;
 use crate::adapters::http::descriptor;
-use crate::domain::secret::SecretValue;
 use crate::domain::StoreEntry;
+use crate::domain::secret::SecretValue;
 use crate::ports::{StagedStore, Store};
 use crate::runner::fake::FakeRunner;
 use crate::runner_https::HttpsReply;
@@ -61,7 +61,8 @@ fn pool() -> DescriptorPool {
 }
 
 fn target() -> HttpTarget {
-    let table: toml::Table = toml::from_str(EXAMPLE).expect("the design §3.1 section is valid TOML");
+    let table: toml::Table =
+        toml::from_str(EXAMPLE).expect("the design §3.1 section is valid TOML");
     crate::adapters::http::config::parse(&table, |_| Ok(DESCRIPTOR.to_vec()))
         .expect("the design §3.1 section loads")
 }
@@ -182,9 +183,7 @@ fn write_sends_the_version_the_last_list_reported() {
         .expect("the write succeeds");
     assert_eq!(
         r.calls.borrow()[1].stdin.as_deref(),
-        Some(
-            include_bytes!("../../../tests/fixtures/https/zonetico/request-save.bin").as_slice()
-        )
+        Some(include_bytes!("../../../tests/fixtures/https/zonetico/request-save.bin").as_slice())
     );
 }
 
@@ -282,7 +281,11 @@ fn check_written_refuses_a_status_the_application_reports_rejected() {
 #[test]
 fn refusal_refuses_a_value_shorter_than_sixteen_characters() {
     let r = FakeRunner::default();
-    assert!(store_of(&r).refusal("OPENROUTER_API_KEY", &secret("short")).is_some());
+    assert!(
+        store_of(&r)
+            .refusal("OPENROUTER_API_KEY", &secret("short"))
+            .is_some()
+    );
 }
 
 #[test]
@@ -309,7 +312,11 @@ fn refusal_refuses_a_value_with_a_control_character() {
 #[test]
 fn remove_refuses_a_name() {
     let r = FakeRunner::default();
-    assert!(store_of(&r).remove(&["OPENROUTER_API_KEY".to_string()]).is_err());
+    assert!(
+        store_of(&r)
+            .remove(&["OPENROUTER_API_KEY".to_string()])
+            .is_err()
+    );
 }
 
 #[test]

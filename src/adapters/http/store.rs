@@ -31,11 +31,11 @@ use crate::cause::{
     OutputProblem, Principal, Refusal, ResourceKind, ResourceName, ResourceRef, StoreObject,
     System, TargetName, Upstream, VaultId,
 };
-use crate::domain::secret::SecretValue;
 use crate::domain::StoreEntry;
+use crate::domain::secret::SecretValue;
 use crate::error::Error;
 use crate::ports::{StagedRuntime, StagedStore, Store, VariableStore};
-use crate::runner::{take_unusable_reply, Call, CommandRunner};
+use crate::runner::{Call, CommandRunner, take_unusable_reply};
 use crate::runner_https::{HttpsRequest, PROGRAM};
 
 /// The shortest value the application accepts (design §6): fewer than 16 characters is
@@ -370,7 +370,13 @@ impl Store for HttpStore<'_> {
                 continue;
             };
             self.versions.borrow_mut().insert(remote, version);
-            if self.target.list.absent.iter().any(|absent| absent == &status) {
+            if self
+                .target
+                .list
+                .absent
+                .iter()
+                .any(|absent| absent == &status)
+            {
                 continue;
             }
             listed.push(StoreEntry {
@@ -418,12 +424,7 @@ impl StagedStore for HttpStore<'_> {
             .ok_or_else(|| self.bug("http: the put method is not in the pinned descriptor"))?;
         for (name, value) in batch {
             let remote = self.remote(name);
-            let version = self
-                .versions
-                .borrow()
-                .get(&remote)
-                .copied()
-                .unwrap_or(0);
+            let version = self.versions.borrow().get(&remote).copied().unwrap_or(0);
             let body = grpc_encode::encode_request(
                 &self.pool,
                 &method,
@@ -451,7 +452,13 @@ impl StagedStore for HttpStore<'_> {
                 continue;
             }
             let named = self.status_name(status);
-            if self.target.put.conflict.iter().any(|conflict| conflict == named) {
+            if self
+                .target
+                .put
+                .conflict
+                .iter()
+                .any(|conflict| conflict == named)
+            {
                 return Err(Cause::ChangedBeforeWrite {
                     object: StoreObject::Resource {
                         resource: self.subject(&remote),
@@ -498,7 +505,13 @@ impl StagedStore for HttpStore<'_> {
             let Some(status) = self.written.borrow().get(name).cloned() else {
                 continue;
             };
-            if !self.target.list.rejected.iter().any(|rejected| rejected == &status) {
+            if !self
+                .target
+                .list
+                .rejected
+                .iter()
+                .any(|rejected| rejected == &status)
+            {
                 continue;
             }
             let remote = self.remote(name);
@@ -628,7 +641,9 @@ fn decode_scalar(
         (Kind::Int32 | Kind::Sint32 | Kind::Sfixed32, toml::Value::Integer(i)) => {
             Ok(Value::I32(*i as i32))
         }
-        (Kind::Int64 | Kind::Sint64 | Kind::Sfixed64, toml::Value::Integer(i)) => Ok(Value::I64(*i)),
+        (Kind::Int64 | Kind::Sint64 | Kind::Sfixed64, toml::Value::Integer(i)) => {
+            Ok(Value::I64(*i))
+        }
         (Kind::Uint32 | Kind::Fixed32, toml::Value::Integer(i)) => Ok(Value::U32(*i as u32)),
         (Kind::Uint64 | Kind::Fixed64, toml::Value::Integer(i)) => Ok(Value::U64(*i as u64)),
         (Kind::Float, toml::Value::Float(f)) => Ok(Value::F32(*f as f32)),
@@ -636,9 +651,9 @@ fn decode_scalar(
         (Kind::Bytes, toml::Value::String(text)) => Ok(Value::Bytes(
             prost::bytes::Bytes::copy_from_slice(text.as_bytes()),
         )),
-        (Kind::Message(nested), toml::Value::Table(table)) => {
-            Ok(Value::Message(decode_template(&nested, table, name, version)?))
-        }
+        (Kind::Message(nested), toml::Value::Table(table)) => Ok(Value::Message(decode_template(
+            &nested, table, name, version,
+        )?)),
         (Kind::Enum(values), toml::Value::String(text)) => {
             let value = values.get_value_by_name(text).ok_or_else(|| {
                 format!(

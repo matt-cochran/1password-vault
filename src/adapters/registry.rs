@@ -93,10 +93,7 @@ mod tests {
 
     #[test]
     fn registry_lists_azure_fly_github_http_and_kubernetes() {
-        assert_eq!(
-            sections(),
-            ["azure", "fly", "github", "http", "kubernetes"]
-        );
+        assert_eq!(sections(), ["azure", "fly", "github", "http", "kubernetes"]);
     }
 
     #[test]

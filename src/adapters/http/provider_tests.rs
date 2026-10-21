@@ -145,7 +145,11 @@ fn config_maps_the_env_name_to_the_remote_name() {
 
 #[test]
 fn config_locator_names_the_host() {
-    assert!(parsed().target_locator().contains("host central.zonetico.com"));
+    assert!(
+        parsed()
+            .target_locator()
+            .contains("host central.zonetico.com")
+    );
 }
 
 #[test]
@@ -168,5 +172,8 @@ fn config_declares_secrets_on_the_store_channel() {
 
 #[test]
 fn config_env_name_is_the_key() {
-    assert_eq!(parsed().env_name("app", "OPENROUTER_API_KEY"), "OPENROUTER_API_KEY");
+    assert_eq!(
+        parsed().env_name("app", "OPENROUTER_API_KEY"),
+        "OPENROUTER_API_KEY"
+    );
 }
