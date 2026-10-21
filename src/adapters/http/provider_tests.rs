@@ -62,8 +62,8 @@ fn provider_section_is_http() {
 }
 
 #[test]
-fn provider_label_is_https_target() {
-    assert_eq!(PROVIDER.label(), "HTTPS target");
+fn provider_label_is_https() {
+    assert_eq!(PROVIDER.label(), "HTTPS");
 }
 
 #[test]

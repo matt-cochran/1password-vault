@@ -80,7 +80,7 @@ impl Provider for HttpProvider {
     }
 
     fn label(&self) -> &'static str {
-        "HTTPS target"
+        "HTTPS"
     }
 
     fn tools(&self) -> &'static [&'static crate::host::Tool] {
