@@ -33,6 +33,9 @@ pub enum Kind {
     Unreachable,
     RateLimited,
     ServerError,
+    /// The target's version moves between the List and the Save, so the Save conflicts
+    /// (https only, design §9).
+    VersionBumped,
     /// The call never answers: it hangs until killed (or `seconds` pass).
     Timeout,
     /// The call succeeds with its output cut in half.
