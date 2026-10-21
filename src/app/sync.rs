@@ -1767,8 +1767,8 @@ fn run_pinned(
     };
     let snap = runtime.bindings()?;
     let d = diff(&snap);
-    if !d.drift.is_empty() {
-        p(out, drift_line(env_name, &names.join(&d.drift)))?;
+    for line in drift_lines(env_name, names, &d.drift, &snap) {
+        p(out, line)?;
     }
     // Pruned like secrets: opv-managed names no longer desired, including config routed to
     // the store (the planner names only secrets).
@@ -1970,6 +1970,39 @@ pub(crate) fn drift_line(env_name: &str, names: &str) -> String {
         "drift: {names} point to an older secret version than the store's latest (re-pinned \
          by hand, or synced without --deploy); opv sync {env_name} --deploy repins them"
     )
+}
+
+/// The line for references opv deployed that were replaced or removed since (#219): drift
+/// like an older version, but a hand edit of the wiring rather than a re-pin.
+pub(crate) fn changed_outside_line(env_name: &str, names: &str) -> String {
+    format!(
+        "changed outside opv since its last deploy: {names} (the next opv sync {env_name} \
+         --deploy restores opv's wiring)"
+    )
+}
+
+/// The drift lines for `drift` as `snap` binds it: the names whose reference was replaced
+/// or removed since opv's last deploy ([`changed_outside_line`]), then those bound to an
+/// older version ([`drift_line`]); each line only when it names something.
+pub(crate) fn drift_lines(
+    env_name: &str,
+    names: &KeyNames,
+    drift: &BTreeSet<String>,
+    snap: &RuntimeSnapshot,
+) -> Vec<String> {
+    let outside = |n: &String| {
+        matches!(snap.bindings.get(n), Some(Binding::Pinned { version, .. })
+            if version == crate::domain::runtime::CHANGED_OUTSIDE_OPV)
+    };
+    let (changed, older): (Vec<&String>, Vec<&String>) = drift.iter().partition(|n| outside(n));
+    let mut lines = Vec::new();
+    if !changed.is_empty() {
+        lines.push(changed_outside_line(env_name, &names.join(changed)));
+    }
+    if !older.is_empty() {
+        lines.push(drift_line(env_name, &names.join(older)));
+    }
+    lines
 }
 
 /// Store names to prune: the plan's secrets plus managed config entries (config routed to
