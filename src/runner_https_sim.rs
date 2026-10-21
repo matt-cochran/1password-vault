@@ -89,7 +89,9 @@ mod tests {
         );
         let path = dir.join("https");
         fs::write(&path, script).expect("write the https script");
-        let mut perms = fs::metadata(&path).expect("the script's mode").permissions();
+        let mut perms = fs::metadata(&path)
+            .expect("the script's mode")
+            .permissions();
         perms.set_mode(0o755);
         fs::set_permissions(&path, perms).expect("make the script executable");
     }

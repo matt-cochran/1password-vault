@@ -41,7 +41,11 @@ expected_version = "{version}"
 }
 
 fn value_field() -> ValueField {
-    ValueField { field: String::from("secret_value"), number: 3, kind: ValueKind::Bytes }
+    ValueField {
+        field: String::from("secret_value"),
+        number: 3,
+        kind: ValueKind::Bytes,
+    }
 }
 
 /// Encode the fixture template with the recorded inputs; the one place tests build inputs.
@@ -105,7 +109,10 @@ fn decoded_frame_carries_the_substituted_version() {
     let encoded = encode(&pool, &template()).expect("the fixture request encodes");
     let decoded =
         DynamicMessage::decode(method(&pool).input(), &encoded[5..]).expect("a valid request");
-    assert_eq!(decoded.get_field_by_name("expected_version").as_deref(), Some(&Value::I64(4)));
+    assert_eq!(
+        decoded.get_field_by_name("expected_version").as_deref(),
+        Some(&Value::I64(4))
+    );
 }
 
 #[test]
@@ -114,7 +121,9 @@ fn decoded_frame_carries_the_secret_value_bytes() {
     let encoded = encode(&pool, &template()).expect("the fixture request encodes");
     let decoded =
         DynamicMessage::decode(method(&pool).input(), &encoded[5..]).expect("a valid request");
-    let value = decoded.get_field_by_name("secret_value").expect("secret_value is set");
+    let value = decoded
+        .get_field_by_name("secret_value")
+        .expect("secret_value is set");
     assert_eq!(&value.as_bytes().expect("bytes")[..], CANARY.as_bytes());
 }
 
@@ -134,7 +143,10 @@ secret_value = "CANARY-IN-TEMPLATE"
 
 #[test]
 fn value_field_with_the_wrong_number_is_refused() {
-    let field = ValueField { number: 5, ..value_field() };
+    let field = ValueField {
+        number: 5,
+        ..value_field()
+    };
     let error = refusal(encode_request(
         &pool(),
         &method(&pool()),
@@ -149,7 +161,10 @@ fn value_field_with_the_wrong_number_is_refused() {
 
 #[test]
 fn value_field_with_the_wrong_type_is_refused() {
-    let field = ValueField { kind: ValueKind::String, ..value_field() };
+    let field = ValueField {
+        kind: ValueKind::String,
+        ..value_field()
+    };
     let error = refusal(encode_request(
         &pool(),
         &method(&pool()),

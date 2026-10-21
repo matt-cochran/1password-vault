@@ -265,8 +265,8 @@ pub(crate) fn real_attempt(call: &Call, limit: Duration) -> io::Result<(Attempt,
     };
     let status = response.status().as_u16();
     let content_type = header_value(response.headers(), "content-type");
-    let grpc_status = header_value(response.headers(), "grpc-status")
-        .and_then(|value| value.parse::<i32>().ok());
+    let grpc_status =
+        header_value(response.headers(), "grpc-status").and_then(|value| value.parse::<i32>().ok());
     let grpc_message = header_value(response.headers(), "grpc-message");
     let body = match response
         .body_mut()
@@ -456,7 +456,8 @@ mod tests {
 
     const CANARY: &str = "CANARY-NOT-A-SECRET-0123456789";
     const OK_REPLY: &str = "HTTP/1.1 200 OK\r\ncontent-type: application/grpc-web+proto\r\ngrpc-status: 7\r\ngrpc-message: permission%20denied\r\ncontent-length: 3\r\n\r\nabc";
-    const REDIRECT_REPLY: &str = "HTTP/1.1 302 Found\r\nlocation: https://elsewhere.invalid/\r\ncontent-length: 0\r\n\r\n";
+    const REDIRECT_REPLY: &str =
+        "HTTP/1.1 302 Found\r\nlocation: https://elsewhere.invalid/\r\ncontent-length: 0\r\n\r\n";
 
     fn call<'a>(args: &'a [&'a str], env: &'a [(&'a str, &'a str)], body: &'a [u8]) -> Call<'a> {
         Call {
@@ -491,7 +492,9 @@ mod tests {
     /// One connection within `deadline`, so a broken attempt fails the test instead of
     /// hanging it on a listener that is never reached.
     fn accept_within(listener: &TcpListener, deadline: Duration) -> TcpStream {
-        listener.set_nonblocking(true).expect("a non-blocking listener");
+        listener
+            .set_nonblocking(true)
+            .expect("a non-blocking listener");
         let stop = std::time::Instant::now() + deadline;
         loop {
             match listener.accept() {
@@ -500,7 +503,10 @@ mod tests {
                     return stream;
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    assert!(std::time::Instant::now() < stop, "the attempt never connected");
+                    assert!(
+                        std::time::Instant::now() < stop,
+                        "the attempt never connected"
+                    );
                     std::thread::sleep(Duration::from_millis(10));
                 }
                 Err(e) => panic!("accept failed: {e}"),
@@ -585,10 +591,16 @@ mod tests {
     #[test]
     fn https_attempt_sends_an_allowlisted_environment_pair_as_a_header() {
         let (uri, server) = answering(OK_REPLY);
-        let _ = attempt(&uri, &[("Authorization", CANARY)], b"", Duration::from_secs(5));
+        let _ = attempt(
+            &uri,
+            &[("Authorization", CANARY)],
+            b"",
+            Duration::from_secs(5),
+        );
         let sent = String::from_utf8_lossy(&server.join().expect("the listener")).to_string();
         assert!(sent.lines().any(|line| match line.split_once(':') {
-            Some((name, value)) => name.eq_ignore_ascii_case("authorization") && value.trim() == CANARY,
+            Some((name, value)) =>
+                name.eq_ignore_ascii_case("authorization") && value.trim() == CANARY,
             None => false,
         }));
     }
@@ -596,7 +608,12 @@ mod tests {
     #[test]
     fn https_attempt_drops_an_environment_pair_outside_the_allowlist() {
         let (uri, server) = answering(OK_REPLY);
-        let _ = attempt(&uri, &[("X-Not-A-Header", CANARY)], b"", Duration::from_secs(5));
+        let _ = attempt(
+            &uri,
+            &[("X-Not-A-Header", CANARY)],
+            b"",
+            Duration::from_secs(5),
+        );
         let sent = String::from_utf8_lossy(&server.join().expect("the listener")).to_string();
         assert!(!sent.contains(CANARY));
     }
@@ -604,7 +621,12 @@ mod tests {
     #[test]
     fn https_attempt_keeps_a_header_value_out_of_the_request_line() {
         let (uri, server) = answering(OK_REPLY);
-        let _ = attempt(&uri, &[("Authorization", CANARY)], b"", Duration::from_secs(5));
+        let _ = attempt(
+            &uri,
+            &[("Authorization", CANARY)],
+            b"",
+            Duration::from_secs(5),
+        );
         let sent = String::from_utf8_lossy(&server.join().expect("the listener")).to_string();
         assert!(!sent.lines().next().unwrap_or("").contains(CANARY));
     }
@@ -692,7 +714,10 @@ mod tests {
 
     #[test]
     fn https_attempt_reports_a_connect_failure_as_an_error() {
-        let uri = format!("127.0.0.1:{}/portal.v1.PlatformConsoleService/List", unused_port());
+        let uri = format!(
+            "127.0.0.1:{}/portal.v1.PlatformConsoleService/List",
+            unused_port()
+        );
         assert!(attempt(&uri, &[], b"", Duration::from_secs(5)).is_err());
     }
 }

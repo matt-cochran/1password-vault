@@ -72,11 +72,19 @@ fn check_value_field(
     request: &MessageDescriptor,
     value_field: &ValueField,
 ) -> Result<FieldDescriptor, String> {
-    let field = request.get_field_by_name(&value_field.field).ok_or_else(|| {
-        format!("the value field `{}` is not in the request message", value_field.field)
-    })?;
+    let field = request
+        .get_field_by_name(&value_field.field)
+        .ok_or_else(|| {
+            format!(
+                "the value field `{}` is not in the request message",
+                value_field.field
+            )
+        })?;
     if field.is_list() || field.is_map() {
-        return Err(format!("the value field `{}` must be singular", value_field.field));
+        return Err(format!(
+            "the value field `{}` must be singular",
+            value_field.field
+        ));
     }
     if field.number() != value_field.number {
         return Err(format!(
@@ -184,7 +192,9 @@ fn decode_scalar(
         (Kind::Int32 | Kind::Sint32 | Kind::Sfixed32, toml::Value::Integer(i)) => {
             Ok(Value::I32(*i as i32))
         }
-        (Kind::Int64 | Kind::Sint64 | Kind::Sfixed64, toml::Value::Integer(i)) => Ok(Value::I64(*i)),
+        (Kind::Int64 | Kind::Sint64 | Kind::Sfixed64, toml::Value::Integer(i)) => {
+            Ok(Value::I64(*i))
+        }
         (Kind::Uint32 | Kind::Fixed32, toml::Value::Integer(i)) => Ok(Value::U32(*i as u32)),
         (Kind::Uint64 | Kind::Fixed64, toml::Value::Integer(i)) => Ok(Value::U64(*i as u64)),
         (Kind::Float, toml::Value::Float(f)) => Ok(Value::F32(*f as f32)),
@@ -201,7 +211,10 @@ fn decode_scalar(
         )?)),
         (Kind::Enum(values), toml::Value::String(text)) => {
             let value = values.get_value_by_name(text).ok_or_else(|| {
-                format!("the request template sets `{}` to an unknown enum value", field.name())
+                format!(
+                    "the request template sets `{}` to an unknown enum value",
+                    field.name()
+                )
             })?;
             Ok(Value::EnumNumber(value.number()))
         }
@@ -211,12 +224,18 @@ fn decode_scalar(
 
 /// A type error that names the field and never a value.
 fn wrong_type(field: &FieldDescriptor) -> String {
-    format!("the request template field `{}` has the wrong type", field.name())
+    format!(
+        "the request template field `{}` has the wrong type",
+        field.name()
+    )
 }
 
 /// A placeholder that cannot fill the field, naming both but never a value.
 fn placeholder_wrong_field(field: &FieldDescriptor, placeholder: &str) -> String {
-    format!("the `{placeholder}` placeholder cannot fill the `{}` field", field.name())
+    format!(
+        "the `{placeholder}` placeholder cannot fill the `{}` field",
+        field.name()
+    )
 }
 
 /// Encode `template` and the value field into one zeroizing body, preserving field-number

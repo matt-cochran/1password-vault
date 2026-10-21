@@ -15,8 +15,7 @@ use super::*;
 use crate::adapters::http::descriptor;
 use crate::runner_https::HttpsReply;
 
-const DESCRIPTOR_SHA256: &str =
-    "ec5b6933b89fc49c1ebeaaa31afc666e9090036c53301648cc657cd18f8a7445";
+const DESCRIPTOR_SHA256: &str = "ec5b6933b89fc49c1ebeaaa31afc666e9090036c53301648cc657cd18f8a7445";
 const LIST_CALL: &str = "portal.v1.PlatformConsoleService/ListPlatformConnections";
 const SAVE_CALL: &str = "portal.v1.PlatformConsoleService/SavePlatformConnection";
 
@@ -36,11 +35,13 @@ fn fixture(dir: &str, case: &str) -> HttpsReply {
         &std::fs::read(root.join(format!("{case}.json"))).expect("the reply json is present"),
     )
     .expect("the reply json parses");
-    let body = std::fs::read(root.join(
-        json["body_file"]
-            .as_str()
-            .expect("the reply names its body file"),
-    ))
+    let body = std::fs::read(
+        root.join(
+            json["body_file"]
+                .as_str()
+                .expect("the reply names its body file"),
+        ),
+    )
     .expect("the reply body is present");
 
     let mut reply = HttpsReply {
@@ -100,7 +101,10 @@ fn status_name(message: &DynamicMessage, path: &str) -> String {
 #[test]
 fn reads_list_ok_connections_with_their_roles() {
     let decoded = decode_fixture("", "list-ok", LIST_CALL);
-    let message = decoded.message.as_ref().expect("a successful reply has a message");
+    let message = decoded
+        .message
+        .as_ref()
+        .expect("a successful reply has a message");
     let entries: Vec<(String, String, i64)> = (0..3)
         .map(|index| {
             let connection = connection(message, index);
@@ -136,7 +140,10 @@ fn reads_list_ok_connections_with_their_roles() {
 #[test]
 fn reads_tonic_web_only_list_ok_connections_with_their_roles() {
     let decoded = decode_fixture("tonic-web-only", "list-ok", LIST_CALL);
-    let message = decoded.message.as_ref().expect("a successful reply has a message");
+    let message = decoded
+        .message
+        .as_ref()
+        .expect("a successful reply has a message");
     let entries: Vec<(String, String, i64)> = (0..3)
         .map(|index| {
             let connection = connection(message, index);
@@ -172,7 +179,10 @@ fn reads_tonic_web_only_list_ok_connections_with_their_roles() {
 #[test]
 fn reads_save_ok_verified_connection_status() {
     let decoded = decode_fixture("", "save-ok-verified", SAVE_CALL);
-    let message = decoded.message.as_ref().expect("a successful reply has a message");
+    let message = decoded
+        .message
+        .as_ref()
+        .expect("a successful reply has a message");
     assert_eq!(
         status_name(message, "connection.status"),
         "CONNECTION_STATUS_VERIFIED"
@@ -182,7 +192,10 @@ fn reads_save_ok_verified_connection_status() {
 #[test]
 fn reads_save_ok_rejected_connection_status() {
     let decoded = decode_fixture("", "save-ok-rejected", SAVE_CALL);
-    let message = decoded.message.as_ref().expect("a successful reply has a message");
+    let message = decoded
+        .message
+        .as_ref()
+        .expect("a successful reply has a message");
     assert_eq!(
         status_name(message, "connection.status"),
         "CONNECTION_STATUS_REJECTED"
@@ -192,40 +205,58 @@ fn reads_save_ok_rejected_connection_status() {
 #[test]
 fn reads_a_string_field_by_path() {
     let decoded = decode_fixture("", "save-ok-verified", SAVE_CALL);
-    let message = decoded.message.as_ref().expect("a successful reply has a message");
+    let message = decoded
+        .message
+        .as_ref()
+        .expect("a successful reply has a message");
     assert_eq!(text(message, "connection.provider"), "openrouter");
 }
 
 #[test]
 fn reads_an_int_field_by_path() {
     let decoded = decode_fixture("", "save-ok-verified", SAVE_CALL);
-    let message = decoded.message.as_ref().expect("a successful reply has a message");
+    let message = decoded
+        .message
+        .as_ref()
+        .expect("a successful reply has a message");
     assert_eq!(number(message, "connection.version"), 5);
 }
 
 #[test]
 fn reads_an_absent_int_as_the_proto3_default() {
     let decoded = decode_fixture("", "list-ok", LIST_CALL);
-    let message = decoded.message.as_ref().expect("a successful reply has a message");
+    let message = decoded
+        .message
+        .as_ref()
+        .expect("a successful reply has a message");
     assert_eq!(number(&connection(message, 1), "version"), 0);
 }
 
 #[test]
 fn reads_a_singular_message_field() {
     let decoded = decode_fixture("", "save-ok-verified", SAVE_CALL);
-    let message = decoded.message.as_ref().expect("a successful reply has a message");
+    let message = decoded
+        .message
+        .as_ref()
+        .expect("a successful reply has a message");
     let RoleValue::Message(connection) =
         read_role(message, "connection", RoleKind::Message).expect("connection is a message")
     else {
         panic!("connection is a message field");
     };
-    assert_eq!(connection.descriptor().full_name(), "portal.v1.PlatformConnection");
+    assert_eq!(
+        connection.descriptor().full_name(),
+        "portal.v1.PlatformConnection"
+    );
 }
 
 #[test]
 fn rejects_a_wrong_field_type_naming_the_path() {
     let decoded = decode_fixture("", "save-ok-verified", SAVE_CALL);
-    let message = decoded.message.as_ref().expect("a successful reply has a message");
+    let message = decoded
+        .message
+        .as_ref()
+        .expect("a successful reply has a message");
     let error = read_role(message, "connection.provider", RoleKind::Int)
         .expect_err("a string is not an integer");
     assert!(error.contains("connection.provider"));
@@ -344,7 +375,8 @@ fn refuses_a_compressed_frame() {
         grpc_message: None,
         body: Zeroizing::new(vec![0x01, 0, 0, 0, 0]),
     };
-    let error = decode_reply(&pool(), LIST_CALL, &reply).expect_err("a compressed frame is refused");
+    let error =
+        decode_reply(&pool(), LIST_CALL, &reply).expect_err("a compressed frame is refused");
     assert!(error.to_string().contains("compressed"));
 }
 

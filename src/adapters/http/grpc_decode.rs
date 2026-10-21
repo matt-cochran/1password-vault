@@ -6,9 +6,7 @@
 //! Reply fields are read afterwards by dotted path ([`read_role`]); nothing is converted to
 //! JSON and no field outside the requested path is read.
 
-use prost_reflect::{
-    DescriptorPool, DynamicMessage, FieldDescriptor, Kind, ReflectMessage, Value,
-};
+use prost_reflect::{DescriptorPool, DynamicMessage, FieldDescriptor, Kind, ReflectMessage, Value};
 
 use crate::adapters::http::descriptor;
 use crate::runner_https::HttpsReply;
@@ -202,7 +200,10 @@ fn require_binary_content_type(content_type: Option<&str>) -> Result<(), ReplyEr
     {
         return Ok(());
     }
-    if essence.to_ascii_lowercase().starts_with("application/grpc-web-text") {
+    if essence
+        .to_ascii_lowercase()
+        .starts_with("application/grpc-web-text")
+    {
         return Err(ReplyError::new(
             "application/grpc-web-text is refused; only binary gRPC-Web is decoded",
         ));
@@ -341,11 +342,7 @@ fn hex_digit(byte: u8) -> Option<u8> {
 /// absent integer or enum reads its proto3 default (`0` / the zero value's name), an absent
 /// repeated message reads as empty. A wrong type is an error naming the path. No other
 /// field of `msg` is read or copied.
-pub fn read_role(
-    msg: &DynamicMessage,
-    path: &str,
-    kind: RoleKind,
-) -> Result<RoleValue, String> {
+pub fn read_role(msg: &DynamicMessage, path: &str, kind: RoleKind) -> Result<RoleValue, String> {
     let segments: Vec<&str> = path.split('.').collect();
     read_role_at(msg, &segments, path, kind)
 }
