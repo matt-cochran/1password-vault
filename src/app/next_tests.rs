@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
-use crate::domain::inventory::{BoundaryIds, Cell, EnvironmentColumn};
+use crate::domain::inventory::{BoundaryIds, Cell, EnvironmentColumn, KeyRow, PresenceView};
 
 /// One environment column with a single `core` boundary, bound or not.
 fn env(name: &str, tier: Tier, vault: Option<&str>) -> EnvironmentColumn {
@@ -30,6 +30,41 @@ fn inventory(environments: Vec<EnvironmentColumn>, cells: Vec<Cell>) -> Inventor
         environments,
         keys: Vec::new(),
         cells,
+    }
+}
+
+/// The same inventory with key rows, so `next` can read a key's `file` declaration.
+fn inventory_with_keys(
+    environments: Vec<EnvironmentColumn>,
+    cells: Vec<Cell>,
+    keys: Vec<KeyRow>,
+) -> Inventory {
+    Inventory {
+        environments,
+        keys,
+        cells,
+    }
+}
+
+/// The key row of a file key `key` in `dev`.
+fn file_key_row(key: &str) -> KeyRow {
+    KeyRow {
+        product: "api".to_string(),
+        key: key.to_string(),
+        kind: "secret".to_string(),
+        source: None,
+        presence: BTreeMap::from([("dev".to_string(), PresenceView::Present)]),
+        lifecycle: "active".to_string(),
+        expires: None,
+        immutable: false,
+        allow_same_value: false,
+        rules: Vec::new(),
+        guidance: String::new(),
+        roles: None,
+        file: Some("tls/private-key".to_string()),
+        targets: BTreeMap::new(),
+        delivery: BTreeMap::new(),
+        next: None,
     }
 }
 
@@ -88,6 +123,23 @@ fn rank_two_an_absent_key_in_a_writable_vault_asks_for_a_set() {
             NextKind::EnterValue,
             NextActor::Person,
             "opv set api/A_ABSENT --env dev".to_string()
+        ))
+    );
+}
+
+#[test]
+fn rank_two_a_file_key_asks_for_a_set_from_the_file() {
+    let inv = inventory_with_keys(
+        vec![env("dev", Tier::Shared, Some("vdev"))],
+        vec![cell("TLS_KEY", ValueState::Absent, Capability::Write)],
+        vec![file_key_row("TLS_KEY")],
+    );
+    assert_eq!(
+        shown(&next(&inv, &Signals::default())),
+        Some((
+            NextKind::EnterValue,
+            NextActor::Person,
+            "opv set api/TLS_KEY --env dev --from-file <PATH>".to_string()
         ))
     );
 }

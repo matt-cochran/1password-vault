@@ -388,6 +388,24 @@ pub enum FieldRule {
     Supply {
         supply: SupplyRule,
     },
+    /// A problem with the file `opv set --from-file` reads. It names a property of the
+    /// path, never a byte, a length or any part of the file's value.
+    SecretFile {
+        problem: SecretFileRule,
+    },
+}
+
+/// What is wrong with the file `opv set --from-file` reads. Every variant is a property
+/// of the path, so none can carry a byte of the secret value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretFileRule {
+    /// The path names something other than a regular file (a folder, device, socket, ...).
+    NotRegular,
+    /// The path is a symbolic link: opv reads the file itself, never a link.
+    Symlink,
+    /// The file is larger than `limit` bytes.
+    TooLarge { limit: u64 },
 }
 
 /// What is wrong with a supply stream (#206 §3, §4.1), or with a workflow step that pipes
@@ -1744,6 +1762,8 @@ pub enum InputKind {
     Supply,
     /// A workflow file whose step pipes into `--supply-stdin` (#206 §8.1).
     Workflow,
+    /// The file `opv set --from-file` reads: its exact bytes are one key's value.
+    SecretFile,
 }
 
 /// What an in-memory folder was needed for (R74).

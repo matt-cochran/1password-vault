@@ -344,6 +344,13 @@ fn run_help_shows_usage() {
     assert!(out.contains("--product"), "{out}");
 }
 
+/// `opv set --help` documents `--from-file`.
+#[test]
+fn set_help_documents_from_file() {
+    let (_, out, _) = opv(&["set", "--help"]);
+    assert!(out.contains("--from-file"), "{out}");
+}
+
 #[test]
 fn run_requires_a_command() {
     let (code, _, err) = opv(&["--config", CFG, "run", "staging", "--product", "allumata"]);

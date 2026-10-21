@@ -219,3 +219,219 @@ fn an_infrastructure_key_is_refused_as_not_stored_before_prompting() {
     let doc = crate::error::document(&err, &crate::error::invocation(), false);
     assert_eq!(doc["subject"]["guard"]["guard"], "not_stored");
 }
+
+// `opv set --from-file` (#217) -------------------------------------------------------------
+
+/// A dev environment on the fake's `myapp-dev` vault: api/PEM (secret, a file key).
+fn file_world() -> (FakeOp, Fleet) {
+    let op = FakeOp::default();
+    let id = op.insert(
+        "vdev0000000000000000000001",
+        serde_json::json!({
+            "title": "myapp · dev values", "category": "SECURE_NOTE",
+            "sections": [{"id": "api", "label": "api"}],
+            "fields": [
+                {"id": "f1", "section": {"id": "api", "label": "api"}, "type": "CONCEALED",
+                 "label": "PEM", "value": ""}
+            ]
+        }),
+    );
+    let fleet = crate::config::parse(&format!(
+        "[environments.dev]\nboundaries.api = {{ vault_id = \"vdev0000000000000000000001\", \
+         item_id = \"{id}\" }}\n[products.api.keys.PEM]\nkind = \"secret\"\n\
+         file = \"private-key\"\nenvironments = [\"dev\"]\n"
+    ))
+    .unwrap();
+    (op, fleet)
+}
+
+/// The item id the dev environment's api boundary is bound to.
+fn boundary_item(fleet: &Fleet) -> String {
+    fleet.environments["dev"].boundaries["api"]
+        .as_ref()
+        .unwrap()
+        .item_id
+        .clone()
+}
+
+#[test]
+fn a_multi_line_file_is_written_byte_for_byte() {
+    let (op, fleet) = file_world();
+    let id = boundary_item(&fleet);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("private-key.pem");
+    std::fs::write(&path, "line one\nline two\n").unwrap();
+    set_from_file(
+        &fleet,
+        &FakeEnv::new("linux").tty(),
+        "api/PEM",
+        "dev",
+        &path,
+        &op,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(field_in(&op, &id, "PEM"), "line one\nline two\n");
+}
+
+#[test]
+fn a_non_file_key_is_refused() {
+    let (op, fleet) = world();
+    let err = set_from_file(
+        &fleet,
+        &FakeEnv::new("linux").tty(),
+        "api/OPENAI_API_KEY",
+        "dev",
+        std::path::Path::new("/nonexistent/never"),
+        &op,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(err.code_str(), "usage");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_is_refused() {
+    let (op, fleet) = file_world();
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("real.pem");
+    std::fs::write(&target, "x\n").unwrap();
+    let link = dir.path().join("link.pem");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let err = set_from_file(
+        &fleet,
+        &FakeEnv::new("linux").tty(),
+        "api/PEM",
+        "dev",
+        &link,
+        &op,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(err.code_str(), "input_invalid");
+}
+
+#[test]
+fn a_directory_is_refused() {
+    let (op, fleet) = file_world();
+    let dir = tempfile::tempdir().unwrap();
+    let err = set_from_file(
+        &fleet,
+        &FakeEnv::new("linux").tty(),
+        "api/PEM",
+        "dev",
+        dir.path(),
+        &op,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(err.code_str(), "input_invalid");
+}
+
+#[test]
+fn a_file_over_the_cap_is_refused() {
+    let (op, fleet) = file_world();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("big.pem");
+    std::fs::write(&path, vec![b'a'; FROM_FILE_MAX_BYTES as usize + 1]).unwrap();
+    let err = set_from_file(
+        &fleet,
+        &FakeEnv::new("linux").tty(),
+        "api/PEM",
+        "dev",
+        &path,
+        &op,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(err.code_str(), "input_invalid");
+}
+
+#[test]
+fn agent_mode_is_refused_before_the_file_is_read() {
+    let (op, fleet) = file_world();
+    let err = set_from_file(
+        &fleet,
+        &FakeEnv::new("linux").mcp(),
+        "api/PEM",
+        "dev",
+        std::path::Path::new("/nonexistent/never-read.pem"),
+        &op,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(err.code_str(), "person_only");
+}
+
+#[test]
+fn a_non_tty_is_refused_before_the_file_is_read() {
+    let (op, fleet) = file_world();
+    let err = set_from_file(
+        &fleet,
+        &FakeEnv::new("linux"),
+        "api/PEM",
+        "dev",
+        std::path::Path::new("/nonexistent/never-read.pem"),
+        &op,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(err.code_str(), "terminal_required");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_group_or_world_readable_file_prints_a_warning() {
+    use std::os::unix::fs::PermissionsExt;
+    let (op, fleet) = file_world();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("private-key.pem");
+    std::fs::write(&path, "x\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let mut out = Vec::new();
+    set_from_file(
+        &fleet,
+        &FakeEnv::new("linux").tty(),
+        "api/PEM",
+        "dev",
+        &path,
+        &op,
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(
+        String::from_utf8(out).unwrap().lines().next(),
+        Some(
+            format!(
+                "warning: {} is readable by other users on this machine; opv stored it, but \
+                 consider chmod 600 or deleting it",
+                path.display()
+            )
+            .as_str()
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_private_file_prints_no_warning() {
+    use std::os::unix::fs::PermissionsExt;
+    let (op, fleet) = file_world();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("private-key.pem");
+    std::fs::write(&path, "x\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut out = Vec::new();
+    set_from_file(
+        &fleet,
+        &FakeEnv::new("linux").tty(),
+        "api/PEM",
+        "dev",
+        &path,
+        &op,
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(String::from_utf8(out).unwrap(), "set\n");
+}
