@@ -178,7 +178,11 @@ from the shipped one (T1). So:
 - **Reply:** require `application/grpc-web` or `application/grpc-web+proto`; refuse
   `grpc-web-text` and compressed frames (flag `0x01`). Read `grpc-status`/`grpc-message` from the
   response headers (trailers-only replies, the usual error shape) *and* from a body trailer frame
-  (`0x80`) (T8). Decode message frames with the descriptor and read only the role fields by field
+  (`0x80`) (T8); recorded Zonetico replies carry it in the body frame, tonic_web alone in
+  headers (`tests/fixtures/https/zonetico/README.md`). Trailer lines are `name:value` with no
+  space; `grpc-message` is percent-encoded. A role field absent from the reply has its proto3
+  default (Zonetico's unconfigured slot has no `version` on the wire, so it reads 0); only a
+  field of the wrong type is a refusal. Decode message frames with the descriptor and read only the role fields by field
   path from the decoded message; no JSON conversion (T10, enforced by a source guard).
 - Fixtures for unit and e2e tests come from **recorded** Zonetico replies (a local Zonetico run
   now, staging after #844) before the sim is built (P2).
