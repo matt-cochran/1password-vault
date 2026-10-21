@@ -8,6 +8,7 @@ mod scenarios {
     pub mod assistant;
     pub mod changed;
     pub mod consistency;
+    pub mod fixes_0141;
     pub mod infrastructure_values;
     pub mod issue_159;
     pub mod issues;
