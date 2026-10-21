@@ -133,6 +133,21 @@ fn a_missing_source_versions_field_is_no_record() {
 }
 
 #[test]
+fn a_field_the_item_does_not_have_is_no_record() {
+    let fleet = fleet_with(&format!("api = \"{DELIVERY_ITEM}\""));
+    let r = FakeRunner::new([listed(8)]);
+    r.push_with_stderr(
+        Output::failure(1),
+        include_str!("../../tests/fixtures/op/failures/16-item-field-missing.stderr"),
+    );
+    let (res, out) = run(&r, &fleet, true);
+    assert_eq!(
+        (res.unwrap(), state_of(&out)),
+        (10, "no_record".to_string())
+    );
+}
+
+#[test]
 fn a_missing_delivery_item_is_no_record() {
     let fleet = fleet_with("");
     let r = FakeRunner::new([listed(8)]);
