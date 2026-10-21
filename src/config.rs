@@ -237,8 +237,12 @@ impl Source<'_> {
 
 /// [`parse`] with errors naming `source`, the line and the field.
 pub fn parse_at(text: &str, source: Source<'_>) -> Result<Fleet, Error> {
+    let dir = match source {
+        Source::File(path) => path.parent(),
+        Source::Manifest(_) | Source::ManifestIn { .. } => None,
+    };
     let source = source.config_source();
-    match parse(text) {
+    match parse_in(text, dir) {
         Ok(mut fleet) => {
             fleet.read_from.0 = source;
             Ok(fleet)
@@ -317,8 +321,15 @@ pub fn not_found(start: &Path) -> Error {
 /// Parse and validate configuration text. A removed form (FR-60) fails before anything else
 /// is read, showing the form to write instead.
 pub fn parse(text: &str) -> Result<Fleet, Error> {
+    parse_in(text, None)
+}
+
+/// [`parse`], with relative file references in sections resolved against `dir` (the
+/// configuration file's directory) instead of the working directory.
+fn parse_in(text: &str, dir: Option<&Path>) -> Result<Fleet, Error> {
     let invalid = |e: toml::de::Error| toml_invalid(text, &e);
-    let doc = Doc::parse(text).map_err(invalid)?;
+    let mut doc = Doc::parse(text).map_err(invalid)?;
+    doc.dir = dir;
     removed_forms(&doc)?;
     // The removed `pattern` rule must be reported as such, rather than as the
     // `deny_unknown_fields` error the typed parse would give (FR-60).
@@ -540,11 +551,15 @@ fn table<'a>(t: &'a DeTable<'a>, name: &str) -> Option<&'a DeTable<'a>> {
 struct Doc<'t> {
     text: &'t str,
     root: Spanned<DeTable<'t>>,
+    /// The directory of the configuration file, when it came from one: where a section's
+    /// relative file references resolve (the `http` target's descriptor set).
+    dir: Option<&'t Path>,
 }
 
 impl<'t> Doc<'t> {
     fn parse(text: &'t str) -> Result<Self, toml::de::Error> {
         Ok(Self {
+            dir: None,
             text,
             root: DeTable::parse(text)?,
         })
@@ -962,7 +977,7 @@ fn stores(raw: &BTreeMap<String, toml::Value>, doc: &Doc<'_>) -> Result<Stores, 
             .value(&path)
             .ok_or_else(|| doc.invalid(&path, FieldRule::Missing))?;
         let store = provider
-            .parse_store(kind, &Section::new(name, value, doc.text))
+            .parse_store(kind, &Section::new(name, value, doc.text).in_dir(doc.dir))
             .map_err(|e| doc.place(e, &["stores", name]))?;
         out.insert(name.clone(), store);
     }
@@ -1052,7 +1067,7 @@ fn target_of(
         _ => None,
     };
     let target = p
-        .parse(&Section::new(env, &rest, doc.text))
+        .parse(&Section::new(env, &rest, doc.text).in_dir(doc.dir))
         .map_err(|e| doc.place(e, &base))?;
     let Some(secrets_in) = secrets_in else {
         return Ok(target);

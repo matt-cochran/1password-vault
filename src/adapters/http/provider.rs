@@ -92,8 +92,8 @@ impl Provider for HttpProvider {
         let table: toml::Table = section.deserialize()?;
         let read: RefCell<Option<Vec<u8>>> = RefCell::new(None);
         let target = super::config::parse(&table, |path| {
-            let bytes =
-                std::fs::read(path).map_err(|e| format!("descriptor could not be read: {e}"))?;
+            let bytes = std::fs::read(section.resolve(path))
+                .map_err(|e| format!("descriptor could not be read: {e}"))?;
             *read.borrow_mut() = Some(bytes.clone());
             Ok(bytes)
         })
