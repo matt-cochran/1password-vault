@@ -13,7 +13,8 @@ PATTERNS=$CANARY/patterns.txt
 ADMIN_KUBECONFIG=$S/kubeconfig      # kind's admin context: kit setup and reads only
 CI_KUBECONFIG=$S/kubeconfig-opv-ci  # the opv-ci identity: what opv uses
 # A5's image: debian-slim pinned by digest (as kit/Dockerfile), for coreutils stat/df -T/sha256sum.
-IMAGE_A5='debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f'
+# Digest-only: Fly's image lookup refuses the name:tag@digest form ("not a valid image").
+IMAGE_A5='docker.io/library/debian@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f'
 export OPV_NO_SKILL=1 FLY_NO_UPDATE_CHECK=1 NO_COLOR=1
 mkdir -p "$E" "$S/a5"
 
@@ -87,7 +88,9 @@ sampled() {
 kadmin() { KUBECONFIG=$ADMIN_KUBECONFIG kubectl "$@"; }
 
 # A5: run the fixed probe in a kit machine; output goes to $E/a5/<label>.txt.
-A5_PATHS=(/dev/shm/opvcanary/a5-file /run/opvcanary/a5-file /opt/opvcanary/a5-file)
+# /dev/shm dropped after the first live run: Fly's init writes the file, then its chown hits
+# ENOENT (tmpfs mounted over it) and the VM reboots in a loop (#136 F2 finding).
+A5_PATHS=(/run/opvcanary/a5-file /opt/opvcanary/a5-file)
 a5_file_secret_flags() { for p in "${A5_PATHS[@]}"; do printf -- '--file-secret\n%s=OPVCANARY_A5_FILE\n' "$p"; done; }
 probe() {
   local id=$1 label=$2 b64; mkdir -p "$E/a5"
