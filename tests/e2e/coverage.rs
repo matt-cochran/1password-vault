@@ -2603,7 +2603,11 @@ fn every_scenario_snapshot_belongs_to_a_scenario() {
         .chain(CORE.iter().copied())
         .chain(crate::scenarios::assistant::SNAPSHOTS.iter().copied())
         .chain(crate::scenarios::consistency::SNAPSHOTS.iter().copied())
-        .chain(crate::scenarios::file_key_guidance::SNAPSHOTS.iter().copied())
+        .chain(
+            crate::scenarios::file_key_guidance::SNAPSHOTS
+                .iter()
+                .copied(),
+        )
         .chain(crate::scenarios::fixes_0141::SNAPSHOTS.iter().copied())
         .chain(crate::scenarios::session_reuse::SNAPSHOTS.iter().copied())
         .collect();

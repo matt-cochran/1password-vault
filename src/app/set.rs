@@ -246,7 +246,7 @@ fn read_secret_file(
     let mut bytes = zeroize::Zeroizing::new(Vec::new());
     std::io::Read::by_ref(&mut file)
         .take(FROM_FILE_MAX_BYTES + 1)
-        .read_to_end(&mut *bytes)
+        .read_to_end(&mut bytes)
         .map_err(|_| not_regular())?;
     if bytes.len() as u64 > FROM_FILE_MAX_BYTES {
         return Err(file_problem(
