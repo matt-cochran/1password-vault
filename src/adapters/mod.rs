@@ -10,6 +10,10 @@ pub mod ci_secrets;
 pub mod fake_op;
 pub mod fly;
 pub mod github;
+/// The HTTP target's shared modules (design `http-target` §5, §6): the pinned descriptor,
+/// the parsed configuration types and (later) the gRPC-Web codec. Not in the registry: an
+/// HTTP target is opt-in per environment.
+pub mod http;
 pub mod kubernetes;
 pub mod onepassword;
 /// Diagnosis of op session and account failures (design §5), and the #160 session probe.

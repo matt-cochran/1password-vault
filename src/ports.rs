@@ -41,6 +41,13 @@ pub trait StagedStore: Store {
     fn write(&self, batch: &[(String, &SecretValue)]) -> Result<(), Error>;
     /// Removes `names` as a pending change.
     fn remove(&self, names: &[String]) -> Result<(), Error>;
+    /// Checks the store's own health for `names` after `sync` recorded their delivery and
+    /// before it finishes (design `http-target` §6): the HTTP store refuses a name whose
+    /// status is rejected (`target_unhealthy`, exit 5) and notes other non-healthy
+    /// statuses. Default: a store with no such notion accepts. Never a value.
+    fn check_written(&self, _names: &[String]) -> Result<(), Error> {
+        Ok(())
+    }
     /// The store's config channel (FR-46), when it delivers config keys itself: GitHub
     /// variables. `None`: config is not delivered by this target. Required: every staged
     /// store declares its config channel (design §1.3).
