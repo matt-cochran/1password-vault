@@ -1,0 +1,33 @@
+{
+  "init": {
+    "cmd": [
+      "sleep",
+      "86400"
+    ]
+  },
+  "guest": {
+    "cpu_kind": "shared",
+    "cpus": 1,
+    "memory_mb": 256
+  },
+  "metadata": {
+    "opv_live_check": "a5"
+  },
+  "image": "docker-hub-mirror.fly.io/library/debian@sha256:918311b7b6c4c6f68b232ba516584925f6c78ad82b6fd534b98979df6438e483",
+  "files": [
+    {
+      "guest_path": "/run/opvcanary/a5-file",
+      "secret_name": "OPVCANARY_A5_FILE"
+    },
+    {
+      "guest_path": "/opt/opvcanary/a5-file",
+      "secret_name": "OPVCANARY_A5_FILE"
+    }
+  ],
+  "restart": {
+    "policy": "no"
+  },
+  "dns": {
+    "skip_registration": true
+  }
+}

@@ -1,0 +1,3 @@
+/run/opvcanary/a5-file: before[inode=131077 mtime=1792550218] after[inode=131077 mtime=1792550232] rewritten-or-absent
+/opt/opvcanary/a5-file: before[inode=131080 mtime=1792550218] after[inode=131080 mtime=1792550232] rewritten-or-absent
+sentinel: present

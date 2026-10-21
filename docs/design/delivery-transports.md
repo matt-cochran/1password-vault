@@ -646,14 +646,18 @@ Until K-R2 and K-R4 exist, the simulator answers exit 86 (`tests/sim/recordings.
 - opv would stage a separate base64 copy (`…__FILE`) of each file key, which keeps the bytes verbatim in one line.
 - Journeeze runs on the infra repo's shared fleet. Its launcher clears the environment (`ced358d:fly.toml:1-10`) and builds the machine configuration in `fly/shared-host/assemble.py` (not read **[A10]**). So `[[files]]` in Journeeze's own `fly.toml` wouldn't apply.
 
-### 7.3 Files on Fly: needs a live check (a throwaway app; O8)
+### 7.3 Files on Fly: answered live (#136 A5, run `256debcd`, 2026-10-21)
 
-- F1: does `fly.toml` `[[files]] secret_name` behave like `--file-secret`? **[A9]**
-- F2: where does the file land (the root filesystem, or RAM), with what mode and owner? Does `--rootfs-persist` (`tests/fixtures/fly/help/machine-run.stdout:104-107`) keep it? **[A9]**
-- F3: are the bytes decoded exactly?
-- F4: does `secrets deploy` rewrite the file?
+These checks ran on the throwaway app `opv-136-canary`, with flyctl 0.4.120 and canaries only. Machine A came from `fly deploy` with `[[files]]`, and machine B from `fly machine run` with `--file-secret`. The record is `docs/verification/v0.13.0-file-delivery.md` §8, and the recordings are in `tests/fixtures/fly/files/`.
 
-Until these are answered, the shim stays (`ced358d:crates/jz_host/src/fleet_secrets.rs:90`, `ced358d:fly.toml:21-23`). It reads only platform-provided env.
+- **F1:** `[[files]] secret_name` is identical to `--file-secret`. Both machines got the same `files` entries and the same files (`machine-{a,b}.files.json`, `f1-probe-{a,b}.txt`). **[A9]** holds.
+- **F2:** the files land on the root filesystem, `/` (`overlay`): the machine's **disk**, not RAM. The mode is **755** (world-readable), owned by `root:root`, in a 755 directory. That holds for `/run` too, which isn't a tmpfs on Fly. The secret isn't also in the env.
+  - A `/dev/shm` guest path can't be used: Fly's init writes the file, its chown then fails with ENOENT, and the machine reboots until it reaches its restart limit (`dev-shm-crashloop.log`).
+- **F2p:** with `--rootfs-persist always` (set by `machine update`), the root filesystem persists across a restart. So do the files: init rewrites them at boot (same inode, new mtime), and they stay on disk (`f2p.txt`).
+- **F3:** the bytes are exact. The canary held CRLF, a NUL, `0xFE 0xFF` and trailing spaces, and both paths on both machines matched its digest.
+- **F4:** `fly secrets deploy` restarts the deploy-managed machine and rewrites its files with the new version. It doesn't reach a machine created with `machine run`: that one kept the old version and didn't reboot until a `machine update` (`f4.txt`).
+
+**Consequence:** Fly's file secrets don't have opv's file property. That property is RAM-only, readable only by the app, with nothing left on disk (§6.3: 0440, root-owned, in the app's group; V9 showed `tmpfs` and `440`). So opv doesn't adopt `[[files]]` as it is. The shim stays (`ced358d:crates/jz_host/src/fleet_secrets.rs:90`, `ced358d:fly.toml:21-23`), and it reads only platform-provided env. The alternative is for the app to copy the value into its own tmpfs at startup, with mode 0400. Any `[[files]]` use rules out `--rootfs-persist`. Rotation reaches only the machines the deploy manages (F4). These answers are posted on `journeeze-saas#274`, and §7.4's steps 2–5 wait on its choice.
 
 ### 7.4 Separate migration app (design only)
 
@@ -1096,7 +1100,7 @@ On a single-node swarm (O13), with an environment `verify-swarm` in the test vau
 | A6 | Pods need no RBAC to mount Secrets or ConfigMaps | V8 |
 | A7 | A missing projected source leaves the pod `ContainerCreating` | K-R4. **K1: confirmed** for a missing Secret and a missing ConfigMap |
 | A8 | 1Password keeps a trailing newline, and `opv sync` preserves it | V8 |
-| A9 | `[[files]] secret_name` equals `--file-secret`; placement, mode and refresh are unknown | F1–F4 |
+| A9 | `[[files]] secret_name` equals `--file-secret`; placement, mode and refresh are unknown | F1–F4: **answered** (§7.3). It holds, and the files are on disk at 755. |
 | A10 | The infra launcher builds Journeeze's machine configuration | the infra repo |
 | A11 | Pod Security `restricted` allows projected volumes and `fsGroup` | V2, with a labelled namespace |
 | A12 | Swarm secrets and configs are immutable; secrets are tmpfs files under `/run/secrets` | S-R2, S-R6 |

@@ -1,0 +1,2 @@
+machine a: /run/opvcanary/a5-file=v2 /opt/opvcanary/a5-file=v2 boot_id_changed=yes
+machine b: /run/opvcanary/a5-file=v1 /opt/opvcanary/a5-file=v1 boot_id_changed=no

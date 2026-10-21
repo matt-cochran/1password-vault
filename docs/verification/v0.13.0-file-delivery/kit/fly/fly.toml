@@ -2,17 +2,14 @@
 # a5-f1.sh writes it to $S/a5/fly.toml with __APP__ replaced, then runs
 #   flyctl deploy --config $S/a5/fly.toml --image <IMAGE_A5> --ha=false --no-public-ips --yes
 # No [http_service] and no [[services]]: the machine gets no public IP and takes no traffic.
-# The three [[files]] entries mirror machine B's --file-secret flags (a5-f1.sh), so F1 compares
-# the two mechanisms path by path.
+# The two [[files]] entries mirror machine B's --file-secret flags (a5-f1.sh), so F1 compares
+# the two mechanisms path by path. A /dev/shm entry was dropped after run 256debcd: Fly's init
+# crash-loops on it (chown ENOENT; runbook §8, Findings).
 app = "__APP__"
 primary_region = "iad"
 
 [processes]
   app = "sleep 86400"
-
-[[files]]
-  guest_path = "/dev/shm/opvcanary/a5-file"
-  secret_name = "OPVCANARY_A5_FILE"
 
 [[files]]
   guest_path = "/run/opvcanary/a5-file"

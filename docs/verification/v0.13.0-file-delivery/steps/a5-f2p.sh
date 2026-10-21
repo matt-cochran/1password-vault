@@ -12,6 +12,7 @@ probe "$id" f2p-before >/dev/null
 flysafe machine restart "$id"
 sleep 10; probe "$id" f2p-after >/dev/null
 for p in "${A5_PATHS[@]}"; do
+  probed "$E/a5/f2p-before.txt" && probed "$E/a5/f2p-after.txt" || { echo "$p: unprobed (a probe failed)"; continue; }
   b=$(grep -F "$p: present" "$E/a5/f2p-before.txt" | grep -o 'inode=[0-9]* mtime=[0-9]*')
   a=$(grep -F "$p: present" "$E/a5/f2p-after.txt" | grep -o 'inode=[0-9]* mtime=[0-9]*')
   echo "$p: before[${b:-absent}] after[${a:-absent}] $([ -n "$b" ] && [ "$b" = "$a" ] && echo kept || echo rewritten-or-absent)"
