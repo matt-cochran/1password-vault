@@ -483,12 +483,14 @@ fields, generates the values asked for, and writes the apply record. Never syncs
 
 const SET_QUICK: &str = "\
 Examples:
-  opv set api/STRIPE_KEY --env dev   # type the value, masked; it goes only to 1Password";
+  opv set api/STRIPE_KEY --env dev   # type the value, masked; it goes only to 1Password
+  opv set api/TLS_KEY --env prod --from-file key.pem   # a file key's exact bytes, line breaks kept";
 
 const SET_MORE: &str = "\
 Needs your own interactive terminal: an AI assistant hands this command to the user. The
 value is written through op's stdin, never its arguments, and is never printed; the key's
-new value state is.";
+new value state is. --from-file is for keys declared with `file = ...`, reads a regular file
+(no symlink, at most 64 KiB) and still needs your own terminal.";
 
 const IMPORT_VALUES_QUICK: &str = "\
 Examples:
@@ -883,6 +885,10 @@ enum Cmd {
         /// Print the key's new value state as one JSON document.
         #[arg(long)]
         json: bool,
+        /// Read a file key's exact value from this file instead of typing it (multi-line
+        /// values such as a PEM).
+        #[arg(long, value_name = "PATH")]
+        from_file: Option<std::path::PathBuf>,
     },
     /// Import values that exist elsewhere into the environment's 1Password item; write-only:
     /// a key whose value is already set is skipped unless named with --replace.
@@ -3626,7 +3632,20 @@ fn person_only(cmd: &Cmd) -> Option<opv::cause::Cmd> {
                 )
                 .collect(),
         ),
-        Cmd::Set { key, env, .. } => (vec!["set"], vec![key.clone(), "--env".into(), env.clone()]),
+        Cmd::Set {
+            key,
+            env,
+            from_file,
+            ..
+        } => {
+            let mut args = vec![key.clone(), "--env".into(), env.clone()];
+            // The refused assistant is handed a placeholder, never the person's real path.
+            if from_file.is_some() {
+                args.push("--from-file".into());
+                args.push("<PATH>".into());
+            }
+            (vec!["set"], args)
+        }
         _ => return None,
     };
     Some(opv::cause::Cmd {
@@ -4731,8 +4750,56 @@ fn run_other(
             };
             opv::app::import::run(&fleet, &env, &opts, r, out)
         }
-        Cmd::Set { key, env, json } => {
+        Cmd::Set {
+            key,
+            env,
+            json,
+            from_file,
+        } => {
             let fleet = loaded?;
+            if let Some(path) = from_file {
+                if !json {
+                    return opv::app::set::set_from_file(
+                        &fleet,
+                        &opv::host::ProcessEnv,
+                        &key,
+                        &env,
+                        &path,
+                        r,
+                        out,
+                    );
+                }
+                // A `warning: ` line names a property of the file; the rest is the state.
+                let mut captured = Vec::new();
+                opv::app::set::set_from_file(
+                    &fleet,
+                    &opv::host::ProcessEnv,
+                    &key,
+                    &env,
+                    &path,
+                    r,
+                    &mut captured,
+                )?;
+                let captured = String::from_utf8_lossy(&captured);
+                let mut warnings = Vec::new();
+                let mut state = Vec::new();
+                for line in captured.lines() {
+                    match line.strip_prefix("warning: ") {
+                        Some(warning) => warnings.push(warning.trim().to_string()),
+                        None => state.push(line),
+                    }
+                }
+                let state = state.join("\n").trim().to_string();
+                let mut doc = serde_json::json!({
+                    "key": key,
+                    "environment": env,
+                    "state": (!state.is_empty()).then_some(state),
+                });
+                if !warnings.is_empty() {
+                    doc["warnings"] = serde_json::json!(warnings);
+                }
+                return writeln!(out, "{doc}").map_err(write_err);
+            }
             let mut prompt = opv::app::masked::prompt;
             if !json {
                 return opv::app::set::set(
