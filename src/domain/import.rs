@@ -217,7 +217,17 @@ pub fn plan(
         let mut failed: Option<&'static str> = None;
         let mut not_applicable = false;
         for (_, value) in entries {
-            match rules::check(product, key, spec, env_name, env, value) {
+            // A file key's value is stored verbatim for local file delivery (M4, §4.5):
+            // the transform and line-shape rules do not apply. A non-file key keeps them.
+            match rules::check_verbatim(
+                product,
+                key,
+                spec,
+                env_name,
+                env,
+                value,
+                spec.file.is_some(),
+            ) {
                 Ok(Some(v)) => normalised.push(v),
                 Ok(None) => not_applicable = true,
                 // `check` refuses an empty applicable value as `nonempty`; the write-only

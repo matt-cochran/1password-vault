@@ -1,0 +1,1 @@
+[ERROR] 2026/10/20 22:16:21 could not read secret 'op://<VAULT>/<ITEM>/source versions': item '<VAULT>/<ITEM>' does not have a field 'source versions'

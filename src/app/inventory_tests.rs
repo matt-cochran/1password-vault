@@ -261,6 +261,50 @@ fn gather_returns_the_read_document() {
     assert_eq!(state, Some(crate::domain::value_state::ValueState::Set));
 }
 
+/// A multi-line value stored for a file key reads `set`: the local file delivery rules
+/// apply (no `single_line`), so it is never reported as `malformed`.
+#[test]
+fn a_multiline_file_key_value_reads_as_set() {
+    let op = FakeOp::default();
+    let id = op.insert(
+        VAULT,
+        json!({
+            "title": "api",
+            "category": "LOGIN",
+            "fields": [{
+                "id": "f-cert",
+                "section": {"id": "s-api", "label": "api"},
+                "label": "TLS_CERT",
+                "type": "CONCEALED",
+                "value": "-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----\n"
+            }]
+        }),
+    );
+    op.vault_users.borrow_mut().insert(VAULT.into(), json!([]));
+    let fleet = crate::config::parse(&format!(
+        r#"
+[environments.dev]
+boundaries.core = {{ vault_id = "{VAULT}", item_id = "{id}" }}
+
+[products.api]
+boundary = "core"
+
+[products.api.keys.TLS_CERT]
+kind = "secret"
+environments = ["dev"]
+file = "tls/private-key"
+"#
+    ))
+    .unwrap();
+    let document = super::gather(&fleet, None, None, &op, None).unwrap();
+    let state = document
+        .cells
+        .iter()
+        .find(|c| c.key == "TLS_CERT")
+        .map(|c| c.state.clone());
+    assert_eq!(state, Some(crate::domain::value_state::ValueState::Set));
+}
+
 /// An environment with no target has nothing to sync to, so its `set` key is delivered and
 /// `opv next` never asks for `opv sync` there (rank 6).
 #[test]

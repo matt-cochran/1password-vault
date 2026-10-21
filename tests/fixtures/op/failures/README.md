@@ -21,3 +21,5 @@ Recorded by the owner with `op` 2.40.0 on Linux/WSL (native `op`), on 2026-10-16
 | 12 | `vault list --account B` with only A signed in: "You are not currently signed in" | `NotSignedIn` (#160) |
 | 13 | `op signin --account B` while `OP_SESSION_*` for A is set and `OP_ACCOUNT` is unset: **succeeded** (exit 0, no stderr) | none. The #153 sign-in failure did not reproduce with op 2.40.0 when `OP_ACCOUNT` is unset |
 | 14–15 | a vault of account B asked for in account A: "isn't a vault in this account" | `InOtherAccount` (#157) |
+| 16 | `op read` of a field the item doesn't have: "does not have a field" (recorded in the #136 live run, 2026-10-21) | `changed`: no record (#218) |
+| 17 | a deleted service account's token: "(403) Forbidden (Service Account Deleted)" (#136 live run) | `CredentialRejected{ServiceAccountToken}` (#221) |

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-10-21
+
+0.14.1 fixes four defects found by #136's live verification against real 1Password, Fly and Kubernetes.
+
+### Upgrade note
+
+- **`opv status --fail-on-drift` now fails on real drift** (#219). A CI gate built on it that passed before may now exit 8 (`target_drift`), when a value or wiring was changed outside opv. That's the gate doing its job. Run `opv sync <env> --deploy` to restore 1Password's values, and check who changed the target.
+
+### Fixed
+
+- **`status --fail-on-drift` missed drift** (#219), in two cases:
+  - **On a staged target such as Fly:** a value changed outside opv was named ("changed outside opv since its last sync") but the command still exited 0.
+  - **On Kubernetes:** a workload reference opv had deployed, then replaced or removed by hand (for example with `kubectl set env`), was reported as "pending deploy".
+  
+  Both are now `target_drift`, exit 8. On Kubernetes, opv records the names it binds in an `opv-bound` annotation on the Deployment: object names only, never a value. `status` and `sync` say "changed outside opv since its last deploy". A Deployment last deployed by 0.14.0 or earlier has no such record, so a hand change there still shows as pending deploy until its next `opv sync --deploy`.
+- **`opv changed` before the first sync** exited 4 ("op failed in a way opv does not recognise"), because op 2.40 replies "does not have a field" (#218). It now reports no record (`ok: true`, exit 10), and the sync is the next step.
+- **A deleted service account** (op: "(403) Forbidden (Service Account Deleted)") was reported as an unrecognised failure (exit 4). It is now the rejected service-account token it is (exit 7): replace `OP_SERVICE_ACCOUNT_TOKEN` (#221).
+- **`opv import` refused a multi-line value for a `file` key** with `single_line`, although opv delivers file keys verbatim (#217). Import and `inventory` now apply the verbatim rules for file keys (`nonempty`, `max_len` and the declared rules), so a PEM or other multi-line file keeps its exact bytes. A non-file key still refuses a line break. Pasting a multi-line value into a field in the 1Password app flattens its line breaks, so import it from a single-quoted `.env` value instead.
+
+### Internal
+
+- The #136 live verification record (`docs/verification/v0.13.0-file-delivery.md`), recorded Fly fixtures and `delivery-transports.md` §7.3's Fly answers (#220).
+- Recorded op replies 16 and 17. opv-sim e2e scenarios cover all four fixes; with a fix reverted, its scenarios fail.
+
 ## [0.14.0] - 2026-10-20
 
 0.14.0 keeps you signed in to 1Password across opv commands without putting the session where anything else can read it. It also closes a leak: `opv run` could hand the 1Password CLI's session or service-account token to the app.
@@ -673,7 +697,8 @@ Local development without a deployment target. Two deprecated forms are removed,
 - `secretctl` renamed to `opv` ([#4](https://github.com/matt-cochran/1password-vault/pull/4)).
 - Gitflow guard, CI on `dev`/`staging`/`main`, and Dependabot targeting `dev` ([#5](https://github.com/matt-cochran/1password-vault/pull/5)).
 
-[Unreleased]: https://github.com/matt-cochran/1password-vault/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/matt-cochran/1password-vault/compare/v0.14.1...HEAD
+[0.14.1]: https://github.com/matt-cochran/1password-vault/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/matt-cochran/1password-vault/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/matt-cochran/1password-vault/compare/v0.12.3...v0.13.0
 [0.12.3]: https://github.com/matt-cochran/1password-vault/compare/v0.12.2...v0.12.3

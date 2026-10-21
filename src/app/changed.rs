@@ -442,6 +442,7 @@ fn missing_field_reply(stderr: &str) -> bool {
     let low = stderr.to_ascii_lowercase();
     low.contains("isn't a field")
         || low.contains("is not a field")
+        || low.contains("does not have a field")
         || low.contains("not a field")
         || low.contains("field not found")
         || low.contains("no field")
