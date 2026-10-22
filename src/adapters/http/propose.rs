@@ -5,8 +5,8 @@
 //! hand-written configuration.
 //!
 //! The generator only reads names, numbers and types out of the descriptor. It never reads a
-//! value (a descriptor holds none) and it never guesses a host: `http.host` is a `<HOST>`
-//! placeholder a person confirms. Every guessed line ends in `# suggested: confirm`; a
+//! value (a descriptor holds none) and it never guesses a host: `http.host` is the one the
+//! person gave (#236). Every guessed line ends in `# suggested: confirm`; a
 //! decision with no candidate is a `# choose:` comment instead.
 
 use prost_reflect::{
@@ -25,7 +25,12 @@ const COMMENT_DEPTH: usize = 3;
 /// The TOML lines of an `http` target section for `service` in the descriptor set
 /// `descriptor` (read from `descriptor_path`, which the section names), or why not. Never a
 /// value: a descriptor holds names, numbers and types only.
-pub fn section(descriptor: &[u8], descriptor_path: &str, service: &str) -> Result<String, String> {
+pub fn section(
+    descriptor: &[u8],
+    descriptor_path: &str,
+    service: &str,
+    host: &str,
+) -> Result<String, String> {
     let pool = DescriptorPool::decode(descriptor)
         .map_err(|e| format!("descriptor could not be read: {e}"))?;
     let service = pool
@@ -34,7 +39,7 @@ pub fn section(descriptor: &[u8], descriptor_path: &str, service: &str) -> Resul
 
     let sha256 = hex::encode(Sha256::digest(descriptor));
     let mut out = String::new();
-    out.push_str("http.host = \"<HOST>\"\n");
+    out.push_str(&format!("http.host = {}\n", toml_str(host)));
     out.push_str(&format!(
         "http.descriptor = {}\n",
         toml_str(descriptor_path)

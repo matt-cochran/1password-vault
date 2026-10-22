@@ -633,7 +633,7 @@ conflict = ["ALREADY_EXISTS"]                      # gRPC codes that mean "chang
 destination is), and the concealed `token`, `cf_access_client_id` and `cf_access_client_secret`
 (opv adds the `Bearer` scheme). opv cannot mint this item, so a person creates it. The section is
 generated from the application's schema with
-`opv propose target <env> <name> --provider http --http-descriptor <file> --http-service <full.name>`.
+`opv propose target <env> <name> --provider http --http-host <host> --http-descriptor <file> --http-service <full.name>`.
 
 ### Secrets in a named store: `[stores.<name>]` and `secrets_in`
 

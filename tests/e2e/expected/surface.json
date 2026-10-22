@@ -405,6 +405,7 @@
         "github-repo",
         "github-secret-name",
         "http-descriptor",
+        "http-host",
         "http-service",
         "json",
         "kubernetes-config",

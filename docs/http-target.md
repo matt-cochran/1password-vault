@@ -201,7 +201,7 @@ The `http` section is generated from the application's descriptor set rather tha
 hand:
 
 ```sh
-opv propose target <env> <name> --provider http --http-descriptor <file> --http-service <full.name>
+opv propose target <env> <name> --provider http --http-host <host> --http-descriptor <file> --http-service <full.name>
 ```
 
 The generator reads the descriptor set and writes a proposal through the existing value-free

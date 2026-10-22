@@ -18,9 +18,12 @@ const SHA256: &str = "ec5b6933b89fc49c1ebeaaa31afc666e9090036c53301648cc657cd18f
 /// The path the generated section names.
 const DESCRIPTOR_PATH: &str = "deploy/opv/platform_console.binpb";
 
+/// The host the person gives.
+const HOST: &str = "central.zonetico.com";
+
 /// The section for the fixture service.
 fn generated() -> String {
-    section(DESCRIPTOR, DESCRIPTOR_PATH, SERVICE).expect("the fixture service generates")
+    section(DESCRIPTOR, DESCRIPTOR_PATH, SERVICE, HOST).expect("the fixture service generates")
 }
 
 #[test]
@@ -48,20 +51,25 @@ fn suggests_the_save_rpc_for_the_put_table() {
 }
 
 #[test]
+fn writes_the_given_host() {
+    assert!(generated().contains("http.host = \"central.zonetico.com\""));
+}
+
+#[test]
 fn produces_byte_identical_text_for_the_same_descriptor() {
     assert_eq!(generated(), generated());
 }
 
 #[test]
 fn refuses_a_service_that_is_not_in_the_descriptor() {
-    let error = section(DESCRIPTOR, DESCRIPTOR_PATH, "portal.v1.NoSuchService")
+    let error = section(DESCRIPTOR, DESCRIPTOR_PATH, "portal.v1.NoSuchService", HOST)
         .expect_err("an unknown service is refused");
     assert!(error.contains("portal.v1.NoSuchService"));
 }
 
 #[test]
-fn generated_section_parses_after_the_host_and_names_are_filled_in() {
-    let text = generated().replace("<HOST>", "central.zonetico.com");
+fn generated_section_parses_after_the_names_are_filled_in() {
+    let text = generated();
     let document: toml::Table = toml::from_str(&text).expect("the generated section is valid TOML");
     let mut section = document
         .get("http")

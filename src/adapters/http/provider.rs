@@ -32,7 +32,12 @@ use crate::provider::{
 use crate::runner::CommandRunner;
 
 /// The `opv target add` options of the `http` provider (design §7).
-const INIT_FIELDS: [InitField; 2] = [
+const INIT_FIELDS: [InitField; 3] = [
+    InitField {
+        field: "host",
+        help: "hostname opv calls (lowercase ASCII, no scheme, port or path)",
+        required: true,
+    },
     InitField {
         field: "descriptor",
         help: "path of the pinned FileDescriptorSet",
@@ -134,13 +139,14 @@ impl Provider for HttpProvider {
     }
 
     fn init_section(&self, values: &BTreeMap<&str, String>) -> Option<String> {
+        let host = values.get("host")?;
         let descriptor = values.get("descriptor")?;
         let service = values.get("service")?;
         // A generation failure stays visible: the section carries the reason as a comment
         // (names only) and then fails the load rules, rather than silently disappearing.
         let generated = std::fs::read(descriptor)
             .map_err(|_| format!("cannot read the descriptor set {descriptor}"))
-            .and_then(|bytes| super::propose::section(&bytes, descriptor, service));
+            .and_then(|bytes| super::propose::section(&bytes, descriptor, service, host));
         Some(generated.unwrap_or_else(|why| format!("{INIT_SECTION_FAILED} {why}\n")))
     }
 
