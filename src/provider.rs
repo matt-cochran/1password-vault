@@ -222,6 +222,11 @@ pub fn init_flag(p: &dyn Provider, field: &InitField) -> String {
     format!("{}-{}", p.section(), field.field.replace('_', "-"))
 }
 
+/// The prefix of the comment a [`Provider::init_section`] returns when it cannot generate
+/// the section: the rest of the line is the reason, names only. A caller that inserts the
+/// section surfaces that reason instead of a section that fails the load rules.
+pub const INIT_SECTION_FAILED: &str = "# opv could not generate this section:";
+
 /// `<section>.<field> = "<value>"` lines, in the order given, for
 /// [`Provider::init_section`]. Values are TOML basic strings.
 pub fn init_lines<'a>(

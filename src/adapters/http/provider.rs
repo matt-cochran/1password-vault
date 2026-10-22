@@ -26,8 +26,8 @@ use crate::error::Error;
 use crate::host::Host;
 use crate::ports::Ports;
 use crate::provider::{
-    Channel, Channels, Check, FileCapability, InitField, NameRules, Preflight, PreflightMode,
-    Provider, Section, TargetConfig,
+    Channel, Channels, Check, FileCapability, INIT_SECTION_FAILED, InitField, NameRules, Preflight,
+    PreflightMode, Provider, Section, TargetConfig,
 };
 use crate::runner::CommandRunner;
 
@@ -141,11 +141,7 @@ impl Provider for HttpProvider {
         let generated = std::fs::read(descriptor)
             .map_err(|_| format!("cannot read the descriptor set {descriptor}"))
             .and_then(|bytes| super::propose::section(&bytes, descriptor, service));
-        Some(
-            generated.unwrap_or_else(|why| {
-                format!("# opv could not generate this http section: {why}\n")
-            }),
-        )
+        Some(generated.unwrap_or_else(|why| format!("{INIT_SECTION_FAILED} {why}\n")))
     }
 
     fn deploy_credential_fields(

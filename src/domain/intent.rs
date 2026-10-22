@@ -407,7 +407,7 @@ fn validate(intent: &Intent) -> Result<(), Error> {
             }
             for (flag, value) in options {
                 check_word(&format!("options.{flag}"), flag)?;
-                screen(&format!("options.{flag}"), value)?;
+                screen_option(&format!("options.{flag}"), value)?;
             }
             if let Some(g) = guidance {
                 screen("guidance", &g.text)?;
@@ -646,8 +646,21 @@ impl Detector {
     }
 }
 
+/// Screen one option value: a provider flag value (a name, a path or a host), not free
+/// text. Like [`screen`] except that the high-entropy detector does not apply, so a long
+/// descriptor path or service name is accepted; a pasted credential still is not.
+fn screen_option(field: &str, text: &str) -> Result<(), Error> {
+    screen_with(field, text, false)
+}
+
 /// Screen one line of free text: at most 200 characters, one line, no value shape (C7, P-2).
 fn screen(field: &str, text: &str) -> Result<(), Error> {
+    screen_with(field, text, true)
+}
+
+/// One line of at most 200 characters with no value shape. `high_entropy` also refuses a
+/// long, varied token; an option value turns it off because it is a name, a path or a host.
+fn screen_with(field: &str, text: &str, high_entropy: bool) -> Result<(), Error> {
     if text.contains('\n') || text.contains('\r') {
         return Err(bad(
             field,
@@ -664,15 +677,16 @@ fn screen(field: &str, text: &str) -> Result<(), Error> {
             },
         ));
     }
-    match detect(text) {
+    match detect(text, high_entropy) {
         Some(detector) => Err(value_in_text(field, detector.name())),
         None => Ok(()),
     }
 }
 
 /// The detector that matched `text`, if any. PEM is checked first so a block header names
-/// `pem_header`; a prefix token names `known_prefix`; a long, varied token names `high_entropy`.
-fn detect(text: &str) -> Option<Detector> {
+/// `pem_header`; a prefix token names `known_prefix`; with `high_entropy` a long, varied
+/// token names `high_entropy`.
+fn detect(text: &str, high_entropy: bool) -> Option<Detector> {
     if text.contains("-----BEGIN") {
         return Some(Detector::PemHeader);
     }
@@ -682,9 +696,10 @@ fn detect(text: &str) -> Option<Detector> {
     {
         return Some(Detector::KnownPrefix);
     }
-    if text
-        .split_whitespace()
-        .any(|token| token.chars().count() >= 20 && entropy_bits(token) > 4.0)
+    if high_entropy
+        && text
+            .split_whitespace()
+            .any(|token| token.chars().count() >= 20 && entropy_bits(token) > 4.0)
     {
         return Some(Detector::HighEntropy);
     }
