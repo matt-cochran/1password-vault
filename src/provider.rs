@@ -315,12 +315,34 @@ pub struct Section<'a> {
     env: &'a str,
     value: &'a Spanned<DeValue<'a>>,
     text: &'a str,
+    dir: Option<&'a std::path::Path>,
 }
 
 impl<'a> Section<'a> {
     /// `value` is the section as parsed from `text`, the whole file.
     pub(crate) fn new(env: &'a str, value: &'a Spanned<DeValue<'a>>, text: &'a str) -> Self {
-        Self { env, value, text }
+        Self {
+            env,
+            value,
+            text,
+            dir: None,
+        }
+    }
+
+    /// This section with relative file references resolving against `dir`, the
+    /// configuration file's directory (`None`: the working directory).
+    pub(crate) fn in_dir(mut self, dir: Option<&'a std::path::Path>) -> Self {
+        self.dir = dir;
+        self
+    }
+
+    /// `path` as the section's file reference: unchanged when absolute or when the
+    /// configuration came from no file, else relative to the configuration file's directory.
+    pub fn resolve(&self, path: &str) -> std::path::PathBuf {
+        match self.dir {
+            Some(dir) if !std::path::Path::new(path).is_absolute() => dir.join(path),
+            _ => std::path::PathBuf::from(path),
+        }
     }
 
     /// The environment this section belongs to (for a `[stores.<name>]` table: the store).
@@ -613,10 +635,43 @@ state_vault_id = "sk8s"
 github.repo = "org/web"
 state_vault_id = "sgh"
 
+[environments.prod.targets.http]
+state_vault_id = "shttp"
+http.host = "central.example.com"
+http.descriptor = "tests/fixtures/https/zonetico/platform_console.binpb"
+http.descriptor_sha256 = "ec5b6933b89fc49c1ebeaaa31afc666e9090036c53301648cc657cd18f8a7445"
+http.names = { DATABASE_URL = "openrouter" }
+http.list.call = "portal.v1.PlatformConsoleService/ListPlatformConnections"
+http.list.request = { operator_id = "00000000-0000-4000-8000-000000000000" }
+http.list.items = "connections"
+http.list.name = "provider"
+http.list.version = "version"
+http.list.status = "status"
+http.list.absent = ["CONNECTION_STATUS_NOT_CONFIGURED", "CONNECTION_STATUS_REVOKED"]
+http.list.rejected = ["CONNECTION_STATUS_REJECTED"]
+http.put.call = "portal.v1.PlatformConsoleService/SavePlatformConnection"
+http.put.request = { operator_id = "00000000-0000-4000-8000-000000000000", provider = "{name}", expected_version = "{version}" }
+http.put.value = { field = "secret_value", number = 3, type = "bytes" }
+http.put.reply = "connection"
+http.put.conflict = ["ALREADY_EXISTS"]
+
 [products.web.keys.DATABASE_URL]
 kind = "secret"
 environments = ["prod"]
 "#;
+
+    /// A section's relative file reference resolves against its configuration file's
+    /// directory (design `http-target` §3.1: the descriptor set sits beside the config).
+    #[test]
+    fn a_relative_reference_resolves_against_the_configuration_directory() {
+        let value = toml::de::DeValue::parse("{ x = 1 }").expect("an inline table");
+        let section = Section::new("prod", &value, "{ x = 1 }")
+            .in_dir(Some(std::path::Path::new("/repo/deploy")));
+        assert_eq!(
+            section.resolve("opv/api.binpb"),
+            std::path::PathBuf::from("/repo/deploy/opv/api.binpb")
+        );
+    }
 
     /// The contract test (design §1.1, §1.3): each provider's table, as today's behaviour.
     #[test]
@@ -672,6 +727,18 @@ environments = ["prod"]
                             label: "GitHub secret"
                         },
                         config: Channel::Variables,
+                        files: FileCapability::None,
+                    },
+                ),
+                (
+                    "http",
+                    Channels {
+                        secret: Channel::Store {
+                            label: "HTTP target"
+                        },
+                        config: Channel::Declined {
+                            why: "the HTTP target delivers secrets only",
+                        },
                         files: FileCapability::None,
                     },
                 ),

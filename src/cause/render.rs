@@ -387,6 +387,7 @@ fn sign_in_advice(system: System, why: RefusedBecause) -> String {
             System::Azure => "sign this CI job in with the target's deploy credentials, a service principal (opv ci workflow prints that step)".to_string(),
             System::Kubernetes => "give this CI job a kubeconfig whose context carries its own credentials".to_string(),
             System::Ssh | System::RemoteOpv => "give this CI job the remote profile's ssh key".to_string(),
+            System::Https => "give this CI job the target's deploy credentials from 1Password".to_string(),
         },
     }
 }
@@ -1131,7 +1132,11 @@ fn vendor_sign_in(system: System) -> Option<VendorCmd> {
         System::Fly => ("flyctl", &["auth", "login"]),
         System::Azure => ("az", &["login"]),
         System::GitHub => ("gh", &["auth", "login"]),
-        System::OnePassword | System::Kubernetes | System::Ssh | System::RemoteOpv => {
+        System::OnePassword
+        | System::Kubernetes
+        | System::Ssh
+        | System::RemoteOpv
+        | System::Https => {
             return None;
         }
     };
@@ -3719,7 +3724,9 @@ impl Cause {
                         (_, Some(vault)) => vendor("op", &["item", "list", "--vault", vault]),
                         (_, None) => vendor("op", &["vault", "list"]),
                     },
-                    (System::Ssh | System::RemoteOpv, _) => Next::None(NoNext::NothingToRun),
+                    (System::Ssh | System::RemoteOpv | System::Https, _) => {
+                        Next::None(NoNext::NothingToRun)
+                    }
                 };
                 plan(inspect(text), next)
             }

@@ -1,0 +1,12 @@
+{
+  "status": 200,
+  "headers": [
+    ["content-type", "application/grpc-web+proto"],
+    ["grpc-status", "7"],
+    ["grpc-message", "Platform%20operator%20required"],
+    ["connection", "close"],
+    ["content-length", "0"],
+    ["date", "Wed, 21 Oct 2026 22:01:19 GMT"]
+  ],
+  "body_file": "err-permission-denied.body"
+}

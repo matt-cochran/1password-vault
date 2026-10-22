@@ -1,0 +1,12 @@
+{
+  "status": 200,
+  "headers": [
+    ["content-type", "application/grpc-web+proto"],
+    ["grpc-status", "3"],
+    ["grpc-message", "Paste%20the%20full%20key%20(16%20characters%20or%20more)"],
+    ["connection", "close"],
+    ["content-length", "0"],
+    ["date", "Wed, 21 Oct 2026 22:01:19 GMT"]
+  ],
+  "body_file": "err-invalid-argument.body"
+}

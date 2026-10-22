@@ -553,7 +553,7 @@ fn diagnose_unanswered(seen: crate::cause::Observed) -> Cause {
         System::Azure => azure::diagnose::diagnose(seen, "", &ctx),
         System::Kubernetes => kubernetes::diagnose::diagnose(seen, "", &ctx),
         System::GitHub => github::diagnose::diagnose(seen, "", &ctx),
-        system @ (System::Ssh | System::RemoteOpv) => Cause::Unavailable {
+        system @ (System::Ssh | System::RemoteOpv | System::Https) => Cause::Unavailable {
             system,
             why: seen.exit().unanswered().unwrap_or(Unanswered::Timeout),
             attempts: seen.attempts(),
