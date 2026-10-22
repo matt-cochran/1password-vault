@@ -1128,7 +1128,7 @@ jobs:
     env:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
       OP_CACHE: "false"
-      OPV_VERSION: v0.15.0  # pin the release you tested; bump it deliberately
+      OPV_VERSION: v0.16.0  # pin the release you tested; bump it deliberately
     steps:
       - uses: actions/checkout@v4
       - name: Install the 1Password CLI
