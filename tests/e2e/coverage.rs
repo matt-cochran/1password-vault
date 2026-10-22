@@ -2603,7 +2603,11 @@ fn every_scenario_snapshot_belongs_to_a_scenario() {
                 .copied(),
         )
         .chain(crate::scenarios::fixes_0141::SNAPSHOTS.iter().copied())
-        .chain(crate::scenarios::http_target_sync::SNAPSHOTS.iter().copied())
+        .chain(
+            crate::scenarios::http_target_sync::SNAPSHOTS
+                .iter()
+                .copied(),
+        )
         .chain(
             crate::scenarios::http_target_faults::SNAPSHOTS
                 .iter()

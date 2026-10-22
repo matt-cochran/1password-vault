@@ -213,6 +213,12 @@ fn save(doc: &Json, state: &mut Json, pool: &DescriptorPool, body: &[u8]) -> Rep
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
 
+    // Zonetico refuses a provider it has no slot for (`spec(provider)`, "Unknown provider",
+    // HTTP 400 -> INVALID_ARGUMENT), so a mapping to a missing remote name fails fast.
+    if !providers(doc).iter().any(|p| *p == provider) {
+        return error(3, "Unknown provider");
+    }
+
     // A `version_bumped` fault arms this flag: bump the target before the write, so the
     // request's expected version is stale and the write conflicts (design §6, §9).
     if state["http"]["bump_before_save"].as_bool().unwrap_or(false) {
@@ -620,5 +626,20 @@ mod tests {
         let stored = serde_json::to_string(&state).expect("the store serializes");
         let printed = String::from_utf8_lossy(&reply.stdout);
         assert!(!stored.contains(CANARY_VALUE) && !printed.contains(CANARY_VALUE));
+    }
+
+    #[test]
+    fn a_save_to_an_unknown_provider_is_invalid_argument() {
+        let pool = pool();
+        let mut state = json!({});
+        let reply = serve(
+            &world_http(),
+            &mut state,
+            "POST",
+            SAVE,
+            Some(AUTHORIZATION),
+            &save_body(&pool, "no-such-slot", 0),
+        );
+        assert_eq!(decode(SAVE, &reply).grpc_status(), 3);
     }
 }

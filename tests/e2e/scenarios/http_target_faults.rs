@@ -22,7 +22,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::coverage::{Run, Scenario, DEV_ACCOUNT, scenario_snapshots, updating};
+use crate::coverage::{DEV_ACCOUNT, Run, Scenario, scenario_snapshots, updating};
 
 /// The scenario snapshots this module writes (`tests/e2e/snapshots/scenarios/`).
 pub(crate) const SNAPSHOTS: &[&str] = &["http_target_faults"];
@@ -102,12 +102,16 @@ fn platform(names: &'static str) -> Scenario {
             out.push_str(&format!("delivery_items.web = \"{DELIVERY_ITEM}\"\n\n"));
             out.push_str(&format!("http.host = \"{HOST}\"\n"));
             out.push_str(&format!("http.descriptor = \"{descriptor}\"\n"));
-            out.push_str(&format!("http.descriptor_sha256 = \"{DESCRIPTOR_SHA256}\"\n\n"));
+            out.push_str(&format!(
+                "http.descriptor_sha256 = \"{DESCRIPTOR_SHA256}\"\n\n"
+            ));
             out.push_str("[environments.prod.targets.platform.http.names]\n");
             out.push_str(names);
             out.push_str("\n[environments.prod.targets.platform.http.list]\n");
             out.push_str("call = \"portal.v1.PlatformConsoleService/ListPlatformConnections\"\n");
-            out.push_str(&format!("request = {{ operator_id = \"{OPERATOR_ID}\" }}\n"));
+            out.push_str(&format!(
+                "request = {{ operator_id = \"{OPERATOR_ID}\" }}\n"
+            ));
             out.push_str("items = \"connections\"\n");
             out.push_str("name = \"provider\"\n");
             out.push_str("version = \"version\"\n");
@@ -128,19 +132,24 @@ fn platform(names: &'static str) -> Scenario {
             out
         })
         .world(|w| {
-            // `opv-sim https` reads these at the world's top level.
-            let http = w["http"].clone();
-            for key in ["descriptor", "operator_id", "token", "rejected"] {
-                w[key] = http[key].clone();
-            }
-            // Every remote name the mapping may use; `tavily` is the world's rejected one.
-            w["providers"] =
-                json!(["openrouter", "tavily", "stripe", "database", "tls-cert", "tls-key"]);
-            w["op"]["vaults"].as_array_mut().expect("vaults").push(json!({
-                "id": DEPLOY_VAULT,
-                "name": DEPLOY_VAULT_NAME,
-                "account": DEV_ACCOUNT,
-            }));
+            // Every remote name the mapping may use, in the world's `http` section that
+            // `opv-sim https` reads; `tavily` is the world's rejected one.
+            w["http"]["providers"] = json!([
+                "openrouter",
+                "tavily",
+                "stripe",
+                "database",
+                "tls-cert",
+                "tls-key"
+            ]);
+            w["op"]["vaults"]
+                .as_array_mut()
+                .expect("vaults")
+                .push(json!({
+                    "id": DEPLOY_VAULT,
+                    "name": DEPLOY_VAULT_NAME,
+                    "account": DEV_ACCOUNT,
+                }));
             w["op"]["items"].as_array_mut().expect("items").push(json!({
                 "id": DEPLOY_ITEM,
                 "title": DEPLOY_ITEM_TITLE,
@@ -157,11 +166,14 @@ fn platform(names: &'static str) -> Scenario {
                      "label": "cf_access_client_secret", "value": CF_CLIENT_SECRET},
                 ]
             }));
-            w["op"]["vaults"].as_array_mut().expect("vaults").push(json!({
-                "id": STATE_VAULT,
-                "name": STATE_VAULT_NAME,
-                "account": DEV_ACCOUNT,
-            }));
+            w["op"]["vaults"]
+                .as_array_mut()
+                .expect("vaults")
+                .push(json!({
+                    "id": STATE_VAULT,
+                    "name": STATE_VAULT_NAME,
+                    "account": DEV_ACCOUNT,
+                }));
             w["op"]["items"].as_array_mut().expect("items").push(json!({
                 "id": DELIVERY_ITEM,
                 "title": "opv · delivery · web · platform",
@@ -355,8 +367,9 @@ fn section(snap: &mut String, label: &str, run: &Run) {
 
 /// Each fault's telling runs, text and `--json`, each case on a fresh world.
 fn transcript() -> String {
-    let mut snap =
-        String::from("# http_target_faults: the HTTPS target's failure paths through the real binary\n");
+    let mut snap = String::from(
+        "# http_target_faults: the HTTPS target's failure paths through the real binary\n",
+    );
     let both = |snap: &mut String, label: &str, build: &dyn Fn() -> Scenario, a: &[&str]| {
         section(snap, &format!("{label} text"), &build().opv(&args(a)));
         let json = [a, &["--json"]].concat();

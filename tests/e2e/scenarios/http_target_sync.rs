@@ -42,8 +42,7 @@ const TARGET: &str = "platform";
 const HOST: &str = "platform.e2e.test";
 /// The pinned descriptor fixture, and the digest the target declares.
 const DESCRIPTOR: &str = "tests/fixtures/https/zonetico/platform_console.binpb";
-const DESCRIPTOR_SHA256: &str =
-    "ec5b6933b89fc49c1ebeaaa31afc666e9090036c53301648cc657cd18f8a7445";
+const DESCRIPTOR_SHA256: &str = "ec5b6933b89fc49c1ebeaaa31afc666e9090036c53301648cc657cd18f8a7445";
 const OPERATOR: &str = "00000000-0000-4000-8000-000000000000";
 /// The simulator's accepted bearer token (`tests/e2e/app/world.json` `http.token`).
 const TOKEN: &str = "CANARY-TOKEN-0123456789";
@@ -225,7 +224,12 @@ fn change_field(s: Scenario, id: &str, label: &str, value: &str) -> Scenario {
 fn rotated() -> Scenario {
     let s = app();
     assert_eq!(s.opv(&sync_args()).code, Some(0), "first sync");
-    change_field(s, WEB_PROD_ITEM, "API_KEY", "S7MARKERVALUE-rotated-api-key-0123456789")
+    change_field(
+        s,
+        WEB_PROD_ITEM,
+        "API_KEY",
+        "S7MARKERVALUE-rotated-api-key-0123456789",
+    )
 }
 
 /// The app after one sync, with the `openrouter` entry's version bumped in the simulator's
@@ -295,7 +299,11 @@ fn a_changed_value_is_written_at_the_listed_version() {
     let s = rotated();
     let run = s.opv(&sync_args());
     assert_eq!(run.code, Some(0), "{}{}", run.stdout, run.stderr);
-    assert_eq!(version_of(&s, "openrouter"), 2, "the change was not written");
+    assert_eq!(
+        version_of(&s, "openrouter"),
+        2,
+        "the change was not written"
+    );
 }
 
 // --- the drift path --------------------------------------------------------------------------
@@ -362,10 +370,7 @@ fn no_snapshot_or_call_log_holds_a_value() {
             TOKEN,
             "masked_key",
         ] {
-            assert!(
-                !text.contains(canary),
-                "a value leaked ({canary}): {text}"
-            );
+            assert!(!text.contains(canary), "a value leaked ({canary}): {text}");
         }
     }
 }
