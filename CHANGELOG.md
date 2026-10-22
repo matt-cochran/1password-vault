@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-21
+
+0.16.0 delivers to an application's own secret store through its API.
+
+### Added
+
+- **The `http` target (#231).** A key can be delivered to an application's own store over gRPC-Web, the calls described in configuration and checked against the application's descriptor set pinned by sha256. The value goes in exactly one pinned field and never through JSON or a string. Destination and credentials come from the 1Password item (`base_url`, `token`, `cf_access_client_id`, `cf_access_client_secret`), and the item's host must equal the reviewed `http.host`. HTTPS only, no redirects, the operating system's trust store, proxies honoured. Drift comes from the store's version counter: a change is detected, equality is not proven. A key the store rejects fails the sync with `target_unhealthy` after its delivery is recorded, and retire is refused for this target. Requires application support; see [the HTTP target guide](docs/http-target.md).
+- **`opv propose target <env> <name> --provider http --http-descriptor <file> --http-service <name>`** generates the section from the descriptor set.
+
+### Internal
+
+- HTTPS runs as a runner effect (retries, budget, observation and the test fakes shared); opv-sim stands in for `https` with a descriptor-driven fake store; recorded gRPC-Web replies are test fixtures; `ChangedBeforeWrite` is reached end to end; a configuration file's relative references resolve beside it.
+
 ## [0.15.0] - 2026-10-21
 
 0.15.0 lets a person store a file key's exact bytes.
@@ -712,7 +725,8 @@ Local development without a deployment target. Two deprecated forms are removed,
 - `secretctl` renamed to `opv` ([#4](https://github.com/matt-cochran/1password-vault/pull/4)).
 - Gitflow guard, CI on `dev`/`staging`/`main`, and Dependabot targeting `dev` ([#5](https://github.com/matt-cochran/1password-vault/pull/5)).
 
-[Unreleased]: https://github.com/matt-cochran/1password-vault/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/matt-cochran/1password-vault/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/matt-cochran/1password-vault/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/matt-cochran/1password-vault/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/matt-cochran/1password-vault/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/matt-cochran/1password-vault/compare/v0.13.0...v0.14.0

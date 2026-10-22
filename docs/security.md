@@ -98,6 +98,15 @@ reaches any other channel. What a tool does with a value after opv hands it over
 correctly is out of scope; opv's scrubber still masks a value a tool echoes back, as
 best-effort defence.
 
+An [HTTP target](http-target.md) hands each value to the application's API as the bytes of one
+pinned `string`/`bytes` request field; the request template cannot reference a credential, and no
+other field is ever set from a value. The three credentials live only in the `deploy_credentials`
+item and reach the runner as HTTPS header pairs, never argv, an error, a log or a file, and header
+values are never printed (even `--verbose` prints only the RPC name, host, status and duration).
+The destination is checked against both the item's `base_url` and the configuration's `http.host`,
+so changing it takes a vault write and a reviewed configuration change. Like any TLS client,
+request buffers inside the TLS library are not zeroized.
+
 ## Values opv never stores: infrastructure values
 
 From 0.13.0 a key declared `source = "infrastructure"` holds a value that infrastructure

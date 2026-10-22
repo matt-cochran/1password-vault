@@ -1,0 +1,103 @@
+# http_target_faults: the HTTPS target's failure paths through the real binary
+
+## version bumped opv sync prod --target platform text exit: 5
+## version bumped opv sync prod --target platform text stdout
+prod/platform: warning: web/LOG_LEVEL not delivered (no config channel: the HTTP target delivers secrets only)
+prod/platform: warning: web/OTEL_RESOURCE not delivered (no config channel: the HTTP target delivers secrets only)
+prod/platform: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
+
+## version bumped opv sync prod --target platform text stderr
+using <SCENARIO>/project/secrets.toml
+opv: external store openrouter changed while opv was working, so opv wrote nothing
+Next: opv plan prod --target platform
+
+## version bumped opv sync prod --target platform --json exit: 5
+## version bumped opv sync prod --target platform --json stdout
+{"schema_version":3,"ok":false,"exit_code":5,"next":{"kind":"run","actor":"assistant","command":"opv plan prod --target platform --json"},"do":null,"error":{"code":"target_changed","category":"target","message":"external store openrouter changed while opv was working, so opv wrote nothing","subject":{"object":{"kind":"resource","resource":{"kind":"external_store","name":"openrouter","scope":null},"changed":[]}},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"safe","human_required":false,"do":null,"next":{"kind":"run","actor":"assistant","command":"opv plan prod --target platform --json"}}}
+
+## version bumped opv sync prod --target platform --json stderr
+using <SCENARIO>/project/secrets.toml
+opv: external store openrouter changed while opv was working, so opv wrote nothing
+Next: opv plan prod --target platform --json
+
+## rejected provider opv sync prod --target platform text exit: 5
+## rejected provider opv sync prod --target platform text stdout
+prod/platform: warning: web/LOG_LEVEL not delivered (no config channel: the HTTP target delivers secrets only)
+prod/platform: warning: web/OTEL_RESOURCE not delivered (no config channel: the HTTP target delivers secrets only)
+prod/platform: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
+prod/platform: delivery: web revision drv-<id>
+
+## rejected provider opv sync prod --target platform text stderr
+using <SCENARIO>/project/secrets.toml
+opv: the new revision tavily of external store tavily at HTTPS target is unhealthy; already written: staged 5 secret(s)
+  checked: op item edit iE2EDELIVERYWEBPLATFORM0001 --vault vE2ESTATEPLATFORM0000000001 --format json (exit 0)
+Do: check why revision tavily of external store tavily fails its health checks in its logs (already written: staged 5 secret(s))
+Next: opv plan prod --target platform
+
+## rejected provider opv sync prod --target platform --json exit: 5
+## rejected provider opv sync prod --target platform --json stdout
+{"schema_version":3,"ok":false,"exit_code":5,"next":{"kind":"run","actor":"assistant","command":"opv plan prod --target platform"},"do":"check why revision tavily of external store tavily fails its health checks in its logs (already written: staged 5 secret(s))","error":{"code":"target_unhealthy","category":"target","message":"the new revision tavily of external store tavily at HTTPS target is unhealthy; already written: staged 5 secret(s)","subject":{"then":{"target":null,"system":"https","subject":{"kind":"external_store","name":"tavily","scope":null},"why":{"why":"unhealthy","new_revision":"tavily","serving":null},"env":"prod"},"done":["staged 5 secret(s)"]},"evidence":{"checked":"op item edit iE2EDELIVERYWEBPLATFORM0001 --vault vE2ESTATEPLATFORM0000000001 --format json","account":null,"upstream":null},"retry":"check_first","human_required":false,"do":"check why revision tavily of external store tavily fails its health checks in its logs (already written: staged 5 secret(s))","next":{"kind":"run","actor":"assistant","command":"opv plan prod --target platform"}}}
+
+## rejected provider opv sync prod --target platform --json stderr
+using <SCENARIO>/project/secrets.toml
+opv: the new revision tavily of external store tavily at HTTPS target is unhealthy; already written: staged 5 secret(s)
+  checked: op item edit iE2EDELIVERYWEBPLATFORM0001 --vault vE2ESTATEPLATFORM0000000001 --format json (exit 0)
+Do: check why revision tavily of external store tavily fails its health checks in its logs (already written: staged 5 secret(s))
+Next: opv plan prod --target platform
+
+## rejected provider opv delivery verify prod --target platform text exit: 0
+## rejected provider opv delivery verify prod --target platform text stdout
+prod/platform web: verified (revision drv-<id>; applied at once)
+
+## rejected provider opv delivery verify prod --target platform text stderr
+using <SCENARIO>/project/secrets.toml
+
+## rejected provider opv delivery verify prod --target platform --json exit: 0
+## rejected provider opv delivery verify prod --target platform --json stdout
+{"schema_version":3,"ok":true,"environment":"prod","placements":[{"product":"web","target":"platform","revision":"drv-<id>","state":"verified","reason":null,"names":[{"name":"API_KEY","state":"verified"},{"name":"DATABASE_URL","state":"verified"},{"name":"SESSION_SECRET","state":"verified"},{"name":"TLS_CERTIFICATE","state":"verified"},{"name":"TLS_PRIVATE_KEY","state":"verified"}],"deployed":"n/a"}],"next":{"kind":"none","actor":"person","command":null},"do":null}
+
+## rejected provider opv delivery verify prod --target platform --json stderr
+using <SCENARIO>/project/secrets.toml
+
+## wrong token opv sync prod --target platform text exit: 7
+## wrong token opv sync prod --target platform text stdout
+
+## wrong token opv sync prod --target platform text stderr
+using <SCENARIO>/project/secrets.toml
+opv: HTTPS target rejected deploy credentials  (vault ) of target  in environment 
+  checked: https POST platform.e2e.test/portal.v1.PlatformConsoleService/ListPlatformConnections as deploy credentials opv-platform-prod (vault e2e-platform-deploy) of target platform in environment prod (exit 0)
+Do: replace deploy credentials  (vault ) of target  in environment  with a valid one
+Next: opv doctor --env prod --target platform
+
+## wrong token opv sync prod --target platform --json exit: 7
+## wrong token opv sync prod --target platform --json stdout
+{"schema_version":3,"ok":false,"exit_code":7,"next":{"kind":"run","actor":"assistant","command":"opv doctor --env prod --target platform"},"do":"replace deploy credentials  (vault ) of target  in environment  with a valid one","error":{"code":"deploy_credentials_failed","category":"auth","message":"HTTPS target rejected deploy credentials  (vault ) of target  in environment ","subject":{"problem":{"problem":"rejected","needs":[]},"system":"https","credential":{"kind":"deploy_credentials","vault":"","item":"","env":"","target":""}},"evidence":{"checked":"https POST platform.e2e.test/portal.v1.PlatformConsoleService/ListPlatformConnections","account":null,"upstream":null},"retry":"after_fix","human_required":true,"do":"replace deploy credentials  (vault ) of target  in environment  with a valid one","next":{"kind":"run","actor":"assistant","command":"opv doctor --env prod --target platform"}}}
+
+## wrong token opv sync prod --target platform --json stderr
+using <SCENARIO>/project/secrets.toml
+opv: HTTPS target rejected deploy credentials  (vault ) of target  in environment 
+  checked: https POST platform.e2e.test/portal.v1.PlatformConsoleService/ListPlatformConnections as deploy credentials opv-platform-prod (vault e2e-platform-deploy) of target platform in environment prod (exit 0)
+Do: replace deploy credentials  (vault ) of target  in environment  with a valid one
+Next: opv doctor --env prod --target platform
+
+## lost reply opv sync prod --target platform text exit: 9
+## lost reply opv sync prod --target platform text stdout
+prod/platform: warning: web/LOG_LEVEL not delivered (no config channel: the HTTP target delivers secrets only)
+prod/platform: warning: web/OTEL_RESOURCE not delivered (no config channel: the HTTP target delivers secrets only)
+prod/platform: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
+
+## lost reply opv sync prod --target platform text stderr
+using <SCENARIO>/project/secrets.toml
+opv: opv cannot tell whether the change to external store platform.e2e.test/portal.v1.PlatformConsoleService/SavePlatformConnection at HTTPS target was applied
+  checked: https POST platform.e2e.test/portal.v1.PlatformConsoleService/SavePlatformConnection as deploy credentials opv-platform-prod (vault e2e-platform-deploy) of target platform in environment prod (stopped by signal 9)
+Next: opv plan prod --target platform
+
+## lost reply opv sync prod --target platform --json exit: 9
+## lost reply opv sync prod --target platform --json stdout
+{"schema_version":3,"ok":false,"exit_code":9,"next":{"kind":"run","actor":"assistant","command":"opv plan prod --target platform --json"},"do":null,"error":{"code":"outcome_unknown","category":"unknown","message":"opv cannot tell whether the change to external store platform.e2e.test/portal.v1.PlatformConsoleService/SavePlatformConnection at HTTPS target was applied","subject":{"subject":{"kind":"external_store","name":"platform.e2e.test/portal.v1.PlatformConsoleService/SavePlatformConnection","scope":null},"system":"https"},"evidence":{"checked":"https POST platform.e2e.test/portal.v1.PlatformConsoleService/SavePlatformConnection","account":null,"upstream":null},"retry":"safe","human_required":false,"do":null,"next":{"kind":"run","actor":"assistant","command":"opv plan prod --target platform --json"}}}
+
+## lost reply opv sync prod --target platform --json stderr
+using <SCENARIO>/project/secrets.toml
+opv: opv cannot tell whether the change to external store platform.e2e.test/portal.v1.PlatformConsoleService/SavePlatformConnection at HTTPS target was applied
+  checked: https POST platform.e2e.test/portal.v1.PlatformConsoleService/SavePlatformConnection as deploy credentials opv-platform-prod (vault e2e-platform-deploy) of target platform in environment prod (stopped by signal 9)
+Next: opv plan prod --target platform --json

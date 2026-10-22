@@ -1,9 +1,9 @@
-//! `opv-sim`: a test-only stand-in for `op`, `flyctl`, `kubectl`, `gh` and `ssh` (design
-//! §13.1), never shipped. One binary answers as whichever tool `argv[0]` names; it is
+//! `opv-sim`: a test-only stand-in for `op`, `flyctl`, `kubectl`, `gh`, `ssh` and `https`
+//! (design §13.1), never shipped. One binary answers as whichever tool `argv[0]` names; it is
 //! installed under each name in a temporary `bin` directory that comes first on `PATH`:
 //!
 //! ```text
-//! opv-sim install <bin dir>     # links op, flyctl, fly, kubectl, gh, ssh and az to itself
+//! opv-sim install <bin dir>     # links op, flyctl, fly, kubectl, gh, ssh and https to itself
 //! ```
 //!
 //! Its state is the scenario directory named by `OPV_SIM_WORLD`: `world.json` (see each
@@ -17,6 +17,7 @@ mod args;
 mod faults;
 mod fly;
 mod gh;
+mod https;
 mod jsonpath;
 mod kube;
 mod op;
@@ -41,6 +42,7 @@ const TOOLS: &[(&str, &str)] = &[
     ("kubectl", "kubectl"),
     ("gh", "gh"),
     ("ssh", "ssh"),
+    ("https", "https"),
     ("az", "az"),
 ];
 
@@ -96,7 +98,9 @@ fn admin(args: &[String]) -> i32 {
             }
             0
         }
-        _ => fail("usage: opv-sim install <bin dir> (or run it as op, flyctl, kubectl, gh or ssh)"),
+        _ => fail(
+            "usage: opv-sim install <bin dir> (or run it as op, flyctl, kubectl, gh, ssh or https)",
+        ),
     }
 }
 
@@ -112,6 +116,7 @@ fn words(program: &str, args: &[String]) -> Vec<String> {
         "kubectl" => kube::call_words(args),
         "gh" => gh::call_words(args),
         "ssh" => ssh::call_words(args),
+        "https" => https::call_words(args),
         _ => args::words(args, &[]),
     }
 }
@@ -124,6 +129,7 @@ fn fault_reply(program: &str, kind: Kind, world: &World, args: &[String]) -> Act
         "kubectl" => kube::fault(kind, world, args),
         "gh" => gh::fault(kind, world, args),
         "ssh" => return ssh::fault(kind, world, args),
+        "https" => https::fault(kind, world, args),
         _ => Reply::no_recording(&format!("{} on {program}", kind.name()), program),
     })
 }
@@ -136,6 +142,7 @@ fn answer(program: &str, world: &mut World, args: &[String]) -> Action {
         "kubectl" => kube::run(world, args),
         "gh" => gh::run(world, args),
         "ssh" => return ssh::run(world, args),
+        "https" => https::run(world, args),
         // Azure recordings are deferred (#40-#42): az is "not installed".
         _ => Reply {
             code: 127,
@@ -150,7 +157,14 @@ fn simulate(program: &str, args: &[String]) -> i32 {
         Err(e) => return fail(&e),
     };
     let w = words(program, args);
-    world.log(&format!("{program} {}", args.join(" ")));
+    // The call log names the words a fault matches: for https that is the method and the
+    // RPC path, never a header value (which travels in env, design §5).
+    let line = if program == "https" {
+        format!("https {}", w.join(" "))
+    } else {
+        format!("{program} {}", args.join(" "))
+    };
+    world.log(&line);
     let faults = match faults::load(&world.dir) {
         Ok(f) => f,
         Err(e) => return fail(&e),
@@ -199,6 +213,16 @@ fn simulate(program: &str, args: &[String]) -> i32 {
                 }
                 other => other,
             }
+        }
+        // A `version_bumped` fault bumps the target's stored version just before the
+        // write, so the listed version is stale and the write conflicts (design §9).
+        Some(Kind::VersionBumped) if program == "https" => {
+            https::arm_version_bump(&mut world);
+            let a = answer(program, &mut world, args);
+            if let Err(e) = world.save() {
+                return fail(&e);
+            }
+            a
         }
         Some(Kind::AppliedButReplyLost) if program != "ssh" => {
             let _ = answer(program, &mut world, args);

@@ -1,0 +1,12 @@
+{
+  "status": 200,
+  "headers": [
+    ["content-type", "application/grpc-web+proto"],
+    ["cache-control", "no-store"],
+    ["x-request-id", "00000000-0000-4000-8000-00000000c0de"],
+    ["connection", "close"],
+    ["content-length", "91"],
+    ["date", "Wed, 21 Oct 2026 22:01:19 GMT"]
+  ],
+  "body_file": "err-invalid-argument.body"
+}

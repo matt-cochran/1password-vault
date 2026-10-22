@@ -196,6 +196,39 @@ pub trait CommandRunner {
         runner_create::from_write(self.write(call), call)
     }
 
+    /// One HTTPS read (design `http-target` §5): an idempotent call to
+    /// [`crate::runner_https::PROGRAM`] sharing [`CommandRunner::read`]'s retries, budget and
+    /// observation (program `https`), whose stdout is the reply envelope. A call that never
+    /// answered is [`crate::cause::Cause::Unavailable`]; a reply opv cannot decode is
+    /// [`crate::cause::Cause::UnexpectedOutput`].
+    fn https_read(
+        &self,
+        req: &crate::runner_https::HttpsRequest,
+    ) -> Result<crate::runner_https::HttpsReply, crate::Error> {
+        req.with_call(|call| match self.read(call, &[]) {
+            Ok(Outcome::Done(o)) => {
+                crate::runner_https::decode_reply(&o.stdout).map_err(|_| https_unusable_reply(call))
+            }
+            Ok(_) | Err(_) => Err(https_unavailable(call)),
+        })
+    }
+
+    /// One HTTPS write (design `http-target` §5): a non-idempotent call to
+    /// [`crate::runner_https::PROGRAM`] sharing [`CommandRunner::write`]'s single attempt,
+    /// `wrote()` and observation. Any outcome other than a decodable exit-0 reply is
+    /// [`crate::cause::Cause::WriteOutcomeUnknown`]: the request was sent, so its effect is
+    /// unknown and the next `list` shows what happened.
+    fn https_write(
+        &self,
+        req: &crate::runner_https::HttpsRequest,
+    ) -> Result<crate::runner_https::HttpsReply, crate::Error> {
+        req.with_call(|call| match self.write(call) {
+            Ok(Outcome::Done(o)) => crate::runner_https::decode_reply(&o.stdout)
+                .map_err(|_| https_write_unknown(call, req)),
+            Ok(_) | Err(_) => Err(https_write_unknown(call, req)),
+        })
+    }
+
     /// True once this run started a write to a target, which a later read that fails or
     /// never answers must not call "nothing was changed" (NR-2, NR-28). The 1Password tidy
     /// (FR-43) rewrites an item's layout, never a target, so `op` writes do not count. A
@@ -349,7 +382,7 @@ pub fn verbose_line(call: &Call, elapsed: Duration, outcome: &str) -> String {
 }
 
 /// What one attempt of a captured call produced.
-enum Attempt {
+pub(crate) enum Attempt {
     Exited(Output),
     TimedOut,
     /// Ended by this signal (not opv's own timeout kill).
@@ -409,6 +442,77 @@ trait Engine {
 /// [`CommandRunner::writes_started`]).
 fn target_write(program: &str) -> bool {
     program != crate::host::OP_CLI.program
+}
+
+/// True when the fake HTTPS attempt may spawn `https` from `PATH`: only with the `fake`
+/// feature and an active sim world. Without it, and in every release build, the real
+/// attempt runs in process, so a program named `https` is never spawned (design §5).
+fn https_fake_attempt() -> bool {
+    fake_https_attempt(
+        cfg!(feature = "fake"),
+        std::env::var_os("OPV_SIM_WORLD").is_some(),
+    )
+}
+
+/// [`https_fake_attempt`] with its inputs explicit, so a test can pin the release path (no
+/// `fake` feature) and a fake build with no active sim world.
+fn fake_https_attempt(fake: bool, sim_world: bool) -> bool {
+    fake && sim_world
+}
+
+/// An HTTPS call that never answered, as the catalog's [`crate::cause::Cause::Unavailable`]
+/// under [`crate::cause::System::Https`]. The runner already observed the failed attempt;
+/// the fallback covers the one case it did not (a read the spent budget never let start).
+fn https_unavailable(call: &Call) -> crate::Error {
+    use crate::cause::{Cause, System, Unanswered};
+    let seen = https_observed(call);
+    let why = seen.exit().unanswered().unwrap_or(Unanswered::Network);
+    Cause::Unavailable {
+        system: System::Https,
+        why,
+        attempts: seen.attempts(),
+        seen,
+    }
+    .into()
+}
+
+/// An HTTPS write the store may have applied: the request was sent, so its effect is unknown
+/// ([`crate::cause::Cause::WriteOutcomeUnknown`]).
+fn https_write_unknown(call: &Call, req: &crate::runner_https::HttpsRequest) -> crate::Error {
+    use crate::cause::{Cause, ResourceKind, ResourceName, ResourceRef, System};
+    Cause::WriteOutcomeUnknown {
+        system: System::Https,
+        subject: ResourceRef {
+            kind: ResourceKind::ExternalStore,
+            name: ResourceName::new(req.uri.clone()),
+            scope: None,
+        },
+        seen: https_observed(call),
+    }
+    .into()
+}
+
+/// An HTTPS reply opv cannot decode: the call answered, but its stdout is unusable.
+fn https_unusable_reply(call: &Call) -> crate::Error {
+    use crate::cause::{Cause, During, OutputProblem, System};
+    let seen = take_unusable_reply(call).unwrap_or_else(|| https_observed(call));
+    Cause::UnexpectedOutput {
+        system: System::Https,
+        at: None,
+        problem: OutputProblem::Unparseable,
+        during: During::Read,
+        seen,
+    }
+    .into()
+}
+
+/// The runner's observation of `call` after a failed HTTPS attempt, or a fresh one for the
+/// budget-spent case the runner never observed.
+fn https_observed(call: &Call) -> crate::cause::Observed {
+    take_observed().unwrap_or_else(|| {
+        observe::failed(call, &Err(io::Error::other("https")))
+            .expect("https is an external system the runner observes")
+    })
 }
 
 /// One attempt through `e`, printing the `--verbose` lines: the call line (NR-22), then the
@@ -899,6 +1003,7 @@ mod observe {
             "gh" => System::GitHub,
             "ssh" => System::Ssh,
             "opv" => System::RemoteOpv,
+            "https" => System::Https,
             _ => return None,
         })
     }
@@ -1818,6 +1923,12 @@ impl Engine for ProcessRunner {
         self.verbose
     }
     fn attempt(&self, call: &Call, limit: Duration) -> io::Result<(Attempt, Stderr)> {
+        // HTTPS is a runner effect, never a spawned program (design §5): the real attempt
+        // runs in process. Only the fake feature with an active sim world spawns the
+        // `https` program from PATH, so a release build can never spawn one.
+        if call.program == crate::runner_https::PROGRAM && !https_fake_attempt() {
+            return crate::runner_https::real_attempt(call, limit);
+        }
         self.spawn_attempt(call, test_call_limit(limit, call))
     }
     fn wrote(&self, program: &str) {
@@ -2416,6 +2527,15 @@ pub mod fake {
             s
         }
 
+        /// Queue an HTTPS reply for the next call to [`crate::runner_https::PROGRAM`]: the
+        /// reply's envelope is what the call's stdout carries, so `https_read` decodes it.
+        pub fn push_https_reply(&self, reply: &crate::runner_https::HttpsReply) {
+            self.responses.borrow_mut().push_back(Ok(Output {
+                status: 0,
+                stdout: crate::runner_https::encode_reply(reply),
+            }));
+        }
+
         /// Queue a spawn failure, e.g. `NotFound` for a missing binary.
         pub fn push_io_error(&self, kind: io::ErrorKind) {
             self.responses
@@ -2637,6 +2757,38 @@ mod observed_tests;
 mod tests {
     use super::fake::FakeRunner;
     use super::*;
+
+    // ------------------------------------------------------------ HTTPS as a runner effect
+
+    #[test]
+    fn fake_runner_returns_a_scripted_https_reply() {
+        let r = FakeRunner::default();
+        r.push_https_reply(&crate::runner_https::HttpsReply {
+            status: 200,
+            content_type: Some("application/grpc-web+proto".into()),
+            grpc_status: Some(0),
+            grpc_message: None,
+            body: zeroize::Zeroizing::new(vec![1, 2, 3]),
+        });
+        let req = crate::runner_https::HttpsRequest {
+            method: "POST",
+            uri: "central.zonetico.com/svc/Method".into(),
+            headers: Vec::new(),
+            body: zeroize::Zeroizing::new(Vec::new()),
+        };
+        let reply = r.https_read(&req).expect("a scripted reply");
+        assert_eq!(reply.grpc_status, Some(0));
+    }
+
+    #[test]
+    fn an_https_call_is_not_spawned_without_a_sim_world() {
+        assert!(!fake_https_attempt(true, false));
+    }
+
+    #[test]
+    fn a_release_build_never_spawns_an_https_call() {
+        assert!(!fake_https_attempt(false, true));
+    }
 
     // ------------------------------------------------------------ the matrix's call limit
 

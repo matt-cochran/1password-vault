@@ -1,0 +1,130 @@
+# http_target_sync: the HTTP target's happy and drift paths
+
+## first opv sync exit: 0
+## first opv sync stdout
+prod/platform: warning: web/LOG_LEVEL not delivered (no config channel: the HTTP target delivers secrets only)
+prod/platform: warning: web/OTEL_RESOURCE not delivered (no config channel: the HTTP target delivers secrets only)
+prod/platform: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
+prod/platform: delivery: web revision drv-<id>
+prod/platform: written: web/API_KEY (API_KEY), web/DATABASE_URL (DATABASE_URL), web/SESSION_SECRET (SESSION_SECRET), web/TLS_CERTIFICATE (TLS_CERTIFICATE), web/TLS_PRIVATE_KEY (TLS_PRIVATE_KEY)
+prod/platform: summary: written 5 · unchanged 0 · held 0 · deployed no · pending 0 · pruned 0 · kept 0 · skipped 1
+
+## first opv sync stderr
+using <SCENARIO>/project/secrets.toml
+
+## second opv sync exit: 0
+## second opv sync stdout
+prod/platform: warning: web/LOG_LEVEL not delivered (no config channel: the HTTP target delivers secrets only)
+prod/platform: warning: web/OTEL_RESOURCE not delivered (no config channel: the HTTP target delivers secrets only)
+prod/platform: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
+prod/platform: delivery: web revision drv-<id>
+prod/platform: summary: written 0 · unchanged 0 · held 0 · deployed no · pending 0 · pruned 0 · kept 0 · skipped 1
+
+## second opv sync stderr
+using <SCENARIO>/project/secrets.toml
+
+## opv status exit: 0
+## opv status stdout
+prod/platform: 10 keys · 9 saved · 1 skipped · 0 findings · 0 not yet on HTTPS
+TARGET    PRODUCT  KEY              KIND    STATE    ON TARGET
+platform  shared   DATABASE_URL     secret  saved    n/a
+platform  shared   FEATURE_FLAGS    config  saved    not delivered (no config channel)
+platform  web      API_KEY          secret  saved    same
+platform  web      DATABASE_URL     secret  saved    same
+    shared from shared/DATABASE_URL
+platform  web      LOG_LEVEL        config  saved    not delivered (no config channel)
+platform  web      MIGRATION_TOKEN  secret  skipped  n/a
+platform  web      OTEL_RESOURCE    config  saved    not delivered (no config channel) · env
+platform  web      SESSION_SECRET   secret  saved    same
+platform  web      TLS_CERTIFICATE  secret  saved    same · env
+platform  web      TLS_PRIVATE_KEY  secret  saved    same · env
+warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
+prod/platform: warning: web/LOG_LEVEL not delivered (no config channel: the HTTP target delivers secrets only)
+prod/platform: warning: web/OTEL_RESOURCE not delivered (no config channel: the HTTP target delivers secrets only)
+prod/platform: warning: web/OTEL_RESOURCE file destination not honoured on platform
+prod/platform: warning: web/TLS_CERTIFICATE file destination not honoured on platform
+prod/platform: warning: web/TLS_PRIVATE_KEY file destination not honoured on platform
+
+## opv status stderr
+using <SCENARIO>/project/secrets.toml
+
+## changed value opv sync exit: 0
+## changed value opv sync stdout
+prod/platform: warning: web/LOG_LEVEL not delivered (no config channel: the HTTP target delivers secrets only)
+prod/platform: warning: web/OTEL_RESOURCE not delivered (no config channel: the HTTP target delivers secrets only)
+prod/platform: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
+prod/platform: delivery: web revision drv-<id>
+prod/platform: written: web/API_KEY (API_KEY)
+prod/platform: summary: written 1 · unchanged 0 · held 0 · deployed no · pending 0 · pruned 0 · kept 0 · skipped 1
+
+## changed value opv sync stderr
+using <SCENARIO>/project/secrets.toml
+
+## drift opv status --fail-on-drift exit: 8
+## drift opv status --fail-on-drift stdout
+prod/platform: 10 keys · 9 saved · 1 skipped · 0 findings · 0 not yet on HTTPS
+TARGET    PRODUCT  KEY              KIND    STATE    ON TARGET
+platform  shared   DATABASE_URL     secret  saved    n/a
+platform  shared   FEATURE_FLAGS    config  saved    not delivered (no config channel)
+platform  web      API_KEY          secret  saved    unknown
+platform  web      DATABASE_URL     secret  saved    same
+    shared from shared/DATABASE_URL
+platform  web      LOG_LEVEL        config  saved    not delivered (no config channel)
+platform  web      MIGRATION_TOKEN  secret  skipped  n/a
+platform  web      OTEL_RESOURCE    config  saved    not delivered (no config channel) · env
+platform  web      SESSION_SECRET   secret  saved    same
+platform  web      TLS_CERTIFICATE  secret  saved    same · env
+platform  web      TLS_PRIVATE_KEY  secret  saved    same · env
+unknown: HTTPS does not reveal stored values, so opv cannot compare them; every sync writes them again (opv help states)
+changed outside opv since its last sync: API_KEY (set on the target by another tool or a person; the next sync writes 1Password's values back)
+warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
+prod/platform: warning: web/LOG_LEVEL not delivered (no config channel: the HTTP target delivers secrets only)
+prod/platform: warning: web/OTEL_RESOURCE not delivered (no config channel: the HTTP target delivers secrets only)
+prod/platform: warning: web/OTEL_RESOURCE file destination not honoured on platform
+prod/platform: warning: web/TLS_CERTIFICATE file destination not honoured on platform
+prod/platform: warning: web/TLS_PRIVATE_KEY file destination not honoured on platform
+
+## drift opv status --fail-on-drift stderr
+using <SCENARIO>/project/secrets.toml
+opv: target platform in environment prod has 1 binding that no longer match 1Password: API_KEY
+Do: re-run the sync to restore 1Password's values
+Next: opv plan prod --target platform
+
+## host mismatch opv sync exit: 2
+## host mismatch opv sync stdout
+
+## host mismatch opv sync stderr
+using <SCENARIO>/project/secrets.toml
+opv: the deploy credentials item: base_url is not valid syntax
+Do: in 1Password, open the deploy credentials item and fix the syntax of base_url
+Next: opv plan prod --target platform
+
+## too-short value opv plan exit: 8
+## too-short value opv plan stdout
+prod/platform: 10 keys · 1 finding · 4 to write · 0 held (immutable) · 0 to prune · 0 unmanaged on HTTPS (never touched)
+TARGET    PRODUCT  KEY              KIND    STATE                                                                  ON TARGET
+platform  web      API_KEY          secret  failed http-value-too-short (the value is shorter than 16 characters)  new
+    guidance: the service's own API key
+platform  shared   DATABASE_URL     secret  saved                                                                  n/a
+platform  shared   FEATURE_FLAGS    config  saved                                                                  not delivered (no config channel)
+platform  web      DATABASE_URL     secret  saved                                                                  new
+    shared from shared/DATABASE_URL
+platform  web      LOG_LEVEL        config  saved                                                                  not delivered (no config channel)
+platform  web      MIGRATION_TOKEN  secret  skipped                                                                n/a
+platform  web      OTEL_RESOURCE    config  saved                                                                  not delivered (no config channel) · env
+platform  web      SESSION_SECRET   secret  saved                                                                  new
+platform  web      TLS_CERTIFICATE  secret  saved                                                                  new · env
+platform  web      TLS_PRIVATE_KEY  secret  saved                                                                  new · env
+warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
+prod/platform: warning: web/LOG_LEVEL not delivered (no config channel: the HTTP target delivers secrets only)
+prod/platform: warning: web/OTEL_RESOURCE not delivered (no config channel: the HTTP target delivers secrets only)
+prod/platform: warning: web/OTEL_RESOURCE file destination not honoured on platform
+prod/platform: warning: web/TLS_CERTIFICATE file destination not honoured on platform
+prod/platform: warning: web/TLS_PRIVATE_KEY file destination not honoured on platform
+prod/platform: would write once the findings are fixed: web/DATABASE_URL (DATABASE_URL), web/SESSION_SECRET (SESSION_SECRET), web/TLS_CERTIFICATE (TLS_CERTIFICATE), web/TLS_PRIVATE_KEY (TLS_PRIVATE_KEY)
+
+## too-short value opv plan stderr
+using <SCENARIO>/project/secrets.toml
+opv: environment prod needs 1 value: web/API_KEY (does not meet its rule http-value-too-short: the value is shorter than 16 characters)
+Do: correct web/API_KEY in 1Password for environment prod
+Next: opv open web/API_KEY --env prod
