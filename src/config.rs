@@ -68,7 +68,7 @@ pub fn parse_file(text: &str, path: &Path, given_by: GivenBy) -> Result<Fleet, E
         given_by: given_by.clone(),
     };
     let merged = merged(text, path, source())?;
-    parse(&merged).map_err(|e| {
+    parse_in(&merged, path.parent()).map_err(|e| {
         in_contract(
             locate::relocate_at(e, &merged, source()),
             text,
@@ -3073,6 +3073,61 @@ environments = ["prod"]
             load(&missing).unwrap_err().cause(),
             Some((Cause::ConfigUnreadable { path, .. }, _)) if path == &missing
         ));
+    }
+
+    /// A valid `secrets.toml` with an `http` target `name` on `env`, its `http.descriptor`
+    /// set to `descriptor` (the pinned descriptor's sha256). Carries no inline 1Password id,
+    /// so it loads without a sibling `secrets.bindings.toml`.
+    fn http_config(env: &str, name: &str, descriptor: &str) -> String {
+        format!(
+            r#"[environments.{env}]
+[environments.{env}.targets.{name}.http]
+host = "central.zonetico.com"
+descriptor = "{descriptor}"
+descriptor_sha256 = "ec5b6933b89fc49c1ebeaaa31afc666e9090036c53301648cc657cd18f8a7445"
+names = {{ OPENAI_API_KEY = "openrouter" }}
+list.call = "portal.v1.PlatformConsoleService/ListPlatformConnections"
+list.request = {{ operator_id = "00000000-0000-4000-8000-000000000000" }}
+list.items = "connections"
+list.name = "provider"
+list.version = "version"
+list.status = "status"
+list.absent = ["CONNECTION_STATUS_NOT_CONFIGURED", "CONNECTION_STATUS_REVOKED"]
+list.rejected = ["CONNECTION_STATUS_REJECTED"]
+put.call = "portal.v1.PlatformConsoleService/SavePlatformConnection"
+put.request = {{ operator_id = "00000000-0000-4000-8000-000000000000", provider = "{{name}}", expected_version = "{{version}}" }}
+put.value = {{ field = "secret_value", number = 3, type = "bytes" }}
+put.reply = "connection"
+put.conflict = ["ALREADY_EXISTS"]
+"#,
+        )
+    }
+
+    /// A config loaded from a file resolves an `http` target's relative descriptor
+    /// against the file's directory, not the working directory (#237).
+    #[test]
+    fn a_loaded_file_resolves_a_relative_descriptor_beside_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("api.binpb"),
+            include_bytes!("../tests/fixtures/https/zonetico/platform_console.binpb"),
+        )
+        .unwrap();
+        let p = dir.path().join("secrets.toml");
+        std::fs::write(&p, http_config("prod", "platform", "api.binpb")).unwrap();
+        assert!(load(&p).is_ok());
+    }
+
+    /// A config read from a 1Password manifest still resolves a relative descriptor
+    /// against the working directory (#237).
+    #[test]
+    fn a_manifest_resolves_a_relative_descriptor_against_the_working_directory() {
+        let text = http_config(
+            "prod",
+            "platform",
+            "tests/fixtures/https/zonetico/platform_console.binpb",
+        );
+        assert!(parse_at(&text, Source::Manifest("opv · app")).is_ok());
     }
 
     #[test]
