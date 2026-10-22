@@ -215,7 +215,7 @@ fn save(doc: &Json, state: &mut Json, pool: &DescriptorPool, body: &[u8]) -> Rep
 
     // Zonetico refuses a provider it has no slot for (`spec(provider)`, "Unknown provider",
     // HTTP 400 -> INVALID_ARGUMENT), so a mapping to a missing remote name fails fast.
-    if !providers(doc).iter().any(|p| *p == provider) {
+    if !providers(doc).contains(&provider) {
         return error(3, "Unknown provider");
     }
 
