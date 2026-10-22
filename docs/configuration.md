@@ -579,6 +579,62 @@ What happens on each command:
 
 Sign-in: your `gh auth login` session, or `GH_TOKEN` / `GITHUB_TOKEN`. For CI, put a fine-grained token in a `deploy_credentials` item with one concealed field `GH_TOKEN`, scoped to the listed repositories with **Secrets: write** and **Variables: write** (and **Environments: read** when you use `environment`). Never use an owner or classic token. A ready-made setup is in [examples/github-ci](../examples/github-ci/).
 
+### HTTPS
+
+An application that keeps its own secrets in its own encrypted store, written through an admin
+API, is a delivery target too. opv reads each value from 1Password, writes it through the API and
+records a value-free receipt; 1Password stays the source of truth. The wire format is gRPC-Web
+from a descriptor set, client only, so a write is live at once and there is nothing to deploy.
+The full guide, including the load rules, the destination check and the errors, is in
+[the HTTP target](http-target.md).
+
+```toml
+[environments.prod.targets.platform]
+products = ["api"]                                # optional: without it, every non-source-only product
+deploy_credentials = "op://Example Platform/opv-platform-prod"   # base_url, token, two CF Access fields
+
+http.host = "central.example.com"                 # must equal the item's base_url host
+http.descriptor = "deploy/opv/platform_console.binpb"
+http.descriptor_sha256 = "ec5b6933b89fc49c1ebeaaa31afc666e9090036c53301648cc657cd18f8a7445"
+
+[environments.prod.targets.platform.http.names]   # delivered env name = remote name
+OPENROUTER_API_KEY = "openrouter"
+TAVILY_API_KEY     = "tavily"
+
+[environments.prod.targets.platform.http.list]
+call    = "portal.v1.PlatformConsoleService/ListPlatformConnections"
+request = { operator_id = "<tenant uuid>" }
+items   = "connections"
+name    = "provider"
+version = "version"
+status  = "status"                                 # must be an enum field
+absent   = ["CONNECTION_STATUS_NOT_CONFIGURED", "CONNECTION_STATUS_REVOKED"]
+rejected = ["CONNECTION_STATUS_REJECTED"]
+
+[environments.prod.targets.platform.http.put]
+call     = "portal.v1.PlatformConsoleService/SavePlatformConnection"
+request  = { operator_id = "<tenant uuid>", provider = "{name}", expected_version = "{version}" }
+value    = { field = "secret_value", number = 3, type = "bytes" }
+reply    = "connection"
+conflict = ["ALREADY_EXISTS"]                      # gRPC codes that mean "changed since opv listed"
+                                                   # state_vault_id: the bindings file
+```
+
+| Field | Meaning |
+|---|---|
+| `http.host` | The destination host. It must equal the `base_url` host in the `deploy_credentials` item, so changing where values go takes both a vault write and a reviewed configuration change. |
+| `http.descriptor` / `http.descriptor_sha256` | The application's pinned `FileDescriptorSet` and its hash; every named method must exist in it. |
+| `http.names` | Delivered environment name → remote name. Every delivered name is mapped, and no two map to one remote name. |
+| `http.list` / `http.put` | The two gRPC methods and the field paths of their requests and replies. `put.value` is the one singular `string`/`bytes` field that receives the value. |
+| `http.list.absent` / `http.list.rejected` | Status values that mean the entry is absent, or that the application rejected the value. |
+| `http.put.conflict` | gRPC status names that mean "changed since opv listed"; empty means no code is a conflict. |
+
+`deploy_credentials` names an item with four fixed fields: `base_url` (text, the only place the
+destination is), and the concealed `token`, `cf_access_client_id` and `cf_access_client_secret`
+(opv adds the `Bearer` scheme). opv cannot mint this item, so a person creates it. The section is
+generated from the application's schema with
+`opv propose target <env> <name> --provider http --http-descriptor <file> --http-service <full.name>`.
+
 ### Secrets in a named store: `[stores.<name>]` and `secrets_in`
 
 A runtime can keep its secrets in a store from another provider. Declare the store once and point the target at it with one line; the commands do not change. In 0.5.0 the one supported pair is **Azure Key Vault → Kubernetes Deployment**, through the [External Secrets Operator](https://external-secrets.io) (ESO).

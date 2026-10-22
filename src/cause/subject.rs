@@ -100,6 +100,8 @@ pub enum System {
     Ssh,
     /// opv on a remote host (#139).
     RemoteOpv,
+    /// An application's own secret store over HTTPS (design http-target §5).
+    Https,
 }
 
 impl System {
@@ -113,6 +115,7 @@ impl System {
             System::GitHub => "GitHub",
             System::Ssh => "ssh",
             System::RemoteOpv => "opv on the remote host",
+            System::Https => "HTTPS target",
         }
     }
 }

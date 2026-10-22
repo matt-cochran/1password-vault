@@ -360,6 +360,10 @@ Secrets are written with `gh secret set` and config with `gh variable set`, valu
 
 `plan` and `status` also list keys the environment does not deliver (`not delivered here: …`, JSON `undelivered`), when the target's `products` leaves their product out, and warn about a source-only value nothing points at (`unreferenced shared value …`, JSON `unreferenced_sources`).
 
+### Sync to an application's own store
+
+An application that keeps its own secrets in its own encrypted store, written through an admin API, is an [HTTP target](http-target.md). opv lists the store, writes one `put` per changed name, re-lists to confirm and records the version in the receipt; a version changed outside opv is drift, and a declared conflict code is `target_changed`. The store applies a write at once, so `--deploy` says there is nothing to deploy. The configuration, the credentials item and the errors are in [the HTTP target](http-target.md).
+
 ### Pruning on Fly
 
 Nothing is deleted by default. `--prune` unsets only names that the template produces for declared keys that are not desired in this environment. Names outside that set are never touched. Immutable keys are never pruned unless named with `--prune-immutable`; they are reported as "held (immutable), not pruned". A name staged by the same run is never pruned. A key you delete from `secrets.toml` is no longer declared, so it is neither reported nor pruned: unset it manually with `flyctl secrets unset`.
@@ -1124,7 +1128,7 @@ jobs:
     env:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
       OP_CACHE: "false"
-      OPV_VERSION: v0.15.0  # pin the release you tested; bump it deliberately
+      OPV_VERSION: v0.16.0  # pin the release you tested; bump it deliberately
     steps:
       - uses: actions/checkout@v4
       - name: Install the 1Password CLI

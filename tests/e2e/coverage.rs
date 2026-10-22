@@ -73,12 +73,6 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "HandoffPipeContested",
         "Windows-only named pipe; Azure has no simulator",
     ),
-    // opv-sim's world changes only through opv's own calls, so nothing changes between two
-    // reads of one run (tidy's stamp, a file edited mid-run, a Deployment moved).
-    (
-        "ChangedBeforeWrite",
-        "nothing changes the simulated world between two reads of a run",
-    ),
     // Built only after `op service-account create` (src/app/access_create.rs), which opv-sim
     // does not model and nobody has recorded.
     (
@@ -192,7 +186,7 @@ impl Scenario {
         self.root.path().join(sub)
     }
 
-    fn faults(self, faults: &str) -> Self {
+    pub(crate) fn faults(self, faults: &str) -> Self {
         std::fs::write(self.path("world/faults.toml"), faults).expect("faults");
         self
     }
@@ -214,7 +208,7 @@ impl Scenario {
 
     /// The project's `secrets.toml`, edited as one text with its ids filled in; the ids of
     /// the edited text go back to `secrets.bindings.toml` (D-G).
-    fn config(self, edit: impl FnOnce(String) -> String) -> Self {
+    pub(crate) fn config(self, edit: impl FnOnce(String) -> String) -> Self {
         let p = self.path("project/secrets.toml");
         let text = opv::config::read_merged(&p).expect("config");
         opv::config::bindings::write_split(&p, &edit(text)).expect("config");
@@ -2609,6 +2603,16 @@ fn every_scenario_snapshot_belongs_to_a_scenario() {
                 .copied(),
         )
         .chain(crate::scenarios::fixes_0141::SNAPSHOTS.iter().copied())
+        .chain(
+            crate::scenarios::http_target_sync::SNAPSHOTS
+                .iter()
+                .copied(),
+        )
+        .chain(
+            crate::scenarios::http_target_faults::SNAPSHOTS
+                .iter()
+                .copied(),
+        )
         .chain(crate::scenarios::session_reuse::SNAPSHOTS.iter().copied())
         .chain(crate::scenarios::set_from_file::SNAPSHOTS.iter().copied())
         .collect();

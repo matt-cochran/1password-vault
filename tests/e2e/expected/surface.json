@@ -404,6 +404,8 @@
         "github-environment",
         "github-repo",
         "github-secret-name",
+        "http-descriptor",
+        "http-service",
         "json",
         "kubernetes-config",
         "kubernetes-container",

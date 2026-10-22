@@ -1149,6 +1149,12 @@ fn run_staged(
             out,
         )?
     };
+    // design http-target §6: after the receipt and evidence are recorded, the store checks
+    // the names this run wrote (a rejected key is `target_unhealthy`, exit 5).
+    let written_names: Vec<String> = batch.iter().map(|(n, _)| n.clone()).collect();
+    store
+        .check_written(&written_names)
+        .map_err(|e| after_writes_in(c, e, &done))?;
     // #206 S5: a rotation of a supplied value is said, with the producer's serial.
     if let Some(supply) = c.supply
         && !opts.json

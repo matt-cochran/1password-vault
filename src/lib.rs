@@ -20,6 +20,8 @@ pub mod ports;
 pub mod provider;
 pub mod ramdir;
 pub mod runner;
+pub mod runner_https;
+pub mod runner_https_sim;
 pub mod scan;
 pub mod schema;
 pub mod scrub;
