@@ -467,6 +467,10 @@ Order: L0 → L1′ ∥ L2a → L2b → L2c → L3 → L4 ∥ L5.
 - *Cost:* about 30 lines, plus one new flag in the CLI surface snapshot. Without it, the list is
   edited by hand.
 
+### 11.1 Owner decisions (2026-10-23)
+
+All recommendations approved: D1 (Option 2, `companion_jobs` on the app target), D2 (jobs before the app), D3 (jobs change only on `--deploy`), D4′ (verify checks the app's and jobs' bindings, on Azure and Kubernetes), D5 (jobs use the app's `azure.identity`), D6 (`azure.container` picks the job's container), D7 (refuse a job update when its identity certainly cannot read the vault; warn when undecidable), D8 (warn, not wait, after a grant under 10 minutes old), D9 (`--azure-companion-jobs a,b` on `opv target add` and `propose target`). Ships in 0.17.x, after 0.17.0.
+
 ## 12. Vet responses (findings not taken as written)
 
 - **Citation corrections in vet item 7** (`render.rs:2113` → `:4089`, `:3771` → `:3709`): **not
