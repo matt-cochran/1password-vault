@@ -412,6 +412,20 @@ Q1, S1 and S6, which are outside opv's control.
 - **Recommendation: (b) if any docker gate is still open when the flyctl lanes are done.** Cost:
   the publisher waits one release.
 
+### 8.1 Owner decisions (2026-10-23)
+
+- **Approved as recommended:** D1 (b′), D2 (the SR-4/FR-40 amendment), D3 (a), D4–D10.
+- **Scope:** all three operations in 0.17.0, flyctl first. If Q1, S6 or the docker fixtures are
+  still open when the flyctl lanes finish, `machines` and `machine-update` ship in 0.17.0 and
+  `registry-push` follows in 0.17.x (D10).
+- **Spikes S1–S4 are skipped.** The first real Tracking CI run serves as the spike. Because of
+  that, the flyctl replies the simulator serves are built from flyctl's documented JSON and marked
+  `"recorded": false` in their fixture file, an exception to the recordings-only rule
+  (`tests/sim/opv_sim.rs:9-13`), until that run's replies replace them. The docker replies are
+  recorded offline against a local fake registry (S1-off), with no credentials.
+- **Q1, Q2 and S6** were asked on #234 on 2026-10-23. Their answers gate L3b and the docker half
+  of L5.
+
 ## 9. Spikes and questions before implementation
 
 | Id | What | Who | Blocks |
