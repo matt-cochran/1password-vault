@@ -167,6 +167,70 @@ fn a_multi_line_guidance_is_refused() {
     assert_eq!(e.code_str(), "config_invalid");
 }
 
+// --- target option screening ----------------------------------------------------
+
+#[test]
+fn an_http_descriptor_and_service_option_parses() {
+    assert!(
+        parse(
+            r#"{"kind":"target","env":"prod","name":"vault","provider":"http","options":{"http-descriptor":"platform_vault_delivery.binpb","http-service":"portal.v1.PlatformVaultDeliveryService"}}"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn a_names_option_of_sixteen_pairs_parses() {
+    let pairs: Vec<String> = (0..16)
+        .map(|i| format!("KEY_{i:02}=remote-name-{i:02}-xx"))
+        .collect();
+    let value = pairs.join(",");
+    assert!(
+        parse(&format!(
+            r#"{{"kind":"target","env":"prod","name":"web","provider":"http","options":{{"http-names":"{value}"}}}}"#
+        ))
+        .is_ok()
+    );
+}
+
+#[test]
+fn a_high_entropy_option_value_parses() {
+    assert!(
+        parse(
+            r#"{"kind":"target","env":"prod","name":"web","provider":"http","options":{"http-descriptor":"aBcDeFgHiJkLmNoPqRsT"}}"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn a_known_prefix_in_an_option_is_refused_naming_the_detector() {
+    let e = parse(
+        r#"{"kind":"target","env":"prod","name":"web","provider":"http","options":{"http-descriptor":"ghp_abcdefghijklmnopqrstuvwxyz"}}"#,
+    )
+    .unwrap_err();
+    assert!(e.to_string().contains("known_prefix"));
+}
+
+#[test]
+fn a_pem_header_in_an_option_is_refused_naming_the_detector() {
+    let e = parse(
+        r#"{"kind":"target","env":"prod","name":"web","provider":"http","options":{"http-service":"-----BEGIN OPENSSH PRIVATE KEY-----"}}"#,
+    )
+    .unwrap_err();
+    assert!(e.to_string().contains("pem_header"));
+}
+
+#[test]
+fn an_option_over_200_characters_is_refused() {
+    let e = parse(&format!(
+        r#"{{"kind":"target","env":"prod","name":"web","provider":"http","options":{{"http-service":"{}"}}}}"#,
+        "a".repeat(201)
+    ))
+    .unwrap_err();
+    assert_eq!(e.code_str(), "config_invalid");
+}
+
 // --- the schema -----------------------------------------------------------------
 
 #[test]

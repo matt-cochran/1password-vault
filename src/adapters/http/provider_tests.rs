@@ -104,14 +104,14 @@ fn provider_offers_the_deploy_credential_fields() {
 }
 
 #[test]
-fn provider_init_fields_are_descriptor_and_service() {
+fn provider_init_fields_are_host_descriptor_service_and_names() {
     assert_eq!(
         PROVIDER
             .init_fields()
             .iter()
             .map(|f| f.field)
             .collect::<Vec<_>>(),
-        ["descriptor", "service"]
+        ["host", "descriptor", "service", "names"]
     );
 }
 

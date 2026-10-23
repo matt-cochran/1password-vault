@@ -21,6 +21,7 @@ use crate::config::bindings::Bindings;
 use crate::domain::intent::Intent;
 use crate::domain::{Fleet, relaxation};
 use crate::error::Error;
+use crate::provider::INIT_SECTION_FAILED;
 
 fn usage(problem: UsageProblem) -> Error {
     Cause::Usage { problem }.into()
@@ -142,6 +143,15 @@ pub(crate) fn target_text(
             format: "a provider opv can write for (opv propose target --help lists them)",
         })
     })?;
+    // The provider could not generate the section and said why in a comment (names only):
+    // carry that reason instead of inserting the comment and letting the load fail with a
+    // message that hides it.
+    if let Some(reason) = section.strip_prefix(INIT_SECTION_FAILED) {
+        return Err(usage(UsageProblem::Rejected {
+            message: reason.trim().to_string(),
+            help: vec!["propose".to_string(), "target".to_string()],
+        }));
+    }
     let products = target_cmd::checked_products(fleet, &spec.products)?;
     let body = target_cmd::target_table(
         &spec.env,
