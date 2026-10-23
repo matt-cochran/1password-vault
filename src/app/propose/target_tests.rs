@@ -84,7 +84,7 @@ fn the_same_target_intent_twice_gives_the_same_plan_id() {
 #[test]
 fn an_http_target_text_carries_the_generated_descriptor_section() {
     let intent = target_intent(
-        r#"{"kind":"target","env":"dev","name":"web","provider":"http","products":["app"],"options":{"http-host":"central.zonetico.com","http-descriptor":"tests/fixtures/https/zonetico/platform_console.binpb","http-service":"portal.v1.PlatformConsoleService"}}"#,
+        r#"{"kind":"target","env":"dev","name":"web","provider":"http","products":["app"],"options":{"http-host":"central.zonetico.com","http-descriptor":"tests/fixtures/https/zonetico/platform_console.binpb","http-service":"portal.v1.PlatformConsoleService","http-names":"OPENROUTER_API_KEY=openrouter"}}"#,
     );
     let spec = super::spec(&intent).expect("the http target spec");
     let fleet = super::trial(FRESH).expect("the fresh contract loads");
@@ -95,9 +95,20 @@ fn an_http_target_text_carries_the_generated_descriptor_section() {
 }
 
 #[test]
+fn an_http_target_text_carries_the_given_names() {
+    let intent = target_intent(
+        r#"{"kind":"target","env":"dev","name":"web","provider":"http","products":["app"],"options":{"http-host":"central.zonetico.com","http-descriptor":"tests/fixtures/https/zonetico/platform_console.binpb","http-service":"portal.v1.PlatformConsoleService","http-names":"OPENROUTER_API_KEY=openrouter"}}"#,
+    );
+    let spec = super::spec(&intent).expect("the http target spec");
+    let fleet = super::trial(FRESH).expect("the fresh contract loads");
+    let text = target_text(FRESH, &fleet, &spec).expect("the http section generates");
+    assert!(text.contains("http.names = { OPENROUTER_API_KEY = \"openrouter\" }"));
+}
+
+#[test]
 fn an_http_service_absent_from_the_descriptor_names_the_reason() {
     let intent = target_intent(
-        r#"{"kind":"target","env":"dev","name":"web","provider":"http","products":["app"],"options":{"http-host":"central.zonetico.com","http-descriptor":"tests/fixtures/https/zonetico/platform_console.binpb","http-service":"portal.v1.NoSuchService"}}"#,
+        r#"{"kind":"target","env":"dev","name":"web","provider":"http","products":["app"],"options":{"http-host":"central.zonetico.com","http-descriptor":"tests/fixtures/https/zonetico/platform_console.binpb","http-service":"portal.v1.NoSuchService","http-names":"OPENROUTER_API_KEY=openrouter"}}"#,
     );
     let e = propose(FRESH, &Bindings::default(), None, &intent)
         .expect_err("the absent service is refused");
@@ -107,7 +118,7 @@ fn an_http_service_absent_from_the_descriptor_names_the_reason() {
 #[test]
 fn an_http_service_absent_from_the_descriptor_does_not_report_no_provider() {
     let intent = target_intent(
-        r#"{"kind":"target","env":"dev","name":"web","provider":"http","products":["app"],"options":{"http-host":"central.zonetico.com","http-descriptor":"tests/fixtures/https/zonetico/platform_console.binpb","http-service":"portal.v1.NoSuchService"}}"#,
+        r#"{"kind":"target","env":"dev","name":"web","provider":"http","products":["app"],"options":{"http-host":"central.zonetico.com","http-descriptor":"tests/fixtures/https/zonetico/platform_console.binpb","http-service":"portal.v1.NoSuchService","http-names":"OPENROUTER_API_KEY=openrouter"}}"#,
     );
     let e = propose(FRESH, &Bindings::default(), None, &intent)
         .expect_err("the absent service is refused");

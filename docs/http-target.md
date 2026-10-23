@@ -201,8 +201,11 @@ The `http` section is generated from the application's descriptor set rather tha
 hand:
 
 ```sh
-opv propose target <env> <name> --provider http --http-host <host> --http-descriptor <file> --http-service <full.name>
+opv propose target <env> <name> --provider http --http-host <host> --http-descriptor <file> --http-service <full.name> --http-names KEY=remote,KEY2=remote2
 ```
+
+opv never guesses a remote name: `--http-names` gives the `http.names` mapping as
+comma-separated `KEY=remote` pairs.
 
 The generator reads the descriptor set and writes a proposal through the existing value-free
 `propose`/`apply` flow, also reachable through MCP `opv_propose`:
@@ -210,6 +213,7 @@ The generator reads the descriptor set and writes a proposal through the existin
 - every RPC of the service with its request and reply field paths, numbers and types, sorted, in
   canonical form: the same descriptor always produces byte-identical output;
 - `descriptor_sha256` filled in;
+- `http.names` written from the `KEY=remote` pairs the person gave, sorted by environment name;
 - suggestions, marked as such, for the decisions a person confirms: which RPC is `list` and
   `put`; which field receives the value (only singular `string`/`bytes` fields are offered, with
   number and type filled in); which fields are `items`, `name`, `version`, `status` (status only
