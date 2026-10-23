@@ -1,131 +1,92 @@
 # Azure target: Container Apps Jobs beside their app (#238)
 
-Status: post-spike, ready for vet, 2026-10-23. Nothing here is built. Spike S-238 ran in the
-sandbox resource group `opv-spike-rg` (§8). Every Azure behaviour of jobs below is verified there
-and cited by its finding id (J1–J12 in `spike-238-azure-jobs-findings.md`). The recorded outputs
-are in `tests/fixtures/azure/jobs/`. Claims about opv cite `file:line` on `dev` at `291c0b16`.
+Status: post-spike, revised per the DESIGN-FMECA vet (`azure-jobs-fmeca.md`, "ready with
+changes"), 2026-10-23. Nothing here is built. Open owner decisions: D4′, D7, D8, D9 (§11).
+
+The Azure behaviour of jobs is verified in the spike (J1–J12 in `spike-238-azure-jobs-findings.md`,
+recorded outputs in `tests/fixtures/azure/jobs/`). Claims about opv cite this branch after
+`v0161/integrate` was merged into it (`e1a31ee5`), so they include the #241 verify fix. §12
+answers the vet's findings that this revision does not take as written.
 
 ## 1. Problem, scope, non-goals
 
 An Azure target names one Container App (`azure.container_app`, `src/adapters/azure/config.rs:48`,
 `:121`). A common pattern runs a Container Apps **Job** beside each app, for example a pre-deploy
 config-validation job whose template copies the app's env, including `secretRef:` variables. After a
-rotation in 1Password, `opv sync --deploy` re-pins the app (`containerapp.rs:643-717`), but the job
-keeps its old Key Vault reference. `opv status` and `opv delivery verify` read only the app
-(`containerapp.rs:638-641`). So the job runs against stale values, and nothing reports it.
+rotation, `opv sync --deploy` re-pins the app (`containerapp.rs:643-717`), but the job keeps its old
+Key Vault reference. `status` and `delivery verify` read only the app (`containerapp.rs:638-641`).
 
-**In scope.** A job that must hold the same managed names as its app: the same Key Vault references
-pinned to the same versions, and the same env-routed config values. The issue's acceptance:
+**Acceptance.**
 
-- A1. A rotated key reaches the app and its job(s) in one `opv sync <env> --deploy`.
-- A2. `opv delivery verify` reports `drifted_on_target` when a job's copy differs.
-- A3. `opv doctor` warns when a job's identity cannot read the Key Vault, and prints the
-  role-assignment command, as it does for apps (`containerapp.rs:887-890`, `:924-932`; `preflight.rs:689-708`).
-- A4 (added after the spike, J3). `opv sync --deploy` refuses to update a job whose identity cannot
-  read the vault, before it updates the job or the app, and names the grant command. Azure accepts
-  that update, and only the job's next execution fails, silently.
+- **A1.** A rotated key reaches the app and its jobs in one `opv sync <env> --deploy`.
+- **A2.** `opv delivery verify` reports `drifted_on_target` when a job's copy differs.
+- **A3.** `opv doctor` warns when a job's identity cannot read the Key Vault, and prints the
+  role-assignment command, as for apps (`containerapp.rs:887-890`, `:924-932`;
+  `preflight.rs:689-708`).
+- **A4** (from J3). `opv sync --deploy` refuses to update a job whose identity provably cannot read
+  the vault, before it updates any job or the app. The refusal names the job's identity (principal
+  id) and the role or access policy it needs. Its Next is `opv doctor --env <env>`, which prints
+  the exact `az role assignment create` or `az keyvault set-policy` command (A3). The command text
+  is built in one place (§4, M3).
 
-**Non-goals.** opv does not start job executions or wait for them, and does not trigger or schedule
-jobs. It does not assign identities or create role assignments: it prints the command, as for apps.
-It does not support a job in another resource group or subscription than its app. It does not
-support a job without an app (see D1). It adds no `az` simulator to `tests/sim` (there is none for
-Azure: `tests/e2e/coverage.rs:74`). It does not work around third-party (`az`, Azure) defects. It
-never uses `az containerapp job secret set` or `--set-env-vars`, because those put values in argv
-(SR-3).
+**Non-goals.** opv does not:
+- start, wait for or schedule job executions;
+- assign identities or create role assignments (it prints the command);
+- support a job in another resource group or subscription than its app, or a job with no app (D1);
+- add an `az` simulator (`tests/e2e/coverage.rs:74`);
+- work around `az` or Azure defects;
+- call `az containerapp job secret set` or `--set-env-vars` (values in argv, SR-3).
 
-## 2. What opv does for an app today (the base both options reuse)
+## 2. What opv does for an app today
 
-- **Config.** `AzureTarget` holds `subscription, key_vault, resource_group, container_app,
-  container, identity, env_name_template, config, vault_uri` (`config.rs:42-58`). The raw section is
-  `deny_unknown_fields` (`config.rs:116-129`). Every identifier goes through `check_ident`
-  (`config.rs:289-306`).
-- **Ports.** `open` returns `Ports::Pinned { store: KeyVault, runtime: ContainerApp }`
-  (`config.rs:465-492`). Core sees only `PinnedRuntime` (`src/ports.rs:112-148`):
-  `bindings, apply, await_healthy, check_access, config_in_store, describe, inspect_hint, chain,
-  release, deploy_preview`.
-- **Bindings.** `snapshot_from` reads the managed container's env (`container_index`,
-  `containerapp.rs:341-371`). A `value` becomes `Plain{sha256}`, and a `secretRef` to an `opv-`
-  secret whose `keyVaultUrl` is `<vaultUri>/secrets/<name>/<version>` becomes `Pinned`. The
-  unmanaged fingerprint is the SHA-256 of the spec with managed env entries, `opv-` secrets and
-  read-only fields removed (`containerapp.rs:380-400`, `:443-486`).
-- **Apply.** It re-reads the app and refuses with `Refusal::ChangedOutsideOpv` when the fingerprint
-  moved (`containerapp.rs:657-671`). It edits the fresh spec: per-version secret names
-  (`secret_name`, `containerapp.rs:989-996`) so a repin is a template change (P1 Q16). It keeps the
-  serving revision's secrets (`serving_refs`, `:543-552`) and sends the whole document with
-  `containerapp update --yaml /dev/stdin` (`:676-690`). Values never go in argv (module doc
-  `:12-15`).
-- **Health.** The new revision must be `Provisioned`, `Running`/`ScaledToZero`, `Healthy` and
-  `latestReadyRevisionName` (`containerapp.rs:719-784`). A refused update is read back: if Azure
-  applied nothing, the cause is `TargetRefused`; otherwise it is `WriteOutcomeUnknown`
-  (`:247-278`).
-- **Sync order.** The sync writes Key Vault versions (`src/app/sync.rs:1717-1726`) and records
-  delivery evidence at those versions (`:1735-1764`). It reads the bindings and drift (`:1774-1778`)
-  and applies with read-back on exit 9 (`apply_reconciled`, `:1847`, `:2052-2082`). It then waits
-  for health (`:1860`) and releases, then deletes, pruned entries (`:1938-1943`). An Azure update
-  is never retried (NR-2).
-- **Doctor.** The lines are `az, az login, azure subscription, key vault, container app, app
-  identity access` (`preflight.rs:43-50`, `:514-557`). The access line is advisory: P1 Q14 showed
-  Azure refuses an app update whose identity cannot read the vault before any rollout
-  (`preflight.rs:689-708`). `check_access` resolves the principal (system, or user-assigned via the
-  app, else `identity show`, `containerapp.rs:583-636`). It then checks an access policy or an RBAC
-  role at vault scope and names `az keyvault set-policy` or `az role assignment create`
-  (`:856-935`).
+- **Config.** The `AzureTarget` fields are at `config.rs:42-58`. `RawAzure` is
+  `deny_unknown_fields` (`:116-129`), and identifiers are checked with `check_ident`
+  (`:289-306`). `open` returns `Ports::Pinned{KeyVault, ContainerApp}` (`:465-492`).
+- **Core's view.** Core sees only `PinnedRuntime` (`src/ports.rs:112-148`). Its doc says
+  `check_access` "never gates a deploy" (`:119`). L3 amends that sentence: the app stays advisory
+  (P1 Q14), and a job is gated inside `apply` (J3).
+- **App runtime.**
+  - Bindings and fingerprint: `container_index`, `strip`, `snapshot_from`
+    (`containerapp.rs:341-371`, `:380-400`, `:443-486`).
+  - Apply: a fingerprint re-check (`:653-671`), `edit` with per-version names (`:489-537`,
+    `:989-996`), `serving_refs` (`:543-552`), and `update --yaml /dev/stdin` (`:676-690`).
+  - Health: `:719-784`. Refused versus unknown read-back: `:247-278`.
+  - Principal and access: `principal` (`:583-636`) and `check_access` (`:856-935`). Access
+    recognises the three `READ_ROLES` by name (`:90-94`) and lists with `--assignee <principal>`
+    (`:903-915`).
+
+  All of these are `ContainerApp` methods bound to `container_app` and to "container app" wording.
+- **Sync order.** Store writes and evidence (`src/app/sync.rs:1717-1764`), then bindings and drift
+  (`:1774-1778`). Then apply when anything is pending (`:1845-1847`, `apply_reconciled`
+  `:2052-2082`), otherwise the no-change path (`:1848-1852`). Then health (`:1860-1880`), the
+  "deployed revision" line (`:1883-1891`), and release then delete (`:1938-1943`). No Azure update
+  is retried (NR-2).
 - **Guards.** `src/app` and `src/domain` name no provider (`src/app/mod.rs:2128-2145`,
-  `:2313-2334`). The Azure adapter has no `host::lost_call` caller (`rg` finds only
-  `src/adapters/fly/mod.rs:712` and `src/adapters/kubernetes/mod.rs:171`). Every `az` failure goes
-  through `az::failed` (`src/adapters/azure/az.rs`), so job calls add no `lost_call` caller.
-
-**A gap found while reading (it affects A2 for either option).** `delivery verify` takes each name's
-version from `store.list()` (`src/app/delivery.rs:1304-1307`, `:1322-1332`). Both pinned stores
-list `version: None`: Key Vault (`keyvault.rs:163-172`, P1 Q2) and Kubernetes
-(`src/adapters/kubernetes/store.rs:499-519`). `name_state` turns a missing version into
-`missing_on_target` (`src/domain/delivery.rs:352-360`). `sync` fills the versions in from its reads
-(`src/app/mod.rs:446-452`), but verify does not. So on a pinned target, verify cannot answer
-`verified` or `drifted_on_target` today. No test covers verify on a pinned target
-(`src/app/azure_tests.rs` and `pinned_tests.rs` have none). Lane L1 (§10) starts with a failing
-test that proves the gap, then fixes it in provider-neutral code. See D4.
+  `:2313-2334`). `host::lost_call` callers are pinned to Fly, Kubernetes and `host.rs`
+  (`tests/observed_seal.rs:42-77`). Job code reports failures through `az::failed` and
+  `preflight::unusable` (`preflight.rs:280`), which take the runner's observation (seal at
+  `observed_seal.rs:79-96`).
+- **Verify after #241.** `verify_target` fills each expected name's version from `store.read`,
+  which is Key Vault's current version (`src/app/delivery.rs:1313-1322`). Tests:
+  `a_freshly_synced_azure_target_is_verified` and
+  `a_key_vault_version_added_outside_opv_is_drift_on_verify` (`src/app/azure_tests.rs:709`,
+  `:718`). Verify never reads the runtime's binding, so a stale app or job pin verifies as
+  `verified`. **A2 needs L1′ (§5).**
 
 ## 3. Option 1: a job target (`azure.container_app_job`)
 
-**Config.** This is a second target whose `azure` section names `container_app_job = "<job>"`
-instead of `container_app` (exactly one of the two). `opv target add --azure-container-app-job`
-writes it (an `INIT_FIELDS` entry, `config.rs:134`).
+This would be a second target whose `azure` section names `container_app_job` instead of
+`container_app`. A job that mirrors its app shares the app's vault and `env_name`. `same_target`
+treats that as the same target (`config.rs:436-443`), and `check_shared_targets` refuses it, both
+within one environment and across environments (`src/config.rs:2503-2552`). Each target prunes what
+it manages (FR-8). The app target's prune releases only its own references (`sync.rs:1938-1943`),
+so it would delete an entry the job still uses.
 
-```toml
-[environments.prod.targets.api-validate.azure]
-subscription = "…"; key_vault = "kv-myapp-prod"; resource_group = "rg-myapp"
-container_app_job = "job-myapp-validate"; identity = "system"; env_name = "FLEET__{PRODUCT}__{KEY}"
-```
-
-**Blocker in current code.** A job that mirrors its app uses the app's Key Vault and template.
-`same_target` calls two Azure targets with the same `key_vault` and `env_name_template` the same
-target (`config.rs:436-443`). `check_shared_targets` refuses that in one environment, and across
-environments too (`src/config.rs:2504-2549`). The rule exists because each target prunes the names
-it manages (FR-8). The app target's `--prune --deploy` would delete a Key Vault entry after
-releasing only *its own* references (`sync.rs:1938-1943`), and the job target would still bind
-that entry. Option 1 therefore needs one of these:
-(a) a separate vault or template for the job, which duplicates every secret and breaks "same env
-as the app";
-(b) relaxing FR-8 for app/job pairs plus cross-target prune coordination, which is a core change
-across placements.
-Neither is small, and (b) is exactly the failure FR-8 prevents.
-
-**Sync path.** The runtime is a job adapter with no revision. `PinnedRuntime::apply` must return a
-`Revision` (`ports.rs:116`), so the job would need a synthetic one, and core prints "deployed
-revision …" (`sync.rs` after `:1860`). `--deploy` then reports "next execution uses the new values"
-(the issue's wording). A1 holds only because one `opv sync <env>` syncs every target of the
-environment. The app and job are independent placements, so a failure on one leaves the other done.
-That is plain per-target partial failure, with no ordering between them.
-
-**Verify / drift.** Each target has its own placement, receipt and delivery item. That means a
-second `state_vault_id` item and `opv apply` for it, and A2 comes per target once L1 lands.
-**Doctor.** The target's own lines, with "job identity access" in place of "app identity access".
-**Benefit.** A person can sync the job alone (`--target api-validate`), run the validation, then
-sync the app. Option 2 gives no pause between job and app inside one run (D3).
+Option 1 therefore needs either a second vault holding copies of every secret, or relaxing FR-8
+with cross-target prune coordination. It also needs a synthetic job "revision", because `apply`
+returns one (`ports.rs:116`). Its only gain is syncing the job alone before the app (D1, D3).
 
 ## 4. Option 2: companion jobs on the app target (`azure.companion_jobs`)
-
-**Config.**
 
 ```toml
 [environments.prod.targets.api.azure]
@@ -133,328 +94,394 @@ sync the app. Option 2 gives no pause between job and app inside one run (D3).
 companion_jobs = ["job-myapp-validate"]   # optional; same resource group and subscription
 ```
 
-- `RawAzure` gains `#[serde(default)] companion_jobs: Vec<String>`. Each name is checked like
-  `container_app` (`check_ident`, `config.rs:298-300`). A duplicate is `FieldRule::DuplicateKey`.
-- `azure.identity` applies to each job (D5): `system` means each job's **own** system-assigned
-  identity, which is a different principal from the app's. A user-assigned id must be attached to
-  every job.
-- `azure.container` applies to each job (D6): the job must have a container of that name, or
-  exactly one container when the field is unset. The error is the app's `ConfigCheck::NotOneOf`
+**Config.**
+- `RawAzure` gains `#[serde(default)] companion_jobs: Vec<String>`. Each name passes
+  `check_ident` (`config.rs:298-300`), and a duplicate is `FieldRule::DuplicateKey`.
+- `azure.identity` applies to each job (D5). `system` means each job's own identity, which is a
+  different principal from the app's.
+- `azure.container` applies to each job (D6), with the app's rule and error
   (`containerapp.rs:353-366`).
-- `same_target` also returns true when two Azure targets share a resource group and any companion
-  job (`config.rs:436-443`), so FR-8 refuses two targets writing one job.
+- `same_target` also matches two targets that share a resource group and a companion job. That
+  case gets its own `shared_target_error` text: "targets X and Y both list container app job J"
+  (`config.rs:445-450`).
+- `opv target add --azure-companion-jobs a,b` writes the TOML array (D9).
 
-**Structure (adapter only; no core change for sync).** There are two new files under
-`src/adapters/azure/`:
+**Ways out** (documented in `docs/configuration.md`, L5).
+- *Urgent rotation while a job is refused (M5).* Remove the job from `companion_jobs`, deploy the
+  app alone, then re-add the job after its grant.
+- *Removing a job for good.* opv forgets a job that is no longer listed. Before removing it,
+  delete its `opv-` env entries and secrets, or keep it listed until a `--prune --deploy` has run.
+  Otherwise a later prune deletes Key Vault entries the job still references, and its next
+  execution fails silently (J3).
 
-- `job.rs`: `ContainerAppJob`, one job as a runtime. It has:
-  - `show` (`containerapp job show`): bindings come from here only, never from an execution, whose
-    template names one `cappjob-<job>` secret (J10). `secrets: null` reads as empty (J2).
-  - `snapshot` and `edit`.
-  - `update` (`containerapp job update --yaml /dev/stdin`, core, J1). The document is on stdin
-    only, and unmanaged secrets are sent back as `show` returned them, without values (J6).
-  - `settle`: read `provisioningState` from the update's reply, which was `Succeeded` every time
-    (J11). `Failed` refuses, and `InProgress` is polled like `settled_app`.
-  - `release`, `principal` and `access` (below).
+**Structure (M4: one engine, two resource descriptors; no core change for sync).**
+- `resource.rs` (new) holds resource-generic functions extracted from `containerapp.rs`:
+  `show`, `container_index`, `strip`, `snapshot_from`, `edit`, `principal`, `access`, and the
+  refused/unknown read-back. They take a descriptor: the kind (app or job), the name and resource
+  group, the `az` noun (`containerapp` or `containerapp job`), the read-only fields, and the
+  identity-assign command.
+- `ContainerApp` becomes a thin caller. `containerapp.rs`'s own tests and the P0 argv
+  characterization must pass **unchanged**: that is the proof the extraction changed nothing.
+- `job.rs` is the job descriptor plus what only a job has:
+  - read-only fields `provisioningState`, `outboundIpAddresses`, `eventStreamEndpoint`,
+    `systemData`; no etag (J2); `secrets: null` reads as empty (J2);
+  - settle from the update reply's `provisioningState` (J11). `Failed` refuses, and `InProgress`
+    (never observed) is polled like `settled_app`;
+  - superseded `opv-` secrets removed in the same update (J9), so no `serving_refs`;
+  - bindings from `job show` only, never from an execution, whose template names one
+    `cappjob-<job>` secret (J10);
+  - unmanaged secrets sent back without values (J6).
+- `companions.rs` (new) holds `AppWithJobs: PinnedRuntime` over the app and its jobs. `open`
+  returns it only when `companion_jobs` is non-empty; otherwise the target is byte-identical to
+  today.
 
-  The job's read-only fields are `provisioningState`, `outboundIpAddresses`, `eventStreamEndpoint`
-  and `systemData`. A job has no etag, so the fingerprint applies as for the app (J2). `job.rs`
-  reuses the app's helpers, made `pub(super)` in `containerapp.rs`: `secret_name, env_refs, upsert,
-  fingerprint, diff_paths, is_opv_secret, policy_grants_get`, and the RBAC/policy half of
-  `check_access`. The user-assigned key match stays case-insensitive (`containerapp.rs:603`), since
-  Azure lower-cases `resourcegroups` in the key (J12).
-- `companions.rs`: `AppWithJobs`, which implements `PinnedRuntime` over one `ContainerApp` and N
-  `ContainerAppJob`. `open` (`config.rs:465-492`) returns it only when `companion_jobs` is
-  non-empty. Otherwise the target is byte-identical to today, so the characterization tests and
-  P0 argv stay unchanged.
+**Bindings (H1: the merge rule).** For each managed name:
+1. The app and every job agree: report that binding.
+2. They disagree: read the name's **current Key Vault version** with the value-free
+   `keyvault secret show --name <n> --query id -o tsv`. This is the read `confirm_version` makes
+   (`keyvault.rs:396-420`), factored out as `current_version` (L2c). The reply is the id, and no
+   value is asked for or kept.
+3. Report the binding of a resource **not** at that version: the app's if the app is among them,
+   otherwise the first such job in config order. A name missing from any resource is absent.
+4. If every resource is at the current version but they still disagree (for example on the secret
+   name), report the app's binding.
 
-**Bindings (what core sees).** For each managed name, `AppWithJobs::bindings` merges the
-per-resource bindings. If the app and every job agree, it reports that binding. Otherwise it
-reports the first job (config order) whose binding differs from the app's, and a job that lacks the
-name makes the name absent. Core then works unchanged:
+A stale resource then yields `Pinned{old}`. Core re-pins it (`pinned_diff`, `sync.rs:2232-2273`),
+flags drift (`:2265-2268`, `TargetDrift` via `status.rs:208-224`), and verify reports it after
+L1′. Step 2 of apply then updates only the resources that are behind. When a disagreement is
+resolved, `runner.note` names the resource and the two version ids (L2): "container app job J
+binds NAME at …; Key Vault is at …". The fingerprint is the SHA-256 of the app's fingerprint
+followed by each job's. `RawSpec` holds `{"app": …, "jobs": {…}}`, with no values (J7).
 
-- `pinned_diff` re-pins a name whose merged binding is not the target version
-  (`sync.rs:2232-2273`).
-- `drift` flags a pin to a version other than the store's current one (`:2265-2268`).
-- `status --fail-on-drift` raises `TargetDrift` (`status.rs:208-224`, `:813-814`).
-- verify (after L1) sees the job's version, so it reports `drifted_on_target` or
-  `missing_on_target`.
+**Apply (D2: jobs first).** `AppWithJobs::apply(change, snap)`:
 
-The unmanaged fingerprint is the SHA-256 of the app's fingerprint followed by each job's, in config
-order. `RawSpec` holds `{"app": <spec>, "jobs": {"<job>": <spec>}}`. It holds no values, only
-Key Vault references and env-routed config, as today (`src/domain/runtime.rs:44-46`). No job
-reply held a value (J7).
+1. **Re-check.** Re-read every resource and compare its own fingerprint with the snapshot. Any
+   difference is `TargetRefused{ChangedOutsideOpv}` naming that resource (`containerapp.rs:653-671`),
+   and nothing is written.
+2. **Sub-changes.** Compute each resource's own sub-change (pins not at target, config with a
+   different digest, unbinds present). A resource whose sub-change is empty is not updated.
+3. **Access gate (A4, D7; M1: Graph-free and three-valued).** It runs for each job that will be
+   updated and will hold an `opv-` reference. The list is
+   `role assignment list --assignee-object-id <P> --scope <vault id> --include-inherited
+   --include-groups --fill-principal-name false -o json`. Unlike `--assignee` and the default
+   `--fill-principal-name`, this form makes no Microsoft Graph query (az 2.91.0 help).
+   - **Granted:** a `READ_ROLES` assignment at the vault or above, or an access policy with `get`.
+     Go on.
+   - **Missing (definite only):**
+     - no system identity, or the user-assigned id is not attached;
+     - an access-policy vault with no `get` for the principal;
+     - the list succeeded and holds no assignment at the vault or above.
 
-**Sync path and ordering (D2; recommended: jobs first, then the app, one apply).**
-`AppWithJobs::apply(change, snap)`:
+     The whole apply is refused before any update, with `MissingRight{grantee}` (Catalog).
+   - **Undetermined:** the list is refused or fails after its retries, or it holds only roles opv
+     does not know (custom roles, secret-scope grants). Go on, with `runner.note`: "could not
+     confirm that container app job J's identity can read Key Vault K (<reason>); its next execution
+     may fail; check with `opv doctor --env <env>`."
 
-1. Re-read every resource and compare each one's own fingerprint with the snapshot. Any difference
-   refuses with `TargetRefused{ChangedOutsideOpv{after_apply:false}}` naming that resource, as the
-   app does today (`containerapp.rs:653-671`). Nothing is written.
-2. For each job, compute **its own** sub-change: the pins whose job binding is not the target, the
-   config whose digest differs, and the unbinds present. A job with an empty sub-change is not
-   updated, so there is no write without a change.
-3. **Access gate (A4, J3).** Each job that will be updated, and will hold an `opv-` Key Vault
-   reference afterwards, gets the job's `access` check: the same reads as `check_access`
-   (`containerapp.rs:856-935`) against the job's principal. A job with no system identity, an
-   unattached user-assigned id, or no read grant refuses the whole apply before any job or app
-   update. The cause is `MissingRight` naming the job's identity and the command (see "Catalog").
-   This check is read-only, and its reads are retried like every read.
-4. **Fresh grant (J5).** When the grant that passes step 3 has a `createdOn` less than 10 minutes
-   old (from the `role assignment list` reply, J4), the apply goes on, and `runner.note` says: "the
-   Key Vault grant to the identity of container app job J is N min old; Azure can take a few
-   minutes to apply it, so an execution started before HH:MM UTC may fail to read its secrets". opv
-   neither waits (it starts no executions) nor refuses (the update is correct). The spike saw 28 s
-   too early and 2 min 18 s enough. The 10 minutes is Azure's documented worst case, not measured.
-   An access-policy vault records no time, so it gets no note.
-5. Edit each job document as `edit` does (`containerapp.rs:489-537`): per-version `opv-` secret
-   names with `keyVaultUrl` and `identity`, and env `secretRef`s. Jobs do not need per-version names
-   (J8), but opv keeps them so app and job share one `secret_name` and one binding reader. Update,
-   then settle (J11). For each job, `runner.note` reports "container app job J pins NAMES; its next
-   execution uses them".
-6. Apply the app's sub-change as today and return its new revision. If the app has nothing to
-   change, return its current `latestRevisionName`, and core confirms that revision is healthy (the
-   existing no-change path, `sync.rs:1848-1852`).
+   The app's doctor argv stays as it is (P0). The shared `access` function takes the assignee form
+   as a parameter. Switching the app to the Graph-free form is a separate, later change.
+4. **Fresh grant (D8; J5).** If the deciding RBAC assignment's `createdOn` is under 10 minutes old,
+   go on, and `runner.note` reuses the existing wording "a new grant can take a few minutes to
+   apply" (`containerapp.rs:929-930`). It adds: "an execution of J started before HH:MM UTC may
+   fail to read its secrets". This covers direct RBAC grants only; an access policy has no time,
+   and a group grant's time is the group's (L9). The spike saw 28 s too early and 2 min 18 s
+   enough. The 10 minutes is Azure's documented propagation bound (Adapted).
+5. **Jobs.** For each job, in config order: edit (per-version names kept to share `secret_name`
+   with the app, J8), update on stdin, and settle (J11). Then note "container app job J pins NAMES;
+   its next execution uses them".
+6. **App.** A non-empty app sub-change is applied as today, and apply returns the new revision. If
+   only jobs changed, note "container app A unchanged; only its jobs changed" and return its current
+   `latestRevisionName`. Core then takes the apply path (`pending` is non-empty, `sync.rs:1845`),
+   waits for that revision's health, and prints "deployed revision <current>: NAMES"
+   (`:1883-1891`). The note comes first, so the line is not misread (L1).
 
-Without `--deploy` nothing is applied, so jobs stay pending like the app (FR-29): the issue's
-"every sync" means every deploying sync (D3). `--prune --deploy`: `AppWithJobs::release` releases
-every job, then the app, before any Key Vault delete (`sync.rs:1938`). No resource keeps a
-reference to an entry opv deletes (FR-32).
+Without `--deploy` nothing is applied, and jobs stay pending like the app (FR-29, D3).
+`--prune --deploy` calls `AppWithJobs::release` on every job, then the app, before any Key Vault
+delete (`sync.rs:1938`, FR-32).
 
-A job has no serving revision to protect, and a running execution keeps the values it started with
-even when its secret is removed (J9). So superseded `opv-` secrets are removed in the same job
-update, and jobs need no `serving_refs`.
+**Partial failure** (no update is retried, NR-2). "Next run" follows the merge rule above.
 
-**Partial failure** (no update is retried, NR-2):
-
-| Where it stops | State | Error | Next run |
+| Stops at | State | Error | Next run |
 |---|---|---|---|
-| access gate (step 3) | KV versions written (not live, FR-29); no job or app updated | `MissingRight{grantee: job k's identity, grant: Rbac{Key Vault Secrets User, vault} or AccessPolicy{get}}` | after the grant, deploys everything |
-| job k refused (Azure applied nothing) | KV versions written; jobs before k updated; app untouched | `Partial{done:["container app job J1 (pinned)", …], then: TargetRefused{subject: job k, why: Validation}}` (`cause/mod.rs:767-774`; render `render.rs:2113`) | re-pins job k and the app |
-| job k outcome unknown | as above, job k unknown | `Partial{…, then: WriteOutcomeUnknown{job k}}`; `apply_reconciled` reads the merged bindings back. The app is not done, so `left(now)` is non-empty and the run stays unknown (`sync.rs:2061-2081`) | reconciles from what it reads |
-| job settles `Failed` | job holds the new references | `TargetRefused{job k, Validation}` in `Partial` | re-applies |
-| app refused or unknown after the jobs | jobs ahead of the app | `Partial{done: jobs, then: <app cause as today>}` | re-pins the app only |
-| app revision unhealthy or timed out | jobs and the app's template at the new versions; old revision serves | today's `Refusal::Unhealthy` / `InProgress` (`sync.rs:1862-1880`); the job notes were already printed | as today |
+| access gate, Missing | KV versions written (not live); nothing updated | `MissingRight{grantee: job k identity}` | after the grant: all resources agree on the old version, so it re-pins and updates all |
+| job k refused (Azure applied nothing) | jobs < k at current; job k and app old | `Partial{done: jobs < k, then: TargetRefused{job k, Validation}}` (`cause/mod.rs:767-774`) | the app is behind and is reported. It updates job k and the app only |
+| job k outcome unknown | jobs < k at current; job k unknown; app old | `Partial{…, then: WriteOutcomeUnknown{job k}}`. The read-back sees the app behind, so `left(now)` is non-empty and the run stays unknown (`sync.rs:2061-2081`) | updates whatever is behind: the app, and job k if it did not land |
+| app refused or unknown, after the jobs | jobs at current; app old (or unknown) | `Partial{done: jobs, then: <app cause as today>}`. If the app landed, the read-back finds all agreeing at current and reports "applied" correctly | re-pins the app only |
+| app revision unhealthy or timed out | app template and jobs at current; old revision serves | as today (`sync.rs:1862-1880`) | as today: no-change path, health re-checked |
 
-**Catalog.** Core's `partial()` merges an adapter's `Partial.done` list (`sync.rs:222-240`), so
-no new cause is needed. There are two catalog changes, both provider-neutral:
+There is no row for a job that settles `Failed`. That state was never observed (J11). The job's
+bindings would already be at the target, so the next run would not touch it. Preflight warns on a
+`Failed` job, as it does for the app.
 
-- `ResourceKind::ContainerAppJob` (`src/cause/subject.rs:245-265`), rendered "container app job"
-  with the listing hint `az containerapp job list` (`render.rs:810`, `:3771`).
-- `MissingRight` gains `grantee: Option<Principal>` (`cause/mod.rs:699-707`). Today its grant
-  action and words take the principal from `seen`, the caller (`render.rs:3598-3614`). That would
-  tell the *deploy identity* to get the role, while the job's identity needs it. With
-  `grantee: Some(Principal::AppIdentity{name: "container app job J (principal P)"})`
-  (`subject.rs:280`, not built anywhere in production today), the action names the right
-  principal. `None` keeps every existing message byte-identical. The cause is built from opv's own
-  `role assignment list` reply through `preflight::unusable` (`preflight.rs:280`), the way
-  `ChangedOutsideOpv` is (`containerapp.rs:657-671`).
+**Catalog (M3).** The adapter's `Partial` reaches the person unchanged, as the GitHub adapter's
+does (`src/adapters/github/gh.rs:510-529`), with Next `plan_read` for `scope: None`. Two
+provider-neutral changes:
 
-`NotFound{named_by: azure.companion_jobs}` for a missing job copies `preflight.rs:445-452`.
+- **`ResourceKind::ContainerAppJob`** (`src/cause/subject.rs:245`): words "container app job"
+  next to `render.rs:810`, and listing hint `az containerapp job list` next to `:3771`.
+- **`MissingRight` gains `#[serde(skip_serializing_if = "Option::is_none")] grantee:
+  Option<Principal>`** (`cause/mod.rs:699`).
+  - The coverage gate drops a field whose attribute starts `#[serde(skip`
+    (`tests/e2e/coverage.rs:2381-2392`), so the 12 e2e snapshots and the JSON contract stay as
+    they are.
+  - When `grantee` is set, `Action::Grant` and `grant_words` use it instead of `seen.principal()`
+    (`render.rs:3598-3614`). The job's grantee is `Principal::AppIdentity{name: "container app
+    job J (principal P)"}` (`subject.rs:280`; no production code builds it today).
+  - The cause is built from opv's own `role assignment list` reply through
+    `preflight::unusable`.
+  - Files: the six production constructors that add `grantee: None` are
+    `src/adapters/onepassword.rs:697`, `onepassword_diagnose_items.rs:107`,
+    `azure/preflight.rs:379`, `kubernetes/diagnose.rs:156`, `kubernetes/mod.rs:220` and
+    `cause/codes.rs:628`. The exhaustive pattern `render.rs:2059` adds the field. Tests:
+    `onepassword_diagnose_items_tests.rs:200,223,240`, `render_tests.rs:372,3040,4126` and
+    `app/ready_tests.rs:52`.
+- `NotFound{named_by: azure.companion_jobs}` for a missing job copies `preflight.rs:445-452`.
 
-**Why jobs first.** (a) A job update changes no serving traffic. (b) The pre-deploy validation job
-then holds the candidate values. (c) A job failure stops before the app changes. (d) When the app's
-new revision is unhealthy, the jobs match the app's *template*, which is what `status` already
-reports for the app in that state. The alternative (app first, jobs after the revision is healthy)
-keeps jobs on proven values only. It has to write from inside `await_healthy`, and a job failure
-there leaves the job stale after a healthy deploy, which is the bug this issue reports.
+**Preflight and doctor.**
+- `preflight::run` (`preflight.rs:68-95`) shows each job after the app. A missing job is
+  `NotFound`; under `Mutate` an `InProgress` job is waited for (`settled_app`, `:476-510`); `Failed`
+  is a warning.
+- Doctor (`:514-557`) adds two lines per job:
+  - `container app job <J>`;
+  - `job <J> identity access`. This is a warning built with the step-3 result. Missing prints
+    `az containerapp job identity assign -g <rg> -n <J> --system-assigned` (J1), or the role or
+    policy command of `containerapp.rs:887-890`, `:924-932`, which worked for a job principal
+    (J4). Undetermined says which read could not decide. A grant under 10 minutes old adds the
+    step-4 note.
+- `status` and `plan` print the access result as a `warn` line. `DOCTOR_CHECKS` stays static
+  (`preflight.rs:43-50`); job line names are built per job.
 
-**Preflight and doctor.** `preflight::run` (`preflight.rs:68-95`) shows each job after the app. A
-job that is missing gets `NotFound`, `InProgress` is waited for under `Mutate`
-(`settled_app`, `:476-510`), and `Failed` is a warning. Doctor appends two lines per job after "app
-identity access" (`preflight.rs:514-557`):
+**Deploy identity's rights** (L5 docs; `docs/configuration.md:388` today names only Key Vault
+Secrets Officer and Contributor on the app). It also needs:
+- Contributor on each companion job;
+- `Microsoft.Authorization/roleAssignments/read` at the vault scope, for the gate.
 
-- `container app job <J>`: it exists, its container matches, and its provisioning state.
-- `job <J> identity access`: a `warn` verdict like `access` (`:689-708`), with the principal
-  taken from the job. Doctor stays a warning, but `sync --deploy` refuses on the same finding
-  (step 3). A missing system identity names `az containerapp job identity assign -g <rg> -n <J>
-  --system-assigned` (core, J1). A missing grant names the same `az role assignment create …
-  --role "Key Vault Secrets User" --scope <vault id>` (or `set-policy`) as
-  `containerapp.rs:887-890`, `:924-932`, which worked verbatim for a job principal (J4). A grant
-  younger than 10 minutes adds step 4's note.
+Key Vault Secrets Officer's control-plane actions are documented to include
+`Microsoft.Authorization/*/read`. That is Adapted, and follow-up F1 (§8) checks it.
 
-`status` and `plan` (`PreflightMode::Read`) print the access finding as a `warn` line, so a person
-sees it before deploying. `DOCTOR_CHECKS` stays static for the "not checked" lines
-(`preflight.rs:43-50`), and job line names are built per job.
+## 5. Verify and drift: L1′ (H2)
 
-## 5. Verify and drift (both options): what L1 changes
+L1′ is an overlay on #241, not a replacement. After #241 fills Key Vault's current version
+(`delivery.rs:1313-1322`), `verify_target` reads `runtime.bindings()` once for a `Ports::Pinned`
+target. For each expected name with recorded evidence:
 
-`verify_target` gets the observed version of a pinned target from `runtime.bindings()`
-(`Binding::Pinned{version}`) and no longer reads it from `store.list()` (`delivery.rs:1304-1332`).
-This is provider-neutral, goes through the `PinnedRuntime` port, and names no provider. It covers
-Kubernetes too. After a sync without `--deploy`, the runtime still binds the old version while the
-receipt records the new one. That name is `drifted_on_target` with `deployed: "staged"` (`:1346-1352`).
-The target does not serve the recorded version (D4). With Option 2 the merged bindings make a
-job's stale copy `drifted_on_target`, which is A2.
+- **Binding at another version.** If the binding is `Pinned` at a version other than the
+  evidence's `store_version`, that version becomes `listed_version`, so the name is
+  `drifted_on_target` (`src/domain/delivery.rs:362-364`). If Key Vault's current version equals the
+  recorded one, the name is also marked `pending`, so `deployed` reads `"staged"`
+  (`delivery.rs:1359-1366`).
+- **No binding.** `listed_version` is `None`, so the name is `missing_on_target`.
+- **`Plain` or `Other` binding.** #241's result stands.
+
+Both #241 tests stay. The overlay is provider-neutral, uses the `PinnedRuntime` port, and covers
+Kubernetes too. Behaviour change (D4′): right after a sync without `--deploy`, verify reports the
+rotated names as `drifted_on_target` with `deployed: "staged"`, where #241 alone says `verified`.
+With Option 2, the merged bindings make a stale job `drifted_on_target`, which meets A2.
 
 ## 6. Security analysis
 
-- **No new value path.** Job documents travel only on stdin (`--yaml /dev/stdin`), exactly as the
-  app's (`containerapp.rs:676-690`). Argv holds names and ids
-  only, because `az` logs argv to `~/.azure/commands` (P1 Q12). The value-carrying `job secret set`
-  and `--set-env-vars` are never called. On native Windows the write uses the existing named-pipe
-  hand-off (`handoff.rs`).
-- **Output.** `job show` and `job update` replies are parsed and never printed. They carry no
-  secret value, and no marker reached `~/.azure` (J7). A plain secret that opv does not own is
-  sent back without its value, and Azure keeps it (J6), so the pre-spike rule "refuse a job that
-  has its own plain secrets" is dropped.
-- **Silent failure closed.** Azure accepts a job reference the identity cannot read (J3), and a
-  failed execution gives no reason (J3, J10). The access gate (step 3) turns that into a refusal
-  that names the grant, before anything is deployed.
-- **Permissions.** 1Password vault access stays the only permission system that opv adds. Azure
-  rights are the operator's: the deploy identity needs write (Contributor) on each job as well as
-  the app, which `docs/configuration.md:388` must say. opv never creates role assignments or
-  identities. It prints the command (A3). A job's system identity is a new principal. Granting it
-  Key Vault Secrets User at vault scope lets the job read every secret in the vault, the same
-  breadth the app has today. Doctor's existing "scope broader than needed" wording applies.
-- **CI** reads 1Password and delivers. It never writes values to 1Password, and this design changes
-  neither.
-- **Blast radius.** The companion list is explicit and checked at load. opv touches only managed
-  env names and `opv-` secrets of named jobs, behind the same unmanaged fingerprint.
+- **No new value path.**
+  - Job documents travel on stdin only (`--yaml /dev/stdin`, or the Windows pipe in
+    `handoff.rs`), as the app's do (`containerapp.rs:676-690`). Argv holds names and ids (P1 Q12).
+  - The merge rule's extra read is the existing `--query id -o tsv` form: no value is asked for
+    or kept (I2-1).
+  - `values_never_reach_argv` and `sync_output_holds_no_value` extend to job documents (§9).
+- **Output.** Replies are parsed, never printed, and held no value (J7). Unmanaged secrets go back
+  without values, and Azure keeps them (J6).
+- **Silent failure closed.** Azure accepts an unreadable reference on a job, and a failed
+  execution gives no reason (J3, J10). The gate (step 3) turns a provable lack of access into a
+  refusal before anything is deployed.
+  - **Evidence (M2).** That W3 and W4b failed for lack of access is **Adapted**. Their reference
+    and length check were identical to W5's, which passed after the grant took effect, but W5's
+    template also added a plain secret and a second check, and executions give no reason. The gate
+    does not rest on that inference. It enforces Container Apps' documented prerequisite that the
+    identity named on a Key Vault reference can read the secret, which Azure enforces synchronously
+    for apps (P1 Q14). Because it refuses only on definite negatives, a wrong inference cannot cause
+    a false refusal.
+- **Permissions.** 1Password vault access stays the only permission system opv adds. Azure rights
+  remain the operator's (§4 deploy identity). opv creates no grants or identities. A job's system
+  identity is a new principal, and Key Vault Secrets User at vault scope gives it the same breadth
+  the app has today.
+- **CI** reads 1Password and delivers. It never writes values to 1Password; unchanged.
 
 ## 7. Recommendation
 
-**Option 2 (`companion_jobs`)**, jobs updated first inside the app's `--deploy`, plus L1. Reasons:
+**Option 2 (`companion_jobs`), jobs updated first inside the app's `--deploy`, with the gate and
+L1′.**
+- It matches "the job runs with its app's environment": the same managed set, vault and template.
+- It needs no FR-8 relaxation and no synthetic revision.
+- Core needs no change for sync, status or drift: everything sits behind `PinnedRuntime`, and the
+  merge rule keeps a stale resource visible to core.
+- There is one placement and one receipt.
 
-1. It fits the stated pattern: the job holds its app's environment, so the app target already owns
-   exactly the right managed set, vault and template.
-2. It needs no FR-8 relaxation. Option 1 is refused by `check_shared_targets`
-   (`src/config.rs:2504-2549`) unless it duplicates the vault or adds cross-target prune
-   coordination, and it brings a synthetic job "revision".
-3. It needs no core change for sync, status or drift. Everything sits behind `PinnedRuntime` in
-   `src/adapters/azure`, so the provider guards hold. The only core change, L1, fixes a gap that
-   exists anyway.
-4. It needs one placement, one receipt and no extra `state_vault_id` item or `opv apply`.
+The vet confirmed the choice. Its two High findings (the merge rule and L1) are fixed above.
+Cost: no "job only, then app" pause (D3), no standalone job (D1), and about 1,450 changed lines in
+seven lanes (§10).
 
-The spike changed nothing in this choice (no finding favours §3). It added the access gate (D7)
-and the fresh-grant note (D8), and removed one safety rule and the `az rest` fallback.
-Cost: there is no pause between the job and the app inside one run (D3), and a standalone job is
-not covered (D1). About 1,350 changed lines over five lanes.
+## 8. Spike S-238: done; one read-only follow-up
 
-## 8. Spike S-238: done
+The spike ran on 2026-10-23 with cleanup, and the resource group matched its baseline afterwards
+(findings J1–J12).
 
-The owner ran it on 2026-10-23. Scripts (R1–R5 read-only, W1–W11 writes, cleanup with a trap,
-redaction) and raw outputs stay in the session scratchpad, outside the repository. Cleanup ran, the
-resource group matched its baseline, and no marker reached `~/.azure` or the outputs.
-`spike-238-azure-jobs-findings.md` has the findings. Their effect on this design:
+| Finding | Effect here |
+|---|---|
+| J1 `job update --yaml` and job identity commands are core | stdin update; no `az rest` fallback |
+| J2, J12 no etag, `secrets: null`, lower-case `resourcegroups` | job read-only fields; null as empty; case-insensitive key (`containerapp.rs:603`) |
+| J3 an unreadable reference is accepted; only the execution fails | gate (step 3); evidence Adapted (§6) |
+| J4 doctor's grant command works for a job principal; the list has `createdOn` | step 3 and step 4 data |
+| J5 a listed grant took between 28 s and 2 min 18 s to work | note, no wait (D8) |
+| J6 an unmanaged plain secret is kept | the pre-spike refusal rule is dropped |
+| J8 repointing `keyVaultUrl` alone reaches the next execution | per-version names kept only to share code |
+| J9 a running execution keeps its start values | superseded secrets removed in the same update |
+| J10 executions reference `cappjob-<job>` | bindings from `job show` only |
+| J11 updates return settled (20–29 s) | settle from the reply |
 
-| Finding | Pre-spike assumption | Now |
-|---|---|---|
-| J1 `job update --yaml` is core | `az rest` fallback | dropped |
-| J3 an unreadable reference is accepted; only the execution fails | doctor advisory, gate "if needed" | access gate before any update (step 3, D7) |
-| J5 a listed grant takes ~0.5–2.3 min to apply | not considered | fresh-grant note, no wait (step 4, D8) |
-| J6 an unmanaged plain secret is kept when sent without its value | refuse such jobs | rule dropped |
-| J8 repointing `keyVaultUrl` alone is seen by the next execution | per-version names needed | kept only to share code with the app |
-| J9 a running execution keeps its start values | maybe keep the superseded secret | removed in the same update |
-| J10 executions reference one `cappjob-<job>` secret | — | bindings from `job show` only |
-| J11 the update returns settled | poll `provisioningState` | read it from the reply |
-| J2, J12 shapes (no etag, `secrets: null`, lower-case `resourcegroups`) | — | read-only list, null secrets, case-insensitive key |
+**F1 (read-only, before L2b).** J4 ran as a person. Repeat its list as the sandbox's *deploy
+service principal*, signed in through a private `AZURE_CONFIG_DIR`, using the app's
+already-granted principal:
+
+1. `az role assignment list --assignee-object-id <app principal> --scope <vault id>
+   --include-inherited --include-groups --fill-principal-name false -o json`
+2. The same with `--assignee <app principal>`.
+
+What it decides: (1) answering proves the gate's read works with the documented deploy rights
+(otherwise L5 names the extra role); (2) failing confirms the Graph dependency M1 avoids. Record (1)
+into `tests/fixtures/azure/jobs/` after redaction.
 
 ## 9. Test plan
 
-- **Adapter unit tests** (in `job.rs`, `FakeRunner` + `tests/fixtures/azure/jobs/`, the pattern
-  of `containerapp.rs:1139-1200`):
-  - the snapshot reads `Pinned`/`Plain`/`Other`, and `secrets: null` reads as empty;
-  - the fingerprint ignores managed entries and the job's read-only fields;
-  - the update sends the whole document on stdin with no value in argv, and an unmanaged plain
-    secret goes back without a value;
-  - settle reads the reply's state;
-  - refused vs unknown read-back, the container rule, the lower-case `resourcegroups` key;
-  - the access findings name the job and the command;
-  - a `createdOn` under 10 minutes yields the note.
-- **Composite tests** (in `companions.rs`): the merge rule (agree, a job differs, a job lacks a
-  name), the per-resource sub-change, no update for an unchanged job, jobs before the app, the
-  access gate refusing with no update sent (A4), the `Partial` done lists in §4's table, and
-  release before delete.
-- **End to end** (`src/app/azure_tests.rs`: the stateful `Sim` of `op` and `az`, `:1-8`). Extend
-  it with jobs, then: a rotation reaches app and job in one deploy (A1); job drift shows in `status`
-  and `--fail-on-drift` exits 8 (as `:705-762`); the interruption matrix covers job calls (extend
-  `:918`, `:956`); `values_never_reach_argv` and `sync_output_holds_no_value` cover job documents
-  (`:1034`, `:1073`); prune leaves no job reference to a deleted entry (as `:983`). A target without
-  `companion_jobs` keeps its exact argv.
-- **Verify** (L1, `src/app/pinned_tests.rs`): verify on a pinned target says `verified` after a
-  deploy, `drifted_on_target` after the binding moves, and `missing_on_target` when unbound; then
-  A2 with a job in `azure_tests.rs`.
-- **Doctor** (in-file tests of `preflight.rs`, from `:729`): the job lines, the missing identity
-  text, and the role command for a job principal (A3).
-- **Catalog** (`src/cause/render_tests.rs`): `MissingRight` with a `grantee` names that principal
-  in the action and the words, and without one every existing render stays byte-identical.
+- **Engine extraction (L2b, L2c).** `containerapp.rs` tests and the P0 argv characterization pass
+  unchanged.
+- **Job unit tests** (`job.rs`, `FakeRunner` with `tests/fixtures/azure/jobs/`):
+  - snapshot and `secrets: null`; read-only fields;
+  - stdin-only update; an unmanaged plain secret sent back without its value;
+  - settle from the reply;
+  - refused and unknown read-back;
+  - the `resourcegroups` key;
+  - the access result for each Granted, Missing and Undetermined case, with the Graph-free argv;
+  - the `createdOn` note;
+  - `current_version` asks only for `--query id`.
+- **Composite tests** (`companions.rs`):
+  - the merge rule: agree; job ahead; app ahead; name missing; several stale;
+  - the per-resource sub-change; the gate refusing with no update sent;
+  - the "app unchanged" note;
+  - release before delete;
+  - every row of the partial-failure table followed by a **second run**, which must update exactly
+    the resources that are behind (H1).
+- **End to end** (`src/app/azure_tests.rs` `Sim`). Extend it with jobs:
+  - A1;
+  - job drift in `status` and `--fail-on-drift` exit 8;
+  - the interruption matrix over job calls (as `:918`, `:956`);
+  - `values_never_reach_argv` and `sync_output_holds_no_value` on job documents;
+  - prune leaves no job reference;
+  - a target without `companion_jobs` issues exactly today's argv.
+- **Verify (L1′).** Both #241 tests are kept. Add: a binding moved → `drifted_on_target`;
+  unbound → `missing_on_target`; a sync without `--deploy` → `drifted_on_target` with
+  `deployed: "staged"`. Then, in L3, A2 with a job.
+- **Catalog** (`render_tests.rs`): `grantee` Some names that principal in action and words; `None`
+  is byte-identical; the e2e snapshots are unchanged.
+- **Doctor** (`preflight.rs` tests from `:729`): the job lines, A3 text, Undetermined text.
+- **Config:** the companion list, duplicate names, shared-job `same_target` text, the D9 flag.
 - **Release gate:** e2e with `CI=true` and `cargo test` before the release PR.
 
-## 10. Delivery lanes (≤ ~400 changed lines each, disjoint files)
+## 10. Delivery lanes (vet order)
 
-| Lane | Files | Lines | After |
+| Lane | Owned files | Lines | After |
 |---|---|---|---|
-| S-238 | done: `tests/fixtures/azure/jobs/`, findings doc | — | — |
-| L1 pinned verify | `src/app/delivery.rs`, `src/app/pinned_tests.rs` | ~180 | none (parallel to S-238) |
-| L2 job runtime | `src/adapters/azure/job.rs` (new), `containerapp.rs` (helper visibility only), `src/cause/{mod,subject,render,codes}.rs` + `render_tests.rs` (job kind, `MissingRight.grantee`), `mod.rs` (`pub mod job;`) | ~450, split below | none |
-| L3 companions | `src/adapters/azure/companions.rs` (new), `config.rs` (field, parse, `same_target`, `open`), `mod.rs` (one line, after L2), `src/app/azure_tests.rs` | ~400 | L2 |
-| L4 doctor/preflight | `src/adapters/azure/preflight.rs` | ~220 | L3 |
-| L5 docs | `docs/configuration.md` (Azure section, deploy-identity rights), `docs/design/multi-cloud-targets.md` (§11 note) | ~80 | L3 |
+| L0 merge | none (`v0161/integrate` into the 0.17 integration branch; done on this branch as `e1a31ee5`) | 0 | — |
+| L1′ verify overlay | `src/app/delivery.rs`, `src/app/azure_tests.rs` | ~100 | L0 |
+| L2a catalog | `src/cause/{mod,subject,render,codes}.rs`, `render_tests.rs`; `grantee: None` in `src/adapters/onepassword.rs`, `onepassword_diagnose_items{,_tests}.rs`, `kubernetes/{diagnose,mod}.rs`, `azure/preflight.rs`, `src/app/ready_tests.rs` | ~120 | L0 (∥ L1′) |
+| L2b engine, read side | `src/adapters/azure/resource.rs` (new), `containerapp.rs` (thin caller), `job.rs` (new; read side), `mod.rs` | ~250 | L2a, F1 |
+| L2c engine, write side | `resource.rs`, `job.rs` (edit, update, settle, release), `keyvault.rs` (`current_version` from `confirm_version`) | ~250 | L2b |
+| L3 companions | `companions.rs` (new), `config.rs` (field, parse, `same_target`, error text, `open`, D9 flag), `mod.rs`, `src/ports.rs` (`:119` doc), `src/app/azure_tests.rs`, `tests/e2e/expected/surface.json` (the flag) | ~400 | L2c, L1′ |
+| L4 doctor and preflight | `src/adapters/azure/preflight.rs` | ~200 | L3 |
+| L5 docs | `docs/configuration.md` (field, deploy rights, ways out), `docs/design/multi-cloud-targets.md` (§11 note) | ~100 | L3 (∥ L4) |
 
-L1 ∥ L2 → L3 → L4 ∥ L5. `mod.rs` is the only file two lanes touch, and they touch it in sequence.
-L2 is split in this order: L2a is the catalog (`src/cause/*`, ~80); L2b is the read side of
-`job.rs` (show, snapshot, principal, access, ~200); L2c is the write side (edit, update, settle,
-release, ~200).
+Order: L0 → L1′ ∥ L2a → L2b → L2c → L3 → L4 ∥ L5.
+- Shared files run in sequence: `azure_tests.rs` (L1′ → L3), `preflight.rs` (L2a → L4), `mod.rs`
+  (L2b → L3).
+- Before L2a starts, check that no other open 0.17 lane edits the Kubernetes or 1Password files
+  it touches.
 
 ## 11. Decisions for the owner
 
-**D1. One target per job (Option 1) or jobs listed on the app's target (Option 2)?**
-In practice, Option 1 makes a job its own destination with its own receipt, so you can sync and run
-the job before you sync the app. Today opv refuses two targets sharing one Key Vault and naming
-scheme, because each would delete what the other still uses. So Option 1 needs either a second vault
-holding copies of every secret, or a core change that coordinates deletes across targets. Option 2
-makes the job follow its app: one sync, one receipt, and the job is updated whenever the app is.
-**Recommend Option 2.** Cost: no "job only, then app" step, and a job with no app is not covered
-(it becomes Option 1 later if a real case appears).
+**D1. Jobs listed on the app's target (Option 2), not one target per job (Option 1).**
+- *In practice:* the job follows its app. There is one sync and one receipt, and the job is updated
+  whenever the app is deployed. Option 1 would make a job its own destination, but opv refuses two
+  targets on one vault and naming scheme, because each would delete what the other uses.
+- *Recommend* Option 2.
+- *Cost:* no job-only sync, and a job without an app is not covered.
 
-**D2. Within one deploy, update the jobs before or after the app?**
-Before (recommended): a validation job already has the new values when the app rolls out. If the
-app's new revision fails, the jobs are on the new values while the old revision serves, which is the
-state `status` already shows for the app's template. After: jobs only ever get values the app proved
-healthy. But a job failure then leaves the job stale after a good deploy (this issue's bug), and opv
-has to write during its health wait. **Recommend before.**
+**D2. Within one deploy, update the jobs before the app.**
+- *In practice:* a validation job already holds the new values when the app rolls out. If any step
+  fails, the next run finds whatever is behind, the app included, and updates only that.
+- *Recommend* before.
+- *Cost:* when the app's new revision fails, the jobs run on the new values while the old app
+  revision serves, until it is fixed.
 
-**D3. Are jobs updated only on `--deploy`?**
-Yes, in the recommended design. Without `--deploy`, new Key Vault versions are invisible to the app
-(FR-29), and jobs behave the same, so the two never differ because of a non-deploying sync. The
-alternative (always re-pin jobs) would let a validation job see staged values before any deploy. It
-breaks the rule that nothing goes live without `--deploy`. **Recommend deploy-only.** Cost: there is
-no built-in "validate first" pause. CI can run the job after `opv sync --deploy` has updated it, or
-the owner can ask for D1's Option 1 later.
+**D3. Jobs change only on `--deploy`.**
+- *In practice:* a sync without `--deploy` changes nothing live, for jobs and the app alike.
+- *Recommend* deploy-only.
+- *Cost:* no built-in "validate first, then deploy" pause. Run the job after the deploy, or ask
+  for Option 1 later.
 
-**D4. Fix `delivery verify` on pinned targets (L1) as part of this work?**
-Read as it stands, verify on Azure (and Kubernetes) cannot say a name is verified or drifted, because
-it never reads the version the app binds (§2). The fix reads the binding. A name staged but not yet
-deployed then reads `drifted_on_target` (`deployed: staged`), meaning the target does not serve the
-recorded version. **Recommend yes, first, as its own PR** (it also deserves its own issue). Cost:
-~180 lines in core, and verify output changes for existing Kubernetes and Azure users.
+**D4′. `delivery verify` also checks what the app and its jobs actually point at (open).**
+- *In practice:* today (after #241) verify compares the Key Vault version with the receipt, so an
+  app or job still pointing at an old version passes. With L1′, verify reports such a name as
+  `drifted_on_target`. That includes the time between a sync without `--deploy` and the deploy,
+  where it shows `deployed: "staged"`. This applies to Azure and Kubernetes.
+- *Recommend* yes. It is the only way A2 holds.
+- *Cost:* about 100 lines in core. Pipelines that verify after a non-deploying sync see
+  "changed / staged" instead of "verified".
 
-**D5. Do jobs use the app's `azure.identity` setting?**
-Recommended: yes. `system` means each job's own identity, which doctor checks separately. A
-user-assigned id must be attached to each job. The alternative is a per-job identity field. Cost of
-the recommendation: a job with a different user-assigned identity than its app is not supported.
+**D5. Jobs use the app's `azure.identity` setting.**
+- *In practice:* `system` means each job's own identity. A user-assigned id must be attached to
+  each job.
+- *Recommend* yes.
+- *Cost:* a job with a different user-assigned identity than its app is not supported.
 
-**D6. Does `azure.container` also pick the job's container?**
-Recommended: yes, with the same rule (that name, or the only container). Alternative: a per-job
-table `{ name, container }`. Cost: a job whose container is named differently needs that later
-extension.
+**D6. `azure.container` also picks the job's container.**
+- *Recommend* yes, with the same rule.
+- *Cost:* a differently named job container needs a later per-job table.
 
-**D7. Refuse to update a job whose identity cannot read the vault (new, from J3).**
-In practice: the spike showed Azure accepts such a job update, and the job's next run then fails
-without saying why. With the gate, `opv sync --deploy` stops before it changes the job or the app.
-It names the job's identity and the exact `az role assignment create` (or `set-policy`) command to
-run. The Key Vault versions it wrote stay staged, as always. The options are to refuse (recommended)
-or to warn and go on, as doctor does. **Recommend refuse.** Cost: two extra reads per job per
-deploy (a few seconds). Also, a deploy refuses in cases where Azure itself would have accepted the
-change.
+**D7. Refuse a deploy when a job's identity provably cannot read the vault (open).**
+- *In practice:* Azure accepts such a job and its next run fails without a reason. opv checks
+  first. When the answer is certainly "no access", it stops before changing anything and names the
+  identity and role (`opv doctor` prints the command). When it cannot tell, it deploys and warns.
+  The way out for an urgent rotation is to remove the job from the list for one deploy.
+- *Recommend* refuse on certain "no", warn on unknown.
+- *Cost:* two reads per job per deploy. The deploy identity needs read access to role assignments
+  on the vault. A job with a custom role passes with a warning, unchecked.
 
-**D8. Right after a new grant: warn, do not wait (new, from J5).**
-A grant appears at once but took up to about 2 minutes to work, and opv cannot test it as the job.
-Recommended: when the grant is under 10 minutes old, the deploy goes on and prints one line saying a
-run started before a given time may fail. The alternatives are to wait up to 10 minutes (it slows
-every first deploy and proves nothing) or to refuse until then. **Recommend warn.** Cost: a run
-started within those minutes can still fail, and the note names the time.
+**D8. Right after a new grant, warn instead of waiting (open).**
+- *In practice:* a grant shows at once but took up to about 2 minutes to work, and opv cannot test
+  it as the job. Under 10 minutes old, the deploy goes on with a line saying that a run started
+  before a given time may fail.
+- *Recommend* warn.
+- *Cost:* such a run can still fail. The note covers direct role grants only.
 
-Spike writes (formerly D7) are approved, done and cleaned up. Two marker secrets remain soft-deleted
-in the sandbox vault until its retention ends or you purge them.
+**D9. `opv target add --azure-companion-jobs a,b` in 0.17.x (open).**
+- *In practice:* one comma-separated option, written as the TOML list. This is safe because job
+  names cannot contain commas (the identifier rule), and the file is checked when it loads.
+- *Recommend* the flag, in L3.
+- *Cost:* about 30 lines, plus one new flag in the CLI surface snapshot. Without it, the list is
+  edited by hand.
+
+## 12. Vet responses (findings not taken as written)
+
+- **Citation corrections in vet item 7** (`render.rs:2113` → `:4089`, `:3771` → `:3709`): **not
+  applied.** The vet read those lines at `291c0b16`. This document cites the branch after the
+  merge, where `render.rs:2113` is the `Refusal::Validation` words of `TargetRefused` and `:3771` is
+  `ResourceKind::ContainerApp => vendor("az", &["containerapp", "list"])` (checked at `e1a31ee5`).
+  The citation base is now stated in the header. The vet's `Partial` render location (`:4089`) is
+  correct and is not cited here.
+- **`MissingRight` constructor list** (vet M3/L2a): **adjusted.** `kubernetes/config.rs:1690` is a
+  test `matches!` pattern with `..`, after `#[cfg(test)]` at `:946`, so it needs no change. The
+  production sites are the six constructors plus the exhaustive pattern `render.rs:2059` (§4
+  Catalog): seven files.
+- **I2-4, app argv:** the app's doctor keeps `--assignee` in this work, to leave P0 untouched. The
+  shared `access` takes the form as a parameter, and moving the app to the Graph-free form is a
+  separate change.
+
+Everything else in `azure-jobs-fmeca.md` is taken as written: H1, H2, M1–M5, L1–L3, L5, L6, L9,
+L10, I2-1–I2-3.
