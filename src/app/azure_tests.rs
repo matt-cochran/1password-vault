@@ -644,6 +644,17 @@ fn delivered() -> Sim {
     sim
 }
 
+/// A delivered world whose item now holds API_KEY v2 and which was synced without
+/// `--deploy`: the value is staged in Key Vault, the app still binds the old version.
+fn staged() -> Sim {
+    let sim = delivered();
+    sim.set_item(item_with(API_V2, LOG_V1));
+    let (res, out) = sync_on(&sim, &fleet_delivered(), &SyncOpts::default());
+    assert!(res.is_ok(), "setup sync failed: {res:?}\n{out}");
+    sim.reset();
+    sim
+}
+
 fn converged_with(fleet: &Fleet) -> Sim {
     let sim = Sim::new(item_with(API_V1, LOG_V1));
     let (res, out) = sync_on(&sim, fleet, &deploy());
@@ -690,6 +701,17 @@ fn placement_state(doc: &Value, product: &str) -> String {
         .unwrap_or_default()
 }
 
+fn placement_deployed(doc: &Value, product: &str) -> String {
+    doc["placements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["product"] == product)
+        .and_then(|p| p["deployed"].as_str())
+        .map(str::to_string)
+        .unwrap_or_default()
+}
+
 fn name_state(doc: &Value, product: &str, name: &str) -> String {
     doc["placements"]
         .as_array()
@@ -728,6 +750,26 @@ fn a_key_vault_version_added_outside_opv_is_drift_on_verify() {
     assert_eq!(
         name_state(&verify_doc(&sim, &fleet_delivered()), "app", "API_KEY"),
         "drifted_on_target"
+    );
+}
+
+// ---- L1′: verify compares the runtime's binding version with the recorded one ----
+
+#[test]
+fn a_synced_but_undeployed_rotation_is_drift_on_the_target() {
+    let sim = staged();
+    assert_eq!(
+        name_state(&verify_doc(&sim, &fleet_delivered()), "app", "API_KEY"),
+        "drifted_on_target"
+    );
+}
+
+#[test]
+fn a_synced_but_undeployed_rotation_reports_the_change_staged() {
+    let sim = staged();
+    assert_eq!(
+        placement_deployed(&verify_doc(&sim, &fleet_delivered()), "app"),
+        "staged"
     );
 }
 
