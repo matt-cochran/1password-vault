@@ -564,15 +564,33 @@ impl TargetConfig for AzureTarget {
             Some((every, max)) => app.with_wait(every, max),
             None => app,
         };
-        Ok(Ports::Pinned {
-            store: Box::new(KeyVault {
+        let store = |managed| KeyVault {
+            runner: r,
+            vault: &self.key_vault,
+            subscription: &self.subscription,
+            env,
+            managed,
+        };
+        // A target with companion jobs syncs and deploys them with the app (#238).
+        let runtime: Box<dyn crate::ports::PinnedRuntime + 'a> = if self.companion_jobs.is_empty() {
+            Box::new(app)
+        } else {
+            Box::new(super::companions::AppWithJobs {
+                app,
+                jobs: (self.companion_jobs.iter())
+                    .map(|j| {
+                        super::job::ContainerAppJob::new(r, self, j, managed.clone()).for_env(env)
+                    })
+                    .collect(),
+                store: store(managed.clone()),
                 runner: r,
-                vault: &self.key_vault,
-                subscription: &self.subscription,
+                target: self,
                 env,
-                managed,
-            }),
-            runtime: Box::new(app),
+            })
+        };
+        Ok(Ports::Pinned {
+            store: Box::new(store(managed)),
+            runtime,
         })
     }
 

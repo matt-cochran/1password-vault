@@ -23,6 +23,11 @@ use crate::runner::{Call, CommandRunner, Outcome, Output};
 
 const APP: &str = "opv-fixture-app";
 const VAULT: &str = "kv-opv-fixture";
+const VAULT_ID: &str = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/\
+                        opv-fixture-rg/providers/Microsoft.KeyVault/vaults/kv-opv-fixture";
+/// The companion job (#238) and its system-assigned identity's principal.
+const JOB: &str = "opv-fixture-job";
+const JOB_PRINCIPAL: &str = "33333333-3333-3333-3333-333333333333";
 
 /// `OLD_KEY` is desired in prod under [`fleet_a`] and only in staging under [`fleet_b`], so
 /// a sync of prod with `fleet_b` prunes it.
@@ -130,6 +135,10 @@ struct World {
     fail_revisions: bool,
     /// New revisions stay provisioning (the health wait times out).
     stall_revisions: bool,
+    /// Companion jobs (#238) by name: each `containerapp job show` document.
+    jobs: BTreeMap<String, Value>,
+    /// The `role assignment list` reply for a job's identity; `None`: the list fails.
+    roles: Option<Value>,
 }
 
 /// One recorded call.
@@ -155,6 +164,8 @@ struct Sim {
     fail_at: Cell<Option<(usize, Fail)>>,
     /// Invariant breaks seen after any call: a serving binding to a missing version.
     violations: RefCell<Vec<String>>,
+    /// The lines opv noted on stderr.
+    notes: RefCell<Vec<String>>,
 }
 
 fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
@@ -217,11 +228,43 @@ impl Sim {
                 serial: 1,
                 fail_revisions: false,
                 stall_revisions: false,
+                jobs: BTreeMap::new(),
+                roles: Some(json!([{
+                    "createdOn": "2020-01-01T00:00:00+00:00",
+                    "principalId": JOB_PRINCIPAL,
+                    "roleDefinitionName": "Key Vault Secrets User",
+                    "scope": VAULT_ID,
+                }])),
             }),
             calls: RefCell::default(),
             fail_at: Cell::new(None),
             violations: RefCell::default(),
+            notes: RefCell::default(),
         }
+    }
+
+    /// The recorded Container Apps Job [`JOB`] with no managed env, using its own
+    /// system-assigned identity (#238).
+    fn add_job(self) -> Self {
+        let path = format!(
+            "{}/tests/fixtures/azure/jobs/containerapp-job-show.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let text = std::fs::read_to_string(path).unwrap();
+        let text = (text.replace("<SUB>", "00000000-0000-0000-0000-000000000000"))
+            .replace("<RG>", "opv-fixture-rg")
+            .replace("<JOB>", JOB)
+            .replace("<PRINCIPAL>", JOB_PRINCIPAL);
+        let job: Value = serde_json::from_str(&text).unwrap();
+        self.world.borrow_mut().jobs.insert(JOB.into(), job);
+        self
+    }
+
+    /// What job [`JOB`] runs with, by managed env name, as [`resolve`] reads the app.
+    fn job_env(&self) -> BTreeMap<String, String> {
+        let w = self.world.borrow();
+        let job = &w.jobs[JOB]["properties"];
+        resolve_with(&w, &job["configuration"]["secrets"], &job["template"])
     }
 
     /// Forget recorded calls (the world stays), so the next run is counted from 0.
@@ -360,6 +403,24 @@ impl Sim {
             return match w.revisions.get(flag(args, "--revision").unwrap()) {
                 Some(r) => ok_json(r),
                 None => Output::failure(3),
+            };
+        }
+        if has(args, &["containerapp", "job", "show"]) {
+            return match w.jobs.get(flag(args, "-n").unwrap()) {
+                Some(j) => ok_json(j),
+                None => Output::failure(3),
+            };
+        }
+        if has(args, &["containerapp", "job", "update"]) {
+            let mut doc: Value = serde_json::from_slice(stdin.unwrap()).unwrap();
+            doc["properties"]["provisioningState"] = json!("Succeeded");
+            w.jobs.insert(flag(args, "-n").unwrap().into(), doc.clone());
+            return ok_json(&doc);
+        }
+        if has(args, &["role", "assignment", "list"]) {
+            return match &w.roles {
+                Some(roles) => ok_json(roles),
+                None => Output::failure(1),
             };
         }
         if has(args, &["containerapp", "show"]) {
@@ -505,10 +566,16 @@ const MISSING: &str = "<missing version>";
 /// env name → value the template gives it: a plain value, or the Key Vault value its
 /// reference resolves to (suffixed `@old` when not the entry's latest version).
 fn resolve(w: &World, template: &Value) -> BTreeMap<String, String> {
-    let secrets = w.app["properties"]["configuration"]["secrets"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    resolve_with(
+        w,
+        &w.app["properties"]["configuration"]["secrets"],
+        template,
+    )
+}
+
+/// [`resolve`] against `secrets`: the app's, or a job's own (#238).
+fn resolve_with(w: &World, secrets: &Value, template: &Value) -> BTreeMap<String, String> {
+    let secrets = secrets.as_array().cloned().unwrap_or_default();
     let mut out = BTreeMap::new();
     for e in template["containers"][0]["env"].as_array().unwrap() {
         let name = e["name"].as_str().unwrap().to_string();
@@ -601,7 +668,9 @@ impl CommandRunner for Sim {
 
     fn pause(&self, _: Duration, _: &str) {}
 
-    fn note(&self, _: &str) {}
+    fn note(&self, line: &str) {
+        self.notes.borrow_mut().push(line.to_string());
+    }
 
     fn run_inherited(&self, _: &str, _: &[&str], _: &[(&str, &str)]) -> io::Result<i32> {
         unreachable!("sync never runs a child")
@@ -1512,4 +1581,220 @@ fn status_json_carries_the_provenance_stamp() {
     super::status::run_with(&fleet_a(), "prod", &sim, &mut out, true).unwrap();
     let doc: Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(doc["provenance"]["plan_id"], json!(id));
+}
+
+// ---- #238: companion jobs ride the app's `sync --deploy` ----
+
+const WITH_JOB: &str = r#"companion_jobs = ["opv-fixture-job"]"#;
+
+/// [`fleet_a`] whose target lists [`JOB`] as a companion job.
+fn fleet_jobs() -> Fleet {
+    config::parse(&toml(r#"["prod"]"#, WITH_JOB, "")).unwrap()
+}
+
+/// [`fleet_jobs`] with the delivery item recorded, for `verify`.
+fn fleet_jobs_delivered() -> Fleet {
+    let delivery = r#"delivery_items = { app = "dapp" }"#;
+    config::parse(&toml(r#"["prod"]"#, WITH_JOB, delivery)).unwrap()
+}
+
+/// A world with the app and its job synced and deployed under `fleet` (API_KEY = v1), whose
+/// item now holds API_KEY v2.
+fn jobs_rotated(fleet: &Fleet) -> Sim {
+    let sim = Sim::new(item_with(API_V1, LOG_V1)).add_job();
+    let (res, out) = sync_on(&sim, fleet, &deploy());
+    assert!(res.is_ok(), "setup sync failed: {res:?}\n{out}");
+    assert_eq!(sim.job_env()["API_KEY"], API_V1);
+    sim.set_item(item_with(API_V2, LOG_V1));
+    sim.notes.borrow_mut().clear();
+    sim
+}
+
+fn updates_of(sim: &Sim, prefix: &[&str]) -> usize {
+    sim.calls
+        .borrow()
+        .iter()
+        .filter(|c| c.program == "az" && has(&c.args, prefix))
+        .count()
+}
+
+fn noted(sim: &Sim, part: &str) -> bool {
+    sim.notes.borrow().iter().any(|n| n.contains(part))
+}
+
+/// A1: one `sync --deploy` brings a rotated key to the app and its job, the job first.
+#[test]
+fn a_rotated_key_reaches_the_app_and_its_job_in_one_deploy() {
+    let sim = jobs_rotated(&fleet_jobs());
+    let (res, out) = sync_on(&sim, &fleet_jobs(), &deploy());
+    assert!(res.is_ok(), "{res:?}\n{out}");
+    assert_eq!(sim.end_state().0["API_KEY"], API_V2);
+    assert_eq!(sim.job_env()["API_KEY"], API_V2);
+    let job = sim.index_of(&["containerapp", "job", "update"]).unwrap();
+    assert!(job < sim.index_of(&["containerapp", "update"]).unwrap());
+    assert!(noted(
+        &sim,
+        "container app job opv-fixture-job pins API_KEY"
+    ));
+    assert!(sim.violations.borrow().is_empty());
+    // Values reach neither argv nor the output; the job document goes on stdin.
+    let argv = sim.argvs().join("\n");
+    assert!(!argv.contains(API_V2) && !out.contains(API_V2), "{out}");
+}
+
+/// A2: verify reports a job left on an old version as drift on the target.
+#[test]
+fn verify_reports_a_job_left_on_an_old_version() {
+    let fleet = fleet_jobs_delivered();
+    let sim = jobs_rotated(&fleet);
+    let old = sim.version("API-KEY");
+    sync_on(&sim, &fleet, &deploy()).0.unwrap();
+    {
+        let mut w = sim.world.borrow_mut();
+        let job = w.jobs.get_mut(JOB).unwrap();
+        for s in job["properties"]["configuration"]["secrets"]
+            .as_array_mut()
+            .unwrap()
+        {
+            if let Some(url) = s["keyVaultUrl"]
+                .as_str()
+                .filter(|u| u.contains("/API-KEY/"))
+            {
+                let base = &url[..url.rfind('/').unwrap()];
+                s["keyVaultUrl"] = json!(format!("{base}/{old}"));
+            }
+        }
+    }
+    let doc = verify_doc(&sim, &fleet);
+    assert_eq!(name_state(&doc, "app", "API_KEY"), "drifted_on_target");
+    assert!(noted(
+        &sim,
+        "container app job opv-fixture-job binds API_KEY at"
+    ));
+}
+
+/// A4/D7: a job whose identity provably cannot read the vault refuses the deploy before
+/// any update, and the refusal names the job's identity, not opv's.
+#[test]
+fn a_job_without_a_grant_refuses_the_deploy_before_any_update() {
+    let sim = jobs_rotated(&fleet_jobs());
+    sim.world.borrow_mut().roles = Some(json!([]));
+    let (res, out) = sync_on(&sim, &fleet_jobs(), &deploy());
+    let err = res.unwrap_err();
+    match err.cause() {
+        Some((
+            crate::cause::Cause::MissingRight {
+                grantee: Some(crate::cause::Principal::AppIdentity { name }),
+                ..
+            },
+            _,
+        )) => assert_eq!(
+            name,
+            &format!("container app job {JOB} (principal {JOB_PRINCIPAL})")
+        ),
+        other => panic!("{other:?}\n{out}"),
+    }
+    assert_eq!(updates_of(&sim, &["containerapp", "job", "update"]), 0);
+    assert_eq!(updates_of(&sim, &["containerapp", "update"]), 0);
+    assert!(noted(
+        &sim,
+        "remove opv-fixture-job from azure.companion_jobs"
+    ));
+    assert_eq!(sim.end_state().0["API_KEY"], format!("{API_V1}@old"));
+}
+
+/// M1: an access check that cannot decide warns and deploys.
+#[test]
+fn an_undetermined_access_check_warns_and_deploys() {
+    let sim = jobs_rotated(&fleet_jobs());
+    sim.world.borrow_mut().roles = None;
+    let (res, out) = sync_on(&sim, &fleet_jobs(), &deploy());
+    assert!(res.is_ok(), "{res:?}\n{out}");
+    assert!(noted(
+        &sim,
+        "could not confirm that container app job opv-fixture-job's identity can read Key \
+         Vault kv-opv-fixture"
+    ));
+    assert_eq!(sim.job_env()["API_KEY"], API_V2);
+    assert_eq!(sim.end_state().0["API_KEY"], API_V2);
+}
+
+/// H1: a run stopped after the job's update and before the app's is reported, and the next
+/// run updates the app only.
+#[test]
+fn an_interrupted_run_is_reported_and_repaired_on_the_next() {
+    let update = {
+        let probe = jobs_rotated(&fleet_jobs());
+        sync_on(&probe, &fleet_jobs(), &deploy()).0.unwrap();
+        probe.index_of(&["containerapp", "update"]).unwrap()
+    };
+    let sim = jobs_rotated(&fleet_jobs());
+    sim.fail_at.set(Some((update, Fail::Before)));
+    let (res, out) = sync_on(&sim, &fleet_jobs(), &deploy());
+    let err = res.unwrap_err();
+    assert_eq!(err.exit_code(), 9, "{out}");
+    assert!(
+        matches!(err.cause(), Some((crate::cause::Cause::Partial { done, .. }, _))
+            if done == &[format!("container app job {JOB}: API_KEY")]),
+        "{err:?}"
+    );
+    assert_eq!(sim.job_env()["API_KEY"], API_V2);
+    assert_eq!(sim.end_state().0["API_KEY"], format!("{API_V1}@old"));
+
+    sim.fail_at.set(None);
+    sim.notes.borrow_mut().clear();
+    let (res, out) = sync_on(&sim, &fleet_jobs(), &deploy());
+    assert!(res.is_ok(), "{res:?}\n{out}");
+    assert!(noted(
+        &sim,
+        "container app opv-fixture-app binds API_KEY at"
+    ));
+    assert_eq!(updates_of(&sim, &["containerapp", "job", "update"]), 0);
+    assert_eq!(updates_of(&sim, &["containerapp", "update"]), 1);
+    assert_eq!(sim.end_state().0["API_KEY"], API_V2);
+}
+
+/// L1: a change only the job lacks says the app is unchanged before core's line.
+#[test]
+fn a_job_only_change_says_the_app_is_unchanged() {
+    let sim = jobs_rotated(&fleet_jobs());
+    sync_on(&sim, &fleet_jobs(), &deploy()).0.unwrap();
+    let old = {
+        let w = sim.world.borrow();
+        w.kv["api-key"].versions[0].0.clone()
+    };
+    {
+        let mut w = sim.world.borrow_mut();
+        let job = w.jobs.get_mut(JOB).unwrap();
+        for s in job["properties"]["configuration"]["secrets"]
+            .as_array_mut()
+            .unwrap()
+        {
+            if let Some(url) = s["keyVaultUrl"]
+                .as_str()
+                .filter(|u| u.contains("/API-KEY/"))
+            {
+                let base = &url[..url.rfind('/').unwrap()];
+                s["keyVaultUrl"] = json!(format!("{base}/{old}"));
+            }
+        }
+    }
+    sim.notes.borrow_mut().clear();
+    let (res, out) = sync_on(&sim, &fleet_jobs(), &deploy());
+    assert!(res.is_ok(), "{res:?}\n{out}");
+    assert!(noted(
+        &sim,
+        "container app opv-fixture-app unchanged; only its jobs changed"
+    ));
+    assert_eq!(updates_of(&sim, &["containerapp", "update"]), 0);
+    assert_eq!(sim.job_env()["API_KEY"], API_V2);
+}
+
+/// A target without companion jobs issues exactly today's calls: no job is read.
+#[test]
+fn a_target_without_jobs_reads_no_job() {
+    let sim = api_changed();
+    sync_on(&sim, &fleet_a(), &deploy()).0.unwrap();
+    assert!(!sim.called(&["containerapp", "job"]));
+    assert!(!sim.called(&["role", "assignment", "list"]));
 }
