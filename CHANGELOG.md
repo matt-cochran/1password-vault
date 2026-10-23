@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Azure companion jobs (#238).** `azure.companion_jobs = ["job-a", …]` lists Container Apps jobs in the app's resource group that carry the same Key Vault references as the app; `opv propose target --azure-companion-jobs a,b` writes the list. `sync --deploy` updates the jobs first, then the app, each only where it is behind; a job-only change leaves the app unchanged. Before any update, opv refuses the deploy when a job's identity certainly cannot read the vault (naming the identity; `doctor` prints the grant command), warns when it cannot tell, and notes a grant under 10 minutes old. `doctor`, `status` and `plan` show each job and its identity's access. The deploy identity also needs Contributor on each job and read access to role assignments at the vault. Two targets cannot share a job. See [companion jobs](docs/configuration.md#companion-jobs).
+
+### Changed
+
+- **`delivery verify` on Azure Key Vault and Kubernetes also checks what the app (and its companion jobs) are bound to** (#238). A name the runtime binds at another version than the receipt is `drifted_on_target`, and one it does not bind is `missing_on_target`. So right after a sync without `--deploy`, verify reports the rotated names as `drifted_on_target` with `deployed: "staged"`, where it used to report them verified.
+
 ## [0.17.0] - 2026-10-23
 
 0.17.0 runs a reviewed operation on a target with that target's own deploy credentials.
