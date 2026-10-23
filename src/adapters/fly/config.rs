@@ -235,6 +235,16 @@ fn check_app(env: &str, app: &str) -> Result<(), Error> {
 }
 
 impl TargetConfig for FlyTarget {
+    /// `opv target op` (#234): bound to this target's app, run by flyctl, images under
+    /// Fly's registry.
+    fn operations(&self) -> Option<crate::provider::OperationBinding> {
+        Some(crate::provider::OperationBinding {
+            app: self.app.clone(),
+            tool: &super::FLYCTL,
+            registry: "registry.fly.io",
+        })
+    }
+
     fn target_locator(&self) -> String {
         format!("app {}", self.app)
     }

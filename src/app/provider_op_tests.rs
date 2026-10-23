@@ -86,6 +86,8 @@ fn admitted(op: Operation) -> Admitted {
         env: "prod".into(),
         target: "web".into(),
         app: "shop".into(),
+        registry: "registry.fly.io",
+        tool: crate::host::tool("flyctl").expect("flyctl is a known tool"),
         credentials: ItemRef {
             vault: "vprod".into(),
             item: "ideploy".into(),

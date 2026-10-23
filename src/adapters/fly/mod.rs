@@ -649,7 +649,7 @@ pub(crate) fn call_error(
 /// Whether a flyctl call changes the app (NR-2): reads are retried by the runner, writes
 /// never are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Effect {
+pub(super) enum Effect {
     Read,
     Write,
 }
@@ -663,7 +663,7 @@ enum Effect {
 /// whose diagnosis cannot run, or that timed out, was killed or was lost, is
 /// `WriteOutcomeUnknown` (exit 9, safe to re-run). A read that never finished after its retries
 /// is the outage error naming the step and Fly's status page (NR-28, exit 9).
-fn run(
+pub(super) fn run(
     r: &dyn CommandRunner,
     effect: Effect,
     what: &str,
@@ -677,12 +677,14 @@ fn run(
     };
     let call = Call::new(PROGRAM, args).with_stdin(stdin);
     // `secrets deploy` restarts the machines one by one and waits for their health checks:
-    // minutes on a multi-machine app (NR-4).
-    let call = if args.starts_with(&["secrets", "deploy"]) {
-        call.rollout()
-    } else {
-        call
-    };
+    // minutes on a multi-machine app (NR-4); `machine update` replaces one and waits the same
+    // way (#234).
+    let call =
+        if args.starts_with(&["secrets", "deploy"]) || args.starts_with(&["machine", "update"]) {
+            call.rollout()
+        } else {
+            call
+        };
     let outcome = match effect {
         Effect::Read => r.read(&call, &[]),
         Effect::Write => r.write(&call),
