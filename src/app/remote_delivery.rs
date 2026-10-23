@@ -24,7 +24,7 @@
 //!   starts anything: a short, malformed or oversized payload starts nothing and writes
 //!   nothing (no partial delivery). File keys go to a fresh 0700 directory on the remote
 //!   user's RAM-backed `$XDG_RUNTIME_DIR` (refused otherwise, never a disk fallback); the
-//!   app's environment is the declared keys plus [`BASICS`](super::local_delivery::BASICS).
+//!   app's environment is the declared keys plus [`ENV_BASICS`](crate::host::ENV_BASICS).
 //! - Liveness: after the payload the sender writes a heartbeat byte every [`HEARTBEAT`].
 //!   When stdin ends (Ctrl-C, the local opv or SSH ended, a dropped connection) or is
 //!   silent for [`SILENCE_LIMIT`], or the receiver gets SIGHUP/SIGTERM/SIGINT, the receiver
@@ -669,7 +669,7 @@ impl Stop {
     }
 }
 
-/// The app's environment on the remote host: [`BASICS`](super::local_delivery::BASICS) from
+/// The app's environment on the remote host: [`ENV_BASICS`](crate::host::ENV_BASICS) from
 /// the receiver's own session (never an `OP_*` variable), each variable key's value, and the
 /// directory variable. Always declared-only: nothing else of the remote session is passed.
 pub fn remote_env(
@@ -680,7 +680,7 @@ pub fn remote_env(
 ) -> Result<Vec<(std::ffi::OsString, std::ffi::OsString)>, Refusal> {
     let mut out: Vec<(std::ffi::OsString, std::ffi::OsString)> = session
         .iter()
-        .filter(|(k, _)| super::local_delivery::is_basic(k))
+        .filter(|(k, _)| crate::host::is_basic_env(k))
         .map(|(k, v)| (k.into(), v.into()))
         .collect();
     for (key, v) in header.keys.iter().zip(values) {
