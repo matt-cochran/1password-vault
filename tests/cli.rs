@@ -1451,3 +1451,11 @@ fn version_without_any_cli_exits_0() {
     let (code, _, err) = opv(&["version", "--json"]);
     assert_eq!(code, 0, "{err}");
 }
+
+/// #234 §3.1: `--target` is required by clap, so `target op` without it is a usage error
+/// before any program runs (the empty PATH would make any call fail otherwise).
+#[test]
+fn target_op_without_a_target_is_refused_before_any_call() {
+    let (code, _, err) = opv(&["--config", CFG, "target", "op", "prod", "machines"]);
+    assert_eq!((code, err.contains("--target")), (2, true), "{err}");
+}

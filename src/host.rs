@@ -678,9 +678,12 @@ pub const ENV_BASICS: &[&str] = &[
     "ComSpec",
 ];
 
-/// True for a variable of [`ENV_BASICS`] or a locale variable (`LC_*`).
+/// True for a variable of [`ENV_BASICS`] or a locale variable (`LC_*`). On Windows, where
+/// names ignore case, in any case (`Path` is `PATH`).
 pub fn is_basic_env(name: &str) -> bool {
-    ENV_BASICS.contains(&name) || name.starts_with("LC_")
+    ENV_BASICS.contains(&name)
+        || name.starts_with("LC_")
+        || (cfg!(windows) && ENV_BASICS.iter().any(|b| b.eq_ignore_ascii_case(name)))
 }
 
 /// A non-interactive 1Password credential in the environment (by name; value never read).

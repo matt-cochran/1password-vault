@@ -545,6 +545,20 @@
       "name": "target list"
     },
     {
+      "args": [
+        "env",
+        "operation"
+      ],
+      "flags": [
+        "confirm",
+        "image",
+        "json",
+        "machine",
+        "target"
+      ],
+      "name": "target op"
+    },
+    {
       "args": [],
       "flags": [],
       "name": "ui"

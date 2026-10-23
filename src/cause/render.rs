@@ -1480,9 +1480,13 @@ fn operation_refused(env: &EnvName, target: &TargetName, reason: &OperationRefus
             ),
             none,
         ),
-        OperationRefusal::MachineNotInApp { .. } => {
-            plan(inspect(format!("name a Machine of target {target}")), none)
-        }
+        OperationRefusal::MachineNotInApp { .. } => plan(
+            inspect(format!("name a Machine of target {target}")),
+            Next::Check(cmd(
+                &["target", "op"],
+                &[env.as_str(), "--target", target.as_str(), "machines"],
+            )),
+        ),
         OperationRefusal::NotYetAvailable => plan(None, none),
     }
 }

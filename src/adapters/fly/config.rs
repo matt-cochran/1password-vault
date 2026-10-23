@@ -242,6 +242,7 @@ impl TargetConfig for FlyTarget {
             app: self.app.clone(),
             tool: &super::FLYCTL,
             registry: "registry.fly.io",
+            calls: &super::operations::OPERATIONS,
         })
     }
 

@@ -50,7 +50,7 @@ fn names_seen_by(program: &str, args: &[&str], env: &[(&str, &str)]) -> BTreeSet
 fn allowed(program: &str, own: &[&str]) -> BTreeSet<String> {
     std::env::vars_os()
         .filter_map(|(k, _)| k.into_string().ok())
-        .filter(|k| kept_when_isolated(k))
+        .filter(|k| crate::host::is_basic_env(k))
         .chain(pinned_env(program).iter().map(|(k, _)| k.to_string()))
         .chain(
             ["PATH", "OPV_DUMP"]
@@ -109,5 +109,5 @@ fn isolation_ends_with_its_scope() {
 #[cfg(windows)]
 #[test]
 fn windows_path_is_a_basic_whatever_its_case() {
-    assert!(kept_when_isolated("Path"));
+    assert!(crate::host::is_basic_env("Path"));
 }

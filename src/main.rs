@@ -335,6 +335,18 @@ Examples:
   opv target credentials staging --target web --create   # mint and store the credential
   opv target credentials staging --target web            # show the recorded state";
 
+const TARGET_OP_QUICK: &str = "\
+Examples:
+  opv target op prod --target web machines                    # list the app's Machines
+  opv target op prod --target web machine-update --machine 0123456789abcd \\
+      --image registry.fly.io/shop:v2 --confirm prod          # move one to another image";
+
+const TARGET_OP_MORE: &str = "\
+Only Fly targets offer operations. The target must record deploy_credentials: the
+operation signs in with that item only, never your own login, and its CLI sees only
+opv's basic variables. The app is always the target's fly.app; --image must be in its
+repository. Output holds ids, names, states, regions and image references, never a value.";
+
 const TARGET_CREDENTIALS_MORE: &str = "\
 Only Fly targets can be minted for: --create mints a Fly deploy token for the target's app
 and stores it in a new 1Password item in the target's state vault, then records
@@ -1662,6 +1674,52 @@ enum TargetCmd {
         #[arg(long)]
         create: bool,
     },
+    /// Run a fixed operation on a target under its own deploy credentials (Fly: list the
+    /// app's Machines, move one to another image). Never prints a value.
+    #[command(before_help = TARGET_OP_QUICK, after_help = TARGET_OP_MORE)]
+    Op {
+        /// Environment name from the configuration (for example prod).
+        env: String,
+        /// The target whose app and deploy credentials the operation uses.
+        #[arg(long)]
+        target: String,
+        /// The operation.
+        #[arg(value_enum)]
+        operation: TargetOperation,
+        /// machine-update: the image, registry.fly.io/<app>:<tag> or …@sha256:<digest>.
+        #[arg(long)]
+        image: Option<String>,
+        /// machine-update: the Machine id (14 lowercase hex characters).
+        #[arg(long)]
+        machine: Option<String>,
+        /// A write on an environment with confirm_env: the environment's name.
+        #[arg(long)]
+        confirm: Option<String>,
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// The operations of `opv target op` (#234 §2).
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum TargetOperation {
+    /// List the app's Machines: id, name, state, region and image (read).
+    Machines,
+    /// Move one Machine of the app to another image (write).
+    MachineUpdate,
+    /// Push a local image to the app's repository (write; not yet available).
+    RegistryPush,
+}
+
+impl From<TargetOperation> for opv::app::provider_op::Operation {
+    fn from(op: TargetOperation) -> Self {
+        match op {
+            TargetOperation::Machines => Self::Machines,
+            TargetOperation::MachineUpdate => Self::MachineUpdate,
+            TargetOperation::RegistryPush => Self::RegistryPush,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -2505,6 +2563,7 @@ impl Cmd {
             | Cmd::Delivery(DeliveryCmd::Verify { json, .. })
             | Cmd::Changed { json, .. }
             | Cmd::Target(TargetCmd::List { json, .. })
+            | Cmd::Target(TargetCmd::Op { json, .. })
             | Cmd::Account(AccountCmd::List { json, .. })
             | Cmd::Account(AccountCmd::Use { json, .. })
             | Cmd::Skill(SkillCmd::Install { json, .. })
@@ -4679,6 +4738,29 @@ fn run_contract(
     contract::write_document(fleet, req.env, req.component, req.json, out)
 }
 
+/// `opv target op` (#234): admission and preflight make no `op` call; only `execute` reads
+/// the target's deploy credentials. Prints the report's value-free lines, or its document.
+fn target_op(
+    fleet: &opv::domain::Fleet,
+    req: &opv::app::provider_op::Request,
+    json: bool,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    use opv::app::provider_op;
+    let mut admitted = provider_op::admit(fleet, req, &opv::host::Host::detect())?;
+    provider_op::preflight(&mut admitted, r)?;
+    let report = provider_op::execute(fleet, &admitted, r)?;
+    if json {
+        return writeln!(out, "{}", report.json()).map_err(write_err);
+    }
+    report
+        .lines
+        .iter()
+        .try_for_each(|l| writeln!(out, "{l}"))
+        .map_err(write_err)
+}
+
 fn run_other(
     cmd: Cmd,
     loaded: Result<opv::domain::Fleet, Error>,
@@ -4890,6 +4972,25 @@ fn run_other(
         }
         Cmd::Target(TargetCmd::List { env, json }) => {
             target_cmd::list(&loaded?, &target_cmd::ListArgs { env, json }, out)
+        }
+        Cmd::Target(TargetCmd::Op {
+            env,
+            target,
+            operation,
+            image,
+            machine,
+            confirm,
+            json,
+        }) => {
+            let req = opv::app::provider_op::Request {
+                env,
+                target,
+                op: operation.into(),
+                image,
+                machine,
+                confirm,
+            };
+            target_op(&loaded?, &req, json, r, out)
         }
         Cmd::Access {
             env: Some(env),

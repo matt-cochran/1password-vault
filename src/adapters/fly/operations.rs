@@ -26,6 +26,7 @@ use serde::Deserialize;
 use super::{Effect, read_json};
 use crate::cause::{Cause, EnvName, Guard, OperationRefusal, TargetName};
 use crate::error::Error;
+use crate::provider::{ListedMachine, TargetOperations};
 use crate::runner::CommandRunner;
 
 /// `machines` argv: `flyctl machine list --app <app> --json` (§2).
@@ -124,6 +125,41 @@ pub fn machine_update(
         None,
     )
     .map(|_| ())
+}
+
+/// The Fly target's [`TargetOperations`], reached by core through
+/// [`crate::provider::OperationBinding::calls`].
+#[derive(Debug)]
+pub struct Operations;
+
+/// The one instance a Fly target's binding carries.
+pub static OPERATIONS: Operations = Operations;
+
+impl TargetOperations for Operations {
+    fn machines(&self, r: &dyn CommandRunner, app: &str) -> Result<Vec<ListedMachine>, Error> {
+        Ok(machines(r, app)?
+            .into_iter()
+            .map(|m| ListedMachine {
+                image: m.image().to_string(),
+                id: m.id,
+                name: m.name,
+                state: m.state,
+                region: m.region,
+            })
+            .collect())
+    }
+
+    fn machine_update(
+        &self,
+        r: &dyn CommandRunner,
+        env: &str,
+        target: &str,
+        app: &str,
+        machine: &str,
+        image: &str,
+    ) -> Result<(), Error> {
+        machine_update(r, env, target, app, machine, image)
+    }
 }
 
 #[cfg(test)]
