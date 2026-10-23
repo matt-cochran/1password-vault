@@ -112,6 +112,7 @@ fn missing_right(
         env: ctx.env.clone(),
         target: ctx.target.clone(),
         seen: seen.clone(),
+        grantee: None,
     }
 }
 
