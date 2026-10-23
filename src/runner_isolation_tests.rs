@@ -2,6 +2,7 @@
 //! cleared environment with opv's basics, the program's pinned variables and the call's own.
 //! Names only: no test reads or prints a value.
 
+#[cfg(unix)]
 use std::collections::BTreeSet;
 
 use super::*;
