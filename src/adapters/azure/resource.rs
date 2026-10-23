@@ -10,20 +10,25 @@
 //! | `show` | `<noun> show -g <rg> -n <name> -o json` (`containerapp` or `containerapp job`) | — |
 //! | `principal` | `identity show --ids <id> -o json` (user-assigned identity whose principal the resource does not list) | — |
 //! | `check_access` | `<noun> show …`, then as `principal`, `keyvault show -n <vault> -o json`, `role assignment list --assignee <principal> --scope <vault id> --include-inherited --include-groups -o json` (RBAC vaults only) | — |
+//! | `update` | `<noun> update -g <rg> -n <name> --yaml /dev/stdin -o json`, then on a non-zero exit `<noun> show …` (the read-back) | the whole document as JSON |
 //!
-//! Every call adds `--only-show-errors` and `--subscription <azure.subscription>` (NR-7). All
-//! calls here are reads (`runner.read`, retried); the updates stay with each resource.
+//! Every call adds `--only-show-errors` and `--subscription <azure.subscription>` (NR-7).
+//! Reads go through `runner.read` (retried), `update` through `runner.write` (never retried,
+//! NR-2). The document travels on stdin (on native Windows a user-only pipe, `handoff`), never
+//! in argv (SR-3). What a resource does around its update (an app's revision and health, a
+//! job's settle) stays with the resource.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 use super::az::{self, Effect};
 use super::{AzureTarget, preflight};
 use crate::cause::{
-    Cause, ConfigCheck, DiagnoseContext, DottedPath, EnvName, FieldRule, ResourceKind,
-    ResourceName, ResourceRef,
+    Cause, ConfigCheck, DiagnoseContext, DottedPath, EnvName, FieldRule, Principal, Refusal,
+    ResourceKind, ResourceName, ResourceRef, System,
 };
 use crate::domain::{AccessFinding, Binding, RawSpec, Revision, RuntimeChange, RuntimeSnapshot};
 use crate::error::Error;
@@ -149,7 +154,7 @@ impl Resource<'_> {
 
     /// One `az` read, parsed; a call that did not succeed is diagnosed from what opv
     /// observed, `az`'s reply as evidence.
-    fn read(&self, what: &str, ctx: DiagnoseContext, base: &[&str]) -> Result<Value, Error> {
+    pub fn read(&self, what: &str, ctx: DiagnoseContext, base: &[&str]) -> Result<Value, Error> {
         let owned = self.argv(base);
         let args: Vec<&str> = owned.iter().map(String::as_str).collect();
         match az::invoke(self.runner, Effect::Read, what, &args, None, &[])? {
@@ -208,15 +213,7 @@ impl Resource<'_> {
 
     /// `spec` without managed env entries, `opv-` secrets and read-only fields (FR-31).
     pub fn strip(&self, spec: &Value, idx: usize) -> Value {
-        let mut v = spec.clone();
-        if let Some(o) = v.as_object_mut() {
-            o.remove("systemData");
-        }
-        if let Some(p) = v.get_mut("properties").and_then(Value::as_object_mut) {
-            for k in self.kind.read_only() {
-                p.remove(*k);
-            }
-        }
+        let mut v = self.without_status(spec);
         if let Some(env) = v
             .pointer_mut(&format!("/properties/template/containers/{idx}/env"))
             .and_then(Value::as_array_mut)
@@ -225,6 +222,20 @@ impl Resource<'_> {
         }
         if let Some(s) = v.pointer_mut(SECRETS).and_then(Value::as_array_mut) {
             s.retain(|s| !is_opv_secret(s));
+        }
+        v
+    }
+
+    /// `spec` without `systemData` and the read-only status fields.
+    fn without_status(&self, spec: &Value) -> Value {
+        let mut v = spec.clone();
+        if let Some(o) = v.as_object_mut() {
+            o.remove("systemData");
+        }
+        if let Some(p) = v.get_mut("properties").and_then(Value::as_object_mut) {
+            for k in self.kind.read_only() {
+                p.remove(*k);
+            }
         }
         v
     }
@@ -483,6 +494,191 @@ impl Resource<'_> {
             ))
         })
     }
+
+    /// The snapshot of `fresh` (just read) when its unmanaged part still matches
+    /// `snapshot`; otherwise the refusal naming the settings that changed, never their
+    /// values (FR-31), and nothing is written.
+    pub fn recheck(
+        &self,
+        fresh: Value,
+        snapshot: &RuntimeSnapshot,
+    ) -> Result<RuntimeSnapshot, Error> {
+        let fresh = self.snapshot_from(fresh)?;
+        if fresh.unmanaged_fingerprint != snapshot.unmanaged_fingerprint {
+            let paths = self.changed_paths(&snapshot.spec.0, &fresh.spec.0);
+            let what = format!("{} show", self.kind.noun().join(" "));
+            return Err(preflight::unusable(&what, |seen| Cause::TargetRefused {
+                system: System::Azure,
+                subject: self.subject(),
+                why: Refusal::ChangedOutsideOpv {
+                    paths,
+                    after_apply: false,
+                },
+                env: self.env.map(EnvName::new),
+                target: None,
+                seen,
+            }));
+        }
+        Ok(fresh)
+    }
+
+    /// What a failed update is read back against (NR-2): the app's `latestRevisionName`; a
+    /// job's whole document without its status fields, since a job has no revision and no
+    /// etag (J2).
+    pub fn mark(&self, spec: &Value) -> Option<String> {
+        match self.kind {
+            Kind::App => spec
+                .pointer("/properties/latestRevisionName")
+                .and_then(Value::as_str)
+                .filter(|r| !r.is_empty())
+                .map(String::from),
+            Kind::Job => Some(fingerprint(&self.without_status(spec))),
+        }
+    }
+
+    /// `<noun> update -g <rg> -n <name> --yaml /dev/stdin -o json` with `doc` on stdin
+    /// (SR-3); `before`: [`Self::mark`] of the document read just before. A write is never
+    /// retried (NR-2).
+    pub fn update(&self, doc: &Value, before: Option<&str>) -> Result<Output, Error> {
+        let body = Zeroizing::new(serde_json::to_vec(doc).map_err(|_| self.encode_bug())?);
+        let noun = self.kind.noun();
+        let what = format!("{} update", noun.join(" "));
+        let mut base = noun.to_vec();
+        base.extend([
+            "update",
+            "-g",
+            self.rg(),
+            "-n",
+            self.name,
+            "--yaml",
+            "/dev/stdin",
+            "-o",
+            "json",
+        ]);
+        let owned = self.argv(&base);
+        let args: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let ctx = self.ctx();
+        match az::invoke(self.runner, Effect::Write, &what, &args, Some(&body), &[])? {
+            Outcome::Done(out) => Ok(out),
+            Outcome::Refused(_)
+            | Outcome::Unknown {
+                status: Some(_), ..
+            } => Err(self.failed_update(ctx, before)),
+            // The update never answered: it may or may not have been applied (NR-2); the
+            // Azure strategy makes that `WriteOutcomeUnknown` from the runner's facts.
+            Outcome::Unknown { status: None, .. } => Err(az::failed(self.runner, az::writing(ctx))),
+        }
+    }
+
+    /// A JSON value opv built itself could not be encoded: nothing was sent.
+    fn encode_bug(&self) -> Error {
+        Cause::Bug {
+            site: match self.kind {
+                Kind::App => "azure: encoding a container app update",
+                Kind::Job => "azure: encoding a container app job update",
+            },
+        }
+        .into()
+    }
+
+    /// An update that exited non-zero (FR-26), read back inside the diagnosis so its reply
+    /// stays the evidence (NR-31). The same [`Self::mark`] and no update in progress means
+    /// Azure applied nothing (06.03, Q14): a definite refusal that re-running would only
+    /// repeat, decided by opv's own read-back, never by `az`'s wording. Signed out of the
+    /// person's own Azure sign-in is that sign-in. Anything else leaves the outcome unknown
+    /// (NR-2), which `sync` reconciles by reading the bindings back.
+    fn failed_update(&self, ctx: DiagnoseContext, before: Option<&str>) -> Error {
+        // Taken first: a read-back that fails must not take the update's observation.
+        let Some((seen, up)) = az::take_failure() else {
+            return az::unobserved(self.runner);
+        };
+        if crate::runner::diagnosing(|| self.read_back(before)) {
+            let refused = Cause::TargetRefused {
+                system: System::Azure,
+                subject: self.subject(),
+                why: match self.kind {
+                    Kind::App => Refusal::NoRevision,
+                    Kind::Job => Refusal::Validation,
+                },
+                env: ctx.env,
+                target: ctx.target,
+                seen,
+            };
+            return az::report(refused, up);
+        }
+        let own = matches!(seen.principal(), Principal::Person { .. });
+        if own
+            && crate::runner::diagnosing(|| az::signed_in(self.runner))
+                .is_ok_and(|signed_in| !signed_in)
+        {
+            return az::report(az::signed_out(), up);
+        }
+        // opv's own read-back shows a change or an update in progress, or could not read
+        // the resource: whether the update was applied is not known (NR-2).
+        let unknown = Cause::WriteOutcomeUnknown {
+            system: System::Azure,
+            subject: self.subject(),
+            seen,
+        };
+        az::report(unknown, up)
+    }
+
+    /// After a failed update: true when the resource still shows `before` and no update is
+    /// in progress (Azure applied nothing); false when it shows a change, an update in
+    /// progress, or cannot be read.
+    fn read_back(&self, before: Option<&str>) -> bool {
+        let Ok(now) = self.show() else {
+            return false;
+        };
+        provisioning_state(&now) != "InProgress" && self.mark(&now).as_deref() == before
+    }
+
+    /// `spec` without its `opv-` secrets that point at the Key Vault entries of `names` and
+    /// that no container references any more, or `None` when it holds none (FR-32).
+    pub fn released(&self, spec: &Value, names: &[String]) -> Result<Option<Value>, Error> {
+        let base = self.vault_uri()?;
+        let used = env_refs(spec);
+        let doomed = |s: &Value| {
+            let name = s["name"].as_str().unwrap_or_default();
+            is_opv_secret(s)
+                && !used.contains(name)
+                && s["keyVaultUrl"]
+                    .as_str()
+                    .and_then(|u| reference(&base, u))
+                    .is_some_and(|b| match b {
+                        Binding::Pinned { store_name, .. } => names.iter().any(|n| {
+                            AzureTarget::key_vault_name(n).eq_ignore_ascii_case(&store_name)
+                        }),
+                        _ => false,
+                    })
+        };
+        let mut doc = spec.clone();
+        let Some(secrets) = doc.pointer_mut(SECRETS).and_then(Value::as_array_mut) else {
+            return Ok(None);
+        };
+        let before = secrets.len();
+        secrets.retain(|s| !doomed(s));
+        Ok((secrets.len() != before).then_some(doc))
+    }
+}
+
+/// Removes each `opv-` secret that neither the edited template nor `serving` (the
+/// references of the revision serving now; empty for a job, J9) uses (R2, NR-1).
+pub(super) fn prune_superseded(doc: &mut Value, serving: &BTreeSet<String>) {
+    let used = env_refs(doc);
+    if let Some(secrets) = doc.pointer_mut(SECRETS).and_then(Value::as_array_mut) {
+        secrets.retain(|s| {
+            let name = s["name"].as_str().unwrap_or_default();
+            !is_opv_secret(s) || used.contains(name) || serving.contains(name)
+        });
+    }
+}
+
+/// The resource's `properties.provisioningState`, or `unknown`.
+pub(super) fn provisioning_state(spec: &Value) -> &str {
+    spec.pointer("/properties/provisioningState")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
 }
 
 /// `Pinned` for `<vault_uri>/secrets/<name>/<version>`, else `None`.
