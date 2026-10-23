@@ -41,6 +41,7 @@
 pub mod config;
 pub mod diagnose;
 pub mod login;
+pub mod operations;
 
 pub use config::{FLYCTL_TESTED, FlyConfig, FlyTarget, PROVIDER};
 
