@@ -41,6 +41,7 @@ fn target(identity: &str) -> AzureTarget {
         key_vault: "<KV>".into(),
         resource_group: "<RG>".into(),
         container_app: "app".into(),
+        companion_jobs: Vec::new(),
         container: None,
         identity: identity.into(),
         env_name_template: "{KEY}".into(),
