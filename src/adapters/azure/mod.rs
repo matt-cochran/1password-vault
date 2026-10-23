@@ -8,15 +8,20 @@
 //! read-only checks run before a command touches the target, the vault URI read from
 //! Azure, and the `doctor` lines (NR-23, NR-25, FR-26, FR-33). `store.rs` is the named
 //! `[stores.<name>]` Key Vault (`azure_key_vault`) other runtimes bind (FR-39).
+//! `resource.rs` is the engine a Container App and a Container Apps Job share (bindings,
+//! fingerprint, edit, identity and access; M4); `job.rs` is a companion job of the app
+//! (`docs/design/azure-jobs.md`).
 
 mod az;
 pub mod config;
 pub mod containerapp;
 pub mod diagnose;
 pub mod handoff;
+pub mod job;
 pub mod keyvault;
 pub mod login;
 pub mod preflight;
+mod resource;
 pub mod store;
 #[cfg(windows)]
 pub(crate) mod winsec;
