@@ -365,6 +365,14 @@ fn preflight_makes_no_op_call() {
     assert!(r.calls.borrow().iter().all(|c| c.program != "op"));
 }
 
+/// The credential-free probe of the target's CLI runs isolated too (§5.5).
+#[test]
+fn the_preflight_probe_runs_isolated() {
+    let r = FakeRunner::new([Output::success("flyctl v0.3")]);
+    let _ = preflight(&mut admitted(Operation::MachineUpdate), &r);
+    assert!(r.calls.borrow().iter().all(|c| c.isolated));
+}
+
 #[test]
 fn a_missing_program_is_refused_without_a_call_of_the_operation() {
     let r = FakeRunner::default();

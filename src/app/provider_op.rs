@@ -196,13 +196,17 @@ pub fn admit(fleet: &Fleet, req: &Request, _host: &Host) -> Result<Admitted, Err
 
 /// P7–P10: credential-free local checks; a registry push records its docker endpoint.
 pub fn preflight(a: &mut Admitted, r: &dyn CommandRunner) -> Result<(), Error> {
-    preflight_in(
-        Host::detect().platform,
-        std::env::var_os("XDG_RUNTIME_DIR"),
-        &ram_backed,
-        a,
-        r,
-    )
+    // Isolated like the operation itself: even a credential-free probe of the target's CLI
+    // or docker never sees opv's whole environment (§5.5).
+    crate::runner::isolated_env(|| {
+        preflight_in(
+            Host::detect().platform,
+            std::env::var_os("XDG_RUNTIME_DIR"),
+            &ram_backed,
+            a,
+            r,
+        )
+    })
 }
 
 /// [`preflight`] with the platform, the runtime directory and RAM test given (tests).
