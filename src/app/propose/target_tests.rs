@@ -81,6 +81,16 @@ fn the_same_target_intent_twice_gives_the_same_plan_id() {
 
 // --- http: descriptor and service options ---------------------------------------
 
+/// The whole proposal loads: the generated `http.list`/`http.put` keys land inside the
+/// target table (#236).
+#[test]
+fn an_http_target_proposal_diff_adds_the_target_section() {
+    let p = proposal(
+        r#"{"kind":"target","env":"dev","name":"web","provider":"http","products":["app"],"options":{"http-host":"central.zonetico.com","http-descriptor":"tests/fixtures/https/zonetico/platform_console.binpb","http-service":"portal.v1.PlatformConsoleService","http-names":"EXISTING_KEY=openrouter"}}"#,
+    );
+    assert!(p.diff.contains("+[environments.dev.targets.web]"));
+}
+
 #[test]
 fn an_http_target_text_carries_the_generated_descriptor_section() {
     let intent = target_intent(
