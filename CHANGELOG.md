@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-10-23
+
+0.16.1 makes the `http` target practical to set up and fixes `delivery verify` on Key Vault and Kubernetes targets.
+
+### Fixed
+
+- **`delivery verify` on pinned targets (#241).** On an Azure Key Vault or Kubernetes target every key read `missing_on_target`, because the store's list carries no versions. verify now reads each key's current version as sync does, so a freshly synced key is delivered and a key changed on the target is `drifted_on_target`.
+- **`http.descriptor` resolves beside the configuration file (#237).** A file given with `--config` (or found by discovery) parsed without its directory, so every `http` target's relative descriptor resolved against the working directory. It now resolves beside the file, as the 0.16.0 notes said.
+- **`opv propose target --provider http` writes a section that loads (#236).** Names and paths in its options (the descriptor file, the gRPC service, the host) are no longer refused as high-entropy values; a pasted credential (a known prefix, a PEM block) still is. The generated `http.list`/`http.put` keys stay inside the target's table. A section that cannot be generated says why (for example `service x.S is not in the descriptor`) instead of "names no provider".
+
+### Added
+
+- **`--http-host <host>` and `--http-names KEY=remote,...` on `opv propose target --provider http` (#236).** Both are required: opv never guesses the host or the application's name for a key.
+
+### Security
+
+- **Another CLI never inherits a 1Password token.** `flyctl`, `az`, `kubectl`, `gh` and the editor already ran without the shell's `OP_SESSION*`; they now also run without `OP_SERVICE_ACCOUNT_TOKEN` and `OP_CONNECT_TOKEN`, so CI's service-account token stays with `op`.
+
+### Documentation
+
+- **Azure `env_name` needs only `{KEY}` (#239).** The configuration reference said `{PRODUCT}` was required; a `"{KEY}"` template delivers bare names, two keys that would render one name are refused when the file loads, and a prune only touches declared, opv-tagged names.
+
 ## [0.16.0] - 2026-10-21
 
 0.16.0 delivers to an application's own secret store through its API.
