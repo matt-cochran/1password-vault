@@ -2930,10 +2930,12 @@ mod tests {
             env: &env,
             ..Call::new("flyctl", &[])
         };
+        // Only the two set here: a session the test process inherited is removed too.
         let removed: Vec<_> = command_for(&call)
             .get_envs()
             .filter(|(_, v)| v.is_none())
             .map(|(k, _)| k.to_string_lossy().into_owned())
+            .filter(|k| k == "OP_SESSION" || k == "OP_SESSION_acct")
             .collect();
         assert_eq!(removed, ["OP_SESSION", "OP_SESSION_acct"]);
     }
