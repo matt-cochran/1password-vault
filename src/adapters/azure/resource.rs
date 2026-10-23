@@ -10,6 +10,7 @@
 //! | `show` | `<noun> show -g <rg> -n <name> -o json` (`containerapp` or `containerapp job`) | — |
 //! | `principal` | `identity show --ids <id> -o json` (user-assigned identity whose principal the resource does not list) | — |
 //! | `check_access` | `<noun> show …`, then as `principal`, `keyvault show -n <vault> -o json`, `role assignment list --assignee <principal> --scope <vault id> --include-inherited --include-groups -o json` (RBAC vaults only) | — |
+//! | `role_assignments` | `role assignment list --assignee <principal>` (app) or `--assignee-object-id <principal> … --fill-principal-name false` (job, M1: no Graph query) `--scope <vault id> --include-inherited --include-groups -o json` | — |
 //!
 //! Every call adds `--only-show-errors` and `--subscription <azure.subscription>` (NR-7). All
 //! calls here are reads (`runner.read`, retried); the updates stay with each resource.
@@ -39,6 +40,15 @@ pub const READ_ROLES: &[&str] = &[
 /// Prefix of the Container Apps secrets opv owns (R2).
 pub(super) const SECRET_PREFIX: &str = "opv-";
 pub(super) const SECRETS: &str = "/properties/configuration/secrets";
+
+/// How `role assignment list` names the principal (M1, I2-4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Assignee {
+    /// `--assignee <principal>`: the app's form (P0), which may query Microsoft Graph.
+    Name,
+    /// `--assignee-object-id <principal> --fill-principal-name false`: no Graph query.
+    ObjectId,
+}
 
 /// Which Container Apps resource the engine reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -407,6 +417,27 @@ impl Resource<'_> {
             }))
     }
 
+    /// `role assignment list` of `principal` at `scope` and above, its groups included, with
+    /// the principal named in `form`.
+    pub fn role_assignments(
+        &self,
+        principal: &str,
+        scope: &str,
+        form: Assignee,
+    ) -> Result<Value, Error> {
+        let mut base = vec!["role", "assignment", "list"];
+        base.extend(match form {
+            Assignee::Name => ["--assignee", principal],
+            Assignee::ObjectId => ["--assignee-object-id", principal],
+        });
+        base.extend(["--scope", scope, "--include-inherited", "--include-groups"]);
+        if form == Assignee::ObjectId {
+            base.extend(["--fill-principal-name", "false"]);
+        }
+        base.extend(["-o", "json"]);
+        self.read("role assignment list", self.vault_ctx(), &base)
+    }
+
     /// Advisory access check (R6): one finding per name the identity cannot read.
     pub fn check_access(&self, names: &[String]) -> Result<Vec<AccessFinding>, Error> {
         let each = |reason: String| {
@@ -450,23 +481,7 @@ impl Resource<'_> {
         let scope = vault["id"]
             .as_str()
             .ok_or_else(|| preflight::missing_in_reply("keyvault show", "id"))?;
-        let roles = self.read(
-            "role assignment list",
-            self.vault_ctx(),
-            &[
-                "role",
-                "assignment",
-                "list",
-                "--assignee",
-                &principal,
-                "--scope",
-                scope,
-                "--include-inherited",
-                "--include-groups",
-                "-o",
-                "json",
-            ],
-        )?;
+        let roles = self.role_assignments(&principal, scope, Assignee::Name)?;
         let has_role = roles.as_array().is_some_and(|rs| {
             rs.iter()
                 .filter_map(|r| r["roleDefinitionName"].as_str())
@@ -505,7 +520,7 @@ pub(super) fn reference(base: &str, url: &str) -> Option<Binding> {
 }
 
 /// Whether an access-policy vault (full `keyvault show` object) lets `principal` get secrets.
-fn policy_grants_get(vault: &Value, principal: &str) -> bool {
+pub(super) fn policy_grants_get(vault: &Value, principal: &str) -> bool {
     vault
         .pointer("/properties/accessPolicies")
         .and_then(Value::as_array)
