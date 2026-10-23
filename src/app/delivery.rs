@@ -1301,7 +1301,7 @@ fn verify_target(
     )?;
     let r: &dyn CommandRunner = &signed_in;
     let (_, ports) = super::open_target(fleet, env_name, target, r)?;
-    let listed: Vec<StoreEntry> = match &ports {
+    let mut listed: Vec<StoreEntry> = match &ports {
         crate::ports::Ports::Staged { store, .. } => store.list()?,
         crate::ports::Ports::Pinned { store, .. } => store.list()?,
     };
@@ -1310,6 +1310,18 @@ fn verify_target(
     let mut checks = Vec::new();
     for product in products_in_scope(fleet, env_name, target, only)? {
         let expected = held_bindings(fleet, env_name, target, &product, &listed)?;
+        // #241: a pinned store's list carries no versions (Key Vault, Kubernetes), so read
+        // each expected name's current version as sync does; a freshly synced key is then
+        // delivered, not missing. The value is dropped here, never stored or shown.
+        if let crate::ports::Ports::Pinned { store, .. } = &ports {
+            for b in &expected {
+                if let Some(entry) = listed.iter_mut().find(|e| e.name == b.name)
+                    && entry.version.is_none()
+                {
+                    entry.version = store.read(&b.name)?.map(|(_, version)| version);
+                }
+            }
+        }
         let this_scope = scope(fleet, env_name, target, &product, &account)?;
         let state = read_state(fleet, env_name, target, &product, r)?;
         let fingerprints: BTreeMap<String, String> =
