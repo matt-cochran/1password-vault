@@ -1,10 +1,10 @@
 # Provider operations under a target's deploy credentials (#234)
 
-Status: draft for 0.17.0, revised 2026-10-23 after the DESIGN-FMECA vet
-([provider-operations-fmeca.md](provider-operations-fmeca.md): ready with changes; every High
-and Medium change is applied below, with vet risk ids in brackets). Awaiting the owner's
-decisions (§8) and the spikes (§9). Issue #234 (Tracking CI). Nothing here is built. Citations
-are against `v0170/design-234` (`22f51c94`; HEAD differs only by the design files).
+Status: approved 2026-10-23; machines and machine-update built for 0.17.0; registry-push follows
+in 0.17.x (gated on #234's Q1/S6 answers). The DESIGN-FMECA
+vet ([provider-operations-fmeca.md](provider-operations-fmeca.md): ready with changes; every High
+and Medium change is applied below, with vet risk ids in brackets) is applied. Citations are
+against `v0170/design-234` (`22f51c94`; HEAD differs only by the design files).
 
 ## 1. Intent
 
