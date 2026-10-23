@@ -1740,9 +1740,14 @@ fn add_op_session(cmd: &mut Command, program: &str) {
     }
 }
 
-/// FMECA M6: a child that is not `op` gets no 1Password session, neither one inherited from
-/// the shell (`opv login --shell`, `eval $(op signin)`) nor one set on `cmd` itself. Applied
-/// after every other variable, so it wins. `op` keeps its session: it needs it.
+/// op's credential variables that are not sessions: a service-account or Connect token gives
+/// whoever holds it the same 1Password access, so another CLI never inherits one either.
+const OP_TOKEN_VARS: &[&str] = &["OP_SERVICE_ACCOUNT_TOKEN", "OP_CONNECT_TOKEN"];
+
+/// FMECA M6: a child that is not `op` gets no 1Password session or token ([`OP_TOKEN_VARS`]),
+/// neither one inherited from the shell (`opv login --shell`, `eval $(op signin)`, CI's
+/// service-account token) nor one set on `cmd` itself. Applied after every other variable,
+/// so it wins. `op` keeps its session: it needs it.
 pub fn strip_op_session(cmd: &mut Command, program: &str) {
     strip_session_vars(
         cmd,
@@ -1768,7 +1773,7 @@ pub(crate) fn strip_session_vars(
         .collect();
     let names: std::collections::BTreeSet<String> = inherited
         .chain(set)
-        .filter(|k| crate::app::account::is_session_var(k))
+        .filter(|k| crate::app::account::is_session_var(k) || OP_TOKEN_VARS.contains(&k.as_str()))
         .collect();
     for name in names {
         cmd.env_remove(name);
@@ -2925,10 +2930,12 @@ mod tests {
             env: &env,
             ..Call::new("flyctl", &[])
         };
+        // Only the two set here: a session the test process inherited is removed too.
         let removed: Vec<_> = command_for(&call)
             .get_envs()
             .filter(|(_, v)| v.is_none())
             .map(|(k, _)| k.to_string_lossy().into_owned())
+            .filter(|k| k == "OP_SESSION" || k == "OP_SESSION_acct")
             .collect();
         assert_eq!(removed, ["OP_SESSION", "OP_SESSION_acct"]);
     }
@@ -2959,6 +2966,28 @@ mod tests {
             .map(|(k, _)| k.to_string_lossy().into_owned())
             .collect();
         assert_eq!(removed, ["OP_SESSION_acct"]);
+    }
+
+    /// CI's service-account token is removed from another CLI, as a session is.
+    #[test]
+    fn an_inherited_service_account_token_is_removed_from_another_cli() {
+        let mut cmd = Command::new("flyctl");
+        let inherited = ["OP_SERVICE_ACCOUNT_TOKEN", "PATH"];
+        strip_session_vars(&mut cmd, "flyctl", inherited.iter().map(|s| s.to_string()));
+        let removed: Vec<_> = cmd
+            .get_envs()
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(removed, ["OP_SERVICE_ACCOUNT_TOKEN"]);
+    }
+
+    /// `op` itself keeps the service-account token: it authenticates with it.
+    #[test]
+    fn an_op_call_keeps_the_service_account_token() {
+        let mut cmd = Command::new("op");
+        let inherited = ["OP_SERVICE_ACCOUNT_TOKEN"];
+        strip_session_vars(&mut cmd, "op", inherited.iter().map(|s| s.to_string()));
+        assert_eq!(cmd.get_envs().count(), 0);
     }
 
     /// The names of the variables an inherited child of `ProcessRunner` saw, by running

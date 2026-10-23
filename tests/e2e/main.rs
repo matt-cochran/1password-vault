@@ -10,6 +10,7 @@ mod scenarios {
     pub mod consistency;
     pub mod file_key_guidance;
     pub mod fixes_0141;
+    pub mod fixes_0161;
     pub mod http_target_faults;
     pub mod http_target_sync;
     pub mod infrastructure_values;

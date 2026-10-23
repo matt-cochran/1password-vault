@@ -501,7 +501,7 @@ azure.config         = "env"                       # default; "store" keeps conf
 | `container_app` | The app that receives the variables. |
 | `container` | Optional. Required only when the app runs more than one container; opv then lists the names. |
 | `identity` | `system`, or the resource id of the user-assigned identity the app uses to read Key Vault. |
-| `env_name` | Template for the variable name; must contain `{PRODUCT}` and `{KEY}`. It defines the managed set. With one product, a `{KEY}` template delivers bare names. |
+| `env_name` | Template for the variable name; must contain `{KEY}`, and `{PRODUCT}` is optional. `"{KEY}"` delivers bare names (`RedisConnectionString`), for an app that binds flat configuration keys; two delivered keys that would render the same name are an error naming both, when the file loads. The rendered names of the declared keys are the managed set: a prune only ever touches those, and only secrets opv tagged. |
 | `config` | `env` (default) or `store`. |
 
 Names and limits are checked when the file loads, before any call:
@@ -633,7 +633,9 @@ conflict = ["ALREADY_EXISTS"]                      # gRPC codes that mean "chang
 destination is), and the concealed `token`, `cf_access_client_id` and `cf_access_client_secret`
 (opv adds the `Bearer` scheme). opv cannot mint this item, so a person creates it. The section is
 generated from the application's schema with
-`opv propose target <env> <name> --provider http --http-descriptor <file> --http-service <full.name>`.
+`opv propose target <env> <name> --provider http --http-host <host> --http-descriptor <file> --http-service <full.name> --http-names KEY=remote,KEY2=remote2`.
+opv never guesses a remote name: `--http-names` gives the `http.names` mapping as comma-separated
+`KEY=remote` pairs.
 
 ### Secrets in a named store: `[stores.<name>]` and `secrets_in`
 
