@@ -23,11 +23,10 @@
 
 use serde::Deserialize;
 
-use super::{FLYCTL, PROGRAM, app_context, call_error, failed_call, read_json};
-use crate::cause::{Cause, DiagnoseContext, EnvName, Guard, OperationRefusal, TargetName};
+use super::{Effect, read_json};
+use crate::cause::{Cause, EnvName, Guard, OperationRefusal, TargetName};
 use crate::error::Error;
-use crate::host::Host;
-use crate::runner::{Call, CommandRunner, Outcome};
+use crate::runner::CommandRunner;
 
 /// `machines` argv: `flyctl machine list --app <app> --json` (§2).
 ///
@@ -42,14 +41,7 @@ pub fn machines_args(app: &str) -> [&str; 5] {
 /// Only the validated id and image are carried (P6, O3); no other flag is passed.
 pub fn machine_update_args<'a>(app: &'a str, machine: &'a str, image: &'a str) -> [&'a str; 8] {
     [
-        "machine",
-        "update",
-        machine,
-        "--app",
-        app,
-        "--image",
-        image,
-        "--yes",
+        "machine", "update", machine, "--app", app, "--image", image, "--yes",
     ]
 }
 
@@ -123,43 +115,15 @@ pub fn machine_update(
         }
         .into());
     }
-    write_rollout(r, app, &machine_update_args(app, machine, image))
-}
-
-/// One `flyctl machine update` write: a [`Call::rollout`] (it restarts the Machine and waits
-/// for its health checks), never retried (NR-2, §5.2).
-///
-/// This is the write counterpart of [`super::run`], which has no rollout entry for this
-/// operation; the failure mapping is the same (design §4.6).
-fn write_rollout(r: &dyn CommandRunner, app: &str, args: &[&str]) -> Result<(), Error> {
-    let ctx = DiagnoseContext {
-        write: true,
-        ..app_context(app)
-    };
-    let call = Call::new(PROGRAM, args).rollout();
-    let outcome = r.write(&call).map_err(|e| match e.kind() {
-        // A spent run budget; the runner's own message names the program (no child output).
-        std::io::ErrorKind::TimedOut => FLYCTL.budget_spent(r, &e),
-        _ => call_error(r, &Host::detect, &e, &ctx),
-    })?;
-    match outcome {
-        Outcome::Done(_) => Ok(()),
-        Outcome::Refused(_) | Outcome::Unknown { status: Some(_), .. } => Err(failed_call(&ctx)),
-        // A write that timed out or was killed: diagnosed by what it was doing (an unknown
-        // write, design §4.6).
-        Outcome::Unknown { .. } => match crate::runner::take_observed() {
-            Some(seen) => Err(super::diagnose::diagnose(seen, "", &ctx).into()),
-            // A runner that reported it unanswered without observing it (an in-memory
-            // double) has it recorded as lost: its outcome is only unknown (NR-2).
-            None => match crate::host::lost_call(PROGRAM) {
-                Some(failed) => Err(super::diagnose::diagnose(failed.seen, "", &ctx).into()),
-                None => Err(Cause::Bug {
-                    site: "fly: an unfinished flyctl write left no observation",
-                }
-                .into()),
-            },
-        },
-    }
+    super::run(
+        r,
+        Effect::Write,
+        "fly machine update",
+        app,
+        &machine_update_args(app, machine, image),
+        None,
+    )
+    .map(|_| ())
 }
 
 #[cfg(test)]

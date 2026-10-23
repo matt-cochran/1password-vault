@@ -1,5 +1,5 @@
 //! `opv target op <env> --target <name> <operation>` (#234,
-//! `docs/design/provider-operations.md`): a fixed operation on a Fly target, run under that
+//! `docs/design/provider-operations.md`): a fixed operation on a target whose provider offers them, run under that
 //! target's own deploy credentials, never printing a value.
 //!
 //! The operations are a closed table compiled into opv (§2): their programs, argv words and
@@ -19,7 +19,6 @@ use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::adapters::fly::{FLYCTL, FlyTarget};
 use crate::adapters::probe::{probe_failure, spawn_tool};
 use crate::cause::{
     Cause, EnvName, Guard, NameKind, OperationRefusal, RamDir, RamPurpose, TargetName, UsageProblem,
@@ -27,6 +26,7 @@ use crate::cause::{
 use crate::domain::{Fleet, ItemRef};
 use crate::error::Error;
 use crate::host::{DOCKER, Host, Platform, Tool};
+use crate::provider::OperationBinding;
 use crate::ramdir::{owned_dir, ram_backed};
 use crate::runner::{Call, CommandRunner, Outcome, Output};
 
@@ -37,7 +37,7 @@ pub enum Operation {
     Machines,
     /// Write: move one Machine of the app to another image.
     MachineUpdate,
-    /// Write: push a local image to the app's repository in Fly's registry.
+    /// Write: push a local image to the app's repository in the target's registry.
     RegistryPush,
 }
 
@@ -56,10 +56,10 @@ impl Operation {
         matches!(self, Operation::MachineUpdate | Operation::RegistryPush)
     }
 
-    /// The program the operation runs (P7).
-    fn program(self) -> &'static Tool {
+    /// The program the operation runs (P7): the target's own CLI, or docker for a push.
+    fn program(self, binding: &OperationBinding) -> &'static Tool {
         match self {
-            Operation::Machines | Operation::MachineUpdate => &FLYCTL,
+            Operation::Machines | Operation::MachineUpdate => binding.tool,
             Operation::RegistryPush => &DOCKER,
         }
     }
@@ -71,7 +71,7 @@ pub struct Request {
     pub env: String,
     pub target: String,
     pub op: Operation,
-    /// `--image`: `registry.fly.io/<app>:<tag>` or `…@sha256:<64 hex>`.
+    /// `--image`: `<registry>/<app>:<tag>` or `…@sha256:<64 hex>`.
     pub image: Option<String>,
     /// `--machine`: a Machine id of the app.
     pub machine: Option<String>,
@@ -84,8 +84,12 @@ pub struct Request {
 pub struct Admitted {
     pub env: String,
     pub target: String,
-    /// The target's `fly.app`, never a caller input.
+    /// The target's bound app ([`OperationBinding::app`]), never a caller input.
     pub app: String,
+    /// The registry host the app's images live under.
+    pub registry: &'static str,
+    /// The target's CLI, which runs the operations other than a push.
+    pub tool: &'static Tool,
     /// The target's `deploy_credentials` item.
     pub credentials: ItemRef,
     pub op: Operation,
@@ -120,8 +124,8 @@ pub fn admit(fleet: &Fleet, req: &Request, _host: &Host) -> Result<Admitted, Err
             env.targets.keys().map(String::as_str),
         )
     })?;
-    // P3: the target's provider offers the operations (v1: Fly only).
-    let Some(fly) = target.config.as_any().downcast_ref::<FlyTarget>() else {
+    // P3: the target's provider offers the operations ([`TargetConfig::operations`]).
+    let Some(binding) = target.config.operations() else {
         return Err(refused(
             &req.env,
             &req.target,
@@ -152,7 +156,8 @@ pub fn admit(fleet: &Fleet, req: &Request, _host: &Host) -> Result<Admitted, Err
                 &req.env,
                 &req.target,
                 req.op,
-                &fly.app,
+                &binding.app,
+                binding.registry,
                 req.image.as_deref(),
             )?),
             Some(checked_machine(req.machine.as_deref())?),
@@ -162,7 +167,8 @@ pub fn admit(fleet: &Fleet, req: &Request, _host: &Host) -> Result<Admitted, Err
                 &req.env,
                 &req.target,
                 req.op,
-                &fly.app,
+                &binding.app,
+                binding.registry,
                 req.image.as_deref(),
             )?),
             None,
@@ -171,7 +177,9 @@ pub fn admit(fleet: &Fleet, req: &Request, _host: &Host) -> Result<Admitted, Err
     Ok(Admitted {
         env: req.env.clone(),
         target: req.target.clone(),
-        app: fly.app.clone(),
+        app: binding.app.clone(),
+        registry: binding.registry,
+        tool: binding.tool,
         credentials,
         op: req.op,
         image,
@@ -200,7 +208,11 @@ fn preflight_in(
     r: &dyn CommandRunner,
 ) -> Result<(), Error> {
     // P7: the operation's program is on PATH.
-    let tool = a.op.program();
+    let tool = a.op.program(&OperationBinding {
+        app: a.app.clone(),
+        tool: a.tool,
+        registry: a.registry,
+    });
     spawn_tool(r, *tool, &|| Host::detect(), tool.version_args)?;
     if a.op != Operation::RegistryPush {
         return Ok(());
@@ -247,7 +259,7 @@ fn usage(problem: UsageProblem) -> Error {
     Cause::Usage { problem }.into()
 }
 
-/// The `--image` slot (P6): exactly `registry.fly.io/<app>` plus a tag (both operations) or
+/// The `--image` slot (P6): exactly `<registry>/<app>` plus a tag (both operations) or
 /// a `sha256:` digest (machine-update only). A well-formed image outside the app is
 /// `ImageOutsideApp`; a malformed slot is `Usage`.
 fn checked_image(
@@ -255,6 +267,7 @@ fn checked_image(
     target: &str,
     op: Operation,
     app: &str,
+    registry: &str,
     given: Option<&str>,
 ) -> Result<String, Error> {
     let format = image_format(op);
@@ -279,7 +292,10 @@ fn checked_image(
     if op == Operation::RegistryPush && !docker_repository(app) {
         return Err(outside());
     }
-    let Some(rest) = image.strip_prefix("registry.fly.io/") else {
+    let Some(rest) = image
+        .strip_prefix(registry)
+        .and_then(|r| r.strip_prefix('/'))
+    else {
         return Err(outside());
     };
     let Some(suffix) = rest.strip_prefix(app) else {
@@ -320,10 +336,10 @@ fn checked_image(
 
 fn image_format(op: Operation) -> &'static str {
     match op {
-        Operation::RegistryPush => "registry.fly.io/<the target's app>:<tag>",
+        Operation::RegistryPush => "<the target's registry>/<app>:<tag>",
         _ => {
-            "registry.fly.io/<the target's app>:<tag> or \
-             registry.fly.io/<the target's app>@sha256:<64 lowercase hex>"
+            "<the target's registry>/<app>:<tag> or \
+             <the target's registry>/<app>@sha256:<64 lowercase hex>"
         }
     }
 }

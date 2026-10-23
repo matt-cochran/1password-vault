@@ -415,9 +415,24 @@ pub struct Channels {
 }
 
 /// A validated, provider-specific target. Core code sees only this trait.
+/// What a provider operation (#234) runs against on a target that offers them: the app the
+/// operations are bound to (never the caller's), the CLI that runs them, and the registry host
+/// an image of that app lives under. Names only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationBinding {
+    pub app: String,
+    pub tool: &'static Tool,
+    pub registry: &'static str,
+}
+
 pub trait TargetConfig: fmt::Debug + Send + Sync {
     /// The provider this target belongs to (its label names it in messages: "on Fly").
     fn provider(&self) -> &'static dyn Provider;
+    /// The binding `opv target op` runs against (#234), or `None` when the target's
+    /// provider offers no operations.
+    fn operations(&self) -> Option<OperationBinding> {
+        None
+    }
     /// Runtime env var name of `product`/`key`.
     fn env_name(&self, product: &str, key: &str) -> String;
     /// The target instance, as one stable string (an app, repositories, a vault and app, a
