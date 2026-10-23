@@ -26,13 +26,18 @@ use crate::error::Error;
 use crate::host::Host;
 use crate::ports::Ports;
 use crate::provider::{
-    Channel, Channels, Check, FileCapability, InitField, NameRules, Preflight, PreflightMode,
-    Provider, Section, TargetConfig,
+    Channel, Channels, Check, FileCapability, INIT_SECTION_FAILED, InitField, NameRules, Preflight,
+    PreflightMode, Provider, Section, TargetConfig,
 };
 use crate::runner::CommandRunner;
 
 /// The `opv target add` options of the `http` provider (design §7).
-const INIT_FIELDS: [InitField; 2] = [
+const INIT_FIELDS: [InitField; 4] = [
+    InitField {
+        field: "host",
+        help: "hostname opv calls (lowercase ASCII, no scheme, port or path)",
+        required: true,
+    },
     InitField {
         field: "descriptor",
         help: "path of the pinned FileDescriptorSet",
@@ -41,6 +46,11 @@ const INIT_FIELDS: [InitField; 2] = [
     InitField {
         field: "service",
         help: "full name of the gRPC service to generate a section for",
+        required: true,
+    },
+    InitField {
+        field: "names",
+        help: "KEY=remote pairs, comma-separated: the app's name for each delivered key",
         required: true,
     },
 ];
@@ -134,18 +144,16 @@ impl Provider for HttpProvider {
     }
 
     fn init_section(&self, values: &BTreeMap<&str, String>) -> Option<String> {
+        let host = values.get("host")?;
         let descriptor = values.get("descriptor")?;
         let service = values.get("service")?;
+        let names = values.get("names")?;
         // A generation failure stays visible: the section carries the reason as a comment
         // (names only) and then fails the load rules, rather than silently disappearing.
         let generated = std::fs::read(descriptor)
             .map_err(|_| format!("cannot read the descriptor set {descriptor}"))
-            .and_then(|bytes| super::propose::section(&bytes, descriptor, service));
-        Some(
-            generated.unwrap_or_else(|why| {
-                format!("# opv could not generate this http section: {why}\n")
-            }),
-        )
+            .and_then(|bytes| super::propose::section(&bytes, descriptor, service, host, names));
+        Some(generated.unwrap_or_else(|why| format!("{INIT_SECTION_FAILED} {why}\n")))
     }
 
     fn deploy_credential_fields(
