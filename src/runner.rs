@@ -1004,6 +1004,7 @@ mod observe {
             "ssh" => System::Ssh,
             "opv" => System::RemoteOpv,
             "https" => System::Https,
+            "docker" => System::Docker,
             _ => return None,
         })
     }

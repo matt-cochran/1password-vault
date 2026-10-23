@@ -1282,6 +1282,65 @@ impl SupplyRefusal {
     }
 }
 
+/// Why opv does not run a target operation (#234, `docs/design/provider-operations.md`
+/// §4): each is a definite refusal, made before any write. Names, ids and image references
+/// only; never a token.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum OperationRefusal {
+    /// The target's provider offers no operations (v1: only Fly does).
+    WrongProvider { provider: String },
+    /// The target records no `deploy_credentials`: an operation never runs under another
+    /// target's or the machine's own login (P4).
+    NoDeployCredentials,
+    /// The image is not in the bound app's repository, `registry.fly.io/<app>`.
+    ImageOutsideApp { app: String },
+    /// docker would talk to a daemon that is not local (`DOCKER_CONTEXT`, or an endpoint
+    /// other than `unix://`), which would then see the token.
+    RemoteDockerDaemon,
+    /// The local docker daemon does not hold the image to push.
+    ImageNotLocal { image: String },
+    /// After `docker login`, the sign-in was not where opv put it: docker kept it in a
+    /// credential helper or store outside opv's private folder (§5.3 step 6).
+    CredentialStoreEscaped,
+    /// The Machine id is not in the app's listing, so nothing was updated (O4).
+    MachineNotInApp { machine: String },
+    /// This build declares the operation but does not run it yet (Step 0 of #234).
+    NotYetAvailable,
+}
+
+impl OperationRefusal {
+    /// The reason in words.
+    pub fn words(&self) -> String {
+        match self {
+            OperationRefusal::WrongProvider { provider } => {
+                format!("the target is on {provider}, and only a Fly target has operations")
+            }
+            OperationRefusal::NoDeployCredentials => {
+                "the target records no deploy_credentials, and an operation never runs under another login".to_string()
+            }
+            OperationRefusal::ImageOutsideApp { app } => {
+                format!("the image is not in the target's repository registry.fly.io/{app}")
+            }
+            OperationRefusal::RemoteDockerDaemon => {
+                "docker is set to use a daemon that is not local to this machine".to_string()
+            }
+            OperationRefusal::ImageNotLocal { image } => {
+                format!("the local docker daemon has no image {image}")
+            }
+            OperationRefusal::CredentialStoreEscaped => {
+                "docker kept the registry sign-in outside opv's private folder".to_string()
+            }
+            OperationRefusal::MachineNotInApp { machine } => {
+                format!("Machine {machine} is not one of the app's Machines, so nothing was updated")
+            }
+            OperationRefusal::NotYetAvailable => {
+                "this build of opv does not run target operations yet".to_string()
+            }
+        }
+    }
+}
+
 impl GenerateRefusal {
     /// The reason in words.
     pub fn words(&self) -> &'static str {
@@ -1691,6 +1750,15 @@ pub enum Guard {
         env: EnvName,
         holds: String,
     },
+    /// opv refuses target operation `operation` (`machines`, `machine-update`,
+    /// `registry-push`) on `env`/`target` (#234, `docs/design/provider-operations.md` §4).
+    /// Names only; never a token.
+    OperationRefused {
+        env: EnvName,
+        target: TargetName,
+        operation: &'static str,
+        reason: OperationRefusal,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -1774,6 +1842,9 @@ pub enum RamPurpose {
     FileDelivery,
     /// az's private configuration folder for a sign-in with deploy credentials.
     AzureDeployCredentials,
+    /// docker's private configuration folder for a registry push with deploy credentials
+    /// (#234).
+    RegistryPush,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]

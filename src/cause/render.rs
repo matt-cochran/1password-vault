@@ -387,7 +387,7 @@ fn sign_in_advice(system: System, why: RefusedBecause) -> String {
             System::Azure => "sign this CI job in with the target's deploy credentials, a service principal (opv ci workflow prints that step)".to_string(),
             System::Kubernetes => "give this CI job a kubeconfig whose context carries its own credentials".to_string(),
             System::Ssh | System::RemoteOpv => "give this CI job the remote profile's ssh key".to_string(),
-            System::Https => "give this CI job the target's deploy credentials from 1Password".to_string(),
+            System::Https | System::Docker => "give this CI job the target's deploy credentials from 1Password".to_string(),
         },
     }
 }
@@ -1136,7 +1136,8 @@ fn vendor_sign_in(system: System) -> Option<VendorCmd> {
         | System::Kubernetes
         | System::Ssh
         | System::RemoteOpv
-        | System::Https => {
+        | System::Https
+        | System::Docker => {
             return None;
         }
     };
@@ -1436,6 +1437,53 @@ fn supply_entry_words(entry: &SupplyEntry) -> String {
     match entry {
         SupplyEntry::Named { product, key } => format!("{product}/{key}"),
         SupplyEntry::Position { document, index } => format!("document {document}, entry {index}"),
+    }
+}
+
+/// The step after a refused target operation (#234, provider-operations §4): the minting of
+/// the target's deploy credentials is a write, named in the Do; every Next is a read (X4).
+fn operation_refused(env: &EnvName, target: &TargetName, reason: &OperationRefusal) -> Plan {
+    let none = Next::None(NoNext::NothingToRun);
+    match reason {
+        OperationRefusal::WrongProvider { .. } => plan(
+            inspect(format!("pick a Fly target of environment {env}")),
+            Next::Check(cmd(&["target", "list"], &["--env", env.as_str()])),
+        ),
+        OperationRefusal::NoDeployCredentials => plan(
+            inspect(format!(
+                "mint the target's deploy credentials: opv target credentials {env} --target {target} --create"
+            )),
+            Next::Check(cmd(
+                &["target", "credentials"],
+                &[env.as_str(), "--target", target.as_str()],
+            )),
+        ),
+        OperationRefusal::ImageOutsideApp { app } => plan(
+            inspect(format!(
+                "name an image in registry.fly.io/{app}, the repository of target {target}"
+            )),
+            none,
+        ),
+        OperationRefusal::RemoteDockerDaemon => plan(
+            inspect("unset DOCKER_CONTEXT and run the push next to a local docker daemon"),
+            none,
+        ),
+        OperationRefusal::ImageNotLocal { image } => plan(
+            inspect(format!(
+                "build or load {image} into the local docker daemon first"
+            )),
+            none,
+        ),
+        OperationRefusal::CredentialStoreEscaped => plan(
+            inspect(
+                "run docker logout registry.fly.io under your own docker configuration; opv removed its private folder",
+            ),
+            none,
+        ),
+        OperationRefusal::MachineNotInApp { .. } => {
+            plan(inspect(format!("name a Machine of target {target}")), none)
+        }
+        OperationRefusal::NotYetAvailable => plan(None, none),
     }
 }
 
@@ -2192,6 +2240,15 @@ impl Cause {
                 self::Guard::ArchiveNotRewritable { env, holds } => format!(
                     "the 1Password item of environment {env} holds {holds}, which opv cannot prove a rewrite keeps, so opv did not archive the field there"
                 ),
+                self::Guard::OperationRefused {
+                    env,
+                    target,
+                    operation,
+                    reason,
+                } => format!(
+                    "opv does not run {operation} on {env}/{target}: {}",
+                    reason.words()
+                ),
             },
             MountUnreadable {
                 workload,
@@ -2481,6 +2538,7 @@ impl Cause {
                 let what = match purpose {
                     RamPurpose::FileDelivery => "the settings file",
                     RamPurpose::AzureDeployCredentials => "az's sign-in with deploy credentials",
+                    RamPurpose::RegistryPush => "docker's registry sign-in with deploy credentials",
                 };
                 match remote {
                     Some(p) => format!(
@@ -3724,7 +3782,7 @@ impl Cause {
                         (_, Some(vault)) => vendor("op", &["item", "list", "--vault", vault]),
                         (_, None) => vendor("op", &["vault", "list"]),
                     },
-                    (System::Ssh | System::RemoteOpv | System::Https, _) => {
+                    (System::Ssh | System::RemoteOpv | System::Https | System::Docker, _) => {
                         Next::None(NoNext::NothingToRun)
                     }
                 };
@@ -3915,6 +3973,9 @@ impl Cause {
                     )),
                     Next::Check(cmd(&["ready"], &[])),
                 ),
+                self::Guard::OperationRefused {
+                    env, target, reason, ..
+                } => operation_refused(env, target, reason),
             },
             MountUnreadable { env, target, .. } => plan(
                 inspect(
@@ -4447,13 +4508,14 @@ impl Cause {
             RamDirUnavailable {
                 remote,
                 why,
-                purpose: RamPurpose::AzureDeployCredentials,
+                purpose:
+                    purpose @ (RamPurpose::AzureDeployCredentials | RamPurpose::RegistryPush),
                 ..
             } => {
-                // az keeps the service principal's secret in its configuration folder, so
-                // opv signs in only where that folder is held in memory (06.49): the way
-                // out is this machine's runtime folder, or a machine that has one; never a
-                // change to how everyone deploys the environment.
+                // az and docker keep the deploy credential in their configuration folder, so
+                // opv signs in only where that folder is held in memory (06.49, #234 §5.3):
+                // the way out is this machine's runtime folder, or a machine that has one;
+                // never a change to how everyone deploys the environment.
                 let host = match remote {
                     Some(p) => format!("the host of remote profile {p}"),
                     None => "this machine".to_string(),
@@ -4474,9 +4536,14 @@ impl Cause {
                     RamDir::NotTmpfs => {
                         format!("set XDG_RUNTIME_DIR on {host} to a tmpfs folder")
                     }
-                    RamDir::NoneOnPlatform { os } => format!(
-                        "deploy to Azure with deploy credentials from a Linux or Windows machine; {os} has no in-memory folder for az's sign-in"
-                    ),
+                    RamDir::NoneOnPlatform { os } => match purpose {
+                        RamPurpose::RegistryPush => format!(
+                            "push the image from a Linux machine; {os} has no in-memory folder for docker's registry sign-in"
+                        ),
+                        _ => format!(
+                            "deploy to Azure with deploy credentials from a Linux or Windows machine; {os} has no in-memory folder for az's sign-in"
+                        ),
+                    },
                 };
                 plan(inspect(text), Next::Rerun)
             }

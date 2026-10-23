@@ -452,9 +452,12 @@ pub fn tools() -> impl Iterator<Item = &'static Tool> {
     )
 }
 
-/// The CLI whose program name is `program`, if opv runs it.
+/// The CLI whose program name is `program`, if opv runs it. docker is run only by a
+/// provider operation (#234), never by a provider's sync, so it is not in [`tools`].
 pub fn tool(program: &str) -> Option<&'static Tool> {
-    tools().find(|t| t.program == program)
+    tools()
+        .chain(std::iter::once(&DOCKER))
+        .find(|t| t.program == program)
 }
 
 impl Tool {
@@ -553,12 +556,14 @@ fn diagnose_unanswered(seen: crate::cause::Observed) -> Cause {
         System::Azure => azure::diagnose::diagnose(seen, "", &ctx),
         System::Kubernetes => kubernetes::diagnose::diagnose(seen, "", &ctx),
         System::GitHub => github::diagnose::diagnose(seen, "", &ctx),
-        system @ (System::Ssh | System::RemoteOpv | System::Https) => Cause::Unavailable {
-            system,
-            why: seen.exit().unanswered().unwrap_or(Unanswered::Timeout),
-            attempts: seen.attempts(),
-            seen,
-        },
+        system @ (System::Ssh | System::RemoteOpv | System::Https | System::Docker) => {
+            Cause::Unavailable {
+                system,
+                why: seen.exit().unanswered().unwrap_or(Unanswered::Timeout),
+                attempts: seen.attempts(),
+                seen,
+            }
+        }
     };
     // Only called once every read attempt went unanswered: the count is the one the runner
     // observed (B), never a constant.
@@ -614,6 +619,69 @@ pub const OP_CLI: Tool = Tool {
     aliases: &[],
     version_args: &["--version"],
 };
+
+/// The docker CLI, which pushes an image to a Fly app's registry (#234). `--version` prints
+/// the client's version without contacting the daemon.
+pub const DOCKER: Tool = Tool {
+    program: "docker",
+    ci: "use a CI runner with docker installed (GitHub Actions: the ubuntu runners have it)",
+    macos: "install: brew install --cask docker",
+    windows: "install: winget install Docker.DockerDesktop",
+    linux: "install docker from https://docs.docker.com/engine/install/ \
+            (the package for this Linux distribution)",
+    vendor: "Docker",
+    status_page: "https://www.dockerstatus.com",
+    pinned_env: &[("NO_COLOR", "1")],
+    not_found: &[],
+    signed_out: &[],
+    aliases: &[],
+    version_args: &["--version"],
+};
+
+/// The variables a child started with a cleared environment still gets from opv's own (a
+/// `declared_only` app, #137; a provider operation's child, #234 §5.5), so tools resolve,
+/// print and reach the network as usual: path, home, user, shell, terminal, locale,
+/// temporary and runtime directories, the proxy and CA variables (NR-29, both cases) and
+/// the Windows basics Go programs need. None of them is a credential. `LC_*` is kept too
+/// ([`is_basic_env`]).
+pub const ENV_BASICS: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TERM",
+    "COLORTERM",
+    "NO_COLOR",
+    "LANG",
+    "LANGUAGE",
+    "TZ",
+    "TMPDIR",
+    "XDG_RUNTIME_DIR",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "all_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "SystemRoot",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "TEMP",
+    "TMP",
+    "PATHEXT",
+    "ComSpec",
+];
+
+/// True for a variable of [`ENV_BASICS`] or a locale variable (`LC_*`).
+pub fn is_basic_env(name: &str) -> bool {
+    ENV_BASICS.contains(&name) || name.starts_with("LC_")
+}
 
 /// A non-interactive 1Password credential in the environment (by name; value never read).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1528,5 +1596,26 @@ mod tests {
         let runner = crate::runner::fake::FakeRunner::default();
         let _ = refuse_if_agent(&env, agent_cmd());
         assert!(runner.calls.borrow().is_empty());
+    }
+
+    /// #234 §4 P7: the probe never touches the docker daemon.
+    #[test]
+    fn docker_is_probed_with_its_local_version_flag() {
+        assert_eq!(
+            tool("docker").map(|t| t.version_args),
+            Some(&["--version"][..])
+        );
+    }
+
+    /// #234 §5.5: a proxy reaches a child with a cleared environment (NR-29).
+    #[test]
+    fn a_proxy_variable_is_a_basic_of_every_child() {
+        assert!(is_basic_env("https_proxy"));
+    }
+
+    /// #234 §5.5: a CI job's own token never does.
+    #[test]
+    fn a_ci_token_is_not_a_basic_of_any_child() {
+        assert!(!is_basic_env("GITHUB_TOKEN"));
     }
 }
