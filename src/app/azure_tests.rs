@@ -26,7 +26,7 @@ const VAULT: &str = "kv-opv-fixture";
 
 /// `OLD_KEY` is desired in prod under [`fleet_a`] and only in staging under [`fleet_b`], so
 /// a sync of prod with `fleet_b` prunes it.
-fn toml(old_key_envs: &str, config_route: &str) -> String {
+fn toml(old_key_envs: &str, config_route: &str, target_extra: &str) -> String {
     let staging_boundary = if old_key_envs.contains("staging") {
         "boundaries.app = { vault_id = \"vstg\", item_id = \"istg\" }"
     } else {
@@ -38,6 +38,7 @@ fn toml(old_key_envs: &str, config_route: &str) -> String {
 boundaries.app = {{ vault_id = "vprd", item_id = "iprd" }}
 [environments.prod.targets.app]
 state_vault_id = "sprod"
+{target_extra}
 [environments.prod.targets.app.azure]
 subscription = "00000000-0000-0000-0000-000000000000"
 key_vault = "{VAULT}"
@@ -65,15 +66,25 @@ environments = {old_key_envs}
 }
 
 fn fleet_a() -> Fleet {
-    config::parse(&toml(r#"["prod"]"#, "")).unwrap()
+    config::parse(&toml(r#"["prod"]"#, "", "")).unwrap()
 }
 
 fn fleet_b() -> Fleet {
-    config::parse(&toml(r#"["staging"]"#, "")).unwrap()
+    config::parse(&toml(r#"["staging"]"#, "", "")).unwrap()
 }
 
 fn fleet_store() -> Fleet {
-    config::parse(&toml(r#"["prod"]"#, r#"config = "store""#)).unwrap()
+    config::parse(&toml(r#"["prod"]"#, r#"config = "store""#, "")).unwrap()
+}
+
+/// [`fleet_a`] with the delivery item recorded, so a sync mints a receipt `verify` reads.
+fn fleet_delivered() -> Fleet {
+    config::parse(&toml(
+        r#"["prod"]"#,
+        "",
+        r#"delivery_items = { app = "dapp" }"#,
+    ))
+    .unwrap()
 }
 
 const API_V1: &str = "api-FIXTUREVALUE-1";
@@ -108,6 +119,8 @@ struct KvEntry {
 /// The fake world `op` and `az` act on.
 struct World {
     item: Vec<u8>,
+    /// Delivery items `op item edit` wrote, by item ID: what `verify` reads back.
+    delivery: BTreeMap<String, Vec<u8>>,
     /// lower-cased Key Vault name → entry.
     kv: BTreeMap<String, KvEntry>,
     app: Value,
@@ -197,6 +210,7 @@ impl Sim {
         Self {
             world: RefCell::new(World {
                 item,
+                delivery: BTreeMap::new(),
                 kv: BTreeMap::new(),
                 app,
                 revisions: BTreeMap::from([(first, rev)]),
@@ -223,7 +237,7 @@ impl Sim {
         let args: Vec<String> = call.args.iter().map(|a| a.to_string()).collect();
         let stdin = call.stdin.map(<[u8]>::to_vec);
         let out = if call.program == "op" {
-            Output::success(self.world.borrow().item.clone())
+            self.op(&args, stdin.as_deref())
         } else {
             self.az(&args, stdin.as_deref())
         };
@@ -234,6 +248,32 @@ impl Sim {
         });
         self.check();
         out
+    }
+
+    /// The fake `op`: `whoami` answers an account; `item edit` keeps a delivery item so a
+    /// later `verify` reads the receipt back; every other read is the source item.
+    fn op(&self, args: &[String], stdin: Option<&[u8]>) -> Output {
+        if has(args, &["whoami"]) {
+            return Output::success(
+                br#"{"user_type":"HUMAN","account_uuid":"AFAKEOP0000000000000000001"}"#.to_vec(),
+            );
+        }
+        let item = (has(args, &["item", "get"]) || has(args, &["item", "edit"]))
+            .then(|| args.get(2).cloned())
+            .flatten();
+        if has(args, &["item", "edit"]) {
+            let doc = stdin.unwrap_or_default().to_vec();
+            if let Some(id) = item {
+                self.world.borrow_mut().delivery.insert(id, doc.clone());
+            }
+            return Output::success(doc);
+        }
+        if let Some(id) = item
+            && let Some(stored) = self.world.borrow().delivery.get(&id)
+        {
+            return Output::success(stored.clone());
+        }
+        Output::success(self.world.borrow().item.clone())
     }
 
     fn az(&self, args: &[String], stdin: Option<&[u8]>) -> Output {
@@ -595,6 +635,15 @@ fn converged() -> Sim {
     converged_with(&fleet_a())
 }
 
+/// A converged world whose delivery item is recorded, so `verify` can read the receipt.
+fn delivered() -> Sim {
+    let sim = Sim::new(item_with(API_V1, LOG_V1));
+    let (res, out) = sync_on(&sim, &fleet_delivered(), &deploy());
+    assert!(res.is_ok(), "setup sync failed: {res:?}\n{out}");
+    sim.reset();
+    sim
+}
+
 fn converged_with(fleet: &Fleet) -> Sim {
     let sim = Sim::new(item_with(API_V1, LOG_V1));
     let (res, out) = sync_on(&sim, fleet, &deploy());
@@ -619,6 +668,67 @@ fn drifted() -> Sim {
     sim.repin_by_hand("API_KEY", &old);
     sim.reset();
     sim
+}
+
+/// `opv delivery verify prod --json`, as the placement checks it reports.
+fn verify_doc(sim: &Sim, fleet: &Fleet) -> Value {
+    sim.reset();
+    let mut out = Vec::new();
+    // An unverified placement reports and then exits non-zero; the JSON is the report.
+    let _ = crate::app::delivery::verify(fleet, "prod", None, &[], None, sim, true, &mut out);
+    serde_json::from_slice(&out).unwrap()
+}
+
+fn placement_state(doc: &Value, product: &str) -> String {
+    doc["placements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["product"] == product)
+        .and_then(|p| p["state"].as_str())
+        .map(str::to_string)
+        .unwrap_or_default()
+}
+
+fn name_state(doc: &Value, product: &str, name: &str) -> String {
+    doc["placements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["product"] == product)
+        .and_then(|p| p["names"].as_array())
+        .and_then(|names| names.iter().find(|n| n["name"] == name))
+        .and_then(|n| n["state"].as_str())
+        .map(str::to_string)
+        .unwrap_or_default()
+}
+
+// ---- #241: verify reads a pinned store's versions ----
+
+#[test]
+fn a_freshly_synced_azure_target_is_verified() {
+    let sim = delivered();
+    assert_eq!(
+        placement_state(&verify_doc(&sim, &fleet_delivered()), "app"),
+        "verified"
+    );
+}
+
+#[test]
+fn a_key_vault_version_added_outside_opv_is_drift_on_verify() {
+    let sim = delivered();
+    {
+        let mut w = sim.world.borrow_mut();
+        let entry = w.kv.get_mut("api-key").unwrap();
+        entry.versions.push((
+            "0000000000000000000000000000d00d".to_string(),
+            API_V2.to_string(),
+        ));
+    }
+    assert_eq!(
+        name_state(&verify_doc(&sim, &fleet_delivered()), "app", "API_KEY"),
+        "drifted_on_target"
+    );
 }
 
 // ---- the brief's table ----
@@ -1141,7 +1251,7 @@ fn no_change_deploy_with_failed_latest_revision_says_opv_changed_nothing() {
 /// A world synced with config in the store, whose LOG_LEVEL key is then withdrawn.
 fn config_withdrawn() -> (Sim, Fleet) {
     let sim = converged_with(&fleet_store());
-    let text = toml(r#"["prod"]"#, r#"config = "store""#)
+    let text = toml(r#"["prod"]"#, r#"config = "store""#, "")
         .replace(
             "[products.app.keys.LOG_LEVEL]\nkind = \"config\"\nenvironments = [\"prod\"]",
             "[products.app.keys.LOG_LEVEL]\nkind = \"config\"\nenvironments = [\"staging\"]",
