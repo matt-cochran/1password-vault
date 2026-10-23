@@ -5,9 +5,11 @@
 //! hand-written configuration.
 //!
 //! The generator only reads names, numbers and types out of the descriptor. It never reads a
-//! value (a descriptor holds none) and it never guesses a host: `http.host` is a `<HOST>`
-//! placeholder a person confirms. Every guessed line ends in `# suggested: confirm`; a
+//! value (a descriptor holds none) and it never guesses a host: `http.host` is the one the
+//! person gave (#236). Every guessed line ends in `# suggested: confirm`; a
 //! decision with no candidate is a `# choose:` comment instead.
+
+use std::collections::BTreeMap;
 
 use prost_reflect::{
     DescriptorPool, EnumDescriptor, FieldDescriptor, Kind, MessageDescriptor, MethodDescriptor,
@@ -23,23 +25,32 @@ mod propose_tests;
 const COMMENT_DEPTH: usize = 3;
 
 /// The TOML lines of an `http` target section for `service` in the descriptor set
-/// `descriptor` (read from `descriptor_path`, which the section names), or why not. Never a
-/// value: a descriptor holds names, numbers and types only.
-pub fn section(descriptor: &[u8], descriptor_path: &str, service: &str) -> Result<String, String> {
+/// `descriptor` (read from `descriptor_path`, which the section names), or why not. `names`
+/// is the `KEY=remote` list the person gave (`--http-names`), never guessed; `host` is the
+/// one they gave (#236). Never a value: a descriptor holds names, numbers and types only.
+pub fn section(
+    descriptor: &[u8],
+    descriptor_path: &str,
+    service: &str,
+    host: &str,
+    names: &str,
+) -> Result<String, String> {
     let pool = DescriptorPool::decode(descriptor)
         .map_err(|e| format!("descriptor could not be read: {e}"))?;
     let service = pool
         .get_service_by_name(service)
         .ok_or_else(|| format!("service `{service}` is not in the descriptor"))?;
+    let names = parse_names(names)?;
 
     let sha256 = hex::encode(Sha256::digest(descriptor));
     let mut out = String::new();
-    out.push_str("http.host = \"<HOST>\"\n");
+    out.push_str(&format!("http.host = {}\n", toml_str(host)));
     out.push_str(&format!(
         "http.descriptor = {}\n",
         toml_str(descriptor_path)
     ));
     out.push_str(&format!("http.descriptor_sha256 = {}\n", toml_str(&sha256)));
+    append_names(&mut out, &names);
     out.push('\n');
 
     append_rpc_comments(&mut out, &service);
@@ -48,6 +59,53 @@ pub fn section(descriptor: &[u8], descriptor_path: &str, service: &str) -> Resul
     out.push('\n');
     append_put_section(&mut out, &service);
     Ok(out)
+}
+
+/// The `http.names` pairs of §7: `KEY=remote`, comma-separated, whitespace around a pair
+/// ignored. Sorted by environment name. A value that is not a non-empty list of such pairs
+/// is refused with a reason that names the pair's position (and, for a repeated key, the
+/// key); the given value itself is never echoed.
+fn parse_names(value: &str) -> Result<BTreeMap<String, String>, String> {
+    let mut names: BTreeMap<String, String> = BTreeMap::new();
+    for (i, pair) in value.split(',').enumerate() {
+        let at = i + 1;
+        let pair = pair.trim();
+        let Some((key, remote)) = pair.split_once('=') else {
+            return Err(format!("names pair {at} is not `KEY=remote`"));
+        };
+        let (key, remote) = (key.trim(), remote.trim());
+        if key.is_empty() || remote.is_empty() {
+            return Err(format!(
+                "names pair {at} must give both a key and a remote name"
+            ));
+        }
+        if !is_names_key(key) {
+            return Err(format!(
+                "names pair {at} has a key that is not an uppercase environment name"
+            ));
+        }
+        if names.insert(key.to_string(), remote.to_string()).is_some() {
+            return Err(format!("names pair {at} repeats the key {key}"));
+        }
+    }
+    Ok(names)
+}
+
+/// `^[A-Z][A-Z0-9_]*$`, the environment-name key of an `http.names` pair (§3.2 rule 5).
+fn is_names_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_uppercase())
+        && chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Append `http.names` as a TOML inline table, in the [`BTreeMap`]'s order (sorted by
+/// environment name), values through [`toml_str`].
+fn append_names(out: &mut String, names: &BTreeMap<String, String>) {
+    let entries: Vec<String> = names
+        .iter()
+        .map(|(key, remote)| format!("{key} = {}", toml_str(remote)))
+        .collect();
+    out.push_str(&format!("http.names = {{ {} }}\n", entries.join(", ")));
 }
 
 /// A TOML basic string, so a path or name with a quote or backslash cannot break the output.

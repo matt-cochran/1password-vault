@@ -180,6 +180,20 @@ fn an_http_descriptor_and_service_option_parses() {
 }
 
 #[test]
+fn a_names_option_of_sixteen_pairs_parses() {
+    let pairs: Vec<String> = (0..16)
+        .map(|i| format!("KEY_{i:02}=remote-name-{i:02}-xx"))
+        .collect();
+    let value = pairs.join(",");
+    assert!(
+        parse(&format!(
+            r#"{{"kind":"target","env":"prod","name":"web","provider":"http","options":{{"http-names":"{value}"}}}}"#
+        ))
+        .is_ok()
+    );
+}
+
+#[test]
 fn a_high_entropy_option_value_parses() {
     assert!(
         parse(
