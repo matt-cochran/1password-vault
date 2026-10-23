@@ -517,19 +517,139 @@ fn a_machine_update_preflight_never_reaches_docker() {
     assert!(a.is_ok() && r.calls.borrow().iter().all(|c| c.program != "docker"));
 }
 
-// --- execute is still the Step 1 refusal ----------------------------------------------------
+// --- execute (§5): the strict sign-in, then the target's calls, all isolated -------------
+
+const MACHINE: &str = "8edd22dc379d68";
+const CANARY: &str = "sk-proj-LEAKCANARY";
+
+/// The deploy credentials item of `web` (`op://vprod/ideploy`).
+fn deploy_item() -> Output {
+    crate::app::testutil::item(&[crate::app::testutil::secret(
+        "",
+        "FLY_API_TOKEN",
+        "fo1_FIXTUREVALUE_deploy_token",
+    )])
+}
+
+// unrecorded: built from flyctl docs, replace with the first real reply (#234 §8.1)
+fn listing() -> Output {
+    Output::success(format!(
+        r#"[{{"id": "{MACHINE}", "name": "opv-canary", "state": "started", "region": "iad",
+            "config": {{"image": "registry.fly.io/shop:v1", "env": {{"OPVCANARY": "{CANARY}"}}}}}}]"#
+    ))
+}
+
+/// `machine-update` of `machine` in `web`, admitted.
+fn update_of(machine: &str) -> Admitted {
+    Admitted {
+        machine: Some(machine.into()),
+        image: Some("registry.fly.io/shop:v2".into()),
+        ..admitted(Operation::MachineUpdate)
+    }
+}
+
+/// The first two argv words of each call after the sign-in's read.
+fn verbs(r: &FakeRunner) -> Vec<String> {
+    r.calls
+        .borrow()
+        .iter()
+        .filter(|c| c.program != "op")
+        .map(|c| c.args[..2].join(" "))
+        .collect()
+}
+
+/// T5 (unit half): the lines and the document of `machines` hold no `config.env` value.
+#[test]
+fn machines_output_holds_no_config_env() {
+    let r = FakeRunner::new([deploy_item(), listing()]);
+    let report = execute(&fleet(), &admitted(Operation::Machines), &r).unwrap();
+    let printed = format!("{}\n{}", report.lines.join("\n"), report.json());
+    assert!(
+        !printed.contains(CANARY) && !printed.contains("OPVCANARY"),
+        "{printed}"
+    );
+}
+
+#[test]
+fn machines_prints_id_name_state_region_and_image() {
+    let r = FakeRunner::new([deploy_item(), listing()]);
+    let report = execute(&fleet(), &admitted(Operation::Machines), &r).unwrap();
+    assert_eq!(
+        report.lines,
+        [format!(
+            "{MACHINE}  opv-canary  started  iad  registry.fly.io/shop:v1"
+        )]
+    );
+}
+
+/// T4: the update is written only after a listing that holds the machine.
+#[test]
+fn machine_update_writes_after_a_listing_that_holds_the_machine() {
+    let r = FakeRunner::new([deploy_item(), listing(), Output::success("")]);
+    execute(&fleet(), &update_of(MACHINE), &r).unwrap();
+    assert_eq!(verbs(&r), ["machine list", "machine update"]);
+}
+
+/// T4: a machine id the listing does not hold is never written.
+#[test]
+fn machine_update_of_an_unlisted_machine_writes_nothing() {
+    let r = FakeRunner::new([deploy_item(), listing()]);
+    let _ = execute(&fleet(), &update_of("0123456789abcd"), &r);
+    assert_eq!(verbs(&r), ["machine list"]);
+}
+
+#[test]
+fn machine_update_reports_the_machine_and_its_new_image() {
+    let r = FakeRunner::new([deploy_item(), listing(), Output::success("")]);
+    let report = execute(&fleet(), &update_of(MACHINE), &r).unwrap();
+    assert_eq!(
+        report.lines,
+        [format!(
+            "updated machine {MACHINE} to registry.fly.io/shop:v2"
+        )]
+    );
+}
+
+/// §5.5: every call of the run, the sign-in's included, is made inside the isolation, where
+/// a child sees only opv's basics and its own variables.
+#[test]
+fn every_call_of_an_operation_runs_isolated() {
+    let r = FakeRunner::new([deploy_item(), listing()]);
+    execute(&fleet(), &admitted(Operation::Machines), &r).unwrap();
+    assert!(r.calls.borrow().iter().all(|c| c.isolated));
+}
+
+/// The run signs in with the named target's own item, never another's.
+#[test]
+fn an_operation_reads_the_named_targets_deploy_credentials() {
+    let r = FakeRunner::new([deploy_item(), listing()]);
+    execute(&fleet(), &admitted(Operation::Machines), &r).unwrap();
+    assert!(r.calls.borrow()[0].args.iter().any(|a| a == "ideploy"));
+}
+
+// --- registry-push is not yet available (L3b) -----------------------------------------------
 
 #[test]
 fn a_refused_operation_exits_with_the_policy_exit_code() {
-    let e = execute(&admitted(Operation::MachineUpdate), &FakeRunner::default()).unwrap_err();
+    let e = execute(
+        &fleet(),
+        &admitted(Operation::RegistryPush),
+        &FakeRunner::default(),
+    )
+    .unwrap_err();
     assert_eq!(e.exit_code(), 6);
 }
 
 #[test]
 fn the_refusal_names_the_operation_and_its_target() {
-    let e = execute(&admitted(Operation::MachineUpdate), &FakeRunner::default()).unwrap_err();
+    let e = execute(
+        &fleet(),
+        &admitted(Operation::RegistryPush),
+        &FakeRunner::default(),
+    )
+    .unwrap_err();
     assert!(
-        e.text().contains("machine-update on prod/web"),
+        e.text().contains("registry-push on prod/web"),
         "{}",
         e.text()
     );

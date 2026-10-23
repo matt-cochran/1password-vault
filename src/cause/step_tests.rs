@@ -126,6 +126,7 @@ parses!(every_next_parses_apply: "apply");
 parses!(every_next_parses_set: "set");
 parses!(every_next_parses_import: "import");
 parses!(every_next_parses_target_credentials: "target", "credentials");
+parses!(every_next_parses_target_op: "target", "op");
 
 /// The command path of `next`'s rendered command (`opv propose structure` →
 /// `["propose", "structure"]`), walked down the registry's tree; `None` when it names a

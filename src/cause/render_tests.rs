@@ -3263,6 +3263,25 @@ fn an_operation_without_deploy_credentials_names_the_mint() {
     );
 }
 
+/// #234 O4: a machine id not in the app points at the listing of the target's machines.
+#[test]
+fn a_machine_not_in_the_app_points_at_the_targets_machines() {
+    let c = Cause::Guard {
+        guard: Guard::OperationRefused {
+            env: EnvName::new("prod"),
+            target: TargetName::new("web"),
+            operation: "machine-update",
+            reason: OperationRefusal::MachineNotInApp {
+                machine: "0123456789abcd".into(),
+            },
+        },
+    };
+    assert_eq!(
+        next_in(&c, &inv()),
+        "opv target op prod --target web machines"
+    );
+}
+
 /// I5: az storing the secret unencrypted is its own cause, not a folder failure.
 #[test]
 fn i5_unencrypted_store_is_a_tool_cause() {

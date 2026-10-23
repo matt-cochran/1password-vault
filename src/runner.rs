@@ -968,16 +968,9 @@ fn isolate(cmd: &mut Command, program: &str) {
         return;
     }
     cmd.env_clear();
-    cmd.envs(std::env::vars_os().filter(|(k, _)| k.to_str().is_some_and(kept_when_isolated)));
-}
-
-/// A basic variable: on Windows, where names ignore case, `Path` is `PATH`.
-fn kept_when_isolated(name: &str) -> bool {
-    crate::host::is_basic_env(name)
-        || (cfg!(windows)
-            && crate::host::ENV_BASICS
-                .iter()
-                .any(|b| b.eq_ignore_ascii_case(name)))
+    cmd.envs(
+        std::env::vars_os().filter(|(k, _)| k.to_str().is_some_and(crate::host::is_basic_env)),
+    );
 }
 
 /// The deploy credentials [`under_deploy`] put in effect, if any: a sign-in's own check of
@@ -2473,6 +2466,9 @@ pub mod fake {
         /// True for `run_inherited` calls.
         pub inherited: bool,
         pub removed: Vec<String>,
+        /// Made inside [`isolated_env`](super::isolated_env): a real child would have seen
+        /// only opv's basics and its own variables.
+        pub isolated: bool,
     }
 
     impl std::fmt::Debug for Call {
@@ -2624,6 +2620,7 @@ pub mod fake {
                     .collect(),
                 inherited,
                 removed: Vec::new(),
+                isolated: super::ISOLATED.with(Cell::get),
             });
             match self.responses.borrow_mut().pop_front() {
                 Some(r) => r,
