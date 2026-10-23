@@ -3228,6 +3228,41 @@ fn i5_ram_dir_for_azure_on_macos_points_to_another_machine() {
     assert!(d.contains("from a Linux or Windows machine"), "{d}");
 }
 
+/// #234 §5.3: a registry push's missing in-memory folder is named for docker's sign-in.
+#[test]
+fn ram_dir_for_a_registry_push_names_dockers_sign_in() {
+    let c = Cause::RamDirUnavailable {
+        remote: None,
+        why: RamDir::NotTmpfs,
+        purpose: RamPurpose::RegistryPush,
+        env: None,
+        product: None,
+    };
+    assert!(
+        c.message().contains("docker's registry sign-in"),
+        "{}",
+        c.message()
+    );
+}
+
+/// #234 P4: an operation without deploy credentials names the mint as the way out.
+#[test]
+fn an_operation_without_deploy_credentials_names_the_mint() {
+    let c = Cause::Guard {
+        guard: Guard::OperationRefused {
+            env: EnvName::new("prod"),
+            target: TargetName::new("web"),
+            operation: "machines",
+            reason: OperationRefusal::NoDeployCredentials,
+        },
+    };
+    let d = c.do_text(&inv()).unwrap_or_default();
+    assert!(
+        d.contains("opv target credentials prod --target web --create"),
+        "{d}"
+    );
+}
+
 /// I5: az storing the secret unencrypted is its own cause, not a folder failure.
 #[test]
 fn i5_unencrypted_store_is_a_tool_cause() {

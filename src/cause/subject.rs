@@ -102,6 +102,8 @@ pub enum System {
     RemoteOpv,
     /// An application's own secret store over HTTPS (design http-target §5).
     Https,
+    /// The docker CLI and the local daemon it drives (a registry push, #234).
+    Docker,
 }
 
 impl System {
@@ -116,6 +118,7 @@ impl System {
             System::Ssh => "ssh",
             System::RemoteOpv => "opv on the remote host",
             System::Https => "HTTPS target",
+            System::Docker => "docker",
         }
     }
 }

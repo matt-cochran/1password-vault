@@ -26,6 +26,17 @@ fn failed_call_is_observed_with_its_call_id() {
     );
 }
 
+/// #234: without docker's system, no docker call could carry an observation.
+#[test]
+fn docker_call_is_observed_under_docker() {
+    let r = FakeRunner::new([Output::failure(1)]);
+    let seen = failed_write(
+        &r,
+        &Call::new("docker", &["push", "registry.fly.io/shop:v1"]),
+    );
+    assert_eq!(seen.map(|o| o.call().system), Some(System::Docker));
+}
+
 #[test]
 fn timed_out_call_is_observed_as_timed_out() {
     let r = FakeRunner::default();
