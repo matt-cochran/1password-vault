@@ -10,9 +10,11 @@
 //! `[stores.<name>]` Key Vault (`azure_key_vault`) other runtimes bind (FR-39).
 //! `resource.rs` is the engine a Container App and a Container Apps Job share (bindings,
 //! fingerprint, edit, identity and access; M4); `job.rs` is a companion job of the app
-//! (`docs/design/azure-jobs.md`).
+//! (`docs/design/azure-jobs.md`), and `companions.rs` the runtime `open` returns for a target
+//! with `azure.companion_jobs`: the app and its jobs, synced and deployed together.
 
 mod az;
+mod companions;
 pub mod config;
 pub mod containerapp;
 pub mod diagnose;
