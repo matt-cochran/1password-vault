@@ -6,10 +6,12 @@
 //!    with the working directory in the scenario's home (not `project/`) reads the descriptor
 //!    beside the configuration file, so the run does not fail with "must be a readable
 //!    descriptor file".
-//! 2. #236: `opv propose target prod vault --provider http --http-descriptor platform_console.binpb
-//!    --http-service portal.v1.PlatformConsoleService`, run in `project/` with the descriptor
-//!    beside `secrets.toml`, is not refused as `high_entropy` and the proposal carries an `http`
-//!    section.
+//! 2. #236: `opv propose target prod vault --provider http --http-host central.zonetico.com
+//!    --http-descriptor platform_console.binpb --http-service portal.v1.PlatformConsoleService
+//!    --http-names DATABASE_URL=openrouter --role serve`, run in `project/` with the descriptor
+//!    beside `secrets.toml`, exits 0 and its diff adds the target section with the generated
+//!    `http.list.call` and the given `http.names`. (`--role serve` is required because the app's
+//!    prod products carry role-scoped keys; every prod target declares it.)
 //! 3. #236: the same with `--http-service portal.v1.NoSuchService` fails naming that the service
 //!    is not in the descriptor, not "names no provider".
 //!
@@ -29,6 +31,9 @@ use crate::coverage::Scenario;
 pub(crate) const SNAPSHOTS: &[&str] = &[];
 
 const HOST: &str = "platform.e2e.test";
+/// The proposal's host (`--http-host`) and one key the app declares (`--http-names`).
+const PROPOSAL_HOST: &str = "central.zonetico.com";
+const DECLARED_KEY: &str = "DATABASE_URL";
 /// The pinned descriptor fixture, and the digest the target declares.
 const DESCRIPTOR: &str = "tests/fixtures/https/zonetico/platform_console.binpb";
 const DESCRIPTOR_SHA256: &str = "ec5b6933b89fc49c1ebeaaa31afc666e9090036c53301648cc657cd18f8a7445";
@@ -152,6 +157,35 @@ fn opv_from_home(s: &Scenario, args: &[String]) -> std::process::Output {
         .expect("run opv")
 }
 
+/// `opv propose target prod vault` for the http provider, in `project/` (the descriptor's
+/// directory): `service` is the `--http-service` under test, `--http-names` maps a declared
+/// key to a simulator-served remote.
+fn propose_target(s: &Scenario, service: &str) -> std::process::Output {
+    s.command()
+        .args([
+            "propose",
+            "target",
+            "prod",
+            "vault",
+            "--provider",
+            "http",
+            "--http-host",
+            PROPOSAL_HOST,
+            "--http-descriptor",
+            "platform_console.binpb",
+            "--http-service",
+            service,
+            // The app's prod products carry role-scoped keys, so a web-delivering target
+            // must declare a role (unrelated to #236).
+            "--role",
+            "serve",
+        ])
+        .arg("--http-names")
+        .arg(format!("{DECLARED_KEY}=openrouter"))
+        .output()
+        .expect("run opv")
+}
+
 // --- #237: a --config file's descriptor resolves beside it -----------------------------------
 
 /// The run from the home directory reaches the descriptor beside the named configuration
@@ -170,26 +204,24 @@ fn a_plan_from_home_reads_the_descriptor_beside_the_named_config() {
 
 // --- #236: propose target screens option names, and carries the http section ------------------
 
-/// The proposal is not refused as `high_entropy` and carries the generated `http` section.
+/// The http proposal succeeds (exit 0).
+#[test]
+fn an_http_target_proposal_exits_zero() {
+    let s = app();
+    let out = propose_target(&s, "portal.v1.PlatformConsoleService");
+    assert!(
+        out.status.success(),
+        "the proposal failed: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The proposal carries the generated `http` section (the descriptor line).
 #[test]
 fn an_http_target_proposal_carries_the_http_section() {
     let s = app();
-    let out = s
-        .command()
-        .args([
-            "propose",
-            "target",
-            "prod",
-            "vault",
-            "--provider",
-            "http",
-            "--http-descriptor",
-            "platform_console.binpb",
-            "--http-service",
-            "portal.v1.PlatformConsoleService",
-        ])
-        .output()
-        .expect("run opv");
+    let out = propose_target(&s, "portal.v1.PlatformConsoleService");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains("http.descriptor = \"platform_console.binpb\""),
@@ -198,26 +230,39 @@ fn an_http_target_proposal_carries_the_http_section() {
     );
 }
 
+/// The proposal's diff adds the generated `http.list.call`.
+#[test]
+fn an_http_target_proposal_carries_the_generated_list_call() {
+    let s = app();
+    let out = propose_target(&s, "portal.v1.PlatformConsoleService");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(
+            "http.list.call = \"portal.v1.PlatformConsoleService/ListPlatformConnections\""
+        ),
+        "the proposal carries no http.list.call: {stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The proposal's diff adds the given `http.names`.
+#[test]
+fn an_http_target_proposal_carries_the_given_names() {
+    let s = app();
+    let out = propose_target(&s, "portal.v1.PlatformConsoleService");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("http.names = { DATABASE_URL = \"openrouter\" }"),
+        "the proposal carries no http.names: {stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// A service absent from the descriptor fails naming that it is not in the descriptor.
 #[test]
 fn an_http_service_absent_from_the_descriptor_names_the_reason() {
     let s = app();
-    let out = s
-        .command()
-        .args([
-            "propose",
-            "target",
-            "prod",
-            "vault",
-            "--provider",
-            "http",
-            "--http-descriptor",
-            "platform_console.binpb",
-            "--http-service",
-            "portal.v1.NoSuchService",
-        ])
-        .output()
-        .expect("run opv");
+    let out = propose_target(&s, "portal.v1.NoSuchService");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("portal.v1.NoSuchService` is not in the descriptor"),
@@ -229,22 +274,7 @@ fn an_http_service_absent_from_the_descriptor_names_the_reason() {
 #[test]
 fn an_http_service_absent_from_the_descriptor_does_not_report_no_provider() {
     let s = app();
-    let out = s
-        .command()
-        .args([
-            "propose",
-            "target",
-            "prod",
-            "vault",
-            "--provider",
-            "http",
-            "--http-descriptor",
-            "platform_console.binpb",
-            "--http-service",
-            "portal.v1.NoSuchService",
-        ])
-        .output()
-        .expect("run opv");
+    let out = propose_target(&s, "portal.v1.NoSuchService");
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
