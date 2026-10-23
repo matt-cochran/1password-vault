@@ -936,6 +936,50 @@ pub fn under_deploy<T>(principal: crate::cause::Principal, f: impl FnOnce() -> T
     observe::under_deploy(principal, f)
 }
 
+/// Run `f` with operation children isolated (#234, design §5.5): every child started inside
+/// it, except `op`, gets a cleared environment with only opv's [basics](crate::host::ENV_BASICS),
+/// the program's [`pinned_env`] and the call's own env, so a CI job's other tokens never
+/// reach a provider tool. Off outside `f`: `plan`, `sync` and `run` keep the inherited
+/// environment. Thread-local, like [`under_deploy`]; [`command_for`] runs on the caller's
+/// thread.
+pub fn isolated_env<T>(f: impl FnOnce() -> T) -> T {
+    let prev = ISOLATED.with(|i| i.replace(true));
+    let _restore = RestoreIsolation(prev);
+    f()
+}
+
+thread_local! {
+    static ISOLATED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Restores the isolation in effect before [`isolated_env`] when dropped (also on a panic).
+struct RestoreIsolation(bool);
+
+impl Drop for RestoreIsolation {
+    fn drop(&mut self) {
+        ISOLATED.with(|i| i.set(self.0));
+    }
+}
+
+/// Inside [`isolated_env`], clear `cmd`'s environment for any program but `op` and put
+/// back opv's basics. Runs first, so the pinned and the call's own variables go on top.
+fn isolate(cmd: &mut Command, program: &str) {
+    if program == "op" || !ISOLATED.with(std::cell::Cell::get) {
+        return;
+    }
+    cmd.env_clear();
+    cmd.envs(std::env::vars_os().filter(|(k, _)| k.to_str().is_some_and(kept_when_isolated)));
+}
+
+/// A basic variable: on Windows, where names ignore case, `Path` is `PATH`.
+fn kept_when_isolated(name: &str) -> bool {
+    crate::host::is_basic_env(name)
+        || (cfg!(windows)
+            && crate::host::ENV_BASICS
+                .iter()
+                .any(|b| b.eq_ignore_ascii_case(name)))
+}
+
 /// The deploy credentials [`under_deploy`] put in effect, if any: a sign-in's own check of
 /// the item's values names that item.
 pub fn deploy_principal() -> Option<crate::cause::Principal> {
@@ -1782,10 +1826,12 @@ pub(crate) fn strip_session_vars(
 }
 
 /// The process for a captured call: argv as given, the program's [`pinned_env`] then the
-/// call's own env on top of the inherited environment, stdin `/dev/null` unless the call
+/// call's own env on top of the inherited environment (only its basics inside
+/// [`isolated_env`]), stdin `/dev/null` unless the call
 /// sends some (NR-11), stdout piped, stderr piped into memory (SR-1, NR-31).
 fn command_for(call: &Call) -> Command {
     let mut cmd = Command::new(call.program);
+    isolate(&mut cmd, call.program);
     cmd.args(with_account(call.program, call.args, call.env))
         .envs(pinned_env(call.program).iter().copied());
     add_op_session(&mut cmd, call.program);
@@ -2071,6 +2117,7 @@ impl ProcessRunner {
         let held = lock(&self.account).clone();
         let env = &self.with_default_account(program, env, &held);
         let mut cmd = Command::new(program);
+        isolate(&mut cmd, program);
         for key in remove {
             cmd.env_remove(key);
         }
@@ -2758,6 +2805,10 @@ pub use runner_create::CreateOutcome;
 #[cfg(test)]
 #[path = "runner_observed_tests.rs"]
 mod observed_tests;
+
+#[cfg(test)]
+#[path = "runner_isolation_tests.rs"]
+mod isolation_tests;
 
 #[cfg(test)]
 mod tests {
