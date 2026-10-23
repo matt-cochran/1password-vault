@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-10-23
+
+0.17.1 delivers an Azure app's secrets to its Container Apps jobs in the same deploy.
+
 ### Added
 
 - **Azure companion jobs (#238).** `azure.companion_jobs = ["job-a", …]` lists Container Apps jobs in the app's resource group that carry the same Key Vault references as the app; `opv propose target --azure-companion-jobs a,b` writes the list. `sync --deploy` updates the jobs first, then the app, each only where it is behind; a job-only change leaves the app unchanged. Before any update, opv refuses the deploy when a job's identity certainly cannot read the vault (naming the identity; `doctor` prints the grant command), warns when it cannot tell, and notes a grant under 10 minutes old. `doctor`, `status` and `plan` show each job and its identity's access. The deploy identity also needs Contributor on each job and read access to role assignments at the vault. Two targets cannot share a job. See [companion jobs](docs/configuration.md#companion-jobs).
