@@ -93,7 +93,8 @@ fn only_an_op_call_escapes_isolation() {
         isolated_env(|| {
             command_for(&Call::new(p, &[]))
                 .get_envs()
-                .any(|(k, _)| k == "PATH")
+                // Windows spells it `Path`.
+                .any(|(k, _)| k.to_str().is_some_and(|k| k.eq_ignore_ascii_case("PATH")))
         })
     };
     assert_eq!((rebuilt("op"), rebuilt("flyctl")), (false, true));
