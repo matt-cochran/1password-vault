@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-10-23
+
+0.16.1 makes the `http` target practical to set up and fixes `delivery verify` on Key Vault and Kubernetes targets.
+
 ### Fixed
 
 - **`delivery verify` on pinned targets (#241).** On an Azure Key Vault or Kubernetes target every key read `missing_on_target`, because the store's list carries no versions. verify now reads each key's current version as sync does, so a freshly synced key is delivered and a key changed on the target is `drifted_on_target`.
