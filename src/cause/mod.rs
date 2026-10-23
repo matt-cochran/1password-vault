@@ -704,6 +704,10 @@ pub enum Cause {
         env: Option<EnvName>,
         target: Option<TargetName>,
         seen: Observed,
+        /// Who needs the right, when it is not the principal that acted: a container app
+        /// job's identity, which opv checks for before a deploy (#238).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        grantee: Option<Principal>,
     },
     OwnerSetupRequired {
         system: System,

@@ -384,6 +384,7 @@ fn vault_answers(v: &Vault, r: &dyn CommandRunner, vault: &Value) -> Result<(), 
                 env: None,
                 target: None,
                 seen,
+                grantee: None,
             };
             Err(az::report(missing, up))
         }

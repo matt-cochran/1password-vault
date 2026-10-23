@@ -382,6 +382,7 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                 seen: seen(Principal::ServicePrincipal {
                     client_id: "sp-client-1".into(),
                 }),
+                grantee: None,
             },
             vec![
                 "Azure",
@@ -3056,6 +3057,7 @@ fn a16_a_missing_kubernetes_right_reads_once() {
         env: None,
         target: None,
         seen: fly_seen(),
+        grantee: None,
     };
     assert_eq!(
         c.message(),
@@ -4142,6 +4144,7 @@ fn a_missing_right_in_a_namespace_names_the_namespace_and_its_context() {
         env: None,
         target: None,
         seen: fly_seen(),
+        grantee: None,
     };
     assert_eq!(
         c.message(),
@@ -4757,4 +4760,83 @@ fn a_shell_mismatch_hands_back_the_running_shells_login() {
         running: crate::host::Shell::Fish,
     };
     assert_eq!(next_in(&c, &inv()), "opv login --shell=fish | source");
+}
+
+/// #238: a Key Vault right a container app job's identity lacks, found by opv's deploy
+/// identity.
+fn job_missing_right(grantee: Option<Principal>) -> Cause {
+    Cause::MissingRight {
+        system: System::Azure,
+        resource: res(ResourceKind::KeyVault, "kv-shop"),
+        right: Right::Read,
+        grant: GrantModel::Rbac {
+            role: "Key Vault Secrets User".into(),
+            scope: "scope-kv".into(),
+        },
+        env: None,
+        target: None,
+        seen: seen(Principal::ServicePrincipal {
+            client_id: "sp-deploy".into(),
+        }),
+        grantee,
+    }
+}
+
+fn job_identity() -> Principal {
+    Principal::AppIdentity {
+        name: "container app job job-migrate (principal p-1)".into(),
+    }
+}
+
+/// #238: the grant goes to the job's identity, not to the deploy identity.
+#[test]
+fn a_missing_right_with_a_grantee_grants_that_principal() {
+    let p = job_missing_right(Some(job_identity())).plan(&inv());
+    assert!(matches!(
+        p.action,
+        Some(Action::Grant { principal, .. }) if principal == job_identity()
+    ));
+}
+
+/// #238: the Do names the job's identity and the role (A4).
+#[test]
+fn a_missing_right_with_a_grantee_asks_for_its_role() {
+    let c = job_missing_right(Some(job_identity()));
+    assert_eq!(
+        c.do_text(&inv()).unwrap_or_default(),
+        "ask an owner to grant the role Key Vault Secrets User on scope-kv to app identity \
+         container app job job-migrate (principal p-1)"
+    );
+}
+
+/// #238: the problem names the job's identity as the one without the right.
+#[test]
+fn a_missing_right_with_a_grantee_names_it_as_lacking() {
+    let c = job_missing_right(Some(job_identity()));
+    assert!(
+        c.message()
+            .starts_with("app identity container app job job-migrate"),
+        "{}",
+        c.message()
+    );
+}
+
+/// #238: without a grantee the grant still goes to the principal that acted.
+#[test]
+fn a_missing_right_without_a_grantee_grants_the_actor() {
+    let c = job_missing_right(None);
+    assert_eq!(
+        c.do_text(&inv()).unwrap_or_default(),
+        "ask an owner to grant the role Key Vault Secrets User on scope-kv to service \
+         principal sp-deploy"
+    );
+}
+
+/// #238: a job reads as a container app job, next to the container app.
+#[test]
+fn a_container_app_job_reads_as_one() {
+    assert_eq!(
+        resource_kind(ResourceKind::ContainerAppJob),
+        "container app job"
+    );
 }
