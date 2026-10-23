@@ -723,6 +723,7 @@ mod tests {
             identity: "system".into(),
             env_name_template: "FLEET__{PRODUCT}__{KEY}".into(),
             config: super::super::ConfigRoute::Env,
+            companion_jobs: Vec::new(),
             vault_uri: Default::default(),
         }
     }

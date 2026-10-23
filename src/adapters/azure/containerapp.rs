@@ -1207,6 +1207,7 @@ mod tests {
             identity: "system".into(),
             env_name_template: "FLEET__{PRODUCT}__{KEY}".into(),
             config: ConfigRoute::Env,
+            companion_jobs: Vec::new(),
             vault_uri: kept(VAULT_URI),
         }
     }
