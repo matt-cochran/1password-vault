@@ -501,7 +501,7 @@ azure.config         = "env"                       # default; "store" keeps conf
 | `container_app` | The app that receives the variables. |
 | `container` | Optional. Required only when the app runs more than one container; opv then lists the names. |
 | `identity` | `system`, or the resource id of the user-assigned identity the app uses to read Key Vault. |
-| `env_name` | Template for the variable name; must contain `{PRODUCT}` and `{KEY}`. It defines the managed set. With one product, a `{KEY}` template delivers bare names. |
+| `env_name` | Template for the variable name; must contain `{KEY}`, and `{PRODUCT}` is optional. `"{KEY}"` delivers bare names (`RedisConnectionString`), for an app that binds flat configuration keys; two delivered keys that would render the same name are an error naming both, when the file loads. The rendered names of the declared keys are the managed set: a prune only ever touches those, and only secrets opv tagged. |
 | `config` | `env` (default) or `store`. |
 
 Names and limits are checked when the file loads, before any call:
