@@ -750,10 +750,13 @@ opv target credentials staging --target web
 
 ## Run a reviewed operation on a target: `opv target op`
 
-`opv target op <env> --target <name> machines` lists the target's Fly app: one line per Machine with its id, name, state, region and image. `opv target op <env> --target <name> machine-update --machine <id> --image <ref>` moves one Machine of the app to another image; `--machine` is the Machine's 14-character lowercase-hex id, and the write needs `--confirm <env>` on an environment that sets `confirm_env`. Only Fly targets offer these operations and `--target` is required. The image must be in the target's own repository, `registry.fly.io/<the target's fly.app>:<tag>` (or, for `machine-update`, `registry.fly.io/<the target's fly.app>@sha256:<64 hex>`). The target must record `deploy_credentials`: the operation signs in with that item only, never your own login, and its `flyctl` child sees only opv's basic variables. It prints the app's ids, names, states, regions and image references, never a value; `--json` prints one document instead of lines. `registry-push` is not shipped in 0.17.1: it refuses as not yet available.
+`opv target op <env> --target <name> machines` lists the target's Fly app: one line per Machine with its id, name, state, region and image. `opv target op <env> --target <name> machine-update --machine <id> --image <ref>` moves one Machine of the app to another image; `--machine` is the Machine's 14-character lowercase-hex id, and the write needs `--confirm <env>` on an environment that sets `confirm_env`. Only Fly targets offer these operations and `--target` is required. The image must be in the target's own repository, `registry.fly.io/<the target's fly.app>:<tag>` (or, for `machine-update`, `registry.fly.io/<the target's fly.app>@sha256:<64 hex>`). The target must record `deploy_credentials`: the operation signs in with that item only, never your own login, and its `flyctl` child sees only opv's basic variables. It prints the app's ids, names, states, regions and image references, never a value; `--json` prints one document instead of lines.
+
+`opv target op <env> --target <name> registry-push --image registry.fly.io/<app>:<tag>` pushes an image to the target's own Fly repository under the same `deploy_credentials`. It runs on Linux only, needs a RAM-backed `$XDG_RUNTIME_DIR` owned by you, and talks only to a local docker daemon on a unix socket: a set `DOCKER_CONTEXT` or a daemon on another host is refused. The image must already be in that local daemon (build or tag it first); opv checks this before it reads any credential. The image is named by a tag, never a digest, and the push needs `--confirm <env>` on an environment that sets `confirm_env`. opv gives docker a private configuration directory in RAM, hands the token to `docker login` on stdin only (never argv or the environment), and removes the directory when the push ends, on errors and Ctrl-C too. If docker kept the registry login anywhere other than that directory (a credential helper or store), opv removes the directory and refuses with `credential_store_escaped` before pushing; run `docker logout registry.fly.io` under your own docker configuration. On success it prints `pushed registry.fly.io/<app>:<tag> sha256:<digest>`, the digest the registry reported, which `machine-update --image registry.fly.io/<app>@sha256:<digest>` can then use. A push that fails part-way is `outcome_unknown` and is never retried.
 
 ```sh
 opv target op staging --target web machines
+opv target op staging --target web registry-push --image registry.fly.io/shop:v2 --confirm staging
 opv target op staging --target web machine-update --machine 0123456789abcd --image registry.fly.io/shop:v2 --confirm staging
 ```
 
@@ -1137,7 +1140,7 @@ jobs:
     env:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
       OP_CACHE: "false"
-      OPV_VERSION: v0.17.1  # pin the release you tested; bump it deliberately
+      OPV_VERSION: v0.17.2  # pin the release you tested; bump it deliberately
     steps:
       - uses: actions/checkout@v4
       - name: Install the 1Password CLI

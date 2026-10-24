@@ -1,7 +1,8 @@
 # Provider operations under a target's deploy credentials (#234)
 
-Status: approved 2026-10-23; machines and machine-update built for 0.17.0; registry-push follows
-in 0.17.x (gated on #234's Q1/S6 answers). The DESIGN-FMECA
+Status: approved 2026-10-23; all three operations shipped (machines and machine-update in
+0.17.0, registry-push in 0.17.2). Spikes S1–S4 were skipped by owner decision (§8.1): the replies
+the simulator serves are built from documentation until the first real run replaces them. The DESIGN-FMECA
 vet ([provider-operations-fmeca.md](provider-operations-fmeca.md): ready with changes; every High
 and Medium change is applied below, with vet risk ids in brackets) is applied. Citations are
 against `v0170/design-234` (`22f51c94`; HEAD differs only by the design files).
