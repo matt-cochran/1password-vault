@@ -132,6 +132,10 @@ pub enum ConfigCheck {
         label: String,
         locator: String,
         other: String,
+        /// The shared place is a job a target lists as a companion (#252); absent from the
+        /// JSON when false.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        job: bool,
     },
     /// Targets of two environments manage the same names in one place.
     SharedAcrossEnvironments {
@@ -139,6 +143,10 @@ pub enum ConfigCheck {
         locator: String,
         other_env: String,
         other_target: String,
+        /// The shared place is a job a target lists as a companion (#252), which no
+        /// template can tell apart; absent from the JSON when false.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        job: bool,
     },
     /// The template renders a name the target cannot hold.
     RenderedName {
@@ -287,6 +295,7 @@ impl ConfigCheck {
                 label,
                 locator,
                 other,
+                ..
             } => format!(
                 "delivers to {label} {locator}, as target {other} of the same environment does; \
                  within one environment, {label} {locator} can belong to only one target"
@@ -296,6 +305,7 @@ impl ConfigCheck {
                 locator,
                 other_env,
                 other_target,
+                ..
             } => format!(
                 "manages the same names on {label} {locator} as target {other_target} of \
                  environment {other_env}, so each would prune the other's"
@@ -451,6 +461,9 @@ impl ConfigCheck {
             }
             CommandArguments => {
                 format!("shorten the arguments of {field} and remove control characters")
+            }
+            SameTarget { job: true, .. } | SharedAcrossEnvironments { job: true, .. } => {
+                "list the job on one target only".into()
             }
             SameTarget { .. } => {
                 "merge the two targets into one, with products listing what it delivers".into()

@@ -490,6 +490,12 @@ pub trait TargetConfig: fmt::Debug + Send + Sync {
     fn shared_locator(&self, _other: &dyn TargetConfig) -> String {
         self.target_locator()
     }
+    /// True when the place [`TargetConfig::shared_locator`] names is a job a target lists
+    /// as a companion: no template tells it apart, so the fix is to list it on one target
+    /// only (#252).
+    fn shares_job(&self, _other: &dyn TargetConfig) -> bool {
+        false
+    }
     /// The configuration error for targets `first` and `second` (each named as `<env>
     /// (target <name>)`) sharing this target.
     fn shared_target_error(&self, first: &str, second: &str) -> String;
