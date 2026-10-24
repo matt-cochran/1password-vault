@@ -9,9 +9,13 @@
 //!
 //! Awaiting a recording: the stdout of `secrets import`, `secrets unset` and `secrets deploy`
 //! (writes, never run against the owner's apps; the simulator prints nothing, and opv does not
-//! read it). A digest the simulator mints for an imported value has the recorded shape (16
-//! lowercase hex characters) but not Fly's value, which is keyed server-side and cannot be
-//! computed (spike D0, Q4).
+//! read it), and `machine list --json` / `machine update --yes` (the owner skipped spikes S2
+//! and S3, design `provider-operations` §8.1). A digest the simulator mints for an imported
+//! value has the recorded shape (16 lowercase hex characters) but not Fly's value, which is
+//! keyed server-side and cannot be computed (spike D0, Q4). `machine list` prints each world
+//! Machine in flyctl's documented JSON shape (its `instance_id`/`created_at` synthesised from
+//! the id, the rest as the world holds it), and `machine update` only moves the listed
+//! Machine's `config.image`; both are documented, never recorded.
 //!
 //! ```json
 //! "fly": {
@@ -19,6 +23,10 @@
 //!   "tokens": ["FlyV1 …"],                   // FLY_API_TOKEN / FLY_ACCESS_TOKEN values Fly accepts
 //!   "apps": {"myapp": {"secrets": [{"name": "A", "digest": "…", "status": "Deployed",
 //!                                   "value": "<marker>"}],
+//!                      "machines": [{"id": "8edd22dc379d68", "name": "web",
+//!                                    "state": "started", "region": "iad",
+//!                                    "config": {"image": "registry.fly.io/myapp:v1",
+//!                                               "env": {"K": "<marker>"}}}],
 //!                      "status": { /* flyctl status --json */ },
 //!                      "releases": [ /* flyctl releases --json */ ]}}
 //! }
@@ -35,7 +43,7 @@ use crate::faults::Kind;
 use crate::recordings::{Reply, fixture, recorded};
 use crate::world::World;
 
-const BOOLEAN: &[&str] = &["--stage", "--json", "--detach"];
+const BOOLEAN: &[&str] = &["--stage", "--json", "--detach", "--yes"];
 const DIR: &str = "fly/failures";
 const OK: &str = "fly/success";
 /// The app name recorded in cases 10 (the recording's own made-up name).
@@ -138,6 +146,36 @@ pub fn run(world: &mut World, args: &[String]) -> Reply {
             }
             Reply::silent()
         }
+        ["machine", "list"] => {
+            let rows: Vec<Value> = machines(world, &app)
+                .iter()
+                .map(|m| {
+                    json!({
+                        "id": m["id"],
+                        "name": m["name"],
+                        "state": m["state"],
+                        "region": m["region"],
+                        "instance_id": format!("{:0>26}", m["id"].as_str().unwrap_or_default()),
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "config": {"image": m["config"]["image"],
+                                   "env": m["config"]["env"].clone()},
+                    })
+                })
+                .collect();
+            Reply::json(&Value::Array(rows))
+        }
+        ["machine", "update", id] => {
+            let image = flag(args, "--image").unwrap_or_default().to_string();
+            let list = world.array_at(&format!("/fly/apps/{app}/machines"));
+            let Some(machine) = list.iter_mut().find(|m| m["id"] == *id) else {
+                return Reply::no_recording(
+                    "flyctl machine update of an id not in the listing",
+                    DIR,
+                );
+            };
+            machine["config"]["image"] = json!(image);
+            Reply::silent()
+        }
         ["status"] => doc(world, &app, "status", "fly/status-deployed.json"),
         ["releases"] => doc(world, &app, "releases", "fly/releases-deployed.json"),
         _ => Reply::unsupported("flyctl", args),
@@ -146,6 +184,14 @@ pub fn run(world: &mut World, args: &[String]) -> Reply {
 
 fn secrets(world: &World, app: &str) -> Vec<Value> {
     world.doc["fly"]["apps"][app]["secrets"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The app's world Machines, in the documented shape (P6: `^[0-9a-f]{14}$`).
+fn machines(world: &World, app: &str) -> Vec<Value> {
+    world.doc["fly"]["apps"][app]["machines"]
         .as_array()
         .cloned()
         .unwrap_or_default()

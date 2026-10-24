@@ -573,3 +573,97 @@ fn signed_out_state_is_one_decision() {
         SessionState::SignedOut
     );
 }
+
+// ---- #234 strict sign-in for target operations (design §4 P4, T12) ----
+
+/// The fixture without `deploy_credentials`.
+fn fleet_without_credentials() -> Fleet {
+    config::parse(&crate::config::merged_text("tests/fixtures/secrets.toml")).unwrap()
+}
+
+/// The cause `open_for_operation` refused with, and whether any call was made.
+fn strict_refusal(fl: &Fleet, env: &str, target: &str) -> (crate::cause::Cause, bool) {
+    let r = FakeRunner::new([]);
+    let Err(Error::Catalog(cause, _)) = open_for_operation(fl, env, target, "machines", &r) else {
+        panic!("the strict sign-in went on");
+    };
+    (*cause, !r.calls.borrow().is_empty())
+}
+
+/// T12: `plan`/`sync`'s sign-in signs nothing in for a target without deploy_credentials,
+/// and goes on under the machine's own login.
+#[test]
+fn lenient_sign_in_goes_on_without_deploy_credentials() {
+    let fl = fleet_without_credentials();
+    let r = FakeRunner::new([]);
+    let opened = open_targeted(&fl, "prod", Some("portfolio"), &r, Reach::Target);
+    assert_eq!((opened.is_ok(), r.calls.borrow().len()), (true, 0));
+}
+
+/// T12: with no target named, `plan`/`sync`'s sign-in uses the environment's only one.
+#[test]
+fn lenient_sign_in_picks_the_only_target_when_none_is_named() {
+    let fl = fleet_with_credentials();
+    let r = FakeRunner::new([deploy_item()]);
+    let _ = open_targeted(&fl, "prod", None, &r, Reach::Target).unwrap();
+    assert_eq!(r.calls.borrow()[0].args[2], "fly");
+}
+
+/// P4: an operation never runs under the machine's own login: a target without
+/// deploy_credentials is refused before any call.
+#[test]
+fn strict_sign_in_refuses_a_target_without_deploy_credentials() {
+    use crate::cause::{Cause, Guard, OperationRefusal};
+    let (cause, called) = strict_refusal(&fleet_without_credentials(), "prod", "portfolio");
+    assert!(
+        matches!(
+            cause,
+            Cause::Guard {
+                guard: Guard::OperationRefused {
+                    reason: OperationRefusal::NoDeployCredentials,
+                    ..
+                }
+            }
+        ) && !called
+    );
+}
+
+/// P2: the target is always named; an empty name is not "the only target".
+#[test]
+fn strict_sign_in_never_picks_the_only_target() {
+    use crate::cause::{Cause, NameKind};
+    let (cause, called) = strict_refusal(&fleet_with_credentials(), "prod", "");
+    assert!(
+        matches!(
+            cause,
+            Cause::NotDeclared {
+                kind: NameKind::Target,
+                ..
+            }
+        ) && !called
+    );
+}
+
+/// P1: an unknown environment is refused, not returned as is.
+#[test]
+fn strict_sign_in_refuses_an_unknown_environment() {
+    use crate::cause::{Cause, NameKind};
+    let (cause, _) = strict_refusal(&fleet_with_credentials(), "prd", "portfolio");
+    assert!(matches!(
+        cause,
+        Cause::NotDeclared {
+            kind: NameKind::Environment,
+            ..
+        }
+    ));
+}
+
+/// The named target's own item is read once, and flyctl then carries its token.
+#[test]
+fn strict_sign_in_signs_in_with_the_named_targets_item() {
+    let fl = fleet_with_credentials();
+    let r = FakeRunner::new([deploy_item(), fly_empty()]);
+    let signed = open_for_operation(&fl, "prod", "portfolio", "machines", &r).unwrap();
+    let _ = signed.read(&Call::new("flyctl", &["version"]), &[]);
+    assert_eq!(env_of(&r.calls.borrow()[1], "FLY_API_TOKEN"), Some(TOKEN));
+}

@@ -305,6 +305,16 @@ pub const EFFECTS: &[Effect] = &[
         handles_values: true,
         ask_user_first: true,
     },
+    // `target op` runs a fixed provider operation under the target's deploy credentials
+    // (#234): `machines` reads, `machine-update` and `registry-push` change the target. The
+    // token reaches the provider's CLI only; nothing is printed.
+    Effect {
+        command: "target op",
+        effect: "writes_target",
+        needs_terminal: false,
+        handles_values: true,
+        ask_user_first: true,
+    },
     Effect {
         command: "needs",
         effect: "reads",

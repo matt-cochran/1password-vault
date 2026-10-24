@@ -415,9 +415,56 @@ pub struct Channels {
 }
 
 /// A validated, provider-specific target. Core code sees only this trait.
+/// What a provider operation (#234) runs against on a target that offers them: the app the
+/// operations are bound to (never the caller's), the CLI that runs them, and the registry host
+/// an image of that app lives under. Names only.
+#[derive(Debug, Clone)]
+pub struct OperationBinding {
+    pub app: String,
+    pub tool: &'static Tool,
+    pub registry: &'static str,
+    /// The provider's calls of the operations, so core runs them without naming it.
+    pub calls: &'static dyn TargetOperations,
+}
+
+/// One machine of a target's app as an operation lists it (#234 §2, O5): ids, names, a
+/// state, a region and an image reference only, never its environment or metadata.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ListedMachine {
+    pub id: String,
+    pub name: String,
+    pub state: String,
+    pub region: String,
+    pub image: String,
+}
+
+/// The calls behind `opv target op` (#234), implemented by a provider whose targets offer
+/// operations. Each runs under the runner it is given (the target's strict deploy sign-in)
+/// with `app` the target's bound app, never a caller input.
+pub trait TargetOperations: fmt::Debug + Sync {
+    /// `machines`: the app's machines, projected (a read).
+    fn machines(&self, r: &dyn CommandRunner, app: &str) -> Result<Vec<ListedMachine>, Error>;
+    /// `machine-update`: list the app, refuse a `machine` not in it, then move that machine
+    /// to `image` (a write, never retried). `env` and `target` name a refusal.
+    fn machine_update(
+        &self,
+        r: &dyn CommandRunner,
+        env: &str,
+        target: &str,
+        app: &str,
+        machine: &str,
+        image: &str,
+    ) -> Result<(), Error>;
+}
+
 pub trait TargetConfig: fmt::Debug + Send + Sync {
     /// The provider this target belongs to (its label names it in messages: "on Fly").
     fn provider(&self) -> &'static dyn Provider;
+    /// The binding `opv target op` runs against (#234), or `None` when the target's
+    /// provider offers no operations.
+    fn operations(&self) -> Option<OperationBinding> {
+        None
+    }
     /// Runtime env var name of `product`/`key`.
     fn env_name(&self, product: &str, key: &str) -> String;
     /// The target instance, as one stable string (an app, repositories, a vault and app, a

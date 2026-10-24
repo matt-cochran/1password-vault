@@ -232,15 +232,55 @@ fn open_at<'a>(
     let Some(env) = fleet.environments.get(env_name) else {
         return Ok(EnvRunner::new(r, None));
     };
-    // A service-account or Connect credential belongs to one account: it decides.
-    let account = env
-        .account
-        .clone()
-        .filter(|_| host().op_credential.is_none());
-    let mut runner = EnvRunner::new(r, account);
+    let mut runner = EnvRunner::new(r, account_of(env, host));
     if reach == Reach::Target {
         runner.deploy_sign_in(fleet, env_name, target)?;
     }
+    Ok(runner)
+}
+
+/// The environment's 1Password account for its `op` calls. A service-account or Connect
+/// credential belongs to one account: it decides, and none is added.
+fn account_of(env: &crate::domain::Environment, host: &dyn Fn() -> Host) -> Option<String> {
+    env.account
+        .clone()
+        .filter(|_| host().op_credential.is_none())
+}
+
+/// The runner for target operation `operation` on target `target` of `env_name` (#234,
+/// design §4 P1, P2, P4): signed in with that target's own `deploy_credentials`. Strict where
+/// [`open_targeted`] is lenient: the target is always named, and one without
+/// `deploy_credentials` is refused, so an operation never runs under the machine's own
+/// vendor login or another target's. Every refusal comes before any `op` call.
+pub fn open_for_operation<'a>(
+    fleet: &Fleet,
+    env_name: &str,
+    target: &str,
+    operation: &'static str,
+    r: &'a dyn CommandRunner,
+) -> Result<EnvRunner<'a>, Error> {
+    let env = fleet.environment(env_name)?;
+    let Some((target_name, t)) = env.targets.get_key_value(target) else {
+        let declared = env.targets.keys().map(String::as_str);
+        return Err(super::not_declared(
+            crate::cause::NameKind::Target,
+            target,
+            declared,
+        ));
+    };
+    let Some(reference) = t.deploy_credentials.as_ref() else {
+        return Err(crate::cause::Cause::Guard {
+            guard: crate::cause::Guard::OperationRefused {
+                env: crate::cause::EnvName::new(env_name),
+                target: crate::cause::TargetName::new(target_name),
+                operation,
+                reason: crate::cause::OperationRefusal::NoDeployCredentials,
+            },
+        }
+        .into());
+    };
+    let mut runner = EnvRunner::new(r, account_of(env, &Host::detect));
+    runner.sign_in_as_target(env_name, target_name, t, reference)?;
     Ok(runner)
 }
 
@@ -342,6 +382,18 @@ impl<'a> EnvRunner<'a> {
         else {
             return Ok(());
         };
+        self.sign_in_as_target(env_name, target_name, t, reference)
+    }
+
+    /// Sign in with `reference`, the `deploy_credentials` of target `target_name` of
+    /// `env_name`, under that target's principal.
+    fn sign_in_as_target(
+        &mut self,
+        env_name: &str,
+        target_name: &str,
+        t: &crate::domain::Target,
+        reference: &ItemRef,
+    ) -> Result<(), Error> {
         // A Key Vault behind a Kubernetes runtime signs `az` in (FR-39, FR-40).
         let provider = crate::provider::deploy_provider(t.config.as_ref());
         // The configuration accepts deploy_credentials only on a provider that has fields
@@ -356,7 +408,7 @@ impl<'a> EnvRunner<'a> {
             vault: crate::cause::VaultId::new(reference.vault.clone()),
             item: crate::cause::ItemId::new(reference.item.clone()),
             env: crate::cause::EnvName::new(env_name),
-            target: crate::cause::TargetName::new(target_name.clone()),
+            target: crate::cause::TargetName::new(target_name),
         };
         self.sign_in_with(login, reference, fields, Some(principal.clone()))?;
         self.deploy = Some(principal);

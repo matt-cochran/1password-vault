@@ -3,8 +3,9 @@
 //! `op://` references into this process's environment) and the app.
 //!
 //! - `environment = "declared_only"` (#137): the app's environment is exactly the product's
-//!   declared keys plus a fixed set of basics ([`BASICS`]: PATH, HOME, user, shell, locale,
-//!   terminal, temporary directory). Nothing else is inherited, so a Cloudflare Worker run
+//!   declared keys plus a fixed set of basics ([`crate::host::ENV_BASICS`]: PATH, HOME, user,
+//!   shell, locale, terminal, temporary and runtime directories, proxy and CA variables).
+//!   Nothing else is inherited, so a Cloudflare Worker run
 //!   with `CLOUDFLARE_INCLUDE_PROCESS_ENV=true` gets the declared keys as its bindings, not
 //!   the developer's whole environment.
 //! - Keys with `file` (#136): each value is written to a file at its declared relative path
@@ -32,23 +33,6 @@ use crate::cause::{
     Cause, EnvName, Invocation, IoKind, Origin, ProductName, ProfileName, RamDir, UsageProblem,
 };
 use crate::error::Error;
-
-/// The variables a `declared_only` app still gets from the environment it started in, so
-/// tools resolve and print as usual. None of them is a credential. `LC_*` is kept too.
-pub const BASICS: &[&str] = &[
-    "PATH",
-    "HOME",
-    "USER",
-    "LOGNAME",
-    "SHELL",
-    "TERM",
-    "COLORTERM",
-    "NO_COLOR",
-    "LANG",
-    "LANGUAGE",
-    "TZ",
-    "TMPDIR",
-];
 
 /// The directory name prefix in `$XDG_RUNTIME_DIR` (swept when its run is gone).
 pub const DIR_PREFIX: &str = "opv-run.";
@@ -163,13 +147,9 @@ impl Outer {
     }
 }
 
-pub(crate) fn is_basic(name: &str) -> bool {
-    BASICS.contains(&name) || name.starts_with("LC_")
-}
-
 /// The app's environment from `inherited` (this process's, holding the resolved values):
 /// never an `OP_*` variable, never a key delivered as a file; under `declared_only`, only
-/// the selected keys and [`BASICS`]. `dir` is added under `dir_env` when files are
+/// the selected keys and [`crate::host::ENV_BASICS`]. `dir` is added under `dir_env` when files are
 /// delivered.
 pub fn child_env(
     d: &Delivery,
@@ -180,7 +160,9 @@ pub fn child_env(
     let mut out: Vec<(String, String)> = inherited
         .iter()
         .filter(|(k, _)| !k.starts_with("OP_") && k != OUTER_VAR && !as_file(k))
-        .filter(|(k, _)| !d.declared_only || is_basic(k) || d.keys.iter().any(|x| x == k))
+        .filter(|(k, _)| {
+            !d.declared_only || crate::host::is_basic_env(k) || d.keys.iter().any(|x| x == k)
+        })
         .cloned()
         .collect();
     if let (Some(var), Some(dir)) = (&d.dir_env, dir) {
