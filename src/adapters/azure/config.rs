@@ -526,6 +526,13 @@ impl TargetConfig for AzureTarget {
             .unwrap_or_else(|| self.target_locator())
     }
 
+    fn shares_job(&self, other: &dyn TargetConfig) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<AzureTarget>()
+            .is_some_and(|o| self.shared_job(o).is_some())
+    }
+
     fn shared_target_error(&self, first: &str, second: &str) -> String {
         format!(
             "environments {first} and {second} both use Key Vault {:?} with azure.env_name {:?}",
@@ -1030,7 +1037,7 @@ environments = ["prod"]
 
     /// The prod target listing job `job-x`, then a target `web` of `env` on app `app` with
     /// `companion_jobs = jobs` and its own vault and template.
-    fn second_target_error(env: &str, app: &str, jobs: &str) -> String {
+    fn second_target_doc(env: &str, app: &str, jobs: &str) -> String {
         let first = AZURE_ENV.replace(
             "identity = \"system\"",
             "identity = \"system\"\ncompanion_jobs = [\"job-x\"]",
@@ -1047,7 +1054,11 @@ environments = ["prod"]
              resource_group = \"rg-myapp\"\ncontainer_app = \"{app}\"\nidentity = \"system\"\n\
              env_name = \"WEB__{{KEY}}\"\ncompanion_jobs = {jobs}\n"
         );
-        azure_err(&azure_doc(&doc, KEYS))
+        azure_doc(&doc, KEYS)
+    }
+
+    fn second_target_error(env: &str, app: &str, jobs: &str) -> String {
+        azure_err(&second_target_doc(env, app, jobs))
     }
 
     #[test]
@@ -1066,6 +1077,28 @@ environments = ["prod"]
             e.contains("manages the same names on Azure container app job rg-myapp/job-x"),
             "{e}"
         );
+    }
+
+    /// The `Do:` of the refusal of a second target listing `jobs` (#252).
+    fn second_target_do(env: &str, jobs: &str) -> String {
+        parse(&second_target_doc(env, "ca-web", jobs))
+            .unwrap_err()
+            .do_text()
+            .unwrap_or_default()
+    }
+
+    /// #252: azure.env_name cannot tell a shared job apart, so the fix lists it once.
+    #[test]
+    fn two_environments_listing_one_job_are_told_to_list_it_on_one_target() {
+        let d = second_target_do("stage", r#"["job-x"]"#);
+        assert!(d.contains("list the job on one target only"), "{d}");
+    }
+
+    /// #252: the same within one environment.
+    #[test]
+    fn two_targets_of_one_environment_listing_one_job_are_told_to_list_it_on_one_target() {
+        let d = second_target_do("prod", r#"["job-x"]"#);
+        assert!(d.contains("list the job on one target only"), "{d}");
     }
 
     #[test]

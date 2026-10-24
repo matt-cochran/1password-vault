@@ -112,6 +112,13 @@ request buffers inside the TLS library are not zeroized.
 target's item. Its `flyctl` child gets a cleared environment with opv's basics only, and the run
 prints ids, names, states, regions and image references, never a value.
 
+`registry-push` is the one place a deploy token rests in a file, because `docker push` reads
+registry auth only from docker's configuration directory. For one push, opv creates a private
+directory (mode 0700) in the RAM-backed `$XDG_RUNTIME_DIR`; `docker login` takes the token on stdin
+and writes the login to the `config.json` (mode 0600) inside it. opv refuses to push if docker put
+the login anywhere else, and removes the directory on every exit path: success, error, Ctrl-C and
+SIGTERM. A killed run's directory is swept at the start of the next push.
+
 ## Values opv never stores: infrastructure values
 
 From 0.13.0 a key declared `source = "infrastructure"` holds a value that infrastructure

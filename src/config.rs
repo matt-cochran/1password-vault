@@ -2531,6 +2531,7 @@ fn check_shared_targets(
                             label: t.provider().label().to_string(),
                             locator: t.shared_locator(*p),
                             other: prev.to_string(),
+                            job: t.shares_job(*p),
                         }),
                     ));
                 }
@@ -2543,6 +2544,7 @@ fn check_shared_targets(
                         locator: t.shared_locator(*p),
                         other_env: prev_env.to_string(),
                         other_target: prev.to_string(),
+                        job: t.shares_job(*p),
                     }),
                 ));
             }
@@ -3956,7 +3958,8 @@ put.conflict = ["ALREADY_EXISTS"]
             ConfigCheck::SameTarget {
                 label: "Fly".into(),
                 locator: "app web-prod".into(),
-                other: "other".into()
+                other: "other".into(),
+                job: false
             }
         );
     }
@@ -3979,6 +3982,23 @@ put.conflict = ["ALREADY_EXISTS"]
         assert_eq!(
             field_of(&text),
             "environments.staging.targets.portfolio.fly.secret_name"
+        );
+    }
+
+    /// #252: a shared app, not a job, keeps its fix text.
+    #[test]
+    fn two_environments_on_one_app_keep_the_place_or_template_fix() {
+        let text = mutate(
+            r#"fly.app = "mcproductlabs-portfolio-staging""#,
+            r#"fly.app = "mcproductlabs-portfolio-production""#,
+        );
+        assert_eq!(
+            do_of(&text).as_deref(),
+            Some(
+                "give one of the targets another place, or set \
+                 environments.staging.targets.portfolio.fly.secret_name so the names differ in \
+                 secrets.toml at line 6, column 1"
+            )
         );
     }
 

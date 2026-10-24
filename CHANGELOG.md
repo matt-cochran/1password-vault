@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.2] - 2026-10-24
+
+0.17.2 completes reviewed target operations with `registry-push` and fixes two pieces of misleading advice.
+
+### Added
+
+- **`opv target op <env> --target <name> registry-push --image registry.fly.io/<app>:<tag>` (#234).** Pushes an image already in the local docker daemon to the target's own Fly repository under the target's `deploy_credentials`, and prints `pushed <image> sha256:<digest>`. Linux only, with a RAM-backed `$XDG_RUNTIME_DIR` and a local unix-socket daemon (a set `DOCKER_CONTEXT` or a remote daemon is refused). The token goes to `docker login` on stdin only; docker keeps the login in a private 0700 RAM directory that opv removes on every exit path, and a login docker stored anywhere else refuses as `credential_store_escaped` before the push. Needs `--confirm <env>` where the environment sets `confirm_env`. SR-4 and FR-40 now name docker's private `DOCKER_CONFIG` beside az's directory.
+
+### Fixed
+
+- `opv ready` no longer suggests declaring a key in an environment its `rules.refuse_in` refuses (#243).
+- A companion job shared by two targets is refused with a step that says to list the job on one target only (#252).
+
 ## [0.17.1] - 2026-10-23
 
 0.17.1 delivers an Azure app's secrets to its Container Apps jobs in the same deploy.
