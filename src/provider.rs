@@ -438,6 +438,25 @@ pub struct ListedMachine {
     pub image: String,
 }
 
+/// One `registry-push` (#234 §5.3) as admission and preflight bound it: names, the target's
+/// deploy credentials item, the validated image, the local daemon's endpoint (P9) and the
+/// RAM runtime directory (P8). No value.
+#[derive(Debug, Clone, Copy)]
+pub struct RegistryPush<'a> {
+    pub env: &'a str,
+    pub target: &'a str,
+    /// The target's bound app, never a caller input.
+    pub app: &'a str,
+    /// The target's `deploy_credentials` item, read once by the push.
+    pub item: &'a crate::domain::ItemRef,
+    /// `<registry>/<app>:<tag>`, validated (P6) and in the local daemon (P10).
+    pub image: &'a str,
+    /// The local daemon's `unix://` endpoint (P9).
+    pub endpoint: &'a str,
+    /// The user-owned, RAM-backed runtime directory (P8).
+    pub runtime: &'a std::path::Path,
+}
+
 /// The calls behind `opv target op` (#234), implemented by a provider whose targets offer
 /// operations. Each runs under the runner it is given (the target's strict deploy sign-in)
 /// with `app` the target's bound app, never a caller input.
@@ -455,6 +474,10 @@ pub trait TargetOperations: fmt::Debug + Sync {
         machine: &str,
         image: &str,
     ) -> Result<(), Error>;
+    /// `registry-push`: push `push.image` from the local daemon to the app's repository
+    /// under the target's deploy credentials (a write, never retried); the digest the
+    /// registry reported (`sha256:<64 hex>`).
+    fn registry_push(&self, r: &dyn CommandRunner, push: &RegistryPush) -> Result<String, Error>;
 }
 
 pub trait TargetConfig: fmt::Debug + Send + Sync {
