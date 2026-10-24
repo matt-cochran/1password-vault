@@ -249,6 +249,8 @@ pub enum ResourceKind {
     FlyApp,
     KeyVault,
     ContainerApp,
+    /// A Container Apps job (#238): its scope names the resource group.
+    ContainerAppJob,
     Namespace,
     Deployment,
     KubeContext,

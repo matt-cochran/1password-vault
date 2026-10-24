@@ -385,7 +385,7 @@ deploy_credentials = "op://infra-prod/fly-deploy" # the deploy identity's item, 
 - `account`: every `op` call for this environment uses this 1Password account (passed as `--account`), and `opv login prod` signs in to it. Set it only when your environments live in different accounts; otherwise the project's account (above) applies. Use the account ID (`op account list` shows it): op takes no email, and a sign-in address may be shared by several accounts. A bad value is a configuration error pointing at its line and column. Under a service-account token in CI the token decides the account.
 - `deploy_credentials`: an `op://<vault>/<item>` reference to a whole item (never a field) holding only this target's least-privilege deploy identity. `status`, `plan`, `sync` and `doctor --env` read it and sign the target CLI in for that run only. The fields are fixed per provider: Fly `FLY_API_TOKEN` (concealed); Azure `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` (text) and `AZURE_CLIENT_SECRET` (concealed). Kubernetes takes none (`kubectl` uses your kubeconfig), except when its secrets live in a Key Vault (`secrets_in`): then the item holds the Azure fields and signs in the `az` that writes that Key Vault. Otherwise `deploy_credentials` on a Kubernetes target is a configuration error. If the sign-in fails, `doctor --env` shows one `FAIL deploy credentials:` line, runs its other checks and skips the target checks that need those credentials.
 
-Give the deploy identity only what a sync needs: a Fly deploy token for that one app, or an Azure service principal with Key Vault Secrets Officer on that vault and Contributor on that Container App. Break-glass (owner or admin) credentials are for people and are never referenced by `deploy_credentials`.
+Give the deploy identity only what a sync needs: a Fly deploy token for that one app, or an Azure service principal with Key Vault Secrets Officer on that vault and Contributor on that Container App (and on each [companion job](#companion-jobs), with read access to role assignments at the vault). Break-glass (owner or admin) credentials are for people and are never referenced by `deploy_credentials`.
 
 How a run uses each field, and where Azure keeps its sign-in:
 
@@ -490,6 +490,7 @@ azure.container      = "api"                       # only if the app has more th
 azure.identity       = "system"                    # or the resource id of a user-assigned identity
 azure.env_name       = "FLEET__{PRODUCT}__{KEY}"   # optional; defines target names
 azure.config         = "env"                       # default; "store" keeps config in Key Vault too
+azure.companion_jobs = ["job-myapp-validate"]      # optional; Container Apps jobs deployed with the app
                                                    # state_vault_id: the bindings file
 ```
 
@@ -503,6 +504,7 @@ azure.config         = "env"                       # default; "store" keeps conf
 | `identity` | `system`, or the resource id of the user-assigned identity the app uses to read Key Vault. |
 | `env_name` | Template for the variable name; must contain `{KEY}`, and `{PRODUCT}` is optional. `"{KEY}"` delivers bare names (`RedisConnectionString`), for an app that binds flat configuration keys; two delivered keys that would render the same name are an error naming both, when the file loads. The rendered names of the declared keys are the managed set: a prune only ever touches those, and only secrets opv tagged. |
 | `config` | `env` (default) or `store`. |
+| `companion_jobs` | Optional. Container Apps jobs in the app's resource group and subscription that get the same variables as the app ([companion jobs](#companion-jobs)). Each name is checked like the other identifiers; a name listed twice, or the app's own name, is an error. `opv propose target … --azure-companion-jobs a,b` writes the list. |
 
 Names and limits are checked when the file loads, before any call:
 
@@ -512,6 +514,28 @@ Names and limits are checked when the file loads, before any call:
 - Every identifier is checked like `fly.app` (no leading `-`, no shell metacharacters).
 
 opv tags every secret it writes `opv-managed=<env>` and only ever deletes tagged secrets. Just before a prune deletes one, opv adds `opv-pruned=<env>`; Key Vault keeps deleted secrets for its retention period, and when that key comes back opv recovers the entry and writes the new version. A deleted secret without both tags is never recovered by opv: sync stops with the `az keyvault secret recover` command. opv never purges. `opv explain <KEY>` shows the Key Vault name and the variable it feeds.
+
+#### Companion jobs
+
+A Container Apps job that runs beside the app, such as a pre-deploy check whose template copies the app's environment, holds its own Key Vault references. List it in `azure.companion_jobs` and opv keeps it on the same versions as the app. `azure.identity` and `azure.container` apply to each job as they do to the app: `system` means the job's own system identity, which is a different principal from the app's, and a user-assigned identity must be attached to each job.
+
+`opv sync <env> --deploy` updates the jobs first, in the order listed, and then the app. Each resource gets only what it does not already have, and one that already matches is not updated. When only a job changed, the app is left as it is and the run says `container app <app> unchanged; only its jobs changed` before the deployed-revision line. Without `--deploy` nothing is applied, for the jobs or the app. opv does not start, wait for or schedule job executions; a job's next execution uses the new versions, and one already running keeps the values it started with. If a run stops partway, the next run finds whatever is behind (a job or the app) and updates only that. `status` and `plan` report a job that points at an old version as drift, and `delivery verify` reports it as `drifted_on_target`.
+
+A job's identity must be able to read the Key Vault. Azure accepts a job whose identity cannot, and only its executions fail, without a reason. So before it updates anything, opv checks each job it will update:
+
+- When the job certainly cannot read the vault (it has no system identity, the user-assigned identity is not attached, a vault using access policies gives it no `get`, or it has no role at the vault or above), the deploy is refused before any job or the app is changed. The error names the job's identity, and `opv doctor --env <env>` prints the `az role assignment create` or `az keyvault set-policy` command that grants it.
+- When opv cannot tell (the role assignment list fails, or the job holds only roles opv does not check, such as a custom role), the deploy goes on with a warning naming the job and the reason.
+- When the deciding role was granted less than 10 minutes ago, the deploy goes on with a note that a new grant can take a few minutes to apply, and that an execution started before a given time (UTC) may fail to read its secrets. This covers direct role grants only.
+
+`opv doctor --env <env>` shows a `container app job <job>` line and a `job <job> identity access` line for each job, and `status` and `plan` show the access line when it is not OK.
+
+The deploy identity needs, besides Key Vault Secrets Officer on the vault and Contributor on the app, Contributor on each companion job, and read access to role assignments (`Microsoft.Authorization/roleAssignments/read`) at the vault's scope for the check above.
+
+To deploy the app alone while a job is refused, for example for an urgent rotation, remove the job from `companion_jobs`, run `opv sync <env> --deploy`, and add the job back once its identity has the grant.
+
+opv forgets a job that is no longer listed: it neither updates it nor cleans it up. Before removing a job for good, keep it listed until an `opv sync <env> --prune --deploy` has run, or delete its `opv-` secrets and the environment variables that use them yourself. Otherwise a later prune deletes Key Vault entries the job still references, and its next execution fails without a reason. A `--prune --deploy` releases each job's references, then the app's, before it deletes anything from Key Vault.
+
+Two targets cannot share a job, in one environment or across environments: each would deliver to it and prune what the other uses. A job listed by two targets in the same resource group and subscription, or a job that is another target's `container_app`, is a configuration error naming the job. List each job on one target only.
 
 ### Kubernetes: Secrets + Deployment
 

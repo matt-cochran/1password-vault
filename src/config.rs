@@ -2529,7 +2529,7 @@ fn check_shared_targets(
                         &["environments", env, "targets", name],
                         check(ConfigCheck::SameTarget {
                             label: t.provider().label().to_string(),
-                            locator: t.target_locator(),
+                            locator: t.shared_locator(*p),
                             other: prev.to_string(),
                         }),
                     ));
@@ -2540,7 +2540,7 @@ fn check_shared_targets(
                     &["environments", env, "targets", name, section],
                     check(ConfigCheck::SharedAcrossEnvironments {
                         label: t.provider().label().to_string(),
-                        locator: t.target_locator(),
+                        locator: t.shared_locator(*p),
                         other_env: prev_env.to_string(),
                         other_target: prev.to_string(),
                     }),

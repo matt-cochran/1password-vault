@@ -313,6 +313,14 @@ diagnosis, `/dev/stdin` and pacing plumbing), and `AzureTarget::open` returns `P
 - Adding a provider = one module under `src/adapters/<provider>/` (declared with `pub mod` in
   `src/adapters/mod.rs`) + one line in the registry + docs. Nothing else.
 
+Companion jobs (#238, [azure-jobs.md](azure-jobs.md)): an Azure target may list Container Apps
+jobs in `azure.companion_jobs`. The contract does not change. With a non-empty list,
+`AzureTarget::open` returns `Ports::Pinned` with `companions::AppWithJobs` as its
+`PinnedRuntime`, which binds, applies (jobs first, then the app) and releases the app and its
+jobs as one runtime; with none, the target is the app alone, as before. `same_target` also
+matches two Azure targets that share a job, and the provided `shared_locator` hook (default: the
+target's locator) lets the error name that job instead of the whole target.
+
 ## 12. Kubernetes target (FR-38)
 
 Store: Kubernetes Secrets. Runtime: a Deployment (StatefulSet later if asked). CLI: `kubectl`.

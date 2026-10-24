@@ -53,6 +53,9 @@ pub struct AzureTarget {
     /// Env-name template with `{KEY}` and optionally `{PRODUCT}`.
     pub env_name_template: String,
     pub config: ConfigRoute,
+    /// `azure.companion_jobs`: Container Apps jobs in the app's resource group that read the
+    /// same secrets (#238); empty when none is listed.
+    pub companion_jobs: Vec<String>,
     /// The vault's `properties.vaultUri`, read once per run (NR-6); not configuration.
     pub vault_uri: ResolvedUri,
 }
@@ -125,13 +128,15 @@ struct RawAzure {
     env_name: String,
     #[serde(default)]
     config: Option<String>,
+    #[serde(default)]
+    companion_jobs: Vec<String>,
 }
 
 /// The env-name template `opv init` writes when none is given.
 const INIT_FLEET_TEMPLATE: &str = "FLEET__{PRODUCT}__{KEY}";
 
 /// `opv target add` options of the Azure provider (H3), in the order they are written.
-static INIT_FIELDS: [InitField; 8] = [
+static INIT_FIELDS: [InitField; 9] = [
     InitField {
         field: "subscription",
         help: "Azure subscription id (a GUID; az account list -o table)",
@@ -172,7 +177,15 @@ static INIT_FIELDS: [InitField; 8] = [
         help: "Where config keys go: env (default) or store",
         required: false,
     },
+    InitField {
+        field: COMPANION_JOBS,
+        help: "Container Apps jobs that read the same secrets, comma-separated (job-a,job-b)",
+        required: false,
+    },
 ];
+
+/// The `azure` field listing the app's companion jobs (#238).
+const COMPANION_JOBS: &str = "companion_jobs";
 
 /// `azure.<field>` breaks `rule` (FR-28). The section does not carry its place in the
 /// file, so the field is named within the section.
@@ -262,6 +275,7 @@ impl Provider for AzureProvider {
         let mut lines: Vec<(&str, &str)> = Vec::new();
         for f in &INIT_FIELDS {
             let v = match (values.get(f.field), f.field) {
+                (_, COMPANION_JOBS) => continue,
                 (Some(v), _) => v.as_str(),
                 (None, "identity") => "system",
                 (None, "env_name") => INIT_FLEET_TEMPLATE,
@@ -269,7 +283,20 @@ impl Provider for AzureProvider {
             };
             lines.push((f.field, v));
         }
-        Some(init_lines("azure", lines))
+        let mut section = init_lines("azure", lines);
+        // D9: `a,b` is the TOML list; a job name cannot hold a comma, and the load checks
+        // each name.
+        if let Some(jobs) = values.get(COMPANION_JOBS) {
+            let list = jobs
+                .split(',')
+                .map(|j| toml::Value::String(j.trim().to_string()))
+                .collect();
+            section.push_str(&format!(
+                "azure.{COMPANION_JOBS} = {}\n",
+                toml::Value::Array(list)
+            ));
+        }
+        Some(section)
     }
 
     fn store_kinds(&self) -> &'static [&'static str] {
@@ -295,8 +322,30 @@ fn azure_target(name: &str, a: RawAzure, template: String) -> Result<AzureTarget
     if let Some(c) = &a.container {
         ids.push(("azure.container", c.as_str()));
     }
+    ids.extend(
+        a.companion_jobs
+            .iter()
+            .map(|j| ("azure.companion_jobs", j.as_str())),
+    );
     for (field, value) in ids {
         check_ident(name, field, value, is_id, "^[A-Za-z0-9][A-Za-z0-9._-]*$")?;
+    }
+    // Azure names ignore case: a job listed twice, or named like the app, is one resource.
+    let mut seen = BTreeSet::from([a.container_app.to_ascii_lowercase()]);
+    for j in &a.companion_jobs {
+        if !seen.insert(j.to_ascii_lowercase()) {
+            return Err(invalid(
+                COMPANION_JOBS,
+                if j.eq_ignore_ascii_case(&a.container_app) {
+                    FieldRule::Collision {
+                        rendered: j.clone(),
+                        other: DottedPath(vec!["azure".into(), "container_app".into()]),
+                    }
+                } else {
+                    FieldRule::DuplicateKey
+                },
+            ));
+        }
     }
     check_ident(
         name,
@@ -329,6 +378,7 @@ fn azure_target(name: &str, a: RawAzure, template: String) -> Result<AzureTarget
         identity: a.identity,
         env_name_template: template,
         config,
+        companion_jobs: a.companion_jobs,
         vault_uri: ResolvedUri::default(),
     })
 }
@@ -370,6 +420,31 @@ impl AzureTarget {
         self.env_name_template
             .replace("{PRODUCT}", &product)
             .replace("{KEY}", key)
+    }
+
+    /// The companion jobs (`azure.companion_jobs`), in config order (#238).
+    pub fn companion_jobs(&self) -> &[String] {
+        &self.companion_jobs
+    }
+
+    /// The Container Apps resource `self` and `o` both deliver to through a companion job
+    /// (#238): a job both list, or a job one lists that is the other's app. Names only.
+    fn shared_job(&self, o: &AzureTarget) -> Option<String> {
+        if self.subscription != o.subscription
+            || !self.resource_group.eq_ignore_ascii_case(&o.resource_group)
+        {
+            return None;
+        }
+        let listed =
+            |t: &AzureTarget, n: &str| t.companion_jobs.iter().any(|j| j.eq_ignore_ascii_case(n));
+        let rg = &self.resource_group;
+        if let Some(j) = self.companion_jobs.iter().find(|j| listed(o, j)) {
+            return Some(format!("container app job {rg}/{j}"));
+        }
+        [(self, o), (o, self)]
+            .into_iter()
+            .find(|(a, b)| listed(b, &a.container_app))
+            .map(|(a, _)| format!("container app {rg}/{}", a.container_app))
     }
 
     /// Key Vault secret name for an env name: `_` becomes `-` (spec section 5).
@@ -438,8 +513,17 @@ impl TargetConfig for AzureTarget {
             .as_any()
             .downcast_ref::<AzureTarget>()
             .is_some_and(|o| {
-                o.key_vault == self.key_vault && o.env_name_template == self.env_name_template
+                (o.key_vault == self.key_vault && o.env_name_template == self.env_name_template)
+                    || self.shared_job(o).is_some()
             })
+    }
+
+    fn shared_locator(&self, other: &dyn TargetConfig) -> String {
+        other
+            .as_any()
+            .downcast_ref::<AzureTarget>()
+            .and_then(|o| self.shared_job(o))
+            .unwrap_or_else(|| self.target_locator())
     }
 
     fn shared_target_error(&self, first: &str, second: &str) -> String {
@@ -480,15 +564,33 @@ impl TargetConfig for AzureTarget {
             Some((every, max)) => app.with_wait(every, max),
             None => app,
         };
-        Ok(Ports::Pinned {
-            store: Box::new(KeyVault {
+        let store = |managed| KeyVault {
+            runner: r,
+            vault: &self.key_vault,
+            subscription: &self.subscription,
+            env,
+            managed,
+        };
+        // A target with companion jobs syncs and deploys them with the app (#238).
+        let runtime: Box<dyn crate::ports::PinnedRuntime + 'a> = if self.companion_jobs.is_empty() {
+            Box::new(app)
+        } else {
+            Box::new(super::companions::AppWithJobs {
+                app,
+                jobs: (self.companion_jobs.iter())
+                    .map(|j| {
+                        super::job::ContainerAppJob::new(r, self, j, managed.clone()).for_env(env)
+                    })
+                    .collect(),
+                store: store(managed.clone()),
                 runner: r,
-                vault: &self.key_vault,
-                subscription: &self.subscription,
+                target: self,
                 env,
-                managed,
-            }),
-            runtime: Box::new(app),
+            })
+        };
+        Ok(Ports::Pinned {
+            store: Box::new(store(managed)),
+            runtime,
         })
     }
 
@@ -876,5 +978,111 @@ environments = ["prod"]
             .replace("ca-myapp", "ca-other");
         let e = azure_err(&azure_doc(&format!("{AZURE_ENV}{second}"), KEYS));
         assert!(e.contains("manages the same names on Azure "), "{e}");
+    }
+
+    // companion_jobs (#238) ---------------------------------------------------------------
+
+    /// `azure` with `companion_jobs = <list>` added after the identity.
+    fn with_jobs(list: &str) -> String {
+        azure_env_with(
+            "identity = \"system\"",
+            &format!("identity = \"system\"\ncompanion_jobs = {list}"),
+        )
+    }
+
+    #[test]
+    fn companion_jobs_load_in_config_order() {
+        let f = parse(&with_jobs(r#"["job-b", "job-a"]"#)).unwrap();
+        assert_eq!(azure_of(&f, "prod").companion_jobs(), ["job-b", "job-a"]);
+    }
+
+    #[test]
+    fn companion_jobs_default_to_none() {
+        let f = parse(&azure_doc(AZURE_ENV, KEYS)).unwrap();
+        assert!(azure_of(&f, "prod").companion_jobs().is_empty());
+    }
+
+    #[test]
+    fn rejects_a_companion_job_listed_twice() {
+        let e = azure_err(&with_jobs(r#"["job-a", "JOB-A"]"#));
+        assert!(
+            e.contains("azure.companion_jobs is set more than once"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn rejects_the_app_itself_as_a_companion_job() {
+        let e = azure_err(&with_jobs(r#"["ca-myapp"]"#));
+        assert!(
+            e.contains(
+                "azure.companion_jobs becomes ca-myapp, the same name as azure.container_app"
+            ),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_companion_job_with_shell_metacharacters() {
+        let e = azure_err(&with_jobs(r#"["job;rm"]"#));
+        assert!(e.contains("azure.companion_jobs"), "{e}");
+    }
+
+    /// The prod target listing job `job-x`, then a target `web` of `env` on app `app` with
+    /// `companion_jobs = jobs` and its own vault and template.
+    fn second_target_error(env: &str, app: &str, jobs: &str) -> String {
+        let first = AZURE_ENV.replace(
+            "identity = \"system\"",
+            "identity = \"system\"\ncompanion_jobs = [\"job-x\"]",
+        );
+        let table = if env == "prod" {
+            String::new()
+        } else {
+            format!("[environments.{env}]\n")
+        };
+        let doc = format!(
+            "{first}{table}[environments.{env}.targets.web]\nstate_vault_id = \"s2\"\n\
+             [environments.{env}.targets.web.azure]\n\
+             subscription = \"00000000-0000-0000-0000-000000000000\"\nkey_vault = \"kv-web\"\n\
+             resource_group = \"rg-myapp\"\ncontainer_app = \"{app}\"\nidentity = \"system\"\n\
+             env_name = \"WEB__{{KEY}}\"\ncompanion_jobs = {jobs}\n"
+        );
+        azure_err(&azure_doc(&doc, KEYS))
+    }
+
+    #[test]
+    fn rejects_two_targets_of_one_environment_listing_one_job() {
+        let e = second_target_error("prod", "ca-web", r#"["job-x"]"#);
+        assert!(
+            e.contains("delivers to Azure container app job rg-myapp/job-x"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn rejects_two_environments_listing_one_job() {
+        let e = second_target_error("stage", "ca-web", r#"["job-x"]"#);
+        assert!(
+            e.contains("manages the same names on Azure container app job rg-myapp/job-x"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_companion_job_that_is_another_targets_app() {
+        let e = second_target_error("stage", "job-x", "[]");
+        assert!(e.contains("on Azure container app rg-myapp/job-x"), "{e}");
+    }
+
+    /// D9: `--azure-companion-jobs a,b` writes the TOML list.
+    #[test]
+    fn init_writes_companion_jobs_as_a_list() {
+        let section = PROVIDER
+            .init_section(&BTreeMap::from([(COMPANION_JOBS, "a,b".to_string())]))
+            .unwrap();
+        assert!(
+            section.contains("azure.companion_jobs = [\"a\", \"b\"]\n"),
+            "{section}"
+        );
     }
 }

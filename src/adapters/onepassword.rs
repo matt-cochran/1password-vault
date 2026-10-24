@@ -706,6 +706,7 @@ fn vault_unreachable(ctx: &DiagnoseContext, seen: &Observed, vault: &str) -> Cau
             env: ctx.env.clone(),
             target: None,
             seen: seen.clone(),
+            grantee: None,
         },
     }
 }

@@ -38,7 +38,7 @@ use crate::domain::delivery::{
 };
 use crate::domain::ledger::{Ledger, hmac_hex, random_key};
 use crate::domain::plan::StoreEntry;
-use crate::domain::{Boundary, Fleet, Kind, Lifecycle, SecretValue, key_label, rules};
+use crate::domain::{Binding, Boundary, Fleet, Kind, Lifecycle, SecretValue, key_label, rules};
 use crate::error::Error;
 use crate::runner::CommandRunner;
 
@@ -1305,6 +1305,12 @@ fn verify_target(
         crate::ports::Ports::Staged { store, .. } => store.list()?,
         crate::ports::Ports::Pinned { store, .. } => store.list()?,
     };
+    // L1′ (#238): a pinned runtime's bindings are what is actually deployed, read once for
+    // the target. Names only; no value is asked for or kept.
+    let runtime_bindings = match &ports {
+        crate::ports::Ports::Pinned { runtime, .. } => Some(runtime.bindings()?.bindings),
+        crate::ports::Ports::Staged { .. } => None,
+    };
     let values = values_by_field(fleet, env_name, r)?;
     let account = account_id(r)?;
     let mut checks = Vec::new();
@@ -1324,6 +1330,38 @@ fn verify_target(
         }
         let this_scope = scope(fleet, env_name, target, &product, &account)?;
         let state = read_state(fleet, env_name, target, &product, r)?;
+        // L1′ (#238): on a pinned target the runtime's binding version is what is deployed;
+        // a name bound at a version other than the recorded one has drifted, even when the
+        // store already holds the recorded version (a sync staged it, `--deploy` has not
+        // run). A name the runtime does not bind is missing; Plain and Other bindings keep
+        // #241's result.
+        if let Some(bindings) = &runtime_bindings {
+            for b in &expected {
+                let Some(entry) = listed.iter_mut().find(|e| e.name == b.name) else {
+                    continue;
+                };
+                let binding = bindings.get(&b.name);
+                let Some(Binding::Pinned { version, .. }) = binding else {
+                    // Plain or Other: #241's result stands. No binding at all: missing.
+                    if binding.is_none() {
+                        entry.version = None;
+                    }
+                    continue;
+                };
+                let recorded = state.as_ref().and_then(|s| {
+                    s.evidence
+                        .iter()
+                        .find(|e| e.name == b.name)
+                        .map(|e| e.store_version.as_str())
+                });
+                if recorded.is_some_and(|rec| rec != version.as_str()) {
+                    // The store holds the recorded version while the runtime binds another:
+                    // the change is staged, not deployed.
+                    entry.pending = entry.version.as_deref() == recorded;
+                    entry.version = Some(version.clone());
+                }
+            }
+        }
         let fingerprints: BTreeMap<String, String> =
             match state.as_ref().and_then(|s| s.key.clone()) {
                 Some(key) => expected

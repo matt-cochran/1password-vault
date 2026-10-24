@@ -11,6 +11,7 @@
 //! | `write_one` | `keyvault secret set --vault-name <vault> --name <name> --file /dev/stdin --encoding utf-8 --tags opv-managed=<env> opv-version=<v> opv-written=<utc> opv-env=<env> opv-plan=<id> --query id -o tsv`, then polls `secret show --query id -o tsv` until the new version shows (NR-30) |
 //! | `delete` | `keyvault secret set-attributes --vault-name <vault> --name <name> --tags <its tags> opv-pruned=<env> -o none`, then `keyvault secret delete --vault-name <vault> --name <name> -o none` |
 //! | `has_version` | `keyvault secret show --vault-name <vault> --name <name> --version <v> --query id -o tsv` (diagnosis only) |
+//! | `current_version` | `keyvault secret show --vault-name <vault> --name <name> --query id -o tsv` (the companion-job merge read) |
 //!
 //! Every call also carries `--subscription <azure.subscription>` (NR-7).
 //!
@@ -397,31 +398,10 @@ impl KeyVault<'_> {
     /// every [`CONFIRM_POLL`] for up to [`CONFIRM_WAIT`] (NR-30).
     fn confirm_version(&self, name: &str, version: &str) -> Result<(), Error> {
         const OP: &str = "keyvault secret show";
-        let args = [
-            "keyvault",
-            "secret",
-            "show",
-            "--vault-name",
-            self.vault,
-            "--name",
-            name,
-            "--query",
-            "id",
-            "-o",
-            "tsv",
-            az::ONLY_SHOW_ERRORS,
-        ];
         let suffix = format!("/{version}");
         let wait = Wait::new(self.runner, CONFIRM_WAIT);
         loop {
-            match invoke(
-                self.runner,
-                Effect::Read,
-                OP,
-                &self.scoped(&args),
-                None,
-                &[3],
-            )? {
+            match self.show_id(name)? {
                 Outcome::Done(out) => {
                     let seen = String::from_utf8_lossy(&out.stdout);
                     if seen.trim().ends_with(&suffix) {
@@ -439,6 +419,49 @@ impl KeyVault<'_> {
             }
             wait.pause(self.runner, CONFIRM_POLL, "");
         }
+    }
+
+    /// `secret show --name <name> --query id -o tsv` (a read): the current version's id,
+    /// never the value; exit 3 is "no such secret". `name` is the Key Vault spelling.
+    fn show_id(&self, name: &str) -> Result<Outcome, Error> {
+        let args = [
+            "keyvault",
+            "secret",
+            "show",
+            "--vault-name",
+            self.vault,
+            "--name",
+            name,
+            "--query",
+            "id",
+            "-o",
+            "tsv",
+            az::ONLY_SHOW_ERRORS,
+        ];
+        invoke(
+            self.runner,
+            Effect::Read,
+            "keyvault secret show",
+            &self.scoped(&args),
+            None,
+            &[3],
+        )
+    }
+
+    /// The version id Key Vault serves now for the env name `name`, or `None` when it has
+    /// no such secret (design §4 H1, the merge read). It asks for the id only, never the
+    /// value (`confirm_version`'s read).
+    pub fn current_version(&self, name: &str) -> Result<Option<String>, Error> {
+        const OP: &str = "keyvault secret show";
+        let out = match self.show_id(&AzureTarget::key_vault_name(name))? {
+            Outcome::Refused(out) if out.status == 3 => return Ok(None),
+            other => read_output(self.runner, self.ctx(), other)?,
+        };
+        std::str::from_utf8(&out.stdout)
+            .ok()
+            .and_then(version_from_id)
+            .map(Some)
+            .ok_or_else(|| invalid_in_reply(OP, "version id"))
     }
 
     /// Whether `version` of `name` exists (exit 3: it does not).
@@ -790,6 +813,17 @@ mod tests {
 
     fn stamp() -> Stamp {
         crate::domain::provenance::fixture()
+    }
+
+    /// The H1 merge read: the id's version, asked for with `--query id` and no value.
+    #[test]
+    fn current_version_reads_the_id_never_the_value() {
+        let r = FakeRunner::new([Output::success(id(VERSION))]);
+        let templates = names(&[]);
+        let v = vault(&r, "prod", &templates).current_version("FLEET__API__DB_URL");
+        let args = r.calls.borrow()[0].args.clone();
+        let id_only = args.windows(2).any(|w| w == ["--query", "id"]);
+        assert!(v.unwrap() == Some(VERSION.into()) && id_only && args.contains(&NAME.into()));
     }
 
     /// FR-42: a write records opv's run metadata as tags on the new version.
