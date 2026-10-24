@@ -808,6 +808,7 @@ fn resource_kind(k: ResourceKind) -> &'static str {
         ResourceKind::FlyApp => "Fly app",
         ResourceKind::KeyVault => "Key Vault",
         ResourceKind::ContainerApp => "container app",
+        ResourceKind::ContainerAppJob => "container app job",
         ResourceKind::Namespace => "namespace",
         ResourceKind::Deployment => "deployment",
         ResourceKind::KubeContext => "kube context",
@@ -2064,9 +2065,10 @@ impl Cause {
                 env: _,
                 target: _,
                 seen,
+                grantee,
             } => format!(
                 "{} may not {} {} at {}",
-                principal_words(seen.principal()),
+                principal_words(grantee.as_ref().unwrap_or(seen.principal())),
                 right_words(right),
                 resource_words(resource),
                 system.label()
@@ -3603,17 +3605,22 @@ impl Cause {
                 env,
                 target,
                 seen,
-            } => plan(
-                Some((
-                    Action::Grant {
-                        principal: seen.principal().clone(),
-                        resource: resource.clone(),
-                        grant: grant.clone(),
-                    },
-                    grant_words(grant, seen.principal(), resource, right),
-                )),
-                doctor_scoped(env, target, Some(seen.principal())),
-            ),
+                grantee,
+            } => {
+                // A job's identity is granted, not the principal that ran opv (#238).
+                let who = grantee.as_ref().unwrap_or(seen.principal());
+                plan(
+                    Some((
+                        Action::Grant {
+                            principal: who.clone(),
+                            resource: resource.clone(),
+                            grant: grant.clone(),
+                        },
+                        grant_words(grant, who, resource, right),
+                    )),
+                    doctor_scoped(env, target, Some(seen.principal())),
+                )
+            }
             OwnerSetupRequired { system, object } => {
                 let text = match object.kind {
                     ResourceKind::GitHubEnvironment => match &object.scope {
@@ -3639,6 +3646,7 @@ impl Cause {
                     | ResourceKind::FlyApp
                     | ResourceKind::KeyVault
                     | ResourceKind::ContainerApp
+                    | ResourceKind::ContainerAppJob
                     | ResourceKind::Namespace
                     | ResourceKind::Deployment
                     | ResourceKind::KubeContext
@@ -3769,6 +3777,9 @@ impl Cause {
                     (System::Fly, _) => vendor("flyctl", &["apps", "list"]),
                     (System::Azure, _) => match resource.kind {
                         ResourceKind::ContainerApp => vendor("az", &["containerapp", "list"]),
+                        ResourceKind::ContainerAppJob => {
+                            vendor("az", &["containerapp", "job", "list"])
+                        }
                         ResourceKind::Subscription => vendor("az", &["account", "list"]),
                         _ => match subscription_of(resource) {
                             Some(sub) => vendor("az", &["keyvault", "list", "--subscription", sub]),

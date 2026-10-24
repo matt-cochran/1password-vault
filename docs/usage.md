@@ -750,7 +750,7 @@ opv target credentials staging --target web
 
 ## Run a reviewed operation on a target: `opv target op`
 
-`opv target op <env> --target <name> machines` lists the target's Fly app: one line per Machine with its id, name, state, region and image. `opv target op <env> --target <name> machine-update --machine <id> --image <ref>` moves one Machine of the app to another image; `--machine` is the Machine's 14-character lowercase-hex id, and the write needs `--confirm <env>` on an environment that sets `confirm_env`. Only Fly targets offer these operations and `--target` is required. The image must be in the target's own repository, `registry.fly.io/<the target's fly.app>:<tag>` (or, for `machine-update`, `registry.fly.io/<the target's fly.app>@sha256:<64 hex>`). The target must record `deploy_credentials`: the operation signs in with that item only, never your own login, and its `flyctl` child sees only opv's basic variables. It prints the app's ids, names, states, regions and image references, never a value; `--json` prints one document instead of lines. `registry-push` is not shipped in 0.17.0: it refuses as not yet available.
+`opv target op <env> --target <name> machines` lists the target's Fly app: one line per Machine with its id, name, state, region and image. `opv target op <env> --target <name> machine-update --machine <id> --image <ref>` moves one Machine of the app to another image; `--machine` is the Machine's 14-character lowercase-hex id, and the write needs `--confirm <env>` on an environment that sets `confirm_env`. Only Fly targets offer these operations and `--target` is required. The image must be in the target's own repository, `registry.fly.io/<the target's fly.app>:<tag>` (or, for `machine-update`, `registry.fly.io/<the target's fly.app>@sha256:<64 hex>`). The target must record `deploy_credentials`: the operation signs in with that item only, never your own login, and its `flyctl` child sees only opv's basic variables. It prints the app's ids, names, states, regions and image references, never a value; `--json` prints one document instead of lines. `registry-push` is not shipped in 0.17.1: it refuses as not yet available.
 
 ```sh
 opv target op staging --target web machines
@@ -1137,7 +1137,7 @@ jobs:
     env:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
       OP_CACHE: "false"
-      OPV_VERSION: v0.17.0  # pin the release you tested; bump it deliberately
+      OPV_VERSION: v0.17.1  # pin the release you tested; bump it deliberately
     steps:
       - uses: actions/checkout@v4
       - name: Install the 1Password CLI

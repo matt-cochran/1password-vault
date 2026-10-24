@@ -1,0 +1,38 @@
+[
+  {
+    "id": "/subscriptions/<SUB>/resourceGroups/<RG>/providers/Microsoft.App/jobs/<JOB>/executions/<JOB>-y8vakwn",
+    "name": "<JOB>-y8vakwn",
+    "properties": {
+      "startTime": "2026-10-23T17:37:04+00:00",
+      "status": "Failed",
+      "template": {
+        "containers": [
+          {
+            "command": [
+              "/bin/sh",
+              "-c",
+              "n=$(printf %s \"$SPIKE_VAL\" | wc -c); echo \"len SPIKE_VAL=$n\"; [ \"$n\" -eq 19 ]"
+            ],
+            "env": [
+              {
+                "name": "SPIKE_VAL",
+                "secretRef": "cappjob-<JOB>"
+              }
+            ],
+            "image": "mcr.microsoft.com/azurelinux/base/core:3.0",
+            "imageType": "ContainerImage",
+            "name": "<JOB>",
+            "resources": {
+              "cpu": 0.25,
+              "ephemeralStorage": "",
+              "memory": "0.5Gi"
+            }
+          }
+        ],
+        "initContainers": []
+      }
+    },
+    "resourceGroup": "<RG>",
+    "type": "Microsoft.App/jobs/executions"
+  }
+]

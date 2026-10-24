@@ -24,12 +24,14 @@ use serde_json::Value;
 use super::AzureTarget;
 use super::az::{self, AZ_CLI, Effect};
 use super::containerapp::{self, ContainerApp, POLL_EVERY, PROGRESS_EVERY, WAIT_MAX};
+use super::resource::{Assignee, Kind, READ_ROLES, Resource, policy_grants_get};
 use crate::adapters::probe::{parse_version, spawn_tool};
 use crate::cause::{
     Cause, DiagnoseContext, DottedPath, During, GrantModel, Location, NamedBy, NotFoundState,
     Observed, OutputProblem, Refusal, ResourceKind, ResourceName, ResourceRef, Right, System,
     Unusable,
 };
+use crate::domain::provenance::utc;
 use crate::error::Error;
 use crate::host::Host;
 use crate::ports::PinnedRuntime;
@@ -90,6 +92,46 @@ pub fn run(
              serving, and opv will apply a fresh one",
         )),
         _ => {}
+    }
+    // Each companion job after the app (#238): `status` and `plan` also show its access.
+    let kv = match mode {
+        PreflightMode::Read if !t.companion_jobs().is_empty() => Some(vault(&t.vault_ref(), r)),
+        _ => None,
+    };
+    for name in t.companion_jobs() {
+        let j = match mode {
+            PreflightMode::Mutate => {
+                let none = BTreeSet::new();
+                let subject = job_res(t, r, name, &none).subject();
+                let words = format!("container app job {name}");
+                settled(
+                    r,
+                    &|| job(t, r, name),
+                    subject,
+                    "containerapp job show",
+                    &words,
+                )?
+            }
+            PreflightMode::Read => job(t, r, name)?,
+        };
+        let mut push = |line: String, v: Verdict| {
+            if !matches!(v, Verdict::Ok(_)) {
+                pre.checks.push(Check {
+                    name: line.into(),
+                    outcome: Ok(v),
+                });
+            }
+        };
+        push(
+            format!("container app job {name}"),
+            job_verdict(t, name, &j),
+        );
+        if let Some(kv) = &kv {
+            push(
+                format!("job {name} identity access"),
+                job_line(t, r, name, &j, kv),
+            );
+        }
     }
     Ok(pre)
 }
@@ -384,6 +426,7 @@ fn vault_answers(v: &Vault, r: &dyn CommandRunner, vault: &Value) -> Result<(), 
                 env: None,
                 target: None,
                 seen,
+                grantee: None,
             };
             Err(az::report(missing, up))
         }
@@ -427,16 +470,60 @@ fn network_restricted(vault: &Value) -> bool {
 
 /// `containerapp show`: the app exists and runs in single-revision mode.
 fn app(t: &AzureTarget, r: &dyn CommandRunner) -> Result<Value, Error> {
-    const OP: &str = "containerapp show";
-    let (a, rg, s) = (
-        t.container_app.as_str(),
-        t.resource_group.as_str(),
-        t.subscription.as_str(),
-    );
-    let base = ["containerapp", "show", "-g", rg, "-n", a, "-o", "json"];
-    let resource = app_ref(t);
-    let app = match read(s, r, OP, &base, &[3])? {
-        Outcome::Done(out) => parse(&out, OP)?,
+    let a = t.container_app.as_str();
+    let app = shown(
+        t,
+        r,
+        &["containerapp"],
+        a,
+        app_ref(t),
+        "azure.container_app",
+    )?;
+    containerapp::single_revision_mode(t, &app, None)?;
+    Ok(app)
+}
+
+/// Companion job `job` (`containerapp job show`); a missing one is `NotFound`, named by
+/// `azure.companion_jobs`.
+fn job(t: &AzureTarget, r: &dyn CommandRunner, job: &str) -> Result<Value, Error> {
+    let none = BTreeSet::new();
+    let subject = job_res(t, r, job, &none).subject();
+    shown(t, r, &["containerapp", "job"], job, subject, COMPANION_JOBS)
+}
+
+const COMPANION_JOBS: &str = "azure.companion_jobs";
+
+fn job_res<'a>(
+    t: &'a AzureTarget,
+    r: &'a dyn CommandRunner,
+    name: &'a str,
+    none: &'a BTreeSet<String>,
+) -> Resource<'a> {
+    Resource {
+        runner: r,
+        target: t,
+        kind: Kind::Job,
+        name,
+        managed: none,
+        env: None,
+    }
+}
+
+/// `<noun> show -g <rg> -n <name> -o json`; exit 3 is `NotFound`, named by `field`.
+fn shown(
+    t: &AzureTarget,
+    r: &dyn CommandRunner,
+    noun: &[&str],
+    name: &str,
+    resource: ResourceRef,
+    field: &str,
+) -> Result<Value, Error> {
+    let op = format!("{} show", noun.join(" "));
+    let (rg, s) = (t.resource_group.as_str(), t.subscription.as_str());
+    let mut base = noun.to_vec();
+    base.extend(["show", "-g", rg, "-n", name, "-o", "json"]);
+    Ok(match read(s, r, &op, &base, &[3])? {
+        Outcome::Done(out) => parse(&out, &op)?,
         // Exit 3 is az's "no such resource" (Q3).
         Outcome::Refused(out) if out.status == 3 => {
             let Some((seen, up)) = az::take_failure() else {
@@ -445,7 +532,7 @@ fn app(t: &AzureTarget, r: &dyn CommandRunner) -> Result<Value, Error> {
             let missing = Cause::NotFound {
                 system: System::Azure,
                 resource,
-                named_by: named_by("azure.container_app"),
+                named_by: named_by(field),
                 state: NotFoundState::Missing,
                 seen,
             };
@@ -454,14 +541,12 @@ fn app(t: &AzureTarget, r: &dyn CommandRunner) -> Result<Value, Error> {
         Outcome::Refused(_) | Outcome::Unknown { .. } => {
             let ctx = DiagnoseContext {
                 resource: Some(resource),
-                named_by: Some(named_by("azure.container_app")),
+                named_by: Some(named_by(field)),
                 ..DiagnoseContext::default()
             };
             return Err(az::failed(r, ctx));
         }
-    };
-    containerapp::single_revision_mode(t, &app, None)?;
-    Ok(app)
+    })
 }
 
 fn provisioning(app: &Value) -> &str {
@@ -474,10 +559,22 @@ fn provisioning(app: &Value) -> &str {
 /// [`WAIT_MAX`], never past the run budget (NR-4), with a progress line at least every
 /// [`PROGRESS_EVERY`].
 fn settled_app(t: &AzureTarget, r: &dyn CommandRunner) -> Result<Value, Error> {
+    let words = format!("container app {}", t.container_app);
+    settled(r, &|| app(t, r), app_ref(t), "containerapp show", &words)
+}
+
+/// [`settled_app`] for any resource `show` reads; `words` names it in the progress line.
+fn settled(
+    r: &dyn CommandRunner,
+    show: &dyn Fn() -> Result<Value, Error>,
+    subject: ResourceRef,
+    op: &str,
+    words: &str,
+) -> Result<Value, Error> {
     let wait = Wait::new(r, WAIT_MAX);
     let mut reported: Option<Duration> = None;
     loop {
-        let app = app(t, r)?;
+        let app = show()?;
         if provisioning(&app) != "InProgress" {
             return Ok(app);
         }
@@ -485,9 +582,9 @@ fn settled_app(t: &AzureTarget, r: &dyn CommandRunner) -> Result<Value, Error> {
         if wait.over(r, POLL_EVERY) {
             // Someone else's update is still running, as opv's own `containerapp show`
             // says; nothing was changed (NR-25).
-            return Err(unusable("containerapp show", |seen| Cause::TargetRefused {
+            return Err(unusable(op, |seen| Cause::TargetRefused {
                 system: System::Azure,
-                subject: app_ref(t),
+                subject: subject.clone(),
                 why: Refusal::InProgress { revision: None },
                 env: None,
                 target: None,
@@ -497,9 +594,8 @@ fn settled_app(t: &AzureTarget, r: &dyn CommandRunner) -> Result<Value, Error> {
         let note = if reported.is_none_or(|at| waited.saturating_sub(at) >= PROGRESS_EVERY) {
             reported = Some(waited);
             format!(
-                "waiting for container app {} to finish its current update (provisioningState \
+                "waiting for {words} to finish its current update (provisioningState \
                  InProgress), {} s",
-                t.container_app,
                 waited.as_secs()
             )
         } else {
@@ -520,7 +616,11 @@ pub fn doctor(t: &AzureTarget, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -
             _ => "the lines above did not pass".to_string(),
         };
         for name in &DOCTOR_CHECKS[checks.len()..] {
-            checks.push(not_checked(name, &why));
+            checks.push(not_checked(*name, &why));
+        }
+        for name in t.companion_jobs() {
+            checks.push(not_checked(format!("container app job {name}"), &why));
+            checks.push(not_checked(format!("job {name} identity access"), &why));
         }
         return checks;
     }
@@ -550,6 +650,38 @@ pub fn doctor(t: &AzureTarget, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -
             "needs the key vault and container app lines above to pass",
         ),
     });
+    let kv = match &checks[3].outcome {
+        Ok(_) if !t.companion_jobs().is_empty() => Some(vault(&t.vault_ref(), r)),
+        _ => None,
+    };
+    for name in t.companion_jobs() {
+        let access = format!("job {name} identity access");
+        match job(t, r, name) {
+            Ok(j) => {
+                checks.push(Check {
+                    name: format!("container app job {name}").into(),
+                    outcome: Ok(job_verdict(t, name, &j)),
+                });
+                checks.push(match &kv {
+                    Some(kv) => Check {
+                        name: access.into(),
+                        outcome: Ok(job_line(t, r, name, &j, kv)),
+                    },
+                    None => not_checked(access, "needs the key vault line above to pass"),
+                });
+            }
+            Err(e) => {
+                checks.push(Check {
+                    name: format!("container app job {name}").into(),
+                    outcome: Err(e),
+                });
+                checks.push(not_checked(
+                    access,
+                    "needs the container app job line above to pass",
+                ));
+            }
+        }
+    }
     checks
 }
 
@@ -597,7 +729,7 @@ fn store_doctor_with_uri(
     if let Some(why) = gate {
         let done = checks.len();
         for name in &STORE_CHECKS[done..] {
-            checks.push(not_checked(name, why));
+            checks.push(not_checked(*name, why));
         }
         return (checks, None);
     }
@@ -625,7 +757,7 @@ fn store_doctor_with_uri(
     }
 }
 
-fn not_checked(name: &'static str, why: &str) -> Check {
+fn not_checked(name: impl Into<std::borrow::Cow<'static, str>>, why: &str) -> Check {
     Check {
         name: name.into(),
         outcome: Ok(Verdict::Warn(format!("not checked: {why}"))),
@@ -703,6 +835,190 @@ fn access(t: &AzureTarget, r: &dyn CommandRunner, uri: String) -> Verdict {
     }
 }
 
+/// A companion job's state and identity as a doctor verdict (#238).
+fn job_verdict(t: &AzureTarget, name: &str, job: &Value) -> Verdict {
+    let (rg, id) = (&t.resource_group, &t.identity);
+    match provisioning(job) {
+        "InProgress" => Verdict::Warn(format!(
+            "{name} in {rg} is being updated (provisioningState InProgress)"
+        )),
+        "Failed" => Verdict::Warn(format!(
+            "the last update of {name} in {rg} failed (provisioningState Failed)"
+        )),
+        _ if id.eq_ignore_ascii_case("system") => Verdict::Ok(format!(
+            "{name} in {rg}, using its system-assigned identity"
+        )),
+        _ => Verdict::Ok(format!(
+            "{name} in {rg}, using the user-assigned identity {id}"
+        )),
+    }
+}
+
+/// How long a new role grant may take to apply: Azure's documented bound (D8, J5).
+const FRESH_GRANT_SECS: u64 = 600;
+
+/// What opv can tell about a companion job identity's read access to the vault (M1).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum JobAccess {
+    /// `fresh`: when a direct grant under 10 minutes old was made (`HH:MM:SS` UTC), and
+    /// the minute by which it has surely applied (`HH:MM` UTC).
+    Granted {
+        principal: String,
+        fresh: Option<(String, String)>,
+    },
+    /// Definitely no access: why, with the command that grants it.
+    Missing(String),
+    /// opv cannot tell: which read could not decide.
+    Undetermined(String),
+}
+
+/// Companion job `name`'s identity's read access to the vault `kv` (`keyvault show`), from
+/// the job's `show` (M1): Graph-free, and missing only on a definite negative.
+pub(super) fn job_access(
+    t: &AzureTarget,
+    r: &dyn CommandRunner,
+    name: &str,
+    show: &Value,
+    kv: &Value,
+    now: u64,
+) -> JobAccess {
+    let none = BTreeSet::new();
+    let res = job_res(t, r, name, &none);
+    let p = match res.principal(show) {
+        Ok(Ok(p)) => p,
+        Ok(Err(reason)) => return JobAccess::Missing(reason),
+        Err(e) => return JobAccess::Undetermined(format!("identity show failed: {e}")),
+    };
+    let (vault, who) = (&t.key_vault, format!("the job identity (principal {p})"));
+    let granted = |fresh| JobAccess::Granted {
+        principal: p.clone(),
+        fresh,
+    };
+    let rbac = kv.pointer("/properties/enableRbacAuthorization");
+    if rbac.and_then(Value::as_bool) != Some(true) {
+        return match policy_grants_get(kv, &p) {
+            true => granted(None),
+            false => JobAccess::Missing(format!(
+                "{who} has no access policy with secret get on Key Vault {vault}; grant it: \
+                 `az keyvault set-policy -n {vault} --object-id {p} --secret-permissions get`"
+            )),
+        };
+    }
+    let Some(scope) = kv["id"].as_str() else {
+        return JobAccess::Undetermined("keyvault show lists no vault id".into());
+    };
+    let roles = match res.role_assignments(&p, scope, Assignee::ObjectId) {
+        Ok(Value::Array(roles)) => roles,
+        Ok(_) => return JobAccess::Undetermined("role assignment list gave no list".into()),
+        Err(e) => return JobAccess::Undetermined(format!("role assignment list failed: {e}")),
+    };
+    let vault_id = scope.to_ascii_lowercase();
+    let above = |a: &&Value| {
+        a["scope"].as_str().is_some_and(|s| {
+            let s = s.trim_end_matches('/').to_ascii_lowercase();
+            vault_id == s || vault_id.starts_with(&format!("{s}/"))
+        })
+    };
+    let role = |a: &Value| a["roleDefinitionName"].as_str().unwrap_or("?").to_string();
+    let reading: Vec<&Value> = roles
+        .iter()
+        .filter(above)
+        .filter(|a| READ_ROLES.contains(&role(a).as_str()))
+        .collect();
+    if !reading.is_empty() {
+        return granted(fresh_grant(&reading, &p, now));
+    }
+    if roles.is_empty() {
+        return JobAccess::Missing(format!(
+            "{who} has no role on Key Vault {vault}; grant it: `az role assignment create \
+             --assignee-object-id {p} --assignee-principal-type ServicePrincipal --role \
+             \"Key Vault Secrets User\" --scope {scope}`"
+        ));
+    }
+    let names: BTreeSet<String> = roles.iter().map(role).collect();
+    let names: Vec<String> = names.into_iter().collect();
+    JobAccess::Undetermined(format!(
+        "its roles there are ones opv does not check: {}",
+        names.join(", ")
+    ))
+}
+
+/// When every deciding grant is the principal's own and under 10 minutes old (D8): the
+/// earliest one's time, and the minute by which it has surely applied. A group's grant
+/// carries the group's time (L9), so it never counts as fresh.
+fn fresh_grant(reading: &[&Value], principal: &str, now: u64) -> Option<(String, String)> {
+    let mut earliest = u64::MAX;
+    for a in reading {
+        let own = a["principalId"]
+            .as_str()
+            .is_some_and(|x| x.eq_ignore_ascii_case(principal));
+        match a["createdOn"].as_str().and_then(epoch_secs) {
+            Some(at) if own && now < at + FRESH_GRANT_SECS => earliest = earliest.min(at),
+            _ => return None,
+        }
+    }
+    let (at, by) = (utc(earliest), utc(earliest + FRESH_GRANT_SECS + 59));
+    Some((at[11..19].to_string(), by[11..16].to_string()))
+}
+
+/// Seconds since the Unix epoch of a UTC `YYYY-MM-DDTHH:MM:SS[.f](+00:00|Z)` time.
+fn epoch_secs(t: &str) -> Option<u64> {
+    if !(t.ends_with("+00:00") || t.ends_with('Z')) || t.len() < 19 {
+        return None;
+    }
+    let n = |a: usize, b: usize| t.get(a..b)?.parse::<i64>().ok();
+    let (y, m, d) = (n(0, 4)?, n(5, 7)?, n(8, 10)?);
+    // Howard Hinnant's days_from_civil.
+    let y = if m <= 2 { y - 1 } else { y };
+    let (era, yoe) = (y.div_euclid(400), y.rem_euclid(400));
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
+    let secs = days * 86_400 + n(11, 13)? * 3600 + n(14, 16)? * 60 + n(17, 19)?;
+    u64::try_from(secs).ok()
+}
+
+/// The `job <J> identity access` line: advisory, so every answer but a settled grant is a
+/// warning (A3, D7, D8).
+fn job_line(
+    t: &AzureTarget,
+    r: &dyn CommandRunner,
+    name: &str,
+    job: &Value,
+    kv: &Result<Value, Error>,
+) -> Verdict {
+    let vault = &t.key_vault;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let access = match kv {
+        Ok(kv) => job_access(t, r, name, job, kv, now),
+        Err(e) => JobAccess::Undetermined(format!("keyvault show failed: {e}")),
+    };
+    match access {
+        JobAccess::Granted { principal, fresh } => {
+            let can = format!(
+                "the job identity (principal {principal}) can read secrets in Key Vault {vault}"
+            );
+            match fresh {
+                None => Verdict::Ok(can),
+                Some((at, by)) => Verdict::Warn(format!(
+                    "{can}, through a grant made at {at} UTC; a new grant can take a few \
+                     minutes to apply: an execution of {name} started before {by} UTC may fail \
+                     to read its secrets"
+                )),
+            }
+        }
+        JobAccess::Missing(why) => Verdict::Warn(format!(
+            "{why}\n  until then each execution of {name} fails to read its secrets: Azure \
+             accepts the job's update, and only the execution fails"
+        )),
+        JobAccess::Undetermined(why) => Verdict::Warn(format!(
+            "could not confirm that container app job {name}'s identity can read Key Vault \
+             {vault} ({why}); its next execution may fail"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -722,6 +1038,7 @@ mod tests {
             identity: "system".into(),
             env_name_template: "FLEET__{PRODUCT}__{KEY}".into(),
             config: super::super::ConfigRoute::Env,
+            companion_jobs: Vec::new(),
             vault_uri: Default::default(),
         }
     }
@@ -1260,6 +1577,186 @@ mod tests {
         let lines = doctor_on(responses);
         assert!(
             matches!(line(&lines, "app identity access"), Ok(Verdict::Warn(m)) if m.starts_with("could not check"))
+        );
+    }
+
+    // ---- companion jobs (#238) ----
+
+    /// A recorded `containerapp job show` or `role assignment list` (Spike S-238).
+    fn job_fixture(name: &str) -> Value {
+        fixture(&format!("jobs/{name}"))
+    }
+
+    /// The RBAC vault the recorded job grant is on (edited recon: its `id` is the grant's
+    /// scope).
+    fn job_vault() -> Value {
+        let scope = job_fixture("role-assignment-list-job-principal.json")[0]["scope"].clone();
+        json!({"id": scope, "properties": {"enableRbacAuthorization": true}})
+    }
+
+    /// The recorded grant's `createdOn` (2026-10-23T17:38:10Z), in Unix seconds.
+    const GRANTED_AT: u64 = 1_792_777_090;
+
+    /// `job_access` of the recorded job against `vault`, the role list answering `roles`.
+    fn access_of(vault: &Value, roles: Vec<Output>, now: u64) -> (FakeRunner, JobAccess) {
+        let r = FakeRunner::new(roles);
+        let show = job_fixture("containerapp-job-show.json");
+        let a = job_access(&target(), &r, "<JOB>", &show, vault, now);
+        (r, a)
+    }
+
+    fn recorded_roles() -> Vec<Output> {
+        vec![out(&job_fixture("role-assignment-list-job-principal.json"))]
+    }
+
+    #[test]
+    fn created_on_reads_as_unix_seconds() {
+        assert_eq!(
+            epoch_secs("2026-10-23T17:38:10.445062+00:00"),
+            Some(GRANTED_AT)
+        );
+    }
+
+    /// M1: the job's list names the principal by object id and asks Graph for nothing.
+    #[test]
+    fn job_access_lists_roles_without_a_graph_query() {
+        let (r, _) = access_of(&job_vault(), recorded_roles(), GRANTED_AT + 3600);
+        let scope = job_vault()["id"].as_str().unwrap().to_string();
+        assert_eq!(
+            r.calls.borrow()[0].args,
+            [
+                "role",
+                "assignment",
+                "list",
+                "--assignee-object-id",
+                "<PRINCIPAL>",
+                "--scope",
+                &scope,
+                "--include-inherited",
+                "--include-groups",
+                "--fill-principal-name",
+                "false",
+                "-o",
+                "json",
+                "--only-show-errors",
+                "--subscription",
+                SUB,
+            ]
+        );
+    }
+
+    #[test]
+    fn job_with_a_settled_read_role_is_granted() {
+        let (_, a) = access_of(&job_vault(), recorded_roles(), GRANTED_AT + 3600);
+        assert_eq!(
+            a,
+            JobAccess::Granted {
+                principal: "<PRINCIPAL>".into(),
+                fresh: None
+            }
+        );
+    }
+
+    /// D8: a direct grant under 10 minutes old names when it surely applies.
+    #[test]
+    fn a_grant_under_ten_minutes_old_is_fresh() {
+        let (_, a) = access_of(&job_vault(), recorded_roles(), GRANTED_AT + 60);
+        assert!(
+            matches!(a, JobAccess::Granted { fresh: Some((at, by)), .. } if at == "17:38:10" && by == "17:49")
+        );
+    }
+
+    #[test]
+    fn job_without_any_role_is_missing_with_the_grant_command() {
+        let (_, a) = access_of(&job_vault(), vec![out(&json!([]))], GRANTED_AT);
+        assert!(matches!(a, JobAccess::Missing(m) if m.contains(
+            "`az role assignment create --assignee-object-id <PRINCIPAL> --assignee-principal-type \
+             ServicePrincipal --role \"Key Vault Secrets User\" --scope /subscriptions/<SUB>/"
+        )));
+    }
+
+    #[test]
+    fn access_policy_vault_without_get_is_missing_with_set_policy() {
+        let vault = json!({"id": "x", "properties": {"accessPolicies": []}});
+        let (_, a) = access_of(&vault, vec![], GRANTED_AT);
+        assert!(matches!(a, JobAccess::Missing(m) if m.contains(
+            "`az keyvault set-policy -n kv-opv-fixture --object-id <PRINCIPAL> --secret-permissions get`"
+        )));
+    }
+
+    #[test]
+    fn job_without_a_system_identity_is_missing_with_the_assign_command() {
+        let r = FakeRunner::default();
+        let mut show = job_fixture("containerapp-job-show.json");
+        show["identity"] = json!({"type": "None"});
+        let a = job_access(&target(), &r, "<JOB>", &show, &job_vault(), GRANTED_AT);
+        assert!(matches!(a, JobAccess::Missing(m) if m.contains(
+            "`az containerapp job identity assign -g opv-fixture-rg -n <JOB> --system-assigned`"
+        )));
+    }
+
+    /// M1: a list that fails decides nothing.
+    #[test]
+    fn a_failed_role_list_is_undetermined() {
+        let mut roles: Vec<Output> = crate::runner::fake::failed_read(1).collect();
+        roles.push(ok());
+        let (_, a) = access_of(&job_vault(), roles, 0);
+        assert!(
+            matches!(a, JobAccess::Undetermined(m) if m.starts_with("role assignment list failed"))
+        );
+    }
+
+    /// M1: a custom role is not refused; opv cannot tell what it grants.
+    #[test]
+    fn only_a_custom_role_is_undetermined() {
+        let mut roles = job_fixture("role-assignment-list-job-principal.json");
+        roles[0]["roleDefinitionName"] = json!("Contoso Secret Reader");
+        let (_, a) = access_of(&job_vault(), vec![out(&roles)], GRANTED_AT + 3600);
+        assert!(matches!(a, JobAccess::Undetermined(m) if m.contains("Contoso Secret Reader")));
+    }
+
+    fn with_job(name: &str) -> AzureTarget {
+        AzureTarget {
+            companion_jobs: vec![name.into()],
+            ..target()
+        }
+    }
+
+    /// A3: after the app's lines, each job's two lines; a job without a role names its grant.
+    #[test]
+    fn doctor_adds_each_jobs_lines_with_the_grant_command() {
+        let mut responses = all_pass("role-assignment-list.json");
+        responses.extend([
+            out(&vault_show()),
+            out(&job_fixture("containerapp-job-show.json")),
+            out(&json!([])),
+        ]);
+        let r = FakeRunner::new(responses);
+        let host = Host::detect();
+        let checks = doctor(&with_job("job-a"), &r, &|| host);
+        let lines: Vec<String> = checks
+            .iter()
+            .skip(DOCTOR_CHECKS.len())
+            .map(|c| match &c.outcome {
+                Ok(Verdict::Ok(m) | Verdict::Warn(m)) => format!("{}: {m}", c.name),
+                o => format!("{}: {o:?}", c.name),
+            })
+            .collect();
+        assert!(
+            lines[0] == "container app job job-a: job-a in opv-fixture-rg, using its system-assigned identity"
+                && lines[1].starts_with("job job-a identity access: the job identity (principal <PRINCIPAL>) has no role on Key Vault kv-opv-fixture; grant it: `az role assignment create --assignee-object-id <PRINCIPAL>"),
+            "{lines:#?}"
+        );
+    }
+
+    #[test]
+    fn missing_job_names_azure_companion_jobs() {
+        let mut responses = healthy_with(&app_show());
+        responses.extend([out(&vault_show()), Output::failure(3)]);
+        let r = FakeRunner::new(responses);
+        let res = run(&with_job("job-a"), &r, PreflightMode::Read);
+        assert!(
+            err_text(res).contains("check azure.companion_jobs, which names container app job")
         );
     }
 }

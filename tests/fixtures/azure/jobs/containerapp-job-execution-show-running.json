@@ -1,0 +1,44 @@
+{
+  "id": "/subscriptions/<SUB>/resourceGroups/<RG>/providers/Microsoft.App/jobs/<JOB>/executions/<JOB>-8gy2u5q",
+  "name": "<JOB>-8gy2u5q",
+  "properties": {
+    "startTime": "2026-10-23T17:43:34+00:00",
+    "status": "Running",
+    "template": {
+      "containers": [
+        {
+          "command": [
+            "/bin/sh",
+            "-c",
+            "sleep 120; n=$(printf %s \"$SPIKE_VAL\" | wc -c); echo \"len SPIKE_VAL=$n\"; [ \"$n\" -eq 26 ]"
+          ],
+          "env": [
+            {
+              "name": "SPIKE_VAL",
+              "secretRef": "cappjob-<JOB>"
+            },
+            {
+              "name": "PLAIN1",
+              "secretRef": "cappjob-<JOB>"
+            },
+            {
+              "name": "SPIKE_TOUCH",
+              "value": "1"
+            }
+          ],
+          "image": "mcr.microsoft.com/azurelinux/base/core:3.0",
+          "imageType": "ContainerImage",
+          "name": "<JOB>",
+          "resources": {
+            "cpu": 0.25,
+            "ephemeralStorage": "",
+            "memory": "0.5Gi"
+          }
+        }
+      ],
+      "initContainers": []
+    }
+  },
+  "resourceGroup": "<RG>",
+  "type": "Microsoft.App/jobs/executions"
+}

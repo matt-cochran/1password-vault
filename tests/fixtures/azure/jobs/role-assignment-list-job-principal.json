@@ -1,0 +1,18 @@
+[
+  {
+    "createdBy": "<PRINCIPAL>",
+    "createdOn": "2026-10-23T17:38:10.445062+00:00",
+    "id": "/subscriptions/<SUB>/resourceGroups/<RG>/providers/Microsoft.KeyVault/vaults/<KV>/providers/Microsoft.Authorization/roleAssignments/<PRINCIPAL>",
+    "name": "<PRINCIPAL>",
+    "principalId": "<PRINCIPAL>",
+    "principalName": "<PRINCIPAL>",
+    "principalType": "ServicePrincipal",
+    "resourceGroup": "<RG>",
+    "roleDefinitionId": "/subscriptions/<SUB>/providers/Microsoft.Authorization/roleDefinitions/<PRINCIPAL>",
+    "roleDefinitionName": "Key Vault Secrets User",
+    "scope": "/subscriptions/<SUB>/resourceGroups/<RG>/providers/Microsoft.KeyVault/vaults/<KV>",
+    "type": "Microsoft.Authorization/roleAssignments",
+    "updatedBy": "<PRINCIPAL>",
+    "updatedOn": "2026-10-23T17:38:10.445062+00:00"
+  }
+]

@@ -389,6 +389,7 @@
         "name"
       ],
       "flags": [
+        "azure-companion-jobs",
         "azure-config",
         "azure-container",
         "azure-container-app",
