@@ -485,6 +485,11 @@ pub trait TargetConfig: fmt::Debug + Send + Sync {
     /// and each would prune what the other stages (FR-8). Which products a target delivers
     /// is not the provider's to decide: see [`crate::domain::Fleet::delivers`] (FR-56).
     fn same_target(&self, other: &dyn TargetConfig) -> bool;
+    /// The place `self` shares with `other` when [`TargetConfig::same_target`] holds, for
+    /// the error: the target's own locator unless the provider names a narrower one.
+    fn shared_locator(&self, _other: &dyn TargetConfig) -> String {
+        self.target_locator()
+    }
     /// The configuration error for targets `first` and `second` (each named as `<env>
     /// (target <name>)`) sharing this target.
     fn shared_target_error(&self, first: &str, second: &str) -> String;

@@ -638,6 +638,7 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
             seen: seen(Principal::ServicePrincipal {
                 client_id: "sp-client-1".into(),
             }),
+            grantee: None,
         },
         OwnerSetupRequired {
             system: System::GitHub,

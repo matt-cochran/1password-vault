@@ -57,6 +57,7 @@ fn vault_no_access() -> Error {
         env: None,
         target: None,
         seen: op_seen(),
+        grantee: None,
     }
     .into()
 }

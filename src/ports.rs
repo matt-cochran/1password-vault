@@ -116,7 +116,8 @@ pub trait PinnedRuntime {
     fn apply(&self, change: &RuntimeChange, snapshot: &RuntimeSnapshot) -> Result<Revision, Error>;
     /// Waits for `revision` to become healthy, unhealthy, or time out (FR-33).
     fn await_healthy(&self, revision: &Revision) -> Result<Health, Error>;
-    /// Advisory only (R6): used by doctor, never gates a deploy.
+    /// Advisory only (R6): used by doctor, never gates the app's deploy. A companion job's
+    /// read access is checked inside `apply` instead, before any update (Azure, #238, J3).
     fn check_access(&self, names: &[String]) -> Result<Vec<AccessFinding>, Error>;
     /// True when config is routed like secrets (`config = "store"`): written to the store
     /// and bound by reference. False: config is a plain env value (FR-14).
