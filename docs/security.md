@@ -107,6 +107,11 @@ The destination is checked against both the item's `base_url` and the configurat
 so changing it takes a vault write and a reviewed configuration change. Like any TLS client,
 request buffers inside the TLS library are not zeroized.
 
+`opv target op` runs a fixed operation on one named target under that target's own
+`deploy_credentials` item alone, never the person's login and never another environment's or
+target's item. Its `flyctl` child gets a cleared environment with opv's basics only, and the run
+prints ids, names, states, regions and image references, never a value.
+
 ## Values opv never stores: infrastructure values
 
 From 0.13.0 a key declared `source = "infrastructure"` holds a value that infrastructure

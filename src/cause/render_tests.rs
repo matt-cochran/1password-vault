@@ -3228,6 +3228,60 @@ fn i5_ram_dir_for_azure_on_macos_points_to_another_machine() {
     assert!(d.contains("from a Linux or Windows machine"), "{d}");
 }
 
+/// #234 §5.3: a registry push's missing in-memory folder is named for docker's sign-in.
+#[test]
+fn ram_dir_for_a_registry_push_names_dockers_sign_in() {
+    let c = Cause::RamDirUnavailable {
+        remote: None,
+        why: RamDir::NotTmpfs,
+        purpose: RamPurpose::RegistryPush,
+        env: None,
+        product: None,
+    };
+    assert!(
+        c.message().contains("docker's registry sign-in"),
+        "{}",
+        c.message()
+    );
+}
+
+/// #234 P4: an operation without deploy credentials names the mint as the way out.
+#[test]
+fn an_operation_without_deploy_credentials_names_the_mint() {
+    let c = Cause::Guard {
+        guard: Guard::OperationRefused {
+            env: EnvName::new("prod"),
+            target: TargetName::new("web"),
+            operation: "machines",
+            reason: OperationRefusal::NoDeployCredentials,
+        },
+    };
+    let d = c.do_text(&inv()).unwrap_or_default();
+    assert!(
+        d.contains("opv target credentials prod --target web --create"),
+        "{d}"
+    );
+}
+
+/// #234 O4: a machine id not in the app points at the listing of the target's machines.
+#[test]
+fn a_machine_not_in_the_app_points_at_the_targets_machines() {
+    let c = Cause::Guard {
+        guard: Guard::OperationRefused {
+            env: EnvName::new("prod"),
+            target: TargetName::new("web"),
+            operation: "machine-update",
+            reason: OperationRefusal::MachineNotInApp {
+                machine: "0123456789abcd".into(),
+            },
+        },
+    };
+    assert_eq!(
+        next_in(&c, &inv()),
+        "opv target op prod --target web machines"
+    );
+}
+
 /// I5: az storing the secret unencrypted is its own cause, not a folder failure.
 #[test]
 fn i5_unencrypted_store_is_a_tool_cause() {

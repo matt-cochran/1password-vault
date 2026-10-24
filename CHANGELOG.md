@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-10-23
+
+0.17.0 runs a reviewed operation on a target with that target's own deploy credentials.
+
+### Added
+
+- **`opv target op <env> --target <name> machines|machine-update` (#234).** A closed set of reviewed Fly operations, run under the named target's `deploy_credentials` and never your own login or an organisation token. `machines` lists the app's Machines (id, name, state, region, image); `machine-update --machine <id> --image <ref>` moves one listed Machine to an image in the target's own repository (`registry.fly.io/<fly.app>:<tag>` or `@sha256:<digest>`) and needs `--confirm <env>` where the environment sets `confirm_env`. Every check (environment, target, provider, deploy credentials, confirmation, image and Machine format, the tool) runs before any 1Password read; the app is always the target's own; the `flyctl` child gets a cleared environment with only the basics; nothing prints a value. Not exposed over MCP. `registry-push` is designed but not yet available (it refuses); it follows in 0.17.x.
+
+### Internal
+
+- `TargetConfig::operations()` and the `TargetOperations` hook keep operations provider-neutral in the core; `runner::isolated_env` scopes a cleared child environment; `signin::open_for_operation` is a strict deploy sign-in that never falls back; `System::Docker`, the `docker` tool and `Guard::OperationRefused` are in the catalog ahead of `registry-push`.
+- The shared environment allowlist (`host::ENV_BASICS`) now also carries the proxy and CA variables, `XDG_RUNTIME_DIR` and the Windows basics (Windows `Path` in any case); `declared_only` local and remote delivery get them too.
+- opv-sim answers `flyctl machine list` and `machine update` in flyctl's documented shape (not yet recorded: the live spikes were skipped by owner decision).
+
 ## [0.16.1] - 2026-10-23
 
 0.16.1 makes the `http` target practical to set up and fixes `delivery verify` on Key Vault and Kubernetes targets.
