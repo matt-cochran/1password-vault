@@ -12,8 +12,8 @@
 //! 3. [`execute`] (§5): the one read of the deploy credentials item, then the calls.
 //!
 //! Every refusal before [`execute`] is made with no `op` call. `opv target op` runs the
-//! three steps; `registry-push` still refuses in [`execute`] with
-//! [`OperationRefusal::NotYetAvailable`] until its lane (L3b, §11) lands.
+//! three steps; each operation reaches the provider through
+//! [`TargetOperations`](crate::provider::TargetOperations), so this module names none.
 
 use std::ffi::OsString;
 use std::io;
@@ -26,7 +26,7 @@ use crate::cause::{
 use crate::domain::{Fleet, ItemRef, Target};
 use crate::error::Error;
 use crate::host::{DOCKER, Host, Platform, Tool};
-use crate::provider::{ListedMachine, OperationBinding};
+use crate::provider::{ListedMachine, OperationBinding, RegistryPush};
 use crate::ramdir::{owned_dir, ram_backed};
 use crate::runner::{Call, CommandRunner, Outcome, Output, isolated_env};
 
@@ -99,6 +99,8 @@ pub struct Admitted {
     pub machine: Option<String>,
     /// The local daemon's `unix://` endpoint, resolved by [`preflight`] for a registry push.
     pub docker_endpoint: Option<String>,
+    /// The RAM runtime directory [`preflight`] checked (P8) for a registry push.
+    pub runtime_dir: Option<PathBuf>,
 }
 
 /// What an operation did, value-free: the lines opv prints and appends to the job summary
@@ -113,6 +115,8 @@ pub struct Report {
     pub machines: Vec<ListedMachine>,
     /// `machine-update`: the machine moved, and the image it now runs.
     pub updated: Option<(String, String)>,
+    /// `registry-push`: the image pushed, and the digest the registry reported.
+    pub pushed: Option<(String, String)>,
 }
 
 impl Report {
@@ -125,7 +129,13 @@ impl Report {
         });
         match self.op {
             Operation::Machines => doc["machines"] = serde_json::json!(self.machines),
-            _ => {
+            Operation::RegistryPush => {
+                if let Some((image, digest)) = &self.pushed {
+                    doc["image"] = serde_json::json!(image);
+                    doc["digest"] = serde_json::json!(digest);
+                }
+            }
+            Operation::MachineUpdate => {
                 if let Some((machine, image)) = &self.updated {
                     doc["machine"] = serde_json::json!(machine);
                     doc["image"] = serde_json::json!(image);
@@ -191,6 +201,7 @@ pub fn admit(fleet: &Fleet, req: &Request, _host: &Host) -> Result<Admitted, Err
         image,
         machine,
         docker_endpoint: None,
+        runtime_dir: None,
     })
 }
 
@@ -224,7 +235,7 @@ fn preflight_in(
         return Ok(());
     }
     // P8: a user-owned, RAM-backed runtime directory for docker's private config.
-    registry_ram_in(platform, runtime, is_ram)?;
+    let runtime = registry_ram_in(platform, runtime, is_ram)?;
     // P9: the local docker daemon (or none), never a remote one.
     let endpoint = docker_endpoint(a, r)?;
     // P10: the image is in that daemon, under the name the push would read.
@@ -236,6 +247,7 @@ fn preflight_in(
     })?;
     docker_image_local(a, r, &endpoint, image)?;
     a.docker_endpoint = Some(endpoint);
+    a.runtime_dir = Some(runtime);
     Ok(())
 }
 
@@ -243,10 +255,8 @@ fn preflight_in(
 /// run, sign-in included, is under [`isolated_env`]: no child but `op` sees more than opv's
 /// basics and its own variables (§5.5).
 pub fn execute(fleet: &Fleet, a: &Admitted, r: &dyn CommandRunner) -> Result<Report, Error> {
-    if a.op == Operation::RegistryPush {
-        return Err(not_yet_available(&a.env, &a.target, a.op));
-    }
     let calls = bound(fleet, &a.env, &a.target, a.op)?.1.calls;
+    let push = registry_push_of(a)?;
     let report = isolated_env(|| -> Result<Report, Error> {
         let signed = super::signin::open_for_operation(fleet, &a.env, &a.target, a.op.name(), r)?;
         let mut report = Report {
@@ -256,10 +266,17 @@ pub fn execute(fleet: &Fleet, a: &Admitted, r: &dyn CommandRunner) -> Result<Rep
             lines: Vec::new(),
             machines: Vec::new(),
             updated: None,
+            pushed: None,
         };
         if a.op == Operation::Machines {
             report.machines = calls.machines(&signed, &a.app)?;
             report.lines = machine_lines(&a.app, &report.machines);
+            return Ok(report);
+        }
+        if let Some(push) = &push {
+            let digest = calls.registry_push(&signed, push)?;
+            report.lines = vec![format!("pushed {} {digest}", push.image)];
+            report.pushed = Some((push.image.to_string(), digest));
             return Ok(report);
         }
         // Admission validated both slots (P6); an `Admitted` built without them is refused.
@@ -280,12 +297,39 @@ pub fn execute(fleet: &Fleet, a: &Admitted, r: &dyn CommandRunner) -> Result<Rep
         a.env,
         a.target,
         a.op.name(),
-        match &report.updated {
-            Some((m, i)) => format!("updated machine {m} to {i}"),
-            None => format!("{} machine(s)", report.machines.len()),
+        match (&report.updated, &report.pushed) {
+            (Some((m, i)), _) => format!("updated machine {m} to {i}"),
+            (_, Some((i, d))) => format!("pushed {i} {d}"),
+            _ => format!("{} machine(s)", report.machines.len()),
         }
     ));
     Ok(report)
+}
+
+/// The bound push of a `registry-push`, `None` for another operation. Admission validated
+/// the image (P6) and preflight resolved the daemon and the runtime directory (P8, P9); an
+/// `Admitted` push without them is opv's own bug, refused before any read.
+fn registry_push_of(a: &Admitted) -> Result<Option<RegistryPush<'_>>, Error> {
+    if a.op != Operation::RegistryPush {
+        return Ok(None);
+    }
+    let (Some(image), Some(endpoint), Some(runtime)) =
+        (&a.image, &a.docker_endpoint, &a.runtime_dir)
+    else {
+        return Err(Cause::Bug {
+            site: "provider_op: registry-push executed without its preflight",
+        }
+        .into());
+    };
+    Ok(Some(RegistryPush {
+        env: &a.env,
+        target: &a.target,
+        app: &a.app,
+        item: &a.credentials,
+        image,
+        endpoint,
+        runtime,
+    }))
 }
 
 /// One line per machine: id, name, state, region and image, nothing else (O5).
@@ -332,10 +376,6 @@ fn bound<'f>(
         )
     })?;
     Ok((t, binding))
-}
-
-fn not_yet_available(env: &str, target: &str, op: Operation) -> Error {
-    refused(env, target, op, OperationRefusal::NotYetAvailable)
 }
 
 /// A refusal of the operation, with the environment, target and operation named.
@@ -527,7 +567,7 @@ fn registry_ram_in(
     platform: Platform,
     runtime: Option<OsString>,
     is_ram: &dyn Fn(&Path) -> io::Result<bool>,
-) -> Result<(), Error> {
+) -> Result<PathBuf, Error> {
     if platform == Platform::MacOs {
         return Err(ram_unavailable(RamDir::NoneOnPlatform { os: "macOS" }));
     }
@@ -547,7 +587,7 @@ fn registry_ram_in(
     if !is_ram(&runtime).unwrap_or(false) {
         return Err(ram_unavailable(RamDir::NotTmpfs));
     }
-    Ok(())
+    Ok(runtime)
 }
 
 fn ram_unavailable(why: RamDir) -> Error {
