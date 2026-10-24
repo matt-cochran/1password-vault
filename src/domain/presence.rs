@@ -61,7 +61,8 @@ pub fn desired_in(key: &KeySpec, env: &str) -> bool {
 }
 
 /// Every `(product, key, env)` an explicit `environments` list leaves out without an
-/// `except`: the `environment_gap` warning (the configuration still loads).
+/// `except`: the `environment_gap` warning (the configuration still loads). An environment
+/// the key's `refuse_in` names is a deliberate exclusion, never a gap (#243).
 pub fn gaps(fleet: &Fleet) -> Vec<(String, String, String)> {
     let mut out = Vec::new();
     for (product, p) in &fleet.products {
@@ -70,7 +71,10 @@ pub fn gaps(fleet: &Fleet) -> Vec<(String, String, String)> {
                 continue;
             };
             for env in fleet.environments.keys() {
-                if !list.iter().any(|e| e == env) && !spec.except.contains_key(env) {
+                if !list.iter().any(|e| e == env)
+                    && !spec.except.contains_key(env)
+                    && !spec.rules.refuse_in.iter().any(|e| e == env)
+                {
                     out.push((product.clone(), key.clone(), env.clone()));
                 }
             }
