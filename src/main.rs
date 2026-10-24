@@ -1708,7 +1708,7 @@ enum TargetOperation {
     Machines,
     /// Move one Machine of the app to another image (write).
     MachineUpdate,
-    /// Push a local image to the app's repository (write; not yet available).
+    /// Push a local image to the app's repository (write; Linux only, with a local docker daemon).
     RegistryPush,
 }
 

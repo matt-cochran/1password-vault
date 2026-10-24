@@ -1,9 +1,9 @@
-//! `opv-sim`: a test-only stand-in for `op`, `flyctl`, `kubectl`, `gh`, `ssh` and `https`
+//! `opv-sim`: a test-only stand-in for `op`, `flyctl`, `kubectl`, `gh`, `ssh`, `https` and `docker`
 //! (design §13.1), never shipped. One binary answers as whichever tool `argv[0]` names; it is
 //! installed under each name in a temporary `bin` directory that comes first on `PATH`:
 //!
 //! ```text
-//! opv-sim install <bin dir>     # links op, flyctl, fly, kubectl, gh, ssh and https to itself
+//! opv-sim install <bin dir>     # links op, flyctl, fly, kubectl, gh, ssh, https and docker to itself
 //! ```
 //!
 //! Its state is the scenario directory named by `OPV_SIM_WORLD`: `world.json` (see each
@@ -11,9 +11,12 @@
 //! `sim-state.json` and `calls.log`. Every failure reply is copied from a recording under
 //! `tests/fixtures/` with the world's names substituted; a reply nobody recorded fails with
 //! exit 86 naming the missing recording, and a command it does not model with exit 87
-//! (`opv-sim: unsupported …`), so a test never passes on invented text.
+//! (`opv-sim: unsupported …`), so a test never passes on invented text. The exceptions are
+//! the replies marked unrecorded in [`fly`] (`machine list`/`machine update`) and every reply
+//! of [`docker`] (owner decision, `docs/design/provider-operations.md` §8.1).
 
 mod args;
+mod docker;
 mod faults;
 mod fly;
 mod gh;
@@ -44,6 +47,7 @@ const TOOLS: &[(&str, &str)] = &[
     ("ssh", "ssh"),
     ("https", "https"),
     ("az", "az"),
+    ("docker", "docker"),
 ];
 
 fn main() {
@@ -99,7 +103,7 @@ fn admin(args: &[String]) -> i32 {
             0
         }
         _ => fail(
-            "usage: opv-sim install <bin dir> (or run it as op, flyctl, kubectl, gh, ssh or https)",
+            "usage: opv-sim install <bin dir> (or run it as op, flyctl, kubectl, gh, ssh, https or docker)",
         ),
     }
 }
@@ -117,6 +121,7 @@ fn words(program: &str, args: &[String]) -> Vec<String> {
         "gh" => gh::call_words(args),
         "ssh" => ssh::call_words(args),
         "https" => https::call_words(args),
+        "docker" => docker::call_words(args),
         _ => args::words(args, &[]),
     }
 }
@@ -143,6 +148,7 @@ fn answer(program: &str, world: &mut World, args: &[String]) -> Action {
         "gh" => gh::run(world, args),
         "ssh" => return ssh::run(world, args),
         "https" => https::run(world, args),
+        "docker" => docker::run(world, args),
         // Azure recordings are deferred (#40-#42): az is "not installed".
         _ => Reply {
             code: 127,

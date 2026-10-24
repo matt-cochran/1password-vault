@@ -26,7 +26,7 @@ use serde::Deserialize;
 use super::{Effect, read_json};
 use crate::cause::{Cause, EnvName, Guard, OperationRefusal, TargetName};
 use crate::error::Error;
-use crate::provider::{ListedMachine, TargetOperations};
+use crate::provider::{ListedMachine, RegistryPush, TargetOperations};
 use crate::runner::CommandRunner;
 
 /// `machines` argv: `flyctl machine list --app <app> --json` (§2).
@@ -159,6 +159,21 @@ impl TargetOperations for Operations {
         image: &str,
     ) -> Result<(), Error> {
         machine_update(r, env, target, app, machine, image)
+    }
+
+    fn registry_push(&self, r: &dyn CommandRunner, push: &RegistryPush) -> Result<String, Error> {
+        super::registry::registry_push(
+            r,
+            &super::registry::PushRequest {
+                env: push.env,
+                target: push.target,
+                app: push.app,
+                item: push.item,
+                image: push.image,
+                endpoint: push.endpoint,
+                runtime: push.runtime,
+            },
+        )
     }
 }
 

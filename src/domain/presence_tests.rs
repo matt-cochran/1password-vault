@@ -67,6 +67,21 @@ fn an_except_environment_is_not_wanted_with_its_reason() {
     );
 }
 
+/// A key refused in an environment is deliberately excluded there, so `ready` never suggests
+/// adding it (#243).
+#[test]
+fn an_environment_the_key_refuses_is_not_an_environment_gap() {
+    let text = "[environments.dev]\n\
+                boundaries.api = { vault_id = \"v\", item_id = \"i\" }\n\
+                [environments.prod]\n\
+                [products.api.keys.ESCAPE_HATCH]\n\
+                kind = \"config\"\n\
+                environments = [\"dev\"]\n\
+                rules.refuse_in = [\"prod\"]\n";
+    let fleet = parse(text).expect("the contract loads");
+    assert!(presence::gaps(&fleet).is_empty());
+}
+
 #[test]
 fn an_explicit_list_leaving_an_environment_out_is_an_environment_gap() {
     let text = "[environments.dev]\n\

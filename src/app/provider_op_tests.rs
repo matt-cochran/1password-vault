@@ -96,6 +96,7 @@ fn admitted(op: Operation) -> Admitted {
         image: Some("registry.fly.io/shop:v1".into()),
         machine: Some("0123456789abcd".into()),
         docker_endpoint: None,
+        runtime_dir: None,
     }
 }
 
@@ -635,30 +636,155 @@ fn an_operation_reads_the_named_targets_deploy_credentials() {
     assert!(r.calls.borrow()[0].args.iter().any(|a| a == "ideploy"));
 }
 
-// --- registry-push is not yet available (L3b) -----------------------------------------------
+// --- registry-push (§5.3) --------------------------------------------------------------------
 
+/// T11: a push writes the registry, so it needs `--confirm` where `confirm_env` is set.
 #[test]
-fn a_refused_operation_exits_with_the_policy_exit_code() {
-    let e = execute(
-        &fleet(),
-        &admitted(Operation::RegistryPush),
-        &FakeRunner::default(),
-    )
-    .unwrap_err();
-    assert_eq!(e.exit_code(), 6);
+fn a_registry_push_without_the_confirmation_is_refused() {
+    let req = Request {
+        confirm: None,
+        ..push("registry.fly.io/shop:v1", "web")
+    };
+    let e = admit(&fleet(), &req, &Host::detect()).unwrap_err();
+    assert_eq!((e.code_str(), e.exit_code()), ("confirm_required", 6));
 }
 
+/// An `Admitted` push that skipped preflight has no endpoint or runtime directory: opv's
+/// own bug, refused before any read.
 #[test]
-fn the_refusal_names_the_operation_and_its_target() {
-    let e = execute(
-        &fleet(),
-        &admitted(Operation::RegistryPush),
-        &FakeRunner::default(),
-    )
-    .unwrap_err();
-    assert!(
-        e.text().contains("registry-push on prod/web"),
-        "{}",
-        e.text()
-    );
+fn a_registry_push_without_its_preflight_reads_nothing() {
+    let r = FakeRunner::default();
+    let _ = execute(&fleet(), &admitted(Operation::RegistryPush), &r);
+    assert!(r.calls.borrow().is_empty());
+}
+
+#[cfg(unix)]
+mod push {
+    use std::io;
+    use std::path::Path;
+    use std::time::Duration;
+
+    use super::*;
+
+    const DIGEST: &str = "sha256:4c6f1d5b0c3e8a9f2d7b1e6a5c4d3b2a1f0e9d8c7b6a5f4e3d2c1b0a9f8e7d6c";
+
+    /// A FakeRunner whose `docker login` writes the file store into `$DOCKER_CONFIG`, as
+    /// docker does. unrecorded: built from docker's documented output (#234 §8.1).
+    struct Daemon(FakeRunner);
+
+    impl Daemon {
+        fn new() -> Self {
+            Self(FakeRunner::new([
+                deploy_item(),
+                deploy_item(),
+                Output::success("Login Succeeded\n"),
+                Output::success(format!(
+                    "The push refers to repository [registry.fly.io/shop]\n\
+                     v1: digest: {DIGEST} size: 1570\n"
+                )),
+            ]))
+        }
+
+        fn child(&self, call: &Call) {
+            let dir = call.env.iter().find(|(k, _)| *k == "DOCKER_CONFIG");
+            if let (Some((_, dir)), Some(&"login")) = (dir, call.args.first()) {
+                std::fs::write(
+                    Path::new(dir).join("config.json"),
+                    r#"{"auths":{"opv.invalid":{},"registry.fly.io":{"auth":"eDp5"}}}"#,
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    impl CommandRunner for Daemon {
+        fn read(&self, call: &Call, refused: &[i32]) -> io::Result<Outcome> {
+            self.child(call);
+            self.0.read(call, refused)
+        }
+        fn write(&self, call: &Call) -> io::Result<Outcome> {
+            self.child(call);
+            self.0.write(call)
+        }
+        fn probe(&self, call: &Call, limit: Duration) -> io::Result<Output> {
+            self.0.probe(call, limit)
+        }
+        fn pause(&self, d: Duration, note: &str) {
+            self.0.pause(d, note);
+        }
+        fn note(&self, line: &str) {
+            self.0.note(line);
+        }
+        fn run_inherited(
+            &self,
+            program: &str,
+            args: &[&str],
+            env: &[(&str, &str)],
+        ) -> io::Result<i32> {
+            self.0.run_inherited(program, args, env)
+        }
+    }
+
+    /// A push of `registry.fly.io/shop:v1`, preflighted into `runtime`.
+    fn pushed(runtime: &tempfile::TempDir) -> (Result<Report, Error>, Daemon) {
+        let a = Admitted {
+            docker_endpoint: Some("unix:///var/run/docker.sock".into()),
+            runtime_dir: Some(runtime.path().to_path_buf()),
+            ..admitted(Operation::RegistryPush)
+        };
+        let d = Daemon::new();
+        (execute(&fleet(), &a, &d), d)
+    }
+
+    #[test]
+    fn a_registry_push_prints_the_image_and_its_digest() {
+        let dir = owned_dir();
+        let report = pushed(&dir).0.unwrap();
+        assert_eq!(
+            report.lines,
+            [format!("pushed registry.fly.io/shop:v1 {DIGEST}")]
+        );
+    }
+
+    #[test]
+    fn a_registry_push_document_holds_the_image_and_its_digest() {
+        let dir = owned_dir();
+        let doc = pushed(&dir).0.unwrap().json();
+        assert_eq!(
+            (doc["image"].as_str(), doc["digest"].as_str()),
+            (Some("registry.fly.io/shop:v1"), Some(DIGEST))
+        );
+    }
+
+    #[test]
+    fn a_registry_push_logs_in_then_pushes() {
+        let dir = owned_dir();
+        let d = pushed(&dir).1;
+        assert_eq!(
+            verbs(&d.0),
+            ["login registry.fly.io", "push registry.fly.io/shop:v1"]
+        );
+    }
+
+    #[test]
+    fn a_registry_push_reads_the_named_targets_deploy_credentials() {
+        let dir = owned_dir();
+        let d = pushed(&dir).1;
+        assert!(d.0.calls.borrow()[0].args.iter().any(|a| a == "ideploy"));
+    }
+
+    /// §5.5: the sign-in, the read and both docker calls run isolated.
+    #[test]
+    fn every_call_of_a_registry_push_runs_isolated() {
+        let dir = owned_dir();
+        let d = pushed(&dir).1;
+        assert!(d.0.calls.borrow().iter().all(|c| c.isolated));
+    }
+
+    #[test]
+    fn a_registry_push_leaves_no_private_directory() {
+        let dir = owned_dir();
+        let _ = pushed(&dir);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
 }

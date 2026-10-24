@@ -15,6 +15,11 @@
 //!    a wrapper in front of the simulator records the *names* of the variables it receives
 //!    (never a value) and the token name is absent (§5.5).
 //!
+//! 6. `registry-push` (Linux only, module [`registry_push`]) pushes through `opv-sim docker`:
+//!    it prints `pushed <image> <digest>`, keeps the token out of every argv, leaves no
+//!    `opv-docker.*` folder after a push, a refused login or a credential-helper login
+//!    (`credential_store_escaped`), and refuses another app's image before any docker call.
+//!
 //! **The flyctl replies.** `opv-sim flyctl` has no recorded `machine list`/`machine update`
 //! reply (the owner skipped spikes S2/S3, design §8.1), so the simulator builds both from
 //! flyctl's documented JSON. That is why this module asserts on behaviour and writes no
@@ -268,4 +273,246 @@ fn a_ci_token_never_reaches_the_flyctl_child() {
     let _ = s.opv(&machines());
     let seen = std::fs::read_to_string(s.path("flyctl-env-names.txt")).expect("env names");
     assert!(!seen.lines().any(|n| n == "GITHUB_TOKEN"), "{seen}");
+}
+
+// --- registry-push (§5.3, T6-T9) -------------------------------------------------------------
+
+/// `registry-push` against `opv-sim docker` (every docker reply unrecorded, design §8.1, as
+/// `tests/sim/docker.rs` says). Linux only: the push needs a RAM-backed `XDG_RUNTIME_DIR`
+/// (P8), here a fresh folder in `/dev/shm`.
+#[cfg(target_os = "linux")]
+mod registry_push {
+    use super::*;
+
+    /// The image the local daemon holds, in the target's repository.
+    const PUSH_IMAGE: &str = "registry.fly.io/e2e-app-prod:v3";
+
+    /// `opv target op prod --target fly registry-push --image <image> --confirm prod`.
+    fn push(image: &str) -> Vec<String> {
+        args(&[
+            "target",
+            "op",
+            "prod",
+            "--target",
+            TARGET,
+            "registry-push",
+            "--image",
+            image,
+            "--confirm",
+            "prod",
+        ])
+    }
+
+    /// One push scenario: the world, and the RAM folder given as `XDG_RUNTIME_DIR`.
+    struct Lab {
+        s: Scenario,
+        ram: tempfile::TempDir,
+    }
+
+    impl Lab {
+        fn run(&self, image: &str) -> crate::coverage::Run {
+            self.s.opv(&push(image))
+        }
+
+        /// The `opv-docker.*` folders left in the runtime directory.
+        fn leftovers(&self) -> Vec<String> {
+            std::fs::read_dir(self.ram.path())
+                .expect("ram dir")
+                .filter_map(Result::ok)
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.starts_with("opv-docker."))
+                .collect()
+        }
+    }
+
+    /// [`fly_ops`] with `PUSH_IMAGE` in the local daemon, `edit` applied to the world's
+    /// `docker` section, and `docker` reconnected to the world.
+    fn lab(edit: fn(&mut Value)) -> Lab {
+        let ram = tempfile::Builder::new()
+            .prefix("opv-e2e-ram.")
+            .tempdir_in("/dev/shm")
+            .expect("a folder in /dev/shm");
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(ram.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("chmod");
+        let s = fly_ops()
+            .world(|w| {
+                w["docker"] = json!({"images": [PUSH_IMAGE]});
+                edit(w);
+            })
+            .var("XDG_RUNTIME_DIR", &ram.path().display().to_string());
+        docker_in_world(&s);
+        Lab { s, ram }
+    }
+
+    /// `docker` in front of the simulator: the operation's children run under
+    /// `isolated_env`, which drops `OPV_SIM_WORLD`, so the wrapper restores it.
+    fn docker_in_world(s: &Scenario) {
+        s.install();
+        let sim = s.path("sim");
+        std::fs::create_dir_all(&sim).expect("sim dir");
+        std::os::unix::fs::symlink(SIM, sim.join("docker")).expect("sim docker");
+        let wrapper = s.path("bin/docker");
+        std::fs::remove_file(&wrapper).expect("simulated docker");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nexport OPV_SIM_WORLD='{world}'\nexec '{sim}' \"$@\"\n",
+                world = s.path("world").display(),
+                sim = sim.join("docker").display(),
+            ),
+        )
+        .expect("fake docker");
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+
+    fn no_edit(_: &mut Value) {}
+
+    /// The deploy token is no longer one the registry accepts.
+    fn token_revoked(w: &mut Value) {
+        w["fly"]["tokens"]
+            .as_array_mut()
+            .expect("tokens")
+            .retain(|t| t != DEPLOY_TOKEN);
+    }
+
+    /// docker's login lands in a credential helper.
+    fn creds_store(w: &mut Value) {
+        w["docker"]["creds_store"] = json!(true);
+    }
+
+    #[test]
+    fn registry_push_prints_the_image_and_the_pushed_digest() {
+        let l = lab(no_edit);
+        let run = l.run(PUSH_IMAGE);
+        let digest = world(&l.s)["docker"]["pushed"][0]["digest"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(
+            (run.code, run.stdout.trim()),
+            (Some(0), format!("pushed {PUSH_IMAGE} {digest}").as_str()),
+            "{}",
+            run.stderr
+        );
+    }
+
+    #[test]
+    fn registry_push_json_holds_the_image_and_the_digest() {
+        let l = lab(no_edit);
+        let mut a = push(PUSH_IMAGE);
+        a.push("--json".into());
+        let run = l.s.opv(&a);
+        let doc: Value = serde_json::from_str(&run.stdout).expect("one JSON document");
+        assert_eq!(
+            (
+                doc["image"].as_str(),
+                doc["digest"].clone(),
+                doc["operation"].as_str()
+            ),
+            (
+                Some(PUSH_IMAGE),
+                world(&l.s)["docker"]["pushed"][0]["digest"].clone(),
+                Some("registry-push")
+            ),
+            "{}",
+            run.stderr
+        );
+    }
+
+    /// T6: the token reaches docker on stdin only; no logged argv holds it.
+    #[test]
+    fn registry_push_never_puts_the_token_in_argv() {
+        let l = lab(no_edit);
+        let _ = l.run(PUSH_IMAGE);
+        let log = calls(&l.s);
+        assert!(
+            log.contains("docker login registry.fly.io -u x --password-stdin")
+                && !log.contains("test-marker-e2e-fly-op-deploy"),
+            "{log}"
+        );
+    }
+
+    #[test]
+    fn registry_push_never_prints_the_token() {
+        let l = lab(no_edit);
+        let run = l.run(PUSH_IMAGE);
+        assert!(
+            !run.stdout.contains("test-marker-e2e-fly-op-deploy")
+                && !run.stderr.contains("test-marker-e2e-fly-op-deploy"),
+            "{}{}",
+            run.stdout,
+            run.stderr
+        );
+    }
+
+    /// T7: the private docker folder is gone after a push.
+    #[test]
+    fn registry_push_leaves_no_private_folder() {
+        let l = lab(no_edit);
+        let _ = l.run(PUSH_IMAGE);
+        assert!(l.leftovers().is_empty(), "{:?}", l.leftovers());
+    }
+
+    /// T9: a login the registry refuses is the deploy credentials' rejection, nothing pushed.
+    #[test]
+    fn a_refused_login_exits_seven_without_a_push() {
+        let l = lab(token_revoked);
+        let run = l.run(PUSH_IMAGE);
+        assert_eq!(
+            (run.code, calls(&l.s).contains("docker push")),
+            (Some(7), false),
+            "{}{}",
+            run.stdout,
+            run.stderr
+        );
+    }
+
+    /// T7: the private docker folder is gone after a refused login.
+    #[test]
+    fn a_refused_login_leaves_no_private_folder() {
+        let l = lab(token_revoked);
+        let _ = l.run(PUSH_IMAGE);
+        assert!(l.leftovers().is_empty(), "{:?}", l.leftovers());
+    }
+
+    /// T8: a login docker kept in a credential helper is refused, nothing pushed.
+    #[test]
+    fn a_credential_helper_login_is_refused_as_escaped() {
+        let l = lab(creds_store);
+        let mut a = push(PUSH_IMAGE);
+        a.push("--json".into());
+        let run = l.s.opv(&a);
+        assert!(
+            run.code == Some(6)
+                && run.stdout.contains("credential_store_escaped")
+                && !calls(&l.s).contains("docker push"),
+            "{:?} {}{}",
+            run.code,
+            run.stdout,
+            run.stderr
+        );
+    }
+
+    /// T8: the private docker folder is gone after a credential-helper login.
+    #[test]
+    fn a_credential_helper_login_leaves_no_private_folder() {
+        let l = lab(creds_store);
+        let _ = l.run(PUSH_IMAGE);
+        assert!(l.leftovers().is_empty(), "{:?}", l.leftovers());
+    }
+
+    /// P6: an image of another app is refused before any docker call.
+    #[test]
+    fn an_image_outside_the_app_is_refused_before_any_docker_call() {
+        let l = lab(no_edit);
+        let run = l.run("registry.fly.io/other-app:v3");
+        assert!(
+            run.code == Some(6) && !calls(&l.s).contains("docker"),
+            "{:?} {}",
+            run.code,
+            calls(&l.s)
+        );
+    }
 }
