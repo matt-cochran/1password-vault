@@ -942,6 +942,54 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             },
             vec!["OPENAI_API_KEY", "env-prod", "src/lib.rs:12"],
         ),
+        // provision (#253)
+        (
+            ProducerFailed {
+                producer: "consent-xyz".into(),
+                why: ProducerFailure::Exit { status: 17 },
+            },
+            vec!["consent-xyz", "17"],
+        ),
+        (
+            ProducerChanged {
+                producer: "consent-xyz".into(),
+                file: PathBuf::from("tools/connect.py"),
+            },
+            vec!["consent-xyz", "tools/connect.py"],
+        ),
+        (
+            Unsupported {
+                feature: UnsupportedFeature::ProducerOnWindows {
+                    set: "set-xyz".into(),
+                    producer: "consent-xyz".into(),
+                },
+            },
+            vec!["set-xyz", "consent-xyz"],
+        ),
+        (
+            Guard {
+                guard: super::super::Guard::ProvisionRefused {
+                    set: "set-xyz".into(),
+                    env: EnvName::new("env-prod"),
+                    reason: ProvisionRefusal::Partial {
+                        missing: vec!["prod-api/REFRESH_TOKEN".into()],
+                    },
+                },
+            },
+            vec!["set-xyz", "env-prod", "prod-api/REFRESH_TOKEN"],
+        ),
+        (
+            Guard {
+                guard: super::super::Guard::SetMember {
+                    product: ProductName::new("prod-api"),
+                    key: KeyName::new("REFRESH_TOKEN"),
+                    env: EnvName::new("env-prod"),
+                    set: "set-xyz".into(),
+                },
+            },
+            vec!["prod-api/REFRESH_TOKEN", "env-prod", "set-xyz"],
+        ),
+        // end provision
     ]
 }
 
@@ -1039,10 +1087,14 @@ fn ordinal(c: &Cause) -> usize {
         NeedsUndeclared { .. } => 80,
         ImportTierRefused { .. } => 81,
         RetireStillRead { .. } => 82,
+        // provision (#253)
+        ProducerFailed { .. } => 86,
+        ProducerChanged { .. } => 87,
+        Unsupported { .. } => 88,
     }
 }
 
-const VARIANTS: usize = 86;
+const VARIANTS: usize = 89;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
@@ -4862,6 +4914,310 @@ fn lost_report_leads_with_outcome() {
     };
     assert!(
         c.message().starts_with("sync finished (ok);"),
+        "{}",
+        c.message()
+    );
+}
+
+// ---- provision (#253, `docs/design/owner-value-ingestion.md`) -------------------------
+
+fn provision_inv() -> Invocation {
+    Invocation {
+        origin: Origin::Cli,
+        command: vec!["provision".into()],
+        args: vec!["grant".into(), "--env".into(), "prod".into()],
+        has_child: false,
+    }
+}
+
+fn provision_refused(reason: ProvisionRefusal) -> Cause {
+    Cause::Guard {
+        guard: Guard::ProvisionRefused {
+            set: "grant".into(),
+            env: EnvName::new("prod"),
+            reason,
+        },
+    }
+}
+
+fn producer_failed(why: ProducerFailure) -> Cause {
+    Cause::ProducerFailed {
+        producer: "consent".into(),
+        why,
+    }
+}
+
+fn produce_invalid(rule: ProduceRule) -> Cause {
+    Cause::InputInvalid {
+        path: PathBuf::from("tools/connect.py"),
+        kind: InputKind::Produce,
+        at: None,
+        field: String::new(),
+        rule: FieldRule::Produce { produce: rule },
+    }
+}
+
+/// §5.2: a producer's failure is told only by its closed code.
+#[test]
+fn a_producer_error_line_is_told_by_its_code() {
+    let c = producer_failed(ProducerFailure::Reported {
+        code: "access_denied".into(),
+    });
+    assert_eq!(
+        c.message(),
+        "producer consent reported access_denied; nothing was written"
+    );
+}
+
+/// §5.2, vet F10: a producer that ran out of time points at its capped timeout.
+#[test]
+fn a_producer_timeout_names_its_timeout_setting() {
+    let c = producer_failed(ProducerFailure::Timeout { seconds: 600 });
+    let d = c.do_text(&provision_inv()).unwrap_or_default();
+    assert!(
+        d.contains("timeout in [producers.consent] (at most 15m)"),
+        "{d}"
+    );
+}
+
+/// §5.2: a non-zero exit sends the person to the producer's own documentation.
+#[test]
+fn a_producer_exit_points_at_its_documentation() {
+    let c = producer_failed(ProducerFailure::Exit { status: 3 });
+    let d = c.do_text(&provision_inv()).unwrap_or_default();
+    assert!(d.contains("documentation for exit status 3"), "{d}");
+}
+
+/// §5.2: a producer failure is re-run once its Do is done.
+#[test]
+fn a_producer_failure_reruns_after_the_fix() {
+    let c = producer_failed(ProducerFailure::Exit { status: 3 });
+    assert_eq!(c.step(&provision_inv()).1, Next::Rerun);
+}
+
+/// §3.2, vet F17: a changed producer file is reviewed and pinned again.
+#[test]
+fn a_changed_producer_asks_for_review_and_a_new_pin() {
+    let c = Cause::ProducerChanged {
+        producer: "consent".into(),
+        file: PathBuf::from("tools/connect.py"),
+    };
+    let d = c.do_text(&provision_inv()).unwrap_or_default();
+    assert!(
+        d.contains("review the change to tools/connect.py; once it is right, set sha256 of [producers.consent]"),
+        "{d}"
+    );
+}
+
+/// D12: a producer on native Windows is run from WSL.
+#[test]
+fn a_producer_on_windows_points_at_wsl() {
+    let c = Cause::Unsupported {
+        feature: UnsupportedFeature::ProducerOnWindows {
+            set: "grant".into(),
+            producer: "consent".into(),
+        },
+    };
+    assert_eq!(
+        c.do_text(&provision_inv()).as_deref(),
+        Some("run opv provision from WSL on this machine")
+    );
+}
+
+/// §4.5: a partial set names its missing members, never a value.
+#[test]
+fn a_partial_set_names_its_missing_members() {
+    let c = provision_refused(ProvisionRefusal::Partial {
+        missing: vec!["admin/REFRESH_TOKEN".into()],
+    });
+    assert!(
+        c.message()
+            .contains("(admin/REFRESH_TOKEN without a value)"),
+        "{}",
+        c.message()
+    );
+}
+
+/// D8: a partial set is re-made whole with --replace.
+#[test]
+fn a_partial_set_do_is_the_replace() {
+    let c = provision_refused(ProvisionRefusal::Partial {
+        missing: vec!["admin/REFRESH_TOKEN".into()],
+    });
+    let d = c.do_text(&provision_inv()).unwrap_or_default();
+    assert!(
+        d.contains("opv provision grant --env prod --replace"),
+        "{d}"
+    );
+}
+
+/// X4: after a refused provision, Next reads the set's state.
+#[test]
+fn a_refused_provision_checks_ready() {
+    let c = provision_refused(ProvisionRefusal::Inconsistent {
+        members: vec!["admin/REFRESH_TOKEN".into()],
+    });
+    assert_eq!(next_in(&c, &provision_inv()), "opv ready prod");
+}
+
+/// D8: --replace of an immutable member is refused, and the Do keeps it.
+#[test]
+fn an_immutable_member_do_leaves_out_replace() {
+    let c = provision_refused(ProvisionRefusal::ImmutableMember {
+        member: "fleet/USER_HASH_KEY".into(),
+    });
+    let d = c.do_text(&provision_inv()).unwrap_or_default();
+    assert!(d.starts_with("leave out --replace"), "{d}");
+}
+
+/// §5.5, vet C21: a producer value another environment holds names that environment.
+#[test]
+fn a_value_shared_across_environments_names_the_other() {
+    let c = provision_refused(ProvisionRefusal::SameAcrossEnvironments {
+        member: "admin/REFRESH_TOKEN".into(),
+        other: EnvName::new("staging"),
+    });
+    assert!(
+        c.message().contains("environment staging already holds"),
+        "{}",
+        c.message()
+    );
+}
+
+/// §4.2 step 7, vet F10: a budget too small hands the person the run with enough time.
+#[test]
+fn a_budget_too_small_hands_off_the_longer_timeout() {
+    let c = provision_refused(ProvisionRefusal::BudgetTooSmall {
+        needed_seconds: 840,
+        left_seconds: 600,
+    });
+    assert_eq!(
+        next_in(&c, &provision_inv()),
+        "opv provision grant --env prod --timeout 840"
+    );
+}
+
+/// §5.6: a set member written alone points at the set's own provision.
+#[test]
+fn a_set_member_do_names_the_provision() {
+    let c = Cause::Guard {
+        guard: Guard::SetMember {
+            product: ProductName::new("admin"),
+            key: KeyName::new("REFRESH_TOKEN"),
+            env: EnvName::new("prod"),
+            set: "grant".into(),
+        },
+    };
+    let d = c.do_text(&inv()).unwrap_or_default();
+    assert!(
+        d.ends_with("opv provision grant --env prod --replace"),
+        "{d}"
+    );
+}
+
+/// §5.2: a bad producer line is named by its number.
+#[test]
+fn a_bad_produce_line_is_named_by_number() {
+    let c = produce_invalid(ProduceRule::NotJson { line: 4 });
+    assert_eq!(
+        c.message(),
+        "the output of producer file tools/connect.py: line 4 is not one JSON object"
+    );
+}
+
+/// §5.2: an undeclared output is named by its position, never its name.
+#[test]
+fn an_undeclared_output_is_named_by_position() {
+    let c = produce_invalid(ProduceRule::Undeclared { position: 2 });
+    assert!(
+        c.message()
+            .ends_with("output 2 of the result is not an output the set uses"),
+        "{}",
+        c.message()
+    );
+}
+
+/// §5.2: a refused consent URL says it was not opened.
+#[test]
+fn a_refused_open_url_was_not_opened() {
+    let c = produce_invalid(ProduceRule::OpenUrlRefused {
+        line: 1,
+        why: OpenUrlProblem::HostNotListed,
+    });
+    assert!(
+        c.message()
+            .ends_with("names a host outside open_url_hosts, so it was not opened"),
+        "{}",
+        c.message()
+    );
+}
+
+/// §5.2: the producer's maintainer fixes its output; opv has no command to run.
+#[test]
+fn a_bad_produce_line_has_nothing_to_run() {
+    let c = produce_invalid(ProduceRule::NoResult);
+    assert_eq!(c.step(&provision_inv()).1, Next::None(NoNext::NothingToRun));
+}
+
+fn set_config_invalid(check: ConfigCheck) -> Cause {
+    Cause::ConfigInvalid {
+        source: file_source(),
+        at: None,
+        field: DottedPath(vec!["sets".into(), "grant".into(), "members".into()]),
+        rule: FieldRule::Check { check },
+    }
+}
+
+/// §3.2, D1: a set spread over two items names both.
+#[test]
+fn a_set_over_two_items_names_both() {
+    let c = set_config_invalid(ConfigCheck::SetSpansBoundaries {
+        env: "prod".into(),
+        boundaries: vec!["fleet".into(), "admin".into()],
+    });
+    assert!(
+        c.message()
+            .contains("2 1Password items in environment prod (fleet, admin)"),
+        "{}",
+        c.message()
+    );
+}
+
+/// §3.2, vet F6: a producer that is op is refused at load.
+#[test]
+fn a_producer_that_is_op_is_named() {
+    let c = Cause::ConfigInvalid {
+        source: file_source(),
+        at: None,
+        field: DottedPath(vec!["producers".into(), "consent".into(), "command".into()]),
+        rule: FieldRule::Check {
+            check: ConfigCheck::ProducerIsOp {
+                program: "op".into(),
+            },
+        },
+    };
+    assert!(
+        c.message()
+            .contains("producers.consent.command starts op; a producer is never op or opv"),
+        "{}",
+        c.message()
+    );
+}
+
+/// §3.2: a producer argument that looks like a secret is named by position only.
+#[test]
+fn a_secret_looking_argument_is_named_by_index() {
+    let c = Cause::ConfigInvalid {
+        source: file_source(),
+        at: None,
+        field: DottedPath(vec!["producers".into(), "consent".into(), "command".into()]),
+        rule: FieldRule::Check {
+            check: ConfigCheck::ProducerArgumentSecret { index: 2 },
+        },
+    };
+    assert!(
+        c.message()
+            .contains("has argument 2 that looks like a secret value"),
         "{}",
         c.message()
     );

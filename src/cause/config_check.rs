@@ -14,6 +14,8 @@ pub enum Declared {
     Key,
     Role,
     Store,
+    /// A `[producers.X]` of the contract (#253).
+    Producer,
 }
 
 impl Declared {
@@ -24,6 +26,7 @@ impl Declared {
             Declared::Key => "key",
             Declared::Role => "role",
             Declared::Store => "store",
+            Declared::Producer => "producer",
         }
     }
 }
@@ -177,6 +180,46 @@ pub enum ConfigCheck {
         other_env: String,
         other_owner: String,
     },
+    // provision (#253, `docs/design/owner-value-ingestion.md` §3.2): `[sets]`, `[producers]`
+    /// A set member is not a key wanted in one of the set's environments.
+    SetMemberNotWanted { member: String, env: String },
+    /// A set's members live in more than one 1Password item (access boundary) in `env`:
+    /// 1Password writes one item atomically, never several (D1).
+    SetSpansBoundaries {
+        env: String,
+        boundaries: Vec<String>,
+    },
+    /// A key is a member of more than one set (D13).
+    MemberOfTwoSets { member: String, sets: Vec<String> },
+    /// A set member is not a team value stored in 1Password: `personal`, `from`, or
+    /// `source = "infrastructure"`.
+    SetMemberNotStored { member: String, why: &'static str },
+    /// `generate = "rules"` on a key whose rules give no recipe.
+    GenerateNoRecipe { member: String },
+    /// A `hex_bytes`/`base64_bytes` size outside 16..=1024.
+    GenerateBytes { bytes: u64 },
+    /// `output` is not one of the producer's declared `outputs`.
+    ProducerOutputUndeclared {
+        producer: String,
+        output: String,
+        outputs: Vec<String>,
+    },
+    /// A producer's declared output no member or template uses.
+    ProducerOutputUnused { producer: String, output: String },
+    /// A producer's `command[0]` is `op` or `opv`: a producer never gets `op`'s
+    /// environment (vet F6).
+    ProducerIsOp { program: String },
+    /// A producer's argument at `index` (0-based) looks like a secret value.
+    ProducerArgumentSecret { index: usize },
+    /// A producer's command names project file `file`, and the contract pins no `sha256`.
+    ProducerShaMissing { file: String },
+    /// A producer input names a key outside the set's own boundary or environment.
+    ProducerInputOutside { input: String, key: String },
+    /// A producer `timeout` over the cap (vet F10).
+    ProducerTimeoutCap { max: &'static str },
+    /// An `open_url_hosts` entry is not a host name.
+    OpenUrlHost { host: String },
+    // end provision
 }
 
 fn list(items: &[String]) -> String {
@@ -353,6 +396,49 @@ impl ConfigCheck {
                 "keeps {label} {name} for {owner} in {store}, where environment {other_env} keeps \
                  it for {other_owner}; each would overwrite and prune the other's value"
             ),
+            // provision (#253)
+            SetMemberNotWanted { member, env } => {
+                format!("names {member}, which is not declared for environment {env}")
+            }
+            SetSpansBoundaries { env, boundaries } => format!(
+                "has members in {} 1Password items in environment {env} ({}); a set fills one item",
+                boundaries.len(),
+                list(boundaries)
+            ),
+            MemberOfTwoSets { member, sets } => {
+                format!(
+                    "makes {member} a member of more than one set ({})",
+                    list(sets)
+                )
+            }
+            SetMemberNotStored { member, why } => format!(
+                "names {member}, which is {why}; a set member is a team value stored in 1Password"
+            ),
+            GenerateNoRecipe { member } => {
+                format!("is \"rules\", but the rules of {member} give no byte recipe")
+            }
+            GenerateBytes { bytes } => format!("asks for {bytes} bytes; it must be 16 to 1024"),
+            ProducerOutputUndeclared {
+                producer, output, ..
+            } => format!("names output {output}, which producer {producer} does not declare"),
+            ProducerOutputUnused { producer, output } => {
+                format!("declares output {output} of producer {producer}, which no member uses")
+            }
+            ProducerIsOp { program } => format!(
+                "starts {program}; a producer is never op or opv, which would get your 1Password session"
+            ),
+            ProducerArgumentSecret { index } => {
+                format!("has argument {index} that looks like a secret value")
+            }
+            ProducerShaMissing { file } => {
+                format!("runs project file {file}, but pins no sha256 of it")
+            }
+            ProducerInputOutside { input, key } => format!(
+                "has input {input} reading {key}, outside the set's own item and environment"
+            ),
+            ProducerTimeoutCap { max } => format!("is longer than {max}"),
+            OpenUrlHost { host } => format!("lists {host}, which is not a host name"),
+            // end provision
         };
         format!("{field} {p}")
     }
@@ -489,6 +575,42 @@ impl ConfigCheck {
             ),
             StoreShared { .. } => {
                 format!("give one of them its own store, or set {field} so the names differ")
+            }
+            // provision (#253)
+            SetMemberNotWanted { member, env } => {
+                format!("add \"{env}\" to the environments of {member}, or remove it from {field}")
+            }
+            SetSpansBoundaries { .. } => {
+                "keep a set's members in one product boundary; other products read them with from"
+                    .into()
+            }
+            MemberOfTwoSets { member, .. } => format!("keep {member} in one set only"),
+            SetMemberNotStored { member, .. } => format!("remove {member} from {field}"),
+            GenerateNoRecipe { .. } => {
+                format!("write {leaf} = {{ hex_bytes = 32 }} or {{ base64_bytes = 32 }}")
+            }
+            GenerateBytes { .. } => format!("set {field} to a size from 16 to 1024"),
+            ProducerOutputUndeclared { outputs, .. } => {
+                format!("set {field} to one of {}", list(outputs))
+            }
+            ProducerOutputUnused { output, .. } => {
+                format!("remove {output} from {field}, or make a member of it")
+            }
+            ProducerIsOp { .. } => {
+                format!("make {field} start the producer's own program, such as python3")
+            }
+            ProducerArgumentSecret { index } => format!(
+                "remove argument {index} from {field}; a producer receives its inputs on standard input"
+            ),
+            ProducerShaMissing { file } => {
+                format!("add sha256 = \"<SHA-256 of {file}>\" next to {field}")
+            }
+            ProducerInputOutside { input, .. } => {
+                format!("point input {input} at a key of the set's own item and environment")
+            }
+            ProducerTimeoutCap { max } => format!("set {leaf} to at most {max}"),
+            OpenUrlHost { host } => {
+                format!("write {host} as a host name only, such as accounts.example.com")
             }
         }
     }

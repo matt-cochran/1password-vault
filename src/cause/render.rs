@@ -973,6 +973,7 @@ fn input_kind(k: InputKind) -> &'static str {
         InputKind::Supply => "the supply",
         InputKind::Workflow => "the workflow file",
         InputKind::SecretFile => "the secret file",
+        InputKind::Produce => "the output of producer file",
     }
 }
 
@@ -1055,8 +1056,216 @@ fn rule_words(field: &str, rule: &FieldRule) -> (String, String) {
         FieldRule::Check { check } => (check.problem(field), check.fix(field)),
         FieldRule::Supply { supply } => supply_rule_words(field, supply),
         FieldRule::SecretFile { problem } => secret_file_rule_words(problem),
+        FieldRule::Produce { produce } => produce_rule_words(produce),
     }
 }
+
+// --- provision (#253, `docs/design/owner-value-ingestion.md`) ---------------------------
+
+/// What is wrong with a producer's `opv.produce/1` output, and the fix its maintainer makes
+/// (§5.2). Positions and declared output names only, never the producer's text.
+fn produce_rule_words(rule: &ProduceRule) -> (String, String) {
+    let one_line = "make the producer print one opv.produce/1 JSON object per line".to_string();
+    match rule {
+        ProduceRule::NotJson { line } => (format!("line {line} is not one JSON object"), one_line),
+        ProduceRule::UnknownField { line } => (
+            format!("line {line} has a field opv.produce/1 does not define"),
+            "print only the fields opv.produce/1 defines".to_string(),
+        ),
+        ProduceRule::WrongSchema { line } => (
+            format!("line {line} is not an opv.produce/1 line"),
+            "set schema to \"opv.produce/1\" on every line".to_string(),
+        ),
+        ProduceRule::LineTooLong { line, limit } => (
+            format!("line {line} is longer than {limit} bytes"),
+            format!("keep each line at most {limit} bytes"),
+        ),
+        ProduceRule::TooMuchOutput { limit } => (
+            format!("the output is larger than {limit} bytes"),
+            format!("print at most {limit} bytes"),
+        ),
+        ProduceRule::NoResult => (
+            "it ended with no result or error line".to_string(),
+            "make the producer print one result or error line last".to_string(),
+        ),
+        ProduceRule::ResultNotLast { line } => (
+            format!("line {line} follows the result or error line"),
+            "print the result or error line once, last".to_string(),
+        ),
+        ProduceRule::WrongEnvironment { line } => (
+            format!("the result on line {line} is for another environment"),
+            "make the producer echo the request's env in its result".to_string(),
+        ),
+        ProduceRule::NonceMismatch { line } => (
+            format!("the result on line {line} does not carry this run's nonce"),
+            "make the producer echo the request's nonce in its result".to_string(),
+        ),
+        ProduceRule::Undeclared { position } => (
+            format!("output {position} of the result is not an output the set uses"),
+            "return only the outputs the request names".to_string(),
+        ),
+        ProduceRule::Missing { names } => (
+            format!("the result lacks {}", list(names)),
+            format!("return {} in the result", list(names)),
+        ),
+        ProduceRule::Duplicate { position } => (
+            format!("output {position} of the result repeats an earlier name"),
+            "return each output once".to_string(),
+        ),
+        ProduceRule::Empty { output } => (
+            format!("output {output} is empty"),
+            format!("return a value for {output}"),
+        ),
+        ProduceRule::NotAString { output } => (
+            format!("output {output} is not a JSON string without NUL"),
+            format!("return {output} as a JSON string"),
+        ),
+        ProduceRule::TooLarge { output, limit } => (
+            format!("output {output} is larger than {limit} bytes"),
+            format!("return {output} in at most {limit} bytes"),
+        ),
+        ProduceRule::OpenUrlRefused { line, why } => {
+            let (problem, fix) = match why {
+                OpenUrlProblem::NotHttps => (
+                    "is not https".to_string(),
+                    "send an https consent URL".to_string(),
+                ),
+                OpenUrlProblem::HostNotListed => (
+                    "names a host outside open_url_hosts".to_string(),
+                    "add the consent page's host to the producer's open_url_hosts, or fix the producer".to_string(),
+                ),
+                OpenUrlProblem::TooLong { limit } => (
+                    format!("is longer than {limit} bytes"),
+                    format!("send a URL of at most {limit} bytes"),
+                ),
+                OpenUrlProblem::Userinfo => (
+                    "carries a user name or password".to_string(),
+                    "send a URL without user information".to_string(),
+                ),
+            };
+            (
+                format!("the open_url on line {line} {problem}, so it was not opened"),
+                fix,
+            )
+        }
+        ProduceRule::ErrorCode { line } => (
+            format!(
+                "the error code on line {line} is not 1 to 40 lowercase letters or underscores"
+            ),
+            "report failure with a code of 1 to 40 lowercase letters or underscores".to_string(),
+        ),
+    }
+}
+
+/// `c` with its `--timeout` replaced by `seconds`.
+fn with_timeout(mut c: Cmd, seconds: u64) -> Cmd {
+    let mut args = Vec::with_capacity(c.args.len() + 2);
+    let mut skip = false;
+    for a in c.args.drain(..) {
+        if skip {
+            skip = false;
+            continue;
+        }
+        if a == "--timeout" {
+            skip = true;
+            continue;
+        }
+        if a.starts_with("--timeout=") {
+            continue;
+        }
+        args.push(a);
+    }
+    args.push("--timeout".into());
+    args.push(seconds.to_string());
+    c.args = args;
+    c
+}
+
+/// The step after a refused provision (§4.2, §4.5, §5.5). Re-making a set is a person's
+/// write, named in the Do; the Next is the read that shows the set's state (X4), or the
+/// person's own run with the budget the producers need.
+fn provision_refused(
+    set: &str,
+    env: &EnvName,
+    reason: &ProvisionRefusal,
+    inv: &Invocation,
+) -> Plan {
+    let ready = Next::Check(cmd(&["ready"], &[env.as_str()]));
+    let replace = format!("opv provision {set} --env {env} --replace");
+    match reason {
+        ProvisionRefusal::Partial { .. } | ProvisionRefusal::Inconsistent { .. } => plan(
+            inspect(format!(
+                "re-make the whole set: {replace} (the replaced values are kept in the item's opv · kept section)"
+            )),
+            ready,
+        ),
+        ProvisionRefusal::ImmutableMember { member } => plan(
+            inspect(format!(
+                "leave out --replace: an immutable member is made once; remove immutable from {member} in the contract only if it must change"
+            )),
+            ready,
+        ),
+        ProvisionRefusal::SameAcrossEnvironments { other, .. } => plan(
+            inspect(format!(
+                "give environment {env} its own client at the issuer, not the one environment {other} uses, then make the set again"
+            )),
+            ready,
+        ),
+        ProvisionRefusal::BudgetTooSmall { needed_seconds, .. } => plan(
+            inspect(format!(
+                "allow the run at least {needed_seconds}s with --timeout"
+            )),
+            Next::Handoff(with_timeout(inv_cmd(inv), *needed_seconds)),
+        ),
+    }
+}
+
+/// The step after a refused write of a set member (§5.6): the set is re-made as a whole.
+fn set_member(env: &EnvName, set: &str) -> Plan {
+    plan(
+        inspect(format!(
+            "make it with its set, in your own terminal: opv provision {set} --env {env} --replace"
+        )),
+        Next::Check(cmd(&["ready"], &[env.as_str()])),
+    )
+}
+
+/// What a producer's failure says (§5.2): its exit, signal, timeout or closed code.
+fn producer_failure_words(producer: &str, why: &ProducerFailure) -> String {
+    match why {
+        ProducerFailure::Exit { status } => {
+            format!("producer {producer} exited with status {status}")
+        }
+        ProducerFailure::Signal { signal } => {
+            format!("producer {producer} was ended by signal {signal}")
+        }
+        ProducerFailure::Timeout { seconds } => format!(
+            "producer {producer} did not finish within its timeout of {seconds}s, so opv stopped it"
+        ),
+        ProducerFailure::Reported { code } => format!("producer {producer} reported {code}"),
+    }
+}
+
+/// The Do after a producer failure (§5.2, vet F19): its own documentation explains its exit
+/// or code, since opv never shows its output.
+fn producer_failure_fix(producer: &str, why: &ProducerFailure) -> String {
+    match why {
+        ProducerFailure::Exit { status } => format!(
+            "see producer {producer}'s documentation for exit status {status}; opv never shows its output"
+        ),
+        ProducerFailure::Signal { signal } => {
+            format!("check what ended producer {producer} with signal {signal}")
+        }
+        ProducerFailure::Timeout { seconds } => format!(
+            "finish the producer's step (such as its consent page) within {seconds}s, or raise timeout in [producers.{producer}] (at most 15m)"
+        ),
+        ProducerFailure::Reported { code } => {
+            format!("see producer {producer}'s documentation for {code}")
+        }
+    }
+}
+
+// --- end provision -------------------------------------------------------------------------
 
 /// What is wrong with the secret file `opv set --from-file` reads, and its fix. These are
 /// properties of the path: no byte, length or part of the file's value is described.
@@ -2258,6 +2467,18 @@ impl Cause {
                     "opv does not run {operation} on {env}/{target}: {}",
                     reason.words()
                 ),
+                self::Guard::ProvisionRefused { set, env, reason } => format!(
+                    "opv does not provision set {set} in environment {env}: {}",
+                    reason.words()
+                ),
+                self::Guard::SetMember {
+                    product,
+                    key,
+                    env,
+                    set,
+                } => format!(
+                    "{product}/{key} in environment {env} is a member of set {set}, so opv writes it only together with the set"
+                ),
             },
             MountUnreadable {
                 workload,
@@ -2749,6 +2970,19 @@ impl Cause {
                     [one] => format!("the ids of environment {one}"),
                     many => format!("the ids of environments {}", list_of(many)),
                 }
+            ),
+            ProducerFailed { producer, why } => format!(
+                "{}; nothing was written",
+                producer_failure_words(producer, why)
+            ),
+            ProducerChanged { producer, file } => format!(
+                "the file {} of producer {producer} changed: its SHA-256 is not the sha256 the contract pins",
+                file.display()
+            ),
+            Unsupported {
+                feature: UnsupportedFeature::ProducerOnWindows { set, producer },
+            } => format!(
+                "set {set} is made by producer {producer}, and opv runs producers only on Linux and macOS, not on native Windows"
             ),
             Bug { site } => format!("opv hit an internal error ({site})"),
         }
@@ -4008,6 +4242,10 @@ impl Cause {
                 self::Guard::OperationRefused {
                     env, target, reason, ..
                 } => operation_refused(env, target, reason),
+                self::Guard::ProvisionRefused { set, env, reason } => {
+                    provision_refused(set, env, reason, inv)
+                }
+                self::Guard::SetMember { env, set, .. } => set_member(env, set),
             },
             MountUnreadable { env, target, .. } => plan(
                 inspect(
@@ -4091,29 +4329,10 @@ impl Cause {
             BudgetSpent {
                 budget_seconds,
                 writes_started: _,
-            } => {
-                let mut c = inv_cmd(inv);
-                let mut args = Vec::with_capacity(c.args.len() + 2);
-                let mut skip = false;
-                for a in c.args.drain(..) {
-                    if skip {
-                        skip = false;
-                        continue;
-                    }
-                    if a == "--timeout" {
-                        skip = true;
-                        continue;
-                    }
-                    if a.starts_with("--timeout=") {
-                        continue;
-                    }
-                    args.push(a);
-                }
-                args.push("--timeout".into());
-                args.push(budget_seconds.saturating_mul(2).to_string());
-                c.args = args;
-                plan(None, run_or_handoff(c))
-            }
+            } => plan(
+                None,
+                run_or_handoff(with_timeout(inv_cmd(inv), budget_seconds.saturating_mul(2))),
+            ),
             Partial { done, scope, then } => {
                 let inner = then.plan_raw(inv);
                 // A15: an empty `done` names nothing as written.
@@ -4440,6 +4659,16 @@ impl Cause {
                     )),
                     Next::Rerun,
                 )
+            }
+            InputInvalid {
+                kind: InputKind::Produce,
+                field,
+                rule,
+                ..
+            } => {
+                // The producer's maintainer fixes it; the person re-runs once it is fixed.
+                let (_, fix) = rule_words(field, rule);
+                plan(inspect(fix), Next::None(NoNext::NothingToRun))
             }
             InputInvalid {
                 kind: InputKind::Supply,
@@ -4968,6 +5197,22 @@ impl Cause {
                     "deploy a revision that no longer reads {key} in {env}, or stop reading it, then retire again"
                 )),
                 Next::Rerun,
+            ),
+            ProducerFailed { producer, why } => {
+                plan(inspect(producer_failure_fix(producer, why)), Next::Rerun)
+            }
+            ProducerChanged { producer, file } => plan(
+                inspect(format!(
+                    "review the change to {}; once it is right, set sha256 of [producers.{producer}] to the file's new SHA-256",
+                    file.display()
+                )),
+                Next::Rerun,
+            ),
+            Unsupported {
+                feature: UnsupportedFeature::ProducerOnWindows { .. },
+            } => plan(
+                inspect("run opv provision from WSL on this machine"),
+                Next::None(NoNext::NothingToRun),
             ),
             Bug { site: _ } => plan(
                 inspect(format!("report this as an opv bug: {ISSUES_URL}")),
