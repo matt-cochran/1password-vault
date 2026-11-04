@@ -28,6 +28,17 @@ fn product(fleet: &Fleet) -> &Product {
     &fleet.products["allumata"]
 }
 
+/// [`role_fleet`] plus a stored key `X` and an infrastructure key `Z` in prod: the pair the
+/// preview splits between `keys` and `supplied_at_sync` (D2-A, #263).
+fn infra_fleet() -> Fleet {
+    role_fleet_with(&format!(
+        "{ROLE_KEYS}\n\
+         [products.allumata.keys.X]\nkind = \"secret\"\nenvironments = [\"prod\"]\n\n\
+         [products.allumata.keys.Z]\nkind = \"secret\"\nsource = \"infrastructure\"\n\
+         environments = [\"prod\"]\nrules = {{ https_url = true }}\n"
+    ))
+}
+
 // --- process roles: selection ---------------------------------------------------------
 
 #[test]
@@ -348,6 +359,89 @@ fn the_preview_lists_the_keys_a_role_withholds() {
     )
     .unwrap();
     assert_eq!(doc["withheld_by_role"], json!(["DATABASE_URL_UNPOOLED"]));
+}
+
+#[test]
+fn preview_lists_an_infrastructure_key_under_supplied_at_sync() {
+    let doc = build(
+        &infra_fleet(),
+        "prod",
+        Some("allumata"),
+        Some("serve"),
+        &signed_in(),
+    )
+    .unwrap();
+    assert_eq!(doc["supplied_at_sync"], json!(["Z"]));
+}
+
+#[test]
+fn preview_keys_omit_an_infrastructure_key() {
+    let doc = build(
+        &infra_fleet(),
+        "prod",
+        Some("allumata"),
+        Some("serve"),
+        &signed_in(),
+    )
+    .unwrap();
+    assert!(
+        !doc["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|k| k["key"] == "Z")
+    );
+}
+
+#[test]
+fn preview_keys_keep_a_stored_key() {
+    let doc = build(
+        &infra_fleet(),
+        "prod",
+        Some("allumata"),
+        Some("serve"),
+        &signed_in(),
+    )
+    .unwrap();
+    assert!(
+        doc["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|k| k["key"] == "X")
+    );
+}
+
+#[test]
+fn preview_without_infrastructure_keys_has_no_supplied_at_sync() {
+    let doc = build(
+        &role_fleet(),
+        "prod",
+        Some("allumata"),
+        Some("serve"),
+        &signed_in(),
+    )
+    .unwrap();
+    assert!(doc.get("supplied_at_sync").is_none());
+}
+
+#[test]
+fn preview_text_names_supplied_at_sync_keys() {
+    let doc = build(
+        &infra_fleet(),
+        "prod",
+        Some("allumata"),
+        Some("serve"),
+        &signed_in(),
+    )
+    .unwrap();
+    let mut out = Vec::new();
+    write_text(&doc, &mut out).unwrap();
+    assert!(
+        String::from_utf8(out)
+            .unwrap()
+            .contains("supplied at sync (not injected): Z")
+    );
 }
 
 #[test]
