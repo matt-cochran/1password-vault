@@ -398,6 +398,18 @@ fn variants(c: &Cause) -> Vec<Cause> {
         Guard { .. } => vec![Guard {
             guard: super::Guard::Declined,
         }],
+        // FR-64: a `--json` document lost on standard output exits 74.
+        LocalIo { .. } => vec![LocalIo {
+            op: LocalOp::Stdout,
+            path: PathBuf::new(),
+            io: IoKind::NoSpace,
+            delivery: Some(Delivery {
+                command: "status".into(),
+                outcome: CommandOutcome::Ok,
+                bytes_written: 0,
+                bytes: 1024,
+            }),
+        }],
         // L5: a dotenv file is a person's to fix; a setup recipe is not.
         InputInvalid { .. } => vec![varied(c, |v| {
             if let InputInvalid { kind, .. } = v {
@@ -888,6 +900,7 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
             op: LocalOp::Write,
             path: PathBuf::from("/work/secrets.toml"),
             io: IoKind::PermissionDenied,
+            delivery: None,
         },
         StoreNotReady {
             store: res(ResourceKind::ExternalStore, "store-op"),

@@ -308,6 +308,7 @@ fn write_err(e: io::Error) -> Error {
         op: crate::cause::LocalOp::Stdout,
         path: std::path::PathBuf::new(),
         io: crate::cause::IoKind::from(e.kind()),
+        delivery: None,
     }
     .into()
 }

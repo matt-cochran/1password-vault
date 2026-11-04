@@ -90,6 +90,7 @@ fn random_source_failed() -> Error {
         op: crate::cause::LocalOp::RandomSource,
         path: std::path::PathBuf::new(),
         io: IoKind::Other,
+        delivery: None,
     }
     .into()
 }

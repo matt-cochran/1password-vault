@@ -148,11 +148,19 @@ pub fn finish_with(
     inv: &crate::cause::Invocation,
     verbose: bool,
 ) -> Vec<u8> {
+    // FR-64: a success that wrote no document is opv's bug, never an empty stdout.
+    let missing;
+    let res = match res {
+        Ok(()) if !is_document(body, raw) => {
+            missing = no_document();
+            Err(&missing)
+        }
+        r => r,
+    };
     let doc = serde_json::from_slice::<Value>(body).ok();
     let out = match (res, doc) {
-        (Ok(()), _) if raw => return body.to_vec(),
-        (Ok(()), Some(Value::Object(fields))) => frame(fields, None),
-        // Not a JSON object: nothing to frame.
+        (Ok(()), Some(Value::Object(fields))) if !raw => frame(fields, None),
+        // A raw document, byte for byte.
         (Ok(()), _) => return body.to_vec(),
         (Err(e), doc) => {
             let fields = match doc {
@@ -166,6 +174,24 @@ pub fn finish_with(
     let mut text = Value::Object(out).to_string();
     text.push('\n');
     text.into_bytes()
+}
+
+/// Whether a successful command's `body` is its document: one JSON object, or under `raw`
+/// any non-empty body (`config export`, `run --preview --json`), kept byte for byte.
+pub fn is_document(body: &[u8], raw: bool) -> bool {
+    if raw {
+        return !body.is_empty();
+    }
+    matches!(serde_json::from_slice::<Value>(body), Ok(Value::Object(_)))
+}
+
+/// The failure a successful `--json` command that wrote no document is (FR-64): an opv
+/// bug, exit 70.
+pub fn no_document() -> Error {
+    crate::cause::Cause::Bug {
+        site: "a --json command wrote no document",
+    }
+    .into()
 }
 
 /// The frame around `fields` (see the module docs), with `failure` the exit code and the
@@ -273,6 +299,34 @@ mod tests {
     #[test]
     fn raw_success_is_unchanged() {
         let body = b"{\n  \"LOG_LEVEL\": \"info\"\n}\n";
+        assert_eq!(finish(body, Ok(()), true), body.to_vec());
+    }
+
+    fn error_code(out: &[u8]) -> Value {
+        parse(out)["error"]["code"].clone()
+    }
+
+    #[test]
+    fn empty_success_is_an_internal_error() {
+        assert_eq!(error_code(&finish(b"", Ok(()), false)), "internal_error");
+    }
+
+    #[test]
+    fn non_object_success_is_an_internal_error() {
+        assert_eq!(
+            error_code(&finish(b"text\n", Ok(()), false)),
+            "internal_error"
+        );
+    }
+
+    #[test]
+    fn empty_raw_success_is_an_internal_error() {
+        assert_eq!(error_code(&finish(b"", Ok(()), true)), "internal_error");
+    }
+
+    #[test]
+    fn raw_success_keeps_its_body() {
+        let body = b"{\"LOG_LEVEL\":\"info\"}";
         assert_eq!(finish(body, Ok(()), true), body.to_vec());
     }
 
