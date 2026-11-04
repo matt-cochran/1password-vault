@@ -1,77 +1,101 @@
 # Sealed target: read 1Password at release time, never at runtime (#271)
 
-Status: design for the owner's review, 2026-11-04. Nothing here is built. Not yet vetted by the
-DESIGN-FMECA procedure; §9 is the author's own self-vet. Branch `v0180/design`, cut from `dev` at
-opv 0.17.2 (`7cc0b6dd`).
+Status: **revised after the DESIGN-FMECA vet** (`sealed-target-fmeca.md`), 2026-11-04. It awaits
+the owner's decisions (§12) and the acceptance of one residual risk (§12, R-U2). Nothing here is
+built. The branch is `v0180/design`, cut from `dev` at opv 0.17.2 (`7cc0b6dd`).
 
-Evidence for the claims in this document:
+Evidence:
 
 - the code at `7cc0b6dd`, with file:line references;
-- dependency probes run for this design in a scratch crate against this repository's `deny.toml`
-  (cargo-deny 0.20.2, 2026-11-04), reported in §6.4;
-- the issue text (#271) and the designs it builds on: `multi-cloud-targets.md` (§3 ports, §11 the
-  plug-in contract), `http-target.md` (the most recent new target), `local-delivery.md`,
-  `remote-delivery.md` and `delivery-receipts.md`.
+- dependency probes against this repository's `deny.toml` (cargo-deny 0.20.2, 2026-11-04;
+  §6.4);
+- the fetched sources of `age 0.12.1` and `ssh-key 0.6.7`;
+- issue #271;
+- the designs this one builds on: `multi-cloud-targets.md` (§3 ports, §11 plug-in contract),
+  `http-target.md` (the most recent new target), `local-delivery.md`, `remote-delivery.md`
+  and `delivery-receipts.md`.
+
+The vet's risk ids (T*, R*, U*, P*, C*) are cited where its findings changed this design.
 
 ## 1. Problem
 
-A runtime that calls `opv run` (or `op`) each time a process starts, or on a drift timer, makes
-1Password a live runtime dependency. A 1Password service account's request budget is per
-account: 1,000 requests per 24 hours on a Families or individual account (Teams 5,000, Business
-50,000, as #271 reports). In production, a self-managed host ran
-`opv run <env> --product <p> -- docker run …` for every container start, plus a 5-minute
-fingerprint poll per product. One day of deploys and rollbacks used up the account's budget.
-Then 6 of 8 services on one environment could not start for about 20 hours, while the owner's
-interactive sessions still worked.
+A runtime that calls `opv run` (or `op`) at every process start, or on a drift timer, makes
+1Password a live runtime dependency. A 1Password service account's budget is per account:
 
-opv's model is that 1Password is read when values **change**, not while systems run. For
-platforms that have their own secret store (Fly, Key Vault, Kubernetes, GitHub, an application's
-store over HTTPS), opv already works that way: `sync` writes the store once, and the platform
-injects the values at start. The gap is a runtime with **no secret store of its own**: a plain
-Docker host, a VM, systemd units, an on-prem box. For these, the only option today is a 1Password
-identity on the runtime, and with it the request budget.
+| Plan | Requests per 24 hours (as #271 reports) |
+|---|---|
+| Families or individual | 1,000 |
+| Teams | 5,000 |
+| Business | 50,000 |
+
+What happened in production:
+
+1. A self-managed host ran `opv run <env> --product <p> -- docker run …` for every container
+   start, plus a 5-minute fingerprint poll per product.
+2. One day of deploys and rollbacks used up the account's budget.
+3. Then 6 of 8 services on one environment could not start for about 20 hours, while the owner's
+   interactive sessions still worked.
+
+opv's model is that 1Password is read when values **change**, not while systems run. Platforms
+with their own secret store (Fly, Key Vault, Kubernetes, GitHub, an application's store over
+HTTPS) already work that way: `sync` writes the store once, and the platform injects the values
+at start.
+
+The gap is a runtime with **no secret store of its own**: a plain Docker host, a VM, systemd
+units. Today such a runtime can only hold a 1Password identity, and with it the request budget.
 
 ### 1.1 What the issue asks for (acceptance, #271)
 
-1. `kind = "sealed"` is validated by `opv config check`: recipients and signers well formed,
+1. `opv config check` validates the sealed target: recipients and signers well formed,
    environments distinct.
-2. Sealing does at most one 1Password read per scope (tested with a counting fake) and never
+2. Sealing makes at most one 1Password read per scope (tested with a counting fake) and never
    exposes a value.
-3. `unseal` rejects a bad or missing signature, the wrong environment or product, and a revision
-   below the floor, all **before decrypting**.
-4. `unseal --exec` and the library deliver variables or tmpfs files with zero network calls.
-5. A staleness check reports by names and digests only.
+3. `unseal` rejects, **before decrypting**:
+   - a bad or missing signature;
+   - the wrong environment or product;
+   - a revision below the floor.
+4. `unseal --exec` and the library deliver variables or tmpfs files with zero network calls. The
+   library is deferred (D7), so this item needs the owner to amend it.
+5. A staleness check reports names and digests only.
 6. A recipient change marks bundles stale, with a documented rotation flow.
-7. Docs cover the trust boundary, per-platform bootstrap of the runtime identity, and migration
-   from runtime `opv run`.
+7. Docs cover the trust boundary, per-platform bootstrap and migration.
 
-A downstream platform is building the same shape locally, so the **bundle format is a contract**
-from the first release (§5).
+**The format has another owner.** #271 says a downstream platform is building "the same inputs,
+outputs and bundle format" locally first. §5 is this design's proposal for that format. The issue
+words it as a **signed payload holding the map**; this design encrypts and then signs, with a
+plaintext header. That conflict is not settled here. Lane K0 obtains the downstream's format and
+a fixture bundle before the format lane B1 starts, and the owner decides which side adapts (D9).
 
-## 2. Summary of the design
+## 2. Summary
 
 - **A sealed target is a registered provider** (`[environments.<env>.targets.<name>]` with
-  `sealed.*` fields, FR-56), delivered by the ordinary `opv sync`. What `sync` writes is one file
-  per product: a **sealed bundle**. It is encrypted with **age** (X25519) to the environment's
-  recipients and signed with an **SSH signature** (SSHSIG, ed25519, namespace `opv-sealed`) by the
-  target's signing key. Plan, status, the plan id, `--expect-plan`, `--confirm`, receipts,
-  `delivery verify` and `opv changed` all work without new commands.
+  `sealed.*` fields, FR-56), delivered by the ordinary `opv sync`.
+  - `sync` writes one file per product, a **sealed bundle**.
+  - The bundle is encrypted with **age** (X25519) to the environment's recipients.
+  - It is signed with an **SSH signature** (SSHSIG, ed25519, namespace `opv-sealed`) by the
+    target's signing key.
+  - Plan, status, plan id, `--expect-plan`, `--confirm`, receipts, `delivery verify` and
+    `opv changed` all apply unchanged.
 - **`opv unseal`** is the runtime side. It needs no configuration file, no `op`, no network and no
-  1Password identity. It verifies the signature, checks scope and revision, then decrypts, and
-  either prints names only or execs the app with the values. It replaces
-  `opv run <env> --product <p> -- cmd` at container start.
-- **Every key lives in 1Password, so vault access stays the only permission system.**
-  - The signing key is the target's `deploy_credentials` item: a 1Password SSH Key item.
-  - The runtime's age identity is an ordinary opv-managed secret, generated into 1Password by
-    `opv generate`. It is delivered once to the runtime by an existing target or by the platform.
-  - Only public keys are in the configuration.
-- **Budget:**
-  - Sealing one product makes the same `op` calls as a sync to any other target: one read of each
-    boundary item the product needs (FR-57), plus the deploy-credential read and the state-item
-    evidence. `--json` reports them as `op_calls`.
+  1Password identity. In order, it:
+  1. checks the signature against a signer **bound to the bundle's environment**;
+  2. checks scope and revision;
+  3. decrypts;
+  4. prints names only, or execs the app with the values.
+
+  It replaces `opv run <env> --product <p> -- cmd` at container start.
+- **Every private key lives in 1Password**, so vault access stays the only permission system:
+  - the signing key is the target's `deploy_credentials` item, a 1Password SSH Key item;
+  - the runtime's age identity is an opv-managed secret generated by `opv generate`, delivered
+    once to the runtime;
+  - only public keys appear in configuration.
+- **Budget.**
+  - Sealing one product makes the same `op` calls as a sync to any target: one read per boundary
+    item (FR-57), the deploy-credential read, and the evidence write. A counting-fake test asserts
+    this.
   - The runtime makes zero calls.
-  - `opv changed` (two calls per vault, existing) replaces the drift poll and runs where the
-    owner chooses, not on the runtime.
+  - `opv changed` replaces the drift poll and runs where the owner chooses (CI on a schedule), not
+    on the runtime.
 
 ## 3. Configuration contract
 
@@ -89,151 +113,201 @@ sealed.recipients = [
 sealed.signer = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA… opv-sealed-prod"
 ```
 
-Differences from the issue's sketch, and why:
+How this differs from the issue's sketch:
 
 | Issue sketch | Here | Why |
 |---|---|---|
-| `[targets.<name>] kind = "sealed"` | `[environments.<env>.targets.<name>]` with `sealed.*` | FR-56: targets are per environment and a target holds one provider's `<section>.*` options. The section name is the kind. One form only (FR-60). |
-| `signers = [...]` | `sealed.signer` (one, the key this target signs with) | The configuration names the key this target **signs** with, and `sync` checks the deploy credential's public key against it before writing. The set of keys a runtime **accepts** belongs to the runtime (`unseal --signers`, an `allowed_signers` file), so it can hold old and new during rotation (§7.3). |
-| `delivery = "env" \| "files"` | per-key `file = "<path>"` and the product's `secrets_dir_env` (FR-62) | These already exist. The bundle records each key's destination. A second switch for the same thing would break FR-60. |
-| `out = …` or stdout | `sealed.out` only | `sync` writes files atomically and records evidence about them, which stdout cannot carry. Publishing is the caller's job (§5.6). |
+| `[targets.<name>] kind = "sealed"` | `[environments.<env>.targets.<name>]` with `sealed.*` | FR-56: a target lives under an environment and holds one provider's options; the section name is the kind (FR-60, one form) |
+| `signers = [...]` | `sealed.signer`: the one key this target signs with | `sync` checks the deploy credential against it before reading any value. The keys a runtime **accepts** are the runtime's `allowed_signers` file, each line bound to one environment (§4.2), which can hold old and new keys during rotation |
+| `delivery = "env" \| "files"` | per-key `file = "<path>"` and the product's `secrets_dir_env` (FR-62) | these already exist; a second switch would break FR-60 |
+| `out = …` or stdout | `sealed.out` only | `sync` writes atomically and records evidence; stdout cannot carry evidence. Publishing is the caller's job (§5.6) |
 
-### 3.1 Load rules (`opv config check`; messages name the field and rule, never a value)
+### 3.1 Load rules
 
-1. `sealed.recipients` is non-empty, and each entry parses as an age X25519 recipient (`age1…`,
-   bech32). Duplicates are an error. Other recipient types (`ssh-ed25519`/`ssh-rsa` age recipients,
-   plugin recipients, `age1pq…`, `age1tag…`) are refused in v1 (§6.1).
-2. **Environments do not share recipients.** A recipient listed by sealed targets in two different
-   environments is a configuration error (`sealed_recipient_shared`) that names both
-   `<env>/<target>`. This makes "staging can't decrypt production" a load rule instead of a habit.
-3. `sealed.signer` is one `ssh-ed25519` public key in OpenSSH format. RSA, ECDSA and `sk-*` keys
+`opv config check` applies these. Messages name the field and the rule, never a value.
+
+1. **Recipients.** `sealed.recipients` is non-empty. Each entry is parsed only with
+   `age::x25519::Recipient::from_str`; no generic recipient parser is used (T11). Duplicates are
+   refused. Every other recipient type is refused in v1 (§6.1).
+2. **Recipients are not shared across environments.** One recipient on sealed targets of two
+   environments is `sealed_recipient_shared`, naming both `<env>/<target>`.
+3. **Signer.** `sealed.signer` is one `ssh-ed25519` OpenSSH public key. RSA, ECDSA and `sk-*` keys
    are refused.
-4. `sealed.out` is relative, with no `..` component and no absolute or home prefix. It contains
-   `{product}` when the target delivers more than one product. After rendering, no two placements
-   in the whole configuration share an output path.
-5. `sealed.env_name` follows the existing template rules (FR-8, FR-30). Rendered names must match
-   `^[A-Za-z_][A-Za-z0-9_]*$` and may not be `OP_*` (as for `run`, FR-35).
-6. `deploy_credentials` is required. Without a signing key the target cannot write a bundle, and
-   a refusal at load is better than one at sync.
-7. A secret value containing a NUL byte that is delivered as a variable is a `Store::refusal`
-   (`plan` shows it, `sync` refuses before writing), since no runtime can export it. File keys
-   may hold any bytes.
+4. **Signers are not shared across environments (T1).** One signer on sealed targets of two
+   environments is `sealed_signer_shared`, naming both `<env>/<target>`. Together with the
+   runtime's principal binding (§4.2), a staging signing key can never sign for production.
+5. **Output path.**
+   - `sealed.out` is relative: no `..`, no absolute or home prefix, no NUL.
+   - It contains `{product}` when the target delivers more than one product.
+   - Rendered paths are unique across the whole configuration.
+6. **Variable names.** `sealed.env_name` follows the template rules (FR-8, FR-30). Rendered names
+   match `^[A-Za-z_][A-Za-z0-9_]*$` and are never `OP_*` (FR-35).
+7. **`deploy_credentials` is required.** Without a signing key nothing can be sealed.
+8. **The identity is never sealed (T14).** A key whose rules say `age_identity = true` is never
+   delivered by a sealed target, since a bundle cannot carry the key that opens it. The error
+   names the key.
+9. **NUL bytes.** A secret delivered as a variable that contains a NUL byte is a `Store::refusal`:
+   `plan` shows it and `sync` refuses before writing. File keys may hold any bytes.
 
-### 3.2 Channels (the all-providers contract, `src/provider.rs:764-833`)
+### 3.2 Channels
+
+These are checked by the all-providers contract (`src/provider.rs:764-833`).
 
 | Channel | Value |
 |---|---|
 | `secret` | `Channel::Store { label: "sealed bundle" }` |
-| `config` | `Channel::Store { label: "sealed bundle" }`: config keys travel in the bundle too, because the runtime has no other channel |
-| `files` | `FileCapability::Native { dir: "<secrets_dir_env> on the runtime" }`: `unseal --exec` writes them to a RAM directory (§5.5) |
+| `config` | `Channel::Store { label: "sealed bundle" }` |
+| `files` | `FileCapability::Native { dir: "$<secrets_dir_env> on the runtime ({product})" }` |
 
-The lane checks that `Channel::Store` is accepted for `config`, since every provider today uses
-`RuntimeEnv`, `Variables` or `Declined` there. If it is not, the provider declares `RuntimeEnv`,
-which describes the runtime equally well.
+**Config travels in the bundle (T15).** Fly (`fly.config = "secrets"`), Kubernetes and Azure
+already use `Channel::Store` for config:
+
+- `src/adapters/fly/config.rs:289-306`;
+- `src/adapters/kubernetes/config.rs:458-466`;
+- `src/adapters/azure/config.rs:547-549`.
+
+When config and secret share one store label and the target has no `runtime_subject`, config is
+staged like a secret (`src/domain/plan.rs:468-484`). That is exactly what a bundle needs, so there
+is no fallback channel. (The first draft wrongly said no provider used `Store` for config, and
+proposed a `RuntimeEnv` fallback. That fallback would leave config out of the bundle and refuse a
+config key with `file`.)
+
+**The file directory carries `{product}` (T5).** `check_file_mounts` refuses two products whose
+rendered directories are equal (`src/config.rs:1551-1561`). A constant `dir` would make any
+two-product target with file keys fail `config check`.
 
 ## 4. CLI
 
 ### 4.1 Sealing: `opv sync`
 
 ```sh
-opv plan prod --target box [--product api]            # what would be (re)sealed, and why
+opv plan prod --target box [--product api]            # what would be (re)sealed
 opv sync prod --target box [--product api] [--confirm prod] [--json]
 opv changed prod --target box                         # source items changed since the last seal? exit 10
 opv delivery verify prod --product api --target box   # the bundle at sealed.out is the one recorded
 ```
 
-There is **no separate `opv seal` command** (owner decision D1). Each command's sealed-target
-behaviour:
+There is no `opv seal` (D1).
 
 | Command | Calls | Result |
 |---|---|---|
-| `plan`, `status` | 1Password reads as for any target; the bundle's header is read from `sealed.out` (local file, no network) | each name `same` / `would_change` / `not_delivered`, plus one whole-bundle row when the bundle is stale for a reason that is not one name's value (§5.3) |
-| `sync` | the same reads, the signing-key read, evidence write | a new bundle with every desired name, written atomically, whenever anything changed (§5.3) |
-| `delivery verify` | evidence read | `verified` when the bundle at `sealed.out` has the recorded revision and digest |
-| `changed` | `op read` of the delivery item's `source versions` field plus `op item list` per vault (existing) | `changed` (exit 10) when a source item moved since the bundle was sealed |
-| retire / prune | none | a name dropped from configuration is absent from the next bundle; nothing to remove remotely |
+| `plan`, `status` | 1Password reads as for any target; the bundle header at `sealed.out`, read locally and checked against `sealed.signer` | `same` / `would_change` / `would_prune` / `not_delivered` per name. When the bundle is stale as a whole (§5.3), every name is `would_change` and preflight prints one line with the reason |
+| `sync` | the same reads, the signing-key read, the evidence write | a new bundle holding every desired name, written atomically, whenever anything changed (§5.3) |
+| `delivery verify` | evidence read | `verified` when the bundle at `sealed.out` has the recorded version |
+| `changed` | existing: `op read` of the delivery item's `source versions` plus `op item list` per vault | `changed` (exit 10) when a source item moved since the seal. This is the issue's `seal --check`, by names and versions |
+| retire / prune | none remote | the name is absent from the next bundle, and pruning alone triggers a re-seal (T3) |
 
-`--json` on `sync`, `plan`, `status` and `changed` gains `op_calls: {reads, writes}`, counted by
-the runner for every `op` invocation of the command. The issue asks for this so callers can assert
-a budget. It is generic: every target reports it.
+The issue's `op_calls` JSON field is **deferred** to its own generic issue (C18). Acceptance 2
+asks for a counting **test**. That test uses the existing `test_support::op_calls`
+(`src/app/mod.rs:2665`).
 
 ### 4.2 The runtime: `opv unseal`
 
 ```sh
 opv unseal <bundle> --env <env> --product <p> --signers <allowed_signers>
            [--identity-file <path> | --identity-env <VAR>]
-           [--min-revision <N>] [--ratchet <path>] [--json]
+           [--min-revision <N>] [--json]
            [--exec -- <command> [args…]]
-opv unseal <bundle> --env <env> --product <p> --signers <allowed_signers> --verify-only [--json]
+opv unseal <bundle> --env <env> --product <p> --signers <allowed_signers> --verify-only
+           [--identity-file <path> | --identity-env <VAR>] [--json]
 ```
 
-- `--env` and `--product` are **required**. They must equal the signed header's environment and
-  product. A bundle copied to the wrong service is refused even if its key could decrypt it.
-- `--signers` is an OpenSSH `allowed_signers` file. Only ed25519 lines whose `namespaces=`
-  includes `opv-sealed` are considered (a line without `namespaces=` is refused, so a general
-  git-signing file is never trusted by accident).
-- The identity comes from `--identity-file` (preferred: a platform secret file, a Kubernetes
-  secret volume, a Docker secret under `/run/secrets`) or `--identity-env VAR` (for platforms
-  whose only secret channel is the environment, such as Fly today). With `--identity-env`, `VAR` is
-  removed from the child's environment. The identity is never an argument (SR-3).
-- `--verify-only` checks the signature, header and revision and needs no identity, so a deploy
-  pipeline can check a bundle before shipping it.
-- Without `--exec`, it verifies, decrypts in memory, checks the payload, and prints names,
-  destinations and the header. No values.
-- With `--exec`, it delivers to the command (§5.5). The exit code is the command's own, as with
-  `opv run` (FR-10).
+**Required scope.** `--env` and `--product` are required, and must equal the signed header's
+environment and product.
 
-`unseal` makes no runner call, loads no `secrets.toml`, needs no `op` and opens no socket. Refusals
-happen before anything is decrypted or started:
+**`--signers` is a strict subset of OpenSSH `allowed_signers` (T1, T13).**
+
+- `ssh-key` 0.6.7 has no `allowed_signers` parser, so opv implements one.
+- The only accepted line form is
+  `<principals> namespaces="opv-sealed" ssh-ed25519 <base64> [comment]`.
+- `#` comments and blank lines are skipped.
+- Any other option is refused with its name and line number: `cert-authority`, `valid-before`,
+  `valid-after`, or any unknown option.
+- Any key type other than `ssh-ed25519` is refused.
+- A line without `namespaces=` is refused, so a git-signing file is never trusted by accident.
+- **A signature counts only when it verifies with a line whose principals include the header's
+  `environment` exactly.** This is `ssh-keygen -Y verify -I <env> -n opv-sealed` semantics. A
+  staging signer listed in the same file cannot sign a `prod` bundle.
+- The refusal names the expected principal and namespace, so the fix is obvious.
+
+**Identity.**
+
+- `--identity-file` is preferred: a platform secret file, a Kubernetes volume, or a root-owned
+  0400 file.
+- `--identity-env VAR` is for environment-only platforms (Fly today). `VAR` is removed from the
+  child's environment.
+- The identity is never an argument (SR-3).
+
+**`--verify-only`** checks signature, header and revision without decrypting. It also checks two
+optional things:
+
+- With an identity (U4): it derives the public recipient and checks that its fingerprint is in
+  the header. Nothing is decrypted.
+- When the bundle has file keys (R2): it runs the RAM-directory check (`runtime_dir_support`,
+  `src/app/local_delivery.rs:201-216`).
+
+A staging smoke test therefore catches a wrong signer file, a wrong identity or a missing tmpfs
+mount before production starts.
+
+**Without `--exec`,** `unseal` verifies, decrypts in memory, checks the payload, and prints names,
+destinations and the header. It never prints a value.
+
+**With `--exec`,** it delivers the values (§5.5). The exit code is the command's own (FR-10).
+
+**One stderr line at start** (observability):
+`opv unseal: prod/api revision N signer SHA256:… 7 names`.
+
+**No other effects.** `unseal` makes no runner call, loads no `secrets.toml`, needs no `op` and
+opens no socket.
+
+**Refusals.** Each one stops before anything is decrypted or started, unless the table says
+otherwise.
 
 | Condition | `error.code` | Exit | Checked |
 |---|---|---|---|
-| file missing, over size limits, not `opv-sealed v1`, malformed armor/header/payload | `sealed_malformed` | 6 | before the signature |
-| signature does not verify, wrong namespace or hash, signer not in `--signers` | `sealed_signature_invalid` | 6 | before the header is trusted |
-| header environment or product differs from the flags | `sealed_scope_mismatch` | 6 | after the signature, before decryption |
-| revision below `--min-revision` or the ratchet | `sealed_revision_below_floor` | 6 | before decryption |
-| identity not readable, not an `AGE-SECRET-KEY-1…` | `sealed_identity_unusable` | 2 | before decryption |
-| the identity's recipient is not in the header's recipient list, or age finds no matching stanza | `sealed_not_a_recipient` | 7 | the list before decryption; the stanza by age |
-| decrypted payload's header digest or name list differs from the header | `sealed_payload_mismatch` | 6 | after decryption, before delivery |
-| a bundle name already set in the inherited environment | `sealed_name_collision` | 6 | before exec |
-| file keys without a RAM-backed runtime directory | `ram_dir_unavailable` (existing) | 6 | before any file |
-| ratchet file unreadable or unwritable | `sealed_ratchet_unusable` | 6 | before decryption (read), before exec (write) |
+| missing file; over size limits; first line not `opv-sealed v1`; a CR byte (T8); malformed armor, header or payload; a header that does not re-serialize to the exact signed bytes (T9); an unsafe file path (T6) | `sealed_malformed` | 6 | before the signature (the header checks right after it) |
+| signature fails; wrong namespace or hash; no `allowed_signers` line for principal `<env>`; malformed signers file | `sealed_signature_invalid` | 6 | before the header is trusted |
+| header environment or product differs from the flags | `sealed_scope_mismatch` | 6 | before decryption |
+| revision below `--min-revision` | `sealed_revision_below_floor` | 6 | before decryption |
+| identity unreadable, or not `AGE-SECRET-KEY-1…` | `sealed_identity_unusable` | 2 | before decryption |
+| identity's recipient not listed in the header, or no age stanza matches | `sealed_not_a_recipient` | 7 | the list before decryption; the stanza by age |
+| payload's header digest or name list differs from the header | `sealed_payload_mismatch` | 6 | after decryption, before delivery |
+| file keys without a RAM-backed runtime directory | `ram_dir_unavailable` (existing) | 6 | at `--verify-only` and before any file |
 | command cannot start | `child_start_failed` (existing) | 3 | |
 
-`--json` (schema `opv.unseal/1`) looks like this:
+**`--json`** uses schema `opv.unseal/1`:
 
 ```json
 {"schema": "opv.unseal/1", "ok": true,
  "bundle": {"format": "opv-sealed/1", "project": "fleet", "environment": "prod", "product": "api",
             "target": "box", "revision": 1793795000, "created_at": "2026-11-04T12:00:00Z",
             "opv_version": "0.18.0", "plan_id": "7f3c9a1e", "contract_digest": "sha256:…",
-            "signer": "SHA256:Xb…", "recipient": "sha256:4be1…", "source_versions": [{"item_id": "…", "version": 41}]},
+            "signer": "SHA256:Xb…", "recipient": "sha256:4be1…"},
  "names": [{"name": "DATABASE_URL", "destination": "env:DATABASE_URL"},
            {"name": "GITHUB_APP_KEY", "destination": "file:github-app/private-key"}],
- "op_calls": 0}
+ "overridden": ["PORT"]}
 ```
 
-Errors use the existing FR-22 shape (`ok: false`, `error.code`, fixed guidance). No value, no
-value-derived digest, no identity and no recipient string appear in any output. Only fingerprints
-appear.
+- Errors use the FR-22 shape.
+- No value, value-derived digest, identity or recipient string appears in any output; only
+  fingerprints do.
 
-### 4.3 MCP and assistants (parity)
+### 4.3 MCP and assistants
 
-The MCP surface stays at five tools (`tests/surface_contract.rs`).
+The MCP surface keeps its five tools (`tests/surface_contract.rs`).
 
-- `opv_state`, `opv_next` and `opv_explain` cover sealed placements like any other target:
-  state, staleness and next step, value-free.
-- `opv_propose` can propose a sealed target section through the provider's `init_fields` /
-  `init_section` (`src/provider.rs:70-81`).
-- **No MCP tool runs `unseal`.** Delivering values to a process is not an assistant action, the
-  same rule as remote delivery (FR-63).
-- `opv unseal --verify-only --json` is value-free and safe for an assistant to run in a shell.
+- `opv_state`, `opv_next` and `opv_explain` cover sealed placements like any target.
+- `opv_propose` can propose a sealed section through `init_fields` / `init_section`
+  (`src/provider.rs:70-81`). This is lane R1, deferred.
+- **No MCP tool runs `unseal`.** Delivering values to a process is not an assistant action (as for
+  FR-63).
+- `opv unseal --verify-only --json` is value-free and safe for an assistant to run.
 
-## 5. Bundle format, `opv-sealed/1`
+## 5. Bundle format proposal, `opv-sealed/1` (subject to D9)
 
 ### 5.1 Layout
 
-One UTF-8 text file. Each block is on its own lines:
+The bundle is one UTF-8 file. **Line endings are LF only.**
 
 ```text
 opv-sealed v1
@@ -246,43 +320,56 @@ opv-sealed v1
 -----END SSH SIGNATURE-----
 ```
 
-- **One file** carries header, ciphertext and signature. Three files (`.age`, `.json`, `.sig`)
-  could be shipped out of step, which is a failure mode with no upside.
-- The armored age block is a standard age file: `age -d -i id.txt` decrypts it after the block is
-  cut out. The signature is a standard SSHSIG: `ssh-keygen -Y verify -n opv-sealed -f allowed_signers
-  -I <principal> -s sig.txt < signed.txt` verifies it. The downstream platform can therefore check
-  the format with stock tools.
-- The extension is `.opv-sealed`, not `.age`: the file is not an age file as a whole, and `age -d`
-  on it would fail confusingly.
+- **One file** holds header, ciphertext and signature, so the parts cannot drift apart.
+- **Stock tools can check each part:**
+  - the age block is a standard age file (`age -d`);
+  - the signature is a standard SSHSIG (`ssh-keygen -Y verify -n opv-sealed -I <env>`).
+- **Extension `.opv-sealed`.** The file as a whole is not an age file.
+- **CR canonicalization (T8).** The signature covers exact bytes, and `core.autocrlf` would add
+  CR on a Windows checkout. A CR anywhere is `sealed_malformed`, and the fix text says: add
+  `*.opv-sealed binary` to `.gitattributes`. The docs' commit pattern includes that line. opv
+  never strips CRs, because that would change signed bytes.
+- **One reading of a header (T9).** The parser re-serializes the parsed header canonically and
+  requires byte equality with the signed line. It also requires the first line's version and
+  `format` to agree. Duplicate keys or non-canonical forms therefore cannot make two readers
+  disagree.
 
 ### 5.2 Header (signed, plaintext, value-free)
 
 | Field | Content |
 |---|---|
-| `format` | `"opv-sealed/1"` (also the first line, so a reader refuses other versions before parsing JSON) |
-| `project`, `environment`, `product`, `target` | the placement (FR-58) |
-| `revision` | unsigned integer, strictly increasing per placement (§5.4) |
+| `format` | `"opv-sealed/1"` |
+| `project`, `environment`, `product`, `target` | the placement (FR-58); `environment` is also the required signer principal |
+| `revision` | `u64`, strictly increasing per placement (§5.4) |
 | `created_at` | RFC 3339 UTC |
 | `opv_version` | the sealing opv |
 | `plan_id` | the plan id of the sync that sealed it (FR-41) |
-| `contract_digest` | `sha256:` over the canonical JSON of everything in configuration that shapes the bundle: the sorted `(name, destination)` list, `secrets_dir_env`, the recipients and the signer (§5.3) |
+| `contract_digest` | `sha256:` over the canonical JSON of the sorted `(name, destination)` list, `secrets_dir_env`, the recipients and the signer |
 | `recipients` | `sha256:<16 hex>` fingerprint of each recipient string, sorted |
-| `signer` | the signing key's OpenSSH fingerprint (`SHA256:…`) |
-| `names` | sorted `[{name, destination}]`, where destination is `env:<NAME>` or `file:<relative path>` |
-| `secrets_dir_env` | the variable that names the file directory, when the product has file keys |
-| `source_versions` | `[{item_id, version}]` of each 1Password item read (the C2 lines of `delivery-receipts.md`) |
+| `signer` | the signing key's OpenSSH fingerprint |
+| `names` | sorted `[{name, destination}]`; destination is `env:<NAME>` or `file:<relative path>` |
+| `secrets_dir_env` | present when the product has file keys |
 
-Canonical JSON means keys sorted, no insignificant whitespace, UTF-8, integers only. The parser
-refuses unknown fields (`deny_unknown_fields`). A header is at most 64 KiB.
+- Canonical JSON: keys sorted, no insignificant whitespace, integers only.
+- Unknown fields are refused. The header is at most 64 KiB.
+- **`source_versions` is not in the header** (C20). `opv changed` reads source versions from the
+  delivery item, and item versions in a published file would reveal how often items change.
+- **Exposure.** Key names and the placement are readable by anyone holding the bundle. They are
+  already in committed configuration (D8).
+- **File destinations follow the configuration's path rule (T6):**
+  - relative; at most four `/`-separated parts;
+  - each part matches `^[a-z0-9]+(-[a-z0-9]+)*$`, so no `.`, `..` or empty part;
+  - no NUL.
 
-**Exposure:** key names, item ids and item versions are readable by anyone holding the bundle.
-Names and ids are already in the committed configuration. Versions show how often items change.
-No value, length or value digest is in the header.
+  The codec refuses a header that breaks the rule. `local_delivery::write_file` also rejects
+  absolute paths and `.`/`..`/empty parts for every caller (`src/app/local_delivery.rs:313-352`
+  follows `..` today, which is safe only because its current paths come from validated
+  configuration).
 
-### 5.3 Payload (inside age)
+### 5.3 Payload and the whole-set rule
 
-Binary framing in the style of the remote-delivery payload (`src/app/remote_delivery.rs:165-230`),
-not JSON, so values are never `String`s:
+The payload (inside age) uses binary framing like the remote payload
+(`src/app/remote_delivery.rs:165-230`). Values are never `String`s.
 
 ```text
 OPV-SEALED-PAYLOAD 1\n
@@ -292,660 +379,832 @@ repeat count: <u16 BE name len><name><u32 BE value len><value bytes>
 END\n
 ```
 
-Limits: at most 256 names, each value at most 1 MiB, the whole bundle at most 8 MiB. Those are the
-remote payload's limits plus room for armor. Every value is read into a `Zeroizing<Vec<u8>>`. The
-payload's header digest must equal the digest of the header actually verified, and its names must
-equal the header's `names`, in order. That binds the plaintext to the signed header, independently
-of the signature.
+- Limits:
+  - at most 256 names;
+  - each value at most 1 MiB;
+  - the bundle at most 8 MiB.
+- Every value is read into a `Zeroizing<Vec<u8>>`.
+- The payload's header digest and name list must equal the verified header's. This binding is
+  cheap defense in depth for the downstream and library paths (C17).
 
-**Staleness and the "whole set" rule.** A bundle is rewritten whole, because opv cannot read the
-previous bundle's values (it holds no runtime identity, by design). The store tells `sync` that a
-change to any one name means re-sealing every name (§8.2). The store also reports **whole-bundle
-staleness** when the header's `contract_digest` differs from the configuration's. This happens
-when a recipient, the signer, a destination or the name set changed. `plan` shows that as one row
-with the reason (`recipients changed`, `signer changed`, `names changed`), and `sync` re-seals.
-This meets acceptance 6: a recipient change marks every bundle of that target stale, with no
-separate `keys` command.
+**Whole set (T3, T4, C7b).** opv cannot read the previous bundle's values, because it holds no
+runtime identity by design. So a sealed store is rewritten whole:
+
+- **The port.** `StagedStore` gains `fn whole_set(&self) -> bool { false }`. The sealed store
+  returns `true`.
+- **The trigger.** For such a store, `prepare_staged` builds the batch **before** the plan id is
+  computed (`c.target_id`, `src/app/sync.rs:1056`). It is triggered by any of:
+  - a staged name (`plan.stage`);
+  - a pruned name (`plan.prune`), so a retired credential leaves the bundle;
+  - a listed version that differs from the ledger.
+
+  The plan id therefore covers exactly what `sync` writes.
+- **The batch.** One function builds it from `plan.rows`: every desired, delivered row, including
+  immutable-held keys and config-as-secret keys, with values from the same read. It asserts that
+  the batch's names equal the header's `names` before signing. No extra `op` call is made.
+- **No per-name remove.** `StagedStore::remove` is unreachable for a whole-set store. Calling it
+  is `Cause::Bug`.
+
+**Whole-bundle staleness (C8).**
+
+- When the header's `contract_digest` differs from the configuration's, `list()` returns
+  versions that cannot match the ledger, so every name is `would_change`. The digest changes when
+  a recipient, the signer, a destination or the name set changes.
+- The target's `preflight` prints one warning line with the reason (`recipients changed`,
+  `signer changed`, `names changed`). No new plan-row type is needed.
+- This meets acceptance 6.
 
 ### 5.4 Revision and rollback
 
-`revision = max(previous + 1, now as Unix seconds)`. `previous` is the revision in the header of
-the bundle currently at `sealed.out`, and the revision recorded in the placement's evidence line,
-when either exists.
+`revision = max(prev.checked_add(1), now as Unix seconds)`. `prev` is the highest of:
 
-- The rule needs **no new state**: a fresh CI checkout without the old bundle still produces a
-  higher revision as long as its clock is not behind the last sealer's.
-- A sealer whose clock is behind fails closed and visibly: the runtime refuses the bundle as below
+- the revision in the placement's evidence line;
+- the revision in the header at `sealed.out`, **only after** that header verified with
+  `sealed.signer` (T10).
+
+A planted or foreign file never sets the revision; it is `drifted_on_target`. An overflow is
+`Cause::Bug`.
+
+Properties:
+
+- The rule needs no new state. A fresh CI checkout still increases the revision if its clock is
+  not behind.
+- A sealer whose clock is behind fails closed, visibly: the runtime refuses the bundle as below
   its floor.
-- Two sealers in the same second still increase, through `previous + 1`, when they see each
-  other's output. Two concurrent seals of one placement that do not see each other can both
-  pick `now`. The rename makes the last one win, and its evidence line then disagrees with the
-  file, which `delivery verify` reports. Lane P3 checks whether sync already serializes a
-  placement's writes. If it does not, P3 adds an exclusive lock file next to `sealed.out`.
+- **Concurrent seals of one placement.** If they do not see each other, both may pick `now`. The
+  last rename wins, and its evidence line may then disagree with the file, which
+  `delivery verify` reports. Lane P3 checks whether sync already serializes a placement's writes.
+  If it does not, P3 adds an exclusive lock file next to `sealed.out`.
 
-The runtime's floor comes from up to two sources, and the higher one wins:
+**The runtime floor is set by the deploy only (D5, R4).** The release that sealed revision N
+deploys the runtime with `--min-revision N`. That is the build-once-deploy-twice shape.
 
-1. `--min-revision N`, set by the deploy. The release that sealed revision N deploys the runtime
-   with `--min-revision N`. This is the build-once-deploy-twice shape: the pipeline knows the
-   revision it shipped.
-2. `--ratchet <path>`, an optional local file holding the highest revision this runtime accepted.
-   It is read before decryption and written (atomically, 0600, not secret) after a successful
-   verify and before exec. This protects long-lived hosts whose deploy does not pass a floor.
-   On an ephemeral container filesystem it resets, so the deploy floor is the primary control.
-
-**No expiry by default** (owner decision D5). An expiring bundle turns a missed re-seal into the
-same outage this design removes.
+- The first draft also had a local ratchet file. It is **removed**: it blocks a legitimate
+  rollback on a long-lived host, adds a cause and a file format, and no consumer asked for it.
+- **No expiry.** An expiring bundle would turn a missed re-seal into the outage this issue
+  removes.
 
 ### 5.5 Delivery to the child (`--exec`)
 
-- **Variables only (no file keys):** opv builds the child's environment and calls `execve`
-  (`CommandExt::exec`). opv's process image is replaced. No opv process stays resident with values
-  in memory, signals reach the app directly, and the app is PID 1 in a container as it would have
-  been. Before exec, opv zeroizes its own copies. The values exist only in the new image's
-  environment, as they do under `op run` today.
-- **With file keys:** opv stays as the parent. It reuses local delivery's private directory unchanged:
+- **Variables only, on Unix.** `unseal` builds the environment, zeroizes its own copies and calls
+  `CommandExt::exec`. The app replaces opv: no process stays holding values, signals reach the
+  app, and the app is PID 1 in a container.
+- **With file keys (Linux).** opv stays the parent and reuses local delivery:
   - `runtime_dir_support` (`src/app/local_delivery.rs:201-216`);
-  - `PrivateDir`, `OpenDir::open_private` and `write_file` (`:278-352`): a 0700 directory on
-    tmpfs/ramfs under `$XDG_RUNTIME_DIR`, files 0400, `O_EXCL|O_NOFOLLOW`, no disk fallback;
-  - the sweep on start, removal on exit and on signal;
-  - the RAM-directory refusals (`local-delivery.md`, Platforms and limits);
-  - signal forwarding to the child and the same exit-code pass-through.
-- **The child's environment** is the inherited environment, minus the `--identity-env` variable,
-  minus every `OP_*` variable, plus the bundle's variables and `secrets_dir_env`.
-  - A bundle name already present in the inherited environment is refused
-    (`sealed_name_collision`) rather than silently shadowed or overridden. During migration that
-    catches a platform secret left behind under the same name.
-  - `declared_only` (FR-62) applies when the product sets it, and the header records the mode.
-- **Hardening, same as the remote receiver:** non-dumpable and zero core limit at start
-  (`src/hardening.rs:9`), and `cloexec_inherited()` just before exec or spawn (`:24`).
+  - `PrivateDir`, `OpenDir::open_private` and `write_file` (`:278-352`, with the T6 path check
+    added);
+  - the result: a 0700 directory on tmpfs/ramfs, 0400 files, `O_EXCL|O_NOFOLLOW`, no disk
+    fallback, sweep on start, removal on exit and on signal, signals forwarded, exit code passed
+    through.
+
+  The RAM directory needs `$XDG_RUNTIME_DIR` on tmpfs, which a stock container lacks (R2). The
+  docs give, per platform:
+  - Docker: `--tmpfs /run/opv:mode=0700,uid=<app uid>` with `XDG_RUNTIME_DIR=/run/opv`;
+  - Kubernetes: an `emptyDir { medium: Memory }`.
+
+  As parent, opv is not an init, so the docs say to run with `docker run --init` or tini (R3).
+- **Off Unix (R5).** `--exec` spawns the command, waits, and passes its exit code. File keys are
+  refused with the existing `ram_dir_unavailable` (`none_on_platform`).
+- **The child's environment:**
+  - the inherited environment, minus the `--identity-env` variable and every `OP_*`;
+  - plus the bundle's variables and `secrets_dir_env`;
+  - `declared_only` (FR-62) applies when the product sets it, and the header's `names` record the
+    selection.
+- **Bundle wins over an inherited variable (R1, D10).**
+  - When a bundle name is already set in the inherited environment (an image's `ENV PORT`, or a
+    platform secret left over from migration), the bundle's value is used.
+  - One stderr line names the variable, never a value:
+    `opv unseal: PORT from the bundle replaces the inherited value`.
+  - `--json` lists it under `overridden`.
+  - A refusal would turn a migration leftover into a start outage, the failure class #271 is
+    about.
+- **Hardening** is the same as the remote receiver:
+  - non-dumpable and zero `RLIMIT_CORE` at start (`src/hardening.rs:9`);
+  - `cloexec_inherited()` just before exec or spawn (`:24`).
+
+  Non-dumpable also makes `/proc/<pid>/environ` root-only. That covers the `--identity-env`
+  string in a supervising parent (R6).
 
 ### 5.6 Where bundles go (first slice: a file)
 
-`sync` writes `sealed.out`: a temporary file in the same directory, `fsync`, `rename`, `fsync` of
-the directory. Publishing is the caller's job. The patterns the docs give, smallest first:
+`sync` writes `sealed.out` as: a temporary file in the same directory, `fsync`, `rename`, `fsync`
+of the directory. Publishing is the caller's job. v1 documents pattern 1:
 
-1. **Commit the bundles** (they are ciphertext) and bake **every environment's** bundle into the
-   one image. Each runtime can open only its own environment's bundle. This fits build once,
-   deploy twice: the same image goes to staging and production. Rotation means re-seal, commit
-   and redeploy.
-2. **Ship beside the image:** a Kubernetes ConfigMap (ciphertext is fine there), a volume, or an
-   object-store fetch in the deploy script.
-3. Later, if a consumer needs it: `sealed.publish` to an OCI artifact or an HTTP PUT through the
-   runner's HTTPS effect. This is not in this design's slices.
+1. **Commit the bundles.** They are ciphertext; `.gitattributes` marks `*.opv-sealed binary`.
+   Bake **every environment's** bundle into the one image: each runtime opens only its own
+   environment's, and accepts only that environment's signer. This fits build once, deploy twice.
+   `sync` runs where the bundles live (the repository), so `status` sees them.
+2. **Ship beside the image** (a ConfigMap, a volume, or an object-store fetch). Documented, with
+   one caveat: away from the sealing checkout the file is absent, and `status` reports each name
+   `absent` with the note "bundle not in this checkout", never drift (U1).
+3. Later: `sealed.publish` to OCI or HTTP (lane X1), if a consumer asks.
 
 ### 5.7 Library form
 
-A small crate (`opv-sealed`: verify → decrypt → `Zeroizing` map) for long-running consumers that
-want no exec. It needs a Cargo workspace, which the repository does not have today (single
-`[package]`, `Cargo.toml:1`). It is deferred to a second slice (D7). The first slice's
-`src/bundle/` module (§8.1) is written with no dependency on the rest of opv, so it can move into
-that crate unchanged.
+A crate `opv-sealed` (verify, then decrypt, returning a `Zeroizing` map) is **deferred** (D7). It
+needs a Cargo workspace (`Cargo.toml:1` has a single package). `src/bundle/` is written with no
+dependency on the rest of opv so it can move into that crate unchanged. Acceptance 4's "and the
+library" stays open until the owner amends it or the crate ships (P3).
 
 ## 6. Cryptography and dependencies
 
-### 6.1 Encryption: age, X25519 recipients only
+### 6.1 Encryption: age, X25519 only
 
-- age is the issue's choice and has a stable, specified format, interoperable CLIs (`age`,
-  `rage`) and a maintained Rust crate (`age` 0.12.1, MIT OR Apache-2.0). It is authenticated
-  encryption (ChaCha20-Poly1305 STREAM), so truncation and modification are detected without the
-  signature too.
-- Encrypting is in process, through `age::Encryptor::with_recipients` and the armored writer.
-  Decrypting is through `age::Decryptor` with exactly one `x25519::Identity`. No scrypt
-  (passphrase) identity is ever offered, so a passphrase stanza cannot be used to downgrade.
-- **v1 accepts X25519 recipients only.** SSH-key recipients (the `ssh` feature) would add RSA and
-  AES-CBC code. Plugin recipients would execute plugin binaries. Hybrid post-quantum recipients
-  (`age1pq…`) are a candidate for `opv-sealed/2`: bundles may sit in git or registries for years,
-  so harvest-now-decrypt-later is a real concern, recorded in §11.
-- **age is not a signature.** Anyone who has a recipient's public key, and recipients are public,
-  can make a ciphertext the runtime would decrypt. The signature is therefore mandatory, and is
-  checked first.
+- **Encrypt** with `age::Encryptor::with_recipients` and the armored writer.
+- **Decrypt** with `age::Decryptor` given exactly one `x25519::Identity`. No scrypt identity is
+  ever offered, so a passphrase stanza cannot be used to downgrade.
+- **v1 accepts X25519 recipients only.**
+  - SSH recipients add RSA and AES-CBC code paths.
+  - Plugin recipients execute binaries.
+  - Hybrid post-quantum `age1pq…` recipients are a candidate for `opv-sealed/2` (§11).
+- **age is not a signature.** Recipients are public, so anyone can produce a ciphertext the
+  runtime would decrypt. The signature is therefore mandatory, and it is checked first.
 
 ### 6.2 Signing: SSHSIG with ed25519, in process
 
 | Option | For | Against | Verdict |
 |---|---|---|---|
-| **SSHSIG, ed25519** (`ssh-key` 0.6 crate, `ed25519` feature) | issue's choice; 1Password stores and generates SSH keys natively (an SSH Key item); `ssh-keygen -Y verify` can check it; `allowed_signers` is a known format; 28 crates, all already-licensed families, `cargo deny` clean (§6.4) | none significant | **recommended** |
-| minisign | tiny verifier (`minisign-verify`, 2 crates) | signing needs the heavier `minisign` crate (scrypt); a key format 1Password does not manage; a second key ecosystem | rejected |
-| an age plugin for signing | none exists; age has no signing | | not an option |
-| shell out to `ssh-keygen -Y sign` with the person's agent | the issue's wording; no new signing code | needs OpenSSH on the sealer; under CI there is no agent, so the key would be loaded from 1Password into a file or an agent, which is worse; an extra failure surface | rejected as the mechanism, but the **output is the same SSHSIG bytes**, so the format is unaffected |
+| **SSHSIG ed25519, `ssh-key` 0.6.7** | the issue's choice; 1Password generates and stores SSH keys natively; `ssh-keygen -Y verify` checks it; `PrivateKey::sign` and `PublicKey::verify` exist; 28 crates, `cargo deny` clean | no `allowed_signers` parser: opv writes the strict subset of §4.2 | **recommended** |
+| minisign | a two-crate verifier | signing needs the heavier crate (with scrypt); a second key ecosystem 1Password does not manage | rejected |
+| shell out to `ssh-keygen -Y sign` with an agent | no signing code | needs OpenSSH on the sealer, and CI has no agent | rejected as the mechanism; its output is the same SSHSIG bytes, so the format is unaffected |
 
-- **The signing key is the target's `deploy_credentials` item** (FR-40): a 1Password SSH Key item.
-  1Password can generate the key itself (`op item create --category "SSH Key" --ssh-generate-key
-  ed25519`), so the private key never passes through opv at creation.
-- At sync, opv reads it like any deploy credential, as a zeroizing `SecretValue`, and checks that
-  its public key equals `sealed.signer` before reading any value. A mismatch is
-  `CredentialRejected { DeployCredentials }` (exit 7), so a staging signer cannot sign a production
-  bundle.
-- Signing is done **as a runner effect**, the way HTTPS is in `http-target.md` §5. The key stays
-  with the run's `DeployLogin` (`src/provider.rs:183-194`), and the adapter asks the runner to sign
-  bytes. `FakeRunner` and the sim sign with a fixture key, so the tested path is the shipped path.
-- To confirm in the spike (lane S0): the shape `op item get --format json` returns for an SSH Key
-  item's private key. It may be PKCS#8 PEM for ed25519 with an OpenSSH form beside it. `ssh-key`
-  parses OpenSSH, and `ed25519-dalek`'s `pkcs8` feature parses PKCS#8.
+**The signing key is the target's `deploy_credentials` item**, a 1Password SSH Key item.
 
-Verification uses `ssh_key::PublicKey::verify(namespace, msg, &SshSig)`, which runs
-`ed25519-dalek` strict verification. Only `ssh-ed25519` keys, the `sha512` hash and namespace
-`opv-sealed` are accepted. Anything else is `sealed_signature_invalid`.
+- 1Password generates it: `op item create --category "SSH Key" --ssh-generate-key ed25519`.
+- opv reads its **OpenSSH** form, which `ssh-key` parses. `op` returns PKCS#8 for ed25519 by
+  default; an OpenSSH form is available. Lane S0 confirms the exact field (T16).
+- **Mismatch (T2).** At sync, before any value is read, its public key must equal
+  `sealed.signer`. A mismatch is `InputInvalid { kind: DeployCredentials, field: "public key" }`
+  (`input_invalid`, exit 2), following `src/adapters/http/login.rs:39-48`. It is not
+  `CredentialRejected`: that cause carries an `Observed`, which only the runner may build
+  (`src/cause/mod.rs:691-696`, `tests/observed_seal.rs:76-95`). A local key comparison has no
+  failed call to observe.
+
+**Signing happens through `EnvRunner`.**
+
+- A `DeployLogin` reaches a call only through `EnvRunner`'s per-program environment
+  (`src/app/signin.rs:156-164`, `:421-437`). A store never holds the login.
+- So signing is a pure runner effect: no retries, no observation, nothing remote can fail.
+- `FakeRunner` and the sim sign with a fixture key, so the tested path is the shipped path.
+
+**Verification** uses `ssh_key::PublicKey::verify` (strict ed25519). Only `ssh-ed25519`, `sha512`
+and namespace `opv-sealed` are accepted, with the principal rule of §4.2.
 
 ### 6.3 Memory hygiene and constant time (SR-2, SR-8)
 
-- **Values:** read from 1Password into `SecretValue` (existing), framed into a
-  `Zeroizing<Vec<u8>>` payload, streamed into the age writer. At unseal, read from the age reader
-  into one `Zeroizing<Vec<u8>>`, then split into zeroizing slices.
-- **Identity:** read into `Zeroizing<String>`, parsed into `age::x25519::Identity`. That type
-  wraps `x25519_dalek::StaticSecret`, which zeroizes on drop. The lane confirms the feature is on
-  in the resolved tree.
-- **Signing key:** `ssh_key::PrivateKey` zeroizes its key data on drop (crate behaviour; the lane
-  confirms it).
-- **Residual:** age's STREAM reader and writer keep 64 KiB chunk buffers internally. The spike
-  checks whether they are zeroized. If not, this is recorded as a known residual, bounded to the
-  life of the unseal process, which `exec` replaces at once in variable-only mode.
-- **Constant time:** signature verification is `ed25519-dalek`'s. No secret comparison is made
-  by opv code in `unseal`. Header fields, revisions and fingerprints are public. Evidence
-  fingerprints at sync are compared with `subtle` (already a dependency, FR-54).
-- No value is ever in a panic message. The codec returns typed refusals whose `Display` names
-  fields, never bytes (the remote payload's `Refusal` pattern).
+**Values:**
+
+- at seal: `SecretValue`, then a `Zeroizing<Vec<u8>>` payload, streamed into age;
+- at unseal: one `Zeroizing<Vec<u8>>`, split into zeroizing slices.
+
+**Keys:**
+
+- The identity is read into a `Zeroizing<String>`, then parsed into `x25519::Identity`. Its
+  `StaticSecret` zeroizes on drop: the probe resolved `x25519-dalek` with `zeroize` and
+  `static_secrets`.
+- `ssh_key::PrivateKey` zeroizes its key data on drop.
+
+**Known residual (T12, verified):** age's `StreamReader`/`StreamWriter` keep a plain
+`chunk: Vec<u8>` (`age-0.12.1/src/primitives/stream.rs:26-34`, `:222-226`) that is **not
+zeroized**. Only `PayloadKey` zeroizes. Up to 64 KiB of plaintext may stay in freed heap for the
+life of the process.
+
+- Variables mode `exec`s at once, which replaces that heap.
+- Non-dumpable and a zero core limit keep the heap out of cores.
+- The docs record this residual.
+
+**Constant time:**
+
+- `ed25519-dalek` performs the signature verification.
+- `unseal` compares no secrets: header fields, revisions and fingerprints are public.
+- Evidence fingerprints at sync use `subtle` (FR-54).
+
+**Messages:** refusals are typed and name fields, never bytes (the remote payload's `Refusal`
+pattern).
 
 ### 6.4 Dependency weight and `cargo deny` (measured 2026-11-04)
 
-Probe: a scratch crate per candidate, `cargo tree -e normal`, and
-`cargo deny check licenses advisories` with this repository's `deny.toml`.
-
-| Crate (features) | Unique crates | Release size of a minimal binary | Licences | Advisories |
+| Crates (features) | Resolved | New to opv's `Cargo.lock` | Licences | Advisories |
 |---|---|---|---|---|
-| `age 0.12.1` (no default features) | 127 (with duplicates of `digest`, `sha2`, `hybrid-array`, `rand_core`: multiple-version warnings) | +0.8 MB (1.28 MB vs 0.46 MB baseline) | ok | **2 errors:** `basic-toml` unmaintained (RUSTSEC-2026-0374), through `i18n-config` used only by the `i18n-embed-fl`/`i18n-embed-impl` proc macros at build time; `crypto-bigint 0.5.5` timing variability (RUSTSEC-2026-0387), through `elliptic-curve`/`p256`/`hpke`, used only by the p256-tag and hybrid recipient types. Fixed upstream in 0.7.6, which `elliptic-curve 0.13` cannot take, so `cargo update` does not clear it |
-| `age 0.11.5` | 117 | (similar) | ok | 2 errors: `basic-toml`, `proc-macro-error2` unmaintained (RUSTSEC-2026-0173), both build-time |
-| `ssh-key 0.6.7` (`ed25519`, `alloc`) | 28 | | ok | clean |
-| `minisign-verify 0.3` | 2 | | ok | clean |
+| `age 0.12.1` (no default features) + `ssh-key 0.6.7` (`ed25519`, `alloc`) | 135 | **~87** | ok | 2 errors, both from age (below) |
+| `ssh-key` alone | 28 | | ok | clean |
 
-Neither age advisory is reachable from opv's use:
+**Size.** age adds about 0.8 MB to a minimal release binary (1.28 MB against 0.46 MB).
 
-- `basic-toml` runs at compile time only.
-- `crypto-bigint` sits on the p256 path, which X25519-only recipients never execute.
+**Notable crates age brings:**
 
-The repository's `deny.toml` has no `[advisories] ignore` list today, so adopting age means adding
-the first two entries, each with this justification and a review date. age also brings an
-i18n/fluent stack (localized error strings, embedded with `rust-embed`) that opv never shows.
+- an i18n/fluent stack (localized strings embedded with `rust-embed`) that opv never shows;
+- `scrypt`;
+- `ml-kem` and a pre-release `kem 0.3.0-pre.0` (for the hybrid recipients opv refuses);
+- `p256`, an unconditional dependency of age and `hpke`;
+- duplicate versions of `digest`, `sha2`, `hybrid-array` and `rand_core` (multiple-version
+  warnings).
 
-This is owner decision **D2**:
+**Advisories, and neither is reachable from opv's use:**
 
-- age crate in process with two documented ignores;
-- the `age` CLI as a runtime dependency;
-- or waiting for an age release without those advisories.
+- `basic-toml`, unmaintained (RUSTSEC-2026-0374). It sits only under the `i18n-embed-fl` proc
+  macro and runs at build time.
+- `crypto-bigint 0.5.5`, timing variability (RUSTSEC-2026-0387), through `elliptic-curve`, `p256`
+  and `hpke`. It runs only for p256-tag and hybrid stanzas, which opv never parses or offers.
+  `elliptic-curve 0.13` cannot take the fixed 0.7.6, so `cargo update` does not clear it.
 
-**Recommendation:** the crate, pinned to `=0.12.1`, X25519 only, ignores dated to the next minor.
+**`deny.toml` changes (D2, T11):**
+
+```toml
+[advisories]
+ignore = [
+  # Build-time only: i18n-embed-fl proc macro (age 0.12.1). Review by 2027-02-01 or next age release.
+  { id = "RUSTSEC-2026-0374", reason = "build-time proc-macro dependency of age; not in the binary's runtime" },
+  # p256 path of age/hpke; opv parses and offers X25519 only. Review by 2027-02-01.
+  { id = "RUSTSEC-2026-0387", reason = "crypto-bigint reached only via p256 tag/hybrid stanzas, never used by opv" },
+]
+
+[bans]
+deny = [
+  # Fence for the ignore above: p256 may enter only through age and hpke.
+  { crate = "p256", wrappers = ["age", "hpke"] },
+]
+```
+
+An advisory ignore is global. The `[bans]` wrapper makes `cargo deny` fail if any other crate
+brings in `p256`, which could make the timing path reachable. Recipients are parsed only with
+`age::x25519::Recipient::from_str`.
 
 ## 7. Keys, identity and the permission model
 
 ### 7.1 Where each key lives
 
-| Key | Secret? | Lives in | Who can use it | How it gets there |
-|---|---|---|---|---|
-| runtime age identity (`AGE-SECRET-KEY-1…`), one per environment, or per environment and product | yes | a 1Password field: a key declared for that environment's runtime, for example `OPV_SEALED_IDENTITY`, `kind = "secret"`, with a new generator rule `age_identity = true` | whoever can read that boundary vault, and the runtime | `opv generate <env> <product/KEY>` (person's session, never printed, `src/app/generate.rs`), which prints the matching `age1…` recipient for the configuration; delivered **once** to the runtime by an existing target (a Fly secret, a Kubernetes Secret, a file through `opv run` local delivery) or by the platform's own secret mechanism |
-| its recipient (`age1…`) | no | `sealed.recipients` | anyone | committed |
-| signing key (ed25519) | yes | the target's `deploy_credentials` 1Password SSH Key item | whoever can read that vault: a person, or the CI deploy identity (FR-40, FR-59) | `op item create --category "SSH Key" --ssh-generate-key ed25519` |
-| signer public key | no | `sealed.signer`; the runtime's `allowed_signers` | anyone | committed or baked into the image |
+| Key | Secret? | Lives in | How it gets there |
+|---|---|---|---|
+| runtime age identity, **one per environment and product by default** | yes | a 1Password field of a key with `age_identity = true` (for example `OPV_SEALED_IDENTITY`), never delivered by a sealed target (§3.1-8) | `opv generate <env> <product/KEY>` (person's session, never printed) prints the matching `age1…` recipient for configuration; it is delivered **once** by an existing target (a Fly secret, a Kubernetes Secret) or by the platform (§7.4) |
+| its recipient `age1…` | no | `sealed.recipients` | committed |
+| signing key (ed25519), one per environment | yes | the target's `deploy_credentials` SSH Key item | 1Password generates it |
+| signer public key | no | `sealed.signer`; the runtime's `allowed_signers`, with principal = environment | committed or baked into the image |
 
-### 7.2 What changes in the security model (honestly)
+### 7.2 What changes in the security model
 
-Today a runtime that calls `opv run` holds a **1Password service-account token**. That token is
-scoped to vaults, revocable centrally at once, audited by 1Password on every read, and rate
-limited. With sealed delivery the runtime holds an **age identity** instead:
+**Today.** A runtime that calls `opv run` holds a 1Password service-account token. The token is:
 
-- **No central revocation.** The identity decrypts, offline and forever, every bundle ever sealed
-  to it, including old copies in git history, registries and caches. "Revoking" it means removing
-  its recipient and re-sealing. That stops **future** bundles only. If the identity leaks, every
-  value in any bundle sealed to it must be treated as exposed and rotated at its provider.
-- **No per-read audit.** 1Password logs the seal (one read per release), not each process start.
-  Runtime reads become invisible to 1Password, which is the point, and also a loss.
-- **A narrower blast radius in one way.** The identity opens only the bundles sealed to it: one
-  environment, and one product when identities are per product. It never reads another value in
-  the vault. A leaked service-account token reads the whole vault until it is revoked.
-- **Integrity now rests on the signing key.** Whoever holds it can make the runtime start with
-  values of their choice (for example a `DATABASE_URL` pointing elsewhere). It lives in 1Password
-  behind vault access and is used only at sync.
+- scoped to vaults;
+- revocable centrally, at once;
+- audited by 1Password on every read;
+- rate limited.
 
-**How this fits "1Password vault access is the only permission system":** opv defines no roles
-here either.
+**With sealed delivery** the runtime holds an age identity instead. What changes:
 
-- **Who can seal** = who can read the boundary vaults and the signing key's vault.
-- **Who can make a runtime identity** = who can write that boundary (a person, through
-  `opv generate`).
-- **Who can run with the values** = who holds the identity, which was itself delivered from
-  1Password by vault access.
-- `sealed.recipients` and `sealed.signer` in the configuration are **trust anchors, not
-  permissions**: public keys that pin where values may go and who may sign, like a remote
-  profile's `host_key` (FR-63). They are reviewed like any configuration change.
-- CI still never writes a value to 1Password. It reads values and the signing key, and writes only
-  delivery evidence to the state vault, as for every target (FR-58).
+- **No central revocation.** The identity decrypts, offline and for ever, every bundle sealed to
+  it, including copies in git history and registries. Removing its recipient and re-sealing stops
+  only **future** bundles. A leaked identity means rotating every value it could open. This is
+  the vet's U2 and is accepted explicitly in §12 (R-U2).
+- **No per-read audit.** 1Password records the seal, not each process start. That is the point,
+  and also a loss.
+- **A narrower reach.** An identity opens only the bundles of one environment and one product,
+  never another value in the vault. A leaked service-account token reads the whole vault until
+  revoked.
+- **Integrity rests on the signing keys.** Whoever holds one can choose the values its
+  environment's runtimes start with (for example a `DATABASE_URL` pointing elsewhere). Only that
+  environment's, though: §3.1-4 and §4.2 bind each signer to one environment. The key lives in
+  1Password and is used only at sync.
+
+**Fit with "1Password vault access is the only permission system".** opv defines no roles here.
+
+| Action | Who can do it |
+|---|---|
+| seal | whoever can read the boundary vaults and the signing key's vault |
+| make an identity | whoever can write that boundary (`opv generate`) |
+| run with the values | whoever holds the identity, delivered from 1Password by vault access |
+
+`sealed.recipients`, `sealed.signer` and the runtime's `allowed_signers` are **trust anchors**:
+public keys, reviewed like code, which grant nothing. But a reviewer who approves an
+`allowed_signers` change approves **who may set that environment's values**, and the docs say so.
+
+Revocation also stops being a 1Password action. Removing a person's vault access does not
+invalidate an identity they once read. The same is true of any value they once read, but a bundle
+is a durable, re-decryptable copy.
+
+CI still never writes a value to 1Password. It reads values and the signing key, and writes only
+evidence to the state vault (FR-58).
 
 ### 7.3 Rotation flows
 
 **Runtime identity:**
 
-1. `opv generate` a new identity into a new field or key.
-2. Add its recipient beside the old one in `sealed.recipients`.
-3. `opv sync` re-seals to both (contract digest changed, §5.3).
-4. Deliver the new identity to the runtime and deploy.
-5. Remove the old recipient and `opv sync` again.
-6. Delete the old field.
-7. If the old identity leaked: also rotate every value it could open.
+1. `opv generate` a new identity.
+2. Add its recipient beside the old one.
+3. `opv sync` re-seals to both, because the contract digest changed.
+4. Deliver the new identity and deploy.
+5. Remove the old recipient.
+6. `opv sync` again.
+7. Delete the old field.
+8. If the identity leaked: also rotate every value it opened.
 
-**Signing key:**
+**Signing key** (environment `prod`):
 
 1. Create a new SSH Key item.
-2. Add its public key to the runtime's `allowed_signers` and deploy.
-3. Point `deploy_credentials` and `sealed.signer` at the new key and `opv sync`.
-4. Remove the old line from `allowed_signers` and deploy.
+2. Add `prod namespaces="opv-sealed" ssh-ed25519 <new>` to the runtime's `allowed_signers` and
+   deploy.
+3. Point `deploy_credentials` and `sealed.signer` at the new key.
+4. `opv sync`.
+5. Remove the old line and deploy.
 
-**Values:** a rotation in 1Password makes `opv changed` exit 10. `opv sync` re-seals, and the
-deploy ships the bundle with `--min-revision` at the new revision, so the old bundle (holding the
-revoked value) is refused.
+`sealed_signer_shared` prevents reusing the key in another environment.
+
+**Values:**
+
+1. A rotation in 1Password makes `opv changed` exit 10.
+2. `opv sync` re-seals.
+3. The deploy passes `--min-revision` set to the new revision, so the old bundle (holding the
+   revoked value) is refused.
 
 ### 7.4 Per-platform bootstrap of the identity (documented, not built)
 
-| Platform | Identity channel | `unseal` flag |
+| Platform | Identity at rest | `unseal` flag |
 |---|---|---|
-| Docker host / Compose | Docker secret or a bind-mounted file from `opv run` local delivery (tmpfs) | `--identity-file /run/secrets/opv_identity` |
-| systemd | `LoadCredential=` / `systemd-creds` (encrypted at rest by the host) | `--identity-file $CREDENTIALS_DIRECTORY/opv_identity` |
-| Kubernetes | Secret delivered by opv's Kubernetes target, mounted as a volume | `--identity-file /var/run/opv/identity` |
-| Fly | Fly secret delivered by opv's Fly target (environment only today) | `--identity-env OPV_SEALED_IDENTITY` |
+| Docker host / Compose | a root-owned 0400 file on the host, mounted read-only. It is plaintext at rest, inside the stated trust boundary ("root on the host"). Compose `secrets:` are such host files | `--identity-file /run/secrets/opv_identity` |
+| systemd | `systemd-creds` (encrypted at rest, TPM-bound where available) with `LoadCredentialEncrypted=` | `--identity-file $CREDENTIALS_DIRECTORY/opv_identity` |
+| Kubernetes | a Secret delivered by opv's Kubernetes target, mounted as a volume | `--identity-file /var/run/opv/identity` |
+| Fly | a Fly secret delivered by opv's Fly target (environment only today) | `--identity-env OPV_SEALED_IDENTITY` |
+
+The first draft's row "a tmpfs file from `opv run` local delivery" is dropped (U3). It needs `op`
+at every boot, which brings back the dependency this design removes.
 
 ## 8. Implementation: where the target is wired
 
 ### 8.1 Modules
 
-- `src/bundle/`: the format and the crypto (§5, §6), with no dependency on the configuration,
-  runner or adapters.
-  - `format.rs`: envelope and header canonical form, payload framing, limits.
-  - `crypto.rs`: age and SSHSIG wrappers, recipient, identity and signer parsing.
-  - Used by the adapter (seal) and by `src/app/unseal.rs` (unseal), and the future library crate.
-  - It is a codec, not a target adapter, so `src/app` may name it. FR-12's guard
-    (`use_cases_name_no_target_adapter`, `src/app/mod.rs:2128`) and FR-37's
-    (`core_modules_name_no_provider`, `:2313`) stay green.
-  - Add `adapters::sealed` and `sealedtarget` to `provider_named`'s words (`:2281-2298`), so core
-    can never name the adapter.
-- `src/adapters/sealed/`:
-  - `mod.rs`, `config.rs`: `sealed.*` parse and the §3.1 rules.
-  - `provider.rs`: `Provider` and `TargetConfig`.
-  - `store.rs`: `StagedStore` (list = read the header at `sealed.out`; write = build, sign and
-    atomically write the bundle), with `StagedRuntime::live() == true` like GitHub and HTTP.
-  - `login.rs`: the SSH Key deploy credential, signing as a runner effect.
-- `src/app/unseal.rs`: verify, decrypt, refusals, JSON, ratchet, and the exec/supervise delivery,
-  reusing `local_delivery`'s directory primitives and `hardening`.
+**`src/bundle/`: the format and crypto, with no dependency on configuration, runner or adapters.**
 
-### 8.2 Registration points and the places a new target must be wired
+- `format.rs`: envelope, canonical header, payload framing, path rule and limits.
+- `crypto.rs`: age and SSHSIG, recipient, identity and signer parsing.
+- `allowed_signers.rs`: the strict subset parser.
 
-| # | Where | Change |
-|---|---|---|
-| 1 | `src/adapters/mod.rs:16` (beside `pub mod http;`) | `pub mod sealed;` |
-| 2 | `src/adapters/registry.rs:4`, `:8-14` | import and one line in `PROVIDERS`; the test at `:95-97` lists `"sealed"` |
-| 3 | `src/provider.rs:695-747` | a `[environments.prod.targets.sealed]` table in `ALL_PROVIDERS` |
-| 4 | `src/provider.rs:764-833` | its row in `the_contract_lists_every_providers_channels` (§3.2) |
-| 5 | `src/provider.rs:679-687` `system_of` | a `"sealed"` arm, plus `System::Sealed` in `src/cause/subject.rs:94-124` with label `"sealed bundle"`. **Found while reading:** `system_of` has no `"http"` arm either, so the HTTP provider is labelled `System::GitHub` by its `_` fallback. Fix both in the same lane |
-| 6 | `src/ports.rs:37-55` `StagedStore` | one defaulted method, `fn whole_set(&self) -> Option<WholeSet> { None }`, where `WholeSet { stale: Option<&'static str> }`: this store rewrites every name together, and why it is stale as a whole |
-| 7 | `src/app/sync.rs:1006-1066` (`prepare_staged`), `:1096-1128` (batch, `write`, `confirm`) | when `whole_set()` is `Some` and the plan stages anything or `stale` is set, the batch is every desired name with its value (from the same read; no extra `op` call), and the plan shows the reason row |
-| 8 | `src/app/mod.rs:2281-2298` | guard words (§8.1) |
-| 9 | `tests/observed_seal.rs:44-82` | **unchanged**: the sealed adapter makes no CLI call of its own, so there is no new `lost_call` caller (J7). The lane asserts the list is the same |
-| 10 | `src/cause/mod.rs` (codes near `:2047`, `exit_code` `:2066-2165`) | the `sealed_*` causes of §4.2 |
-| 11 | `src/main.rs`: `Cmd` enum (near `Run`, `:814`) | `Unseal`, dispatched early without loading configuration, like `RemoteReceive` (`:1050`, `:2688`); the exhaustive matches near `:4774-4788` |
-| 12 | `tests/e2e/expected/surface.json` | an `unseal` CLI entry; MCP list unchanged |
-| 13 | `tests/cli_ux.rs:92-99` | the exit-code help line "5 target (Fly, Azure, Kubernetes, GitHub, HTTPS, sealed bundle)" built from `labels()`; `tools()` is empty, so the "3 dependency" line is unchanged |
-| 14 | `src/schema.rs:520` | capability `sealed_bundles/1` and the new cause codes |
-| 15 | `src/app/generate.rs:28-31` `Recipe` and the key-rule parser (`src/domain/catalog.rs`) | `AgeIdentity`, printing the recipient |
-| 16 | `src/runner.rs` and `src/app/mod.rs:2665` (`op_calls` test helper) | the `op_calls` count in `--json`; the signing effect |
-| 17 | `tests/e2e/app/secrets.toml`, `world.json`, `tests/e2e/scenarios/` | a sealed target in the e2e app and its scenarios; fault-matrix cells or `UNREACHABLE` entries for each new cause |
-| 18 | `deny.toml`, `Cargo.toml` | `[advisories] ignore` (D2), `age`, `ssh-key` |
-| 19 | docs: `docs/usage.md`, `opv guide agent`, the agent skill, `docs/design/requirements.md` (new FR-64), CHANGELOG | `tests/docs_commands.rs` parses every documented `opv …` line |
+The adapter and `src/app/unseal.rs` both use it.
+
+- It is a codec, not a target adapter, so `src/app` may name it. FR-12
+  (`use_cases_name_no_target_adapter`, `src/app/mod.rs:2128`) and FR-37
+  (`core_modules_name_no_provider`, `:2313`) stay green.
+- `provider_named` (`:2281-2298`) gains `adapters::sealed` and `sealedtarget`, so core can never
+  name the adapter.
+
+**`src/adapters/sealed/`: the provider.**
+
+- `config.rs`: the §3.1 rules.
+- `provider.rs`.
+- `store.rs`: `StagedStore`. `whole_set() == true`. `list` reads and verifies the header. `write`
+  builds, signs and atomically writes. `live() == true`, like GitHub and HTTP
+  (`src/ports.rs:93-102`).
+- `login.rs`: the SSH Key deploy credential.
+
+**`src/app/unseal.rs` and `src/app/unseal_exec.rs`: the runtime command.**
+
+### 8.2 Registration and wiring points
+
+| # | Where | Change | Lane |
+|---|---|---|---|
+| 0 | `src/provider.rs:679-687` `system_of`; `src/app/mod.rs:2281-2298` | **pre-slice fix, its own PR:** add `"http" => System::Https` (the variant exists, `src/cause/subject.rs:103-104`; today HTTP falls through to `System::GitHub`, reaching users via `SecretNotStored` and `Guard::ProviderHidesValues`), preferably by replacing `system_of` with a required `Provider::system()` so no provider can fall through; add the HTTP adapter's words to `provider_named` | F0 |
+| 1 | `src/adapters/mod.rs:16` | `pub mod sealed;` | P1 |
+| 2 | `src/adapters/registry.rs:4`, `:8-14`, test `:95-97` | one `PROVIDERS` line; `"sealed"` in the sections test | P1 |
+| 3 | `src/provider.rs:695-747` | a sealed table in `ALL_PROVIDERS` | P1 |
+| 4 | `src/provider.rs:764-833` | the channel row (§3.2) | P1 |
+| 5 | `src/provider.rs` `system()`/`system_of` and `src/cause/subject.rs:94-124` | `System::Sealed`, label `"sealed bundle"` (after F0) | P1 |
+| 6 | `src/ports.rs:37-55` | `fn whole_set(&self) -> bool { false }` | C1 |
+| 7 | `src/app/sync.rs:1006-1066` (`prepare_staged`, before `c.target_id` at `:1056`), `:1096-1128` | the whole-set batch from `plan.rows`, triggered by stage, prune or mismatch; `remove()` unreachable for whole-set stores | C1 |
+| 8 | `src/app/mod.rs:2281-2298` | guard words `adapters::sealed`, `sealedtarget` | P1 |
+| 9 | `tests/observed_seal.rs:44-75` | **unchanged** (J7): the signer mismatch is `InputInvalid`, so no new `lost_call` caller; the lane asserts the list is the same | P2 |
+| 10 | `src/cause/mod.rs` (codes near `:2047`, `exit_code` `:2066-2165`) | the `sealed_*` causes (§3.1, §4.2) | P1, U1 |
+| 11 | `src/cause/codes.rs:455` `one_of_each()`, retry class and `human_required` (`src/schema.rs:801-835`) | one example per new cause | P1, U1 |
+| 12 | `docs/usage.md` error-code table (generated; checked by `tests/docs_commands.rs:400-420`) | regenerated with the new codes | U1 |
+| 13 | `tests/agent_guidance.rs:158-169` and the guide's `error_codes` | the new codes listed | U1 |
+| 14 | `src/main.rs` `Cmd` (near `Run`, `:814`) | `Unseal`, dispatched early without configuration like `RemoteReceive` (`:1050-1051`, `:2688`); the exhaustive matches near `:4774-4788` | U1 |
+| 15 | `tests/e2e/expected/surface.json` | an `unseal` CLI entry; MCP unchanged | U1 |
+| 16 | `tests/cli_ux.rs:92-99` | exit-code help "5 target (…, HTTPS, sealed bundle)" from `labels()` | P1 |
+| 17 | `src/schema.rs:520` | capability `sealed_bundles/1` | U1 |
+| 18 | `src/app/generate.rs:28-31` `Recipe`, `src/domain/catalog.rs` | `AgeIdentity`, printing the recipient | G1 |
+| 19 | `src/runner.rs`, `src/app/signin.rs:421-437` | the signing effect through `EnvRunner`; fake signing | P2 |
+| 20 | `tests/e2e/app/secrets.toml`, `world.json`, `tests/e2e/scenarios/` | a sealed target and scenarios; fault-matrix cells or `UNREACHABLE` entries | E1 |
+| 21 | `src/app/local_delivery.rs:313-352` `write_file` | reject absolute paths and `.`/`..`/empty parts (T6) | U2 |
+| 22 | `deny.toml`, `Cargo.toml` | §6.4 | S0 |
+| 23 | docs, skill, `requirements.md` FR-64, CHANGELOG | §13 D1d | D1d |
 
 ### 8.3 Composition with what exists
 
-- **sync / plan / status:** a staged, live target. `Store::list` reads the header from the local
-  file, so plan never needs the runtime.
-- **Receipts and evidence (FR-58, `delivery-receipts.md`):** the per-name store version is
-  `r<revision>.<first 16 hex of sha256(bundle file)>`. It is a digest of ciphertext under a random
-  age file key, so it is not value-derived (`versions_reveal_values() == false`). Evidence lines,
-  revisions and `delivery verify` work unchanged. A bundle replaced on disk outside opv is
-  `drifted_on_target`, and a missing one is `missing_on_target`.
-- **`opv changed`:** unchanged. It already compares recorded `source versions` with
-  `op item list` (`src/app/changed.rs:1-21`). This is the issue's `seal --check`: names and
-  versions only.
-- **`run --product`:** unchanged. `opv run` stays the developer path through `op run`, and
-  `unseal --exec` is the runtime path. They share the delivery primitives, not the command (D6).
-- **Roles (`--role`, local-delivery §Process roles):** a sealed target may declare `roles` like any
-  target, and the bundle then holds that role's selection. Two roles mean two targets, so a
-  migration job's bundle never reaches the server.
+- **sync, plan, status:** a staged, live, whole-set target. `list` reads the local header, so the
+  runtime is never needed.
+- **Receipts and evidence (FR-58).**
+  - The store version is `r<revision>.<16 hex of sha256(bundle file)>`. That is a digest of
+    ciphertext under a random file key, not value-derived (`versions_reveal_values() == false`).
+  - A file replaced outside opv is `drifted_on_target`.
+  - An opv-signed bundle with no evidence line (for example a write followed by a failed evidence
+    write, R7) is the existing `not_recorded` state, not drift.
+  - A missing file is `absent`, with the note of §5.6.
+- **`opv changed`:** unchanged (`src/app/changed.rs:1-21`).
+- **`run --product`:** unchanged. `opv run` stays the developer path through `op run`. `unseal
+  --exec` is the runtime path. They share the delivery primitives, not the command (D6).
+- **Roles:** a sealed target may declare `roles`, and the bundle then holds that role's selection.
+  Two roles mean two targets.
 
-## 9. Self-vet
+## 9. Self-vet (the author's own, then corrected by the vet)
 
-### 9.1 Poka-yoke (mistakes made impossible or loud)
+### 9.1 Poka-yoke
 
 | Mistake | Guard |
 |---|---|
-| a production bundle sealed to a staging recipient, or the reverse | load rule: no recipient in two environments (§3.1-2) |
-| a staging signer used for production | sync refuses unless the credential's public key equals `sealed.signer` (§6.2) |
-| the wrong bundle shipped to a service | `--env` and `--product` required and checked against the signed header |
-| an old bundle (revoked value) redeployed | revision floor from the deploy, and the ratchet |
-| forgetting to re-seal after a rotation | `opv changed` exit 10, which a scheduled CI job or `opv ready` surfaces; not a runtime poll |
-| recipients changed but bundles not | contract digest makes every bundle of the target stale in `plan` (§5.3) |
-| a platform secret left with the same name during migration | `sealed_name_collision` |
-| an `allowed_signers` file meant for git commits trusted for bundles | lines without `namespaces="opv-sealed"` are ignored, and a file with no such line is refused |
-| three-file bundles out of step | one file (§5.1) |
-| a format change read by an old runtime | the first line names the version; an unknown version is refused, never guessed |
+| prod bundle sealed to a staging recipient | `sealed_recipient_shared` |
+| a staging signer signs a prod bundle | `sealed_signer_shared` at load; principal = header environment at unseal (T1) |
+| the deploy credential is not the configured signer | `input_invalid` before any value is read (T2) |
+| the wrong bundle is shipped to a service | `--env` and `--product` required and checked |
+| an old bundle with a revoked value is redeployed | the deploy's `--min-revision` |
+| no re-seal after a rotation | `opv changed` exit 10 on a CI schedule, not a runtime poll |
+| a name is retired but stays in the bundle | prune triggers the whole-set re-seal (T3) |
+| recipients changed but bundles not | contract digest makes every name `would_change`, with a preflight line |
+| a CRLF checkout breaks signatures | `sealed_malformed` naming the `.gitattributes` fix (T8) |
+| a git-signing `allowed_signers` file is used | strict subset; `namespaces="opv-sealed"` and the principal are required (T13) |
+| no tmpfs in the container | `--verify-only` runs the RAM-directory check in staging (R2) |
+| the wrong identity is shipped | `--verify-only` with the identity checks membership (U4) |
+| the identity is put in a bundle | load rule (T14) |
+| a header path escapes the directory | codec path rule plus `write_file` check (T6) |
 
 ### 9.2 Security checklist
 
-- **Values never in argv:** sealing reads through the existing `op` paths (stdin/JSON). `unseal`'s
-  argv holds paths, names and numbers. The child's argv is the person's command. Test: argv and
-  environment scan with marker values (as `tests/security.rs`).
-- **Never in opv's own environment:** values are never exported into opv's process environment.
-  In `--exec` they are placed only in the `execve` environment of the child, or the supervised
-  child's `Command::envs`. The `--identity-env` mode is the one place a **key** arrives through
-  opv's environment, because the platform has no other channel. It is removed from the child.
-- **Never in files or logs:** the bundle is ciphertext (SR-4 is about plaintext). File keys go
-  only to the RAM directory. Every refusal is built from fixed text and field names.
-  `--verbose` never prints a header field that is not in `--json`.
-- **Plaintext never at rest:** no temporary plaintext file at seal (payload in memory, streamed
-  into age), none at unseal. Swap is the host's residual, as in `local-delivery.md`.
-- **Verify before decrypt:** the parse order is fixed and tested:
+- **Values never in argv.** `unseal`'s argv holds paths, names and numbers. It is tested by
+  scanning argv and environment for marker values.
+- **Values never in opv's own environment.** Values go only into the `execve` environment, or the
+  supervised child's `envs`. The `--identity-env` key is the one secret that arrives through opv's
+  environment. It is removed from the child, and `/proc/<pid>/environ` is root-only under
+  non-dumpable.
+- **Values never in files or logs.**
+  - The bundle is ciphertext (SR-4).
+  - File keys go only to the RAM directory.
+  - Messages are fixed text and field names.
+  - The override notice and the start line name variables, never values.
+- **Plaintext never at rest.** No temporary plaintext file is written at either end. Two
+  residuals: swap is the host's, and age's chunk buffers stay in the heap until `exec` (T12).
+- **Verify before decrypt, in a fixed and tested order:**
   1. size bounds;
-  2. format line;
-  3. split blocks;
-  4. SSHSIG verify over the exact signed bytes;
-  5. header parse;
-  6. scope, revision and recipient checks;
-  7. decrypt;
-  8. payload binding;
-  9. delivery.
+  2. LF-only and the format line;
+  3. split the blocks;
+  4. SSHSIG with the environment principal;
+  5. parse the header, and check its canonical re-serialization;
+  6. path rules;
+  7. scope, revision and recipient;
+  8. decrypt;
+  9. payload binding;
+  10. deliver.
 
-  The file is read once into memory, so there is no time-of-check/time-of-use gap between steps.
+  The file is read once, so there is no time-of-check/time-of-use gap.
 - **Downgrade attacks:**
-  - format version pinned (v1 only);
-  - signature algorithm pinned (ed25519, sha512, namespace);
-  - age stanzas limited to X25519 by offering only an X25519 identity (a scrypt stanza is never
-    tried; age refuses a scrypt stanza mixed with others);
-  - recipient types refused at load (§3.1-1);
-  - no fallback to `op` or to an unsigned bundle anywhere.
+  - format v1 only;
+  - ed25519, sha512 and the namespace pinned;
+  - only an X25519 identity is offered;
+  - recipient types refused at load;
+  - no fallback to `op` or to an unsigned bundle.
 - **Key compromise:**
-  - identity: §7.2–7.3, rotate the identity **and** the values it opened;
-  - signing key: an attacker can make runtimes accept chosen values until the key is removed from
-    `allowed_signers`, so keep it in a vault only the deploy identity and owners read;
-  - recipient list in configuration: a malicious edit adds an attacker's recipient. It is a
-    reviewed configuration change, and the contract digest makes it visible as `recipients
-    changed` in `plan`.
-- **Denial of service:** bounded sizes before any crypto. Signature verification costs one SHA-512
-  over at most 8 MiB plus one ed25519 verification.
-- **Trust boundary (stated in the docs):** root on the runtime host, or any process of the same
-  user while the app runs, can read the values (the same residual as `local-delivery.md`). The
-  identity on the host decrypts every bundle sealed to it.
+  - identity: §7.2–7.3 and R-U2;
+  - a signing key: an attacker can set **that one environment's** values until the key is removed
+    from `allowed_signers`;
+  - a malicious recipient edit: shown as `recipients changed`, and caught in review.
+- **Denial of service.** Bounds are checked before any cryptography. The cost is one SHA-512 over
+  at most 8 MiB plus one ed25519 verification.
+- **Trust boundary (in the docs).** Root on the runtime host, or a process of the same user while
+  the app runs, can read the values (as `local-delivery.md` says). The identity decrypts every
+  bundle sealed to it.
 
 ### 9.3 Architecture guards
 
-- FR-12 and FR-37: the adapter is under `src/adapters/sealed/`, and core uses ports and
-  `TargetConfig` only. `src/bundle/` is a codec. Guard words are extended (§8.2-8).
+- FR-12 and FR-37: §8.1.
 - J7: no new `lost_call` caller.
-- Golden surfaces: `surface.json`, the exit-code help, and the all-providers channel contract are
-  each updated in the lane that changes them (§10), never left to a later lane.
-- FR-60: no `opv seal` alias beside `sync`, no `delivery =` switch beside per-key `file`, one
-  bundle format.
+- The golden surfaces (`surface.json`, exit-code help, the channel contract, the usage.md error
+  table, agent guidance `error_codes`, `one_of_each`) are each updated in the lane that changes
+  them.
+- FR-60: no `opv seal` alias, no `delivery =` switch, one bundle format.
 
 ## 10. Test plan
 
-Each test is one behavioural assertion. Fixtures use marker values and test-only keys under
-`tests/fixtures/sealed/`, with a README saying they are test keys.
+Each test is one behavioural assertion. Fixtures are marker values and test keys under
+`tests/fixtures/sealed/`, with a README.
 
-**Known-answer vectors (S0 produces them with stock tools):**
+**Known-answer vectors.** S0 makes them with stock tools; K0 adds the downstream's.
 
-1. A fixture bundle made with the `age` CLI and `ssh-keygen -Y sign` from fixed keys is accepted by
-   `unseal` with the exact names and bytes. This proves interoperability in one direction.
-2. A bundle `opv` seals decrypts with `age -d` (armor block cut out) and verifies with
-   `ssh-keygen -Y verify`: a one-off check in S0, recorded. In CI, the same check runs through the
-   crates against the fixture keys.
-3. The canonical header of a fixed placement serializes to fixed bytes with a fixed sha256.
-4. ed25519 signing is deterministic: a fixed key and message give the fixture SSHSIG byte for
-   byte.
-5. The payload framing of a fixed name and value set gives fixed bytes; decoding them round-trips
-   PEM, binary and empty values exactly.
+1. A bundle made with `age` and `ssh-keygen -Y sign -I prod` from fixed keys is accepted with
+   exact names and bytes.
+2. **A bundle made by the downstream platform** is accepted, or rejected in the way D9 decides.
+3. An opv-sealed bundle decrypts with `age -d` and verifies with
+   `ssh-keygen -Y verify -I prod -n opv-sealed`. This is a one-off check, recorded in S0.
+4. A fixed placement's canonical header gives fixed bytes and a fixed sha256.
+5. ed25519 signing of a fixed key and message gives the fixture SSHSIG, byte for byte.
+6. A fixed payload frames to fixed bytes, and round-trips PEM, binary and empty values.
+7. `allowed_signers` parsing agrees with `ssh-keygen -Y verify` on each accepted fixture line.
+   Each refused form gives its named refusal.
 
-**Codec refusals (unit, `src/bundle/`)**, one test each, each asserting decryption was never
-attempted (a counting identity):
+**Codec refusals.** One test each, each asserting that decryption was never attempted:
 
-- a bundle with no signature block is refused;
-- a signature by a key not in `allowed_signers` is refused;
-- a signature in another namespace is refused;
-- an RSA signer line is ignored;
-- one flipped header byte fails the signature;
-- one flipped ciphertext byte fails the signature;
-- a format line `opv-sealed v2` is refused;
-- an unknown header field is refused;
-- a header over 64 KiB is refused before verification;
-- a wrong environment is refused before decryption;
-- a wrong product is refused before decryption;
-- revision N-1 under floor N is refused before decryption;
-- an identity whose recipient is not listed is refused before decryption;
-- a payload whose header digest differs is refused after decryption, before delivery;
-- an `OP_*` name in a payload is refused;
-- a truncated armor block is refused.
+- no signature block;
+- a signer not listed;
+- a signer listed only for principal `staging` on a `prod` header (T1);
+- another namespace;
+- an RSA line;
+- a `cert-authority` option;
+- one flipped header byte;
+- one flipped ciphertext byte;
+- `opv-sealed v2`;
+- an unknown header field;
+- a duplicate header key, which fails canonical equality;
+- a CR byte;
+- a header over 64 KiB;
+- a `file:../x` destination;
+- a wrong environment;
+- a wrong product;
+- a revision below the floor;
+- an unlisted recipient.
 
-**Adapter and config (unit, `FakeRunner`):**
+Two further codec tests:
 
-- each §3.1 rule, one test per rule;
-- `list` on a missing file gives no entries;
-- `list` reads names and versions from a fixture header;
-- one changed value stages every name (whole set);
-- a recipients change marks the bundle stale with reason `recipients changed`;
-- a signer mismatch refuses before any value read;
-- the write is atomic (an interrupted write leaves the old bundle);
-- **a counting fake: sealing one product makes exactly one `op item get` per boundary item it
-  needs** (acceptance 2), using `op_calls` (`src/app/mod.rs:2665`);
-- `--json` reports `op_calls`.
+- a payload digest mismatch is refused after decryption and before delivery;
+- an `OP_*` name in the payload is refused.
 
-**Unseal (unit and `tests/sealed_unseal.rs` on the real binary):**
+**Adapter and configuration (`FakeRunner`):**
 
-- with no `op` on `PATH` and `OPV_SIM_WORLD` unset, unseal succeeds (no runner use);
-- a source guard asserts `src/app/unseal.rs` and `src/bundle/` name no `CommandRunner`, `ureq` or
+- each §3.1 rule, including `sealed_signer_shared` and the identity rule;
+- two products with file keys pass `config check` (T5);
+- a missing file lists `absent`;
+- a verified header lists versions;
+- a foreign header is drift and does not set the revision (T10);
+- an opv-signed bundle without evidence is `not_recorded` (R7);
+- one changed value re-seals every name;
+- a prune-only change re-seals without the pruned name (T3);
+- the plan id equals what sync writes (T4);
+- an immutable-held key stays in the re-sealed bundle (C7b);
+- `remove()` on a whole-set store is `Bug`;
+- a recipient change makes every name `would_change`, with the preflight line;
+- a signer mismatch is `input_invalid` before any value read (T2);
+- the write is atomic;
+- **the counting fake: sealing one product makes exactly one `op item get` per boundary item**
+  (acceptance 2).
+
+**Unseal** (unit tests, and `tests/sealed_unseal.rs` on the real binary):
+
+- succeeds with no `op` on `PATH` and `OPV_SIM_WORLD` unset;
+- a source guard: `src/app/unseal*.rs` and `src/bundle/` name no `CommandRunner`, `ureq` or
   `std::net`;
-- `--exec` with variables only: the child sees exact values, and no `OP_*` variable and no
-  identity variable;
-- `--exec` with variables only replaces the process (the child's pid equals unseal's);
-- `--exec` with file keys writes 0400 files in a 0700 RAM directory, removed after exit;
-- a SIGTERM to the parent removes the directory;
-- a name collision is refused before exec;
-- the ratchet rises after a successful run;
-- the ratchet refuses a lower revision;
-- an unwritable ratchet refuses;
+- variables mode: exact values, no `OP_*`, no identity variable;
+- variables mode replaces the process (same pid);
+- an inherited `PORT` is replaced, and stderr names `PORT` without a value (R1);
+- file keys give 0400 files in a 0700 RAM directory, removed after exit;
+- a SIGTERM removes the directory and is forwarded (R3);
 - `--verify-only` needs no identity;
-- no output, error or `--json` contains a marker value, the identity or a recipient string.
+- `--verify-only` with a non-member identity exits 7 without decrypting (U4);
+- `--verify-only` with file keys and no tmpfs gives `ram_dir_unavailable` (R2);
+- on Windows CI, `--exec` spawns and passes the exit code (R5);
+- the start line names env, product, revision and signer;
+- no output contains a marker value, the identity or a recipient string.
 
-**e2e through opv-sim (`tests/e2e/scenarios/sealed.rs`)**, with a sealed target in
-`tests/e2e/app/secrets.toml` and the signer item in `world.json`:
+**e2e through opv-sim (`tests/e2e/scenarios/sealed.rs`):**
 
-- first sync writes a bundle;
+- the first sync writes a bundle;
 - a second sync writes nothing;
-- a rotated value re-seals with a higher revision;
-- `opv changed` exits 10 after a rotation and 0 after the re-seal;
-- `delivery verify` is `verified`, and `drifted_on_target` after the file is replaced;
-- `unseal --exec` of the synced bundle delivers the marker values;
-- every new cause is a fault-matrix cell or an `UNREACHABLE` entry with its reason.
+- a rotation re-seals with a higher revision;
+- `opv changed` exits 10, then 0;
+- `delivery verify` gives `verified`, then `drifted_on_target` after the file is replaced;
+- `unseal --exec` delivers the markers;
+- every new cause is a fault-matrix cell or an `UNREACHABLE` entry.
 
-**Gates:** golden surfaces updated; `cargo deny check` green with the D2 ignores; the release gate
-under `CI=true` (memory: release gate under CI).
+**Gates:**
+
+- the golden surfaces;
+- `cargo deny check` green with the §6.4 ignores and ban;
+- the release gate under `CI=true`.
 
 ## 11. Alternatives considered
 
-| Alternative | What it would do | Why not (or not now) |
-|---|---|---|
-| **Cache `op` sessions or values on the host** | fewer reads per start | the runtime still holds a 1Password identity; a cold start or cache expiry still calls; a value cache is plaintext somewhere (SR-4) |
-| **1Password Connect server** | a self-hosted cache with its own request budget | another always-on server holding a vault token, so still a live runtime identity; Connect's availability on Families accounts needs confirming (believed Teams/Business); it moves the dependency instead of removing it |
-| **A bigger 1Password plan** | a 5–50× budget | the budget still caps restarts; the dependency remains |
-| **The target's own secret store** | already opv's answer where one exists (Fly, Key Vault, Kubernetes, GitHub, HTTP) | the gap is hosts **without** one. A `systemd-creds` target (host-bound, TPM) or Docker Swarm secrets could cover some, but each is one platform; a sealed bundle is portable and composes with them (§7.4 uses them for the identity) |
-| **SOPS (with age)** | encrypted YAML/JSON with names in clear | no signature (its MAC is made with the data key, so any recipient-key holder can forge a file); a Go binary or immature Rust port at runtime; per-value ciphertext shows value lengths; a second format to own |
-| **`op inject` to a file at deploy** | no runtime calls | plaintext at rest (SR-4) |
-| **Shell out to the `age` CLI** | no age crate in the tree | every runtime image and sealer needs the binary; values through a pipe to another program; still needs SSHSIG. This is the fallback if D2 rejects the crate |
-| **Symmetric key in 1Password instead of age** | smaller dependency | per-environment separation and rotation become opv's own key management; "no custom cryptography" |
-| **Bundle expiry** | bounds how long a stolen bundle stays useful | a missed re-seal becomes an outage again (D5) |
-| **Post-quantum hybrid recipients (`age1pq…`)** | protects archived bundles against future quantum decryption | larger keys, newer code paths (the `hpke`/`ml-kem` stack whose `crypto-bigint` advisory is open), and the downstream's tooling must support it; a candidate for `opv-sealed/2` |
+| Alternative | Why not (or not now) |
+|---|---|
+| Cache `op` sessions or values on the host | the runtime still holds a 1Password identity; cold starts still call; a value cache is plaintext somewhere (SR-4) |
+| 1Password Connect server | an always-on server holding a vault token, so the runtime identity remains; availability on Families accounts needs confirming (believed Teams/Business only) |
+| A bigger 1Password plan | raises the budget, keeps the dependency |
+| The target's own secret store | already opv's answer where one exists; the gap is hosts without one. `systemd-creds` or Swarm secrets each cover one platform; §7.4 uses them for the identity |
+| SOPS with age | no signature (its MAC uses the data key, so any recipient can forge a file); a Go binary or immature port at runtime; per-value ciphertext shows lengths |
+| `op inject` to a file at deploy | plaintext at rest (SR-4) |
+| Shell out to the `age` CLI | a binary on every image and sealer; still needs SSHSIG. The fallback if D2 rejects the crate |
+| A symmetric key in 1Password | opv would invent key management ("no custom cryptography") |
+| Bundle expiry | a missed re-seal becomes an outage again (D5) |
+| A local ratchet file | blocks legitimate rollbacks; no consumer (removed, R4) |
+| Refuse a name collision | turns a migration leftover into a start outage (D10) |
+| Post-quantum hybrid `age1pq…` | archived bundles make harvest-now-decrypt-later real, but it needs the `hpke`/`ml-kem` path with the open advisory and downstream support; a candidate for `opv-sealed/2` |
 
 ## 12. Owner decisions
 
 Each decision can be read on its own.
 
-### D1. Seal through `opv sync` (a target), or a separate `opv seal` command?
+### D1. Seal through `opv sync`, or a separate `opv seal` command?
 
-**Situation.** The issue proposes `opv seal`. opv already has one command that reads 1Password
-once and writes to a delivery target: `sync`. It brings plan ids, `--expect-plan`, `--confirm`,
-receipts, `delivery verify`, `opv changed`, access checks and MCP state.
+**Situation.** The issue proposes `opv seal`. `sync` already reads 1Password once and writes to a
+target, with plan ids, `--expect-plan`, confirm, receipts, `delivery verify`, `opv changed` and
+MCP state.
 
 **Options:**
 
-- **(a) A target delivered by `sync`.** Every existing guarantee applies. The downstream calls
-  `opv sync <env> --target <t>` instead of `opv seal`; the file format is identical.
-- **(b) A new `opv seal`.** It matches the issue's wording, but repeats or skips sync's plan,
-  confirm and evidence. FR-60 forbids two ways to deliver.
+- (a) A target delivered by `sync`. The downstream runs `opv sync <env> --target <t>`, and the
+  file is the same.
+- (b) A new `opv seal`. It matches the issue's wording, but repeats or skips sync's safety. FR-60
+  forbids two ways to deliver.
 
-**Recommendation: (a).** One way, and every safety check opv has already built applies to the
-new target for free.
+**Recommendation: (a).** One way to deliver, and every existing safety check applies.
 
 ### D2. Which cryptographic dependency?
 
-**Situation.** The age crate is the standard implementation. Measured today:
-
-- it adds about 127 crates and about 0.8 MB to the binary;
-- it fails this repository's `cargo deny` on two advisories, neither reachable from opv's use
-  (§6.4): one unmaintained build-time crate, and one timing issue on a recipient type opv refuses.
+**Situation.** age and ssh-key add about 87 crates new to opv (135 resolved) and about 0.8 MB.
+The tree includes an unused i18n stack, `scrypt`, `ml-kem` and a pre-release `kem`. Two
+`cargo deny` advisories are unreachable from opv's X25519-only use.
 
 **Options:**
 
-- **(a) The crate, pinned, X25519 only,** with two dated `deny.toml` ignores.
-- **(b) The `age` CLI** on every sealer and runtime.
-- **(c) Wait** for an age release without the advisories.
+- (a) The crate, pinned `=0.12.1`, with two dated ignores fenced by a `[bans]` wrapper on `p256`.
+- (b) The `age` CLI on every sealer and runtime.
+- (c) Wait for an age release without the advisories.
 
-**Recommendation: (a).** In-process is testable and needs nothing on runtime images, and the
-ignores are narrow and justified. Signing uses `ssh-key` (28 crates, clean) whichever is chosen.
+**Recommendation: (a).** It is in process and testable, nothing is needed on runtime images, and
+the fence keeps the ignore honest.
 
 ### D3. Where the signing key lives and how it signs
 
-**Situation.** The issue says `ssh-keygen -Y sign` with the caller's key or agent. CI has no agent.
+**Situation.** The issue says `ssh-keygen` with the caller's agent. CI has no agent.
 
 **Options:**
 
-- **(a) The target's `deploy_credentials` is a 1Password SSH Key item,** read at sync and used
-  in process (a runner effect).
-- **(b) `ssh-keygen` with an agent.**
+- (a) The target's `deploy_credentials` is a 1Password SSH Key item, used in process through
+  `EnvRunner`.
+- (b) `ssh-keygen` with an agent.
 
-**Recommendation: (a).** Vault access decides who can seal, for people and CI alike; there is no
-OpenSSH dependency; and the signature bytes are the same SSHSIG either way, so the format and the
-downstream's verifier are unaffected.
+**Recommendation: (a).** Vault access decides who seals, for people and CI alike, and there is no
+OpenSSH dependency. The signature bytes are the same either way. A mismatch with
+`sealed.signer` is `input_invalid` (exit 2).
 
-### D4. How the runtime gets its age identity
+### D4. How the runtime gets its identity
 
-**Situation.** The identity replaces the runtime's 1Password token. Some platforms deliver
-secrets as files, but Fly today delivers them only as environment variables.
-
-**Options:**
-
-- **(a) Files only** (`--identity-file`).
-- **(b) Files, plus `--identity-env VAR`** for environment-only platforms. opv removes the
-  variable from the app's environment.
-
-**Recommendation: (b), documenting file as preferred.** In both, the identity is generated into
-1Password by `opv generate` and delivered once by an existing target, so it is never typed or
-pasted.
-
-### D5. Rollback protection: what sets the revision floor, and do bundles expire?
+**Situation.** Fly delivers secrets only as environment variables.
 
 **Options:**
 
-- **(a) The deploy passes `--min-revision`,** plus an optional local `--ratchet` file, and there
-  is **no expiry**.
-- **(b) Add an optional `sealed.max_age`** that the runtime enforces.
+- (a) Files only.
+- (b) Files, plus `--identity-env VAR`, removed from the app's environment.
 
-**What changes.** Expiry limits how long a stolen old bundle works, but a missed re-seal then
-stops services, which is the outage this issue is about.
+**Recommendation: (b)**, with files documented as preferred. The identity is always generated
+into 1Password by `opv generate`.
 
-**Recommendation: (a).** Revisit expiry only with a scheduled re-seal in place.
+### D5. Rollback protection: what sets the floor, and do bundles expire? (revised)
 
-### D6. Runtime command: `opv unseal --exec`, or `opv run --sealed <bundle>`?
-
-**Situation.** `opv run` loads configuration and drives `op run`. The runtime has neither.
+**Situation.** An old bundle can hold a revoked value. A local ratchet file also blocks a
+legitimate rollback on a long-lived host. Expiry turns a missed re-seal into an outage.
 
 **Options:**
 
-- **(a) `opv unseal … --exec -- cmd`:** configuration-free, network-free, with its own flags.
-- **(b) A `--sealed` mode of `run`,** with a different set of required inputs and none of `run`'s
-  checks.
+- (a) The deploy sets `--min-revision`, with no ratchet and no expiry.
+- (b) Add a ratchet file.
+- (c) Add `sealed.max_age`.
 
-**Recommendation: (a).** Different inputs and trust mean a different command. They share the
+**Recommendation: (a).** The release pipeline knows the revision it ships. The ratchet is
+removed from this design.
+
+### D6. `opv unseal --exec`, or `opv run --sealed`?
+
+**Options:**
+
+- (a) `unseal`: configuration-free and network-free.
+- (b) A `run` mode with different required inputs.
+
+**Recommendation: (a).** Different inputs and trust mean a different command; they share the
 delivery code.
 
-### D7. Ship the library crate in the first release?
+### D7. Ship the library crate now?
 
 **Options:**
 
-- **(a) Defer.** `unseal --exec` covers process start, and `src/bundle/` is written so it can
-  move into a crate unchanged.
-- **(b) Build now.** This means turning the repository into a Cargo workspace and publishing a
-  second crate.
+- (a) Defer. Amend acceptance 4 to "`unseal --exec`, library to follow".
+- (b) Build a workspace and a second crate now.
 
-**Recommendation: (a).** No consumer has asked for in-process use yet.
+**Recommendation: (a).** No consumer has asked yet, and `src/bundle/` is ready to move.
 
-### D8. Names in the clear header?
-
-**Situation.** `plan` and `status` read the header to know what a bundle holds without
-decrypting it. opv never can decrypt it.
+### D8. Key names in the clear header?
 
 **Options:**
 
-- **(a) Names in the clear.** They are in the committed configuration anyway.
-- **(b) Names only inside the ciphertext.** `plan` then sees "a bundle, revision N" and must
-  trust evidence lines alone.
+- (a) Names in the clear. They are already in committed configuration, and `plan` needs them.
+- (b) Names only inside the ciphertext.
 
-**Recommendation: (a).** Values, lengths and value digests are never in the header.
+**Recommendation: (a).** `source_versions` is dropped from the header in either case.
+
+### D9. Who owns the bundle format? (new)
+
+**Situation.** #271 says a downstream platform is building the same format first, so it can
+switch to opv without changing it. This design proposes its own layout (§5): a plaintext signed
+header, then encrypt-then-sign. The issue's wording ("the signed payload contains the key/value
+map, the environment …") may mean sign-then-encrypt. If the two differ, either the downstream
+cannot switch, or opv ships a v2 within a month.
+
+**Options:**
+
+- (a) The downstream's format wins. opv implements it as v1, and §5 is replaced. This is only safe
+  if it keeps verify-before-decrypt and the environment-bound signer.
+- (b) opv's §5 wins. The downstream adapts before its own rollout.
+- (c) Negotiate one format, frozen with a shared fixture.
+
+**What changes in practice.** Lane K0 (1 h) obtains the downstream's format description and one
+bundle before B1 starts. B1 is blocked until this is decided.
+
+**Recommendation: (c), defaulting to (b) on any point that weakens a §9.2 property.** Signing
+the plaintext would force decryption before verification, which acceptance 3 forbids.
+
+### D10. A bundle name already in the inherited environment (new)
+
+**Situation.** An image's `ENV PORT`, or a platform secret left from migration, may already set
+a name the bundle delivers.
+
+**Options:**
+
+- (a) Refuse to start. This is safe against silent shadowing, but turns a leftover into the
+  outage #271 is about.
+- (b) The bundle wins, with one stderr line naming the variable (never the value), and the name
+  listed under `overridden` in `--json`.
+
+**Recommendation: (b).** It gives the signal without the outage.
+
+### R-U2. Residual risk for explicit acceptance: no central revocation of a runtime identity
+
+A leaked age identity decrypts every bundle ever sealed to it, offline, including copies in git
+history and registries. Unlike a 1Password token, it cannot be revoked centrally.
+
+What limits it:
+
+- identities are per environment and product by default;
+- `--min-revision` stops old bundles at deploy;
+- the rotation runbook (§7.3) says to rotate the identity **and every value it opened**.
+
+Removing the risk would need an online check at every start, which is exactly the runtime
+dependency #271 removes. The vet rates it **Medium** (High severity, Low probability). **The owner
+accepts it, or the design stops here.**
 
 ## 13. Delivery steps
 
-Hours are estimates for one agent. **Broad** = reads across the codebase (→ Claude agent).
-**File-scoped** = a bounded change in owned files (→ commodity worker through Junior). Each lane
-stays under about 400 changed lines.
+Hours are for one agent. **Broad** = reads across the codebase (Claude agent). **File-scoped** =
+a bounded change in owned files (commodity worker through Junior). Every lane changes fewer than
+about 400 lines.
 
-| Id | Lane | Files owned | Prereqs | Hours | Owner type | First slice |
-|---|---|---|---|---|---|---|
-| S0 | Spike: age and ssh-key API checks, zeroize of age chunk buffers, `op` JSON shape of an SSH Key item, stock-tool interop; produce KAT fixtures; `deny.toml` ignores and `Cargo.toml` deps | `tests/fixtures/sealed/*`, `deny.toml`, `Cargo.toml`, `Cargo.lock` | D2, D3 | 3 | Broad (Claude) | ✔ |
-| B1 | Bundle format: envelope, canonical header, payload framing, limits, refusals (no crypto) | `src/bundle/mod.rs`, `src/bundle/format.rs`, `src/bundle/format_tests.rs` | S0 | 4 | File-scoped (commodity) | ✔ |
-| B2 | Bundle crypto: age encrypt/decrypt, SSHSIG sign/verify, recipient/identity/signer/allowed_signers parsing, verify-before-decrypt `open()` | `src/bundle/crypto.rs`, `src/bundle/crypto_tests.rs` | S0, B1 | 5 | File-scoped (commodity) | ✔ |
-| P1 | Sealed provider: config and §3.1 rules, `Provider`/`TargetConfig`, channels; registry; all-providers fixture and contract; `System::Sealed` and the `system_of` fix (with `http`); exit-code help; guard words | `src/adapters/sealed/{mod,config,config_tests,provider}.rs`, `src/adapters/mod.rs`, `src/adapters/registry.rs`, `src/provider.rs`, `src/cause/subject.rs`, `src/app/mod.rs` (guard words only), `tests/cli_ux.rs` | B1 | 5 | Broad (Claude) | ✔ |
-| P2 | Signing as a runner effect and the SSH Key deploy login; FakeRunner/sim signing with the fixture key | `src/adapters/sealed/login.rs`, `src/runner.rs` (effect), runner fake | B2, P1 | 4 | Broad (Claude) | ✔ |
-| P3 | Sealed store: `list` from header, `write` builds/signs/atomic-writes the whole set, version string, contract-digest staleness, NUL refusal | `src/adapters/sealed/store.rs`, `store_tests.rs` | B2, P1, P2 | 4 | File-scoped (commodity) | ✔ |
-| C1 | Core whole-set port: `StagedStore::whole_set`, sync batch = every desired name, plan reason row | `src/ports.rs`, `src/app/sync.rs`, plan rows in `src/app/mod.rs` | P1 | 5 | Broad (Claude) | ✔ |
-| C2 | `op_calls` in `--json` of sync/plan/status/changed; counting-fake test of one read per scope | `src/runner.rs` (counter only), `src/app/{sync,status,changed}.rs` report fields | C1 (sync.rs order) | 3 | Broad (Claude) | ✔ |
-| U1 | `opv unseal` verify/inspect: CLI wiring (early dispatch), causes and exit codes, `--json` schema, ratchet, `--verify-only`; surface golden; schema capability | `src/app/unseal.rs`, `src/main.rs`, `src/cause/mod.rs`, `src/schema.rs`, `tests/e2e/expected/surface.json` | B2 | 5 | Broad (Claude) | ✔ |
-| U2 | `unseal --exec`: exec for variables, supervised RAM directory for file keys, collision rule, `OP_*` and identity scrub, hardening | `src/app/unseal_exec.rs`, `tests/sealed_unseal.rs` | U1 | 4 | Broad (Claude) | ✔ |
-| G1 | `opv generate` recipe `age_identity` (prints the recipient) | `src/app/generate.rs`, `src/domain/catalog.rs`, their tests | B2 | 2 | File-scoped (commodity) | ✔ |
-| E1 | e2e: sealed target in the e2e app, `world.json` signer item, scenarios, fault-matrix cells and `UNREACHABLE` entries | `tests/e2e/app/*`, `tests/e2e/scenarios/sealed.rs`, matrix coverage | P3, C1, U2 | 5 | Broad (Claude) | ✔ |
-| D1d | Docs: `docs/sealed-delivery.md` (trust boundary, per-platform bootstrap §7.4, rotation §7.3, migration from runtime `opv run`), usage, guide agent, skill, FR-64 in requirements, CHANGELOG | `docs/**`, skill files | E1 | 3 | Broad (Claude) | ✔ |
-| R1 | `opv propose target sealed` (`init_fields`/`init_section`) | `src/adapters/sealed/provider.rs` (init only), propose tests | P1 | 2 | File-scoped (commodity) | later |
-| L1 | Library crate `opv-sealed` (workspace, move `src/bundle/`, public API, docs) | `Cargo.toml` workspace, `crates/opv-sealed/**` | first slice shipped, D7 | 6 | Broad (Claude) | later |
-| X1 | Publishing (`sealed.publish`: OCI or HTTP PUT) if a consumer asks | TBD | first slice | — | — | later |
+**Pre-slice, its own PR, outside 0.18.** F0 lands first, so P1 builds on `Provider::system()`.
 
-**First slice** (all ✔): about 52 hours of work. Critical path:
+| Id | Lane | Files owned | Prereqs | Hours | Owner type |
+|---|---|---|---|---|---|
+| F0 | `system_of`: add `"http" => System::Https`, ideally as a required `Provider::system()`; HTTP words in `provider_named`; tests | `src/provider.rs`, `src/adapters/*/provider.rs` or `config.rs` (one method each), `src/app/mod.rs` (guard words) | none | 1 | File-scoped (commodity) |
 
-```text
-S0 → B1 → B2 → P2 → P3 → E1 → D1d
-         ↘ P1 → C1 → C2
-         ↘ U1 → U2 ↗
-```
+**First slice, about 43 h:**
 
-- B1 and P1 can overlap once the format types are fixed.
-- U1/U2 run in parallel with P1–P3 and C1–C2, since they share only `src/bundle/`.
-- `src/app/sync.rs` is touched by C1 then C2 in that order. That is the only shared file between
-  lanes, and the reason C2 follows C1.
+| Id | Lane | Files owned | Prereqs | Hours | Owner type |
+|---|---|---|---|---|---|
+| K0 | Obtain the downstream's bundle format and one fixture bundle; write the D9 comparison for the owner | `tests/fixtures/sealed/downstream/*`, a note in this doc | none (owner contact) | 1 | Broad (Claude) |
+| S0 | Spike: SSH Key item OpenSSH field (T16); age/ssh-key API; stock-tool KATs; `allowed_signers` KAT against `ssh-keygen`; `deny.toml` ignores + `[bans]`; `Cargo.toml` deps | `tests/fixtures/sealed/*`, `deny.toml`, `Cargo.toml`, `Cargo.lock` | D2, D3 | 2 | Broad (Claude) |
+| B1 | Format: envelope, LF-only, canonical header and re-serialize check, payload framing, path rule, limits, refusals | `src/bundle/mod.rs`, `format.rs`, `format_tests.rs` | K0, D9 | 4 | File-scoped (commodity) |
+| B2 | Crypto: age, SSHSIG, recipient/identity/signer parsing, strict `allowed_signers` with principal = environment, verify-before-decrypt `open()` | `src/bundle/crypto.rs`, `allowed_signers.rs`, their tests | S0, B1 | 5 | File-scoped (commodity) |
+| P1 | Provider: config and §3.1 rules (incl. `sealed_signer_shared`, identity rule), channels with `{product}` dir; registry; `ALL_PROVIDERS` + contract; `System::Sealed`; exit-code help; guard words; config causes in `one_of_each` | `src/adapters/sealed/{mod,config,config_tests,provider}.rs`, `src/adapters/mod.rs`, `src/adapters/registry.rs`, `src/provider.rs` (fixture/contract), `src/cause/subject.rs`, `src/cause/{mod,codes}.rs` (config causes), `src/app/mod.rs` (guard words), `tests/cli_ux.rs` | F0, B1 | 4 | Broad (Claude) |
+| P2 | Signing via `EnvRunner` and the SSH Key login; `input_invalid` mismatch; fake signing; J7 list unchanged | `src/adapters/sealed/login.rs`, `src/runner.rs` (effect), `src/app/signin.rs` (program entry), runner fake | B2, P1 | 3 | Broad (Claude) |
+| P3 | Store: verified-header `list`, version string, contract-digest staleness + preflight line, `not_recorded` (R7), atomic whole write, revision rule (T10), lock if needed; counting-fake test | `src/adapters/sealed/store.rs`, `store_tests.rs` | B2, P1, P2 | 4 | File-scoped (commodity) |
+| C1 | Whole-set port: `whole_set() -> bool`; batch from `plan.rows` in `prepare_staged` before the plan id; stage/prune/mismatch trigger; `remove()` unreachable | `src/ports.rs`, `src/app/sync.rs` | P1 | 3 | Broad (Claude) |
+| U1 | `opv unseal` verify/inspect: early dispatch, causes, `one_of_each`, usage.md error table, agent-guidance `error_codes`, `--json`, `--verify-only` (identity membership, RAM check), start line, surface golden, schema capability | `src/app/unseal.rs`, `src/main.rs`, `src/cause/{mod,codes}.rs` (unseal causes), `src/schema.rs`, `docs/usage.md` (generated table), `tests/agent_guidance.rs`, `tests/e2e/expected/surface.json` | B2 (P1 merged first for `src/cause/*`) | 4 | Broad (Claude) |
+| U2 | `unseal --exec`: exec for variables, supervised RAM directory for files, bundle-wins notice, `OP_*`/identity scrub, Windows spawn, hardening; `write_file` path check | `src/app/unseal_exec.rs`, `src/app/local_delivery.rs` (`write_file` only), `tests/sealed_unseal.rs` | U1 | 4 | Broad (Claude) |
+| G1 | `opv generate` recipe `age_identity`, printing the recipient | `src/app/generate.rs`, `src/domain/catalog.rs`, their tests | B2 | 2 | File-scoped (commodity) |
+| E1 | e2e: sealed target in the e2e app, signer item in `world.json`, scenarios, fault-matrix cells / `UNREACHABLE` | `tests/e2e/app/*`, `tests/e2e/scenarios/sealed.rs`, matrix coverage | P3, C1, U2 | 4 | Broad (Claude) |
+| D1d | Docs: `docs/sealed-delivery.md` (trust boundary, R-U2, §7.4 bootstrap with honest at-rest rows, tmpfs mount, `--init`, `.gitattributes`, principal lines, rotation, migration), usage, guide agent, skill, FR-64, CHANGELOG | `docs/**` (except the generated table), skill files | E1 | 3 | Broad (Claude) |
+
+The first slice totals 43 h over 13 lanes. If the owner defers file keys, U2 drops to about 2.5 h
+and E1 to about 3 h, about 40.5 h.
+
+**Deferred:**
+
+| Id | Lane | Prereqs | Hours | Owner type |
+|---|---|---|---|---|
+| C2 | `op_calls` in `--json` across commands (a generic issue) | first slice | 3 | Broad (Claude) |
+| R1 | `opv propose target sealed` (`init_fields`/`init_section`) | P1 | 2 | File-scoped (commodity) |
+| L1 | Library crate `opv-sealed` (workspace; move `src/bundle/`) | first slice, D7 | 6 | Broad (Claude) |
+| X1 | Publishing (`sealed.publish`: OCI or HTTP PUT) | a consumer | — | — |
+
+**Critical path:** K0 (1) → B1 (4) → B2 (5) → P2 (3) → P3 (4) → E1 (4) → D1d (3) = **about 24 h**.
+B2 also needs S0, which runs in parallel with K0 and B1.
+
+**Ordering constraints:**
+
+- P1 needs F0 and B1; C1 needs P1.
+- U1 → U2 run in parallel with P2/P3 and C1, joining at E1. G1 runs in parallel after B2.
+- **Shared files:**
+  - `src/cause/{mod,codes}.rs`: P1 (configuration causes), then U1 (unseal causes).
+  - `src/provider.rs`: F0, then P1.
+
+  Everything else is disjoint.
 
 **Migration for the downstream (in D1d):**
 
 1. Add the sealed target and generate the identity.
 2. Deliver the identity once.
-3. `opv sync` and publish the bundle.
-4. Change the entrypoint from `opv run <env> --product <p> -- cmd` to
+3. Run `opv sync` and commit the bundle, with `.gitattributes`.
+4. In staging, run `unseal --verify-only` with the identity.
+5. Change the entrypoint to
    `opv unseal <bundle> --env <env> --product <p> --signers … --identity-… --min-revision <N> --exec -- cmd`.
-5. Delete the 5-minute fingerprint poll, and run `opv changed` in CI on a schedule instead.
-6. Revoke the runtime's service-account token.
+6. Replace the 5-minute poll with a scheduled `opv changed` in CI.
+7. **After one full release cycle on bundles,** revoke the runtime's service-account token.
