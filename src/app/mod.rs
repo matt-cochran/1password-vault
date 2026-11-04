@@ -537,6 +537,7 @@ pub(crate) fn write_err(e: io::Error) -> Error {
         op: crate::cause::LocalOp::Stdout,
         path: std::path::PathBuf::new(),
         io: e.kind().into(),
+        delivery: None,
     }
     .into()
 }

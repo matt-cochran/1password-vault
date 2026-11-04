@@ -948,7 +948,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `handoff_refused` | 6 | after_fix | no | another process connected to opv's private hand-off pipe; opv refused it and sent nothing |
 | `import_tier_refused` | 6 | after_fix | yes | opv_import_local was pointed at an environment whose tier is not local; the person runs opv import instead |
 | `keys_blocking` | 6 | after_fix | yes | a write refused: keys are missing or failing a rule; nothing was written |
-| `local_io_failed` | 6 | after_fix | no | opv's own local input or output failed (a file, the current folder, standard output, ...) |
+| `local_io_failed` | 6/74 | after_fix/safe | no | opv's own local input or output failed (a file, the current folder, standard output, ...) |
 | `mount_unreadable` | 6 | after_fix | no | the workload that would mount opv's secrets cannot read them; the fix is in its own manifest |
 | `person_only` | 6 | never | yes | a person-only command was called from an assistant; it runs only in a person's terminal |
 | `plan_unknown` | 6 | never | no | no plan has this id |
@@ -1081,9 +1081,10 @@ SSH key or any other field type it does not rewrite exactly; it says so in one n
 | 9 | outcome unknown, or a provider did not answer: nothing is known to be broken; re-run the same command ([exit 9](how-opv-handles-failures.md#exit-9-re-run-the-same-command)) |
 | 10 | `opv changed` found a source item changed since the last sync (`source_changed`): a result, not a failure (`ok` is true), and the next step is the sync |
 | 70 | internal error: an opv bug; nothing to fix on your side. `Next: opv version`; report it with that output |
+| 74 | standard output could not be written (`local_io_failed` with `subject.op` `stdout`): a closed pipe, a full disk. Under `--json` the document is lost, so opv exits 74 instead of 0; stderr says first how the command itself ended (a sync that wrote stays written), then why. Safe to re-run. `--verbose` prints `stdout: one JSON document, <n> bytes, delivered` when the document was written |
 | 129 / 130 / 131 / 143 | interrupted by SIGHUP (a closed terminal), Ctrl-C (SIGINT), SIGQUIT or SIGTERM (128 + the signal); safe to re-run |
 
-CI may retry a job that exited 9 when `error.retry` is `safe`; codes 2 to 8 and 70 need a fix first. `run` exits with the child's own exit code, which can equal one of these; opv's own errors print `opv: ...` on stderr. A closed stdout (`status | head`) does not change the result. With `--json`, `error.code` names the cause within a category ([codes](#json-contract)).
+CI may retry a job that exited 9 or 74 when `error.retry` is `safe`; codes 2 to 8 and 70 need a fix first. `run` exits with the child's own exit code, which can equal one of these; opv's own errors print `opv: ...` on stderr. A closed stdout (`status | head`) does not change a text command's result; under `--json` it exits 74. With `--json`, `error.code` names the cause within a category ([codes](#json-contract)).
 
 ## When sync runs: `opv changed`, the drift check and CI
 

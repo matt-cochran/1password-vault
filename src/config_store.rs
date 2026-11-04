@@ -798,6 +798,7 @@ pub fn record_account(start: &Path, account: &str) -> Result<RecordOutcome, Erro
             op,
             path: path.clone(),
             io,
+            delivery: None,
         }
         .into()
     };

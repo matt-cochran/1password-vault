@@ -25,6 +25,7 @@ pub mod runner_https_sim;
 pub mod scan;
 pub mod schema;
 pub mod scrub;
+pub mod stdout_sink;
 #[cfg(feature = "ui")]
 pub mod ui;
 

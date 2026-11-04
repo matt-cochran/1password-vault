@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A `--json` command emits exactly one JSON document, or exits non-zero and says why (#265, FR-64).** The framed document is now written with every write and the flush checked: a document that cannot be written (a closed pipe, a full disk) is `local_io_failed` with `subject.op` `stdout` and exits **74** instead of 0, and its stderr line first says how the command itself ended (`opv: sync finished (ok); its JSON report could not be written to standard output (...)`). A successful command that wrote no document is `internal_error` (exit 70) instead of an empty stdout. A text command piped into `head` still exits 0; any other text-mode stdout error now exits 74 instead of 6. `--verbose` adds `stdout: one JSON document, <n> bytes, delivered` on stderr. The cause of #265 is not established yet: this release ships the checked write and the diagnostic so the reporter can re-run `opv ready --json --verbose > f; echo $?`.
+- `opv --help`, `docs/usage.md` and `opv schema` list exit 10 (`source_changed`) and exit 74, and a test keeps every exit code listed.
+
 ## [0.17.2] - 2026-10-24
 
 0.17.2 completes reviewed target operations with `registry-push` and fixes two pieces of misleading advice.
