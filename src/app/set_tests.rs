@@ -435,3 +435,50 @@ fn a_private_file_prints_no_warning() {
     .unwrap();
     assert_eq!(String::from_utf8(out).unwrap(), "set\n");
 }
+
+// A service account's 1Password session is read-only: `set` and `set --from-file` refuse
+// before the prompt or the file read, naming the person's own session (test 30).
+
+#[test]
+fn a_service_account_refuses_set_before_prompting() {
+    let (op, fleet) = world();
+    let mut never = |_: &str| -> Result<Option<SecretValue>, Error> { panic!("prompted") };
+    let err = crate::host::with_test_host(
+        crate::host::Host::from_env(&FakeEnv::new("linux").var("OP_SERVICE_ACCOUNT_TOKEN")),
+        || {
+            set(
+                &fleet,
+                &FakeEnv::new("linux").tty(),
+                "api/OPENAI_API_KEY",
+                "dev",
+                &mut never,
+                &op,
+                &mut Vec::new(),
+            )
+            .unwrap_err()
+        },
+    );
+    assert_eq!(err.code_str(), "own_session_required");
+}
+
+#[test]
+fn a_service_account_refuses_set_from_file_before_reading_it() {
+    let (op, fleet) = file_world();
+    let path = std::path::Path::new("/nonexistent/opv-set-from-file");
+    let err = crate::host::with_test_host(
+        crate::host::Host::from_env(&FakeEnv::new("linux").var("OP_SERVICE_ACCOUNT_TOKEN")),
+        || {
+            set_from_file(
+                &fleet,
+                &FakeEnv::new("linux").tty(),
+                "api/PEM",
+                "dev",
+                path,
+                &op,
+                &mut Vec::new(),
+            )
+            .unwrap_err()
+        },
+    );
+    assert_eq!(err.code_str(), "own_session_required");
+}
