@@ -26,11 +26,13 @@ use crate::runner::CommandRunner;
 const FROM_FILE_MAX_BYTES: u64 = 65_536;
 
 /// Refuse a non-person 1Password session before the prompt or the file read. The host
-/// names a service account, Connect, CI or the deploy credentials without a call; a
-/// person's session needs no refusal here.
+/// names a service account or Connect token, and the runner the deploy credentials, without
+/// a call; a person's session needs no refusal here. A `CI` marker alone is not a non-person
+/// session: CI without a terminal is already refused above, and a person at a terminal
+/// that happens to export `CI` still writes as themselves.
 fn require_person_if_not_person(r: &dyn CommandRunner) -> Result<(), Error> {
     let host = crate::host::Host::detect();
-    if host.op_credential.is_some() || host.ci || r.deploy_signed_in() {
+    if host.op_credential.is_some() || r.deploy_signed_in() {
         super::tidy::require_person(r, "opv set")?;
     }
     Ok(())

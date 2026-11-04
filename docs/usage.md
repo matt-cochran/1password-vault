@@ -435,7 +435,7 @@ dev[local]: core=vDEV.../iDEV...
 next: opv set api/OPENAI_API_KEY --env dev
 ```
 
-`run <env> [--product <p>] [--role <r>] -- <cmd>` starts a command with the keys as environment variables under their plain names, through `op run`, with no `.env` file. It first removes every key name declared in the configuration from the inherited environment, so another product's keys never leak in. opv's options go before `--`; `run` exits with the command's own exit code. The local guide, with Docker Compose, editors, product switching and WSL, is [local-development.md](local-development.md). An [infrastructure key](#infrastructure-values---supply-stdin) is never injected: its value is not in 1Password, and `run` prints one note naming it.
+`run <env> [--product <p>] [--role <r>] -- <cmd>` starts a command with the keys as environment variables under their plain names, through `op run`, with no `.env` file. It first removes every key name declared in the configuration from the inherited environment, so another product's keys never leak in. A name declared only as `source = "infrastructure"` is the exception (since 0.17.3): opv never holds its value, so it is kept as the parent environment sets it, and `run` prints one names-only note, `taken from the environment as given (supplied at sync, never stored in 1Password): <product/KEY>, …`. opv's options go before `--`; `run` exits with the command's own exit code. The local guide, with Docker Compose, editors, product switching and WSL, is [local-development.md](local-development.md). An [infrastructure key](#infrastructure-values---supply-stdin) is never injected: its value is not in 1Password, and `run` prints one note naming it. `run` reads only the boundary items that hold its own keys (with `--product`, the selected product's keys and their `from` sources, never a sibling's separate item), and its one `still needs a value in 1Password (<env>): …` note names only those keys that are empty or missing; another product's empty key in the same item is not named.
 
 **File keys.** A key with `file` is written to a fresh private directory on a RAM-backed `$XDG_RUNTIME_DIR` (0700, files 0400) and removed when the app exits. Which platforms support it and which limits opv enforces (same user, root, ptrace, inherited descriptors, swap, core dumps, hard links, reboot) are in [platforms and limits](design/local-delivery.md#platforms-and-limits). Since 0.13.0:
 
@@ -451,7 +451,7 @@ All refusals are fail-closed, before anything is read from 1Password: a product 
 
 ### Delivery preview: `--preview`
 
-`opv run <env> [--product <p>] [--role <r>] --preview [--json]` prints what this run would deliver without reading a value and without running `op run` or `op read`; a command after `--` is refused. For each key it would deliver: product, key, `source` (`<product>/<KEY>`, or the `from` source), `destination` (`env:<NAME>` or `file:<relative path>` under `secrets_dir_env`) and its `roles`. Then the environment mode (`inherit` / `declared_only`), the secrets directory variable, file-delivery platform support with its reason, and the prerequisites `op` present (`yes`/`no`/`unknown`) and signed in (`yes`/`no`/`unknown`; a discovery that cannot be determined is `unknown`, never `no`). Keys excluded by role are listed under `withheld_by_role`, names only. `--json` prints one document (`schema_version` 4); the text form prints one line per key plus the summary lines.
+`opv run <env> [--product <p>] [--role <r>] --preview [--json]` prints what this run would deliver without reading a value and without running `op run` or `op read`; a command after `--` is refused. For each key it would deliver: product, key, `source` (`<product>/<KEY>`, or the `from` source), `destination` (`env:<NAME>` or `file:<relative path>` under `secrets_dir_env`) and its `roles`. Then the environment mode (`inherit` / `declared_only`), the secrets directory variable, file-delivery platform support with its reason, and the prerequisites `op` present (`yes`/`no`/`unknown`) and signed in (`yes`/`no`/`unknown`; a discovery that cannot be determined is `unknown`, never `no`). Keys excluded by role are listed under `withheld_by_role`, names only. Infrastructure keys are not in `keys`: they are listed under `supplied_at_sync`, names only and present only when non-empty (text: `supplied at sync (not injected): …`). `--json` prints one document (`schema_version` 4); the text form prints one line per key plus the summary lines.
 
 ### Remote development: `--remote`
 
@@ -1141,7 +1141,7 @@ jobs:
     env:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
       OP_CACHE: "false"
-      OPV_VERSION: v0.17.2  # pin the release you tested; bump it deliberately
+      OPV_VERSION: v0.17.3  # pin the release you tested; bump it deliberately
     steps:
       - uses: actions/checkout@v4
       - name: Install the 1Password CLI

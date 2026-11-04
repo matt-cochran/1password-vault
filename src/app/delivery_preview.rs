@@ -353,7 +353,11 @@ fn write_text(doc: &Value, out: &mut dyn Write) -> io::Result<()> {
         .filter_map(Value::as_str)
         .collect();
     if !supplied.is_empty() {
-        writeln!(out, "supplied at sync (not injected): {}", supplied.join(", "))?;
+        writeln!(
+            out,
+            "supplied at sync (not injected): {}",
+            supplied.join(", ")
+        )?;
     }
     let withheld: Vec<&str> = doc["withheld_by_role"]
         .as_array()

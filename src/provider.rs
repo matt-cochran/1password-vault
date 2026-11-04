@@ -779,7 +779,8 @@ environments = ["prod"]
     /// A cause about the HTTP target's provider names the HTTPS system, not GitHub (FR-37).
     #[test]
     fn a_cause_about_the_http_target_names_the_https_system() {
-        let http = crate::adapters::registry::find("http").expect("the HTTP provider is registered");
+        let http =
+            crate::adapters::registry::find("http").expect("the HTTP provider is registered");
         assert_eq!(system_of(http), crate::cause::System::Https);
     }
 

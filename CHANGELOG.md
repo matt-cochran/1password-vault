@@ -5,7 +5,9 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.17.3] - 2026-11-04
+
+0.17.3 makes `opv run --product` read, name and pass on only what the selected product uses, makes every `--json` command emit one document or fail loudly, and refuses `opv set` from a non-person session.
 
 ### Changed
 
@@ -16,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **`opv run --product <p>` reads and names only its own keys (#263).** It reads only the boundary items holding the product's selected keys (and their `from` sources), never another product's separate item (FR-57), and its "still needs a value in 1Password" note names only those keys, printed once whether or not the run tidied the item. An empty key of another product, a key withheld by `--role` or an infrastructure key is no longer named. A shared item is still tidied with every product in it.
+- **`opv set` and `opv set --from-file` refuse a non-person 1Password session.** A service account, a Connect server, CI or a target's deploy credentials are refused with `needs_own_session` before the prompt or the file read, as `generate` and `import` already were; a person's session makes no extra `op` call.
+- `opv run --preview` (and MCP `opv_state` section `delivery_preview`) no longer lists a `source = "infrastructure"` key as delivered: such keys move to a `supplied_at_sync` array, present only when non-empty, and the text form prints `supplied at sync (not injected): <KEY>, …` (#263).
+- A cause about the http target's provider names HTTPS instead of GitHub: every provider now declares its catalog system.
 
 ## [0.17.2] - 2026-10-24
 
