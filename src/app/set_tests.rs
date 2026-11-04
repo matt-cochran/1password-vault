@@ -462,6 +462,31 @@ fn a_service_account_refuses_set_before_prompting() {
 }
 
 #[test]
+fn a_person_at_a_terminal_with_ci_set_reaches_the_prompt() {
+    let (op, fleet) = world();
+    let mut prompted = false;
+    let mut cancel = |_: &str| -> Result<Option<SecretValue>, Error> {
+        prompted = true;
+        Ok(None)
+    };
+    let _ = crate::host::with_test_host(
+        crate::host::Host::from_env(&FakeEnv::new("linux").var("CI")),
+        || {
+            set(
+                &fleet,
+                &FakeEnv::new("linux").tty(),
+                "api/OPENAI_API_KEY",
+                "dev",
+                &mut cancel,
+                &op,
+                &mut Vec::new(),
+            )
+        },
+    );
+    assert!(prompted);
+}
+
+#[test]
 fn a_service_account_refuses_set_from_file_before_reading_it() {
     let (op, fleet) = file_world();
     let path = std::path::Path::new("/nonexistent/opv-set-from-file");
