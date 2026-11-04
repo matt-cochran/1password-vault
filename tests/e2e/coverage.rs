@@ -96,7 +96,22 @@ const UNREACHABLE: &[(&str, &str)] = &[
     (
         "PlanUnknown",
         "only opv apply reaches it, and only at a person's terminal, which the harness never gives",
+    ), // provision (#253): registered by lane A2 before `opv provision` exists; lane A10 replaces
+    // each entry with a PTY or opv-sim cell, or keeps it with the unit test that covers it
+    // (`docs/design/owner-value-ingestion.md` §10.7).
+    (
+        "ProducerFailed",
+        "no command raises it until opv provision lands (0.18.0 lane A10)",
     ),
+    (
+        "ProducerChanged",
+        "no command raises it until the [producers] load rules land (0.18.0 lane A10)",
+    ),
+    (
+        "Unsupported",
+        "native Windows only (D12); no command raises it until opv provision lands",
+    ),
+    // end provision
 ];
 
 fn snapshots() -> PathBuf {

@@ -193,3 +193,97 @@ fn file_local_io_still_exits_6() {
 fn stdout_local_io_is_safe_to_rerun() {
     assert_eq!(local_io(LocalOp::Stdout).retry(), RetryClass::Safe);
 }
+
+// ---- provision (#253): code and exit of each new cause --------------------------------
+
+fn producer_failed() -> Cause {
+    Cause::ProducerFailed {
+        producer: "consent".into(),
+        why: ProducerFailure::Timeout { seconds: 600 },
+    }
+}
+
+fn producer_changed() -> Cause {
+    Cause::ProducerChanged {
+        producer: "consent".into(),
+        file: std::path::PathBuf::from("tools/connect.py"),
+    }
+}
+
+fn producer_on_windows() -> Cause {
+    Cause::Unsupported {
+        feature: UnsupportedFeature::ProducerOnWindows {
+            set: "grant".into(),
+            producer: "consent".into(),
+        },
+    }
+}
+
+#[test]
+fn a_failed_producer_is_producer_failed() {
+    assert_eq!(producer_failed().code(), "producer_failed");
+}
+
+#[test]
+fn a_failed_producer_exits_as_an_external_tool() {
+    assert_eq!(producer_failed().exit_code(), 3);
+}
+
+#[test]
+fn a_failed_producer_reruns_after_the_fix() {
+    assert_eq!(producer_failed().retry(), RetryClass::AfterFix);
+}
+
+#[test]
+fn a_changed_producer_is_producer_changed() {
+    assert_eq!(producer_changed().code(), "producer_changed");
+}
+
+#[test]
+fn a_changed_producer_exits_as_configuration() {
+    assert_eq!(producer_changed().exit_code(), 2);
+}
+
+#[test]
+fn a_producer_on_windows_is_platform_unsupported() {
+    assert_eq!(producer_on_windows().code(), "platform_unsupported");
+}
+
+#[test]
+fn a_producer_on_windows_exits_as_a_refusal() {
+    assert_eq!(producer_on_windows().exit_code(), 6);
+}
+
+#[test]
+fn a_producer_on_windows_is_never_retried_here() {
+    assert_eq!(producer_on_windows().retry(), RetryClass::Never);
+}
+
+#[test]
+fn a_refused_provision_is_policy_refused() {
+    let c = Cause::Guard {
+        guard: Guard::ProvisionRefused {
+            set: "grant".into(),
+            env: EnvName::new("prod"),
+            reason: ProvisionRefusal::BudgetTooSmall {
+                needed_seconds: 840,
+                left_seconds: 600,
+            },
+        },
+    };
+    assert_eq!(c.code(), "policy_refused");
+}
+
+#[test]
+fn a_bad_producer_output_is_input_invalid() {
+    let c = Cause::InputInvalid {
+        path: std::path::PathBuf::from("tools/connect.py"),
+        kind: InputKind::Produce,
+        at: None,
+        field: String::new(),
+        rule: FieldRule::Produce {
+            produce: ProduceRule::NoResult,
+        },
+    };
+    assert_eq!(c.exit_code(), 2);
+}

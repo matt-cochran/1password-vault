@@ -291,6 +291,17 @@ pub fn meaning(code: &str) -> &'static str {
         }
         "title_not_found" => "no 1Password vault or item has exactly this title",
         "title_ambiguous" => "more than one 1Password vault or item has exactly this title",
+        // provision (#253)
+        "producer_failed" => {
+            "a producer ended with a non-zero exit, a signal, its timeout or its own error code; nothing was written"
+        }
+        "producer_changed" => {
+            "a producer's file no longer has the sha256 the contract pins; a person reviews the change and pins it again"
+        }
+        "platform_unsupported" => {
+            "the command needs something this platform lacks (a producer on native Windows); run it from WSL"
+        }
+        // end provision
         "internal_error" => "opv hit an internal error; report it",
         _ => "",
     }
@@ -986,6 +997,24 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
             tier: "shared",
             file: PathBuf::from("local.env"),
         },
+        // provision (#253)
+        ProducerFailed {
+            producer: "consent-xyz".into(),
+            why: ProducerFailure::Reported {
+                code: "access_denied".into(),
+            },
+        },
+        ProducerChanged {
+            producer: "consent-xyz".into(),
+            file: PathBuf::from("tools/connect.py"),
+        },
+        Unsupported {
+            feature: UnsupportedFeature::ProducerOnWindows {
+                set: "set-xyz".into(),
+                producer: "consent-xyz".into(),
+            },
+        },
+        // end provision
         Bug { site: "site-xyz" },
     ]
 }

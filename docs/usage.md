@@ -905,6 +905,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `needs_undeclared` | 2 | after_fix | no | the code reads names the contract declares nowhere and the default branch does not declare either |
 | `no_target` | 2 | never | no | the environment has no deployment target (run-only) |
 | `nothing_in_scope` | 2 | never | no | nothing in the environment matches the scope the command was given |
+| `producer_changed` | 2 | after_fix | no | a producer's file no longer has the sha256 the contract pins; a person reviews the change and pins it again |
 | `regenerated_file_differs` | 2 | never | no | a file project's regenerated configuration file differs from the committed copy; a person picks which is right |
 | `retire_still_read` | 2 | after_fix | no | the deployed code still reads a key a person asked to retire, or no receipt records the deployed revision |
 | `shell_mismatch` | 2 | never | yes | opv login --shell was asked for another shell's syntax than the shell running it; nothing was signed in |
@@ -923,6 +924,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `value_in_text_field` | 2 | after_fix | no | free text in an intent document looks like a secret value and is refused before anything is written |
 | `child_start_failed` | 3 | after_fix | no | the command opv run starts could not be started |
 | `dependency_missing` | 3 | after_fix | no | op or the target CLI is not installed or not on PATH |
+| `producer_failed` | 3 | after_fix | no | a producer ended with a non-zero exit, a signal, its timeout or its own error code; nothing was written |
 | `remote_version_mismatch` | 3 | after_fix | no | opv on the remote host speaks another protocol version |
 | `tool_unusable` | 3 | after_fix | no | op or the target CLI is installed but cannot be used (an unreadable version, a Windows op.exe from WSL, ...) |
 | `concurrent_edit` | 4 | check_first | yes | another edit landed together with opv's; check the history before acting again |
@@ -952,6 +954,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `mount_unreadable` | 6 | after_fix | no | the workload that would mount opv's secrets cannot read them; the fix is in its own manifest |
 | `person_only` | 6 | never | yes | a person-only command was called from an assistant; it runs only in a person's terminal |
 | `plan_unknown` | 6 | never | no | no plan has this id |
+| `platform_unsupported` | 6 | never | no | the command needs something this platform lacks (a producer on native Windows); run it from WSL |
 | `policy_refused` | 6 | never | no | opv refused the operation (a value too large, a name opv does not manage, a credential given as an option, ...) |
 | `private_dir_failed` | 6 | after_fix | no | opv could not make its private folder |
 | `ram_dir_unavailable` | 6 | after_fix | no | a private RAM-backed folder is needed (Azure deploy credentials, a file opv run delivers) and none is usable; nothing was read or changed |

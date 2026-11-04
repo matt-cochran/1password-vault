@@ -393,6 +393,12 @@ pub enum FieldRule {
     SecretFile {
         problem: SecretFileRule,
     },
+    /// A line a producer printed breaks `opv.produce/1` (#253,
+    /// `docs/design/owner-value-ingestion.md` §5.2). Positions, limits and declared output
+    /// names only: never the producer's own text, nor serde's.
+    Produce {
+        produce: ProduceRule,
+    },
 }
 
 /// What is wrong with the file `opv set --from-file` reads. Every variant is a property
@@ -437,6 +443,62 @@ pub enum SupplyRule {
     /// `github.*` on this line: it is expanded into the step's logged script.
     ExpressionInSupplyStep { line: u32 },
 }
+
+// --- provision (#253, `docs/design/owner-value-ingestion.md`) ---------------------------
+
+/// What is wrong with a producer's `opv.produce/1` output (§5.2, admission). Line numbers,
+/// output positions, limits and the contract's declared output names only: a producer's
+/// text is never shown, and an undeclared output is named by its position.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "check", rename_all = "snake_case")]
+pub enum ProduceRule {
+    /// The line is not one JSON object.
+    NotJson { line: u32 },
+    /// The line has a field `opv.produce/1` does not define.
+    UnknownField { line: u32 },
+    /// `schema` is missing or is not `opv.produce/1`.
+    WrongSchema { line: u32 },
+    /// The line is longer than `limit` bytes.
+    LineTooLong { line: u32, limit: u64 },
+    /// The output is larger than `limit` bytes.
+    TooMuchOutput { limit: u64 },
+    /// The producer exited with no result or error line.
+    NoResult,
+    /// A line follows the result or error line.
+    ResultNotLast { line: u32 },
+    /// The result's `env` is not the run's `--env`.
+    WrongEnvironment { line: u32 },
+    /// The result's `nonce` is not this run's.
+    NonceMismatch { line: u32 },
+    /// The output at this position (1-based) of the result is not one the set uses.
+    Undeclared { position: u32 },
+    /// The result lacks these declared outputs.
+    Missing { names: Vec<String> },
+    /// The output at this position (1-based) repeats an earlier name.
+    Duplicate { position: u32 },
+    /// The declared output is an empty string.
+    Empty { output: String },
+    /// The declared output is not a JSON string, or holds a NUL.
+    NotAString { output: String },
+    /// The declared output is longer than `limit` bytes.
+    TooLarge { output: String, limit: u64 },
+    /// A notice's `open_url` is refused, so it was not opened.
+    OpenUrlRefused { line: u32, why: OpenUrlProblem },
+    /// An `error` line's code is not 1 to 40 of `[a-z_]`.
+    ErrorCode { line: u32 },
+}
+
+/// Why a notice's `open_url` is refused (§5.2). The URL itself is never shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenUrlProblem {
+    NotHttps,
+    HostNotListed,
+    TooLong { limit: u64 },
+    Userinfo,
+}
+
+// --- end provision -------------------------------------------------------------------------
 
 /// What a `NotFound` resource's state is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -1060,6 +1122,26 @@ pub enum Cause {
         /// The file the caller named, as given: the person's own import reads it.
         file: PathBuf,
     },
+    // provision (#253, `docs/design/owner-value-ingestion.md` §5.2, §6, §9.3)
+    /// A producer ended without a usable result: its exit, its timeout, or its own closed
+    /// `error` code (§5.2). Nothing was written. Its stderr is never shown, so the cause
+    /// carries no text of the producer's beyond the code.
+    ProducerFailed {
+        producer: String,
+        why: ProducerFailure,
+    },
+    /// A producer's project file no longer has the `sha256` the contract pins (§3.2, vet
+    /// F17): an edited producer never receives the set's inputs before review.
+    ProducerChanged {
+        producer: String,
+        file: PathBuf,
+    },
+    /// The command needs something this platform does not have (D12: producers on native
+    /// Windows).
+    Unsupported {
+        feature: UnsupportedFeature,
+    },
+    // end provision
     Bug {
         site: &'static str,
     },
@@ -1348,6 +1430,83 @@ impl OperationRefusal {
         }
     }
 }
+
+// --- provision (#253, `docs/design/owner-value-ingestion.md`) ---------------------------
+
+/// Why `opv provision` does not fill a set (§4.2, §4.5, §5.5). Member names are
+/// `product/KEY`; never a value, length or digest.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum ProvisionRefusal {
+    /// Some but not all members hold a value (§4.5); Slice A never fills part of a set.
+    Partial { missing: Vec<String> },
+    /// Every member holds a value, but these fail their rules (§4.5).
+    Inconsistent { members: Vec<String> },
+    /// `--replace` would re-make this `immutable` member (D8).
+    ImmutableMember { member: String },
+    /// The producer made the value environment `other` holds for this member (§5.5, vet
+    /// C21): one issuer client serves two environments.
+    SameAcrossEnvironments { member: String, other: EnvName },
+    /// The producers' timeouts plus the commit reserve need `needed_seconds`, and the run
+    /// has `left_seconds` (§4.2 step 7): refused before consent.
+    BudgetTooSmall {
+        needed_seconds: u64,
+        left_seconds: u64,
+    },
+}
+
+impl ProvisionRefusal {
+    /// The reason in words.
+    pub fn words(&self) -> String {
+        match self {
+            ProvisionRefusal::Partial { missing } => format!(
+                "the set is partial ({} without a value), and opv fills only an absent set",
+                missing.join(", ")
+            ),
+            ProvisionRefusal::Inconsistent { members } => format!(
+                "every member holds a value, but {} fail their rules",
+                members.join(", ")
+            ),
+            ProvisionRefusal::ImmutableMember { member } => {
+                format!("member {member} is immutable, so --replace cannot re-make the set")
+            }
+            ProvisionRefusal::SameAcrossEnvironments { member, other } => format!(
+                "the producer made the value of {member} that environment {other} already holds"
+            ),
+            ProvisionRefusal::BudgetTooSmall {
+                needed_seconds,
+                left_seconds,
+            } => format!(
+                "its producers and the write need {needed_seconds}s, and the run has {left_seconds}s left"
+            ),
+        }
+    }
+}
+
+/// How a producer ended without a usable result (§5.2).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "failure", rename_all = "snake_case")]
+pub enum ProducerFailure {
+    /// It exited with this status (a result before a non-zero exit is discarded).
+    Exit { status: i32 },
+    /// It was ended by this signal.
+    Signal { signal: i32 },
+    /// It did not end within its `timeout`; opv stopped its process group.
+    Timeout { seconds: u64 },
+    /// Its `error` line's code, from the closed vocabulary `[a-z_]{1,40}`.
+    Reported { code: String },
+}
+
+/// What this platform does not support (§4.2 step 3).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "feature", rename_all = "snake_case")]
+pub enum UnsupportedFeature {
+    /// Set `set` has a member made by `producer`, and opv runs no producer on native Windows
+    /// (no process group, group kill or core limit there; D12).
+    ProducerOnWindows { set: String, producer: String },
+}
+
+// --- end provision -------------------------------------------------------------------------
 
 impl GenerateRefusal {
     /// The reason in words.
@@ -1811,6 +1970,23 @@ pub enum Guard {
         operation: &'static str,
         reason: OperationRefusal,
     },
+    // provision (#253, `docs/design/owner-value-ingestion.md` §4.2, §5.6)
+    /// `opv provision` does not fill set `set` in `env` (§4.2 steps 6, 7, 10). Names only;
+    /// never a value, length or digest.
+    ProvisionRefused {
+        set: String,
+        env: EnvName,
+        reason: ProvisionRefusal,
+    },
+    /// `product/key` is a member of set `set` (§5.6): `set`, `import` and `generate` refuse
+    /// to write it alone, because the set's members are made and written together.
+    SetMember {
+        product: ProductName,
+        key: KeyName,
+        env: EnvName,
+        set: String,
+    },
+    // end provision
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -1884,6 +2060,8 @@ pub enum InputKind {
     Workflow,
     /// The file `opv set --from-file` reads: its exact bytes are one key's value.
     SecretFile,
+    /// A producer's `opv.produce/1` output (#253; `path`: the producer's project file).
+    Produce,
 }
 
 /// What an in-memory folder was needed for (R74).
@@ -2085,6 +2263,9 @@ impl Cause {
             ValuesNeeded { .. } => "findings",
             GateFailed { .. } => "gate_failed",
             ImportTierRefused { .. } => "import_tier_refused",
+            ProducerFailed { .. } => "producer_failed",
+            ProducerChanged { .. } => "producer_changed",
+            Unsupported { .. } => "platform_unsupported",
             KeysBlocking { .. } => "keys_blocking",
             LocalFileTooOpen { .. } => "file_too_open",
             InputInvalid { .. } => "input_invalid",
@@ -2148,11 +2329,13 @@ impl Cause {
             | InputUnreadable { .. }
             | SourceOnly { .. }
             | TitleLookup { .. }
-            | AccountRequired { .. } => 2,
+            | AccountRequired { .. }
+            | ProducerChanged { .. } => 2,
             ToolMissing { .. }
             | ToolUnusable { .. }
             | RemoteVersionMismatch { .. }
-            | ChildStartFailed { .. } => 3,
+            | ChildStartFailed { .. }
+            | ProducerFailed { .. } => 3,
             InventoryIncomplete { .. }
             | ChangedBeforeWrite {
                 object: StoreObject::Item { .. },
@@ -2203,7 +2386,8 @@ impl Cause {
             | LocalIo { .. }
             | KeysBlocking { .. }
             | ImportTierRefused { .. }
-            | HandoffPipeContested { .. } => 6,
+            | HandoffPipeContested { .. }
+            | Unsupported { .. } => 6,
             NotSignedIn { .. }
             | AccountNotOnMachine { .. }
             | AccountAmbiguous { .. }
@@ -2275,6 +2459,7 @@ impl Cause {
             | SecretNotStored { .. }
             | SourceOnly { .. }
             | SourceChanged { .. }
+            | Unsupported { .. }
             | Bug { .. } => RetryClass::Never,
             _ => RetryClass::AfterFix,
         }
