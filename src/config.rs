@@ -37,6 +37,7 @@ use crate::provider::{
 mod locate;
 
 pub mod bindings;
+mod sets;
 
 /// Read and validate the configuration at `path`, found by discovery. An error names the
 /// file, the line and the field the validator checked, and the fix built from the field and
@@ -845,6 +846,12 @@ struct RawConfig {
     /// Named stores (FR-39), parsed by the provider that declares their kind.
     #[serde(default)]
     stores: BTreeMap<String, toml::Value>,
+    /// Provisioning sets (#253, #262), checked by [`sets`].
+    #[serde(default)]
+    sets: BTreeMap<String, sets::RawSet>,
+    /// Producers (#253), checked by [`sets`].
+    #[serde(default)]
+    producers: BTreeMap<String, sets::RawProducer>,
 }
 
 /// One environment's generic fields.
@@ -1375,11 +1382,13 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
 
     let mut products = raw.products;
     check_shared(&mut products, &environments, doc)?;
-    let fleet = Fleet {
+    let mut fleet = Fleet {
         environments,
         products,
         origin: Default::default(),
         read_from: Default::default(),
+        sets: Default::default(),
+        producers: Default::default(),
     };
     check_scopes(&fleet, doc)?;
     check_infrastructure(&fleet, doc)?;
@@ -1390,6 +1399,7 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
     check_personal(&fleet, doc)?;
     check_evidence_width(&fleet, doc)?;
     check_delivery_items(&fleet, doc)?;
+    sets::check_into(&mut fleet, raw.sets, raw.producers, doc)?;
     Ok(fleet)
 }
 

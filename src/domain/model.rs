@@ -663,6 +663,10 @@ pub struct Fleet {
     pub origin: Origin,
     /// The configuration's source, for the causes a later lookup reports (X16).
     pub read_from: ReadFrom,
+    /// `[sets.<name>]` (#253, #262): keys of one boundary provisioned together.
+    pub sets: BTreeMap<String, crate::domain::provision::ProvisionSet>,
+    /// `[producers.<name>]` (#253): the programs that make set members' values.
+    pub producers: BTreeMap<String, crate::domain::provision::Producer>,
 }
 
 /// Where a configuration was read from (FR-44). Wording only: the plan id and every other
@@ -687,6 +691,19 @@ impl Origin {
 }
 
 impl Fleet {
+    /// The set `product`/`key` is a member of, by name; `None` for a key in no set. Load
+    /// keeps a key in at most one set, so the answer is unique.
+    pub fn set_of(&self, product: &str, key: &str) -> Option<&str> {
+        self.sets
+            .iter()
+            .find(|(_, s)| {
+                s.members
+                    .keys()
+                    .any(|m| m.product == product && m.key == key)
+            })
+            .map(|(name, _)| name.as_str())
+    }
+
     /// Look up an environment by a (possibly user-supplied) name.
     ///
     /// An unknown name is [`crate::cause::Cause::NotDeclared`]: it lists the declared ones,

@@ -17,6 +17,7 @@ pub mod model;
 pub mod naming;
 pub mod placement;
 pub mod presence;
+pub mod provision;
 pub mod relaxation;
 pub mod secret;
 pub mod value_state;
