@@ -1690,7 +1690,7 @@ fn status_json_schema_version_is_three() {
     let h = Harness::new(&good_item());
     let r = h.run(&["status", "prod", "--json"]);
     let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
-    assert_eq!(doc["schema_version"], json!(3), "{}", r.all());
+    assert_eq!(doc["schema_version"], json!(4), "{}", r.all());
 }
 
 /// FR-21: the document names the environment and carries names-only totals.
@@ -1794,7 +1794,7 @@ fn status_json_reason_keeps_schema_version_three() {
     let h = Harness::new(&item(good_fields("pk-S7MARKERVALUEbadprefix0014")));
     let r = h.run(&["status", "prod", "--json"]);
     let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
-    assert_eq!(doc["schema_version"], json!(3), "{}", r.all());
+    assert_eq!(doc["schema_version"], json!(4), "{}", r.all());
 }
 
 /// FR-22: text output shows `failed <rule> (<reason>)`.

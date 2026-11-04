@@ -18,7 +18,7 @@ use serde_json::{Map, Value};
 use crate::error::Error;
 
 /// The version of every `--json` document's shape.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// The action a `next` names (schema 3): the closed set a client branches on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn success_keeps_the_commands_own_next() {
         let out = finish(
-            br#"{"schema_version":3,"next":"opv sync prod"}"#,
+            br#"{"schema_version":4,"next":"opv sync prod"}"#,
             Ok(()),
             false,
         );
@@ -348,14 +348,14 @@ mod tests {
     #[test]
     fn a_successful_documents_next_is_a_typed_run_for_the_assistant() {
         let out = finish(
-            br#"{"schema_version":3,"next":"opv sync prod"}"#,
+            br#"{"schema_version":4,"next":"opv sync prod"}"#,
             Ok(()),
             false,
         );
         assert_eq!(
             parse(&out),
             serde_json::json!({
-                "schema_version": 3,
+                "schema_version": 4,
                 "ok": true,
                 "next": {"kind": "run", "actor": "assistant", "command": "opv sync prod"},
                 "do": null,
@@ -367,12 +367,12 @@ mod tests {
     fn a_failing_documents_next_is_a_typed_person_handoff() {
         let e = refused();
         let inv = inv();
-        let out = finish_with(br#"{"schema_version":3}"#, Err(&e), false, &inv, false);
+        let out = finish_with(br#"{"schema_version":4}"#, Err(&e), false, &inv, false);
         let error = crate::error::document(&e, &inv, false);
         assert_eq!(
             parse(&out),
             serde_json::json!({
-                "schema_version": 3,
+                "schema_version": 4,
                 "ok": false,
                 "exit_code": e.exit_code(),
                 "next": {
@@ -388,11 +388,11 @@ mod tests {
 
     #[test]
     fn a_document_without_a_next_is_a_typed_none_for_the_person() {
-        let out = finish(br#"{"schema_version":3,"rows":[]}"#, Ok(()), false);
+        let out = finish(br#"{"schema_version":4,"rows":[]}"#, Ok(()), false);
         assert_eq!(
             parse(&out),
             serde_json::json!({
-                "schema_version": 3,
+                "schema_version": 4,
                 "ok": true,
                 "rows": [],
                 "next": {"kind": "none", "actor": "person", "command": null},

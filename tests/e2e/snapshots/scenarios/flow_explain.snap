@@ -18,10 +18,10 @@ using <SCENARIO>/project/secrets.toml
 
 ## json exit: 0
 ## json stdout
-{"schema_version":3,"ok":true,"environment":"dev","product":"web","key":"PERSONAL_LLM_KEY","kind":"secret","field":"concealed field","source":"own field","personal":true,"boundary":null,"environments":["dev"],"targets":[],"delivered_to":[],"rules":[],"immutable":false,"guidance":"your own key, billed to you","required_here":true,"shared_from":null,"shared_by":[],"next":{"kind":"none","actor":"person","command":null},"do":null}
+{"schema_version":4,"ok":true,"environment":"dev","product":"web","key":"PERSONAL_LLM_KEY","kind":"secret","field":"concealed field","source":"own field","personal":true,"boundary":null,"environments":["dev"],"targets":[],"delivered_to":[],"rules":[],"immutable":false,"guidance":"your own key, billed to you","required_here":true,"shared_from":null,"shared_by":[],"next":{"kind":"none","actor":"person","command":null},"do":null}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml
 
 ## mcp opv_explain {"key":"web/PERSONAL_LLM_KEY"}
-{"schema_version":3,"ok":true,"environment":"dev","product":"web","key":"PERSONAL_LLM_KEY","kind":"secret","field":"concealed field","source":"own field","personal":true,"boundary":null,"environments":["dev"],"targets":[],"delivered_to":[],"rules":[],"immutable":false,"guidance":"your own key, billed to you","required_here":true,"shared_from":null,"shared_by":[],"next":{"kind":"none","actor":"person","command":null},"do":null}
+{"schema_version":4,"ok":true,"environment":"dev","product":"web","key":"PERSONAL_LLM_KEY","kind":"secret","field":"concealed field","source":"own field","personal":true,"boundary":null,"environments":["dev"],"targets":[],"delivered_to":[],"rules":[],"immutable":false,"guidance":"your own key, billed to you","required_here":true,"shared_from":null,"shared_by":[],"next":{"kind":"none","actor":"person","command":null},"do":null}

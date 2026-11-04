@@ -13,7 +13,7 @@ Next: opv plan prod
 
 ## json exit: 6
 ## json stdout
-{"schema_version":3,"ok":false,"exit_code":6,"next":{"kind":"run","actor":"assistant","command":"opv plan prod"},"do":"review the new plan 623778c8","error":{"code":"stale_plan","category":"policy","message":"the plan changed since it was made: deadbeef is now 623778c8","subject":{"scope":{"kind":"sync","env":"prod","targets":[],"product":null,"deploy":false,"prune":false,"rotate":[]},"old":"deadbeef","new":"623778c8"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":"review the new plan 623778c8","next":{"kind":"run","actor":"assistant","command":"opv plan prod"}}}
+{"schema_version":4,"ok":false,"exit_code":6,"next":{"kind":"run","actor":"assistant","command":"opv plan prod"},"do":"review the new plan 623778c8","error":{"code":"stale_plan","category":"policy","message":"the plan changed since it was made: deadbeef is now 623778c8","subject":{"scope":{"kind":"sync","env":"prod","targets":[],"product":null,"deploy":false,"prune":false,"rotate":[]},"old":"deadbeef","new":"623778c8"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"never","human_required":false,"do":"review the new plan 623778c8","next":{"kind":"run","actor":"assistant","command":"opv plan prod"}}}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml

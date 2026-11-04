@@ -156,7 +156,7 @@ It reads each boundary item once per target, a run-only environment's too, so a 
 For example, `opv --config secrets.toml status --json` when `flyctl` fails with a reply opv does not recognise for both environments:
 
 ```json
-{"schema_version":3,"ok":false,"exit_code":5,"product":null,"environments":[{"name":"prod","target":"fly","state":"not_checked","keys":null,"saved":null,"skipped":null,"findings":null,"error_code":"unrecognized_failure","error":"flyctl failed at Fly in a way opv does not recognise","next":"opv doctor --config secrets.toml"},{"name":"staging","target":"fly","state":"not_checked","keys":null,"saved":null,"skipped":null,"findings":null,"error_code":"unrecognized_failure","error":"flyctl failed at Fly in a way opv does not recognise","next":"opv doctor --config secrets.toml"}],"totals":{"environments":2,"findings":0},"next":{"kind":"run","actor":"assistant","command":"opv doctor --config secrets.toml"},"do":"read the reply of flyctl shown above; opv does not recognise it"}
+{"schema_version":4,"ok":false,"exit_code":5,"product":null,"environments":[{"name":"prod","target":"fly","state":"not_checked","keys":null,"saved":null,"skipped":null,"findings":null,"error_code":"unrecognized_failure","error":"flyctl failed at Fly in a way opv does not recognise","next":"opv doctor --config secrets.toml"},{"name":"staging","target":"fly","state":"not_checked","keys":null,"saved":null,"skipped":null,"findings":null,"error_code":"unrecognized_failure","error":"flyctl failed at Fly in a way opv does not recognise","next":"opv doctor --config secrets.toml"}],"totals":{"environments":2,"findings":0},"next":{"kind":"run","actor":"assistant","command":"opv doctor --config secrets.toml"},"do":"read the reply of flyctl shown above; opv does not recognise it"}
 ```
 
 (The failure's `error` object, last in the document, is left out above.)
@@ -308,7 +308,7 @@ The line is always `summary: written N · unchanged N · held N · deployed <rev
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "environment": "prod",
   "product": null,
   "targets": [{"target": "web", "provider": "fly", "deployed": false, "revision": null}],
@@ -451,7 +451,7 @@ All refusals are fail-closed, before anything is read from 1Password: a product 
 
 ### Delivery preview: `--preview`
 
-`opv run <env> [--product <p>] [--role <r>] --preview [--json]` prints what this run would deliver without reading a value and without running `op run` or `op read`; a command after `--` is refused. For each key it would deliver: product, key, `source` (`<product>/<KEY>`, or the `from` source), `destination` (`env:<NAME>` or `file:<relative path>` under `secrets_dir_env`) and its `roles`. Then the environment mode (`inherit` / `declared_only`), the secrets directory variable, file-delivery platform support with its reason, and the prerequisites `op` present (`yes`/`no`/`unknown`) and signed in (`yes`/`no`/`unknown`; a discovery that cannot be determined is `unknown`, never `no`). Keys excluded by role are listed under `withheld_by_role`, names only. `--json` prints one document (`schema_version` 2); the text form prints one line per key plus the summary lines.
+`opv run <env> [--product <p>] [--role <r>] --preview [--json]` prints what this run would deliver without reading a value and without running `op run` or `op read`; a command after `--` is refused. For each key it would deliver: product, key, `source` (`<product>/<KEY>`, or the `from` source), `destination` (`env:<NAME>` or `file:<relative path>` under `secrets_dir_env`) and its `roles`. Then the environment mode (`inherit` / `declared_only`), the secrets directory variable, file-delivery platform support with its reason, and the prerequisites `op` present (`yes`/`no`/`unknown`) and signed in (`yes`/`no`/`unknown`; a discovery that cannot be determined is `unknown`, never `no`). Keys excluded by role are listed under `withheld_by_role`, names only. `--json` prints one document (`schema_version` 4); the text form prints one line per key plus the summary lines.
 
 ### Remote development: `--remote`
 
@@ -842,7 +842,7 @@ Every command that takes `--json` — `inventory`, `needs`, `contract`, `ready`,
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "ok": false,
   "exit_code": 6,
   "next": {
@@ -869,7 +869,7 @@ Every command that takes `--json` — `inventory`, `needs`, `contract`, `ready`,
 }
 ```
 
-`schema_version` is `3` since 0.12.0. `next` is a typed object `{kind, actor, command}` everywhere, so no client reads free text to decide an action. `kind` is a closed set: `run`, `apply`, `enter_value`, `authorize`, `wait_ci`, `none`. `actor` is a closed set: `assistant`, `person`, `ci`. `command` is the exact command to run, or `null`. An assistant runs a `next` itself only when its `actor` is `assistant`; a `person` action is handed to the user and a `ci` action is left to CI, and `none` is nothing to run. A command that runs as typed is `kind: run` and `actor: assistant`; a change a person applies is `kind: apply`; typing a value is `enter_value`; a sign-in is `authorize`; waiting for CI is `wait_ci`.
+`schema_version` is `4` since 0.12.0. `next` is a typed object `{kind, actor, command}` everywhere, so no client reads free text to decide an action. `kind` is a closed set: `run`, `apply`, `enter_value`, `authorize`, `wait_ci`, `none`. `actor` is a closed set: `assistant`, `person`, `ci`. `command` is the exact command to run, or `null`. An assistant runs a `next` itself only when its `actor` is `assistant`; a `person` action is handed to the user and a `ci` action is left to CI, and `none` is nothing to run. A command that runs as typed is `kind: run` and `actor: assistant`; a change a person applies is `kind: apply`; typing a value is `enter_value`; a sign-in is `authorize`; waiting for CI is `wait_ci`.
 
 A failure after the command produced its document (findings, exit 8) keeps that document's fields between `exit_code` and `next`. `config export <ENV>` (and `config export --json`) prints the bare document on success and the failure document on failure. Usage errors (`--json` with an unknown flag) print the failure document with code `usage`.
 
@@ -993,12 +993,12 @@ opv schema | jq -r '.error_codes[] | "\(.code) \(.retry)"'
 and nothing else. It contains names, states and counts only: no value, no value fragment,
 no value length and no guidance. Exit codes are unchanged. Findings (exit 8) keep the rows
 and add `ok: false`, `exit_code` and `error`; an error before the rows exist prints the
-[failure document](#json-contract). The top-level `schema_version` is `3` (0.12.0 typed `next`); adding a field keeps it, while
+[failure document](#json-contract). The top-level `schema_version` is `4` (0.12.0 typed `next`); adding a field keeps it, while
 renaming or removing a field, or changing its meaning, increments it.
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "ok": true,
   "environment": "prod",
   "product": null,

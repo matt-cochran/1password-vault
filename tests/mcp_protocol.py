@@ -78,7 +78,7 @@ with tempfile.TemporaryDirectory() as directory:
         reply = send('tools/call', {'name': 'opv_state', 'arguments': {'section': 'contract'}}, 3)
         text = reply['result']['content'][0]['text']
         contract_doc = json.loads(text)
-        assert contract_doc['ok'] and contract_doc['schema_version'] == 3, contract_doc
+        assert contract_doc['ok'] and contract_doc['schema_version'] == 4, contract_doc
         assert contract_doc['components'] and contract_doc['contract_digest'], contract_doc
         assert 'vault_id' not in text and 'item_id' not in text and 'rules' not in text
         # An agent cannot sync: there is no sync tool.
@@ -118,7 +118,7 @@ with tempfile.TemporaryDirectory() as directory:
             'env': 'not a name'}}, 24)
         answer = json.loads(refused_next['result']['content'][0]['text'])
         assert answer['ok'] is False and answer['error']['code'] == 'usage', answer
-        assert answer['schema_version'] == 3 and answer['exit_code'] == 2, answer
+        assert answer['schema_version'] == 4 and answer['exit_code'] == 2, answer
         assert set(answer['next']) == {'kind', 'actor', 'command'}, answer
         # opv_explain takes a key or a plan_id, and the environment.
         explain_tool = next(t for t in tools if t['name'] == 'opv_explain')
