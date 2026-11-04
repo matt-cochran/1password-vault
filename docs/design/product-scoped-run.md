@@ -1,5 +1,7 @@
 # Product-scoped `opv run` (#264, #263)
 
+> **Owner decisions (2026-11-04):** the owner accepted every recommended option in this document's decisions section.
+
 Status: design, for 0.18.0. **Revised after DESIGN-FMECA vet**
 (`docs/design/product-scoped-run-fmeca.md`, verdict "ready with changes"; every required
 change is applied here). Branch `v0180/design`, cut from `dev` at opv 0.17.2 (7cc0b6dd).

@@ -1,5 +1,7 @@
 # Sealed target: read 1Password at release time, never at runtime (#271)
 
+> **Owner decisions (2026-11-04):** the owner accepted every recommended option in this document's decisions section, including explicit acceptance of residual risk R-U2 (a leaked runtime identity cannot be revoked centrally; recovery is rotating the identity and the values).
+
 Status: **revised after the DESIGN-FMECA vet** (`sealed-target-fmeca.md`), 2026-11-04. It awaits
 the owner's decisions (§12) and the acceptance of one residual risk (§12, R-U2). Nothing here is
 built. The branch is `v0180/design`, cut from `dev` at opv 0.17.2 (`7cc0b6dd`).

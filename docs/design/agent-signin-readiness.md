@@ -1,5 +1,7 @@
 # Agent sign-in and readiness: one document, typed recovery, no guessing
 
+> **Owner decisions (2026-11-04):** the owner accepted every recommended option in this document's decisions section.
+
 Status: **Revised after DESIGN-FMECA vet** (`agent-signin-readiness-fmeca.md`, verdict "ready with
 changes"; every required change applied, §10). Draft for 0.18.0 (branch `v0180/design`, cut from
 dev at opv 0.17.2), 2026-11-04. Issues #265, #266, #257 and #267. It builds on

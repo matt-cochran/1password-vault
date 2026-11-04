@@ -1,5 +1,7 @@
 # Owner value ingestion: matched sets and in-memory producers (#262, #253)
 
+> **Owner decisions (2026-11-04):** the owner accepted every recommended option in this document's decisions section.
+
 Status: **Revised after DESIGN-FMECA vet** ([owner-value-ingestion-fmeca.md](owner-value-ingestion-fmeca.md),
 verdict "not ready as written, ready with changes for a smaller first slice"). Every required change
 of the vet is applied here, its scope cut is taken, and its new decisions are D10-D13 (§8). Draft
