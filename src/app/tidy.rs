@@ -327,8 +327,6 @@ pub(crate) fn read(fleet: &Fleet, env_name: &str, r: &dyn CommandRunner) -> Resu
 /// desires in the environment (today's [`read`]); [`ReadScope::Keys`] is a command's own key
 /// set, such as `run --product`'s `wanted` ids, with each `from` key already replaced by its
 /// source id (FR-45).
-// `run --product` (#263, #264) builds `Keys` in the next change; until then only tests do.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReadScope {
     /// Every boundary item the fleet needs in the environment; a person's tidy prints its
@@ -343,7 +341,6 @@ pub(crate) enum ReadScope {
 /// [`read`] limited to `scope`'s boundary items. Each item read is still tidied with every
 /// product in it (a shared item is never tidied with sections missing, FR-43), and
 /// [`Read::needing_values`] covers those items whole.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn read_for(
     fleet: &Fleet,
     scope: &ReadScope,
@@ -867,4 +864,4 @@ fn finish(
 
 #[cfg(test)]
 #[path = "tidy_tests.rs"]
-mod tests;
+pub(crate) mod tests;

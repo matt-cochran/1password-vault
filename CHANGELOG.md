@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`opv run --product <p>` (and `run --remote`) keeps a declared infrastructure name the parent environment sets (#264).** A key declared `source = "infrastructure"` in any product is no longer removed from the environment the command inherits: opv never holds that value, and the caller's environment is its only carrier, so a producer that needs a sibling's infrastructure value now gets it. When such a name is set, `run` prints one names-only note: `taken from the environment as given (supplied at sync, never stored in 1Password): <product>/<KEY>, …`. Every stored or `from` name is still removed, so a stale parent value never shadows a value from 1Password.
+
+### Fixed
+
+- **`opv run --product <p>` reads and names only its own keys (#263).** It reads only the boundary items holding the product's selected keys (and their `from` sources), never another product's separate item (FR-57), and its "still needs a value in 1Password" note names only those keys, printed once whether or not the run tidied the item. An empty key of another product, a key withheld by `--role` or an infrastructure key is no longer named. A shared item is still tidied with every product in it.
+
 ## [0.17.2] - 2026-10-24
 
 0.17.2 completes reviewed target operations with `registry-push` and fixes two pieces of misleading advice.
