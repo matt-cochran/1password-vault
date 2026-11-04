@@ -791,6 +791,7 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                 op: LocalOp::Write,
                 path: PathBuf::from("/work/secrets.toml"),
                 io: IoKind::PermissionDenied,
+                delivery: None,
             },
             vec!["/work/secrets.toml"],
         ),
@@ -2453,6 +2454,7 @@ fn a3_local_io_names_the_path() {
         op: LocalOp::Write,
         path: PathBuf::from("/work/secrets.toml"),
         io: IoKind::PermissionDenied,
+        delivery: None,
     };
     assert_eq!(
         c.message(),
@@ -3755,6 +3757,7 @@ fn f2_a_random_source_failure_is_named() {
         op: LocalOp::RandomSource,
         path: PathBuf::new(),
         io: IoKind::Other,
+        delivery: None,
     };
     assert!(c.message().contains("random source"));
 }
@@ -4102,6 +4105,7 @@ fn i6_a_symlinked_dot_opv_is_named() {
         op: LocalOp::Write,
         path: PathBuf::from("/work/shop/.opv"),
         io: IoKind::NotAPlainFile,
+        delivery: None,
     };
     assert!(c.message().contains("symbolic link"), "{}", c.message());
 }
@@ -4838,5 +4842,27 @@ fn a_container_app_job_reads_as_one() {
     assert_eq!(
         resource_kind(ResourceKind::ContainerAppJob),
         "container app job"
+    );
+}
+
+/// #265 (FR-64): a lost `--json` report leads with what the command itself did, so a write
+/// that happened never looks undone.
+#[test]
+fn lost_report_leads_with_outcome() {
+    let c = Cause::LocalIo {
+        op: LocalOp::Stdout,
+        path: PathBuf::new(),
+        io: IoKind::NoSpace,
+        delivery: Some(Delivery {
+            command: "sync".into(),
+            outcome: CommandOutcome::Ok,
+            bytes_written: 0,
+            bytes: 2214,
+        }),
+    };
+    assert!(
+        c.message().starts_with("sync finished (ok);"),
+        "{}",
+        c.message()
     );
 }

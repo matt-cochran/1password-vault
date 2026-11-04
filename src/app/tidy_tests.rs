@@ -14,7 +14,7 @@ use crate::domain::convention::KEPT_SECTION;
 use crate::host::FakeEnv;
 use crate::runner::{Call, Outcome, Output};
 
-const MARKER: &str = "TIDYMARKER";
+pub(crate) const MARKER: &str = "TIDYMARKER";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Edit {
@@ -31,7 +31,7 @@ enum Edit {
 
 type Editor = fn(&mut Value);
 
-struct FakeOp {
+pub(crate) struct FakeOp {
     item: RefCell<Value>,
     user_type: &'static str,
     edit: Cell<Edit>,
@@ -46,8 +46,10 @@ struct FakeOp {
     /// What `op item edit` echoes: the item as written (op's behaviour) or nothing.
     echo: Cell<bool>,
     calls: RefCell<Vec<(Vec<String>, Vec<u8>)>>,
-    notes: RefCell<Vec<String>>,
-    child_env: RefCell<Vec<(String, String)>>,
+    pub(crate) notes: RefCell<Vec<String>>,
+    pub(crate) child_env: RefCell<Vec<(String, String)>>,
+    /// The names `run` asked to remove from the inherited environment.
+    pub(crate) removed: RefCell<Vec<String>>,
 }
 
 impl FakeOp {
@@ -64,10 +66,11 @@ impl FakeOp {
             calls: RefCell::default(),
             notes: RefCell::default(),
             child_env: RefCell::default(),
+            removed: RefCell::default(),
         }
     }
 
-    fn person(item: Value) -> Self {
+    pub(crate) fn person(item: Value) -> Self {
         Self::new(item, "USER")
     }
 
@@ -78,7 +81,7 @@ impl FakeOp {
         ));
     }
 
-    fn count(&self, prefix: &[&str]) -> usize {
+    pub(crate) fn count(&self, prefix: &[&str]) -> usize {
         self.calls
             .borrow()
             .iter()
@@ -86,11 +89,11 @@ impl FakeOp {
             .count()
     }
 
-    fn edits(&self) -> usize {
+    pub(crate) fn edits(&self) -> usize {
         self.count(&["item", "edit"])
     }
 
-    fn notes(&self) -> String {
+    pub(crate) fn notes(&self) -> String {
         self.notes.borrow().join("\n")
     }
 
@@ -223,8 +226,9 @@ impl CommandRunner for FakeOp {
         program: &str,
         args: &[&str],
         env: &[(&str, &str)],
-        _remove: &[String],
+        remove: &[String],
     ) -> io::Result<i32> {
+        self.removed.borrow_mut().extend(remove.iter().cloned());
         self.run_inherited(program, args, env)
     }
 }
@@ -285,10 +289,10 @@ environments = ["dev"]
 }
 
 /// (section label or "" for top level, label, type, value).
-type F<'a> = (&'a str, &'a str, &'a str, &'a str);
+pub(crate) type F<'a> = (&'a str, &'a str, &'a str, &'a str);
 
 /// `op item get --format json` output for `fields` (D0 shape).
-fn item(fields: &[F<'_>]) -> Value {
+pub(crate) fn item(fields: &[F<'_>]) -> Value {
     let mut sections: Vec<Value> = Vec::new();
     let mut fs = vec![
         json!({"id": "notesPlain", "type": "STRING", "purpose": "NOTES", "label": "notesPlain"}),
@@ -1542,4 +1546,235 @@ fn a_field_the_write_dropped_steps_to_the_tidying_read() {
             args: vec!["dev".into()],
         })
     );
+}
+
+// ---- #263/#264: a scoped read (`ReadScope`) and the needs-value note -------------------
+
+/// One boundary item holding a stored key and an infrastructure key (never stored; it
+/// needs a target to be delivered to).
+fn infrastructure_fleet() -> Fleet {
+    config::parse(
+        r#"
+[environments.dev]
+boundaries.core = { vault_id = "vdev", item_id = "idev" }
+
+[environments.dev.targets.web]
+fly.app = "web-dev"
+fly.secret_name = "{KEY}"
+products = ["api"]
+state_vault_id = "sdev"
+
+[products.api]
+boundary = "core"
+
+[products.api.keys.LOG_LEVEL]
+kind = "config"
+environments = ["dev"]
+
+[products.api.keys.DATABASE_URL]
+kind = "secret"
+source = "infrastructure"
+environments = ["dev"]
+rules = { regex = "postgres(ql)?://.+" }
+"#,
+    )
+    .unwrap()
+}
+
+#[test]
+fn needing_values_never_names_an_infrastructure_key() {
+    let op = FakeOp::person(item(&[]));
+    let _on = activate();
+    read(&infrastructure_fleet(), "dev", &op).unwrap();
+    assert!(!op.notes().contains("api/DATABASE_URL"), "{}", op.notes());
+}
+
+#[test]
+fn needing_values_names_an_empty_stored_key_beside_it() {
+    let op = FakeOp::person(item(&[]));
+    let _on = activate();
+    read(&infrastructure_fleet(), "dev", &op).unwrap();
+    assert!(
+        op.notes()
+            .contains("still needs a value in 1Password (dev): api/LOG_LEVEL"),
+        "{}",
+        op.notes()
+    );
+}
+
+/// Products `a` and `b`, each in a boundary item of its own (`ia`, `ib`).
+fn two_boundary_fleet() -> Fleet {
+    config::parse(
+        r#"
+[environments.dev]
+boundaries.a = { vault_id = "vdev", item_id = "ia" }
+boundaries.b = { vault_id = "vdev", item_id = "ib" }
+
+[products.a]
+boundary = "a"
+
+[products.a.keys.K]
+kind = "secret"
+environments = ["dev"]
+
+[products.b]
+boundary = "b"
+
+[products.b.keys.K]
+kind = "secret"
+environments = ["dev"]
+"#,
+    )
+    .unwrap()
+}
+
+/// `a`'s item laid out by the convention, so a read of it never tidies.
+fn a_tidy_item() -> Value {
+    item(&[
+        ("a", "K", "CONCEALED", "a-TIDYMARKER"),
+        ("opv", "convention", "STRING", "1"),
+    ])
+}
+
+fn keys(ids: &[(&str, &str)]) -> ReadScope {
+    ReadScope::Keys(
+        ids.iter()
+            .map(|(p, k)| ((*p).to_string(), (*k).to_string()))
+            .collect(),
+    )
+}
+
+#[test]
+fn a_scoped_read_reads_only_the_scopes_boundary_item() {
+    let op = FakeOp::person(a_tidy_item());
+    let _on = activate();
+    read_for(&two_boundary_fleet(), &keys(&[("a", "K")]), "dev", &op).unwrap();
+    assert_eq!(op.count(&["item", "get", "ib"]), 0);
+}
+
+#[test]
+fn a_scoped_read_reads_the_scopes_item() {
+    let op = FakeOp::person(a_tidy_item());
+    let _on = activate();
+    read_for(&two_boundary_fleet(), &keys(&[("a", "K")]), "dev", &op).unwrap();
+    assert_eq!(op.count(&["item", "get", "ia"]), 1);
+}
+
+#[test]
+fn a_scoped_read_reads_a_from_sources_boundary() {
+    let fleet = config::parse(
+        r#"
+[environments.dev]
+boundaries.app = { vault_id = "vdev", item_id = "iapp" }
+boundaries.shared = { vault_id = "vdev", item_id = "ishared" }
+
+[products.app]
+boundary = "app"
+
+[products.app.keys.K]
+kind = "secret"
+environments = ["dev"]
+from = "shared/K"
+
+[products.shared]
+boundary = "shared"
+
+[products.shared.keys.K]
+kind = "secret"
+environments = ["dev"]
+"#,
+    )
+    .unwrap();
+    let op = FakeOp::person(item(&[
+        ("shared", "K", "CONCEALED", "s-TIDYMARKER"),
+        ("opv", "convention", "STRING", "1"),
+    ]));
+    let _on = activate();
+    read_for(&fleet, &keys(&[("shared", "K")]), "dev", &op).unwrap();
+    assert_eq!(op.count(&["item", "get", "ishared"]), 1);
+}
+
+#[test]
+fn a_scoped_tidy_still_sees_every_product_in_a_shared_item() {
+    let op = FakeOp::person(item(&[
+        ("api", "OPENAI_API_KEY", "CONCEALED", "sk-TIDYMARKER"),
+        ("api", "LOG_LEVEL", "STRING", "info"),
+        ("", "SESSION_KEY", "CONCEALED", "s-TIDYMARKER"),
+        ("opv", "convention", "STRING", "1"),
+    ]));
+    let _on = activate();
+    read_for(&fleet(), &keys(&[("api", "OPENAI_API_KEY")]), "dev", &op).unwrap();
+    assert!(
+        op.field(Some("web"), "SESSION_KEY").is_some(),
+        "{:?}",
+        op.fields()
+    );
+}
+
+#[test]
+fn a_scoped_tidy_prints_no_needs_value_note() {
+    let op = FakeOp::person(tidy_item_without("LOG_LEVEL"));
+    let _on = activate();
+    read_for(&fleet(), &keys(&[("api", "LOG_LEVEL")]), "dev", &op).unwrap();
+    assert!(
+        !op.notes().contains("still needs a value"),
+        "{}",
+        op.notes()
+    );
+}
+
+/// Every declared key in its place, with `api/LOG_LEVEL` empty: nothing to tidy.
+fn tidy_item_with_empty_log_level() -> Value {
+    item(&[
+        ("api", "OPENAI_API_KEY", "CONCEALED", "sk-TIDYMARKER"),
+        ("api", "LOG_LEVEL", "STRING", ""),
+        ("web", "SESSION_KEY", "CONCEALED", "s-TIDYMARKER"),
+        ("opv", "convention", "STRING", "1"),
+    ])
+}
+
+#[test]
+fn a_scoped_read_of_a_tidy_item_prints_no_needs_value_note() {
+    let op = FakeOp::person(tidy_item_with_empty_log_level());
+    let _on = activate();
+    read_for(&fleet(), &keys(&[("api", "LOG_LEVEL")]), "dev", &op).unwrap();
+    assert!(
+        !op.notes().contains("still needs a value"),
+        "{}",
+        op.notes()
+    );
+}
+
+#[test]
+fn a_scoped_read_returns_the_keys_needing_a_value() {
+    let op = FakeOp::person(tidy_item_with_empty_log_level());
+    let _on = activate();
+    let read = read_for(&fleet(), &keys(&[("api", "LOG_LEVEL")]), "dev", &op).unwrap();
+    assert_eq!(
+        read.needing_values,
+        vec![("api".to_string(), "LOG_LEVEL".to_string())]
+    );
+}
+
+#[test]
+fn a_whole_read_still_prints_the_tidy_needs_value_note() {
+    let op = FakeOp::person(tidy_item_without("LOG_LEVEL"));
+    let _on = activate();
+    read_for(&fleet(), &ReadScope::Whole, "dev", &op).unwrap();
+    assert!(
+        op.notes()
+            .contains("still needs a value in 1Password (dev): api/LOG_LEVEL"),
+        "{}",
+        op.notes()
+    );
+}
+
+#[test]
+fn an_unscoped_read_is_unchanged() {
+    let today = FakeOp::person(a_tidy_item());
+    let whole = FakeOp::person(a_tidy_item());
+    let _on = activate();
+    read(&two_boundary_fleet(), "dev", &today).unwrap();
+    read_for(&two_boundary_fleet(), &ReadScope::Whole, "dev", &whole).unwrap();
+    assert_eq!(*whole.calls.borrow(), *today.calls.borrow());
 }

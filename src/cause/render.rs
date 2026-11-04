@@ -691,6 +691,9 @@ fn io_words(io: IoKind) -> &'static str {
         IoKind::NotAPlainFile => {
             "it is a symbolic link or another kind of file, and opv writes only a plain file there"
         }
+        IoKind::BrokenPipe => "the reader of the pipe is gone",
+        IoKind::NoSpace => "no space left on the device",
+        IoKind::WouldBlock => "it stayed full until the time budget ran out",
         IoKind::Other => "an input or output error",
     }
 }
@@ -2627,7 +2630,21 @@ impl Cause {
                     format!("the source items of environment {env} changed since the last sync")
                 }
             }
-            LocalIo { op, path, io } => {
+            // FR-64: the command's own outcome first, so a write that happened never
+            // looks undone.
+            LocalIo {
+                io,
+                delivery: Some(d),
+                ..
+            } => format!(
+                "{} finished ({}); its JSON report could not be written to standard output ({}, {} of {} bytes written)",
+                d.command,
+                d.outcome,
+                io_words(*io),
+                d.bytes_written,
+                d.bytes
+            ),
+            LocalIo { op, path, io, .. } => {
                 if path.as_os_str().is_empty() {
                     format!("opv could not {}: {}", local_op(*op), io_words(*io))
                 } else {
@@ -4765,7 +4782,7 @@ impl Cause {
                 )),
                 Next::Rerun,
             ),
-            LocalIo { op, path, io: _ } => plan(
+            LocalIo { op, path, .. } => plan(
                 inspect(match op {
                     LocalOp::Stdout => {
                         "check where standard output goes (a closed pipe, a full disk)".to_string()
@@ -5069,6 +5086,7 @@ pub fn category(exit_code: i32) -> &'static str {
         8 => "findings",
         9 => "unknown",
         EXIT_INTERNAL => "internal",
+        EXIT_STDOUT => "output",
         n if n > 128 => "interrupted",
         _ => "unknown",
     }

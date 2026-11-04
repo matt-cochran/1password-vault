@@ -299,7 +299,8 @@ revision is minted when every name is written, identical, carried or attested.
 | `delivery verify` | `verified` (`"supplied": true`; means "unchanged since supplied", not "current"), `drifted_on_target`, `missing_on_target`; never `source_changed` |
 | `inventory`, `opv_state` | value state `supplied`, the 8th word of the guided-setup §3.3 |
 | `explain p/K` | "supplied at sync; never stored", with last delivery time, serial and last rotation per placement |
-| `opv run` in a target environment | does not inject the key; prints one note naming it |
+| `opv run` in a target environment | does not inject the key; prints one note naming it. Since 0.17.3 (#264) it does not clear the name from the inherited environment either: a value the parent sets reaches the child as given, with one names-only note, `taken from the environment as given (supplied at sync, never stored in 1Password): …`. A name some product stores is still cleared |
+| `opv run --preview`, `opv_state` `delivery_preview` | leaves the key out of `keys` and names it under `supplied_at_sync` (omitted when empty); text: `supplied at sync (not injected): …` |
 
 ## 7. Identity
 

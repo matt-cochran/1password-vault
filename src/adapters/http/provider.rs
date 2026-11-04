@@ -89,6 +89,10 @@ impl Provider for HttpProvider {
         "http"
     }
 
+    fn system(&self) -> crate::cause::System {
+        crate::cause::System::Https
+    }
+
     fn label(&self) -> &'static str {
         "HTTPS"
     }

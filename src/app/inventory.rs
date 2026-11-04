@@ -630,6 +630,7 @@ fn read_receipt(path: &Path) -> Result<ReceiptView, Error> {
             op: LocalOp::Read,
             path: path.to_path_buf(),
             io: e.kind().into(),
+            delivery: None,
         })
     })?;
     let doc: Value = serde_json::from_str(&text).map_err(|e| {

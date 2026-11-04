@@ -70,7 +70,9 @@ Exit codes:
   7 authentication, 8 findings (status, plan, ready --gate),
   9 outcome unknown (a change may or may not have been applied) or provider
   unavailable; safe to re-run,
+  10 source changed (opv changed: the next step is the sync),
   70 internal error (an opv bug; please report it),
+  74 standard output could not be written (a --json document lost; safe to re-run),
   128 + signal when interrupted (130 Ctrl-C, 143 SIGTERM, 129 SIGHUP, 131 SIGQUIT);
   safe to re-run.
   `run` exits with the command's own exit code.
@@ -2042,6 +2044,10 @@ fn main() -> ExitCode {
     // check` with only "run opv login"). Never for --json, scripts, CI or a service
     // account, and never for login and setup, which sign in themselves.
     let may_sign_in = json.is_none() && !matches!(cli.cmd, Cmd::Login { .. } | Cmd::Setup { .. });
+    // `opv login -- opv … --json` that succeeds: its child wrote its own document.
+    let child_writes_document = matches!(cli.cmd, Cmd::Login { .. });
+    // A full non-blocking stdout is waited on within the run's own budget (FR-64).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(cli.timeout);
     let mut first = Some(cli);
     let mut signed_in = false;
     let res = loop {
@@ -2082,13 +2088,41 @@ fn main() -> ExitCode {
         }
         break res;
     };
-    if let Some(raw) = json {
+    let mut res = res;
+    let child_wrote = child_writes_document && res.is_ok() && body.is_empty();
+    if let (Some(raw), false) = (json, child_wrote) {
+        // FR-64 (#265): exactly one document, or a non-zero exit that says why. A success
+        // that wrote no document is opv's bug (exit 70), and a document that cannot be
+        // written is `local_io_failed` (exit 74), never an empty stdout at exit 0.
+        if res.is_ok() && !opv::json::is_document(&body, raw) {
+            res = Err(opv::json::no_document());
+        }
         let inv = render.inv.clone().unwrap_or_else(opv::error::invocation);
         let framed = match &res {
             Err(e) => opv::json::finish_with(&body, Err(e), raw, &inv, render.verbose),
             Ok(_) => opv::json::finish(&body, Ok(()), raw),
         };
-        let _ = opv::output::OutputGuard::new(&mut stdout).write_all(&framed);
+        let outcome = match &res {
+            Ok(0) => opv::cause::CommandOutcome::Ok,
+            Ok(code) => opv::cause::CommandOutcome::Exit(*code),
+            Err(e) => opv::cause::CommandOutcome::Exit(e.exit_code()),
+        };
+        // Not through `PipeSafe`: under --json a reader that has gone loses the document.
+        match opv::stdout_sink::deliver(&framed, deadline) {
+            // The diagnostic #265's reporter re-runs with: size and shape only (NR-22).
+            Ok(n) if render.verbose => {
+                let _ = writeln!(
+                    opv::output::stderr(),
+                    "stdout: one JSON document, {n} bytes, delivered"
+                );
+            }
+            Ok(_) => {}
+            Err(lost) => {
+                res = Err(lost
+                    .cause(inv.command.join(" "), outcome, framed.len() as u64)
+                    .into());
+            }
+        }
     }
     let _ = stdout.flush();
     match res {
@@ -3439,6 +3473,7 @@ fn local_io(op: opv::cause::LocalOp, kind: io::ErrorKind) -> Error {
         op,
         path: PathBuf::new(),
         io: kind.into(),
+        delivery: None,
     }
     .into()
 }
@@ -5356,6 +5391,7 @@ fn mcp_serve(project: &std::path::Path) -> Result<i32, Error> {
             op,
             path: PathBuf::new(),
             io: opv::cause::IoKind::Other,
+            delivery: None,
         })
     };
     let project = project
