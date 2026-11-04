@@ -220,6 +220,10 @@ impl Provider for AzureProvider {
         "azure"
     }
 
+    fn system(&self) -> crate::cause::System {
+        crate::cause::System::Azure
+    }
+
     fn label(&self) -> &'static str {
         "Azure"
     }

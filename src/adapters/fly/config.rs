@@ -100,6 +100,10 @@ impl Provider for FlyProvider {
         "fly"
     }
 
+    fn system(&self) -> crate::cause::System {
+        crate::cause::System::Fly
+    }
+
     fn label(&self) -> &'static str {
         "Fly"
     }
