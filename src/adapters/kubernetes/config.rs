@@ -244,6 +244,10 @@ impl Provider for KubernetesProvider {
         "kubernetes"
     }
 
+    fn system(&self) -> crate::cause::System {
+        crate::cause::System::Kubernetes
+    }
+
     fn label(&self) -> &'static str {
         "Kubernetes"
     }

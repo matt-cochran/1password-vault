@@ -2290,6 +2290,9 @@ fn provider_named(src: &str) -> Option<String> {
         // The GitHub provider by its module and target type; plain "GitHub" stays allowed
         // (CI detection, documentation links).
         "githubtarget",
+        // The HTTP provider by its module and target type; plain "HTTP" stays allowed
+        // (the protocol, documentation links).
+        "httpprovider",
         // Store kinds and bindings (FR-39): core sees only `StoreConfig`.
         "azure_key_vault",
         "external-secrets",
@@ -2297,7 +2300,7 @@ fn provider_named(src: &str) -> Option<String> {
         "clustersecretstores?",
     ];
     let re = regex::Regex::new(&format!(
-        r"(?i)\b({})\b|\b(az|gh)\s|\bgithub::",
+        r"(?i)\b({})\b|\b(az|gh)\s|\bgithub::|\bhttp::",
         words.join("|")
     ))
     .unwrap();
@@ -2357,6 +2360,14 @@ fn guard_flags_a_provider_named_after_a_test_block() {
 fn guard_ignores_a_provider_named_in_a_test_item() {
     let src = "fn f() {}\n#[cfg(test)]\n#[test]\nfn t() { let _ = \"fly\"; }\n";
     assert_eq!(provider_named(src), None);
+}
+
+/// The guard flags the HTTP adapter's module (FR-37).
+#[cfg(test)]
+#[test]
+fn guard_flags_a_source_naming_the_http_adapter() {
+    let src = "fn f() -> &'static dyn Provider { &crate::adapters::http::PROVIDER }\n";
+    assert_eq!(provider_named(src).as_deref(), Some("http::"));
 }
 
 #[cfg(test)]

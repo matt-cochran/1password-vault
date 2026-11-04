@@ -114,6 +114,9 @@ impl Provider for GithubProvider {
     fn section(&self) -> &'static str {
         "github"
     }
+    fn system(&self) -> crate::cause::System {
+        crate::cause::System::GitHub
+    }
     fn label(&self) -> &'static str {
         "GitHub"
     }
