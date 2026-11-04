@@ -14,7 +14,7 @@ use crate::domain::convention::KEPT_SECTION;
 use crate::host::FakeEnv;
 use crate::runner::{Call, Outcome, Output};
 
-const MARKER: &str = "TIDYMARKER";
+pub(crate) const MARKER: &str = "TIDYMARKER";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Edit {
@@ -31,7 +31,7 @@ enum Edit {
 
 type Editor = fn(&mut Value);
 
-struct FakeOp {
+pub(crate) struct FakeOp {
     item: RefCell<Value>,
     user_type: &'static str,
     edit: Cell<Edit>,
@@ -46,8 +46,10 @@ struct FakeOp {
     /// What `op item edit` echoes: the item as written (op's behaviour) or nothing.
     echo: Cell<bool>,
     calls: RefCell<Vec<(Vec<String>, Vec<u8>)>>,
-    notes: RefCell<Vec<String>>,
-    child_env: RefCell<Vec<(String, String)>>,
+    pub(crate) notes: RefCell<Vec<String>>,
+    pub(crate) child_env: RefCell<Vec<(String, String)>>,
+    /// The names `run` asked to remove from the inherited environment.
+    pub(crate) removed: RefCell<Vec<String>>,
 }
 
 impl FakeOp {
@@ -64,10 +66,11 @@ impl FakeOp {
             calls: RefCell::default(),
             notes: RefCell::default(),
             child_env: RefCell::default(),
+            removed: RefCell::default(),
         }
     }
 
-    fn person(item: Value) -> Self {
+    pub(crate) fn person(item: Value) -> Self {
         Self::new(item, "USER")
     }
 
@@ -78,7 +81,7 @@ impl FakeOp {
         ));
     }
 
-    fn count(&self, prefix: &[&str]) -> usize {
+    pub(crate) fn count(&self, prefix: &[&str]) -> usize {
         self.calls
             .borrow()
             .iter()
@@ -86,11 +89,11 @@ impl FakeOp {
             .count()
     }
 
-    fn edits(&self) -> usize {
+    pub(crate) fn edits(&self) -> usize {
         self.count(&["item", "edit"])
     }
 
-    fn notes(&self) -> String {
+    pub(crate) fn notes(&self) -> String {
         self.notes.borrow().join("\n")
     }
 
@@ -223,8 +226,9 @@ impl CommandRunner for FakeOp {
         program: &str,
         args: &[&str],
         env: &[(&str, &str)],
-        _remove: &[String],
+        remove: &[String],
     ) -> io::Result<i32> {
+        self.removed.borrow_mut().extend(remove.iter().cloned());
         self.run_inherited(program, args, env)
     }
 }
@@ -285,10 +289,10 @@ environments = ["dev"]
 }
 
 /// (section label or "" for top level, label, type, value).
-type F<'a> = (&'a str, &'a str, &'a str, &'a str);
+pub(crate) type F<'a> = (&'a str, &'a str, &'a str, &'a str);
 
 /// `op item get --format json` output for `fields` (D0 shape).
-fn item(fields: &[F<'_>]) -> Value {
+pub(crate) fn item(fields: &[F<'_>]) -> Value {
     let mut sections: Vec<Value> = Vec::new();
     let mut fs = vec![
         json!({"id": "notesPlain", "type": "STRING", "purpose": "NOTES", "label": "notesPlain"}),
