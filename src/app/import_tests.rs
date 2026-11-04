@@ -721,3 +721,303 @@ fn no_infrastructure_refusal_or_plan_shows_the_value() {
     );
     assert!(!shown.contains("S7MARKER"), "{shown}");
 }
+
+// D10: one checked writer (design `owner-value-ingestion.md` §4.6, §10.2 tests 12-17) ------
+
+/// The dev environment and the api boundary of [`world`].
+fn dev_api(fleet: &Fleet) -> (&crate::domain::Environment, &Boundary) {
+    (
+        fleet.environment("dev").unwrap(),
+        fleet.boundary("dev", "api").unwrap(),
+    )
+}
+
+/// The one write of the design tests: api/OPENAI_API_KEY := MARK_NEW.
+fn new_key() -> (String, String, SecretValue) {
+    (
+        "api".to_string(),
+        "OPENAI_API_KEY".to_string(),
+        SecretValue::new(MARK_NEW.to_string()),
+    )
+}
+
+/// The command a write names on a read-back failure.
+fn by() -> Cmd {
+    Cmd {
+        command: vec!["import".into()],
+        args: vec!["dev".into()],
+    }
+}
+
+/// `write_item` of [`new_key`] into [`world`]'s api item, with `expected` (S0).
+fn write_new_key(
+    op: &dyn CommandRunner,
+    fleet: &Fleet,
+    expected: Option<&Expected<'_>>,
+) -> Result<Written, Error> {
+    let (env, b) = dev_api(fleet);
+    let w = new_key();
+    write_item(fleet, env, b, &[&w], None, &by(), expected, op)
+}
+
+/// The item as a caller planned on it (S0): its layout and stamp.
+fn read_s0(op: &FakeOp, fleet: &Fleet) -> (convention::Layout, onepassword_tidy::Stamp) {
+    let (env, b) = dev_api(fleet);
+    let item = onepassword::read_whole_fresh(op, env, b).unwrap();
+    onepassword_tidy::parse(item.raw()).unwrap()
+}
+
+/// Someone else sets api/OPENAI_API_KEY in the 1Password app: the version moves on.
+fn change_member_elsewhere(op: &FakeOp, id: &str) {
+    for i in op.items.borrow_mut().iter_mut() {
+        if i["id"] == id {
+            i["fields"][0]["value"] = serde_json::json!("sk-proj-set-elsewhere");
+        }
+    }
+    op.bump(id);
+}
+
+fn members() -> Vec<(String, String)> {
+    vec![("api".to_string(), "OPENAI_API_KEY".to_string())]
+}
+
+fn item_edits(op: &FakeOp) -> usize {
+    op.count(&["op", "item", "edit"])
+}
+
+/// Test 12: an edit landing together with opv's is reported, and opv's fields still verify.
+#[test]
+fn an_edit_racing_the_write_is_reported_as_a_concurrent_edit() {
+    let (op, fleet, _dir) = world(false);
+    op.racing_edit.set(Some(1));
+    let written = write_new_key(&op, &fleet, None).unwrap();
+    assert!(written.concurrent_edit);
+}
+
+#[test]
+fn a_quiet_write_is_not_a_concurrent_edit() {
+    let (op, fleet, _dir) = world(false);
+    let written = write_new_key(&op, &fleet, None).unwrap();
+    assert!(!written.concurrent_edit);
+}
+
+/// Test 13: a member changed between the caller's read (S0) and the writer's (S1).
+#[test]
+fn a_member_changed_since_the_planned_read_is_changed_before_write() {
+    let (op, fleet, _dir) = world(false);
+    let (seen, stamp) = read_s0(&op, &fleet);
+    change_member_elsewhere(&op, &boundary_item(&fleet, "api"));
+    let members = members();
+    let expected = Expected {
+        stamp: &stamp,
+        seen: &seen,
+        members: &members,
+    };
+    let e = write_new_key(&op, &fleet, Some(&expected)).unwrap_err();
+    assert_eq!(e.code_str(), "item_changed");
+}
+
+#[test]
+fn a_member_changed_since_the_planned_read_makes_no_edit() {
+    let (op, fleet, _dir) = world(false);
+    let (seen, stamp) = read_s0(&op, &fleet);
+    change_member_elsewhere(&op, &boundary_item(&fleet, "api"));
+    let members = members();
+    let expected = Expected {
+        stamp: &stamp,
+        seen: &seen,
+        members: &members,
+    };
+    let _ = write_new_key(&op, &fleet, Some(&expected));
+    assert_eq!(item_edits(&op), 0);
+}
+
+/// Test 14: an unrelated field changed between S0 and S1: re-planned on S1, one edit.
+#[test]
+fn an_unrelated_change_since_the_planned_read_is_written_in_one_edit() {
+    let (op, fleet, _dir) = world(false);
+    let (seen, stamp) = read_s0(&op, &fleet);
+    op.edit_elsewhere(&boundary_item(&fleet, "api"), "edited elsewhere");
+    let members = members();
+    let expected = Expected {
+        stamp: &stamp,
+        seen: &seen,
+        members: &members,
+    };
+    write_new_key(&op, &fleet, Some(&expected)).unwrap();
+    assert_eq!(item_edits(&op), 1);
+}
+
+/// The fake `op` whose `item edit` reply is lost (the outcome is unknown): the edit is
+/// applied first when `applied`. Records the person's notes.
+struct LostEdit<'a> {
+    op: &'a FakeOp,
+    applied: bool,
+    notes: std::cell::RefCell<Vec<String>>,
+}
+
+impl<'a> LostEdit<'a> {
+    fn new(op: &'a FakeOp, applied: bool) -> Self {
+        Self {
+            op,
+            applied,
+            notes: std::cell::RefCell::default(),
+        }
+    }
+}
+
+impl CommandRunner for LostEdit<'_> {
+    fn read(
+        &self,
+        call: &crate::runner::Call,
+        refused: &[i32],
+    ) -> std::io::Result<crate::runner::Outcome> {
+        self.op.read(call, refused)
+    }
+
+    fn write(&self, call: &crate::runner::Call) -> std::io::Result<crate::runner::Outcome> {
+        if !call.args.starts_with(&["item", "edit"]) {
+            return self.op.write(call);
+        }
+        if self.applied {
+            self.op.write(call)?;
+        }
+        Ok(crate::runner::Outcome::Unknown {
+            reason: "lost",
+            status: None,
+        })
+    }
+
+    fn probe(
+        &self,
+        call: &crate::runner::Call,
+        limit: std::time::Duration,
+    ) -> std::io::Result<Output> {
+        self.op.probe(call, limit)
+    }
+
+    fn pause(&self, _d: std::time::Duration, _note: &str) {}
+
+    fn note(&self, line: &str) {
+        self.notes.borrow_mut().push(line.to_string());
+    }
+
+    fn run_inherited(&self, _: &str, _: &[&str], _: &[(&str, &str)]) -> std::io::Result<i32> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+}
+
+/// Test 15: the edit landed but its reply was lost: the final fresh read proves it.
+#[test]
+fn a_lost_reply_whose_edit_landed_is_a_verified_write() {
+    let (op, fleet, _dir) = world(false);
+    let lost = LostEdit::new(&op, true);
+    assert!(write_new_key(&lost, &fleet, None).is_ok());
+}
+
+/// Test 16: the edit's reply was lost and nothing landed: not written, safe to re-run.
+#[test]
+fn a_lost_reply_whose_edit_did_not_land_says_not_written() {
+    let (op, fleet, _dir) = world(false);
+    let lost = LostEdit::new(&op, false);
+    let _ = write_new_key(&lost, &fleet, None);
+    assert!(
+        lost.notes
+            .borrow()
+            .iter()
+            .any(|n| n.contains("not written; safe to re-run")),
+        "{:?}",
+        lost.notes.borrow()
+    );
+}
+
+#[test]
+fn a_lost_reply_whose_edit_did_not_land_stays_an_unknown_outcome() {
+    let (op, fleet, _dir) = world(false);
+    let lost = LostEdit::new(&op, false);
+    let e = write_new_key(&lost, &fleet, None).unwrap_err();
+    assert_eq!(e.code_str(), "outcome_unknown");
+}
+
+/// Test 17: the shared writer `opv set` and `opv generate` use (no expected stamp) still
+/// makes exactly one edit on a quiet item.
+#[test]
+fn a_write_without_an_expected_stamp_makes_exactly_one_edit_on_a_quiet_item() {
+    let (op, fleet, _dir) = world(false);
+    let env = fleet.environment("dev").unwrap();
+    write_values(&fleet, env, &[new_key()], &by(), &op).unwrap();
+    assert_eq!(item_edits(&op), 1);
+}
+
+#[test]
+fn a_written_value_is_never_in_an_item_edit_argv() {
+    let (op, fleet, _dir) = world(false);
+    write_new_key(&op, &fleet, None).unwrap();
+    assert!(
+        !op.calls
+            .borrow()
+            .iter()
+            .any(|c| c.args.iter().any(|a| a.contains(MARK_NEW)))
+    );
+}
+
+// §5.6: a set member is written only by `opv provision` ---------------------------------
+
+/// [`world`] (empty item) whose api/OPENAI_API_KEY is the member of the set `grant`.
+fn set_world() -> (FakeOp, Fleet, tempfile::TempDir) {
+    let (op, _, dir) = world(true);
+    let id = op.items.borrow()[0]["id"].as_str().unwrap().to_string();
+    let fleet = crate::config::parse(&format!(
+        "[environments.dev]\nboundaries.api = {{ vault_id = \"vdev0000000000000000000001\", \
+         item_id = \"{id}\" }}\n[products.api.keys.OPENAI_API_KEY]\nkind = \"secret\"\n\
+         environments = [\"dev\"]\n\
+         [products.api.keys.LOG_LEVEL]\nkind = \"config\"\nenvironments = [\"dev\"]\n\
+         [sets.grant]\nenvironments = [\"dev\"]\n\
+         members = {{ \"api/OPENAI_API_KEY\" = {{ generate = {{ hex_bytes = 32 }} }} }}\n"
+    ))
+    .unwrap();
+    (op, fleet, dir)
+}
+
+fn guard_of(e: &Error) -> serde_json::Value {
+    let doc = crate::error::document(e, &crate::error::invocation(), false);
+    doc["subject"]["guard"]["guard"].clone()
+}
+
+#[test]
+fn importing_a_set_member_is_refused_as_a_set_member() {
+    let (op, fleet, dir) = set_world();
+    let e = run(&fleet, "dev", &opts(&dir, false, &[]), &op, &mut Vec::new()).unwrap_err();
+    assert_eq!(guard_of(&e), "set_member");
+}
+
+#[test]
+fn a_refused_set_member_import_makes_no_edit() {
+    let (op, fleet, dir) = set_world();
+    let _ = run(&fleet, "dev", &opts(&dir, false, &[]), &op, &mut Vec::new());
+    assert_eq!(item_edits(&op), 0);
+}
+
+#[test]
+fn a_dry_run_naming_a_set_member_is_refused_as_a_set_member() {
+    let (op, fleet, dir) = set_world();
+    let e = run(&fleet, "dev", &opts(&dir, true, &[]), &op, &mut Vec::new()).unwrap_err();
+    assert_eq!(guard_of(&e), "set_member");
+}
+
+#[test]
+fn replacing_a_set_member_is_refused_as_a_set_member() {
+    let (op, fleet, dir) = set_world();
+    let o = opts(&dir, true, &["api/OPENAI_API_KEY"]);
+    let e = run(&fleet, "dev", &o, &op, &mut Vec::new()).unwrap_err();
+    assert_eq!(guard_of(&e), "set_member");
+}
+
+#[test]
+fn skipping_the_set_member_imports_the_other_keys() {
+    let (op, fleet, dir) = set_world();
+    let mut o = opts(&dir, false, &[]);
+    o.skip = vec!["api/OPENAI_API_KEY".into()];
+    run(&fleet, "dev", &o, &op, &mut Vec::new()).unwrap();
+    assert_eq!(value_of(&op, &fleet, "LOG_LEVEL"), "info");
+}
