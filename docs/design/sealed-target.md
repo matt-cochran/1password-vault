@@ -632,6 +632,92 @@ An advisory ignore is global. The `[bans]` wrapper makes `cargo deny` fail if an
 brings in `p256`, which could make the timing path reachable. Recipients are parsed only with
 `age::x25519::Recipient::from_str`.
 
+### 6.5 S0 findings (spike, 2026-11-04): **GO**
+
+Lane S0 ran on `v0180/st-s0`. All four conditions hold, so the sealed slice stays in 0.18.0.
+
+**1. API fit: holds.** `tests/sealed_kat.rs` (8 tests) runs against stock-tool fixtures in
+`tests/fixtures/sealed/kat/`.
+
+- age:
+  - `Decryptor::new(ArmoredReader::new(..))`, then `decrypt` with one `x25519::Identity`,
+    decrypts a ciphertext made by the `age` 1.1.1 CLI (`age -a -r`).
+  - `is_scrypt()` lets opv refuse a passphrase stanza before decrypting.
+  - `Encryptor::with_recipients` over `ArmoredWriter` (`Format::AsciiArmor`) round-trips, and
+    the armor is LF only.
+  - A different identity is refused.
+- ssh-key:
+  - `PublicKey::verify("opv-sealed", ..)` accepts an `ssh-keygen -Y sign -n opv-sealed`
+    signature, which carries `HashAlg::Sha512`.
+  - It refuses a wrong namespace and a changed message.
+  - `PrivateKey::sign` in process gives an SSHSIG **byte-identical** to `ssh-keygen`'s.
+    Ed25519 is deterministic.
+- `allowed_signers`: the strict-subset line `prod namespaces="opv-sealed" ssh-ed25519 <b64>
+  <comment>` behaves as follows under `ssh-keygen -Y verify`:
+  - accepted with `-I prod`;
+  - refused with `-I staging`;
+  - refused with `-n git`.
+
+  This is the T1/T13 KAT that B2's parser must match.
+- Features used:
+  - `age 0.12.1` with `default-features = false, features = ["armor"]`, so no `ssh`,
+    `plugin`, `async` or `cli-common`;
+  - `ssh-key 0.6.7` with `default-features = false, features = ["ed25519", "alloc", "std"]`,
+    so no ECDSA, RSA or DSA, and no `encryption`, because 1Password returns the key
+    unencrypted.
+
+  `zeroize` was already a dependency.
+
+**2. `cargo deny check`: passes.** The result is `advisories ok, bans ok, licenses ok,
+sources ok`.
+
+- The two ignores in §6.4 are in `deny.toml`. Each has a reason, and each states an expiry of
+  2027-02-01 in its reason and comment.
+- cargo-deny 0.20 has no expiry field, so the date is a review commitment, not enforced.
+- **The fence was checked to bite.** With `ssh-key`'s `p256` feature switched on, `cargo deny
+  check bans` fails with `crate 'p256 = 0.13.2' is explicitly banned` and `direct parent
+  'ssh-key' … was not marked as a wrapper`. The change was then reverted.
+- There are new `multiple-versions` warnings (`digest`, `sha2`, `hybrid-array`, `base64`,
+  `thiserror`, `toml` and others). They are warnings only.
+
+**3. Crate count: about 100, not ~87.** The count is the `cargo tree -e normal,build`
+difference, and covers what the target builds, not the lockfile:
+
+| Target | Before | After | Added |
+|---|---|---|---|
+| `x86_64-unknown-linux-gnu` | 167 | 268 | 101 |
+| `x86_64-pc-windows-msvc` | 162 | 265 | 103 |
+
+- `Cargo.lock` gains 115 packages. It also lists optional dependencies that are not built,
+  such as `rsa`, `p384` and `p521` under `ssh-key`.
+- The added crates are the ones §6.4 lists: the fluent/i18n stack, `scrypt`, `ml-kem`,
+  `kem 0.3.0-pre.0`, `p256` and `hpke`.
+- The release binary-size delta was not re-measured. With the crates unused, the linker drops
+  them, so a measurement now would mean nothing. §6.4's 0.8 MB stands until B2 wires them in.
+
+**4. T16: answered from documentation; one live check is left for P2.**
+
+- **`op` 2.40.0's own help** (`op read --help`) documents
+  `op read "op://<vault>/<item>/private key?ssh-format=openssh"` for the OpenSSH form. Without
+  the parameter, `op` returns PKCS#8 (`-----BEGIN PRIVATE KEY-----`).
+- **`op item get --format json`:** the `private_key` field (type `SSHKEY`) holds PKCS#8 PEM in
+  `value`, and the OpenSSH PEM in `ssh_formats.openssh.value`.
+  - 1Password's published docs do not show this JSON shape. It comes from a third-party
+    consumer of `op` (Ansible `community.general.onepassword_ssh_key`, which reads both).
+  - It was **not** confirmed on a live item, by rule.
+  - P2's sim fixture and first live run must confirm the field path.
+- **Parse paths:**
+  - **Preferred:** take `ssh_formats.openssh.value`, or the field read with
+    `?ssh-format=openssh`, and parse it with `PrivateKey::from_openssh`. Refuse
+    `is_encrypted()`.
+  - **Fallback for PKCS#8:** RFC 8410 ed25519 PKCS#8 is a fixed 48-byte DER, made of the
+    16-byte prefix `302e020100300506032b657004220420` and the 32-byte seed. Then use
+    `Ed25519Keypair::from_seed`.
+    - The KAT proves that this gives the same public key as the OpenSSH form.
+    - It needs no extra crate.
+    - Anything else (another length or prefix, or an RSA key) is
+      `input_invalid { field: "private key" }`.
+
 ## 7. Keys, identity and the permission model
 
 ### 7.1 Where each key lives

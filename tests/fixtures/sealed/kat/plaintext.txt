@@ -1,0 +1,1 @@
+OPV_SEALED_KAT=not-a-secret-test-fixture

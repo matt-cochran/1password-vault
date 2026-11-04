@@ -51,6 +51,13 @@ subtle = "2"
 getrandom = "0.4"
 rpassword = "7.5"
 clap_complete = "4.6"
+# The sealed target (design sealed-target §6, D2, #271): age for encryption to X25519
+# recipients only (no `ssh`, `plugin`, `async` or `cli-common`; `armor` for the bundle's
+# ASCII block), and SSHSIG ed25519 signing and verification in process (`ssh-key`, no
+# default features: no ECDSA/RSA/DSA, no key encryption; 1Password returns the key
+# unencrypted). `deny.toml` fences the p256 that age and hpke always bring.
+age = { version = "0.12.1", default-features = false, features = ["armor"] }
+ssh-key = { version = "0.6.7", default-features = false, features = ["ed25519", "alloc", "std"] }
 ratatui = { version = "0.30", optional = true, default-features = false, features = ["crossterm"] }
 crossterm = { version = "0.29", optional = true }
 

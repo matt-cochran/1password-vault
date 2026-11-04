@@ -1,0 +1,4 @@
+# TEST FIXTURE ONLY - obviously fake opv-sealed KAT identity; never use for real data.
+# created: 2026-11-04T18:03:09-05:00
+# public key: age1xlat04nuqwds8wyugdtxywsphgyy87wkuw9yee5gn5044a8569vs3qn5qc
+AGE-SECRET-KEY-1ZWMAJU0XPN23TYNGZCRJTJH6KCCGCQCZVXRZHUF8H0CHVJG35PCQN4PZ58
