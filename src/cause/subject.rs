@@ -80,12 +80,30 @@ pub enum AccountRef {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "from", rename_all = "snake_case")]
 pub enum AccountSource {
-    DotOpv { path: PathBuf },
-    EnvVar { var: VarName },
+    DotOpv {
+        path: PathBuf,
+    },
+    EnvVar {
+        var: VarName,
+    },
     Flag,
-    Environment { env: EnvName },
+    Environment {
+        env: EnvName,
+    },
+    /// The configuration's own `account`, which every environment agrees on: like `.opv`,
+    /// the project records it, so `opv login` finds it without `--account` (FR-40).
+    Configuration,
     OpDefault,
     Argument,
+}
+
+impl AccountSource {
+    /// True when the project itself records the account (`.opv`, or the configuration's
+    /// `account`), so a sign-in step need not name it (FR-40 amended, design
+    /// agent-signin-readiness §2.4 item 6).
+    pub fn recorded_by_project(&self) -> bool {
+        matches!(self, Self::DotOpv { .. } | Self::Configuration)
+    }
 }
 
 /// An external system opv talks to (each has one diagnosis strategy, §5).
@@ -161,9 +179,18 @@ pub enum ConfigSource {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "via", rename_all = "snake_case")]
 pub enum GivenBy {
-    Flag { flag: String },
-    EnvVar { var: VarName },
+    Flag {
+        flag: String,
+    },
+    EnvVar {
+        var: VarName,
+    },
     Discovered,
+    /// The `config = "<path>"` line of this `.opv` named it (FR-66); the path in the
+    /// cause is that line's file, resolved against the `.opv`'s folder.
+    DotOpv {
+        path: PathBuf,
+    },
 }
 
 /// What kind of declared name a `NotDeclared`/`Ambiguous` is about.

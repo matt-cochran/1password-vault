@@ -499,7 +499,7 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
         "conventions": {
             "json": "with --json (and always for schema and config export <env>) stdout is one JSON document; human text goes to stderr",
             "ok": "true on success; false on failure, with exit_code and error",
-            "next": "{kind (run|apply|enter_value|authorize|wait_ci|none), actor (assistant|person|ci), command or null}: what runs next; on failure always set",
+            "next": "{kind (run|apply|enter_value|authorize|wait_ci|choose|none), actor (assistant|person|ci), command or null, argv?, reach?, choices?}: what runs next; on failure always set. argv (schema 4): the exact words to exec, present only when built from a typed opv command (ready, account list, and the session and account errors: op_not_signed_in, account_not_registered, account_required, account_ambiguous, own_session_required, credential_rejected); never present for a placeholder (-- <command>), a vendor command or an MCP call, and never parsed from command; a missing argv reads as null. choose: a person picks one of choices [{account {account_id, shorthand, email, address, signed_in}, steps [{kind, actor, effect (writes_config|signs_in|reads), command, argv?, do?}]}], then that choice's steps run in order; command is null, there are always two or more, and opv never picks one. reach (app|shell|none): how far this process reaches a 1Password session; with none the person's own run is the check",
             "do": "what to do before `next`, or null; shown before next. Only a person can do it when human_required is true (fill a value in 1Password, approve, sign in)",
             "retry": "safe: re-run the same command now; after_fix: re-run it once `do` is done; never: run `next` instead",
             "human_required": "true when an agent must hand `do` and `next` to the user instead of acting",
@@ -509,7 +509,7 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
             "plan_id": "plan --json prints plan_id when the plan is clean; it covers exactly the targets planned (every target of the environment, or those --target names); sync --expect-plan <plan_id> applies exactly that plan to the same targets or fails with stale_plan (exit 6) and changes nothing",
             "targets": "status, plan and sync cover every target of the environment in name order, or only those --target names (repeatable); every row and key reference names its target",
             "run": "run always passes op:// references to op run, so op run masks values in the child's output; a value needing a fix a person's tidy would make is warned about on stderr, never injected",
-            "schema_version": "3 since 0.12.0 (next became the typed {kind, actor, command} object); stays 3 while fields are only added; changes when a field changes meaning",
+            "schema_version": "4 since 0.18.0 (next gained argv, reach, choices and the kind choose); 3 from 0.12.0 (next became the typed {kind, actor, command} object); changes when a field changes meaning or a closed set grows",
         },
         "global_flags": global,
         "commands": commands,

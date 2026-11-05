@@ -2360,7 +2360,20 @@ fn core_access_raises_single_writer_for_the_vault_with_one_writer() {
 /// Every `Cause` variant and the fields its document's `subject` holds (`seen` and the
 /// `cause` tag are never shown), read from `src/cause/mod.rs`.
 fn variants() -> &'static BTreeMap<String, BTreeSet<String>> {
-    static V: OnceLock<BTreeMap<String, BTreeSet<String>>> = OnceLock::new();
+    &variant_fields().0
+}
+
+/// Each variant's fields serde leaves out when empty (`skip_serializing_if`): a subject may
+/// show them or not.
+fn optional_fields() -> &'static BTreeMap<String, BTreeSet<String>> {
+    &variant_fields().1
+}
+
+/// Each variant's always-shown fields, and its fields shown only when set.
+type Fields = BTreeMap<String, BTreeSet<String>>;
+
+fn variant_fields() -> &'static (Fields, Fields) {
+    static V: OnceLock<(Fields, Fields)> = OnceLock::new();
     V.get_or_init(|| {
         let src = std::fs::read_to_string(Path::new(ROOT).join("src/cause/mod.rs"))
             .expect("src/cause/mod.rs");
@@ -2368,20 +2381,37 @@ fn variants() -> &'static BTreeMap<String, BTreeSet<String>> {
         let field = re(r"^(?:pub\s+)?([a-z_][a-z0-9_]*)\s*:");
         let variant = re(r"^([A-Z][A-Za-z0-9]*)\s*(\{)?");
         let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut optional: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut current = String::new();
         let mut depth = 0i32;
         let mut skip_field = false;
+        let mut optional_field = false;
         for line in src[start..].lines() {
             let l = line.trim();
             if l.is_empty() || l.starts_with("//") {
                 continue;
             }
             if l.starts_with('#') {
-                // A field serde does not serialize is not part of the subject.
-                if l.starts_with("#[serde(skip") {
+                // A field serde does not serialize is not part of the subject; one it skips
+                // only when empty may be.
+                if l.starts_with("#[serde(skip_serializing_if") {
+                    optional_field = true;
+                } else if l.starts_with("#[serde(skip") {
                     skip_field = true;
                 }
                 continue;
+            }
+            if optional_field {
+                optional_field = false;
+                if depth == 1
+                    && let Some(c) = field.captures(l)
+                {
+                    optional
+                        .entry(current.clone())
+                        .or_default()
+                        .insert(c[1].to_string());
+                    continue;
+                }
             }
             if skip_field {
                 skip_field = false;
@@ -2407,7 +2437,7 @@ fn variants() -> &'static BTreeMap<String, BTreeSet<String>> {
             }
             depth += l.matches('{').count() as i32 - l.matches('}').count() as i32;
         }
-        out
+        (out, optional)
     })
 }
 
@@ -2447,12 +2477,16 @@ fn variant_codes() -> &'static BTreeMap<String, BTreeSet<String>> {
 }
 
 /// The variant an error object (or a `then` inside one) was rendered from: the one whose
-/// fields are exactly the subject's keys, and whose codes include `code` when several match.
+/// fields are the subject's keys (less any it shows only when set), and whose codes include `code` when several match.
 fn identify_with(subject: &Value, code: &str) -> Option<String> {
     let keys: BTreeSet<String> = subject.as_object()?.keys().cloned().collect();
+    let none = BTreeSet::new();
     let by_fields: Vec<&String> = variants()
         .iter()
-        .filter(|(_, f)| **f == keys)
+        .filter(|(v, f)| {
+            let optional = optional_fields().get(*v).unwrap_or(&none);
+            f.is_subset(&keys) && keys.iter().all(|k| f.contains(k) || optional.contains(k))
+        })
         .map(|(v, _)| v)
         .collect();
     match by_fields.as_slice() {

@@ -276,6 +276,7 @@ pub(crate) fn signed_out() -> Cause {
         system: System::Azure,
         account: None,
         state: SessionState::SignedOut,
+        selected_by: None,
     }
 }
 

@@ -201,6 +201,7 @@ impl Failure {
             system: System::OnePassword,
             account: account.map(AccountId::new),
             state,
+            selected_by: None,
         };
         Some(match self {
             // Audit 04.02: only an email follows `opv login --add --account`; an account ID

@@ -27,6 +27,7 @@ pub fn diagnose(seen: Observed, stderr: &str, ctx: &DiagnoseContext) -> Cause {
             system: System::Fly,
             account: ctx.account.clone(),
             state: SessionState::SignedOut,
+            selected_by: None,
         },
         Some(Reading::CredentialRejected) => credential_rejected(&seen, ctx),
         Some(Reading::AppMissing) => {
@@ -168,6 +169,7 @@ fn credential_rejected(seen: &Observed, ctx: &DiagnoseContext) -> Cause {
             system: System::Fly,
             account: ctx.account.clone(),
             state: SessionState::Expired,
+            selected_by: None,
         },
     }
 }

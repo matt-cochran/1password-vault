@@ -869,7 +869,7 @@ Every command that takes `--json` — `inventory`, `needs`, `contract`, `ready`,
 }
 ```
 
-`schema_version` is `4` since 0.12.0. `next` is a typed object `{kind, actor, command}` everywhere, so no client reads free text to decide an action. `kind` is a closed set: `run`, `apply`, `enter_value`, `authorize`, `wait_ci`, `none`. `actor` is a closed set: `assistant`, `person`, `ci`. `command` is the exact command to run, or `null`. An assistant runs a `next` itself only when its `actor` is `assistant`; a `person` action is handed to the user and a `ci` action is left to CI, and `none` is nothing to run. A command that runs as typed is `kind: run` and `actor: assistant`; a change a person applies is `kind: apply`; typing a value is `enter_value`; a sign-in is `authorize`; waiting for CI is `wait_ci`.
+`schema_version` is `4` since 0.18.0 (`3` from 0.12.0, when `next` became typed). `next` is a typed object `{kind, actor, command}` everywhere, so no client reads free text to decide an action. `kind` is a closed set: `run`, `apply`, `enter_value`, `authorize`, `wait_ci`, `choose`, `none`. Schema 4 adds `argv`, `reach` and `choices`, each present only when known: `argv` is the exact words to exec, built from a typed opv command and never split from `command` (absent for a `-- <command>` placeholder); `choose` means a person picks one of `choices` (two or more, never ranked), whose `steps` then run in order; `reach` (`app`, `shell`, `none`) says how far the current process reaches a 1Password session. `actor` is a closed set: `assistant`, `person`, `ci`. `command` is the exact command to run, or `null`. An assistant runs a `next` itself only when its `actor` is `assistant`; a `person` action is handed to the user and a `ci` action is left to CI, and `none` is nothing to run. A command that runs as typed is `kind: run` and `actor: assistant`; a change a person applies is `kind: apply`; typing a value is `enter_value`; a sign-in is `authorize`; waiting for CI is `wait_ci`.
 
 A failure after the command produced its document (findings, exit 8) keeps that document's fields between `exit_code` and `next`. `config export <ENV>` (and `config export --json`) prints the bare document on success and the failure document on failure. Usage errors (`--json` with an unknown flag) print the failure document with code `usage`.
 
@@ -993,7 +993,7 @@ opv schema | jq -r '.error_codes[] | "\(.code) \(.retry)"'
 and nothing else. It contains names, states and counts only: no value, no value fragment,
 no value length and no guidance. Exit codes are unchanged. Findings (exit 8) keep the rows
 and add `ok: false`, `exit_code` and `error`; an error before the rows exist prints the
-[failure document](#json-contract). The top-level `schema_version` is `4` (0.12.0 typed `next`); adding a field keeps it, while
+[failure document](#json-contract). The top-level `schema_version` is `4` (since 0.18.0; `3` from 0.12.0's typed `next`); adding a field keeps it, while
 renaming or removing a field, or changing its meaning, increments it.
 
 ```json

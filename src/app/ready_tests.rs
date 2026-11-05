@@ -80,6 +80,7 @@ fn op_signed_out() -> Error {
         system: System::OnePassword,
         account: None,
         state: SessionState::SignedOut,
+        selected_by: None,
     }
     .into()
 }

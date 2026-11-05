@@ -1296,6 +1296,7 @@ pub fn not_found(start: &Path, repo: Option<&str>, account: Option<&str>) -> Err
             repo: repo.map(str::to_string),
             account: account.map(crate::cause::AccountId::new),
         }),
+        found: None,
     }
     .into()
 }

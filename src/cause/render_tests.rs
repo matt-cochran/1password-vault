@@ -109,6 +109,7 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                     repo: Some("repo-xyz".into()),
                     account: Some(AccountId::new("ACC-XYZ")),
                 }),
+                found: None,
             },
             vec!["/work/shop", "env-stage", "repo-xyz", "ACC-XYZ"],
         ),
@@ -303,6 +304,7 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                 system: System::OnePassword,
                 account: Some(AccountId::new("ACC-6AIN")),
                 state: SessionState::Expired,
+                selected_by: None,
             },
             vec!["1Password", "ACC-6AIN"],
         ),
@@ -851,13 +853,18 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                         email: "me@one.example".into(),
                         address: "my.1password.com".into(),
                         id: AccountId::new("ACC-ONE"),
+                        shorthand: None,
+                        signed_in: None,
                     },
                     AccountChoice {
                         email: "me@two.example".into(),
                         address: "my.1password.com".into(),
                         id: AccountId::new("ACC-TWO"),
+                        shorthand: None,
+                        signed_in: None,
                     },
                 ],
+                reach: crate::json::Reach::None,
             },
             vec!["me@one.example", "ACC-ONE", "ACC-TWO"],
         ),
@@ -1399,6 +1406,13 @@ fn person_only_flags_appear_only_in_a_handoff() {
             Next::Run(cmd) | Next::Check(cmd) => {
                 cmd.args.iter().any(|a| a.starts_with("--confirm"))
             }
+            // A choice's steps are the assistant's too, except the person's sign-in.
+            Next::Choose(c) => c.choices.iter().flat_map(|ch| &ch.steps).any(|s| {
+                s.actor == NextActor::Assistant
+                    && s.run
+                        .as_ref()
+                        .is_some_and(|r| r.args.iter().any(|a| a.starts_with("--confirm")))
+            }),
             Next::Rerun | Next::Handoff(_) | Next::Vendor(_) | Next::None(_) => false,
         })
         .map(Cause::code)
@@ -2407,6 +2421,7 @@ fn not_signed_in(system: System) -> Cause {
         system,
         account: None,
         state: SessionState::SignedOut,
+        selected_by: None,
     }
 }
 
@@ -3032,6 +3047,7 @@ fn a16_a_kubernetes_sign_in_refreshes_the_context() {
         system: System::Kubernetes,
         account: Some(AccountId::new("prod-aks")),
         state: SessionState::Expired,
+        selected_by: None,
     };
     let d = c.do_text(&inv()).unwrap_or_default();
     assert!(d.contains("credentials of kube context prod-aks"), "{d}");
@@ -3966,6 +3982,7 @@ fn d3_a_built_step_keeps_the_project_flag() {
         searched_from: PathBuf::from("/work"),
         env: Some(EnvName::new("prod")),
         manifest: None,
+        found: None,
     };
     assert_eq!(
         next_in(&c, &cli(&["opv", "access", "prod", "--project", "acme"])),
@@ -4113,15 +4130,21 @@ fn i6_a_symlinked_dot_opv_is_named() {
 /// I6: several accounts and none chosen keeps the public code `account_required`.
 #[test]
 fn i6_account_required_keeps_its_code() {
-    let c = Cause::AccountRequired { accounts: vec![] };
+    let c = Cause::AccountRequired {
+        accounts: vec![],
+        reach: crate::json::Reach::None,
+    };
     assert_eq!(c.code(), "account_required");
 }
 
 /// I6: and its Do is the person's pick, never a guessed account.
 #[test]
 fn i6_account_required_is_a_persons_pick() {
-    let (action, _) =
-        Cause::AccountRequired { accounts: vec![] }.step_in(&inv(), &person_at_terminal());
+    let (action, _) = Cause::AccountRequired {
+        accounts: vec![],
+        reach: crate::json::Reach::None,
+    }
+    .step_in(&inv(), &person_at_terminal());
     assert_eq!(action, Some(Action::PickBetween));
 }
 
@@ -4745,6 +4768,7 @@ fn an_expired_shell_session_is_refreshed_by_the_eval_line() {
         system: System::OnePassword,
         account: Some(AccountId::new("ACC-6AIN")),
         state: SessionState::Expired,
+        selected_by: None,
     };
     assert_eq!(next_in(&c, &inv()), "eval \"$(opv login --shell)\"");
     let c = Cause::ShellEvalRequired {
@@ -4862,6 +4886,332 @@ fn lost_report_leads_with_outcome() {
     };
     assert!(
         c.message().starts_with("sync finished (ok);"),
+        "{}",
+        c.message()
+    );
+}
+
+// --- FR-65 / FR-66 / FR-40 amended (design agent-signin-readiness §2.2-2.4) ---------------
+
+/// The codes of every catalog example whose `human_required` step is not the person's.
+fn assistant_steps_needing_a_person() -> Vec<&'static str> {
+    let inv = inv();
+    let sit = person_at_terminal();
+    let mut codes: Vec<&'static str> = super::super::codes::examples()
+        .iter()
+        .filter(|c| c.human_required_in(&inv, &sit))
+        .filter(|c| invocation_kind_actor(&c.plan_in(&inv, &sit).next, &inv).1 != NextActor::Person)
+        .map(Cause::code)
+        .collect();
+    codes.sort_unstable();
+    codes.dedup();
+    codes
+}
+
+/// Vet item 7: outside the decided list, `human_required` implies `next.actor == person`.
+#[test]
+fn human_required_implies_person_actor() {
+    let accepted = super::super::codes::ASSISTANT_READS_AFTER_PERSON;
+    let unexpected: Vec<_> = assistant_steps_needing_a_person()
+        .into_iter()
+        .filter(|c| !accepted.contains(c))
+        .collect();
+    assert_eq!(unexpected, Vec::<&str>::new());
+}
+
+/// The decided list holds no stale entry: each still has an assistant step and a person's Do.
+#[test]
+fn every_decided_assistant_read_is_still_one() {
+    let found = assistant_steps_needing_a_person();
+    let stale: Vec<_> = super::super::codes::ASSISTANT_READS_AFTER_PERSON
+        .iter()
+        .filter(|c| !found.contains(c))
+        .collect();
+    assert_eq!(stale, Vec::<&&str>::new());
+}
+
+fn choice(id: &str, signed_in: Option<bool>) -> AccountChoice {
+    AccountChoice {
+        email: format!("{id}@example.com"),
+        address: "my.1password.com".into(),
+        id: AccountId::new(id),
+        shorthand: None,
+        signed_in,
+    }
+}
+
+fn account_required(reach: crate::json::Reach) -> Cause {
+    Cause::AccountRequired {
+        accounts: vec![choice("TTDZ56BH", Some(false)), choice("6AINMAIK", None)],
+        reach,
+    }
+}
+
+fn json_next(c: &Cause, inv: &Invocation) -> serde_json::Value {
+    document(c, None, inv, false)["next"].clone()
+}
+
+#[test]
+fn account_required_plans_choose() {
+    let next = json_next(
+        &account_required(crate::json::Reach::None),
+        &cli(&["opv", "ready", "--json"]),
+    );
+    assert_eq!(next["kind"], "choose");
+}
+
+#[test]
+fn account_required_choose_is_the_persons() {
+    let next = json_next(
+        &account_required(crate::json::Reach::None),
+        &cli(&["opv", "ready", "--json"]),
+    );
+    assert_eq!(next["actor"], "person");
+}
+
+#[test]
+fn account_required_choose_has_no_command() {
+    let next = json_next(
+        &account_required(crate::json::Reach::None),
+        &cli(&["opv", "ready", "--json"]),
+    );
+    assert_eq!(next["command"], serde_json::Value::Null);
+}
+
+#[test]
+fn account_required_choose_reports_its_reach() {
+    let next = json_next(
+        &account_required(crate::json::Reach::App),
+        &cli(&["opv", "ready", "--json"]),
+    );
+    assert_eq!(next["reach"], "app");
+}
+
+#[test]
+fn account_required_lists_one_choice_per_account() {
+    let next = json_next(
+        &account_required(crate::json::Reach::None),
+        &cli(&["opv", "ready", "--json"]),
+    );
+    assert_eq!(next["choices"].as_array().map(Vec::len), Some(2));
+}
+
+#[test]
+fn a_choice_names_its_account_by_id() {
+    let next = json_next(
+        &account_required(crate::json::Reach::None),
+        &cli(&["opv", "ready", "--json"]),
+    );
+    assert_eq!(next["choices"][1]["account"]["account_id"], "6AINMAIK");
+}
+
+#[test]
+fn a_choose_is_human_required() {
+    let c = account_required(crate::json::Reach::None);
+    assert!(c.human_required_in(&inv(), &person_at_terminal()));
+}
+
+#[test]
+fn a_choose_next_line_offers_each_account_use() {
+    let text = render_text(
+        &account_required(crate::json::Reach::None),
+        None,
+        &cli(&["opv", "ready"]),
+        false,
+        true,
+        false,
+    );
+    assert!(
+        text.ends_with("Next: pick one: opv account use TTDZ56BH; opv account use 6AINMAIK\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn placeholder_step_has_null_argv() {
+    let c = not_signed_in(System::OnePassword);
+    let next = json_next(&c, &cli(&["opv", "run", "dev", "--", "sh", "-c", "true"]));
+    assert_eq!(next["argv"], serde_json::Value::Null);
+}
+
+#[test]
+fn a_signin_handoff_shows_the_child_as_a_placeholder() {
+    let c = not_signed_in(System::OnePassword);
+    let next = json_next(&c, &cli(&["opv", "run", "dev", "--", "sh", "-c", "true"]));
+    assert_eq!(next["command"], "opv login -- opv run dev -- <command>");
+}
+
+#[test]
+fn a_signin_handoff_carries_its_argv() {
+    let c = not_signed_in(System::OnePassword);
+    let next = json_next(&c, &cli(&["opv", "ready", "dev"]));
+    assert_eq!(
+        next["argv"],
+        serde_json::json!(["opv", "login", "--", "opv", "ready", "dev"])
+    );
+}
+
+#[test]
+fn a_cause_outside_the_typed_producers_has_no_argv() {
+    let c = Cause::NeedsConfirm {
+        env: EnvName::new("prod"),
+    };
+    assert!(json_next(&c, &inv()).get("argv").is_none());
+}
+
+fn signed_out_selected_by(by: AccountSource) -> Cause {
+    Cause::NotSignedIn {
+        system: System::OnePassword,
+        account: Some(AccountId::new("6AINMAIK")),
+        state: SessionState::SignedOut,
+        selected_by: Some(by),
+    }
+}
+
+#[test]
+fn signin_next_omits_account_known_to_pointer() {
+    let c = signed_out_selected_by(AccountSource::DotOpv {
+        path: PathBuf::from("/work/shop/.opv"),
+    });
+    assert_eq!(
+        json_next(&c, &inv())["command"],
+        "opv login -- opv sync prod --target web"
+    );
+}
+
+#[test]
+fn signin_next_omits_account_the_configuration_records() {
+    let c = signed_out_selected_by(AccountSource::Configuration);
+    assert_eq!(
+        json_next(&c, &inv())["command"],
+        "opv login -- opv sync prod --target web"
+    );
+}
+
+#[test]
+fn signin_next_names_account_from_environment_only() {
+    let c = signed_out_selected_by(AccountSource::Environment {
+        env: EnvName::new("prod"),
+    });
+    assert_eq!(
+        json_next(&c, &inv())["command"],
+        "opv login --account 6AINMAIK -- opv sync prod --target web"
+    );
+}
+
+#[test]
+fn not_signed_in_says_where_the_account_was_selected() {
+    let c = signed_out_selected_by(AccountSource::DotOpv {
+        path: PathBuf::from("/work/shop/.opv"),
+    });
+    assert!(
+        c.message()
+            .ends_with("(selected by the .opv file /work/shop/.opv)"),
+        "{}",
+        c.message()
+    );
+}
+
+fn not_found_with(paths: &[&str], stopped: bool) -> Cause {
+    Cause::ConfigNotFound {
+        searched_from: PathBuf::from("/repo/infra/shared-host"),
+        env: None,
+        manifest: None,
+        found: Some(FoundConfigs {
+            paths: paths.iter().map(PathBuf::from).collect(),
+            dot_opv: PathBuf::from("/repo/infra/.opv"),
+            stopped,
+        }),
+    }
+}
+
+#[test]
+fn one_found_config_reruns_with_config_relative_to_cwd() {
+    let c = not_found_with(&["/repo/infra/shared-host/fleet/secrets.toml"], false);
+    assert_eq!(
+        json_next(&c, &cli(&["opv", "ready"]))["command"],
+        "opv ready --config fleet/secrets.toml"
+    );
+}
+
+#[test]
+fn one_found_config_names_the_dot_opv_line_relative_to_it() {
+    let c = not_found_with(&["/repo/infra/shared-host/fleet/secrets.toml"], false);
+    let d = c
+        .do_text_in(&cli(&["opv", "ready"]), &person_at_terminal())
+        .unwrap_or_default();
+    assert!(
+        d.contains("config = \"shared-host/fleet/secrets.toml\""),
+        "{d}"
+    );
+}
+
+#[test]
+fn one_found_config_above_cwd_climbs_with_dotdot() {
+    let c = not_found_with(&["/repo/infra/fleet/secrets.toml"], false);
+    assert_eq!(
+        json_next(&c, &cli(&["opv", "ready"]))["command"],
+        "opv ready --config ../fleet/secrets.toml"
+    );
+}
+
+#[test]
+fn several_found_configs_have_no_runnable_next() {
+    let c = not_found_with(&["/repo/a/secrets.toml", "/repo/b/secrets.toml"], false);
+    assert_eq!(json_next(&c, &cli(&["opv", "ready"]))["kind"], "none");
+}
+
+#[test]
+fn several_found_configs_are_the_persons_pick() {
+    let c = not_found_with(&["/repo/a/secrets.toml", "/repo/b/secrets.toml"], false);
+    let (action, _) = c.step_in(&cli(&["opv", "ready"]), &person_at_terminal());
+    assert_eq!(action, Some(Action::PickBetween));
+}
+
+#[test]
+fn a_stopped_search_says_there_may_be_more() {
+    let c = not_found_with(&["/repo/a/secrets.toml"], true);
+    let d = c
+        .do_text_in(&cli(&["opv", "ready"]), &person_at_terminal())
+        .unwrap_or_default();
+    assert!(d.contains("search stopped"), "{d}");
+}
+
+#[test]
+fn a_search_that_found_nothing_keeps_the_first_run_router() {
+    let c = not_found_with(&[], false);
+    let d = c
+        .do_text_in(&cli(&["opv", "ready"]), &person_at_terminal())
+        .unwrap_or_default();
+    assert!(d.contains("opv propose setup"), "{d}");
+}
+
+#[test]
+fn a_found_config_hint_is_left_out_of_the_subject_when_no_search_ran() {
+    let c = Cause::ConfigNotFound {
+        searched_from: PathBuf::from("/repo"),
+        env: None,
+        manifest: None,
+        found: None,
+    };
+    assert!(
+        document(&c, None, &inv(), false)["subject"]
+            .get("found")
+            .is_none()
+    );
+}
+
+#[test]
+fn a_config_named_by_dot_opv_says_so() {
+    let c = Cause::ConfigUnreadable {
+        path: PathBuf::from("/repo/infra/fleet/secrets.toml"),
+        io: IoKind::NotFound,
+        given_by: GivenBy::DotOpv {
+            path: PathBuf::from("/repo/infra/.opv"),
+        },
+    };
+    assert!(
+        c.message().contains("(named by /repo/infra/.opv)"),
         "{}",
         c.message()
     );

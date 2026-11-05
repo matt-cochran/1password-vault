@@ -261,6 +261,39 @@ pub enum Next {
     Vendor(VendorCmd),
     /// No command: the person decides (for example, which copy of a configuration wins).
     None(NoNext),
+    /// A person picks one of two or more choices; that choice's steps then run in order
+    /// (FR-65). Built only by [`step::account_choices`], which never picks one itself.
+    Choose(Choose),
+}
+
+/// The candidates of a [`Next::Choose`] (FR-65) and how far this process reaches a
+/// 1Password session, which decided each choice's sign-in and verify steps.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Choose {
+    pub reach: crate::json::Reach,
+    /// Two or more, in the order the producer listed the accounts; never ranked.
+    pub choices: Vec<Choice>,
+}
+
+/// One candidate of a [`Choose`]: the account and the steps that make it the project's.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Choice {
+    pub account: AccountChoice,
+    pub steps: Vec<Step>,
+}
+
+/// One step of a [`Choice`], typed like a `next` (schema 4).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Step {
+    pub kind: crate::json::NextKind,
+    pub actor: crate::json::NextActor,
+    pub effect: crate::json::StepEffect,
+    /// The opv command, or `None` for a person's action with no command (unlocking the
+    /// 1Password app), which `does` then names. A trailing `--` is the person's own child
+    /// command, shown as `-- <command>` and never stored; such a step has no `argv`.
+    pub run: Option<Cmd>,
+    /// The action in words when there is no command.
+    pub does: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -510,6 +543,10 @@ pub enum Cause {
         /// The 1Password manifest search that found nothing too, when one ran (03.20: only
         /// the selected account is searched).
         manifest: Option<ManifestSearch>,
+        /// The `secrets.toml` files the bounded search below the repository found (FR-66),
+        /// when it ran: a hint only, never used without being named.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        found: Option<FoundConfigs>,
     },
     ConfigSourceMismatch {
         command: CommandId,
@@ -651,6 +688,10 @@ pub enum Cause {
         system: System,
         account: Option<AccountId>,
         state: SessionState,
+        /// Where `account` was chosen, when it was filled from the selection (FR-40): a
+        /// project-recorded account is left out of the sign-in step.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        selected_by: Option<AccountSource>,
     },
     AccountNotOnMachine {
         account: AccountRef,
@@ -666,6 +707,8 @@ pub enum Cause {
     /// picks one. Public code `account_required`.
     AccountRequired {
         accounts: Vec<AccountChoice>,
+        /// How far this process reaches a session: the sign-in step of each choice.
+        reach: crate::json::Reach,
     },
     InOtherAccount {
         vault: VaultId,
@@ -1565,13 +1608,33 @@ pub enum CredentialProblem {
 }
 
 /// One of the person's own 1Password accounts, shown so they can choose
-/// (`AccountRequired`).
+/// (`AccountRequired`, [`Choice`]). It holds no session, token or value (SR-1).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AccountChoice {
     pub email: String,
     /// The sign-in address (`my.1password.com`).
     pub address: String,
     pub id: AccountId,
+    /// op's shorthand for the account, when op lists one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shorthand: Option<String>,
+    /// Whether this process is signed in to it (`op whoami --account <id>`'s exit status,
+    /// FR-49); `None` when not probed. It never selects a choice.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signed_in: Option<bool>,
+}
+
+/// The bounded search for `secrets.toml` below the repository root that a
+/// `ConfigNotFound` reports (FR-66): names only, never a file's contents.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FoundConfigs {
+    /// Absolute paths, at most 20, in the search's order.
+    pub paths: Vec<PathBuf>,
+    /// The `.opv` that names the configuration (`config = "<path>"`): the nearest one, or
+    /// the one opv would write at the repository root. Absolute.
+    pub dot_opv: PathBuf,
+    /// The search stopped at its cap (depth, files or folders visited).
+    pub stopped: bool,
 }
 
 /// The 1Password field type a credential's field must have.
@@ -1981,6 +2044,21 @@ impl Cause {
             _ => {}
         }
         self
+    }
+
+    /// True for the session and account causes, whose `next` carries the schema-4 `argv`
+    /// when it is a typed command (FR-65; design agent-signin-readiness §2.3): the causes
+    /// `opv run`'s preflight stops on. Every other cause's `next` has no `argv` yet.
+    pub fn types_argv(&self) -> bool {
+        matches!(
+            self,
+            Cause::NotSignedIn { .. }
+                | Cause::AccountNotOnMachine { .. }
+                | Cause::AccountRequired { .. }
+                | Cause::AccountAmbiguous { .. }
+                | Cause::NeedsOwnSession { .. }
+                | Cause::CredentialRejected { .. }
+        )
     }
 
     /// The stable machine-readable code (public contract, `schema_version` 2).
