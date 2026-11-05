@@ -533,6 +533,106 @@ pub enum OpenUrlProblem {
 
 // --- end provision -------------------------------------------------------------------------
 
+// --- sealed target (#271, design `sealed-target` §4.2): `opv unseal` --------------------------
+
+/// Why `opv unseal` refused a bundle: one `error.code` each ([`Cause::code`]).
+/// `detail` is the codec's own words, which name a field or a rule and never a value.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SealedRefusal {
+    /// The file is missing, too large, or breaks the `opv-sealed/1` format.
+    Malformed { detail: String },
+    /// The signature, or the `allowed_signers` file it is checked against, was refused.
+    SignatureInvalid { signers: PathBuf, detail: String },
+    /// The signed header's environment or product is not the one asked for.
+    ScopeMismatch {
+        field: String,
+        expected: String,
+        found: String,
+    },
+    /// The signed revision is below the deploy's `--min-revision`.
+    RevisionBelowFloor { revision: u64, floor: u64 },
+    /// The age identity could not be read, or is not one `AGE-SECRET-KEY-1…` line.
+    IdentityUnusable { from: IdentityFrom, detail: String },
+    /// The identity's recipient is not listed in the header, or no age stanza matched it.
+    /// `recipient` is its `sha256:…` fingerprint.
+    NotARecipient { recipient: Option<String> },
+    /// The decrypted payload does not bind to the verified header.
+    PayloadMismatch { detail: String },
+}
+
+/// Where `opv unseal` read its age identity from (D4); never the identity itself.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "from", rename_all = "snake_case")]
+pub enum IdentityFrom {
+    File { path: PathBuf },
+    Env { var: String },
+}
+
+/// The cause for a refusal of the bundle codec (`crate::bundle::crypto`), keeping its code:
+/// `bundle` is the bundle's path, `signers` the `allowed_signers` file, `from` where the
+/// identity came from. A codec error `opv unseal` can never produce (a sealing-side one) is
+/// opv's bug.
+pub fn sealed_refusal(
+    bundle: &std::path::Path,
+    signers: &std::path::Path,
+    from: Option<&IdentityFrom>,
+    err: &crate::bundle::crypto::CryptoError,
+) -> Cause {
+    use crate::bundle::crypto::CryptoError as E;
+    let refusal = match err {
+        E::Malformed(_) | E::AgeMalformed => SealedRefusal::Malformed {
+            detail: err.to_string(),
+        },
+        E::Signature(_) | E::Signers(_) => SealedRefusal::SignatureInvalid {
+            signers: signers.to_path_buf(),
+            detail: err.to_string(),
+        },
+        E::ScopeMismatch {
+            field,
+            expected,
+            found,
+        } => SealedRefusal::ScopeMismatch {
+            field: (*field).to_string(),
+            expected: expected.clone(),
+            found: found.clone(),
+        },
+        E::RevisionBelowFloor { revision, floor } => SealedRefusal::RevisionBelowFloor {
+            revision: *revision,
+            floor: *floor,
+        },
+        E::IdentityUnusable(why) => match from {
+            Some(from) => SealedRefusal::IdentityUnusable {
+                from: from.clone(),
+                detail: (*why).to_string(),
+            },
+            None => {
+                return Cause::Bug {
+                    site: "unseal parsed an identity it was not given",
+                };
+            }
+        },
+        E::NotARecipient => SealedRefusal::NotARecipient { recipient: None },
+        E::PayloadMismatch(_) => SealedRefusal::PayloadMismatch {
+            detail: err.to_string(),
+        },
+        E::RecipientUnsupported(_)
+        | E::SigningKeyInvalid(_)
+        | E::SealMismatch(_)
+        | E::Internal(_) => {
+            return Cause::Bug {
+                site: "unseal met a sealing-side codec error",
+            };
+        }
+    };
+    Cause::SealedRefused {
+        bundle: bundle.to_path_buf(),
+        refusal,
+    }
+}
+
+// --- end sealed target ------------------------------------------------------------------------
+
 /// What a `NotFound` resource's state is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1185,6 +1285,15 @@ pub enum Cause {
         feature: UnsupportedFeature,
     },
     // end provision
+    // sealed target (#271, design `sealed-target` §4.2): `opv unseal`'s refusals
+    /// `opv unseal` refused a sealed bundle. Every refusal but `payload_mismatch` stops
+    /// before anything is decrypted; none names a value, an identity or a recipient string,
+    /// only fingerprints.
+    SealedRefused {
+        bundle: PathBuf,
+        refusal: SealedRefusal,
+    },
+    // end sealed target
     Bug {
         site: &'static str,
     },
@@ -2391,6 +2500,16 @@ impl Cause {
             SourceOnly { .. } => "source_only",
             TitleLookup { matches: 0, .. } => "title_not_found",
             TitleLookup { .. } => "title_ambiguous",
+            // sealed target (#271, design `sealed-target` §4.2): `opv unseal`'s refusals
+            SealedRefused { refusal, .. } => match refusal {
+                SealedRefusal::Malformed { .. } => "sealed_malformed",
+                SealedRefusal::SignatureInvalid { .. } => "sealed_signature_invalid",
+                SealedRefusal::ScopeMismatch { .. } => "sealed_scope_mismatch",
+                SealedRefusal::RevisionBelowFloor { .. } => "sealed_revision_below_floor",
+                SealedRefusal::IdentityUnusable { .. } => "sealed_identity_unusable",
+                SealedRefusal::NotARecipient { .. } => "sealed_not_a_recipient",
+                SealedRefusal::PayloadMismatch { .. } => "sealed_payload_mismatch",
+            },
             Bug { .. } => "internal_error",
         }
     }
@@ -2507,6 +2626,13 @@ impl Cause {
             | SecretNotStored { .. } => 9,
             Partial { then, .. } | PersonalNotSetUp { then, .. } => then.exit_code(),
             Interrupted { signal, .. } => 128 + signal,
+            // An unusable identity is the caller's input (2), a wrong one a credential (7),
+            // every other refusal of a bundle a refusal (6).
+            SealedRefused { refusal, .. } => match refusal {
+                SealedRefusal::IdentityUnusable { .. } => 2,
+                SealedRefusal::NotARecipient { .. } => 7,
+                _ => 6,
+            },
             Bug { .. } => EXIT_INTERNAL,
         }
     }

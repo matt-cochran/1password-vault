@@ -1883,6 +1883,89 @@ fn not_stored(product: &ProductName, key: &KeyName, env: &EnvName) -> Plan {
     )
 }
 
+// --- sealed target (#271, design `sealed-target` §4.2): `opv unseal` -------------------------
+
+/// The first line of an `opv unseal` refusal: what was refused and that nothing was
+/// decrypted (or, for a payload mismatch, delivered). Names, fingerprints and paths only.
+fn sealed_refusal_words(bundle: &std::path::Path, refusal: &SealedRefusal) -> String {
+    let b = bundle.display();
+    match refusal {
+        SealedRefusal::Malformed { detail } => {
+            format!("the sealed bundle {b} was refused: {detail}; nothing was decrypted")
+        }
+        SealedRefusal::SignatureInvalid { signers, detail } => format!(
+            "the sealed bundle {b} failed its signature check against {}: {detail}; nothing was decrypted",
+            signers.display()
+        ),
+        SealedRefusal::ScopeMismatch {
+            field,
+            expected,
+            found,
+        } => format!(
+            "the sealed bundle {b} is signed for {field} {found}, not {expected}; nothing was decrypted"
+        ),
+        SealedRefusal::RevisionBelowFloor { revision, floor } => format!(
+            "the sealed bundle {b} has revision {revision}, below the floor {floor} that --min-revision sets; nothing was decrypted"
+        ),
+        SealedRefusal::IdentityUnusable { from, detail } => format!(
+            "the age identity from {} is unusable: {detail}; nothing was decrypted",
+            identity_from_words(from)
+        ),
+        SealedRefusal::NotARecipient { recipient } => match recipient {
+            Some(r) => format!(
+                "the age identity (recipient {r}) is not a recipient of the sealed bundle {b}; nothing was decrypted"
+            ),
+            None => format!(
+                "the age identity is not a recipient of the sealed bundle {b}; nothing was decrypted"
+            ),
+        },
+        SealedRefusal::PayloadMismatch { detail } => format!(
+            "the sealed bundle {b} decrypted, but its payload does not match its signed header: {detail}; nothing was delivered"
+        ),
+    }
+}
+
+/// Where an identity came from, in words.
+fn identity_from_words(from: &IdentityFrom) -> String {
+    match from {
+        IdentityFrom::File { path } => format!("the file {}", path.display()),
+        IdentityFrom::Env { var } => format!("the variable {var}"),
+    }
+}
+
+/// The Do and Next of an `opv unseal` refusal: the fix is at the release (a new bundle) or
+/// at the deploy (its flags, its identity), then the same command again.
+fn sealed_refusal_plan(refusal: &SealedRefusal) -> Plan {
+    let fix = match refusal {
+        SealedRefusal::Malformed { .. } => {
+            "deploy the bundle file exactly as opv sync wrote it (no edit, no CR-LF conversion), or seal it again with opv sync".to_string()
+        }
+        SealedRefusal::SignatureInvalid { .. } => {
+            "give --signers the allowed_signers file whose line for this environment (namespaces=\"opv-sealed\") holds the release's signing key, or seal the bundle again with opv sync".to_string()
+        }
+        SealedRefusal::ScopeMismatch { field, .. } => format!(
+            "deploy the bundle sealed for this {field}, or correct --{}",
+            if field == "product" { "product" } else { "env" }
+        ),
+        SealedRefusal::RevisionBelowFloor { floor, .. } => format!(
+            "deploy a bundle of revision {floor} or later (seal it with opv sync); never lower --min-revision to accept an older one"
+        ),
+        SealedRefusal::IdentityUnusable { from, .. } => format!(
+            "put exactly the runtime's age identity, one AGE-SECRET-KEY-1 line, in {}",
+            identity_from_words(from)
+        ),
+        SealedRefusal::NotARecipient { .. } => {
+            "give this runtime the identity whose recipient the sealed target lists, or add its recipient to the target and seal again with opv sync".to_string()
+        }
+        SealedRefusal::PayloadMismatch { .. } => {
+            "seal the bundle again with opv sync and deploy the new file; this one was not produced by a matching opv".to_string()
+        }
+    };
+    plan(inspect(fix), Next::Rerun)
+}
+
+// --- end sealed target ------------------------------------------------------------------------
+
 fn inspect(text: impl Into<String>) -> Option<(Action, String)> {
     Some((Action::Inspect, text.into()))
 }
@@ -3016,6 +3099,9 @@ impl Cause {
             } => format!(
                 "set {set} is made by producer {producer}, and opv runs producers only on Linux and macOS, not on native Windows"
             ),
+            // sealed target (#271): `opv unseal`'s refusals
+            SealedRefused { bundle, refusal } => sealed_refusal_words(bundle, refusal),
+            // end sealed target
             Bug { site } => format!("opv hit an internal error ({site})"),
         }
     }
@@ -5271,6 +5357,9 @@ impl Cause {
                 inspect("run opv provision from WSL on this machine"),
                 Next::None(NoNext::NothingToRun),
             ),
+            // sealed target (#271): `opv unseal`'s refusals
+            SealedRefused { refusal, .. } => sealed_refusal_plan(refusal),
+            // end sealed target
             Bug { site: _ } => plan(
                 inspect(format!("report this as an opv bug: {ISSUES_URL}")),
                 Next::Check(cmd(&["version"], &[])),

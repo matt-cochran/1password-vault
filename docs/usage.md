@@ -908,6 +908,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `producer_changed` | 2 | after_fix | no | a producer's file no longer has the sha256 the contract pins; a person reviews the change and pins it again |
 | `regenerated_file_differs` | 2 | never | no | a file project's regenerated configuration file differs from the committed copy; a person picks which is right |
 | `retire_still_read` | 2 | after_fix | no | the deployed code still reads a key a person asked to retire, or no receipt records the deployed revision |
+| `sealed_identity_unusable` | 2 | after_fix | no | opv unseal: the age identity could not be read, or is not exactly one AGE-SECRET-KEY-1 line |
 | `sealed_recipient_shared` | 2 | after_fix | no | an age recipient of a sealed target is also a recipient of a sealed target in another trust group |
 | `sealed_signer_shared` | 2 | after_fix | no | a sealed target's signer also signs for a sealed target in another trust group, so one could sign for the other |
 | `shell_mismatch` | 2 | never | yes | opv login --shell was asked for another shell's syntax than the shell running it; nothing was signed in |
@@ -960,6 +961,11 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `policy_refused` | 6 | never | no | opv refused the operation (a value too large, a name opv does not manage, a credential given as an option, ...) |
 | `private_dir_failed` | 6 | after_fix | no | opv could not make its private folder |
 | `ram_dir_unavailable` | 6 | after_fix | no | a private RAM-backed folder is needed (Azure deploy credentials, a file opv run delivers) and none is usable; nothing was read or changed |
+| `sealed_malformed` | 6 | after_fix | no | opv unseal: the bundle is missing, too large or not a well-formed opv-sealed/1 file; nothing was decrypted |
+| `sealed_payload_mismatch` | 6 | after_fix | no | opv unseal: the decrypted payload does not match the signed header; nothing was delivered |
+| `sealed_revision_below_floor` | 6 | after_fix | no | opv unseal: the bundle's signed revision is below --min-revision (a rollback); nothing was decrypted |
+| `sealed_scope_mismatch` | 6 | after_fix | no | opv unseal: the bundle's signed environment or product is not the one --env or --product names; nothing was decrypted |
+| `sealed_signature_invalid` | 6 | after_fix | no | opv unseal: the bundle's signature does not verify against an allowed_signers line for its environment (namespace opv-sealed), or the signers file was refused; nothing was decrypted |
 | `shell_eval_required` | 6 | after_fix | yes | opv login --shell prints a 1Password session only to a pipe; run it inside the shell's eval |
 | `stale_plan` | 6 | never | no | the plan changed since it was reviewed (the item, the target or the configuration); nothing was changed |
 | `terminal_required` | 6 | never | yes | the command needs the person's own interactive terminal |
@@ -970,6 +976,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `ids_not_in_account` | 7 | after_fix | yes | an environment's recorded vault is not in the selected 1Password account; a person selects the owning account or rebinds the environment |
 | `op_not_signed_in` | 7 | after_fix | yes | not signed in to 1Password |
 | `own_session_required` | 7 | never | yes | the command writes 1Password, which only a person signed in with their own session may do (not a service account, Connect or deploy credentials) |
+| `sealed_not_a_recipient` | 7 | after_fix | no | opv unseal: the age identity is not a recipient of this bundle |
 | `target_not_signed_in` | 7 | after_fix | yes | not signed in to the target CLI |
 | `delivery_unverified` | 8 | after_fix | yes | a placement no longer holds what opv delivered, or could not be checked |
 | `findings` | 8 | after_fix | yes | keys are missing or failing a rule (values are filled in 1Password by a person) |

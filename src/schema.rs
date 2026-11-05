@@ -184,6 +184,15 @@ pub const EFFECTS: &[Effect] = &[
         handles_values: true,
         ask_user_first: true,
     },
+    // #271: without --exec, unseal verifies and inspects a sealed bundle offline and prints
+    // no value; `opv unseal --verify-only --json` is safe for an assistant (design §4.3).
+    Effect {
+        command: "unseal",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
     Effect {
         command: "run --preview",
         effect: "reads",
@@ -517,7 +526,8 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
         "exit_codes": exit_codes(),
         "error_codes": error_codes(),
         // #206 (docs/design/deliver-only.md): values supplied at sync, never stored.
-        "capabilities": ["supplied_values/1"],
+        // #271 (docs/design/sealed-target.md): `opv unseal` verifies a sealed bundle offline.
+        "capabilities": ["supplied_values/1", "sealed_bundles/1"],
         "inputs": {
             "opv.supply/1": "what opv sync <env> --supply-stdin reads: one or more JSON documents back to back, each {schema: \"opv.supply/1\", env: <the sync's environment>, serial: <a whole number from the producer's own object>, values: {\"<product>/<KEY>\": \"<value>\"}} with no other field; values are non-empty strings of at least 8 bytes for declared infrastructure keys (source = \"infrastructure\"); at most 1 MiB and 256 names in all; every infrastructure key in the run's scope is supplied; never written to 1Password",
         },
@@ -789,6 +799,7 @@ fn documents() -> Value {
         "delivery verify": "{environment, placements: [{product, target, revision, state, reason, names: [{name, state, attested?, supplied?}], attested?, supplied?, deployed, receipt_revision?}]}: every placement of the product, each with its target and state; --target narrows to one placement; a receipt kept from sync --receipt must be the current delivery; attested (a name's flag, the placement's list from its receipt) marks a name counted on a person's attestation, not proven (docs/attestation.md); supplied marks a name whose value was supplied at sync: its verified means unchanged on the target since supplied, not current, and it is never source_changed",
         "changed": "{environment, changed, placements: [{product, target, state (unchanged|changed|no_record), items?: [{item_id, recorded, current?}]}], next, do}: each placement's recorded source versions against the item's current version (item IDs and version numbers only, never a value); exit 10 when something changed, with ok true",
         "schema": "this document",
+        "unseal": "{schema: \"opv.unseal/1\", bundle: {format, project, environment, product, target, revision, created_at, opv_version, plan_id, contract_digest, signer, recipient}, names: [{name, destination}], checked: {signature, recipient, payload, runtime_dir (ram_backed|not_needed|not_checked)}}: a sealed bundle verified offline (signer and recipient are fingerprints); never a value, an identity or a recipient string",
         "inventory": [
             "environments: [{env, tier, boundaries: {name: {vault_id, item_id} or null}}]",
             "keys: [{product, key, kind, source, presence, lifecycle, expires, attributes, delivery, location, next}]",

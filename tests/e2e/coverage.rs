@@ -112,6 +112,14 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "native Windows only (D12); no command raises it until opv provision lands",
     ),
     // end provision
+    // sealed target (#271): `opv unseal` (lane st-u1) raises it, and unit and CLI tests
+    // cover each refusal (`src/app/unseal_tests.rs`); lane st-e1 adds the sealed scenarios
+    // and replaces this entry.
+    (
+        "SealedRefused",
+        "opv unseal reads a bundle file the e2e app does not produce until lane st-e1",
+    ),
+    // end sealed target
 ];
 
 fn snapshots() -> PathBuf {

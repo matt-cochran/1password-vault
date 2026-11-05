@@ -997,6 +997,18 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             vec!["prod-api/REFRESH_TOKEN", "env-prod", "set-xyz"],
         ),
         // end provision
+        // sealed target (#271): `opv unseal`
+        (
+            SealedRefused {
+                bundle: PathBuf::from("deploy/prod-api.opv-sealed"),
+                refusal: SealedRefusal::RevisionBelowFloor {
+                    revision: 6,
+                    floor: 7,
+                },
+            },
+            vec!["deploy/prod-api.opv-sealed", "6", "7"],
+        ),
+        // end sealed target
     ]
 }
 
@@ -1098,10 +1110,12 @@ fn ordinal(c: &Cause) -> usize {
         ProducerFailed { .. } => 86,
         ProducerChanged { .. } => 87,
         Unsupported { .. } => 88,
+        // sealed target (#271)
+        SealedRefused { .. } => 89,
     }
 }
 
-const VARIANTS: usize = 89;
+const VARIANTS: usize = 90;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
