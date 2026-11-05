@@ -8,11 +8,12 @@
 //! - [`login`]: the SSH Key deploy credential (P2), checked against `sealed.signer` at sign-in
 //!   and handed only to the runner's seal effect.
 //!
-//! A later lane adds `store.rs` (P3, the `StagedStore`); until then the target's `open`
-//! refuses as an internal error naming the missing lane.
+//! - [`store`]: the whole-set `StagedStore` (P3): a verified, value-free listing, whole-bundle
+//!   staleness, and the atomic write of one signed bundle per product.
 
 pub mod config;
 pub mod login;
 pub mod provider;
+pub mod store;
 
 pub use provider::PROVIDER;

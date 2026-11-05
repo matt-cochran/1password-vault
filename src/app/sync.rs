@@ -1250,7 +1250,11 @@ fn run_staged(
     let list_b = if batch.is_empty() && !reseal {
         list_a.clone()
     } else {
-        store.write(&batch)?;
+        let run = crate::ports::WriteRun {
+            plan_id: &report.plan_id,
+            product: opts.product.as_deref(),
+        };
+        store.write_run(&batch, &run)?;
         done.push(format!("staged {} secret(s)", batch.len()));
         confirm(store, &batch, c, &done)?
     };

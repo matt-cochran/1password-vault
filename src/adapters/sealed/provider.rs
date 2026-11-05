@@ -4,15 +4,14 @@
 //! The signing login (lane P2, [`super::login`]) needs `sealed.signer`, so a parsed target
 //! keeps a per-signer provider, as the HTTP target keeps a per-host one.
 //!
-//! Stub left for a later lane, refusing as an internal error that names the lane:
-//! - `TargetConfig::open` → lane P3 (`store.rs`: the whole-set `StagedStore` with
-//!   `live() == true`, its runtime) and lane C1 (`whole_set()` on the port).
+//! `TargetConfig::open` returns the whole-set bundle store ([`super::store`]).
 
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, OnceLock};
 
 use super::config::{Raw, SealedTarget, check_fleet};
+use super::store::{SealedRuntime, SealedStore};
 use crate::cause::Cause;
 use crate::domain::runtime::FileMount;
 use crate::error::Error;
@@ -170,19 +169,26 @@ impl TargetConfig for SealedTarget {
 
     fn open<'a>(
         &'a self,
-        _env: &'a str,
+        env: &'a str,
         _managed: BTreeSet<String>,
         _files: &BTreeMap<String, FileMount>,
         _config: &BTreeSet<String>,
-        _r: &'a dyn CommandRunner,
+        r: &'a dyn CommandRunner,
     ) -> Result<Ports<'a>, Error> {
-        Err(not_yet(
-            "sealed open: the bundle store is lane st-p3 (whole-set port lane st-c1)",
-        ))
+        Ok(Ports::Staged {
+            store: Box::new(SealedStore::new(self, env, r)),
+            runtime: Box::new(SealedRuntime),
+        })
     }
 
+    /// One warning line per bundle that is stale as a whole (§5.3, C8): its contract digest
+    /// differs from the configuration's, so every name of it is re-sealed. A tampered
+    /// bundle refuses here, before anything is read from 1Password.
     fn preflight(&self, _r: &dyn CommandRunner, _mode: PreflightMode) -> Result<Preflight, Error> {
-        Ok(Preflight::default())
+        Ok(Preflight {
+            checks: super::store::stale_checks(self)?,
+            skip_deploy: None,
+        })
     }
 
     fn doctor(&self, _r: &dyn CommandRunner, _host: &dyn Fn() -> Host) -> Vec<Check> {
@@ -198,6 +204,10 @@ impl TargetConfig for SealedTarget {
 
     fn set_out_root(&mut self, root: &std::path::Path) {
         self.out_root = Some(root.to_path_buf());
+    }
+
+    fn set_placement(&mut self, placement: &crate::provider::Placement) {
+        self.placement = placement.clone();
     }
 
     fn eq_dyn(&self, other: &dyn TargetConfig) -> bool {

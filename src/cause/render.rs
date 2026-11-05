@@ -980,6 +980,7 @@ fn input_kind(k: InputKind) -> &'static str {
         InputKind::Workflow => "the workflow file",
         InputKind::SecretFile => "the secret file",
         InputKind::Produce => "the output of producer file",
+        InputKind::SealedBundle => "the sealed bundle",
     }
 }
 
