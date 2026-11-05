@@ -19,7 +19,8 @@ use crate::cause::{Cause, ConfigCheck, Declared, FieldRule, PatternId};
 use crate::domain::provision::{
     Generator, KeyRef, MAX_PRODUCER_TIMEOUT, MemberSource, Producer, ProvisionSet,
 };
-use crate::domain::{Fleet, KeySpec, ValueSource};
+use crate::domain::provision_template::{self as template, LeafError, Node, Ref, Template};
+use crate::domain::{Fleet, KeySpec, Kind, ValueSource};
 use crate::error::Error;
 
 /// `[sets.<name>]` as written.
@@ -30,7 +31,9 @@ pub(super) struct RawSet {
     members: BTreeMap<String, RawMember>,
 }
 
-/// One `members` entry as written: a producer output or a generator.
+/// One `members` entry as written: a producer output, a generator or a template. A
+/// template's tree is read from the document itself ([`template_tree`]), which keeps the
+/// declared order; this field only marks that one is written.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawMember {
@@ -40,6 +43,8 @@ struct RawMember {
     output: Option<String>,
     #[serde(default)]
     generate: Option<toml::Value>,
+    #[serde(default)]
+    template: Option<toml::Value>,
 }
 
 /// `[producers.<name>]` as written.
@@ -227,11 +232,13 @@ fn set(
         let source = member_source(m, &key, spec, producers, doc, &path)?;
         members.insert(key, source);
     }
-    Ok(ProvisionSet {
+    let set = ProvisionSet {
         environments: raw.environments,
         boundary: boundary.unwrap_or_default(),
         members,
-    })
+    };
+    check_templates(name, &set, producers, doc)?;
+    Ok(set)
 }
 
 fn member_source(
@@ -247,6 +254,30 @@ fn member_source(
         p.push(field);
         p
     };
+    if m.template.is_some() {
+        let other = [
+            ("producer", m.producer.is_some()),
+            ("output", m.output.is_some()),
+            ("generate", m.generate.is_some()),
+        ];
+        if let Some((field, _)) = other.iter().find(|(_, written)| *written) {
+            return Err(doc.invalid(
+                &at("template"),
+                FieldRule::ConflictsWith {
+                    field: super::dotted(&at(field)),
+                },
+            ));
+        }
+        if spec.kind != Kind::Secret {
+            return Err(doc.invalid(
+                &at("template"),
+                FieldRule::Type {
+                    expected: TEMPLATE_KIND,
+                },
+            ));
+        }
+        return Ok(MemberSource::Template(template_tree(doc, &at("template"))?));
+    }
     match (&m.producer, &m.output, &m.generate) {
         (Some(_), _, Some(_)) => Err(doc.invalid(
             &at("generate"),
@@ -297,6 +328,164 @@ fn member_source(
             &at("generate"),
         )?)),
     }
+}
+
+/// What a template string leaf may be (§3.2).
+const TEMPLATE_LEAF: &str = "a literal without \"${\", or exactly \"${product/KEY}\" (a member of this set) or \"${producer.output}\"";
+/// What a template node may be: TOML floats and datetimes have no exact JSON form here.
+const TEMPLATE_NODE: &str = "a string, integer, boolean, array or table";
+/// A template renders secrets, so its member is one.
+const TEMPLATE_KIND: &str = "a key of kind \"secret\" (a template renders secrets)";
+/// A template whose references come back to itself.
+const TEMPLATE_CYCLE: &str =
+    "a template that does not reference itself, directly or through another template";
+
+/// The member's `template` at `path`, read from the document so tables keep their declared
+/// order (the parsed table is sorted): each table's entries ordered by where their keys are
+/// written. String leaves are literals or whole references ([`template::leaf`]); a table key
+/// holding `${` is refused like a leaf.
+fn template_tree(doc: &Doc<'_>, path: &[&str]) -> Result<Template, Error> {
+    let mut table = Some(doc.root.get_ref());
+    let mut found = None;
+    for part in path {
+        let Some((_, v)) =
+            table.and_then(|t| t.iter().find(|(n, _)| n.get_ref().as_ref() == *part))
+        else {
+            return Err(doc.invalid(path, FieldRule::Missing));
+        };
+        table = v.get_ref().as_table();
+        found = Some(v);
+    }
+    let Some(v) = found else {
+        return Err(doc.invalid(path, FieldRule::Missing));
+    };
+    let mut at: Vec<String> = path.iter().map(|p| p.to_string()).collect();
+    Ok(Template::new(node(v.get_ref(), doc, &mut at)?))
+}
+
+fn node(v: &toml::de::DeValue<'_>, doc: &Doc<'_>, at: &mut Vec<String>) -> Result<Node, Error> {
+    use toml::de::DeValue;
+    let refuse = |at: &[String], rule: FieldRule| {
+        let p: Vec<&str> = at.iter().map(String::as_str).collect();
+        doc.invalid(&p, rule)
+    };
+    let leaf_rule = |e: LeafError| match e {
+        LeafError::Interpolated | LeafError::Malformed => FieldRule::Type {
+            expected: TEMPLATE_LEAF,
+        },
+    };
+    Ok(match v {
+        DeValue::String(s) => template::leaf(s).map_err(|e| refuse(at, leaf_rule(e)))?,
+        DeValue::Boolean(b) => Node::Bool(*b),
+        DeValue::Integer(i) => {
+            Node::Integer(i64::from_str_radix(i.as_str(), i.radix()).map_err(|_| {
+                refuse(
+                    at,
+                    FieldRule::Type {
+                        expected: TEMPLATE_NODE,
+                    },
+                )
+            })?)
+        }
+        DeValue::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for (i, item) in items.iter().enumerate() {
+                at.push(i.to_string());
+                out.push(node(item.get_ref(), doc, at)?);
+                at.pop();
+            }
+            Node::Array(out)
+        }
+        DeValue::Table(t) => {
+            let mut entries: Vec<_> = t.iter().collect();
+            entries.sort_by_key(|(k, _)| k.span().start);
+            let mut out = Vec::with_capacity(entries.len());
+            for (k, item) in entries {
+                let k = k.get_ref().to_string();
+                at.push(k.clone());
+                if k.contains("${") {
+                    return Err(refuse(at, leaf_rule(LeafError::Interpolated)));
+                }
+                out.push((k, node(item.get_ref(), doc, at)?));
+                at.pop();
+            }
+            Node::Table(out)
+        }
+        DeValue::Float(_) | DeValue::Datetime(_) => {
+            return Err(refuse(
+                at,
+                FieldRule::Type {
+                    expected: TEMPLATE_NODE,
+                },
+            ));
+        }
+    })
+}
+
+/// A set's templates (§3.2): each `${product/KEY}` names a member of the set, each
+/// `${producer.output}` a declared output of a declared producer, and no template
+/// references itself, directly or through another template.
+fn check_templates(
+    name: &str,
+    set: &ProvisionSet,
+    producers: &BTreeMap<String, Producer>,
+    doc: &Doc<'_>,
+) -> Result<(), Error> {
+    for (key, source) in &set.members {
+        let MemberSource::Template(t) = source else {
+            continue;
+        };
+        let label = key.to_string();
+        let path = ["sets", name, "members", label.as_str(), "template"];
+        for r in t.references() {
+            match r {
+                Ref::Member(m) if !set.members.contains_key(m) => {
+                    let declared: Vec<String> = set.members.keys().map(|k| k.to_string()).collect();
+                    return Err(doc.invalid(
+                        &path,
+                        undeclared(
+                            Declared::Key,
+                            &m.to_string(),
+                            declared.iter().map(String::as_str),
+                        ),
+                    ));
+                }
+                Ref::Member(_) => {}
+                Ref::Output { producer, output } => {
+                    let Some(p) = producers.get(producer) else {
+                        return Err(doc.invalid(
+                            &path,
+                            undeclared(
+                                Declared::Producer,
+                                producer,
+                                producers.keys().map(String::as_str),
+                            ),
+                        ));
+                    };
+                    if !p.outputs.contains(output) {
+                        return Err(doc.invalid(
+                            &path,
+                            check(ConfigCheck::ProducerOutputUndeclared {
+                                producer: producer.clone(),
+                                output: output.clone(),
+                                outputs: p.outputs.clone(),
+                            }),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    if let Err(template::Cycle { member }) = template::render_order(set) {
+        let label = member.to_string();
+        return Err(doc.invalid(
+            &["sets", name, "members", label.as_str(), "template"],
+            FieldRule::Type {
+                expected: TEMPLATE_CYCLE,
+            },
+        ));
+    }
+    Ok(())
 }
 
 /// `generate = "rules"` (on a key whose rules give a recipe), or exactly one of
@@ -564,7 +753,7 @@ fn project_file(dir: &Path, arg: &str) -> Option<std::path::PathBuf> {
     (file.starts_with(&root) && file.is_file()).then_some(file)
 }
 
-/// Each producer output is used by a member of some set (templates join in Slice B).
+/// Each producer output is used by a member or a template of some set.
 fn check_outputs_used(
     producers: &BTreeMap<String, Producer>,
     sets: &BTreeMap<String, ProvisionSet>,
@@ -572,10 +761,13 @@ fn check_outputs_used(
 ) -> Result<(), Error> {
     for (name, p) in producers {
         let used = |o: &String| {
-            sets.values().flat_map(|s| s.members.values()).any(|m| {
-                matches!(m, MemberSource::Producer { producer, output }
-                    if producer == name && output == o)
-            })
+            sets.values()
+                .flat_map(|s| s.members.values())
+                .any(|m| match m {
+                    MemberSource::Producer { producer, output } => producer == name && output == o,
+                    MemberSource::Template(t) => t.uses_output(name, o),
+                    MemberSource::Generate(_) => false,
+                })
         };
         if let Some(unused) = p.outputs.iter().find(|o| !used(o)) {
             return Err(doc.invalid(
@@ -600,9 +792,11 @@ fn check_inputs(
 ) -> Result<(), Error> {
     for (name, p) in producers {
         let served = sets.values().filter(|s| {
-            s.members
-                .values()
-                .any(|m| matches!(m, MemberSource::Producer { producer, .. } if producer == name))
+            s.members.values().any(|m| match m {
+                MemberSource::Producer { producer, .. } => producer == name,
+                MemberSource::Template(t) => t.uses_producer(name),
+                MemberSource::Generate(_) => false,
+            })
         });
         for s in served {
             for (input, k) in &p.inputs {
