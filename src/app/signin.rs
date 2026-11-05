@@ -532,6 +532,16 @@ impl CommandRunner for EnvRunner<'_> {
         self.inner.spawns_processes()
     }
 
+    /// A producer (#253) is the inner runner's: it gets none of this runner's environment
+    /// (the produce effect clears it to opv's basics) and runs as no principal.
+    fn produce(
+        &self,
+        call: &crate::runner::ProduceCall,
+        on_line: &mut dyn FnMut(crate::runner::ProducedLine<'_>) -> crate::runner::LineVerdict,
+    ) -> Result<crate::runner::Produced, Error> {
+        self.inner.produce(call, on_line)
+    }
+
     /// A target write through this runner is the inner runner's (L2: a spent budget after
     /// one never says "before any write").
     fn writes_started(&self) -> bool {

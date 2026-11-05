@@ -96,22 +96,16 @@ const UNREACHABLE: &[(&str, &str)] = &[
     (
         "PlanUnknown",
         "only opv apply reaches it, and only at a person's terminal, which the harness never gives",
-    ), // provision (#253): registered by lane A2 before `opv provision` exists; lane A10 replaces
-    // each entry with a PTY or opv-sim cell, or keeps it with the unit test that covers it
-    // (`docs/design/owner-value-ingestion.md` §10.7).
-    (
-        "ProducerFailed",
-        "no command raises it until opv provision lands (0.18.0 lane A10)",
     ),
-    (
-        "ProducerChanged",
-        "no command raises it until the [producers] load rules land (0.18.0 lane A10)",
-    ),
+    // provision (#253): `ProducerFailed` and `ProducerChanged` are reached by
+    // scenarios/provision.rs (a person's terminal under a pseudo-terminal). `Unsupported` is
+    // raised only for a producer member on native Windows (D12, src/app/provision.rs
+    // `who_is_running`), which the Unix-only e2e harness never runs on. Reached by
+    // src/app/provision_tests.rs (`a_producer_member_on_native_windows_is_unsupported`).
     (
         "Unsupported",
-        "native Windows only (D12); no command raises it until opv provision lands",
+        "native Windows only (D12); the e2e harness is Unix-only",
     ),
-    // end provision
 ];
 
 fn snapshots() -> PathBuf {
@@ -192,7 +186,7 @@ impl Scenario {
         }
     }
 
-    fn after_install(mut self, f: fn(&Scenario)) -> Self {
+    pub(crate) fn after_install(mut self, f: fn(&Scenario)) -> Self {
         self.after_install.push(f);
         self
     }
@@ -2666,6 +2660,7 @@ fn every_scenario_snapshot_belongs_to_a_scenario() {
         )
         .chain(crate::scenarios::session_reuse::SNAPSHOTS.iter().copied())
         .chain(crate::scenarios::set_from_file::SNAPSHOTS.iter().copied())
+        .chain(crate::scenarios::provision::SNAPSHOTS.iter().copied())
         .collect();
     let orphans: Vec<String> = std::fs::read_dir(scenario_snapshots())
         .map(|d| {
