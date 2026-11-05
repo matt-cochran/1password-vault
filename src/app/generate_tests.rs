@@ -24,6 +24,11 @@ rules = { prefix = "sk_" }
 [products.api.keys.PLAIN]
 kind = "secret"
 environments = ["dev"]
+
+[products.api.keys.OPV_SEALED_IDENTITY]
+kind = "secret"
+environments = ["dev"]
+rules = { age_identity = true }
 "#;
 
 /// A fake whose dev item already holds `api/WEBHOOK_HEX` = `already-set`.
@@ -63,6 +68,80 @@ fn a_base64_key_is_generated_as_base64() {
         recipe("api", "SESSION_KEY", "dev", &spec(&fleet, "SESSION_KEY")).unwrap(),
         Recipe::Base64(32)
     );
+}
+
+// st-g1 (sealed-target §7.1): an `age_identity = true` key is made in memory and only
+// its public recipient is shown, so it can go into `sealed.recipients`.
+
+#[test]
+fn an_age_identity_key_gets_the_age_identity_recipe() {
+    let (fleet, _, _) = world();
+    assert_eq!(
+        recipe(
+            "api",
+            "OPV_SEALED_IDENTITY",
+            "dev",
+            &spec(&fleet, "OPV_SEALED_IDENTITY")
+        )
+        .unwrap(),
+        Recipe::AgeIdentity
+    );
+}
+
+#[test]
+fn a_generated_age_identity_parses_as_an_age_x25519_identity() {
+    let v = make(Recipe::AgeIdentity).unwrap();
+    assert!(crate::bundle::crypto::parse_identity(v.expose()).is_ok());
+}
+
+#[test]
+fn the_age_identity_recipe_names_itself() {
+    assert!(
+        Recipe::AgeIdentity
+            .describe()
+            .contains("age X25519 identity")
+    );
+}
+
+#[test]
+fn an_age_identity_prints_its_recipient() {
+    let (fleet, op, id) = world();
+    let mut out = Vec::new();
+    run(
+        &fleet,
+        "dev",
+        &["api/OPV_SEALED_IDENTITY".into()],
+        &op,
+        &mut out,
+    )
+    .unwrap();
+    let recipient =
+        crate::bundle::crypto::parse_identity(&field(&op, &id, "OPV_SEALED_IDENTITY").unwrap())
+            .unwrap()
+            .recipient()
+            .to_string();
+    assert!(
+        String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .any(|line| line == recipient)
+    );
+}
+
+#[test]
+fn an_age_identity_never_prints_the_identity() {
+    let (fleet, op, id) = world();
+    let mut out = Vec::new();
+    run(
+        &fleet,
+        "dev",
+        &["api/OPV_SEALED_IDENTITY".into()],
+        &op,
+        &mut out,
+    )
+    .unwrap();
+    let identity = field(&op, &id, "OPV_SEALED_IDENTITY").unwrap();
+    assert!(!String::from_utf8(out).unwrap().contains(&identity));
 }
 
 #[test]
