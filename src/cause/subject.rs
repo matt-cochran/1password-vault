@@ -551,6 +551,8 @@ pub enum PatternId {
     /// A container path (`secrets_dir`, delivery-transports §6.2): an absolute path with no
     /// `..`, such as `/run/secrets/{product}`.
     ContainerPath,
+    /// A `.opv` `config` path (FR-66): relative to the `.opv`'s folder, plain parts only.
+    RelativeInRepo,
 }
 
 impl PatternId {
@@ -589,6 +591,9 @@ impl PatternId {
                 "a tenant ID (a GUID) or a tenant domain, such as contoso.onmicrosoft.com"
             }
             PatternId::ContainerPath => "an absolute path such as /run/secrets/{product}",
+            PatternId::RelativeInRepo => {
+                "a path relative to the .opv's folder, such as infra/fleet/secrets.toml, with no .. part"
+            }
         }
     }
 }

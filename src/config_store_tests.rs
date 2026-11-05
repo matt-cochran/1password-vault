@@ -1436,3 +1436,280 @@ fn the_move_reader_returns_a_manifests_inline_ids() {
         Some("app")
     );
 }
+
+// --- 0.18.0 #267 (FR-66): `.opv` names the configuration; bounded discovery ---
+
+/// The project's configuration, relative to the repository root (the #267 layout with a
+/// neutral folder name).
+const NAMED: &str = "deploy/shared-host/fleet/secrets.toml";
+
+/// A repository (a `.git` folder) holding the configuration at [`NAMED`], and a `.opv` at
+/// its root with `extra` as its text.
+fn repo_267(extra: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    let file = dir.path().join(NAMED);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, TOML).unwrap();
+    std::fs::write(
+        dir.path().join(DOT_FILE),
+        format!("account = \"{ACCOUNT_A}\"\n{extra}"),
+    )
+    .unwrap();
+    dir
+}
+
+fn named_line() -> String {
+    format!("config = \"{NAMED}\"\n")
+}
+
+fn ends_with_named(found: &Result<Found, Error>) -> bool {
+    matches!(found, Ok(Found::File { store, .. }) if store.path.ends_with(NAMED))
+}
+
+#[test]
+fn dot_opv_config_is_found_from_a_folder_above_it() {
+    let dir = repo_267(&named_line());
+    let found = locate(
+        &req(&dir.path().join("deploy/shared-host")),
+        &FakeOp::default(),
+    );
+    assert!(ends_with_named(&found), "{}", title_of(found));
+}
+
+#[test]
+fn dot_opv_config_is_announced_as_named_by_the_dot_opv() {
+    let dir = repo_267(&named_line());
+    let found = locate(&req(&dir.path().join("deploy")), &FakeOp::default()).unwrap();
+    assert!(
+        found
+            .announce(false)
+            .unwrap_or_default()
+            .ends_with(&format!(
+                "(named by {})",
+                dir.path().join(DOT_FILE).display()
+            )),
+        "{:?}",
+        found.announce(false)
+    );
+}
+
+#[test]
+fn a_file_named_by_dot_opv_reports_its_source_as_the_dot_opv() {
+    let dir = repo_267(&named_line());
+    let found = locate(&req(dir.path()), &FakeOp::default()).unwrap();
+    assert!(matches!(
+        found.cause_source(),
+        ConfigSource::File {
+            given_by: GivenBy::DotOpv { .. },
+            ..
+        }
+    ));
+}
+
+#[test]
+fn dot_opv_config_with_dot_dot_is_refused_at_parse() {
+    let e = parse_dot_opv("config = \"../outside.toml\"\n", Path::new(".opv")).unwrap_err();
+    assert_eq!(e.code_str(), "config_invalid");
+}
+
+#[test]
+fn dot_opv_config_that_is_absolute_is_refused_at_parse() {
+    let e = parse_dot_opv("config = \"/etc/secrets.toml\"\n", Path::new(".opv")).unwrap_err();
+    assert_eq!(e.code_str(), "config_invalid");
+}
+
+#[test]
+fn dot_opv_config_with_a_nul_is_refused_at_parse() {
+    let e = parse_dot_opv("config = \"a\\u0000b.toml\"\n", Path::new(".opv")).unwrap_err();
+    assert_eq!(e.code_str(), "config_invalid");
+}
+
+#[test]
+fn dot_opv_config_together_with_project_is_refused_at_parse() {
+    let e = parse_dot_opv(
+        "project = \"myapp\"\nconfig = \"secrets.toml\"\n",
+        Path::new(".opv"),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        cause_of(&e),
+        Cause::ConfigInvalid {
+            rule: FieldRule::ConflictsWith { .. },
+            ..
+        }
+    ));
+}
+
+#[test]
+fn dot_opv_config_is_read_into_the_pointer() {
+    let d = parse_dot_opv(&named_line(), Path::new(".opv")).unwrap();
+    assert_eq!(d.config.as_deref(), Some(NAMED));
+}
+
+#[test]
+fn a_missing_named_config_still_lets_login_read_the_account() {
+    let dir = repo_267(&named_line());
+    std::fs::remove_file(dir.path().join(NAMED)).unwrap();
+    assert_eq!(pointer_account(dir.path()).as_deref(), Some(ACCOUNT_A));
+}
+
+#[test]
+fn a_missing_named_config_is_config_unreadable() {
+    let dir = repo_267(&named_line());
+    std::fs::remove_file(dir.path().join(NAMED)).unwrap();
+    let e = locate(&req(dir.path()), &FakeOp::default()).unwrap_err();
+    assert!(matches!(
+        cause_of(&e),
+        Cause::ConfigUnreadable {
+            io: IoKind::NotFound,
+            given_by: GivenBy::DotOpv { .. },
+            ..
+        }
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_named_config_symlinked_outside_the_repository_is_refused() {
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("outside.toml"), TOML).unwrap();
+    let dir = repo_267("config = \"escape.toml\"\n");
+    std::os::unix::fs::symlink(
+        outside.path().join("outside.toml"),
+        dir.path().join("escape.toml"),
+    )
+    .unwrap();
+    let e = locate(&req(dir.path()), &FakeOp::default()).unwrap_err();
+    assert!(matches!(
+        cause_of(&e),
+        Cause::ConfigUnreadable {
+            given_by: GivenBy::DotOpv { .. },
+            ..
+        }
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_named_config_through_a_symlinked_folder_outside_is_refused() {
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("secrets.toml"), TOML).unwrap();
+    let dir = repo_267("config = \"linked/secrets.toml\"\n");
+    std::os::unix::fs::symlink(outside.path(), dir.path().join("linked")).unwrap();
+    let e = locate(&req(dir.path()), &FakeOp::default()).unwrap_err();
+    assert_eq!(e.code_str(), "config_unreadable");
+}
+
+#[test]
+fn a_walk_up_secrets_toml_above_the_dot_opv_loses_to_its_config() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join(FILE_NAME), TOML).unwrap();
+    let repo = home.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(repo.join("deploy")).unwrap();
+    std::fs::write(repo.join("deploy/fleet.toml"), TOML).unwrap();
+    std::fs::write(repo.join(DOT_FILE), "config = \"deploy/fleet.toml\"\n").unwrap();
+    let found = locate(&req(&repo), &FakeOp::default());
+    assert!(
+        matches!(&found, Ok(Found::File { store, .. }) if store.path.ends_with("deploy/fleet.toml")),
+        "{}",
+        title_of(found)
+    );
+}
+
+#[test]
+fn a_walk_up_secrets_toml_below_the_dot_opv_wins_over_its_config() {
+    let dir = repo_267(&named_line());
+    let fleet = dir.path().join("deploy/shared-host/fleet");
+    let found = locate(&req(&fleet), &FakeOp::default());
+    assert!(
+        matches!(&found, Ok(Found::File { given: None, .. })),
+        "{}",
+        title_of(found)
+    );
+}
+
+#[test]
+fn recording_an_account_keeps_the_config_line() {
+    let dir = repo_267(&named_line());
+    record_account(dir.path(), ACCOUNT_B).unwrap();
+    let text = std::fs::read_to_string(dir.path().join(DOT_FILE)).unwrap();
+    assert!(text.contains(&named_line()), "{text}");
+}
+
+/// The #267 layout without `config =`: discovery fails, and says where the file is.
+fn not_found_267() -> Error {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    let file = dir.path().join(NAMED);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, TOML).unwrap();
+    locate(
+        &req(&dir.path().join("deploy/shared-host")),
+        &FakeOp::default(),
+    )
+    .unwrap_err()
+}
+
+#[test]
+fn not_found_lists_the_config_one_level_down() {
+    let e = not_found_267();
+    let Cause::ConfigNotFound {
+        found: Some(found), ..
+    } = cause_of(&e)
+    else {
+        panic!("no found configs: {e}")
+    };
+    assert!(found.paths.len() == 1 && found.paths[0].ends_with(NAMED));
+}
+
+#[test]
+fn not_found_with_one_found_config_suggests_config() {
+    let e = not_found_267();
+    let inv = crate::cause::Invocation::from_cli(&["opv".into(), "ready".into()]);
+    let next = crate::cause::render::next_text(&cause_of(&e).step(&inv).1, &inv);
+    assert_eq!(
+        next.as_deref(),
+        Some("opv ready --config fleet/secrets.toml")
+    );
+}
+
+#[test]
+fn not_found_with_one_found_config_does_not_suggest_propose_setup() {
+    let e = not_found_267();
+    let inv = crate::cause::Invocation::from_cli(&["opv".into(), "ready".into()]);
+    let (_, next) = cause_of(&e).step(&inv);
+    let text = format!(
+        "{} {}",
+        e,
+        crate::cause::render::next_text(&next, &inv).unwrap_or_default()
+    );
+    assert!(!text.contains("propose setup"), "{text}");
+}
+
+#[test]
+fn not_found_names_the_root_dot_opv_for_the_config_line() {
+    let e = not_found_267();
+    let Cause::ConfigNotFound {
+        found: Some(found), ..
+    } = cause_of(&e)
+    else {
+        panic!("no found configs: {e}")
+    };
+    assert_eq!(
+        found.dot_opv.file_name(),
+        Some(std::ffi::OsStr::new(DOT_FILE))
+    );
+}
+
+#[test]
+fn not_found_without_any_config_below_keeps_the_first_run_router() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    let e = locate(&req(dir.path()), &FakeOp::default()).unwrap_err();
+    assert!(matches!(
+        cause_of(&e),
+        Cause::ConfigNotFound { found: None, .. }
+    ));
+}
