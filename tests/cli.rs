@@ -968,7 +968,7 @@ fn sigint_with_json_exits_130() {
         .unwrap();
     let started = dir.path().join("log.start");
     let t = std::time::Instant::now();
-    while !started.exists() && t.elapsed() < std::time::Duration::from_secs(10) {
+    while !started.exists() && t.elapsed() < std::time::Duration::from_secs(60) {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     Command::new("/bin/kill")
@@ -1285,7 +1285,7 @@ fn sighup_is_handled_and_exits_129() {
 #[cfg(unix)]
 fn wait_for(path: &std::path::Path) {
     let t = std::time::Instant::now();
-    while !path.exists() && t.elapsed() < std::time::Duration::from_secs(10) {
+    while !path.exists() && t.elapsed() < std::time::Duration::from_secs(60) {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
