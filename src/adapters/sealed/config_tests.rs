@@ -357,6 +357,59 @@ fn a_key_shared_from_an_age_identity_is_refused() {
     ));
 }
 
+// --- #275: an infrastructure key has no 1Password value to seal -----------------------------
+
+/// `api` gains `DB_URL`, supplied at sync (`source = "infrastructure"`) in staging.
+fn with_infrastructure_key() -> String {
+    format!(
+        "{}\n[products.api.keys.DB_URL]\nkind = \"secret\"\nsource = \"infrastructure\"\n\
+         environments = [\"staging\"]\nrules = {{ regex = \"postgres://.+\" }}\n",
+        example()
+    )
+}
+
+#[test]
+fn an_infrastructure_key_a_sealed_target_delivers_is_refused_at_the_key() {
+    assert_eq!(
+        refused_field(&with_infrastructure_key()),
+        "products.api.keys.DB_URL"
+    );
+}
+
+#[test]
+fn an_infrastructure_key_a_sealed_target_delivers_is_refused_naming_the_target() {
+    let e = crate::config::parse(&with_infrastructure_key()).expect_err("refused");
+    assert!(
+        e.parts().0.message().contains("sealed target box"),
+        "{}",
+        e.parts().0.message()
+    );
+}
+
+#[test]
+fn an_infrastructure_key_of_a_product_no_sealed_target_delivers_loads() {
+    let text = with_infrastructure_key()
+        .replace("products.api.keys.DB_URL", "products.worker.keys.DB_URL")
+        .replace(
+            "boundaries.api = { vault_id = \"vapis\", item_id = \"iapis\" }",
+            "boundaries.api = { vault_id = \"vapis\", item_id = \"iapis\" }\n\
+             boundaries.worker = { vault_id = \"vwrks\", item_id = \"iwrks\" }",
+        )
+        .replace(
+            "[environments.staging.targets.box]\n",
+            "[environments.staging.targets.box]\nproducts = [\"api\"]\n",
+        )
+        + "\n[environments.staging.targets.jobs]\nfly.app = \"jobs-staging\"\n\
+           fly.secret_name = \"{KEY}\"\nproducts = [\"worker\"]\nstate_vault_id = \"sjobs\"\n";
+    assert!(
+        crate::config::parse(&text).is_ok(),
+        "{:?}",
+        crate::config::parse(&text)
+            .err()
+            .map(|e| e.parts().0.message())
+    );
+}
+
 // --- channels (§3.2, T5) ----------------------------------------------------------------------
 
 #[test]

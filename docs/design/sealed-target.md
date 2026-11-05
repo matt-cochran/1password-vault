@@ -149,7 +149,11 @@ How this differs from the issue's sketch:
 8. **The identity is never sealed (T14).** A key whose rules say `age_identity = true` is never
    delivered by a sealed target, since a bundle cannot carry the key that opens it. The error
    names the key.
-9. **NUL bytes.** A secret delivered as a variable that contains a NUL byte is a `Store::refusal`:
+9. **No infrastructure key (#275).** A key with `source = "infrastructure"` (deliver-only,
+   `docs/design/deliver-only.md`) is supplied at sync and never stored in 1Password, so a sealed
+   target has no value to seal. A sealed target that would deliver one is refused at load
+   (`config_invalid`), naming the key as `<product>/<KEY>` and the target.
+10. **NUL bytes.** A secret delivered as a variable that contains a NUL byte is a `Store::refusal`:
    `plan` shows it and `sync` refuses before writing. File keys may hold any bytes.
 
 ### 3.2 Channels

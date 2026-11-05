@@ -446,11 +446,21 @@ fn a_seal_already_in_progress_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let (t, r) = (target(dir.path()), FakeRunner::new([]));
     std::fs::create_dir_all(bundle(&t).parent().unwrap()).unwrap();
-    std::fs::write(dir.path().join("sealed/prod/api.opv-sealed.lock"), b"").unwrap();
+    let _held = Lock::take(&bundle(&t)).unwrap();
     assert_eq!(
         code(&write(&store(&t, &r), &["TOKEN"]).unwrap_err()),
         "local_io_failed"
     );
+}
+
+/// A lock file left by a run that was killed has no holder, so it does not block.
+#[test]
+fn a_leftover_lock_file_without_a_holder_does_not_block_a_seal() {
+    let dir = tempfile::tempdir().unwrap();
+    let (t, r) = (target(dir.path()), FakeRunner::new([]));
+    std::fs::create_dir_all(bundle(&t).parent().unwrap()).unwrap();
+    std::fs::write(dir.path().join("sealed/prod/api.opv-sealed.lock"), b"").unwrap();
+    assert!(write(&store(&t, &r), &["TOKEN"]).is_ok());
 }
 
 #[test]

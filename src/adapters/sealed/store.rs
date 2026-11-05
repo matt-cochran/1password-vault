@@ -16,7 +16,7 @@
 //!   lists its configured names at `unreadable`.
 //! - **Writing.** The header is built here (placement, revision, signer and recipient
 //!   fingerprints, contract digest, opv version, plan id), sealed and signed by the runner's
-//!   seal effect, and written atomically under an exclusive lock file beside the bundle: a
+//!   seal effect, and written atomically under an OS advisory lock on a file beside the bundle (released when its holder dies): a
 //!   temporary file in the same directory, `fsync`, `rename`, `fsync` of the directory (§5.6).
 //!   `revision = max(previous + 1, now)` in Unix seconds, `previous` from a verified header
 //!   only (§5.4, D5: no ratchet file).
@@ -406,27 +406,102 @@ fn seal_failure(f: SealFailure) -> Error {
 }
 
 /// The exclusive lock beside a bundle while it is written (§5.4: two seals of one placement
-/// never interleave). Removed when dropped.
-struct Lock(PathBuf);
+/// never interleave): an OS advisory lock on `<bundle>.lock` (`flock` on Unix, `LockFileEx`
+/// on Windows), which the kernel releases when its holder exits, however it exits. A file
+/// left by a killed run has no holder and blocks nothing. The file is removed while the lock
+/// is still held, and a lock taken on a file that was meanwhile removed or replaced is taken
+/// again, so two runs never both hold a lock.
+struct Lock {
+    path: PathBuf,
+    // Held for the lock: closing it releases the lock.
+    _file: std::fs::File,
+}
 
 impl Lock {
     fn take(bundle: &Path) -> Result<Self, Error> {
         let mut name = bundle.as_os_str().to_os_string();
         name.push(".lock");
         let path = PathBuf::from(name);
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|e| local_io(LocalOp::Write, &path, &e))?;
-        Ok(Lock(path))
+        // A removal between our open and our lock is another run finishing: a few tries.
+        for _ in 0..8 {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+                .map_err(|e| local_io(LocalOp::Write, &path, &e))?;
+            try_lock_exclusive(&file).map_err(|e| local_io(LocalOp::Write, &path, &e))?;
+            if still_at(&file, &path) {
+                return Ok(Lock { path, _file: file });
+            }
+        }
+        let busy = std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "the lock file kept being replaced",
+        );
+        Err(local_io(LocalOp::Write, &path, &busy))
     }
 }
 
 impl Drop for Lock {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        // Removed before the handle closes, so no run locks the removed file afterwards
+        // without seeing it gone ([`still_at`]).
+        let _ = std::fs::remove_file(&self.path);
     }
+}
+
+/// An exclusive lock on `file` without waiting: `WouldBlock` while another holds it.
+#[cfg(unix)]
+fn try_lock_exclusive(file: &std::fs::File) -> std::io::Result<()> {
+    rustix::fs::flock(file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+        .map_err(std::io::Error::from)
+}
+
+/// An exclusive lock on `file` without waiting: an error while another holds it.
+#[cfg(windows)]
+fn try_lock_exclusive(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
+    };
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+
+    // SAFETY: an all-zero OVERLAPPED is valid (offset 0, no event); the handle is owned by
+    // `file`, which outlives the call.
+    let ok = unsafe {
+        let mut overlapped: OVERLAPPED = std::mem::zeroed();
+        LockFileEx(
+            file.as_raw_handle(),
+            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            0,
+            u32::MAX,
+            u32::MAX,
+            &mut overlapped,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Whether `path` still names the file `file` has open, and not one created after a holder
+/// removed it.
+#[cfg(unix)]
+fn still_at(file: &std::fs::File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (file.metadata(), std::fs::metadata(path)) {
+        (Ok(held), Ok(named)) => held.dev() == named.dev() && held.ino() == named.ino(),
+        _ => false,
+    }
+}
+
+/// Whether `path` still names a file: a holder removes it before releasing its lock.
+#[cfg(windows)]
+fn still_at(_file: &std::fs::File, path: &Path) -> bool {
+    path.exists()
 }
 
 /// `bytes` to `path` atomically (§5.6): a temporary file in the same directory, `fsync`,
