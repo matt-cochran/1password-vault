@@ -197,10 +197,17 @@ pub fn build_for(
     } else {
         None
     };
+    // Infrastructure keys are supplied at sync, never injected (#263, D2-A): they leave
+    // `keys` for `supplied_at_sync`, whose order is the delivered key order.
+    let mut supplied_at_sync: Vec<&str> = Vec::new();
     let keys: Vec<Value> = selection
         .delivered
         .iter()
-        .map(|(key, spec)| {
+        .filter_map(|(key, spec)| {
+            if crate::app::deliver_only::is_infrastructure(spec) {
+                supplied_at_sync.push(key.as_str());
+                return None;
+            }
             let (source_product, source_key) = spec
                 .source()
                 .unwrap_or((product_name.as_str(), key.as_str()));
@@ -208,7 +215,7 @@ pub fn build_for(
                 Some(path) => format!("file:{path}"),
                 None => format!("env:{key}"),
             };
-            json!({
+            Some(json!({
                 "product": product_name,
                 "key": key,
                 "source": format!("{source_product}/{source_key}"),
@@ -217,7 +224,7 @@ pub fn build_for(
                     Some(roles) => json!(roles),
                     None => Value::Null,
                 },
-            })
+            }))
         })
         .collect();
     let mut doc = json!({
@@ -243,6 +250,11 @@ pub fn build_for(
     // files is unchanged.
     if let Some(line) = containers {
         doc["containers"] = json!(line);
+    }
+    // Present only when a supplied key exists, like `containers`, so a document without
+    // infrastructure keys is unchanged.
+    if !supplied_at_sync.is_empty() {
+        doc["supplied_at_sync"] = json!(supplied_at_sync);
     }
     Ok(doc)
 }
@@ -308,6 +320,7 @@ fn write_err(e: io::Error) -> Error {
         op: crate::cause::LocalOp::Stdout,
         path: std::path::PathBuf::new(),
         io: crate::cause::IoKind::from(e.kind()),
+        delivery: None,
     }
     .into()
 }
@@ -331,6 +344,19 @@ fn write_text(doc: &Value, out: &mut dyn Write) -> io::Result<()> {
             k["destination"].as_str().unwrap_or(""),
             k["source"].as_str().unwrap_or(""),
             roles
+        )?;
+    }
+    let supplied: Vec<&str> = doc["supplied_at_sync"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    if !supplied.is_empty() {
+        writeln!(
+            out,
+            "supplied at sync (not injected): {}",
+            supplied.join(", ")
         )?;
     }
     let withheld: Vec<&str> = doc["withheld_by_role"]

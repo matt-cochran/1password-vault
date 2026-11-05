@@ -435,7 +435,7 @@ dev[local]: core=vDEV.../iDEV...
 next: opv set api/OPENAI_API_KEY --env dev
 ```
 
-`run <env> [--product <p>] [--role <r>] -- <cmd>` starts a command with the keys as environment variables under their plain names, through `op run`, with no `.env` file. It first removes every key name declared in the configuration from the inherited environment, so another product's keys never leak in. opv's options go before `--`; `run` exits with the command's own exit code. The local guide, with Docker Compose, editors, product switching and WSL, is [local-development.md](local-development.md). An [infrastructure key](#infrastructure-values---supply-stdin) is never injected: its value is not in 1Password, and `run` prints one note naming it.
+`run <env> [--product <p>] [--role <r>] -- <cmd>` starts a command with the keys as environment variables under their plain names, through `op run`, with no `.env` file. It first removes every key name declared in the configuration from the inherited environment, so another product's keys never leak in. A name declared only as `source = "infrastructure"` is the exception (since 0.17.3): opv never holds its value, so it is kept as the parent environment sets it, and `run` prints one names-only note, `taken from the environment as given (supplied at sync, never stored in 1Password): <product/KEY>, …`. opv's options go before `--`; `run` exits with the command's own exit code. The local guide, with Docker Compose, editors, product switching and WSL, is [local-development.md](local-development.md). An [infrastructure key](#infrastructure-values---supply-stdin) is never injected: its value is not in 1Password, and `run` prints one note naming it. `run` reads only the boundary items that hold its own keys (with `--product`, the selected product's keys and their `from` sources, never a sibling's separate item), and its one `still needs a value in 1Password (<env>): …` note names only those keys that are empty or missing; another product's empty key in the same item is not named.
 
 **File keys.** A key with `file` is written to a fresh private directory on a RAM-backed `$XDG_RUNTIME_DIR` (0700, files 0400) and removed when the app exits. Which platforms support it and which limits opv enforces (same user, root, ptrace, inherited descriptors, swap, core dumps, hard links, reboot) are in [platforms and limits](design/local-delivery.md#platforms-and-limits). Since 0.13.0:
 
@@ -451,7 +451,7 @@ All refusals are fail-closed, before anything is read from 1Password: a product 
 
 ### Delivery preview: `--preview`
 
-`opv run <env> [--product <p>] [--role <r>] --preview [--json]` prints what this run would deliver without reading a value and without running `op run` or `op read`; a command after `--` is refused. For each key it would deliver: product, key, `source` (`<product>/<KEY>`, or the `from` source), `destination` (`env:<NAME>` or `file:<relative path>` under `secrets_dir_env`) and its `roles`. Then the environment mode (`inherit` / `declared_only`), the secrets directory variable, file-delivery platform support with its reason, and the prerequisites `op` present (`yes`/`no`/`unknown`) and signed in (`yes`/`no`/`unknown`; a discovery that cannot be determined is `unknown`, never `no`). Keys excluded by role are listed under `withheld_by_role`, names only. `--json` prints one document (`schema_version` 2); the text form prints one line per key plus the summary lines.
+`opv run <env> [--product <p>] [--role <r>] --preview [--json]` prints what this run would deliver without reading a value and without running `op run` or `op read`; a command after `--` is refused. For each key it would deliver: product, key, `source` (`<product>/<KEY>`, or the `from` source), `destination` (`env:<NAME>` or `file:<relative path>` under `secrets_dir_env`) and its `roles`. Then the environment mode (`inherit` / `declared_only`), the secrets directory variable, file-delivery platform support with its reason, and the prerequisites `op` present (`yes`/`no`/`unknown`) and signed in (`yes`/`no`/`unknown`; a discovery that cannot be determined is `unknown`, never `no`). Keys excluded by role are listed under `withheld_by_role`, names only. Infrastructure keys are not in `keys`: they are listed under `supplied_at_sync`, names only and present only when non-empty (text: `supplied at sync (not injected): …`). `--json` prints one document (`schema_version` 2); the text form prints one line per key plus the summary lines.
 
 ### Remote development: `--remote`
 
@@ -948,7 +948,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `handoff_refused` | 6 | after_fix | no | another process connected to opv's private hand-off pipe; opv refused it and sent nothing |
 | `import_tier_refused` | 6 | after_fix | yes | opv_import_local was pointed at an environment whose tier is not local; the person runs opv import instead |
 | `keys_blocking` | 6 | after_fix | yes | a write refused: keys are missing or failing a rule; nothing was written |
-| `local_io_failed` | 6 | after_fix | no | opv's own local input or output failed (a file, the current folder, standard output, ...) |
+| `local_io_failed` | 6/74 | after_fix/safe | no | opv's own local input or output failed (a file, the current folder, standard output, ...) |
 | `mount_unreadable` | 6 | after_fix | no | the workload that would mount opv's secrets cannot read them; the fix is in its own manifest |
 | `person_only` | 6 | never | yes | a person-only command was called from an assistant; it runs only in a person's terminal |
 | `plan_unknown` | 6 | never | no | no plan has this id |
@@ -1081,9 +1081,10 @@ SSH key or any other field type it does not rewrite exactly; it says so in one n
 | 9 | outcome unknown, or a provider did not answer: nothing is known to be broken; re-run the same command ([exit 9](how-opv-handles-failures.md#exit-9-re-run-the-same-command)) |
 | 10 | `opv changed` found a source item changed since the last sync (`source_changed`): a result, not a failure (`ok` is true), and the next step is the sync |
 | 70 | internal error: an opv bug; nothing to fix on your side. `Next: opv version`; report it with that output |
+| 74 | standard output could not be written (`local_io_failed` with `subject.op` `stdout`): a closed pipe, a full disk. Under `--json` the document is lost, so opv exits 74 instead of 0; stderr says first how the command itself ended (a sync that wrote stays written), then why. Safe to re-run. `--verbose` prints `stdout: one JSON document, <n> bytes, delivered` when the document was written |
 | 129 / 130 / 131 / 143 | interrupted by SIGHUP (a closed terminal), Ctrl-C (SIGINT), SIGQUIT or SIGTERM (128 + the signal); safe to re-run |
 
-CI may retry a job that exited 9 when `error.retry` is `safe`; codes 2 to 8 and 70 need a fix first. `run` exits with the child's own exit code, which can equal one of these; opv's own errors print `opv: ...` on stderr. A closed stdout (`status | head`) does not change the result. With `--json`, `error.code` names the cause within a category ([codes](#json-contract)).
+CI may retry a job that exited 9 or 74 when `error.retry` is `safe`; codes 2 to 8 and 70 need a fix first. `run` exits with the child's own exit code, which can equal one of these; opv's own errors print `opv: ...` on stderr. A closed stdout (`status | head`) does not change a text command's result; under `--json` it exits 74. With `--json`, `error.code` names the cause within a category ([codes](#json-contract)).
 
 ## When sync runs: `opv changed`, the drift check and CI
 
@@ -1140,7 +1141,7 @@ jobs:
     env:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
       OP_CACHE: "false"
-      OPV_VERSION: v0.17.2  # pin the release you tested; bump it deliberately
+      OPV_VERSION: v0.17.3  # pin the release you tested; bump it deliberately
     steps:
       - uses: actions/checkout@v4
       - name: Install the 1Password CLI

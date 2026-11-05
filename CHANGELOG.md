@@ -5,7 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.17.3] - 2026-11-04
+
+0.17.3 makes `opv run --product` read, name and pass on only what the selected product uses, makes every `--json` command emit one document or fail loudly, and refuses `opv set` from a non-person session.
+
+### Changed
+
+- **A `--json` command emits exactly one JSON document, or exits non-zero and says why (#265, FR-64).** The framed document is now written with every write and the flush checked: a document that cannot be written (a closed pipe, a full disk) is `local_io_failed` with `subject.op` `stdout` and exits **74** instead of 0, and its stderr line first says how the command itself ended (`opv: sync finished (ok); its JSON report could not be written to standard output (...)`). A successful command that wrote no document is `internal_error` (exit 70) instead of an empty stdout. A text command piped into `head` still exits 0; any other text-mode stdout error now exits 74 instead of 6. `--verbose` adds `stdout: one JSON document, <n> bytes, delivered` on stderr. The cause of #265 is not established yet: this release ships the checked write and the diagnostic so the reporter can re-run `opv ready --json --verbose > f; echo $?`.
+- `opv --help`, `docs/usage.md` and `opv schema` list exit 10 (`source_changed`) and exit 74, and a test keeps every exit code listed.
+- **`opv run --product <p>` (and `run --remote`) keeps a declared infrastructure name the parent environment sets (#264).** A key declared `source = "infrastructure"` in any product is no longer removed from the environment the command inherits: opv never holds that value, and the caller's environment is its only carrier, so a producer that needs a sibling's infrastructure value now gets it. When such a name is set, `run` prints one names-only note: `taken from the environment as given (supplied at sync, never stored in 1Password): <product>/<KEY>, …`. Every stored or `from` name is still removed, so a stale parent value never shadows a value from 1Password.
+
+### Fixed
+
+- **`opv run --product <p>` reads and names only its own keys (#263).** It reads only the boundary items holding the product's selected keys (and their `from` sources), never another product's separate item (FR-57), and its "still needs a value in 1Password" note names only those keys, printed once whether or not the run tidied the item. An empty key of another product, a key withheld by `--role` or an infrastructure key is no longer named. A shared item is still tidied with every product in it.
+- **`opv set` and `opv set --from-file` refuse a non-person 1Password session.** A service account, a Connect server, CI or a target's deploy credentials are refused with `needs_own_session` before the prompt or the file read, as `generate` and `import` already were; a person's session makes no extra `op` call.
+- `opv run --preview` (and MCP `opv_state` section `delivery_preview`) no longer lists a `source = "infrastructure"` key as delivered: such keys move to a `supplied_at_sync` array, present only when non-empty, and the text form prints `supplied at sync (not injected): <KEY>, …` (#263).
+- A cause about the http target's provider names HTTPS instead of GitHub: every provider now declares its catalog system.
 
 ## [0.17.2] - 2026-10-24
 

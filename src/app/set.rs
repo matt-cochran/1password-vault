@@ -25,6 +25,19 @@ use crate::runner::CommandRunner;
 /// refused by its size, never by its content.
 const FROM_FILE_MAX_BYTES: u64 = 65_536;
 
+/// Refuse a non-person 1Password session before the prompt or the file read. The host
+/// names a service account or Connect token, and the runner the deploy credentials, without
+/// a call; a person's session needs no refusal here. A `CI` marker alone is not a non-person
+/// session: CI without a terminal is already refused above, and a person at a terminal
+/// that happens to export `CI` still writes as themselves.
+fn require_person_if_not_person(r: &dyn CommandRunner) -> Result<(), Error> {
+    let host = crate::host::Host::detect();
+    if host.op_credential.is_some() || r.deploy_signed_in() {
+        super::tidy::require_person(r, "opv set")?;
+    }
+    Ok(())
+}
+
 /// The exact command a person is handed when an assistant calls `set`, and the command named
 /// by a read-back failure as the one to run again.
 fn command(key: &str, env_name: &str) -> Cmd {
@@ -61,6 +74,10 @@ pub fn set(
         }
         .into());
     }
+    // A service account, Connect or the deploy credentials are read-only: only a person's
+    // own session writes (FR-11, SR-5; test 30). The host names a non-person without a
+    // call; a person's session needs no refusal here. Checked before the prompt.
+    require_person_if_not_person(r)?;
     let environment = fleet.environment(env_name)?;
     let (product, name) = resolve(fleet, key, env_name)?;
     let spec = &fleet.products[&product].keys[&name];
@@ -124,6 +141,10 @@ pub fn set_from_file(
         }
         .into());
     }
+    // A service account, Connect or the deploy credentials are read-only: only a person's
+    // own session writes (FR-11, SR-5; test 30). The host names a non-person without a
+    // call; a person's session needs no refusal here. Checked before the file is read.
+    require_person_if_not_person(r)?;
     let (product, name) = resolve(fleet, key, env_name)?;
     let spec = &fleet.products[&product].keys[&name];
     // D3: the verbatim form is only for a key declared with `file`; any other key keeps the

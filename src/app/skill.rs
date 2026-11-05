@@ -334,6 +334,7 @@ fn write_error(what: &str, p: &Path, e: io::Error) -> Error {
         },
         path: p.to_path_buf(),
         io: crate::cause::IoKind::from(e.kind()),
+        delivery: None,
     }
     .into()
 }

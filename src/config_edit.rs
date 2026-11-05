@@ -443,6 +443,7 @@ pub(crate) fn write_atomic(
             op: crate::cause::LocalOp::Write,
             path: target.to_path_buf(),
             io: crate::cause::IoKind::from(e.kind()),
+            delivery: None,
         }
         .into()
     };

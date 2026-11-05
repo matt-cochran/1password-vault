@@ -964,6 +964,10 @@ pub enum Cause {
         op: LocalOp,
         path: PathBuf,
         io: IoKind,
+        /// `op: Stdout` under `--json` (FR-64): the command's document that could not be
+        /// written, with the command's own outcome. Sizes only, never the document.
+        #[serde(skip_serializing_if = "Option::is_none", flatten)]
+        delivery: Option<Delivery>,
     },
     /// An external store (a ClusterSecretStore) is not ready; `reason` is the condition's
     /// reason code (a CamelCase word) when it names one, never its message.
@@ -1403,6 +1407,12 @@ pub enum IoKind {
     /// A symbolic link (or another kind of file) where opv reads and writes only a plain file
     /// (a symlinked `.opv`): opv never writes through it.
     NotAPlainFile,
+    /// The reader of a pipe is gone (`EPIPE`).
+    BrokenPipe,
+    /// No space left on the device, or the quota is spent (`ENOSPC`, `EDQUOT`).
+    NoSpace,
+    /// A non-blocking descriptor stayed full past the run's budget (`EAGAIN`).
+    WouldBlock,
     Other,
 }
 
@@ -1412,6 +1422,9 @@ impl From<std::io::ErrorKind> for IoKind {
             std::io::ErrorKind::NotFound => IoKind::NotFound,
             std::io::ErrorKind::PermissionDenied => IoKind::PermissionDenied,
             std::io::ErrorKind::IsADirectory => IoKind::IsADirectory,
+            std::io::ErrorKind::BrokenPipe => IoKind::BrokenPipe,
+            std::io::ErrorKind::StorageFull | std::io::ErrorKind::QuotaExceeded => IoKind::NoSpace,
+            std::io::ErrorKind::WouldBlock => IoKind::WouldBlock,
             _ => IoKind::Other,
         }
     }
@@ -1625,6 +1638,41 @@ pub enum During {
     /// A write the provider applied (it exited 0): the change is made, only its reply is
     /// unusable.
     AppliedWrite,
+}
+
+/// A `--json` document that did not reach standard output (`LocalIo { op: Stdout }`,
+/// FR-64): which command, how it ended, and how much of the document was written.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Delivery {
+    /// The subcommand path (`sync`, `target list`): never its arguments.
+    pub command: String,
+    /// How the command itself ended, before its report was lost.
+    pub outcome: CommandOutcome,
+    pub bytes_written: u64,
+    /// The whole document's size.
+    pub bytes: u64,
+}
+
+/// How a command ended: `ok`, or `exit N` with its own exit code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandOutcome {
+    Ok,
+    Exit(i32),
+}
+
+impl std::fmt::Display for CommandOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CommandOutcome::Ok => f.write_str("ok"),
+            CommandOutcome::Exit(n) => write!(f, "exit {n}"),
+        }
+    }
+}
+
+impl serde::Serialize for CommandOutcome {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
 }
 
 /// Which of opv's own local operations failed (`LocalIo`).
@@ -1892,6 +1940,9 @@ pub enum Unverified {
 /// The exit code for internal errors (`EX_SOFTWARE`).
 pub const EXIT_INTERNAL: i32 = 70;
 
+/// Exit code when standard output could not be written (`EX_IOERR`, FR-64).
+pub const EXIT_STDOUT: i32 = 74;
+
 impl Cause {
     /// This cause with the environment it belongs to filled in when the adapter that
     /// classified it did not know it (an overview knows the environment's name). An `env`
@@ -2131,6 +2182,12 @@ impl Cause {
             Guard {
                 guard: self::Guard::Declined,
             } => 0,
+            // FR-64: standard output itself failed (EX_IOERR), so a lost `--json` document
+            // is never mistaken for a refusal or a success.
+            LocalIo {
+                op: LocalOp::Stdout,
+                ..
+            } => EXIT_STDOUT,
             Guard { .. }
             | MountUnreadable { .. }
             | NeedsTerminal { .. }
@@ -2180,6 +2237,10 @@ impl Cause {
             | ChangedBeforeWrite { .. }
             | Guard {
                 guard: self::Guard::Declined,
+            }
+            | LocalIo {
+                op: LocalOp::Stdout,
+                ..
             } => RetryClass::Safe,
             CreateOutcomeUnknown {
                 refind: Refind::ByTitle,
