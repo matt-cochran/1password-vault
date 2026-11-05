@@ -26,7 +26,7 @@ deliver with CI or your own terminal. The grouping is who runs a command.
 | propose | `opv propose retire <[p/]KEY>` | anyone | marks the key `retiring`; CI then prunes it with `opv sync <env> --prune --retire` and a person archives it with `opv apply rp-<id>` ([retiring a key](#retiring-a-key)) |
 | propose | `opv propose setup [--from-item <env> [--vault <t>] [--item <t>]] [--names-from <.env> [--config-key K]… [--secret-key K]…] [--file \| --project <p>] [--account <a>]` | anyone | first setup: the contract from an existing item or a `.env`'s names (each present in every environment), and every boundary, item, state vault and field |
 | propose | `opv propose structure [--rebind <env>]… [--project <p>]` | anyone | the structure the contract declares, or new ids for an environment |
-| propose | `opv propose generate <env> <p/KEY>…` | anyone | generated values for rule-backed keys |
+| propose | `opv propose generate <env> <p/KEY>…` | anyone | generated values for rule-backed keys; an `age_identity` key's `opv apply` prints only its `age1…` recipient ([sealed delivery](sealed-delivery.md#the-runtime-identity-generate-it-into-1password)) |
 | propose | `opv propose --intent <file.json>` | anyone | the categorical intent document, the same as MCP `opv_propose`; its `extend` kind adds an environment to every explicit-list key ([below](#extend-an-environment-to-every-key-the-extend-intent)) |
 | propose | any `opv propose …` with `--write` | anyone (CLI only) | also writes the contract diff into the repository's contract file. Without `--write`, and always over MCP, a proposal writes nothing |
 | apply | `opv apply [<plan_id>] [--project <p>] [--attest <env>:<target>:<product/KEY>]…` | **person, in a terminal** | recompute the plan from the contract on disk and the actual state, refuse a stale `<plan_id>`, show it, confirm, and run it in one process |
@@ -39,13 +39,14 @@ deliver with CI or your own terminal. The grouping is who runs a command.
 | deliver | `opv changed <env> [--product <p>] [--target <t>] [--json]` | CI, person | did a source item change since the last sync (exit 10) |
 | deliver | `opv sync <env> [--deploy] [--prune [--retire]] [--rotate <product/KEY>] [--prune-immutable <product/KEY>] [--expect-plan <id>] [--confirm <env>] [--product <p>] [--target <t>] [--receipt <file>] [--supply-stdin] [--json]` | CI, person | delivery, opv as the courier; `--retire` is a retirement's prune step, `--supply-stdin` takes [infrastructure values](#infrastructure-values---supply-stdin) on stdin (CI only) |
 | deliver | `opv delivery verify <env> [--product <p>] [--target <t>] [--receipt <file>] [--json]` | CI, person | does every placement still hold what opv delivered |
+| runtime | `opv unseal <bundle> --env <e> --product <p> --signers <file> [--identity-file <path> \| --identity-env <VAR>] [--min-revision <N>] [--verify-only] [--json] [--exec -- <cmd>]` | the runtime, CI; an assistant: `--verify-only` and inspect | verify a [sealed bundle](sealed-delivery.md), then inspect its names or run the command with its values; no configuration, `op` or network ([below](#sealed-bundles-opv-unseal)) |
 | deliver | `opv ci workflow <env> --target <t> [--github-env <e>] [--deploy]`, `… --on-change [--every <m>]`, `… --drift`, `opv ci workflow <env> --target <t> --supply [--deploy]`, `opv ci workflow --supply-check <file>` | person | ready-to-commit workflows, including the `needs`, `contract --check`, `ready --gate` and `opv/relaxations` checks; `--supply` prints the step that delivers infrastructure values and `--supply-check` guards it in pull requests |
 | admin | `opv access <env> --create --github <owner/repo> [--github-env <e>] [--secret-name <n>]`, `opv target credentials <env> --target <t> [--create]` | person | CI and deploy identities |
 | admin | `opv target list [--env <env>] [--json]`, `opv vault locate <vault ID> [--json]`, `opv projects [--account <a>] [--long] [--json]` | anyone | targets, the account a vault lives in, and projects in 1Password |
 | admin | `opv config export [<env>] [--toml\|--json] [--with-ids] [--product <p>]`, `opv config import --vault <v> [--file <f>] …`, `opv config check --file <f>`, `opv config edit` | person | the manifest mirror; `config edit` needs your own terminal |
 | tooling | `opv mcp serve\|install`, `opv skill install\|status`, `opv guide agent`, `opv schema`, `opv version [--json]`, `opv completions <bash\|zsh\|fish\|powershell>`, `opv help states`, `opv help <command>` | anyone | unchanged |
 
-Hidden internal commands (`remote-send`, `remote-receive`, `local-delivery`) are not listed.
+Hidden internal commands (`remote-send`, `remote-receive`, `local-delivery`) are not listed. `sync --sealed-root <dir>` is hidden too: it writes a [sealed target](sealed-delivery.md#bundles-in-another-repository---sealed-root)'s bundles under another checkout.
 
 "Who" is who may run it, not what is permitted: the CLI has no permission model of its own. A command named **person** needs your own terminal and refuses CI or agent mode. A read that opens an item may also tidy its 1Password layout once when a person runs it signed in with their own session (missing sections and empty fields, labels, duplicates; nothing is deleted, [store layout](configuration.md#store-layout)); a service account, Connect, CI or a run under `deploy_credentials` never writes to 1Password.
 
@@ -365,6 +366,10 @@ Secrets are written with `gh secret set` and config with `gh variable set`, valu
 
 An application that keeps its own secrets in its own encrypted store, written through an admin API, is an [HTTP target](http-target.md). opv lists the store, writes one `put` per changed name, re-lists to confirm and records the version in the receipt; a version changed outside opv is drift, and a declared conflict code is `target_changed`. The store applies a write at once, so `--deploy` says there is nothing to deploy. The configuration, the credentials item and the errors are in [the HTTP target](http-target.md).
 
+### Sync to a sealed bundle
+
+A runtime with no secret store of its own (a Docker host, a VM, systemd units) gets a [sealed target](sealed-delivery.md): `sync` writes one signed, age-encrypted `opv-sealed/1` file per product at `sealed.out`, and the runtime opens it with [`opv unseal`](#sealed-bundles-opv-unseal), so 1Password is read at release time, never at start. Any change re-seals the whole bundle (a pruned or retired name leaves it); no change writes nothing. A changed recipient, signer or name set marks the bundle stale as a whole, with one line saying why. The existing bundle is verified against `sealed.signer` before any value is read; a tampered one refuses (`input_invalid`) and is left alone. `sync --sealed-root <dir>` (hidden) writes the bundles under another checkout. The configuration, the trust boundary and its residual risk, rotation and migration are in [sealed delivery](sealed-delivery.md).
+
 ### Pruning on Fly
 
 Nothing is deleted by default. `--prune` unsets only names that the template produces for declared keys that are not desired in this environment. Names outside that set are never touched. Immutable keys are never pruned unless named with `--prune-immutable`; they are reported as "held (immutable), not pruned". A name staged by the same run is never pruned. A key you delete from `secrets.toml` is no longer declared, so it is neither reported nor pruned: unset it manually with `flyctl secrets unset`.
@@ -459,6 +464,10 @@ All refusals are fail-closed, before anything is read from 1Password: a product 
 ### Remote development: `--remote`
 
 `opv run <env> [--product <p>] [--role <r>] --remote <profile>` delivers the same selection to a reviewed profile (`[products.<p>.remotes.<profile>]`) over pinned SSH and runs the profile's pinned command there; it takes no command after `--`. It needs an interactive terminal (refused under CI or with a service-account or Connect credential: `terminal_required`). An unknown profile is `usage`; an environment or role the profile does not allow is `policy_refused`; both before anything is read. The exit code is the remote app's, or 255 when SSH itself failed (connection, authentication or the pinned host key). Closing the terminal, Ctrl-C or a dropped connection stops the remote app and removes its secrets directory. `--preview --remote <profile>` adds `transport: remote` and the profile's pinned connection and command (identifiers only) to the preview. Design and limits: [remote delivery](design/remote-delivery.md).
+
+## Sealed bundles: `opv unseal`
+
+`opv unseal <bundle> --env <e> --product <p> --signers <allowed_signers>` is the runtime side of a [sealed target](sealed-delivery.md). It reads the bundle, the signers file and an age identity, and nothing else: no configuration, no `op`, no socket. It checks the signature against a signers line whose principals include the bundle's environment (namespace `opv-sealed`), then the environment and product, then `--min-revision <N>` (the deploy's rollback floor), then that the identity is a recipient, and only then decrypts. `--verify-only` decrypts nothing and needs no identity; with one it also checks membership, and with file keys the RAM-backed `$XDG_RUNTIME_DIR`. Without a mode it decrypts in memory and prints the header and names, never a value. `--exec -- <cmd>` runs the command with the values: every `OP_*` and the `--identity-env` variable are removed, a bundle name replaces an inherited one (named on stderr), file keys go to a private RAM folder, and the exit code is the command's. The identity comes from `--identity-file <path>` or `--identity-env <VAR>`, never an argument. `--json` (not with `--exec`) prints one `opv.unseal/1` document of names and fingerprints. Refusals are the `sealed_*` codes in the [table](#json-contract).
 
 ## Doctor
 
@@ -712,7 +721,7 @@ opv ready                                        # names: opv apply rp-<id>
 
 `opv propose structure [--rebind <env>]… [--project <p>]` plans the structure the contract declares (missing vaults, items, state vaults and empty fields) or new ids for an environment, and ends with the `opv apply` that runs it. It is also the one-time move that reads inline ids from `secrets.toml` and writes them to `secrets.bindings.toml`: a `secrets.toml` that still carries inline ids is refused at load by every command with `config_invalid`, naming the field, and `opv propose structure` then `opv apply` is the only path that reads them, only to move them.
 
-`opv propose generate <env> <p/KEY>…` plans generated values for rule-backed keys.
+`opv propose generate <env> <p/KEY>…` plans generated values for rule-backed keys. A key with `rules = { age_identity = true }` gets a fresh age X25519 identity: the person's `opv apply` writes it into 1Password and prints only its public `age1…` recipient, for a sealed target's `sealed.recipients` ([sealed delivery](sealed-delivery.md#the-runtime-identity-generate-it-into-1password)).
 
 ### The intent document: `opv propose --intent <file.json>`
 

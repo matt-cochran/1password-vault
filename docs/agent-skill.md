@@ -112,6 +112,18 @@ with `section: plan` and the same targets, product and rotate). CI runs `opv syn
 and on a schedule. `stale_plan`: the item, target or configuration changed; show the new
 plan and ask again.
 
+## Sealed bundles
+
+A sealed target's bundle (`*.opv-sealed`) is opened at the runtime by `opv unseal`, never by
+you. You may run `opv unseal <bundle> --env <env> --product <p> --signers <file> --verify-only
+--json`, or the same without `--verify-only` and with the runtime's identity file, to check a
+bundle: both print names, destinations and fingerprints, never a value. Never run `unseal
+--exec`, never read or copy an age identity (`AGE-SECRET-KEY-1…`) and never decrypt a bundle
+with `age -d`. A runtime identity is a key with `rules = { age_identity = true }`, made by
+`opv propose generate` and the person's `opv apply`, which prints only its `age1…` recipient.
+Changes to `sealed.recipients`, `sealed.signer` or a runtime's `allowed_signers` decide who
+may open or set an environment's values: propose them and let the user review them like code.
+
 ## Self-made secrets
 
 For a key with `base64_bytes` or `hex_bytes` (encryption, session, signing keys), ask the user,
