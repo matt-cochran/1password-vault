@@ -78,9 +78,19 @@ exactly the CLI's `--json` error object.
 Every failure has one `error.code` from a closed list (`opv schema` lists them), the same
 in the CLI's `--json` document and in an MCP answer:
 
-- `next` is `{kind, actor, command}`. Run `next.command` yourself only when `next.actor`
-  is `assistant` and `human_required` is false; otherwise hand `do` and the command to the
-  user and wait (a `ci` action is left to CI).
+- `next` is `{kind, actor, command}`, and in schema 4 a step can also carry `argv`, `reach`
+  and `choices`. Run `next.command` yourself only when `next.actor` is `assistant` and
+  `human_required` is false; otherwise hand `do` and the command to the user and wait (a
+  `ci` action is left to CI). `next.kind: choose` is a person's pick: it comes with two or
+  more `choices` (accounts), each with its ordered `steps` as `argv` arrays. Never choose an
+  account for the user and never run a choice's steps; show the choices and wait. `reach`
+  (`app`, `shell`, `none`) says how far this session can reach a 1Password session: with
+  `none` you cannot verify a sign-in yourself, and the person runs `next` in their terminal.
+- You cannot share the person's 1Password session. On WSL with the Linux `op`, and on
+  headless hosts, a sign-in lives only in the shell that made it, so after the person signs
+  in in their terminal you still see value-state only. The shell-function form
+  `eval "$(opv login --shell)"` for the person's own shell is documented only: it is never
+  a typed `next` step, and no opv output steers you into a session.
 - `retry`: `safe` re-run as is; `after_fix` once `do` is done; `check_first` run `next` (a
   read) before acting again, because something may already exist; `never` the command
   must change.
@@ -169,9 +179,10 @@ A `pending_revoke` finding means an old identity still reads the vault: once
   records `deploy_credentials` — the token is never printed. If they decline or the target
   already records one, it is a stop: hand `opv explain` to them and wait.
 - **Account findings** (`no_accounts`, `selected_account_absent`, `account_ambiguous`,
-  `selected_signed_out`): run `opv account list --json`; ask the user which account; record it
-  with `opv account use <ID>`; hand `opv login --add --account <email>` or
-  `opv login --account <ID>` to the user, wait, then re-run `opv ready --json`.
+  `selected_signed_out`, `account_required`): run `opv account list --json`; when its `next`
+  is `kind: choose`, show the user its choices and never pick one yourself. Ask the user
+  which account; record it with `opv account use <ID>`; hand `opv login --add --account
+  <email>` or `opv login --account <ID>` to the user, wait, then re-run `opv ready --json`.
 - **`ids_not_in_account`**: the recorded vault is in another account. Ask the user: select
   that account (`opv account use <ID>`) or rebind (`opv propose structure --rebind <env>`),
   then `opv apply`.
