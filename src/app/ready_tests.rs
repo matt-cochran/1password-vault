@@ -2219,7 +2219,99 @@ fn a_partial_provision_set_finding_names_the_provision_command() {
     let doc = ready_on_a_set(serde_json::json!([concealed("ALPHA", SET_HEX32)]));
     assert_eq!(
         set_findings(&doc)[0]["prerequisite"],
-        "opv provision grant --env dev"
+        "opv provision grant --env dev --fill-missing"
+    );
+}
+
+/// A `prod` Fly target holding set `grant` (`app/ALPHA` set, `app/BETA` as `beta`) in
+/// `state`, and `app/PLAIN` (in no set) missing when `plain`.
+fn receipt_with_a_set_on_a_target(
+    report: &account::Report,
+    beta: KeyState,
+    state: ValueState,
+    plain: bool,
+) -> Receipt {
+    let mut rows = vec![
+        row("app", "ALPHA", KeyState::Ready, TargetState::Present),
+        row("app", "BETA", beta, TargetState::Absent),
+    ];
+    if plain {
+        rows.push(row("app", "PLAIN", KeyState::Missing, TargetState::Absent));
+    }
+    let envs = vec![env("prod", Some("Fly"), rows)];
+    let sets = [SetInput {
+        name: "grant".into(),
+        environment: "prod".into(),
+        members: vec![ValueState::Set, state],
+    }];
+    let members: Vec<SetMember> = ["ALPHA", "BETA"]
+        .iter()
+        .map(|k| ("grant".into(), "prod".into(), "app".into(), (*k).into()))
+        .collect();
+    receipt_with_sets(
+        &inputs(report, envs),
+        "0.18.0",
+        "",
+        BTreeMap::new(),
+        None,
+        &[],
+        &sets,
+        &members,
+    )
+}
+
+/// A `prod` Fly target where set `grant` is partial (`app/BETA` is missing), with
+/// `app/PLAIN` (in no set) missing when `plain`.
+fn receipt_with_a_partial_set_on_a_target(report: &account::Report, plain: bool) -> Receipt {
+    receipt_with_a_set_on_a_target(report, KeyState::Missing, ValueState::Absent, plain)
+}
+
+#[test]
+fn a_partial_provision_sets_ready_next_fills_the_missing_members() {
+    let report = account_report();
+    let r = receipt_with_a_partial_set_on_a_target(&report, false);
+    assert_eq!(
+        r.next.unwrap().step,
+        "opv provision grant --env prod --fill-missing"
+    );
+}
+
+#[test]
+fn an_inconsistent_provision_sets_ready_next_replaces_the_set() {
+    let report = account_report();
+    let r = receipt_with_a_set_on_a_target(
+        &report,
+        KeyState::RuleFailed("hex_bytes", Reason::Fixed("not hex")),
+        ValueState::Malformed {
+            rule: "hex_bytes".into(),
+        },
+        false,
+    );
+    assert_eq!(
+        r.next.unwrap().step,
+        "opv provision grant --env prod --replace"
+    );
+}
+
+#[test]
+fn a_set_member_missing_on_a_target_yields_no_opv_open_step() {
+    let report = account_report();
+    let r = receipt_with_a_partial_set_on_a_target(&report, true);
+    assert!(
+        !r.findings
+            .iter()
+            .any(|f| f.prerequisite.starts_with("opv open app/BETA"))
+    );
+}
+
+#[test]
+fn a_missing_key_in_no_set_still_yields_opv_open() {
+    let report = account_report();
+    let r = receipt_with_a_partial_set_on_a_target(&report, true);
+    assert!(
+        r.findings
+            .iter()
+            .any(|f| f.prerequisite == "opv open app/PLAIN --env prod")
     );
 }
 
