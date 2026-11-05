@@ -17,7 +17,7 @@ use crate::cause::{ConfigCheck, DottedPath, FieldRule};
 use crate::config::section_invalid;
 use crate::domain::{Fleet, ItemRef};
 use crate::error::Error;
-use crate::provider::FleetRefusal;
+use crate::provider::{FleetRefusal, Placement};
 
 /// The placeholder `sealed.out` renders per product.
 pub const PRODUCT: &str = "{product}";
@@ -47,6 +47,9 @@ pub enum TrustGroup {
 /// with their fingerprints, which are what messages show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SealedTarget {
+    /// The environment whose section this is: the header's `environment` and the signer's
+    /// principal.
+    pub env: String,
     /// `sealed.out`: relative, no `..`, may hold `{product}`.
     pub out: String,
     /// `sealed.env_name`: holds `{KEY}`, may hold `{PRODUCT}`.
@@ -57,12 +60,18 @@ pub struct SealedTarget {
     pub recipient_fingerprints: Vec<String>,
     /// `SHA256:…` of `sealed.signer`.
     pub signer_fingerprint: String,
+    /// `sealed.signer` in OpenSSH form without its comment, which a listed bundle's
+    /// signature is verified against (T10, R7).
+    pub signer_key: String,
     pub trust_group: TrustGroup,
     /// The configuration file's directory, which `sealed.out` is relative to without
     /// `--sealed-root`.
     pub config_dir: PathBuf,
     /// `opv sync --sealed-root <dir>` (D12), for this run; `None` from the configuration.
     pub out_root: Option<PathBuf>,
+    /// The target's name and what it delivers, set when the configuration is read
+    /// ([`crate::provider::TargetConfig::set_placement`]).
+    pub placement: Placement,
 }
 
 /// `field` of the `sealed` section, refused for `rule`.
@@ -160,14 +169,19 @@ impl SealedTarget {
             }
         };
         Ok(SealedTarget {
+            env: env.to_string(),
             out: raw.out,
             env_name_template: raw.env_name,
             recipients,
             recipient_fingerprints,
             signer_fingerprint: signer_fingerprint(&signer),
+            signer_key: ssh_key::PublicKey::new(signer.key_data().clone(), "")
+                .to_openssh()
+                .map_err(|_| expected("signer", "one ssh-ed25519 OpenSSH public key"))?,
             trust_group,
             config_dir,
             out_root: None,
+            placement: Placement::default(),
         })
     }
 

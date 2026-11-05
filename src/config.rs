@@ -1458,7 +1458,56 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
     check_evidence_width(&fleet, doc)?;
     check_delivery_items(&fleet, doc)?;
     sets::check_into(&mut fleet, raw.sets, raw.producers, doc)?;
+    place_targets(&mut fleet);
     Ok(fleet)
+}
+
+/// Tells every target its placement ([`crate::provider::TargetConfig::set_placement`]): its
+/// name and, per product it delivers, the env name and file path of each key desired in
+/// the environment.
+fn place_targets(fleet: &mut Fleet) {
+    use crate::provider::{PlacedProduct, Placement};
+    let mut placements = Vec::new();
+    for (env_name, env) in &fleet.environments {
+        for (name, target) in &env.targets {
+            let products = fleet
+                .products
+                .iter()
+                .filter(|(p, _)| fleet.delivers(env_name, name, p))
+                .map(|(p, prod)| {
+                    let names = prod
+                        .keys
+                        .iter()
+                        .filter(|(_, s)| s.is_desired_in(env_name))
+                        .map(|(k, s)| (target.config.env_name(p, k), s.file.clone()))
+                        .collect();
+                    let secrets_dir_env =
+                        prod.local.as_ref().and_then(|l| l.secrets_dir_env.clone());
+                    (
+                        p.clone(),
+                        PlacedProduct {
+                            names,
+                            secrets_dir_env,
+                        },
+                    )
+                })
+                .collect();
+            let placement = Placement {
+                target: name.clone(),
+                products,
+            };
+            placements.push((env_name.clone(), name.clone(), placement));
+        }
+    }
+    for (env_name, name, placement) in placements {
+        if let Some(t) = fleet
+            .environments
+            .get_mut(&env_name)
+            .and_then(|e| e.targets.get_mut(&name))
+        {
+            t.config.set_placement(&placement);
+        }
+    }
 }
 
 /// Ignore annotations (Part V, row `annotations`): a scanner-observed name a person judged

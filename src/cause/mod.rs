@@ -2241,6 +2241,9 @@ pub enum InputKind {
     SecretFile,
     /// A producer's `opv.produce/1` output (#253; `path`: the producer's project file).
     Produce,
+    /// A sealed bundle at `sealed.out` that `sync` cannot trust or replace (#271,
+    /// `sealed-target` §5.1, T8, T10; `path`: the bundle).
+    SealedBundle,
 }
 
 /// What an in-memory folder was needed for (R74).

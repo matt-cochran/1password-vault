@@ -602,6 +602,10 @@ pub trait TargetConfig: fmt::Debug + Send + Sync {
     /// files of its own resolves them under `root` for this run instead of beside the
     /// configuration. Default: the target writes no files of its own and ignores it.
     fn set_out_root(&mut self, _root: &std::path::Path) {}
+    /// Where the target sits in the configuration, set once when the configuration is read
+    /// (design `sealed-target` §5.2): a target that names its placement in what it writes
+    /// (a sealed bundle's header) keeps it. Default: ignored.
+    fn set_placement(&mut self, _placement: &Placement) {}
     /// Equal configuration (every field), for comparing whole configurations.
     fn eq_dyn(&self, other: &dyn TargetConfig) -> bool;
     /// For [`TargetConfig::same_target`] and [`TargetConfig::eq_dyn`] implementations.
@@ -679,6 +683,24 @@ pub struct Preflight {
     /// Set when the runtime has nothing to restart: `sync --deploy` skips the deploy and
     /// prints this line instead (exit 0).
     pub skip_deploy: Option<String>,
+}
+
+/// One target's placement (design `sealed-target` §5.2), as [`TargetConfig::set_placement`]
+/// receives it. Names and paths only.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Placement {
+    /// The target's name in its environment.
+    pub target: String,
+    /// Each product the target delivers.
+    pub products: BTreeMap<String, PlacedProduct>,
+}
+
+/// A product a target delivers: each key's rendered env name with its `file` path (`None`
+/// for a key delivered as a variable), and the product's `local.secrets_dir_env`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlacedProduct {
+    pub names: BTreeMap<String, Option<String>>,
+    pub secrets_dir_env: Option<String>,
 }
 
 /// A passing check: ok, or ok with a warning.
