@@ -148,8 +148,17 @@ pub struct PlanMember {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "maker", rename_all = "snake_case")]
 pub enum MadeBy {
-    Producer { producer: String, output: String },
-    Generate { generator: String },
+    Producer {
+        producer: String,
+        output: String,
+    },
+    Generate {
+        generator: String,
+    },
+    /// #262: rendered from other members and producer outputs, named by reference only.
+    Template {
+        references: Vec<String>,
+    },
 }
 
 /// One producer as the contract declares it (value-free; `command` is checked at load).
@@ -340,6 +349,13 @@ fn first_producer(set: &ProvisionSet) -> Option<&str> {
     set.members.values().find_map(|m| match m {
         MemberSource::Producer { producer, .. } => Some(producer.as_str()),
         MemberSource::Generate(_) => None,
+        // #262: a template's leaf may name a producer output, which runs for it.
+        MemberSource::Template(t) => t.references().into_iter().find_map(|r| match r {
+            crate::domain::provision_template::Ref::Output { producer, .. } => {
+                Some(producer.as_str())
+            }
+            crate::domain::provision_template::Ref::Member(_) => None,
+        }),
     })
 }
 
@@ -532,6 +548,9 @@ fn made_by(source: &MemberSource) -> MadeBy {
                 Generator::Base64Bytes(n) => format!("base64_bytes {n}"),
             },
         },
+        MemberSource::Template(t) => MadeBy::Template {
+            references: t.references().iter().map(ToString::to_string).collect(),
+        },
     }
 }
 
@@ -579,6 +598,7 @@ pub fn render_plan(plan: &Plan) -> String {
         let how = match &m.made_by {
             MadeBy::Producer { producer, output } => format!("producer {producer} → {output}"),
             MadeBy::Generate { generator } => format!("generate {generator}"),
+            MadeBy::Template { references } => format!("template of {}", references.join(", ")),
         };
         lines.push(format!("  make    {}   {how}", m.key));
     }
