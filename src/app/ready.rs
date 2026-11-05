@@ -209,6 +209,11 @@ pub struct SetInput {
     pub members: Vec<ValueState>,
 }
 
+/// One provision set member in one environment the set names (#253/#262, §4.5, D7):
+/// `(set, environment, product, key)`. A member is written only by `opv provision`, so
+/// `ready` never sends the person to `opv open` for one.
+pub type SetMember = (String, String, String, String);
+
 /// A provision set's state in one environment, as the receipt reports it (#253/#262, §4.5).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SetReport {
@@ -334,6 +339,7 @@ fn receipt_with(
         revision,
         gaps,
         &[],
+        &[],
     )
 }
 
@@ -350,6 +356,7 @@ fn receipt_with_sets(
     revision: Option<String>,
     gaps: &[(String, String, String)],
     sets: &[SetInput],
+    members: &[SetMember],
 ) -> Receipt {
     let config = ConfigRef {
         source: inputs.config_source.clone(),
@@ -366,6 +373,7 @@ fn receipt_with_sets(
         gaps,
         crate::host::Host::detect().agent_mode().is_some(),
         &sets,
+        members,
     );
     let next = findings
         .iter()
@@ -780,6 +788,7 @@ fn build_findings(
     gaps: &[(String, String, String)],
     agent: bool,
     sets: &[SetReport],
+    members: &[SetMember],
 ) -> Vec<Finding> {
     let mut out = Vec::new();
     let selected = inputs
@@ -897,6 +906,7 @@ fn build_findings(
         let Ok(rows) = &env.rows else { continue };
         row_findings(&mut out, inputs, env, None, rows);
     }
+    fold_set_members(&mut out, sets, members);
     out.extend(inputs.retirement.iter().cloned());
     // #253/#262: a provision set that is partial or inconsistent blocks readiness; the
     // owner runs `opv provision <set> --env <env>`. A complete set has no finding, and an
@@ -952,14 +962,81 @@ fn build_findings(
     out
 }
 
+/// A row finding's `opv open` step for a provision set member (#253/#262, §4.5, §7, D7): a
+/// member is written only by `opv provision`, never by hand. Where the set's own
+/// `keys_blocking` finding covers that environment, the member's finding is dropped (one
+/// finding per set, not one per member per target); otherwise (an absent set, or one
+/// `ready` could not judge) its step is the set's provision command. Findings for keys in
+/// no set are kept as they are.
+fn fold_set_members(out: &mut Vec<Finding>, sets: &[SetReport], members: &[SetMember]) {
+    let set_of = |f: &Finding| {
+        let env = f.scope.environment.as_deref()?;
+        let product = f.scope.product.as_deref()?;
+        let key = f.scope.key.as_deref()?;
+        members
+            .iter()
+            .find(|(_, e, p, k)| e == env && p == product && k == key)
+            .map(|(set, ..)| (set.clone(), env.to_string()))
+    };
+    let opens = |f: &Finding| {
+        matches!(
+            f.code.as_str(),
+            "key_missing" | "key_empty" | "key_failed_rule" | "key_wrong_kind"
+        ) && f.prerequisite.starts_with("opv open ")
+    };
+    out.retain_mut(|f| {
+        if !opens(f) {
+            return true;
+        }
+        let Some((set, env)) = set_of(f) else {
+            return true;
+        };
+        let covered = sets.iter().any(|s| {
+            s.set == set
+                && s.environment == env
+                && matches!(s.state, SetState::Partial | SetState::Inconsistent)
+        });
+        if covered {
+            return false;
+        }
+        f.prerequisite = format!("opv provision {set} --env {env}");
+        true
+    });
+}
+
+/// Each provision set member in each environment the set names (#253/#262, §4.5), scoped
+/// by `only` like the rest of the receipt.
+fn set_members(fleet: &crate::domain::Fleet, only: Option<&str>) -> Vec<SetMember> {
+    let mut out = Vec::new();
+    for (name, set) in &fleet.sets {
+        for environment in &set.environments {
+            if only.is_some_and(|o| o != environment) {
+                continue;
+            }
+            for member in set.members.keys() {
+                out.push((
+                    name.clone(),
+                    environment.clone(),
+                    member.product.clone(),
+                    member.key.clone(),
+                ));
+            }
+        }
+    }
+    out
+}
+
 /// The `keys_blocking` finding for a provision set (#253/#262, §7): a set whose members are
 /// some-but-not-all set, or all set but one failing its rules. Blocking, naming the set and
-/// the owner's step `opv provision <set> --env <env>`. A complete or absent set produces
-/// none; the receipt's `sets` field carries the state either way.
+/// the owner's step: `opv provision <set> --env <env> --fill-missing` for a partial set,
+/// `--replace` for an inconsistent one (§7, D7). A complete or absent set produces none;
+/// the receipt's `sets` field carries the state either way.
 fn set_finding(s: &SetReport) -> Option<Finding> {
-    if !matches!(s.state, SetState::Partial | SetState::Inconsistent) {
-        return None;
-    }
+    let flag = match s.state {
+        SetState::Partial => "--fill-missing",
+        SetState::Inconsistent => "--replace",
+        _ => return None,
+    };
     Some(Finding {
         code: "keys_blocking".into(),
         scope: Scope {
@@ -970,7 +1047,7 @@ fn set_finding(s: &SetReport) -> Option<Finding> {
         blocking: true,
         actor: "owner".into(),
         effect: "writes_1password".into(),
-        prerequisite: format!("opv provision {} --env {}", s.set, s.environment),
+        prerequisite: format!("opv provision {} --env {} {flag}", s.set, s.environment),
         verify: VERIFY.into(),
         message: None,
         act: None,
@@ -1642,6 +1719,7 @@ pub fn run_at(
         revision,
         &gaps,
         &sets,
+        &set_members(fleet, only),
     );
     // The receipt is plain data: failing to serialize it is opv's own bug.
     let bug = |_| {
