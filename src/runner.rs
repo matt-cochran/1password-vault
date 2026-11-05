@@ -1743,6 +1743,12 @@ impl Default for ProcessRunner {
 static DEFAULT_ACCOUNT: Mutex<Option<String>> = Mutex::new(None);
 static SIGNED_OUT_ACCOUNT: Mutex<Option<String>> = Mutex::new(None);
 
+/// The run's default 1Password account, when one was selected ([`ProcessRunner::use_account`]):
+/// `opv run`'s preflight refuses op's default account only when none was (FR-40, #266).
+pub fn run_account() -> Option<String> {
+    lock(&DEFAULT_ACCOUNT).clone()
+}
+
 /// The account an `op` call names: its `--account` value, else its `OP_ACCOUNT`.
 fn call_account(call: &Call) -> Option<String> {
     call.args

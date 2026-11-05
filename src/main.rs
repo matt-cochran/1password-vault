@@ -2073,7 +2073,8 @@ fn main() -> ExitCode {
             let _ = guard.flush();
             res
         };
-        let signed_out = matches!(&res, Err(e) if e.code_str() == "op_not_signed_in");
+        // `opv run` is replayed only before its child started (#266, D4): never twice.
+        let signed_out = run_cmd::may_replay(&res);
         if may_sign_in && signed_out && !signed_in {
             match sign_in_here() {
                 // Once: a second failure is reported as it is.
