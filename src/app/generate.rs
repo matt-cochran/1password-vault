@@ -217,7 +217,7 @@ pub fn plan(
         };
         // A set member is written only together with its set (#253 §5.6): refused from the
         // configuration alone, before the recipe, so no 1Password call is ever made.
-        super::set::refuse_set_member(fleet, product, key, env_name)?;
+        super::import::refuse_set_member(fleet, product, key, env_name)?;
         chosen.push((
             product.into(),
             key.into(),

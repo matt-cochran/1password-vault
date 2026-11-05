@@ -77,7 +77,11 @@ fn shown(e: &Error) -> String {
 
 #[test]
 fn an_allowed_open_url_is_returned_as_a_notice() {
-    let text = format!("{}\n{}", notice_open(URL), result(r#""refresh_token":"v1""#));
+    let text = format!(
+        "{}\n{}",
+        notice_open(URL),
+        result(r#""refresh_token":"v1""#)
+    );
     let produced = run(&text).unwrap();
     assert!(matches!(produced.notices(), [Notice::OpenUrl(u)] if u == URL));
 }
@@ -128,7 +132,11 @@ fn an_open_url_to_a_host_outside_the_list_is_refused() {
 #[test]
 fn an_open_url_longer_than_the_limit_is_refused() {
     let long = format!("https://{HOST}/{}", "a".repeat(URL_LIMIT));
-    let text = format!("{}\n{}", notice_open(&long), result(r#""refresh_token":"v1""#));
+    let text = format!(
+        "{}\n{}",
+        notice_open(&long),
+        result(r#""refresh_token":"v1""#)
+    );
     assert_eq!(
         rule_of(&text),
         Some(ProduceRule::OpenUrlRefused {
@@ -185,7 +193,10 @@ fn a_result_for_another_environment_is_refused() {
 #[test]
 fn an_undeclared_output_is_reported_by_its_position() {
     let text = result(r#""refresh_token":"v1","extra":"v2""#);
-    assert_eq!(rule_of(&text), Some(ProduceRule::Undeclared { position: 2 }));
+    assert_eq!(
+        rule_of(&text),
+        Some(ProduceRule::Undeclared { position: 2 })
+    );
 }
 
 #[test]
@@ -272,17 +283,12 @@ fn a_second_terminal_line_after_a_result_is_refused() {
 
 #[test]
 fn no_terminal_line_is_refused() {
-    assert_eq!(
-        rule_of(&notice_waiting()),
-        Some(ProduceRule::NoResult)
-    );
+    assert_eq!(rule_of(&notice_waiting()), Some(ProduceRule::NoResult));
 }
 
 #[test]
 fn an_unknown_field_is_refused() {
-    let text = format!(
-        r#"{{"schema":"{SCHEMA}","kind":"notice","waiting":true,"extra":1}}"#
-    );
+    let text = format!(r#"{{"schema":"{SCHEMA}","kind":"notice","waiting":true,"extra":1}}"#);
     assert_eq!(rule_of(&text), Some(ProduceRule::UnknownField { line: 1 }));
 }
 

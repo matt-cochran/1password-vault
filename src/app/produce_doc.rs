@@ -221,7 +221,10 @@ fn open_url_problem(url: &str, hosts: &[String]) -> Option<OpenUrlProblem> {
         },
         None => authority.split(':').next().unwrap_or(""),
     };
-    if !hosts.iter().any(|allowed| allowed.eq_ignore_ascii_case(host)) {
+    if !hosts
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(host))
+    {
         return Some(OpenUrlProblem::HostNotListed);
     }
     if url.len() > URL_LIMIT {
@@ -236,9 +239,7 @@ fn open_url_problem(url: &str, hosts: &[String]) -> Option<OpenUrlProblem> {
 fn valid_code(code: &str) -> bool {
     !code.is_empty()
         && code.len() <= 40
-        && code
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b == b'_')
+        && code.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
 }
 
 fn classify(line: &[u8], at: u32, context: &Context<'_>) -> Result<Line, Error> {
