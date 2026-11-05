@@ -1,18 +1,19 @@
 //! The sealed target's provider (design `sealed-target` §3, §3.2, §8.1, §8.2): parses the
 //! `sealed` section, declares the channels and the cross-target load rules.
 //!
-//! Stubs left for later lanes, each refusing as an internal error that names the lane:
+//! The signing login (lane P2, [`super::login`]) needs `sealed.signer`, so a parsed target
+//! keeps a per-signer provider, as the HTTP target keeps a per-host one.
+//!
+//! Stub left for a later lane, refusing as an internal error that names the lane:
 //! - `TargetConfig::open` → lane P3 (`store.rs`: the whole-set `StagedStore` with
-//!   `live() == true`, its runtime) and lane C1 (`whole_set()` on the port);
-//! - `Provider::deploy_login` and [`SIGNER_FIELDS`] → lane P2 (`login.rs`: the SSH Key
-//!   item's OpenSSH private key, signing through `EnvRunner`).
+//!   `live() == true`, its runtime) and lane C1 (`whole_set()` on the port).
 
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Mutex, OnceLock};
 
 use super::config::{Raw, SealedTarget, check_fleet};
 use crate::cause::Cause;
-use crate::domain::Kind;
 use crate::domain::runtime::FileMount;
 use crate::error::Error;
 use crate::host::Host;
@@ -26,19 +27,39 @@ use crate::runner::CommandRunner;
 /// The label of the sealed bundle in messages, for both channels (§3.2).
 pub const LABEL: &str = "sealed bundle";
 
-/// The registered `sealed` provider.
-pub static PROVIDER: SealedProvider = SealedProvider;
+/// The registered `sealed` provider: parses sections only, so it carries no signer.
+pub static PROVIDER: SealedProvider = SealedProvider {
+    signer: String::new(),
+};
 
-/// The sealed target's provider.
+/// The sealed target's provider. `signer` is `SHA256:…` of the configuration's
+/// `sealed.signer`; it is empty on [`PROVIDER`] and set on the per-signer provider a parsed
+/// target answers with.
 #[derive(Debug)]
-pub struct SealedProvider;
+pub struct SealedProvider {
+    signer: String,
+}
 
-/// The fields the signing item holds (D3, D13: a 1Password SSH Key item). Stub until lane
-/// P2's `login.rs` owns it.
-pub const SIGNER_FIELDS: &[CredentialField] = &[CredentialField {
-    label: "private key",
-    kind: Kind::Secret,
-}];
+/// The fields the signing item holds (D3, D13: a 1Password SSH Key item).
+pub const SIGNER_FIELDS: &[CredentialField] = super::login::FIELDS;
+
+/// The per-signer provider of `signer`, interned so a process leaks at most one per distinct
+/// signer.
+fn provider_for(signer: &str) -> &'static SealedProvider {
+    static CACHE: OnceLock<Mutex<BTreeMap<String, &'static SealedProvider>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(provider) = cache.get(signer) {
+        return provider;
+    }
+    let provider: &'static SealedProvider = Box::leak(Box::new(SealedProvider {
+        signer: signer.to_string(),
+    }));
+    cache.insert(signer.to_string(), provider);
+    provider
+}
 
 /// The refusal of a capability a later lane of 0.18.0 builds (never reached in a release).
 fn not_yet(site: &'static str) -> Error {
@@ -81,10 +102,15 @@ impl Provider for SealedProvider {
         Ok(SIGNER_FIELDS)
     }
 
+    /// The SSH Key login, which refuses a key other than `sealed.signer` (T2). Only a
+    /// parsed target's provider knows the signer; the registered one is never asked.
     fn deploy_login(&self) -> Result<Box<dyn DeployLogin>, Error> {
-        Err(not_yet(
-            "sealed deploy_login: the SSH Key signing login is lane st-p2",
-        ))
+        if self.signer.is_empty() {
+            return Err(not_yet("sealed deploy_login on the registered provider"));
+        }
+        Ok(Box::new(super::login::SealedLogin::new(
+            self.signer.clone(),
+        )))
     }
 
     fn check_fleet(&self, fleet: &crate::domain::Fleet) -> Result<(), Box<FleetRefusal>> {
@@ -94,7 +120,7 @@ impl Provider for SealedProvider {
 
 impl TargetConfig for SealedTarget {
     fn provider(&self) -> &'static dyn Provider {
-        &PROVIDER
+        provider_for(&self.signer_fingerprint)
     }
 
     fn env_name(&self, product: &str, key: &str) -> String {

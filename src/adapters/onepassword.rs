@@ -1091,15 +1091,24 @@ fn read_deploy_credentials_on(
             Kind::Secret => ("CONCEALED", FieldType::Concealed),
             Kind::Config => ("STRING", FieldType::Text),
         };
-        if f.ty != expected {
+        // An SSH Key item's concealed key (#271 T16) is `SSHKEY`: its OpenSSH form when the
+        // item has one, else its default PKCS#8 `value`.
+        let ssh_key = f.ty == "SSHKEY" && want.kind == Kind::Secret;
+        if f.ty != expected && !ssh_key {
             unusable.get_or_insert(CredentialProblem::WrongType {
                 field: FieldName::new(want.label),
                 expected: words,
             });
             continue;
         }
+        let openssh = f.ssh_formats.and_then(|s| s.openssh).and_then(|o| o.value);
+        let value = if ssh_key {
+            openssh.filter(|c| !c.0.expose().is_empty()).or(f.value)
+        } else {
+            f.value
+        };
         // An empty field is a missing one: no value to sign in with.
-        let Some(value) = f.value.map(|c| c.0).filter(|v| !v.expose().is_empty()) else {
+        let Some(value) = value.map(|c| c.0).filter(|v| !v.expose().is_empty()) else {
             continue;
         };
         if found.insert(want.label.to_string(), value).is_some() {
@@ -1538,6 +1547,21 @@ struct RawField {
     ty: String,
     #[serde(default)]
     label: String,
+    #[serde(default)]
+    value: Option<Concealed>,
+    /// An `SSHKEY` field's other encodings (#271 T16): `openssh.value` is its OpenSSH PEM.
+    #[serde(default)]
+    ssh_formats: Option<RawSshFormats>,
+}
+
+#[derive(Deserialize)]
+struct RawSshFormats {
+    #[serde(default)]
+    openssh: Option<RawSshFormat>,
+}
+
+#[derive(Deserialize)]
+struct RawSshFormat {
     #[serde(default)]
     value: Option<Concealed>,
 }

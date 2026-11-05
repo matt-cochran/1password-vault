@@ -5,12 +5,14 @@
 //! - [`config`]: the section and the §3.1 load rules, including the rules across targets
 //!   (trust groups, D11) and the `sealed.out` resolver (D12).
 //! - [`provider`]: the registered [`PROVIDER`] and the target's [`crate::provider::TargetConfig`].
+//! - [`login`]: the SSH Key deploy credential (P2), checked against `sealed.signer` at sign-in
+//!   and handed only to the runner's seal effect.
 //!
-//! Later lanes add `store.rs` (P3, the `StagedStore`), `login.rs` (P2, the SSH Key deploy
-//! credential and signing); until then the provider's `open` and `deploy_login` refuse as
-//! an internal error naming the missing lane.
+//! A later lane adds `store.rs` (P3, the `StagedStore`); until then the target's `open`
+//! refuses as an internal error naming the missing lane.
 
 pub mod config;
+pub mod login;
 pub mod provider;
 
 pub use provider::PROVIDER;
