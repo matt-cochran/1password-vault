@@ -5121,6 +5121,18 @@ fn a_budget_too_small_hands_off_the_longer_timeout() {
     );
 }
 
+/// §4.2 step 5, I4: an item the whole-item edit cannot keep is named, not "archived".
+#[test]
+fn an_item_not_rewritable_names_what_it_holds() {
+    let c = provision_refused(ProvisionRefusal::ItemNotRewritable {
+        holds: "an attachment".into(),
+    });
+    assert_eq!(
+        c.message(),
+        "opv does not provision set grant in environment prod: its item holds an attachment, which opv cannot prove one whole-item edit keeps"
+    );
+}
+
 /// §5.6: a set member written alone points at the set's own provision.
 #[test]
 fn a_set_member_do_names_the_provision() {

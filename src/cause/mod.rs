@@ -1496,6 +1496,10 @@ pub enum ProvisionRefusal {
         needed_seconds: u64,
         left_seconds: u64,
     },
+    /// The set's item holds `holds` (an attachment, a website list, a field type opv does
+    /// not fully understand), which the one whole-item edit is not proven to keep (I4, §4.2
+    /// step 5): refused before anything is made. Names only.
+    ItemNotRewritable { holds: String },
 }
 
 impl ProvisionRefusal {
@@ -1522,6 +1526,9 @@ impl ProvisionRefusal {
             } => format!(
                 "its producers and the write need {needed_seconds}s, and the run has {left_seconds}s left"
             ),
+            ProvisionRefusal::ItemNotRewritable { holds } => {
+                format!("its item holds {holds}, which opv cannot prove one whole-item edit keeps")
+            }
         }
     }
 }
