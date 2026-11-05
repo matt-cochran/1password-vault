@@ -15,8 +15,8 @@
 //! The order is the codec's (§9.2): the bundle and signers are verified before the identity
 //! is read, and the identity's membership is checked before anything is decrypted.
 //!
-//! [`open`] is the seam lane st-u2's `--exec` delivers from: the same checks, returning the
-//! opened bundle with its zeroizing values.
+//! [`open`] is the seam `--exec` (`super::unseal_exec`) delivers from: the same checks,
+//! returning the opened bundle with its zeroizing values.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -148,6 +148,7 @@ pub(crate) fn run_with(
         (Some(opened.recipient.clone()), true, RuntimeDir::NotChecked)
     };
     let report = Report {
+        overridden: would_override(req, &verified.header),
         header: &verified.header,
         signer: &verified.signer,
         recipient: recipient.as_deref(),
@@ -320,6 +321,24 @@ fn load_identity(req: &Request, source: &IdentitySource) -> Result<Identity, Err
     crypto::parse_identity(text).map_err(|e| req.refused(&e))
 }
 
+/// The bundle variables this environment already sets: the names `--exec` would replace
+/// (R1, D10). Names only.
+fn would_override(req: &Request, header: &Header) -> Vec<String> {
+    let names: Vec<&str> = header
+        .names
+        .iter()
+        .filter_map(|n| n.destination.strip_prefix("env:"))
+        .collect();
+    let inherited: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
+        .map(|(k, _)| (k, std::ffi::OsString::new()))
+        .collect();
+    let identity_var = match &req.identity {
+        Some(IdentitySource::Env(var)) => Some(var.as_str()),
+        _ => None,
+    };
+    super::unseal_exec::overridden(&names, &inherited, identity_var)
+}
+
 /// Whether any name is delivered as a file (`file:` destination).
 pub fn has_file_keys(header: &Header) -> bool {
     header
@@ -335,11 +354,13 @@ struct Report<'a> {
     recipient: Option<&'a str>,
     decrypted: bool,
     runtime: RuntimeDir,
+    /// The bundle variables this environment already sets, which `--exec` would replace.
+    overridden: Vec<String>,
 }
 
 impl Report<'_> {
-    /// The `opv.unseal/1` document (design §4.2), without `overridden`, which only
-    /// `--exec` has.
+    /// The `opv.unseal/1` document (design §4.2). `overridden` lists the names `--exec`
+    /// would replace in this environment (with `--exec`, stdout is the command's).
     fn json(&self) -> serde_json::Value {
         let h = self.header;
         json!({
@@ -368,6 +389,7 @@ impl Report<'_> {
                 "payload": self.decrypted,
                 "runtime_dir": self.runtime.word(),
             },
+            "overridden": self.overridden,
         })
     }
 
@@ -405,6 +427,13 @@ impl Report<'_> {
         };
         if let Some(r) = runtime {
             writeln!(out, "  runtime dir {r}")?;
+        }
+        if !self.overridden.is_empty() {
+            writeln!(
+                out,
+                "  overrides   {} (inherited; --exec delivers the bundle's)",
+                self.overridden.join(", ")
+            )?;
         }
         let width = h.names.iter().map(|n| n.name.len()).max().unwrap_or(0);
         writeln!(out, "names ({}):", h.names.len())?;

@@ -856,13 +856,15 @@ enum Cmd {
         )]
         command: Vec<String>,
     },
-    /// Verify a sealed bundle offline and print its signed header, never a value (#271).
+    /// Verify a sealed bundle offline and print its signed header, never a value; with
+    /// --exec, run your app with its values (#271).
     ///
     /// The runtime side of a sealed target: reads the bundle, the allowed_signers file and
     /// an age identity, and nothing else (no configuration, no 1Password, no network). The
     /// signature, environment, product and revision are checked before anything is
     /// decrypted. --verify-only decrypts nothing; it also checks that the identity is a
-    /// recipient and, for file keys, that a RAM-backed runtime folder exists.
+    /// recipient and, for file keys, that a RAM-backed runtime folder exists. --exec
+    /// delivers the values to the command after `--` and exits with its code.
     #[command(before_help = UNSEAL_QUICK)]
     Unseal {
         /// The sealed bundle file that opv sync wrote.
@@ -897,8 +899,17 @@ enum Cmd {
         #[arg(long)]
         verify_only: bool,
         /// Print one JSON document (schema opv.unseal/1) instead of lines.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "exec")]
         json: bool,
+        /// Run the command after `--` with the bundle's values: variables in its
+        /// environment (a bundle name wins over an inherited one, named on stderr), file
+        /// keys in a private RAM folder. OP_* and the --identity-env variable never reach
+        /// it; its exit code is opv's.
+        #[arg(long, conflicts_with = "verify_only", requires = "command")]
+        exec: bool,
+        /// With --exec: the command and its arguments, after `--`.
+        #[arg(last = true, requires = "exec", value_name = "COMMAND")]
+        command: Vec<String>,
     },
     /// Propose a change: the contract diff and its plan id. Writes nothing unless --write,
     /// and then only the contract file; a person runs the plan with opv apply.
@@ -1666,7 +1677,8 @@ Examples:
 const UNSEAL_QUICK: &str = "\
 Examples:
   opv unseal app.opv-sealed --env prod --product api --signers allowed_signers --verify-only
-  opv unseal app.opv-sealed --env prod --product api --signers allowed_signers --identity-file id.txt --json";
+  opv unseal app.opv-sealed --env prod --product api --signers allowed_signers --identity-file id.txt --json
+  opv unseal app.opv-sealed --env prod --product api --signers allowed_signers --identity-env AGE_IDENTITY --exec -- ./server";
 
 #[derive(Subcommand)]
 enum CiCmd {
@@ -2831,6 +2843,8 @@ fn run(
         min_revision,
         verify_only,
         json,
+        exec,
+        command,
     } = &cli.cmd
     {
         use opv::app::unseal::{IdentitySource, Request};
@@ -2849,6 +2863,9 @@ fn run(
             verify_only: *verify_only,
             json: *json,
         };
+        if *exec {
+            return opv::app::unseal_exec::run(&req, command);
+        }
         return opv::app::unseal::run(&req, out);
     }
     if let Cmd::Run { command, .. } = &cli.cmd {

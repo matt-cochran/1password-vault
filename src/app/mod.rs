@@ -113,6 +113,7 @@ pub mod target_cmd;
 pub mod target_credentials;
 pub(crate) mod tidy;
 pub mod unseal;
+pub mod unseal_exec;
 #[cfg(test)]
 mod ux2_tests;
 #[cfg(test)]
