@@ -169,3 +169,27 @@ fn an_external_cause_carries_what_the_runner_observed() {
     };
     assert!(c.observed().is_some());
 }
+
+fn local_io(op: LocalOp) -> Cause {
+    Cause::LocalIo {
+        op,
+        path: std::path::PathBuf::new(),
+        io: IoKind::Other,
+        delivery: None,
+    }
+}
+
+#[test]
+fn stdout_local_io_exits_74() {
+    assert_eq!(local_io(LocalOp::Stdout).exit_code(), 74);
+}
+
+#[test]
+fn file_local_io_still_exits_6() {
+    assert_eq!(local_io(LocalOp::Write).exit_code(), 6);
+}
+
+#[test]
+fn stdout_local_io_is_safe_to_rerun() {
+    assert_eq!(local_io(LocalOp::Stdout).retry(), RetryClass::Safe);
+}

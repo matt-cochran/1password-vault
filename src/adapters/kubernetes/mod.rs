@@ -271,6 +271,7 @@ pub fn new_version() -> Result<String, Error> {
             op: crate::cause::LocalOp::RandomSource,
             path: std::path::PathBuf::new(),
             io: crate::cause::IoKind::Other,
+            delivery: None,
         })
     })?;
     let mut id = String::with_capacity(VERSION_LEN);

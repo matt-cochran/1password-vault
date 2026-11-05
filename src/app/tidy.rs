@@ -306,9 +306,10 @@ pub(crate) struct Read {
     /// The `version` integer read from each boundary item, by its item id (C2): what a sync
     /// records in the delivery item's `source versions` field.
     pub item_versions: BTreeMap<String, u64>,
-    /// The declared keys whose field is missing or empty ([`needing_values`]): `run` names
-    /// them before the command starts, so an empty value is never passed silently.
-    pub needing_values: Vec<String>,
+    /// The declared keys whose field is missing or empty ([`needing_values`]), for every
+    /// product in each item read (not only a [`ReadScope::Keys`] scope's): `run` names
+    /// those it uses before the command starts, so an empty value is never passed silently.
+    pub needing_values: Vec<KeyId>,
     /// Who ran opv, when the item needed a tidy (`None` when it did not, or tidying is
     /// off): `run` words its warning by it (a person whose tidy failed is not told to sign
     /// in as themselves).
@@ -320,6 +321,33 @@ pub(crate) struct Read {
 /// only when an item cannot be read at all.
 pub(crate) fn read(fleet: &Fleet, env_name: &str, r: &dyn CommandRunner) -> Result<Read, Error> {
     read_as(fleet, env_name, r, Mode::Tidy)
+}
+
+/// Which declared keys a read is for (FR-57). [`ReadScope::Whole`] is every key the fleet
+/// desires in the environment (today's [`read`]); [`ReadScope::Keys`] is a command's own key
+/// set, such as `run --product`'s `wanted` ids, with each `from` key already replaced by its
+/// source id (FR-45).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReadScope {
+    /// Every boundary item the fleet needs in the environment; a person's tidy prints its
+    /// own "still needs a value" note.
+    Whole,
+    /// Only the boundary items holding these `(product, KEY)` ids. The read never prints
+    /// the "still needs a value" note: the caller prints the ids it uses from
+    /// [`Read::needing_values`] once, with [`note_needing_values`].
+    Keys(BTreeSet<KeyId>),
+}
+
+/// [`read`] limited to `scope`'s boundary items. Each item read is still tidied with every
+/// product in it (a shared item is never tidied with sections missing, FR-43), and
+/// [`Read::needing_values`] covers those items whole.
+pub(crate) fn read_for(
+    fleet: &Fleet,
+    scope: &ReadScope,
+    env_name: &str,
+    r: &dyn CommandRunner,
+) -> Result<Read, Error> {
+    read_scoped(fleet, scope, env_name, r, Mode::Tidy)
 }
 
 /// The environment's item, read tolerantly and never written, whoever runs opv (#113):
@@ -356,9 +384,35 @@ pub(crate) fn boundaries_needed<'f>(
     fleet: &'f Fleet,
     env_name: &str,
 ) -> Result<BTreeMap<String, &'f Boundary>, Error> {
+    boundaries_for(fleet, &ReadScope::Whole, env_name)
+}
+
+/// [`boundaries_needed`] limited to `scope`: the boundaries holding the values of its ids
+/// (a `from` id's value lives in its source's, FR-45). Filtering only ever removes: an id
+/// outside what the fleet needs in `env_name` adds nothing, and a boundary outside the scope
+/// is never resolved, so an unbound sibling boundary is no error.
+fn boundaries_for<'f>(
+    fleet: &'f Fleet,
+    scope: &ReadScope,
+    env_name: &str,
+) -> Result<BTreeMap<String, &'f Boundary>, Error> {
+    let homes: Option<BTreeSet<&str>> = match scope {
+        ReadScope::Whole => None,
+        ReadScope::Keys(ids) => Some(
+            ids.iter()
+                .filter_map(|(p, k)| {
+                    let spec = fleet.products.get(p)?.keys.get(k)?;
+                    let home = spec.source().map_or(p.as_str(), |(sp, _)| sp);
+                    Some(fleet.boundary_of(home))
+                })
+                .collect(),
+        ),
+    };
     let mut out = BTreeMap::new();
     for (b, needer) in fleet.needed_boundaries(env_name) {
-        out.insert(b.to_string(), fleet.boundary(env_name, needer)?);
+        if homes.as_ref().is_none_or(|h| h.contains(b)) {
+            out.insert(b.to_string(), fleet.boundary(env_name, needer)?);
+        }
     }
     Ok(out)
 }
@@ -386,21 +440,25 @@ pub(crate) fn read_as(
     r: &dyn CommandRunner,
     mode: Mode,
 ) -> Result<Read, Error> {
-    read_in(fleet, fleet, env_name, r, mode)
+    read_scoped(fleet, &ReadScope::Whole, env_name, r, mode)
 }
 
-/// [`read_as`] of the boundary items `scope` needs, each read for `fleet`'s products in it.
-fn read_in(
-    scope: &Fleet,
+/// [`read_as`] of the boundary items `scope` needs, each read (and tidied) with every
+/// product of the whole `fleet` in it ([`in_boundary`]): the scope narrows which items are
+/// read, never which products a tidy sees.
+fn read_scoped(
     fleet: &Fleet,
+    scope: &ReadScope,
     env_name: &str,
     r: &dyn CommandRunner,
     mode: Mode,
 ) -> Result<Read, Error> {
     let env = fleet.environment(env_name)?;
+    // Rule 3 (#263): a scoped read's caller prints the needs-value note itself, once.
+    let note = *scope == ReadScope::Whole;
     let mut out: Option<Read> = None;
-    for (name, b) in boundaries_needed(scope, env_name)? {
-        let part = read_item_as(&in_boundary(fleet, &name), env_name, env, b, r, mode)?;
+    for (name, b) in boundaries_for(fleet, scope, env_name)? {
+        let part = read_item_as(&in_boundary(fleet, &name), env_name, env, b, r, mode, note)?;
         match &mut out {
             None => out = Some(part),
             Some(read) => merge(read, part),
@@ -434,7 +492,8 @@ fn merge(read: &mut Read, part: Read) {
     read.identity = read.identity.or(part.identity);
 }
 
-/// One boundary item `b` of `env`, read for `fleet` (the products it holds).
+/// One boundary item `b` of `env`, read for `fleet` (the products it holds). `note`: a tidy
+/// that wrote names the keys still needing a value (a [`ReadScope::Whole`] read).
 fn read_item_as(
     fleet: &Fleet,
     env_name: &str,
@@ -442,6 +501,7 @@ fn read_item_as(
     b: &Boundary,
     r: &dyn CommandRunner,
     mode: Mode,
+    note: bool,
 ) -> Result<Read, Error> {
     let item = onepassword::read_whole(r, env, b)?;
     let (layout, stamp) = onepassword_tidy::parse(item.raw())?;
@@ -523,11 +583,13 @@ fn read_item_as(
                     "tidied 1Password ({env_name}): {}",
                     convention::summary(&t.changes)
                 ));
-                note_needing_values(
-                    r,
-                    env_name,
-                    &needing_values(&t.layout, fleet, env_name, env),
-                );
+                if note {
+                    note_needing_values(
+                        r,
+                        env_name,
+                        &needing_values(&t.layout, fleet, env_name, env),
+                    );
+                }
             }
             let mut res = done(t.layout, t.changes, t.error, t.version, Some(who));
             res.tidy_failure = t.failure;
@@ -716,36 +778,36 @@ fn tidy(
     Ok(None)
 }
 
-/// The declared keys (applying in `env_name`, shared keys excepted) whose field is missing
-/// or empty: they still need a value, typed by a person (FR-43).
-fn needing_values(
-    layout: &Layout,
-    fleet: &Fleet,
-    env_name: &str,
-    env: &Environment,
-) -> Vec<String> {
+/// The declared keys (applying in `env_name`; shared, personal and infrastructure keys
+/// excepted) whose field is missing or empty: they still need a value, typed by a person
+/// (FR-43).
+fn needing_values(layout: &Layout, fleet: &Fleet, env_name: &str, env: &Environment) -> Vec<KeyId> {
     let res = convention::resolve(layout, fleet);
     fleet
         .products
         .iter()
         .flat_map(|(p, prod)| prod.keys.iter().map(move |(k, s)| (p, k, s)))
         // A shared key (FR-45) has no field: its source is named instead. A personal key
-        // (FR-55) is not the team item's to fill.
-        .filter(|(_, _, s)| s.from.is_none() && !s.personal)
+        // (FR-55) is not the team item's to fill. An infrastructure key is never stored in
+        // 1Password (deliver-only §6.4).
+        .filter(|(_, _, s)| {
+            s.from.is_none() && !s.personal && !super::deliver_only::is_infrastructure(s)
+        })
         .filter(|(p, _, s)| rules::applies(s, env_name, env, p))
         .filter(|(p, k, _)| {
             res.chosen
                 .get(&((*p).clone(), (*k).clone()))
                 .is_none_or(|&i| layout.fields[i].value.expose().is_empty())
         })
-        .map(|(p, k, _)| key_label(p, k))
+        .map(|(p, k, _)| (p.clone(), k.clone()))
         .collect()
 }
 
 /// One line naming the keys that still need a value and how to reach them: `opv open`,
 /// then Edit, because 1Password shows an empty field only in edit mode (found live: the
 /// field opv created looked missing). Names only, never a value.
-pub(crate) fn note_needing_values(r: &dyn CommandRunner, env_name: &str, keys: &[String]) {
+pub(crate) fn note_needing_values(r: &dyn CommandRunner, env_name: &str, keys: &[KeyId]) {
+    let keys: Vec<String> = keys.iter().map(|(p, k)| key_label(p, k)).collect();
     if let Some(first) = keys.first() {
         r.note(&format!(
             "still needs a value in 1Password ({env_name}): {}. Open it with opv open {first} \
@@ -802,4 +864,4 @@ fn finish(
 
 #[cfg(test)]
 #[path = "tidy_tests.rs"]
-mod tests;
+pub(crate) mod tests;

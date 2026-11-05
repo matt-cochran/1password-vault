@@ -11,6 +11,7 @@
 //! login <env>`, after which a run tidies it). No value passes through opv, argv or files
 //! (SR-1, SR-3, SR-4).
 
+use std::collections::BTreeSet;
 use std::io;
 
 use super::local_delivery::{OUTER_VAR, Outer};
@@ -18,6 +19,7 @@ use super::personal;
 use crate::cause::{
     Cause, Closest, EnvName, Guard, IoKind, NameKind, ProfileName, Unusable, UsageProblem,
 };
+use crate::domain::convention::KeyId;
 use crate::domain::{Fleet, KeySpec};
 use crate::error::Error;
 use crate::host::Host;
@@ -281,19 +283,43 @@ fn launch(
         None
     };
 
-    // FR-43: one tolerant item read first, which tidies the item when a person runs opv.
+    // #263, FR-57: the run's own key set, computed once. It drives the read scope and the
+    // needs-value note: the selected stored keys, a shared key (FR-45) as its source's id
+    // (its value lives in the source's field). A personal key (FR-55) is in the person's
+    // item, checked above; an infrastructure key is never stored.
+    let wanted: BTreeSet<KeyId> = selected
+        .iter()
+        .filter(|(_, spec)| !personal::is_personal(fleet, spec))
+        .map(|(key, spec)| {
+            let (p, k) = spec.source().unwrap_or((product, key));
+            (p.to_string(), k.to_string())
+        })
+        .collect();
+
+    // FR-43: one tolerant read of the boundary items holding `wanted` (never a sibling's
+    // separate item, FR-57), which tidies each item read, whole, when a person runs opv.
     // A key whose field is still not where the convention puts it (a read-only run) is
     // referenced by field id. If the read fails, `op run` reports the problem itself.
     let read = super::tidy::active()
-        .then(|| super::tidy::read(fleet, env_name, runner).ok())
+        .then(|| {
+            let scope = super::tidy::ReadScope::Keys(wanted.clone());
+            super::tidy::read_for(fleet, &scope, env_name, runner).ok()
+        })
         .flatten();
     let by_id = read.as_ref().map(|r| &r.refs);
     let normalized = read.as_ref().map(|r| &r.normalized);
     let who = read.as_ref().and_then(|r| r.identity);
-    // Found live: an empty key reached the app as "" with no word. A tidy that wrote
-    // already named these keys.
-    if let Some(r) = read.as_ref().filter(|r| r.changes.is_empty()) {
-        super::tidy::note_needing_values(runner, env_name, &r.needing_values);
+    // Found live: an empty key reached the app as "" with no word. A scoped read never
+    // names them, so this is the one place they are named, tidied or not, and only this
+    // run's own keys are (#263): another product's empty key is not this run's blocker.
+    if let Some(r) = read.as_ref() {
+        let needing: Vec<KeyId> = r
+            .needing_values
+            .iter()
+            .filter(|id| wanted.contains(*id))
+            .cloned()
+            .collect();
+        super::tidy::note_needing_values(runner, env_name, &needing);
     }
     let refs: Vec<(&str, String)> = selected
         .iter()
@@ -373,19 +399,92 @@ fn launch(
         args.extend(command.iter().map(String::as_str));
     }
 
-    // Clear all declared keys, including other products and mode-skipped keys.
-    // Keep PATH and authentication context; add only selected references afterward.
-    let remove: Vec<String> = fleet
-        .products
-        .values()
-        .flat_map(|p| p.keys.keys().cloned())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
+    // Clear every declared stored name, including other products' and mode-skipped keys,
+    // so a stale parent value never shadows one from 1Password. Keep PATH and the
+    // authentication context; add only selected references afterward.
+    let remove = names_to_clear(fleet);
+    note_inherited_infrastructure(fleet, &remove, runner);
     ensure_native(runner)?;
     runner
         .run_inherited_clean(OP, &args, &env_pairs, &remove)
         .map_err(|e| op_unusable(e.kind()))
+}
+
+/// The declared names a run removes from the environment it inherits: every key name of
+/// every product, except a name declared only as `source = "infrastructure"` (D4-B, #264).
+/// opv never holds such a value, and the parent environment is its only carrier, so
+/// clearing it would only take it away from the command that needs it. A name some product
+/// stores is still cleared.
+fn names_to_clear(fleet: &Fleet) -> Vec<String> {
+    fleet
+        .products
+        .values()
+        .flat_map(|p| p.keys.iter())
+        .filter(|(_, spec)| !super::deliver_only::is_infrastructure(spec))
+        .map(|(key, _)| key.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// D4-B: one names-only note for the declared infrastructure names the run keeps and the
+/// parent environment sets, so the person sees which values came from outside 1Password.
+/// Never reads or prints a value.
+fn note_inherited_infrastructure(fleet: &Fleet, cleared: &[String], runner: &dyn CommandRunner) {
+    let kept: Vec<String> = fleet
+        .products
+        .iter()
+        .flat_map(|(p, prod)| prod.keys.iter().map(move |(k, s)| (p, k, s)))
+        .filter(|(_, k, s)| {
+            super::deliver_only::is_infrastructure(s) && !cleared.contains(*k) && in_parent_env(k)
+        })
+        .map(|(p, k, _)| crate::domain::key_label(p, k))
+        .collect();
+    if !kept.is_empty() {
+        runner.note(&format!(
+            "taken from the environment as given (supplied at sync, never stored in \
+             1Password): {}",
+            kept.join(", ")
+        ));
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static PARENT_ENV: std::cell::RefCell<BTreeSet<String>> =
+        std::cell::RefCell::default();
+}
+
+/// Whether `name` is set in the environment opv was started with, which `op run` passes
+/// on to the child (D4-B). Names only: the value is dropped unread. In this crate's unit
+/// tests the parent environment is the set of names given to `parent_env`.
+fn in_parent_env(name: &str) -> bool {
+    #[cfg(test)]
+    {
+        PARENT_ENV.with(|s| s.borrow().contains(name))
+    }
+    #[cfg(not(test))]
+    {
+        std::env::var_os(name).is_some()
+    }
+}
+
+/// Sets the parent environment's names for [`in_parent_env`] on this thread until the
+/// guard drops (tests).
+#[cfg(test)]
+pub(crate) struct ParentEnv;
+
+#[cfg(test)]
+pub(crate) fn parent_env(names: &[&str]) -> ParentEnv {
+    PARENT_ENV.with(|s| *s.borrow_mut() = names.iter().map(|n| n.to_string()).collect());
+    ParentEnv
+}
+
+#[cfg(test)]
+impl Drop for ParentEnv {
+    fn drop(&mut self) {
+        PARENT_ENV.with(|s| s.borrow_mut().clear());
+    }
 }
 
 /// `op` could not be started for the run.
@@ -505,6 +604,10 @@ pub fn ensure_native(runner: &dyn CommandRunner) -> Result<(), Error> {
         .into()
     })
 }
+
+#[cfg(test)]
+#[path = "run_scope_tests.rs"]
+mod scope_tests;
 
 #[cfg(test)]
 mod tests {

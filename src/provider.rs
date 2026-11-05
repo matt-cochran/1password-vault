@@ -25,6 +25,9 @@ pub trait Provider: Sync {
     /// Config section name under `[environments.<env>.targets.<name>]`: "fly", "azure",
     /// "kubernetes", "github".
     fn section(&self) -> &'static str;
+    /// The catalog's external system behind this provider (FR-37), for a cause about the
+    /// provider itself such as `Guard::ProviderHidesValues`.
+    fn system(&self) -> crate::cause::System;
     /// User-facing name: "Fly", "Azure", "Kubernetes".
     fn label(&self) -> &'static str;
     /// The forms this provider's own section checks ask for, as `(marker, words)`: a serde
@@ -674,16 +677,10 @@ impl Verdict {
     }
 }
 
-/// The catalog's external system behind `provider`, by its configuration section (for a
+/// The catalog's external system behind `provider`, as the provider declares it (for a
 /// cause about the provider itself, such as `Guard::ProviderHidesValues`).
 pub fn system_of(provider: &dyn Provider) -> crate::cause::System {
-    use crate::cause::System;
-    match provider.section() {
-        "fly" => System::Fly,
-        "azure" => System::Azure,
-        "kubernetes" => System::Kubernetes,
-        _ => System::GitHub,
-    }
+    provider.system()
 }
 
 #[cfg(test)]
@@ -757,6 +754,34 @@ environments = ["prod"]
             section.resolve("opv/api.binpb"),
             std::path::PathBuf::from("/repo/deploy/opv/api.binpb")
         );
+    }
+
+    /// Every provider returns its own catalog system from `system()` (FR-37).
+    #[test]
+    fn each_provider_names_its_catalog_system() {
+        use crate::cause::System;
+        let systems: Vec<(&str, System)> = crate::adapters::registry::PROVIDERS
+            .iter()
+            .map(|p| (p.section(), p.system()))
+            .collect();
+        assert_eq!(
+            systems,
+            vec![
+                ("fly", System::Fly),
+                ("azure", System::Azure),
+                ("kubernetes", System::Kubernetes),
+                ("github", System::GitHub),
+                ("http", System::Https),
+            ]
+        );
+    }
+
+    /// A cause about the HTTP target's provider names the HTTPS system, not GitHub (FR-37).
+    #[test]
+    fn a_cause_about_the_http_target_names_the_https_system() {
+        let http =
+            crate::adapters::registry::find("http").expect("the HTTP provider is registered");
+        assert_eq!(system_of(http), crate::cause::System::Https);
     }
 
     /// The contract test (design §1.1, §1.3): each provider's table, as today's behaviour.
