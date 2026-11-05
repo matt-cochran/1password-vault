@@ -673,6 +673,31 @@ fn confirm_on(out: &mut dyn Write, question: &str) -> Result<bool, Error> {
     ))
 }
 
+/// Ask `question` and read one typed-back line (the confirmation of `opv provision`,
+/// design `owner-value-ingestion.md` §4.4): the line trimmed, or `None` when the person
+/// typed nothing or closed the input (Ctrl-D), which the caller treats as declined. The
+/// same line reader as [`confirm_on`]; nothing is masked, because the answer is a name.
+pub(crate) fn type_back_on(
+    out: &mut dyn Write,
+    input: &mut dyn io::BufRead,
+    question: &str,
+) -> Result<Option<String>, Error> {
+    write!(out, "{question} ").map_err(|_| terminal_lost())?;
+    out.flush().map_err(|_| terminal_lost())?;
+    let mut answer = String::new();
+    if input.read_line(&mut answer).map_err(|_| terminal_lost())? == 0 {
+        return Ok(None);
+    }
+    let answer = answer.trim();
+    Ok((!answer.is_empty()).then(|| answer.to_string()))
+}
+
+/// [`type_back_on`] at the terminal: the question on stderr (stdout stays the command's
+/// document), the answer from stdin.
+pub(crate) fn type_back(question: &str) -> Result<Option<String>, Error> {
+    type_back_on(&mut io::stderr(), &mut io::stdin().lock(), question)
+}
+
 fn choose_on(out: &mut dyn Write, question: &str, choices: &[String]) -> Result<String, Error> {
     let lost = |_: io::Error| terminal_lost();
     writeln!(out, "{question}").map_err(lost)?;
@@ -799,7 +824,7 @@ mod said_tests {
 
 #[cfg(test)]
 mod terminal_tests {
-    use super::{own_session_refusal, terminal_refusal};
+    use super::{own_session_refusal, terminal_refusal, type_back_on};
     use crate::cause::{Cause, Invocation, Next, NoTerminal};
 
     fn cause_of(e: &crate::error::Error) -> Cause {
@@ -910,5 +935,26 @@ mod terminal_tests {
             super::unanswered(false, None).code_str(),
             "provider_unavailable"
         );
+    }
+
+    #[test]
+    fn a_typed_back_line_is_returned_trimmed() {
+        let mut input: &[u8] = b"  prod  \n";
+        let typed = type_back_on(&mut Vec::new(), &mut input, "Type it:").unwrap();
+        assert_eq!(typed.as_deref(), Some("prod"));
+    }
+
+    #[test]
+    fn an_empty_typed_back_line_is_no_answer() {
+        let mut input: &[u8] = b"\n";
+        let typed = type_back_on(&mut Vec::new(), &mut input, "Type it:").unwrap();
+        assert_eq!(typed, None);
+    }
+
+    #[test]
+    fn a_closed_input_is_no_typed_back_answer() {
+        let mut input: &[u8] = b"";
+        let typed = type_back_on(&mut Vec::new(), &mut input, "Type it:").unwrap();
+        assert_eq!(typed, None);
     }
 }
