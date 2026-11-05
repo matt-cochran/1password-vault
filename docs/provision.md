@@ -439,3 +439,132 @@ does not block; a `complete` one has no finding. So a set broken by a later edit
 
 An assistant reads that finding, may run the `--dry-run --json` plan to show the person what
 will run, and hands the command to the person verbatim.
+
+## Matched sets: a worked example
+
+A matched set is a set whose members must agree with each other: values one system issues,
+values opv generates, and a bundle that repeats some of them for another consumer. This walk
+through uses the shape of the Journeeze set above (§ "Example: a matched set with a template")
+with neutral names, as the end-to-end test `tests/e2e/scenarios/provision_sets.rs` runs it.
+
+**The members.** Nine fields of one item (one boundary, so one checked write):
+
+| Member | Made by | Read by |
+|---|---|---|
+| `web/PLATFORM_IDENTITY_SECRET`, `web/AGENCY_IDENTITY_SECRET`, `web/OWNER_IDENTITY_SECRET` | `generate = { hex_bytes = 32 }` | the consumer, one per site, and the bundle |
+| `web/SITES_GATEWAY_KEY` | `generate = { hex_bytes = 32 }` | the consumer and every site of the bundle |
+| `web/USER_HASH_KEY` | `generate = { hex_bytes = 32 }` | the consumer only |
+| `web/PLATFORM_SITE_KEY`, `web/AGENCY_SITE_KEY`, `web/OWNER_SITE_KEY` | the producer `site-issuer` (`<site>_site_key`) | the consumer |
+| `web/SITE_SECRETS` | a template | the bundle's own reader |
+
+**The producer issues the site keys.** `site-issuer` is a get-or-create: it asks the issuing
+system for the platform, agency and owner sites, creates any that do not exist, and returns six
+outputs, each site's id and key. A second call returns the same sites, so running it again
+never makes new ones. The three `*_site_id` outputs are intermediates: they go into the bundle
+and are never stored as keys.
+
+```toml
+[producers.site-issuer]
+command = ["python3", "deploy/sites_produce.py"]
+sha256  = "…64 hex of deploy/sites_produce.py…"
+outputs = ["platform_site_id", "platform_site_key", "agency_site_id", "agency_site_key",
+           "owner_site_id", "owner_site_key"]
+timeout = "5m"
+```
+
+**The bundle template.** Its shape is the bundle's reader's, and each leaf is one reference:
+
+```toml
+[sets.sites.members."web/SITE_SECRETS".template]
+version = 1
+sites = [
+  { siteId = "${site-issuer.platform_site_id}", identitySecret = "${web/PLATFORM_IDENTITY_SECRET}", gatewaySecret = "${web/SITES_GATEWAY_KEY}" },
+  { siteId = "${site-issuer.agency_site_id}",   identitySecret = "${web/AGENCY_IDENTITY_SECRET}",   gatewaySecret = "${web/SITES_GATEWAY_KEY}" },
+  { siteId = "${site-issuer.owner_site_id}",    identitySecret = "${web/OWNER_IDENTITY_SECRET}",    gatewaySecret = "${web/SITES_GATEWAY_KEY}" },
+]
+```
+
+rendered compact as
+`{"version":1,"sites":[{"siteId":…,"identitySecret":…,"gatewaySecret":…},…]}`.
+
+**The consumer fields match the bundle.** The consumer reads
+`PLATFORM_IDENTITY_SECRET`, `AGENCY_IDENTITY_SECRET`, `OWNER_IDENTITY_SECRET` and
+`SITES_GATEWAY_KEY` as its own fields, and the bundle's reader reads the same values out of
+`SITE_SECRETS`. Because both come from one run and one write, each `identitySecret` leaf equals
+its site's identity secret and every `gatewaySecret` leaf equals the gateway key. opv checks
+this on every run and in `ready`; a bundle that no longer matches is `inconsistent`.
+
+**First run.** At a person's terminal:
+
+```
+$ opv provision sites --env prod
+  …
+  state   absent (0 of 9 members set)
+  make    web/AGENCY_IDENTITY_SECRET   generate hex_bytes 32
+  …
+  make    web/PLATFORM_SITE_KEY   producer site-issuer → platform_site_key
+  make    web/SITE_SECRETS   template of ${site-issuer.platform_site_id}, ${web/PLATFORM_IDENTITY_SECRET}, …
+  …
+Type the environment name to provision sites in it: prod
+provisioned set sites in environment prod: item at version 2, verified
+Next: opv ready prod
+```
+
+All nine fields arrive in one item edit; the receipt's `item.version_after` is one past
+`version_before` and `verified_at` equals it. `opv ready prod` then reports the set as
+`complete` (`"sets":[{"set":"sites","environment":"prod","state":"complete"}]`).
+
+**A second run** asks nothing, runs no producer and writes nothing:
+
+```
+set sites in environment prod is already complete; nothing made or written
+```
+
+**A partial set.** Suppose `PLATFORM_SITE_KEY` and `USER_HASH_KEY` are lost from the item (a
+hand edit, an older whole-item write). `opv ready prod` reports the set `partial` with the
+blocking finding `keys_blocking prod → opv provision sites --env prod`, and that command
+refuses, naming the recovery:
+
+```
+opv: opv does not provision set sites in environment prod: the set is partial (web/PLATFORM_SITE_KEY, web/USER_HASH_KEY without a value), so it is completed only with --fill-missing
+Do: make only the missing members, keeping every present one: opv provision sites --env prod --fill-missing
+```
+
+`--fill-missing --dry-run` shows what it will keep and make:
+
+```
+opv provision sites --env prod --fill-missing
+  state   partial (7 of 9 members set)
+  keep    web/AGENCY_IDENTITY_SECRET
+  keep    web/AGENCY_SITE_KEY
+  keep    web/OWNER_IDENTITY_SECRET
+  keep    web/OWNER_SITE_KEY
+  keep    web/PLATFORM_IDENTITY_SECRET
+  make    web/PLATFORM_SITE_KEY   producer site-issuer → platform_site_key
+  keep    web/SITES_GATEWAY_KEY
+  keep    web/SITE_SECRETS
+  make    web/USER_HASH_KEY   generate hex_bytes 32
+```
+
+Run without `--dry-run`, the issuer is asked again and returns the platform site it already
+made, so the lost site key comes back as it was and its site id equals the bundle's `siteId`
+(had it differed, the set would be `inconsistent` and nothing written). `USER_HASH_KEY`, which
+no bundle holds, is generated. Every other member, and the bundle, keeps its value; the write is
+again one item edit, and `ready` reads the set `complete`.
+
+**An inconsistent set.** Every member holds a value but the bundle no longer matches them, for
+instance `SITES_GATEWAY_KEY` was changed by hand. `ready` reports `keys_blocking` for the set
+(`state: "inconsistent"`), and `opv provision sites --env prod` refuses:
+
+```
+opv: opv does not provision set sites in environment prod: every member holds a value, but web/SITE_SECRETS fail their rules
+Do: re-make the whole set: opv provision sites --env prod --replace (the replaced values are kept in the item's opv · kept section)
+```
+
+`--fill-missing` cannot help here (nothing is missing). `--replace` re-makes the set, unless a
+member is `immutable`: then a person decides which value is right, restores it from the item's
+history, and `ready` reads the set `complete` again.
+
+No value appears in any of this output, in the receipts or in `ready`: the end-to-end test runs
+every step above with marked values and fails if a marker, or any value the vault holds,
+reaches a stream, a receipt, a file other than the vault, or its snapshot.
