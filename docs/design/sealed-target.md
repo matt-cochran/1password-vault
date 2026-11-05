@@ -674,6 +674,8 @@ Three gaps are in opv's **configuration rules**, not in the format, and need own
 
 #### 5.8.6 Owner decisions raised by K0
 
+> **Owner decisions (2026-11-04, interview):** D9 confirmed as (b): opv keeps `opv-sealed/1`, and the downstream adapts. D11 (a): `sealed.trust_group`. D12 (a): `opv sync --sealed-root <dir>`. D13 (a): both platform signing keys move to 1Password SSH Key items, used as the targets' `deploy_credentials`. Lane P1 carries D11, D12 and G4 (never seal the target's own signing key). Lane B2 carries G5 (principal lists, no patterns). The downstream work (a platformd reader for `opv-sealed/1`, principal lines per environment, SSH Key items, retiring `sealed.py`) is infra work outside opv's plan.
+
 **D9, confirmed or reopened.** The owner accepted D9's recommendation, on the premise that the
 downstream might have no format. It has one. Applying the accepted rule:
 
