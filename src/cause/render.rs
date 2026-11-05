@@ -1485,6 +1485,7 @@ fn local_op(op: LocalOp) -> &'static str {
             "keep the MCP session with its client over standard input and output"
         }
         LocalOp::RandomSource => "read the operating system's random source",
+        LocalOp::SealLock => "take the seal lock of",
     }
 }
 
@@ -2997,6 +2998,14 @@ impl Cause {
                 io_words(*io),
                 d.bytes_written,
                 d.bytes
+            ),
+            LocalIo {
+                op: LocalOp::SealLock,
+                path,
+                ..
+            } => format!(
+                "another opv run is sealing {}; retry when it finishes",
+                path.display()
             ),
             LocalIo { op, path, io, .. } => {
                 if path.as_os_str().is_empty() {
@@ -5191,6 +5200,10 @@ impl Cause {
                     LocalOp::RandomSource => {
                         "check that this system's random source (getrandom, /dev/urandom) is available".to_string()
                     }
+                    LocalOp::SealLock => format!(
+                        "wait for the other opv run sealing {} to finish",
+                        path.display()
+                    ),
                 }),
                 Next::Rerun,
             ),

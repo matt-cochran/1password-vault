@@ -60,6 +60,12 @@ pub trait StagedStore: Store {
     fn whole_set(&self) -> bool {
         false
     }
+    /// Refuses what the store can tell from its local state alone, before `sync` reads any
+    /// value from 1Password (design `sealed-target` T10: a tampered sealed bundle costs no
+    /// values read). Never a value. Default: a store with no local state accepts.
+    fn check_local(&self) -> Result<(), Error> {
+        Ok(())
+    }
     /// Checks the store's own health for `names` after `sync` recorded their delivery and
     /// before it finishes (design `http-target` §6): the HTTP store refuses a name whose
     /// status is rejected (`target_unhealthy`, exit 5) and notes other non-healthy

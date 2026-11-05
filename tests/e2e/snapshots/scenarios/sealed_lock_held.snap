@@ -6,16 +6,16 @@ prod/box: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points
 
 ## text stderr
 using <SCENARIO>/project/secrets.toml
-opv: opv could not write <SCENARIO>/project/sealed/prod/web.opv-sealed.lock: it stayed full until the time budget ran out
-Do: check free space and permissions of <SCENARIO>/project/sealed/prod/web.opv-sealed.lock
+opv: another opv run is sealing <SCENARIO>/project/sealed/prod/web.opv-sealed; retry when it finishes
+Do: wait for the other opv run sealing <SCENARIO>/project/sealed/prod/web.opv-sealed to finish
 Next: opv plan prod --target box
 
 ## json exit: 6
 ## json stdout
-{"schema_version":4,"ok":false,"exit_code":6,"next":{"kind":"run","actor":"assistant","command":"opv plan prod --target box --json"},"do":"check free space and permissions of <SCENARIO>/project/sealed/prod/web.opv-sealed.lock","error":{"code":"local_io_failed","category":"policy","message":"opv could not write <SCENARIO>/project/sealed/prod/web.opv-sealed.lock: it stayed full until the time budget ran out","subject":{"io":"would_block","op":"write","path":"<SCENARIO>/project/sealed/prod/web.opv-sealed.lock"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"check free space and permissions of <SCENARIO>/project/sealed/prod/web.opv-sealed.lock","next":{"kind":"run","actor":"assistant","command":"opv plan prod --target box --json"}}}
+{"schema_version":4,"ok":false,"exit_code":6,"next":{"kind":"run","actor":"assistant","command":"opv plan prod --target box --json"},"do":"wait for the other opv run sealing <SCENARIO>/project/sealed/prod/web.opv-sealed to finish","error":{"code":"local_io_failed","category":"policy","message":"another opv run is sealing <SCENARIO>/project/sealed/prod/web.opv-sealed; retry when it finishes","subject":{"io":"would_block","op":"seal_lock","path":"<SCENARIO>/project/sealed/prod/web.opv-sealed"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"safe","human_required":false,"do":"wait for the other opv run sealing <SCENARIO>/project/sealed/prod/web.opv-sealed to finish","next":{"kind":"run","actor":"assistant","command":"opv plan prod --target box --json"}}}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml
-opv: opv could not write <SCENARIO>/project/sealed/prod/web.opv-sealed.lock: it stayed full until the time budget ran out
-Do: check free space and permissions of <SCENARIO>/project/sealed/prod/web.opv-sealed.lock
+opv: another opv run is sealing <SCENARIO>/project/sealed/prod/web.opv-sealed; retry when it finishes
+Do: wait for the other opv run sealing <SCENARIO>/project/sealed/prod/web.opv-sealed to finish
 Next: opv plan prod --target box --json

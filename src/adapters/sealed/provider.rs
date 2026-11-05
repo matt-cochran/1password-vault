@@ -183,7 +183,8 @@ impl TargetConfig for SealedTarget {
 
     /// One warning line per bundle that is stale as a whole (§5.3, C8): its contract digest
     /// differs from the configuration's, so every name of it is re-sealed. A tampered
-    /// bundle refuses here, before anything is read from 1Password.
+    /// bundle refuses here; `opv sync` has already refused it when it opened the target
+    /// ([`crate::ports::StagedStore::check_local`]), before its values read.
     fn preflight(&self, _r: &dyn CommandRunner, _mode: PreflightMode) -> Result<Preflight, Error> {
         Ok(Preflight {
             checks: super::store::stale_checks(self)?,

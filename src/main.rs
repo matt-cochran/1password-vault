@@ -804,6 +804,16 @@ enum Cmd {
         /// 1Password. Without it, drift stays a printed line and the exit code is unchanged.
         #[arg(long, requires = "env")]
         fail_on_drift: bool,
+        /// Resolve a sealed target's bundle paths under DIR, a checkout of the repository
+        /// that holds them, instead of beside the configuration (as `opv sync --sealed-root`).
+        #[arg(
+            long,
+            value_name = "DIR",
+            requires = "env",
+            hide_short_help = true,
+            hide_long_help = true
+        )]
+        sealed_root: Option<std::path::PathBuf>,
     },
     /// List the projects whose configuration lives in 1Password (names only).
     ///
@@ -1344,6 +1354,15 @@ struct PlanArgs {
     /// the plan id, so a plan with rotation never shares an id with one without.
     #[arg(long, value_name = "PRODUCT/KEY", hide_short_help = true)]
     rotate: Vec<String>,
+    /// Resolve a sealed target's bundle paths under DIR, a checkout of the repository that
+    /// holds them, instead of beside the configuration (as `opv sync --sealed-root`).
+    #[arg(
+        long,
+        value_name = "DIR",
+        hide_short_help = true,
+        hide_long_help = true
+    )]
+    sealed_root: Option<std::path::PathBuf>,
 }
 
 /// Arguments of `sync`.
@@ -1658,6 +1677,15 @@ enum DeliveryCmd {
         /// Print one JSON document instead of lines.
         #[arg(long)]
         json: bool,
+        /// Resolve a sealed target's bundle paths under DIR, a checkout of the repository
+        /// that holds them, instead of beside the configuration (as `opv sync --sealed-root`).
+        #[arg(
+            long,
+            value_name = "DIR",
+            hide_short_help = true,
+            hide_long_help = true
+        )]
+        sealed_root: Option<std::path::PathBuf>,
     },
 }
 
@@ -3614,6 +3642,15 @@ fn home_missing(here: &std::path::Path, target: SkillTarget, force: bool) -> Err
 
 /// opv's own local input or output failed (`LocalIo`): the folder, its program file, the
 /// home folder or the output stream. No path is named; the operation says which.
+/// `fleet` with its targets' own files under `root` when `--sealed-root` gives one
+/// (design `sealed-target` D12: sync, status and delivery verify resolve bundles alike).
+fn rooted(fleet: opv::domain::Fleet, root: Option<&std::path::Path>) -> opv::domain::Fleet {
+    match root {
+        Some(root) => sync::with_out_root(&fleet, root),
+        None => fleet,
+    }
+}
+
 fn local_io(op: opv::cause::LocalOp, kind: io::ErrorKind) -> Error {
     opv::cause::Cause::LocalIo {
         op,
@@ -5337,8 +5374,9 @@ fn run_other(
             target,
             receipt,
             json,
+            sealed_root,
         }) => opv::app::delivery::verify(
-            &loaded?,
+            &rooted(loaded?, sealed_root.as_deref()),
             &env,
             product.as_deref(),
             &target,
@@ -5424,9 +5462,10 @@ fn run_other(
             json,
             target,
             fail_on_drift,
+            sealed_root,
             ..
         } => status::run_targeted(
-            &loaded?,
+            &rooted(loaded?, sealed_root.as_deref()),
             &env,
             &target,
             product.as_deref(),
@@ -5437,12 +5476,13 @@ fn run_other(
         )
         // An adapter's cause names the environment the command ran for (L10 follow-up).
         .map_err(|e| e.in_env(&env)),
-        Cmd::Plan(a) => sync::plan_rotating(
+        Cmd::Plan(a) => sync::plan_rooted(
             &loaded?,
             &a.env,
             &a.target,
             a.product.as_deref(),
             &a.rotate,
+            a.sealed_root.as_deref(),
             r,
             out,
             a.json,

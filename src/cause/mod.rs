@@ -2031,6 +2031,9 @@ pub enum LocalOp {
     McpSession,
     /// The operating system's random source (F2).
     RandomSource,
+    /// The exclusive lock beside a sealed bundle, held by another opv run sealing it
+    /// (design `sealed-target` §5.4); `path` is the bundle.
+    SealLock,
 }
 
 /// Why a mounted secrets volume would be unreadable or is of unknown readability
@@ -2654,7 +2657,7 @@ impl Cause {
                 guard: self::Guard::Declined,
             }
             | LocalIo {
-                op: LocalOp::Stdout,
+                op: LocalOp::Stdout | LocalOp::SealLock,
                 ..
             } => RetryClass::Safe,
             CreateOutcomeUnknown {

@@ -453,6 +453,44 @@ fn a_seal_already_in_progress_is_refused() {
     );
 }
 
+/// A held seal lock names the other run and the bundle, never "full" or a time budget.
+#[test]
+fn a_held_lock_says_another_run_is_sealing_the_bundle() {
+    let dir = tempfile::tempdir().unwrap();
+    let (t, r) = (target(dir.path()), FakeRunner::new([]));
+    std::fs::create_dir_all(bundle(&t).parent().unwrap()).unwrap();
+    let _held = Lock::take(&bundle(&t)).unwrap();
+    let e = write(&store(&t, &r), &["TOKEN"]).unwrap_err();
+    assert_eq!(
+        e.cause().map(|(c, _)| c.message()),
+        Some(format!(
+            "another opv run is sealing {}; retry when it finishes",
+            bundle(&t).display()
+        ))
+    );
+}
+
+/// A tampered bundle refuses the store's local check, which `sync` runs before any read.
+#[test]
+fn the_local_check_refuses_a_tampered_bundle() {
+    let dir = tempfile::tempdir().unwrap();
+    let (t, r) = (target(dir.path()), FakeRunner::new([]));
+    write(&store(&t, &r), &["TOKEN"]).unwrap();
+    let mut bytes = std::fs::read(bundle(&t)).unwrap();
+    let at = bytes
+        .windows(format::AGE_BEGIN.len())
+        .position(|w| w == format::AGE_BEGIN)
+        .unwrap()
+        + format::AGE_BEGIN.len()
+        + 4;
+    bytes[at] = if bytes[at] == b'A' { b'B' } else { b'A' };
+    std::fs::write(bundle(&t), bytes).unwrap();
+    assert_eq!(
+        code(&store(&t, &r).check_local().unwrap_err()),
+        "input_invalid"
+    );
+}
+
 /// A lock file left by a run that was killed has no holder, so it does not block.
 #[test]
 fn a_leftover_lock_file_without_a_holder_does_not_block_a_seal() {

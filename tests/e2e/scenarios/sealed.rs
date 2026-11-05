@@ -261,6 +261,73 @@ fn sealed_root_writes_under_the_given_directory() {
     );
 }
 
+/// `{root}/store` after `opv sync --sealed-root {root}/store` (D12): the bundle is there only.
+fn rooted_app() -> Scenario {
+    let s = app().file("store/README", "the store checkout\n");
+    let mut a = sync_args();
+    a.extend(args(&["--sealed-root", "{root}/store"]));
+    let run = s.opv(&a);
+    assert_eq!(run.code, Some(0), "{}{}", run.stdout, run.stderr);
+    s
+}
+
+/// D12: `opv status --sealed-root` reads the bundle under the root, so every name is on it.
+#[test]
+fn status_with_sealed_root_reports_the_bundle_written_there() {
+    let s = rooted_app();
+    let run = s.opv(&args(&[
+        "status",
+        "prod",
+        "--target",
+        TARGET,
+        "--sealed-root",
+        "{root}/store",
+    ]));
+    assert!(
+        run.stdout.contains("0 not yet on sealed bundle"),
+        "{}{}",
+        run.stdout,
+        run.stderr
+    );
+}
+
+/// D12: `opv plan --sealed-root` derives the plan id the sync under the same root checks.
+#[test]
+fn plan_with_sealed_root_gives_the_plan_id_of_the_sync() {
+    let s = rooted_app();
+    let root = ["--sealed-root", "{root}/store"];
+    let mut plan = args(&["plan", "prod", "--target", TARGET, "--json"]);
+    plan.extend(args(&root));
+    let planned = s.opv(&plan);
+    let id = document(&planned)["plan_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{}{}", planned.stdout, planned.stderr))
+        .to_string();
+    let mut sync = sync_args();
+    sync.extend(args(&root));
+    sync.extend(args(&["--expect-plan", &id]));
+    let run = s.opv(&sync);
+    assert_eq!(run.code, Some(0), "{}{}", run.stdout, run.stderr);
+}
+
+/// D12: `opv delivery verify --sealed-root` checks the bundle under the root.
+#[test]
+fn delivery_verify_with_sealed_root_verifies_the_bundle_written_there() {
+    let s = rooted_app();
+    let run = s.opv(&args(&[
+        "delivery",
+        "verify",
+        "prod",
+        "--product",
+        "web",
+        "--target",
+        TARGET,
+        "--sealed-root",
+        "{root}/store",
+    ]));
+    assert_eq!(run.code, Some(0), "{}{}", run.stdout, run.stderr);
+}
+
 #[test]
 fn a_staging_signer_is_refused_for_the_prod_target_before_any_value_read() {
     let s = staging_signed();
@@ -350,6 +417,16 @@ fn a_tampered_bundle_is_refused_by_sync_and_left_alone() {
     assert_eq!(run.code, Some(2), "{}{}", run.stdout, run.stderr);
     assert_eq!(document(&run)["error"]["code"], "input_invalid");
     assert_eq!(bundle_bytes(&s, BUNDLE), before, "the bundle was replaced");
+}
+
+/// A tampered bundle costs no 1Password values read: it is refused before the read.
+#[test]
+fn a_tampered_bundle_is_refused_before_any_value_read() {
+    let s = tampered_app();
+    std::fs::write(s.path("world/calls.log"), "").expect("calls.log");
+    s.opv(&sync_args());
+    let reads: usize = BOUNDARIES.iter().map(|item| value_reads(&s, item)).sum();
+    assert_eq!(reads, 0, "{}", calls(&s));
 }
 
 #[test]

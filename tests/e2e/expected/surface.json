@@ -134,6 +134,7 @@
         "json",
         "product",
         "receipt",
+        "sealed-root",
         "target"
       ],
       "name": "delivery verify"
@@ -280,6 +281,7 @@
         "json",
         "product",
         "rotate",
+        "sealed-root",
         "target"
       ],
       "name": "plan"
@@ -516,6 +518,7 @@
         "fail-on-drift",
         "json",
         "product",
+        "sealed-root",
         "target"
       ],
       "name": "status"
