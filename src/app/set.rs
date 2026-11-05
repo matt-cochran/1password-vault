@@ -12,7 +12,7 @@ use std::io::{Read, Write};
 
 use super::write_err;
 use crate::cause::{
-    Cause, Cmd, EnvName, FieldRule, InputKind, KeyName, NameKind, NoTerminal, ProductName,
+    Cause, Cmd, EnvName, FieldRule, Guard, InputKind, KeyName, NameKind, NoTerminal, ProductName,
     SecretFileRule, UsageProblem,
 };
 use crate::domain::value_state::{ValueState, classify};
@@ -36,6 +36,29 @@ fn require_person_if_not_person(r: &dyn CommandRunner) -> Result<(), Error> {
         super::tidy::require_person(r, "opv set")?;
     }
     Ok(())
+}
+
+/// Refuse `product/key` in `env_name` when it is a member of a set (#253 §5.6): `set` and
+/// `set --from-file` never write a set's member alone, since its set writes the members
+/// together. Derived from the configuration alone, before any prompt or file read.
+pub(crate) fn refuse_set_member(
+    fleet: &Fleet,
+    product: &str,
+    key: &str,
+    env_name: &str,
+) -> Result<(), Error> {
+    let Some(set) = fleet.set_of(product, key) else {
+        return Ok(());
+    };
+    Err(Cause::Guard {
+        guard: Guard::SetMember {
+            product: ProductName::new(product),
+            key: KeyName::new(key),
+            env: EnvName::new(env_name),
+            set: set.to_string(),
+        },
+    }
+    .into())
 }
 
 /// The exact command a person is handed when an assistant calls `set`, and the command named
@@ -64,6 +87,9 @@ pub fn set(
     // configuration alone, so nobody is handed a command that cannot succeed.
     if let Ok((product, name)) = resolve(fleet, key, env_name) {
         super::import::refuse_not_stored(fleet, &product, &name, env_name)?;
+        // A set member is written only with its set (#253 §5.6): also from the configuration
+        // alone, before the person is prompted.
+        refuse_set_member(fleet, &product, &name, env_name)?;
     }
     // An assistant is refused before anything, with the exact command for the person; then
     // a process without a terminal. Neither path calls the prompt (R60).
@@ -129,9 +155,11 @@ pub fn set_from_file(
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     // The same order as `set`: an infrastructure key has no value to store, said from the
-    // configuration; then a person at a terminal, refused before the file is touched.
+    // configuration; then a set member, whose set writes it; then a person at a terminal,
+    // refused before the file is touched.
     if let Ok((product, name)) = resolve(fleet, key, env_name) {
         super::import::refuse_not_stored(fleet, &product, &name, env_name)?;
+        refuse_set_member(fleet, &product, &name, env_name)?;
     }
     let by = from_file_command(key, env_name);
     refuse_if_agent(env, by.clone())?;

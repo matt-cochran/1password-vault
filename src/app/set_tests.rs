@@ -507,3 +507,106 @@ fn a_service_account_refuses_set_from_file_before_reading_it() {
     );
     assert_eq!(err.code_str(), "own_session_required");
 }
+
+// A set member is written only together with its set (#253 §5.6; test 29): `set` and
+// `set --from-file` refuse it from the configuration alone, before the prompt or the read.
+
+/// A dev environment on the fake's `myapp-dev` vault: api/OPENAI_API_KEY and api/PEM are
+/// the members of the set `grant`, and PEM is also a file key.
+fn set_world() -> (FakeOp, Fleet) {
+    let op = FakeOp::default();
+    let id = op.insert(
+        "vdev0000000000000000000001",
+        serde_json::json!({
+            "title": "myapp · dev values", "category": "SECURE_NOTE",
+            "sections": [{"id": "api", "label": "api"}],
+            "fields": [
+                {"id": "f1", "section": {"id": "api", "label": "api"}, "type": "CONCEALED",
+                 "label": "OPENAI_API_KEY", "value": ""},
+                {"id": "f2", "section": {"id": "api", "label": "api"}, "type": "CONCEALED",
+                 "label": "PEM", "value": ""}
+            ]
+        }),
+    );
+    let fleet = crate::config::parse(&format!(
+        "[environments.dev]\nboundaries.api = {{ vault_id = \"vdev0000000000000000000001\", \
+         item_id = \"{id}\" }}\n\
+         [products.api.keys.OPENAI_API_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n\
+         [products.api.keys.PEM]\nkind = \"secret\"\nfile = \"private-key\"\n\
+         environments = [\"dev\"]\n\
+         [sets.grant]\nenvironments = [\"dev\"]\n\
+         members = {{ \"api/OPENAI_API_KEY\" = {{ generate = {{ hex_bytes = 32 }} }}, \
+         \"api/PEM\" = {{ generate = {{ hex_bytes = 32 }} }} }}\n"
+    ))
+    .unwrap();
+    (op, fleet)
+}
+
+#[test]
+fn a_set_member_is_refused_as_a_set_member() {
+    let (op, fleet) = set_world();
+    let mut never = |_: &str| -> Result<Option<SecretValue>, Error> { panic!("prompted") };
+    let err = set(
+        &fleet,
+        &FakeEnv::new("linux").tty(),
+        "api/OPENAI_API_KEY",
+        "dev",
+        &mut never,
+        &op,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    let doc = crate::error::document(&err, &crate::error::invocation(), false);
+    assert_eq!(doc["subject"]["guard"]["guard"], "set_member");
+}
+
+#[test]
+fn a_set_member_refusal_runs_no_op_command() {
+    let (op, fleet) = set_world();
+    let mut never = |_: &str| -> Result<Option<SecretValue>, Error> { panic!("prompted") };
+    let _ = set(
+        &fleet,
+        &FakeEnv::new("linux").tty(),
+        "api/OPENAI_API_KEY",
+        "dev",
+        &mut never,
+        &op,
+        &mut Vec::new(),
+    );
+    assert!(op.calls.borrow().is_empty());
+}
+
+#[test]
+fn a_set_member_file_key_is_refused_as_a_set_member() {
+    let (op, fleet) = set_world();
+    let err = set_from_file(
+        &fleet,
+        &FakeEnv::new("linux").tty(),
+        "api/PEM",
+        "dev",
+        std::path::Path::new("/nonexistent/never-read.pem"),
+        &op,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    let doc = crate::error::document(&err, &crate::error::invocation(), false);
+    assert_eq!(doc["subject"]["guard"]["guard"], "set_member");
+}
+
+#[test]
+fn a_set_member_file_refusal_runs_no_op_command() {
+    let (op, fleet) = set_world();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("private-key.pem");
+    std::fs::write(&path, "line one\nline two\n").unwrap();
+    let _ = set_from_file(
+        &fleet,
+        &FakeEnv::new("linux").tty(),
+        "api/PEM",
+        "dev",
+        &path,
+        &op,
+        &mut Vec::new(),
+    );
+    assert!(op.calls.borrow().is_empty());
+}
