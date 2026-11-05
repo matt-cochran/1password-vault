@@ -245,6 +245,7 @@ pub fn write_needs_session(what: &str, account: Option<&str>, command: &[String]
         system: crate::cause::System::OnePassword,
         account: account.map(crate::cause::AccountId::new),
         state: crate::cause::SessionState::EndedWithEarlierCommand,
+        selected_by: None,
     }
     .into()
 }

@@ -144,6 +144,7 @@ fn diagnosis(
             system: System::OnePassword,
             account: Some(AccountId::new(id)),
             state: SessionState::SignedOut,
+            selected_by: None,
         }
     };
     failed.report(cause)
@@ -296,8 +297,11 @@ pub fn choose_error(accounts: &[Account]) -> Error {
                     .trim_end_matches('/')
                     .to_string(),
                 id: AccountId::new(a.account_uuid.as_str()),
+                shorthand: None,
+                signed_in: None,
             })
             .collect(),
+        reach: crate::json::Reach::None,
     }
     .into()
 }
@@ -1021,16 +1025,19 @@ mod tests {
         assert!(e.to_string().contains("ACCOUNTUUID000000000000AAA"), "{e}");
     }
 
-    /// I7: several accounts and no choice: the step is opv's own list command, one
-    /// command that runs as typed.
+    /// I7, FR-65: several accounts and no choice: the person picks one of the typed
+    /// choices, each recorded by `opv account use <account ID>`; opv never picks.
     #[test]
-    fn choosing_among_several_accounts_steps_to_account_list() {
+    fn choosing_among_several_accounts_offers_each_account() {
         let e = choose_error(&[
             account("ACCOUNTUUID000000000000AAA"),
             account("ACCOUNTUUID000000000000BBB"),
         ]);
         assert!(
-            crate::error::report(&e).contains("Next: opv account list"),
+            crate::error::report(&e).contains(
+                "Next: pick one: opv account use ACCOUNTUUID000000000000AAA; \
+                 opv account use ACCOUNTUUID000000000000BBB"
+            ),
             "{}",
             crate::error::report(&e)
         );

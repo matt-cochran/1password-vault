@@ -9,13 +9,16 @@
 //! `--cache=false` read refreshes the cache.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::runner::{Call, CommandRunner, Outcome, Output};
+use crate::runner::fake::{ScriptedProducer, play};
+use crate::runner::{
+    Call, CommandRunner, LineVerdict, Outcome, Output, ProduceCall, Produced, ProducedLine,
+};
 
 /// One recorded call.
 #[derive(Debug, Clone)]
@@ -42,6 +45,8 @@ pub struct FakeOp {
     /// `op vault user list <vault>` answers by vault ID (#96); a vault not here fails, as
     /// for a person who cannot manage it.
     pub vault_users: RefCell<BTreeMap<String, Value>>,
+    /// Scripted producers (#253), one per `produce` call, in order.
+    pub producers: RefCell<VecDeque<ScriptedProducer>>,
     edits: Cell<usize>,
     next_id: Cell<u32>,
 }
@@ -61,6 +66,7 @@ impl Default for FakeOp {
             cache: RefCell::default(),
             racing_edit: Cell::new(None),
             vault_users: RefCell::default(),
+            producers: RefCell::default(),
             edits: Cell::new(0),
             next_id: Cell::new(1),
         }
@@ -378,5 +384,26 @@ impl CommandRunner for FakeOp {
 
     fn run_inherited(&self, _: &str, _: &[&str], _: &[(&str, &str)]) -> io::Result<i32> {
         Err(io::ErrorKind::Unsupported.into())
+    }
+
+    /// Records the call (argv `command`, the request as stdin) and plays the next queued
+    /// [`ScriptedProducer`].
+    fn produce(
+        &self,
+        call: &ProduceCall,
+        on_line: &mut dyn FnMut(ProducedLine<'_>) -> LineVerdict,
+    ) -> Result<Produced, crate::Error> {
+        let (program, args) = call.command.split_first().unwrap_or((&"", &[]));
+        self.calls.borrow_mut().push(Recorded {
+            program: program.to_string(),
+            args: args.iter().map(|a| a.to_string()).collect(),
+            stdin: Some(call.request.to_vec()),
+        });
+        let script = self
+            .producers
+            .borrow_mut()
+            .pop_front()
+            .unwrap_or_else(|| panic!("FakeOp: no producer queued for {program}"));
+        play(&script, call, on_line)
     }
 }

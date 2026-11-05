@@ -73,6 +73,33 @@ pub fn table() -> Vec<CodeRow> {
     rows
 }
 
+/// The codes whose `next` stays the assistant's read although `human_required` is true
+/// (FR-65; design agent-signin-readiness §2.3, vet item 7). For each, a person-only Do
+/// (a grant, a value, a confirmation, a pick, a revoke, an owner's setup) comes first, and
+/// the assistant's read afterwards shows whether it took, so the read is not flipped to the
+/// person and `human_required` keeps saying a person must act. Every other code obeys
+/// "`human_required` implies `next.actor == person`" (a test); each entry is decided in
+/// `docs/design/error-catalog.md` §6.3.
+pub const ASSISTANT_READS_AFTER_PERSON: &[&str] = &[
+    "account_ambiguous",
+    "choice_required",
+    "concurrent_edit",
+    "confirm_mismatch",
+    "create_outcome_unknown",
+    "credential_rejected",
+    "deploy_credentials_failed",
+    "findings",
+    "ids_not_in_account",
+    "input_invalid",
+    "keys_blocking",
+    "manifest_ambiguous",
+    "owner_setup_required",
+    "permission_denied",
+    "secret_not_stored",
+    "target_not_signed_in",
+    "vault_no_access",
+];
+
 /// What a code means, in one line. Every code [`examples`] produces has one (a test).
 pub fn meaning(code: &str) -> &'static str {
     match code {
@@ -493,6 +520,7 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
                 repo: Some("repo-xyz".into()),
                 account: Some(AccountId::new("ACC-XYZ")),
             }),
+            found: None,
         },
         ConfigSourceMismatch {
             command: CommandId("apply".into()),
@@ -615,6 +643,7 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
             system: System::OnePassword,
             account: Some(AccountId::new("ACC-6AIN")),
             state: SessionState::Expired,
+            selected_by: None,
         },
         AccountNotOnMachine {
             account: AccountRef::Shorthand("acct-short".into()),
@@ -958,13 +987,18 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
                     email: "me@one.example".into(),
                     address: "my.1password.com".into(),
                     id: AccountId::new("ACC-ONE"),
+                    shorthand: None,
+                    signed_in: None,
                 },
                 AccountChoice {
                     email: "me@two.example".into(),
                     address: "my.1password.com".into(),
                     id: AccountId::new("ACC-TWO"),
+                    shorthand: None,
+                    signed_in: None,
                 },
             ],
+            reach: crate::json::Reach::None,
         },
         SourceOnly {
             product: ProductName::new("shared-xyz"),

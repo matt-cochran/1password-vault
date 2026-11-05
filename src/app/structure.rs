@@ -184,6 +184,7 @@ fn no_account(command: &str) -> Error {
             system: System::OnePassword,
             account: None,
             state: SessionState::SignedOut,
+            selected_by: None,
         }
         .into(),
     }

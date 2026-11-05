@@ -525,6 +525,32 @@ fn account_source(ctx: &DiagnoseContext) -> AccountSource {
     }
 }
 
+/// The account a call that carried no `--account` stood for (`OP_ACCOUNT`, then the
+/// checkout's `.opv`), as an ID with where it was chosen. An email or sign-in address is
+/// left out (an account ID only in rendered evidence). `None` in this crate's unit tests,
+/// which never depend on the developer's shell or checkout (as [`shell_session_vars`]).
+fn selection_without_flag() -> (Option<AccountId>, Option<AccountSource>) {
+    if cfg!(test) {
+        return (None, None);
+    }
+    let is_id = |a: &String| !a.contains(['@', '.']);
+    if let Some(a) = crate::config_store::account_env().filter(is_id) {
+        let var = VarName::new("OP_ACCOUNT");
+        return (Some(AccountId::new(a)), Some(AccountSource::EnvVar { var }));
+    }
+    let here = std::env::current_dir().unwrap_or_default();
+    match (
+        crate::config_store::pointer_account(&here).filter(is_id),
+        crate::config_store::find_dot_opv(&here),
+    ) {
+        (Some(a), Some(path)) => (
+            Some(AccountId::new(a)),
+            Some(AccountSource::DotOpv { path }),
+        ),
+        _ => (None, None),
+    }
+}
+
 /// The 1Password app holds op's accounts here (macOS, Windows, or op.exe from WSL), so an
 /// account is added there, never with `op account add`.
 fn accounts_in_app(host: &Host) -> bool {
@@ -588,15 +614,24 @@ fn session_cause_with(
             problem: CredentialProblem::Unreadable,
             seen: seen.cloned()?,
         }),
-        Session::NotSignedIn => Some(Cause::NotSignedIn {
-            system: System::OnePassword,
-            account: ctx.account.clone(),
-            state: crate::app::signin::signed_out_state(
-                ctx.account.as_ref().map(|a| a.as_str()),
-                shell_vars,
-                integration,
-            ),
-        }),
+        Session::NotSignedIn => {
+            // FR-40 (agent-signin-readiness §2.2 item 6): the account is named whenever it
+            // is known, from the call or else from the selection it stood for.
+            let (account, selected_by) = match &ctx.account {
+                Some(a) => (Some(a.clone()), Some(account_source(ctx))),
+                None => selection_without_flag(),
+            };
+            Some(Cause::NotSignedIn {
+                system: System::OnePassword,
+                state: crate::app::signin::signed_out_state(
+                    account.as_ref().map(|a| a.as_str()),
+                    shell_vars,
+                    integration,
+                ),
+                account,
+                selected_by: selected_by.filter(|s| *s != AccountSource::OpDefault),
+            })
+        }
         Session::AccountAbsent(cause) => Some(*cause),
         // No account at all is on this machine, so any account will do (the `Any` form);
         // an account the caller selected but op does not know keeps its id.

@@ -36,6 +36,7 @@ pub fn diagnose(seen: Observed, stderr: &str, ctx: &DiagnoseContext) -> Cause {
             system: System::GitHub,
             account: ctx.account.clone(),
             state: SessionState::SignedOut,
+            selected_by: None,
         },
         Some(Reading::LoginOverridden) => {
             let var = overriding_var(&seen, stderr);
@@ -165,6 +166,7 @@ fn credential_rejected(seen: Observed, ctx: &DiagnoseContext) -> Cause {
                 system: System::GitHub,
                 account: ctx.account.clone(),
                 state: SessionState::Expired,
+                selected_by: None,
             };
         }
     };
