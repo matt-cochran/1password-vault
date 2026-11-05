@@ -3,9 +3,11 @@
 //! person or assistant ever sees, copies or pastes it.
 //!
 //! Only keys whose rules say what the value is: `base64_bytes = N` (N random bytes,
-//! standard padded base64) or `hex_bytes = N` (N random bytes, lowercase hex), from the
-//! operating system's CSPRNG. Provider-issued keys (anything with a prefix rule, or no
-//! byte-length rule) are refused: those come from the provider, typed by a person.
+//! standard padded base64), `hex_bytes = N` (N random bytes, lowercase hex), from the
+//! operating system's CSPRNG, or `age_identity = true` (a fresh X25519 identity, whose
+//! public `age1…` recipient is printed and whose secret is only stored). Provider-issued
+//! keys (anything with a prefix rule, or no byte-length rule) are refused: those come from
+//! the provider, typed by a person.
 //!
 //! A field that already holds a value is never overwritten: rotation is a separate,
 //! reviewed step. The write is one item edit, read back and verified (the same writer as
@@ -15,6 +17,7 @@
 use std::io::Write;
 
 use base64::Engine as _;
+use secrecy::ExposeSecret;
 
 use super::write_err;
 use crate::cause::{
@@ -29,6 +32,9 @@ use crate::runner::CommandRunner;
 pub enum Recipe {
     Base64(usize),
     Hex(usize),
+    /// A fresh age X25519 identity (`AGE-SECRET-KEY-1…`), whose public `age1…`
+    /// recipient is printed for the sealed target's `recipients` (§7.1).
+    AgeIdentity,
 }
 
 impl Recipe {
@@ -37,6 +43,7 @@ impl Recipe {
         match self {
             Recipe::Base64(n) => format!("base64, {n} random bytes"),
             Recipe::Hex(n) => format!("hex, {n} random bytes"),
+            Recipe::AgeIdentity => "an age X25519 identity".to_string(),
         }
     }
 }
@@ -64,6 +71,11 @@ pub fn recipe(product: &str, key: &str, env: &str, spec: &KeySpec) -> Result<Rec
     // first, since its shape rule may well give a byte count.
     if super::deliver_only::is_infrastructure(spec) {
         return refuse(GenerateRefusal::Infrastructure);
+    }
+    // An age identity carries its meaning in the flag, not a byte count, so it is chosen
+    // before any shape rule that would otherwise refuse it (§7.1).
+    if r.age_identity {
+        return Ok(Recipe::AgeIdentity);
     }
     if r.prefix.is_some() || r.ensure_prefix.is_some() || r.prefix_by_mode.is_some() {
         return refuse(GenerateRefusal::ProviderIssued);
@@ -99,14 +111,27 @@ fn random_source_failed() -> Error {
 pub fn make(recipe: Recipe) -> Result<SecretValue, Error> {
     let n = match recipe {
         Recipe::Base64(n) | Recipe::Hex(n) => n,
+        Recipe::AgeIdentity => return Ok(make_identity().0),
     };
     let mut bytes = zeroize::Zeroizing::new(vec![0u8; n]);
     getrandom::fill(&mut bytes).map_err(|_| -> Error { random_source_failed() })?;
     let text = match recipe {
         Recipe::Base64(_) => base64::engine::general_purpose::STANDARD.encode(&*bytes),
         Recipe::Hex(_) => hex::encode(&*bytes),
+        Recipe::AgeIdentity => unreachable!("handled by the early return above"),
     };
     Ok(SecretValue::new(text))
+}
+
+/// A fresh age X25519 identity, as the secret text to store and its public `age1…`
+/// recipient. `age`'s identity zeroizes on drop, and the text lives in a [`SecretValue`].
+fn make_identity() -> (SecretValue, String) {
+    let identity = age::x25519::Identity::generate();
+    let recipient = identity.to_public().to_string();
+    (
+        SecretValue::new(identity.to_string().expose_secret().to_owned()),
+        recipient,
+    )
 }
 
 /// Generate each `product/KEY` in `env_name` and write it into 1Password.
@@ -145,10 +170,21 @@ pub fn run_on(
             return Err(refused(product, key, env_name, GenerateRefusal::HasValue));
         }
     }
-    let writes: Vec<(String, String, SecretValue)> = chosen
-        .iter()
-        .map(|(p, k, rcp)| make(*rcp).map(|v| (p.clone(), k.clone(), v)))
-        .collect::<Result<_, _>>()?;
+    let mut writes: Vec<(String, String, SecretValue)> = Vec::with_capacity(chosen.len());
+    let mut recipients: Vec<Option<String>> = Vec::with_capacity(chosen.len());
+    for (p, k, rcp) in &chosen {
+        match rcp {
+            Recipe::AgeIdentity => {
+                let (value, recipient) = make_identity();
+                writes.push((p.clone(), k.clone(), value));
+                recipients.push(Some(recipient));
+            }
+            _ => {
+                writes.push((p.clone(), k.clone(), make(*rcp)?));
+                recipients.push(None);
+            }
+        }
+    }
     // A read-back failure names the apply that generates (05.10): run again, a value that
     // landed is refused as already there, never replaced.
     let by = crate::cause::Cmd {
@@ -159,7 +195,7 @@ pub fn run_on(
             .collect(),
     };
     super::import::write_values(fleet, env, &writes, &by, r)?;
-    for (p, k, rcp) in &chosen {
+    for ((p, k, rcp), recipient) in chosen.iter().zip(&recipients) {
         writeln!(
             out,
             "generated {} in 1Password ({}); the value was never shown",
@@ -167,6 +203,11 @@ pub fn run_on(
             rcp.describe()
         )
         .map_err(write_err)?;
+        // The identity is a secret; only its public recipient is shown, so the person can
+        // put it in the sealed target's `recipients` (§7.1).
+        if let Some(recipient) = recipient {
+            writeln!(out, "{recipient}").map_err(write_err)?;
+        }
     }
     let next = crate::cause::Cmd {
         command: vec!["status".into()],
