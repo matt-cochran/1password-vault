@@ -38,6 +38,11 @@ pub struct Rules {
     pub prefix_by_mode: Option<PrefixByMode>,
     pub refuse_in: Vec<String>,
     pub transform: Option<String>,
+    /// The key holds an age identity (`AGE-SECRET-KEY-1…`) that opens sealed bundles: a
+    /// sealed target never delivers it, since a bundle cannot carry the key that opens it
+    /// (design `sealed-target` §3.1-8, T14).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub age_identity: bool,
 }
 
 /// A string or a list of strings in TOML (`x = "a"` or `x = ["a", "b"]`).

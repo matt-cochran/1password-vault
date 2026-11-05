@@ -307,6 +307,62 @@ pub fn discover(start: &Path) -> Option<PathBuf> {
     None
 }
 
+/// How deep [`found_below`] looks: folders at most this many levels under the root.
+const FOUND_DEPTH: usize = 4;
+/// The most files [`found_below`] reports.
+const FOUND_FILES: usize = 20;
+/// The most folders [`found_below`] opens.
+const FOUND_FOLDERS: usize = 2_000;
+
+/// The `secrets.toml` files under `root` (FR-66): the hint a `ConfigNotFound` shows, never a
+/// file opv uses unless it is named. Breadth first, each folder's entries in name order, so
+/// shallower files come first. Bounded: folders at most four levels down, 20 files, 2 000
+/// folders opened; the `bool` is `true` when a bound cut the search short. Hidden folders,
+/// `node_modules` and `target` are skipped, symbolic links are never followed, and only names
+/// are read, never a file's contents.
+pub fn found_below(root: &Path) -> (Vec<PathBuf>, bool) {
+    let mut found = Vec::new();
+    let mut cut = false;
+    let mut queue = std::collections::VecDeque::from([(root.to_path_buf(), 0usize)]);
+    let mut opened = 0usize;
+    while let Some((dir, depth)) = queue.pop_front() {
+        if opened == FOUND_FOLDERS {
+            return (found, true);
+        }
+        opened += 1;
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut entries: Vec<_> = entries.flatten().collect();
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            // The entry's own type: a symbolic link is neither a file nor a folder here.
+            let Ok(kind) = e.file_type() else { continue };
+            let name = e.file_name();
+            if kind.is_file() && name == "secrets.toml" {
+                if found.len() == FOUND_FILES {
+                    return (found, true);
+                }
+                found.push(e.path());
+            } else if kind.is_dir() {
+                let skip = name
+                    .to_str()
+                    .is_none_or(|n| n.starts_with('.') || n == "node_modules" || n == "target");
+                if skip {
+                    continue;
+                }
+                if depth == FOUND_DEPTH {
+                    // A folder past the depth bound: there may be more.
+                    cut = true;
+                    continue;
+                }
+                queue.push_back((e.path(), depth + 1));
+            }
+        }
+    }
+    (found, cut)
+}
+
 /// No `secrets.toml` in `start` or a parent (P3): the first-run router, offering both
 /// starting paths and the explicit `--config`.
 pub fn not_found(start: &Path) -> Error {
@@ -1396,6 +1452,7 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
     check_boundaries(&fleet, doc)?;
     check_target_roles(&fleet, doc)?;
     check_file_mounts(&fleet, doc)?;
+    check_provider_rules(&fleet, doc)?;
     check_names(&fleet, doc)?;
     check_personal(&fleet, doc)?;
     check_evidence_width(&fleet, doc)?;
@@ -1576,6 +1633,19 @@ fn check_file_mounts(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
                 rendered.push((rendered_dir, product.clone(), files[0].0.to_string()));
             }
         }
+    }
+    Ok(())
+}
+
+/// The load rules each provider makes across its own targets ([`Provider::check_fleet`],
+/// FR-37), placed at the field the provider names.
+fn check_provider_rules(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
+    for p in registry::PROVIDERS {
+        p.check_fleet(fleet).map_err(|refusal| {
+            let crate::provider::FleetRefusal { path, rule } = *refusal;
+            let path: Vec<&str> = path.iter().map(String::as_str).collect();
+            doc.invalid(&path, rule)
+        })?;
     }
     Ok(())
 }
@@ -4892,6 +4962,77 @@ put.conflict = ["ALREADY_EXISTS"]
         let nested = dir.path().join("a");
         std::fs::create_dir_all(&nested).unwrap();
         assert_eq!(discover(&nested), None);
+    }
+
+    /// `secrets.toml` at each of `rels` (relative folders) under a fresh directory.
+    fn tree(rels: &[&str]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for rel in rels {
+            let d = dir.path().join(rel);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("secrets.toml"), "").unwrap();
+        }
+        dir
+    }
+
+    fn twenty_one() -> tempfile::TempDir {
+        let rels: Vec<String> = (0..21).map(|i| format!("d{i:02}")).collect();
+        tree(&rels.iter().map(String::as_str).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn found_below_finds_a_config_three_folders_down() {
+        let dir = tree(&["deploy/shared-host/fleet"]);
+        assert_eq!(
+            found_below(dir.path()).0,
+            vec![dir.path().join("deploy/shared-host/fleet/secrets.toml")]
+        );
+    }
+
+    #[test]
+    fn found_below_skips_hidden_and_build_folders() {
+        let dir = tree(&[".cache", "node_modules/x", "target/debug"]);
+        assert!(found_below(dir.path()).0.is_empty());
+    }
+
+    #[test]
+    fn found_below_stops_at_four_levels() {
+        let dir = tree(&["a/b/c/d/e"]);
+        assert!(found_below(dir.path()).0.is_empty());
+    }
+
+    #[test]
+    fn found_below_says_it_stopped_at_the_depth_cap() {
+        let dir = tree(&["a/b/c/d/e"]);
+        assert!(found_below(dir.path()).1);
+    }
+
+    #[test]
+    fn found_below_keeps_at_most_twenty_files() {
+        assert_eq!(found_below(twenty_one().path()).0.len(), 20);
+    }
+
+    #[test]
+    fn found_below_says_it_stopped_at_the_file_cap() {
+        assert!(found_below(twenty_one().path()).1);
+    }
+
+    #[test]
+    fn found_below_lists_shallower_files_first() {
+        let dir = tree(&["a/b", "z"]);
+        assert_eq!(
+            found_below(dir.path()).0.first(),
+            Some(&dir.path().join("z/secrets.toml"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn found_below_never_follows_a_symlinked_folder() {
+        let outside = tree(&["x"]);
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
+        assert!(found_below(dir.path()).0.is_empty());
     }
 
     #[test]

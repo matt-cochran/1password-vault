@@ -908,6 +908,8 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `producer_changed` | 2 | after_fix | no | a producer's file no longer has the sha256 the contract pins; a person reviews the change and pins it again |
 | `regenerated_file_differs` | 2 | never | no | a file project's regenerated configuration file differs from the committed copy; a person picks which is right |
 | `retire_still_read` | 2 | after_fix | no | the deployed code still reads a key a person asked to retire, or no receipt records the deployed revision |
+| `sealed_recipient_shared` | 2 | after_fix | no | an age recipient of a sealed target is also a recipient of a sealed target in another trust group |
+| `sealed_signer_shared` | 2 | after_fix | no | a sealed target's signer also signs for a sealed target in another trust group, so one could sign for the other |
 | `shell_mismatch` | 2 | never | yes | opv login --shell was asked for another shell's syntax than the shell running it; nothing was signed in |
 | `source_only` | 2 | never | no | the product is source-only: it holds shared values for other products' keys and is never run, checked or planned on its own |
 | `state_vault_missing` | 2 | after_fix | yes | a target's state vault for its delivery evidence is not bound yet; a person runs opv apply |

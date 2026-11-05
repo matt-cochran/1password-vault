@@ -329,6 +329,14 @@ pub fn meaning(code: &str) -> &'static str {
             "the command needs something this platform lacks (a producer on native Windows); run it from WSL"
         }
         // end provision
+        // sealed target (#271)
+        "sealed_recipient_shared" => {
+            "an age recipient of a sealed target is also a recipient of a sealed target in another trust group"
+        }
+        "sealed_signer_shared" => {
+            "a sealed target's signer also signs for a sealed target in another trust group, so one could sign for the other"
+        }
+        // end sealed target
         "internal_error" => "opv hit an internal error; report it",
         _ => "",
     }
@@ -1049,8 +1057,48 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
             },
         },
         // end provision
+        // sealed target (#271): the configuration causes
+        ConfigInvalid {
+            source: file_source(),
+            at: Some(Location { line: 9, col: 1 }),
+            field: DottedPath(sealed_path("recipients")),
+            rule: FieldRule::Check {
+                check: ConfigCheck::SealedRecipientShared {
+                    recipient: "sha256:0123456789abcdef".into(),
+                    other_env: "env-stage".into(),
+                    other_target: "box-xyz".into(),
+                },
+            },
+        },
+        ConfigInvalid {
+            source: file_source(),
+            at: Some(Location { line: 10, col: 1 }),
+            field: DottedPath(sealed_path("signer")),
+            rule: FieldRule::Check {
+                check: ConfigCheck::SealedSignerShared {
+                    signer: "SHA256:abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG".into(),
+                    other_env: "env-stage".into(),
+                    other_target: "box-xyz".into(),
+                },
+            },
+        },
+        // end sealed target
         Bug { site: "site-xyz" },
     ]
+}
+
+/// The path of field `leaf` of the example sealed target.
+fn sealed_path(leaf: &str) -> Vec<String> {
+    [
+        "environments",
+        "env-prod",
+        "targets",
+        "box-xyz",
+        "sealed",
+        leaf,
+    ]
+    .map(String::from)
+    .to_vec()
 }
 
 /// The observation the examples carry (only the runner builds one; it never reaches a

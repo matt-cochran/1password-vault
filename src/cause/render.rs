@@ -389,7 +389,7 @@ fn sign_in_advice(system: System, why: RefusedBecause) -> String {
             System::Azure => "sign this CI job in with the target's deploy credentials, a service principal (opv ci workflow prints that step)".to_string(),
             System::Kubernetes => "give this CI job a kubeconfig whose context carries its own credentials".to_string(),
             System::Ssh | System::RemoteOpv => "give this CI job the remote profile's ssh key".to_string(),
-            System::Https | System::Docker => "give this CI job the target's deploy credentials from 1Password".to_string(),
+            System::Https | System::Docker | System::Sealed => "give this CI job the target's deploy credentials from 1Password".to_string(),
         },
     }
 }
@@ -1223,6 +1223,12 @@ fn provision_refused(
             )),
             Next::Handoff(with_timeout(inv_cmd(inv), *needed_seconds)),
         ),
+        ProvisionRefusal::ItemNotRewritable { holds } => plan(
+            inspect(format!(
+                "in 1Password, move {holds} out of the item of environment {env} into an item of its own, then run opv provision {set} --env {env} again"
+            )),
+            ready,
+        ),
     }
 }
 
@@ -1356,7 +1362,8 @@ fn vendor_sign_in(system: System) -> Option<VendorCmd> {
         | System::Ssh
         | System::RemoteOpv
         | System::Https
-        | System::Docker => {
+        | System::Docker
+        | System::Sealed => {
             return None;
         }
     };
@@ -4098,7 +4105,7 @@ impl Cause {
                         (_, Some(vault)) => vendor("op", &["item", "list", "--vault", vault]),
                         (_, None) => vendor("op", &["vault", "list"]),
                     },
-                    (System::Ssh | System::RemoteOpv | System::Https | System::Docker, _) => {
+                    (System::Ssh | System::RemoteOpv | System::Https | System::Docker | System::Sealed, _) => {
                         Next::None(NoNext::NothingToRun)
                     }
                 };
