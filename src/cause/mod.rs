@@ -619,6 +619,7 @@ pub fn sealed_refusal(
         E::RecipientUnsupported(_)
         | E::SigningKeyInvalid(_)
         | E::SealMismatch(_)
+        | E::SealsSigningKey(_)
         | E::Internal(_) => {
             return Cause::Bug {
                 site: "unseal met a sealing-side codec error",
