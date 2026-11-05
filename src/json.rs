@@ -251,13 +251,19 @@ pub fn finish_with(
     text.into_bytes()
 }
 
-/// Whether a successful command's `body` is its document: one JSON object, or under `raw`
-/// any non-empty body (`config export`, `run --preview --json`), kept byte for byte.
+/// Whether a successful command's `body` is its document: one JSON object or array, or
+/// under `raw` any non-empty body (`config export`, `run --preview --json`), kept byte for
+/// byte.
 pub fn is_document(body: &[u8], raw: bool) -> bool {
     if raw {
         return !body.is_empty();
     }
-    matches!(serde_json::from_slice::<Value>(body), Ok(Value::Object(_)))
+    // An object is framed; a top-level array (`opv target list --json`) is a document too,
+    // passed through as it always was (#276).
+    matches!(
+        serde_json::from_slice::<Value>(body),
+        Ok(Value::Object(_) | Value::Array(_))
+    )
 }
 
 /// The failure a successful `--json` command that wrote no document is (FR-64): an opv
@@ -301,6 +307,12 @@ fn frame(mut fields: Map<String, Value>, failure: Option<(i32, Value)>) -> Map<S
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_top_level_array_is_a_document() {
+        assert!(super::is_document(b"[{\"name\":\"web\"}]\n", false));
+    }
+
     use super::*;
 
     fn refused() -> Error {
