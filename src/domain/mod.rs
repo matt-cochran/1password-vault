@@ -18,6 +18,7 @@ pub mod naming;
 pub mod placement;
 pub mod presence;
 pub mod provision;
+pub mod provision_template;
 pub mod relaxation;
 pub mod secret;
 pub mod value_state;

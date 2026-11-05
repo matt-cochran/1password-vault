@@ -1,5 +1,5 @@
 //! `[sets]` and `[producers]` at load (design `owner-value-ingestion.md` §3.2, §10.1 tests
-//! 1-8): one behavioural assertion per test.
+//! 1-11): one behavioural assertion per test.
 
 use std::path::Path;
 
@@ -7,6 +7,7 @@ use crate::cause::{Cause, ConfigCheck, FieldRule, GivenBy};
 use crate::config::{parse, parse_file};
 use crate::domain::Fleet;
 use crate::domain::provision::{Generator, KeyRef, MemberSource};
+use crate::domain::provision_template::{Node, Template};
 use crate::error::Error;
 
 /// Two products in their own boundaries; `app` has a client id, a token and a key with a
@@ -419,5 +420,292 @@ members = { "app/REFRESH_TOKEN" = { producer = "consent", output = "refresh_toke
     assert!(matches!(
         refused_rule(load(&format!("{PRODUCER}{set}"))),
         Some(FieldRule::ConflictsWith { .. })
+    ));
+}
+
+// ---- templates (Slice B, §3.2, §10.1 tests 9-11) ---------------------------------------
+
+/// The #262 set's shape (§3.1) with fake names: a site issuer producing three site ids and
+/// keys, five generated hex secrets, and a bundle template over ids, identities and the
+/// shared gateway key, all in one boundary.
+const SITES: &str = r#"[environments.prod]
+boundaries.hub = {}
+
+[environments.staging]
+boundaries.hub = {}
+
+[products.shop]
+boundary = "hub"
+
+[products.shop.keys.PLATFORM_IDENTITY_SECRET]
+kind = "secret"
+rules = { regex = "[0-9a-f]{64}" }
+
+[products.shop.keys.AGENCY_IDENTITY_SECRET]
+kind = "secret"
+rules = { regex = "[0-9a-f]{64}" }
+
+[products.shop.keys.OWNER_IDENTITY_SECRET]
+kind = "secret"
+rules = { regex = "[0-9a-f]{64}" }
+
+[products.shop.keys.SITES_GATEWAY_KEY]
+kind = "secret"
+rules = { regex = "[0-9a-f]{64}" }
+
+[products.shop.keys.USER_HASH_KEY]
+kind = "secret"
+immutable = true
+rules = { regex = "[0-9a-f]{64}" }
+
+[products.shop.keys.PLATFORM_SITE_KEY]
+kind = "secret"
+rules = { regex = "pk_[A-Za-z0-9_]{1,61}" }
+
+[products.shop.keys.AGENCY_SITE_KEY]
+kind = "secret"
+rules = { regex = "pk_[A-Za-z0-9_]{1,61}" }
+
+[products.shop.keys.OWNER_SITE_KEY]
+kind = "secret"
+rules = { regex = "pk_[A-Za-z0-9_]{1,61}" }
+
+[products.collector]
+boundary = "hub"
+
+[products.collector.keys.SITE_SECRETS]
+kind = "secret"
+rules = { regex = "\\{[ -~]{1,65533}\\}" }
+
+[producers.site-issuer]
+command = ["python3", "-c", "pass"]
+outputs = ["platform_site_id", "platform_site_key", "agency_site_id", "agency_site_key",
+           "owner_site_id", "owner_site_key"]
+timeout = "5m"
+
+[sets.sites]
+environments = ["staging"]
+
+[sets.sites.members]
+"shop/PLATFORM_IDENTITY_SECRET" = { generate = { hex_bytes = 32 } }
+"shop/AGENCY_IDENTITY_SECRET"   = { generate = { hex_bytes = 32 } }
+"shop/OWNER_IDENTITY_SECRET"    = { generate = { hex_bytes = 32 } }
+"shop/SITES_GATEWAY_KEY"        = { generate = { hex_bytes = 32 } }
+"shop/USER_HASH_KEY"            = { generate = { hex_bytes = 32 } }
+"shop/PLATFORM_SITE_KEY" = { producer = "site-issuer", output = "platform_site_key" }
+"shop/AGENCY_SITE_KEY"   = { producer = "site-issuer", output = "agency_site_key" }
+"shop/OWNER_SITE_KEY"    = { producer = "site-issuer", output = "owner_site_key" }
+
+[sets.sites.members."collector/SITE_SECRETS".template]
+version = 1
+sites = [
+  { siteId = "${site-issuer.platform_site_id}", identitySecret = "${shop/PLATFORM_IDENTITY_SECRET}", gatewaySecret = "${shop/SITES_GATEWAY_KEY}" },
+  { siteId = "${site-issuer.agency_site_id}",   identitySecret = "${shop/AGENCY_IDENTITY_SECRET}",   gatewaySecret = "${shop/SITES_GATEWAY_KEY}" },
+  { siteId = "${site-issuer.owner_site_id}",    identitySecret = "${shop/OWNER_IDENTITY_SECRET}",    gatewaySecret = "${shop/SITES_GATEWAY_KEY}" },
+]
+"#;
+
+fn bundle_key() -> KeyRef {
+    KeyRef::parse("collector/SITE_SECRETS").unwrap()
+}
+
+/// The loaded bundle template of [`SITES`].
+fn sites_template(fleet: &Fleet) -> Template {
+    match &fleet.sets["sites"].members[&bundle_key()] {
+        MemberSource::Template(t) => t.clone(),
+        other => panic!("expected a template, got {other:?}"),
+    }
+}
+
+/// [`SITES`] with its first site's `siteId` leaf replaced by `leaf`.
+fn sites_with_leaf(leaf: &str) -> String {
+    SITES.replacen(r#""${site-issuer.platform_site_id}""#, leaf, 1)
+}
+
+/// Test 11.
+#[test]
+fn the_three_site_bundle_set_loads() {
+    assert!(parse(SITES).is_ok());
+}
+
+#[test]
+fn a_loaded_template_keeps_its_declared_key_order() {
+    let fleet = parse(SITES).unwrap();
+    let Node::Table(root) = sites_template(&fleet).root().clone() else {
+        panic!("expected a table");
+    };
+    let Node::Array(sites) = &root[1].1 else {
+        panic!("expected an array");
+    };
+    let Node::Table(first) = &sites[0] else {
+        panic!("expected a table");
+    };
+    let keys: Vec<&str> = first.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, ["siteId", "identitySecret", "gatewaySecret"]);
+}
+
+#[test]
+fn a_loaded_template_holds_an_output_leaf() {
+    let fleet = parse(SITES).unwrap();
+    assert!(sites_template(&fleet).uses_output("site-issuer", "owner_site_id"));
+}
+
+#[test]
+fn an_output_used_only_by_a_template_counts_as_used() {
+    let fleet = parse(SITES).unwrap();
+    assert_eq!(fleet.producers["site-issuer"].outputs.len(), 6);
+}
+
+/// Test 9.
+#[test]
+fn a_partially_interpolated_leaf_is_refused() {
+    assert_eq!(
+        refused_field(parse(&sites_with_leaf(r#""x${shop/SITES_GATEWAY_KEY}""#))).as_deref(),
+        Some("sets.sites.members.collector/SITE_SECRETS.template.sites.0.siteId")
+    );
+}
+
+#[test]
+fn a_partially_interpolated_leaf_is_a_type_refusal() {
+    assert!(matches!(
+        refused_rule(parse(&sites_with_leaf(r#""x${shop/SITES_GATEWAY_KEY}""#))),
+        Some(FieldRule::Type { .. })
+    ));
+}
+
+/// Test 10.
+#[test]
+fn a_template_reference_cycle_is_refused() {
+    let set = r#"
+[sets.loop]
+environments = ["prod"]
+
+[sets.loop.members."app/PLAIN".template]
+inner = "${app/CLIENT_ID}"
+
+[sets.loop.members."app/CLIENT_ID".template]
+inner = "${app/PLAIN}"
+"#;
+    assert!(matches!(
+        refused_rule(load(set)),
+        Some(FieldRule::Type { expected }) if expected.contains("does not reference itself")
+    ));
+}
+
+#[test]
+fn a_template_referencing_itself_is_refused() {
+    let set = r#"
+[sets.self]
+environments = ["prod"]
+
+[sets.self.members."app/PLAIN".template]
+inner = "${app/PLAIN}"
+"#;
+    assert_eq!(
+        refused_field(load(set)).as_deref(),
+        Some("sets.self.members.app/PLAIN.template")
+    );
+}
+
+#[test]
+fn a_reference_to_a_key_outside_the_set_is_refused() {
+    let set = r#"
+[sets.outside]
+environments = ["prod"]
+
+[sets.outside.members."app/PLAIN".template]
+inner = "${app/CLIENT_ID}"
+"#;
+    assert!(matches!(
+        refused_rule(load(set)),
+        Some(FieldRule::Check {
+            check: ConfigCheck::Undeclared { .. }
+        })
+    ));
+}
+
+#[test]
+fn a_reference_to_an_undeclared_producer_is_refused() {
+    assert!(matches!(
+        refused_rule(parse(&sites_with_leaf(r#""${nobody.platform_site_id}""#))),
+        Some(FieldRule::Check {
+            check: ConfigCheck::Undeclared { .. }
+        })
+    ));
+}
+
+#[test]
+fn a_reference_to_an_undeclared_output_is_refused() {
+    assert!(matches!(
+        refused_rule(parse(&sites_with_leaf(r#""${site-issuer.site_id}""#))),
+        Some(FieldRule::Check {
+            check: ConfigCheck::ProducerOutputUndeclared { .. }
+        })
+    ));
+}
+
+#[test]
+fn a_malformed_reference_is_refused() {
+    assert!(matches!(
+        refused_rule(parse(&sites_with_leaf(r#""${justaname}""#))),
+        Some(FieldRule::Type { .. })
+    ));
+}
+
+#[test]
+fn a_float_in_a_template_is_refused() {
+    let fleet = parse(&SITES.replace("version = 1\n", "version = 1.0\n"));
+    assert_eq!(
+        refused_field(fleet).as_deref(),
+        Some("sets.sites.members.collector/SITE_SECRETS.template.version")
+    );
+}
+
+#[test]
+fn a_template_with_generate_is_refused() {
+    let set = r#"
+[sets.both]
+environments = ["prod"]
+
+[sets.both.members."app/PLAIN"]
+generate = { hex_bytes = 32 }
+template = { inner = "lit" }
+"#;
+    assert!(matches!(
+        refused_rule(load(set)),
+        Some(FieldRule::ConflictsWith { .. })
+    ));
+}
+
+#[test]
+fn a_template_on_a_config_key_is_refused() {
+    let set = r#"
+[products.app.keys.SETTING]
+kind = "config"
+
+[sets.cfg]
+environments = ["prod"]
+
+[sets.cfg.members."app/SETTING".template]
+inner = "lit"
+"#;
+    assert_eq!(
+        refused_field(load(set)).as_deref(),
+        Some("sets.cfg.members.app/SETTING.template")
+    );
+}
+
+#[test]
+fn a_reference_in_a_table_key_is_refused() {
+    let set = r#"
+[sets.keyref]
+environments = ["prod"]
+
+[sets.keyref.members."app/PLAIN".template]
+"${app/PLAIN}" = "lit"
+"#;
+    assert!(matches!(
+        refused_rule(load(set)),
+        Some(FieldRule::Type { .. })
     ));
 }

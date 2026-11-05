@@ -57,6 +57,8 @@ pub enum MemberSource {
     Producer { producer: String, output: String },
     /// A CSPRNG generator (§5.1).
     Generate(Generator),
+    /// A JSON document rendered from other members and producer outputs (§5.3, Slice B).
+    Template(super::provision_template::Template),
 }
 
 /// The closed set of generators (§5.1); no token generator.
