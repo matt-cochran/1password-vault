@@ -1,6 +1,7 @@
 //! The fault matrix (design §13.3, §13.4): every command in [`COMMANDS`] × every call it
 //! makes against `tests/e2e/app` × every fault `opv-sim` has a recording for at that call.
-//! Each cell runs the real `opv` twice (text and `--json`) with `OPV_NO_SKILL=1`, a scratch
+//! Each cell runs the real `opv` twice (text and `--json`) with `OPV_NO_SKILL=1`, no
+//! terminal (stdin `/dev/null`, a new session without a controlling terminal), a scratch
 //! `HOME`, a temp copy of the project and the simulator first on `PATH`, then checks the
 //! catalog's rules on the result, one test per rule, named `<cell>::<rule>`.
 //!
@@ -278,7 +279,8 @@ impl Scenario {
 
     /// Run `opv args` in the project; `None` exit when it had to be killed.
     fn opv(&self, args: &[String]) -> Run {
-        let mut child = Command::new(OPV)
+        let mut command = Command::new(OPV);
+        command
             .args(args)
             .current_dir(self.path("project"))
             .env_clear()
@@ -303,9 +305,9 @@ impl Scenario {
             }))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("run opv");
+            .stderr(Stdio::piped());
+        no_controlling_terminal(&mut command);
+        let mut child = command.spawn().expect("run opv");
         let deadline = Instant::now() + RUN_LIMIT;
         let mut overran = false;
         loop {
@@ -384,6 +386,21 @@ impl Scenario {
         core_dump_json_re()
             .replace_all(&s, r#"{"name":"core dumps","host":true}"#)
             .into_owned()
+    }
+}
+
+/// Run the command in a new session, so it has no controlling terminal (`setsid`), as an
+/// agent's shell or a CI runner starts it ([`Rule::OneDocumentNoTty`]).
+fn no_controlling_terminal(command: &mut Command) {
+    use std::os::unix::process::CommandExt as _;
+    // SAFETY: `setsid` is async-signal-safe and touches no memory of the parent.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
     }
 }
 
@@ -933,6 +950,7 @@ enum Rule {
     HumanRequiredMatchesTheStep,
     NoCanaryValue,
     NoEscapeSequence,
+    OneDocumentNoTty,
 }
 
 const RULES: &[Rule] = &[
@@ -943,6 +961,7 @@ const RULES: &[Rule] = &[
     Rule::HumanRequiredMatchesTheStep,
     Rule::NoCanaryValue,
     Rule::NoEscapeSequence,
+    Rule::OneDocumentNoTty,
 ];
 
 impl Rule {
@@ -955,6 +974,7 @@ impl Rule {
             Rule::HumanRequiredMatchesTheStep => "human_required_matches_the_step",
             Rule::NoCanaryValue => "no_canary_value",
             Rule::NoEscapeSequence => "no_escape_sequence",
+            Rule::OneDocumentNoTty => "one_document_no_tty",
         }
     }
 
@@ -1057,6 +1077,16 @@ impl Rule {
                     None => Ok(()),
                 }
             }
+            // FR-64 (#265): run without a terminal (stdin /dev/null, no controlling
+            // terminal, stdout a pipe), a `--json` command prints exactly one document or
+            // fails loudly; it never exits 0 with nothing on stdout.
+            Rule::OneDocumentNoTty => match (o.json.code, doc) {
+                (Some(0), None) => Err(format!(
+                    "--json exited 0 without exactly one document: {:?}",
+                    o.json.stdout
+                )),
+                _ => Ok(()),
+            },
         }
     }
 }
@@ -1168,6 +1198,10 @@ macro_rules! cells {
                 #[test]
                 fn no_escape_sequence() {
                     rule_test(&cell(), Rule::NoEscapeSequence);
+                }
+                #[test]
+                fn one_document_no_tty() {
+                    rule_test(&cell(), Rule::OneDocumentNoTty);
                 }
                 #[test]
                 fn snapshot() {
