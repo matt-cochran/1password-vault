@@ -26,9 +26,9 @@ use std::path::PathBuf;
 
 use zeroize::Zeroize as _;
 
-use super::unseal::{IdentitySource, Request, has_file_keys, open, start_line};
+use super::unseal::{IdentitySource, Request, check_variables, has_file_keys, open, start_line};
 use crate::bundle::crypto::OpenedBundle;
-use crate::cause::{Cause, IoKind, RamDir, RamPurpose, SealedRefusal};
+use crate::cause::{Cause, IoKind, RamDir, RamPurpose};
 use crate::error::Error;
 
 /// The private directory's name prefix in `$XDG_RUNTIME_DIR` (swept when its run is gone).
@@ -121,28 +121,20 @@ pub(crate) fn run_with(
     status
 }
 
-/// Each `env:` destination's variable with its value, in header order. A variable name
-/// that cannot be set (empty, `=` or NUL) is refused as malformed, before anything starts.
+/// Each `env:` destination's variable with its value, in header order. The variables were
+/// checked when the bundle was verified ([`check_variables`]); they are checked again here,
+/// right before delivery, and a refusal starts nothing.
 fn variables<'a>(
     req: &Request,
     opened: &'a OpenedBundle,
 ) -> Result<Vec<(&'a str, &'a [u8])>, Error> {
+    check_variables(req, &opened.header)?;
     let mut out = Vec::new();
     for (n, (name, value)) in opened.header.names.iter().zip(&opened.values) {
         debug_assert_eq!(&n.name, name);
-        let Some(var) = n.destination.strip_prefix("env:") else {
-            continue;
-        };
-        if var.is_empty() || var.contains(['=', '\0']) {
-            return Err(Cause::SealedRefused {
-                bundle: req.bundle.clone(),
-                refusal: SealedRefusal::Malformed {
-                    detail: format!("the destination of {name} is not a variable name"),
-                },
-            }
-            .into());
+        if let Some(var) = n.destination.strip_prefix("env:") {
+            out.push((var, value.as_slice()));
         }
-        out.push((var, value.as_slice()));
     }
     Ok(out)
 }
@@ -441,6 +433,7 @@ mod tests {
                 .join("tests/fixtures/sealed/kat/bundle.opv-sealed"),
             env: "prod".into(),
             product: "api".into(),
+            project: None,
             signers: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/sealed/kat/allowed_signers"),
             identity: Some(IdentitySource::File(

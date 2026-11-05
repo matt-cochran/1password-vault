@@ -1870,3 +1870,61 @@ fn the_fill_missing_plan_keeps_present_members() {
     let _ = run(&op, &fleet, &person(), sites_request(true), &mut console);
     assert!(console.shown[0].contains("  keep    shop/PLATFORM_IDENTITY_SECRET"));
 }
+
+// ---- security review 0.18.0 S9: the pin again, right before the spawn ------------
+
+/// `world()` whose `consent` producer runs the project file `connect.py`, pinned to the
+/// reviewed text, while the file in the project now holds `now`.
+fn pinned_world(now: &str) -> (FakeOp, Fleet, tempfile::TempDir) {
+    use sha2::Digest as _;
+    let (op, mut fleet) = world();
+    consent(&op, "prod", MADE);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("connect.py"), now).unwrap();
+    let producer = fleet.producers.get_mut("consent").unwrap();
+    producer.command = vec!["python3".into(), "connect.py".into()];
+    producer.sha256 = Some(hex::encode(sha2::Sha256::digest(b"print('reviewed')\n")));
+    (op, fleet, dir)
+}
+
+fn run_in(op: &FakeOp, fleet: &Fleet, dir: &Path) -> Result<Outcome, Error> {
+    let req = Request {
+        project: dir,
+        ..request("grant", "prod")
+    };
+    run(
+        op,
+        fleet,
+        &person(),
+        req,
+        &mut Scripted::answering(Some("prod")),
+    )
+}
+
+#[test]
+fn a_producer_file_changed_after_load_is_refused_as_changed() {
+    let (op, fleet, dir) = pinned_world("print('edited')\n");
+    assert_eq!(
+        cause_of(run_in(&op, &fleet, dir.path())),
+        Cause::ProducerChanged {
+            producer: "consent".into(),
+            file: "connect.py".into(),
+        }
+    );
+}
+
+#[test]
+fn a_producer_file_changed_after_load_is_never_spawned() {
+    let (op, fleet, dir) = pinned_world("print('edited')\n");
+    let _ = run_in(&op, &fleet, dir.path());
+    assert_eq!(op.producers.borrow().len(), 1);
+}
+
+#[test]
+fn a_producer_file_still_matching_its_pin_is_written() {
+    let (op, fleet, dir) = pinned_world("print('reviewed')\n");
+    assert!(matches!(
+        run_in(&op, &fleet, dir.path()),
+        Ok(Outcome::Written(_))
+    ));
+}

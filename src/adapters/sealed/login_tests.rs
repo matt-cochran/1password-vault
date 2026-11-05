@@ -152,6 +152,7 @@ fn verifies(bundle: &[u8]) -> bool {
     let expect = Expect {
         environment: "prod",
         product: "api",
+        project: None,
         min_revision: None,
     };
     verify_bundle(bundle, &signers, &expect).is_ok()

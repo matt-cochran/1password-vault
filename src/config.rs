@@ -38,6 +38,7 @@ mod locate;
 
 pub mod bindings;
 mod sets;
+pub(crate) use sets::recheck_pin;
 
 /// Read and validate the configuration at `path`, found by discovery. An error names the
 /// file, the line and the field the validator checked, and the fix built from the field and

@@ -110,6 +110,8 @@ pub enum FormatError {
     BadFilePath(&'static str),
     #[error("a destination is not `env:` or `file:`: {0}")]
     BadDestination(String),
+    #[error("a variable name is not allowed: {0}")]
+    BadVariable(String),
     #[error("the payload is malformed")]
     PayloadMalformed,
     #[error("a payload value is larger than 1 MiB")]
@@ -215,16 +217,32 @@ pub fn contract_digest(
     format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
 }
 
-/// Check a `name -> destination` pair's destination. `env:` names are free-form; `file:`
-/// paths obey the T6 path rule.
+/// Check a `name -> destination` pair's destination. `env:` variables obey
+/// [`check_variable`]; `file:` paths obey the T6 path rule.
 pub fn check_destination(destination: &str) -> Result<(), FormatError> {
     if let Some(path) = destination.strip_prefix("file:") {
         check_file_path(path)
-    } else if destination.starts_with("env:") {
-        Ok(())
+    } else if let Some(var) = destination.strip_prefix("env:") {
+        check_variable(var)
     } else {
         Err(FormatError::BadDestination(destination.to_string()))
     }
+}
+
+/// A variable a bundle sets in the app's environment (an `env:` destination or
+/// `secrets_dir_env`; security review 0.18.0 S2, S3): `^[A-Za-z_][A-Za-z0-9_]*$`, and never
+/// `OP_*` in any case, the 1Password CLI's own environment. The runtime also refuses the
+/// `--identity-env` variable, which only it knows.
+pub fn check_variable(var: &str) -> Result<(), FormatError> {
+    let mut chars = var.chars();
+    let shaped = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !shaped || var.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("OP_")) {
+        return Err(FormatError::BadVariable(var.to_string()));
+    }
+    Ok(())
 }
 
 /// The configuration's relative file path (T6): at most [`MAX_PATH_PARTS`] `/`-separated
@@ -465,6 +483,9 @@ fn check_header(header: &Header) -> Result<(), FormatError> {
     }
     for name in &header.names {
         check_destination(&name.destination)?;
+    }
+    if let Some(var) = &header.secrets_dir_env {
+        check_variable(var)?;
     }
     if header.recipients.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(FormatError::RecipientsNotSorted);

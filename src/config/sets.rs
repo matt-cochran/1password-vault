@@ -726,13 +726,7 @@ fn pin(
             check(ConfigCheck::ProducerShaMissing { file: arg.clone() }),
         ));
     };
-    let actual = std::fs::read(file)
-        .map(|bytes| {
-            use sha2::Digest as _;
-            hex::encode(sha2::Sha256::digest(&bytes))
-        })
-        .ok();
-    if actual.as_deref() != Some(pinned.as_str()) {
+    if file_sha256(file).as_deref() != Some(pinned.as_str()) {
         return Err(Cause::ProducerChanged {
             producer: producer.to_string(),
             file: std::path::PathBuf::from(arg),
@@ -740,6 +734,48 @@ fn pin(
         .into());
     }
     Ok(Some(pinned))
+}
+
+/// The lowercase hex SHA-256 of `file`, if it can be read.
+fn file_sha256(file: &Path) -> Option<String> {
+    use sha2::Digest as _;
+    std::fs::read(file)
+        .map(|bytes| hex::encode(sha2::Sha256::digest(&bytes)))
+        .ok()
+}
+
+/// The producer's pin checked again right before it is spawned (security review 0.18.0
+/// S9): the load-time check leaves the confirmation prompt as a window to edit the file.
+/// The project file `command` names must still be one, hash to `sha256`, and need a pin;
+/// with a pin and no project file, an argument that now names some other path (a symlink
+/// out of the project, say) is refused too. Refuses with `ProducerChanged`.
+pub(crate) fn recheck_pin(producer: &str, p: &Producer, dir: &Path) -> Result<(), Error> {
+    let changed = |arg: &str| -> Error {
+        Cause::ProducerChanged {
+            producer: producer.to_string(),
+            file: std::path::PathBuf::from(arg),
+        }
+        .into()
+    };
+    let files: Vec<(&String, std::path::PathBuf)> = p
+        .command
+        .iter()
+        .filter_map(|a| project_file(dir, a).map(|f| (a, f)))
+        .collect();
+    match (files.as_slice(), p.sha256.as_deref()) {
+        ([], None) => Ok(()),
+        ([], Some(_)) => match p
+            .command
+            .iter()
+            .skip(1)
+            .find(|a| !a.starts_with('-') && dir.join(a).symlink_metadata().is_ok())
+        {
+            Some(arg) => Err(changed(arg)),
+            None => Ok(()),
+        },
+        ([(arg, file)], Some(pinned)) if file_sha256(file).as_deref() == Some(pinned) => Ok(()),
+        ([(arg, _), ..], _) => Err(changed(arg)),
+    }
 }
 
 /// The file `arg` names inside the project directory `dir`, if it is one: an argument that

@@ -236,7 +236,9 @@ opv unseal sealed/prod/api.opv-sealed --env prod --product api --signers /etc/op
 
 `unseal` reads the bundle, the `allowed_signers` file and the identity, and nothing else. In
 order it checks the signature, then the header's environment and product against `--env` and
-`--product`, then the revision against `--min-revision`, then that the identity is a
+`--product` (and its project against `--project`, when given), then the revision against
+`--min-revision`, then that every variable the bundle sets is a plain name (`[A-Za-z_][A-Za-z0-9_]*`,
+never `OP_*` in any case, never the `--identity-env` variable), then that the identity is a
 recipient, and only then decrypts. One stderr line names what it opened:
 `opv unseal: prod/api revision 1793795000 signer SHA256:… 7 names`.
 
@@ -267,6 +269,13 @@ bundle's environment.
 Kubernetes volume, a root-owned 0400 file) or `--identity-env <VAR>` (environment-only
 platforms such as Fly). It is never an argument, and the variable never reaches the command.
 One of them is required except with `--verify-only`.
+
+**`--project <name>`** (optional) refuses a bundle sealed for another project
+(`sealed_scope_mismatch`). The signer's principal is the environment name, not the project, so
+a runtime whose `allowed_signers` trusts two projects' keys for the same environment (`prod`)
+would otherwise accept project B's bundle for project A's product of the same name. Keep one
+signing key per project and environment, list only your project's keys, and pass `--project`:
+together they bind a bundle to one project. Without it the project is not checked, as before.
 
 **`--min-revision <N>`** is the rollback floor, set by the deploy: the release that sealed
 revision N deploys the runtime with `--min-revision N`, so an older bundle (which may hold a
