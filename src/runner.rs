@@ -3319,15 +3319,15 @@ mod produce_tests {
                 }
                 result_ends(line)
             });
-        assert_eq!(
-            (failure(&res), gone(pid_in(dir.path(), "gc"))),
-            (
-                Some(ProducerFailure::Signal {
-                    signal: libc::SIGINT
-                }),
-                true
-            )
+        // The group is gone and no result was taken. How `sh` reports the interrupt is the
+        // platform's: killed by SIGINT (Linux) or exit 128 + n after its own handler (macOS).
+        let interrupted = matches!(
+            failure(&res),
+            Some(ProducerFailure::Signal {
+                signal: libc::SIGINT
+            }) | Some(ProducerFailure::Exit { status: 129..=130 })
         );
+        assert_eq!((interrupted, gone(pid_in(dir.path(), "gc"))), (true, true));
     }
 
     // 49

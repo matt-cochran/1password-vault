@@ -916,3 +916,12 @@ fn seal_keeps_a_value_that_is_another_signing_key() {
         .is_ok()
     );
 }
+
+/// Windows: age armors with CRLF there; the bundle's age block is LF-only everywhere.
+#[test]
+fn crlf_armor_is_normalised_to_lf() {
+    assert_eq!(
+        super::crypto::lf_only_for_tests(b"a\r\nb\r\n".to_vec()),
+        b"a\nb\n".to_vec()
+    );
+}

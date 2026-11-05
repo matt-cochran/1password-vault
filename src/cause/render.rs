@@ -5545,8 +5545,7 @@ fn found_config_plan(found: &FoundConfigs, searched_from: &Path, inv: &Invocatio
         [one] if matches!(inv.origin, Origin::Cli) && !inv.command.is_empty() => {
             let mut c = inv_cmd(inv);
             c.args.push("--config".into());
-            c.args
-                .push(relative_to(one, searched_from).display().to_string());
+            c.args.push(slashed(&relative_to(one, searched_from)));
             if inv.has_child {
                 c.args.push("--".into());
             }
@@ -5554,7 +5553,7 @@ fn found_config_plan(found: &FoundConfigs, searched_from: &Path, inv: &Invocatio
                 inspect(format!(
                     "a configuration exists; name it in {} as config = \"{}\"{stopped}",
                     found.dot_opv.display(),
-                    relative_to(one, base).display()
+                    slashed(&relative_to(one, base))
                 )),
                 Next::Run(c),
             )
@@ -5566,7 +5565,7 @@ fn found_config_plan(found: &FoundConfigs, searched_from: &Path, inv: &Invocatio
                     "configurations exist at {}; name the project's one in {} as config = \"<path>\"{stopped}",
                     paths
                         .iter()
-                        .map(|p| relative_to(p, base).display().to_string())
+                        .map(|p| slashed(&relative_to(p, base)))
                         .collect::<Vec<_>>()
                         .join(", "),
                     found.dot_opv.display()
@@ -5575,6 +5574,15 @@ fn found_config_plan(found: &FoundConfigs, searched_from: &Path, inv: &Invocatio
             Next::None(NoNext::PersonPicksDirection),
         ),
     }
+}
+
+/// A relative path with `/` separators on every platform: the `.opv` line is committed and
+/// shared across operating systems, and `--config` accepts `/` on Windows too.
+fn slashed(path: &Path) -> String {
+    path.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// `path` relative to `base`, both absolute (`..` where `base` is deeper); `path` itself

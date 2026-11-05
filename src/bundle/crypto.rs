@@ -223,7 +223,31 @@ pub fn encrypt(recipients: &[x25519::Recipient], plaintext: &[u8]) -> Result<Vec
         .and_then(|()| writer.finish())
         .and_then(|armor| armor.finish())
         .map_err(|_| CryptoError::Internal("age encrypt"))?;
-    Ok(armored)
+    // The `age` crate armors with CRLF on Windows; the bundle is LF-only on every platform
+    // (age's reader accepts LF everywhere). The armor holds only base64 and markers.
+    Ok(lf_only(armored))
+}
+
+/// `bytes` with every CRLF turned into LF.
+#[cfg(test)]
+pub(crate) fn lf_only_for_tests(bytes: Vec<u8>) -> Vec<u8> {
+    lf_only(bytes)
+}
+
+/// `bytes` with every CRLF turned into LF.
+fn lf_only(bytes: Vec<u8>) -> Vec<u8> {
+    if !bytes.contains(&b'\r') {
+        return bytes;
+    }
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut it = bytes.iter().peekable();
+    while let Some(&b) = it.next() {
+        if b == b'\r' && it.peek() == Some(&&b'\n') {
+            continue;
+        }
+        out.push(b);
+    }
+    out
 }
 
 /// Decrypt an armored age file with exactly one X25519 identity. A passphrase (scrypt)
