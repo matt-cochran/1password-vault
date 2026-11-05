@@ -14,7 +14,7 @@
 //! values live in [`SecretValue`]s and zeroizing buffers and never leave this module except
 //! on the producer's stdin and the one item edit's stdin.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -33,6 +33,7 @@ use crate::cause::{
 use crate::domain::provision::{
     self as model, Generator, KeyRef, MemberSource, ProvisionSet, SetState,
 };
+use crate::domain::provision_template::{self as template, Ref, RenderError, Template};
 use crate::domain::value_state::{self, ValueState};
 use crate::domain::{
     Boundary, Environment, Fleet, Kind, SecretValue, Tier, convention, presence, rules,
@@ -54,6 +55,8 @@ pub struct Request<'a> {
     pub dry_run: bool,
     /// `--replace`: re-make a complete or inconsistent set (D8).
     pub replace: bool,
+    /// `--fill-missing`: complete a partial set, keeping every present member (§4.7, D7).
+    pub fill_missing: bool,
     /// The project directory (where the contract was read): a producer's cwd and the base
     /// of the project file its `command` names.
     pub project: &'a Path,
@@ -291,9 +294,13 @@ pub struct Plan {
     /// The set's state in this environment (§4.5).
     pub state: SetState,
     pub replace: bool,
+    /// `--fill-missing` (§4.7): present members are kept, only missing ones are made.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub fill_missing: bool,
     /// Each member in name order.
     pub members: Vec<PlanMember>,
-    /// Each producer the set's members name, once, in name order (the order they run).
+    /// Each producer that runs, once, in name order (the order they run): those the members
+    /// to make name, directly or through a template's `${producer.output}` leaf.
     pub producers: Vec<PlanProducer>,
     pub budget: PlanBudget,
     /// The other environments of the set whose producer-made members are compared for
@@ -435,19 +442,33 @@ pub fn provision(
         layout: &layout,
         res: &res,
     };
+    if req.fill_missing && req.replace {
+        return Err(usage(
+            "--fill-missing",
+            "either --fill-missing or --replace, not both",
+        ));
+    }
     let states = member_states(fleet, set, req.env, environment, &held);
     // Step 6: classify.
     let state = model::classify(states.iter().map(|(_, s)| s)).map_err(|_| Cause::Bug {
         site: "provision member not stored",
     })?;
-    let plan = build_plan(fleet, set, req, b, item.version, state, &states, r);
+    // §4.7: a partial set completed with --fill-missing makes only its missing members.
+    let filling = req.fill_missing && state == SetState::Partial;
+    let fill = if filling {
+        Fill::read(set, &states, &held)
+    } else {
+        Fill::everything(set)
+    };
+    let runs = fill.producers(fleet, set);
+    let plan = build_plan(fleet, set, req, b, item.version, state, &states, &runs, r);
     if req.dry_run {
         return Ok(Outcome::DryRun(plan));
     }
     match state {
         SetState::Complete if !req.replace => return Ok(Outcome::Unchanged(plan)),
-        // Slice A never fills part of a set, with or without --replace.
-        SetState::Partial => {
+        // Without --fill-missing opv never fills part of a set, with or without --replace.
+        SetState::Partial if !filling => {
             let missing = plan
                 .members
                 .iter()
@@ -456,16 +477,34 @@ pub fn provision(
                 .collect();
             return Err(refused(req, ProvisionRefusal::Partial { missing }));
         }
+        // A present member failing its rules, or a present template disagreeing with the
+        // members, is never kept: --replace is the way (D7).
         SetState::Inconsistent if !req.replace => {
-            let members = plan
-                .members
-                .iter()
-                .filter(|m| m.state == "malformed")
-                .map(|m| m.key.clone())
-                .collect();
-            return Err(refused(req, ProvisionRefusal::Inconsistent { members }));
+            return Err(refused(
+                req,
+                ProvisionRefusal::Inconsistent {
+                    members: malformed(&plan),
+                },
+            ));
+        }
+        SetState::Partial if plan.members.iter().any(|m| m.state == "malformed") => {
+            return Err(refused(
+                req,
+                ProvisionRefusal::Inconsistent {
+                    members: malformed(&plan),
+                },
+            ));
         }
         _ => {}
+    }
+    if let Some(template) = fill.disagreeing.first() {
+        // Two present templates hold different leaves for one missing member or output.
+        return Err(refused(
+            req,
+            ProvisionRefusal::Inconsistent {
+                members: vec![template.to_string()],
+            },
+        ));
     }
     if req.replace
         && let Some(member) = set
@@ -479,17 +518,6 @@ pub fn provision(
                 member: member.to_string(),
             },
         ));
-    }
-    if set
-        .members
-        .values()
-        .any(|m| matches!(m, MemberSource::Template(_)))
-    {
-        // Slice B (lane iv-b2) renders templates; until then a template set is not made.
-        return Err(Cause::Bug {
-            site: "provision template member before templates are wired",
-        }
-        .into());
     }
     // Every producer input must hold a value before anyone is asked to consent.
     inputs_present(fleet, &plan, req, &held)?;
@@ -522,12 +550,22 @@ pub fn provision(
                 b,
                 stamp: &stamp,
                 held: &held,
+                fill: &fill,
                 r,
             };
             let receipt = run.make_and_commit(&plan, console)?;
             Ok(Outcome::Written(Box::new((plan, receipt))))
         }
     }
+}
+
+/// The members the plan judged `malformed`, by name.
+fn malformed(plan: &Plan) -> Vec<String> {
+    plan.members
+        .iter()
+        .filter(|m| m.state == "malformed")
+        .map(|m| m.key.clone())
+        .collect()
 }
 
 /// The item read at `S0`: its layout and which field holds each key.
@@ -558,7 +596,126 @@ struct Run<'a> {
     b: &'a Boundary,
     stamp: &'a onepassword_tidy::Stamp,
     held: &'a Held<'a>,
+    /// Which members this run makes, and what present templates already hold (§4.7).
+    fill: &'a Fill,
     r: &'a dyn CommandRunner,
+}
+
+/// What a run makes (§4.7). Without `--fill-missing` (an absent set, or `--replace`) every
+/// member is made and nothing held is used. With it, present members are kept; a missing
+/// member a present template holds is filled from that leaf, and the intermediates present
+/// templates hold are what a rerun producer must give again.
+struct Fill {
+    /// The members this run makes and writes.
+    make: BTreeSet<KeyRef>,
+    /// Missing members filled from a present template's leaf.
+    from_leaf: BTreeMap<KeyRef, SecretValue>,
+    /// The intermediates present templates hold, by `(producer, output)`, with the template
+    /// holding them.
+    outputs: BTreeMap<(String, String), (KeyRef, SecretValue)>,
+    /// Present templates that hold a leaf another present template contradicts.
+    disagreeing: Vec<KeyRef>,
+}
+
+impl Fill {
+    /// Every member is made (an absent set, or `--replace`).
+    fn everything(set: &ProvisionSet) -> Self {
+        Self {
+            make: set.members.keys().cloned().collect(),
+            from_leaf: BTreeMap::new(),
+            outputs: BTreeMap::new(),
+            disagreeing: Vec::new(),
+        }
+    }
+
+    /// `--fill-missing` on the item read at `S0`: the members holding no value are made;
+    /// each present template's leaves (already judged to fit, §4.5) are recovered.
+    fn read(set: &ProvisionSet, states: &[(String, ValueState)], held: &Held<'_>) -> Self {
+        let make: BTreeSet<KeyRef> = set
+            .members
+            .keys()
+            .zip(states)
+            .filter(|(_, (_, s))| !matches!(s, ValueState::Set | ValueState::Malformed { .. }))
+            .map(|(k, _)| k.clone())
+            .collect();
+        let mut fill = Self {
+            make,
+            from_leaf: BTreeMap::new(),
+            outputs: BTreeMap::new(),
+            disagreeing: Vec::new(),
+        };
+        for (k, source) in &set.members {
+            let MemberSource::Template(t) = source else {
+                continue;
+            };
+            if fill.make.contains(k) {
+                continue;
+            }
+            let Some(stored) = held.value(k) else {
+                continue;
+            };
+            let Ok(leaves) = template::extract(t, stored.expose().as_bytes()) else {
+                // Judged `malformed` at classification, and refused there.
+                continue;
+            };
+            for r in t.references() {
+                let Some(v) = leaves.get(r) else { continue };
+                let agrees = match r {
+                    Ref::Member(m) if fill.make.contains(m) => match fill.from_leaf.get(m) {
+                        Some(seen) => same(seen, v),
+                        None => {
+                            fill.from_leaf.insert(m.clone(), copy(v));
+                            true
+                        }
+                    },
+                    Ref::Member(_) => true,
+                    Ref::Output { producer, output } => {
+                        match fill.outputs.get(&(producer.clone(), output.clone())) {
+                            Some((_, seen)) => same(seen, v),
+                            None => {
+                                fill.outputs.insert(
+                                    (producer.clone(), output.clone()),
+                                    (k.clone(), copy(v)),
+                                );
+                                true
+                            }
+                        }
+                    }
+                };
+                if !agrees && !fill.disagreeing.contains(k) {
+                    fill.disagreeing.push(k.clone());
+                }
+            }
+        }
+        fill
+    }
+
+    /// The producers this run starts, in name order: one a member to make names (unless
+    /// it is filled from a leaf), or whose output a template to make uses.
+    fn producers<'f>(&self, fleet: &'f Fleet, set: &ProvisionSet) -> Vec<&'f str> {
+        fleet
+            .producers
+            .keys()
+            .filter(|name| {
+                set.members.iter().any(|(k, m)| {
+                    self.make.contains(k)
+                        && match m {
+                            MemberSource::Producer { producer, .. } => {
+                                producer == *name && !self.from_leaf.contains_key(k)
+                            }
+                            MemberSource::Template(t) => t.uses_producer(name),
+                            MemberSource::Generate(_) => false,
+                        }
+                })
+            })
+            .map(String::as_str)
+            .collect()
+    }
+}
+
+/// A second [`SecretValue`] of the same value, for the run only.
+fn copy(v: &SecretValue) -> SecretValue {
+    SecretValue::new(v.expose().to_string())
 }
 
 /// The fixed, neutral line after a producer ran and nothing was stored (§4.6, vet F19).
@@ -571,28 +728,65 @@ impl Run<'_> {
         plan: &Plan,
         console: &mut dyn ProvisionConsole,
     ) -> Result<Receipt, Error> {
-        let mut made: BTreeMap<KeyRef, SecretValue> = BTreeMap::new();
+        // §4.7: a missing member a present template holds is filled from that leaf.
+        let mut made: BTreeMap<KeyRef, SecretValue> = self
+            .fill
+            .from_leaf
+            .iter()
+            .map(|(k, v)| (k.clone(), copy(v)))
+            .collect();
+        // Producer outputs only templates use (intermediates): held for this run, never
+        // stored.
+        let mut intermediates: BTreeMap<(String, String), SecretValue> = BTreeMap::new();
         let mut ran = Vec::new();
         // Step 8: each producer once, in plan order. One attempt; nothing is retried.
-        for p in &plan.producers {
-            let outputs = self.produce(p, console)?;
-            ran.push(ReceiptProducer {
-                name: p.name.clone(),
-                sha256: p.sha256.clone(),
-                exit: 0,
-            });
-            for (member, source) in &self.set.members {
-                if let MemberSource::Producer { producer, output } = source
-                    && producer == &p.name
-                {
-                    let v = outputs.get(output).ok_or(Cause::Bug {
-                        site: "provision producer output not admitted",
-                    })?;
-                    made.insert(member.clone(), SecretValue::new(v.expose().to_string()));
+        let produced = (|| -> Result<(), Error> {
+            for p in &plan.producers {
+                let mut outputs = self.produce(p, console)?;
+                ran.push(ReceiptProducer {
+                    name: p.name.clone(),
+                    sha256: p.sha256.clone(),
+                    exit: 0,
+                });
+                for (member, source) in &self.set.members {
+                    if let MemberSource::Producer { producer, output } = source
+                        && producer == &p.name
+                        && self.fill.make.contains(member)
+                        && !made.contains_key(member)
+                    {
+                        let v = outputs.get(output).ok_or(Cause::Bug {
+                            site: "provision producer output not admitted",
+                        })?;
+                        made.insert(member.clone(), copy(v));
+                    }
+                }
+                for (name, v) in std::mem::take(&mut outputs) {
+                    if !self.set.members.values().any(
+                        |m| matches!(m, MemberSource::Template(t) if t.uses_output(&p.name, &name)),
+                    ) {
+                        continue;
+                    }
+                    // §4.7: a rerun's intermediate must equal what the stored template holds.
+                    if let Some((template, stored)) =
+                        self.fill.outputs.get(&(p.name.clone(), name.clone()))
+                        && !same(stored, &v)
+                    {
+                        return Err(refused(
+                            self.req,
+                            ProvisionRefusal::Inconsistent {
+                                members: vec![template.to_string()],
+                            },
+                        ));
+                    }
+                    intermediates.insert((p.name.clone(), name), v);
                 }
             }
-        }
-        match self.generate_validate_commit(plan, made, ran.is_empty()) {
+            Ok(())
+        })();
+        let result = produced.and_then(|()| {
+            self.generate_validate_commit(plan, made, &intermediates, ran.is_empty())
+        });
+        match result {
             Ok((written, compared, not_compared)) => Ok(Receipt {
                 schema: RECEIPT_SCHEMA,
                 set: plan.set.clone(),
@@ -630,21 +824,55 @@ impl Run<'_> {
         }
     }
 
-    /// Steps 9-11: generate, validate, compare, commit. `made` holds the producer values.
+    /// Steps 9-11: generate, render, validate, compare, commit. `made` holds the producer
+    /// values (and, for `--fill-missing`, the values recovered from present templates).
     fn generate_validate_commit(
         &self,
         plan: &Plan,
         mut made: BTreeMap<KeyRef, SecretValue>,
+        intermediates: &BTreeMap<(String, String), SecretValue>,
         no_producer: bool,
     ) -> Result<(import::Written, Vec<String>, Vec<String>), Error> {
         // Step 9: generators.
         for (member, source) in &self.set.members {
-            if let MemberSource::Generate(g) = source {
+            if let MemberSource::Generate(g) = source
+                && self.fill.make.contains(member)
+                && !made.contains_key(member)
+            {
                 made.insert(member.clone(), self.generate(member, *g)?);
             }
         }
+        // Step 9 (§5.3): templates, each after the templates it references.
+        let order = template::render_order(self.set).map_err(|_| Cause::Bug {
+            site: "provision template cycle after load",
+        })?;
+        let mut unrendered = Vec::new();
+        for member in order {
+            let Some(MemberSource::Template(t)) = self.set.members.get(&member) else {
+                continue;
+            };
+            if !self.fill.make.contains(&member) {
+                continue;
+            }
+            match self.render(t, &made, intermediates)? {
+                Some(v) => {
+                    made.insert(member, v);
+                }
+                None => unrendered.push(member),
+            }
+        }
+        // §4.7: every present template still fits the set as it will be written.
+        let changed = self.kept_templates_fit(&made);
+        if !changed.is_empty() {
+            return Err(refused(
+                self.req,
+                ProvisionRefusal::Inconsistent {
+                    members: changed.iter().map(ToString::to_string).collect(),
+                },
+            ));
+        }
         // Step 10: every member against its rules, collected (NR-17).
-        self.validate(&made)?;
+        self.validate(&made, &unrendered)?;
         let (compared, not_compared) = if no_producer {
             (Vec::new(), Vec::new())
         } else {
@@ -695,9 +923,12 @@ impl Run<'_> {
             .outputs
             .iter()
             .filter(|o| {
-                self.set.members.values().any(|m| {
-                    matches!(m, MemberSource::Producer { producer, output }
-                        if producer == &p.name && output == *o)
+                self.set.members.values().any(|m| match m {
+                    MemberSource::Producer { producer, output } => {
+                        producer == &p.name && output == *o
+                    }
+                    MemberSource::Template(t) => t.uses_output(&p.name, o),
+                    MemberSource::Generate(_) => false,
                 })
             })
             .cloned()
@@ -748,6 +979,83 @@ impl Run<'_> {
         })
     }
 
+    /// Template `t` rendered from this run's values (members made now, else the present
+    /// ones kept) and intermediates, and read back (§5.3). `None` when it does not read
+    /// back to its sources (named by [`Run::validate`]).
+    fn render(
+        &self,
+        t: &Template,
+        made: &BTreeMap<KeyRef, SecretValue>,
+        intermediates: &BTreeMap<(String, String), SecretValue>,
+    ) -> Result<Option<SecretValue>, Error> {
+        let lookup = |r: &Ref| match r {
+            Ref::Member(k) => self.value_of(k, made),
+            Ref::Output { producer, output } => {
+                intermediates.get(&(producer.clone(), output.clone()))
+            }
+        };
+        let mut bytes = match template::render(t, lookup) {
+            Ok(b) => b,
+            Err(RenderError::RoundTrip(_)) => return Ok(None),
+            Err(RenderError::Missing { .. }) => {
+                return Err(Cause::Bug {
+                    site: "provision template reference without a value",
+                }
+                .into());
+            }
+        };
+        // The JSON writer writes UTF-8 only; the buffer moves into the value, no copy.
+        match String::from_utf8(std::mem::take(&mut *bytes)) {
+            Ok(text) => {
+                let v = SecretValue::new(text);
+                crate::scrub::register_secret(v.expose());
+                Ok(Some(v))
+            }
+            Err(e) => {
+                zeroize::Zeroize::zeroize(&mut e.into_bytes());
+                Err(Cause::Bug {
+                    site: "provision template rendered other than UTF-8",
+                }
+                .into())
+            }
+        }
+    }
+
+    /// The value member `k` will hold after this run: made now, or kept when this run does
+    /// not make it (`--fill-missing`).
+    fn value_of<'v>(
+        &'v self,
+        k: &KeyRef,
+        made: &'v BTreeMap<KeyRef, SecretValue>,
+    ) -> Option<&'v SecretValue> {
+        made.get(k).or_else(|| {
+            if self.fill.make.contains(k) {
+                None
+            } else {
+                self.held.value(k)
+            }
+        })
+    }
+
+    /// The present templates (`--fill-missing` keeps them) that would no longer fit the
+    /// members as written: a present template that would change is refused (§4.7).
+    fn kept_templates_fit(&self, made: &BTreeMap<KeyRef, SecretValue>) -> Vec<KeyRef> {
+        self.set
+            .members
+            .iter()
+            .filter(|(k, _)| !self.fill.make.contains(*k))
+            .filter_map(|(k, source)| match source {
+                MemberSource::Template(t) => {
+                    let stored = self.held.value(k)?;
+                    template::fit(t, stored.expose().as_bytes(), |m| self.value_of(m, made))
+                        .is_err()
+                        .then(|| k.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     fn generate(&self, member: &KeyRef, g: Generator) -> Result<SecretValue, Error> {
         let recipe = match g {
             Generator::Rules => {
@@ -765,8 +1073,23 @@ impl Run<'_> {
     /// §5.4: every made value against its key's rules; a placeholder and a secret shorter
     /// than [`crate::scrub::SECRET_MIN`] fail too. Every failing member is named, with its
     /// rule only; any failure drops every value.
-    fn validate(&self, made: &BTreeMap<KeyRef, SecretValue>) -> Result<(), Error> {
-        let mut rows = Vec::new();
+    fn validate(
+        &self,
+        made: &BTreeMap<KeyRef, SecretValue>,
+        unrendered: &[KeyRef],
+    ) -> Result<(), Error> {
+        let mut rows: Vec<ValueRow> = unrendered
+            .iter()
+            .map(|member| ValueRow {
+                product: ProductName::new(&member.product),
+                key: KeyName::new(&member.key),
+                target: None,
+                state: crate::cause::ValueState::RuleFailed {
+                    rule: TEMPLATE_RULE,
+                    reason: None,
+                },
+            })
+            .collect();
         for (member, value) in made {
             let spec = &self.fleet.products[&member.product].keys[&member.key];
             let failed = if crate::domain::health::is_placeholder(value.expose()) {
@@ -866,6 +1189,10 @@ impl Run<'_> {
         Some((layout, res))
     }
 }
+
+/// The rule a template member fails when its document does not read back to its sources
+/// (§5.3, §5.4). Never a value.
+const TEMPLATE_RULE: &str = "template";
 
 /// The rule-failure reason for a secret below [`crate::scrub::SECRET_MIN`] (§5.4): a fixed
 /// phrase built from the constant, never from the value.
@@ -1177,7 +1504,8 @@ fn who_is_running(
 }
 
 /// Each member's value state in the item read at `S0`, in name order. The values are
-/// judged in memory against every declared rule and dropped here.
+/// judged in memory against every declared rule (a template also against the members it
+/// holds, §4.5) and dropped here.
 fn member_states(
     fleet: &Fleet,
     set: &ProvisionSet,
@@ -1186,8 +1514,8 @@ fn member_states(
     held: &Held<'_>,
 ) -> Vec<(String, ValueState)> {
     set.members
-        .keys()
-        .map(|m| {
+        .iter()
+        .map(|(m, source)| {
             let spec = &fleet.products[&m.product].keys[&m.key];
             let value = held
                 .res
@@ -1208,6 +1536,20 @@ fn member_states(
                     .map(|_| ())
                     .map_err(|f| f.rule)
                 });
+            // §4.5: a stored template whose document is not the template's, or whose
+            // member leaves differ from the stored members, is malformed.
+            let state = match (state, source) {
+                (ValueState::Set, MemberSource::Template(t))
+                    if held.value(m).is_some_and(|v| {
+                        template::fit(t, v.expose().as_bytes(), |k| held.value(k)).is_err()
+                    }) =>
+                {
+                    ValueState::Malformed {
+                        rule: TEMPLATE_RULE.to_string(),
+                    }
+                }
+                (state, _) => state,
+            };
             (m.to_string(), state)
         })
         .collect()
@@ -1222,6 +1564,7 @@ fn build_plan(
     version: Option<u64>,
     state: SetState,
     states: &[(String, ValueState)],
+    used: &[&str],
     r: &dyn CommandRunner,
 ) -> Plan {
     let members = set
@@ -1241,16 +1584,6 @@ fn build_plan(
                 rule,
             }
         })
-        .collect();
-    let used: Vec<&str> = fleet
-        .producers
-        .keys()
-        .filter(|name| {
-            set.members
-                .values()
-                .any(|m| matches!(m, MemberSource::Producer { producer, .. } if producer == *name))
-        })
-        .map(String::as_str)
         .collect();
     let producers: Vec<PlanProducer> = used
         .iter()
@@ -1291,6 +1624,7 @@ fn build_plan(
         },
         state,
         replace: req.replace,
+        fill_missing: req.fill_missing && state == SetState::Partial,
         members,
         producers,
         budget,
@@ -1341,7 +1675,13 @@ pub fn render_plan(plan: &Plan) -> String {
         "opv provision {} --env {}{}",
         plan.set,
         plan.env,
-        if plan.replace { " --replace" } else { "" }
+        if plan.replace {
+            " --replace"
+        } else if plan.fill_missing {
+            " --fill-missing"
+        } else {
+            ""
+        }
     )];
     let version = plan
         .item
@@ -1363,7 +1703,11 @@ pub fn render_plan(plan: &Plan) -> String {
             MadeBy::Generate { generator } => format!("generate {generator}"),
             MadeBy::Template { references } => format!("template of {}", references.join(", ")),
         };
-        lines.push(format!("  make    {}   {how}", m.key));
+        if plan.fill_missing && m.state == "set" {
+            lines.push(format!("  keep    {}", m.key));
+        } else {
+            lines.push(format!("  make    {}   {how}", m.key));
+        }
     }
     for p in &plan.producers {
         lines.push(format!("  producer {}: {}", p.name, p.command.join(" ")));

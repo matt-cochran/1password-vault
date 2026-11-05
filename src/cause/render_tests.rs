@@ -5062,20 +5062,32 @@ fn a_partial_set_names_its_missing_members() {
     );
 }
 
-/// D8: a partial set is re-made whole with --replace.
+/// D7: a partial set is completed with --fill-missing, keeping what exists.
 #[test]
-fn a_partial_set_do_is_the_replace() {
+fn a_partial_set_do_is_the_fill_missing() {
     let c = provision_refused(ProvisionRefusal::Partial {
         missing: vec!["admin/REFRESH_TOKEN".into()],
     });
     let d = c.do_text(&provision_inv()).unwrap_or_default();
     assert!(
-        d.contains("opv provision grant --env prod --replace"),
+        d.contains("opv provision grant --env prod --fill-missing"),
         "{d}"
     );
 }
 
-/// §4.5: a partial or inconsistent set is handed to the person's own `--replace` run.
+/// D7: a partial set is handed to the person's own `--fill-missing` run.
+#[test]
+fn a_partial_set_hands_off_the_fill_missing() {
+    let c = provision_refused(ProvisionRefusal::Partial {
+        missing: vec!["admin/REFRESH_TOKEN".into()],
+    });
+    assert_eq!(
+        next_in(&c, &provision_inv()),
+        "opv provision grant --env prod --fill-missing"
+    );
+}
+
+/// §4.5: an inconsistent set is handed to the person's own `--replace` run.
 #[test]
 fn an_inconsistent_set_hands_off_the_replace() {
     let c = provision_refused(ProvisionRefusal::Inconsistent {

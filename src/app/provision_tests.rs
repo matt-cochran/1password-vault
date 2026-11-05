@@ -223,6 +223,7 @@ fn request<'a>(set: &'a str, env: &'a str) -> Request<'a> {
         env,
         dry_run: false,
         replace: false,
+        fill_missing: false,
         project: Path::new("."),
     }
 }
@@ -1300,4 +1301,572 @@ fn nothing_the_producer_printed_is_shown() {
             .iter()
             .any(|l| l.contains(MADE) || l.contains("opv.produce"))
     );
+}
+
+// ---- #262 Slice B: templates (§3.1, §5.3, §5.4) and --fill-missing (§4.7) -------------
+
+/// The issuer's three site IDs: intermediates, rendered into the bundle and never stored.
+const SITE_IDS: [&str; 3] = [
+    "00000000-0000-4000-8000-000000000001",
+    "00000000-0000-4000-8000-000000000002",
+    "00000000-0000-4000-8000-000000000003",
+];
+
+/// A Journeeze-shaped world (§3.1, neutral names): in `staging`, the set `sites` holds five
+/// generated secrets, three site keys from the producer `site-issuer`, and the bundle
+/// `shop/SITE_SECRETS` rendered from three site IDs (intermediates) and four of the
+/// secrets. `bundle_rules` is the bundle key's extra TOML (its rules).
+fn sites_world_with(bundle_rules: &str) -> (FakeOp, Fleet) {
+    let op = FakeOp::default();
+    let id = op.insert(
+        VAULT,
+        serde_json::json!({
+            "title": "shop · staging values", "category": "SECURE_NOTE",
+            "sections": [{"id": "shop", "label": "shop"}],
+            "fields": []
+        }),
+    );
+    let secret = |k: &str| format!("[products.shop.keys.{k}]\nkind = \"secret\"\n");
+    let keys: String = [
+        "PLATFORM_IDENTITY_SECRET",
+        "AGENCY_IDENTITY_SECRET",
+        "OWNER_IDENTITY_SECRET",
+        "SITES_GATEWAY_KEY",
+        "USER_HASH_KEY",
+        "PLATFORM_SITE_KEY",
+        "AGENCY_SITE_KEY",
+        "OWNER_SITE_KEY",
+    ]
+    .iter()
+    .map(|k| secret(k))
+    .collect();
+    let fleet = crate::config::parse(&format!(
+        r#"[environments.staging]
+tier = "shared"
+boundaries.shop = {{ vault_id = "{VAULT}", item_id = "{id}" }}
+
+{keys}
+[products.shop.keys.SITE_SECRETS]
+kind = "secret"
+{bundle_rules}
+
+[producers.site-issuer]
+command = ["python3", "-c", "pass"]
+outputs = ["platform_site_id", "platform_site_key", "agency_site_id", "agency_site_key",
+           "owner_site_id", "owner_site_key"]
+timeout = "5m"
+
+[sets.sites]
+environments = ["staging"]
+
+[sets.sites.members]
+"shop/PLATFORM_IDENTITY_SECRET" = {{ generate = {{ hex_bytes = 32 }} }}
+"shop/AGENCY_IDENTITY_SECRET"   = {{ generate = {{ hex_bytes = 32 }} }}
+"shop/OWNER_IDENTITY_SECRET"    = {{ generate = {{ hex_bytes = 32 }} }}
+"shop/SITES_GATEWAY_KEY"        = {{ generate = {{ hex_bytes = 32 }} }}
+"shop/USER_HASH_KEY"            = {{ generate = {{ hex_bytes = 32 }} }}
+"shop/PLATFORM_SITE_KEY" = {{ producer = "site-issuer", output = "platform_site_key" }}
+"shop/AGENCY_SITE_KEY"   = {{ producer = "site-issuer", output = "agency_site_key" }}
+"shop/OWNER_SITE_KEY"    = {{ producer = "site-issuer", output = "owner_site_key" }}
+
+[sets.sites.members."shop/SITE_SECRETS".template]
+version = 1
+sites = [
+  {{ siteId = "${{site-issuer.platform_site_id}}", identitySecret = "${{shop/PLATFORM_IDENTITY_SECRET}}", gatewaySecret = "${{shop/SITES_GATEWAY_KEY}}" }},
+  {{ siteId = "${{site-issuer.agency_site_id}}",   identitySecret = "${{shop/AGENCY_IDENTITY_SECRET}}",   gatewaySecret = "${{shop/SITES_GATEWAY_KEY}}" }},
+  {{ siteId = "${{site-issuer.owner_site_id}}",    identitySecret = "${{shop/OWNER_IDENTITY_SECRET}}",    gatewaySecret = "${{shop/SITES_GATEWAY_KEY}}" }},
+]
+"#
+    ))
+    .unwrap();
+    (op, fleet)
+}
+
+fn sites_world() -> (FakeOp, Fleet) {
+    sites_world_with("")
+}
+
+/// The set's item in `staging`.
+fn sites_item(fleet: &Fleet) -> String {
+    fleet.environments["staging"].boundaries["shop"]
+        .as_ref()
+        .unwrap()
+        .item_id
+        .clone()
+}
+
+/// Queue the site issuer returning `ids` and three site keys.
+fn issuing(op: &FakeOp, ids: [&str; 3]) {
+    producing(
+        op,
+        vec![result_line(
+            "staging",
+            &[
+                ("platform_site_id", ids[0]),
+                ("platform_site_key", "site-key-platform-0001"),
+                ("agency_site_id", ids[1]),
+                ("agency_site_key", "site-key-agency-0002"),
+                ("owner_site_id", ids[2]),
+                ("owner_site_key", "site-key-owner-0003"),
+            ],
+        )],
+    );
+}
+
+fn sites_request(fill_missing: bool) -> Request<'static> {
+    Request {
+        fill_missing,
+        ..request("sites", "staging")
+    }
+}
+
+/// Provision `sites` in `staging` with the issuer giving `ids`.
+fn provision_sites(op: &FakeOp, fleet: &Fleet, fill_missing: bool) -> Result<Outcome, Error> {
+    run(
+        op,
+        fleet,
+        &person(),
+        sites_request(fill_missing),
+        &mut Scripted::answering(Some("staging")),
+    )
+}
+
+/// A complete `sites` set, made by one run.
+fn provisioned_sites() -> (FakeOp, Fleet) {
+    let (op, fleet) = sites_world();
+    issuing(&op, SITE_IDS);
+    provision_sites(&op, &fleet, false).unwrap();
+    (op, fleet)
+}
+
+/// Field `label` of the set's item.
+fn site_field(op: &FakeOp, fleet: &Fleet, label: &str) -> Option<String> {
+    field(op, &sites_item(fleet), label)
+}
+
+/// The bundle as the owner script builds it from the stored members and `ids`.
+fn expected_bundle(op: &FakeOp, fleet: &Fleet, ids: [&str; 3]) -> serde_json::Value {
+    let f = |k: &str| site_field(op, fleet, k).unwrap();
+    let gateway = f("SITES_GATEWAY_KEY");
+    serde_json::json!({"version": 1, "sites": [
+        {"siteId": ids[0], "identitySecret": f("PLATFORM_IDENTITY_SECRET"), "gatewaySecret": gateway},
+        {"siteId": ids[1], "identitySecret": f("AGENCY_IDENTITY_SECRET"), "gatewaySecret": gateway},
+        {"siteId": ids[2], "identitySecret": f("OWNER_IDENTITY_SECRET"), "gatewaySecret": gateway},
+    ]})
+}
+
+fn stored_bundle(op: &FakeOp, fleet: &Fleet) -> serde_json::Value {
+    serde_json::from_str(&site_field(op, fleet, "SITE_SECRETS").unwrap()).unwrap()
+}
+
+#[test]
+fn a_template_set_is_written() {
+    let (op, fleet) = sites_world();
+    issuing(&op, SITE_IDS);
+    assert!(matches!(
+        provision_sites(&op, &fleet, false),
+        Ok(Outcome::Written(_))
+    ));
+}
+
+#[test]
+fn a_journeeze_shaped_set_stores_the_bundle_of_its_members_and_site_ids() {
+    let (op, fleet) = provisioned_sites();
+    assert_eq!(
+        stored_bundle(&op, &fleet),
+        expected_bundle(&op, &fleet, SITE_IDS)
+    );
+}
+
+#[test]
+fn the_bundle_is_compact_json() {
+    let (op, fleet) = provisioned_sites();
+    assert!(
+        site_field(&op, &fleet, "SITE_SECRETS")
+            .unwrap()
+            .starts_with(r#"{"version":1,"sites":[{"siteId":""#)
+    );
+}
+
+#[test]
+fn a_producer_member_holds_its_output_beside_the_bundle() {
+    let (op, fleet) = provisioned_sites();
+    assert_eq!(
+        site_field(&op, &fleet, "AGENCY_SITE_KEY").as_deref(),
+        Some("site-key-agency-0002")
+    );
+}
+
+#[test]
+fn an_intermediate_is_stored_only_inside_the_bundle() {
+    let (op, fleet) = provisioned_sites();
+    let id = sites_item(&fleet);
+    assert_eq!(
+        held_in(&op, &id, |f| f["value"]
+            .as_str()
+            .is_some_and(|v| v.contains(SITE_IDS[0]))),
+        site_field(&op, &fleet, "SITE_SECRETS")
+    );
+}
+
+#[test]
+fn a_template_set_writes_in_one_item_edit() {
+    let (op, _fleet) = provisioned_sites();
+    assert_eq!(op.count(&["op", "item", "edit"]), 1);
+}
+
+#[test]
+fn the_receipt_names_the_bundle_as_template_made() {
+    let (op, fleet) = sites_world();
+    issuing(&op, SITE_IDS);
+    let receipt = provision_sites(&op, &fleet, false)
+        .unwrap()
+        .receipt()
+        .unwrap();
+    assert!(
+        receipt
+            .members
+            .iter()
+            .any(|m| m.key == "shop/SITE_SECRETS" && m.made_by == "template")
+    );
+}
+
+#[test]
+fn the_receipt_holds_no_site_id() {
+    let (op, fleet) = sites_world();
+    issuing(&op, SITE_IDS);
+    let receipt = provision_sites(&op, &fleet, false)
+        .unwrap()
+        .receipt()
+        .unwrap();
+    let text = format!("{}{receipt:?}", serde_json::to_string(&receipt).unwrap());
+    assert!(!text.contains(SITE_IDS[0]));
+}
+
+#[test]
+fn the_plan_runs_a_producer_a_template_uses() {
+    let (op, fleet) = sites_world();
+    let r = run(
+        &op,
+        &fleet,
+        &person(),
+        Request {
+            dry_run: true,
+            ..sites_request(false)
+        },
+        &mut Scripted::answering(None),
+    );
+    let names: Vec<String> = r
+        .unwrap()
+        .plan()
+        .producers
+        .iter()
+        .map(|p| p.name.clone())
+        .collect();
+    assert_eq!(names, ["site-issuer"]);
+}
+
+#[test]
+fn a_rendered_bundle_failing_its_keys_rules_is_refused_naming_it() {
+    let (op, fleet) = sites_world_with("rules = { prefix = \"bundle:\" }");
+    issuing(&op, SITE_IDS);
+    let named: Vec<String> = match cause_of(provision_sites(&op, &fleet, false)) {
+        Cause::KeysBlocking { rows, .. } => rows
+            .iter()
+            .map(|row| format!("{}/{}", row.product, row.key))
+            .collect(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(named, ["shop/SITE_SECRETS"]);
+}
+
+#[test]
+fn a_rendered_bundle_failing_its_keys_rules_makes_no_item_edit() {
+    let (op, fleet) = sites_world_with("rules = { prefix = \"bundle:\" }");
+    issuing(&op, SITE_IDS);
+    let _ = provision_sites(&op, &fleet, false);
+    assert_eq!(op.count(&["op", "item", "edit"]), 0);
+}
+
+#[test]
+fn a_complete_template_set_is_unchanged() {
+    let (op, fleet) = provisioned_sites();
+    assert!(matches!(
+        provision_sites(&op, &fleet, false),
+        Ok(Outcome::Unchanged(_))
+    ));
+}
+
+#[test]
+fn a_bundle_disagreeing_with_a_member_is_refused_as_inconsistent() {
+    let (op, fleet) = provisioned_sites();
+    put(
+        &op,
+        &sites_item(&fleet),
+        "SITES_GATEWAY_KEY",
+        &"e".repeat(64),
+    );
+    assert_eq!(
+        refusal_of(provision_sites(&op, &fleet, false)),
+        Some(ProvisionRefusal::Inconsistent {
+            members: vec!["shop/SITE_SECRETS".into()]
+        })
+    );
+}
+
+#[test]
+fn a_bundle_of_another_shape_is_refused_as_inconsistent() {
+    let (op, fleet) = provisioned_sites();
+    put(
+        &op,
+        &sites_item(&fleet),
+        "SITE_SECRETS",
+        r#"{"version":2,"sites":[]}"#,
+    );
+    assert_eq!(
+        refusal_of(provision_sites(&op, &fleet, false)),
+        Some(ProvisionRefusal::Inconsistent {
+            members: vec!["shop/SITE_SECRETS".into()]
+        })
+    );
+}
+
+#[test]
+fn replace_remakes_a_disagreeing_bundle_from_the_new_members() {
+    let (op, fleet) = provisioned_sites();
+    put(
+        &op,
+        &sites_item(&fleet),
+        "SITES_GATEWAY_KEY",
+        &"e".repeat(64),
+    );
+    issuing(&op, SITE_IDS);
+    let _ = run(
+        &op,
+        &fleet,
+        &person(),
+        Request {
+            replace: true,
+            ..sites_request(false)
+        },
+        &mut Scripted::answering(Some("staging")),
+    );
+    assert_eq!(
+        stored_bundle(&op, &fleet),
+        expected_bundle(&op, &fleet, SITE_IDS)
+    );
+}
+
+// ---- --fill-missing (§4.7, D7) --------------------------------------------------------
+
+#[test]
+fn fill_missing_with_replace_is_a_usage_error() {
+    let (op, fleet) = provisioned_sites();
+    let r = run(
+        &op,
+        &fleet,
+        &person(),
+        Request {
+            replace: true,
+            ..sites_request(true)
+        },
+        &mut Scripted::answering(Some("staging")),
+    );
+    assert_eq!(r.unwrap_err().code_str(), "usage");
+}
+
+#[test]
+fn fill_missing_keeps_every_present_value() {
+    let (op, fleet) = provisioned_sites();
+    let before = site_field(&op, &fleet, "PLATFORM_IDENTITY_SECRET");
+    put(&op, &sites_item(&fleet), "USER_HASH_KEY", "");
+    provision_sites(&op, &fleet, true).unwrap();
+    assert_eq!(site_field(&op, &fleet, "PLATFORM_IDENTITY_SECRET"), before);
+}
+
+#[test]
+fn fill_missing_keeps_the_present_bundle() {
+    let (op, fleet) = provisioned_sites();
+    let before = site_field(&op, &fleet, "SITE_SECRETS");
+    put(&op, &sites_item(&fleet), "USER_HASH_KEY", "");
+    provision_sites(&op, &fleet, true).unwrap();
+    assert_eq!(site_field(&op, &fleet, "SITE_SECRETS"), before);
+}
+
+#[test]
+fn fill_missing_generates_a_missing_member_no_bundle_holds() {
+    let (op, fleet) = provisioned_sites();
+    put(&op, &sites_item(&fleet), "USER_HASH_KEY", "");
+    provision_sites(&op, &fleet, true).unwrap();
+    let v = site_field(&op, &fleet, "USER_HASH_KEY").unwrap_or_default();
+    assert!(v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit()));
+}
+
+#[test]
+fn fill_missing_of_a_generated_member_starts_no_producer() {
+    let (op, fleet) = provisioned_sites();
+    put(&op, &sites_item(&fleet), "USER_HASH_KEY", "");
+    issuing(&op, SITE_IDS);
+    provision_sites(&op, &fleet, true).unwrap();
+    assert_eq!(op.producers.borrow().len(), 1);
+}
+
+#[test]
+fn fill_missing_recovers_a_member_from_the_bundles_leaf() {
+    let (op, fleet) = provisioned_sites();
+    let before = site_field(&op, &fleet, "AGENCY_IDENTITY_SECRET");
+    put(&op, &sites_item(&fleet), "AGENCY_IDENTITY_SECRET", "");
+    provision_sites(&op, &fleet, true).unwrap();
+    assert_eq!(site_field(&op, &fleet, "AGENCY_IDENTITY_SECRET"), before);
+}
+
+#[test]
+fn fill_missing_renders_a_missing_bundle_from_the_present_members() {
+    let (op, fleet) = provisioned_sites();
+    put(&op, &sites_item(&fleet), "SITE_SECRETS", "");
+    issuing(&op, SITE_IDS);
+    provision_sites(&op, &fleet, true).unwrap();
+    assert_eq!(
+        stored_bundle(&op, &fleet),
+        expected_bundle(&op, &fleet, SITE_IDS)
+    );
+}
+
+#[test]
+fn fill_missing_keeps_a_site_key_the_rerun_producer_returns_again() {
+    let (op, fleet) = provisioned_sites();
+    put(&op, &sites_item(&fleet), "OWNER_SITE_KEY", "");
+    put(
+        &op,
+        &sites_item(&fleet),
+        "PLATFORM_SITE_KEY",
+        "kept-platform-key-0001",
+    );
+    issuing(&op, SITE_IDS);
+    provision_sites(&op, &fleet, true).unwrap();
+    assert_eq!(
+        site_field(&op, &fleet, "PLATFORM_SITE_KEY").as_deref(),
+        Some("kept-platform-key-0001")
+    );
+}
+
+#[test]
+fn fill_missing_takes_a_missing_site_key_from_the_rerun_producer() {
+    let (op, fleet) = provisioned_sites();
+    put(&op, &sites_item(&fleet), "OWNER_SITE_KEY", "");
+    issuing(&op, SITE_IDS);
+    provision_sites(&op, &fleet, true).unwrap();
+    assert_eq!(
+        site_field(&op, &fleet, "OWNER_SITE_KEY").as_deref(),
+        Some("site-key-owner-0003")
+    );
+}
+
+#[test]
+fn fill_missing_refuses_a_rerun_whose_site_id_differs_from_the_bundle() {
+    let (op, fleet) = provisioned_sites();
+    put(&op, &sites_item(&fleet), "OWNER_SITE_KEY", "");
+    issuing(
+        &op,
+        [
+            SITE_IDS[0],
+            SITE_IDS[1],
+            "00000000-0000-4000-8000-0000000000ff",
+        ],
+    );
+    assert_eq!(
+        refusal_of(provision_sites(&op, &fleet, true)),
+        Some(ProvisionRefusal::Inconsistent {
+            members: vec!["shop/SITE_SECRETS".into()]
+        })
+    );
+}
+
+#[test]
+fn fill_missing_with_a_differing_site_id_makes_no_item_edit() {
+    let (op, fleet) = provisioned_sites();
+    put(&op, &sites_item(&fleet), "OWNER_SITE_KEY", "");
+    issuing(
+        &op,
+        [
+            SITE_IDS[0],
+            SITE_IDS[1],
+            "00000000-0000-4000-8000-0000000000ff",
+        ],
+    );
+    let _ = provision_sites(&op, &fleet, true);
+    assert_eq!(op.count(&["op", "item", "edit"]), 1);
+}
+
+#[test]
+fn fill_missing_refuses_a_partial_set_whose_bundle_disagrees_with_a_member() {
+    let (op, fleet) = provisioned_sites();
+    put(&op, &sites_item(&fleet), "USER_HASH_KEY", "");
+    put(
+        &op,
+        &sites_item(&fleet),
+        "SITES_GATEWAY_KEY",
+        &"e".repeat(64),
+    );
+    assert_eq!(
+        refusal_of(provision_sites(&op, &fleet, true)),
+        Some(ProvisionRefusal::Inconsistent {
+            members: vec!["shop/SITE_SECRETS".into()]
+        })
+    );
+}
+
+#[test]
+fn fill_missing_on_a_complete_set_is_unchanged() {
+    let (op, fleet) = provisioned_sites();
+    assert!(matches!(
+        provision_sites(&op, &fleet, true),
+        Ok(Outcome::Unchanged(_))
+    ));
+}
+
+#[test]
+fn fill_missing_on_a_partial_generated_set_fills_it() {
+    // `keys` holds CLIENT_ID and not SESSION_KEY.
+    let (op, fleet) = world();
+    let _ = run(
+        &op,
+        &fleet,
+        &person(),
+        Request {
+            fill_missing: true,
+            ..request("keys", "prod")
+        },
+        &mut Scripted::answering(Some("prod")),
+    );
+    let v = field(&op, &item_id(&fleet, "prod"), "SESSION_KEY").unwrap_or_default();
+    assert!(v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit()));
+}
+
+#[test]
+fn fill_missing_on_a_partial_generated_set_keeps_the_present_member() {
+    let (op, fleet) = world();
+    let _ = run(
+        &op,
+        &fleet,
+        &person(),
+        Request {
+            fill_missing: true,
+            ..request("keys", "prod")
+        },
+        &mut Scripted::answering(Some("prod")),
+    );
+    assert_eq!(
+        field(&op, &item_id(&fleet, "prod"), "CLIENT_ID").as_deref(),
+        Some("client-id-value")
+    );
+}
+
+#[test]
+fn the_fill_missing_plan_keeps_present_members() {
+    let (op, fleet) = provisioned_sites();
+    put(&op, &sites_item(&fleet), "USER_HASH_KEY", "");
+    let mut console = Scripted::answering(None);
+    let _ = run(&op, &fleet, &person(), sites_request(true), &mut console);
+    assert!(console.shown[0].contains("  keep    shop/PLATFORM_IDENTITY_SECRET"));
 }

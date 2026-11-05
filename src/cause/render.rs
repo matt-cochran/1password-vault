@@ -1187,8 +1187,8 @@ fn with_timeout(mut c: Cmd, seconds: u64) -> Cmd {
     c
 }
 
-/// The step after a refused provision (§4.2, §4.5, §5.5). A partial or inconsistent set is
-/// handed to the person's own `--replace` run; a refusal the person resolves first steps to
+/// The step after a refused provision (§4.2, §4.5, §4.7, §5.5). A partial set is handed to
+/// the person's own `--fill-missing` run (D7), an inconsistent one to `--replace`; a refusal the person resolves first steps to
 /// the read that shows the set's state (X4), or to the run with the budget the producers need.
 fn provision_refused(
     set: &str,
@@ -1199,7 +1199,16 @@ fn provision_refused(
     let ready = Next::Check(cmd(&["ready"], &[env.as_str()]));
     let replace = format!("opv provision {set} --env {env} --replace");
     match reason {
-        ProvisionRefusal::Partial { .. } | ProvisionRefusal::Inconsistent { .. } => plan(
+        ProvisionRefusal::Partial { .. } => plan(
+            inspect(format!(
+                "make only the missing members, keeping every present one: opv provision {set} --env {env} --fill-missing"
+            )),
+            Next::Handoff(cmd(
+                &["provision"],
+                &[set, "--env", env.as_str(), "--fill-missing"],
+            )),
+        ),
+        ProvisionRefusal::Inconsistent { .. } => plan(
             inspect(format!(
                 "re-make the whole set: {replace} (the replaced values are kept in the item's opv · kept section)"
             )),

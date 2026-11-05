@@ -958,8 +958,11 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
         /// Re-make the whole set (rotation, re-consent); old values are kept in the item.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "fill_missing")]
         replace: bool,
+        /// Complete a partial set: make only its missing members, keeping every present one.
+        #[arg(long)]
+        fill_missing: bool,
         /// Print the plan (--dry-run) or the receipt as one JSON document.
         #[arg(long)]
         json: bool,
@@ -4850,7 +4853,7 @@ fn run_provision(
     set: &str,
     env: &str,
     dry_run: bool,
-    replace: bool,
+    (replace, fill_missing): (bool, bool),
     json: bool,
     r: &dyn CommandRunner,
     out: &mut dyn Write,
@@ -4869,6 +4872,7 @@ fn run_provision(
         env,
         dry_run,
         replace,
+        fill_missing,
         project: &project,
     };
     let outcome = provision::provision(
@@ -4886,6 +4890,9 @@ fn run_provision(
         let mut again = vec!["provision", set, "--env", env];
         if replace {
             again.push("--replace");
+        }
+        if fill_missing {
+            again.push("--fill-missing");
         }
         let doc = serde_json::json!({
             "schema": provision::RECEIPT_SCHEMA,
@@ -5002,6 +5009,7 @@ fn run_other(
             env,
             dry_run,
             replace,
+            fill_missing,
             json,
         } => run_provision(
             &loaded?,
@@ -5009,7 +5017,7 @@ fn run_other(
             &set,
             &env,
             dry_run,
-            replace,
+            (replace, fill_missing),
             json,
             r,
             out,
@@ -6841,7 +6849,7 @@ members = {{ "app/SIGNING_KEY" = {{ generate = "rules" }} }}
             "signing",
             "prod",
             true,
-            false,
+            (false, false),
             true,
             &op,
             &mut out,

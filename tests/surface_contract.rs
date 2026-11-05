@@ -121,7 +121,7 @@ fn surface_golden_lists_no_removed_zero_eleven_command() {
     );
 }
 
-/// #253: `opv provision` is on the CLI surface with its Slice A flags.
+/// #253, #262: `opv provision` is on the CLI surface with its Slice A and B flags.
 #[test]
 fn surface_golden_lists_provision_with_its_flags() {
     let golden = golden();
@@ -134,7 +134,7 @@ fn surface_golden_lists_provision_with_its_flags() {
         .unwrap_or(Value::Null);
     assert_eq!(
         provision["flags"],
-        serde_json::json!(["dry-run", "env", "json", "replace"])
+        serde_json::json!(["dry-run", "env", "fill-missing", "json", "replace"])
     );
 }
 

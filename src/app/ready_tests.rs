@@ -2277,3 +2277,113 @@ fn ready_never_prints_a_set_member_value() {
     ]));
     assert!(!doc.to_string().contains("deadbeef"));
 }
+
+// #262: a set with a template member is judged with the stored members ----------------
+
+/// `opv ready --json` on a run-only `dev` with one `[sets.bundle]`: `app/ALPHA` (32 hex
+/// bytes by rule), `app/BETA` from the producer `issuer`, and `app/BUNDLE`, the template
+/// `{ v = 1, alpha = "${app/ALPHA}", beta = "${app/BETA}", id = "${issuer.site_id}" }`.
+fn ready_on_a_template_set(fields: serde_json::Value) -> serde_json::Value {
+    use crate::adapters::fake_op::FakeOp;
+    let op = FakeOp::default();
+    let item = serde_json::json!({
+        "title": "t", "category": "SECURE_NOTE",
+        "sections": [{"id": "app", "label": "app"}],
+        "fields": fields,
+    });
+    let id = op.insert("vdev0000000000000000000001", item);
+    let fleet = crate::config::parse(&format!(
+        "[environments.dev]\n\
+         boundaries.app = {{ vault_id = \"vdev0000000000000000000001\", item_id = \"{id}\" }}\n\
+         [products.app.keys.ALPHA]\nkind = \"secret\"\nrules = {{ hex_bytes = 32 }}\n\
+         [products.app.keys.BETA]\nkind = \"secret\"\n\
+         [products.app.keys.BUNDLE]\nkind = \"secret\"\n\
+         [producers.issuer]\ncommand = [\"python3\", \"-c\", \"pass\"]\n\
+         outputs = [\"site_id\", \"key\"]\ntimeout = \"1m\"\n\
+         [sets.bundle]\nenvironments = [\"dev\"]\n\
+         [sets.bundle.members]\n\
+         \"app/ALPHA\" = {{ generate = \"rules\" }}\n\
+         \"app/BETA\" = {{ producer = \"issuer\", output = \"key\" }}\n\
+         [sets.bundle.members.\"app/BUNDLE\".template]\n\
+         v = 1\nalpha = \"${{app/ALPHA}}\"\nbeta = \"${{app/BETA}}\"\nid = \"${{issuer.site_id}}\"\n"
+    ))
+    .unwrap();
+    let mut out = Vec::new();
+    run(&fleet, None, None, &op, true, None, false, &mut out).unwrap();
+    serde_json::from_slice(&out).unwrap()
+}
+
+/// A value `app/BETA` may hold.
+const SET_BETA: &str = "beta-SITEKEY-0123456789";
+
+/// The bundle as stored, holding `alpha` for `app/ALPHA` and `beta` for `app/BETA`.
+fn bundle_of(alpha: &str, beta: &str) -> String {
+    serde_json::json!({"v": 1, "alpha": alpha, "beta": beta, "id": "site-0001"}).to_string()
+}
+
+#[test]
+fn a_template_set_whose_bundle_fits_its_members_is_complete() {
+    let doc = ready_on_a_template_set(serde_json::json!([
+        concealed("ALPHA", SET_HEX32),
+        concealed("BETA", SET_BETA),
+        concealed("BUNDLE", &bundle_of(SET_HEX32, SET_BETA)),
+    ]));
+    assert_eq!(doc["sets"][0]["state"], "complete");
+}
+
+#[test]
+fn a_bundle_disagreeing_with_a_member_makes_the_set_inconsistent() {
+    let doc = ready_on_a_template_set(serde_json::json!([
+        concealed("ALPHA", SET_HEX32),
+        concealed("BETA", SET_BETA),
+        concealed("BUNDLE", &bundle_of(SET_HEX32, "beta-OTHERKEY-9876543210")),
+    ]));
+    assert_eq!(doc["sets"][0]["state"], "inconsistent");
+}
+
+#[test]
+fn a_bundle_disagreeing_with_a_member_is_one_blocking_finding() {
+    let doc = ready_on_a_template_set(serde_json::json!([
+        concealed("ALPHA", SET_HEX32),
+        concealed("BETA", SET_BETA),
+        concealed("BUNDLE", &bundle_of(SET_HEX32, "beta-OTHERKEY-9876543210")),
+    ]));
+    assert_eq!(
+        doc["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["scope"]["set"] == "bundle" && f["blocking"] == true)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn a_bundle_not_of_its_templates_shape_makes_the_set_inconsistent() {
+    let doc = ready_on_a_template_set(serde_json::json!([
+        concealed("ALPHA", SET_HEX32),
+        concealed("BETA", SET_BETA),
+        concealed("BUNDLE", r#"{"v":2}"#),
+    ]));
+    assert_eq!(doc["sets"][0]["state"], "inconsistent");
+}
+
+#[test]
+fn a_bundle_whose_member_is_missing_leaves_the_set_partial() {
+    let doc = ready_on_a_template_set(serde_json::json!([
+        concealed("ALPHA", SET_HEX32),
+        concealed("BUNDLE", &bundle_of(SET_HEX32, SET_BETA)),
+    ]));
+    assert_eq!(doc["sets"][0]["state"], "partial");
+}
+
+#[test]
+fn ready_never_prints_a_bundle_leaf() {
+    let doc = ready_on_a_template_set(serde_json::json!([
+        concealed("ALPHA", SET_HEX32),
+        concealed("BETA", SET_BETA),
+        concealed("BUNDLE", &bundle_of(SET_HEX32, "beta-OTHERKEY-9876543210")),
+    ]));
+    assert!(!doc.to_string().contains("SITEKEY") && !doc.to_string().contains("OTHERKEY"));
+}
