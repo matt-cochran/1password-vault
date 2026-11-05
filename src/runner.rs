@@ -2267,6 +2267,7 @@ pub mod signals {
 
     /// Track `child`, the leader of its own process group: a forwarded signal reaches the
     /// whole group.
+    #[cfg(unix)]
     pub(super) fn track_group(child: &Child) {
         let mut slot = lock(&CHILD);
         *slot = Some(child.id());
@@ -2274,6 +2275,7 @@ pub mod signals {
     }
 
     /// Wait for `child` (exited or being stopped) under the lock and forget it.
+    #[cfg(unix)]
     pub(super) fn reap_now(child: &mut Child) -> std::io::Result<ExitStatus> {
         let mut slot = lock(&CHILD);
         let res = child.wait();

@@ -21,7 +21,9 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::coverage::{Run, Scenario, scenario_snapshots, updating};
+#[cfg(target_os = "linux")]
+use crate::coverage::updating;
+use crate::coverage::{Run, Scenario, scenario_snapshots};
 
 /// The scenario snapshots this module writes (`tests/e2e/snapshots/scenarios/`).
 pub(crate) const SNAPSHOTS: &[&str] = &["sealed"];
