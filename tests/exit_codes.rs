@@ -151,3 +151,20 @@ fn verbose_json_names_the_delivered_document() {
     );
     assert!(stderr.contains(&want), "{stderr}");
 }
+
+/// #276: `target list --json` prints a top-level array, a document since before 0.17.4.
+#[test]
+fn target_list_json_exits_zero() {
+    let out = opv()
+        .args([
+            "--config",
+            "tests/fixtures/secrets.toml",
+            "target",
+            "list",
+            "--json",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+}

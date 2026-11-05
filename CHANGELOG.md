@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.4] - 2026-11-05
+
+0.17.4 fixes a 0.17.3 regression in `opv target list --json`.
+
+### Fixed
+
+- **`opv target list --json` exits 0 again (#276).** 0.17.3's check that a `--json` command wrote a document accepted only a JSON object, so `target list`'s top-level array was reported as an internal error (exit 70). A top-level array is a document; the output is unchanged.
+
 ## [0.17.3] - 2026-11-04
 
 0.17.3 makes `opv run --product` read, name and pass on only what the selected product uses, makes every `--json` command emit one document or fail loudly, and refuses `opv set` from a non-person session.

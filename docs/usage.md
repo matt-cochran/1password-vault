@@ -435,7 +435,7 @@ dev[local]: core=vDEV.../iDEV...
 next: opv set api/OPENAI_API_KEY --env dev
 ```
 
-`run <env> [--product <p>] [--role <r>] -- <cmd>` starts a command with the keys as environment variables under their plain names, through `op run`, with no `.env` file. It first removes every key name declared in the configuration from the inherited environment, so another product's keys never leak in. A name declared only as `source = "infrastructure"` is the exception (since 0.17.3): opv never holds its value, so it is kept as the parent environment sets it, and `run` prints one names-only note, `taken from the environment as given (supplied at sync, never stored in 1Password): <product/KEY>, …`. opv's options go before `--`; `run` exits with the command's own exit code. The local guide, with Docker Compose, editors, product switching and WSL, is [local-development.md](local-development.md). An [infrastructure key](#infrastructure-values---supply-stdin) is never injected: its value is not in 1Password, and `run` prints one note naming it. `run` reads only the boundary items that hold its own keys (with `--product`, the selected product's keys and their `from` sources, never a sibling's separate item), and its one `still needs a value in 1Password (<env>): …` note names only those keys that are empty or missing; another product's empty key in the same item is not named.
+`run <env> [--product <p>] [--role <r>] -- <cmd>` starts a command with the keys as environment variables under their plain names, through `op run`, with no `.env` file. It first removes every key name declared in the configuration from the inherited environment, so another product's keys never leak in. A name declared only as `source = "infrastructure"` is the exception (since 0.17.4): opv never holds its value, so it is kept as the parent environment sets it, and `run` prints one names-only note, `taken from the environment as given (supplied at sync, never stored in 1Password): <product/KEY>, …`. opv's options go before `--`; `run` exits with the command's own exit code. The local guide, with Docker Compose, editors, product switching and WSL, is [local-development.md](local-development.md). An [infrastructure key](#infrastructure-values---supply-stdin) is never injected: its value is not in 1Password, and `run` prints one note naming it. `run` reads only the boundary items that hold its own keys (with `--product`, the selected product's keys and their `from` sources, never a sibling's separate item), and its one `still needs a value in 1Password (<env>): …` note names only those keys that are empty or missing; another product's empty key in the same item is not named.
 
 **File keys.** A key with `file` is written to a fresh private directory on a RAM-backed `$XDG_RUNTIME_DIR` (0700, files 0400) and removed when the app exits. Which platforms support it and which limits opv enforces (same user, root, ptrace, inherited descriptors, swap, core dumps, hard links, reboot) are in [platforms and limits](design/local-delivery.md#platforms-and-limits). Since 0.13.0:
 
@@ -1141,7 +1141,7 @@ jobs:
     env:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
       OP_CACHE: "false"
-      OPV_VERSION: v0.17.3  # pin the release you tested; bump it deliberately
+      OPV_VERSION: v0.17.4  # pin the release you tested; bump it deliberately
     steps:
       - uses: actions/checkout@v4
       - name: Install the 1Password CLI
