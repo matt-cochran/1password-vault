@@ -1223,6 +1223,12 @@ fn provision_refused(
             )),
             Next::Handoff(with_timeout(inv_cmd(inv), *needed_seconds)),
         ),
+        ProvisionRefusal::ItemNotRewritable { holds } => plan(
+            inspect(format!(
+                "in 1Password, move {holds} out of the item of environment {env} into an item of its own, then run opv provision {set} --env {env} again"
+            )),
+            ready,
+        ),
     }
 }
 

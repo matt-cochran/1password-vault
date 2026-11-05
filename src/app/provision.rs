@@ -1,30 +1,47 @@
-//! `opv provision <SET> --env <ENV>` (#253, design `owner-value-ingestion.md` §4), part 1:
-//! steps 1-7 of §4.2. The set and environment are resolved, the caller is judged (§6), the
-//! set's one item is read fresh and classified (§4.5), and the value-free plan (§4.3) is
-//! shown, checked against the run budget and confirmed by typing the environment back
-//! (§4.4). `--dry-run` stops after the plan.
+//! `opv provision <SET> --env <ENV>` (#253, design `owner-value-ingestion.md` §4).
 //!
-//! Part 2 (lane iv-a6b) fills in steps 8-12 where [`provision`] returns
-//! [`Outcome::Confirmed`]: produce, generate, validate, the checked commit and the receipt,
-//! and `--replace`'s re-make. The plan's [`PlanItem::version`] is the stamp `S0` the commit
-//! checks against (§4.6).
+//! Steps 1-7 of §4.2: the set and environment are resolved, the caller is judged (§6), the
+//! set's one item is read fresh (the stamp `S0`) and classified (§4.5), and the value-free
+//! plan (§4.3) is shown, checked against the run budget and confirmed by typing the
+//! environment back (§4.4). `--dry-run` stops after the plan.
 //!
-//! No value, length, digest or prefix reaches the plan, an error or `Debug`: member values
-//! are read only to judge their state, and never leave this module.
+//! Steps 8-12: each producer runs once (§5.2; its consent page opened by opv, its text never
+//! shown), generated members are made (§5.1), every made value is validated and producer-made
+//! ones compared with the set's other environments (§5.4, §5.5), the set is committed in one
+//! checked edit against `S0` (§4.6), and a value-free [`Receipt`] (§7) is returned.
+//!
+//! No value, length, digest or prefix reaches the plan, the receipt, an error or `Debug`:
+//! values live in [`SecretValue`]s and zeroizing buffers and never leave this module except
+//! on the producer's stdin and the one item edit's stdin.
 
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use zeroize::Zeroizing;
+
+use super::generate::{self, Recipe};
+use super::import::{self, Expected};
+use super::open::Opener;
+use super::produce_doc::{self, Notice, Parser, Terminal};
 use crate::adapters::{onepassword, onepassword_tidy};
 use crate::cause::{
-    Cause, Cmd, CommandId, EnvName, Guard, NoTerminal, Principal, ProvisionRefusal,
-    UnsupportedFeature, UsageProblem, VarName,
+    Cause, Cmd, CommandId, EnvName, FieldRule, Guard, InputKind, KeyName, NoTerminal, Principal,
+    ProduceRule, ProducerFailure, ProductName, ProvisionRefusal, UnsupportedFeature, UsageProblem,
+    ValueRow, VarName,
 };
-use crate::domain::provision::{self as model, Generator, MemberSource, ProvisionSet, SetState};
+use crate::domain::provision::{
+    self as model, Generator, KeyRef, MemberSource, ProvisionSet, SetState,
+};
 use crate::domain::value_state::{self, ValueState};
-use crate::domain::{Environment, Fleet, Tier, convention, presence, rules};
+use crate::domain::{
+    Boundary, Environment, Fleet, Kind, SecretValue, Tier, convention, presence, rules,
+};
 use crate::error::Error;
 use crate::host::{Host, HostEnv, Platform, refuse_if_agent};
-use crate::runner::{CommandRunner, READ_TIMEOUT, WRITE_TIMEOUT};
+use crate::runner::{
+    CommandRunner, LineVerdict, ProduceCall, ProducedLine, READ_TIMEOUT, WRITE_TIMEOUT,
+};
 
 /// What the command line asks for (§4.1).
 #[derive(Debug, Clone, Copy)]
@@ -35,8 +52,11 @@ pub struct Request<'a> {
     pub env: &'a str,
     /// `--dry-run`: the plan only; a read, allowed for an assistant and in CI.
     pub dry_run: bool,
-    /// `--replace`: re-make a complete or inconsistent set (D8); part 2 makes the values.
+    /// `--replace`: re-make a complete or inconsistent set (D8).
     pub replace: bool,
+    /// The project directory (where the contract was read): a producer's cwd and the base
+    /// of the project file its `command` names.
+    pub project: &'a Path,
 }
 
 /// Where the plan is shown and the confirmation typed (§4.4). The CLI passes
@@ -47,11 +67,28 @@ pub trait ProvisionConsole {
     /// Ask `question` and read the typed-back answer; `None` when the person typed nothing
     /// or closed the input (declined).
     fn type_back(&mut self, question: &str) -> Result<Option<String>, Error>;
+    /// Open `url`, a consent page the producer named and opv admitted (`https`, a host in
+    /// the producer's `open_url_hosts`, no userinfo), in the person's browser. False when
+    /// there is no opener here (SSH, CI, headless) or it could not be started: the caller
+    /// then prints the URL for the person to open.
+    fn open_url(&mut self, url: &str) -> bool;
 }
 
 /// The person's terminal: the plan and the question on stderr (stdout stays the command's
-/// document), the answer through the setup console's line reader.
-pub struct TerminalConsole;
+/// document), the answer through the setup console's line reader, a consent page through the
+/// desktop's [`Opener`] (`opv open`'s, from [`super::open::opener`]).
+pub struct TerminalConsole {
+    pub opener: Option<Opener>,
+}
+
+impl TerminalConsole {
+    /// The console for this host: its opener, or none over SSH, in CI or without a desktop.
+    pub fn new(env: &dyn HostEnv) -> Self {
+        Self {
+            opener: super::open::opener(env),
+        }
+    }
+}
 
 impl ProvisionConsole for TerminalConsole {
     fn show(&mut self, text: &str) -> Result<(), Error> {
@@ -67,9 +104,36 @@ impl ProvisionConsole for TerminalConsole {
     fn type_back(&mut self, question: &str) -> Result<Option<String>, Error> {
         super::setup_runtime::type_back(question)
     }
+
+    /// The opener is started directly, detached from the runner: it runs while the producer
+    /// is the runner's current child, whose group opv's signals are forwarded to, and a
+    /// runner call here would take that place. The URL is its one argument, never a shell
+    /// (SR-7); its output is discarded (NR-31). Reaped on a thread.
+    fn open_url(&mut self, url: &str) -> bool {
+        use std::process::{Command, Stdio};
+        let Some(o) = self.opener else {
+            return false;
+        };
+        let child = Command::new(o.program)
+            .args(o.args)
+            .arg(url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        match child {
+            Ok(mut child) => {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                true
+            }
+            Err(_) => false,
+        }
+    }
 }
 
-/// How the run ended (part 1). Part 2 turns [`Outcome::Confirmed`] into a write.
+/// How the run ended without an error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     /// `--dry-run`: the plan; nothing ran, nothing was made or written.
@@ -78,19 +142,18 @@ pub enum Outcome {
     Unchanged(Plan),
     /// The person typed nothing at the confirmation (exit 0); nothing ran.
     Declined(Plan),
-    /// The person typed the environment back: steps 8-12 (lane iv-a6b) make and commit
-    /// the set against [`PlanItem::version`].
-    Confirmed(Plan),
+    /// The set was made, committed in one checked edit and read back (§4.6).
+    Written(Box<(Plan, Receipt)>),
 }
 
 impl Outcome {
-    /// The receipt's `result` word (§7) for the outcomes part 1 ends with.
+    /// The receipt's `result` word (§7).
     pub fn result(&self) -> &'static str {
         match self {
             Outcome::DryRun(_) => "dry_run",
             Outcome::Unchanged(_) => "unchanged",
             Outcome::Declined(_) => "declined",
-            Outcome::Confirmed(_) => "confirmed",
+            Outcome::Written(_) => "written",
         }
     }
 
@@ -98,8 +161,124 @@ impl Outcome {
     pub fn plan(&self) -> &Plan {
         match self {
             Outcome::DryRun(p) | Outcome::Unchanged(p) | Outcome::Declined(p) => p,
-            Outcome::Confirmed(p) => p,
+            Outcome::Written(w) => &w.0,
         }
+    }
+
+    /// The value-free receipt (§7), for every outcome but `--dry-run` (whose document is the
+    /// plan). Nothing ran for `unchanged` and `declined`: no version after, no producer.
+    pub fn receipt(&self) -> Option<Receipt> {
+        match self {
+            Outcome::DryRun(_) => None,
+            Outcome::Written(w) => Some(w.1.clone()),
+            Outcome::Unchanged(p) | Outcome::Declined(p) => {
+                Some(Receipt::untouched(p, self.result()))
+            }
+        }
+    }
+}
+
+/// The receipt (§7): names, versions and the producers' pins only; no value, length, digest
+/// or prefix.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Receipt {
+    /// `opv.provision/1`.
+    pub schema: &'static str,
+    pub set: String,
+    pub env: String,
+    /// The set's state when read (`absent`, `complete`, `inconsistent`), or `replace`.
+    pub mode: &'static str,
+    /// `written`, `unchanged` or `declined` (a refusal is the error document instead).
+    pub result: &'static str,
+    /// The edit's version was not one past opv's own read: an edit made just before opv's
+    /// may have been replaced (kept in the item's history).
+    pub concurrent_edit: bool,
+    pub item: ReceiptItem,
+    pub members: Vec<ReceiptMember>,
+    /// The producers that ran, each once, in run order.
+    pub producers: Vec<ReceiptProducer>,
+    /// The other environments whose producer-made members were compared (§5.5).
+    pub compared_environments: Vec<String>,
+    /// The other environments opv could not read, so not compared.
+    pub not_compared: Vec<String>,
+    /// The command to run next, `opv ready <env>`.
+    pub next: String,
+}
+
+/// The item written: IDs and versions only.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ReceiptItem {
+    pub vault_id: String,
+    pub item_id: String,
+    /// The stamp `S0` the plan was made on.
+    pub version_before: Option<u64>,
+    /// The item's version after the edit (the revision plan-bound delivery builds on).
+    pub version_after: Option<u64>,
+    /// The version the final fresh read verified every written member at.
+    pub verified_at: Option<u64>,
+}
+
+/// One member: how it was made and its state after the run.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ReceiptMember {
+    /// `product/KEY`.
+    pub key: String,
+    /// `producer`, `generate` or `template`.
+    pub made_by: &'static str,
+    /// `set` once written; otherwise the state it was read in.
+    pub state: &'static str,
+}
+
+/// One producer that ran: its name, pin and exit (always 0: any other exit is a refusal).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ReceiptProducer {
+    pub name: String,
+    pub sha256: Option<String>,
+    pub exit: i32,
+}
+
+impl Receipt {
+    /// The receipt of a run that made and wrote nothing.
+    fn untouched(plan: &Plan, result: &'static str) -> Self {
+        Self {
+            schema: RECEIPT_SCHEMA,
+            set: plan.set.clone(),
+            env: plan.env.clone(),
+            mode: mode(plan),
+            result,
+            concurrent_edit: false,
+            item: ReceiptItem {
+                vault_id: plan.item.vault_id.clone(),
+                item_id: plan.item.item_id.clone(),
+                version_before: plan.item.version,
+                version_after: None,
+                verified_at: None,
+            },
+            members: plan
+                .members
+                .iter()
+                .map(|m| ReceiptMember {
+                    key: m.key.clone(),
+                    made_by: m.made_by.word(),
+                    state: m.state,
+                })
+                .collect(),
+            producers: Vec::new(),
+            compared_environments: Vec::new(),
+            not_compared: Vec::new(),
+            next: format!("opv ready {}", plan.env),
+        }
+    }
+}
+
+/// The receipt's schema (§7).
+pub const RECEIPT_SCHEMA: &str = "opv.provision/1";
+
+fn mode(plan: &Plan) -> &'static str {
+    if plan.replace {
+        "replace"
+    } else {
+        state_word(plan.state)
     }
 }
 
@@ -161,6 +340,17 @@ pub enum MadeBy {
     },
 }
 
+impl MadeBy {
+    /// The receipt's `made_by` word (§7).
+    pub fn word(&self) -> &'static str {
+        match self {
+            MadeBy::Producer { .. } => "producer",
+            MadeBy::Generate { .. } => "generate",
+            MadeBy::Template { .. } => "template",
+        }
+    }
+}
+
 /// One producer as the contract declares it (value-free; `command` is checked at load).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PlanProducer {
@@ -200,9 +390,9 @@ impl PlanBudget {
 const COMMIT_RESERVE: Duration =
     Duration::from_secs(READ_TIMEOUT.as_secs() + WRITE_TIMEOUT.as_secs() + READ_TIMEOUT.as_secs());
 
-/// `opv provision` part 1 (§4.2 steps 1-7). The contract is loaded (step 1) by the caller.
-/// Refusals come before any `op` call where §6 says so; the confirmation comes before
-/// anything is made.
+/// `opv provision` (§4.2). The contract is loaded (step 1) by the caller. Refusals come
+/// before any `op` call where §6 says so; the confirmation comes before anything is made;
+/// nothing is written before the one checked edit (step 11).
 pub fn provision(
     fleet: &Fleet,
     host_env: &dyn HostEnv,
@@ -231,15 +421,21 @@ pub fn provision(
     let item = onepassword::read_whole_fresh(r, environment, b)?;
     if let Some(holds) = onepassword_tidy::unprovable(item.raw()) {
         // A whole-item edit could drop what opv cannot prove it keeps (I4).
-        return Err(Cause::Guard {
-            guard: Guard::ArchiveNotRewritable {
-                env: EnvName::new(req.env),
+        return Err(refused(
+            req,
+            ProvisionRefusal::ItemNotRewritable {
                 holds: holds.into(),
             },
-        }
-        .into());
+        ));
     }
-    let states = member_states(fleet, set, req.env, environment, item.raw())?;
+    let (layout, stamp) = onepassword_tidy::parse(item.raw())?;
+    let part = super::tidy::in_boundary(fleet, &set.boundary);
+    let res = convention::resolve(&layout, &part);
+    let held = Held {
+        layout: &layout,
+        res: &res,
+    };
+    let states = member_states(fleet, set, req.env, environment, &held);
     // Step 6: classify.
     let state = model::classify(states.iter().map(|(_, s)| s)).map_err(|_| Cause::Bug {
         site: "provision member not stored",
@@ -284,6 +480,19 @@ pub fn provision(
             },
         ));
     }
+    if set
+        .members
+        .values()
+        .any(|m| matches!(m, MemberSource::Template(_)))
+    {
+        // Slice B (lane iv-b2) renders templates; until then a template set is not made.
+        return Err(Cause::Bug {
+            site: "provision template member before templates are wired",
+        }
+        .into());
+    }
+    // Every producer input must hold a value before anyone is asked to consent.
+    inputs_present(fleet, &plan, req, &held)?;
     // Step 7: plan, budget, confirm. The budget is checked before consent (vet F10).
     console.show(&render_plan(&plan))?;
     if !plan.budget.fits() {
@@ -303,8 +512,565 @@ pub fn provision(
             env: EnvName::new(req.env),
         }
         .into()),
-        // Steps 8-12 are part 2 (lane iv-a6b): produce, generate, validate, commit, receipt.
-        Some(_) => Ok(Outcome::Confirmed(plan)),
+        Some(_) => {
+            let run = Run {
+                fleet,
+                part: &part,
+                set,
+                req,
+                environment,
+                b,
+                stamp: &stamp,
+                held: &held,
+                r,
+            };
+            let receipt = run.make_and_commit(&plan, console)?;
+            Ok(Outcome::Written(Box::new((plan, receipt))))
+        }
+    }
+}
+
+/// The item read at `S0`: its layout and which field holds each key.
+struct Held<'a> {
+    layout: &'a convention::Layout,
+    res: &'a convention::Resolution,
+}
+
+impl Held<'_> {
+    /// The value `key` holds, `None` when it has no field or an empty one.
+    fn value(&self, key: &KeyRef) -> Option<&SecretValue> {
+        self.res
+            .chosen
+            .get(&(key.product.clone(), key.key.clone()))
+            .map(|&i| &self.layout.fields[i].value)
+            .filter(|v| !v.expose().trim().is_empty())
+    }
+}
+
+/// A confirmed run (steps 8-12): what it was planned on.
+struct Run<'a> {
+    fleet: &'a Fleet,
+    /// `fleet` limited to the set's boundary (the item's products).
+    part: &'a Fleet,
+    set: &'a ProvisionSet,
+    req: &'a Request<'a>,
+    environment: &'a Environment,
+    b: &'a Boundary,
+    stamp: &'a onepassword_tidy::Stamp,
+    held: &'a Held<'a>,
+    r: &'a dyn CommandRunner,
+}
+
+/// The fixed, neutral line after a producer ran and nothing was stored (§4.6, vet F19).
+const OUTPUTS_NOT_STORED: &str =
+    "the producer's outputs were not stored; what it created at its issuer still exists";
+
+impl Run<'_> {
+    fn make_and_commit(
+        &self,
+        plan: &Plan,
+        console: &mut dyn ProvisionConsole,
+    ) -> Result<Receipt, Error> {
+        let mut made: BTreeMap<KeyRef, SecretValue> = BTreeMap::new();
+        let mut ran = Vec::new();
+        // Step 8: each producer once, in plan order. One attempt; nothing is retried.
+        for p in &plan.producers {
+            let outputs = self.produce(p, console)?;
+            ran.push(ReceiptProducer {
+                name: p.name.clone(),
+                sha256: p.sha256.clone(),
+                exit: 0,
+            });
+            for (member, source) in &self.set.members {
+                if let MemberSource::Producer { producer, output } = source
+                    && producer == &p.name
+                {
+                    let v = outputs.get(output).ok_or(Cause::Bug {
+                        site: "provision producer output not admitted",
+                    })?;
+                    made.insert(member.clone(), SecretValue::new(v.expose().to_string()));
+                }
+            }
+        }
+        match self.generate_validate_commit(plan, made, ran.is_empty()) {
+            Ok((written, compared, not_compared)) => Ok(Receipt {
+                schema: RECEIPT_SCHEMA,
+                set: plan.set.clone(),
+                env: plan.env.clone(),
+                mode: mode(plan),
+                result: "written",
+                concurrent_edit: written.concurrent_edit,
+                item: ReceiptItem {
+                    vault_id: plan.item.vault_id.clone(),
+                    item_id: plan.item.item_id.clone(),
+                    version_before: plan.item.version,
+                    version_after: written.version,
+                    verified_at: written.version,
+                },
+                members: plan
+                    .members
+                    .iter()
+                    .map(|m| ReceiptMember {
+                        key: m.key.clone(),
+                        made_by: m.made_by.word(),
+                        state: "set",
+                    })
+                    .collect(),
+                producers: ran,
+                compared_environments: compared,
+                not_compared,
+                next: format!("opv ready {}", plan.env),
+            }),
+            Err(e) => {
+                if !ran.is_empty() && !is_unknown_outcome(&e) {
+                    console.show(OUTPUTS_NOT_STORED)?;
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Steps 9-11: generate, validate, compare, commit. `made` holds the producer values.
+    fn generate_validate_commit(
+        &self,
+        plan: &Plan,
+        mut made: BTreeMap<KeyRef, SecretValue>,
+        no_producer: bool,
+    ) -> Result<(import::Written, Vec<String>, Vec<String>), Error> {
+        // Step 9: generators.
+        for (member, source) in &self.set.members {
+            if let MemberSource::Generate(g) = source {
+                made.insert(member.clone(), self.generate(member, *g)?);
+            }
+        }
+        // Step 10: every member against its rules, collected (NR-17).
+        self.validate(&made)?;
+        let (compared, not_compared) = if no_producer {
+            (Vec::new(), Vec::new())
+        } else {
+            self.distinct(plan, &made)?
+        };
+        // Step 11: one checked edit against S0.
+        let writes: Vec<(String, String, SecretValue)> = made
+            .into_iter()
+            .map(|(m, v)| (m.product, m.key, v))
+            .collect();
+        let refs: Vec<&(String, String, SecretValue)> = writes.iter().collect();
+        let members: Vec<(String, String)> = self
+            .set
+            .members
+            .keys()
+            .map(|m| (m.product.clone(), m.key.clone()))
+            .collect();
+        let expected = Expected {
+            stamp: self.stamp,
+            seen: self.held.layout,
+            members: &members,
+        };
+        let written = import::write_item(
+            self.part,
+            self.environment,
+            self.b,
+            &refs,
+            None,
+            &command(self.req),
+            Some(&expected),
+            self.r,
+        )?;
+        Ok((written, compared, not_compared))
+    }
+
+    /// One producer attempt (§5.2): the request on stdin, each stdout line through the
+    /// `opv.produce/1` parser as it arrives. A consent page is opened by opv; only fixed
+    /// lines and the closed error code are ever shown, never the producer's text.
+    fn produce(
+        &self,
+        p: &PlanProducer,
+        console: &mut dyn ProvisionConsole,
+    ) -> Result<BTreeMap<String, SecretValue>, Error> {
+        let producer = self.fleet.producers.get(&p.name).ok_or(Cause::Bug {
+            site: "provision producer not declared",
+        })?;
+        let outputs: Vec<String> = producer
+            .outputs
+            .iter()
+            .filter(|o| {
+                self.set.members.values().any(|m| {
+                    matches!(m, MemberSource::Producer { producer, output }
+                        if producer == &p.name && output == *o)
+                })
+            })
+            .cloned()
+            .collect();
+        let mut inputs = Vec::new();
+        for (name, key) in &producer.inputs {
+            let v = self.held.value(key).ok_or(Cause::Bug {
+                site: "provision input checked before consent",
+            })?;
+            inputs.push((name.as_str(), v));
+        }
+        let nonce = nonce()?;
+        let request = request_line(self.req, &outputs, &nonce, &inputs);
+        let command: Vec<&str> = producer.command.iter().map(String::as_str).collect();
+        let file = project_file(self.req.project, &producer.command);
+        let call = ProduceCall {
+            set: self.req.set,
+            producer: &p.name,
+            file: &file,
+            command: &command,
+            cwd: self.req.project,
+            request: &request,
+            timeout: producer.timeout,
+        };
+        let context = produce_doc::Context {
+            env: self.req.env,
+            nonce: &nonce,
+            outputs: &outputs,
+            open_url_hosts: &producer.open_url_hosts,
+        };
+        console.show(&format!("running producer {}", p.name))?;
+        let mut sink = Sink {
+            producer: &p.name,
+            file: &file,
+            parser: Some(Parser::new(context)),
+            result: None,
+            console,
+            shown: Ok(()),
+        };
+        let res = self.r.produce(&call, &mut |line| sink.line(line));
+        sink.shown?;
+        res?;
+        sink.result.ok_or_else(|| {
+            Cause::Bug {
+                site: "provision producer ended without its result",
+            }
+            .into()
+        })
+    }
+
+    fn generate(&self, member: &KeyRef, g: Generator) -> Result<SecretValue, Error> {
+        let recipe = match g {
+            Generator::Rules => {
+                let spec = &self.fleet.products[&member.product].keys[&member.key];
+                generate::recipe(&member.product, &member.key, self.req.env, spec)?
+            }
+            Generator::HexBytes(n) => Recipe::Hex(usize::from(n)),
+            Generator::Base64Bytes(n) => Recipe::Base64(usize::from(n)),
+        };
+        let v = generate::make(recipe)?;
+        crate::scrub::register_secret(v.expose());
+        Ok(v)
+    }
+
+    /// §5.4: every made value against its key's rules; a placeholder and a secret shorter
+    /// than [`crate::scrub::SECRET_MIN`] fail too. Every failing member is named, with its
+    /// rule only; any failure drops every value.
+    fn validate(&self, made: &BTreeMap<KeyRef, SecretValue>) -> Result<(), Error> {
+        let mut rows = Vec::new();
+        for (member, value) in made {
+            let spec = &self.fleet.products[&member.product].keys[&member.key];
+            let failed = if crate::domain::health::is_placeholder(value.expose()) {
+                Some(("placeholder", None))
+            } else if let Err(f) = rules::check_verbatim(
+                &member.product,
+                &member.key,
+                spec,
+                self.req.env,
+                self.environment,
+                value,
+                spec.file.is_some(),
+            ) {
+                Some((f.rule, Some(f.reason.to_string())))
+            } else if spec.kind == Kind::Secret && value.expose().len() < crate::scrub::SECRET_MIN {
+                Some(("secret_min", Some(SECRET_TOO_SHORT.to_string())))
+            } else {
+                None
+            };
+            if let Some((rule, reason)) = failed {
+                rows.push(ValueRow {
+                    product: ProductName::new(&member.product),
+                    key: KeyName::new(&member.key),
+                    target: None,
+                    state: crate::cause::ValueState::RuleFailed { rule, reason },
+                });
+            }
+        }
+        if rows.is_empty() {
+            Ok(())
+        } else {
+            Err(Cause::KeysBlocking {
+                env: EnvName::new(self.req.env),
+                rows,
+            }
+            .into())
+        }
+    }
+
+    /// §5.5 (vet C21): each producer-made member against the same field in every other
+    /// environment of the set. Equal ⇒ `SameAcrossEnvironments`. An environment opv cannot
+    /// read is listed as not compared. Generated members are never compared.
+    fn distinct(
+        &self,
+        plan: &Plan,
+        made: &BTreeMap<KeyRef, SecretValue>,
+    ) -> Result<(Vec<String>, Vec<String>), Error> {
+        let produced: Vec<(&KeyRef, &SecretValue)> = made
+            .iter()
+            .filter(|(m, _)| {
+                matches!(
+                    self.set.members.get(*m),
+                    Some(MemberSource::Producer { .. })
+                )
+            })
+            .collect();
+        let (mut compared, mut not_compared) = (Vec::new(), Vec::new());
+        let Some(&(first, _)) = produced.first() else {
+            return Ok((compared, not_compared));
+        };
+        for other in &plan.compare {
+            let Some((layout, res)) = self.read_other(other, first) else {
+                not_compared.push(other.clone());
+                continue;
+            };
+            let there = Held {
+                layout: &layout,
+                res: &res,
+            };
+            for (member, value) in &produced {
+                if there.value(member).is_some_and(|v| same(v, value)) {
+                    return Err(refused(
+                        self.req,
+                        ProvisionRefusal::SameAcrossEnvironments {
+                            member: member.to_string(),
+                            other: EnvName::new(other),
+                        },
+                    ));
+                }
+            }
+            compared.push(other.clone());
+        }
+        Ok((compared, not_compared))
+    }
+
+    /// The set's item in environment `other`, read fresh, or `None` when opv cannot read it.
+    fn read_other(
+        &self,
+        other: &str,
+        member: &KeyRef,
+    ) -> Option<(convention::Layout, convention::Resolution)> {
+        let environment = self.fleet.environment(other).ok()?;
+        let b = self.fleet.boundary(other, &member.product).ok()?;
+        let item = onepassword::read_whole_fresh(self.r, environment, b).ok()?;
+        let (layout, _) = onepassword_tidy::parse(item.raw()).ok()?;
+        let res = convention::resolve(&layout, self.part);
+        Some((layout, res))
+    }
+}
+
+/// The rule-failure reason for a secret below [`crate::scrub::SECRET_MIN`] (§5.4): a fixed
+/// phrase built from the constant, never from the value.
+const SECRET_TOO_SHORT: &str = "a secret needs at least 8 bytes";
+
+/// Two values equal, compared in constant time (never printed).
+fn same(a: &SecretValue, b: &SecretValue) -> bool {
+    use subtle::ConstantTimeEq;
+    a.expose().as_bytes().ct_eq(b.expose().as_bytes()).into()
+}
+
+fn is_unknown_outcome(e: &Error) -> bool {
+    matches!(e.cause(), Some((Cause::WriteOutcomeUnknown { .. }, _)))
+}
+
+/// The runner's line sink: each line through the parser; a notice shown (and a consent page
+/// opened) at once; the result kept; an `error` line refused with its closed code.
+struct Sink<'a, 'c> {
+    producer: &'a str,
+    file: &'a Path,
+    parser: Option<Parser<'a>>,
+    result: Option<BTreeMap<String, SecretValue>>,
+    console: &'c mut dyn ProvisionConsole,
+    /// A console failure, reported after the attempt.
+    shown: Result<(), Error>,
+}
+
+impl Sink<'_, '_> {
+    fn line(&mut self, line: ProducedLine<'_>) -> LineVerdict {
+        let Some(parser) = self.parser.as_mut() else {
+            // A line after the terminal one.
+            return LineVerdict::Refuse(
+                Cause::InputInvalid {
+                    path: self.file.to_path_buf(),
+                    kind: InputKind::Produce,
+                    at: None,
+                    field: "standard output".to_string(),
+                    rule: FieldRule::Produce {
+                        produce: ProduceRule::ResultNotLast { line: line.number },
+                    },
+                }
+                .into(),
+            );
+        };
+        match parser.feed(line.bytes) {
+            Err(e) => LineVerdict::Refuse(e),
+            Ok(Some(notice)) => {
+                self.notice(&notice);
+                LineVerdict::More
+            }
+            Ok(None) => match self.parser.take().map(Parser::finish) {
+                Some(Ok(Terminal::Result(outputs))) => {
+                    self.result = Some(outputs);
+                    LineVerdict::Terminal
+                }
+                Some(Ok(Terminal::Error(code))) => LineVerdict::Refuse(
+                    Cause::ProducerFailed {
+                        producer: self.producer.to_string(),
+                        why: ProducerFailure::Reported { code },
+                    }
+                    .into(),
+                ),
+                Some(Err(e)) => LineVerdict::Refuse(e),
+                None => LineVerdict::Refuse(
+                    Cause::Bug {
+                        site: "provision parser gone",
+                    }
+                    .into(),
+                ),
+            },
+        }
+    }
+
+    /// Fixed lines only. A consent URL holds public parameters only (OAuth authorization
+    /// URLs), and is shown so a person without an opener can copy it.
+    fn notice(&mut self, notice: &Notice) {
+        let text = match notice {
+            Notice::OpenUrl(url) => {
+                if self.console.open_url(url) {
+                    format!("opening the consent page in your browser: {url}")
+                } else {
+                    format!("open the consent page in your browser: {url}")
+                }
+            }
+            Notice::Waiting => "waiting for the producer".to_string(),
+        };
+        if self.shown.is_ok() {
+            self.shown = self.console.show(&text);
+        }
+    }
+}
+
+/// This run's nonce (§5.2): `n-` and 26 base32 characters from the OS CSPRNG.
+fn nonce() -> Result<String, Error> {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let mut bytes = [0u8; 26];
+    getrandom::fill(&mut bytes).map_err(|_| -> Error {
+        Cause::LocalIo {
+            op: crate::cause::LocalOp::RandomSource,
+            path: PathBuf::new(),
+            io: crate::cause::IoKind::Other,
+            delivery: None,
+        }
+        .into()
+    })?;
+    let mut s = String::from("n-");
+    s.extend(
+        bytes
+            .iter()
+            .map(|b| char::from(ALPHABET[usize::from(*b % 32)])),
+    );
+    Ok(s)
+}
+
+/// The one-line `opv.produce/1` request (§5.2), built straight into a zeroizing buffer sized
+/// up front (no reallocation leaves a copy behind); no `serde_json::Value` holds an input.
+fn request_line(
+    req: &Request<'_>,
+    outputs: &[String],
+    nonce: &str,
+    inputs: &[(&str, &SecretValue)],
+) -> Zeroizing<Vec<u8>> {
+    // Escaping makes a string at most 6 bytes per byte, plus its quotes.
+    let quoted = |n: usize| n * 6 + 2;
+    let size = 128
+        + quoted(req.env.len())
+        + quoted(req.set.len())
+        + quoted(nonce.len())
+        + outputs.iter().map(|o| quoted(o.len()) + 1).sum::<usize>()
+        + inputs
+            .iter()
+            .map(|(n, v)| quoted(n.len()) + quoted(v.expose().len()) + 2)
+            .sum::<usize>();
+    let mut buf = Zeroizing::new(Vec::with_capacity(size));
+    let put_str = |buf: &mut Vec<u8>, s: &str| {
+        // Writing a `&str` into a Vec cannot fail.
+        let _ = serde_json::to_writer(&mut *buf, s);
+    };
+    buf.extend_from_slice(b"{\"schema\":\"opv.produce/1\",\"kind\":\"request\",\"env\":");
+    put_str(&mut buf, req.env);
+    buf.extend_from_slice(b",\"set\":");
+    put_str(&mut buf, req.set);
+    buf.extend_from_slice(b",\"outputs\":[");
+    for (i, o) in outputs.iter().enumerate() {
+        if i > 0 {
+            buf.push(b',');
+        }
+        put_str(&mut buf, o);
+    }
+    buf.extend_from_slice(b"],\"nonce\":");
+    put_str(&mut buf, nonce);
+    buf.extend_from_slice(b",\"inputs\":{");
+    for (i, (name, value)) in inputs.iter().enumerate() {
+        if i > 0 {
+            buf.push(b',');
+        }
+        put_str(&mut buf, name);
+        buf.push(b':');
+        put_str(&mut buf, value.expose());
+    }
+    buf.extend_from_slice(b"}}\n");
+    buf
+}
+
+/// The project file the producer's `command` names (the one its `sha256` pins), for a
+/// refusal to name; else `command[0]`.
+fn project_file(project: &Path, command: &[String]) -> PathBuf {
+    command
+        .iter()
+        .skip(1)
+        .find(|a| !a.starts_with('-') && project.join(a).is_file())
+        .or(command.first())
+        .map(PathBuf::from)
+        .unwrap_or_default()
+}
+
+/// Every input of every producer in the plan holds a value in the set's item (§5.5: inputs
+/// resolve only within this environment's item), else `KeysBlocking` naming each missing
+/// one, before the confirmation.
+fn inputs_present(
+    fleet: &Fleet,
+    plan: &Plan,
+    req: &Request<'_>,
+    held: &Held<'_>,
+) -> Result<(), Error> {
+    let rows: Vec<ValueRow> = plan
+        .producers
+        .iter()
+        .flat_map(|p| fleet.producers[&p.name].inputs.values())
+        .filter(|key| held.value(key).is_none())
+        .map(|key| ValueRow {
+            product: ProductName::new(&key.product),
+            key: KeyName::new(&key.key),
+            target: None,
+            state: crate::cause::ValueState::Missing,
+        })
+        .collect();
+    if rows.is_empty() {
+        Ok(())
+    } else {
+        Err(Cause::KeysBlocking {
+            env: EnvName::new(req.env),
+            rows,
+        }
+        .into())
     }
 }
 
@@ -410,29 +1176,26 @@ fn who_is_running(
     super::tidy::require_person_on(r, "opv provision", host)
 }
 
-/// Each member's value state in the item `raw`, in name order. The values are judged in
-/// memory against every declared rule and dropped here.
+/// Each member's value state in the item read at `S0`, in name order. The values are
+/// judged in memory against every declared rule and dropped here.
 fn member_states(
     fleet: &Fleet,
     set: &ProvisionSet,
     env_name: &str,
     environment: &Environment,
-    raw: &[u8],
-) -> Result<Vec<(String, ValueState)>, Error> {
-    let (layout, _) = onepassword_tidy::parse(raw)?;
-    let part = super::tidy::in_boundary(fleet, &set.boundary);
-    let res = convention::resolve(&layout, &part);
-    Ok(set
-        .members
+    held: &Held<'_>,
+) -> Vec<(String, ValueState)> {
+    set.members
         .keys()
         .map(|m| {
             let spec = &fleet.products[&m.product].keys[&m.key];
-            let held = res
+            let value = held
+                .res
                 .chosen
                 .get(&(m.product.clone(), m.key.clone()))
-                .map(|&i| &layout.fields[i].value);
+                .map(|&i| &held.layout.fields[i].value);
             let state =
-                value_state::classify(Ok(held), presence::present_in(spec, env_name), true, |v| {
+                value_state::classify(Ok(value), presence::present_in(spec, env_name), true, |v| {
                     rules::check_verbatim(
                         &m.product,
                         &m.key,
@@ -447,7 +1210,7 @@ fn member_states(
                 });
             (m.to_string(), state)
         })
-        .collect())
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -455,7 +1218,7 @@ fn build_plan(
     fleet: &Fleet,
     set: &ProvisionSet,
     req: &Request<'_>,
-    b: &crate::domain::Boundary,
+    b: &Boundary,
     version: Option<u64>,
     state: SetState,
     states: &[(String, ValueState)],

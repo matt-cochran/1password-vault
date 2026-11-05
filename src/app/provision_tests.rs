@@ -1,8 +1,8 @@
-//! `opv provision` part 1 (design `owner-value-ingestion.md` §10.3 test 28, §10.4 tests
-//! 31-38, and the classify and confirmation steps of §4.2): one behavioural assertion per
-//! test, through the public `provision` seam with the stateful fake `op`.
+//! `opv provision` (design `owner-value-ingestion.md` §10.3 tests 18-28, §10.4 tests
+//! 31-38, and the steps of §4.2): one behavioural assertion per test, through the public
+//! `provision` seam with the stateful fake `op` and scripted producers.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::io;
 use std::time::Duration;
 
@@ -10,6 +10,7 @@ use super::*;
 use crate::adapters::fake_op::FakeOp;
 use crate::cause::{Cause, Guard, NoTerminal, Principal, ProvisionRefusal, UnsupportedFeature};
 use crate::host::FakeEnv;
+use crate::runner::fake::{ScriptedEnd, ScriptedProducer};
 use crate::runner::{Call, Output};
 
 const VAULT: &str = "vdev0000000000000000000001";
@@ -60,11 +61,37 @@ kind = "secret"
 kind = "secret"
 rules = {{ hex_bytes = 32 }}
 
+[products.app.keys.SIGNING_KEY]
+kind = "secret"
+rules = {{ hex_bytes = 32 }}
+
+[products.app.keys.ID_TOKEN]
+kind = "secret"
+rules = {{ prefix = "id_" }}
+
+[products.app.keys.ACCESS_TOKEN]
+kind = "secret"
+rules = {{ prefix = "at_" }}
+
 [producers.consent]
 command = ["python3", "-c", "pass"]
 outputs = ["refresh_token"]
 inputs = {{ client_id = "app/CLIENT_ID" }}
+open_url_hosts = ["accounts.example.com"]
 timeout = "10m"
+
+[producers.pair]
+command = ["python3", "-c", "pass"]
+outputs = ["id", "access"]
+timeout = "1m"
+
+[sets.signing]
+environments = ["prod", "staging"]
+members = {{ "app/SIGNING_KEY" = {{ generate = "rules" }} }}
+
+[sets.tokens]
+environments = ["prod"]
+members = {{ "app/ID_TOKEN" = {{ producer = "pair", output = "id" }}, "app/ACCESS_TOKEN" = {{ producer = "pair", output = "access" }} }}
 
 [sets.grant]
 environments = ["prod", "staging"]
@@ -84,11 +111,79 @@ fn world() -> (FakeOp, Fleet) {
     world_with("")
 }
 
-/// A console that answers the typed-back question with `answer` and counts the questions.
+/// The item ID of `app` in `env`.
+fn item_id(fleet: &Fleet, env: &str) -> String {
+    fleet.environments[env].boundaries["app"]
+        .as_ref()
+        .unwrap()
+        .item_id
+        .clone()
+}
+
+/// The value of field `label` in item `id` outside the kept section, if any.
+fn field(op: &FakeOp, id: &str, label: &str) -> Option<String> {
+    held_in(op, id, |f| {
+        f["label"] == label && f["section"]["label"] != crate::domain::convention::KEPT_SECTION
+    })
+}
+
+/// The value of the first field of item `id` that `pick` chooses.
+fn held_in(op: &FakeOp, id: &str, pick: impl Fn(&serde_json::Value) -> bool) -> Option<String> {
+    op.item(id)["fields"]
+        .as_array()?
+        .iter()
+        .find(|f| pick(f))
+        .and_then(|f| f["value"].as_str().map(str::to_string))
+}
+
+/// Set field `label` of item `id` to `value`.
+fn put(op: &FakeOp, id: &str, label: &str, value: &str) {
+    for i in op.items.borrow_mut().iter_mut() {
+        if i["id"] == id {
+            for f in i["fields"].as_array_mut().into_iter().flatten() {
+                if f["label"] == label {
+                    f["value"] = serde_json::json!(value);
+                }
+            }
+        }
+    }
+}
+
+/// A made refresh token the scripted producer returns.
+const MADE: &str = "made-REFRESHTOKEN-9876543210";
+
+/// A producer's result line for `env` with `outputs`; `{nonce}` is this run's nonce.
+fn result_line(env: &str, outputs: &[(&str, &str)]) -> String {
+    let outputs: serde_json::Map<String, serde_json::Value> = outputs
+        .iter()
+        .map(|(k, v)| (k.to_string(), serde_json::json!(v)))
+        .collect();
+    serde_json::json!({
+        "schema": "opv.produce/1", "kind": "result", "env": env, "nonce": "{nonce}",
+        "outputs": outputs
+    })
+    .to_string()
+}
+
+/// Queue a producer that prints `lines` and exits 0.
+fn producing(op: &FakeOp, lines: Vec<String>) {
+    op.producers
+        .borrow_mut()
+        .push_back(ScriptedProducer::new(lines, ScriptedEnd::Exit(0)));
+}
+
+/// Queue the `consent` producer returning `token` for `env`.
+fn consent(op: &FakeOp, env: &str, token: &str) {
+    producing(op, vec![result_line(env, &[("refresh_token", token)])]);
+}
+
+/// A console that answers the typed-back question with `answer`, counts the questions, and
+/// records what it showed and the URLs it was asked to open.
 struct Scripted {
     answer: Option<&'static str>,
     asked: Cell<usize>,
     shown: Vec<String>,
+    opened: RefCell<Vec<String>>,
 }
 
 impl Scripted {
@@ -97,6 +192,7 @@ impl Scripted {
             answer,
             asked: Cell::new(0),
             shown: Vec::new(),
+            opened: RefCell::default(),
         }
     }
 }
@@ -109,6 +205,10 @@ impl ProvisionConsole for Scripted {
     fn type_back(&mut self, _question: &str) -> Result<Option<String>, Error> {
         self.asked.set(self.asked.get() + 1);
         Ok(self.answer.map(str::to_string))
+    }
+    fn open_url(&mut self, url: &str) -> bool {
+        self.opened.borrow_mut().push(url.to_string());
+        true
     }
 }
 
@@ -123,17 +223,27 @@ fn request<'a>(set: &'a str, env: &'a str) -> Request<'a> {
         env,
         dry_run: false,
         replace: false,
+        project: Path::new("."),
     }
 }
 
 fn run(
-    op: &dyn CommandRunner,
+    op: &FakeOp,
     fleet: &Fleet,
     host: &FakeEnv,
     req: Request<'_>,
     console: &mut Scripted,
 ) -> Result<Outcome, Error> {
-    provision(fleet, host, &req, op, console)
+    provision(fleet, host, &req, &Wrapped::new(op), console)
+}
+
+fn run_on(
+    r: &Wrapped<'_>,
+    fleet: &Fleet,
+    req: Request<'_>,
+    console: &mut Scripted,
+) -> Result<Outcome, Error> {
+    provision(fleet, &person(), &req, r, console)
 }
 
 /// The refusal's cause; panics on success.
@@ -150,17 +260,43 @@ fn refusal_of(r: Result<Outcome, Error>) -> Option<ProvisionRefusal> {
     }
 }
 
-/// The fake `op` with a run budget of `left`.
-struct Budgeted<'a> {
+/// The fake `op`, with an optional run budget of `left`, an `item edit` that can fail, and
+/// scripted producers whose `{nonce}` becomes the run's own.
+struct Wrapped<'a> {
     op: &'a FakeOp,
-    left: Duration,
+    left: Option<Duration>,
+    fail_edit: bool,
 }
 
-impl CommandRunner for Budgeted<'_> {
+impl<'a> Wrapped<'a> {
+    fn new(op: &'a FakeOp) -> Self {
+        Self {
+            op,
+            left: None,
+            fail_edit: false,
+        }
+    }
+}
+
+/// The fake `op` with a run budget of `left`.
+fn budgeted(op: &FakeOp, left: Duration) -> Wrapped<'_> {
+    Wrapped {
+        left: Some(left),
+        ..Wrapped::new(op)
+    }
+}
+
+impl CommandRunner for Wrapped<'_> {
     fn read(&self, call: &Call, refused: &[i32]) -> io::Result<crate::runner::Outcome> {
         self.op.read(call, refused)
     }
     fn write(&self, call: &Call) -> io::Result<crate::runner::Outcome> {
+        if self.fail_edit && call.args.starts_with(&["item", "edit"]) {
+            return Ok(crate::runner::Outcome::Unknown {
+                reason: "failed-write",
+                status: Some(1),
+            });
+        }
         self.op.write(call)
     }
     fn probe(&self, call: &Call, limit: Duration) -> io::Result<Output> {
@@ -176,7 +312,21 @@ impl CommandRunner for Budgeted<'_> {
         self.op.run_inherited(p, a, e)
     }
     fn remaining(&self) -> Option<Duration> {
-        Some(self.left)
+        self.left
+    }
+    fn produce(
+        &self,
+        call: &crate::runner::ProduceCall,
+        on_line: &mut dyn FnMut(crate::runner::ProducedLine<'_>) -> crate::runner::LineVerdict,
+    ) -> Result<crate::runner::Produced, Error> {
+        let request: serde_json::Value = serde_json::from_slice(call.request).unwrap();
+        let nonce = request["nonce"].as_str().unwrap().to_string();
+        if let Some(script) = self.op.producers.borrow_mut().front_mut() {
+            for line in &mut script.lines {
+                *line = line.replace("{nonce}", &nonce);
+            }
+        }
+        self.op.produce(call, on_line)
     }
 }
 
@@ -185,14 +335,10 @@ impl CommandRunner for Budgeted<'_> {
 #[test]
 fn a_budget_smaller_than_the_producer_timeout_and_reserve_is_refused() {
     let (op, fleet) = world();
-    let short = Budgeted {
-        op: &op,
-        left: Duration::from_secs(5 * 60),
-    };
-    let r = run(
+    let short = budgeted(&op, Duration::from_secs(5 * 60));
+    let r = run_on(
         &short,
         &fleet,
-        &person(),
         request("grant", "prod"),
         &mut Scripted::answering(Some("prod")),
     );
@@ -208,36 +354,24 @@ fn a_budget_smaller_than_the_producer_timeout_and_reserve_is_refused() {
 #[test]
 fn a_budget_refusal_comes_before_the_confirmation() {
     let (op, fleet) = world();
-    let short = Budgeted {
-        op: &op,
-        left: Duration::from_secs(5 * 60),
-    };
+    let short = budgeted(&op, Duration::from_secs(5 * 60));
     let mut console = Scripted::answering(Some("prod"));
-    let _ = run(
-        &short,
-        &fleet,
-        &person(),
-        request("grant", "prod"),
-        &mut console,
-    );
+    let _ = run_on(&short, &fleet, request("grant", "prod"), &mut console);
     assert_eq!(console.asked.get(), 0);
 }
 
 #[test]
-fn a_budget_with_room_for_the_producer_and_reserve_is_confirmed() {
+fn a_budget_with_room_for_the_producer_and_reserve_is_written() {
     let (op, fleet) = world();
-    let room = Budgeted {
-        op: &op,
-        left: Duration::from_secs(30 * 60),
-    };
-    let r = run(
+    consent(&op, "prod", MADE);
+    let room = budgeted(&op, Duration::from_secs(30 * 60));
+    let r = run_on(
         &room,
         &fleet,
-        &person(),
         request("grant", "prod"),
         &mut Scripted::answering(Some("prod")),
     );
-    assert!(matches!(r, Ok(Outcome::Confirmed(_))));
+    assert!(matches!(r, Ok(Outcome::Written(_))));
 }
 
 // ---- §10.4 tests 31-38: refusals --------------------------------------------------
@@ -366,6 +500,7 @@ fn a_session_variable_in_production_needs_the_persons_own_session() {
 #[test]
 fn a_session_variable_outside_production_is_not_refused() {
     let (op, fleet) = world();
+    consent(&op, "staging", MADE);
     let r = run(
         &op,
         &fleet,
@@ -373,7 +508,7 @@ fn a_session_variable_outside_production_is_not_refused() {
         request("grant", "staging"),
         &mut Scripted::answering(Some("staging")),
     );
-    assert!(matches!(r, Ok(Outcome::Confirmed(_))));
+    assert!(matches!(r, Ok(Outcome::Written(_))));
 }
 
 #[test]
@@ -594,8 +729,9 @@ fn an_inconsistent_set_is_refused_naming_the_failing_member() {
 }
 
 #[test]
-fn an_absent_set_typed_back_is_confirmed() {
+fn an_absent_set_typed_back_is_written() {
     let (op, fleet) = world();
+    consent(&op, "prod", MADE);
     let r = run(
         &op,
         &fleet,
@@ -603,7 +739,7 @@ fn an_absent_set_typed_back_is_confirmed() {
         request("grant", "prod"),
         &mut Scripted::answering(Some("prod")),
     );
-    assert!(matches!(r, Ok(Outcome::Confirmed(_))));
+    assert!(matches!(r, Ok(Outcome::Written(_))));
 }
 
 #[test]
@@ -620,8 +756,9 @@ fn no_typed_answer_declines() {
 }
 
 #[test]
-fn the_confirmed_plan_carries_the_version_read() {
+fn the_written_plan_carries_the_version_read() {
     let (op, fleet) = world();
+    consent(&op, "prod", MADE);
     let r = run(
         &op,
         &fleet,
@@ -635,6 +772,7 @@ fn the_confirmed_plan_carries_the_version_read() {
 #[test]
 fn the_plan_is_shown_before_the_confirmation() {
     let (op, fleet) = world();
+    consent(&op, "prod", MADE);
     let mut console = Scripted::answering(Some("prod"));
     let _ = run(
         &op,
@@ -653,18 +791,10 @@ fn the_plan_is_shown_before_the_confirmation() {
 #[test]
 fn the_plan_shows_the_budget_with_the_commit_reserve() {
     let (op, fleet) = world();
-    let room = Budgeted {
-        op: &op,
-        left: Duration::from_secs(30 * 60),
-    };
+    consent(&op, "prod", MADE);
+    let room = budgeted(&op, Duration::from_secs(30 * 60));
     let mut console = Scripted::answering(Some("prod"));
-    let _ = run(
-        &room,
-        &fleet,
-        &person(),
-        request("grant", "prod"),
-        &mut console,
-    );
+    let _ = run_on(&room, &fleet, request("grant", "prod"), &mut console);
     assert!(
         console.shown[0].contains("budget  10m producer + 4m commit of 30m left"),
         "{:?}",
@@ -744,4 +874,430 @@ fn replace_with_an_immutable_member_is_refused_before_the_confirmation() {
 fn a_session_variable_is_found_through_the_host_seam() {
     let found = crate::host::credential_on(&FakeEnv::new("linux").var("OP_SESSION_abcdef"));
     assert_eq!(found.as_deref(), Some("OP_SESSION_abcdef"));
+}
+
+// ---- §10.3 tests 18-27: produce, generate, validate, commit -----------------------
+
+#[test]
+fn an_absent_producer_set_holds_the_producers_value_after_the_write() {
+    let (op, fleet) = world();
+    consent(&op, "prod", MADE);
+    let _ = run(
+        &op,
+        &fleet,
+        &person(),
+        request("grant", "prod"),
+        &mut Scripted::answering(Some("prod")),
+    );
+    assert_eq!(
+        field(&op, &item_id(&fleet, "prod"), "REFRESH_TOKEN").as_deref(),
+        Some(MADE)
+    );
+}
+
+#[test]
+fn a_complete_set_makes_no_item_edit() {
+    let (op, fleet) = world_with(HELD);
+    let _ = run(
+        &op,
+        &fleet,
+        &person(),
+        request("grant", "prod"),
+        &mut Scripted::answering(Some("prod")),
+    );
+    assert_eq!(op.count(&["op", "item", "edit"]), 0);
+}
+
+#[test]
+fn a_complete_set_never_starts_the_producer() {
+    let (op, fleet) = world_with(HELD);
+    consent(&op, "prod", MADE);
+    let _ = run(
+        &op,
+        &fleet,
+        &person(),
+        request("grant", "prod"),
+        &mut Scripted::answering(Some("prod")),
+    );
+    assert_eq!(op.producers.borrow().len(), 1);
+}
+
+#[test]
+fn a_partial_set_makes_no_item_edit() {
+    let (op, fleet) = world();
+    let _ = run(
+        &op,
+        &fleet,
+        &person(),
+        request("keys", "prod"),
+        &mut Scripted::answering(Some("prod")),
+    );
+    assert_eq!(op.count(&["op", "item", "edit"]), 0);
+}
+
+#[test]
+fn a_failed_item_edit_leaves_the_item_at_its_prior_version() {
+    let (op, fleet) = world();
+    consent(&op, "prod", MADE);
+    let failing = Wrapped {
+        fail_edit: true,
+        ..Wrapped::new(&op)
+    };
+    let _ = run_on(
+        &failing,
+        &fleet,
+        request("grant", "prod"),
+        &mut Scripted::answering(Some("prod")),
+    );
+    assert_eq!(op.item(&item_id(&fleet, "prod"))["version"], 1);
+}
+
+#[test]
+fn replace_keeps_the_old_value_in_the_kept_section() {
+    let (op, fleet) = world_with(HELD);
+    consent(&op, "prod", MADE);
+    let _ = run(
+        &op,
+        &fleet,
+        &person(),
+        Request {
+            replace: true,
+            ..request("grant", "prod")
+        },
+        &mut Scripted::answering(Some("prod")),
+    );
+    let kept = held_in(&op, &item_id(&fleet, "prod"), |f| {
+        f["section"]["label"] == crate::domain::convention::KEPT_SECTION
+    });
+    assert_eq!(kept.as_deref(), Some(HELD));
+}
+
+#[test]
+fn replace_with_an_immutable_member_never_starts_the_producer() {
+    let (op, mut fleet) = world_with(HELD);
+    consent(&op, "prod", MADE);
+    fleet
+        .products
+        .get_mut("app")
+        .unwrap()
+        .keys
+        .get_mut("REFRESH_TOKEN")
+        .unwrap()
+        .immutable = true;
+    let _ = run(
+        &op,
+        &fleet,
+        &person(),
+        Request {
+            replace: true,
+            ..request("grant", "prod")
+        },
+        &mut Scripted::answering(Some("prod")),
+    );
+    assert_eq!(op.producers.borrow().len(), 1);
+}
+
+#[test]
+fn a_producer_value_another_environment_holds_is_refused_as_the_same_across_environments() {
+    let (op, fleet) = world();
+    put(&op, &item_id(&fleet, "staging"), "REFRESH_TOKEN", MADE);
+    consent(&op, "prod", MADE);
+    let r = run(
+        &op,
+        &fleet,
+        &person(),
+        request("grant", "prod"),
+        &mut Scripted::answering(Some("prod")),
+    );
+    assert_eq!(
+        refusal_of(r),
+        Some(ProvisionRefusal::SameAcrossEnvironments {
+            member: "app/REFRESH_TOKEN".into(),
+            other: EnvName::new("staging"),
+        })
+    );
+}
+
+#[test]
+fn a_generated_set_reads_no_other_environment() {
+    let (op, fleet) = world();
+    let staging = item_id(&fleet, "staging");
+    let _ = run(
+        &op,
+        &fleet,
+        &person(),
+        request("signing", "prod"),
+        &mut Scripted::answering(Some("prod")),
+    );
+    assert!(!op.calls.borrow().iter().any(|c| c.args.contains(&staging)));
+}
+
+#[test]
+fn made_values_failing_their_rules_name_every_failing_member() {
+    let (op, fleet) = world();
+    producing(
+        &op,
+        vec![result_line(
+            "prod",
+            &[
+                ("id", "no-prefix-id-value"),
+                ("access", "no-prefix-access-value"),
+            ],
+        )],
+    );
+    let r = run(
+        &op,
+        &fleet,
+        &person(),
+        request("tokens", "prod"),
+        &mut Scripted::answering(Some("prod")),
+    );
+    let named: Vec<String> = match cause_of(r) {
+        Cause::KeysBlocking { rows, .. } => rows
+            .iter()
+            .map(|row| format!("{}/{}", row.product, row.key))
+            .collect(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(named, ["app/ACCESS_TOKEN", "app/ID_TOKEN"]);
+}
+
+#[test]
+fn made_values_failing_their_rules_make_no_item_edit() {
+    let (op, fleet) = world();
+    producing(
+        &op,
+        vec![result_line(
+            "prod",
+            &[
+                ("id", "no-prefix-id-value"),
+                ("access", "no-prefix-access-value"),
+            ],
+        )],
+    );
+    let _ = run(
+        &op,
+        &fleet,
+        &person(),
+        request("tokens", "prod"),
+        &mut Scripted::answering(Some("prod")),
+    );
+    assert_eq!(op.count(&["op", "item", "edit"]), 0);
+}
+
+// ---- §5.2 through the use case: the producer's lines --------------------------------
+
+#[test]
+fn a_producer_error_line_is_reported_by_its_code() {
+    let (op, fleet) = world();
+    producing(
+        &op,
+        vec![r#"{"schema":"opv.produce/1","kind":"error","code":"access_denied"}"#.into()],
+    );
+    let r = run(
+        &op,
+        &fleet,
+        &person(),
+        request("grant", "prod"),
+        &mut Scripted::answering(Some("prod")),
+    );
+    assert_eq!(
+        cause_of(r),
+        Cause::ProducerFailed {
+            producer: "consent".into(),
+            why: ProducerFailure::Reported {
+                code: "access_denied".into()
+            },
+        }
+    );
+}
+
+#[test]
+fn a_producer_error_line_makes_no_item_edit() {
+    let (op, fleet) = world();
+    producing(
+        &op,
+        vec![r#"{"schema":"opv.produce/1","kind":"error","code":"access_denied"}"#.into()],
+    );
+    let _ = run(
+        &op,
+        &fleet,
+        &person(),
+        request("grant", "prod"),
+        &mut Scripted::answering(Some("prod")),
+    );
+    assert_eq!(op.count(&["op", "item", "edit"]), 0);
+}
+
+const CONSENT_URL: &str = "https://accounts.example.com/o/oauth2/auth?client_id=public";
+
+fn consent_with_url(op: &FakeOp, url: &str) {
+    producing(
+        op,
+        vec![
+            serde_json::json!({"schema": "opv.produce/1", "kind": "notice", "open_url": url})
+                .to_string(),
+            result_line("prod", &[("refresh_token", MADE)]),
+        ],
+    );
+}
+
+#[test]
+fn an_allowed_consent_url_is_handed_to_the_opener() {
+    let (op, fleet) = world();
+    consent_with_url(&op, CONSENT_URL);
+    let console = &mut Scripted::answering(Some("prod"));
+    let _ = run(&op, &fleet, &person(), request("grant", "prod"), console);
+    assert_eq!(*console.opened.borrow(), [CONSENT_URL]);
+}
+
+#[test]
+fn a_consent_url_on_another_host_is_never_opened() {
+    let (op, fleet) = world();
+    consent_with_url(&op, "https://evil.example.net/consent");
+    let console = &mut Scripted::answering(Some("prod"));
+    let _ = run(&op, &fleet, &person(), request("grant", "prod"), console);
+    assert!(console.opened.borrow().is_empty());
+}
+
+#[test]
+fn the_producer_gets_the_input_value_on_its_stdin() {
+    let (op, fleet) = world();
+    consent(&op, "prod", MADE);
+    let _ = run(
+        &op,
+        &fleet,
+        &person(),
+        request("grant", "prod"),
+        &mut Scripted::answering(Some("prod")),
+    );
+    let stdin = op
+        .calls
+        .borrow()
+        .iter()
+        .find(|c| c.program == "python3")
+        .and_then(|c| c.stdin.clone())
+        .unwrap_or_default();
+    let request: serde_json::Value = serde_json::from_slice(&stdin).unwrap();
+    assert_eq!(request["inputs"]["client_id"], "client-id-value");
+}
+
+#[test]
+fn a_missing_input_is_refused_before_the_confirmation() {
+    let (op, fleet) = world();
+    put(&op, &item_id(&fleet, "prod"), "CLIENT_ID", "");
+    let mut console = Scripted::answering(Some("prod"));
+    let _ = run(
+        &op,
+        &fleet,
+        &person(),
+        request("grant", "prod"),
+        &mut console,
+    );
+    assert_eq!(console.asked.get(), 0);
+}
+
+#[test]
+fn a_generated_set_holds_its_value_after_the_write() {
+    let (op, fleet) = world();
+    let _ = run(
+        &op,
+        &fleet,
+        &person(),
+        request("signing", "prod"),
+        &mut Scripted::answering(Some("prod")),
+    );
+    let v = field(&op, &item_id(&fleet, "prod"), "SIGNING_KEY").unwrap_or_default();
+    assert!(v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit()));
+}
+
+// ---- §4.2 step 5: an item the edit cannot keep -------------------------------------
+
+#[test]
+fn an_item_with_an_attachment_is_refused_as_not_rewritable() {
+    let (op, fleet) = world();
+    let id = item_id(&fleet, "prod");
+    for i in op.items.borrow_mut().iter_mut() {
+        if i["id"] == id.as_str() {
+            i["files"] = serde_json::json!([{"id": "f", "name": "cert.pem"}]);
+        }
+    }
+    let r = run(
+        &op,
+        &fleet,
+        &person(),
+        request("grant", "prod"),
+        &mut Scripted::answering(Some("prod")),
+    );
+    assert_eq!(
+        refusal_of(r),
+        Some(ProvisionRefusal::ItemNotRewritable {
+            holds: "an attachment".into()
+        })
+    );
+}
+
+// ---- §7: the receipt ----------------------------------------------------------------
+
+fn written_receipt(op: &FakeOp, fleet: &Fleet) -> Receipt {
+    run(
+        op,
+        fleet,
+        &person(),
+        request("grant", "prod"),
+        &mut Scripted::answering(Some("prod")),
+    )
+    .unwrap()
+    .receipt()
+    .unwrap()
+}
+
+#[test]
+fn the_receipt_names_the_versions_before_and_after() {
+    let (op, fleet) = world();
+    consent(&op, "prod", MADE);
+    let item = written_receipt(&op, &fleet).item;
+    assert_eq!(
+        (item.version_before, item.version_after),
+        (Some(1), Some(2))
+    );
+}
+
+#[test]
+fn the_receipt_lists_the_compared_environment() {
+    let (op, fleet) = world();
+    consent(&op, "prod", MADE);
+    assert_eq!(
+        written_receipt(&op, &fleet).compared_environments,
+        ["staging"]
+    );
+}
+
+#[test]
+fn the_receipt_holds_no_value() {
+    let (op, fleet) = world();
+    consent(&op, "prod", MADE);
+    let receipt = written_receipt(&op, &fleet);
+    let text = format!("{}{receipt:?}", serde_json::to_string(&receipt).unwrap());
+    assert!(!text.contains(MADE) && !text.contains("client-id-value"));
+}
+
+#[test]
+fn nothing_the_producer_printed_is_shown() {
+    let (op, fleet) = world();
+    consent_with_url(&op, CONSENT_URL);
+    let mut console = Scripted::answering(Some("prod"));
+    let _ = run(
+        &op,
+        &fleet,
+        &person(),
+        request("grant", "prod"),
+        &mut console,
+    );
+    assert!(
+        !console
+            .shown
+            .iter()
+            .any(|l| l.contains(MADE) || l.contains("opv.produce"))
+    );
 }
