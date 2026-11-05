@@ -193,6 +193,15 @@ pub const EFFECTS: &[Effect] = &[
         handles_values: false,
         ask_user_first: false,
     },
+    // #271: with --exec, unseal delivers the bundle's values to the command it runs (design
+    // §5.5), like `run`.
+    Effect {
+        command: "unseal --exec",
+        effect: "runs_command",
+        needs_terminal: false,
+        handles_values: true,
+        ask_user_first: true,
+    },
     Effect {
         command: "run --preview",
         effect: "reads",
@@ -726,6 +735,7 @@ fn exit_codes() -> Value {
         "131": {"meaning": "interrupted (SIGQUIT)", "retry": "safe"},
         "143": {"meaning": "interrupted (SIGTERM)", "retry": "safe"},
         "run": "opv run exits with the child's own code",
+        "unseal --exec": "opv unseal --exec exits with the command's own code",
     })
 }
 
@@ -837,7 +847,7 @@ fn documents() -> Value {
         "delivery verify": "{environment, placements: [{product, target, revision, state, reason, names: [{name, state, attested?, supplied?}], attested?, supplied?, deployed, receipt_revision?}]}: every placement of the product, each with its target and state; --target narrows to one placement; a receipt kept from sync --receipt must be the current delivery; attested (a name's flag, the placement's list from its receipt) marks a name counted on a person's attestation, not proven (docs/attestation.md); supplied marks a name whose value was supplied at sync: its verified means unchanged on the target since supplied, not current, and it is never source_changed",
         "changed": "{environment, changed, placements: [{product, target, state (unchanged|changed|no_record), items?: [{item_id, recorded, current?}]}], next, do}: each placement's recorded source versions against the item's current version (item IDs and version numbers only, never a value); exit 10 when something changed, with ok true",
         "schema": "this document",
-        "unseal": "{schema: \"opv.unseal/1\", bundle: {format, project, environment, product, target, revision, created_at, opv_version, plan_id, contract_digest, signer, recipient}, names: [{name, destination}], checked: {signature, recipient, payload, runtime_dir (ram_backed|not_needed|not_checked)}}: a sealed bundle verified offline (signer and recipient are fingerprints); never a value, an identity or a recipient string",
+        "unseal": "{schema: \"opv.unseal/1\", bundle: {format, project, environment, product, target, revision, created_at, opv_version, plan_id, contract_digest, signer, recipient}, names: [{name, destination}], checked: {signature, recipient, payload, runtime_dir (ram_backed|not_needed|not_checked)}, overridden: [name]}: a sealed bundle verified offline; overridden names the bundle variables this environment already sets, which --exec replaces (--json conflicts with --exec) (signer and recipient are fingerprints); never a value, an identity or a recipient string",
         "inventory": [
             "environments: [{env, tier, boundaries: {name: {vault_id, item_id} or null}}]",
             "keys: [{product, key, kind, source, presence, lifecycle, expires, attributes, delivery, location, next}]",

@@ -579,10 +579,12 @@
     },
     {
       "args": [
-        "bundle"
+        "bundle",
+        "command"
       ],
       "flags": [
         "env",
+        "exec",
         "identity-env",
         "identity-file",
         "json",
