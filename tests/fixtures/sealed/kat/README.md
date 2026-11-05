@@ -13,6 +13,7 @@ anything; never use them for real data.
 | `signer_ed25519.pkcs8.pem` | the same key's seed as RFC 8410 PKCS#8 DER (the form `op` returns by default, T16); `openssl pkey -pubout` gives the same public key |
 | `message.txt`, `message.txt.sig` | `ssh-keygen -Y sign -n opv-sealed -f signer_ed25519 message.txt` |
 | `allowed_signers` | one strict-subset line, principal `prod` (an environment name) |
+| `bundle.opv-sealed` | lane B2, design §10 item 1: an `opv-sealed/1` bundle built with the stock tools only — a hand-framed payload (`DATABASE_URL`, `TLS_KEY`, marker values), `age -a -r <age-recipient.txt>`, then `ssh-keygen -Y sign -n opv-sealed -f signer_ed25519` over the format line, header and age block |
 
 Checked with the stock tool:
 
@@ -21,6 +22,11 @@ ssh-keygen -Y verify -f allowed_signers -I prod    -n opv-sealed -s message.txt.
 ssh-keygen -Y verify -f allowed_signers -I staging -n opv-sealed -s message.txt.sig < message.txt   # refused
 ssh-keygen -Y verify -f allowed_signers -I prod    -n git        -s message.txt.sig < message.txt   # refused: namespace
 ```
+
+Design §10 item 3 (one-off, 2026-11-04, lane B2): a bundle sealed in process by
+`bundle::crypto::seal` verifies with `ssh-keygen -Y verify -f allowed_signers -I prod -n
+opv-sealed` over its bytes above the signature block, and its age block decrypts with
+`age -d -i age-identity.txt` to the framed payload.
 
 `tests/sealed_kat.rs` loads these with the `age` and `ssh-key` crates. `.gitattributes` keeps
 the bytes exact on any checkout.

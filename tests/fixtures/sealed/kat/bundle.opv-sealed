@@ -1,0 +1,19 @@
+opv-sealed v1
+{"contract_digest":"sha256:6b0a19f4287da60ff9f109e83c6090b5d1ad830a1b90f5847a62e41b70d0d0de","created_at":"2026-11-04T12:00:00Z","environment":"prod","format":"opv-sealed/1","names":[{"destination":"env:DATABASE_URL","name":"DATABASE_URL"},{"destination":"file:tls/key","name":"TLS_KEY"}],"opv_version":"0.18.0","plan_id":"plan_kat0001","product":"api","project":"fleet","recipients":["sha256:40ef75a4870713f1"],"revision":7,"signer":"SHA256:WukzcBfSQ/h2lb+LBUQqZV32GZGju50eutYraFc51OY","target":"box"}
+-----BEGIN AGE ENCRYPTED FILE-----
+YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBoQ0ozR3NKbGlWeUlzWnFw
+U3MzZ3JnMHBSUmF3Ykh1YlJrTkpBQ2d4Z3hjCnQwaGFHc3pKZVRrN0UxZ0piSjZB
+N1NndHNUSm8rcXQ5dDVRL0xGcE5jdFEKLS0tIHZoenNMdjdkZ1g2YzY3TmlvU3J5
+RG9kZHhyOEZHSVZpbll2VlBQeXhLQWcKdkH89nq6V481PYOh6x2Iy0p0crq9cQ9Q
+IzfUqzghQPIzGy4xkxQfBMFD/D65DNMJH0JzZN8ei7ILGbJsAONSWWVCxuD7ojR6
+Ln72CpK+k3Q1hFbYvkFRlJs2DMwXIqysvebPpHIJbmUiH+6B3LYz+MNGWVIRV4PY
+LQxDKoxOOPp7iGz3co2PyAREqeszYCBoRsm2DIsDxhEUrNm+MjhmLuNWcJ2NLtis
+DmhPZTJtXcyXNOvhqDuFksCD+6PQofsHZd+dr9AfH6Edjjh1RIHEepj5Q2Fbrgb1
+y7myg6NHbZ5Ydto=
+-----END AGE ENCRYPTED FILE-----
+-----BEGIN SSH SIGNATURE-----
+U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAg2KuCitiVA3453l4C2kkEjLXAg4
+K+V9B/Xshd0y3PI/kAAAAKb3B2LXNlYWxlZAAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gt
+ZWQyNTUxOQAAAECQKJ7HVICB+qXhbk11pDwaK77drCWGAOgsRPkJKhilXlr3ZqENO8EO2+
+sIhmU0vQDOn+VbsUa276mOGVVY5jUO
+-----END SSH SIGNATURE-----
