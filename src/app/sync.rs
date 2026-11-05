@@ -36,9 +36,9 @@ use sha2::{Digest, Sha256};
 use super::{
     JsonPart, KeyNames, Prefixed, check_product, ci_summary, compare, findings_error, is_blocking,
     managed_names, open_target, placement, plan_id_of, plan_item_with, plural, preflight,
-    print_extras, print_legend, print_rows, product_names, read_and_plan_versioned,
-    read_item_fields, resolve_targets, rows_item_url, scope_plan, target_cell, target_runners,
-    target_word, unmanaged_on_target, write_err, write_json,
+    print_extras, print_legend, print_rows, product_names, read_item_fields, resolve_targets,
+    rows_item_url, scope_plan, target_cell, target_runners, target_word, unmanaged_on_target,
+    write_err, write_json,
 };
 use crate::cause::{
     Cause, Closest, Cmd, EnvName, KeyName, NameKind, PlanId, PlanScope, ProductKey, ProductName,
@@ -93,6 +93,10 @@ pub struct SyncOpts {
     /// its infrastructure keys from standard input ([`run_supplying`]); the values are never
     /// written to 1Password.
     pub supply_stdin: bool,
+    /// `--sealed-root <dir>` (design `sealed-target` D12): a target that writes files of
+    /// its own (a sealed bundle) resolves them under `<dir>`, a checkout of the repository
+    /// that holds them, instead of beside the configuration.
+    pub sealed_root: Option<std::path::PathBuf>,
 }
 
 impl SyncOpts {
@@ -130,6 +134,9 @@ impl SyncOpts {
         }
         if self.supply_stdin {
             args.push("--supply-stdin".into());
+        }
+        if let Some(root) = &self.sealed_root {
+            args.extend(["--sealed-root".into(), root.display().to_string()]);
         }
         args.extend(config_flag());
         Cmd {
@@ -305,6 +312,15 @@ fn deliver_with(
     opts: &SyncOpts,
     raw: Option<super::deliver_only::RawSupply>,
 ) -> Result<(), Error> {
+    // D12: `--sealed-root` moves where this run's targets write their own files.
+    let rooted;
+    let fleet = match &opts.sealed_root {
+        Some(root) => {
+            rooted = with_out_root(fleet, root);
+            &rooted
+        }
+        None => fleet,
+    };
     // Every check below happens before any subprocess call, except the confirm_env guard
     // for a missing --confirm: it gates the first write, so one run reports blocking keys
     // and the guard together (H12).
@@ -848,6 +864,8 @@ impl Report {
             retire: false,
             // A value is supplied by the job that produced it, never by a follow-up step.
             supply_stdin: false,
+            // The follow-up writes where this run wrote.
+            sealed_root: opts.sealed_root.clone(),
         };
         Some(step_text(&o.command(env_name)))
     }
@@ -1017,6 +1035,8 @@ fn prepare_staged(
     if let Some(supply) = c.supply {
         fields.extend(super::deliver_only::item_fields(fleet, supply));
     }
+    // T3, T4: a whole-set store re-plans from these same values, never a second read.
+    let whole = store.whole_set().then(|| copy_fields(&fields));
     let ledgers = super::placement_ledgers(fleet, env_name, Some(c.target), Some(ports), c.r);
     let (mut plan, list_a) = plan_item_with(
         fleet,
@@ -1055,6 +1075,24 @@ fn prepare_staged(
         None => None,
     };
     refuse_blocking(&plan, env_name).map_err(|e| c.refusal(e))?;
+    // T3, T4: the whole set, before the plan id, so the id covers exactly what is written.
+    if let Some(fields) = whole {
+        plan = whole_set(
+            &WholeSet {
+                fleet,
+                env_name,
+                target: c.target,
+                ports,
+                rotate: c.rotate,
+                prune_immutable: c.prune_immutable,
+                ledgers: &ledgers,
+                retiring_prune: c.opts.retire,
+                scope: c.opts.product.as_deref().zip(c.scope.as_ref()),
+            },
+            fields,
+            plan,
+        )?;
+    }
     Ok(Planned {
         id: c.target_id(&plan, &list_a, item_version, ports),
         prepared: Prepared::Staged {
@@ -1064,6 +1102,89 @@ fn prepare_staged(
             source_versions,
         },
     })
+}
+
+/// `fields` copied value by value, for a whole-set store's second plan over the same read
+/// (design `sealed-target` §5.3): no second 1Password read.
+fn copy_fields(fields: &[ItemField]) -> Vec<ItemField> {
+    fields
+        .iter()
+        .map(|f| ItemField {
+            section: f.section.clone(),
+            label: f.label.clone(),
+            kind: f.kind,
+            value: SecretValue::new(f.value.expose().to_string()),
+            concealed: f.concealed,
+        })
+        .collect()
+}
+
+/// What [`whole_set`] plans against: one target's planning inputs.
+struct WholeSet<'w> {
+    fleet: &'w Fleet,
+    env_name: &'w str,
+    target: &'w str,
+    ports: &'w Ports<'w>,
+    rotate: &'w BTreeSet<(String, String)>,
+    prune_immutable: &'w BTreeSet<(String, String)>,
+    ledgers: &'w [crate::domain::ledger::Ledger],
+    retiring_prune: bool,
+    /// `--product` and its managed names, when given.
+    scope: Option<(&'w str, &'w HashSet<String>)>,
+}
+
+/// True when `plan` changes anything on a whole-set store (design `sealed-target` §5.3, T3):
+/// a name is staged, a name is pruned (a retired credential must leave the set), or a
+/// listed version differs from the ledger.
+fn whole_set_changes(plan: &SyncPlan) -> bool {
+    !plan.stage.is_empty() || !plan.prune.is_empty() || !plan.drift.is_empty()
+}
+
+/// Design `sealed-target` §5.3 (T3, T4): on a whole-set store, `plan` stages every desired,
+/// delivered name, immutable ones included, whenever [`whole_set_changes`]; else `plan`
+/// unchanged. The values come from `fields`, the run's one read, planned again with every
+/// row rotated, so each value is the one the planner checks and transforms.
+fn whole_set(w: &WholeSet<'_>, fields: Vec<ItemField>, plan: SyncPlan) -> Result<SyncPlan, Error> {
+    if !whole_set_changes(&plan) {
+        return Ok(plan);
+    }
+    let mut every = w.rotate.clone();
+    every.extend(
+        plan.rows
+            .iter()
+            .filter(|r| r.target != TargetState::NotDelivered)
+            .map(|r| (r.product.clone(), r.key.clone())),
+    );
+    let (mut full, _) = plan_item_with(
+        w.fleet,
+        w.env_name,
+        Some(w.target),
+        fields,
+        Some(w.ports),
+        &every,
+        w.prune_immutable,
+        w.ledgers,
+        w.retiring_prune,
+    )?;
+    if let Some((p, names)) = w.scope {
+        scope_plan(&mut full, p, names);
+    }
+    let mut plan = plan;
+    plan.stage = full.stage;
+    plan.held_immutable = full.held_immutable;
+    Ok(plan)
+}
+
+/// `fleet` with every target's own files resolved under `root` (`--sealed-root`, design
+/// `sealed-target` D12); a target that writes no files of its own ignores it.
+pub(crate) fn with_out_root(fleet: &Fleet, root: &std::path::Path) -> Fleet {
+    let mut rooted = fleet.clone();
+    for env in rooted.environments.values_mut() {
+        for t in env.targets.values_mut() {
+            t.config.set_out_root(root);
+        }
+    }
+    rooted
 }
 
 /// A staged target's plan, ready to apply.
@@ -1096,6 +1217,10 @@ fn run_staged(
     let vars = store.variables();
     let batch: Vec<(String, &SecretValue)> =
         plan.stage.iter().map(|(n, v)| (n.clone(), v)).collect();
+    // A whole-set store (design `sealed-target` §5.3) is rewritten, never pruned name by
+    // name: a pruned name leaves it by this write, even when no name is left.
+    let whole = store.whole_set();
+    let reseal = whole && (!batch.is_empty() || !plan.prune.is_empty());
     store.validate(&batch).map_err(|e| c.refusal(e))?;
     c.require_confirm()?;
     // Last read-only step before the first write (NR-23, NR-24).
@@ -1122,7 +1247,7 @@ fn run_staged(
     // Writes this run completed, named when a later step fails (NR-10).
     let mut done: Vec<String> = Vec::new();
     // Nothing staged by this run: list A is the current state, no second list needed.
-    let list_b = if batch.is_empty() {
+    let list_b = if batch.is_empty() && !reseal {
         list_a.clone()
     } else {
         store.write(&batch)?;
@@ -1143,7 +1268,7 @@ fn run_staged(
             c,
             &written,
             &identical,
-            &without_pruned(&list_b, &plan.prune, opts.prune),
+            &without_pruned(&list_b, &plan.prune, opts.prune || whole),
             &source_versions,
             &mut report,
             out,
@@ -1200,9 +1325,10 @@ fn run_staged(
     let var_prune: &[String] = var_plan.as_ref().map_or(&[], |vp| vp.prune.as_slice());
     let all_prune: Vec<String> = plan.prune.iter().chain(var_prune).cloned().collect();
     let mut pruned = Vec::new();
-    if !all_prune.is_empty() && opts.prune {
+    if !all_prune.is_empty() && (opts.prune || whole) {
         p(out, format!("will prune: {}", names.join(&all_prune)))?;
-        if !plan.prune.is_empty() {
+        // A whole-set store already lost them: the set written above leaves them out (T3).
+        if !whole && !plan.prune.is_empty() {
             store
                 .remove(&plan.prune)
                 .map_err(|e| after_writes_in(c, e, &done))?;
@@ -2832,8 +2958,21 @@ fn plan_part<'f>(
     rotate: &BTreeSet<(String, String)>,
     r: &dyn CommandRunner,
 ) -> Result<PlanPart<'f>, Error> {
-    let (_, t) = super::target(fleet, env_name, name)?;
     let (_, ports) = open_target(fleet, env_name, name, r)?;
+    plan_part_with(fleet, env_name, name, product, rotate, r, &ports)
+}
+
+/// [`plan_part`] through the target's opened `ports`.
+fn plan_part_with<'f>(
+    fleet: &'f Fleet,
+    env_name: &str,
+    name: &str,
+    product: Option<&str>,
+    rotate: &BTreeSet<(String, String)>,
+    r: &dyn CommandRunner,
+    ports: &Ports<'_>,
+) -> Result<PlanPart<'f>, Error> {
+    let (_, t) = super::target(fleet, env_name, name)?;
     let at = preflight::At {
         fleet,
         env: env_name,
@@ -2841,16 +2980,27 @@ fn plan_part<'f>(
     };
     preflight::read(at, t, r)?;
     let none = BTreeSet::new();
-    let (mut plan, on_target, item_version, _) = read_and_plan_versioned(
+    // The plan `sync` re-derives (FR-41), whole-set expansion included (T4): one read.
+    let read = super::tidy::read(fleet, env_name, r)?;
+    let whole = match ports {
+        Ports::Staged { store, .. } if store.whole_set() => Some(copy_fields(&read.fields)),
+        _ => None,
+    };
+    let ledgers = super::placement_ledgers(fleet, env_name, Some(name), Some(ports), r);
+    let (mut plan, on_target) = plan_item_with(
         fleet,
         env_name,
         Some(name),
-        r,
-        Some(&ports),
+        read.fields,
+        Some(ports),
         rotate,
         &none,
+        &ledgers,
         false,
     )?;
+    plan.tidy = read.changes;
+    plan.tidy_error = read.tidy_error;
+    let item_version = read.version;
     let scope = match product {
         Some(p) => {
             let names = product_names(fleet, env_name, name, p)?;
@@ -2859,8 +3009,25 @@ fn plan_part<'f>(
         }
         None => None,
     };
+    if let Some(fields) = whole {
+        plan = whole_set(
+            &WholeSet {
+                fleet,
+                env_name,
+                target: name,
+                ports,
+                rotate,
+                prune_immutable: &none,
+                ledgers: &ledgers,
+                retiring_prune: false,
+                scope: product.zip(scope.as_ref()),
+            },
+            fields,
+            plan,
+        )?;
+    }
     // The config channel (FR-46): state of each config row, and what sync would set/prune.
-    let (live, var_plan) = match &ports {
+    let (live, var_plan) = match ports {
         Ports::Staged { store, runtime } => {
             let vp = match store.variables() {
                 Some(v) => Some(super::variables::plan(
@@ -2886,14 +3053,14 @@ fn plan_part<'f>(
         item_version,
         &plan,
         &on_target,
-        &ports,
+        ports,
         rotate,
         None,
     );
     // What a pinned target's sync would write beyond the staged secrets, and what its deploy
     // would change beyond the bindings (design §6.7). Display only: the plan id above is
     // what `sync` re-derives.
-    let (config_writes, deploy) = match &ports {
+    let (config_writes, deploy) = match ports {
         Ports::Pinned { store, runtime } => {
             let config_writes = if runtime.config_in_store() {
                 config_writes(fleet, env_name, name, t, &plan, store.as_ref())?
@@ -4593,3 +4760,7 @@ mod tests {
 #[cfg(test)]
 #[path = "supply_tests.rs"]
 mod supply_tests;
+
+#[cfg(test)]
+#[path = "whole_set_tests.rs"]
+mod whole_set_tests;

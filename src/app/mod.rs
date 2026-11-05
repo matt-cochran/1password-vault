@@ -182,48 +182,6 @@ pub(crate) fn read_and_plan(
 /// [`read_item_fields`]'s result.
 pub(crate) type ItemRead = (Vec<plan::ItemField>, Option<u64>, BTreeMap<String, u64>);
 
-/// A plan, its store listing, the item's `version` and each boundary item's `version` by id
-/// (C2): [`read_and_plan_versioned`]'s result.
-pub(crate) type VersionedPlan = (
-    SyncPlan,
-    Vec<StoreEntry>,
-    Option<u64>,
-    BTreeMap<String, u64>,
-);
-
-/// [`read_and_plan`] that also returns the item's `version` integer and the `version` read
-/// from each boundary item by id (C2), for the plan id (FR-41) and the delivery recording.
-/// Still one item read (FR-13), plus a person's tidy (FR-43): the version is the tidied
-/// item's, so a plan that tidied and the sync after it agree.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn read_and_plan_versioned(
-    fleet: &Fleet,
-    env_name: &str,
-    target: Option<&str>,
-    r: &dyn CommandRunner,
-    ports: Option<&Ports<'_>>,
-    rotate: &BTreeSet<(String, String)>,
-    prune_immutable: &BTreeSet<(String, String)>,
-    retiring_prune: bool,
-) -> Result<VersionedPlan, Error> {
-    let read = tidy::read(fleet, env_name, r)?;
-    let ledgers = placement_ledgers(fleet, env_name, target, ports, r);
-    let (mut plan, listed) = plan_item_with(
-        fleet,
-        env_name,
-        target,
-        read.fields,
-        ports,
-        rotate,
-        prune_immutable,
-        &ledgers,
-        retiring_prune,
-    )?;
-    plan.tidy = read.changes;
-    plan.tidy_error = read.tidy_error;
-    Ok((plan, listed, read.version, read.item_versions))
-}
-
 /// The environment's item fields, `version` integer (FR-41) and per-boundary-item versions
 /// (C2): its one read by IDs (FR-13), tolerant and tidied when a person runs opv (FR-43,
 /// [`tidy::read`]).

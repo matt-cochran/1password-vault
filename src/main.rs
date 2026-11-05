@@ -1318,6 +1318,15 @@ struct SyncArgs {
         hide_long_help = true
     )]
     supply_stdin: bool,
+    /// Resolve a sealed target's bundle paths under DIR, a checkout of the repository that
+    /// holds them, instead of beside the configuration.
+    #[arg(
+        long,
+        value_name = "DIR",
+        hide_short_help = true,
+        hide_long_help = true
+    )]
+    sealed_root: Option<std::path::PathBuf>,
 }
 
 impl From<SyncArgs> for sync::SyncOpts {
@@ -1335,6 +1344,7 @@ impl From<SyncArgs> for sync::SyncOpts {
             targets: a.target,
             retire: a.retire,
             supply_stdin: a.supply_stdin,
+            sealed_root: a.sealed_root,
         }
     }
 }

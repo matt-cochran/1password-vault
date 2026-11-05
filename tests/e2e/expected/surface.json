@@ -522,6 +522,7 @@
         "receipt",
         "retire",
         "rotate",
+        "sealed-root",
         "supply-stdin",
         "target"
       ],
