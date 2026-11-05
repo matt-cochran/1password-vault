@@ -432,6 +432,7 @@
       "flags": [
         "dry-run",
         "env",
+        "fill-missing",
         "json",
         "replace"
       ],

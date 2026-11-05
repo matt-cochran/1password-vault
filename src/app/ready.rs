@@ -18,7 +18,8 @@ use crate::app::account::Report;
 use crate::app::rule_source::{RuleSource, RuleStatus, rule_source};
 use crate::cause::{Cause, EnvName, KeyName, ProductName};
 use crate::domain::plan::RuleGate;
-use crate::domain::provision::{SetState, classify};
+use crate::domain::provision::{KeyRef, MemberSource, SetState, classify};
+use crate::domain::provision_template as template;
 use crate::domain::value_state::ValueState;
 use crate::domain::{KeyState, Row, TargetState, key_label};
 use crate::error::Error;
@@ -995,11 +996,16 @@ fn set_reports(sets: &[SetInput]) -> Vec<SetReport> {
 /// Each provision set's members' value states in each environment it names, from the rows
 /// `ready` already read (#253/#262, §4.5): no new `op` call. A member with no row, or a
 /// state `classify` cannot judge, leaves the set unreported, never misreported as absent.
+/// A template member that is set is also judged against the stored members (#262, §4.5):
+/// a document not of its template's shape, or whose member leaves differ from the stored
+/// members, is malformed, so the set is inconsistent. `kept` is each environment's fields
+/// as read; the values are compared in memory and dropped here.
 fn set_inputs(
     fleet: &crate::domain::Fleet,
     envs: &[EnvInput],
     only: Option<&str>,
     placeholders: &BTreeSet<(String, String, String)>,
+    kept: &[(String, bool, Vec<crate::domain::plan::ItemField>)],
 ) -> Vec<SetInput> {
     let mut rows: BTreeMap<(&str, &str, &str), &Row> = BTreeMap::new();
     for env in envs {
@@ -1030,7 +1036,8 @@ fn set_inputs(
             }
             let mut members = Vec::with_capacity(set.members.len());
             let mut judged = true;
-            for member in set.members.keys() {
+            let stored = |k: &KeyRef| stored_value(kept, environment, k);
+            for (member, source) in &set.members {
                 let Some(row) = rows.get(&(
                     environment.as_str(),
                     member.product.as_str(),
@@ -1045,6 +1052,13 @@ fn set_inputs(
                     member.key.clone(),
                 ));
                 match row_value_state(row, placeholder) {
+                    Some(ValueState::Set)
+                        if template_disagrees(source, stored(member), &stored) =>
+                    {
+                        members.push(ValueState::Malformed {
+                            rule: "template".to_string(),
+                        });
+                    }
                     Some(state) => members.push(state),
                     None => {
                         judged = false;
@@ -1062,6 +1076,36 @@ fn set_inputs(
         }
     }
     out
+}
+
+/// The value `ready` read for member `k` in `environment`, if any (an empty field holds
+/// none).
+fn stored_value<'k>(
+    kept: &'k [(String, bool, Vec<crate::domain::plan::ItemField>)],
+    environment: &str,
+    k: &KeyRef,
+) -> Option<&'k crate::domain::SecretValue> {
+    kept.iter()
+        .filter(|(name, _, _)| name == environment)
+        .flat_map(|(_, _, fields)| fields)
+        .find(|f| f.section == k.product && f.label == k.key)
+        .map(|f| &f.value)
+        .filter(|v| !v.expose().trim().is_empty())
+}
+
+/// A template member's stored document does not [`template::fit`] the stored members
+/// (#262, §4.5). Not a template, or no document read: false (the row's state stands).
+fn template_disagrees<'v>(
+    source: &MemberSource,
+    document: Option<&crate::domain::SecretValue>,
+    stored: &impl Fn(&KeyRef) -> Option<&'v crate::domain::SecretValue>,
+) -> bool {
+    match (source, document) {
+        (MemberSource::Template(t), Some(doc)) => {
+            template::fit(t, doc.expose().as_bytes(), |k| stored(k)).is_err()
+        }
+        _ => false,
+    }
 }
 
 /// One row's value state as [`classify`] reads it (#253/#262, §4.5), the same judgement
@@ -1578,7 +1622,7 @@ pub fn run_at(
     gaps.sort();
     // #253/#262: each provision set's member value states, from the rows read above (no
     // new `op` call). Scoped by `only` like the rest of the receipt.
-    let sets = set_inputs(fleet, &envs, only, &placeholder_values);
+    let sets = set_inputs(fleet, &envs, only, &placeholder_values, &kept);
     let doc = receipt_with_sets(
         &Inputs {
             config_source: config_source.map(str::to_string),
