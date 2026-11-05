@@ -5275,6 +5275,37 @@ fn a_set_over_two_items_names_both() {
     );
 }
 
+/// #275: an infrastructure key on a sealed target is refused at load, naming the key and
+/// the target.
+#[test]
+fn an_infrastructure_key_on_a_sealed_target_names_the_key_and_the_target() {
+    let c = Cause::ConfigInvalid {
+        source: file_source(),
+        at: None,
+        field: DottedPath(vec![
+            "products".into(),
+            "api".into(),
+            "keys".into(),
+            "DB_URL".into(),
+        ]),
+        rule: FieldRule::Check {
+            check: ConfigCheck::SealedDeliversInfrastructure {
+                product: "api".into(),
+                key: "DB_URL".into(),
+                target: "box".into(),
+            },
+        },
+    };
+    assert!(
+        c.message().contains(
+            "is api/DB_URL, supplied at sync (source = \"infrastructure\") and never stored \
+                 in 1Password, so sealed target box has no value to seal"
+        ),
+        "{}",
+        c.message()
+    );
+}
+
 /// §3.2, vet F6: a producer that is op is refused at load.
 #[test]
 fn a_producer_that_is_op_is_named() {

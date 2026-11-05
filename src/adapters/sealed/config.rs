@@ -15,7 +15,7 @@ use serde::Deserialize;
 use crate::bundle::crypto::{parse_recipient, recipient_fingerprint, signer_fingerprint};
 use crate::cause::{ConfigCheck, DottedPath, FieldRule};
 use crate::config::section_invalid;
-use crate::domain::{Fleet, ItemRef};
+use crate::domain::{Fleet, ItemRef, ValueSource};
 use crate::error::Error;
 use crate::provider::{FleetRefusal, Placement};
 
@@ -302,8 +302,8 @@ fn shared_across_groups(entry: &Entry<'_>, earlier: &[Entry<'_>]) -> Result<(), 
 }
 
 /// The rules of one target that need the products: `deploy_credentials` (§3.1-7),
-/// `{product}` (§3.1-5), no `OP_*` name (§3.1-6), no age identity (§3.1-8, T14) and no key
-/// read from the signing item (G4).
+/// `{product}` (§3.1-5), no `OP_*` name (§3.1-6), no age identity (§3.1-8, T14), no
+/// infrastructure key (#275) and no key read from the signing item (G4).
 fn check_target(fleet: &Fleet, entry: &Entry<'_>) -> Result<(), Box<FleetRefusal>> {
     let Some(signer_item) = entry.deploy_credentials else {
         return Err(Box::new(FleetRefusal {
@@ -345,6 +345,19 @@ fn check_target(fleet: &Fleet, entry: &Entry<'_>) -> Result<(), Box<FleetRefusal
                     path: key_path(),
                     rule: FieldRule::Check {
                         check: ConfigCheck::SealedDeliversIdentity { target },
+                    },
+                }));
+            }
+            // #275: a supplied key has no 1Password value, so there is nothing to seal.
+            if spec.value_source == Some(ValueSource::Infrastructure) {
+                return Err(Box::new(FleetRefusal {
+                    path: key_path(),
+                    rule: FieldRule::Check {
+                        check: ConfigCheck::SealedDeliversInfrastructure {
+                            product: product.clone(),
+                            key: key.clone(),
+                            target,
+                        },
                     },
                 }));
             }
