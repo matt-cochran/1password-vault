@@ -77,9 +77,12 @@ fn age_round_trips_armored_to_one_x25519_recipient() {
     let mut w = encryptor.wrap_output(armor).expect("stream");
     w.write_all(b"round trip").unwrap();
     w.finish().unwrap().finish().unwrap();
-    let text = String::from_utf8(armored.clone()).unwrap();
+    // The crate armors with CRLF on Windows; opv's `bundle::crypto::encrypt` normalises
+    // that to LF (tested there). This test only proves the API fit.
+    let text = String::from_utf8(armored.clone())
+        .unwrap()
+        .replace("\r\n", "\n");
     assert!(text.starts_with("-----BEGIN AGE ENCRYPTED FILE-----\n"));
-    assert!(!text.contains('\r'), "armor is LF only");
     assert_eq!(decrypt(&armored, &identity()).unwrap(), b"round trip");
 }
 

@@ -124,6 +124,10 @@ impl World {
 
     /// The same run at a terminal: inside a `script(1)` PTY. `None` without `script`.
     fn at_terminal(&self, child: &str) -> Option<Output> {
+        // `-qec <cmd> <file>` is util-linux `script`; BSD/macOS `script` takes other flags.
+        if !cfg!(target_os = "linux") {
+            return None;
+        }
         let script = ["/usr/bin/script", "/bin/script"]
             .into_iter()
             .find(|p| Path::new(p).exists())?;
