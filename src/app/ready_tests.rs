@@ -128,6 +128,7 @@ fn account_report() -> account::Report {
         manifest: None,
         platform: Platform::Linux,
         session_vars: Vec::new(),
+        reach: crate::json::Reach::None,
     })
 }
 
@@ -194,6 +195,7 @@ fn signed_out_report() -> account::Report {
         manifest: None,
         platform: Platform::Linux,
         session_vars: Vec::new(),
+        reach: crate::json::Reach::None,
     })
 }
 
@@ -209,6 +211,7 @@ fn unavailable_report() -> account::Report {
         manifest: None,
         platform: Platform::Linux,
         session_vars: Vec::new(),
+        reach: crate::json::Reach::None,
     })
 }
 
@@ -1469,6 +1472,7 @@ fn a_shared_sign_in_address_does_not_block_readiness() {
         manifest: None,
         platform: crate::host::Platform::Wsl,
         session_vars: Vec::new(),
+        reach: crate::json::Reach::None,
     });
     let r = receipt(&inputs(&account, vec![]), "0.8.0");
     assert!(
@@ -2012,4 +2016,98 @@ fn ready_text_groups_environment_gaps_into_one_count_line() {
         &three_environment_gaps(),
     );
     assert!(text(&r).starts_with("ready: 0 blocking · 3 findings · receipt rcpt-"));
+}
+
+// --- #257, FR-65: the account choice is typed, and the same as `account list`'s ---------
+
+fn second() -> Account {
+    account(
+        "BBBB0000000000000000000002",
+        "other@example.com",
+        "my.1password.com",
+        "my",
+        "USER0000000000000000000002",
+    )
+}
+
+/// Two accounts, both signed out, none selected for the project (#257).
+fn unselected_report() -> account::Report {
+    account::report(&account::Inputs {
+        discovery: Discovery::Listed(vec![owner(), second()]),
+        signed_in: &|_| Some(false),
+        flag: None,
+        env: None,
+        pointer: None,
+        manifest: None,
+        platform: Platform::Linux,
+        session_vars: Vec::new(),
+        reach: crate::json::Reach::None,
+    })
+}
+
+/// The receipt's `next` as `opv ready --json` frames it (schema 4).
+fn framed_next(r: &Receipt) -> serde_json::Value {
+    let body = serde_json::to_vec(r).unwrap();
+    let doc: serde_json::Value =
+        serde_json::from_slice(&crate::json::finish(&body, Ok(()), false)).unwrap();
+    doc["next"].clone()
+}
+
+#[test]
+fn several_unselected_accounts_block_readiness() {
+    let report = unselected_report();
+    let r = receipt(&inputs(&report, vec![]), "0.18.0");
+    assert!(
+        r.findings
+            .iter()
+            .any(|f| f.code == "account_required" && f.blocking)
+    );
+}
+
+/// #257: `next.kind` is `choose`, never `none` and never `opv account list` again.
+#[test]
+fn several_unselected_accounts_next_is_choose() {
+    let report = unselected_report();
+    let r = receipt(&inputs(&report, vec![]), "0.18.0");
+    assert_eq!(framed_next(&r)["kind"], "choose");
+}
+
+/// FR-65: `ready --json` gives the same choices as `account list --json`.
+#[test]
+fn ready_choices_are_account_lists_choices() {
+    let report = unselected_report();
+    let r = receipt(&inputs(&report, vec![]), "0.18.0");
+    assert_eq!(
+        framed_next(&r)["choices"],
+        report.next.as_ref().unwrap()["choices"]
+    );
+}
+
+#[test]
+fn several_unselected_accounts_step_offers_each_account() {
+    let report = unselected_report();
+    let r = receipt(&inputs(&report, vec![]), "0.18.0");
+    assert_eq!(
+        r.findings[0].prerequisite,
+        "pick one: opv account use AAAA0000000000000000000001; \
+         opv account use BBBB0000000000000000000002"
+    );
+}
+
+/// E9: the selected account signed out is the person's sign-in, with its exec argv.
+#[test]
+fn selected_signed_out_next_is_authorize() {
+    let report = signed_out_report();
+    let r = receipt(&inputs(&report, vec![]), "0.18.0");
+    assert_eq!(framed_next(&r)["kind"], "authorize");
+}
+
+#[test]
+fn selected_signed_out_next_has_its_argv() {
+    let report = signed_out_report();
+    let r = receipt(&inputs(&report, vec![]), "0.18.0");
+    assert_eq!(
+        framed_next(&r)["argv"],
+        serde_json::json!(["opv", "login", "--account", "AAAA0000000000000000000001"])
+    );
 }

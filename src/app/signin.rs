@@ -108,6 +108,41 @@ pub fn signed_out_state(
     }
 }
 
+/// How far this process can reach a 1Password session for `account` (FR-65, design
+/// agent-signin-readiness §2.3, `next.reach`): [`reuse_path`] with the host's static
+/// integration ([`super::doctor_session::host_integration`]; it never probes). `App` where
+/// the 1Password app's CLI integration is active or available, `Shell` where this process
+/// holds the account's `OP_SESSION_<id>` (names only, never a value), `None` otherwise: the
+/// person signs in in their own terminal and that run is the check.
+pub fn reach(
+    account: Option<&str>,
+    vars: &[String],
+    listed: &[Account],
+    host: &Host,
+) -> crate::json::Reach {
+    let integration = super::doctor_session::host_integration(host);
+    match reuse_path(account, vars, listed).with_integration(integration) {
+        ReusePath::App => crate::json::Reach::App,
+        ReusePath::Shell { .. } => crate::json::Reach::Shell,
+        ReusePath::PerCommand => crate::json::Reach::None,
+    }
+}
+
+/// The account a sign-in step names (session-reuse §5.2, design agent-signin-readiness §2.4
+/// item 6): `account`, unless `opv login` finds it by itself: `configured` (recorded in
+/// `.opv` by this login, or the configuration's `account` setting), the nearest `.opv`, or
+/// `OP_ACCOUNT`.
+pub fn refresh_account(account: Option<&str>, configured: bool) -> Option<&str> {
+    let account = account?;
+    if configured {
+        return None;
+    }
+    let here = std::env::current_dir().unwrap_or_default();
+    let known = crate::config_store::pointer_account(&here).as_deref() == Some(account)
+        || crate::config_store::account_env().as_deref() == Some(account);
+    (!known).then_some(account)
+}
+
 /// What `sign_in_here` (main.rs) says before an in-command sign-in (§4.1). `kind` is the
 /// sign-in's own answer when known (V1); before it, the host's static integration decides.
 /// `expired` is the shell's session variable for the account when there is one

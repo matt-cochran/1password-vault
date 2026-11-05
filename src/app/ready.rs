@@ -227,6 +227,17 @@ pub struct Next {
     pub actor: String,
     /// The command to run; `None` for a personal key's step, which is no command.
     pub command: Option<String>,
+    /// The exact words to exec (schema 4, FR-65): only for an account finding's typed step,
+    /// built from its command and never split from `command`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argv: Option<Vec<String>>,
+    /// How far this process reaches a 1Password session, for a `choose` (FR-65).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reach: Option<crate::json::Reach>,
+    /// The candidates of a `choose` (`account_required`), as `opv account list --json` gives
+    /// them: the same builder (FR-65).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choices: Option<serde_json::Value>,
     /// The finding's step as the text output shows it; never serialized.
     #[serde(skip)]
     pub step: String,
@@ -304,15 +315,24 @@ fn receipt_with(
     );
     let next = findings
         .iter()
-        .find(|f| f.blocking)
-        .or_else(|| findings.first())
-        .map(|f| {
-            let personal = is_personal_step(&f.code);
-            Next {
-                kind: personal.then_some(crate::json::NextKind::EnterValue),
-                actor: f.actor.clone(),
-                command: (!personal).then(|| f.prerequisite.clone()),
-                step: f.prerequisite.clone(),
+        .position(|f| f.blocking)
+        .or_else(|| (!findings.is_empty()).then_some(0))
+        .map(|at| {
+            let f = &findings[at];
+            match account_step(inputs, &findings, at) {
+                Some(step) => typed_next(f, step),
+                None => {
+                    let personal = is_personal_step(&f.code);
+                    Next {
+                        kind: personal.then_some(crate::json::NextKind::EnterValue),
+                        actor: f.actor.clone(),
+                        command: (!personal).then(|| f.prerequisite.clone()),
+                        argv: None,
+                        reach: None,
+                        choices: None,
+                        step: f.prerequisite.clone(),
+                    }
+                }
             }
         });
     let receipt_id = receipt_id(&config, &account, &matrix, &findings);
@@ -339,6 +359,36 @@ fn receipt_with(
         item_versions,
         revision,
         environments,
+    }
+}
+
+/// The typed step of the finding at `at` when it is one of the account report's (FR-65):
+/// [`build_findings`] puts every account finding first, one for one and in order, so the
+/// finding at `at` is the account report's `at`-th when that one has the same code.
+fn account_step<'a>(
+    inputs: &'a Inputs<'_>,
+    findings: &[Finding],
+    at: usize,
+) -> Option<&'a crate::cause::Next> {
+    let f = inputs.account.findings.get(at)?;
+    (f.code == findings[at].code).then_some(f.step.as_ref())?
+}
+
+/// The receipt's `next` from an account finding's typed step: the same `kind`, `command`,
+/// `argv`, `reach` and `choices` as `opv account list --json` gives
+/// ([`super::account::typed_step`]), with the finding's actor.
+fn typed_next(f: &Finding, step: &crate::cause::Next) -> Next {
+    let v = super::account::typed_step(step);
+    Next {
+        kind: v["kind"]
+            .as_str()
+            .and_then(crate::json::NextKind::from_name),
+        actor: f.actor.clone(),
+        command: v["command"].as_str().map(str::to_string),
+        argv: serde_json::from_value(v["argv"].clone()).ok(),
+        reach: serde_json::from_value(v["reach"].clone()).ok(),
+        choices: v.get("choices").cloned(),
+        step: f.prerequisite.clone(),
     }
 }
 
@@ -702,7 +752,7 @@ fn build_findings(
             ),
             actor: "owner".into(),
             effect: effect.into(),
-            prerequisite: f.next.clone().unwrap_or_else(|| "opv account list".into()),
+            prerequisite: f.step_text().unwrap_or_else(|| "opv account list".into()),
             verify: "opv account list --json".into(),
             message: None,
             act: None,
@@ -1113,7 +1163,7 @@ pub fn run_at(
         Err(e) if e.code_str() == "account_not_registered" => {}
         other => other?,
     }
-    let account = super::account::gather(r, None);
+    let account = project_accounts(fleet, r);
     // FR-55: the environments' own order, then their keys; never a fixed list.
     let mut ordered: Vec<(&String, &crate::domain::Environment)> = fleet
         .environments
@@ -1347,6 +1397,28 @@ pub fn run_at(
         writeln!(out, "saved: {}", path.display()).map_err(super::write_err)?;
     }
     Ok(())
+}
+
+/// The FR-49 account report as `ready` reads it: the account the environments agree on
+/// selects as the project's (FR-40). When every environment names its own account and they
+/// differ, none is chosen for the project, so there is no `account_required` (#257).
+fn project_accounts(fleet: &crate::domain::Fleet, r: &dyn crate::runner::CommandRunner) -> Report {
+    let named: std::collections::BTreeSet<Option<&str>> = fleet
+        .environments
+        .values()
+        .map(|e| e.account.as_deref())
+        .collect();
+    let agreed = match named.iter().collect::<Vec<_>>().as_slice() {
+        [Some(one)] => Some(*one),
+        _ => None,
+    };
+    let report = super::account::gather_with(r, None, agreed);
+    let each_names_own = !named.is_empty() && !named.contains(&None);
+    if each_names_own && agreed.is_none() {
+        report.without("account_required")
+    } else {
+        report
+    }
 }
 
 /// The git commit of the repository, `git rev-parse HEAD` through the runner; `None`

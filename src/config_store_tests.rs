@@ -914,12 +914,20 @@ fn several_accounts_and_none_chosen_is_account_required() {
     assert_eq!(e.code_str(), "account_required");
 }
 
-/// opv never searches every account: the only call is `op account list`.
+/// opv never searches every account: `op account list`, then only each account's session
+/// probe (`op whoami --account <id>`, exit status only, FR-49/FR-65), never a vault or item.
 #[test]
 fn several_accounts_and_none_chosen_searches_no_account() {
     let r = accounts_runner(TWO_ACCOUNTS);
     let _ = pick_account(&r, None);
-    assert_eq!(r.calls.borrow().len(), 1);
+    assert!(
+        r.calls.borrow().iter().all(|c| matches!(
+            c.args.first().map(String::as_str),
+            Some("account" | "whoami")
+        )),
+        "{:?}",
+        r.calls.borrow()
+    );
 }
 
 #[test]

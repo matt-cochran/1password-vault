@@ -424,7 +424,12 @@ pub fn run_with(
             let label = account
                 .as_deref()
                 .map_or_else(|| "1Password".to_string(), |a| backend.account_label(a));
-            let refresh = refresh_command(req.shell, refresh_account(&req, account.as_deref()));
+            // §5.2: the account only when `opv login` would not find it by itself.
+            let configured = req.record.is_some() || req.fleet.is_some();
+            let refresh = refresh_command(
+                req.shell,
+                super::signin::refresh_account(account.as_deref(), configured),
+            );
             ui.show(&format!(
                 "Signed in to {label} in this shell. The session ends after 30 minutes idle; \
                  run {refresh} again then."
@@ -432,19 +437,6 @@ pub fn run_with(
             Ok(ShellEmit { lines })
         }
     }
-}
-
-/// §5.2: `<refresh>` names the account only when it did not come from `.opv` (recorded now,
-/// or already) or the configuration's `account` setting.
-fn refresh_account<'a>(req: &ShellLogin<'_>, account: Option<&'a str>) -> Option<&'a str> {
-    let account = account?;
-    if req.record.is_some() || req.fleet.is_some() {
-        return None;
-    }
-    let here = std::env::current_dir().unwrap_or_default();
-    let known = crate::config_store::pointer_account(&here).as_deref() == Some(account)
-        || crate::config_store::account_env().as_deref() == Some(account);
-    (!known).then_some(account)
 }
 
 /// §5.6: the one write of the session, to the raw stdout lock `out`, then a flush. A failed

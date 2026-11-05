@@ -1038,7 +1038,7 @@ fn pick_account_at(
         (given, []) => Ok(given),
         (Some(a), all) => manifest::resolve_from(all, &a, account_source(&a, start)).map(Some),
         (None, [one]) => Ok(Some(one.account_uuid.clone())),
-        (None, all) => Err(manifest::choose_error(all)),
+        (None, all) => Err(manifest::choose_error(all, r)),
     }
 }
 

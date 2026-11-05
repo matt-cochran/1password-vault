@@ -284,8 +284,29 @@ fn not_known(who: &str, selected_by: AccountSource) -> Error {
 /// never searches them all (each search asks the 1Password app about that account, and
 /// none of them was granted to this project). The person picks one: `AccountRequired`,
 /// whose public code stays `account_required` (docs/usage.md, and `doctor`'s skip of the
-/// sign-in check).
-pub fn choose_error(accounts: &[Account]) -> Error {
+/// sign-in check). Each candidate carries its shorthand and whether this process is signed
+/// in to it (one `op whoami --account <id>` probe each, exit status only, FR-49), and the
+/// cause carries how far this process reaches a session (FR-65): the same choices
+/// `opv account list` gives (`app::account`).
+pub fn choose_error(accounts: &[Account], r: &dyn CommandRunner) -> Error {
+    choose_error_with(
+        accounts,
+        &|id| signed_in(r, id),
+        crate::app::signin::reach(
+            None,
+            &crate::app::account::session_var_names(),
+            accounts,
+            &Host::detect(),
+        ),
+    )
+}
+
+/// [`choose_error`] with the session probe and the reach given.
+pub fn choose_error_with(
+    accounts: &[Account],
+    signed_in: &dyn Fn(&str) -> Option<bool>,
+    reach: crate::json::Reach,
+) -> Error {
     Cause::AccountRequired {
         accounts: accounts
             .iter()
@@ -297,11 +318,11 @@ pub fn choose_error(accounts: &[Account]) -> Error {
                     .trim_end_matches('/')
                     .to_string(),
                 id: AccountId::new(a.account_uuid.as_str()),
-                shorthand: None,
-                signed_in: None,
+                shorthand: (!a.shorthand.is_empty()).then(|| a.shorthand.clone()),
+                signed_in: signed_in(&a.account_uuid),
             })
             .collect(),
-        reach: crate::json::Reach::None,
+        reach,
     }
     .into()
 }
@@ -1029,10 +1050,14 @@ mod tests {
     /// choices, each recorded by `opv account use <account ID>`; opv never picks.
     #[test]
     fn choosing_among_several_accounts_offers_each_account() {
-        let e = choose_error(&[
-            account("ACCOUNTUUID000000000000AAA"),
-            account("ACCOUNTUUID000000000000BBB"),
-        ]);
+        let e = choose_error_with(
+            &[
+                account("ACCOUNTUUID000000000000AAA"),
+                account("ACCOUNTUUID000000000000BBB"),
+            ],
+            &|_| None,
+            crate::json::Reach::None,
+        );
         assert!(
             crate::error::report(&e).contains(
                 "Next: pick one: opv account use ACCOUNTUUID000000000000AAA; \
@@ -1047,11 +1072,58 @@ mod tests {
     /// doctor's skip of the sign-in check).
     #[test]
     fn choosing_among_several_accounts_keeps_account_required() {
-        let e = choose_error(&[
-            account("ACCOUNTUUID000000000000AAA"),
-            account("ACCOUNTUUID000000000000BBB"),
-        ]);
+        let e = choose_error_with(
+            &[
+                account("ACCOUNTUUID000000000000AAA"),
+                account("ACCOUNTUUID000000000000BBB"),
+            ],
+            &|_| None,
+            crate::json::Reach::None,
+        );
         assert_eq!(e.code_str(), "account_required");
+    }
+
+    /// FR-65: each candidate carries the session probe's answer, as `account list` shows it.
+    #[test]
+    fn choosing_among_several_accounts_says_which_are_signed_in() {
+        let e = choose_error_with(
+            &[
+                account("ACCOUNTUUID000000000000AAA"),
+                account("ACCOUNTUUID000000000000BBB"),
+            ],
+            &|id| Some(id.ends_with("AAA")),
+            crate::json::Reach::None,
+        );
+        let Some((Cause::AccountRequired { accounts, .. }, _)) = e.cause() else {
+            panic!("{e}");
+        };
+        assert_eq!(
+            accounts.iter().map(|a| a.signed_in).collect::<Vec<_>>(),
+            [Some(true), Some(false)]
+        );
+    }
+
+    /// FR-65: the cause carries the reach its choices' sign-in steps were built for.
+    #[test]
+    fn choosing_among_several_accounts_keeps_the_reach() {
+        let e = choose_error_with(
+            &[
+                account("ACCOUNTUUID000000000000AAA"),
+                account("ACCOUNTUUID000000000000BBB"),
+            ],
+            &|_| None,
+            crate::json::Reach::App,
+        );
+        assert!(matches!(
+            e.cause(),
+            Some((
+                Cause::AccountRequired {
+                    reach: crate::json::Reach::App,
+                    ..
+                },
+                _
+            ))
+        ));
     }
 
     fn plain_linux() -> Host {
