@@ -22,6 +22,7 @@ mod scenarios {
     pub mod provider_ops;
     pub mod provision;
     pub mod provision_sets;
+    pub mod sealed;
     pub mod session_reuse;
     pub mod set_from_file;
     pub mod wiring;

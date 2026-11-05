@@ -107,14 +107,6 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "native Windows only (D12); the e2e harness is Unix-only",
     ),
     // end provision
-    // sealed target (#271): `opv unseal` (lane st-u1) raises it, and unit and CLI tests
-    // cover each refusal (`src/app/unseal_tests.rs`); lane st-e1 adds the sealed scenarios
-    // and replaces this entry.
-    (
-        "SealedRefused",
-        "opv unseal reads a bundle file the e2e app does not produce until lane st-e1",
-    ),
-    // end sealed target
 ];
 
 fn snapshots() -> PathBuf {
@@ -324,7 +316,7 @@ impl Scenario {
 
     /// The project's git checkout with everything staged committed, so `HEAD` holds it
     /// (the revision CI deploys: what a retirement's needs check scans).
-    fn committed(self) -> Self {
+    pub(crate) fn committed(self) -> Self {
         let ok = Command::new("git")
             .args(["commit", "-qm", "the app"])
             .current_dir(self.path("project"))
@@ -1392,6 +1384,36 @@ mod cases {
         )
         .mcp("opv_propose", value_intent())
     }
+
+    // --- the sealed target (#271, scenarios/sealed.rs) ----------------------------------------
+
+    /// `opv unseal` of a bundle one header byte of which changed after `opv sync` sealed it:
+    /// refused at the signature, before anything is decrypted.
+    pub fn sealed_refused() -> Case {
+        Case {
+            scenario: crate::scenarios::sealed::tampered_runtime(),
+            args: crate::scenarios::sealed::unseal_identity_args(),
+            mcp: None,
+        }
+    }
+
+    /// `opv sync` over that tampered bundle: refused as an input, and the file left alone.
+    pub fn sealed_bundle_tampered() -> Case {
+        Case {
+            scenario: crate::scenarios::sealed::tampered_app(),
+            args: crate::scenarios::sealed::sync_args(),
+            mcp: None,
+        }
+    }
+
+    /// `opv sync` while the bundle's lock file is held: the write is refused, no bundle.
+    pub fn sealed_lock_held() -> Case {
+        Case {
+            scenario: crate::scenarios::sealed::locked_app(),
+            args: crate::scenarios::sealed::sync_args(),
+            mcp: None,
+        }
+    }
 }
 
 /// A Rust file reading one declared name (`API_KEY`) and one the contract does not declare.
@@ -2220,6 +2242,9 @@ scenarios! {
         retire_still_read => RetireStillRead,
         contract_stale => ContractStale,
         value_in_text_field => ValueInTextField,
+        sealed_refused => SealedRefused,
+        sealed_bundle_tampered => InputInvalid,
+        sealed_lock_held => LocalIo,
     ],
     text: [
         config_source_mismatch => ConfigSourceMismatch,
@@ -2671,6 +2696,7 @@ fn every_scenario_snapshot_belongs_to_a_scenario() {
         .chain(crate::scenarios::set_from_file::SNAPSHOTS.iter().copied())
         .chain(crate::scenarios::provision::SNAPSHOTS.iter().copied())
         .chain(crate::scenarios::provision_sets::SNAPSHOTS.iter().copied())
+        .chain(crate::scenarios::sealed::SNAPSHOTS.iter().copied())
         .collect();
     let orphans: Vec<String> = std::fs::read_dir(scenario_snapshots())
         .map(|d| {

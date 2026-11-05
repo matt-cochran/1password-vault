@@ -1,0 +1,21 @@
+# sealed_lock_held: opv sync prod --confirm prod --target box
+
+## text exit: 6
+## text stdout
+prod/box: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: opv could not write <SCENARIO>/project/sealed/prod/web.opv-sealed.lock: it stayed full until the time budget ran out
+Do: check free space and permissions of <SCENARIO>/project/sealed/prod/web.opv-sealed.lock
+Next: opv plan prod --target box
+
+## json exit: 6
+## json stdout
+{"schema_version":4,"ok":false,"exit_code":6,"next":{"kind":"run","actor":"assistant","command":"opv plan prod --target box --json"},"do":"check free space and permissions of <SCENARIO>/project/sealed/prod/web.opv-sealed.lock","error":{"code":"local_io_failed","category":"policy","message":"opv could not write <SCENARIO>/project/sealed/prod/web.opv-sealed.lock: it stayed full until the time budget ran out","subject":{"io":"would_block","op":"write","path":"<SCENARIO>/project/sealed/prod/web.opv-sealed.lock"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"check free space and permissions of <SCENARIO>/project/sealed/prod/web.opv-sealed.lock","next":{"kind":"run","actor":"assistant","command":"opv plan prod --target box --json"}}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: opv could not write <SCENARIO>/project/sealed/prod/web.opv-sealed.lock: it stayed full until the time budget ran out
+Do: check free space and permissions of <SCENARIO>/project/sealed/prod/web.opv-sealed.lock
+Next: opv plan prod --target box --json

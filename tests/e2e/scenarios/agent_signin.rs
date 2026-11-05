@@ -208,6 +208,21 @@ const JSON_COMMANDS: &[(&str, &[&str])] = &[
     ("sync", &["sync", "prod"]),
     ("target list", &["target", "list"]),
     ("target op", &["target", "op", "prod", "machines"]),
+    // #271: no bundle here, so a refusal document (scenarios/sealed.rs runs a real one).
+    (
+        "unseal",
+        &[
+            "unseal",
+            "absent.opv-sealed",
+            "--env",
+            "prod",
+            "--product",
+            "web",
+            "--signers",
+            "absent_signers",
+            "--verify-only",
+        ],
+    ),
     (
         "vault locate",
         &["vault", "locate", "vE2ESHAREDDEV00000000000001"],
