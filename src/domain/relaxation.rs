@@ -186,6 +186,7 @@ fn rules_loosened(base: &Rules, head: &Rules) -> bool {
         || unset(&base.r#enum, &head.r#enum)
         || (base.email_list && !head.email_list)
         || (base.https_url && !head.https_url)
+        || (base.age_identity && !head.age_identity)
         || dropped_entries(base.not_prefix.as_ref(), head.not_prefix.as_ref())
         || dropped_strings(&base.refuse_in, &head.refuse_in)
         || widened_strings(base.r#enum.as_ref(), head.r#enum.as_ref())

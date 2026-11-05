@@ -2168,6 +2168,22 @@ impl Cause {
             ConfigNotFound { .. } => "config_not_found",
             ConfigSourceMismatch { .. } => "config_source_mismatch",
             ConfigUnreadable { .. } => "config_unreadable",
+            // sealed target (#271, design `sealed-target` §3.1): the configuration causes
+            ConfigInvalid {
+                rule:
+                    FieldRule::Check {
+                        check: ConfigCheck::SealedRecipientShared { .. },
+                    },
+                ..
+            } => "sealed_recipient_shared",
+            ConfigInvalid {
+                rule:
+                    FieldRule::Check {
+                        check: ConfigCheck::SealedSignerShared { .. },
+                    },
+                ..
+            } => "sealed_signer_shared",
+            // end sealed target
             ConfigInvalid { .. } => "config_invalid",
             ContractStale { .. } => "contract_stale",
             ValueInTextField { .. } => "value_in_text_field",
