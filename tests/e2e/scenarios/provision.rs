@@ -198,7 +198,7 @@ fn provision(extra: &[&str]) -> Vec<String> {
     v
 }
 
-fn document(run: &Run) -> Value {
+pub(crate) fn document(run: &Run) -> Value {
     serde_json::Deserializer::from_str(&run.stdout)
         .into_iter::<Value>()
         .next()
@@ -224,7 +224,7 @@ fn stored(s: &Scenario, label: &str) -> Option<String> {
 }
 
 /// What a terminal run's snapshot must not depend on: the time left of the run budget.
-fn steady(s: &str) -> String {
+pub(crate) fn steady(s: &str) -> String {
     let s = regex::Regex::new(r"of \S+ left")
         .expect("regex")
         .replace_all(s, "of <left> left");
@@ -242,6 +242,17 @@ fn steady(s: &str) -> String {
 /// wait is on output or the child, bounded by [`DEADLINE`]; past it the child is killed and
 /// the test fails with what it printed.
 fn at_a_terminal(s: &Scenario, args: &[String], answer: Option<&str>) -> Run {
+    at_a_terminal_asking(s, args, QUESTION, answer)
+}
+
+/// [`at_a_terminal`] for another set's confirmation: `answer` is typed once `question` has
+/// arrived on stderr (`provision_sets.rs` reuses it).
+pub(crate) fn at_a_terminal_asking(
+    s: &Scenario,
+    args: &[String],
+    question: &str,
+    answer: Option<&str>,
+) -> Run {
     use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 
     let mut master: libc::c_int = -1;
@@ -322,7 +333,7 @@ fn at_a_terminal(s: &Scenario, args: &[String], answer: Option<&str>) -> Run {
             }
         }
         if let Some(a) = pending
-            && String::from_utf8_lossy(&err).contains(QUESTION)
+            && String::from_utf8_lossy(&err).contains(question)
         {
             keyboard
                 .write_all(format!("{a}\n").as_bytes())
@@ -349,7 +360,7 @@ fn at_a_terminal(s: &Scenario, args: &[String], answer: Option<&str>) -> Run {
     let out = shown.join().expect("pty reader");
     assert!(
         pending.is_none(),
-        "opv never asked {QUESTION:?}: {}",
+        "opv never asked {question:?}: {}",
         String::from_utf8_lossy(&err)
     );
     Run {

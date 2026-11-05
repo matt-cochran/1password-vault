@@ -2670,6 +2670,7 @@ fn every_scenario_snapshot_belongs_to_a_scenario() {
         .chain(crate::scenarios::session_reuse::SNAPSHOTS.iter().copied())
         .chain(crate::scenarios::set_from_file::SNAPSHOTS.iter().copied())
         .chain(crate::scenarios::provision::SNAPSHOTS.iter().copied())
+        .chain(crate::scenarios::provision_sets::SNAPSHOTS.iter().copied())
         .collect();
     let orphans: Vec<String> = std::fs::read_dir(scenario_snapshots())
         .map(|d| {
