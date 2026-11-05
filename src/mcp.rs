@@ -524,26 +524,9 @@ fn config_request(project: &std::path::Path) -> config_store::Request {
     }
 }
 
-/// Credentials that would let this process write 1Password without the person's own
-/// authorization in the 1Password app (#133): an `op` session token, a service account or
-/// Connect. The first one set, by name.
-fn credential_in_environment(vars: impl Iterator<Item = (String, String)>) -> Option<String> {
-    vars.filter(|(_, v)| !v.is_empty())
-        .map(|(k, _)| k)
-        .find(|k| {
-            crate::app::account::is_session_var(k)
-                || [
-                    "OP_SERVICE_ACCOUNT_TOKEN",
-                    "OP_CONNECT_HOST",
-                    "OP_CONNECT_TOKEN",
-                ]
-                .contains(&k.as_str())
-        })
-}
-
 /// The refusal of a 1Password write when this process runs under CI (`CI` or
 /// `GITHUB_ACTIONS`): 1Password is read-only there (`require_person`), so it is refused
-/// before any call, like [`credential_in_environment`].
+/// before any call, like [`crate::host::credential_in_environment`].
 fn ci_refusal() -> Option<Cause> {
     crate::host::Host::detect()
         .ci
@@ -1070,7 +1053,7 @@ fn import_local_doc<R: Accounted>(
     if !one_line(&args.file) {
         return call.refused(usage("file", "the path of a .env file, on one line"));
     }
-    if let Some(var) = credential_in_environment(vars) {
+    if let Some(var) = crate::host::credential_in_environment(vars) {
         return call.refused(own_session("import", var));
     }
     if let Some(refused) = ci_refusal() {
@@ -1702,51 +1685,6 @@ mod tests {
         assert!(scan_inside(&project, "src"));
         assert!(!scan_inside(&project, links.path().to_str().unwrap()));
     }
-    fn vars(pairs: &[(&str, &str)]) -> impl Iterator<Item = (String, String)> {
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect::<Vec<_>>()
-            .into_iter()
-    }
-
-    #[test]
-    fn an_op_session_token_refuses_the_structural_apply() {
-        let found = credential_in_environment(vars(&[("OP_SESSION_my", "x")]));
-        assert_eq!(found.as_deref(), Some("OP_SESSION_my"));
-    }
-
-    #[test]
-    fn a_bare_op_session_refuses_the_structural_apply() {
-        let found = credential_in_environment(vars(&[("OP_SESSION", "x")]));
-        assert_eq!(found.as_deref(), Some("OP_SESSION"));
-    }
-
-    /// FMECA L6: op's delegation setting shares the prefix but holds no session.
-    #[test]
-    fn the_delegation_setting_does_not_refuse_the_structural_apply() {
-        let found = credential_in_environment(vars(&[("OP_SESSION_DELEGATION_ENABLED", "true")]));
-        assert_eq!(found, None);
-    }
-
-    #[test]
-    fn a_service_account_token_refuses_the_structural_apply() {
-        let found = credential_in_environment(vars(&[("OP_SERVICE_ACCOUNT_TOKEN", "ops_x")]));
-        assert_eq!(found.as_deref(), Some("OP_SERVICE_ACCOUNT_TOKEN"));
-    }
-
-    #[test]
-    fn a_connect_credential_refuses_the_structural_apply() {
-        let found = credential_in_environment(vars(&[("OP_CONNECT_TOKEN", "x")]));
-        assert_eq!(found.as_deref(), Some("OP_CONNECT_TOKEN"));
-    }
-
-    #[test]
-    fn an_environment_without_op_credentials_may_apply() {
-        let found = credential_in_environment(vars(&[("OP_ACCOUNT", "A"), ("HOME", "/h")]));
-        assert_eq!(found, None);
-    }
-
     #[test]
     fn every_registered_tool_has_a_cli_parity_entry() {
         let mut registered: Vec<String> = Server::tool_router()

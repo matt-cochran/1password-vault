@@ -77,6 +77,7 @@ pub(crate) mod preflight;
 mod product_flag_tests;
 pub mod propose;
 pub mod provider_op;
+pub mod provision;
 pub mod ready;
 pub mod receipt_age;
 pub mod remote_delivery;
