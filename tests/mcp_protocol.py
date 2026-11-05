@@ -74,7 +74,7 @@ with tempfile.TemporaryDirectory() as directory:
             'section', 'env', 'product', 'target', 'role'}, state_tool
         assert state_tool['inputSchema']['properties']['section']['enum'] == [
             'inventory', 'needs', 'contract', 'ready', 'plan', 'changed', 'access',
-            'delivery_preview', 'history', 'status'], state_tool
+            'delivery_preview', 'history', 'accounts', 'status'], state_tool
         reply = send('tools/call', {'name': 'opv_state', 'arguments': {'section': 'contract'}}, 3)
         text = reply['result']['content'][0]['text']
         contract_doc = json.loads(text)

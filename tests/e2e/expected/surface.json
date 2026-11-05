@@ -1068,6 +1068,7 @@
               "access",
               "delivery_preview",
               "history",
+              "accounts",
               "status"
             ]
           },

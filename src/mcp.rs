@@ -329,7 +329,7 @@ fn stopped(tool: &str, writes: bool, verbose: bool) -> Value {
 impl Server {
     #[tool(
         name = "opv_state",
-        description = "Read one section of this project's state, as the same document the CLI command of that name prints with --json: inventory (opv inventory: every declared key's state per environment), needs (opv needs: the names the code reads against the contract), contract (opv contract: the contract as data), ready (opv ready: readiness findings and each one's next step), plan (opv plan <env>: what a sync would change, and its plan_id), changed (opv changed <env>: source items changed since the last sync), access (opv access: who needs which vault for CI and deploys), delivery_preview (opv run <env> --preview: what a local run would deliver), history (opv history <env>: what opv last wrote to the targets) or status (opv status: settings in 1Password and on the targets). env, product and target scope the section as the command's own arguments do; plan, changed, delivery_preview and history need env. Names, states, item ids and versions only, never a value. Changes nothing: a sync, deploy or apply is a person's or CI's.",
+        description = "Read one section of this project's state, as the same document the CLI command of that name prints with --json: inventory (opv inventory: every declared key's state per environment), needs (opv needs: the names the code reads against the contract), contract (opv contract: the contract as data), ready (opv ready: readiness findings and each one's next step), plan (opv plan <env>: what a sync would change, and its plan_id), changed (opv changed <env>: source items changed since the last sync), access (opv access: who needs which vault for CI and deploys), delivery_preview (opv run <env> --preview: what a local run would deliver), history (opv history <env>: what opv last wrote to the targets), accounts (opv account list: this machine's accounts, which is signed in, and the choice to make when none is selected) or status (opv status: settings in 1Password and on the targets). env, product and target scope the section as the command's own arguments do; plan, changed, delivery_preview and history need env. Names, states, item ids and versions only, never a value. Changes nothing: a sync, deploy or apply is a person's or CI's.",
         input_schema = state_schema(),
         annotations(read_only_hint = true, destructive_hint = false)
     )]
@@ -1207,7 +1207,7 @@ fn next_doc<R: Accounted>(project: &std::path::Path, r: &R, args: &NextScope) ->
 }
 
 /// The sections of `opv_state` (design §25.2), in the golden's order.
-const SECTIONS: [(&str, Section); 10] = [
+const SECTIONS: [(&str, Section); 11] = [
     ("inventory", Section::Inventory),
     ("needs", Section::Needs),
     ("contract", Section::Contract),
@@ -1217,11 +1217,12 @@ const SECTIONS: [(&str, Section); 10] = [
     ("access", Section::Access),
     ("delivery_preview", Section::DeliveryPreview),
     ("history", Section::History),
+    ("accounts", Section::Accounts),
     ("status", Section::Status),
 ];
 
 /// What an unknown section is refused with.
-const SECTION_FORMAT: &str = "one of inventory, needs, contract, ready, plan, changed, access, delivery_preview, history or status";
+const SECTION_FORMAT: &str = "one of inventory, needs, contract, ready, plan, changed, access, delivery_preview, history, accounts or status";
 
 /// One `opv_state` section: the CLI command whose `--json` document it answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1235,6 +1236,7 @@ enum Section {
     Access,
     DeliveryPreview,
     History,
+    Accounts,
     Status,
 }
 
@@ -1270,6 +1272,7 @@ impl Section {
             Self::Access => &["access"],
             Self::DeliveryPreview => &["run"],
             Self::History => &["history"],
+            Self::Accounts => &["account", "list"],
             Self::Status => &["status"],
         }
     }
@@ -1285,6 +1288,7 @@ impl Section {
             Self::Access => [Optional, No, Optional],
             Self::DeliveryPreview => [Required, Optional, No],
             Self::History => [Required, No, Optional],
+            Self::Accounts => [No, No, No],
             Self::Status => [Optional, Optional, Optional],
         }
     }
@@ -1328,6 +1332,7 @@ fn state_words(
         .concat(),
         Section::Inventory => [flag("--env", env), flag("--product", product)].concat(),
         Section::Contract => [flag("--env", env), flag("--component", product)].concat(),
+        Section::Accounts => Vec::new(),
         _ => {
             let preview = (section == Section::DeliveryPreview).then(|| "--preview".to_string());
             let positional: Vec<String> =
@@ -1559,6 +1564,12 @@ fn state_doc<R: Accounted>(
             };
         }
         Section::History => crate::app::history::run(&fleet, required, target, r, true, &mut *out),
+        Section::Accounts => {
+            return match crate::app::account::document(&crate::app::account::gather(r, None)) {
+                Ok(doc) => call.document(doc.to_string().as_bytes(), Ok(())),
+                Err(e) => call.failed(&e),
+            };
+        }
         Section::Status => match env {
             None => crate::app::status::overview(&fleet, product, r, &mut *out, true),
             Some(env) => crate::app::status::run_targeted(
