@@ -122,6 +122,8 @@ pub enum System {
     Https,
     /// The docker CLI and the local daemon it drives (a registry push, #234).
     Docker,
+    /// A signed, encrypted bundle file opv writes and the runtime opens (#271).
+    Sealed,
 }
 
 impl System {
@@ -137,6 +139,7 @@ impl System {
             System::RemoteOpv => "opv on the remote host",
             System::Https => "HTTPS target",
             System::Docker => "docker",
+            System::Sealed => "sealed bundle",
         }
     }
 }

@@ -556,14 +556,16 @@ fn diagnose_unanswered(seen: crate::cause::Observed) -> Cause {
         System::Azure => azure::diagnose::diagnose(seen, "", &ctx),
         System::Kubernetes => kubernetes::diagnose::diagnose(seen, "", &ctx),
         System::GitHub => github::diagnose::diagnose(seen, "", &ctx),
-        system @ (System::Ssh | System::RemoteOpv | System::Https | System::Docker) => {
-            Cause::Unavailable {
-                system,
-                why: seen.exit().unanswered().unwrap_or(Unanswered::Timeout),
-                attempts: seen.attempts(),
-                seen,
-            }
-        }
+        system @ (System::Ssh
+        | System::RemoteOpv
+        | System::Https
+        | System::Docker
+        | System::Sealed) => Cause::Unavailable {
+            system,
+            why: seen.exit().unanswered().unwrap_or(Unanswered::Timeout),
+            attempts: seen.attempts(),
+            seen,
+        },
     };
     // Only called once every read attempt went unanswered: the count is the one the runner
     // observed (B), never a constant.

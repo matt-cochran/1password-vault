@@ -2298,6 +2298,9 @@ fn provider_named(src: &str) -> Option<String> {
         // The HTTP provider by its module and target type; plain "HTTP" stays allowed
         // (the protocol, documentation links).
         "httpprovider",
+        // The sealed provider by its target type; core may name the `bundle` codec and the
+        // word "sealed" (a bundle, `opv unseal`), never the adapter (design §8.1).
+        "sealedtarget",
         // Store kinds and bindings (FR-39): core sees only `StoreConfig`.
         "azure_key_vault",
         "external-secrets",
@@ -2305,7 +2308,7 @@ fn provider_named(src: &str) -> Option<String> {
         "clustersecretstores?",
     ];
     let re = regex::Regex::new(&format!(
-        r"(?i)\b({})\b|\b(az|gh)\s|\bgithub::|\bhttp::",
+        r"(?i)\b({})\b|\b(az|gh)\s|\bgithub::|\bhttp::|\badapters::sealed\b",
         words.join("|")
     ))
     .unwrap();
@@ -2373,6 +2376,30 @@ fn guard_ignores_a_provider_named_in_a_test_item() {
 fn guard_flags_a_source_naming_the_http_adapter() {
     let src = "fn f() -> &'static dyn Provider { &crate::adapters::http::PROVIDER }\n";
     assert_eq!(provider_named(src).as_deref(), Some("http::"));
+}
+
+/// The guard flags the sealed adapter's module (FR-37, design `sealed-target` §8.1).
+#[cfg(test)]
+#[test]
+fn guard_flags_a_source_naming_the_sealed_adapter() {
+    let src = "fn f() -> &'static dyn Provider { &crate::adapters::sealed::PROVIDER }\n";
+    assert_eq!(provider_named(src).as_deref(), Some("adapters::sealed"));
+}
+
+/// The guard flags the sealed target's type (FR-37).
+#[cfg(test)]
+#[test]
+fn guard_flags_a_source_naming_the_sealed_target_type() {
+    let src = "fn f(t: &dyn Any) -> bool { t.is::<SealedTarget>() }\n";
+    assert_eq!(provider_named(src).as_deref(), Some("SealedTarget"));
+}
+
+/// The bundle codec is not an adapter: core may name it (design `sealed-target` §8.1).
+#[cfg(test)]
+#[test]
+fn guard_allows_a_source_naming_the_bundle_codec() {
+    let src = "use crate::bundle::format::Header;\nfn f() -> &'static str { \"sealed\" }\n";
+    assert_eq!(provider_named(src), None);
 }
 
 #[cfg(test)]

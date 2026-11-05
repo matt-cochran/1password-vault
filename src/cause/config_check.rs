@@ -220,6 +220,27 @@ pub enum ConfigCheck {
     /// An `open_url_hosts` entry is not a host name.
     OpenUrlHost { host: String },
     // end provision
+    // sealed target (#271, `docs/design/sealed-target.md` §3.1)
+    /// A sealed target's recipient is also a recipient of a sealed target in another trust
+    /// group (`sealed_recipient_shared`). `recipient` is its fingerprint, never the key.
+    SealedRecipientShared {
+        recipient: String,
+        other_env: String,
+        other_target: String,
+    },
+    /// A sealed target's signer also signs for a sealed target in another trust group
+    /// (`sealed_signer_shared`, T1). `signer` is its fingerprint.
+    SealedSignerShared {
+        signer: String,
+        other_env: String,
+        other_target: String,
+    },
+    /// A key a sealed target delivers holds an age identity (`age_identity = true`, T14).
+    SealedDeliversIdentity { target: String },
+    /// A key a sealed target delivers is read from the item of the target's own
+    /// `deploy_credentials`, its signing key (G4).
+    SealedDeliversSigner { target: String },
+    // end sealed target
 }
 
 fn list(items: &[String]) -> String {
@@ -439,6 +460,30 @@ impl ConfigCheck {
             ProducerTimeoutCap { max } => format!("is longer than {max}"),
             OpenUrlHost { host } => format!("lists {host}, which is not a host name"),
             // end provision
+            SealedRecipientShared {
+                recipient,
+                other_env,
+                other_target,
+            } => format!(
+                "lists recipient {recipient}, which target {other_target} of environment \
+                 {other_env} also seals to, in another trust group"
+            ),
+            SealedSignerShared {
+                signer,
+                other_env,
+                other_target,
+            } => format!(
+                "is signer {signer}, which also signs for target {other_target} of environment \
+                 {other_env}, in another trust group"
+            ),
+            SealedDeliversIdentity { target } => format!(
+                "is an age identity (age_identity = true), and sealed target {target} delivers \
+                 it; a bundle cannot carry the key that opens it"
+            ),
+            SealedDeliversSigner { target } => format!(
+                "is read from the item of sealed target {target}'s deploy_credentials, its \
+                 signing key, and a sealed target never delivers its own signing key"
+            ),
         };
         format!("{field} {p}")
     }
@@ -612,6 +657,17 @@ impl ConfigCheck {
             OpenUrlHost { host } => {
                 format!("write {host} as a host name only, such as accounts.example.com")
             }
+            SealedRecipientShared { other_target, .. }
+            | SealedSignerShared { other_target, .. } => {
+                format!(
+                    "give this target its own key in {field}, or set the same sealed.trust_group \
+                     on it and on target {other_target}"
+                )
+            }
+            SealedDeliversIdentity { target } | SealedDeliversSigner { target } => format!(
+                "remove the product of {field} from target {target}'s products, or deliver this \
+                 key from another target"
+            ),
         }
     }
 }

@@ -1452,6 +1452,7 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
     check_boundaries(&fleet, doc)?;
     check_target_roles(&fleet, doc)?;
     check_file_mounts(&fleet, doc)?;
+    check_provider_rules(&fleet, doc)?;
     check_names(&fleet, doc)?;
     check_personal(&fleet, doc)?;
     check_evidence_width(&fleet, doc)?;
@@ -1632,6 +1633,19 @@ fn check_file_mounts(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
                 rendered.push((rendered_dir, product.clone(), files[0].0.to_string()));
             }
         }
+    }
+    Ok(())
+}
+
+/// The load rules each provider makes across its own targets ([`Provider::check_fleet`],
+/// FR-37), placed at the field the provider names.
+fn check_provider_rules(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
+    for p in registry::PROVIDERS {
+        p.check_fleet(fleet).map_err(|refusal| {
+            let crate::provider::FleetRefusal { path, rule } = *refusal;
+            let path: Vec<&str> = path.iter().map(String::as_str).collect();
+            doc.invalid(&path, rule)
+        })?;
     }
     Ok(())
 }

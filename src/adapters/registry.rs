@@ -1,7 +1,7 @@
 //! The registered deployment providers (FR-37). Adding a provider is one module under
 //! `src/adapters/<provider>/` plus one line in [`PROVIDERS`].
 
-use super::{azure, fly, github, http, kubernetes};
+use super::{azure, fly, github, http, kubernetes, sealed};
 use crate::provider::Provider;
 
 /// Every provider, in the order their sections are named in messages.
@@ -11,6 +11,7 @@ pub static PROVIDERS: &[&dyn Provider] = &[
     &kubernetes::PROVIDER,
     &github::PROVIDER,
     &http::PROVIDER,
+    &sealed::PROVIDER,
 ];
 
 /// The provider opv suggests when an environment has none, and the one `opv init` writes.
@@ -92,8 +93,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_lists_azure_fly_github_http_and_kubernetes() {
-        assert_eq!(sections(), ["azure", "fly", "github", "http", "kubernetes"]);
+    fn registry_lists_every_provider_section() {
+        assert_eq!(
+            sections(),
+            ["azure", "fly", "github", "http", "kubernetes", "sealed"]
+        );
     }
 
     #[test]
