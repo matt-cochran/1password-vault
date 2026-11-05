@@ -856,6 +856,50 @@ enum Cmd {
         )]
         command: Vec<String>,
     },
+    /// Verify a sealed bundle offline and print its signed header, never a value (#271).
+    ///
+    /// The runtime side of a sealed target: reads the bundle, the allowed_signers file and
+    /// an age identity, and nothing else (no configuration, no 1Password, no network). The
+    /// signature, environment, product and revision are checked before anything is
+    /// decrypted. --verify-only decrypts nothing; it also checks that the identity is a
+    /// recipient and, for file keys, that a RAM-backed runtime folder exists.
+    #[command(before_help = UNSEAL_QUICK)]
+    Unseal {
+        /// The sealed bundle file that opv sync wrote.
+        #[arg(value_name = "BUNDLE")]
+        bundle: PathBuf,
+        /// The environment the bundle must be signed for; also the allowed_signers principal.
+        #[arg(long, value_name = "ENV")]
+        env: String,
+        /// The product the bundle must be sealed for.
+        #[arg(long, value_name = "PRODUCT")]
+        product: String,
+        /// The allowed_signers file: `<env> namespaces="opv-sealed" ssh-ed25519 <key>` lines.
+        #[arg(long, value_name = "FILE")]
+        signers: PathBuf,
+        /// Read the age identity from this file (a platform secret file or a 0400 file).
+        #[arg(
+            long,
+            value_name = "PATH",
+            conflicts_with = "identity_env",
+            required_unless_present_any = ["identity_env", "verify_only"]
+        )]
+        identity_file: Option<PathBuf>,
+        /// Read the age identity once from this environment variable (environment-only
+        /// platforms). The identity is never an argument.
+        #[arg(long, value_name = "VAR")]
+        identity_env: Option<String>,
+        /// Refuse a bundle whose signed revision is below N (the deploy's rollback floor).
+        #[arg(long, value_name = "N")]
+        min_revision: Option<u64>,
+        /// Check without decrypting: signature, header, revision, and with an identity its
+        /// membership; with file keys, the RAM-backed runtime folder.
+        #[arg(long)]
+        verify_only: bool,
+        /// Print one JSON document (schema opv.unseal/1) instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
     /// Propose a change: the contract diff and its plan id. Writes nothing unless --write,
     /// and then only the contract file; a person runs the plan with opv apply.
     #[command(
@@ -1615,6 +1659,11 @@ Examples:
   opv changed prod                       # did any source item change since the last sync?
   opv changed prod --product api         # only api's placements
   opv changed prod --json                # one JSON document; exit 10 when something changed";
+
+const UNSEAL_QUICK: &str = "\
+Examples:
+  opv unseal app.opv-sealed --env prod --product api --signers allowed_signers --verify-only
+  opv unseal app.opv-sealed --env prod --product api --signers allowed_signers --identity-file id.txt --json";
 
 #[derive(Subcommand)]
 enum CiCmd {
@@ -2645,7 +2694,8 @@ impl Cmd {
             | Cmd::Account(AccountCmd::List { json, .. })
             | Cmd::Account(AccountCmd::Use { json, .. })
             | Cmd::Skill(SkillCmd::Install { json, .. })
-            | Cmd::Skill(SkillCmd::Status { json, .. }) => *json,
+            | Cmd::Skill(SkillCmd::Status { json, .. })
+            | Cmd::Unseal { json, .. } => *json,
             Cmd::Plan(a) => a.json,
             Cmd::Sync(a) => a.json,
             Cmd::Schema => true,
@@ -2765,6 +2815,38 @@ fn run(
     }
     if let Cmd::RemoteReceive = &cli.cmd {
         return opv::app::remote_delivery::receive(Box::new(io::stdin()));
+    }
+    // #271: the runtime reads only the bundle, the signers file and the identity: no
+    // configuration, no account, no 1Password.
+    if let Cmd::Unseal {
+        bundle,
+        env,
+        product,
+        signers,
+        identity_file,
+        identity_env,
+        min_revision,
+        verify_only,
+        json,
+    } = &cli.cmd
+    {
+        use opv::app::unseal::{IdentitySource, Request};
+        let identity = match (identity_file, identity_env) {
+            (Some(path), _) => Some(IdentitySource::File(path.clone())),
+            (None, Some(var)) => Some(IdentitySource::Env(var.clone())),
+            (None, None) => None,
+        };
+        let req = Request {
+            bundle: bundle.clone(),
+            env: env.clone(),
+            product: product.clone(),
+            signers: signers.clone(),
+            identity,
+            min_revision: *min_revision,
+            verify_only: *verify_only,
+            json: *json,
+        };
+        return opv::app::unseal::run(&req, out);
     }
     if let Cmd::Run { command, .. } = &cli.cmd {
         let argv: Vec<String> = std::env::args().collect();
@@ -4951,6 +5033,7 @@ fn run_other(
         | Cmd::LocalDelivery { .. }
         | Cmd::RemoteSend { .. }
         | Cmd::RemoteReceive
+        | Cmd::Unseal { .. }
         | Cmd::Schema
         | Cmd::Help { .. } => {
             unreachable!("handled by run")

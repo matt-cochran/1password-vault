@@ -134,6 +134,7 @@ opv delivery verify prod --product api --json   # does the target still hold wha
 opv changed prod --json    # did a source item change since the last sync? (exit 10 when it did)
 opv status staging         # one environment's rows
 opv history prod --json    # what opv last wrote to a target: time, plan id, changed outside opv
+opv unseal deploy/prod-api.opv-sealed --env prod --product api --signers allowed_signers --verify-only --json   # a sealed bundle verified offline (names and fingerprints, never a value)
 ```
 
 Problem rows come first. Each row's STATE is `saved`, `missing`, `failed <rule> (<reason>)`, `skipped` (not wanted in this environment) or `blocked by source` (fixed with the key it shares); `opv help states` defines every word. A config key stored in a concealed field is still `saved`: opv delivers it as a plain value, never prints it, and `status` warns once. For each missing or failed row:

@@ -336,6 +336,27 @@ pub fn meaning(code: &str) -> &'static str {
         "sealed_signer_shared" => {
             "a sealed target's signer also signs for a sealed target in another trust group, so one could sign for the other"
         }
+        "sealed_malformed" => {
+            "opv unseal: the bundle is missing, too large or not a well-formed opv-sealed/1 file; nothing was decrypted"
+        }
+        "sealed_signature_invalid" => {
+            "opv unseal: the bundle's signature does not verify against an allowed_signers line for its environment (namespace opv-sealed), or the signers file was refused; nothing was decrypted"
+        }
+        "sealed_scope_mismatch" => {
+            "opv unseal: the bundle's signed environment or product is not the one --env or --product names; nothing was decrypted"
+        }
+        "sealed_revision_below_floor" => {
+            "opv unseal: the bundle's signed revision is below --min-revision (a rollback); nothing was decrypted"
+        }
+        "sealed_identity_unusable" => {
+            "opv unseal: the age identity could not be read, or is not exactly one AGE-SECRET-KEY-1 line"
+        }
+        "sealed_not_a_recipient" => {
+            "opv unseal: the age identity is not a recipient of this bundle"
+        }
+        "sealed_payload_mismatch" => {
+            "opv unseal: the decrypted payload does not match the signed header; nothing was delivered"
+        }
         // end sealed target
         "internal_error" => "opv hit an internal error; report it",
         _ => "",
@@ -1082,9 +1103,64 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
                 },
             },
         },
+        // `opv unseal`'s refusals (design §4.2), one per code
+        SealedRefused {
+            bundle: sealed_bundle(),
+            refusal: SealedRefusal::Malformed {
+                detail: "the bundle contains a CR byte".into(),
+            },
+        },
+        SealedRefused {
+            bundle: sealed_bundle(),
+            refusal: SealedRefusal::SignatureInvalid {
+                signers: PathBuf::from("/etc/opv/allowed_signers"),
+                detail: "no allowed_signers line for principal `env-prod` with namespaces=\"opv-sealed\" holds the signing key".into(),
+            },
+        },
+        SealedRefused {
+            bundle: sealed_bundle(),
+            refusal: SealedRefusal::ScopeMismatch {
+                field: "environment".into(),
+                expected: "env-prod".into(),
+                found: "env-stage".into(),
+            },
+        },
+        SealedRefused {
+            bundle: sealed_bundle(),
+            refusal: SealedRefusal::RevisionBelowFloor {
+                revision: 6,
+                floor: 7,
+            },
+        },
+        SealedRefused {
+            bundle: sealed_bundle(),
+            refusal: SealedRefusal::IdentityUnusable {
+                from: IdentityFrom::Env {
+                    var: "OPV_AGE_IDENTITY".into(),
+                },
+                detail: "no AGE-SECRET-KEY-1… line".into(),
+            },
+        },
+        SealedRefused {
+            bundle: sealed_bundle(),
+            refusal: SealedRefusal::NotARecipient {
+                recipient: Some("sha256:0123456789abcdef".into()),
+            },
+        },
+        SealedRefused {
+            bundle: sealed_bundle(),
+            refusal: SealedRefusal::PayloadMismatch {
+                detail: "the payload's names differ from the header".into(),
+            },
+        },
         // end sealed target
         Bug { site: "site-xyz" },
     ]
+}
+
+/// The example sealed bundle `opv unseal` reads.
+fn sealed_bundle() -> PathBuf {
+    PathBuf::from("deploy/prod-api.opv-sealed")
 }
 
 /// The path of field `leaf` of the example sealed target.
