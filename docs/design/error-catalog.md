@@ -83,9 +83,9 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 
 | Variant | Fields | Code | Retry | Do | Next |
 |---|---|---|---|---|---|
-| `ConfigNotFound` | searched_from: Path; env: Option<Env> | config_not_found | after_fix | — | `opv init <env>` when env is known, else `opv init --help` [R01] |
+| `ConfigNotFound` | searched_from: Path; env: Option<Env>; found: Option<FoundConfigs{paths, dot_opv, stopped}> (FR-66) | config_not_found | after_fix | one found: name it in `.opv` as `config = "<path relative to the .opv>"`; several: pick (PickBetween) | `opv init <env>` when env is known, else `opv init --help` [R01]; one found: rerun with `--config <path relative to cwd>`; several: none |
 | `ConfigSourceMismatch` | command: CommandId; manifest: ManifestRef | **config_source_mismatch** | never | "<command> works on a secrets.toml; this project's configuration is the 1Password manifest <title>" | `opv config edit`, or the command's manifest route [R02] |
-| `ConfigUnreadable` | path; io: IoKind; given_by: Flag/EnvVar/Discovered | config_unreadable | after_fix | named by given_by | rerun [R03] |
+| `ConfigUnreadable` | path; io: IoKind; given_by: Flag/EnvVar/Discovered/DotOpv{path} (FR-66) | config_unreadable | after_fix | named by given_by | rerun [R03] |
 | `ConfigInvalid` | source: ConfigSource; at: Location{line, col}; field: DottedPath; rule: FieldRule | config_invalid | after_fix | built from (field, rule) (§4.12) | rerun [R04–R08, R12] |
 | `RecordMissing` | what: Boundary{env, product} / StateVault{env, target}; source | boundary_missing / state_vault_missing | after_fix | — | file: `opv bootstrap`; manifest: `opv structure plan` [R09, R10] |
 | `StateVaultTooWide` | env; target; vault; shared_with; source; at | state_vault_wider_than_values | after_fix | "delete state_vault_id from [environments.E.targets.T]" | `opv bootstrap` [R11] |
@@ -111,7 +111,7 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 
 | Variant | Fields | Code | Retry | Do | Next |
 |---|---|---|---|---|---|
-| `NotSignedIn` | system: System; account: Option<Account>; state: SignedOut / Expired / AppLocked / AppPromptUnanswered{waited} | op_not_signed_in / **target_not_signed_in** | after_fix | app states: "unlock the 1Password app and approve its prompt"; targets: the typed vendor sign-in | 1Password: `opv login --account <id> -- <rerun>`; targets: rerun [R28, R29, R35] |
+| `NotSignedIn` | system: System; account: Option<Account>; state: SignedOut / Expired / AppLocked / AppPromptUnanswered{waited}; selected_by: Option<AccountSource> (FR-40: filled from the selection when the call carried no account) | op_not_signed_in / **target_not_signed_in** | after_fix | app states: "unlock the 1Password app and approve its prompt"; targets: the typed vendor sign-in | 1Password: `opv login --account <id> -- <rerun>`, without `--account` when `.opv` or the configuration records it; a child is `-- <command>` with no `argv`; targets: rerun [R28, R29, R35] |
 | `AccountNotOnMachine` | account; selected_by: AccountSource{path or var}; add_route: Cli / App{platform} | account_not_registered | after_fix | App: "add it in the 1Password app and turn on CLI integration"; Cli: "add it at op's prompt" | Cli: `opv login --add` (an email only in `--account`); App: `opv login` [R30] |
 | `AccountAmbiguous` | given; source; candidates: Vec<{id, email, shorthand}> | account_ambiguous | after_fix | "pick the account by its email" | `opv account list`; never `opv account use <first>` [R31] |
 | `InOtherAccount` | vault: VaultId; item: Option<ItemId>; selected: Account; owning: Option<Account>; unasked: Vec<Account>; searched: bool, the other accounts were listed and asked (§12.4, #153a); env | ids_not_in_account | after_fix | "select the owning account (opv account use <id>), or fix vault_id for <env>"; with no owner found, "sign in to <unasked> to look for vault <vault> there, or fix vault_id for <env>"; searched with every account asked, "no 1Password account on this machine holds vault <vault>: fix vault_id for <env> with a vault of account <selected>"; not searched (op listed no accounts), "find the account that holds vault <vault>, or fix vault_id for <env>" | `opv account use <owning>`; with accounts not asked, `opv login --account <first unasked> --no-record -- opv vault locate <vault>` (handoff); searched with every account asked, `op vault list --account <selected>`; not searched, `opv vault locate <vault>` [R32] |
@@ -297,7 +297,11 @@ pub enum Next {
     Handoff(Command),              // only a person runs it (approve, --confirm, login)
     Vendor(VendorCommand),         // a typed vendor command (flyctl auth login, ssh -p …)
     None(NoNextReason),            // CopiesDiffer, RegeneratedFileDiffers: the person picks the direction
+    Choose(Choose),                // FR-65: a person picks one of 2+ choices, whose steps then run
 }
+pub struct Choose { reach: Reach, choices: Vec<Choice> }        // Reach: App | Shell | None
+pub struct Choice { account: AccountChoice, steps: Vec<Step> }
+pub struct Step { kind: NextKind, actor: NextActor, effect: StepEffect, run: Option<Cmd>, does: Option<&'static str> }
 pub enum Action { /* typed, rendered from a table: Grant{…}, FillValue{…}, Unset{var}, Chmod{…}, … */ }
 ```
 
@@ -316,6 +320,8 @@ pub enum Action { /* typed, rendered from a table: Grant{…}, FillValue{…}, U
 - **opv never confirms for the person.** `--confirm`, `--approved`, `--expect-plan` and `--prune-immutable` can appear only inside a `Handoff`.
 - **No blind re-run after an unknown create.** `CreateOutcomeUnknown` with `refind: Check` has no `Rerun` arm.
 - **No re-run of a used approval.** `Partial` and `ApprovalUsed` produce only `Check`/`Run` reads.
+- **No guessed account (FR-65).** `Next::Choose` is built only by `cause::step::account_choices(candidates, reach, rerun)`, and only with two or more candidates; one candidate is recorded (`opv account use <id>`), none is the person's `opv login --add`. There is no accessor for a "first" choice, and `signed_in` never selects one.
+- **No `argv` from display text (FR-65).** A schema-4 `argv` comes only from `Cmd::exec_argv`, which is `None` for a trailing `--` (the child placeholder) and for a shell refresh line. `render::typed_next_value` adds it for the producers migrated to it (`Cause::types_argv`: the session and account causes); `render::next_value` never does.
 
 ### 6.3 `human_required` is derived
 
@@ -324,7 +330,27 @@ pub enum Action { /* typed, rendered from a table: Grant{…}, FillValue{…}, U
 - an `Action` marked person-only: Grant, FillValue, Approve, AddAccountInApp, OwnerSetup, Revoke, PickBetween, Confirm;
 - or one of the variants `NeedsTerminal`, `NeedsOwnSession`, `NeedsConfirm`, `ApprovalMissing`.
 
-It can't disagree with the step, and the CLI and MCP can't disagree with each other.
+It can't disagree with the step, and the CLI and MCP can't disagree with each other. A `Choose` is a person's step too.
+
+**`human_required` implies `next.actor == person`** (FR-65, agent-signin-readiness vet item 7), checked over every catalog example by `render::tests::human_required_implies_person_actor`. The rule is scoped, not blanket: these codes keep the assistant's read as their `next` while `human_required` stays true, because a person-only Do comes first and the read then shows whether it took (`cause::codes::ASSISTANT_READS_AFTER_PERSON`; `every_decided_assistant_read_is_still_one` keeps the list free of stale entries). Flipping them to `authorize`/`person` would stop assistants from running harmless reads (design A15); turning `human_required` off would hide that a person must act.
+
+| Code | Do (person) | Next (assistant read) | Decision |
+|---|---|---|---|
+| `account_required` | pick the project's account | was `opv account list` | **flipped**: `choose`, `actor: person` (FR-65) |
+| `account_ambiguous` | pick the account by ID | `opv account list` | keep: the list shows the candidates' IDs |
+| `choice_required` | pick between candidates | `opv contract` | keep: the read lists them |
+| `manifest_ambiguous` | pick the project's manifest | `opv projects` | keep: the read lists them |
+| `concurrent_edit` | decide which edit wins | `opv status <env>` | keep: the read shows the current state |
+| `ids_not_in_account` | fix the IDs or switch account | `opv account use <owning>` | keep: the owning account was found by search, not guessed |
+| `confirm_mismatch` | confirm the environment | `opv plan <env>` | keep: the plan shows what a confirmation would apply |
+| `create_outcome_unknown` | revoke an orphan | the refind read | keep: the read shows whether it was created |
+| `secret_not_stored` | revoke the unstored secret | `opv target credentials …` | keep: the read shows what remains |
+| `permission_denied`, `vault_no_access` | an owner grants the right | `opv doctor --env …` | keep: doctor shows whether the grant took |
+| `owner_setup_required` | an owner's setup at the provider | `opv ready` | keep: ready shows whether it took |
+| `findings`, `keys_blocking` | fill the value in 1Password | `opv open …` | keep: the read opens the item to fill |
+| `input_invalid` | edit the input file (it holds values) | the same command | keep: the re-run checks the edited file |
+| `deploy_credentials_failed`, `credential_rejected` | replace or unset the credential | `opv doctor …` | keep: doctor shows whether the credential works |
+| `target_not_signed_in` | the vendor sign-in (`flyctl auth login`, …) | the same command | keep: the vendor's sign-in is stored for the user, so the re-run sees it |
 
 It is **guidance, not enforcement**. An agent with a shell can run anything the person can; §9 says what actually stops an agent.
 

@@ -19,6 +19,7 @@ pub fn not_signed_in() -> Error {
         system: System::GitHub,
         account: None,
         state: SessionState::SignedOut,
+        selected_by: None,
     }
     .into()
 }

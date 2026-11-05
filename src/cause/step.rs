@@ -5,7 +5,8 @@
 //! The child command after `--` is opaque: `run` and `login` take one, and its words are
 //! never stored, so `Rerun` can never leak or re-run them (design §6.1).
 
-use super::{Cmd, Invocation, Origin};
+use super::{AccountChoice, Choice, Choose, Cmd, Invocation, Next, Origin, Step};
+use crate::json::{NextActor, NextKind, Reach, StepEffect};
 
 /// Global options that take a value. Used only to find the subcommand path when global
 /// options are written before it (`opv --config PATH run …`).
@@ -76,6 +77,114 @@ impl Cmd {
         argv.extend(self.command.iter().cloned());
         argv.extend(self.args.iter().cloned());
         argv
+    }
+
+    /// The schema-4 `argv` of a step that runs this command (FR-65): [`Cmd::to_argv`], or
+    /// `None` when the words are not a command to exec as they stand: a trailing `--` (the
+    /// person's own child command, a placeholder) or a shell refresh line (`opv login
+    /// --shell`, which only runs inside the shell's `eval`).
+    pub fn exec_argv(&self) -> Option<Vec<String>> {
+        let placeholder = self.args.last().is_some_and(|a| a == "--");
+        (!placeholder && self.as_login_shell().is_none()).then(|| self.to_argv())
+    }
+}
+
+/// The `next` for several 1Password accounts with none selected (FR-65, design
+/// agent-signin-readiness §2.3): one builder for the catalog's `account_required`,
+/// `opv ready` and `opv account list`.
+///
+/// - Two or more candidates: [`Next::Choose`], in the given order. opv never picks one.
+/// - One candidate: there is nothing to choose, so the step records it (`opv account use`).
+/// - None: the person adds an account (`opv login --add`).
+///
+/// Each choice's steps: `opv account use <id>` (the assistant, `writes_config`, only after
+/// the person named the choice); then, unless the candidate is known to be signed in, the
+/// person's sign-in by `reach` (`app`: unlock the app; `shell`: the shell's refresh line;
+/// `none`: `opv login -- <rerun>` in their own terminal); then, unless the person's own run
+/// is the check (`reach` `none`, signed out), the assistant's `rerun`. `rerun` ends with
+/// `--` when it carries the person's child command (its words are never stored).
+pub fn account_choices(candidates: &[AccountChoice], reach: Reach, rerun: &Cmd) -> Next {
+    match candidates {
+        [] => Next::Handoff(Cmd {
+            command: vec!["login".into()],
+            args: vec!["--add".into()],
+        }),
+        [one] => Next::Run(account_use(one)),
+        many => Next::Choose(Choose {
+            reach,
+            choices: many
+                .iter()
+                .map(|a| Choice {
+                    account: a.clone(),
+                    steps: choice_steps(a, reach, rerun),
+                })
+                .collect(),
+        }),
+    }
+}
+
+/// `opv account use <account id>`: names the account by ID, never `op signin` (FR-50).
+fn account_use(a: &AccountChoice) -> Cmd {
+    Cmd {
+        command: vec!["account".into(), "use".into()],
+        args: vec![a.id.to_string()],
+    }
+}
+
+fn choice_steps(a: &AccountChoice, reach: Reach, rerun: &Cmd) -> Vec<Step> {
+    let mut steps = vec![Step {
+        kind: NextKind::Run,
+        actor: NextActor::Assistant,
+        effect: StepEffect::WritesConfig,
+        run: Some(account_use(a)),
+        does: None,
+    }];
+    let signed_in = a.signed_in == Some(true);
+    if !signed_in {
+        steps.push(sign_in_step(reach, rerun));
+    }
+    if signed_in || reach != Reach::None {
+        steps.push(Step {
+            kind: NextKind::Run,
+            actor: NextActor::Assistant,
+            effect: StepEffect::Reads,
+            run: Some(rerun.clone()),
+            does: None,
+        });
+    }
+    steps
+}
+
+/// The person's sign-in for a choice. `opv account use` has just recorded the account in
+/// `.opv`, so no sign-in names it (FR-40 amended).
+fn sign_in_step(reach: Reach, rerun: &Cmd) -> Step {
+    let (run, does) = match reach {
+        Reach::App => (
+            None,
+            Some("unlock the 1Password app and approve its prompt"),
+        ),
+        Reach::Shell => (
+            Some(Cmd::login_shell(crate::host::Host::detect().shell, None)),
+            None,
+        ),
+        Reach::None => {
+            let mut args = vec!["--".to_string()];
+            args.extend(rerun.to_argv());
+            (
+                Some(Cmd {
+                    command: vec!["login".into()],
+                    args,
+                }),
+                None,
+            )
+        }
+    };
+    Step {
+        kind: NextKind::Authorize,
+        actor: NextActor::Person,
+        effect: StepEffect::SignsIn,
+        run,
+        does,
     }
 }
 

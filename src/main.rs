@@ -5552,12 +5552,14 @@ fn init_for(e: Error, env: Option<&str>) -> Error {
                 searched_from,
                 env: None,
                 manifest,
+                found,
             },
             _,
         )) => opv::cause::Cause::ConfigNotFound {
             searched_from: searched_from.clone(),
             env: Some(opv::cause::EnvName::new(env)),
             manifest: manifest.clone(),
+            found: found.clone(),
         }
         .into(),
         _ => e,

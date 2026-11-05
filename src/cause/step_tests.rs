@@ -237,3 +237,242 @@ fn a_rebuilt_step_leaves_out_the_colour_flag() {
     ]);
     assert_eq!(inv.args, vec!["--config".to_string(), "x.toml".to_string()]);
 }
+
+// --- FR-65: typed choices and argv (design agent-signin-readiness §2.3) --------------------
+
+use crate::cause::{AccountChoice, AccountId, Next, Step};
+use crate::json::{NextActor, Reach, StepEffect};
+
+fn candidate(id: &str, signed_in: Option<bool>) -> AccountChoice {
+    AccountChoice {
+        email: format!("{id}@example.com"),
+        address: "my.1password.com".into(),
+        id: AccountId::new(id),
+        shorthand: Some("my".into()),
+        signed_in,
+    }
+}
+
+fn ready_json() -> Cmd {
+    Cmd {
+        command: words("ready"),
+        args: words("--json"),
+    }
+}
+
+fn two_candidates() -> Vec<AccountChoice> {
+    vec![
+        candidate("TTDZ56BH", Some(false)),
+        candidate("6AINMAIK", Some(true)),
+    ]
+}
+
+/// The steps of choice `at` for `reach`.
+fn steps_of(reach: Reach, at: usize) -> Vec<Step> {
+    match crate::cause::step::account_choices(&two_candidates(), reach, &ready_json()) {
+        Next::Choose(c) => c.choices[at].steps.clone(),
+        other => panic!("not a choose: {other:?}"),
+    }
+}
+
+fn texts(steps: &[Step]) -> Vec<Option<String>> {
+    steps
+        .iter()
+        .map(|s| s.run.as_ref().map(|c| c.to_argv().join(" ")))
+        .collect()
+}
+
+#[test]
+fn two_candidates_are_a_choose() {
+    let next = crate::cause::step::account_choices(&two_candidates(), Reach::None, &ready_json());
+    assert!(matches!(next, Next::Choose(_)));
+}
+
+#[test]
+fn choose_needs_two_candidates() {
+    let one = [candidate("TTDZ56BH", None)];
+    let next = crate::cause::step::account_choices(&one, Reach::None, &ready_json());
+    assert!(!matches!(next, Next::Choose(_)));
+}
+
+#[test]
+fn no_candidate_is_the_persons_add() {
+    let next = crate::cause::step::account_choices(&[], Reach::None, &ready_json());
+    assert_eq!(
+        next,
+        Next::Handoff(Cmd {
+            command: words("login"),
+            args: words("--add"),
+        })
+    );
+}
+
+#[test]
+fn choices_keep_the_given_order() {
+    let ids: Vec<String> =
+        match crate::cause::step::account_choices(&two_candidates(), Reach::None, &ready_json()) {
+            Next::Choose(c) => c.choices.iter().map(|c| c.account.id.to_string()).collect(),
+            _ => Vec::new(),
+        };
+    assert_eq!(ids, ["TTDZ56BH", "6AINMAIK"]);
+}
+
+#[test]
+fn a_choice_starts_with_account_use_by_id() {
+    assert_eq!(
+        texts(&steps_of(Reach::None, 0))[0].as_deref(),
+        Some("opv account use TTDZ56BH")
+    );
+}
+
+#[test]
+fn account_use_is_the_assistants_config_write() {
+    let first = &steps_of(Reach::None, 0)[0];
+    assert_eq!(
+        (first.actor, first.effect),
+        (NextActor::Assistant, StepEffect::WritesConfig)
+    );
+}
+
+#[test]
+fn signed_out_without_reach_signs_in_in_the_persons_terminal() {
+    assert_eq!(
+        texts(&steps_of(Reach::None, 0)),
+        [
+            Some("opv account use TTDZ56BH".to_string()),
+            Some("opv login -- opv ready --json".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn signed_out_with_the_app_unlocks_it_then_verifies() {
+    assert_eq!(
+        texts(&steps_of(Reach::App, 0)),
+        [
+            Some("opv account use TTDZ56BH".to_string()),
+            None,
+            Some("opv ready --json".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn the_app_sign_in_says_what_to_do() {
+    assert_eq!(
+        steps_of(Reach::App, 0)[1].does,
+        Some("unlock the 1Password app and approve its prompt")
+    );
+}
+
+#[test]
+fn a_shell_reach_signs_in_with_the_refresh_line() {
+    let sign_in = &steps_of(Reach::Shell, 0)[1];
+    assert!(
+        sign_in
+            .run
+            .as_ref()
+            .is_some_and(|c| c.as_login_shell().is_some())
+    );
+}
+
+#[test]
+fn signed_in_choice_has_no_signin_step() {
+    let effects: Vec<StepEffect> = steps_of(Reach::None, 1).iter().map(|s| s.effect).collect();
+    assert!(!effects.contains(&StepEffect::SignsIn), "{effects:?}");
+}
+
+#[test]
+fn every_sign_in_step_is_the_persons() {
+    let actors: Vec<NextActor> = [Reach::App, Reach::Shell, Reach::None]
+        .into_iter()
+        .flat_map(|r| steps_of(r, 0))
+        .filter(|s| s.effect == StepEffect::SignsIn)
+        .map(|s| s.actor)
+        .collect();
+    assert!(actors.iter().all(|a| *a == NextActor::Person), "{actors:?}");
+}
+
+#[test]
+fn a_rerun_with_a_child_signs_in_with_a_placeholder() {
+    let rerun = Cmd {
+        command: words("run"),
+        args: words("dev --"),
+    };
+    let next = crate::cause::step::account_choices(&two_candidates(), Reach::None, &rerun);
+    let Next::Choose(c) = next else {
+        panic!("not a choose")
+    };
+    assert_eq!(
+        c.choices[0].steps[1].run.as_ref().and_then(Cmd::exec_argv),
+        None
+    );
+}
+
+#[test]
+fn exec_argv_of_a_placeholder_is_none() {
+    let c = Cmd {
+        command: words("login"),
+        args: words("-- opv run dev --"),
+    };
+    assert_eq!(c.exec_argv(), None);
+}
+
+#[test]
+fn exec_argv_of_a_refresh_line_is_none() {
+    let c = Cmd::login_shell(crate::host::Shell::Posix, None);
+    assert_eq!(c.exec_argv(), None);
+}
+
+#[test]
+fn exec_argv_of_a_plain_command_is_its_argv() {
+    assert_eq!(ready_json().exec_argv(), Some(words("opv ready --json")));
+}
+
+/// Every `argv` the catalog's typed producers and the choices emit, under a few invocations.
+fn every_emitted_argv() -> Vec<Vec<String>> {
+    let invocations = [
+        Invocation::from_cli(&words("opv ready dev --json")),
+        Invocation::from_cli(&words("opv run dev -- sh -c true")),
+        Invocation::from_cli(&words("opv sync prod --target web")),
+        Invocation::from_mcp("opv_state", Vec::new()),
+    ];
+    let mut out = Vec::new();
+    for inv in &invocations {
+        for c in crate::cause::codes::examples() {
+            let doc = crate::cause::render::document(&c, None, inv, false);
+            if let Some(argv) = doc["next"]["argv"].as_array() {
+                out.push(
+                    argv.iter()
+                        .filter_map(|w| w.as_str().map(String::from))
+                        .collect(),
+                );
+            }
+        }
+    }
+    for reach in [Reach::App, Reach::Shell, Reach::None] {
+        for at in 0..2 {
+            out.extend(
+                steps_of(reach, at)
+                    .iter()
+                    .filter_map(|s| s.run.as_ref()?.exec_argv()),
+            );
+        }
+    }
+    out
+}
+
+#[test]
+fn argv_round_trips_clap() {
+    let refused: Vec<String> = every_emitted_argv()
+        .into_iter()
+        .filter(|argv| cli_command().try_get_matches_from(argv).is_err())
+        .map(|argv| argv.join(" "))
+        .collect();
+    assert_eq!(refused, Vec::<String>::new());
+}
+
+#[test]
+fn the_typed_producers_emit_argv() {
+    assert!(!every_emitted_argv().is_empty());
+}

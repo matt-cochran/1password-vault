@@ -315,6 +315,7 @@ pub fn not_found(start: &Path) -> Error {
         searched_from: start.to_path_buf(),
         env: None,
         manifest: None,
+        found: None,
     }
     .into()
 }

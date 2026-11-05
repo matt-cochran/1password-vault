@@ -806,6 +806,7 @@ mod said_tests {
             system: crate::cause::System::OnePassword,
             account: None,
             state: crate::cause::SessionState::SignedOut,
+            selected_by: None,
         }
         .into();
         let m = vec!["[ERROR] You are not currently signed in.".to_string()];

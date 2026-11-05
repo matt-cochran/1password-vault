@@ -140,6 +140,7 @@ fn signed_out(seen: Observed, ctx: &DiagnoseContext) -> Cause {
             system: System::Kubernetes,
             account: ctx.account.clone(),
             state: SessionState::Expired,
+            selected_by: None,
         },
     }
 }

@@ -5,6 +5,8 @@
 //! Every word comes from the variant's typed fields; upstream text only ever reaches the
 //! evidence box ([`super::evidence`]), never a message or a step (§9.3).
 
+use std::path::Path;
+
 use super::evidence;
 use super::situation::{RefusedBecause, Situation};
 use super::*;
@@ -425,7 +427,7 @@ fn refusal(next: &Next, inv: &Invocation, sit: &Situation) -> Option<(RefusedBec
         Next::Run(c) | Next::Check(c) => (c.clone(), cmd_text(c), false),
         Next::Handoff(c) => (c.clone(), cmd_text(c), true),
         Next::Vendor(v) => (vendor_as_cmd(v), vendor_text(v), false),
-        Next::None(_) => return None,
+        Next::None(_) | Next::Choose(_) => return None,
     };
     match sit.refuses(&checked) {
         Some(RefusedBecause::NoTerminal) if persons_own => None,
@@ -739,6 +741,9 @@ fn source_words(s: &ConfigSource) -> String {
             GivenBy::Flag { flag } => format!("{} (given by {flag})", path.display()),
             GivenBy::EnvVar { var } => format!("{} (given by {var})", path.display()),
             GivenBy::Discovered => path.display().to_string(),
+            GivenBy::DotOpv { path: dot_opv } => {
+                format!("{} (named by {})", path.display(), dot_opv.display())
+            }
         },
         ConfigSource::Manifest {
             title,
@@ -764,6 +769,7 @@ fn account_source(s: &AccountSource) -> String {
         AccountSource::EnvVar { var } => format!("the variable {var}"),
         AccountSource::Flag => "--account".to_string(),
         AccountSource::Environment { env } => format!("environment {env}"),
+        AccountSource::Configuration => "the configuration's account".to_string(),
         AccountSource::OpDefault => "op's default account".to_string(),
         AccountSource::Argument => "the command line".to_string(),
     }
@@ -1883,6 +1889,7 @@ impl Cause {
                 searched_from,
                 env,
                 manifest,
+                found: _,
             } => {
                 let manifest = match manifest {
                     None => String::new(),
@@ -1921,6 +1928,7 @@ impl Cause {
                     GivenBy::Flag { flag } => format!(" (given by {flag})"),
                     GivenBy::EnvVar { var } => format!(" (given by {var})"),
                     GivenBy::Discovered => String::new(),
+                    GivenBy::DotOpv { path } => format!(" (named by {})", path.display()),
                 };
                 format!(
                     "cannot read the configuration file {}{by}: {}",
@@ -2134,7 +2142,24 @@ impl Cause {
                 system,
                 account,
                 state,
-            } => session_words(*system, account, state),
+                selected_by,
+            } => {
+                let words = session_words(*system, account, state);
+                // Where a recorded or configured account was chosen; a flag or an
+                // argument is the person's own words, so it needs no reminder.
+                match (account, selected_by) {
+                    (
+                        Some(_),
+                        Some(
+                            by @ (AccountSource::DotOpv { .. }
+                            | AccountSource::EnvVar { .. }
+                            | AccountSource::Environment { .. }
+                            | AccountSource::Configuration),
+                        ),
+                    ) => format!("{words} (selected by {})", account_source(by)),
+                    _ => words,
+                }
+            }
             AccountNotOnMachine {
                 account,
                 selected_by,
@@ -2161,7 +2186,7 @@ impl Cause {
                 "account {given} matches more than one 1Password account: {}",
                 list_of(candidates)
             ),
-            AccountRequired { accounts } => format!(
+            AccountRequired { accounts, .. } => format!(
                 "{} 1Password accounts are on this machine and this project names none; opv uses only the account you choose, never op's default: {}",
                 accounts.len(),
                 account_choices(accounts)
@@ -3017,7 +3042,7 @@ impl Cause {
     /// `human_required` in `sit`: a step the situation refused is a person's.
     pub fn human_required_in(&self, inv: &Invocation, sit: &Situation) -> bool {
         let p = self.plan_in(inv, sit);
-        matches!(p.next, Next::Handoff(_))
+        matches!(p.next, Next::Handoff(_) | Next::Choose(_))
             || p.refused
             || p.action.is_some_and(|a| a.person_only())
             || matches!(
@@ -3184,9 +3209,16 @@ impl Cause {
         match self {
             PersonalNotSetUp { then, .. } => then.plan_raw(inv),
             ConfigNotFound {
+                searched_from,
+                env: _,
+                manifest: _,
+                found: Some(found),
+            } if !found.paths.is_empty() => found_config_plan(found, searched_from, inv),
+            ConfigNotFound {
                 searched_from: _,
                 env,
                 manifest: _,
+                found: _,
             } => plan(
                 // P3: the first-run router's other starting paths.
                 inspect(
@@ -3215,6 +3247,10 @@ impl Cause {
                     GivenBy::Discovered => {
                         format!("check that you can read {}", path.display())
                     }
+                    GivenBy::DotOpv { path: dot_opv } => format!(
+                        "check the config line of {}: it must name a file inside this repository",
+                        dot_opv.display()
+                    ),
                 }),
                 match io {
                     IoKind::NotFound => Next::Run(cmd(&["doctor"], &[])),
@@ -3573,6 +3609,7 @@ impl Cause {
                 system,
                 account,
                 state,
+                selected_by,
             } => {
                 let app = matches!(
                     state,
@@ -3638,7 +3675,14 @@ impl Cause {
                         })
                     } else {
                         let mut args = Vec::new();
-                        if let Some(a) = account {
+                        // FR-40 amended: an account the project records (`.opv`, the
+                        // configuration's `account`) is found by `opv login` itself.
+                        let recorded = selected_by
+                            .as_ref()
+                            .is_some_and(AccountSource::recorded_by_project);
+                        if let Some(a) = account
+                            && !recorded
+                        {
                             args.push("--account".to_string());
                             args.push(a.to_string());
                         }
@@ -3650,6 +3694,11 @@ impl Cause {
                             args.push("opv".into());
                             args.extend(inv.command.iter().cloned());
                             args.extend(inv.args.iter().cloned());
+                            // The child's words are never stored: a trailing `--` shows
+                            // `-- <command>` and the step has no argv (FR-65, SR-3).
+                            if inv.has_child {
+                                args.push("--".into());
+                            }
                         }
                         Next::Handoff(Cmd {
                             command: vec!["login".into()],
@@ -3699,13 +3748,14 @@ impl Cause {
                     next,
                 )
             }
-            // Never a guessed account (X2): the person picks, in their own terminal.
-            AccountRequired { .. } => plan(
+            // Never a guessed account (X2, FR-65): the person picks one of the choices.
+            AccountRequired { accounts, reach } => plan(
                 Some((
                     Action::PickBetween,
-                    "pick the project's account: run opv login --account <email or account ID> in your own terminal".to_string(),
+                    "pick the project's account: opv account use <account ID> records it in .opv"
+                        .to_string(),
                 )),
-                Next::Check(cmd(&["account", "list"], &[])),
+                super::step::account_choices(accounts, *reach, &choice_rerun(inv)),
             ),
             AccountAmbiguous { given, candidates } => plan(
                 Some((
@@ -5249,6 +5299,7 @@ pub fn next_kind_actor(n: &Next) -> (NextKind, NextActor) {
         Next::Handoff(_) => (NextKind::Apply, NextActor::Person),
         Next::Vendor(_) => (NextKind::Run, NextActor::Person),
         Next::None(_) => (NextKind::None, NextActor::Person),
+        Next::Choose(_) => (NextKind::Choose, NextActor::Person),
     }
 }
 
@@ -5258,15 +5309,164 @@ fn is_sign_in(c: &Cmd) -> bool {
         || c.to_argv().iter().any(|w| w == "signin")
 }
 
-/// The typed `next` object of the error document (schema 3): `kind`, `actor` and the exact
-/// command (or `null`).
+/// The typed `next` object of the error document (schema 4): `kind`, `actor` and the exact
+/// command (or `null`); a `choose` adds `reach` and `choices`. No `argv`: only
+/// [`typed_next_value`] adds one.
 pub fn next_value(n: &Next, inv: &Invocation) -> serde_json::Value {
     let (kind, actor) = invocation_kind_actor(n, inv);
-    serde_json::json!({
+    let mut v = serde_json::json!({
         "kind": kind,
         "actor": actor,
         "command": next_text(n, inv),
+    });
+    if let Next::Choose(c) = n {
+        v["reach"] = serde_json::json!(c.reach);
+        v["choices"] = c.choices.iter().map(choice_value).collect();
+    }
+    v
+}
+
+/// [`next_value`] with the `argv` of a step built from a typed command (FR-65, schema 4):
+/// for a producer migrated to the typed `next` (`ready`, `account list`, the session and
+/// account causes, [`Cause::types_argv`]). There is no `argv` for a placeholder, a vendor
+/// command, an MCP call or no command ([`next_argv`]).
+pub fn typed_next_value(n: &Next, inv: &Invocation) -> serde_json::Value {
+    let mut v = next_value(n, inv);
+    if let Some(argv) = next_argv(n, inv) {
+        v["argv"] = serde_json::json!(argv);
+    }
+    v
+}
+
+/// The words to exec for a step, built from its typed command and never from its display
+/// text (FR-65): the same command [`next_text`] shows (a person's step without `--json`).
+pub fn next_argv(n: &Next, inv: &Invocation) -> Option<Vec<String>> {
+    let person = invocation_kind_actor(n, inv).1 == NextActor::Person;
+    let shown = |c: Cmd| if person { without_json(c) } else { c };
+    match n {
+        Next::Rerun => match &inv.origin {
+            Origin::Cli if !inv.has_child && !inv.command.is_empty() => {
+                shown(inv_cmd(inv)).exec_argv()
+            }
+            _ => None,
+        },
+        Next::Run(c) | Next::Check(c) | Next::Handoff(c) => shown(c.clone()).exec_argv(),
+        Next::Vendor(_) | Next::None(_) | Next::Choose(_) => None,
+    }
+}
+
+/// One choice of a `choose` (schema 4): the account as `account list` shows it, and its
+/// steps, each typed like a `next`.
+fn choice_value(c: &Choice) -> serde_json::Value {
+    let a = &c.account;
+    serde_json::json!({
+        "account": {
+            "account_id": a.id,
+            "shorthand": a.shorthand,
+            "email": a.email,
+            "address": a.address,
+            "signed_in": a.signed_in,
+        },
+        "steps": c.steps.iter().map(step_value).collect::<Vec<_>>(),
     })
+}
+
+fn step_value(s: &Step) -> serde_json::Value {
+    let mut v = serde_json::json!({
+        "kind": s.kind,
+        "actor": s.actor,
+        "effect": s.effect,
+        "command": s.run.as_ref().map(cmd_text),
+    });
+    if let Some(argv) = s.run.as_ref().and_then(Cmd::exec_argv) {
+        v["argv"] = serde_json::json!(argv);
+    }
+    if let Some(does) = s.does {
+        v["do"] = serde_json::json!(does);
+    }
+    v
+}
+
+/// The command a choice's steps re-run: the invocation without a person's consent (X4)
+/// and its child as `-- <command>`, or `opv ready --json` for an MCP call, which has no
+/// command line.
+fn choice_rerun(inv: &Invocation) -> Cmd {
+    match inv.origin {
+        Origin::Cli if !inv.command.is_empty() => {
+            let mut c = without_consent(inv_cmd(inv));
+            if inv.has_child {
+                c.args.push("--".into());
+            }
+            c
+        }
+        _ => cmd(&["ready"], &["--json"]),
+    }
+}
+
+/// The Do and Next of a `ConfigNotFound` whose search below the repository found files
+/// (FR-66, design agent-signin-readiness §2.4 item 5). One: the Do names the `.opv` line
+/// (relative to the `.opv`'s folder) and the Next re-runs with `--config` (relative to the
+/// folder searched from). Several: the person picks; no Next is a guess.
+fn found_config_plan(found: &FoundConfigs, searched_from: &Path, inv: &Invocation) -> Plan {
+    let stopped = if found.stopped {
+        "; the search stopped at its limit, so there may be more"
+    } else {
+        ""
+    };
+    let base = found.dot_opv.parent().unwrap_or(Path::new(""));
+    match found.paths.as_slice() {
+        [one] if matches!(inv.origin, Origin::Cli) && !inv.command.is_empty() => {
+            let mut c = inv_cmd(inv);
+            c.args.push("--config".into());
+            c.args
+                .push(relative_to(one, searched_from).display().to_string());
+            if inv.has_child {
+                c.args.push("--".into());
+            }
+            plan(
+                inspect(format!(
+                    "a configuration exists; name it in {} as config = \"{}\"{stopped}",
+                    found.dot_opv.display(),
+                    relative_to(one, base).display()
+                )),
+                Next::Run(c),
+            )
+        }
+        paths => plan(
+            Some((
+                Action::PickBetween,
+                format!(
+                    "configurations exist at {}; name the project's one in {} as config = \"<path>\"{stopped}",
+                    paths
+                        .iter()
+                        .map(|p| relative_to(p, base).display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    found.dot_opv.display()
+                ),
+            )),
+            Next::None(NoNext::PersonPicksDirection),
+        ),
+    }
+}
+
+/// `path` relative to `base`, both absolute (`..` where `base` is deeper); `path` itself
+/// when they share no root.
+fn relative_to(path: &Path, base: &Path) -> PathBuf {
+    let p: Vec<_> = path.components().collect();
+    let b: Vec<_> = base.components().collect();
+    let common = p.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    if common == 0 {
+        return path.to_path_buf();
+    }
+    let mut out = PathBuf::new();
+    for _ in common..b.len() {
+        out.push("..");
+    }
+    for c in &p[common..] {
+        out.push(c);
+    }
+    out
 }
 
 /// The [`NextKind`] and [`NextActor`] of a step under this invocation: a re-run of a
@@ -5298,8 +5498,18 @@ pub fn next_text(n: &Next, inv: &Invocation) -> Option<String> {
         }),
         Next::Run(c) | Next::Check(c) | Next::Handoff(c) => Some(cmd_text(&shown(c.clone()))),
         Next::Vendor(v) => Some(vendor_text(v)),
-        Next::None(_) => None,
+        Next::None(_) | Next::Choose(_) => None,
     }
+}
+
+/// A `choose` as the `Next:` line: each choice's first step, for the person to pick from.
+fn choose_words(c: &Choose) -> String {
+    let firsts = c
+        .choices
+        .iter()
+        .filter_map(|choice| choice.steps.first()?.run.as_ref().map(cmd_text))
+        .collect::<Vec<_>>();
+    format!("pick one: {}", firsts.join("; "))
 }
 
 fn none_words(n: NoNext) -> &'static str {
@@ -5385,6 +5595,7 @@ pub fn render_text(
     let next = match (&p.next, next_text(&p.next, inv)) {
         (_, Some(t)) => t,
         (Next::None(n), None) => none_words(*n).to_string(),
+        (Next::Choose(c), None) => choose_words(c),
         (_, None) => "none".to_string(),
     };
     s.push_str(&format!("Next: {next}\n"));
@@ -5458,7 +5669,11 @@ pub fn document(
         "retry": cause.retry(),
         "human_required": cause.human_required(inv),
         "do": do_with_reply(cause, upstream.is_some(), p.do_text),
-        "next": next_value(&p.next, inv),
+        "next": if cause.types_argv() {
+            typed_next_value(&p.next, inv)
+        } else {
+            next_value(&p.next, inv)
+        },
     })
 }
 

@@ -391,6 +391,7 @@ fn not_signed_in(seen: &Observed, ctx: &DiagnoseContext, facts: &Facts) -> Cause
         system: System::OnePassword,
         account,
         state,
+        selected_by: None,
     }
 }
 

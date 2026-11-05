@@ -7,11 +7,15 @@
 //! the bare envelope; a failure after it (findings, exit 8) keeps the rows and adds `error`. The
 //! human text still goes to stderr, so a terminal user loses nothing.
 //!
-//! `schema_version` is 3 since 0.12.0: `next` is the typed object `{kind, actor,
-//! command}` (a closed kind: `run`, `apply`, `enter_value`, `authorize`, `wait_ci`, `none`;
-//! a closed actor: `assistant`, `person`, `ci`), so no client reads a free-text field to
-//! decide an action. It changes only when a field changes meaning. Names only, never a
-//! value (SR-1).
+//! `schema_version` is 4 since 0.18.0 (3 from 0.12.0): `next` is the typed object `{kind,
+//! actor, command}` (a closed kind: `run`, `apply`, `enter_value`, `authorize`, `wait_ci`,
+//! `choose`, `none`; a closed actor: `assistant`, `person`, `ci`), so no client reads a
+//! free-text field to decide an action. Schema 4 adds three keys a `next` carries only when
+//! its producer knows them (FR-65): `argv` (the exact words to exec, built from a typed
+//! command and never parsed from `command`), `reach` (how far this process can reach a
+//! 1Password session) and `choices` (the candidates of a `choose`). A missing key reads as
+//! `null`. The version changes only when a field changes meaning. Names only, never a value
+//! (SR-1).
 
 use serde_json::{Map, Value};
 
@@ -20,7 +24,7 @@ use crate::error::Error;
 /// The version of every `--json` document's shape.
 pub const SCHEMA_VERSION: u32 = 4;
 
-/// The action a `next` names (schema 3): the closed set a client branches on.
+/// The action a `next` names (schema 4): the closed set a client branches on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NextKind {
@@ -29,10 +33,41 @@ pub enum NextKind {
     EnterValue,
     Authorize,
     WaitCi,
+    /// A person picks one of `choices`; that choice's steps then run in order (FR-65). Its
+    /// `command` and `argv` are `null`, and it is never built with fewer than two choices.
+    Choose,
     None,
 }
 
-/// Who performs a `next` (schema 3): the closed set of actors.
+/// How far the current process can reach a 1Password session (FR-65, design
+/// agent-signin-readiness §2.3): it decides a sign-in step and whether a verify step follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reach {
+    /// The 1Password app's CLI integration is active or available: the person unlocks the
+    /// app and approves its prompt, and this process then sees the session.
+    App,
+    /// This process already holds a shell session for the account: the person refreshes it.
+    Shell,
+    /// This process cannot share the person's sign-in (WSL with the Linux `op`, headless):
+    /// the person runs the command in their own terminal, and that run is the check.
+    None,
+}
+
+/// What one step of a choice does (FR-65): a client may run an `assistant` step that only
+/// `reads` or `writes_config`; a step that `signs_in` is always the person's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepEffect {
+    /// A deterministic local write of the project's pointer (`opv account use`); asks nothing.
+    WritesConfig,
+    /// A sign-in, in the person's own terminal or app.
+    SignsIn,
+    /// A read that shows whether the choice took (`opv ready --json`).
+    Reads,
+}
+
+/// Who performs a `next` (schema 4): the closed set of actors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NextActor {
@@ -50,6 +85,19 @@ impl NextKind {
             "enter_value" => Some(Self::EnterValue),
             "authorize" => Some(Self::Authorize),
             "wait_ci" => Some(Self::WaitCi),
+            "choose" => Some(Self::Choose),
+            "none" => Some(Self::None),
+            _ => None,
+        }
+    }
+}
+
+impl Reach {
+    /// The reach named by a serialised `next.reach`; `None` when it is not in the closed set.
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s {
+            "app" => Some(Self::App),
+            "shell" => Some(Self::Shell),
             "none" => Some(Self::None),
             _ => None,
         }
@@ -69,10 +117,12 @@ impl NextActor {
     }
 }
 
-/// A `next` field as the typed object of schema 3. A command's own string `next` is a `run`
-/// for the assistant; an object that already names a `kind` keeps it (the error document,
-/// `ready`); an object that only names an `actor` takes the kind that actor runs; anything
-/// else is `none` for the person, with no command.
+/// A `next` field as the typed object of schema 4. A command's own string `next` is a `run`
+/// for the assistant, with no `argv` (a display string is never split into words, FR-65);
+/// an object that already names a `kind` keeps it (the error document, `ready`); an object
+/// that only names an `actor` takes the kind that actor runs; anything else is `none` for the
+/// person, with no command. An object's `argv`, `reach` and `choices` are kept when they are
+/// well formed ([`extensions`]).
 fn typed_next(next: Value) -> Value {
     match next {
         Value::String(command) => typed(NextKind::Run, NextActor::Assistant, Some(command)),
@@ -91,10 +141,35 @@ fn typed_next(next: Value) -> Value {
                 .get("command")
                 .and_then(Value::as_str)
                 .map(str::to_string);
-            typed(kind, actor, command)
+            let mut out = typed(kind, actor, command);
+            if let Value::Object(o) = &mut out {
+                o.extend(extensions(&fields));
+            }
+            out
         }
         _ => typed(NextKind::None, NextActor::Person, None),
     }
+}
+
+/// The schema-4 keys of a `next` object that carry a value, in order `argv`, `reach`,
+/// `choices`: `argv` only as an array of strings, `reach` only as a name in [`Reach`],
+/// `choices` only as an array. A malformed or `null` one is left out, so it reads as `null`.
+fn extensions(fields: &Map<String, Value>) -> Vec<(String, Value)> {
+    let mut out = Vec::new();
+    if let Some(argv @ Value::Array(words)) = fields.get("argv")
+        && words.iter().all(Value::is_string)
+    {
+        out.push(("argv".to_string(), argv.clone()));
+    }
+    if let Some(reach) = fields.get("reach")
+        && reach.as_str().and_then(Reach::from_name).is_some()
+    {
+        out.push(("reach".to_string(), reach.clone()));
+    }
+    if let Some(choices @ Value::Array(_)) = fields.get("choices") {
+        out.push(("choices".to_string(), choices.clone()));
+    }
+    out
 }
 
 /// The kind an actor runs when its `next` does not name one (the `ready` document): the
@@ -110,7 +185,7 @@ fn typed(kind: NextKind, actor: NextActor, command: Option<String>) -> Value {
     serde_json::json!({"kind": kind, "actor": actor, "command": command})
 }
 
-/// The command a `next` value names: the schema-3 object's `command`, or a bare string
+/// The command a `next` value names: the schema-4 object's `command`, or a bare string
 /// (a command's own body before [`finish`] framed it).
 pub fn command_of(next: &Value) -> Option<&str> {
     match next {
@@ -120,7 +195,7 @@ pub fn command_of(next: &Value) -> Option<&str> {
     }
 }
 
-/// A `next` read back as the command it names, whether it is the schema-3 object or a bare
+/// A `next` read back as the command it names, whether it is the schema-4 object or a bare
 /// string (a command's own body before [`finish`] framed it). For clients that only show it.
 pub fn next_command<'de, D>(d: D) -> Result<Option<String>, D::Error>
 where
@@ -399,5 +474,66 @@ mod tests {
                 "do": null,
             })
         );
+    }
+
+    // --- schema 4: `argv`, `reach`, `choices` (FR-65) -------------------------------------
+
+    fn framed_next(next: Value) -> Value {
+        let body = serde_json::json!({"schema_version": 4, "next": next}).to_string();
+        parse(&finish(body.as_bytes(), Ok(()), false))["next"].clone()
+    }
+
+    #[test]
+    fn typed_next_keeps_argv() {
+        let next = framed_next(serde_json::json!({
+            "kind": "run", "actor": "assistant", "command": "opv ready --json",
+            "argv": ["opv", "ready", "--json"],
+        }));
+        assert_eq!(next["argv"], serde_json::json!(["opv", "ready", "--json"]));
+    }
+
+    #[test]
+    fn typed_next_keeps_reach() {
+        let next = framed_next(serde_json::json!({
+            "kind": "choose", "actor": "person", "command": null, "reach": "none",
+        }));
+        assert_eq!(next["reach"], "none");
+    }
+
+    #[test]
+    fn typed_next_keeps_choices() {
+        let choices = serde_json::json!([{"account": {"account_id": "A1"}, "steps": []}]);
+        let next = framed_next(serde_json::json!({
+            "kind": "choose", "actor": "person", "command": null, "choices": choices.clone(),
+        }));
+        assert_eq!(next["choices"], choices);
+    }
+
+    #[test]
+    fn choose_is_a_kind_of_the_closed_set() {
+        let next = framed_next(serde_json::json!({"kind": "choose", "actor": "person"}));
+        assert_eq!(next["kind"], "choose");
+    }
+
+    #[test]
+    fn a_string_next_is_never_split_into_argv() {
+        let next = framed_next(serde_json::json!("opv sync prod"));
+        assert!(next.get("argv").is_none());
+    }
+
+    #[test]
+    fn an_argv_with_a_non_string_word_is_left_out() {
+        let next = framed_next(serde_json::json!({
+            "kind": "run", "actor": "assistant", "command": "opv ready", "argv": ["opv", 1],
+        }));
+        assert!(next.get("argv").is_none());
+    }
+
+    #[test]
+    fn a_reach_outside_the_closed_set_is_left_out() {
+        let next = framed_next(serde_json::json!({
+            "kind": "run", "actor": "assistant", "command": "opv ready", "reach": "daemon",
+        }));
+        assert!(next.get("reach").is_none());
     }
 }

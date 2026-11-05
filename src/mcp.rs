@@ -1830,6 +1830,7 @@ mod tests {
             system: crate::cause::System::Fly,
             account: None,
             state: crate::cause::SessionState::SignedOut,
+            selected_by: None,
         }
         .into()
     }

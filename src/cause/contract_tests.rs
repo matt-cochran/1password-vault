@@ -119,6 +119,7 @@ fn a_target_sign_in_is_not_a_1password_sign_in() {
         system: System::Fly,
         account: None,
         state: SessionState::Expired,
+        selected_by: None,
     };
     assert_eq!(c.code(), "target_not_signed_in");
 }
@@ -131,6 +132,7 @@ fn a_live_session_for_another_account_is_not_signed_in_to_the_one_asked_for() {
         state: SessionState::OtherAccount {
             live: AccountId::new("A"),
         },
+        selected_by: None,
     };
     assert_eq!(c.code(), "op_not_signed_in");
 }

@@ -2374,6 +2374,7 @@ mod tests {
                 system: crate::cause::System::Azure,
                 account: None,
                 state: crate::cause::SessionState::SignedOut,
+                selected_by: None,
             }
             .into()),
         );
