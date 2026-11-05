@@ -5,7 +5,9 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.18.0] - 2026-11-05
+
+0.18.0 adds the sealed target (seal at release time, unseal at runtime with no 1Password call), `opv provision` for owner-produced and matched values, typed account choices and a sign-in preflight for `opv run`, and `.opv` naming the configuration.
 
 ### Added
 
@@ -21,6 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`schema_version` is `4` (#257, D2).** `next` gains `argv`, `reach` and `choices`, and the kind `choose` joins its closed set, so a client that switches on `kind` must handle `choose`. A `choose` carries two or more candidate accounts, each with the ordered `steps` (as `argv` arrays) that make it the project's account and sign in; `argv` is built only from a typed opv command and is null for a `-- <command>` placeholder.
 - **`opv run` stops before `op run` when signed out, with a typed cause (breaking, #266, FR-40).** The run's preflight read is now a sign-in check: a session or account cause — `op_not_signed_in` (exit **7**), `account_not_registered`, `account_required`, `account_ambiguous`, `own_session_required` or `credential_rejected` — stops the run with that cause and its `choose`/sign-in step instead of 1Password's raw error. With several accounts and none selected for the project, a run that `op run` used to send to op's default account now stops with `account_required`. For a signed-out session at a terminal opv signs the person in at 1Password's own prompt and runs the same arguments once more in the same process; an account cause stops with its own step instead, and a run whose child has started is never replayed.
 - **`.opv` may name the configuration as `config = "<path>"` (#267, FR-66).** The path is relative to the `.opv`'s folder and must exist inside the repository; discovery prefers it over a `secrets.toml` above the `.opv`, and a failed discovery lists the `secrets.toml` files found below the repository root (bounded to four levels, 20 files and 2 000 folders). opv 0.17 refuses a `.opv` that has `config` (it denies unknown fields), so a team sharing the pointer upgrades together.
+
+## [0.17.4] - 2026-11-05
+
+0.17.4 fixes a 0.17.3 regression in `opv target list --json`.
+
+### Fixed
+
+- **`opv target list --json` exits 0 again (#276).** 0.17.3's check that a `--json` command wrote a document accepted only a JSON object, so `target list`'s top-level array was reported as an internal error (exit 70). A top-level array is a document; the output is unchanged.
 
 ## [0.17.3] - 2026-11-04
 
