@@ -427,6 +427,18 @@
     },
     {
       "args": [
+        "set"
+      ],
+      "flags": [
+        "dry-run",
+        "env",
+        "json",
+        "replace"
+      ],
+      "name": "provision"
+    },
+    {
+      "args": [
         "env"
       ],
       "flags": [

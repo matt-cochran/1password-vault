@@ -518,6 +518,17 @@ value is replaced only when named with --replace (immutable keys also need --rot
 Values are never printed. --from target:<name> reads that target's Key Vault, Kubernetes
 and GitHub variables; Fly and GitHub secrets cannot be read back.";
 
+const PROVISION_QUICK: &str = "\
+Examples:
+  opv provision workspace-admin-grant --env prod --dry-run   # the plan; nothing run or written
+  opv provision workspace-admin-grant --env prod             # make the set, typed confirmation";
+
+const PROVISION_MORE: &str = "\
+Makes every member of a contract [sets.<SET>] (its producers run once, its generated members
+are made) and writes them in one checked edit of the set's one item. Needs your own interactive
+terminal: an AI assistant runs only --dry-run --json and hands the rest to the user. No value
+is printed; the receipt names versions and members only.";
+
 const SCHEMA_QUICK: &str = "\
 Examples:
   opv schema                       # the whole description
@@ -930,6 +941,26 @@ enum Cmd {
         #[arg(long, value_name = "ENV", hide_short_help = true)]
         confirm: Option<String>,
         /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Make a contract set's values and write them together into its 1Password item (your
+    /// own terminal only).
+    #[command(before_help = PROVISION_QUICK, after_help = PROVISION_MORE)]
+    Provision {
+        /// The set: a [sets.<SET>] of the contract.
+        #[arg(value_name = "SET")]
+        set: String,
+        /// Environment whose item receives the set; one of the set's environments.
+        #[arg(long, required = true)]
+        env: String,
+        /// Show the plan and the set's state; run nothing, make nothing, write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Re-make the whole set (rotation, re-consent); old values are kept in the item.
+        #[arg(long)]
+        replace: bool,
+        /// Print the plan (--dry-run) or the receipt as one JSON document.
         #[arg(long)]
         json: bool,
     },
@@ -2535,6 +2566,7 @@ impl Cmd {
             Cmd::Run { env, .. }
             | Cmd::Changed { env, .. }
             | Cmd::Set { env, .. }
+            | Cmd::Provision { env, .. }
             | Cmd::Config(ConfigCmd::Export { env: Some(env), .. }) => Some((env, Reach::Store)),
             Cmd::Status { env: Some(env), .. } | Cmd::History { env, .. } => {
                 Some((env, Reach::Target))
@@ -2595,6 +2627,7 @@ impl Cmd {
             | Cmd::Apply { json, .. }
             | Cmd::Set { json, .. }
             | Cmd::Import { json, .. }
+            | Cmd::Provision { json, .. }
             | Cmd::Delivery(DeliveryCmd::Verify { json, .. })
             | Cmd::Changed { json, .. }
             | Cmd::Target(TargetCmd::List { json, .. })
@@ -4797,6 +4830,92 @@ fn target_op(
         .map_err(write_err)
 }
 
+/// `opv provision` (#253): the use case judges the caller, plans, confirms and writes; this
+/// prints its plan (`--dry-run`) or its receipt, as text or one JSON document. The producers'
+/// working directory is the contract's own (a manifest has none: the current directory).
+#[allow(clippy::too_many_arguments)]
+fn run_provision(
+    fleet: &opv::domain::Fleet,
+    host_env: &dyn opv::host::HostEnv,
+    set: &str,
+    env: &str,
+    dry_run: bool,
+    replace: bool,
+    json: bool,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    use opv::app::provision::{self, Outcome, Request, TerminalConsole};
+    let project = match &fleet.read_from.0 {
+        opv::cause::ConfigSource::File { path, .. } => path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(std::path::Path::to_path_buf),
+        _ => None,
+    }
+    .unwrap_or_else(|| PathBuf::from("."));
+    let req = Request {
+        set,
+        env,
+        dry_run,
+        replace,
+        project: &project,
+    };
+    let outcome = provision::provision(
+        fleet,
+        host_env,
+        &req,
+        r,
+        &mut TerminalConsole::new(host_env),
+    )?;
+    if let Outcome::DryRun(plan) = &outcome {
+        if !json {
+            return writeln!(out, "{}", provision::render_plan(plan)).map_err(write_err);
+        }
+        // Names, makers, destinations and hashes only (§4.3); the write is the person's run.
+        let mut again = vec!["provision", set, "--env", env];
+        if replace {
+            again.push("--replace");
+        }
+        let doc = serde_json::json!({
+            "schema": provision::RECEIPT_SCHEMA,
+            "result": outcome.result(),
+            "plan": plan,
+            "next": {"actor": "person", "command": format!("opv {}", again.join(" "))},
+        });
+        return writeln!(out, "{doc}").map_err(write_err);
+    }
+    let Some(receipt) = outcome.receipt() else {
+        return Err(opv::cause::Cause::Bug {
+            site: "provision outcome without a receipt",
+        }
+        .into());
+    };
+    if json {
+        let doc = serde_json::to_value(&receipt).map_err(|_| {
+            Error::from(opv::cause::Cause::Bug {
+                site: "provision receipt is not JSON",
+            })
+        })?;
+        return writeln!(out, "{doc}").map_err(write_err);
+    }
+    let what = format!("set {} in environment {}", receipt.set, receipt.env);
+    let mut lines = vec![match (receipt.result, receipt.item.version_after) {
+        ("written", Some(v)) => format!("provisioned {what}: item at version {v}, verified"),
+        ("written", None) => format!("provisioned {what}: verified"),
+        ("unchanged", _) => format!("{what} is already complete; nothing made or written"),
+        _ => format!("{what}: declined; nothing made or written"),
+    }];
+    if receipt.concurrent_edit {
+        lines.push(
+            "note: an edit made just before opv's may have been replaced; restore it from the item's history"
+                .to_string(),
+        );
+    }
+    lines.push(format!("Next: {}", receipt.next));
+    writeln!(out, "{}", lines.join("\n")).map_err(write_err)
+}
+
 fn run_other(
     cmd: Cmd,
     loaded: Result<opv::domain::Fleet, Error>,
@@ -4868,6 +4987,23 @@ fn run_other(
             };
             opv::app::import::run(&fleet, &env, &opts, r, out)
         }
+        Cmd::Provision {
+            set,
+            env,
+            dry_run,
+            replace,
+            json,
+        } => run_provision(
+            &loaded?,
+            &opv::host::ProcessEnv,
+            &set,
+            &env,
+            dry_run,
+            replace,
+            json,
+            r,
+            out,
+        ),
         Cmd::Set {
             key,
             env,
@@ -6458,6 +6594,7 @@ mod tests {
             &["opv", "apply", "--json"],
             &["opv", "set", "api/KEY", "--env", "dev", "--json"],
             &["opv", "import", "dev", "--from", ".env", "--json"],
+            &["opv", "provision", "grant", "--env", "dev", "--json"],
             &["opv", "needs", "--json"],
             &["opv", "contract", "--json"],
             &["opv", "inventory", "--json"],
@@ -6637,5 +6774,74 @@ mod tests {
         let project = dir.path().join("secrets.toml");
         std::fs::write(&project, "").unwrap();
         assert_eq!(file_project_for_check(None, dir.path(), &project), None);
+    }
+
+    /// #253 §4.1: `opv provision --help` names the set, the environment and the Slice A flags.
+    #[test]
+    fn provision_help_lists_its_flags() {
+        let help = leaf_helps()
+            .into_iter()
+            .find(|(name, _, _)| name == "provision")
+            .map(|(_, long, _)| long)
+            .unwrap_or_default();
+        assert!(
+            ["<SET>", "--env <ENV>", "--dry-run", "--replace", "--json"]
+                .iter()
+                .all(|w| help.contains(w)),
+            "{help}"
+        );
+    }
+
+    /// #253 §4.1: `--dry-run --json` prints one plan document and no value, even where a
+    /// member already holds one.
+    #[cfg(feature = "fake")]
+    #[test]
+    fn provision_dry_run_json_is_one_plan_document_without_a_value() {
+        const HELD: &str = "held-REFRESHMARKER-0123456789";
+        let op = opv::adapters::fake_op::FakeOp::default();
+        let vault = "vdev0000000000000000000001";
+        let item = op.insert(
+            vault,
+            serde_json::json!({
+                "title": "app · prod values", "category": "SECURE_NOTE",
+                "sections": [{"id": "app", "label": "app"}],
+                "fields": [{"id": "f1", "section": {"id": "app", "label": "app"},
+                    "type": "CONCEALED", "label": "SIGNING_KEY", "value": HELD}]
+            }),
+        );
+        let fleet = opv::config::parse(&format!(
+            r#"[environments.prod]
+tier = "shared"
+boundaries.app = {{ vault_id = "{vault}", item_id = "{item}" }}
+
+[products.app.keys.SIGNING_KEY]
+kind = "secret"
+rules = {{ hex_bytes = 32 }}
+
+[sets.signing]
+environments = ["prod"]
+members = {{ "app/SIGNING_KEY" = {{ generate = "rules" }} }}
+"#
+        ))
+        .unwrap();
+        let mut out = Vec::new();
+        run_provision(
+            &fleet,
+            &opv::host::FakeEnv::new("linux"),
+            "signing",
+            "prod",
+            true,
+            false,
+            true,
+            &op,
+            &mut out,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(
+            doc["plan"]["set"] == "signing" && !text.contains(HELD),
+            "{text}"
+        );
     }
 }
