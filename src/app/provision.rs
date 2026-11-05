@@ -968,6 +968,8 @@ impl Run<'_> {
             console,
             shown: Ok(()),
         };
+        // S9 (security review 0.18.0): the pin again, immediately before the spawn.
+        crate::config::recheck_pin(&p.name, producer, self.req.project)?;
         let res = self.r.produce(&call, &mut |line| sink.line(line));
         sink.shown?;
         res?;

@@ -594,6 +594,7 @@
         "json",
         "min-revision",
         "product",
+        "project",
         "signers",
         "verify-only"
       ],

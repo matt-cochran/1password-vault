@@ -405,3 +405,40 @@ fn payload_name_round_trip(names: &[String]) -> Vec<String> {
         .map(|(name, _)| name)
         .collect()
 }
+
+// --- variable names (security review 0.18.0 S2, S3) ---
+
+#[test]
+fn an_op_session_destination_is_refused() {
+    assert!(matches!(
+        super::format::check_destination("env:OP_SESSION_x"),
+        Err(FormatError::BadVariable(_))
+    ));
+}
+
+#[test]
+fn a_lowercase_op_destination_is_refused() {
+    assert!(matches!(
+        super::format::check_destination("env:op_x"),
+        Err(FormatError::BadVariable(_))
+    ));
+}
+
+#[test]
+fn a_destination_variable_outside_the_name_rule_is_refused() {
+    assert!(matches!(
+        super::format::check_destination("env:A=B"),
+        Err(FormatError::BadVariable(_))
+    ));
+}
+
+#[test]
+fn a_bad_secrets_dir_env_is_refused() {
+    let mut header = fixture_header();
+    header.secrets_dir_env = Some("OP_DIR".to_string());
+    let line = canonical_header(&header).expect("canonical");
+    assert!(matches!(
+        parse_header(&line),
+        Err(FormatError::BadVariable(_))
+    ));
+}

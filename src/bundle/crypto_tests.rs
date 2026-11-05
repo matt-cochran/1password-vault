@@ -114,6 +114,7 @@ fn prod_signers() -> String {
 const PROD: Expect<'static> = Expect {
     environment: "prod",
     product: "api",
+    project: None,
     min_revision: None,
 };
 
@@ -861,7 +862,7 @@ fn an_op_name_in_the_payload_is_refused_after_decryption() {
     let mut op = header("prod", &id, &key);
     op.names[0] = Name {
         name: "OP_SERVICE_ACCOUNT_TOKEN".to_string(),
-        destination: "env:OP_SERVICE_ACCOUNT_TOKEN".to_string(),
+        destination: "env:SERVICE_ACCOUNT_TOKEN".to_string(),
     };
     let line = canonical_header(&op).expect("header");
     let entries: [(&str, &[u8]); 2] = [("OP_SERVICE_ACCOUNT_TOKEN", b"x"), ("TLS_KEY", b"y")];

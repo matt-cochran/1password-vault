@@ -868,13 +868,10 @@ enum Cmd {
     },
     /// Verify a sealed bundle offline and print its signed header, never a value; with
     /// --exec, run your app with its values (#271).
-    ///
-    /// The runtime side of a sealed target: reads the bundle, the allowed_signers file and
-    /// an age identity, and nothing else (no configuration, no 1Password, no network). The
-    /// signature, environment, product and revision are checked before anything is
-    /// decrypted. --verify-only decrypts nothing; it also checks that the identity is a
-    /// recipient and, for file keys, that a RAM-backed runtime folder exists. --exec
-    /// delivers the values to the command after `--` and exits with its code.
+    // The runtime side of a sealed target: it reads the bundle, the allowed_signers file and
+    // an age identity, and nothing else; the signature, scope and revision are checked before
+    // anything is decrypted. (Kept out of `--help` for H9's 50-line cap; see
+    // docs/sealed-delivery.md.)
     #[command(before_help = UNSEAL_QUICK)]
     Unseal {
         /// The sealed bundle file that opv sync wrote.
@@ -886,6 +883,9 @@ enum Cmd {
         /// The product the bundle must be sealed for.
         #[arg(long, value_name = "PRODUCT")]
         product: String,
+        /// The project the bundle must be sealed for (optional; binds it to one project).
+        #[arg(long, value_name = "PROJECT")]
+        project: Option<String>,
         /// The allowed_signers file: `<env> namespaces="opv-sealed" ssh-ed25519 <key>` lines.
         #[arg(long, value_name = "FILE")]
         signers: PathBuf,
@@ -1705,7 +1705,6 @@ Examples:
 const UNSEAL_QUICK: &str = "\
 Examples:
   opv unseal app.opv-sealed --env prod --product api --signers allowed_signers --verify-only
-  opv unseal app.opv-sealed --env prod --product api --signers allowed_signers --identity-file id.txt --json
   opv unseal app.opv-sealed --env prod --product api --signers allowed_signers --identity-env AGE_IDENTITY --exec -- ./server";
 
 #[derive(Subcommand)]
@@ -2865,6 +2864,7 @@ fn run(
         bundle,
         env,
         product,
+        project,
         signers,
         identity_file,
         identity_env,
@@ -2885,6 +2885,7 @@ fn run(
             bundle: bundle.clone(),
             env: env.clone(),
             product: product.clone(),
+            project: project.clone(),
             signers: signers.clone(),
             identity,
             min_revision: *min_revision,

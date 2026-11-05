@@ -59,6 +59,9 @@ pub struct Request {
     pub bundle: PathBuf,
     pub env: String,
     pub product: String,
+    /// `--project`: when given, the header's project must equal it (security review 0.18.0
+    /// S4).
+    pub project: Option<String>,
     pub signers: PathBuf,
     pub identity: Option<IdentitySource>,
     pub min_revision: Option<u64>,
@@ -71,6 +74,7 @@ impl Request {
         Expect {
             environment: &self.env,
             product: &self.product,
+            project: self.project.as_deref(),
             min_revision: self.min_revision,
         }
     }
@@ -203,10 +207,13 @@ impl Inputs {
         })
     }
 
-    /// Verify the bundle without decrypting it.
+    /// Verify the bundle without decrypting it, then its variables against this run's
+    /// identity variable.
     fn verify(&self, req: &Request) -> Result<VerifiedBundle, Error> {
-        crypto::verify_bundle(&self.bundle, &self.signers, &req.expect())
-            .map_err(|e| req.refused(&e))
+        let verified = crypto::verify_bundle(&self.bundle, &self.signers, &req.expect())
+            .map_err(|e| req.refused(&e))?;
+        check_variables(req, &verified.header)?;
+        Ok(verified)
     }
 
     /// Read the identity, check it is a listed recipient, then the codec's own
@@ -226,6 +233,37 @@ impl Inputs {
             e => req.refused(&e),
         })
     }
+}
+
+/// Every variable the bundle would set (each `env:` destination and `secrets_dir_env`)
+/// obeys the codec's name rule and is not the `--identity-env` variable (security review
+/// 0.18.0 S2, S3), else the bundle is refused as malformed before anything is decrypted or
+/// delivered.
+pub(crate) fn check_variables(req: &Request, header: &Header) -> Result<(), Error> {
+    let identity_var = match &req.identity {
+        Some(IdentitySource::Env(var)) => Some(var.as_str()),
+        _ => None,
+    };
+    let vars = header
+        .names
+        .iter()
+        .filter_map(|n| n.destination.strip_prefix("env:"))
+        .chain(header.secrets_dir_env.as_deref());
+    for var in vars {
+        let detail = if crate::bundle::format::check_variable(var).is_err() {
+            format!("the variable {var} is not allowed")
+        } else if Some(var) == identity_var {
+            format!("the variable {var} is the --identity-env variable")
+        } else {
+            continue;
+        };
+        return Err(Cause::SealedRefused {
+            bundle: req.bundle.clone(),
+            refusal: SealedRefusal::Malformed { detail },
+        }
+        .into());
+    }
+    Ok(())
 }
 
 /// The identity's recipient fingerprint when the header lists it.

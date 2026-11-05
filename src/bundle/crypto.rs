@@ -398,6 +398,9 @@ pub struct Expect<'a> {
     pub environment: &'a str,
     /// `--product`.
     pub product: &'a str,
+    /// `--project`; `None` leaves the header's project unchecked (security review 0.18.0
+    /// S4: with per-environment principals it binds a bundle to one project).
+    pub project: Option<&'a str>,
     /// `--min-revision`; `None` sets no floor.
     pub min_revision: Option<u64>,
 }
@@ -524,6 +527,15 @@ pub fn verify_bundle(
             field: "product",
             expected: expect.product.to_string(),
             found: header.product,
+        });
+    }
+    if let Some(project) = expect.project
+        && header.project != project
+    {
+        return Err(CryptoError::ScopeMismatch {
+            field: "project",
+            expected: project.to_string(),
+            found: header.project,
         });
     }
     if let Some(floor) = expect.min_revision

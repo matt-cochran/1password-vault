@@ -375,6 +375,7 @@ fn the_written_bundle_opens_with_the_fixture_identity_to_the_exact_values() {
     let expect = Expect {
         environment: "prod",
         product: "api",
+        project: None,
         min_revision: Some(1_000),
     };
     let opened = crypto::open(
