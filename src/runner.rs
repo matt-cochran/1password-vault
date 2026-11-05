@@ -316,6 +316,13 @@ pub trait CommandRunner {
         }
         .into())
     }
+
+    /// Seal one sealed bundle with the run's signing key (#271, sealed-target §6.2): see
+    /// [`seal`](self::seal). In process, never retried, nothing observed. Without a
+    /// signed-in sealed deploy credential it refuses and nothing is sealed.
+    fn seal_bundle(&self, call: &SealCall) -> Result<Vec<u8>, SealFailure> {
+        seal::run(call, None)
+    }
 }
 
 /// Append `markdown` to the job summary file at `path` (H8), creating it if needed. Errors
@@ -3550,6 +3557,108 @@ mod produce_tests {
 
 // --- end produce ---------------------------------------------------------------------------
 
+// --- seal (#271, docs/design/sealed-target.md §6.2) ------------------------------------------
+
+pub use seal::{SealCall, SealFailure};
+
+/// The sealed target's signing effect (design `sealed-target` §6.2, D3, T2): seal one
+/// whole-set bundle with the target's SSH Key deploy credential, in process.
+///
+/// The private key never leaves the run's `DeployLogin`: `EnvRunner` adds it to the call's
+/// environment for [`PROGRAM`](seal::PROGRAM) only, as it adds a token to a vendor CLI's
+/// child environment, and this effect parses it into a zeroizing key for the one seal and
+/// drops it. Nothing remote is called, so nothing is retried or observed (no `Observed`,
+/// no `lost_call`, J7). The fake seals through the same [`seal::run`], with the stock-tool
+/// fixture key when no login added one, so the tested path is the shipped path.
+pub mod seal {
+    use age::x25519;
+
+    use crate::bundle::crypto::{self, CryptoError};
+    use crate::bundle::format::Header;
+
+    /// The pseudo-program whose per-program environment carries the signing key.
+    pub const PROGRAM: &str = "opv-seal";
+
+    /// The name the signing key travels under in a [`SealCall`]'s environment.
+    pub const KEY: &str = "OPV_SEALED_SIGNING_KEY";
+
+    /// One bundle to seal: the header it is sealed under, the whole batch in header order and
+    /// its recipients. A store builds it with [`SealCall::new`]; only `EnvRunner` fills `env`.
+    #[derive(Clone, Copy)]
+    pub struct SealCall<'a> {
+        pub header: &'a Header,
+        /// Each name with its value, in header order.
+        pub entries: &'a [(&'a str, &'a [u8])],
+        pub recipients: &'a [x25519::Recipient],
+        /// The signed-in login's environment for [`PROGRAM`] ([`KEY`]); empty from a store.
+        pub env: &'a [(&'a str, &'a str)],
+    }
+
+    impl<'a> SealCall<'a> {
+        /// A seal of `entries` under `header` to `recipients`, signed by the run's login.
+        pub fn new(
+            header: &'a Header,
+            entries: &'a [(&'a str, &'a [u8])],
+            recipients: &'a [x25519::Recipient],
+        ) -> Self {
+            Self {
+                header,
+                entries,
+                recipients,
+                env: &[],
+            }
+        }
+
+        fn key(&self) -> Option<&'a str> {
+            self.env.iter().find(|(k, _)| *k == KEY).map(|(_, v)| *v)
+        }
+    }
+
+    /// Names only: never a value, a key or a recipient string.
+    impl std::fmt::Debug for SealCall<'_> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("SealCall")
+                .field("environment", &self.header.environment)
+                .field("product", &self.header.product)
+                .field(
+                    "entries",
+                    &self.entries.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+                )
+                .field("recipients", &self.recipients.len())
+                .field("signed_in", &self.key().is_some())
+                .finish()
+        }
+    }
+
+    /// Why a seal did not happen.
+    #[derive(Debug)]
+    pub enum SealFailure {
+        /// No signed-in sealed deploy credential reached the call: an opv bug, since a sealed
+        /// target always signs in before it writes (`internal_error`).
+        NotSignedIn(crate::Error),
+        /// The codec refused the inputs (a limit, a header mismatch); the store maps it.
+        Codec(CryptoError),
+    }
+
+    /// Seal `call` with the key in its environment, or with `fallback` (the fake's fixture
+    /// key) when no login added one.
+    pub fn run(call: &SealCall, fallback: Option<&str>) -> Result<Vec<u8>, SealFailure> {
+        let Some(pem) = call.key().or(fallback) else {
+            return Err(SealFailure::NotSignedIn(
+                crate::cause::Cause::Bug {
+                    site: "seal without a signed-in sealed deploy credential",
+                }
+                .into(),
+            ));
+        };
+        // Zeroized on drop (`ssh_key::PrivateKey`); sign-in already accepted this key.
+        let key = crypto::parse_signing_key(pem).map_err(SealFailure::Codec)?;
+        crypto::seal(call.header, call.entries, call.recipients, &key).map_err(SealFailure::Codec)
+    }
+}
+
+// --- end seal ------------------------------------------------------------------------------
+
 #[cfg(any(test, feature = "fake"))]
 pub mod fake {
     //! Recording runner for tests. Enable with `--features fake` outside this crate.
@@ -3594,6 +3703,11 @@ pub mod fake {
                 .finish()
         }
     }
+
+    /// The stock-tool test signer (`tests/fixtures/sealed/kat/signer_ed25519`, an obviously
+    /// fake key) the fake seals with when no signed-in login supplied one (#271 §6.2).
+    pub const FIXTURE_SIGNING_KEY: &str =
+        include_str!("../tests/fixtures/sealed/kat/signer_ed25519");
 
     /// Returns queued responses in order and records every call.
     pub struct FakeRunner {
@@ -3942,6 +4056,26 @@ pub mod fake {
                 .pop_front()
                 .unwrap_or_else(|| panic!("FakeRunner: no producer queued for {program}"));
             play(&script, call, on_line)
+        }
+
+        /// Records the call (program [`super::seal::PROGRAM`], env names only, never the key)
+        /// and seals through the shipped [`super::seal::run`]: with the signed-in login's key
+        /// when an `EnvRunner` added one, else with the stock-tool fixture key (#271 §6.2).
+        fn seal_bundle(&self, call: &super::SealCall) -> Result<Vec<u8>, super::SealFailure> {
+            self.calls.borrow_mut().push(Call {
+                program: super::seal::PROGRAM.to_string(),
+                args: Vec::new(),
+                stdin: None,
+                env: call
+                    .env
+                    .iter()
+                    .map(|(k, _)| (k.to_string(), String::new()))
+                    .collect(),
+                inherited: false,
+                removed: Vec::new(),
+                isolated: false,
+            });
+            super::seal::run(call, Some(FIXTURE_SIGNING_KEY))
         }
 
         fn read(&self, call: &super::Call, refused: &[i32]) -> io::Result<Outcome> {

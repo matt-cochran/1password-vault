@@ -525,6 +525,20 @@ impl CommandRunner for EnvRunner<'_> {
         let env = self.merged(program, env);
         self.inner.run_inherited_clean(program, args, &env, remove)
     }
+
+    /// The seal effect (#271, sealed-target §6.2): the signed-in login's key joins the call
+    /// for the seal program only, as a token joins its CLI's child environment; a store
+    /// never holds it.
+    fn seal_bundle(
+        &self,
+        call: &crate::runner::SealCall,
+    ) -> Result<Vec<u8>, crate::runner::SealFailure> {
+        let env = self.merged(crate::runner::seal::PROGRAM, call.env);
+        self.as_principal(crate::runner::seal::PROGRAM, || {
+            self.inner
+                .seal_bundle(&crate::runner::SealCall { env: &env, ..*call })
+        })
+    }
 }
 
 #[cfg(test)]
