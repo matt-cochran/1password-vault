@@ -5075,11 +5075,24 @@ fn a_partial_set_do_is_the_replace() {
     );
 }
 
-/// X4: after a refused provision, Next reads the set's state.
+/// §4.5: a partial or inconsistent set is handed to the person's own `--replace` run.
 #[test]
-fn a_refused_provision_checks_ready() {
+fn an_inconsistent_set_hands_off_the_replace() {
     let c = provision_refused(ProvisionRefusal::Inconsistent {
         members: vec!["admin/REFRESH_TOKEN".into()],
+    });
+    assert_eq!(
+        next_in(&c, &provision_inv()),
+        "opv provision grant --env prod --replace"
+    );
+}
+
+/// X4: after a refusal the person must resolve first, Next reads the set's state.
+#[test]
+fn a_set_used_elsewhere_checks_ready() {
+    let c = provision_refused(ProvisionRefusal::SameAcrossEnvironments {
+        member: "admin/REFRESH_TOKEN".into(),
+        other: EnvName::new("staging"),
     });
     assert_eq!(next_in(&c, &provision_inv()), "opv ready prod");
 }
@@ -5148,6 +5161,23 @@ fn a_set_member_do_names_the_provision() {
     assert!(
         d.ends_with("opv provision grant --env prod --replace"),
         "{d}"
+    );
+}
+
+/// §5.6: the Next of a set member written alone is the set's own provision, a person's run.
+#[test]
+fn a_set_member_hands_off_the_provision() {
+    let c = Cause::Guard {
+        guard: Guard::SetMember {
+            product: ProductName::new("admin"),
+            key: KeyName::new("REFRESH_TOKEN"),
+            env: EnvName::new("prod"),
+            set: "grant".into(),
+        },
+    };
+    assert_eq!(
+        next_in(&c, &inv()),
+        "opv provision grant --env prod --replace"
     );
 }
 

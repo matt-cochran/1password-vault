@@ -1187,9 +1187,9 @@ fn with_timeout(mut c: Cmd, seconds: u64) -> Cmd {
     c
 }
 
-/// The step after a refused provision (§4.2, §4.5, §5.5). Re-making a set is a person's
-/// write, named in the Do; the Next is the read that shows the set's state (X4), or the
-/// person's own run with the budget the producers need.
+/// The step after a refused provision (§4.2, §4.5, §5.5). A partial or inconsistent set is
+/// handed to the person's own `--replace` run; a refusal the person resolves first steps to
+/// the read that shows the set's state (X4), or to the run with the budget the producers need.
 fn provision_refused(
     set: &str,
     env: &EnvName,
@@ -1203,7 +1203,7 @@ fn provision_refused(
             inspect(format!(
                 "re-make the whole set: {replace} (the replaced values are kept in the item's opv · kept section)"
             )),
-            ready,
+            provision_replace(set, env),
         ),
         ProvisionRefusal::ImmutableMember { member } => plan(
             inspect(format!(
@@ -1238,8 +1238,16 @@ fn set_member(env: &EnvName, set: &str) -> Plan {
         inspect(format!(
             "make it with its set, in your own terminal: opv provision {set} --env {env} --replace"
         )),
-        Next::Check(cmd(&["ready"], &[env.as_str()])),
+        provision_replace(set, env),
     )
+}
+
+/// `opv provision <set> --env <env> --replace`: the person's own run (§4.4, §6).
+fn provision_replace(set: &str, env: &EnvName) -> Next {
+    Next::Handoff(cmd(
+        &["provision"],
+        &[set, "--env", env.as_str(), "--replace"],
+    ))
 }
 
 /// What a producer's failure says (§5.2): its exit, signal, timeout or closed code.
