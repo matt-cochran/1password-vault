@@ -1069,6 +1069,17 @@ Adopted for 0.18.0. Design: `docs/design/agent-signin-readiness.md` §2.4. Amend
 - Discovery order: `--config`/`OPV_CONFIG`, `OPV_PROJECT`, a walk-up `secrets.toml` at or below the nearest `.opv`'s folder, that `.opv`'s `config`, its `project`, a walk-up `secrets.toml` above it (only when it names neither), then the git remote.
 - When discovery fails, `config_not_found` gains `found`: the `secrets.toml` files below the repository root (at most 4 levels, 20 files and 2 000 folders visited; `.git`, `node_modules`, `target` and hidden folders skipped; names only), with whether the search stopped. One found: the Do names the `.opv` line (relative to the `.opv`) and the Next re-runs with `--config` (relative to the current folder). Several: the person picks (`next.kind: none`). A found file is never used without being named.
 
+## FR-67 — Owner Provisioning of Matched Sets (#253, #262)
+
+Adopted for 0.18.0. Design: `docs/design/owner-value-ingestion.md` (owner decisions D1-D13). User guide: `docs/provision.md`.
+
+- The contract may declare `[sets.<name>]` (environments; members, each a declared stored team key made by a producer output, a generator or a template) and `[producers.<name>]` (argv `command`, `sha256` pin of the project file it names, `outputs`, `inputs`, `open_url_hosts`, `timeout` at most 15 minutes). A set's members are in **one boundary** (1Password has no cross-item transaction); a key is in at most one set; `command[0]` is never `op` or `opv`. Violations are `config_invalid`; a changed producer file is `producer_changed`.
+- `opv provision <SET> --env <ENV> [--dry-run] [--replace] [--fill-missing] [--json]` is a person's command: refused in agent mode, CI, without a TTY, for a service account, Connect or deploy credentials, for a producer on native Windows, and in a production-tier or `confirm_env` environment with an exported session or token variable. `--dry-run` is a read and is the assistant's form; there is no MCP tool.
+- Order: load, resolve, judge the caller, read the item fresh, classify (`absent`, `complete`, `partial`, `inconsistent`), plan, check the run budget, confirm by typing the environment back, produce (one attempt each, `opv.produce/1`), generate, render templates, validate every member, compare producer-made members across the set's environments, one checked edit, read back, receipt `opv.provision/1`. Nothing reaches a producer before the confirmation; nothing is written before the edit.
+- A complete set is `unchanged` (no producer runs). `--replace` re-makes the whole set and keeps old values in `opv · kept`; refused for an immutable member. `--fill-missing` completes a partial set from stored template leaves, producers and generators without rotating a present member.
+- `set`, `set --from-file`, `import` and generate plans refuse a set member. The writer they share with `provision` checks the item's version around the edit: for `provision`, a member changed since the plan's read refuses (`item_changed`); for every caller, a version that is not one past the fresh read is reported as `concurrent_edit` (detected, not prevented: `op` has no version precondition).
+- `opv ready` reports each set's state per environment; `partial` and `inconsistent` are blocking `keys_blocking` findings naming `opv provision <set> --env <env>`.
+
 # 4. Security Requirements
 
 ## SR-1 — No Secret Logging
@@ -1116,6 +1127,8 @@ Secret transmission to external tools shall use:
 - environment variables;
 - controlled in-memory APIs.
 
+A producer (`opv provision`, FR-67) is argv exactly as committed in the contract, checked at load against the scrubber's secret patterns; its inputs and outputs travel only on its stdin and stdout, its environment is cleared to non-credential basics, and its stderr is wiped unread.
+
 ## SR-4 — No Plaintext Temporary Files
 
 The CLI shall not create plaintext files containing resolved secrets, including temporary files.
@@ -1135,6 +1148,8 @@ A CI identity shall require only:
 Deploy identities are per environment (FR-40): each environment's `deploy_credentials` item holds only what a sync of that environment needs (a Fly deploy token for one app; an Azure service principal limited to that Key Vault's opv-tagged secrets and that Container App), never a person's or an organisation-wide credential. Break-glass credentials (owner, admin, emergency access) are for people only, kept in 1Password, and never referenced by opv. In CI, one service-account token reads the environment's vaults; the target credential is a `deploy_credentials` item or the CI provider's OIDC federation.
 
 The CLI shall not require write access to 1Password for synchronization. Owner-guided `setup` may create a Secure Note or fill only missing declared fields after a concrete save confirmation. It preserves existing filled values and uses JSON stdin, never secret arguments or files. Because the owner may spend a long time at its prompts, `setup` reads the item again with `--cache=false` right before it writes: if the item's version moved since setup read it, nothing is overwritten; setup re-plans on the fresh item, keeps the values already entered in memory (they fill only fields that are still empty; a field filled elsewhere keeps its 1Password value and setup names it), says so and asks once more. A further change before the save writes nothing (`item_changed`). After the edit the same check as the tidy applies: exactly one version past the fresh read and every field setup wrote or kept present, else `item_changed` and a pointer to the item's history (final review, setup save). This write exception does not apply to synchronization or CI.
+
+`opv provision` (FR-67) is a person's write too: refused for a service account, Connect, deploy credentials and CI, and in a production-tier or `confirm_env` environment also when `OP_SESSION_*`, `OP_SERVICE_ACCOUNT_TOKEN` or `OP_CONNECT_*` is set, so the write uses the 1Password app's authorization or a sign-in opv prompts for. CI never writes a set; vault access is the only permission.
 
 A run by a signed-in person (not a service account, Connect or CI) may also tidy the item's layout (FR-43): one whole-item edit, JSON on stdin, nothing deleted, displaced values kept in `opv · kept`. Without write access the tidy is skipped with a note; no command needs write access to 1Password.
 

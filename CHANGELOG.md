@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`opv provision <SET> --env <ENV>`: an owner's producer hands a value to opv (#253).** The contract declares `[producers.<name>]` (argv `command`, never `op` or `opv`; the `sha256` of the project file it runs; `outputs`; `inputs` from the set's own item; `open_url_hosts`; `timeout` at most 15m) and `[sets.<name>]` (`environments`, `members` made by a producer output or a generator), all members in one item. In your own terminal opv shows the plan, asks you to type the environment back, runs each producer once over the new `opv.produce/1` protocol (request on stdin with a nonce; `open_url`/`waiting` notices, opened by opv; one `result` or closed `error` code; stderr never shown; cleared environment, own process group, no core dumps), validates every value, and writes the set in one checked edit; the `opv.provision/1` receipt names versions and members only. `--dry-run [--json]` is the plan (the one form an assistant or CI may run); `--replace` re-makes the set, old values in `opv · kept`. Refused in agent mode, CI, without a TTY, for a service account, Connect or deploy credentials, in production with an exported session or token variable, and for producers on native Windows. `opv schema` lists the capability `owner_produce/1`. Guide: `docs/provision.md`.
+- **Matched sets with templates and `--fill-missing` (#262).** A set member may be a `template`: a JSON document built from other members and from producer outputs that are never stored (Journeeze's site-secrets bundle with its `siteId`s), rendered by opv's own JSON writer and checked to round-trip. `opv provision … --fill-missing` completes a partial set from the stored bundle, its producers and generators without rotating a present member.
+- `opv ready` reports each set's state per environment (`sets`: `absent`, `complete`, `partial`, `inconsistent`) and blocks on a partial or inconsistent set with `opv provision <set> --env <env>`, so a broken set is found before a release-time `sync`.
+- `opv set`, `opv import` and generate plans refuse a set member and name `opv provision <set> --env <env> --replace`. The writer they share with `provision` now checks the item version around its edit: an edit racing opv's is reported (`concurrent_edit`), not prevented, since 1Password has no version precondition; `provision` also refuses (`item_changed`) when a member changed after its plan was read.
+
 ## [0.17.3] - 2026-11-04
 
 0.17.3 makes `opv run --product` read, name and pass on only what the selected product uses, makes every `--json` command emit one document or fail loudly, and refuses `opv set` from a non-person session.
