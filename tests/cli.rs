@@ -918,9 +918,12 @@ fn sigterm_forwards_and_exits_143() {
         .unwrap();
     let started = dir.path().join("log.start");
     let t = std::time::Instant::now();
-    while !started.exists() && t.elapsed() < std::time::Duration::from_secs(10) {
+    // Generous: under a loaded parallel suite the fake `op` can take seconds to start, and
+    // a SIGTERM sent before it runs has nothing to forward (a flake, not a defect).
+    while !started.exists() && t.elapsed() < std::time::Duration::from_secs(60) {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+    assert!(started.exists(), "the fake op never started within 60s");
     Command::new("/bin/kill")
         .args(["-TERM", &child.id().to_string()])
         .status()
