@@ -1616,7 +1616,7 @@ impl ProvisionRefusal {
     pub fn words(&self) -> String {
         match self {
             ProvisionRefusal::Partial { missing } => format!(
-                "the set is partial ({} without a value), and opv fills only an absent set",
+                "the set is partial ({} without a value), so it is completed only with --fill-missing",
                 missing.join(", ")
             ),
             ProvisionRefusal::Inconsistent { members } => format!(
