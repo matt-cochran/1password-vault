@@ -370,6 +370,11 @@ fn deliver_with(
             None => r,
         };
         let (t, ports) = open_target(fleet, env_name, name, r)?;
+        // T10: what the store refuses from local state alone (a tampered sealed bundle)
+        // refuses before the values read below.
+        if let Ports::Staged { store, .. } = &ports {
+            store.check_local()?;
+        }
         opened.push((name.as_str(), t, ports, r));
     }
     let rotate = parse_rotate(fleet, env_name, &opts.rotate)?;
@@ -1177,7 +1182,7 @@ fn whole_set(w: &WholeSet<'_>, fields: Vec<ItemField>, plan: SyncPlan) -> Result
 
 /// `fleet` with every target's own files resolved under `root` (`--sealed-root`, design
 /// `sealed-target` D12); a target that writes no files of its own ignores it.
-pub(crate) fn with_out_root(fleet: &Fleet, root: &std::path::Path) -> Fleet {
+pub fn with_out_root(fleet: &Fleet, root: &std::path::Path) -> Fleet {
     let mut rooted = fleet.clone();
     for env in rooted.environments.values_mut() {
         for t in env.targets.values_mut() {
@@ -2635,6 +2640,34 @@ pub fn plan_rotating(
     out: &mut dyn Write,
     json: bool,
 ) -> Result<(), Error> {
+    plan_rooted(
+        fleet, env_name, targets, product, rotate, None, r, out, json,
+    )
+}
+
+/// [`plan_rotating`] with `--sealed-root <dir>` (design `sealed-target` D12): bundles are
+/// read under `sealed_root`, as the sync it previews writes them, so both derive one plan
+/// id, and the sync step it names carries the same `--sealed-root`.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_rooted(
+    fleet: &Fleet,
+    env_name: &str,
+    targets: &[String],
+    product: Option<&str>,
+    rotate: &[String],
+    sealed_root: Option<&std::path::Path>,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+    json: bool,
+) -> Result<(), Error> {
+    let rooted;
+    let fleet = match sealed_root {
+        Some(root) => {
+            rooted = with_out_root(fleet, root);
+            &rooted
+        }
+        None => fleet,
+    };
     check_names(fleet, env_name, targets, product)?;
     check_product(fleet, product, Some(env_name))?;
     let parsed = parse_rotate(fleet, env_name, rotate)?;
@@ -2680,6 +2713,7 @@ pub fn plan_rotating(
             targets: targets.to_vec(),
             // The canonical (sorted, deduped) rotate set, so the Next command is stable.
             rotate: parsed.iter().map(|(p, k)| key_label(p, k)).collect(),
+            sealed_root: sealed_root.map(std::path::Path::to_path_buf),
             ..SyncOpts::default()
         }
         .command(env_name),
@@ -2798,6 +2832,9 @@ struct PlanPart<'f> {
     deploy: Vec<String>,
     /// `stage` on a staging target, else `write`.
     verb: &'static str,
+    /// The store is rewritten whole (a sealed bundle, T3): a pruned name leaves it at the
+    /// next sync, with or without `--prune`.
+    whole_set: bool,
     /// This target's plan id (FR-41), one input of the run's.
     id: String,
     /// Names on the target opv does not manage (FR-5, never touched).
@@ -2924,7 +2961,13 @@ impl PlanPart<'_> {
             .chain(&self.var_plan.prune)
             .cloned()
             .collect();
-        if !prunes.is_empty() {
+        if !prunes.is_empty() && self.whole_set {
+            line(format!(
+                "would leave the {} at the next sync (no --prune needed): {}",
+                self.t.provider().label(),
+                names.join(&prunes)
+            ))?;
+        } else if !prunes.is_empty() {
             line(format!(
                 "would prune (needs --prune): {}",
                 names.join(&prunes)
@@ -3085,6 +3128,7 @@ fn plan_part_with<'f>(
         Ports::Staged { .. } if !live => "stage",
         _ => "write",
     };
+    let whole_set = matches!(ports, Ports::Staged { store, .. } if store.whole_set());
     Ok(PlanPart {
         name: name.to_string(),
         t,
@@ -3097,6 +3141,7 @@ fn plan_part_with<'f>(
         config_writes,
         deploy,
         verb,
+        whole_set,
         id,
         rotate: rotate.clone(),
     })
@@ -4672,6 +4717,7 @@ mod tests {
             config_writes: config.iter().map(|n| n.to_string()).collect(),
             deploy: deploy.iter().map(|n| n.to_string()).collect(),
             verb: "write",
+            whole_set: false,
             id: String::new(),
             unmanaged: 0,
             rotate: BTreeSet::new(),

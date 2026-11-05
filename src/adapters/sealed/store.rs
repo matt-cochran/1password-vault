@@ -13,7 +13,9 @@
 //!   line with the reason. A bundle signed by another key is drift (`foreign.<hex>`) and never
 //!   sets the revision (T10); a tampered one (unparseable, or a bad signature of
 //!   `sealed.signer`'s key) refuses. An absent bundle lists nothing; one that cannot be read
-//!   lists its configured names at `unreadable`.
+//!   lists its configured names at `unreadable`. `sync` runs the same verification
+//!   ([`StagedStore::check_local`]) when it opens the target, before it reads any value from
+//!   1Password, so a tampered bundle costs no values read.
 //! - **Writing.** The header is built here (placement, revision, signer and recipient
 //!   fingerprints, contract digest, opv version, plan id), sealed and signed by the runner's
 //!   seal effect, and written atomically under an OS advisory lock on a file beside the bundle (released when its holder dies): a
@@ -35,7 +37,7 @@ use super::provider::LABEL;
 use crate::bundle::allowed_signers::AllowedSigners;
 use crate::bundle::crypto::{self, CryptoError, SignatureRefusal};
 use crate::bundle::format::{self, FORMAT, Header, MAX_NAMES, MAX_VALUE, NAMESPACE, Name};
-use crate::cause::{Cause, FieldRule, InputKind, LocalOp};
+use crate::cause::{Cause, FieldRule, InputKind, IoKind, LocalOp};
 use crate::domain::{SecretValue, StoreEntry};
 use crate::error::Error;
 use crate::ports::{StagedRuntime, StagedStore, Store, VariableStore, WriteRun};
@@ -430,17 +432,35 @@ impl Lock {
                 .truncate(false)
                 .open(&path)
                 .map_err(|e| local_io(LocalOp::Write, &path, &e))?;
-            try_lock_exclusive(&file).map_err(|e| local_io(LocalOp::Write, &path, &e))?;
+            match try_lock_exclusive(&file) {
+                Ok(()) => {}
+                Err(e) if held_elsewhere(&e) => return Err(sealing_elsewhere(bundle)),
+                Err(e) => return Err(local_io(LocalOp::Write, &path, &e)),
+            }
             if still_at(&file, &path) {
                 return Ok(Lock { path, _file: file });
             }
         }
-        let busy = std::io::Error::new(
-            std::io::ErrorKind::WouldBlock,
-            "the lock file kept being replaced",
-        );
-        Err(local_io(LocalOp::Write, &path, &busy))
+        // The lock file kept being replaced: other runs kept sealing this bundle.
+        Err(sealing_elsewhere(bundle))
     }
+}
+
+/// Another opv run holds the lock beside `bundle` (§5.4): names the bundle, nothing else.
+fn sealing_elsewhere(bundle: &Path) -> Error {
+    Cause::LocalIo {
+        op: LocalOp::SealLock,
+        path: bundle.to_path_buf(),
+        io: IoKind::WouldBlock,
+        delivery: None,
+    }
+    .into()
+}
+
+/// Whether a lock attempt failed because another process holds the lock: `EWOULDBLOCK` on
+/// Unix, `ERROR_LOCK_VIOLATION` (33) on Windows.
+fn held_elsewhere(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::WouldBlock || (cfg!(windows) && e.raw_os_error() == Some(33))
 }
 
 impl Drop for Lock {
@@ -656,6 +676,15 @@ impl StagedStore for SealedStore<'_> {
 
     fn whole_set(&self) -> bool {
         true
+    }
+
+    /// Every product's bundle read and verified as [`Store::list`] does, so a tampered one
+    /// refuses before `sync` reads any value from 1Password (T10).
+    fn check_local(&self) -> Result<(), Error> {
+        for product in self.target.placement.products.keys() {
+            self.target.found(self.env, product)?;
+        }
+        Ok(())
     }
 
     /// Config travels in the bundle like a secret (T15).

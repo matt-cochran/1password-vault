@@ -301,7 +301,7 @@ pub fn meaning(code: &str) -> &'static str {
             "a source item changed since the last sync, or no source versions are recorded; the next step is the sync"
         }
         "local_io_failed" => {
-            "opv's own local input or output failed (a file, the current folder, standard output, ...)"
+            "opv's own local input or output failed (a file, the current folder, standard output, a sealed bundle another opv run is sealing, ...)"
         }
         "handoff_refused" => {
             "another process connected to opv's private hand-off pipe; opv refused it and sent nothing"

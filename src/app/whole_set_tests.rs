@@ -315,6 +315,28 @@ fn plan_part_on(fleet: &Fleet, w: &World, ports: &Ports<'_>) -> String {
         .id
 }
 
+/// `opv plan` on a whole-set store: a retired name leaves at the next sync, no `--prune`
+/// needed (T3), since that sync re-writes the set without it.
+#[test]
+fn opv_plan_says_a_retired_name_leaves_the_whole_set_at_the_next_sync() {
+    let (w, fleet, store) = synced();
+    with_retired(&store);
+    let ports = Ports::Staged {
+        store: Box::new(store.clone()),
+        runtime: Box::new(Live),
+    };
+    let none = BTreeSet::new();
+    let part = plan_part_with(&fleet, "dev", "app", None, &none, &w, &ports).unwrap();
+    let mut out = Vec::new();
+    part.print_changes(&mut out, &fleet, "dev", false).unwrap();
+    assert!(
+        String::from_utf8(out)
+            .unwrap()
+            .contains("at the next sync (no --prune needed): "),
+        "plan wording"
+    );
+}
+
 #[test]
 fn remove_is_never_called_on_a_whole_set_store() {
     let (w, fleet, store) = synced();

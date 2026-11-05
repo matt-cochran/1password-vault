@@ -149,12 +149,13 @@ opv delivery verify prod --product api --target box # the bundle is the one reco
   `would_change`, and the plan prints one line: `stale as a whole (recipients changed): every
   name is sealed again`.
 - **Checked before any value read.** `plan` and `sync` verify the existing bundle's signature
-  with `sealed.signer` first. A tampered bundle refuses (`input_invalid`) and is left alone; a
+  with `sealed.signer` first, before any value is read. A tampered bundle refuses (`input_invalid`) and is left alone; a
   bundle signed by another key is drift and never sets the revision. A signing key that does
   not match `sealed.signer` refuses (`input_invalid`, exit 2) before any value is read.
 - **Atomic.** The file is written to a temporary file beside it, synced and renamed, under a
   lock on `<bundle>.lock`; a second seal of the same bundle while the lock is held refuses with
-  `local_io_failed` and writes nothing.
+  `local_io_failed` (`subject.op` `seal_lock`: "another opv run is sealing <bundle>; retry when
+  it finishes") and writes nothing.
 - **Revision.** Each bundle carries `revision = max(previous + 1, now in Unix seconds)`, the
   previous one taken only from a bundle that verified with `sealed.signer`. A sealer whose clock
   is behind fails visibly, at the runtime's floor.
@@ -171,8 +172,9 @@ opv sync prod --target box --confirm prod --sealed-root ../platform-manifests
 ```
 
 The bundles are written under that folder at `sealed.out`, and nothing beside the
-configuration. Commit and push them there. Only `sync` takes the flag: `plan` and `status` look
-for bundles beside the configuration, so a plan id from `opv plan` may not match a rooted sync's.
+configuration. Commit and push them there. `plan`, `status` and `delivery verify` take the same
+flag and read the bundles under that folder, so `opv plan --sealed-root <dir>` gives the plan id
+the rooted sync checks, and its `Next:` line carries the flag.
 
 ### Committing bundles
 

@@ -46,7 +46,7 @@ deliver with CI or your own terminal. The grouping is who runs a command.
 | admin | `opv config export [<env>] [--toml\|--json] [--with-ids] [--product <p>]`, `opv config import --vault <v> [--file <f>] …`, `opv config check --file <f>`, `opv config edit` | person | the manifest mirror; `config edit` needs your own terminal |
 | tooling | `opv mcp serve\|install`, `opv skill install\|status`, `opv guide agent`, `opv schema`, `opv version [--json]`, `opv completions <bash\|zsh\|fish\|powershell>`, `opv help states`, `opv help <command>` | anyone | unchanged |
 
-Hidden internal commands (`remote-send`, `remote-receive`, `local-delivery`) are not listed. `sync --sealed-root <dir>` is hidden too: it writes a [sealed target](sealed-delivery.md#bundles-in-another-repository---sealed-root)'s bundles under another checkout.
+Hidden internal commands (`remote-send`, `remote-receive`, `local-delivery`) are not listed. `--sealed-root <dir>` on `sync`, `plan`, `status` and `delivery verify` is hidden too: it resolves a [sealed target](sealed-delivery.md#bundles-in-another-repository---sealed-root)'s bundles under another checkout.
 
 "Who" is who may run it, not what is permitted: the CLI has no permission model of its own. A command named **person** needs your own terminal and refuses CI or agent mode. A read that opens an item may also tidy its 1Password layout once when a person runs it signed in with their own session (missing sections and empty fields, labels, duplicates; nothing is deleted, [store layout](configuration.md#store-layout)); a service account, Connect, CI or a run under `deploy_credentials` never writes to 1Password.
 
@@ -368,7 +368,7 @@ An application that keeps its own secrets in its own encrypted store, written th
 
 ### Sync to a sealed bundle
 
-A runtime with no secret store of its own (a Docker host, a VM, systemd units) gets a [sealed target](sealed-delivery.md): `sync` writes one signed, age-encrypted `opv-sealed/1` file per product at `sealed.out`, and the runtime opens it with [`opv unseal`](#sealed-bundles-opv-unseal), so 1Password is read at release time, never at start. Any change re-seals the whole bundle (a pruned or retired name leaves it); no change writes nothing. A changed recipient, signer or name set marks the bundle stale as a whole, with one line saying why. The existing bundle is verified against `sealed.signer` before any value is read; a tampered one refuses (`input_invalid`) and is left alone. `sync --sealed-root <dir>` (hidden) writes the bundles under another checkout. The configuration, the trust boundary and its residual risk, rotation and migration are in [sealed delivery](sealed-delivery.md).
+A runtime with no secret store of its own (a Docker host, a VM, systemd units) gets a [sealed target](sealed-delivery.md): `sync` writes one signed, age-encrypted `opv-sealed/1` file per product at `sealed.out`, and the runtime opens it with [`opv unseal`](#sealed-bundles-opv-unseal), so 1Password is read at release time, never at start. Any change re-seals the whole bundle (a pruned or retired name leaves it); no change writes nothing. A changed recipient, signer or name set marks the bundle stale as a whole, with one line saying why. The existing bundle is verified against `sealed.signer` before any value is read; a tampered one refuses (`input_invalid`) and is left alone. `--sealed-root <dir>` (hidden) on `sync`, `plan`, `status` and `delivery verify` resolves the bundles under another checkout. On a sealed target `plan` says `would leave the sealed bundle at the next sync (no --prune needed)` for a retired name. The configuration, the trust boundary and its residual risk, rotation and migration are in [sealed delivery](sealed-delivery.md).
 
 ### Pruning on Fly
 
@@ -979,7 +979,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `handoff_refused` | 6 | after_fix | no | another process connected to opv's private hand-off pipe; opv refused it and sent nothing |
 | `import_tier_refused` | 6 | after_fix | yes | opv_import_local was pointed at an environment whose tier is not local; the person runs opv import instead |
 | `keys_blocking` | 6 | after_fix | yes | a write refused: keys are missing or failing a rule; nothing was written |
-| `local_io_failed` | 6/74 | after_fix/safe | no | opv's own local input or output failed (a file, the current folder, standard output, ...) |
+| `local_io_failed` | 6/74 | after_fix/safe | no | opv's own local input or output failed (a file, the current folder, standard output, a sealed bundle another opv run is sealing, ...) |
 | `mount_unreadable` | 6 | after_fix | no | the workload that would mount opv's secrets cannot read them; the fix is in its own manifest |
 | `person_only` | 6 | never | yes | a person-only command was called from an assistant; it runs only in a person's terminal |
 | `plan_unknown` | 6 | never | no | no plan has this id |
