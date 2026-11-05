@@ -269,3 +269,58 @@ fn an_infrastructure_key_is_refused_as_infrastructure() {
     let e = recipe("api", "SESSION_KEY", "dev", &s).unwrap_err();
     assert_eq!(why_of(&e), GenerateRefusal::Infrastructure.words());
 }
+
+// A set member is written only together with its set (#253 §5.6; test 29): `generate`
+// refuses it from the configuration alone, before any 1Password call.
+
+/// A dev fleet where api/SESSION_KEY is a member of the set `grant`.
+fn set_world() -> (crate::domain::Fleet, FakeOp) {
+    let op = FakeOp::default();
+    op.signed_in.set(true);
+    let id = op.insert(
+        "vdev0000000000000000000001",
+        serde_json::json!({
+            "title": "myapp · api · dev values", "category": "SECURE_NOTE",
+            "sections": [{"id": "api", "label": "api"}],
+            "fields": []
+        }),
+    );
+    let fleet = crate::config::parse(&format!(
+        "[environments.dev]\nboundaries.api = {{ vault_id = \"vdev0000000000000000000001\", \
+         item_id = \"{id}\" }}\n\
+         [products.api.keys.SESSION_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n\
+         rules = {{ base64_bytes = 32 }}\n\
+         [sets.grant]\nenvironments = [\"dev\"]\n\
+         members = {{ \"api/SESSION_KEY\" = {{ generate = \"rules\" }} }}\n"
+    ))
+    .unwrap();
+    (fleet, op)
+}
+
+#[test]
+fn a_set_member_is_refused_as_a_set_member() {
+    let (fleet, op) = set_world();
+    let e = run(
+        &fleet,
+        "dev",
+        &["api/SESSION_KEY".into()],
+        &op,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    let doc = crate::error::document(&e, &crate::error::invocation(), false);
+    assert_eq!(doc["subject"]["guard"]["guard"], "set_member");
+}
+
+#[test]
+fn a_set_member_refusal_runs_no_op_command() {
+    let (fleet, op) = set_world();
+    let _ = run(
+        &fleet,
+        "dev",
+        &["api/SESSION_KEY".into()],
+        &op,
+        &mut Vec::new(),
+    );
+    assert!(op.calls.borrow().is_empty());
+}
