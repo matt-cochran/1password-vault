@@ -19,6 +19,7 @@ mod scenarios {
     pub mod k8s_files;
     pub mod live_audit;
     pub mod provider_ops;
+    pub mod provision;
     pub mod session_reuse;
     pub mod set_from_file;
     pub mod wiring;
