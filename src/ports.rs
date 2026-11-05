@@ -39,8 +39,17 @@ pub trait StagedStore: Store {
     fn validate(&self, batch: &[(String, &SecretValue)]) -> Result<(), Error>;
     /// Writes the batch as a pending change, values on stdin only (SR-3).
     fn write(&self, batch: &[(String, &SecretValue)]) -> Result<(), Error>;
-    /// Removes `names` as a pending change.
+    /// Removes `names` as a pending change. Never called on a [`StagedStore::whole_set`]
+    /// store: a name leaves such a store when `sync` rewrites the set without it.
     fn remove(&self, names: &[String]) -> Result<(), Error>;
+    /// True when every write replaces the store's whole contents (design `sealed-target`
+    /// §5.3, T3, T4: a sealed bundle). `sync` then writes every desired, delivered name
+    /// whenever any of them is staged, pruned or listed at a version the ledger did not
+    /// record, so a retired name never stays behind, and it never calls
+    /// [`StagedStore::remove`]. Default: each name is written on its own.
+    fn whole_set(&self) -> bool {
+        false
+    }
     /// Checks the store's own health for `names` after `sync` recorded their delivery and
     /// before it finishes (design `http-target` §6): the HTTP store refuses a name whose
     /// status is rejected (`target_unhealthy`, exit 5) and notes other non-healthy

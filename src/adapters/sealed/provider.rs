@@ -170,6 +170,10 @@ impl TargetConfig for SealedTarget {
         ]
     }
 
+    fn set_out_root(&mut self, root: &std::path::Path) {
+        self.out_root = Some(root.to_path_buf());
+    }
+
     fn eq_dyn(&self, other: &dyn TargetConfig) -> bool {
         eq_as(self, other)
     }

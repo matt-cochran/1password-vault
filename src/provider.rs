@@ -598,6 +598,10 @@ pub trait TargetConfig: fmt::Debug + Send + Sync {
     )> {
         None
     }
+    /// `opv sync --sealed-root <dir>` (design `sealed-target` D12): a target that writes
+    /// files of its own resolves them under `root` for this run instead of beside the
+    /// configuration. Default: the target writes no files of its own and ignores it.
+    fn set_out_root(&mut self, _root: &std::path::Path) {}
     /// Equal configuration (every field), for comparing whole configurations.
     fn eq_dyn(&self, other: &dyn TargetConfig) -> bool;
     /// For [`TargetConfig::same_target`] and [`TargetConfig::eq_dyn`] implementations.

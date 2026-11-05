@@ -61,6 +61,8 @@ pub struct SealedTarget {
     /// The configuration file's directory, which `sealed.out` is relative to without
     /// `--sealed-root`.
     pub config_dir: PathBuf,
+    /// `opv sync --sealed-root <dir>` (D12), for this run; `None` from the configuration.
+    pub out_root: Option<PathBuf>,
 }
 
 /// `field` of the `sealed` section, refused for `rule`.
@@ -165,6 +167,7 @@ impl SealedTarget {
             signer_fingerprint: signer_fingerprint(&signer),
             trust_group,
             config_dir,
+            out_root: None,
         })
     }
 
@@ -187,6 +190,12 @@ impl SealedTarget {
     pub fn bundle_path(&self, product: &str, sealed_root: Option<&Path>) -> PathBuf {
         let base = sealed_root.unwrap_or(&self.config_dir);
         base.join(self.out_of(product))
+    }
+
+    /// Where this run writes `product`'s bundle: [`SealedTarget::bundle_path`] under the
+    /// run's `--sealed-root`, when given ([`crate::provider::TargetConfig::set_out_root`]).
+    pub fn written_path(&self, product: &str) -> PathBuf {
+        self.bundle_path(product, self.out_root.as_deref())
     }
 }
 
