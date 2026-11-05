@@ -1080,6 +1080,17 @@ Adopted for 0.18.0. Design: `docs/design/owner-value-ingestion.md` (owner decisi
 - `set`, `set --from-file`, `import` and generate plans refuse a set member. The writer they share with `provision` checks the item's version around the edit: for `provision`, a member changed since the plan's read refuses (`item_changed`); for every caller, a version that is not one past the fresh read is reported as `concurrent_edit` (detected, not prevented: `op` has no version precondition).
 - `opv ready` reports each set's state per environment; `partial` and `inconsistent` are blocking `keys_blocking` findings naming `opv provision <set> --env <env>`.
 
+## FR-68 — Sealed Delivery (#271, #275)
+
+Adopted for 0.18.0. Design: `docs/design/sealed-target.md` (owner decisions D1-D13; residual risk R-U2 accepted). User guide: `docs/sealed-delivery.md`.
+
+- A sealed target is a registered provider, `[environments.<env>.targets.<name>]` with `sealed.out`, `sealed.env_name`, `sealed.recipients` (age X25519 only), `sealed.signer` (one `ssh-ed25519` key) and optional `sealed.trust_group`, delivered by `opv sync` (FR-60: no separate seal command). `deploy_credentials` is required and is a 1Password SSH Key item; `sync` signs in process and refuses a key that is not `sealed.signer` (`input_invalid`) before any value read.
+- Load rules: no recipient or signer shared across trust groups (`sealed_recipient_shared`, `sealed_signer_shared`; without a group, the environment is the group); `sealed.out` relative, holding `{product}` when the target delivers more than one product, unique across the configuration; no `OP_*` name; never an `age_identity` key, a key read from the signing item, or a `source = "infrastructure"` key (#275, `config_invalid`).
+- `sync` writes one `opv-sealed/1` file per product: a format line, a signed canonical value-free header, an age block, an SSHSIG block (namespace `opv-sealed`), LF only, each part checkable with stock `age` and `ssh-keygen`. The bundle is a whole set: any change re-seals every desired name; a recipient, signer or name change marks it stale as a whole. One 1Password read per boundary item and one of the signing key per seal; the runtime makes none. Written atomically under a lock; `revision = max(previous + 1, now)`, previous only from a bundle that verified. `--sealed-root <dir>` writes under another checkout.
+- `opv unseal` needs no configuration, `op` or network. It verifies the signature against a strict `allowed_signers` line whose principals include the header's environment, then environment, product and `--min-revision` (set by the deploy; no ratchet, no expiry), then recipient membership, before decrypting. `--verify-only` decrypts nothing; inspect prints names only; `--exec` delivers variables (replacing an inherited name, named on stderr) and file keys in a RAM directory, never `OP_*` or the `--identity-env` variable. The identity is a file or a variable, never an argument.
+- `opv propose generate` of an `age_identity` key makes the identity in 1Password and prints only its recipient. No MCP tool runs `unseal`; an assistant may run `--verify-only` and inspect.
+- R-U2: a leaked runtime identity cannot be revoked centrally; recovery is rotating the identity and every value it could open.
+
 # 4. Security Requirements
 
 ## SR-1 — No Secret Logging
