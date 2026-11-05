@@ -182,6 +182,13 @@ A `pending_revoke` finding means an old identity still reads the vault: once
   hand it over and never read that file. Values that already exist elsewhere:
   the user runs `opv import <env> --from <file.env>`; `--dry-run` shows what would come in;
   `--replace` is the user's decision.
+- **A set** (`keys_blocking` with `scope.set`; a contract `[sets.<SET>]`, e.g. an OAuth
+  consent's refresh token from a `[producers.<name>]` command, or matched generated keys and
+  their bundle): never run `opv provision` yourself and never set a member with `opv set`. You
+  may run `opv provision <SET> --env <env> --dry-run --json` to show the plan (names, makers,
+  pins; never a value), then hand the finding's `opv provision <SET> --env <env>` to the user
+  verbatim (`--fill-missing` for a partial set, `--replace` only if they decide to re-make it)
+  and wait; they type the environment back and consent in their browser.
 - **Everything saved**: local runs use `opv run <env> --product <p> -- <command>`; deploys go
   `opv plan <env>` then `opv sync <env> --expect-plan <id>` (add `--deploy` only when the user
   wants to deploy). CI secrets in GitHub Actions use a `github` environment and the same sync.
