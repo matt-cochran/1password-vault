@@ -382,7 +382,7 @@ impl<'a> SealedStore<'a> {
         let bundle = self
             .r
             .seal_bundle(&SealCall::new(&header, &values, &keys))
-            .map_err(seal_failure)?;
+            .map_err(|f| seal_failure(f, &self.target.placement.target))?;
         write_atomically(&path, &bundle)
     }
 }
@@ -390,9 +390,22 @@ impl<'a> SealedStore<'a> {
 /// A seal that did not happen, as the catalog's cause (§6.2): a signing key the codec
 /// refuses is the deploy credential's field; any other codec refusal is a batch the plan
 /// should never have passed.
-fn seal_failure(f: SealFailure) -> Error {
+fn seal_failure(f: SealFailure, target: &str) -> Error {
     match f {
         SealFailure::NotSignedIn(e) => e,
+        // G4 by value: a key whose value is the signing key, whatever reference reads it.
+        SealFailure::Codec(CryptoError::SealsSigningKey(name)) => Cause::InputInvalid {
+            path: PathBuf::new(),
+            kind: InputKind::DeployCredentials,
+            at: None,
+            field: name,
+            rule: FieldRule::Check {
+                check: crate::cause::ConfigCheck::SealedDeliversSigner {
+                    target: target.to_string(),
+                },
+            },
+        }
+        .into(),
         SealFailure::Codec(CryptoError::SigningKeyInvalid(expected)) => Cause::InputInvalid {
             path: PathBuf::new(),
             kind: InputKind::DeployCredentials,

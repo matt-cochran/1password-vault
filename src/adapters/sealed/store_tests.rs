@@ -718,3 +718,25 @@ fn a_second_sync_with_nothing_changed_seals_nothing() {
     sync_dev(&w, &fleet, dir.path());
     assert_eq!(w.seals.borrow().len(), 1);
 }
+
+/// G4 by value (security review 0.18.0): this fixture names its `deploy_credentials` by
+/// vault and item *name*, so the configuration's id comparison cannot see that a key is read
+/// from the signing item. A value that is the signing key still refuses the seal, names the
+/// key and leaves no bundle.
+#[test]
+fn a_value_that_is_the_signing_key_is_never_sealed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (t, r) = (target(dir.path()), FakeRunner::new([]));
+    let key = v(&kat("signer_ed25519"));
+    let token = v(TOKEN);
+    let batch = vec![("TLS_KEY".to_string(), &key), ("TOKEN".to_string(), &token)];
+    let run = WriteRun {
+        plan_id: PLAN,
+        product: None,
+    };
+    let err = store(&t, &r).write_run(&batch, &run).unwrap_err();
+    assert_eq!(code(&err), "input_invalid");
+    let text = crate::error::report(&err);
+    assert!(text.contains("TLS_KEY") && !text.contains("PRIVATE KEY"));
+    assert!(!bundle(&t).exists());
+}

@@ -872,3 +872,46 @@ fn an_op_name_in_the_payload_is_refused_after_decryption() {
         (CryptoError::PayloadMismatch(FormatError::OpName), 1)
     );
 }
+
+/// G4 by value (security review 0.18.0): the signing key is never sealed, whichever form the
+/// value holds and however the configuration names the item it is read from.
+#[test]
+fn seal_refuses_a_value_that_is_its_own_signing_key() {
+    let id = identity();
+    let key = signer();
+    for pem in [
+        kat_str("signer_ed25519"),
+        kat_str("signer_ed25519.pkcs8.pem"),
+    ] {
+        let entries: [(&str, &[u8]); 2] = [("API_TOKEN", b"marker"), ("TLS_KEY", pem.as_bytes())];
+        let err = seal(
+            &header("prod", &id, &key),
+            &entries,
+            &[id.recipient()],
+            &key,
+        )
+        .err();
+        assert_eq!(err, Some(CryptoError::SealsSigningKey("TLS_KEY".into())));
+        assert!(!err.unwrap().to_string().contains("PRIVATE KEY"));
+    }
+}
+
+/// Another ed25519 key is an ordinary value: only the bundle's own signer is refused.
+#[test]
+fn seal_keeps_a_value_that_is_another_signing_key() {
+    let id = identity();
+    let key = signer();
+    let other = PrivateKey::from(Ed25519Keypair::from_seed(&[9; 32]))
+        .to_openssh(LineEnding::LF)
+        .expect("openssh");
+    let entries: [(&str, &[u8]); 2] = [("API_TOKEN", b"marker"), ("TLS_KEY", other.as_bytes())];
+    assert!(
+        seal(
+            &header("prod", &id, &key),
+            &entries,
+            &[id.recipient()],
+            &key
+        )
+        .is_ok()
+    );
+}

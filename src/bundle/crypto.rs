@@ -85,6 +85,10 @@ pub enum CryptoError {
     /// Sealing inputs disagree with the header they are sealed under.
     #[error("the sealed {0} differ from the header")]
     SealMismatch(&'static str),
+    /// A value of the batch is the bundle's own signing key (G4): a sealed target never
+    /// seals it, however its configuration names the key. Names the key, never the value.
+    #[error("the value of {0} is the bundle's own signing key")]
+    SealsSigningKey(String),
     /// age or ssh-key failed while producing output.
     #[error("the {0} step failed")]
     Internal(&'static str),
@@ -101,7 +105,9 @@ impl CryptoError {
             Self::IdentityUnusable(_) => "sealed_identity_unusable",
             Self::NotARecipient => "sealed_not_a_recipient",
             Self::PayloadMismatch(_) => "sealed_payload_mismatch",
-            Self::RecipientUnsupported(_) | Self::SigningKeyInvalid(_) => "input_invalid",
+            Self::RecipientUnsupported(_)
+            | Self::SigningKeyInvalid(_)
+            | Self::SealsSigningKey(_) => "input_invalid",
             Self::SealMismatch(_) | Self::Internal(_) => "bug",
         }
     }
@@ -296,7 +302,8 @@ fn parse_pkcs8(pem: &str) -> Result<SigningKey, CryptoError> {
     if lines.next() != Some(PKCS8_BEGIN) {
         return Err(CryptoError::SigningKeyInvalid("malformed PKCS#8 armor"));
     }
-    let mut body = Zeroizing::new(String::new());
+    // Sized up front: growing the buffer would free unzeroized copies of the key's base64.
+    let mut body = Zeroizing::new(String::with_capacity(pem.len()));
     let mut ended = false;
     for line in lines {
         if ended {
@@ -458,6 +465,11 @@ pub fn seal(
     {
         return Err(CryptoError::SealMismatch("names"));
     }
+    // G4 by value: the configuration check compares `deploy_credentials` with the boundary
+    // by ids, which a name reference never matches; the key itself never matches here.
+    if let Some((name, _)) = entries.iter().find(|(_, v)| is_signing_key(v, key)) {
+        return Err(CryptoError::SealsSigningKey((*name).to_string()));
+    }
     let header_line = format::canonical_header(header).map_err(CryptoError::Malformed)?;
     let payload = format::encode_payload(&header_line, entries).map_err(CryptoError::Malformed)?;
     let age = encrypt(recipients, &payload)?;
@@ -468,6 +480,15 @@ pub fn seal(
     signed.extend_from_slice(&age);
     let signature = sign(key, &signed)?;
     format::encode_envelope(&header_line, &age, &signature).map_err(CryptoError::Malformed)
+}
+
+/// Whether `value` is `key` itself, in either form 1Password returns (OpenSSH or PKCS#8):
+/// the same public key, so a re-encoded copy matches too. Never formats the value.
+fn is_signing_key(value: &[u8], key: &SigningKey) -> bool {
+    std::str::from_utf8(value)
+        .ok()
+        .and_then(|text| parse_signing_key(text).ok())
+        .is_some_and(|found| found.public_key().key_data() == key.public_key().key_data())
 }
 
 /// Verify a bundle without decrypting it: the codec checks, then the SSHSIG over the format
