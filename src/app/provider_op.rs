@@ -251,7 +251,8 @@ fn preflight_in(
     Ok(())
 }
 
-/// §5: read the deploy credentials item once, then make the operation's calls. The whole
+/// §5: read the deploy credentials item once (the strict sign-in, whose credential a
+/// registry push reuses, #289), then make the operation's calls. The whole
 /// run, sign-in included, is under [`isolated_env`]: no child but `op` sees more than opv's
 /// basics and its own variables (§5.5).
 pub fn execute(fleet: &Fleet, a: &Admitted, r: &dyn CommandRunner) -> Result<Report, Error> {
@@ -274,7 +275,11 @@ pub fn execute(fleet: &Fleet, a: &Admitted, r: &dyn CommandRunner) -> Result<Rep
             return Ok(report);
         }
         if let Some(push) = &push {
-            let digest = calls.registry_push(&signed, push)?;
+            // The strict sign-in read the deploy item; the push uses what it holds (#289).
+            let login = signed.deploy_login().ok_or(Cause::Bug {
+                site: "provider_op: registry-push signed in without a deploy login",
+            })?;
+            let digest = calls.registry_push(&signed, push, login)?;
             report.lines = vec![format!("pushed {} {digest}", push.image)];
             report.pushed = Some((push.image.to_string(), digest));
             return Ok(report);

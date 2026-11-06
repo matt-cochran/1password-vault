@@ -131,6 +131,13 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             vec!["cfg/other.toml", "--config"],
         ),
         (
+            ConfigOutsideRepository {
+                path: PathBuf::from("/elsewhere/xyz.toml"),
+                dot_opv: PathBuf::from("/repo/infra/.opv"),
+            },
+            vec!["/elsewhere/xyz.toml", "/repo/infra/.opv"],
+        ),
+        (
             ConfigInvalid {
                 source: file_source(),
                 at: Some(Location { line: 12, col: 3 }),
@@ -1020,6 +1027,7 @@ fn ordinal(c: &Cause) -> usize {
         ConfigNotFound { .. } => 0,
         ConfigSourceMismatch { .. } => 1,
         ConfigUnreadable { .. } => 2,
+        ConfigOutsideRepository { .. } => 90,
         ConfigInvalid { .. } => 3,
         ContractStale { .. } => 50,
         BoundaryMissing { .. } => 4,
@@ -1115,7 +1123,7 @@ fn ordinal(c: &Cause) -> usize {
     }
 }
 
-const VARIANTS: usize = 90;
+const VARIANTS: usize = 91;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
@@ -5669,5 +5677,31 @@ fn a_config_named_by_dot_opv_says_so() {
         c.message().contains("(named by /repo/infra/.opv)"),
         "{}",
         c.message()
+    );
+}
+
+/// #288: a `.opv` config line that resolves outside the repository is a containment rule, not
+/// a permission problem.
+#[test]
+fn a_config_outside_the_repository_never_says_permission_denied() {
+    let c = Cause::ConfigOutsideRepository {
+        path: PathBuf::from("/elsewhere/secrets.toml"),
+        dot_opv: PathBuf::from("/repo/.opv"),
+    };
+    assert!(!c.message().contains("permission"), "{}", c.message());
+}
+
+/// #288: its Do says the line must name a file inside this repository.
+#[test]
+fn a_config_outside_the_repository_says_to_name_a_file_inside_it() {
+    let c = Cause::ConfigOutsideRepository {
+        path: PathBuf::from("/elsewhere/secrets.toml"),
+        dot_opv: PathBuf::from("/repo/.opv"),
+    };
+    let doc = document(&c, None, &inv(), false);
+    assert!(
+        doc.to_string()
+            .contains("must name a file inside this repository"),
+        "{doc}"
     );
 }

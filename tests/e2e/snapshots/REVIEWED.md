@@ -42,6 +42,7 @@ Each snapshot has the text run (stderr: `opv:` line, `checked:`, the tool's scru
 - [ ] `scenarios/config_proposal_invalid.snap` (config_invalid)
 - [ ] `scenarios/config_source_mismatch.snap` (config_source_mismatch)
 - [ ] `scenarios/config_unreadable.snap` (config_unreadable)
+- [ ] `scenarios/config_outside_repository.snap` (config_outside_repository)
 - [ ] `scenarios/confirm_mismatch.snap` (confirm_mismatch)
 - [ ] `scenarios/copies_differ.snap` (text only)
 - [ ] `scenarios/create_outcome_unknown.snap` (create_outcome_unknown)

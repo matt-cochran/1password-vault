@@ -1065,7 +1065,7 @@ Adopted for 0.18.0. Design: `docs/design/agent-signin-readiness.md` §2.3. Amend
 Adopted for 0.18.0. Design: `docs/design/agent-signin-readiness.md` §2.4. Amends FR-25.
 
 - `.opv` may hold `config = "<path>"`, relative to the `.opv`'s folder. At parse only its syntax is checked (relative, no `..`, not absolute, no NUL; not together with `project`), each failure `config_invalid`, so `opv login` and `opv account use` keep working in a clone whose generated configuration does not exist yet.
-- At use the repository root and the file are both canonicalized; a missing file or one outside the root (the `.opv`'s folder outside a repository) is `config_unreadable` with `given_by: dot_opv`.
+- At use the repository root and the file are both canonicalized; a missing file is `config_unreadable` with `given_by: dot_opv`; one outside the root (the `.opv`'s folder outside a repository) is `config_outside_repository`, naming the `.opv` and the path (#288).
 - Discovery order: `--config`/`OPV_CONFIG`, `OPV_PROJECT`, a walk-up `secrets.toml` at or below the nearest `.opv`'s folder, that `.opv`'s `config`, its `project`, a walk-up `secrets.toml` above it (only when it names neither), then the git remote.
 - When discovery fails, `config_not_found` gains `found`: the `secrets.toml` files below the repository root (at most 4 levels, 20 files and 2 000 folders visited; `.git`, `node_modules`, `target` and hidden folders skipped; names only), with whether the search stopped. One found: the Do names the `.opv` line (relative to the `.opv`) and the Next re-runs with `--config` (relative to the current folder). Several: the person picks (`next.kind: none`). A found file is never used without being named.
 
