@@ -782,14 +782,25 @@ and namespace `opv-sealed` are accepted, with the principal rule of §4.2.
   `static_secrets`.
 - `ssh_key::PrivateKey` zeroizes its key data on drop.
 
-**Known residual (T12, verified):** age's `StreamReader`/`StreamWriter` keep a plain
-`chunk: Vec<u8>` (`age-0.12.1/src/primitives/stream.rs:26-34`, `:222-226`) that is **not
-zeroized**. Only `PayloadKey` zeroizes. Up to 64 KiB of plaintext may stay in freed heap for the
-life of the process.
+**Library internals (S7, audited for 0.18.1 against `age 0.12.1`, `age-core 0.12.0`,
+`x25519-dalek 2.0.1`, `chacha20poly1305 0.10.1`, `ssh-key 0.6.7`, `ssh-encoding 0.2.0`,
+`base64ct 1.8.3`, `ed25519-dalek 2.2.0` as locked):**
 
-- Variables mode `exec`s at once, which replaces that heap.
-- Non-dumpable and a zero core limit keep the heap out of cores.
-- The docs record this residual.
+| Where | Zeroized | Not zeroized (residual) |
+|---|---|---|
+| age identity parse (`x25519.rs:42-63`) | the decoded 32 bytes (`buf.zeroize()`); `StaticSecret` on drop (x25519-dalek's default `zeroize` feature is on). Bech32 decoding (`CheckedHrpstring`, `ByteIter`) borrows the input and decodes lazily: no copy. | nothing in age; the input string is opv's (`Zeroizing`). |
+| age header unwrap (`x25519.rs:110-150`) | `SharedSecret` on drop; the unwrapped file key (`pt.zeroize()`, `FileKey` is a `SecretBox`); `HmacKey` and `PayloadKey` (`stream.rs:26-34`) on drop; the AEAD's own key (`chacha20poly1305` `Drop`). | the HKDF output `enc_key` (a `[u8; 32]` returned by value, `age-core primitives.rs:51`) and the HKDF/HMAC states; the per-call ChaCha20 state (`chacha20` is built without its `zeroize` feature). All are stack temporaries, overwritten by later calls. |
+| age STREAM decrypt (`stream.rs:197-212`, `:400-411`) | each plaintext chunk is a `SecretSlice` (zeroized on drop). | `Vec`→`Box<[u8]>` drops the 16-byte tag capacity; the allocator may move the block instead of shrinking it in place, leaving an unzeroized copy of up to 64 KiB of plaintext in freed heap. |
+| age STREAM encrypt (`stream.rs:222-262`) | `PayloadKey`. | the writer's plaintext `chunk: Vec<u8>` (capacity 64 KiB, `clear()`ed, never zeroized): the last chunk of payload stays in freed heap. |
+| ssh-key OpenSSH parse (`private.rs:232`, `private/ed25519.rs:212-225`) | the 32 private bytes read into `Zeroizing`; `Ed25519PrivateKey` on drop; `ed25519_dalek::SigningKey` built per signature zeroizes on drop. | base64ct's 3-byte `BlockBuffer` on the stack (the PEM's last decoded bytes: checkint padding and comment, after the key). |
+
+**What opv does:** every value and key buffer it owns is `Zeroizing` (identity text, payload,
+`decrypt`'s output, sized so `read_to_end` never reallocates, the PKCS#8 body and DER, the
+seed). The library residuals above cannot be reached from opv without forking the crates, so
+none is patched; they rest on the process controls: variables mode `exec`s at once, which
+replaces the heap, and a non-dumpable process with a zero core limit keeps it out of core
+files. A cheap feature flip (`chacha20/zeroize`) was considered and not taken: it wipes only a
+stack state that the next call overwrites. Revisit when age ships a zeroizing `StreamWriter`.
 
 **Constant time:**
 

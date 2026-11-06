@@ -40,12 +40,15 @@ pub const TOTAL_LIMIT: usize = 1 << 20;
 pub const LINE_LIMIT: usize = 64 << 10;
 /// The most bytes an `open_url` notice may hold (§5.2).
 pub const URL_LIMIT: usize = 2048;
+/// The most bytes an `open_url` notice's query and fragment together may hold (S8, security
+/// review 0.18.0): enough for an OAuth authorization request, too little to carry a payload.
+pub const QUERY_LIMIT: usize = 512;
 /// The most bytes one output value may hold (§5.2).
 pub const VALUE_LIMIT: usize = 64 << 10;
 
 /// What the caller knows before a producer runs: the run's `--env`, this run's nonce, the
-/// declared outputs the set uses (in request order), and the producer's allowed `open_url`
-/// hosts.
+/// declared outputs the set uses (in request order), the producer's allowed `open_url`
+/// hosts, and the input values it was given.
 #[derive(Debug, Clone, Copy)]
 pub struct Context<'a> {
     /// The environment a `result` must name.
@@ -56,13 +59,17 @@ pub struct Context<'a> {
     pub outputs: &'a [String],
     /// Hosts an `open_url` notice may name.
     pub open_url_hosts: &'a [String],
+    /// The input values the producer received on stdin. An `open_url` that carries one, raw,
+    /// percent-decoded or base64-encoded, is refused (S8); they are only compared, never shown.
+    pub inputs: &'a [&'a SecretValue],
 }
 
 /// A notice from a line before the terminal one, already admitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Notice {
     /// The consent page to open: `https`, an allowed host, at most [`URL_LIMIT`] bytes, no
-    /// userinfo. Without an opener the caller prints it.
+    /// userinfo, a query and fragment of at most [`QUERY_LIMIT`] bytes, and none of the
+    /// producer's input values. Without an opener the caller prints it.
     OpenUrl(String),
     /// The producer is waiting for something (for example, consent).
     Waiting,
@@ -201,9 +208,13 @@ fn refuse(rule: ProduceRule) -> Error {
     .into()
 }
 
-/// One `open_url` notice's refusal reason, in precedence order: scheme, userinfo, host, then
-/// the byte limit.
-fn open_url_problem(url: &str, hosts: &[String]) -> Option<OpenUrlProblem> {
+/// One `open_url` notice's refusal reason, in precedence order: scheme, userinfo, host, the
+/// byte limit, the query limit, then an input value carried in it.
+fn open_url_problem(
+    url: &str,
+    hosts: &[String],
+    inputs: &[&SecretValue],
+) -> Option<OpenUrlProblem> {
     let Some(after_scheme) = url.strip_prefix("https://") else {
         return Some(OpenUrlProblem::NotHttps);
     };
@@ -232,7 +243,72 @@ fn open_url_problem(url: &str, hosts: &[String]) -> Option<OpenUrlProblem> {
             limit: URL_LIMIT as u64,
         });
     }
+    let tail = after_scheme[end..]
+        .find(['?', '#'])
+        .map_or("", |at| &after_scheme[end + at..]);
+    if tail.len() > QUERY_LIMIT {
+        return Some(OpenUrlProblem::QueryTooLong {
+            limit: QUERY_LIMIT as u64,
+        });
+    }
+    if carries_input(url, inputs) {
+        return Some(OpenUrlProblem::CarriesInput);
+    }
     None
+}
+
+/// Whether `url` holds one of `inputs` (S8): raw, after percent-decoding (with and without
+/// `+` as a space), or in any base64 alphabet. Values shorter than
+/// [`crate::scrub::MIN_SUBSTRING`] bytes are skipped: they would match by chance.
+fn carries_input(url: &str, inputs: &[&SecretValue]) -> bool {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
+    let raw = url.as_bytes();
+    let decoded = percent_decode(raw, false);
+    let decoded_plus = percent_decode(raw, true);
+    inputs.iter().any(|v| {
+        let v = v.expose().as_bytes();
+        if v.len() < crate::scrub::MIN_SUBSTRING {
+            return false;
+        }
+        let mut forms = vec![Zeroizing::new(v.to_vec())];
+        for engine in [&STANDARD_NO_PAD, &URL_SAFE_NO_PAD] {
+            forms.push(Zeroizing::new(engine.encode(v).into_bytes()));
+        }
+        forms.iter().any(|form| {
+            [raw, decoded.as_slice(), decoded_plus.as_slice()]
+                .iter()
+                .any(|hay| contains(hay, form))
+        })
+    })
+}
+
+/// `bytes` with every `%XX` decoded (and `+` as a space when `plus`); a malformed escape is
+/// kept as it is.
+fn percent_decode(bytes: &[u8], plus: bool) -> Zeroizing<Vec<u8>> {
+    fn hex(b: u8) -> Option<u8> {
+        (b as char).to_digit(16).and_then(|d| u8::try_from(d).ok())
+    }
+    let mut out = Zeroizing::new(Vec::with_capacity(bytes.len()));
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2]))
+        {
+            out.push(hi << 4 | lo);
+            i += 3;
+            continue;
+        }
+        out.push(if plus && b == b'+' { b' ' } else { b });
+        i += 1;
+    }
+    out
+}
+
+fn contains(hay: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty() && hay.windows(needle.len()).any(|w| w == needle)
 }
 
 /// `code` is 1 to 40 bytes of `[a-z_]` (the vocabulary the `error` line may report).
@@ -266,7 +342,7 @@ fn notice(raw: Raw, at: u32, context: &Context<'_>) -> Result<Line, Error> {
     match (&raw.open_url, raw.waiting) {
         (Some(_), None) => {
             let url = text(&raw.open_url).unwrap_or("");
-            match open_url_problem(url, context.open_url_hosts) {
+            match open_url_problem(url, context.open_url_hosts, context.inputs) {
                 Some(why) => Err(refuse(ProduceRule::OpenUrlRefused { line: at, why })),
                 None => Ok(Line::Notice(Notice::OpenUrl(url.to_string()))),
             }
