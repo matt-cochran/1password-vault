@@ -79,12 +79,15 @@ pub trait StagedStore: Store {
     fn variables(&self) -> Option<&dyn VariableStore>;
 }
 
-/// The run a [`StagedStore::write_run`] belongs to: its plan id, and `--product` when the
-/// run is scoped to one product (a whole-set store rewrites only that product's set).
+/// The run a [`StagedStore::write_run`] belongs to: its plan id, `--product` when the run
+/// is scoped to one product (a whole-set store rewrites only that product's set), and the
+/// store names whose values this run supplied with `--supply-stdin` (#206, #287), names
+/// only.
 #[derive(Debug, Clone, Copy)]
 pub struct WriteRun<'a> {
     pub plan_id: &'a str,
     pub product: Option<&'a str>,
+    pub supplied: &'a [String],
 }
 
 /// Config delivered as named, readable values (FR-46): GitHub Actions variables. Config is

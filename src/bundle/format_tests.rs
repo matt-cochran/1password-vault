@@ -38,12 +38,18 @@ fn fixture_header() -> Header {
         ],
         secrets_dir_env: None,
         child_environment: Some(ChildEnvironment::DeclaredOnly),
+        supplied: Some(vec!["DATABASE_URL".to_string()]),
     }
 }
 
 /// The exact canonical bytes of [`fixture_header`] (test 4). Regenerated deliberately for
-/// 0.18.1 (#279 S5): the header now carries `child_environment`.
-const FIXTURE_HEADER: &[u8] = b"{\"child_environment\":\"declared_only\",\"contract_digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"created_at\":\"2026-01-02T03:04:05Z\",\"environment\":\"prod-zonetico\",\"format\":\"opv-sealed/1\",\"names\":[{\"destination\":\"env:DATABASE_URL\",\"name\":\"DATABASE_URL\"},{\"destination\":\"file:github-app/private-key\",\"name\":\"GITHUB_APP_KEY\"}],\"opv_version\":\"0.18.0\",\"plan_id\":\"plan_0000\",\"product\":\"zonetico\",\"project\":\"fleet\",\"recipients\":[\"sha256:1111111111111111\"],\"revision\":42,\"signer\":\"SHA256:2222222222222222222222222222222222222222222\",\"target\":\"box\"}";
+/// 0.18.1 (#279 S5): the header carries `child_environment`; and again for 0.18.2 (#287): it
+/// names the keys whose values were supplied at sync.
+const FIXTURE_HEADER: &[u8] = b"{\"child_environment\":\"declared_only\",\"contract_digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"created_at\":\"2026-01-02T03:04:05Z\",\"environment\":\"prod-zonetico\",\"format\":\"opv-sealed/1\",\"names\":[{\"destination\":\"env:DATABASE_URL\",\"name\":\"DATABASE_URL\"},{\"destination\":\"file:github-app/private-key\",\"name\":\"GITHUB_APP_KEY\"}],\"opv_version\":\"0.18.0\",\"plan_id\":\"plan_0000\",\"product\":\"zonetico\",\"project\":\"fleet\",\"recipients\":[\"sha256:1111111111111111\"],\"revision\":42,\"signer\":\"SHA256:2222222222222222222222222222222222222222222\",\"supplied\":[\"DATABASE_URL\"],\"target\":\"box\"}";
+
+/// The 0.18.1 canonical bytes of the same placement, before `supplied` existed (#287): a
+/// bundle sealed then must still parse, naming nothing supplied.
+const V0181_HEADER: &[u8] = b"{\"child_environment\":\"declared_only\",\"contract_digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"created_at\":\"2026-01-02T03:04:05Z\",\"environment\":\"prod-zonetico\",\"format\":\"opv-sealed/1\",\"names\":[{\"destination\":\"env:DATABASE_URL\",\"name\":\"DATABASE_URL\"},{\"destination\":\"file:github-app/private-key\",\"name\":\"GITHUB_APP_KEY\"}],\"opv_version\":\"0.18.0\",\"plan_id\":\"plan_0000\",\"product\":\"zonetico\",\"project\":\"fleet\",\"recipients\":[\"sha256:1111111111111111\"],\"revision\":42,\"signer\":\"SHA256:2222222222222222222222222222222222222222222\",\"target\":\"box\"}";
 
 /// The 0.18.0 canonical bytes of the same placement, before `child_environment` existed:
 /// a bundle sealed then must still parse, and inherit (#279 S5).
@@ -136,6 +142,29 @@ fn a_header_without_child_environment_parses_as_inherit() {
 fn a_header_without_child_environment_stays_canonical() {
     let parsed = parse_header(LEGACY_HEADER).expect("parse");
     assert_eq!(canonical_header(&parsed).expect("canonical"), LEGACY_HEADER);
+}
+
+#[test]
+fn a_header_without_supplied_names_nothing_supplied() {
+    assert_eq!(parse_header(V0181_HEADER).expect("parse").supplied, None);
+}
+
+#[test]
+fn a_header_without_supplied_stays_canonical() {
+    let parsed = parse_header(V0181_HEADER).expect("parse");
+    assert_eq!(canonical_header(&parsed).expect("canonical"), V0181_HEADER);
+}
+
+#[test]
+fn a_supplied_name_the_header_does_not_name_is_refused() {
+    let line = String::from_utf8(FIXTURE_HEADER.to_vec()).unwrap().replace(
+        "\"supplied\":[\"DATABASE_URL\"]",
+        "\"supplied\":[\"OTHER\"]",
+    );
+    assert_eq!(
+        parse_header(line.as_bytes()),
+        Err(FormatError::SuppliedNotNamed)
+    );
 }
 
 #[test]
