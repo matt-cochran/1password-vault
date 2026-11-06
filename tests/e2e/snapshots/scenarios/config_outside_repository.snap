@@ -1,0 +1,18 @@
+# config_outside_repository: opv contract
+
+## text exit: 2
+## text stdout
+
+## text stderr
+opv: the config line of <SCENARIO>/project/.opv names <SCENARIO>/project/escape.toml, which resolves outside this repository; opv reads only a configuration file inside the repository that holds the .opv
+Do: change the config line of <SCENARIO>/project/.opv: it must name a file inside this repository
+Next: opv contract
+
+## json exit: 2
+## json stdout
+{"schema_version":4,"ok":false,"exit_code":2,"next":{"kind":"run","actor":"assistant","command":"opv contract --json"},"do":"change the config line of <SCENARIO>/project/.opv: it must name a file inside this repository","error":{"code":"config_outside_repository","category":"config","message":"the config line of <SCENARIO>/project/.opv names <SCENARIO>/project/escape.toml, which resolves outside this repository; opv reads only a configuration file inside the repository that holds the .opv","subject":{"dot_opv":"<SCENARIO>/project/.opv","path":"<SCENARIO>/project/escape.toml"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"change the config line of <SCENARIO>/project/.opv: it must name a file inside this repository","next":{"kind":"run","actor":"assistant","command":"opv contract --json"}}}
+
+## json stderr
+opv: the config line of <SCENARIO>/project/.opv names <SCENARIO>/project/escape.toml, which resolves outside this repository; opv reads only a configuration file inside the repository that holds the .opv
+Do: change the config line of <SCENARIO>/project/.opv: it must name a file inside this repository
+Next: opv contract --json

@@ -676,7 +676,6 @@ mod push {
         fn new() -> Self {
             Self(FakeRunner::new([
                 deploy_item(),
-                deploy_item(),
                 Output::success("Login Succeeded\n"),
                 Output::success(format!(
                     "The push refers to repository [registry.fly.io/shop]\n\
@@ -773,7 +772,22 @@ mod push {
         assert!(d.0.calls.borrow()[0].args.iter().any(|a| a == "ideploy"));
     }
 
-    /// §5.5: the sign-in, the read and both docker calls run isolated.
+    /// #289: the push uses the credential the strict sign-in read; the deploy item is read
+    /// from 1Password once per push.
+    #[test]
+    fn a_registry_push_reads_its_deploy_item_once() {
+        let dir = owned_dir();
+        let d = pushed(&dir).1;
+        let reads =
+            d.0.calls
+                .borrow()
+                .iter()
+                .filter(|c| c.program == "op" && c.args.iter().any(|a| a == "ideploy"))
+                .count();
+        assert_eq!(reads, 1);
+    }
+
+    /// §5.5: the sign-in and both docker calls run isolated.
     #[test]
     fn every_call_of_a_registry_push_runs_isolated() {
         let dir = owned_dir();

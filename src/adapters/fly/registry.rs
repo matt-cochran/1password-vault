@@ -30,7 +30,7 @@ use crate::cause::{
     Cause, CredentialProblem, CredentialRef, During, EnvName, Guard, ItemId, OperationRefusal,
     OutputProblem, Principal, System, TargetName, Unanswered, Upstream, VaultId,
 };
-use crate::domain::ItemRef;
+use crate::domain::{ItemRef, SecretValue};
 use crate::error::Error;
 use crate::host::{DOCKER, Host};
 use crate::ramdir::{PrivateDir, sweep};
@@ -49,15 +49,19 @@ const SEED: &[u8] = br#"{"auths":{"opv.invalid":{}}}"#;
 pub const LOGIN_ARGS: [&str; 5] = ["login", REGISTRY, "-u", "x", "--password-stdin"];
 
 /// One `registry-push`, as admission bound it: names, the validated image, the endpoint P9
-/// resolved and the RAM runtime directory P8 checked. No value.
+/// resolved and the RAM runtime directory P8 checked, and the deploy token the strict
+/// sign-in read (#289; `Debug` prints it `<REDACTED>`).
 #[derive(Debug, Clone, Copy)]
 pub struct PushRequest<'a> {
     pub env: &'a str,
     pub target: &'a str,
     /// The target's `fly.app`.
     pub app: &'a str,
-    /// The target's `deploy_credentials` item.
+    /// The target's `deploy_credentials` item: the principal the push runs under.
     pub item: &'a ItemRef,
+    /// The item's `FLY_API_TOKEN`, held by the strict sign-in that read it: the push
+    /// reads nothing from 1Password itself (#289).
+    pub token: &'a SecretValue,
     /// `registry.fly.io/<app>:<tag>`, validated (P6) and local (P10).
     pub image: &'a str,
     /// The local daemon's `unix://` endpoint (P9).
@@ -67,7 +71,8 @@ pub struct PushRequest<'a> {
 }
 
 /// Push `p.image` (§5.3) and return the digest the registry reported (`sha256:<64 hex>`).
-/// Reads the deploy item once under its principal; isolated like every operation child.
+/// Uses the token the strict sign-in read (no second read of the deploy item, #289);
+/// isolated like every operation child.
 pub fn registry_push(r: &dyn CommandRunner, p: &PushRequest) -> Result<String, Error> {
     crate::runner::isolated_env(|| push_isolated(r, p))
 }
@@ -83,15 +88,7 @@ fn push_isolated(r: &dyn CommandRunner, p: &PushRequest) -> Result<String, Error
         env: EnvName::new(p.env),
         target: TargetName::new(p.target),
     };
-    let mut values = crate::adapters::onepassword::read_deploy_credentials(
-        r,
-        p.item,
-        super::login::FIELDS,
-        Some(&principal),
-    )?;
-    let token = values.remove(super::login::TOKEN_FIELD).ok_or(Cause::Bug {
-        site: "fly: deploy credentials read without their declared field",
-    })?;
+    let token = p.token;
     // docker's file holds base64("x:<token>"): scrub that composite in every reply (X7).
     let pair = Zeroizing::new(format!("x:{}", token.expose()));
     let encoded = Zeroizing::new(base64::engine::general_purpose::STANDARD.encode(pair.as_bytes()));
@@ -101,7 +98,6 @@ fn push_isolated(r: &dyn CommandRunner, p: &PushRequest) -> Result<String, Error
     let env = [("DOCKER_CONFIG", dir.utf8()), ("DOCKER_HOST", p.endpoint)];
     crate::runner::under_deploy(principal, || {
         login(r, &env, token.expose().as_bytes(), p)?;
-        drop(token);
         // The directory is removed as this function returns, on this path too.
         if !file_store_only(&config) {
             return Err(escaped(p));

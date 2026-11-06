@@ -919,6 +919,7 @@ The `error` object is the same for every failure: `code`, `category`, `message`,
 | `config_invalid` | 2 | after_fix/never | no | secrets.toml, the manifest or a change opv proposed breaks a field rule |
 | `config_not_editable` | 2 | never | no | the configuration cannot be edited in place (generated, or a layout opv does not write) |
 | `config_not_found` | 2 | after_fix | no | no secrets.toml in this folder or a parent, and no 1Password manifest for this checkout |
+| `config_outside_repository` | 2 | after_fix | no | a .opv config line names a file that resolves outside the repository holding the .opv |
 | `config_source_mismatch` | 2 | never | no | the command works on a secrets.toml, but this project's configuration is a 1Password manifest |
 | `config_unreadable` | 2 | after_fix | no | the configuration file could not be read |
 | `contract_stale` | 2 | after_fix | no | a committed contract copy differs from the contract this configuration produces; regenerate it with opv contract |
