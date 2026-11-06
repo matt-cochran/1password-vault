@@ -1149,6 +1149,14 @@ fn produce_rule_words(rule: &ProduceRule) -> (String, String) {
                     "carries a user name or password".to_string(),
                     "send a URL without user information".to_string(),
                 ),
+                OpenUrlProblem::QueryTooLong { limit } => (
+                    format!("has a query and fragment longer than {limit} bytes"),
+                    format!("send a URL whose query and fragment fit in {limit} bytes"),
+                ),
+                OpenUrlProblem::CarriesInput => (
+                    "carries one of the producer's input values".to_string(),
+                    "fix the producer: an input value must never appear in its consent URL".to_string(),
+                ),
             };
             (
                 format!("the open_url on line {line} {problem}, so it was not opened"),
