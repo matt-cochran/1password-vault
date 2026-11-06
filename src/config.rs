@@ -1484,11 +1484,15 @@ fn place_targets(fleet: &mut Fleet) {
                         .collect();
                     let secrets_dir_env =
                         prod.local.as_ref().and_then(|l| l.secrets_dir_env.clone());
+                    let declared_only = prod.local.as_ref().is_some_and(|l| {
+                        l.environment == crate::domain::model::LocalEnvironment::DeclaredOnly
+                    });
                     (
                         p.clone(),
                         PlacedProduct {
                             names,
                             secrets_dir_env,
+                            declared_only,
                         },
                     )
                 })

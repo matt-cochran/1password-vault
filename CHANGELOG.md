@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.1] - 2026-11-06
+
+0.18.1 closes the Low findings left from the 0.18.0 security review (#279).
+
+### Changed
+
+- **A sealed bundle carries the product's child environment mode (S5).** The signed header gains `child_environment` (`inherit` or `declared_only`), and `opv unseal --exec` applies `declared_only` as local delivery does, so the app sees only the bundle's variables and the basic environment. A 0.18.0 bundle without the field still inherits. Switching a product to `declared_only` changes its contract digest, so the next sync re-seals it.
+
+### Security
+
+- `opv unseal --exec` with file keys catches signals before it creates the RAM folder, and clears opv's copies of the values right after the app starts (S6).
+- A producer's `open_url` notice is refused when its query or fragment exceeds 512 bytes or carries one of the producer's input values, raw, percent-decoded or base64 (S8). The URL is never opened.
+- `.opv` values are written with TOML escaping (S10).
+- docs/design/sealed-target.md §6.3 records what the `age` and `ssh-key` crates zeroize and the residual risk (S7).
+
 ## [0.18.0] - 2026-11-05
 
 0.18.0 adds the sealed target (seal at release time, unseal at runtime with no 1Password call), `opv provision` for owner-produced and matched values, typed account choices and a sign-in preflight for `opv run`, and `.opv` naming the configuration.

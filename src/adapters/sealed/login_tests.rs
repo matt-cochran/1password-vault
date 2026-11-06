@@ -135,6 +135,7 @@ fn header() -> Header {
             destination: "env:DATABASE_URL".to_string(),
         }],
         secrets_dir_env: None,
+        child_environment: None,
     }
 }
 

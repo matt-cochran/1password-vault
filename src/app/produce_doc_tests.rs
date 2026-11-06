@@ -36,6 +36,7 @@ fn context<'a>(outputs: &'a [String], hosts: &'a [String]) -> Context<'a> {
         nonce: NONCE,
         outputs,
         open_url_hosts: hosts,
+        inputs: &[],
     }
 }
 
@@ -158,6 +159,59 @@ fn an_open_url_with_userinfo_is_refused() {
         Some(ProduceRule::OpenUrlRefused {
             line: 1,
             why: OpenUrlProblem::Userinfo,
+        })
+    );
+}
+
+/// S8 (security review 0.18.0): a producer that receives `client_secret` on stdin and puts it,
+/// percent-encoded, in its consent URL's query is refused, so the URL is never opened.
+#[test]
+fn an_open_url_carrying_an_input_value_percent_encoded_is_refused() {
+    let secret = SecretValue::new("S7MARKER-client-secret/0001".to_string());
+    let inputs = [&secret];
+    let outputs = names();
+    let hosts = allow();
+    let ctx = Context {
+        inputs: &inputs,
+        ..context(&outputs, &hosts)
+    };
+    let text = format!(
+        "{}\n{}",
+        notice_open("https://consent.example/authorize?state=S7MARKER%2Dclient%2Dsecret%2F0001"),
+        result(r#""refresh_token":"v1""#)
+    );
+    let rule = match parse(text.lines(), ctx).err().map(|e| e.parts().0.clone()) {
+        Some(Cause::InputInvalid {
+            rule: FieldRule::Produce { produce },
+            ..
+        }) => Some(produce),
+        _ => None,
+    };
+    assert_eq!(
+        rule,
+        Some(ProduceRule::OpenUrlRefused {
+            line: 1,
+            why: OpenUrlProblem::CarriesInput,
+        })
+    );
+}
+
+/// S8: a query and fragment longer than [`QUERY_LIMIT`] bytes is refused, whatever it holds.
+#[test]
+fn an_open_url_with_a_query_longer_than_its_limit_is_refused() {
+    let long = format!("https://{HOST}/authorize?x={}", "a".repeat(QUERY_LIMIT));
+    let text = format!(
+        "{}\n{}",
+        notice_open(&long),
+        result(r#""refresh_token":"v1""#)
+    );
+    assert_eq!(
+        rule_of(&text),
+        Some(ProduceRule::OpenUrlRefused {
+            line: 1,
+            why: OpenUrlProblem::QueryTooLong {
+                limit: QUERY_LIMIT as u64
+            },
         })
     );
 }

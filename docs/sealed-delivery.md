@@ -210,7 +210,9 @@ opv-sealed v1
   whitespace) with `format`, `project`, `environment`, `product`, `target`, `revision`,
   `created_at`, `opv_version`, `plan_id`, `contract_digest`, `recipients` (fingerprints),
   `signer` (fingerprint), `names` (`[{name, destination}]`, `env:<NAME>` or
-  `file:<path>`) and, with file keys, `secrets_dir_env`. Unknown fields are refused. Key names
+  `file:<path>`), with file keys `secrets_dir_env`, and `child_environment` (`inherit` or
+  `declared_only`, the product's `local.environment`; absent in bundles sealed before 0.18.1,
+  which means `inherit`). Unknown fields are refused. Key names
   and the placement are readable by anyone holding the file; they are already in committed
   configuration.
 - **Encrypt, then sign.** The payload (the values, bound to the header by its digest) is
@@ -287,7 +289,11 @@ expiry: a missed re-seal never becomes an outage.
 
 **The command's environment** (`--exec`):
 
-- the inherited environment, minus every `OP_*` and the `--identity-env` variable;
+- the inherited environment, minus every `OP_*` and the `--identity-env` variable; when the
+  product is `environment = "declared_only"` (`[products.<p>.local]`, recorded in the signed
+  header), only the basic environment is inherited (`PATH`, `HOME`, locale, terminal, temp
+  and runtime directories, as under `opv run`), so a host credential or an identity exported
+  under another name never reaches the app. Changing the setting re-seals the bundle;
 - plus the bundle's variables and, with file keys, the product's `secrets_dir_env`;
 - **the bundle wins** over an inherited variable of the same name (an image's `ENV PORT`, a
   platform secret left from migration), with one stderr line naming it, never the value:
@@ -300,7 +306,11 @@ values, signals reach the app, and the app is PID 1 in a container.
 
 With file keys (Linux only), opv stays the parent: it writes the files into a private 0700
 directory under `$XDG_RUNTIME_DIR` (files 0400, never disk), forwards signals, passes the exit
-code through and removes the directory when the command exits. `$XDG_RUNTIME_DIR` must be an
+code through and removes the directory when the command exits. Signals are caught from before
+the directory is made: a SIGTERM while the files are written starts nothing, removes the
+directory and exits 143. opv's own copies of the values are zeroized as soon as the command
+starts; the command's environment is handed to the child without `std::process::Command`
+holding a copy. `$XDG_RUNTIME_DIR` must be an
 absolute path to a directory owned by the app's user, on tmpfs or ramfs, and not writable by
 others; otherwise nothing is written or started (`ram_dir_unavailable`). A stock container has
 none, so mount one, and run with an init (`docker run --init` or tini), since opv is not one.

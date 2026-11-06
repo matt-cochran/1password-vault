@@ -980,6 +980,22 @@ fn recording_the_account_keeps_the_pointers_project() {
     );
 }
 
+/// S10 (security review 0.18.0): a `config` path holding `"` is written back escaped, so the
+/// rewritten pointer names the same path (and gains no key).
+#[test]
+fn recording_the_account_keeps_a_config_path_with_a_quote_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(DOT_FILE),
+        "config = 'ops/a\" account = \"x/opv.toml'\n",
+    )
+    .unwrap();
+    record_account(dir.path(), "ALABS000000000000000000001").unwrap();
+    let text = std::fs::read_to_string(dir.path().join(DOT_FILE)).unwrap();
+    let d = parse_dot_opv(&text, Path::new(".opv")).unwrap();
+    assert_eq!(d.config.as_deref(), Some("ops/a\" account = \"x/opv.toml"));
+}
+
 #[cfg(unix)]
 #[test]
 fn recording_the_account_never_writes_through_a_symlinked_pointer() {

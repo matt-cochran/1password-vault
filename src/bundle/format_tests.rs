@@ -5,8 +5,9 @@
 use std::path::PathBuf;
 
 use super::format::{
-    Envelope, FormatError, Header, MAX_BUNDLE, MAX_HEADER, Name, Payload, canonical_header,
-    contract_digest, decode_payload, encode_envelope, encode_payload, parse_envelope, parse_header,
+    ChildEnvironment, Envelope, FormatError, Header, MAX_BUNDLE, MAX_HEADER, Name, Payload,
+    canonical_header, contract_digest, decode_payload, encode_envelope, encode_payload,
+    parse_envelope, parse_header,
 };
 
 /// A fixed placement whose canonical bytes and digest are locked by the tests below.
@@ -36,14 +37,25 @@ fn fixture_header() -> Header {
             },
         ],
         secrets_dir_env: None,
+        child_environment: Some(ChildEnvironment::DeclaredOnly),
     }
 }
 
-/// The exact canonical bytes of [`fixture_header`] (test 4).
-const FIXTURE_HEADER: &[u8] = b"{\"contract_digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"created_at\":\"2026-01-02T03:04:05Z\",\"environment\":\"prod-zonetico\",\"format\":\"opv-sealed/1\",\"names\":[{\"destination\":\"env:DATABASE_URL\",\"name\":\"DATABASE_URL\"},{\"destination\":\"file:github-app/private-key\",\"name\":\"GITHUB_APP_KEY\"}],\"opv_version\":\"0.18.0\",\"plan_id\":\"plan_0000\",\"product\":\"zonetico\",\"project\":\"fleet\",\"recipients\":[\"sha256:1111111111111111\"],\"revision\":42,\"signer\":\"SHA256:2222222222222222222222222222222222222222222\",\"target\":\"box\"}";
+/// The exact canonical bytes of [`fixture_header`] (test 4). Regenerated deliberately for
+/// 0.18.1 (#279 S5): the header now carries `child_environment`.
+const FIXTURE_HEADER: &[u8] = b"{\"child_environment\":\"declared_only\",\"contract_digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"created_at\":\"2026-01-02T03:04:05Z\",\"environment\":\"prod-zonetico\",\"format\":\"opv-sealed/1\",\"names\":[{\"destination\":\"env:DATABASE_URL\",\"name\":\"DATABASE_URL\"},{\"destination\":\"file:github-app/private-key\",\"name\":\"GITHUB_APP_KEY\"}],\"opv_version\":\"0.18.0\",\"plan_id\":\"plan_0000\",\"product\":\"zonetico\",\"project\":\"fleet\",\"recipients\":[\"sha256:1111111111111111\"],\"revision\":42,\"signer\":\"SHA256:2222222222222222222222222222222222222222222\",\"target\":\"box\"}";
 
-/// The contract digest of [`fixture_header`]'s placement (test 4).
+/// The 0.18.0 canonical bytes of the same placement, before `child_environment` existed:
+/// a bundle sealed then must still parse, and inherit (#279 S5).
+const LEGACY_HEADER: &[u8] = b"{\"contract_digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"created_at\":\"2026-01-02T03:04:05Z\",\"environment\":\"prod-zonetico\",\"format\":\"opv-sealed/1\",\"names\":[{\"destination\":\"env:DATABASE_URL\",\"name\":\"DATABASE_URL\"},{\"destination\":\"file:github-app/private-key\",\"name\":\"GITHUB_APP_KEY\"}],\"opv_version\":\"0.18.0\",\"plan_id\":\"plan_0000\",\"product\":\"zonetico\",\"project\":\"fleet\",\"recipients\":[\"sha256:1111111111111111\"],\"revision\":42,\"signer\":\"SHA256:2222222222222222222222222222222222222222222\",\"target\":\"box\"}";
+
+/// The contract digest of [`fixture_header`]'s placement (test 4). Regenerated
+/// deliberately for 0.18.1 (#279 S5): a `declared_only` contract digests the policy.
 const FIXTURE_CONTRACT_DIGEST: &str =
+    "sha256:cfab4c849ab005fbc72ccf06d7f6dcce6a24081413b46cb4d4e664aebf8703f3";
+
+/// The 0.18.0 contract digest of the same placement, which an `inherit` contract keeps.
+const LEGACY_CONTRACT_DIGEST: &str =
     "sha256:4f4e43c8d9f1fc6b912e4d448646e8f4dddaa8dd912d9b42c6c2db407e3485d2";
 
 /// A minimal valid envelope around `age`/`signature` armor, with the fixed header.
@@ -94,8 +106,46 @@ fn contract_digest_is_fixed() {
             header.secrets_dir_env.as_deref(),
             &header.recipients,
             &header.signer,
+            header.declared_only(),
         ),
         FIXTURE_CONTRACT_DIGEST
+    );
+}
+
+#[test]
+fn an_inherit_contract_keeps_its_0_18_0_digest() {
+    let header = fixture_header();
+    assert_eq!(
+        contract_digest(
+            &header.names,
+            header.secrets_dir_env.as_deref(),
+            &header.recipients,
+            &header.signer,
+            false,
+        ),
+        LEGACY_CONTRACT_DIGEST
+    );
+}
+
+#[test]
+fn a_header_without_child_environment_parses_as_inherit() {
+    assert!(!parse_header(LEGACY_HEADER).expect("parse").declared_only());
+}
+
+#[test]
+fn a_header_without_child_environment_stays_canonical() {
+    let parsed = parse_header(LEGACY_HEADER).expect("parse");
+    assert_eq!(canonical_header(&parsed).expect("canonical"), LEGACY_HEADER);
+}
+
+#[test]
+fn an_unknown_child_environment_is_refused() {
+    let line = String::from_utf8(FIXTURE_HEADER.to_vec())
+        .unwrap()
+        .replace("declared_only", "everything");
+    assert_eq!(
+        parse_header(line.as_bytes()),
+        Err(FormatError::HeaderMalformed)
     );
 }
 
@@ -138,11 +188,11 @@ fn duplicate_header_key_is_refused() {
 
 #[test]
 fn payload_frames_to_fixed_bytes() {
-    let framed = encode_payload(FIXTURE_HEADER, &[("DATABASE_URL", b"fake")]).expect("frame");
+    let framed = encode_payload(LEGACY_HEADER, &[("DATABASE_URL", b"fake")]).expect("frame");
     assert_eq!(&framed[..], PAYLOAD_FIXTURE);
 }
 
-/// The exact framing of `DATABASE_URL -> "fake"` under [`FIXTURE_HEADER`] (test 6).
+/// The exact framing of `DATABASE_URL -> "fake"` under [`LEGACY_HEADER`] (test 6).
 const PAYLOAD_FIXTURE: &[u8] = b"OPV-SEALED-PAYLOAD 1\n\x94\x79\x10\xea\x37\xb3\x1b\x4b\x10\x68\xbb\xe4\xfe\xd5\x7c\x4a\x60\xdf\x55\x10\xdb\x1b\x45\xe5\x6d\x18\xed\xf0\xb3\xad\x47\xe5\x00\x00\x00\x01\x00\x0cDATABASE_URL\x00\x00\x00\x04fakeEND\n";
 
 #[test]

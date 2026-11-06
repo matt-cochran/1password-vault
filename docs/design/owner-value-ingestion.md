@@ -362,7 +362,9 @@ scripted reply.
 **Response** (stdout): a **line-streaming** reader (bounded: 1 MiB total, 64 KiB per line,
 `Zeroizing` buffers) hands each complete line to the parser as it arrives:
 - `{"schema":"opv.produce/1","kind":"notice","open_url":"https://…"}`: `https`, host in
-  `open_url_hosts`, at most 2048 bytes, no userinfo, else refused. opv **opens it with
+  `open_url_hosts`, at most 2048 bytes, no userinfo, query and fragment at most 512 bytes, and
+  none of the producer's input values in it (raw, percent-decoded or base64; values under 4 bytes
+  are not compared), else refused (S8, 0.18.1). opv **opens it with
   `open::opener`** (`src/app/open.rs:30`; WSL `rundll32.exe`, desktop `xdg-open`) and prints the
   fixed line "opening the consent page in your browser: <url>" (shown so a headless person can copy
   it; OAuth authorization URLs carry only public parameters). With no opener (SSH, headless) it is

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use opv::bundle::crypto::{parse_identity, parse_signing_key, recipient_fingerprint, seal};
-use opv::bundle::format::{Header, Name};
+use opv::bundle::format::{ChildEnvironment, Header, Name};
 
 /// The bundle's variable, a marker only.
 const TOKEN_MARKER: &str = "S7MARKERunsealtoken0001";
@@ -19,6 +19,8 @@ const PORT_BUNDLE: &str = "S7MARKERunsealport0001";
 const PORT_INHERITED: &str = "S7MARKERinheritedport0001";
 /// The file key's value.
 const FILE_MARKER: &str = "S7MARKERunsealfile0001";
+/// An inherited variable no bundle declares (a host credential, say).
+const EXTRA_INHERITED: &str = "S7MARKERinheritedextra0001";
 
 fn kat(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -36,6 +38,15 @@ type Entry<'a> = (&'a str, &'a str, &'a str);
 /// Seal `entries` for `prod/api` to the fixture identity with the fixture signer, into a
 /// fresh directory (kept alive by the returned guard).
 fn bundle(entries: &[Entry<'_>], secrets_dir_env: Option<&str>) -> (tempfile::TempDir, PathBuf) {
+    bundle_with(entries, secrets_dir_env, None)
+}
+
+/// [`bundle`] with the header's `child_environment` (#279 S5; `None` is a 0.18.0 bundle).
+fn bundle_with(
+    entries: &[Entry<'_>],
+    secrets_dir_env: Option<&str>,
+    child_environment: Option<ChildEnvironment>,
+) -> (tempfile::TempDir, PathBuf) {
     let identity = parse_identity(&kat_str("age-identity.txt")).expect("fixture identity");
     let key = parse_signing_key(&kat_str("signer_ed25519")).expect("fixture signer");
     let header = Header {
@@ -59,6 +70,7 @@ fn bundle(entries: &[Entry<'_>], secrets_dir_env: Option<&str>) -> (tempfile::Te
             })
             .collect(),
         secrets_dir_env: secrets_dir_env.map(str::to_string),
+        child_environment,
     };
     let values: Vec<(&str, &[u8])> = entries
         .iter()
@@ -79,6 +91,18 @@ fn variables_bundle() -> (tempfile::TempDir, PathBuf) {
             ("PORT", "env:PORT", PORT_BUNDLE),
         ],
         None,
+    )
+}
+
+/// [`variables_bundle`] sealed for a product with `environment = "declared_only"`.
+fn declared_only_bundle() -> (tempfile::TempDir, PathBuf) {
+    bundle_with(
+        &[
+            ("API_TOKEN", "env:API_TOKEN", TOKEN_MARKER),
+            ("PORT", "env:PORT", PORT_BUNDLE),
+        ],
+        None,
+        Some(ChildEnvironment::DeclaredOnly),
     )
 }
 
@@ -193,6 +217,39 @@ fn no_1password_variable_or_identity_variable_reaches_the_child() {
     );
 }
 
+// --- declared_only (#137, #279 S5) ------------------------------------------------------------
+
+#[test]
+fn a_declared_only_bundle_gives_the_child_no_inherited_undeclared_variable() {
+    let (_d, b) = declared_only_bundle();
+    let o = run(&b, &[("EXTRA", EXTRA_INHERITED), ("HOME", "/h")], "env");
+    assert!(
+        !names_seen(&o).contains(&"EXTRA".to_string()),
+        "EXTRA was not inherited"
+    );
+}
+
+#[test]
+fn a_declared_only_bundle_keeps_the_basic_environment() {
+    let (_d, b) = declared_only_bundle();
+    let o = run(&b, &[("HOME", "/h")], "printf %s \"$HOME\"");
+    assert_eq!(stdout(&o), "/h");
+}
+
+#[test]
+fn a_declared_only_bundle_still_delivers_its_variables() {
+    let (_d, b) = declared_only_bundle();
+    let o = run(&b, &[], "printf %s \"$API_TOKEN\"");
+    assert!(stdout(&o) == TOKEN_MARKER, "the child got API_TOKEN");
+}
+
+#[test]
+fn a_bundle_without_the_environment_field_still_inherits() {
+    let (_d, b) = variables_bundle();
+    let o = run(&b, &[("EXTRA", EXTRA_INHERITED)], "printf %s \"$EXTRA\"");
+    assert_eq!(stdout(&o), EXTRA_INHERITED);
+}
+
 #[test]
 fn the_childs_exit_code_is_passed_through() {
     let (_d, b) = variables_bundle();
@@ -302,6 +359,24 @@ fn the_ram_directory_is_removed_when_the_child_exits() {
         "{} was removed",
         dir.display()
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_declared_only_bundle_with_file_keys_still_names_the_directory() {
+    let Some(rt) = runtime_dir() else { return };
+    let (_d, b) = bundle_with(
+        &[("TLS_KEY", "file:tls/key", FILE_MARKER)],
+        Some("SECRETS_DIR"),
+        Some(ChildEnvironment::DeclaredOnly),
+    );
+    let rt_path = rt.path().to_str().expect("utf-8").to_string();
+    let o = run(
+        &b,
+        &[("XDG_RUNTIME_DIR", rt_path.as_str())],
+        "cat \"$SECRETS_DIR/tls/key\"",
+    );
+    assert_eq!(stdout(&o), FILE_MARKER);
 }
 
 #[cfg(target_os = "linux")]
