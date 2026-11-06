@@ -1082,6 +1082,20 @@ fn prepare_staged(
     refuse_blocking(&plan, env_name).map_err(|e| c.refusal(e))?;
     // T3, T4: the whole set, before the plan id, so the id covers exactly what is written.
     if let Some(fields) = whole {
+        // #287: a rewrite of the set carries every delivered infrastructure key's value, so
+        // it needs this run to supply each one.
+        if whole_set_changes(&plan) {
+            let missing: Vec<(&str, &str)> = plan
+                .rows
+                .iter()
+                .filter(|r| r.state == KeyState::SuppliedAtSync)
+                .filter(|r| r.target != TargetState::NotDelivered)
+                .map(|r| (r.product.as_str(), r.key.as_str()))
+                .collect();
+            if let Some(e) = super::deliver_only::unsupplied_on_whole_set(env_name, &missing) {
+                return Err(c.refusal(e));
+            }
+        }
         plan = whole_set(
             &WholeSet {
                 fleet,
@@ -1258,6 +1272,7 @@ fn run_staged(
         let run = crate::ports::WriteRun {
             plan_id: &report.plan_id,
             product: opts.product.as_deref(),
+            supplied: &report.supplied,
         };
         store.write_run(&batch, &run)?;
         done.push(format!("staged {} secret(s)", batch.len()));

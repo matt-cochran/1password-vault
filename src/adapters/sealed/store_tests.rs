@@ -127,6 +127,7 @@ fn write(s: &SealedStore<'_>, names: &[&str]) -> Result<(), Error> {
     let run = WriteRun {
         plan_id: PLAN,
         product: None,
+        supplied: &[],
     };
     s.write_run(&batch, &run)
 }
@@ -180,6 +181,7 @@ fn plant_foreign(t: &SealedTarget, revision: u64) {
         names,
         secrets_dir_env: None,
         child_environment: None,
+        supplied: None,
     };
     let entries: [(&str, &[u8]); 1] = [("TOKEN", b"test-marker-planted")];
     let bytes = crypto::seal(&header, &entries, &[recipient], &key).unwrap();
@@ -719,6 +721,11 @@ impl CommandRunner for World {
 /// dev's sealed target `box` delivering api's A_KEY and B_KEY, with its signing item (the
 /// fixture key) and delivery item in the shared vault.
 fn counting_world() -> (World, Fleet) {
+    counting_world_with("")
+}
+
+/// [`counting_world`] with `keys` (TOML key tables) appended to the configuration.
+fn counting_world_with(keys: &str) -> (World, Fleet) {
     use serde_json::json;
     const VALUES: &str = "vdev0000000000000000000001";
     const SHARED: &str = "vshr0000000000000000000002";
@@ -770,6 +777,7 @@ kind = "secret"
 
 [products.api.keys.B_KEY]
 kind = "secret"
+{keys}
 "#,
         recipient_line(),
         kat("signer_ed25519.pub").trim()
@@ -786,8 +794,15 @@ kind = "secret"
 /// `opv sync` on `fleet`'s dev, signed in with the target's deploy credentials as `opv sync`
 /// is, writing under `root`.
 fn sync_dev(w: &World, fleet: &Fleet, root: &Path) {
+    try_sync_dev(w, fleet, root, None).unwrap();
+}
+
+/// [`sync_dev`] as `opv sync dev --supply-stdin` when `supply` is the standard input, its
+/// result returned.
+fn try_sync_dev(w: &World, fleet: &Fleet, root: &Path, supply: Option<&str>) -> Result<(), Error> {
     let opts = crate::app::sync::SyncOpts {
         sealed_root: Some(root.to_path_buf()),
+        supply_stdin: supply.is_some(),
         ..Default::default()
     };
     let linux =
@@ -795,7 +810,16 @@ fn sync_dev(w: &World, fleet: &Fleet, root: &Path) {
     let signed_in =
         crate::app::signin::open_on(fleet, "dev", w, crate::app::signin::Reach::Target, &linux)
             .unwrap();
-    crate::app::sync::run(fleet, "dev", &signed_in, &mut Vec::new(), &opts).unwrap();
+    match supply {
+        None => crate::app::sync::run(fleet, "dev", &signed_in, &mut Vec::new(), &opts),
+        Some(text) => {
+            let limits = crate::app::deliver_only::Limits::new(
+                std::time::Instant::now() + std::time::Duration::from_secs(60),
+            );
+            let raw = crate::app::deliver_only::read(&mut text.as_bytes(), false, &limits)?;
+            crate::app::sync::run_supplying(fleet, "dev", &signed_in, &mut Vec::new(), &opts, raw)
+        }
+    }
 }
 
 #[test]
@@ -833,10 +857,113 @@ fn a_value_that_is_the_signing_key_is_never_sealed() {
     let run = WriteRun {
         plan_id: PLAN,
         product: None,
+        supplied: &[],
     };
     let err = store(&t, &r).write_run(&batch, &run).unwrap_err();
     assert_eq!(code(&err), "input_invalid");
     let text = crate::error::report(&err);
     assert!(text.contains("TLS_KEY") && !text.contains("PRIVATE KEY"));
     assert!(!bundle(&t).exists());
+}
+
+// --- #287: an infrastructure key sealed from the value supplied at sync ----------------------
+
+/// The value `opv sync --supply-stdin` supplies for api/DB_URL: a test marker.
+const SUPPLIED: &str = "test-marker-supplied-db-url";
+
+/// [`counting_world`] with api/DB_URL supplied at sync (`source = "infrastructure"`).
+fn infrastructure_world() -> (World, Fleet) {
+    counting_world_with(
+        "\n[products.api.keys.DB_URL]\nkind = \"secret\"\nsource = \"infrastructure\"\n\
+         environments = [\"dev\"]\nrules = { prefix = \"test-marker-\" }\n",
+    )
+}
+
+/// One `opv.supply/1` document for dev supplying api/DB_URL.
+fn supply_doc() -> String {
+    serde_json::json!({
+        "schema": "opv.supply/1", "env": "dev", "serial": 1,
+        "values": {"api/DB_URL": SUPPLIED}
+    })
+    .to_string()
+}
+
+/// The written bundle of dev's `box` under `root`, opened with the fixture identity.
+fn open_dev(root: &Path) -> crypto::OpenedBundle {
+    let identity = parse_identity(
+        kat("age-identity.txt")
+            .lines()
+            .find(|l| l.starts_with("AGE-SECRET-KEY-1"))
+            .unwrap(),
+    )
+    .unwrap();
+    // The fixture lists the signer for prod; this world seals dev.
+    let signers = AllowedSigners::parse(
+        kat("allowed_signers")
+            .replacen("prod ", "dev ", 1)
+            .as_bytes(),
+    )
+    .unwrap();
+    let expect = Expect {
+        environment: "dev",
+        product: "api",
+        project: None,
+        min_revision: None,
+    };
+    crypto::open(
+        &std::fs::read(root.join("sealed/api.opv-sealed")).unwrap(),
+        &identity,
+        &signers,
+        &expect,
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_supplied_infrastructure_value_is_sealed_and_unsealed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (w, fleet) = infrastructure_world();
+    try_sync_dev(&w, &fleet, dir.path(), Some(&supply_doc())).unwrap();
+    let opened = open_dev(dir.path());
+    let db = opened.values.iter().find(|(n, _)| n == "DB_URL");
+    assert_eq!(db.map(|(_, v)| v.as_slice()), Some(SUPPLIED.as_bytes()));
+}
+
+#[test]
+fn the_header_names_a_supplied_infrastructure_key_as_supplied() {
+    let dir = tempfile::tempdir().unwrap();
+    let (w, fleet) = infrastructure_world();
+    try_sync_dev(&w, &fleet, dir.path(), Some(&supply_doc())).unwrap();
+    assert_eq!(
+        open_dev(dir.path()).header.supplied,
+        Some(vec!["DB_URL".to_string()])
+    );
+}
+
+#[test]
+fn a_sync_without_the_supplied_value_is_refused_naming_the_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let (w, fleet) = infrastructure_world();
+    let err = try_sync_dev(&w, &fleet, dir.path(), None).unwrap_err();
+    assert!(
+        crate::error::report(&err).contains("supplies no value for api/DB_URL"),
+        "{}",
+        crate::error::report(&err)
+    );
+}
+
+#[test]
+fn a_sync_without_the_supplied_value_writes_no_bundle() {
+    let dir = tempfile::tempdir().unwrap();
+    let (w, fleet) = infrastructure_world();
+    let _ = try_sync_dev(&w, &fleet, dir.path(), None);
+    assert!(!dir.path().join("sealed/api.opv-sealed").exists());
+}
+
+#[test]
+fn a_bundle_of_stored_keys_only_names_nothing_supplied() {
+    let dir = tempfile::tempdir().unwrap();
+    let (w, fleet) = counting_world();
+    sync_dev(&w, &fleet, dir.path());
+    assert_eq!(open_dev(dir.path()).header.supplied, None);
 }

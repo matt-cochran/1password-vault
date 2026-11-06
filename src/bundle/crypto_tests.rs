@@ -88,6 +88,7 @@ fn header(environment: &str, recipient: &Identity, key: &SigningKey) -> Header {
         ],
         secrets_dir_env: Some("SECRETS_DIR".to_string()),
         child_environment: None,
+        supplied: None,
     }
 }
 
