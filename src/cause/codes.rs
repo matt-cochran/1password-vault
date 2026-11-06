@@ -110,6 +110,9 @@ pub fn meaning(code: &str) -> &'static str {
             "the command works on a secrets.toml, but this project's configuration is a 1Password manifest"
         }
         "config_unreadable" => "the configuration file could not be read",
+        "config_outside_repository" => {
+            "a .opv config line names a file that resolves outside the repository holding the .opv"
+        }
         "config_invalid" => {
             "secrets.toml, the manifest or a change opv proposed breaks a field rule"
         }
@@ -553,6 +556,10 @@ pub(crate) fn one_of_each() -> Vec<Cause> {
             given_by: GivenBy::Flag {
                 flag: "--config".into(),
             },
+        },
+        ConfigOutsideRepository {
+            path: PathBuf::from("/elsewhere/xyz.toml"),
+            dot_opv: PathBuf::from("/repo/infra/.opv"),
         },
         ConfigInvalid {
             source: file_source(),

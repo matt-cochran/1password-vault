@@ -602,6 +602,28 @@ mod cases {
         case(Scenario::new(), &["--config", "{root}/project", "contract"])
     }
 
+    pub fn config_outside_repository() -> Case {
+        // #288: the checkout's `.opv` names a link to a file outside the repository (no
+        // walk-up `secrets.toml` beside the `.opv`, which would win).
+        case(
+            Scenario::new()
+                .without_config()
+                .git_checkout()
+                .file("outside.toml", "[environments.stray]\ntitle = \"Stray\"\n")
+                .dot_opv(Some(&format!(
+                    "account = \"{DEV_ACCOUNT}\"\nconfig = \"escape.toml\"\n"
+                )))
+                .after_install(|s| {
+                    std::os::unix::fs::symlink(
+                        s.path("outside.toml"),
+                        s.path("project/escape.toml"),
+                    )
+                    .expect("escape link");
+                }),
+            &["contract"],
+        )
+    }
+
     pub fn config_invalid() -> Case {
         case(
             Scenario::new().config(|c| c.replacen("[environments.dev]", "[environments.dev\n", 1)),
@@ -2178,6 +2200,7 @@ scenarios! {
     json: [
         config_not_found => ConfigNotFound,
         config_unreadable => ConfigUnreadable,
+        config_outside_repository => ConfigOutsideRepository,
         config_invalid => ConfigInvalid,
         boundary_missing => BoundaryMissing,
         state_vault_missing => StateVaultMissing,

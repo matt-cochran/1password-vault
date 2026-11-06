@@ -1055,7 +1055,7 @@ fn within(path: &Path, dir: &Path) -> bool {
 /// The file a `.opv`'s `config = "<named>"` line names, resolved (FR-66). The file must exist
 /// and, once symbolic links are followed, sit inside the repository holding the `.opv` (the
 /// `.opv`'s folder outside a repository): a cloned repository is untrusted, so a link out of it
-/// is refused by name, as `config_unreadable` naming the `.opv`. The resolved path is what is
+/// is refused by name, as `config_outside_repository` naming the `.opv` (#288). The resolved path is what is
 /// read, so the file opened is the file checked.
 fn named_by_dot_opv(dot_opv: &Path, named: &str) -> Result<PathBuf, Error> {
     let dir = dot_opv.parent().unwrap_or(Path::new("."));
@@ -1074,7 +1074,11 @@ fn named_by_dot_opv(dot_opv: &Path, named: &str) -> Result<PathBuf, Error> {
     let root = repo_root(&dir).unwrap_or(&dir);
     let file = given.canonicalize().map_err(|e| refuse(e.kind().into()))?;
     if !file.starts_with(root) {
-        return Err(refuse(IoKind::PermissionDenied));
+        return Err(Cause::ConfigOutsideRepository {
+            path: given,
+            dot_opv: dot_opv.to_path_buf(),
+        }
+        .into());
     }
     Ok(file)
 }

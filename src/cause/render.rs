@@ -2053,6 +2053,11 @@ impl Cause {
                     io_words(*io)
                 )
             }
+            ConfigOutsideRepository { path, dot_opv } => format!(
+                "the config line of {} names {}, which resolves outside this repository; opv reads only a configuration file inside the repository that holds the .opv",
+                dot_opv.display(),
+                path.display()
+            ),
             ConfigInvalid {
                 source,
                 at,
@@ -3384,6 +3389,13 @@ impl Cause {
                     IoKind::NotFound => Next::Run(cmd(&["doctor"], &[])),
                     _ => Next::Rerun,
                 },
+            ),
+            ConfigOutsideRepository { path: _, dot_opv } => plan(
+                inspect(format!(
+                    "change the config line of {}: it must name a file inside this repository",
+                    dot_opv.display()
+                )),
+                Next::Rerun,
             ),
             ConfigInvalid {
                 source,

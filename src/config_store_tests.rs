@@ -1607,10 +1607,7 @@ fn a_named_config_symlinked_outside_the_repository_is_refused() {
     let e = locate(&req(dir.path()), &FakeOp::default()).unwrap_err();
     assert!(matches!(
         cause_of(&e),
-        Cause::ConfigUnreadable {
-            given_by: GivenBy::DotOpv { .. },
-            ..
-        }
+        Cause::ConfigOutsideRepository { dot_opv, .. } if dot_opv.ends_with(DOT_FILE)
     ));
 }
 
@@ -1622,7 +1619,7 @@ fn a_named_config_through_a_symlinked_folder_outside_is_refused() {
     let dir = repo_267("config = \"linked/secrets.toml\"\n");
     std::os::unix::fs::symlink(outside.path(), dir.path().join("linked")).unwrap();
     let e = locate(&req(dir.path()), &FakeOp::default()).unwrap_err();
-    assert_eq!(e.code_str(), "config_unreadable");
+    assert_eq!(e.code_str(), "config_outside_repository");
 }
 
 #[test]
