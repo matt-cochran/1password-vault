@@ -12,10 +12,10 @@ using <SCENARIO>/project/secrets.toml
 
 ## json exit: 0
 ## json stdout
-{"schema_version":3,"ok":true,"environment":"dev","applied":true,"rows":[{"found":["API_KEY"],"product":"web","key":"API_KEY","action":"skipped_already_set","rule":null},{"found":["SESSION_SECRET"],"product":"web","key":"SESSION_SECRET","action":"imported","rule":null}],"writes":1,"decisions_needed":1,"next":{"kind":"run","actor":"assistant","command":"opv ready dev"},"do":null}
+{"schema_version":4,"ok":true,"environment":"dev","applied":true,"rows":[{"found":["API_KEY"],"product":"web","key":"API_KEY","action":"skipped_already_set","rule":null},{"found":["SESSION_SECRET"],"product":"web","key":"SESSION_SECRET","action":"imported","rule":null}],"writes":1,"decisions_needed":1,"next":{"kind":"run","actor":"assistant","command":"opv ready dev"},"do":null}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml
 
 ## mcp opv_import_local {"env":"dev","file":"local.env"}
-{"schema_version":3,"ok":true,"environment":"dev","applied":true,"rows":[{"found":["API_KEY"],"product":"web","key":"API_KEY","action":"skipped_already_set","rule":null},{"found":["SESSION_SECRET"],"product":"web","key":"SESSION_SECRET","action":"imported","rule":null}],"writes":1,"decisions_needed":1,"next":{"kind":"run","actor":"assistant","command":"opv ready dev"},"do":null}
+{"schema_version":4,"ok":true,"environment":"dev","applied":true,"rows":[{"found":["API_KEY"],"product":"web","key":"API_KEY","action":"skipped_already_set","rule":null},{"found":["SESSION_SECRET"],"product":"web","key":"SESSION_SECRET","action":"imported","rule":null}],"writes":1,"decisions_needed":1,"next":{"kind":"run","actor":"assistant","command":"opv ready dev"},"do":null}

@@ -109,6 +109,7 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                     repo: Some("repo-xyz".into()),
                     account: Some(AccountId::new("ACC-XYZ")),
                 }),
+                found: None,
             },
             vec!["/work/shop", "env-stage", "repo-xyz", "ACC-XYZ"],
         ),
@@ -303,6 +304,7 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                 system: System::OnePassword,
                 account: Some(AccountId::new("ACC-6AIN")),
                 state: SessionState::Expired,
+                selected_by: None,
             },
             vec!["1Password", "ACC-6AIN"],
         ),
@@ -851,13 +853,18 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                         email: "me@one.example".into(),
                         address: "my.1password.com".into(),
                         id: AccountId::new("ACC-ONE"),
+                        shorthand: None,
+                        signed_in: None,
                     },
                     AccountChoice {
                         email: "me@two.example".into(),
                         address: "my.1password.com".into(),
                         id: AccountId::new("ACC-TWO"),
+                        shorthand: None,
+                        signed_in: None,
                     },
                 ],
+                reach: crate::json::Reach::None,
             },
             vec!["me@one.example", "ACC-ONE", "ACC-TWO"],
         ),
@@ -942,6 +949,66 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             },
             vec!["OPENAI_API_KEY", "env-prod", "src/lib.rs:12"],
         ),
+        // provision (#253)
+        (
+            ProducerFailed {
+                producer: "consent-xyz".into(),
+                why: ProducerFailure::Exit { status: 17 },
+            },
+            vec!["consent-xyz", "17"],
+        ),
+        (
+            ProducerChanged {
+                producer: "consent-xyz".into(),
+                file: PathBuf::from("tools/connect.py"),
+            },
+            vec!["consent-xyz", "tools/connect.py"],
+        ),
+        (
+            Unsupported {
+                feature: UnsupportedFeature::ProducerOnWindows {
+                    set: "set-xyz".into(),
+                    producer: "consent-xyz".into(),
+                },
+            },
+            vec!["set-xyz", "consent-xyz"],
+        ),
+        (
+            Guard {
+                guard: super::super::Guard::ProvisionRefused {
+                    set: "set-xyz".into(),
+                    env: EnvName::new("env-prod"),
+                    reason: ProvisionRefusal::Partial {
+                        missing: vec!["prod-api/REFRESH_TOKEN".into()],
+                    },
+                },
+            },
+            vec!["set-xyz", "env-prod", "prod-api/REFRESH_TOKEN"],
+        ),
+        (
+            Guard {
+                guard: super::super::Guard::SetMember {
+                    product: ProductName::new("prod-api"),
+                    key: KeyName::new("REFRESH_TOKEN"),
+                    env: EnvName::new("env-prod"),
+                    set: "set-xyz".into(),
+                },
+            },
+            vec!["prod-api/REFRESH_TOKEN", "env-prod", "set-xyz"],
+        ),
+        // end provision
+        // sealed target (#271): `opv unseal`
+        (
+            SealedRefused {
+                bundle: PathBuf::from("deploy/prod-api.opv-sealed"),
+                refusal: SealedRefusal::RevisionBelowFloor {
+                    revision: 6,
+                    floor: 7,
+                },
+            },
+            vec!["deploy/prod-api.opv-sealed", "6", "7"],
+        ),
+        // end sealed target
     ]
 }
 
@@ -1039,10 +1106,16 @@ fn ordinal(c: &Cause) -> usize {
         NeedsUndeclared { .. } => 80,
         ImportTierRefused { .. } => 81,
         RetireStillRead { .. } => 82,
+        // provision (#253)
+        ProducerFailed { .. } => 86,
+        ProducerChanged { .. } => 87,
+        Unsupported { .. } => 88,
+        // sealed target (#271)
+        SealedRefused { .. } => 89,
     }
 }
 
-const VARIANTS: usize = 86;
+const VARIANTS: usize = 90;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
@@ -1399,6 +1472,13 @@ fn person_only_flags_appear_only_in_a_handoff() {
             Next::Run(cmd) | Next::Check(cmd) => {
                 cmd.args.iter().any(|a| a.starts_with("--confirm"))
             }
+            // A choice's steps are the assistant's too, except the person's sign-in.
+            Next::Choose(c) => c.choices.iter().flat_map(|ch| &ch.steps).any(|s| {
+                s.actor == NextActor::Assistant
+                    && s.run
+                        .as_ref()
+                        .is_some_and(|r| r.args.iter().any(|a| a.starts_with("--confirm")))
+            }),
             Next::Rerun | Next::Handoff(_) | Next::Vendor(_) | Next::None(_) => false,
         })
         .map(Cause::code)
@@ -2407,6 +2487,7 @@ fn not_signed_in(system: System) -> Cause {
         system,
         account: None,
         state: SessionState::SignedOut,
+        selected_by: None,
     }
 }
 
@@ -3032,6 +3113,7 @@ fn a16_a_kubernetes_sign_in_refreshes_the_context() {
         system: System::Kubernetes,
         account: Some(AccountId::new("prod-aks")),
         state: SessionState::Expired,
+        selected_by: None,
     };
     let d = c.do_text(&inv()).unwrap_or_default();
     assert!(d.contains("credentials of kube context prod-aks"), "{d}");
@@ -3966,6 +4048,7 @@ fn d3_a_built_step_keeps_the_project_flag() {
         searched_from: PathBuf::from("/work"),
         env: Some(EnvName::new("prod")),
         manifest: None,
+        found: None,
     };
     assert_eq!(
         next_in(&c, &cli(&["opv", "access", "prod", "--project", "acme"])),
@@ -4113,15 +4196,21 @@ fn i6_a_symlinked_dot_opv_is_named() {
 /// I6: several accounts and none chosen keeps the public code `account_required`.
 #[test]
 fn i6_account_required_keeps_its_code() {
-    let c = Cause::AccountRequired { accounts: vec![] };
+    let c = Cause::AccountRequired {
+        accounts: vec![],
+        reach: crate::json::Reach::None,
+    };
     assert_eq!(c.code(), "account_required");
 }
 
 /// I6: and its Do is the person's pick, never a guessed account.
 #[test]
 fn i6_account_required_is_a_persons_pick() {
-    let (action, _) =
-        Cause::AccountRequired { accounts: vec![] }.step_in(&inv(), &person_at_terminal());
+    let (action, _) = Cause::AccountRequired {
+        accounts: vec![],
+        reach: crate::json::Reach::None,
+    }
+    .step_in(&inv(), &person_at_terminal());
     assert_eq!(action, Some(Action::PickBetween));
 }
 
@@ -4745,6 +4834,7 @@ fn an_expired_shell_session_is_refreshed_by_the_eval_line() {
         system: System::OnePassword,
         account: Some(AccountId::new("ACC-6AIN")),
         state: SessionState::Expired,
+        selected_by: None,
     };
     assert_eq!(next_in(&c, &inv()), "eval \"$(opv login --shell)\"");
     let c = Cause::ShellEvalRequired {
@@ -4862,6 +4952,721 @@ fn lost_report_leads_with_outcome() {
     };
     assert!(
         c.message().starts_with("sync finished (ok);"),
+        "{}",
+        c.message()
+    );
+}
+
+// ---- provision (#253, `docs/design/owner-value-ingestion.md`) -------------------------
+
+fn provision_inv() -> Invocation {
+    Invocation {
+        origin: Origin::Cli,
+        command: vec!["provision".into()],
+        args: vec!["grant".into(), "--env".into(), "prod".into()],
+        has_child: false,
+    }
+}
+
+fn provision_refused(reason: ProvisionRefusal) -> Cause {
+    Cause::Guard {
+        guard: Guard::ProvisionRefused {
+            set: "grant".into(),
+            env: EnvName::new("prod"),
+            reason,
+        },
+    }
+}
+
+fn producer_failed(why: ProducerFailure) -> Cause {
+    Cause::ProducerFailed {
+        producer: "consent".into(),
+        why,
+    }
+}
+
+fn produce_invalid(rule: ProduceRule) -> Cause {
+    Cause::InputInvalid {
+        path: PathBuf::from("tools/connect.py"),
+        kind: InputKind::Produce,
+        at: None,
+        field: String::new(),
+        rule: FieldRule::Produce { produce: rule },
+    }
+}
+
+/// §5.2: a producer's failure is told only by its closed code.
+#[test]
+fn a_producer_error_line_is_told_by_its_code() {
+    let c = producer_failed(ProducerFailure::Reported {
+        code: "access_denied".into(),
+    });
+    assert_eq!(
+        c.message(),
+        "producer consent reported access_denied; nothing was written"
+    );
+}
+
+/// §5.2, vet F10: a producer that ran out of time points at its capped timeout.
+#[test]
+fn a_producer_timeout_names_its_timeout_setting() {
+    let c = producer_failed(ProducerFailure::Timeout { seconds: 600 });
+    let d = c.do_text(&provision_inv()).unwrap_or_default();
+    assert!(
+        d.contains("timeout in [producers.consent] (at most 15m)"),
+        "{d}"
+    );
+}
+
+/// §5.2: a non-zero exit sends the person to the producer's own documentation.
+#[test]
+fn a_producer_exit_points_at_its_documentation() {
+    let c = producer_failed(ProducerFailure::Exit { status: 3 });
+    let d = c.do_text(&provision_inv()).unwrap_or_default();
+    assert!(d.contains("documentation for exit status 3"), "{d}");
+}
+
+/// §5.2: a producer failure is re-run once its Do is done.
+#[test]
+fn a_producer_failure_reruns_after_the_fix() {
+    let c = producer_failed(ProducerFailure::Exit { status: 3 });
+    assert_eq!(c.step(&provision_inv()).1, Next::Rerun);
+}
+
+/// §3.2, vet F17: a changed producer file is reviewed and pinned again.
+#[test]
+fn a_changed_producer_asks_for_review_and_a_new_pin() {
+    let c = Cause::ProducerChanged {
+        producer: "consent".into(),
+        file: PathBuf::from("tools/connect.py"),
+    };
+    let d = c.do_text(&provision_inv()).unwrap_or_default();
+    assert!(
+        d.contains("review the change to tools/connect.py; once it is right, set sha256 of [producers.consent]"),
+        "{d}"
+    );
+}
+
+/// D12: a producer on native Windows is run from WSL.
+#[test]
+fn a_producer_on_windows_points_at_wsl() {
+    let c = Cause::Unsupported {
+        feature: UnsupportedFeature::ProducerOnWindows {
+            set: "grant".into(),
+            producer: "consent".into(),
+        },
+    };
+    assert_eq!(
+        c.do_text(&provision_inv()).as_deref(),
+        Some("run opv provision from WSL on this machine")
+    );
+}
+
+/// §4.5: a partial set names its missing members, never a value.
+#[test]
+fn a_partial_set_names_its_missing_members() {
+    let c = provision_refused(ProvisionRefusal::Partial {
+        missing: vec!["admin/REFRESH_TOKEN".into()],
+    });
+    assert!(
+        c.message()
+            .contains("(admin/REFRESH_TOKEN without a value)"),
+        "{}",
+        c.message()
+    );
+}
+
+/// D7: a partial set is completed with --fill-missing, keeping what exists.
+#[test]
+fn a_partial_set_do_is_the_fill_missing() {
+    let c = provision_refused(ProvisionRefusal::Partial {
+        missing: vec!["admin/REFRESH_TOKEN".into()],
+    });
+    let d = c.do_text(&provision_inv()).unwrap_or_default();
+    assert!(
+        d.contains("opv provision grant --env prod --fill-missing"),
+        "{d}"
+    );
+}
+
+/// D7: a partial set is handed to the person's own `--fill-missing` run.
+#[test]
+fn a_partial_set_hands_off_the_fill_missing() {
+    let c = provision_refused(ProvisionRefusal::Partial {
+        missing: vec!["admin/REFRESH_TOKEN".into()],
+    });
+    assert_eq!(
+        next_in(&c, &provision_inv()),
+        "opv provision grant --env prod --fill-missing"
+    );
+}
+
+/// §4.5: an inconsistent set is handed to the person's own `--replace` run.
+#[test]
+fn an_inconsistent_set_hands_off_the_replace() {
+    let c = provision_refused(ProvisionRefusal::Inconsistent {
+        members: vec!["admin/REFRESH_TOKEN".into()],
+    });
+    assert_eq!(
+        next_in(&c, &provision_inv()),
+        "opv provision grant --env prod --replace"
+    );
+}
+
+/// X4: after a refusal the person must resolve first, Next reads the set's state.
+#[test]
+fn a_set_used_elsewhere_checks_ready() {
+    let c = provision_refused(ProvisionRefusal::SameAcrossEnvironments {
+        member: "admin/REFRESH_TOKEN".into(),
+        other: EnvName::new("staging"),
+    });
+    assert_eq!(next_in(&c, &provision_inv()), "opv ready prod");
+}
+
+/// D8: --replace of an immutable member is refused, and the Do keeps it.
+#[test]
+fn an_immutable_member_do_leaves_out_replace() {
+    let c = provision_refused(ProvisionRefusal::ImmutableMember {
+        member: "fleet/USER_HASH_KEY".into(),
+    });
+    let d = c.do_text(&provision_inv()).unwrap_or_default();
+    assert!(d.starts_with("leave out --replace"), "{d}");
+}
+
+/// §5.5, vet C21: a producer value another environment holds names that environment.
+#[test]
+fn a_value_shared_across_environments_names_the_other() {
+    let c = provision_refused(ProvisionRefusal::SameAcrossEnvironments {
+        member: "admin/REFRESH_TOKEN".into(),
+        other: EnvName::new("staging"),
+    });
+    assert!(
+        c.message().contains("environment staging already holds"),
+        "{}",
+        c.message()
+    );
+}
+
+/// §4.2 step 7, vet F10: a budget too small hands the person the run with enough time.
+#[test]
+fn a_budget_too_small_hands_off_the_longer_timeout() {
+    let c = provision_refused(ProvisionRefusal::BudgetTooSmall {
+        needed_seconds: 840,
+        left_seconds: 600,
+    });
+    assert_eq!(
+        next_in(&c, &provision_inv()),
+        "opv provision grant --env prod --timeout 840"
+    );
+}
+
+/// §4.2 step 5, I4: an item the whole-item edit cannot keep is named, not "archived".
+#[test]
+fn an_item_not_rewritable_names_what_it_holds() {
+    let c = provision_refused(ProvisionRefusal::ItemNotRewritable {
+        holds: "an attachment".into(),
+    });
+    assert_eq!(
+        c.message(),
+        "opv does not provision set grant in environment prod: its item holds an attachment, which opv cannot prove one whole-item edit keeps"
+    );
+}
+
+/// §5.6: a set member written alone points at the set's own provision.
+#[test]
+fn a_set_member_do_names_the_provision() {
+    let c = Cause::Guard {
+        guard: Guard::SetMember {
+            product: ProductName::new("admin"),
+            key: KeyName::new("REFRESH_TOKEN"),
+            env: EnvName::new("prod"),
+            set: "grant".into(),
+        },
+    };
+    let d = c.do_text(&inv()).unwrap_or_default();
+    assert!(
+        d.ends_with("opv provision grant --env prod --replace"),
+        "{d}"
+    );
+}
+
+/// §5.6: the Next of a set member written alone is the set's own provision, a person's run.
+#[test]
+fn a_set_member_hands_off_the_provision() {
+    let c = Cause::Guard {
+        guard: Guard::SetMember {
+            product: ProductName::new("admin"),
+            key: KeyName::new("REFRESH_TOKEN"),
+            env: EnvName::new("prod"),
+            set: "grant".into(),
+        },
+    };
+    assert_eq!(
+        next_in(&c, &inv()),
+        "opv provision grant --env prod --replace"
+    );
+}
+
+/// §5.2: a bad producer line is named by its number.
+#[test]
+fn a_bad_produce_line_is_named_by_number() {
+    let c = produce_invalid(ProduceRule::NotJson { line: 4 });
+    assert_eq!(
+        c.message(),
+        "the output of producer file tools/connect.py: line 4 is not one JSON object"
+    );
+}
+
+/// §5.2: an undeclared output is named by its position, never its name.
+#[test]
+fn an_undeclared_output_is_named_by_position() {
+    let c = produce_invalid(ProduceRule::Undeclared { position: 2 });
+    assert!(
+        c.message()
+            .ends_with("output 2 of the result is not an output the set uses"),
+        "{}",
+        c.message()
+    );
+}
+
+/// §5.2: a refused consent URL says it was not opened.
+#[test]
+fn a_refused_open_url_was_not_opened() {
+    let c = produce_invalid(ProduceRule::OpenUrlRefused {
+        line: 1,
+        why: OpenUrlProblem::HostNotListed,
+    });
+    assert!(
+        c.message()
+            .ends_with("names a host outside open_url_hosts, so it was not opened"),
+        "{}",
+        c.message()
+    );
+}
+
+/// §5.2: the producer's maintainer fixes its output; opv has no command to run.
+#[test]
+fn a_bad_produce_line_has_nothing_to_run() {
+    let c = produce_invalid(ProduceRule::NoResult);
+    assert_eq!(c.step(&provision_inv()).1, Next::None(NoNext::NothingToRun));
+}
+
+fn set_config_invalid(check: ConfigCheck) -> Cause {
+    Cause::ConfigInvalid {
+        source: file_source(),
+        at: None,
+        field: DottedPath(vec!["sets".into(), "grant".into(), "members".into()]),
+        rule: FieldRule::Check { check },
+    }
+}
+
+/// §3.2, D1: a set spread over two items names both.
+#[test]
+fn a_set_over_two_items_names_both() {
+    let c = set_config_invalid(ConfigCheck::SetSpansBoundaries {
+        env: "prod".into(),
+        boundaries: vec!["fleet".into(), "admin".into()],
+    });
+    assert!(
+        c.message()
+            .contains("2 1Password items in environment prod (fleet, admin)"),
+        "{}",
+        c.message()
+    );
+}
+
+/// #275: an infrastructure key on a sealed target is refused at load, naming the key and
+/// the target.
+#[test]
+fn an_infrastructure_key_on_a_sealed_target_names_the_key_and_the_target() {
+    let c = Cause::ConfigInvalid {
+        source: file_source(),
+        at: None,
+        field: DottedPath(vec![
+            "products".into(),
+            "api".into(),
+            "keys".into(),
+            "DB_URL".into(),
+        ]),
+        rule: FieldRule::Check {
+            check: ConfigCheck::SealedDeliversInfrastructure {
+                product: "api".into(),
+                key: "DB_URL".into(),
+                target: "box".into(),
+            },
+        },
+    };
+    assert!(
+        c.message().contains(
+            "is api/DB_URL, supplied at sync (source = \"infrastructure\") and never stored \
+                 in 1Password, so sealed target box has no value to seal"
+        ),
+        "{}",
+        c.message()
+    );
+}
+
+/// §3.2, vet F6: a producer that is op is refused at load.
+#[test]
+fn a_producer_that_is_op_is_named() {
+    let c = Cause::ConfigInvalid {
+        source: file_source(),
+        at: None,
+        field: DottedPath(vec!["producers".into(), "consent".into(), "command".into()]),
+        rule: FieldRule::Check {
+            check: ConfigCheck::ProducerIsOp {
+                program: "op".into(),
+            },
+        },
+    };
+    assert!(
+        c.message()
+            .contains("producers.consent.command starts op; a producer is never op or opv"),
+        "{}",
+        c.message()
+    );
+}
+
+/// §3.2: a producer argument that looks like a secret is named by position only.
+#[test]
+fn a_secret_looking_argument_is_named_by_index() {
+    let c = Cause::ConfigInvalid {
+        source: file_source(),
+        at: None,
+        field: DottedPath(vec!["producers".into(), "consent".into(), "command".into()]),
+        rule: FieldRule::Check {
+            check: ConfigCheck::ProducerArgumentSecret { index: 2 },
+        },
+    };
+    assert!(
+        c.message()
+            .contains("has argument 2 that looks like a secret value"),
+        "{}",
+        c.message()
+    );
+}
+
+// --- FR-65 / FR-66 / FR-40 amended (design agent-signin-readiness §2.2-2.4) ---------------
+
+/// The codes of every catalog example whose `human_required` step is not the person's.
+fn assistant_steps_needing_a_person() -> Vec<&'static str> {
+    let inv = inv();
+    let sit = person_at_terminal();
+    let mut codes: Vec<&'static str> = super::super::codes::examples()
+        .iter()
+        .filter(|c| c.human_required_in(&inv, &sit))
+        .filter(|c| invocation_kind_actor(&c.plan_in(&inv, &sit).next, &inv).1 != NextActor::Person)
+        .map(Cause::code)
+        .collect();
+    codes.sort_unstable();
+    codes.dedup();
+    codes
+}
+
+/// Vet item 7: outside the decided list, `human_required` implies `next.actor == person`.
+#[test]
+fn human_required_implies_person_actor() {
+    let accepted = super::super::codes::ASSISTANT_READS_AFTER_PERSON;
+    let unexpected: Vec<_> = assistant_steps_needing_a_person()
+        .into_iter()
+        .filter(|c| !accepted.contains(c))
+        .collect();
+    assert_eq!(unexpected, Vec::<&str>::new());
+}
+
+/// The decided list holds no stale entry: each still has an assistant step and a person's Do.
+#[test]
+fn every_decided_assistant_read_is_still_one() {
+    let found = assistant_steps_needing_a_person();
+    let stale: Vec<_> = super::super::codes::ASSISTANT_READS_AFTER_PERSON
+        .iter()
+        .filter(|c| !found.contains(c))
+        .collect();
+    assert_eq!(stale, Vec::<&&str>::new());
+}
+
+fn choice(id: &str, signed_in: Option<bool>) -> AccountChoice {
+    AccountChoice {
+        email: format!("{id}@example.com"),
+        address: "my.1password.com".into(),
+        id: AccountId::new(id),
+        shorthand: None,
+        signed_in,
+    }
+}
+
+fn account_required(reach: crate::json::Reach) -> Cause {
+    Cause::AccountRequired {
+        accounts: vec![choice("TTDZ56BH", Some(false)), choice("6AINMAIK", None)],
+        reach,
+    }
+}
+
+fn json_next(c: &Cause, inv: &Invocation) -> serde_json::Value {
+    document(c, None, inv, false)["next"].clone()
+}
+
+#[test]
+fn account_required_plans_choose() {
+    let next = json_next(
+        &account_required(crate::json::Reach::None),
+        &cli(&["opv", "ready", "--json"]),
+    );
+    assert_eq!(next["kind"], "choose");
+}
+
+#[test]
+fn account_required_choose_is_the_persons() {
+    let next = json_next(
+        &account_required(crate::json::Reach::None),
+        &cli(&["opv", "ready", "--json"]),
+    );
+    assert_eq!(next["actor"], "person");
+}
+
+#[test]
+fn account_required_choose_has_no_command() {
+    let next = json_next(
+        &account_required(crate::json::Reach::None),
+        &cli(&["opv", "ready", "--json"]),
+    );
+    assert_eq!(next["command"], serde_json::Value::Null);
+}
+
+#[test]
+fn account_required_choose_reports_its_reach() {
+    let next = json_next(
+        &account_required(crate::json::Reach::App),
+        &cli(&["opv", "ready", "--json"]),
+    );
+    assert_eq!(next["reach"], "app");
+}
+
+#[test]
+fn account_required_lists_one_choice_per_account() {
+    let next = json_next(
+        &account_required(crate::json::Reach::None),
+        &cli(&["opv", "ready", "--json"]),
+    );
+    assert_eq!(next["choices"].as_array().map(Vec::len), Some(2));
+}
+
+#[test]
+fn a_choice_names_its_account_by_id() {
+    let next = json_next(
+        &account_required(crate::json::Reach::None),
+        &cli(&["opv", "ready", "--json"]),
+    );
+    assert_eq!(next["choices"][1]["account"]["account_id"], "6AINMAIK");
+}
+
+#[test]
+fn a_choose_is_human_required() {
+    let c = account_required(crate::json::Reach::None);
+    assert!(c.human_required_in(&inv(), &person_at_terminal()));
+}
+
+#[test]
+fn a_choose_next_line_offers_each_account_use() {
+    let text = render_text(
+        &account_required(crate::json::Reach::None),
+        None,
+        &cli(&["opv", "ready"]),
+        false,
+        true,
+        false,
+    );
+    assert!(
+        text.ends_with("Next: pick one: opv account use TTDZ56BH; opv account use 6AINMAIK\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn placeholder_step_has_null_argv() {
+    let c = not_signed_in(System::OnePassword);
+    let next = json_next(&c, &cli(&["opv", "run", "dev", "--", "sh", "-c", "true"]));
+    assert_eq!(next["argv"], serde_json::Value::Null);
+}
+
+#[test]
+fn a_signin_handoff_shows_the_child_as_a_placeholder() {
+    let c = not_signed_in(System::OnePassword);
+    let next = json_next(&c, &cli(&["opv", "run", "dev", "--", "sh", "-c", "true"]));
+    assert_eq!(next["command"], "opv login -- opv run dev -- <command>");
+}
+
+#[test]
+fn a_signin_handoff_carries_its_argv() {
+    let c = not_signed_in(System::OnePassword);
+    let next = json_next(&c, &cli(&["opv", "ready", "dev"]));
+    assert_eq!(
+        next["argv"],
+        serde_json::json!(["opv", "login", "--", "opv", "ready", "dev"])
+    );
+}
+
+#[test]
+fn a_cause_outside_the_typed_producers_has_no_argv() {
+    let c = Cause::NeedsConfirm {
+        env: EnvName::new("prod"),
+    };
+    assert!(json_next(&c, &inv()).get("argv").is_none());
+}
+
+fn signed_out_selected_by(by: AccountSource) -> Cause {
+    Cause::NotSignedIn {
+        system: System::OnePassword,
+        account: Some(AccountId::new("6AINMAIK")),
+        state: SessionState::SignedOut,
+        selected_by: Some(by),
+    }
+}
+
+#[test]
+fn signin_next_omits_account_known_to_pointer() {
+    let c = signed_out_selected_by(AccountSource::DotOpv {
+        path: PathBuf::from("/work/shop/.opv"),
+    });
+    assert_eq!(
+        json_next(&c, &inv())["command"],
+        "opv login -- opv sync prod --target web"
+    );
+}
+
+#[test]
+fn signin_next_omits_account_the_configuration_records() {
+    let c = signed_out_selected_by(AccountSource::Configuration);
+    assert_eq!(
+        json_next(&c, &inv())["command"],
+        "opv login -- opv sync prod --target web"
+    );
+}
+
+#[test]
+fn signin_next_names_account_from_environment_only() {
+    let c = signed_out_selected_by(AccountSource::Environment {
+        env: EnvName::new("prod"),
+    });
+    assert_eq!(
+        json_next(&c, &inv())["command"],
+        "opv login --account 6AINMAIK -- opv sync prod --target web"
+    );
+}
+
+#[test]
+fn not_signed_in_says_where_the_account_was_selected() {
+    let c = signed_out_selected_by(AccountSource::DotOpv {
+        path: PathBuf::from("/work/shop/.opv"),
+    });
+    assert!(
+        c.message()
+            .ends_with("(selected by the .opv file /work/shop/.opv)"),
+        "{}",
+        c.message()
+    );
+}
+
+fn not_found_with(paths: &[&str], stopped: bool) -> Cause {
+    Cause::ConfigNotFound {
+        searched_from: PathBuf::from("/repo/infra/shared-host"),
+        env: None,
+        manifest: None,
+        found: Some(FoundConfigs {
+            paths: paths.iter().map(PathBuf::from).collect(),
+            dot_opv: PathBuf::from("/repo/infra/.opv"),
+            stopped,
+        }),
+    }
+}
+
+#[test]
+fn one_found_config_reruns_with_config_relative_to_cwd() {
+    let c = not_found_with(&["/repo/infra/shared-host/fleet/secrets.toml"], false);
+    assert_eq!(
+        json_next(&c, &cli(&["opv", "ready"]))["command"],
+        "opv ready --config fleet/secrets.toml"
+    );
+}
+
+#[test]
+fn one_found_config_names_the_dot_opv_line_relative_to_it() {
+    let c = not_found_with(&["/repo/infra/shared-host/fleet/secrets.toml"], false);
+    let d = c
+        .do_text_in(&cli(&["opv", "ready"]), &person_at_terminal())
+        .unwrap_or_default();
+    assert!(
+        d.contains("config = \"shared-host/fleet/secrets.toml\""),
+        "{d}"
+    );
+}
+
+#[test]
+fn one_found_config_above_cwd_climbs_with_dotdot() {
+    let c = not_found_with(&["/repo/infra/fleet/secrets.toml"], false);
+    assert_eq!(
+        json_next(&c, &cli(&["opv", "ready"]))["command"],
+        "opv ready --config ../fleet/secrets.toml"
+    );
+}
+
+#[test]
+fn several_found_configs_have_no_runnable_next() {
+    let c = not_found_with(&["/repo/a/secrets.toml", "/repo/b/secrets.toml"], false);
+    assert_eq!(json_next(&c, &cli(&["opv", "ready"]))["kind"], "none");
+}
+
+#[test]
+fn several_found_configs_are_the_persons_pick() {
+    let c = not_found_with(&["/repo/a/secrets.toml", "/repo/b/secrets.toml"], false);
+    let (action, _) = c.step_in(&cli(&["opv", "ready"]), &person_at_terminal());
+    assert_eq!(action, Some(Action::PickBetween));
+}
+
+#[test]
+fn a_stopped_search_says_there_may_be_more() {
+    let c = not_found_with(&["/repo/a/secrets.toml"], true);
+    let d = c
+        .do_text_in(&cli(&["opv", "ready"]), &person_at_terminal())
+        .unwrap_or_default();
+    assert!(d.contains("search stopped"), "{d}");
+}
+
+#[test]
+fn a_search_that_found_nothing_keeps_the_first_run_router() {
+    let c = not_found_with(&[], false);
+    let d = c
+        .do_text_in(&cli(&["opv", "ready"]), &person_at_terminal())
+        .unwrap_or_default();
+    assert!(d.contains("opv propose setup"), "{d}");
+}
+
+#[test]
+fn a_found_config_hint_is_left_out_of_the_subject_when_no_search_ran() {
+    let c = Cause::ConfigNotFound {
+        searched_from: PathBuf::from("/repo"),
+        env: None,
+        manifest: None,
+        found: None,
+    };
+    assert!(
+        document(&c, None, &inv(), false)["subject"]
+            .get("found")
+            .is_none()
+    );
+}
+
+#[test]
+fn a_config_named_by_dot_opv_says_so() {
+    let c = Cause::ConfigUnreadable {
+        path: PathBuf::from("/repo/infra/fleet/secrets.toml"),
+        io: IoKind::NotFound,
+        given_by: GivenBy::DotOpv {
+            path: PathBuf::from("/repo/infra/.opv"),
+        },
+    };
+    assert!(
+        c.message().contains("(named by /repo/infra/.opv)"),
         "{}",
         c.message()
     );

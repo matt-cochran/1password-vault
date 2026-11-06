@@ -5,6 +5,8 @@
 //! Every word comes from the variant's typed fields; upstream text only ever reaches the
 //! evidence box ([`super::evidence`]), never a message or a step (§9.3).
 
+use std::path::Path;
+
 use super::evidence;
 use super::situation::{RefusedBecause, Situation};
 use super::*;
@@ -387,7 +389,7 @@ fn sign_in_advice(system: System, why: RefusedBecause) -> String {
             System::Azure => "sign this CI job in with the target's deploy credentials, a service principal (opv ci workflow prints that step)".to_string(),
             System::Kubernetes => "give this CI job a kubeconfig whose context carries its own credentials".to_string(),
             System::Ssh | System::RemoteOpv => "give this CI job the remote profile's ssh key".to_string(),
-            System::Https | System::Docker => "give this CI job the target's deploy credentials from 1Password".to_string(),
+            System::Https | System::Docker | System::Sealed => "give this CI job the target's deploy credentials from 1Password".to_string(),
         },
     }
 }
@@ -425,7 +427,7 @@ fn refusal(next: &Next, inv: &Invocation, sit: &Situation) -> Option<(RefusedBec
         Next::Run(c) | Next::Check(c) => (c.clone(), cmd_text(c), false),
         Next::Handoff(c) => (c.clone(), cmd_text(c), true),
         Next::Vendor(v) => (vendor_as_cmd(v), vendor_text(v), false),
-        Next::None(_) => return None,
+        Next::None(_) | Next::Choose(_) => return None,
     };
     match sit.refuses(&checked) {
         Some(RefusedBecause::NoTerminal) if persons_own => None,
@@ -739,6 +741,9 @@ fn source_words(s: &ConfigSource) -> String {
             GivenBy::Flag { flag } => format!("{} (given by {flag})", path.display()),
             GivenBy::EnvVar { var } => format!("{} (given by {var})", path.display()),
             GivenBy::Discovered => path.display().to_string(),
+            GivenBy::DotOpv { path: dot_opv } => {
+                format!("{} (named by {})", path.display(), dot_opv.display())
+            }
         },
         ConfigSource::Manifest {
             title,
@@ -764,6 +769,7 @@ fn account_source(s: &AccountSource) -> String {
         AccountSource::EnvVar { var } => format!("the variable {var}"),
         AccountSource::Flag => "--account".to_string(),
         AccountSource::Environment { env } => format!("environment {env}"),
+        AccountSource::Configuration => "the configuration's account".to_string(),
         AccountSource::OpDefault => "op's default account".to_string(),
         AccountSource::Argument => "the command line".to_string(),
     }
@@ -973,6 +979,8 @@ fn input_kind(k: InputKind) -> &'static str {
         InputKind::Supply => "the supply",
         InputKind::Workflow => "the workflow file",
         InputKind::SecretFile => "the secret file",
+        InputKind::Produce => "the output of producer file",
+        InputKind::SealedBundle => "the sealed bundle",
     }
 }
 
@@ -1055,8 +1063,239 @@ fn rule_words(field: &str, rule: &FieldRule) -> (String, String) {
         FieldRule::Check { check } => (check.problem(field), check.fix(field)),
         FieldRule::Supply { supply } => supply_rule_words(field, supply),
         FieldRule::SecretFile { problem } => secret_file_rule_words(problem),
+        FieldRule::Produce { produce } => produce_rule_words(produce),
     }
 }
+
+// --- provision (#253, `docs/design/owner-value-ingestion.md`) ---------------------------
+
+/// What is wrong with a producer's `opv.produce/1` output, and the fix its maintainer makes
+/// (§5.2). Positions and declared output names only, never the producer's text.
+fn produce_rule_words(rule: &ProduceRule) -> (String, String) {
+    let one_line = "make the producer print one opv.produce/1 JSON object per line".to_string();
+    match rule {
+        ProduceRule::NotJson { line } => (format!("line {line} is not one JSON object"), one_line),
+        ProduceRule::UnknownField { line } => (
+            format!("line {line} has a field opv.produce/1 does not define"),
+            "print only the fields opv.produce/1 defines".to_string(),
+        ),
+        ProduceRule::WrongSchema { line } => (
+            format!("line {line} is not an opv.produce/1 line"),
+            "set schema to \"opv.produce/1\" on every line".to_string(),
+        ),
+        ProduceRule::LineTooLong { line, limit } => (
+            format!("line {line} is longer than {limit} bytes"),
+            format!("keep each line at most {limit} bytes"),
+        ),
+        ProduceRule::TooMuchOutput { limit } => (
+            format!("the output is larger than {limit} bytes"),
+            format!("print at most {limit} bytes"),
+        ),
+        ProduceRule::NoResult => (
+            "it ended with no result or error line".to_string(),
+            "make the producer print one result or error line last".to_string(),
+        ),
+        ProduceRule::ResultNotLast { line } => (
+            format!("line {line} follows the result or error line"),
+            "print the result or error line once, last".to_string(),
+        ),
+        ProduceRule::WrongEnvironment { line } => (
+            format!("the result on line {line} is for another environment"),
+            "make the producer echo the request's env in its result".to_string(),
+        ),
+        ProduceRule::NonceMismatch { line } => (
+            format!("the result on line {line} does not carry this run's nonce"),
+            "make the producer echo the request's nonce in its result".to_string(),
+        ),
+        ProduceRule::Undeclared { position } => (
+            format!("output {position} of the result is not an output the set uses"),
+            "return only the outputs the request names".to_string(),
+        ),
+        ProduceRule::Missing { names } => (
+            format!("the result lacks {}", list(names)),
+            format!("return {} in the result", list(names)),
+        ),
+        ProduceRule::Duplicate { position } => (
+            format!("output {position} of the result repeats an earlier name"),
+            "return each output once".to_string(),
+        ),
+        ProduceRule::Empty { output } => (
+            format!("output {output} is empty"),
+            format!("return a value for {output}"),
+        ),
+        ProduceRule::NotAString { output } => (
+            format!("output {output} is not a JSON string without NUL"),
+            format!("return {output} as a JSON string"),
+        ),
+        ProduceRule::TooLarge { output, limit } => (
+            format!("output {output} is larger than {limit} bytes"),
+            format!("return {output} in at most {limit} bytes"),
+        ),
+        ProduceRule::OpenUrlRefused { line, why } => {
+            let (problem, fix) = match why {
+                OpenUrlProblem::NotHttps => (
+                    "is not https".to_string(),
+                    "send an https consent URL".to_string(),
+                ),
+                OpenUrlProblem::HostNotListed => (
+                    "names a host outside open_url_hosts".to_string(),
+                    "add the consent page's host to the producer's open_url_hosts, or fix the producer".to_string(),
+                ),
+                OpenUrlProblem::TooLong { limit } => (
+                    format!("is longer than {limit} bytes"),
+                    format!("send a URL of at most {limit} bytes"),
+                ),
+                OpenUrlProblem::Userinfo => (
+                    "carries a user name or password".to_string(),
+                    "send a URL without user information".to_string(),
+                ),
+            };
+            (
+                format!("the open_url on line {line} {problem}, so it was not opened"),
+                fix,
+            )
+        }
+        ProduceRule::ErrorCode { line } => (
+            format!(
+                "the error code on line {line} is not 1 to 40 lowercase letters or underscores"
+            ),
+            "report failure with a code of 1 to 40 lowercase letters or underscores".to_string(),
+        ),
+    }
+}
+
+/// `c` with its `--timeout` replaced by `seconds`.
+fn with_timeout(mut c: Cmd, seconds: u64) -> Cmd {
+    let mut args = Vec::with_capacity(c.args.len() + 2);
+    let mut skip = false;
+    for a in c.args.drain(..) {
+        if skip {
+            skip = false;
+            continue;
+        }
+        if a == "--timeout" {
+            skip = true;
+            continue;
+        }
+        if a.starts_with("--timeout=") {
+            continue;
+        }
+        args.push(a);
+    }
+    args.push("--timeout".into());
+    args.push(seconds.to_string());
+    c.args = args;
+    c
+}
+
+/// The step after a refused provision (§4.2, §4.5, §4.7, §5.5). A partial set is handed to
+/// the person's own `--fill-missing` run (D7), an inconsistent one to `--replace`; a refusal the person resolves first steps to
+/// the read that shows the set's state (X4), or to the run with the budget the producers need.
+fn provision_refused(
+    set: &str,
+    env: &EnvName,
+    reason: &ProvisionRefusal,
+    inv: &Invocation,
+) -> Plan {
+    let ready = Next::Check(cmd(&["ready"], &[env.as_str()]));
+    let replace = format!("opv provision {set} --env {env} --replace");
+    match reason {
+        ProvisionRefusal::Partial { .. } => plan(
+            inspect(format!(
+                "make only the missing members, keeping every present one: opv provision {set} --env {env} --fill-missing"
+            )),
+            Next::Handoff(cmd(
+                &["provision"],
+                &[set, "--env", env.as_str(), "--fill-missing"],
+            )),
+        ),
+        ProvisionRefusal::Inconsistent { .. } => plan(
+            inspect(format!(
+                "re-make the whole set: {replace} (the replaced values are kept in the item's opv · kept section)"
+            )),
+            provision_replace(set, env),
+        ),
+        ProvisionRefusal::ImmutableMember { member } => plan(
+            inspect(format!(
+                "leave out --replace: an immutable member is made once; remove immutable from {member} in the contract only if it must change"
+            )),
+            ready,
+        ),
+        ProvisionRefusal::SameAcrossEnvironments { other, .. } => plan(
+            inspect(format!(
+                "give environment {env} its own client at the issuer, not the one environment {other} uses, then make the set again"
+            )),
+            ready,
+        ),
+        ProvisionRefusal::BudgetTooSmall { needed_seconds, .. } => plan(
+            inspect(format!(
+                "allow the run at least {needed_seconds}s with --timeout"
+            )),
+            Next::Handoff(with_timeout(inv_cmd(inv), *needed_seconds)),
+        ),
+        ProvisionRefusal::ItemNotRewritable { holds } => plan(
+            inspect(format!(
+                "in 1Password, move {holds} out of the item of environment {env} into an item of its own, then run opv provision {set} --env {env} again"
+            )),
+            ready,
+        ),
+    }
+}
+
+/// The step after a refused write of a set member (§5.6): the set is re-made as a whole.
+fn set_member(env: &EnvName, set: &str) -> Plan {
+    plan(
+        inspect(format!(
+            "make it with its set, in your own terminal: opv provision {set} --env {env} --replace"
+        )),
+        provision_replace(set, env),
+    )
+}
+
+/// `opv provision <set> --env <env> --replace`: the person's own run (§4.4, §6).
+fn provision_replace(set: &str, env: &EnvName) -> Next {
+    Next::Handoff(cmd(
+        &["provision"],
+        &[set, "--env", env.as_str(), "--replace"],
+    ))
+}
+
+/// What a producer's failure says (§5.2): its exit, signal, timeout or closed code.
+fn producer_failure_words(producer: &str, why: &ProducerFailure) -> String {
+    match why {
+        ProducerFailure::Exit { status } => {
+            format!("producer {producer} exited with status {status}")
+        }
+        ProducerFailure::Signal { signal } => {
+            format!("producer {producer} was ended by signal {signal}")
+        }
+        ProducerFailure::Timeout { seconds } => format!(
+            "producer {producer} did not finish within its timeout of {seconds}s, so opv stopped it"
+        ),
+        ProducerFailure::Reported { code } => format!("producer {producer} reported {code}"),
+    }
+}
+
+/// The Do after a producer failure (§5.2, vet F19): its own documentation explains its exit
+/// or code, since opv never shows its output.
+fn producer_failure_fix(producer: &str, why: &ProducerFailure) -> String {
+    match why {
+        ProducerFailure::Exit { status } => format!(
+            "see producer {producer}'s documentation for exit status {status}; opv never shows its output"
+        ),
+        ProducerFailure::Signal { signal } => {
+            format!("check what ended producer {producer} with signal {signal}")
+        }
+        ProducerFailure::Timeout { seconds } => format!(
+            "finish the producer's step (such as its consent page) within {seconds}s, or raise timeout in [producers.{producer}] (at most 15m)"
+        ),
+        ProducerFailure::Reported { code } => {
+            format!("see producer {producer}'s documentation for {code}")
+        }
+    }
+}
+
+// --- end provision -------------------------------------------------------------------------
 
 /// What is wrong with the secret file `opv set --from-file` reads, and its fix. These are
 /// properties of the path: no byte, length or part of the file's value is described.
@@ -1141,7 +1380,8 @@ fn vendor_sign_in(system: System) -> Option<VendorCmd> {
         | System::Ssh
         | System::RemoteOpv
         | System::Https
-        | System::Docker => {
+        | System::Docker
+        | System::Sealed => {
             return None;
         }
     };
@@ -1245,6 +1485,7 @@ fn local_op(op: LocalOp) -> &'static str {
             "keep the MCP session with its client over standard input and output"
         }
         LocalOp::RandomSource => "read the operating system's random source",
+        LocalOp::SealLock => "take the seal lock of",
     }
 }
 
@@ -1661,6 +1902,89 @@ fn not_stored(product: &ProductName, key: &KeyName, env: &EnvName) -> Plan {
     )
 }
 
+// --- sealed target (#271, design `sealed-target` §4.2): `opv unseal` -------------------------
+
+/// The first line of an `opv unseal` refusal: what was refused and that nothing was
+/// decrypted (or, for a payload mismatch, delivered). Names, fingerprints and paths only.
+fn sealed_refusal_words(bundle: &std::path::Path, refusal: &SealedRefusal) -> String {
+    let b = bundle.display();
+    match refusal {
+        SealedRefusal::Malformed { detail } => {
+            format!("the sealed bundle {b} was refused: {detail}; nothing was decrypted")
+        }
+        SealedRefusal::SignatureInvalid { signers, detail } => format!(
+            "the sealed bundle {b} failed its signature check against {}: {detail}; nothing was decrypted",
+            signers.display()
+        ),
+        SealedRefusal::ScopeMismatch {
+            field,
+            expected,
+            found,
+        } => format!(
+            "the sealed bundle {b} is signed for {field} {found}, not {expected}; nothing was decrypted"
+        ),
+        SealedRefusal::RevisionBelowFloor { revision, floor } => format!(
+            "the sealed bundle {b} has revision {revision}, below the floor {floor} that --min-revision sets; nothing was decrypted"
+        ),
+        SealedRefusal::IdentityUnusable { from, detail } => format!(
+            "the age identity from {} is unusable: {detail}; nothing was decrypted",
+            identity_from_words(from)
+        ),
+        SealedRefusal::NotARecipient { recipient } => match recipient {
+            Some(r) => format!(
+                "the age identity (recipient {r}) is not a recipient of the sealed bundle {b}; nothing was decrypted"
+            ),
+            None => format!(
+                "the age identity is not a recipient of the sealed bundle {b}; nothing was decrypted"
+            ),
+        },
+        SealedRefusal::PayloadMismatch { detail } => format!(
+            "the sealed bundle {b} decrypted, but its payload does not match its signed header: {detail}; nothing was delivered"
+        ),
+    }
+}
+
+/// Where an identity came from, in words.
+fn identity_from_words(from: &IdentityFrom) -> String {
+    match from {
+        IdentityFrom::File { path } => format!("the file {}", path.display()),
+        IdentityFrom::Env { var } => format!("the variable {var}"),
+    }
+}
+
+/// The Do and Next of an `opv unseal` refusal: the fix is at the release (a new bundle) or
+/// at the deploy (its flags, its identity), then the same command again.
+fn sealed_refusal_plan(refusal: &SealedRefusal) -> Plan {
+    let fix = match refusal {
+        SealedRefusal::Malformed { .. } => {
+            "deploy the bundle file exactly as opv sync wrote it (no edit, no CR-LF conversion), or seal it again with opv sync".to_string()
+        }
+        SealedRefusal::SignatureInvalid { .. } => {
+            "give --signers the allowed_signers file whose line for this environment (namespaces=\"opv-sealed\") holds the release's signing key, or seal the bundle again with opv sync".to_string()
+        }
+        SealedRefusal::ScopeMismatch { field, .. } => format!(
+            "deploy the bundle sealed for this {field}, or correct --{}",
+            if field == "product" { "product" } else { "env" }
+        ),
+        SealedRefusal::RevisionBelowFloor { floor, .. } => format!(
+            "deploy a bundle of revision {floor} or later (seal it with opv sync); never lower --min-revision to accept an older one"
+        ),
+        SealedRefusal::IdentityUnusable { from, .. } => format!(
+            "put exactly the runtime's age identity, one AGE-SECRET-KEY-1 line, in {}",
+            identity_from_words(from)
+        ),
+        SealedRefusal::NotARecipient { .. } => {
+            "give this runtime the identity whose recipient the sealed target lists, or add its recipient to the target and seal again with opv sync".to_string()
+        }
+        SealedRefusal::PayloadMismatch { .. } => {
+            "seal the bundle again with opv sync and deploy the new file; this one was not produced by a matching opv".to_string()
+        }
+    };
+    plan(inspect(fix), Next::Rerun)
+}
+
+// --- end sealed target ------------------------------------------------------------------------
+
 fn inspect(text: impl Into<String>) -> Option<(Action, String)> {
     Some((Action::Inspect, text.into()))
 }
@@ -1674,6 +1998,7 @@ impl Cause {
                 searched_from,
                 env,
                 manifest,
+                found: _,
             } => {
                 let manifest = match manifest {
                     None => String::new(),
@@ -1712,6 +2037,7 @@ impl Cause {
                     GivenBy::Flag { flag } => format!(" (given by {flag})"),
                     GivenBy::EnvVar { var } => format!(" (given by {var})"),
                     GivenBy::Discovered => String::new(),
+                    GivenBy::DotOpv { path } => format!(" (named by {})", path.display()),
                 };
                 format!(
                     "cannot read the configuration file {}{by}: {}",
@@ -1925,7 +2251,24 @@ impl Cause {
                 system,
                 account,
                 state,
-            } => session_words(*system, account, state),
+                selected_by,
+            } => {
+                let words = session_words(*system, account, state);
+                // Where a recorded or configured account was chosen; a flag or an
+                // argument is the person's own words, so it needs no reminder.
+                match (account, selected_by) {
+                    (
+                        Some(_),
+                        Some(
+                            by @ (AccountSource::DotOpv { .. }
+                            | AccountSource::EnvVar { .. }
+                            | AccountSource::Environment { .. }
+                            | AccountSource::Configuration),
+                        ),
+                    ) => format!("{words} (selected by {})", account_source(by)),
+                    _ => words,
+                }
+            }
             AccountNotOnMachine {
                 account,
                 selected_by,
@@ -1952,7 +2295,7 @@ impl Cause {
                 "account {given} matches more than one 1Password account: {}",
                 list_of(candidates)
             ),
-            AccountRequired { accounts } => format!(
+            AccountRequired { accounts, .. } => format!(
                 "{} 1Password accounts are on this machine and this project names none; opv uses only the account you choose, never op's default: {}",
                 accounts.len(),
                 account_choices(accounts)
@@ -2257,6 +2600,18 @@ impl Cause {
                 } => format!(
                     "opv does not run {operation} on {env}/{target}: {}",
                     reason.words()
+                ),
+                self::Guard::ProvisionRefused { set, env, reason } => format!(
+                    "opv does not provision set {set} in environment {env}: {}",
+                    reason.words()
+                ),
+                self::Guard::SetMember {
+                    product,
+                    key,
+                    env,
+                    set,
+                } => format!(
+                    "{product}/{key} in environment {env} is a member of set {set}, so opv writes it only together with the set"
                 ),
             },
             MountUnreadable {
@@ -2644,6 +2999,14 @@ impl Cause {
                 d.bytes_written,
                 d.bytes
             ),
+            LocalIo {
+                op: LocalOp::SealLock,
+                path,
+                ..
+            } => format!(
+                "another opv run is sealing {}; retry when it finishes",
+                path.display()
+            ),
             LocalIo { op, path, io, .. } => {
                 if path.as_os_str().is_empty() {
                     format!("opv could not {}: {}", local_op(*op), io_words(*io))
@@ -2750,6 +3113,22 @@ impl Cause {
                     many => format!("the ids of environments {}", list_of(many)),
                 }
             ),
+            ProducerFailed { producer, why } => format!(
+                "{}; nothing was written",
+                producer_failure_words(producer, why)
+            ),
+            ProducerChanged { producer, file } => format!(
+                "the file {} of producer {producer} changed: its SHA-256 is not the sha256 the contract pins",
+                file.display()
+            ),
+            Unsupported {
+                feature: UnsupportedFeature::ProducerOnWindows { set, producer },
+            } => format!(
+                "set {set} is made by producer {producer}, and opv runs producers only on Linux and macOS, not on native Windows"
+            ),
+            // sealed target (#271): `opv unseal`'s refusals
+            SealedRefused { bundle, refusal } => sealed_refusal_words(bundle, refusal),
+            // end sealed target
             Bug { site } => format!("opv hit an internal error ({site})"),
         }
     }
@@ -2783,7 +3162,7 @@ impl Cause {
     /// `human_required` in `sit`: a step the situation refused is a person's.
     pub fn human_required_in(&self, inv: &Invocation, sit: &Situation) -> bool {
         let p = self.plan_in(inv, sit);
-        matches!(p.next, Next::Handoff(_))
+        matches!(p.next, Next::Handoff(_) | Next::Choose(_))
             || p.refused
             || p.action.is_some_and(|a| a.person_only())
             || matches!(
@@ -2950,9 +3329,16 @@ impl Cause {
         match self {
             PersonalNotSetUp { then, .. } => then.plan_raw(inv),
             ConfigNotFound {
+                searched_from,
+                env: _,
+                manifest: _,
+                found: Some(found),
+            } if !found.paths.is_empty() => found_config_plan(found, searched_from, inv),
+            ConfigNotFound {
                 searched_from: _,
                 env,
                 manifest: _,
+                found: _,
             } => plan(
                 // P3: the first-run router's other starting paths.
                 inspect(
@@ -2981,6 +3367,10 @@ impl Cause {
                     GivenBy::Discovered => {
                         format!("check that you can read {}", path.display())
                     }
+                    GivenBy::DotOpv { path: dot_opv } => format!(
+                        "check the config line of {}: it must name a file inside this repository",
+                        dot_opv.display()
+                    ),
                 }),
                 match io {
                     IoKind::NotFound => Next::Run(cmd(&["doctor"], &[])),
@@ -3339,6 +3729,7 @@ impl Cause {
                 system,
                 account,
                 state,
+                selected_by,
             } => {
                 let app = matches!(
                     state,
@@ -3404,7 +3795,14 @@ impl Cause {
                         })
                     } else {
                         let mut args = Vec::new();
-                        if let Some(a) = account {
+                        // FR-40 amended: an account the project records (`.opv`, the
+                        // configuration's `account`) is found by `opv login` itself.
+                        let recorded = selected_by
+                            .as_ref()
+                            .is_some_and(AccountSource::recorded_by_project);
+                        if let Some(a) = account
+                            && !recorded
+                        {
                             args.push("--account".to_string());
                             args.push(a.to_string());
                         }
@@ -3416,6 +3814,11 @@ impl Cause {
                             args.push("opv".into());
                             args.extend(inv.command.iter().cloned());
                             args.extend(inv.args.iter().cloned());
+                            // The child's words are never stored: a trailing `--` shows
+                            // `-- <command>` and the step has no argv (FR-65, SR-3).
+                            if inv.has_child {
+                                args.push("--".into());
+                            }
                         }
                         Next::Handoff(Cmd {
                             command: vec!["login".into()],
@@ -3465,13 +3868,14 @@ impl Cause {
                     next,
                 )
             }
-            // Never a guessed account (X2): the person picks, in their own terminal.
-            AccountRequired { .. } => plan(
+            // Never a guessed account (X2, FR-65): the person picks one of the choices.
+            AccountRequired { accounts, reach } => plan(
                 Some((
                     Action::PickBetween,
-                    "pick the project's account: run opv login --account <email or account ID> in your own terminal".to_string(),
+                    "pick the project's account: opv account use <account ID> records it in .opv"
+                        .to_string(),
                 )),
-                Next::Check(cmd(&["account", "list"], &[])),
+                super::step::account_choices(accounts, *reach, &choice_rerun(inv)),
             ),
             AccountAmbiguous { given, candidates } => plan(
                 Some((
@@ -3814,7 +4218,7 @@ impl Cause {
                         (_, Some(vault)) => vendor("op", &["item", "list", "--vault", vault]),
                         (_, None) => vendor("op", &["vault", "list"]),
                     },
-                    (System::Ssh | System::RemoteOpv | System::Https | System::Docker, _) => {
+                    (System::Ssh | System::RemoteOpv | System::Https | System::Docker | System::Sealed, _) => {
                         Next::None(NoNext::NothingToRun)
                     }
                 };
@@ -4008,6 +4412,10 @@ impl Cause {
                 self::Guard::OperationRefused {
                     env, target, reason, ..
                 } => operation_refused(env, target, reason),
+                self::Guard::ProvisionRefused { set, env, reason } => {
+                    provision_refused(set, env, reason, inv)
+                }
+                self::Guard::SetMember { env, set, .. } => set_member(env, set),
             },
             MountUnreadable { env, target, .. } => plan(
                 inspect(
@@ -4091,29 +4499,10 @@ impl Cause {
             BudgetSpent {
                 budget_seconds,
                 writes_started: _,
-            } => {
-                let mut c = inv_cmd(inv);
-                let mut args = Vec::with_capacity(c.args.len() + 2);
-                let mut skip = false;
-                for a in c.args.drain(..) {
-                    if skip {
-                        skip = false;
-                        continue;
-                    }
-                    if a == "--timeout" {
-                        skip = true;
-                        continue;
-                    }
-                    if a.starts_with("--timeout=") {
-                        continue;
-                    }
-                    args.push(a);
-                }
-                args.push("--timeout".into());
-                args.push(budget_seconds.saturating_mul(2).to_string());
-                c.args = args;
-                plan(None, run_or_handoff(c))
-            }
+            } => plan(
+                None,
+                run_or_handoff(with_timeout(inv_cmd(inv), budget_seconds.saturating_mul(2))),
+            ),
             Partial { done, scope, then } => {
                 let inner = then.plan_raw(inv);
                 // A15: an empty `done` names nothing as written.
@@ -4440,6 +4829,16 @@ impl Cause {
                     )),
                     Next::Rerun,
                 )
+            }
+            InputInvalid {
+                kind: InputKind::Produce,
+                field,
+                rule,
+                ..
+            } => {
+                // The producer's maintainer fixes it; the person re-runs once it is fixed.
+                let (_, fix) = rule_words(field, rule);
+                plan(inspect(fix), Next::None(NoNext::NothingToRun))
             }
             InputInvalid {
                 kind: InputKind::Supply,
@@ -4801,6 +5200,10 @@ impl Cause {
                     LocalOp::RandomSource => {
                         "check that this system's random source (getrandom, /dev/urandom) is available".to_string()
                     }
+                    LocalOp::SealLock => format!(
+                        "wait for the other opv run sealing {} to finish",
+                        path.display()
+                    ),
                 }),
                 Next::Rerun,
             ),
@@ -4969,6 +5372,25 @@ impl Cause {
                 )),
                 Next::Rerun,
             ),
+            ProducerFailed { producer, why } => {
+                plan(inspect(producer_failure_fix(producer, why)), Next::Rerun)
+            }
+            ProducerChanged { producer, file } => plan(
+                inspect(format!(
+                    "review the change to {}; once it is right, set sha256 of [producers.{producer}] to the file's new SHA-256",
+                    file.display()
+                )),
+                Next::Rerun,
+            ),
+            Unsupported {
+                feature: UnsupportedFeature::ProducerOnWindows { .. },
+            } => plan(
+                inspect("run opv provision from WSL on this machine"),
+                Next::None(NoNext::NothingToRun),
+            ),
+            // sealed target (#271): `opv unseal`'s refusals
+            SealedRefused { refusal, .. } => sealed_refusal_plan(refusal),
+            // end sealed target
             Bug { site: _ } => plan(
                 inspect(format!("report this as an opv bug: {ISSUES_URL}")),
                 Next::Check(cmd(&["version"], &[])),
@@ -5004,6 +5426,7 @@ pub fn next_kind_actor(n: &Next) -> (NextKind, NextActor) {
         Next::Handoff(_) => (NextKind::Apply, NextActor::Person),
         Next::Vendor(_) => (NextKind::Run, NextActor::Person),
         Next::None(_) => (NextKind::None, NextActor::Person),
+        Next::Choose(_) => (NextKind::Choose, NextActor::Person),
     }
 }
 
@@ -5013,15 +5436,172 @@ fn is_sign_in(c: &Cmd) -> bool {
         || c.to_argv().iter().any(|w| w == "signin")
 }
 
-/// The typed `next` object of the error document (schema 3): `kind`, `actor` and the exact
-/// command (or `null`).
+/// The typed `next` object of the error document (schema 4): `kind`, `actor` and the exact
+/// command (or `null`); a `choose` adds `reach` and `choices`. No `argv`: only
+/// [`typed_next_value`] adds one.
 pub fn next_value(n: &Next, inv: &Invocation) -> serde_json::Value {
     let (kind, actor) = invocation_kind_actor(n, inv);
-    serde_json::json!({
+    let mut v = serde_json::json!({
         "kind": kind,
         "actor": actor,
         "command": next_text(n, inv),
+    });
+    if let Next::Choose(c) = n {
+        v["reach"] = serde_json::json!(c.reach);
+        v["choices"] = c.choices.iter().map(choice_value).collect();
+    }
+    v
+}
+
+/// [`next_value`] with the `argv` of a step built from a typed command (FR-65, schema 4):
+/// for a producer migrated to the typed `next` (`ready`, `account list`, the session and
+/// account causes, [`Cause::types_argv`]). There is no `argv` for a placeholder, a vendor
+/// command, an MCP call or no command ([`next_argv`]).
+pub fn typed_next_value(n: &Next, inv: &Invocation) -> serde_json::Value {
+    let mut v = next_value(n, inv);
+    if let Some(argv) = next_argv(n, inv) {
+        v["argv"] = serde_json::json!(argv);
+    }
+    v
+}
+
+/// The words to exec for a step, built from its typed command and never from its display
+/// text (FR-65): the same command [`next_text`] shows (a person's step without `--json`).
+pub fn next_argv(n: &Next, inv: &Invocation) -> Option<Vec<String>> {
+    let person = invocation_kind_actor(n, inv).1 == NextActor::Person;
+    let shown = |c: Cmd| if person { without_json(c) } else { c };
+    match n {
+        Next::Rerun => match &inv.origin {
+            Origin::Cli if !inv.has_child && !inv.command.is_empty() => {
+                shown(inv_cmd(inv)).exec_argv()
+            }
+            _ => None,
+        },
+        Next::Run(c) | Next::Check(c) | Next::Handoff(c) => shown(c.clone()).exec_argv(),
+        Next::Vendor(_) | Next::None(_) | Next::Choose(_) => None,
+    }
+}
+
+/// One choice of a `choose` (schema 4): the account as `account list` shows it, and its
+/// steps, each typed like a `next`.
+fn choice_value(c: &Choice) -> serde_json::Value {
+    let a = &c.account;
+    serde_json::json!({
+        "account": {
+            "account_id": a.id,
+            "shorthand": a.shorthand,
+            "email": a.email,
+            "address": a.address,
+            "signed_in": a.signed_in,
+        },
+        "steps": c.steps.iter().map(step_value).collect::<Vec<_>>(),
     })
+}
+
+fn step_value(s: &Step) -> serde_json::Value {
+    let mut v = serde_json::json!({
+        "kind": s.kind,
+        "actor": s.actor,
+        "effect": s.effect,
+        "command": s.run.as_ref().map(cmd_text),
+    });
+    if let Some(argv) = s.run.as_ref().and_then(Cmd::exec_argv) {
+        v["argv"] = serde_json::json!(argv);
+    }
+    if let Some(does) = s.does {
+        v["do"] = serde_json::json!(does);
+    }
+    v
+}
+
+/// The command a choice's steps re-run: the invocation without a person's consent (X4)
+/// and its child as `-- <command>`, or `opv ready --json` for an MCP call, which has no
+/// command line.
+fn choice_rerun(inv: &Invocation) -> Cmd {
+    match inv.origin {
+        Origin::Cli if !inv.command.is_empty() => {
+            let mut c = without_consent(inv_cmd(inv));
+            if inv.has_child {
+                c.args.push("--".into());
+            }
+            c
+        }
+        _ => cmd(&["ready"], &["--json"]),
+    }
+}
+
+/// The Do and Next of a `ConfigNotFound` whose search below the repository found files
+/// (FR-66, design agent-signin-readiness §2.4 item 5). One: the Do names the `.opv` line
+/// (relative to the `.opv`'s folder) and the Next re-runs with `--config` (relative to the
+/// folder searched from). Several: the person picks; no Next is a guess.
+fn found_config_plan(found: &FoundConfigs, searched_from: &Path, inv: &Invocation) -> Plan {
+    let stopped = if found.stopped {
+        "; the search stopped at its limit, so there may be more"
+    } else {
+        ""
+    };
+    let base = found.dot_opv.parent().unwrap_or(Path::new(""));
+    match found.paths.as_slice() {
+        [one] if matches!(inv.origin, Origin::Cli) && !inv.command.is_empty() => {
+            let mut c = inv_cmd(inv);
+            c.args.push("--config".into());
+            c.args.push(slashed(&relative_to(one, searched_from)));
+            if inv.has_child {
+                c.args.push("--".into());
+            }
+            plan(
+                inspect(format!(
+                    "a configuration exists; name it in {} as config = \"{}\"{stopped}",
+                    found.dot_opv.display(),
+                    slashed(&relative_to(one, base))
+                )),
+                Next::Run(c),
+            )
+        }
+        paths => plan(
+            Some((
+                Action::PickBetween,
+                format!(
+                    "configurations exist at {}; name the project's one in {} as config = \"<path>\"{stopped}",
+                    paths
+                        .iter()
+                        .map(|p| slashed(&relative_to(p, base)))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    found.dot_opv.display()
+                ),
+            )),
+            Next::None(NoNext::PersonPicksDirection),
+        ),
+    }
+}
+
+/// A relative path with `/` separators on every platform: the `.opv` line is committed and
+/// shared across operating systems, and `--config` accepts `/` on Windows too.
+fn slashed(path: &Path) -> String {
+    path.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// `path` relative to `base`, both absolute (`..` where `base` is deeper); `path` itself
+/// when they share no root.
+fn relative_to(path: &Path, base: &Path) -> PathBuf {
+    let p: Vec<_> = path.components().collect();
+    let b: Vec<_> = base.components().collect();
+    let common = p.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    if common == 0 {
+        return path.to_path_buf();
+    }
+    let mut out = PathBuf::new();
+    for _ in common..b.len() {
+        out.push("..");
+    }
+    for c in &p[common..] {
+        out.push(c);
+    }
+    out
 }
 
 /// The [`NextKind`] and [`NextActor`] of a step under this invocation: a re-run of a
@@ -5053,8 +5633,18 @@ pub fn next_text(n: &Next, inv: &Invocation) -> Option<String> {
         }),
         Next::Run(c) | Next::Check(c) | Next::Handoff(c) => Some(cmd_text(&shown(c.clone()))),
         Next::Vendor(v) => Some(vendor_text(v)),
-        Next::None(_) => None,
+        Next::None(_) | Next::Choose(_) => None,
     }
+}
+
+/// A `choose` as the `Next:` line: each choice's first step, for the person to pick from.
+fn choose_words(c: &Choose) -> String {
+    let firsts = c
+        .choices
+        .iter()
+        .filter_map(|choice| choice.steps.first()?.run.as_ref().map(cmd_text))
+        .collect::<Vec<_>>();
+    format!("pick one: {}", firsts.join("; "))
 }
 
 fn none_words(n: NoNext) -> &'static str {
@@ -5140,6 +5730,7 @@ pub fn render_text(
     let next = match (&p.next, next_text(&p.next, inv)) {
         (_, Some(t)) => t,
         (Next::None(n), None) => none_words(*n).to_string(),
+        (Next::Choose(c), None) => choose_words(c),
         (_, None) => "none".to_string(),
     };
     s.push_str(&format!("Next: {next}\n"));
@@ -5213,7 +5804,11 @@ pub fn document(
         "retry": cause.retry(),
         "human_required": cause.human_required(inv),
         "do": do_with_reply(cause, upstream.is_some(), p.do_text),
-        "next": next_value(&p.next, inv),
+        "next": if cause.types_argv() {
+            typed_next_value(&p.next, inv)
+        } else {
+            next_value(&p.next, inv)
+        },
     })
 }
 

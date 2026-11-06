@@ -302,6 +302,27 @@ pub trait CommandRunner {
     fn spawns_processes(&self) -> bool {
         false
     }
+
+    /// One producer attempt (`opv.produce/1`, #253, owner-value-ingestion §5.2), never
+    /// retried: see [`produce`](self::produce). A runner that runs no producer refuses;
+    /// nothing runs.
+    fn produce(
+        &self,
+        _call: &ProduceCall,
+        _on_line: &mut dyn FnMut(ProducedLine<'_>) -> LineVerdict,
+    ) -> Result<Produced, crate::Error> {
+        Err(crate::cause::Cause::Bug {
+            site: "produce on a runner that runs no producer",
+        }
+        .into())
+    }
+
+    /// Seal one sealed bundle with the run's signing key (#271, sealed-target §6.2): see
+    /// [`seal`](self::seal). In process, never retried, nothing observed. Without a
+    /// signed-in sealed deploy credential it refuses and nothing is sealed.
+    fn seal_bundle(&self, call: &SealCall) -> Result<Vec<u8>, SealFailure> {
+        seal::run(call, None)
+    }
 }
 
 /// Append `markdown` to the job summary file at `path` (H8), creating it if needed. Errors
@@ -1729,6 +1750,12 @@ impl Default for ProcessRunner {
 static DEFAULT_ACCOUNT: Mutex<Option<String>> = Mutex::new(None);
 static SIGNED_OUT_ACCOUNT: Mutex<Option<String>> = Mutex::new(None);
 
+/// The run's default 1Password account, when one was selected ([`ProcessRunner::use_account`]):
+/// `opv run`'s preflight refuses op's default account only when none was (FR-40, #266).
+pub fn run_account() -> Option<String> {
+    lock(&DEFAULT_ACCOUNT).clone()
+}
+
 /// The account an `op` call names: its `--account` value, else its `OP_ACCOUNT`.
 fn call_account(call: &Call) -> Option<String> {
     call.args
@@ -2020,6 +2047,14 @@ impl CommandRunner for ProcessRunner {
         true
     }
 
+    fn produce(
+        &self,
+        call: &ProduceCall,
+        on_line: &mut dyn FnMut(ProducedLine<'_>) -> LineVerdict,
+    ) -> Result<Produced, crate::Error> {
+        produce::run(self, call, on_line)
+    }
+
     fn writes_started(&self) -> bool {
         self.wrote.load(Ordering::SeqCst)
     }
@@ -2145,6 +2180,9 @@ pub mod signals {
 
     /// The captured child currently running, by pid.
     static CHILD: Mutex<Option<u32>> = Mutex::new(None);
+    /// The running child leads its own process group (a producer, #253): signals go to the
+    /// whole group. Changed only under the [`CHILD`] lock.
+    static GROUP: AtomicBool = AtomicBool::new(false);
     /// A target write started in this process: the interruption says so (design §4.6).
     static WRITES_STARTED: AtomicBool = AtomicBool::new(false);
 
@@ -2222,7 +2260,37 @@ pub mod signals {
     }
 
     pub(super) fn track(child: &Child) {
-        *lock(&CHILD) = Some(child.id());
+        let mut slot = lock(&CHILD);
+        *slot = Some(child.id());
+        GROUP.store(false, Ordering::SeqCst);
+    }
+
+    /// Track `child`, the leader of its own process group: a forwarded signal reaches the
+    /// whole group.
+    #[cfg(unix)]
+    pub(super) fn track_group(child: &Child) {
+        let mut slot = lock(&CHILD);
+        *slot = Some(child.id());
+        GROUP.store(true, Ordering::SeqCst);
+    }
+
+    /// Wait for `child` (exited or being stopped) under the lock and forget it.
+    #[cfg(unix)]
+    pub(super) fn reap_now(child: &mut Child) -> std::io::Result<ExitStatus> {
+        let mut slot = lock(&CHILD);
+        let res = child.wait();
+        if *slot == Some(child.id()) {
+            *slot = None;
+            GROUP.store(false, Ordering::SeqCst);
+        }
+        res
+    }
+
+    /// Send `sig` to process `pid`, or to its whole group when `group`.
+    #[cfg(unix)]
+    pub(super) fn send(pid: i32, group: bool, sig: i32) {
+        // SAFETY: a plain syscall on a pid (or group) we spawned and have not reaped.
+        unsafe { libc::kill(if group { -pid } else { pid }, sig) };
     }
 
     /// `try_wait` under the lock, so the handler never signals a reaped (reusable) pid.
@@ -2411,19 +2479,22 @@ pub mod signals {
     fn forward(_sig: i32) {}
 
     /// Send `sig` to the current child (SIGQUIT as SIGTERM: no core dump), wait up to the
-    /// grace period, then kill it.
+    /// grace period, then kill it. A producer's whole process group gets both.
     #[cfg(unix)]
     fn forward(sig: i32) {
-        let Some(id) = *lock(&CHILD) else { return };
+        let (id, group) = {
+            let slot = lock(&CHILD);
+            (*slot, GROUP.load(Ordering::SeqCst))
+        };
+        let Some(id) = id else { return };
         let Ok(pid) = i32::try_from(id) else { return };
         let sig = if sig == libc::SIGQUIT {
             libc::SIGTERM
         } else {
             sig
         };
-        // SAFETY: a plain syscall on a pid we spawned and have not reaped (the slot is
-        // cleared under the same lock when it is reaped).
-        unsafe { libc::kill(pid, sig) };
+        // The slot is cleared under the same lock when the child is reaped.
+        send(pid, group, sig);
         let t = std::time::Instant::now();
         while t.elapsed() < super::SIGNAL_GRACE {
             if *lock(&CHILD) != Some(id) {
@@ -2433,11 +2504,1162 @@ pub mod signals {
         }
         let slot = lock(&CHILD);
         if *slot == Some(id) {
-            // SAFETY: as above, under the lock that guards reaping.
-            unsafe { libc::kill(pid, libc::SIGKILL) };
+            send(pid, group, libc::SIGKILL);
         }
     }
 }
+
+// --- produce (#253, docs/design/owner-value-ingestion.md §5.2) ----------------------------
+
+pub use produce::{
+    LineVerdict, PRODUCE_EXIT_GRACE, PRODUCE_LINE_CAP, PRODUCE_OUTPUT_CAP, PRODUCE_TIMEOUT_CAP,
+    ProduceCall, Produced, ProducedLine,
+};
+
+/// The `opv.produce/1` effect (vet F2, F3, F5, F6): one attempt of an owner-invoked
+/// producer, never retried (a retry could ask for consent twice). It lives in this file so
+/// every `Observed` stays built here (`tests/observed_seal.rs`); a producer is no external
+/// system, so it records none, and its stderr never reaches a failure excerpt.
+///
+/// The producer runs with argv exactly `command`, cwd the project, a cleared environment
+/// holding only opv's [basics](crate::host::ENV_BASICS), its own process group and a hard
+/// `RLIMIT_CORE` of 0 (its non-dumpable flag resets on `execve`). The request goes to its
+/// stdin, which is then closed. Each complete stdout line is handed to the caller's sink as
+/// it arrives (so a consent URL is shown while consent waits); stderr is counted and wiped
+/// unread. The attempt ends when the sink saw a terminal line **and** the child exited, never
+/// waiting for stdout EOF (a browser or loopback server holding the pipe cannot turn success
+/// into a timeout); at its `timeout` (or the run budget); or when the child exited with no
+/// terminal line. Whatever ends it, the whole process group is then stopped (SIGTERM, up to
+/// [`PRODUCE_EXIT_GRACE`], SIGKILL), and opv's own SIGINT/SIGTERM/SIGHUP is forwarded to the
+/// group. Native Windows is refused before spawn (D12).
+pub mod produce {
+    // Native Windows refuses before spawn: the reader, the drain and the limits go unused.
+    #![cfg_attr(not(unix), allow(dead_code, unused_imports))]
+
+    use std::io::{self, Read};
+    use std::path::Path;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    use zeroize::{Zeroize, Zeroizing};
+
+    use crate::cause::{Cause, FieldRule, InputKind, ProduceRule, ProducerFailure};
+
+    /// Longest stdout line, newline excluded.
+    pub const PRODUCE_LINE_CAP: usize = 64 * 1024;
+    /// Most stdout one producer may write.
+    pub const PRODUCE_OUTPUT_CAP: usize = 1024 * 1024;
+    /// A producer's `timeout` is capped here (vet F10), whatever the contract says.
+    pub const PRODUCE_TIMEOUT_CAP: Duration = Duration::from_secs(15 * 60);
+    /// After the terminal line, how long the child gets to exit; after SIGTERM, how long the
+    /// group gets before SIGKILL.
+    pub const PRODUCE_EXIT_GRACE: Duration = Duration::from_secs(5);
+    /// After the child exited, how long lines it already wrote may still arrive (a grandchild
+    /// may hold the pipe, so EOF is not awaited).
+    pub(crate) const DRAIN_GRACE: Duration = Duration::from_millis(500);
+    const TICK: Duration = Duration::from_millis(5);
+
+    /// One producer run. `request` is the one-line `opv.produce/1` request (it holds values:
+    /// `Debug` shows its length only).
+    pub struct ProduceCall<'a> {
+        /// The set being provisioned (for the Windows refusal).
+        pub set: &'a str,
+        /// The `[producers.X]` name.
+        pub producer: &'a str,
+        /// The producer's project file, named by an `InputInvalid` refusal.
+        pub file: &'a Path,
+        /// argv, exactly the contract's `command` (SR-7); `command[0]` is the program.
+        pub command: &'a [&'a str],
+        /// The project directory.
+        pub cwd: &'a Path,
+        pub request: &'a [u8],
+        /// The contract's `timeout`, capped at [`PRODUCE_TIMEOUT_CAP`] and the run budget.
+        pub timeout: Duration,
+    }
+
+    impl std::fmt::Debug for ProduceCall<'_> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("ProduceCall")
+                .field("set", &self.set)
+                .field("producer", &self.producer)
+                .field("file", &self.file)
+                .field("command", &self.command)
+                .field("cwd", &self.cwd)
+                .field("request_len", &self.request.len())
+                .field("timeout", &self.timeout)
+                .finish()
+        }
+    }
+
+    /// One complete stdout line (newline removed), numbered from 1. It may hold values:
+    /// `Debug` shows its number and length only, and the bytes are wiped once the sink returns.
+    pub struct ProducedLine<'a> {
+        pub number: u32,
+        pub bytes: &'a [u8],
+    }
+
+    impl std::fmt::Debug for ProducedLine<'_> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("ProducedLine")
+                .field("number", &self.number)
+                .field("len", &self.bytes.len())
+                .finish()
+        }
+    }
+
+    /// What the sink (the `opv.produce/1` parser) made of a line.
+    #[derive(Debug)]
+    pub enum LineVerdict {
+        /// A notice: keep reading.
+        More,
+        /// The result line: the attempt ends once the child exits (0 or it is discarded).
+        Terminal,
+        /// Refused (a bad line, a line after the result, an `error` line): the group is
+        /// stopped and this error is the attempt's.
+        Refuse(crate::Error),
+    }
+
+    /// A finished attempt whose terminal line the sink accepted and whose child exited 0.
+    /// Counts only (`--verbose`): the producer's text is never kept.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct Produced {
+        pub lines: u32,
+        pub stderr_bytes: u64,
+    }
+
+    /// Why reading stopped.
+    pub(crate) enum Stop {
+        Terminal,
+        Refused(crate::Error),
+        Invalid(ProduceRule),
+        /// The child exited and no terminal line came.
+        Ended,
+        TimedOut,
+    }
+
+    /// How the child ended.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum End {
+        Code(i32),
+        Signal(i32),
+    }
+
+    /// The attempt's limit: its `timeout`, capped, within what is `left` of the run budget.
+    pub(crate) fn limit_of(call: &ProduceCall, left: Duration) -> Duration {
+        call.timeout.min(PRODUCE_TIMEOUT_CAP).min(left)
+    }
+
+    fn failed(call: &ProduceCall, why: ProducerFailure) -> crate::Error {
+        Cause::ProducerFailed {
+            producer: call.producer.to_string(),
+            why,
+        }
+        .into()
+    }
+
+    pub(crate) fn invalid(call: &ProduceCall, rule: ProduceRule) -> crate::Error {
+        Cause::InputInvalid {
+            path: call.file.to_path_buf(),
+            kind: InputKind::Produce,
+            at: None,
+            field: String::new(),
+            rule: FieldRule::Produce { produce: rule },
+        }
+        .into()
+    }
+
+    /// Nothing ran: the program could not be started.
+    pub(crate) fn not_started(call: &ProduceCall) -> crate::Error {
+        failed(call, ProducerFailure::Exit { status: 127 })
+    }
+
+    /// The attempt's outcome from why reading stopped and how the child ended (shared by the
+    /// real runner and the fakes, so both decide alike). A result counts only with exit 0.
+    pub(crate) fn settle(
+        call: &ProduceCall,
+        stop: Stop,
+        end: End,
+        limit: Duration,
+        produced: Produced,
+    ) -> Result<Produced, crate::Error> {
+        let bad_end = match end {
+            End::Code(0) => None,
+            End::Code(status) => Some(ProducerFailure::Exit { status }),
+            End::Signal(signal) => Some(ProducerFailure::Signal { signal }),
+        };
+        match (stop, bad_end) {
+            (Stop::Refused(e), _) => Err(e),
+            (Stop::Invalid(rule), _) => Err(invalid(call, rule)),
+            (Stop::TimedOut, _) => Err(failed(
+                call,
+                ProducerFailure::Timeout {
+                    seconds: limit.as_secs(),
+                },
+            )),
+            (Stop::Terminal, None) => Ok(produced),
+            (Stop::Ended, None) => Err(invalid(call, ProduceRule::NoResult)),
+            (Stop::Terminal | Stop::Ended, Some(why)) => Err(failed(call, why)),
+        }
+    }
+
+    /// The producer's environment: only opv's basics from `inherited` (never a 1Password
+    /// session or token, a provider credential, `BROWSER` or `DISPLAY`).
+    pub(crate) fn producer_env(
+        inherited: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    ) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+        inherited
+            .filter(|(k, _)| k.to_str().is_some_and(crate::host::is_basic_env))
+            .collect()
+    }
+
+    /// What the stdout reader hands over.
+    pub(crate) enum Piece {
+        Line(Zeroizing<Vec<u8>>),
+        LineTooLong,
+        TooMuch,
+        Eof,
+    }
+
+    /// Splits stdout into lines within [`PRODUCE_LINE_CAP`] and [`PRODUCE_OUTPUT_CAP`]; the
+    /// line buffer never grows past its first allocation and is wiped after each line.
+    pub(crate) struct Splitter {
+        line: Zeroizing<Vec<u8>>,
+        total: usize,
+    }
+
+    impl Splitter {
+        pub(crate) fn new() -> Self {
+            Self {
+                line: Zeroizing::new(Vec::with_capacity(PRODUCE_LINE_CAP)),
+                total: 0,
+            }
+        }
+
+        fn emit(&mut self, out: &mut dyn FnMut(Piece) -> bool) -> bool {
+            let line = Zeroizing::new(self.line.to_vec());
+            // Only the used bytes: the whole capacity per line would cost 64 KiB a line.
+            self.line[..].zeroize();
+            self.line.clear();
+            out(Piece::Line(line))
+        }
+
+        /// Feed `data`; false once a limit was hit or the receiver is gone.
+        pub(crate) fn feed(&mut self, data: &[u8], out: &mut dyn FnMut(Piece) -> bool) -> bool {
+            for &b in data {
+                self.total += 1;
+                if self.total > PRODUCE_OUTPUT_CAP {
+                    out(Piece::TooMuch);
+                    return false;
+                }
+                if b == b'\n' {
+                    if !self.emit(out) {
+                        return false;
+                    }
+                } else if self.line.len() >= PRODUCE_LINE_CAP {
+                    out(Piece::LineTooLong);
+                    return false;
+                } else {
+                    self.line.push(b);
+                }
+            }
+            true
+        }
+
+        /// stdout ended: a last line without a newline still counts.
+        pub(crate) fn finish(&mut self, out: &mut dyn FnMut(Piece) -> bool) {
+            if !self.line.is_empty() && !self.emit(out) {
+                return;
+            }
+            out(Piece::Eof);
+        }
+    }
+
+    fn read_lines(mut pipe: impl Read, tx: mpsc::Sender<Piece>) {
+        let mut chunk = Zeroizing::new([0u8; 8 * 1024]);
+        let mut split = Splitter::new();
+        let mut send = |p: Piece| tx.send(p).is_ok();
+        loop {
+            match pipe.read(&mut chunk[..]) {
+                Ok(0) => return split.finish(&mut send),
+                Ok(n) => {
+                    let more = split.feed(&chunk[..n], &mut send);
+                    chunk[..n].zeroize();
+                    if !more {
+                        return;
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => return split.finish(&mut send),
+            }
+        }
+    }
+
+    /// stderr is drained so the producer never blocks on it, counted, and wiped unread.
+    fn drain(mut pipe: impl Read, count: &std::sync::atomic::AtomicU64) {
+        let mut chunk = Zeroizing::new([0u8; 8 * 1024]);
+        loop {
+            match pipe.read(&mut chunk[..]) {
+                Ok(0) => return,
+                Ok(n) => {
+                    count.fetch_add(n as u64, std::sync::atomic::Ordering::SeqCst);
+                    chunk[..n].zeroize();
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => return,
+            }
+        }
+    }
+
+    /// The child's own hard and soft core limit, 0 (runs in the child between fork and exec:
+    /// async-signal-safe only, no allocation).
+    #[cfg(unix)]
+    fn no_core_dumps() -> io::Result<()> {
+        let none = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: setrlimit is async-signal-safe and only reads `none`.
+        if unsafe { libc::setrlimit(libc::RLIMIT_CORE, &none) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// True once `pid` (our unreaped child) exited; it stays a zombie (`WNOWAIT`), so its pid
+    /// (the group id) cannot be reused before the group is stopped.
+    #[cfg(unix)]
+    fn has_exited(pid: i32) -> bool {
+        // SAFETY: a zeroed siginfo_t is a valid out-parameter for waitid.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let Ok(id) = libc::id_t::try_from(pid) else {
+            return true;
+        };
+        // SAFETY: a plain syscall on our own child; WNOWAIT leaves it unreaped.
+        let rc = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                id,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if rc != 0 {
+            return io::Error::last_os_error().kind() != io::ErrorKind::Interrupted;
+        }
+        // SAFETY: waitid filled `info` (zeroed when nothing changed state).
+        unsafe { info.si_pid() != 0 }
+    }
+
+    /// True while any process of group `pgid` exists.
+    #[cfg(unix)]
+    fn group_alive(pgid: i32) -> bool {
+        // SAFETY: signal 0 only checks for existence.
+        let found = unsafe { libc::kill(-pgid, 0) } == 0;
+        found || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+
+    fn wait_until(grace: Duration, done: impl Fn() -> bool) -> bool {
+        let t = Instant::now();
+        while !done() {
+            if t.elapsed() >= grace {
+                return false;
+            }
+            std::thread::sleep(TICK);
+        }
+        true
+    }
+
+    /// Stop the whole group: SIGTERM, up to the grace for the child to exit, SIGKILL; reap
+    /// the child; then SIGKILL whatever of the group outlives the grace.
+    #[cfg(unix)]
+    fn end_group(
+        child: &mut std::process::Child,
+        pgid: i32,
+    ) -> io::Result<std::process::ExitStatus> {
+        super::signals::send(pgid, true, libc::SIGTERM);
+        if !wait_until(PRODUCE_EXIT_GRACE, || has_exited(pgid)) {
+            super::signals::send(pgid, true, libc::SIGKILL);
+        }
+        let status = super::signals::reap_now(child);
+        if !wait_until(PRODUCE_EXIT_GRACE, || !group_alive(pgid)) {
+            super::signals::send(pgid, true, libc::SIGKILL);
+        }
+        status
+    }
+
+    /// [`CommandRunner::produce`](super::CommandRunner::produce) for the real runner.
+    #[cfg(unix)]
+    pub(super) fn run(
+        r: &super::ProcessRunner,
+        call: &ProduceCall,
+        on_line: &mut dyn FnMut(ProducedLine<'_>) -> LineVerdict,
+    ) -> Result<Produced, crate::Error> {
+        use std::io::Write;
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        if super::signals::stopping() {
+            super::signals::wait_for_exit();
+        }
+        let started = Instant::now();
+        let limit = limit_of(call, super::left(r));
+        let Some((program, args)) = call.command.split_first() else {
+            return Err(Cause::Bug {
+                site: "producer with an empty command",
+            }
+            .into());
+        };
+        let mut cmd = Command::new(program);
+        cmd.args(args)
+            .current_dir(call.cwd)
+            .env_clear()
+            .envs(producer_env(std::env::vars_os()))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        // SAFETY: `no_core_dumps` is async-signal-safe and allocates nothing.
+        unsafe { cmd.pre_exec(no_core_dumps) };
+        let Ok(mut child) = cmd.spawn() else {
+            return Err(not_started(call));
+        };
+        super::signals::track_group(&child);
+        let Ok(pgid) = i32::try_from(child.id()) else {
+            return Err(not_started(call));
+        };
+
+        let stdin = child.stdin.take();
+        let request = Zeroizing::new(call.request.to_vec());
+        std::thread::spawn(move || {
+            if let Some(mut pipe) = stdin {
+                let _ = pipe.write_all(&request);
+            } // the pipe closes here: the producer sees EOF
+        });
+        let stderr_bytes = Arc::new(AtomicU64::new(0));
+        let counter = Arc::clone(&stderr_bytes);
+        let stderr = child.stderr.take().expect("stderr is piped");
+        let drained = std::thread::spawn(move || drain(stderr, &counter));
+        let (tx, rx) = mpsc::channel();
+        let stdout = child.stdout.take().expect("stdout is piped");
+        std::thread::spawn(move || read_lines(stdout, tx));
+
+        let deadline = started + limit;
+        let mut produced = Produced::default();
+        let mut eof = false;
+        let mut terminal_at: Option<Instant> = None;
+        let mut exited_at: Option<Instant> = None;
+        let stop = loop {
+            if exited_at.is_none() && has_exited(pgid) {
+                exited_at = Some(Instant::now());
+            }
+            if super::signals::stopping() {
+                let _ = end_group(&mut child, pgid);
+                super::signals::wait_for_exit();
+            }
+            if let Some(at) = exited_at
+                && (eof || at.elapsed() >= DRAIN_GRACE)
+            {
+                break if terminal_at.is_some() {
+                    Stop::Terminal
+                } else {
+                    Stop::Ended
+                };
+            }
+            match terminal_at {
+                Some(t) if t.elapsed() >= PRODUCE_EXIT_GRACE => break Stop::Terminal,
+                None if Instant::now() >= deadline => break Stop::TimedOut,
+                _ => {}
+            }
+            if eof {
+                std::thread::sleep(TICK);
+                continue;
+            }
+            match rx.recv_timeout(TICK) {
+                Ok(Piece::Line(line)) => {
+                    produced.lines += 1;
+                    let seen = ProducedLine {
+                        number: produced.lines,
+                        bytes: &line,
+                    };
+                    match on_line(seen) {
+                        LineVerdict::More => {}
+                        LineVerdict::Terminal => {
+                            terminal_at.get_or_insert_with(Instant::now);
+                        }
+                        LineVerdict::Refuse(e) => break Stop::Refused(e),
+                    }
+                }
+                Ok(Piece::LineTooLong) => {
+                    break Stop::Invalid(ProduceRule::LineTooLong {
+                        line: produced.lines + 1,
+                        limit: PRODUCE_LINE_CAP as u64,
+                    });
+                }
+                Ok(Piece::TooMuch) => {
+                    break Stop::Invalid(ProduceRule::TooMuchOutput {
+                        limit: PRODUCE_OUTPUT_CAP as u64,
+                    });
+                }
+                Ok(Piece::Eof) | Err(mpsc::RecvTimeoutError::Disconnected) => eof = true,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        };
+        let end = match end_group(&mut child, pgid) {
+            Ok(st) => match super::killed_by_signal(st) {
+                Some(signal) => End::Signal(signal),
+                None => End::Code(super::exit_code(st)),
+            },
+            Err(_) => End::Signal(libc::SIGKILL),
+        };
+        drop(rx);
+        // The group is gone, so stderr's pipe closed: let the count finish (bounded).
+        wait_until(super::STDERR_GRACE, || drained.is_finished());
+        produced.stderr_bytes = stderr_bytes.load(Ordering::SeqCst);
+        let res = settle(call, stop, end, limit, produced);
+        if super::Engine::verbose(r) {
+            super::Engine::note(
+                r,
+                &format!(
+                    "producer {} ({:.2} s): {}, {} stdout lines, {} stderr bytes",
+                    call.producer,
+                    started.elapsed().as_secs_f64(),
+                    if res.is_ok() { "result" } else { "failed" },
+                    produced.lines,
+                    produced.stderr_bytes,
+                ),
+            );
+        }
+        res
+    }
+
+    /// No process group, group kill or core limit on native Windows (D12): refused before
+    /// anything runs.
+    #[cfg(not(unix))]
+    pub(super) fn run(
+        _r: &super::ProcessRunner,
+        call: &ProduceCall,
+        _on_line: &mut dyn FnMut(ProducedLine<'_>) -> LineVerdict,
+    ) -> Result<Produced, crate::Error> {
+        Err(Cause::Unsupported {
+            feature: crate::cause::UnsupportedFeature::ProducerOnWindows {
+                set: call.set.to_string(),
+                producer: call.producer.to_string(),
+            },
+        }
+        .into())
+    }
+}
+
+/// The produce effect (design §10.5, tests 39-50). Process tests run tiny `sh` producers,
+/// like the runner's other process tests.
+#[cfg(test)]
+mod produce_tests {
+    #![cfg_attr(not(unix), allow(dead_code, unused_imports))]
+
+    use std::ffi::OsString;
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    use super::fake::{FakeRunner, ScriptedEnd, ScriptedProducer};
+    use super::produce::{Piece, Splitter, producer_env};
+    use super::{CommandRunner, LineVerdict, ProcessRunner, ProduceCall, Produced, ProducedLine};
+    use crate::cause::{Cause, FieldRule, ProduceRule, ProducerFailure};
+
+    fn call<'a>(
+        command: &'a [&'a str],
+        cwd: &'a Path,
+        request: &'a [u8],
+        timeout: Duration,
+    ) -> ProduceCall<'a> {
+        ProduceCall {
+            set: "workspace-admin-grant",
+            producer: "consent",
+            file: Path::new("tools/connect.py"),
+            command,
+            cwd,
+            request,
+            timeout,
+        }
+    }
+
+    /// The parser stand-in: a line naming `result` is terminal, every other line a notice.
+    fn result_ends(line: ProducedLine<'_>) -> LineVerdict {
+        if line.bytes.windows(6).any(|w| w == b"result") {
+            LineVerdict::Terminal
+        } else {
+            LineVerdict::More
+        }
+    }
+
+    fn failure(res: &Result<Produced, crate::Error>) -> Option<ProducerFailure> {
+        match res.as_ref().err()?.cause()?.0 {
+            Cause::ProducerFailed { why, .. } => Some(why.clone()),
+            _ => None,
+        }
+    }
+
+    fn produce_rule(res: &Result<Produced, crate::Error>) -> Option<ProduceRule> {
+        match res.as_ref().err()?.cause()?.0 {
+            Cause::InputInvalid {
+                rule: FieldRule::Produce { produce },
+                ..
+            } => Some(produce.clone()),
+            _ => None,
+        }
+    }
+
+    /// Run `script` under `sh -c` in `dir`, every line through [`result_ends`].
+    #[cfg(unix)]
+    fn run_sh(
+        dir: &Path,
+        script: &str,
+        timeout: Duration,
+    ) -> (Result<Produced, crate::Error>, Duration) {
+        let command = ["sh", "-c", script];
+        let t = Instant::now();
+        let res = ProcessRunner::default()
+            .produce(&call(&command, dir, b"{}\n", timeout), &mut result_ends);
+        (res, t.elapsed())
+    }
+
+    #[cfg(unix)]
+    fn pid_in(dir: &Path, name: &str) -> i32 {
+        std::fs::read_to_string(dir.join(name))
+            .expect("pid file")
+            .trim()
+            .parse()
+            .expect("pid")
+    }
+
+    /// True once `pid` no longer runs (gone, or a zombie awaiting its reaper), within 3 s.
+    #[cfg(unix)]
+    fn gone(pid: i32) -> bool {
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_secs(3) {
+            // SAFETY: signal 0 only checks for existence.
+            let exists = unsafe { libc::kill(pid, 0) } == 0;
+            let zombie = std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
+                s.rsplit(')')
+                    .next()
+                    .is_some_and(|r| r.trim_start().starts_with('Z'))
+            });
+            if !exists || zombie {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    const LONG: Duration = Duration::from_secs(20);
+
+    // 39
+    #[cfg(unix)]
+    #[test]
+    fn the_producer_gets_exactly_the_contracts_argv() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = [
+            "sh",
+            "-c",
+            "printf '%s|' \"$0\" \"$@\" > argv; echo result",
+            "first",
+            "a b",
+            "--x=1",
+        ];
+        let res = ProcessRunner::default()
+            .produce(&call(&command, dir.path(), b"", LONG), &mut result_ends);
+        assert_eq!(
+            (
+                res.is_ok(),
+                std::fs::read_to_string(dir.path().join("argv")).unwrap()
+            ),
+            (true, "first|a b|--x=1|".to_string())
+        );
+    }
+
+    fn env_of(inherited: &[(&str, &str)]) -> Vec<String> {
+        producer_env(
+            inherited
+                .iter()
+                .map(|(k, v)| (OsString::from(k), OsString::from(v))),
+        )
+        .into_iter()
+        .map(|(k, _)| k.into_string().unwrap())
+        .collect()
+    }
+
+    const SHELL: &[(&str, &str)] = &[
+        ("PATH", "/usr/bin"),
+        ("HOME", "/home/me"),
+        ("OP_SESSION_my", "s"),
+        ("OP_SERVICE_ACCOUNT_TOKEN", "ops_x"),
+        ("OP_CONNECT_TOKEN", "c"),
+        ("DISPLAY", ":0"),
+        ("BROWSER", "firefox"),
+        ("FLY_API_TOKEN", "f"),
+    ];
+
+    // 40
+    #[test]
+    fn the_producer_environment_holds_no_op_session() {
+        assert!(!env_of(SHELL).iter().any(|k| k.starts_with("OP_SESSION")));
+    }
+
+    // 41
+    #[test]
+    fn the_producer_environment_holds_no_service_account_token() {
+        assert!(
+            !env_of(SHELL)
+                .iter()
+                .any(|k| k == "OP_SERVICE_ACCOUNT_TOKEN")
+        );
+    }
+
+    // 42
+    #[test]
+    fn the_producer_environment_holds_no_display() {
+        assert!(!env_of(SHELL).iter().any(|k| k == "DISPLAY"));
+    }
+
+    #[test]
+    fn the_producer_environment_keeps_only_the_basics() {
+        assert_eq!(env_of(SHELL), vec!["PATH", "HOME"]);
+    }
+
+    // 43
+    #[cfg(unix)]
+    #[test]
+    fn the_request_with_its_nonce_reaches_stdin_whole_and_then_closes() {
+        let dir = tempfile::tempdir().unwrap();
+        let request = br#"{"schema":"opv.produce/1","kind":"request","nonce":"n-ABCDEFGH"}"#;
+        let command = ["sh", "-c", "cat > req; echo result"];
+        let res = ProcessRunner::default()
+            .produce(&call(&command, dir.path(), request, LONG), &mut result_ends);
+        assert_eq!(
+            (res.is_ok(), std::fs::read(dir.path().join("req")).unwrap()),
+            (true, request.to_vec())
+        );
+    }
+
+    // 44
+    #[cfg(unix)]
+    #[test]
+    fn a_notice_reaches_the_sink_before_the_producer_exits() {
+        let dir = tempfile::tempdir().unwrap();
+        // The producer prints its result only once the sink has acted on its notice.
+        let script = "echo notice; i=0; \
+            while [ ! -f seen ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; \
+            [ -f seen ] && echo result";
+        let command = ["sh", "-c", script];
+        let seen = dir.path().join("seen");
+        let res =
+            ProcessRunner::default().produce(&call(&command, dir.path(), b"", LONG), &mut |line| {
+                if line.bytes == b"notice" {
+                    std::fs::write(&seen, b"").unwrap();
+                }
+                result_ends(line)
+            });
+        assert!(res.is_ok(), "{res:?}");
+    }
+
+    // 45
+    #[cfg(unix)]
+    #[test]
+    fn a_sleeper_holding_stdout_cannot_hold_the_result_past_the_childs_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let (res, took) = run_sh(dir.path(), "sleep 30 & echo result; exit 0", LONG);
+        assert_eq!((res.is_ok(), took < Duration::from_secs(10)), (true, true));
+    }
+
+    // 46
+    #[cfg(unix)]
+    #[test]
+    fn after_the_result_the_sleepers_group_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, _) = run_sh(dir.path(), "sleep 30 & echo $! > gc; echo result", LONG);
+        assert!(gone(pid_in(dir.path(), "gc")));
+    }
+
+    // 47
+    #[cfg(unix)]
+    #[test]
+    fn a_timeout_kills_the_whole_process_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, _) = run_sh(
+            dir.path(),
+            "sleep 30 & echo $! > gc; sleep 30",
+            Duration::from_secs(1),
+        );
+        assert!(gone(pid_in(dir.path(), "gc")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_producer_past_its_timeout_fails_as_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let (res, _) = run_sh(dir.path(), "echo notice; sleep 30", Duration::from_secs(1));
+        assert_eq!(failure(&res), Some(ProducerFailure::Timeout { seconds: 1 }));
+    }
+
+    // 48
+    #[cfg(unix)]
+    #[test]
+    fn sigint_forwarded_to_the_group_ends_the_producer_with_no_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = "sleep 30 & echo $! > gc; echo $$ > leader; echo notice; wait; echo result";
+        let command = ["sh", "-c", script];
+        let path = dir.path().to_path_buf();
+        let res =
+            ProcessRunner::default().produce(&call(&command, dir.path(), b"", LONG), &mut |line| {
+                if line.bytes == b"notice" {
+                    // What opv's signal handler does with a producer's group (forward).
+                    super::signals::send(pid_in(&path, "leader"), true, libc::SIGINT);
+                }
+                result_ends(line)
+            });
+        // The group is gone and no result was taken. How `sh` reports the interrupt is the
+        // platform's: killed by SIGINT (Linux) or exit 128 + n after its own handler (macOS).
+        let interrupted = matches!(
+            failure(&res),
+            Some(ProducerFailure::Signal {
+                signal: libc::SIGINT
+            }) | Some(ProducerFailure::Exit { status: 129..=130 })
+        );
+        assert_eq!((interrupted, gone(pid_in(dir.path(), "gc"))), (true, true));
+    }
+
+    // 49
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_producer_is_spawned_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (res, _) = run_sh(dir.path(), "echo x >> count; exit 3", LONG);
+        assert_eq!(
+            (
+                failure(&res),
+                std::fs::read_to_string(dir.path().join("count")).unwrap()
+            ),
+            (Some(ProducerFailure::Exit { status: 3 }), "x\n".to_string())
+        );
+    }
+
+    #[test]
+    fn a_failing_scripted_producer_is_called_once() {
+        let r = FakeRunner::default();
+        r.push_producer(ScriptedProducer::new(["notice"], ScriptedEnd::Exit(1)));
+        let command = ["python3", "connect.py"];
+        let _ = r.produce(
+            &call(&command, Path::new("."), b"{}", LONG),
+            &mut result_ends,
+        );
+        assert_eq!(r.calls.borrow().len(), 1);
+    }
+
+    // 50
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_producers_hard_core_limit_is_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, _) = run_sh(
+            dir.path(),
+            "grep 'Max core file size' /proc/$$/limits > limits; echo result",
+            LONG,
+        );
+        let limits = std::fs::read_to_string(dir.path().join("limits")).unwrap();
+        // "Max core file size  <soft>  <hard>  bytes"
+        assert_eq!(limits.split_whitespace().nth(5), Some("0"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_producer_on_native_windows_is_refused_before_it_runs() {
+        let command = ["python3", "connect.py"];
+        let res = ProcessRunner::default().produce(
+            &call(&command, Path::new("."), b"{}", LONG),
+            &mut result_ends,
+        );
+        assert!(matches!(
+            res.as_ref().err().and_then(|e| e.cause()).map(|c| c.0),
+            Some(Cause::Unsupported { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_result_then_a_non_zero_exit_is_discarded_as_that_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let (res, _) = run_sh(dir.path(), "echo result; exit 1", LONG);
+        assert_eq!(failure(&res), Some(ProducerFailure::Exit { status: 1 }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_exit_0_without_a_terminal_line_is_no_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let (res, _) = run_sh(dir.path(), "echo notice; exit 0", LONG);
+        assert_eq!(produce_rule(&res), Some(ProduceRule::NoResult));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_line_stops_the_producer_with_the_sinks_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = ["sh", "-c", "echo bad; sleep 30"];
+        let t = Instant::now();
+        let res =
+            ProcessRunner::default().produce(&call(&command, dir.path(), b"", LONG), &mut |_| {
+                LineVerdict::Refuse(
+                    Cause::ProducerFailed {
+                        producer: "consent".into(),
+                        why: ProducerFailure::Reported {
+                            code: "access_denied".into(),
+                        },
+                    }
+                    .into(),
+                )
+            });
+        assert_eq!(
+            (failure(&res), t.elapsed() < Duration::from_secs(10)),
+            (
+                Some(ProducerFailure::Reported {
+                    code: "access_denied".into()
+                }),
+                true
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_line_after_the_result_still_reaches_the_sink() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = ["sh", "-c", "echo result; echo late"];
+        let mut seen = Vec::new();
+        let _ =
+            ProcessRunner::default().produce(&call(&command, dir.path(), b"", LONG), &mut |line| {
+                seen.push(line.number);
+                result_ends(line)
+            });
+        assert_eq!(seen, vec![1, 2]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn producer_stderr_is_counted_and_never_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let (res, _) = run_sh(dir.path(), "echo token-abc >&2; echo result", LONG);
+        assert_eq!(
+            res.ok(),
+            Some(Produced {
+                lines: 1,
+                stderr_bytes: 10
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_producer_program_fails_without_running() {
+        let command = ["/nonexistent/opv-producer"];
+        let res = ProcessRunner::default()
+            .produce(&call(&command, Path::new("."), b"", LONG), &mut result_ends);
+        assert_eq!(failure(&res), Some(ProducerFailure::Exit { status: 127 }));
+    }
+
+    fn pieces(data: &[u8]) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut split = Splitter::new();
+        let mut take = |p: Piece| {
+            out.push(match p {
+                Piece::Line(l) => String::from_utf8_lossy(&l).into_owned(),
+                Piece::LineTooLong => "<too long>".into(),
+                Piece::TooMuch => "<too much>".into(),
+                Piece::Eof => "<eof>".into(),
+            });
+            true
+        };
+        if split.feed(data, &mut take) {
+            split.finish(&mut take);
+        }
+        out
+    }
+
+    #[test]
+    fn stdout_splits_into_lines_and_keeps_an_unterminated_last_one() {
+        assert_eq!(pieces(b"a\nb\nc"), vec!["a", "b", "c", "<eof>"]);
+    }
+
+    #[test]
+    fn a_line_past_64_kib_is_refused() {
+        let long = vec![b'x'; super::PRODUCE_LINE_CAP + 1];
+        assert_eq!(pieces(&long), vec!["<too long>"]);
+    }
+
+    #[test]
+    fn stdout_past_1_mib_is_refused() {
+        let many = b"0123456789abcde\n".repeat(super::PRODUCE_OUTPUT_CAP / 16 + 1);
+        assert_eq!(pieces(&many).last().map(String::as_str), Some("<too much>"));
+    }
+
+    #[test]
+    fn a_timeout_is_capped_at_15_minutes() {
+        let command = ["sh"];
+        let c = call(&command, Path::new("."), b"", Duration::from_secs(3600));
+        assert_eq!(
+            super::produce::limit_of(&c, Duration::MAX),
+            super::PRODUCE_TIMEOUT_CAP
+        );
+    }
+
+    #[test]
+    fn produce_call_debug_hides_the_request() {
+        let command = ["sh"];
+        let c = call(&command, Path::new("."), b"sk-live-secret", LONG);
+        assert!(!format!("{c:?}").contains("sk-live"));
+    }
+
+    #[test]
+    fn fake_runner_plays_a_scripted_producer_to_its_result() {
+        let r = FakeRunner::default();
+        r.push_producer(ScriptedProducer::new(
+            ["notice", "result"],
+            ScriptedEnd::Exit(0),
+        ));
+        let command = ["python3", "connect.py"];
+        let res = r.produce(
+            &call(&command, Path::new("."), b"{}", LONG),
+            &mut result_ends,
+        );
+        assert_eq!(
+            res.ok(),
+            Some(Produced {
+                lines: 2,
+                stderr_bytes: 0
+            })
+        );
+    }
+
+    #[test]
+    fn a_hanging_scripted_producer_fails_as_timeout() {
+        let r = FakeRunner::default();
+        r.push_producer(ScriptedProducer::new(["notice"], ScriptedEnd::Hangs));
+        let command = ["python3", "connect.py"];
+        let res = r.produce(
+            &call(&command, Path::new("."), b"{}", Duration::from_secs(600)),
+            &mut result_ends,
+        );
+        assert_eq!(
+            failure(&res),
+            Some(ProducerFailure::Timeout { seconds: 600 })
+        );
+    }
+}
+
+// --- end produce ---------------------------------------------------------------------------
+
+// --- seal (#271, docs/design/sealed-target.md §6.2) ------------------------------------------
+
+pub use seal::{SealCall, SealFailure};
+
+/// The sealed target's signing effect (design `sealed-target` §6.2, D3, T2): seal one
+/// whole-set bundle with the target's SSH Key deploy credential, in process.
+///
+/// The private key never leaves the run's `DeployLogin`: `EnvRunner` adds it to the call's
+/// environment for [`PROGRAM`](seal::PROGRAM) only, as it adds a token to a vendor CLI's
+/// child environment, and this effect parses it into a zeroizing key for the one seal and
+/// drops it. Nothing remote is called, so nothing is retried or observed (no `Observed`,
+/// no `lost_call`, J7). The fake seals through the same [`seal::run`], with the stock-tool
+/// fixture key when no login added one, so the tested path is the shipped path.
+pub mod seal {
+    use age::x25519;
+
+    use crate::bundle::crypto::{self, CryptoError};
+    use crate::bundle::format::Header;
+
+    /// The pseudo-program whose per-program environment carries the signing key.
+    pub const PROGRAM: &str = "opv-seal";
+
+    /// The name the signing key travels under in a [`SealCall`]'s environment.
+    pub const KEY: &str = "OPV_SEALED_SIGNING_KEY";
+
+    /// One bundle to seal: the header it is sealed under, the whole batch in header order and
+    /// its recipients. A store builds it with [`SealCall::new`]; only `EnvRunner` fills `env`.
+    #[derive(Clone, Copy)]
+    pub struct SealCall<'a> {
+        pub header: &'a Header,
+        /// Each name with its value, in header order.
+        pub entries: &'a [(&'a str, &'a [u8])],
+        pub recipients: &'a [x25519::Recipient],
+        /// The signed-in login's environment for [`PROGRAM`] ([`KEY`]); empty from a store.
+        pub env: &'a [(&'a str, &'a str)],
+    }
+
+    impl<'a> SealCall<'a> {
+        /// A seal of `entries` under `header` to `recipients`, signed by the run's login.
+        pub fn new(
+            header: &'a Header,
+            entries: &'a [(&'a str, &'a [u8])],
+            recipients: &'a [x25519::Recipient],
+        ) -> Self {
+            Self {
+                header,
+                entries,
+                recipients,
+                env: &[],
+            }
+        }
+
+        fn key(&self) -> Option<&'a str> {
+            self.env.iter().find(|(k, _)| *k == KEY).map(|(_, v)| *v)
+        }
+    }
+
+    /// Names only: never a value, a key or a recipient string.
+    impl std::fmt::Debug for SealCall<'_> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("SealCall")
+                .field("environment", &self.header.environment)
+                .field("product", &self.header.product)
+                .field(
+                    "entries",
+                    &self.entries.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+                )
+                .field("recipients", &self.recipients.len())
+                .field("signed_in", &self.key().is_some())
+                .finish()
+        }
+    }
+
+    /// Why a seal did not happen.
+    #[derive(Debug)]
+    pub enum SealFailure {
+        /// No signed-in sealed deploy credential reached the call: an opv bug, since a sealed
+        /// target always signs in before it writes (`internal_error`).
+        NotSignedIn(crate::Error),
+        /// The codec refused the inputs (a limit, a header mismatch); the store maps it.
+        Codec(CryptoError),
+    }
+
+    /// Seal `call` with the key in its environment, or with `fallback` (the fake's fixture
+    /// key) when no login added one.
+    pub fn run(call: &SealCall, fallback: Option<&str>) -> Result<Vec<u8>, SealFailure> {
+        let Some(pem) = call.key().or(fallback) else {
+            return Err(SealFailure::NotSignedIn(
+                crate::cause::Cause::Bug {
+                    site: "seal without a signed-in sealed deploy credential",
+                }
+                .into(),
+            ));
+        };
+        // Zeroized on drop (`ssh_key::PrivateKey`); sign-in already accepted this key.
+        let key = crypto::parse_signing_key(pem).map_err(SealFailure::Codec)?;
+        crypto::seal(call.header, call.entries, call.recipients, &key).map_err(SealFailure::Codec)
+    }
+}
+
+// --- end seal ------------------------------------------------------------------------------
 
 #[cfg(any(test, feature = "fake"))]
 pub mod fake {
@@ -2484,6 +3706,11 @@ pub mod fake {
         }
     }
 
+    /// The stock-tool test signer (`tests/fixtures/sealed/kat/signer_ed25519`, an obviously
+    /// fake key) the fake seals with when no signed-in login supplied one (#271 §6.2).
+    pub const FIXTURE_SIGNING_KEY: &str =
+        include_str!("../tests/fixtures/sealed/kat/signer_ed25519");
+
     /// Returns queued responses in order and records every call.
     pub struct FakeRunner {
         pub calls: RefCell<Vec<Call>>,
@@ -2507,6 +3734,8 @@ pub mod fake {
         pub call_cost: Cell<Duration>,
         /// A target write started ([`CommandRunner::writes_started`]).
         pub target_writes: Cell<bool>,
+        /// Scripted producers, one per [`CommandRunner::produce`] call, in order.
+        pub producers: RefCell<VecDeque<ScriptedProducer>>,
     }
 
     impl Default for FakeRunner {
@@ -2524,8 +3753,113 @@ pub mod fake {
                 summaries: RefCell::default(),
                 call_cost: Cell::new(Duration::ZERO),
                 target_writes: Cell::new(false),
+                producers: RefCell::default(),
             }
         }
+    }
+
+    /// A scripted producer (#253): the stdout lines it prints, then how it ends.
+    #[derive(Clone)]
+    pub struct ScriptedProducer {
+        pub lines: Vec<String>,
+        pub end: ScriptedEnd,
+    }
+
+    impl std::fmt::Debug for ScriptedProducer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("ScriptedProducer")
+                .field("lines", &self.lines.len())
+                .field("end", &self.end)
+                .finish()
+        }
+    }
+
+    /// How a [`ScriptedProducer`] ends after its lines.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ScriptedEnd {
+        /// It exits with this status.
+        Exit(i32),
+        /// A signal ends it.
+        Signal(i32),
+        /// It never exits: past its timeout, or stopped after the exit grace that follows a
+        /// result (SIGTERM).
+        Hangs,
+        /// The program cannot be started.
+        SpawnFails,
+    }
+
+    impl ScriptedProducer {
+        pub fn new(lines: impl IntoIterator<Item = impl Into<String>>, end: ScriptedEnd) -> Self {
+            Self {
+                lines: lines.into_iter().map(Into::into).collect(),
+                end,
+            }
+        }
+    }
+
+    /// Play `script` into `on_line` and decide as the real runner does: lines in order (also
+    /// after the terminal line, until the child would exit), the same limits, the same
+    /// [`settle`](super::produce::settle).
+    pub fn play(
+        script: &ScriptedProducer,
+        call: &super::ProduceCall,
+        on_line: &mut dyn FnMut(super::ProducedLine<'_>) -> super::LineVerdict,
+    ) -> Result<super::Produced, crate::Error> {
+        use super::produce::{End, Stop, not_started, settle};
+        use super::{LineVerdict, PRODUCE_LINE_CAP, PRODUCE_OUTPUT_CAP, Produced};
+        use crate::cause::ProduceRule;
+
+        fn read(
+            script: &ScriptedProducer,
+            on_line: &mut dyn FnMut(super::ProducedLine<'_>) -> LineVerdict,
+            produced: &mut Produced,
+        ) -> Result<bool, Stop> {
+            let mut terminal = false;
+            let mut total = 0;
+            for line in &script.lines {
+                total += line.len() + 1;
+                if total > PRODUCE_OUTPUT_CAP {
+                    return Err(Stop::Invalid(ProduceRule::TooMuchOutput {
+                        limit: PRODUCE_OUTPUT_CAP as u64,
+                    }));
+                }
+                if line.len() > PRODUCE_LINE_CAP {
+                    return Err(Stop::Invalid(ProduceRule::LineTooLong {
+                        line: produced.lines + 1,
+                        limit: PRODUCE_LINE_CAP as u64,
+                    }));
+                }
+                produced.lines += 1;
+                let seen = super::ProducedLine {
+                    number: produced.lines,
+                    bytes: line.as_bytes(),
+                };
+                match on_line(seen) {
+                    LineVerdict::More => {}
+                    LineVerdict::Terminal => terminal = true,
+                    LineVerdict::Refuse(e) => return Err(Stop::Refused(e)),
+                }
+            }
+            Ok(terminal)
+        }
+
+        let limit = super::produce::limit_of(call, Duration::MAX);
+        let mut produced = Produced::default();
+        if script.end == ScriptedEnd::SpawnFails {
+            return Err(not_started(call));
+        }
+        let stop = match read(script, on_line, &mut produced) {
+            Err(stop) => stop,
+            Ok(true) => Stop::Terminal,
+            Ok(false) if script.end == ScriptedEnd::Hangs => Stop::TimedOut,
+            Ok(false) => Stop::Ended,
+        };
+        let end = match script.end {
+            ScriptedEnd::Exit(code) => End::Code(code),
+            ScriptedEnd::Signal(signal) => End::Signal(signal),
+            ScriptedEnd::Hangs | ScriptedEnd::SpawnFails => End::Signal(15),
+        };
+        settle(call, stop, end, limit, produced)
     }
 
     /// A read that fails with `status` on every attempt: [`READ_ATTEMPTS`] responses.
@@ -2583,6 +3917,11 @@ pub mod fake {
                 status: 0,
                 stdout: crate::runner_https::encode_reply(reply),
             }));
+        }
+
+        /// Queue `script` for the next [`CommandRunner::produce`] call.
+        pub fn push_producer(&self, script: ScriptedProducer) {
+            self.producers.borrow_mut().push_back(script);
         }
 
         /// Queue a spawn failure, e.g. `NotFound` for a missing binary.
@@ -2694,6 +4033,51 @@ pub mod fake {
 
         fn writes_started(&self) -> bool {
             self.target_writes.get()
+        }
+
+        /// Records the call (program `command[0]`, the rest as args, the request as stdin, an
+        /// empty environment) and plays the next queued [`ScriptedProducer`].
+        fn produce(
+            &self,
+            call: &super::ProduceCall,
+            on_line: &mut dyn FnMut(super::ProducedLine<'_>) -> super::LineVerdict,
+        ) -> Result<super::Produced, crate::Error> {
+            let (program, args) = call.command.split_first().unwrap_or((&"", &[]));
+            self.calls.borrow_mut().push(Call {
+                program: program.to_string(),
+                args: args.iter().map(|a| a.to_string()).collect(),
+                stdin: Some(call.request.to_vec()),
+                env: Vec::new(),
+                inherited: false,
+                removed: Vec::new(),
+                isolated: true,
+            });
+            let script = self
+                .producers
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or_else(|| panic!("FakeRunner: no producer queued for {program}"));
+            play(&script, call, on_line)
+        }
+
+        /// Records the call (program [`super::seal::PROGRAM`], env names only, never the key)
+        /// and seals through the shipped [`super::seal::run`]: with the signed-in login's key
+        /// when an `EnvRunner` added one, else with the stock-tool fixture key (#271 §6.2).
+        fn seal_bundle(&self, call: &super::SealCall) -> Result<Vec<u8>, super::SealFailure> {
+            self.calls.borrow_mut().push(Call {
+                program: super::seal::PROGRAM.to_string(),
+                args: Vec::new(),
+                stdin: None,
+                env: call
+                    .env
+                    .iter()
+                    .map(|(k, _)| (k.to_string(), String::new()))
+                    .collect(),
+                inherited: false,
+                removed: Vec::new(),
+                isolated: false,
+            });
+            super::seal::run(call, Some(FIXTURE_SIGNING_KEY))
         }
 
         fn read(&self, call: &super::Call, refused: &[i32]) -> io::Result<Outcome> {

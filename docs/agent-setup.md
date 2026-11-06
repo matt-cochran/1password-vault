@@ -50,6 +50,8 @@ A concealed field is a **secret**; a text field is **config**. Each environment 
 
 **Values that already exist elsewhere** (a `.env` file, a Key Vault, a cluster): the person runs `opv import <env> --from <file.env>` (or `--from target:NAME`); `--dry-run` shows what would come in, names and actions only. Overwriting a set value is the person's `--replace product/KEY`. Fly and GitHub secrets cannot be read back: the user enters those in 1Password. An assistant may import a local `.env` itself with the MCP tool `opv_import_local`, and only into an environment of tier `local`.
 
+**Values a set makes together** (a contract `[sets.<SET>]`: an OAuth consent's refresh token from a `[producers.<name>]` command, matched generated keys): the person runs `opv provision <SET> --env <env>` in their own terminal; it shows the plan, asks them to type the environment back, runs each producer once and writes the whole set in one checked edit. An assistant runs only `opv provision <SET> --env <env> --dry-run --json` (the plan: names, makers and hashes, never a value) and hands the rest over; there is no MCP tool for it.
+
 First check whether the project already has one: `opv doctor` names it on its `config` line (a `secrets.toml`, or a manifest in 1Password found by the git remote). If it has none and the 1Password item already exists, let opv write it. `opv propose setup --from-item` looks the vault and item up by title once and returns the field names and kinds, never values. `--product <name>` names the product that unsectioned fields belong to; sectioned fields become products named by their section. In a new project it saves a manifest in 1Password (ask first; it needs the user's own signed-in session), or with `--file` a `secrets.toml`:
 
 ```sh
@@ -132,6 +134,7 @@ opv delivery verify prod --product api --json   # does the target still hold wha
 opv changed prod --json    # did a source item change since the last sync? (exit 10 when it did)
 opv status staging         # one environment's rows
 opv history prod --json    # what opv last wrote to a target: time, plan id, changed outside opv
+opv unseal deploy/prod-api.opv-sealed --env prod --product api --signers allowed_signers --verify-only --json   # a sealed bundle verified offline (names and fingerprints, never a value)
 ```
 
 Problem rows come first. Each row's STATE is `saved`, `missing`, `failed <rule> (<reason>)`, `skipped` (not wanted in this environment) or `blocked by source` (fixed with the key it shares); `opv help states` defines every word. A config key stored in a concealed field is still `saved`: opv delivers it as a plain value, never prints it, and `status` warns once. For each missing or failed row:
@@ -142,7 +145,7 @@ Problem rows come first. Each row's STATE is `saved`, `missing`, `failed <rule> 
 
 Never ask for the value to check it yourself. A failed rule prints the rule and a reason (for example `failed prefix (expected prefix sk-)`), which is enough to tell the user what is wrong.
 
-For scripts, `opv status staging --json` returns names and states only (`schema_version` 2); see [usage.md](usage.md#machine-readable-status-and-plan). Exit 8 still prints the rows, plus `error` with `code: "findings"` and `human_required: true`: the user fills the values.
+For scripts, `opv status staging --json` returns names and states only (`schema_version` 4); see [usage.md](usage.md#machine-readable-status-and-plan). Exit 8 still prints the rows, plus `error` with `code: "findings"` and `human_required: true`: the user fills the values.
 
 Self-made secrets (an encryption, session or signing key: a key whose rules give `base64_bytes` or `hex_bytes`) need no person to type them: after the user agrees, propose `opv propose generate <env> <product/KEY>…`, then have the person run `opv apply <plan_id>`. opv makes the value and writes it straight into the empty 1Password field; you never see it, and it never replaces a value. Provider-issued keys (anything with a prefix rule) are still typed by the user in 1Password. Never suggest `openssl rand` or any command whose output the user would paste.
 

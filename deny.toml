@@ -15,6 +15,16 @@ targets = [
 # cargo-deny configuration (v2 schema).
 # https://embarkstudios.github.io/cargo-deny/
 
+[advisories]
+# Two dated ignores for the sealed target's age dependency (design sealed-target §6.4, D2,
+# FMECA T11). Neither path is reachable from opv's use, and the [bans] fence below keeps the
+# second one that way. Expiry: review both by 2027-02-01 or at the next age release,
+# whichever comes first; remove an entry as soon as `cargo deny check` passes without it.
+ignore = [
+    { id = "RUSTSEC-2026-0374", reason = "expires 2027-02-01: basic-toml is unmaintained; it is reached only through the i18n-embed-fl proc macro of age 0.12.1 and runs at build time, never in the opv binary" },
+    { id = "RUSTSEC-2026-0387", reason = "expires 2027-02-01: crypto-bigint 0.5.5 timing variability, reached only through elliptic-curve/p256 for age's p256-tag and hybrid stanzas, which opv never parses or offers (X25519 recipients only, parsed with age::x25519::Recipient::from_str); fenced by the p256 [bans] wrapper" },
+]
+
 [licenses]
 # Licenses used by the dependency tree that are approved for this crate.
 allow = [
@@ -30,6 +40,12 @@ allow = [
 
 [bans]
 multiple-versions = "warn"
+deny = [
+    # Fence for the RUSTSEC-2026-0387 ignore above (FMECA T11): p256 may enter the graph only
+    # as a direct dependency of age or hpke. Any other crate that brings p256 fails this check,
+    # because it could make the ignored timing path reachable.
+    { crate = "p256", wrappers = ["age", "hpke"], reason = "p256 is reachable only through age's refused p256 paths; see the RUSTSEC-2026-0387 ignore" },
+]
 
 [sources]
 # Only crates from the configured registry are permitted.

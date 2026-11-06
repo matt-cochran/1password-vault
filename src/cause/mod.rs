@@ -261,6 +261,39 @@ pub enum Next {
     Vendor(VendorCmd),
     /// No command: the person decides (for example, which copy of a configuration wins).
     None(NoNext),
+    /// A person picks one of two or more choices; that choice's steps then run in order
+    /// (FR-65). Built only by [`step::account_choices`], which never picks one itself.
+    Choose(Choose),
+}
+
+/// The candidates of a [`Next::Choose`] (FR-65) and how far this process reaches a
+/// 1Password session, which decided each choice's sign-in and verify steps.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Choose {
+    pub reach: crate::json::Reach,
+    /// Two or more, in the order the producer listed the accounts; never ranked.
+    pub choices: Vec<Choice>,
+}
+
+/// One candidate of a [`Choose`]: the account and the steps that make it the project's.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Choice {
+    pub account: AccountChoice,
+    pub steps: Vec<Step>,
+}
+
+/// One step of a [`Choice`], typed like a `next` (schema 4).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Step {
+    pub kind: crate::json::NextKind,
+    pub actor: crate::json::NextActor,
+    pub effect: crate::json::StepEffect,
+    /// The opv command, or `None` for a person's action with no command (unlocking the
+    /// 1Password app), which `does` then names. A trailing `--` is the person's own child
+    /// command, shown as `-- <command>` and never stored; such a step has no `argv`.
+    pub run: Option<Cmd>,
+    /// The action in words when there is no command.
+    pub does: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -393,6 +426,12 @@ pub enum FieldRule {
     SecretFile {
         problem: SecretFileRule,
     },
+    /// A line a producer printed breaks `opv.produce/1` (#253,
+    /// `docs/design/owner-value-ingestion.md` §5.2). Positions, limits and declared output
+    /// names only: never the producer's own text, nor serde's.
+    Produce {
+        produce: ProduceRule,
+    },
 }
 
 /// What is wrong with the file `opv set --from-file` reads. Every variant is a property
@@ -437,6 +476,163 @@ pub enum SupplyRule {
     /// `github.*` on this line: it is expanded into the step's logged script.
     ExpressionInSupplyStep { line: u32 },
 }
+
+// --- provision (#253, `docs/design/owner-value-ingestion.md`) ---------------------------
+
+/// What is wrong with a producer's `opv.produce/1` output (§5.2, admission). Line numbers,
+/// output positions, limits and the contract's declared output names only: a producer's
+/// text is never shown, and an undeclared output is named by its position.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "check", rename_all = "snake_case")]
+pub enum ProduceRule {
+    /// The line is not one JSON object.
+    NotJson { line: u32 },
+    /// The line has a field `opv.produce/1` does not define.
+    UnknownField { line: u32 },
+    /// `schema` is missing or is not `opv.produce/1`.
+    WrongSchema { line: u32 },
+    /// The line is longer than `limit` bytes.
+    LineTooLong { line: u32, limit: u64 },
+    /// The output is larger than `limit` bytes.
+    TooMuchOutput { limit: u64 },
+    /// The producer exited with no result or error line.
+    NoResult,
+    /// A line follows the result or error line.
+    ResultNotLast { line: u32 },
+    /// The result's `env` is not the run's `--env`.
+    WrongEnvironment { line: u32 },
+    /// The result's `nonce` is not this run's.
+    NonceMismatch { line: u32 },
+    /// The output at this position (1-based) of the result is not one the set uses.
+    Undeclared { position: u32 },
+    /// The result lacks these declared outputs.
+    Missing { names: Vec<String> },
+    /// The output at this position (1-based) repeats an earlier name.
+    Duplicate { position: u32 },
+    /// The declared output is an empty string.
+    Empty { output: String },
+    /// The declared output is not a JSON string, or holds a NUL.
+    NotAString { output: String },
+    /// The declared output is longer than `limit` bytes.
+    TooLarge { output: String, limit: u64 },
+    /// A notice's `open_url` is refused, so it was not opened.
+    OpenUrlRefused { line: u32, why: OpenUrlProblem },
+    /// An `error` line's code is not 1 to 40 of `[a-z_]`.
+    ErrorCode { line: u32 },
+}
+
+/// Why a notice's `open_url` is refused (§5.2). The URL itself is never shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenUrlProblem {
+    NotHttps,
+    HostNotListed,
+    TooLong { limit: u64 },
+    Userinfo,
+}
+
+// --- end provision -------------------------------------------------------------------------
+
+// --- sealed target (#271, design `sealed-target` §4.2): `opv unseal` --------------------------
+
+/// Why `opv unseal` refused a bundle: one `error.code` each ([`Cause::code`]).
+/// `detail` is the codec's own words, which name a field or a rule and never a value.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SealedRefusal {
+    /// The file is missing, too large, or breaks the `opv-sealed/1` format.
+    Malformed { detail: String },
+    /// The signature, or the `allowed_signers` file it is checked against, was refused.
+    SignatureInvalid { signers: PathBuf, detail: String },
+    /// The signed header's environment or product is not the one asked for.
+    ScopeMismatch {
+        field: String,
+        expected: String,
+        found: String,
+    },
+    /// The signed revision is below the deploy's `--min-revision`.
+    RevisionBelowFloor { revision: u64, floor: u64 },
+    /// The age identity could not be read, or is not one `AGE-SECRET-KEY-1…` line.
+    IdentityUnusable { from: IdentityFrom, detail: String },
+    /// The identity's recipient is not listed in the header, or no age stanza matched it.
+    /// `recipient` is its `sha256:…` fingerprint.
+    NotARecipient { recipient: Option<String> },
+    /// The decrypted payload does not bind to the verified header.
+    PayloadMismatch { detail: String },
+}
+
+/// Where `opv unseal` read its age identity from (D4); never the identity itself.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "from", rename_all = "snake_case")]
+pub enum IdentityFrom {
+    File { path: PathBuf },
+    Env { var: String },
+}
+
+/// The cause for a refusal of the bundle codec (`crate::bundle::crypto`), keeping its code:
+/// `bundle` is the bundle's path, `signers` the `allowed_signers` file, `from` where the
+/// identity came from. A codec error `opv unseal` can never produce (a sealing-side one) is
+/// opv's bug.
+pub fn sealed_refusal(
+    bundle: &std::path::Path,
+    signers: &std::path::Path,
+    from: Option<&IdentityFrom>,
+    err: &crate::bundle::crypto::CryptoError,
+) -> Cause {
+    use crate::bundle::crypto::CryptoError as E;
+    let refusal = match err {
+        E::Malformed(_) | E::AgeMalformed => SealedRefusal::Malformed {
+            detail: err.to_string(),
+        },
+        E::Signature(_) | E::Signers(_) => SealedRefusal::SignatureInvalid {
+            signers: signers.to_path_buf(),
+            detail: err.to_string(),
+        },
+        E::ScopeMismatch {
+            field,
+            expected,
+            found,
+        } => SealedRefusal::ScopeMismatch {
+            field: (*field).to_string(),
+            expected: expected.clone(),
+            found: found.clone(),
+        },
+        E::RevisionBelowFloor { revision, floor } => SealedRefusal::RevisionBelowFloor {
+            revision: *revision,
+            floor: *floor,
+        },
+        E::IdentityUnusable(why) => match from {
+            Some(from) => SealedRefusal::IdentityUnusable {
+                from: from.clone(),
+                detail: (*why).to_string(),
+            },
+            None => {
+                return Cause::Bug {
+                    site: "unseal parsed an identity it was not given",
+                };
+            }
+        },
+        E::NotARecipient => SealedRefusal::NotARecipient { recipient: None },
+        E::PayloadMismatch(_) => SealedRefusal::PayloadMismatch {
+            detail: err.to_string(),
+        },
+        E::RecipientUnsupported(_)
+        | E::SigningKeyInvalid(_)
+        | E::SealMismatch(_)
+        | E::SealsSigningKey(_)
+        | E::Internal(_) => {
+            return Cause::Bug {
+                site: "unseal met a sealing-side codec error",
+            };
+        }
+    };
+    Cause::SealedRefused {
+        bundle: bundle.to_path_buf(),
+        refusal,
+    }
+}
+
+// --- end sealed target ------------------------------------------------------------------------
 
 /// What a `NotFound` resource's state is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -510,6 +706,10 @@ pub enum Cause {
         /// The 1Password manifest search that found nothing too, when one ran (03.20: only
         /// the selected account is searched).
         manifest: Option<ManifestSearch>,
+        /// The `secrets.toml` files the bounded search below the repository found (FR-66),
+        /// when it ran: a hint only, never used without being named.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        found: Option<FoundConfigs>,
     },
     ConfigSourceMismatch {
         command: CommandId,
@@ -651,6 +851,10 @@ pub enum Cause {
         system: System,
         account: Option<AccountId>,
         state: SessionState,
+        /// Where `account` was chosen, when it was filled from the selection (FR-40): a
+        /// project-recorded account is left out of the sign-in step.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        selected_by: Option<AccountSource>,
     },
     AccountNotOnMachine {
         account: AccountRef,
@@ -666,6 +870,8 @@ pub enum Cause {
     /// picks one. Public code `account_required`.
     AccountRequired {
         accounts: Vec<AccountChoice>,
+        /// How far this process reaches a session: the sign-in step of each choice.
+        reach: crate::json::Reach,
     },
     InOtherAccount {
         vault: VaultId,
@@ -1060,6 +1266,35 @@ pub enum Cause {
         /// The file the caller named, as given: the person's own import reads it.
         file: PathBuf,
     },
+    // provision (#253, `docs/design/owner-value-ingestion.md` §5.2, §6, §9.3)
+    /// A producer ended without a usable result: its exit, its timeout, or its own closed
+    /// `error` code (§5.2). Nothing was written. Its stderr is never shown, so the cause
+    /// carries no text of the producer's beyond the code.
+    ProducerFailed {
+        producer: String,
+        why: ProducerFailure,
+    },
+    /// A producer's project file no longer has the `sha256` the contract pins (§3.2, vet
+    /// F17): an edited producer never receives the set's inputs before review.
+    ProducerChanged {
+        producer: String,
+        file: PathBuf,
+    },
+    /// The command needs something this platform does not have (D12: producers on native
+    /// Windows).
+    Unsupported {
+        feature: UnsupportedFeature,
+    },
+    // end provision
+    // sealed target (#271, design `sealed-target` §4.2): `opv unseal`'s refusals
+    /// `opv unseal` refused a sealed bundle. Every refusal but `payload_mismatch` stops
+    /// before anything is decrypted; none names a value, an identity or a recipient string,
+    /// only fingerprints.
+    SealedRefused {
+        bundle: PathBuf,
+        refusal: SealedRefusal,
+    },
+    // end sealed target
     Bug {
         site: &'static str,
     },
@@ -1349,6 +1584,90 @@ impl OperationRefusal {
     }
 }
 
+// --- provision (#253, `docs/design/owner-value-ingestion.md`) ---------------------------
+
+/// Why `opv provision` does not fill a set (§4.2, §4.5, §5.5). Member names are
+/// `product/KEY`; never a value, length or digest.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum ProvisionRefusal {
+    /// Some but not all members hold a value (§4.5); Slice A never fills part of a set.
+    Partial { missing: Vec<String> },
+    /// Every member holds a value, but these fail their rules (§4.5).
+    Inconsistent { members: Vec<String> },
+    /// `--replace` would re-make this `immutable` member (D8).
+    ImmutableMember { member: String },
+    /// The producer made the value environment `other` holds for this member (§5.5, vet
+    /// C21): one issuer client serves two environments.
+    SameAcrossEnvironments { member: String, other: EnvName },
+    /// The producers' timeouts plus the commit reserve need `needed_seconds`, and the run
+    /// has `left_seconds` (§4.2 step 7): refused before consent.
+    BudgetTooSmall {
+        needed_seconds: u64,
+        left_seconds: u64,
+    },
+    /// The set's item holds `holds` (an attachment, a website list, a field type opv does
+    /// not fully understand), which the one whole-item edit is not proven to keep (I4, §4.2
+    /// step 5): refused before anything is made. Names only.
+    ItemNotRewritable { holds: String },
+}
+
+impl ProvisionRefusal {
+    /// The reason in words.
+    pub fn words(&self) -> String {
+        match self {
+            ProvisionRefusal::Partial { missing } => format!(
+                "the set is partial ({} without a value), so it is completed only with --fill-missing",
+                missing.join(", ")
+            ),
+            ProvisionRefusal::Inconsistent { members } => format!(
+                "every member holds a value, but {} fail their rules",
+                members.join(", ")
+            ),
+            ProvisionRefusal::ImmutableMember { member } => {
+                format!("member {member} is immutable, so --replace cannot re-make the set")
+            }
+            ProvisionRefusal::SameAcrossEnvironments { member, other } => format!(
+                "the producer made the value of {member} that environment {other} already holds"
+            ),
+            ProvisionRefusal::BudgetTooSmall {
+                needed_seconds,
+                left_seconds,
+            } => format!(
+                "its producers and the write need {needed_seconds}s, and the run has {left_seconds}s left"
+            ),
+            ProvisionRefusal::ItemNotRewritable { holds } => {
+                format!("its item holds {holds}, which opv cannot prove one whole-item edit keeps")
+            }
+        }
+    }
+}
+
+/// How a producer ended without a usable result (§5.2).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "failure", rename_all = "snake_case")]
+pub enum ProducerFailure {
+    /// It exited with this status (a result before a non-zero exit is discarded).
+    Exit { status: i32 },
+    /// It was ended by this signal.
+    Signal { signal: i32 },
+    /// It did not end within its `timeout`; opv stopped its process group.
+    Timeout { seconds: u64 },
+    /// Its `error` line's code, from the closed vocabulary `[a-z_]{1,40}`.
+    Reported { code: String },
+}
+
+/// What this platform does not support (§4.2 step 3).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "feature", rename_all = "snake_case")]
+pub enum UnsupportedFeature {
+    /// Set `set` has a member made by `producer`, and opv runs no producer on native Windows
+    /// (no process group, group kill or core limit there; D12).
+    ProducerOnWindows { set: String, producer: String },
+}
+
+// --- end provision -------------------------------------------------------------------------
+
 impl GenerateRefusal {
     /// The reason in words.
     pub fn words(&self) -> &'static str {
@@ -1565,13 +1884,33 @@ pub enum CredentialProblem {
 }
 
 /// One of the person's own 1Password accounts, shown so they can choose
-/// (`AccountRequired`).
+/// (`AccountRequired`, [`Choice`]). It holds no session, token or value (SR-1).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AccountChoice {
     pub email: String,
     /// The sign-in address (`my.1password.com`).
     pub address: String,
     pub id: AccountId,
+    /// op's shorthand for the account, when op lists one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shorthand: Option<String>,
+    /// Whether this process is signed in to it (`op whoami --account <id>`'s exit status,
+    /// FR-49); `None` when not probed. It never selects a choice.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signed_in: Option<bool>,
+}
+
+/// The bounded search for `secrets.toml` below the repository root that a
+/// `ConfigNotFound` reports (FR-66): names only, never a file's contents.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FoundConfigs {
+    /// Absolute paths, at most 20, in the search's order.
+    pub paths: Vec<PathBuf>,
+    /// The `.opv` that names the configuration (`config = "<path>"`): the nearest one, or
+    /// the one opv would write at the repository root. Absolute.
+    pub dot_opv: PathBuf,
+    /// The search stopped at its cap (depth, files or folders visited).
+    pub stopped: bool,
 }
 
 /// The 1Password field type a credential's field must have.
@@ -1692,6 +2031,9 @@ pub enum LocalOp {
     McpSession,
     /// The operating system's random source (F2).
     RandomSource,
+    /// The exclusive lock beside a sealed bundle, held by another opv run sealing it
+    /// (design `sealed-target` §5.4); `path` is the bundle.
+    SealLock,
 }
 
 /// Why a mounted secrets volume would be unreadable or is of unknown readability
@@ -1811,6 +2153,23 @@ pub enum Guard {
         operation: &'static str,
         reason: OperationRefusal,
     },
+    // provision (#253, `docs/design/owner-value-ingestion.md` §4.2, §5.6)
+    /// `opv provision` does not fill set `set` in `env` (§4.2 steps 6, 7, 10). Names only;
+    /// never a value, length or digest.
+    ProvisionRefused {
+        set: String,
+        env: EnvName,
+        reason: ProvisionRefusal,
+    },
+    /// `product/key` is a member of set `set` (§5.6): `set`, `import` and `generate` refuse
+    /// to write it alone, because the set's members are made and written together.
+    SetMember {
+        product: ProductName,
+        key: KeyName,
+        env: EnvName,
+        set: String,
+    },
+    // end provision
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -1884,6 +2243,11 @@ pub enum InputKind {
     Workflow,
     /// The file `opv set --from-file` reads: its exact bytes are one key's value.
     SecretFile,
+    /// A producer's `opv.produce/1` output (#253; `path`: the producer's project file).
+    Produce,
+    /// A sealed bundle at `sealed.out` that `sync` cannot trust or replace (#271,
+    /// `sealed-target` §5.1, T8, T10; `path`: the bundle).
+    SealedBundle,
 }
 
 /// What an in-memory folder was needed for (R74).
@@ -1983,6 +2347,21 @@ impl Cause {
         self
     }
 
+    /// True for the session and account causes, whose `next` carries the schema-4 `argv`
+    /// when it is a typed command (FR-65; design agent-signin-readiness §2.3): the causes
+    /// `opv run`'s preflight stops on. Every other cause's `next` has no `argv` yet.
+    pub fn types_argv(&self) -> bool {
+        matches!(
+            self,
+            Cause::NotSignedIn { .. }
+                | Cause::AccountNotOnMachine { .. }
+                | Cause::AccountRequired { .. }
+                | Cause::AccountAmbiguous { .. }
+                | Cause::NeedsOwnSession { .. }
+                | Cause::CredentialRejected { .. }
+        )
+    }
+
     /// The stable machine-readable code (public contract, `schema_version` 2).
     pub fn code(&self) -> &'static str {
         use Cause::*;
@@ -1990,6 +2369,22 @@ impl Cause {
             ConfigNotFound { .. } => "config_not_found",
             ConfigSourceMismatch { .. } => "config_source_mismatch",
             ConfigUnreadable { .. } => "config_unreadable",
+            // sealed target (#271, design `sealed-target` §3.1): the configuration causes
+            ConfigInvalid {
+                rule:
+                    FieldRule::Check {
+                        check: ConfigCheck::SealedRecipientShared { .. },
+                    },
+                ..
+            } => "sealed_recipient_shared",
+            ConfigInvalid {
+                rule:
+                    FieldRule::Check {
+                        check: ConfigCheck::SealedSignerShared { .. },
+                    },
+                ..
+            } => "sealed_signer_shared",
+            // end sealed target
             ConfigInvalid { .. } => "config_invalid",
             ContractStale { .. } => "contract_stale",
             ValueInTextField { .. } => "value_in_text_field",
@@ -2085,6 +2480,9 @@ impl Cause {
             ValuesNeeded { .. } => "findings",
             GateFailed { .. } => "gate_failed",
             ImportTierRefused { .. } => "import_tier_refused",
+            ProducerFailed { .. } => "producer_failed",
+            ProducerChanged { .. } => "producer_changed",
+            Unsupported { .. } => "platform_unsupported",
             KeysBlocking { .. } => "keys_blocking",
             LocalFileTooOpen { .. } => "file_too_open",
             InputInvalid { .. } => "input_invalid",
@@ -2109,6 +2507,16 @@ impl Cause {
             SourceOnly { .. } => "source_only",
             TitleLookup { matches: 0, .. } => "title_not_found",
             TitleLookup { .. } => "title_ambiguous",
+            // sealed target (#271, design `sealed-target` §4.2): `opv unseal`'s refusals
+            SealedRefused { refusal, .. } => match refusal {
+                SealedRefusal::Malformed { .. } => "sealed_malformed",
+                SealedRefusal::SignatureInvalid { .. } => "sealed_signature_invalid",
+                SealedRefusal::ScopeMismatch { .. } => "sealed_scope_mismatch",
+                SealedRefusal::RevisionBelowFloor { .. } => "sealed_revision_below_floor",
+                SealedRefusal::IdentityUnusable { .. } => "sealed_identity_unusable",
+                SealedRefusal::NotARecipient { .. } => "sealed_not_a_recipient",
+                SealedRefusal::PayloadMismatch { .. } => "sealed_payload_mismatch",
+            },
             Bug { .. } => "internal_error",
         }
     }
@@ -2148,11 +2556,13 @@ impl Cause {
             | InputUnreadable { .. }
             | SourceOnly { .. }
             | TitleLookup { .. }
-            | AccountRequired { .. } => 2,
+            | AccountRequired { .. }
+            | ProducerChanged { .. } => 2,
             ToolMissing { .. }
             | ToolUnusable { .. }
             | RemoteVersionMismatch { .. }
-            | ChildStartFailed { .. } => 3,
+            | ChildStartFailed { .. }
+            | ProducerFailed { .. } => 3,
             InventoryIncomplete { .. }
             | ChangedBeforeWrite {
                 object: StoreObject::Item { .. },
@@ -2203,7 +2613,8 @@ impl Cause {
             | LocalIo { .. }
             | KeysBlocking { .. }
             | ImportTierRefused { .. }
-            | HandoffPipeContested { .. } => 6,
+            | HandoffPipeContested { .. }
+            | Unsupported { .. } => 6,
             NotSignedIn { .. }
             | AccountNotOnMachine { .. }
             | AccountAmbiguous { .. }
@@ -2222,6 +2633,13 @@ impl Cause {
             | SecretNotStored { .. } => 9,
             Partial { then, .. } | PersonalNotSetUp { then, .. } => then.exit_code(),
             Interrupted { signal, .. } => 128 + signal,
+            // An unusable identity is the caller's input (2), a wrong one a credential (7),
+            // every other refusal of a bundle a refusal (6).
+            SealedRefused { refusal, .. } => match refusal {
+                SealedRefusal::IdentityUnusable { .. } => 2,
+                SealedRefusal::NotARecipient { .. } => 7,
+                _ => 6,
+            },
             Bug { .. } => EXIT_INTERNAL,
         }
     }
@@ -2239,7 +2657,7 @@ impl Cause {
                 guard: self::Guard::Declined,
             }
             | LocalIo {
-                op: LocalOp::Stdout,
+                op: LocalOp::Stdout | LocalOp::SealLock,
                 ..
             } => RetryClass::Safe,
             CreateOutcomeUnknown {
@@ -2275,6 +2693,7 @@ impl Cause {
             | SecretNotStored { .. }
             | SourceOnly { .. }
             | SourceChanged { .. }
+            | Unsupported { .. }
             | Bug { .. } => RetryClass::Never,
             _ => RetryClass::AfterFix,
         }

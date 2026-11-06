@@ -934,6 +934,7 @@ fn describe_rules(r: &Rules) -> Vec<String> {
         prefix_by_mode,
         refuse_in,
         transform,
+        age_identity,
     } = r;
     let mut out = Vec::new();
     if let Some(p) = prefix {
@@ -985,6 +986,9 @@ fn describe_rules(r: &Rules) -> Vec<String> {
     }
     if let Some(t) = transform {
         out.push(format!("transform = {t:?}"));
+    }
+    if *age_identity {
+        out.push("age_identity = true".into());
     }
     out
 }

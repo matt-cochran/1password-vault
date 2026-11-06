@@ -83,9 +83,9 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 
 | Variant | Fields | Code | Retry | Do | Next |
 |---|---|---|---|---|---|
-| `ConfigNotFound` | searched_from: Path; env: Option<Env> | config_not_found | after_fix | — | `opv init <env>` when env is known, else `opv init --help` [R01] |
+| `ConfigNotFound` | searched_from: Path; env: Option<Env>; found: Option<FoundConfigs{paths, dot_opv, stopped}> (FR-66) | config_not_found | after_fix | one found: name it in `.opv` as `config = "<path relative to the .opv>"`; several: pick (PickBetween) | `opv init <env>` when env is known, else `opv init --help` [R01]; one found: rerun with `--config <path relative to cwd>`; several: none |
 | `ConfigSourceMismatch` | command: CommandId; manifest: ManifestRef | **config_source_mismatch** | never | "<command> works on a secrets.toml; this project's configuration is the 1Password manifest <title>" | `opv config edit`, or the command's manifest route [R02] |
-| `ConfigUnreadable` | path; io: IoKind; given_by: Flag/EnvVar/Discovered | config_unreadable | after_fix | named by given_by | rerun [R03] |
+| `ConfigUnreadable` | path; io: IoKind; given_by: Flag/EnvVar/Discovered/DotOpv{path} (FR-66) | config_unreadable | after_fix | named by given_by | rerun [R03] |
 | `ConfigInvalid` | source: ConfigSource; at: Location{line, col}; field: DottedPath; rule: FieldRule | config_invalid | after_fix | built from (field, rule) (§4.12) | rerun [R04–R08, R12] |
 | `RecordMissing` | what: Boundary{env, product} / StateVault{env, target}; source | boundary_missing / state_vault_missing | after_fix | — | file: `opv bootstrap`; manifest: `opv structure plan` [R09, R10] |
 | `StateVaultTooWide` | env; target; vault; shared_with; source; at | state_vault_wider_than_values | after_fix | "delete state_vault_id from [environments.E.targets.T]" | `opv bootstrap` [R11] |
@@ -94,6 +94,7 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 | `RegeneratedFileDiffers` | file; committed; in_place: bool | **regenerated_file_differs** | never | "decide which is right: update <file> or the committed configuration <committed>" | none: the person picks the direction (#178) |
 | `ManifestProblem` | state: NotFound{project, from} / Ambiguous{candidates, reason} / Exists{title, local_file} | manifest_not_found / manifest_ambiguous / manifest_exists | per state | per state | `opv projects`; `opv config check --file <f>`; `opv config edit` [R17–R19] |
 | `InventoryIncomplete` | unlisted: Vec<(Account, Cause)> | inventory_incomplete | after_fix | "sign in to account <id>" | `opv login --account <id> --no-record -- <rerun>` [R20] |
+| `ProducerChanged` (#253) | producer; file: the producer's project file named in `command` | **producer_changed** | after_fix | "review the change to <file>; once it is right, set sha256 of [producers.<producer>] to the file's new SHA-256" | rerun. Raised when the contract loads, before any producer runs or any input is read (`docs/design/owner-value-ingestion.md` §3.2, vet F17) |
 
 ### 4.2 Names and usage (exit 2)
 
@@ -110,7 +111,7 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 
 | Variant | Fields | Code | Retry | Do | Next |
 |---|---|---|---|---|---|
-| `NotSignedIn` | system: System; account: Option<Account>; state: SignedOut / Expired / AppLocked / AppPromptUnanswered{waited} | op_not_signed_in / **target_not_signed_in** | after_fix | app states: "unlock the 1Password app and approve its prompt"; targets: the typed vendor sign-in | 1Password: `opv login --account <id> -- <rerun>`; targets: rerun [R28, R29, R35] |
+| `NotSignedIn` | system: System; account: Option<Account>; state: SignedOut / Expired / AppLocked / AppPromptUnanswered{waited}; selected_by: Option<AccountSource> (FR-40: filled from the selection when the call carried no account) | op_not_signed_in / **target_not_signed_in** | after_fix | app states: "unlock the 1Password app and approve its prompt"; targets: the typed vendor sign-in | 1Password: `opv login --account <id> -- <rerun>`, without `--account` when `.opv` or the configuration records it; a child is `-- <command>` with no `argv`; targets: rerun [R28, R29, R35] |
 | `AccountNotOnMachine` | account; selected_by: AccountSource{path or var}; add_route: Cli / App{platform} | account_not_registered | after_fix | App: "add it in the 1Password app and turn on CLI integration"; Cli: "add it at op's prompt" | Cli: `opv login --add` (an email only in `--account`); App: `opv login` [R30] |
 | `AccountAmbiguous` | given; source; candidates: Vec<{id, email, shorthand}> | account_ambiguous | after_fix | "pick the account by its email" | `opv account list`; never `opv account use <first>` [R31] |
 | `InOtherAccount` | vault: VaultId; item: Option<ItemId>; selected: Account; owning: Option<Account>; unasked: Vec<Account>; searched: bool, the other accounts were listed and asked (§12.4, #153a); env | ids_not_in_account | after_fix | "select the owning account (opv account use <id>), or fix vault_id for <env>"; with no owner found, "sign in to <unasked> to look for vault <vault> there, or fix vault_id for <env>"; searched with every account asked, "no 1Password account on this machine holds vault <vault>: fix vault_id for <env> with a vault of account <selected>"; not searched (op listed no accounts), "find the account that holds vault <vault>, or fix vault_id for <env>" | `opv account use <owning>`; with accounts not asked, `opv login --account <first unasked> --no-record -- opv vault locate <vault>` (handoff); searched with every account asked, `op vault list --account <selected>`; not searched, `opv vault locate <vault>` [R32] |
@@ -136,6 +137,8 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 | `Guard::SupplyRefused` (#206) | env; entry: Named{product, key} (a declared key only) / Position{document, index}; reason: Undeclared{closest} / NotOptedIn / NotInEnvironment / OutOfScope{targets, product} / NotSupplied{keys} / Duplicate / WrongEnvironment{document_env} / Empty / TooShort / Placeholder / NotAString / RotateWithoutValue / RuleFailed{rule} / Stored{boundary} / Unproven / ImmutableDiffers / Stale{recorded, supplied} / SerialReused{serial} | policy_refused (guard `supply_refused`) | never | Undeclared: "declare the key with source = \"infrastructure\", or fix the producer's name" (with the closest infrastructure key); NotOptedIn: "P/K comes from 1Password; only an infrastructure key takes a supplied value"; NotInEnvironment, OutOfScope: "leave it out of this supply"; NotSupplied: "supply every infrastructure key in scope, or narrow the run with --product or --target"; Duplicate: "supply P/K once"; WrongEnvironment: "this document was produced for <env>"; Empty, TooShort, Placeholder, NotAString: "the producer gave no usable value for P/K"; RotateWithoutValue: "supply P/K in the same run to rotate it"; RuleFailed: "the supplied value of P/K fails rule <rule>; check the producer"; Stored: "archive field P/K in boundary B of E: infrastructure keys are never stored"; Unproven, ImmutableDiffers, Stale, SerialReused: the producer's fix, or one `--rotate P/K` | NotOptedIn, NotInEnvironment: `opv explain <p/K> --env <e>`; OutOfScope, NotSupplied: `opv plan <e> [--target <t>] [--product <p>]`; Stored: `opv propose key <p/K> --source infrastructure`; Undeclared and the target-state reasons: a person picks; otherwise none. Never a value, and an input name only when it is a declared key (`docs/design/deliver-only.md` §3, §4) |
 | `Guard::NotStored` (#206) | product; key; env | policy_refused (guard `not_stored`) | never | "change P/K where infrastructure produces it and re-run the deploy job, which supplies it to opv sync; it has no 1Password field" | `opv explain <p/K> --env <e>`. Raised from the configuration alone, before any prompt or 1Password call, by `opv set`, `opv import --replace/--rotate` and `opv open` (`docs/design/deliver-only.md` §4.4); `generate` refuses with `GenerateRefused{reason: Infrastructure}` (same Do and Next), `attest` with `AttestRefused{reason: NotStored}`, and `import` plans a found value `not_stored` without writing it |
 | `Guard::OperationRefused` (#234) | env; target; operation (`machines` / `machine-update` / `registry-push`); reason: WrongProvider{provider} / NoDeployCredentials / ImageOutsideApp{app} / RemoteDockerDaemon / ImageNotLocal{image} / CredentialStoreEscaped / MachineNotInApp{machine} / NotYetAvailable | policy_refused (guard `operation_refused`) | never | WrongProvider: "pick a Fly target of E"; NoDeployCredentials: "mint the target's deploy credentials: opv target credentials E --target T --create"; ImageOutsideApp: "name an image in registry.fly.io/<app>"; RemoteDockerDaemon: "unset DOCKER_CONTEXT and run the push next to a local docker daemon"; ImageNotLocal: "build or load the image into the local docker daemon first"; CredentialStoreEscaped: "run docker logout registry.fly.io under your own docker configuration"; MachineNotInApp: "name a Machine of target T"; NotYetAvailable: none | WrongProvider: `opv target list --env <e>`; NoDeployCredentials: `opv target credentials <e> --target <t>`; MachineNotInApp: `opv target op <e> --target <t> machines`; otherwise none. Every refusal is made before any write, and all but CredentialStoreEscaped and MachineNotInApp before any `op` call. Never a token (`docs/design/provider-operations.md` §4) |
+| `Guard::ProvisionRefused` (#253) | set; env; reason: Partial{missing} / Inconsistent{members} / ImmutableMember{member} / SameAcrossEnvironments{member, other} / BudgetTooSmall{needed_seconds, left_seconds} / ItemNotRewritable{holds} | policy_refused (guard `provision_refused`) | never | Partial: "make only the missing members, keeping every present one: opv provision S --env E --fill-missing"; Inconsistent: "re-make the whole set: opv provision S --env E --replace (the replaced values are kept in the item's opv · kept section)"; ImmutableMember: "leave out --replace: an immutable member is made once; remove immutable from M in the contract only if it must change"; SameAcrossEnvironments: "give environment E its own client at the issuer, not the one environment O uses, then make the set again"; BudgetTooSmall: "allow the run at least Ns with --timeout"; ItemNotRewritable: "in 1Password, move H out of the item of environment E into an item of its own, then run opv provision S --env E again" | BudgetTooSmall: a handoff of the same command with `--timeout <needed>`; Partial: a handoff of `opv provision S --env E --fill-missing`; Inconsistent: a handoff of `opv provision S --env E --replace`; otherwise `opv ready <e>`. ItemNotRewritable when the item is read (§4.2 step 5), Partial and Inconsistent before any producer runs (step 6), ImmutableMember and BudgetTooSmall before consent (step 7), SameAcrossEnvironments after producing and before the write (step 10). Member names only; never a value, length or digest (`docs/design/owner-value-ingestion.md` §4.5, §5.5) |
+| `Guard::SetMember` (#253) | product; key; env; set | policy_refused (guard `set_member`) | never | "make it with its set, in your own terminal: opv provision S --env E --replace" | a handoff of `opv provision S --env E --replace`. Raised by `opv set`, `set --from-file`, `opv import` and `opv apply --generate` from the configuration alone, before any prompt (§5.6) |
 | `MountUnreadable` | workload; container; run_as: Option<u32>; why: NoFsGroup / RunAsUnknown; env; target | **mount_unreadable** | after_fix | "set spec.template.spec.securityContext.fsGroup (any group, for example 10001), or runAsUser: 0. Nothing was written." | `opv plan <env> --target <t>` (K5/K6 wire it) |
 
 ### 4.6 Outcomes, availability and budgets
@@ -152,6 +155,8 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 | `ConcurrentEdit` | object: StoreObject | **concurrent_edit** | 4 | check_first | "check <object>'s history in 1Password and keep the right version" | a read, never the write [R14] |
 | `ReadBackMissing` | vault; item; fields; by: CommandId | tidy_unverified | 4 | after_fix | "restore <fields> from the item's history in 1Password" | the writing command [R55] |
 
+`opv provision` (#253) commits through the one checked writer `import::write_item` (`docs/design/owner-value-ingestion.md` §4.6, D10) and adds no cause for it: a member field changed between the plan's read and the write is `ChangedBeforeWrite{Item}` (item_changed, nothing written); an echoed version other than the read's + 1 is not a cause but the receipt note `concurrent_edit` (the write stands, its members verified); a final read that lacks a written field is `ReadBackMissing`; and an unknown outcome the final read cannot settle is `WriteOutcomeUnknown`. A failed commit after a producer ran has the fixed Do "the producer's outputs were not stored; what it created at its issuer still exists" (vet F19), added by the provision use case.
+
 ### 4.7 External tools (exit 3, or 4/5)
 
 | Variant | Fields | Code | Retry | Do | Next |
@@ -160,6 +165,7 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 | `ToolUnusable` | tool; path; why: NotExecutable / WslInteropOff / TooOld{have, min} / VersionUnreadable / SpawnFailed{io} / WindowsExeFromWsl | **tool_unusable** | after_fix | per why | `opv doctor` [R57] |
 | `UnexpectedOutput` | system; call; at; during: Read | **unexpected_output** | never | "update <tool> (opv doctor checks its version)" | `opv doctor` [R58] |
 | `Unrecognized` | system; call; account: Option | **unrecognized_failure** | after_fix | "<tool>'s reply is shown above; opv does not recognise it" | `opv doctor --env E` [R59] |
+| `ProducerFailed` (#253) | producer; why: Exit{status} / Signal{signal} / Timeout{seconds} / Reported{code} | **producer_failed** | after_fix | Exit: "see producer P's documentation for exit status N; opv never shows its output"; Signal: "check what ended producer P with signal N"; Timeout: "finish the producer's step (such as its consent page) within Ns, or raise timeout in [producers.P] (at most 15m)"; Reported: "see producer P's documentation for <code>" | rerun. One attempt, never retried by opv; nothing written. Its stderr is never shown: a producer explains failure only by its closed `error` code `[a-z_]{1,40}`, rendered as "producer P reported <code>" (`docs/design/owner-value-ingestion.md` §5.2) |
 
 ### 4.8 Person-only steps and local inputs (exit 6, or 8)
 
@@ -176,6 +182,7 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 | `InputInvalid` | path; kind: Dotenv / Recipe / Receipt; at; field; rule | **input_invalid** | after_fix | "edit <path> at line L: <rule>" | rerun [R67, R68, R83] |
 | `InputInvalid` (kind Supply, #206) | path `<stdin>`; at (NotJson); field: `standard input` / `document N`; rule: Supply{StdinIsTerminal / NotJson{line, col} / UnknownField / WrongSchema / TooLarge{limit} / TooManyNames{limit} / MissingSerial / NoValues / NoDocuments / Timeout} | **input_invalid** (exit 2) | after_fix | the producer's fix, e.g. "add the producer's serial to document N"; positions only, never serde's text | none |
 | `InputInvalid` (kind Workflow, #206) | path; at; field; rule: Supply{ExpressionInSupplyStep{line}} | **input_invalid** | after_fix | "edit <path>: pass the value through the step's env: and use only github.* expressions in its script" | rerun |
+| `InputInvalid` (kind Produce, #253) | path: the producer's project file; at; field; rule: Produce{NotJson{line} / UnknownField{line} / WrongSchema{line} / LineTooLong{line, limit} / TooMuchOutput{limit} / NoResult / ResultNotLast{line} / WrongEnvironment{line} / NonceMismatch{line} / Undeclared{position} / Missing{names} / Duplicate{position} / Empty{output} / NotAString{output} / TooLarge{output, limit} / OpenUrlRefused{line, why: NotHttps / HostNotListed / TooLong{limit} / Userinfo} / ErrorCode{line}} | **input_invalid** (exit 2) | after_fix | the producer maintainer's fix, e.g. "make the producer echo the request's nonce in its result"; line numbers, output positions and declared output names only, never the producer's text or serde's | none. An undeclared output is named by its position; a refused `open_url` is not opened and not shown (`docs/design/owner-value-ingestion.md` §5.2) |
 
 ### 4.9 Approvals and plans (exit 6)
 
@@ -198,13 +205,14 @@ Where a code's meaning is unchanged, the code keeps today's name. New codes are 
 | `DeliveryUnverified` | env; target; product; state: NotRecorded / Superseded{receipt} / OtherAccount{account} / ChangedOnTarget / ChangedInOnePassword / Unverifiable{cause} | **delivery_unverified** | 8 | after_fix | per state | per state [R82, R84] |
 | `TargetDrift` | env; target; names: Vec<String> | **target_drift** | 8 | after_fix | "re-run the sync to restore 1Password's values" | `opv plan <env> --target <t>` |
 | `SourceChanged` | env; no_record: bool | **source_changed** | 10 | never | no_record: "run opv bootstrap to record delivery items" | no_record: `opv bootstrap`; else the sync: `opv sync <env> --deploy` (or `opv plan <env>` on a guarded environment). A result, not a failure (`ok: true`) [R83] |
+| `Unsupported` (#253) | feature: ProducerOnWindows{set, producer} | **platform_unsupported** | 6 | never | "run opv provision from WSL on this machine" | none. Native Windows has no process group, group kill or core limit for a producer (D12); generated members work everywhere |
 | `Bug` | site: InvariantId (static) | **internal_error** | 70 | never | "report this as an opv bug: <issues URL>" | `opv version` [R85] |
 
 `McpClientProtocolFailed` [R86] is not an opv cause: it is the MCP transport's own error, reported by the MCP library.
 
 ### 4.11 Codes
 
-- **New:** config_source_mismatch, config_unreadable, config_not_editable, copies_differ, regenerated_file_differs, unknown_target, unknown_role, unknown_profile, ambiguous_name, choice_required, nothing_in_scope, already_declared, target_not_signed_in, own_session_required, credential_rejected, resource_not_found, create_outcome_unknown, budget_spent, concurrent_edit, tool_unusable, unexpected_output, unrecognized_failure, declined, file_too_open, input_invalid, approval_used, plan_unknown, private_dir_failed, remote_unreachable, remote_version_mismatch, child_start_failed, delivery_unverified, target_drift, source_changed, mount_unreadable, shell_eval_required and shell_mismatch (0.14.0, #203), internal_error.
+- **New:** config_source_mismatch, config_unreadable, config_not_editable, copies_differ, regenerated_file_differs, unknown_target, unknown_role, unknown_profile, ambiguous_name, choice_required, nothing_in_scope, already_declared, target_not_signed_in, own_session_required, credential_rejected, resource_not_found, create_outcome_unknown, budget_spent, concurrent_edit, tool_unusable, unexpected_output, unrecognized_failure, declined, file_too_open, input_invalid, approval_used, plan_unknown, private_dir_failed, remote_unreachable, remote_version_mismatch, child_start_failed, delivery_unverified, target_drift, source_changed, mount_unreadable, shell_eval_required and shell_mismatch (0.14.0, #203), producer_failed, producer_changed and platform_unsupported (0.18.0, #253), internal_error.
 - **Removed:** source_error, target_error, auth_required, desktop_app_unavailable (now a `NotSignedIn` state), op_unexpected (now `unrecognized_failure`), duplicate_scope (now `input_invalid`), credential_rejected for op's prompt (now `NotSignedIn`), and the MCP-only codes.
 - **Exit 70 (internal error)** is new; it follows `EX_SOFTWARE`.
 
@@ -226,6 +234,9 @@ Under FR-60 (one way only) nothing keeps the old names. The `--json` `schema_ver
 - `NoEnvironment`;
 - `ModeUnmapped{env, mode, allowed}`, checked at load;
 - `Collision{rendered, other}`.
+- `Check{check}` for `[sets]` and `[producers]` (#253, `docs/design/owner-value-ingestion.md` §3.2): SetMemberNotWanted{member, env}, SetSpansBoundaries{env, boundaries} (D1), MemberOfTwoSets{member, sets} (D13), SetMemberNotStored{member, why}, GenerateNoRecipe{member}, GenerateBytes{bytes}, ProducerOutputUndeclared{producer, output, outputs}, ProducerOutputUnused{producer, output}, ProducerIsOp{program} (vet F6), ProducerArgumentSecret{index} (the argument itself is never shown), ProducerShaMissing{file}, ProducerInputOutside{input, key}, ProducerTimeoutCap{max} (vet F10), OpenUrlHost{host}; an undeclared producer is `Undeclared{kind: Producer}`.
+- `Check{check}` for a `sealed` target (#271, `docs/design/sealed-target.md` §3.1): SealedRecipientShared{recipient, other_env, other_target} (`sealed_recipient_shared`), SealedSignerShared{signer, other_env, other_target} (`sealed_signer_shared`), SealedDeliversIdentity{target} (T14), SealedDeliversSigner{target} (G4) and SealedDeliversInfrastructure{product, key, target} (#275: a `source = "infrastructure"` key is supplied at sync and never stored, so a sealed target has no value to seal; refused at load at the key, `config_invalid`). Recipients and signers are named by fingerprint only.
+- `Produce{produce}`: a producer's `opv.produce/1` output (`InputInvalid`, kind Produce, §4.8).
 
 ### 4.13 Ready findings (not causes)
 
@@ -287,7 +298,11 @@ pub enum Next {
     Handoff(Command),              // only a person runs it (approve, --confirm, login)
     Vendor(VendorCommand),         // a typed vendor command (flyctl auth login, ssh -p …)
     None(NoNextReason),            // CopiesDiffer, RegeneratedFileDiffers: the person picks the direction
+    Choose(Choose),                // FR-65: a person picks one of 2+ choices, whose steps then run
 }
+pub struct Choose { reach: Reach, choices: Vec<Choice> }        // Reach: App | Shell | None
+pub struct Choice { account: AccountChoice, steps: Vec<Step> }
+pub struct Step { kind: NextKind, actor: NextActor, effect: StepEffect, run: Option<Cmd>, does: Option<&'static str> }
 pub enum Action { /* typed, rendered from a table: Grant{…}, FillValue{…}, Unset{var}, Chmod{…}, … */ }
 ```
 
@@ -306,6 +321,8 @@ pub enum Action { /* typed, rendered from a table: Grant{…}, FillValue{…}, U
 - **opv never confirms for the person.** `--confirm`, `--approved`, `--expect-plan` and `--prune-immutable` can appear only inside a `Handoff`.
 - **No blind re-run after an unknown create.** `CreateOutcomeUnknown` with `refind: Check` has no `Rerun` arm.
 - **No re-run of a used approval.** `Partial` and `ApprovalUsed` produce only `Check`/`Run` reads.
+- **No guessed account (FR-65).** `Next::Choose` is built only by `cause::step::account_choices(candidates, reach, rerun)`, and only with two or more candidates; one candidate is recorded (`opv account use <id>`), none is the person's `opv login --add`. There is no accessor for a "first" choice, and `signed_in` never selects one.
+- **No `argv` from display text (FR-65).** A schema-4 `argv` comes only from `Cmd::exec_argv`, which is `None` for a trailing `--` (the child placeholder) and for a shell refresh line. `render::typed_next_value` adds it for the producers migrated to it (`Cause::types_argv`: the session and account causes); `render::next_value` never does.
 
 ### 6.3 `human_required` is derived
 
@@ -314,7 +331,27 @@ pub enum Action { /* typed, rendered from a table: Grant{…}, FillValue{…}, U
 - an `Action` marked person-only: Grant, FillValue, Approve, AddAccountInApp, OwnerSetup, Revoke, PickBetween, Confirm;
 - or one of the variants `NeedsTerminal`, `NeedsOwnSession`, `NeedsConfirm`, `ApprovalMissing`.
 
-It can't disagree with the step, and the CLI and MCP can't disagree with each other.
+It can't disagree with the step, and the CLI and MCP can't disagree with each other. A `Choose` is a person's step too.
+
+**`human_required` implies `next.actor == person`** (FR-65, agent-signin-readiness vet item 7), checked over every catalog example by `render::tests::human_required_implies_person_actor`. The rule is scoped, not blanket: these codes keep the assistant's read as their `next` while `human_required` stays true, because a person-only Do comes first and the read then shows whether it took (`cause::codes::ASSISTANT_READS_AFTER_PERSON`; `every_decided_assistant_read_is_still_one` keeps the list free of stale entries). Flipping them to `authorize`/`person` would stop assistants from running harmless reads (design A15); turning `human_required` off would hide that a person must act.
+
+| Code | Do (person) | Next (assistant read) | Decision |
+|---|---|---|---|
+| `account_required` | pick the project's account | was `opv account list` | **flipped**: `choose`, `actor: person` (FR-65) |
+| `account_ambiguous` | pick the account by ID | `opv account list` | keep: the list shows the candidates' IDs |
+| `choice_required` | pick between candidates | `opv contract` | keep: the read lists them |
+| `manifest_ambiguous` | pick the project's manifest | `opv projects` | keep: the read lists them |
+| `concurrent_edit` | decide which edit wins | `opv status <env>` | keep: the read shows the current state |
+| `ids_not_in_account` | fix the IDs or switch account | `opv account use <owning>` | keep: the owning account was found by search, not guessed |
+| `confirm_mismatch` | confirm the environment | `opv plan <env>` | keep: the plan shows what a confirmation would apply |
+| `create_outcome_unknown` | revoke an orphan | the refind read | keep: the read shows whether it was created |
+| `secret_not_stored` | revoke the unstored secret | `opv target credentials …` | keep: the read shows what remains |
+| `permission_denied`, `vault_no_access` | an owner grants the right | `opv doctor --env …` | keep: doctor shows whether the grant took |
+| `owner_setup_required` | an owner's setup at the provider | `opv ready` | keep: ready shows whether it took |
+| `findings`, `keys_blocking` | fill the value in 1Password | `opv open …` | keep: the read opens the item to fill |
+| `input_invalid` | edit the input file (it holds values) | the same command | keep: the re-run checks the edited file |
+| `deploy_credentials_failed`, `credential_rejected` | replace or unset the credential | `opv doctor …` | keep: doctor shows whether the credential works |
+| `target_not_signed_in` | the vendor sign-in (`flyctl auth login`, …) | the same command | keep: the vendor's sign-in is stored for the user, so the re-run sees it |
 
 It is **guidance, not enforcement**. An agent with a shell can run anything the person can; §9 says what actually stops an agent.
 

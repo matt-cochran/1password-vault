@@ -45,6 +45,18 @@ Every key is declared for exactly the environments that use it. The `web` bounda
 holds the `web` section, the `shared` boundary item the `shared` section; a `from` key
 reads the source product's field.
 
+## The sealed target's world (#271)
+
+`world.json` also holds what the sealed target's scenarios (`scenarios/sealed.rs`) need;
+the target section itself is appended by those scenarios, so the other snapshots do not
+change:
+
+- `e2e-app · box · signer`: the deploy credentials, a 1Password SSH Key item (`SSH_KEY`,
+  field `private key` typed `SSHKEY`: PKCS#8 in `value`, OpenSSH in
+  `ssh_formats.openssh.value`). It carries the **test-only** fixture signer of
+  `tests/fixtures/sealed/kat/`, which protects nothing; it is a key, not a marker.
+- `e2e-app · box · state`: the target's state vault, with its `web` delivery item.
+
 ## Running the e2e tests
 
 The Rust test `tests/e2e_app_loads.rs` loads the configuration and opens the world through

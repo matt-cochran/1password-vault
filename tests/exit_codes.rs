@@ -152,7 +152,7 @@ fn verbose_json_names_the_delivered_document() {
     assert!(stderr.contains(&want), "{stderr}");
 }
 
-/// #276: `target list --json` prints a top-level array, a document since before 0.17.4.
+/// #276: `target list --json` prints a top-level array, a document since 0.17.2 and before (#276).
 #[test]
 fn target_list_json_exits_zero() {
     let out = opv()

@@ -65,7 +65,15 @@ class HookTests(unittest.TestCase):
 
     def test_unknown_schema_returns_unconfirmed_context(self):
         self.assertIn("could not be confirmed", self.run_hook(
+            self.receipt([]).replace("'schema_version': 2", "'schema_version': 5")).stdout)
+
+    def test_receipt_from_opv_0_12_is_still_read(self):
+        self.assertIn("no blocking findings", self.run_hook(
             self.receipt([]).replace("'schema_version': 2", "'schema_version': 3")).stdout)
+
+    def test_receipt_from_opv_0_18_is_read(self):
+        self.assertIn("no blocking findings", self.run_hook(
+            self.receipt([]).replace("'schema_version': 2", "'schema_version': 4")).stdout)
 
     def test_receipt_from_opv_0_9_is_still_read(self):
         self.assertIn("no blocking findings", self.run_hook(

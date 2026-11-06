@@ -27,3 +27,5 @@ pub mod onepassword_manifest;
 pub mod onepassword_tidy;
 pub(crate) mod probe;
 pub mod registry;
+/// The sealed target (#271): signed, encrypted bundles the runtime opens without 1Password.
+pub mod sealed;

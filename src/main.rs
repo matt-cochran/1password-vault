@@ -518,6 +518,17 @@ value is replaced only when named with --replace (immutable keys also need --rot
 Values are never printed. --from target:<name> reads that target's Key Vault, Kubernetes
 and GitHub variables; Fly and GitHub secrets cannot be read back.";
 
+const PROVISION_QUICK: &str = "\
+Examples:
+  opv provision workspace-admin-grant --env prod --dry-run   # the plan; nothing run or written
+  opv provision workspace-admin-grant --env prod             # make the set, typed confirmation";
+
+const PROVISION_MORE: &str = "\
+Makes every member of a contract [sets.<SET>] (its producers run once, its generated members
+are made) and writes them in one checked edit of the set's one item. Needs your own interactive
+terminal: an AI assistant runs only --dry-run --json and hands the rest to the user. No value
+is printed; the receipt names versions and members only.";
+
 const SCHEMA_QUICK: &str = "\
 Examples:
   opv schema                       # the whole description
@@ -793,6 +804,16 @@ enum Cmd {
         /// 1Password. Without it, drift stays a printed line and the exit code is unchanged.
         #[arg(long, requires = "env")]
         fail_on_drift: bool,
+        /// Resolve a sealed target's bundle paths under DIR, a checkout of the repository
+        /// that holds them, instead of beside the configuration (as `opv sync --sealed-root`).
+        #[arg(
+            long,
+            value_name = "DIR",
+            requires = "env",
+            hide_short_help = true,
+            hide_long_help = true
+        )]
+        sealed_root: Option<std::path::PathBuf>,
     },
     /// List the projects whose configuration lives in 1Password (names only).
     ///
@@ -843,6 +864,61 @@ enum Cmd {
             trailing_var_arg = true,
             allow_hyphen_values = true
         )]
+        command: Vec<String>,
+    },
+    /// Verify a sealed bundle offline and print its signed header, never a value; with
+    /// --exec, run your app with its values (#271).
+    // The runtime side of a sealed target: it reads the bundle, the allowed_signers file and
+    // an age identity, and nothing else; the signature, scope and revision are checked before
+    // anything is decrypted. (Kept out of `--help` for H9's 50-line cap; see
+    // docs/sealed-delivery.md.)
+    #[command(before_help = UNSEAL_QUICK)]
+    Unseal {
+        /// The sealed bundle file that opv sync wrote.
+        #[arg(value_name = "BUNDLE")]
+        bundle: PathBuf,
+        /// The environment the bundle must be signed for; also the allowed_signers principal.
+        #[arg(long, value_name = "ENV")]
+        env: String,
+        /// The product the bundle must be sealed for.
+        #[arg(long, value_name = "PRODUCT")]
+        product: String,
+        /// The project the bundle must be sealed for (optional; binds it to one project).
+        #[arg(long, value_name = "PROJECT")]
+        project: Option<String>,
+        /// The allowed_signers file: `<env> namespaces="opv-sealed" ssh-ed25519 <key>` lines.
+        #[arg(long, value_name = "FILE")]
+        signers: PathBuf,
+        /// Read the age identity from this file (a platform secret file or a 0400 file).
+        #[arg(
+            long,
+            value_name = "PATH",
+            conflicts_with = "identity_env",
+            required_unless_present_any = ["identity_env", "verify_only"]
+        )]
+        identity_file: Option<PathBuf>,
+        /// Read the age identity once from this environment variable (environment-only
+        /// platforms). The identity is never an argument.
+        #[arg(long, value_name = "VAR")]
+        identity_env: Option<String>,
+        /// Refuse a bundle whose signed revision is below N (the deploy's rollback floor).
+        #[arg(long, value_name = "N")]
+        min_revision: Option<u64>,
+        /// Check without decrypting: signature, header, revision, and with an identity its
+        /// membership; with file keys, the RAM-backed runtime folder.
+        #[arg(long)]
+        verify_only: bool,
+        /// Print one JSON document (schema opv.unseal/1) instead of lines.
+        #[arg(long, conflicts_with = "exec")]
+        json: bool,
+        /// Run the command after `--` with the bundle's values: variables in its
+        /// environment (a bundle name wins over an inherited one, named on stderr), file
+        /// keys in a private RAM folder. OP_* and the --identity-env variable never reach
+        /// it; its exit code is opv's.
+        #[arg(long, conflicts_with = "verify_only", requires = "command")]
+        exec: bool,
+        /// With --exec: the command and its arguments, after `--`.
+        #[arg(last = true, requires = "exec", value_name = "COMMAND")]
         command: Vec<String>,
     },
     /// Propose a change: the contract diff and its plan id. Writes nothing unless --write,
@@ -930,6 +1006,29 @@ enum Cmd {
         #[arg(long, value_name = "ENV", hide_short_help = true)]
         confirm: Option<String>,
         /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Make a contract set's values and write them together into its 1Password item (your
+    /// own terminal only).
+    #[command(before_help = PROVISION_QUICK, after_help = PROVISION_MORE)]
+    Provision {
+        /// The set: a [sets.<SET>] of the contract.
+        #[arg(value_name = "SET")]
+        set: String,
+        /// Environment whose item receives the set; one of the set's environments.
+        #[arg(long, required = true)]
+        env: String,
+        /// Show the plan and the set's state; run nothing, make nothing, write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Re-make the whole set (rotation, re-consent); old values are kept in the item.
+        #[arg(long, conflicts_with = "fill_missing")]
+        replace: bool,
+        /// Complete a partial set: make only its missing members, keeping every present one.
+        #[arg(long)]
+        fill_missing: bool,
+        /// Print the plan (--dry-run) or the receipt as one JSON document.
         #[arg(long)]
         json: bool,
     },
@@ -1255,6 +1354,15 @@ struct PlanArgs {
     /// the plan id, so a plan with rotation never shares an id with one without.
     #[arg(long, value_name = "PRODUCT/KEY", hide_short_help = true)]
     rotate: Vec<String>,
+    /// Resolve a sealed target's bundle paths under DIR, a checkout of the repository that
+    /// holds them, instead of beside the configuration (as `opv sync --sealed-root`).
+    #[arg(
+        long,
+        value_name = "DIR",
+        hide_short_help = true,
+        hide_long_help = true
+    )]
+    sealed_root: Option<std::path::PathBuf>,
 }
 
 /// Arguments of `sync`.
@@ -1318,6 +1426,15 @@ struct SyncArgs {
         hide_long_help = true
     )]
     supply_stdin: bool,
+    /// Resolve a sealed target's bundle paths under DIR, a checkout of the repository that
+    /// holds them, instead of beside the configuration.
+    #[arg(
+        long,
+        value_name = "DIR",
+        hide_short_help = true,
+        hide_long_help = true
+    )]
+    sealed_root: Option<std::path::PathBuf>,
 }
 
 impl From<SyncArgs> for sync::SyncOpts {
@@ -1335,6 +1452,7 @@ impl From<SyncArgs> for sync::SyncOpts {
             targets: a.target,
             retire: a.retire,
             supply_stdin: a.supply_stdin,
+            sealed_root: a.sealed_root,
         }
     }
 }
@@ -1559,6 +1677,15 @@ enum DeliveryCmd {
         /// Print one JSON document instead of lines.
         #[arg(long)]
         json: bool,
+        /// Resolve a sealed target's bundle paths under DIR, a checkout of the repository
+        /// that holds them, instead of beside the configuration (as `opv sync --sealed-root`).
+        #[arg(
+            long,
+            value_name = "DIR",
+            hide_short_help = true,
+            hide_long_help = true
+        )]
+        sealed_root: Option<std::path::PathBuf>,
     },
 }
 
@@ -1574,6 +1701,11 @@ Examples:
   opv changed prod                       # did any source item change since the last sync?
   opv changed prod --product api         # only api's placements
   opv changed prod --json                # one JSON document; exit 10 when something changed";
+
+const UNSEAL_QUICK: &str = "\
+Examples:
+  opv unseal app.opv-sealed --env prod --product api --signers allowed_signers --verify-only
+  opv unseal app.opv-sealed --env prod --product api --signers allowed_signers --identity-env AGE_IDENTITY --exec -- ./server";
 
 #[derive(Subcommand)]
 enum CiCmd {
@@ -2073,7 +2205,8 @@ fn main() -> ExitCode {
             let _ = guard.flush();
             res
         };
-        let signed_out = matches!(&res, Err(e) if e.code_str() == "op_not_signed_in");
+        // `opv run` is replayed only before its child started (#266, D4): never twice.
+        let signed_out = run_cmd::may_replay(&res);
         if may_sign_in && signed_out && !signed_in {
             match sign_in_here() {
                 // Once: a second failure is reported as it is.
@@ -2534,6 +2667,7 @@ impl Cmd {
             Cmd::Run { env, .. }
             | Cmd::Changed { env, .. }
             | Cmd::Set { env, .. }
+            | Cmd::Provision { env, .. }
             | Cmd::Config(ConfigCmd::Export { env: Some(env), .. }) => Some((env, Reach::Store)),
             Cmd::Status { env: Some(env), .. } | Cmd::History { env, .. } => {
                 Some((env, Reach::Target))
@@ -2594,6 +2728,7 @@ impl Cmd {
             | Cmd::Apply { json, .. }
             | Cmd::Set { json, .. }
             | Cmd::Import { json, .. }
+            | Cmd::Provision { json, .. }
             | Cmd::Delivery(DeliveryCmd::Verify { json, .. })
             | Cmd::Changed { json, .. }
             | Cmd::Target(TargetCmd::List { json, .. })
@@ -2601,7 +2736,8 @@ impl Cmd {
             | Cmd::Account(AccountCmd::List { json, .. })
             | Cmd::Account(AccountCmd::Use { json, .. })
             | Cmd::Skill(SkillCmd::Install { json, .. })
-            | Cmd::Skill(SkillCmd::Status { json, .. }) => *json,
+            | Cmd::Skill(SkillCmd::Status { json, .. })
+            | Cmd::Unseal { json, .. } => *json,
             Cmd::Plan(a) => a.json,
             Cmd::Sync(a) => a.json,
             Cmd::Schema => true,
@@ -2721,6 +2857,45 @@ fn run(
     }
     if let Cmd::RemoteReceive = &cli.cmd {
         return opv::app::remote_delivery::receive(Box::new(io::stdin()));
+    }
+    // #271: the runtime reads only the bundle, the signers file and the identity: no
+    // configuration, no account, no 1Password.
+    if let Cmd::Unseal {
+        bundle,
+        env,
+        product,
+        project,
+        signers,
+        identity_file,
+        identity_env,
+        min_revision,
+        verify_only,
+        json,
+        exec,
+        command,
+    } = &cli.cmd
+    {
+        use opv::app::unseal::{IdentitySource, Request};
+        let identity = match (identity_file, identity_env) {
+            (Some(path), _) => Some(IdentitySource::File(path.clone())),
+            (None, Some(var)) => Some(IdentitySource::Env(var.clone())),
+            (None, None) => None,
+        };
+        let req = Request {
+            bundle: bundle.clone(),
+            env: env.clone(),
+            product: product.clone(),
+            project: project.clone(),
+            signers: signers.clone(),
+            identity,
+            min_revision: *min_revision,
+            verify_only: *verify_only,
+            json: *json,
+        };
+        if *exec {
+            return opv::app::unseal_exec::run(&req, command);
+        }
+        return opv::app::unseal::run(&req, out);
     }
     if let Cmd::Run { command, .. } = &cli.cmd {
         let argv: Vec<String> = std::env::args().collect();
@@ -3468,6 +3643,15 @@ fn home_missing(here: &std::path::Path, target: SkillTarget, force: bool) -> Err
 
 /// opv's own local input or output failed (`LocalIo`): the folder, its program file, the
 /// home folder or the output stream. No path is named; the operation says which.
+/// `fleet` with its targets' own files under `root` when `--sealed-root` gives one
+/// (design `sealed-target` D12: sync, status and delivery verify resolve bundles alike).
+fn rooted(fleet: opv::domain::Fleet, root: Option<&std::path::Path>) -> opv::domain::Fleet {
+    match root {
+        Some(root) => sync::with_out_root(&fleet, root),
+        None => fleet,
+    }
+}
+
 fn local_io(op: opv::cause::LocalOp, kind: io::ErrorKind) -> Error {
     opv::cause::Cause::LocalIo {
         op,
@@ -4796,6 +4980,96 @@ fn target_op(
         .map_err(write_err)
 }
 
+/// `opv provision` (#253): the use case judges the caller, plans, confirms and writes; this
+/// prints its plan (`--dry-run`) or its receipt, as text or one JSON document. The producers'
+/// working directory is the contract's own (a manifest has none: the current directory).
+#[allow(clippy::too_many_arguments)]
+fn run_provision(
+    fleet: &opv::domain::Fleet,
+    host_env: &dyn opv::host::HostEnv,
+    set: &str,
+    env: &str,
+    dry_run: bool,
+    (replace, fill_missing): (bool, bool),
+    json: bool,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    use opv::app::provision::{self, Outcome, Request, TerminalConsole};
+    let project = match &fleet.read_from.0 {
+        opv::cause::ConfigSource::File { path, .. } => path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(std::path::Path::to_path_buf),
+        _ => None,
+    }
+    .unwrap_or_else(|| PathBuf::from("."));
+    let req = Request {
+        set,
+        env,
+        dry_run,
+        replace,
+        fill_missing,
+        project: &project,
+    };
+    let outcome = provision::provision(
+        fleet,
+        host_env,
+        &req,
+        r,
+        &mut TerminalConsole::new(host_env),
+    )?;
+    if let Outcome::DryRun(plan) = &outcome {
+        if !json {
+            return writeln!(out, "{}", provision::render_plan(plan)).map_err(write_err);
+        }
+        // Names, makers, destinations and hashes only (§4.3); the write is the person's run.
+        let mut again = vec!["provision", set, "--env", env];
+        if replace {
+            again.push("--replace");
+        }
+        if fill_missing {
+            again.push("--fill-missing");
+        }
+        let doc = serde_json::json!({
+            "schema": provision::RECEIPT_SCHEMA,
+            "result": outcome.result(),
+            "plan": plan,
+            "next": {"actor": "person", "command": format!("opv {}", again.join(" "))},
+        });
+        return writeln!(out, "{doc}").map_err(write_err);
+    }
+    let Some(receipt) = outcome.receipt() else {
+        return Err(opv::cause::Cause::Bug {
+            site: "provision outcome without a receipt",
+        }
+        .into());
+    };
+    if json {
+        let doc = serde_json::to_value(&receipt).map_err(|_| {
+            Error::from(opv::cause::Cause::Bug {
+                site: "provision receipt is not JSON",
+            })
+        })?;
+        return writeln!(out, "{doc}").map_err(write_err);
+    }
+    let what = format!("set {} in environment {}", receipt.set, receipt.env);
+    let mut lines = vec![match (receipt.result, receipt.item.version_after) {
+        ("written", Some(v)) => format!("provisioned {what}: item at version {v}, verified"),
+        ("written", None) => format!("provisioned {what}: verified"),
+        ("unchanged", _) => format!("{what} is already complete; nothing made or written"),
+        _ => format!("{what}: declined; nothing made or written"),
+    }];
+    if receipt.concurrent_edit {
+        lines.push(
+            "note: an edit made just before opv's may have been replaced; restore it from the item's history"
+                .to_string(),
+        );
+    }
+    lines.push(format!("Next: {}", receipt.next));
+    writeln!(out, "{}", lines.join("\n")).map_err(write_err)
+}
+
 fn run_other(
     cmd: Cmd,
     loaded: Result<opv::domain::Fleet, Error>,
@@ -4821,6 +5095,7 @@ fn run_other(
         | Cmd::LocalDelivery { .. }
         | Cmd::RemoteSend { .. }
         | Cmd::RemoteReceive
+        | Cmd::Unseal { .. }
         | Cmd::Schema
         | Cmd::Help { .. } => {
             unreachable!("handled by run")
@@ -4867,6 +5142,24 @@ fn run_other(
             };
             opv::app::import::run(&fleet, &env, &opts, r, out)
         }
+        Cmd::Provision {
+            set,
+            env,
+            dry_run,
+            replace,
+            fill_missing,
+            json,
+        } => run_provision(
+            &loaded?,
+            &opv::host::ProcessEnv,
+            &set,
+            &env,
+            dry_run,
+            (replace, fill_missing),
+            json,
+            r,
+            out,
+        ),
         Cmd::Set {
             key,
             env,
@@ -5082,8 +5375,9 @@ fn run_other(
             target,
             receipt,
             json,
+            sealed_root,
         }) => opv::app::delivery::verify(
-            &loaded?,
+            &rooted(loaded?, sealed_root.as_deref()),
             &env,
             product.as_deref(),
             &target,
@@ -5169,9 +5463,10 @@ fn run_other(
             json,
             target,
             fail_on_drift,
+            sealed_root,
             ..
         } => status::run_targeted(
-            &loaded?,
+            &rooted(loaded?, sealed_root.as_deref()),
             &env,
             &target,
             product.as_deref(),
@@ -5182,12 +5477,13 @@ fn run_other(
         )
         // An adapter's cause names the environment the command ran for (L10 follow-up).
         .map_err(|e| e.in_env(&env)),
-        Cmd::Plan(a) => sync::plan_rotating(
+        Cmd::Plan(a) => sync::plan_rooted(
             &loaded?,
             &a.env,
             &a.target,
             a.product.as_deref(),
             &a.rotate,
+            a.sealed_root.as_deref(),
             r,
             out,
             a.json,
@@ -5552,12 +5848,14 @@ fn init_for(e: Error, env: Option<&str>) -> Error {
                 searched_from,
                 env: None,
                 manifest,
+                found,
             },
             _,
         )) => opv::cause::Cause::ConfigNotFound {
             searched_from: searched_from.clone(),
             env: Some(opv::cause::EnvName::new(env)),
             manifest: manifest.clone(),
+            found: found.clone(),
         }
         .into(),
         _ => e,
@@ -6455,6 +6753,7 @@ mod tests {
             &["opv", "apply", "--json"],
             &["opv", "set", "api/KEY", "--env", "dev", "--json"],
             &["opv", "import", "dev", "--from", ".env", "--json"],
+            &["opv", "provision", "grant", "--env", "dev", "--json"],
             &["opv", "needs", "--json"],
             &["opv", "contract", "--json"],
             &["opv", "inventory", "--json"],
@@ -6634,5 +6933,74 @@ mod tests {
         let project = dir.path().join("secrets.toml");
         std::fs::write(&project, "").unwrap();
         assert_eq!(file_project_for_check(None, dir.path(), &project), None);
+    }
+
+    /// #253 §4.1: `opv provision --help` names the set, the environment and the Slice A flags.
+    #[test]
+    fn provision_help_lists_its_flags() {
+        let help = leaf_helps()
+            .into_iter()
+            .find(|(name, _, _)| name == "provision")
+            .map(|(_, long, _)| long)
+            .unwrap_or_default();
+        assert!(
+            ["<SET>", "--env <ENV>", "--dry-run", "--replace", "--json"]
+                .iter()
+                .all(|w| help.contains(w)),
+            "{help}"
+        );
+    }
+
+    /// #253 §4.1: `--dry-run --json` prints one plan document and no value, even where a
+    /// member already holds one.
+    #[cfg(feature = "fake")]
+    #[test]
+    fn provision_dry_run_json_is_one_plan_document_without_a_value() {
+        const HELD: &str = "held-REFRESHMARKER-0123456789";
+        let op = opv::adapters::fake_op::FakeOp::default();
+        let vault = "vdev0000000000000000000001";
+        let item = op.insert(
+            vault,
+            serde_json::json!({
+                "title": "app · prod values", "category": "SECURE_NOTE",
+                "sections": [{"id": "app", "label": "app"}],
+                "fields": [{"id": "f1", "section": {"id": "app", "label": "app"},
+                    "type": "CONCEALED", "label": "SIGNING_KEY", "value": HELD}]
+            }),
+        );
+        let fleet = opv::config::parse(&format!(
+            r#"[environments.prod]
+tier = "shared"
+boundaries.app = {{ vault_id = "{vault}", item_id = "{item}" }}
+
+[products.app.keys.SIGNING_KEY]
+kind = "secret"
+rules = {{ hex_bytes = 32 }}
+
+[sets.signing]
+environments = ["prod"]
+members = {{ "app/SIGNING_KEY" = {{ generate = "rules" }} }}
+"#
+        ))
+        .unwrap();
+        let mut out = Vec::new();
+        run_provision(
+            &fleet,
+            &opv::host::FakeEnv::new("linux"),
+            "signing",
+            "prod",
+            true,
+            (false, false),
+            true,
+            &op,
+            &mut out,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(
+            doc["plan"]["set"] == "signing" && !text.contains(HELD),
+            "{text}"
+        );
     }
 }

@@ -3,7 +3,8 @@
 //! installed under each name in a temporary `bin` directory that comes first on `PATH`:
 //!
 //! ```text
-//! opv-sim install <bin dir>     # links op, flyctl, fly, kubectl, gh, ssh, https and docker to itself
+//! opv-sim install <bin dir>     # links op, flyctl, fly, kubectl, gh, ssh, https, docker and
+//!                               # opv-e2e-producer (a scripted `opv.produce/1` producer) to itself
 //! ```
 //!
 //! Its state is the scenario directory named by `OPV_SIM_WORLD`: `world.json` (see each
@@ -24,6 +25,7 @@ mod https;
 mod jsonpath;
 mod kube;
 mod op;
+mod producer;
 mod recordings;
 mod ssh;
 mod world;
@@ -48,6 +50,7 @@ const TOOLS: &[(&str, &str)] = &[
     ("https", "https"),
     ("az", "az"),
     ("docker", "docker"),
+    ("opv-e2e-producer", "producer"),
 ];
 
 fn main() {
@@ -64,6 +67,8 @@ fn main() {
     let args = argv.get(1..).unwrap_or_default().to_vec();
     let program = TOOLS.iter().find(|(n, _)| *n == name).map(|(_, p)| *p);
     let code = match program {
+        // A producer runs with opv's cleared environment (no world): its script is its state.
+        Some("producer") => producer::run(&args),
         Some(p) => simulate(p, &args),
         None => admin(&args),
     };

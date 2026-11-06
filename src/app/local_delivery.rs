@@ -306,6 +306,17 @@ impl OpenDir {
     }
 }
 
+/// Whether `rel` stays inside the directory it is written under (T6): relative, every
+/// `/`-separated part non-empty and neither `.` nor `..`, no NUL and no backslash. Every
+/// caller of [`write_file`] gets this rule, not only the sealed codec's stricter one.
+pub(crate) fn safe_relative_path(rel: &str) -> bool {
+    !rel.is_empty()
+        && !rel.contains(['\0', '\\'])
+        && rel
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
+}
+
 /// Write `value` to `<dir>/<rel>`: each directory component created inside `dir` (0700),
 /// the file created exclusively with mode 0400, never through a link. Every step is
 /// relative to an open directory handle (`mkdirat`, `openat` with `O_NOFOLLOW`), never a
@@ -314,6 +325,9 @@ impl OpenDir {
 pub(crate) fn write_file(dir: &OpenDir, rel: &str, value: &[u8]) -> std::io::Result<()> {
     use rustix::fs::{Mode, OFlags};
     use std::os::fd::AsFd as _;
+    if !safe_relative_path(rel) {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
     let parts: Vec<&str> = rel.split('/').collect();
     let mut owned: Option<std::os::fd::OwnedFd> = None;
     for part in &parts[..parts.len() - 1] {
@@ -355,6 +369,9 @@ pub(crate) fn write_file(dir: &OpenDir, rel: &str, value: &[u8]) -> std::io::Res
 /// ([`runtime_dir_support`]); this path-based write is never reached there.
 #[cfg(not(unix))]
 pub(crate) fn write_file(dir: &OpenDir, rel: &str, value: &[u8]) -> std::io::Result<()> {
+    if !safe_relative_path(rel) {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
     let mut at = dir.0.clone();
     let parts: Vec<&str> = rel.split('/').collect();
     for part in &parts[..parts.len() - 1] {

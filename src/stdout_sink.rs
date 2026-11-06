@@ -173,7 +173,7 @@ mod tests {
         }
     }
 
-    const DOC: &[u8] = b"{\"schema_version\":3,\"ok\":true}\n";
+    const DOC: &[u8] = b"{\"schema_version\":4,\"ok\":true}\n";
 
     fn later() -> Instant {
         Instant::now() + Duration::from_secs(60)

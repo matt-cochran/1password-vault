@@ -1,0 +1,20 @@
+# sealed_bundle_tampered: opv sync prod --confirm prod --target box
+
+## text exit: 2
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: the sealed bundle <SCENARIO>/project/sealed/prod/web.opv-sealed: its content (the signature does not verify over the bundle) must be an unchanged opv-sealed/1 bundle signed by sealed.signer (mark *.opv-sealed binary in .gitattributes, or delete the file and sync again)
+Do: edit <SCENARIO>/project/sealed/prod/web.opv-sealed: make its content (the signature does not verify over the bundle) an unchanged opv-sealed/1 bundle signed by sealed.signer (mark *.opv-sealed binary in .gitattributes, or delete the file and sync again)
+Next: opv plan prod --target box
+
+## json exit: 2
+## json stdout
+{"schema_version":4,"ok":false,"exit_code":2,"next":{"kind":"run","actor":"assistant","command":"opv plan prod --target box --json"},"do":"edit <SCENARIO>/project/sealed/prod/web.opv-sealed: make its content (the signature does not verify over the bundle) an unchanged opv-sealed/1 bundle signed by sealed.signer (mark *.opv-sealed binary in .gitattributes, or delete the file and sync again)","error":{"code":"input_invalid","category":"config","message":"the sealed bundle <SCENARIO>/project/sealed/prod/web.opv-sealed: its content (the signature does not verify over the bundle) must be an unchanged opv-sealed/1 bundle signed by sealed.signer (mark *.opv-sealed binary in .gitattributes, or delete the file and sync again)","subject":{"rule":{"rule":"type","expected":"an unchanged opv-sealed/1 bundle signed by sealed.signer (mark *.opv-sealed binary in .gitattributes, or delete the file and sync again)"},"path":"<SCENARIO>/project/sealed/prod/web.opv-sealed","kind":"sealed_bundle","at":null,"field":"its content (the signature does not verify over the bundle)"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"edit <SCENARIO>/project/sealed/prod/web.opv-sealed: make its content (the signature does not verify over the bundle) an unchanged opv-sealed/1 bundle signed by sealed.signer (mark *.opv-sealed binary in .gitattributes, or delete the file and sync again)","next":{"kind":"run","actor":"assistant","command":"opv plan prod --target box --json"}}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: the sealed bundle <SCENARIO>/project/sealed/prod/web.opv-sealed: its content (the signature does not verify over the bundle) must be an unchanged opv-sealed/1 bundle signed by sealed.signer (mark *.opv-sealed binary in .gitattributes, or delete the file and sync again)
+Do: edit <SCENARIO>/project/sealed/prod/web.opv-sealed: make its content (the signature does not verify over the bundle) an unchanged opv-sealed/1 bundle signed by sealed.signer (mark *.opv-sealed binary in .gitattributes, or delete the file and sync again)
+Next: opv plan prod --target box --json

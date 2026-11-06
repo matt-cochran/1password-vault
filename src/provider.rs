@@ -165,6 +165,23 @@ pub trait Provider: Sync {
         let _ = (target, store);
         Err(unreachable_default("bind of a provider without bindings"))
     }
+    /// The load rules of this provider that span targets (a key two targets may share only
+    /// within a group, a path unique across the configuration), run once every target is
+    /// parsed and the products are known. Each provider sees the whole fleet and checks
+    /// only its own targets. Default: no rule spans targets.
+    fn check_fleet(&self, fleet: &crate::domain::Fleet) -> Result<(), Box<FleetRefusal>> {
+        let _ = fleet;
+        Ok(())
+    }
+}
+
+/// A [`Provider::check_fleet`] refusal: the configuration path it is about, from the root
+/// (`["environments", "prod", "targets", "box", "sealed", "recipients"]`), and the rule.
+/// Names only, never a value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FleetRefusal {
+    pub path: Vec<String>,
+    pub rule: crate::cause::FieldRule,
 }
 
 /// A provider-trait default that the configuration's own checks never let run: reaching it
@@ -581,6 +598,14 @@ pub trait TargetConfig: fmt::Debug + Send + Sync {
     )> {
         None
     }
+    /// `opv sync --sealed-root <dir>` (design `sealed-target` D12): a target that writes
+    /// files of its own resolves them under `root` for this run instead of beside the
+    /// configuration. Default: the target writes no files of its own and ignores it.
+    fn set_out_root(&mut self, _root: &std::path::Path) {}
+    /// Where the target sits in the configuration, set once when the configuration is read
+    /// (design `sealed-target` §5.2): a target that names its placement in what it writes
+    /// (a sealed bundle's header) keeps it. Default: ignored.
+    fn set_placement(&mut self, _placement: &Placement) {}
     /// Equal configuration (every field), for comparing whole configurations.
     fn eq_dyn(&self, other: &dyn TargetConfig) -> bool;
     /// For [`TargetConfig::same_target`] and [`TargetConfig::eq_dyn`] implementations.
@@ -658,6 +683,24 @@ pub struct Preflight {
     /// Set when the runtime has nothing to restart: `sync --deploy` skips the deploy and
     /// prints this line instead (exit 0).
     pub skip_deploy: Option<String>,
+}
+
+/// One target's placement (design `sealed-target` §5.2), as [`TargetConfig::set_placement`]
+/// receives it. Names and paths only.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Placement {
+    /// The target's name in its environment.
+    pub target: String,
+    /// Each product the target delivers.
+    pub products: BTreeMap<String, PlacedProduct>,
+}
+
+/// A product a target delivers: each key's rendered env name with its `file` path (`None`
+/// for a key delivered as a variable), and the product's `local.secrets_dir_env`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlacedProduct {
+    pub names: BTreeMap<String, Option<String>>,
+    pub secrets_dir_env: Option<String>,
 }
 
 /// A passing check: ok, or ok with a warning.
@@ -738,6 +781,14 @@ http.put.value = { field = "secret_value", number = 3, type = "bytes" }
 http.put.reply = "connection"
 http.put.conflict = ["ALREADY_EXISTS"]
 
+[environments.prod.targets.sealed]
+state_vault_id = "ssealed"
+deploy_credentials = "op://Ops Prod/opv-sealed-prod-signer"
+sealed.out = "sealed/prod/{product}.opv-sealed"
+sealed.env_name = "{KEY}"
+sealed.recipients = ["age13ts5aywwye8k4qr653hu89n89lt2eexd7szjadl9u3m47fzneggstxdxvs"]
+sealed.signer = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGNsg+yKsUThHH7nZ6IW5uovkXhn/YPafac8XHSwvmSJ"
+
 [products.web.keys.DATABASE_URL]
 kind = "secret"
 environments = ["prod"]
@@ -772,6 +823,7 @@ environments = ["prod"]
                 ("kubernetes", System::Kubernetes),
                 ("github", System::GitHub),
                 ("http", System::Https),
+                ("sealed", System::Sealed),
             ]
         );
     }
@@ -851,6 +903,20 @@ environments = ["prod"]
                             why: "the HTTP target delivers secrets only",
                         },
                         files: FileCapability::None,
+                    },
+                ),
+                (
+                    "sealed",
+                    Channels {
+                        secret: Channel::Store {
+                            label: "sealed bundle"
+                        },
+                        config: Channel::Store {
+                            label: "sealed bundle"
+                        },
+                        files: FileCapability::Native {
+                            dir: "$<secrets_dir_env> on the runtime ({product})".to_string(),
+                        },
                     },
                 ),
             ]

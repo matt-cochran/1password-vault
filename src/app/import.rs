@@ -177,6 +177,36 @@ pub(crate) fn refuse_not_stored(
     .into())
 }
 
+/// Refuse a lone write of `product/key` in `env_name` when it is a member of a set (design
+/// `owner-value-ingestion.md` §5.6, #262): a set's members are made and written together,
+/// only by `opv provision`. Names only, from the configuration.
+pub(crate) fn refuse_set_member(
+    fleet: &Fleet,
+    product: &str,
+    key: &str,
+    env_name: &str,
+) -> Result<(), Error> {
+    let Some(set) = fleet.set_of(product, key) else {
+        return Ok(());
+    };
+    Err(Cause::Guard {
+        guard: Guard::SetMember {
+            product: crate::cause::ProductName::new(product),
+            key: crate::cause::KeyName::new(key),
+            env: EnvName::new(env_name),
+            set: set.to_string(),
+        },
+    }
+    .into())
+}
+
+/// [`refuse_set_member`] for every value a plan would write.
+fn refuse_set_member_writes(fleet: &Fleet, env_name: &str, plan: &AdoptPlan) -> Result<(), Error> {
+    plan.writes
+        .iter()
+        .try_for_each(|(p, k, _)| refuse_set_member(fleet, p, k, env_name))
+}
+
 /// The found values: the dotenv file, or what the target can read back. A target that
 /// cannot show values (Fly secrets, GitHub secrets) is refused with the manual way.
 fn read_source(
@@ -268,8 +298,10 @@ pub fn run_tagged(
     let skip = pairs(fleet, &opts.skip, "--skip")?;
     // Asking to replace or rotate an infrastructure key is refused by name (#206 §4.4); a
     // found value of one is only ever planned `not_stored`.
+    // A set member is written only by `opv provision` (§5.6), so asking for one is refused.
     for (p, k) in replace.iter().chain(&rotate) {
         refuse_not_stored(fleet, p, k, env_name)?;
+        refuse_set_member(fleet, p, k, env_name)?;
     }
     let plan = plan_skipping(
         fleet,
@@ -316,6 +348,9 @@ fn plan_skipping(
     }
     plan.writes
         .retain(|(p, k, _)| !skip.contains(&(p.clone(), k.clone())));
+    // A found value of a set member is refused in the review too (§5.6); `--skip` leaves it
+    // out and imports the rest.
+    refuse_set_member_writes(fleet, env_name, &plan)?;
     if apply {
         super::tidy::require_person(r, "opv import")?;
         if !plan.writes.is_empty() {
@@ -345,6 +380,7 @@ pub fn plan_and_write(
     let read = super::tidy::read(fleet, env_name, r)?;
     let plan = crate::domain::import::plan(fleet, env_name, &read.fields, &found, replace, rotate);
     if apply && !plan.writes.is_empty() {
+        refuse_set_member_writes(fleet, env_name, &plan)?;
         write(fleet, env, &plan_command(&env.name, source), &plan, None, r)?;
     }
     Ok(plan)
@@ -411,7 +447,7 @@ pub fn write_values_tagged(
     for (name, writes) in by_boundary {
         let b = fleet.boundary(&env.name, &writes[0].0)?;
         let part = super::tidy::in_boundary(fleet, name);
-        write_item(&part, env, b, &writes, tag, by, r)?;
+        write_item(&part, env, b, &writes, tag, by, None, r)?;
     }
     Ok(())
 }
@@ -443,19 +479,84 @@ fn tag_template(
     Ok(template)
 }
 
-/// [`write`] into one boundary item `b`, holding `fleet`'s products.
-fn write_item(
+/// What a caller planned its write on (design `owner-value-ingestion.md` §4.6 step 1, D10):
+/// the item's stamp `S0` and its layout at that read, and the fields that must not have
+/// changed since. `set`, `import` and `generate` plan on the writer's own read and pass none.
+pub struct Expected<'a> {
+    /// The stamp (`version`, `updated_at`) of the read the caller planned on.
+    pub stamp: &'a onepassword_tidy::Stamp,
+    /// The item as the caller read it at `stamp`.
+    pub seen: &'a convention::Layout,
+    /// `(product, key)` whose field (presence and value) must be what `seen` holds.
+    pub members: &'a [(String, String)],
+}
+
+/// What the one checked writer did: the edit landed and every written field was read back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Written {
+    /// The item's version the final fresh read verified (`verified at version N`).
+    pub version: Option<u64>,
+    /// The edit's version was not exactly one past the writer's own read: another edit
+    /// landed just before opv's and may have been replaced (kept only in the item's
+    /// history). Detected, never prevented: `op` 2.40 has no version precondition.
+    pub concurrent_edit: bool,
+}
+
+/// The one checked writer (D10): `writes` into the boundary item `b`, holding `fleet`'s
+/// products, shared by `set`, `import`, `generate` and `provision`.
+///
+/// 1. A fresh read (`S1`) builds the whole-item template. With `expected`, a stamp other
+///    than its `S0` is refused `ChangedBeforeWrite` (nothing written) when any of its
+///    member fields changed; otherwise the write is re-planned on `S1`.
+/// 2. One `op item edit`, the template (values included) on stdin only, never argv.
+/// 3. The version the edit echoes must be `S1 + 1`; otherwise the write still stands but is
+///    reported as a [`Written::concurrent_edit`]. 1Password offers no compare-and-swap
+///    (`op` 2.40 has no version-precondition flag), so an edit racing opv's is detected
+///    here, not prevented.
+/// 4. A final fresh read: every field the template holds or kept is there
+///    ([`onepassword_tidy::lost`]) and every written field holds its value, else
+///    `ReadBackMissing` naming `by`.
+/// 5. An edit whose outcome is unknown (timeout, kill, lost reply) is decided by that final
+///    read: the written values there is success; the item still at `S1` with the written
+///    fields unchanged is "not written; safe to re-run"; anything else stays
+///    `WriteOutcomeUnknown`. Both failures keep the unknown outcome's exit.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_item(
     fleet: &Fleet,
     env: &crate::domain::Environment,
     b: &Boundary,
     writes: &[&(String, String, SecretValue)],
     tag: Option<&str>,
     by: &Cmd,
+    expected: Option<&Expected<'_>>,
     r: &dyn CommandRunner,
-) -> Result<(), Error> {
+) -> Result<Written, Error> {
     let item = onepassword::read_whole_fresh(r, env, b)?;
-    let (layout, _) = onepassword_tidy::parse(item.raw())?;
+    let (layout, stamp) = onepassword_tidy::parse(item.raw())?;
     let res = convention::resolve(&layout, fleet);
+    if let Some(exp) = expected
+        && stamp != *exp.stamp
+    {
+        let before = convention::resolve(exp.seen, fleet);
+        let changed = exp
+            .members
+            .iter()
+            .any(|id| !same_field(field_of(exp.seen, &before, id), field_of(&layout, &res, id)));
+        if changed {
+            r.note(&format!(
+                "1Password ({}): a field opv was about to write changed since opv read the \
+                 item; nothing written.",
+                env.name
+            ));
+            return Err(Cause::ChangedBeforeWrite {
+                object: crate::cause::StoreObject::Item {
+                    vault: VaultId::new(&b.vault_id),
+                    item: ItemId::new(&b.item_id),
+                },
+            }
+            .into());
+        }
+    }
     let date = super::tidy::today();
     let mut ops = Vec::new();
     let mut kept = false;
@@ -500,21 +601,65 @@ fn write_item(
         Some(tag) => tag_template(template, tag)?,
         None => template,
     };
-    onepassword_tidy::write(r, env, b, &template)?;
-    // Verify by reading back: every written field holds exactly what was written.
-    let after = onepassword::read_whole_fresh(r, env, b)?;
-    let (layout, _) = onepassword_tidy::parse(after.raw())?;
-    let res = convention::resolve(&layout, fleet);
-    let missing: Vec<FieldName> = writes
+    let (echoed_version, unknown) = match onepassword_tidy::write(r, env, b, &template) {
+        Ok(echoed) => (onepassword::item_version(&echoed), None),
+        Err(e) if is_unknown_outcome(&e) => (None, Some(e)),
+        Err(e) => return Err(e),
+    };
+    // The final fresh read decides, whatever the edit answered.
+    let after = match onepassword::read_whole_fresh(r, env, b) {
+        Ok(after) => after,
+        Err(e) => return Err(unknown.unwrap_or(e)),
+    };
+    let (after_layout, _) = onepassword_tidy::parse(after.raw())?;
+    let after_res = convention::resolve(&after_layout, fleet);
+    let mut missing: Vec<FieldName> = writes
         .iter()
         .copied()
         .filter(|(p, k, v)| {
-            res.chosen
-                .get(&(p.clone(), k.clone()))
-                .is_none_or(|&i| layout.fields[i].value.expose() != v.expose())
+            let id = (p.clone(), k.clone());
+            !field_of(&after_layout, &after_res, &id).is_some_and(|f| same(f, v))
         })
         .map(|(p, k, _)| FieldName::new(key_label(p, k)))
         .collect();
+    for f in onepassword_tidy::lost(item.raw(), &template, after.raw())? {
+        if !missing.contains(&f) {
+            missing.push(f);
+        }
+    }
+    drop(template);
+    if let Some(unknown) = unknown {
+        if !missing.is_empty() {
+            let untouched = after.version.is_some()
+                && after.version == item.version
+                && writes.iter().copied().all(|(p, k, _)| {
+                    let id = (p.clone(), k.clone());
+                    same_field(
+                        field_of(&layout, &res, &id),
+                        field_of(&after_layout, &after_res, &id),
+                    )
+                });
+            r.note(&if untouched {
+                format!(
+                    "1Password ({}): opv's edit of the item did not land: not written; safe to \
+                     re-run.",
+                    env.name
+                )
+            } else {
+                format!(
+                    "1Password ({}): opv cannot tell whether its edit of the item landed; \
+                     check the item (and its history) in 1Password before re-running.",
+                    env.name
+                )
+            });
+            return Err(unknown);
+        }
+        r.note(&format!(
+            "1Password ({}): the edit's reply was lost; the item read back holds what opv \
+             wrote.",
+            env.name
+        ));
+    }
     if !missing.is_empty() {
         // 05.10: the command that wrote is named, not always `opv import`.
         return Err(Cause::ReadBackMissing {
@@ -525,7 +670,51 @@ fn write_item(
         }
         .into());
     }
-    Ok(())
+    // Step 3: the echoed version (or, without one, the version read back) against `S1 + 1`.
+    let landed = echoed_version.or(after.version);
+    let concurrent_edit = item.version.is_some_and(|v| landed != Some(v + 1));
+    if concurrent_edit {
+        r.note(&format!(
+            "1Password ({}): an edit made just before opv's may have been replaced; restore it \
+             from the item's history.",
+            env.name
+        ));
+    }
+    Ok(Written {
+        version: after.version,
+        concurrent_edit,
+    })
+}
+
+/// True for an edit whose outcome is unknown (it may or may not have landed).
+fn is_unknown_outcome(e: &Error) -> bool {
+    matches!(e.cause(), Some((Cause::WriteOutcomeUnknown { .. }, _)))
+}
+
+/// The value of `id`'s field in `layout` (resolved as `res`), `None` when it has none.
+fn field_of<'a>(
+    layout: &'a convention::Layout,
+    res: &convention::Resolution,
+    id: &(String, String),
+) -> Option<&'a SecretValue> {
+    res.chosen.get(id).map(|&i| &layout.fields[i].value)
+}
+
+/// Two values equal, compared in constant time (never printed).
+fn same(a: &SecretValue, b: &SecretValue) -> bool {
+    use subtle::ConstantTimeEq;
+    a.expose().as_bytes().ct_eq(b.expose().as_bytes()).into()
+}
+
+/// Two fields the same: both without a value (absent or empty), or both holding the same.
+fn same_field(a: Option<&SecretValue>, b: Option<&SecretValue>) -> bool {
+    let a = a.filter(|v| !v.expose().is_empty());
+    let b = b.filter(|v| !v.expose().is_empty());
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => same(a, b),
+        _ => false,
+    }
 }
 
 /// The plan's next step (design §10.1): `opv ready <env>` once written or when nothing is
