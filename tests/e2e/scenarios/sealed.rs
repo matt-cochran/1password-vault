@@ -606,15 +606,17 @@ mod runtime {
             .and_then(|f| f["value"].as_str())
             .expect("API_KEY")
             .to_string();
-        let s = with_ram(s, &ram).var("E2E_WANT_API_KEY", &want);
+        // web is `declared_only` (#279 S5): an inherited variable would not reach the child,
+        // so the expected value is read from a file.
+        let want_file = s.path("want-api-key");
+        std::fs::write(&want_file, &want).expect("want file");
+        let s = with_ram(s, &ram);
+        let script = format!(
+            "[ \"$API_KEY\" = \"$(cat '{}')\" ] && echo same",
+            want_file.display()
+        );
         let mut a = unseal_identity_args();
-        a.extend(args(&[
-            "--exec",
-            "--",
-            "sh",
-            "-c",
-            "[ \"$API_KEY\" = \"$E2E_WANT_API_KEY\" ] && echo same",
-        ]));
+        a.extend(args(&["--exec", "--", "sh", "-c", &script]));
         let run = s.opv(&a);
         assert_eq!(run.code, Some(0), "{}", run.stderr);
         assert_eq!(run.stdout.trim(), "same");
