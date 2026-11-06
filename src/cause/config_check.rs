@@ -240,13 +240,6 @@ pub enum ConfigCheck {
     /// A key a sealed target delivers is read from the item of the target's own
     /// `deploy_credentials`, its signing key (G4).
     SealedDeliversSigner { target: String },
-    /// A key a sealed target delivers is `source = "infrastructure"` (#206): supplied at
-    /// sync, never stored in 1Password, so there is no value to seal (#275).
-    SealedDeliversInfrastructure {
-        product: String,
-        key: String,
-        target: String,
-    },
     // end sealed target
 }
 
@@ -491,14 +484,6 @@ impl ConfigCheck {
                 "is read from the item of sealed target {target}'s deploy_credentials, its \
                  signing key, and a sealed target never delivers its own signing key"
             ),
-            SealedDeliversInfrastructure {
-                product,
-                key,
-                target,
-            } => format!(
-                "is {product}/{key}, supplied at sync (source = \"infrastructure\") and never \
-                 stored in 1Password, so sealed target {target} has no value to seal"
-            ),
         };
         format!("{field} {p}")
     }
@@ -682,11 +667,6 @@ impl ConfigCheck {
             SealedDeliversIdentity { target } | SealedDeliversSigner { target } => format!(
                 "remove the product of {field} from target {target}'s products, or deliver this \
                  key from another target"
-            ),
-            SealedDeliversInfrastructure { target, .. } => format!(
-                "remove the product of {field} from target {target}'s products and deliver it \
-                 from a target that is not sealed, or store the value in 1Password (drop \
-                 source = \"infrastructure\")"
             ),
         }
     }

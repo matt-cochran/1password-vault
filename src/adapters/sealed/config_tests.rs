@@ -357,7 +357,7 @@ fn a_key_shared_from_an_age_identity_is_refused() {
     ));
 }
 
-// --- #275: an infrastructure key has no 1Password value to seal -----------------------------
+// --- #287: an infrastructure key is sealed from the value supplied at sync --------------------
 
 /// `api` gains `DB_URL`, supplied at sync (`source = "infrastructure"`) in staging.
 fn with_infrastructure_key() -> String {
@@ -368,21 +368,16 @@ fn with_infrastructure_key() -> String {
     )
 }
 
+/// #287 (was refused at load by #275): the value comes from `opv sync --supply-stdin`.
 #[test]
-fn an_infrastructure_key_a_sealed_target_delivers_is_refused_at_the_key() {
-    assert_eq!(
-        refused_field(&with_infrastructure_key()),
-        "products.api.keys.DB_URL"
-    );
-}
-
-#[test]
-fn an_infrastructure_key_a_sealed_target_delivers_is_refused_naming_the_target() {
-    let e = crate::config::parse(&with_infrastructure_key()).expect_err("refused");
+fn an_infrastructure_key_a_sealed_target_delivers_loads() {
+    let text = with_infrastructure_key();
     assert!(
-        e.parts().0.message().contains("sealed target box"),
-        "{}",
-        e.parts().0.message()
+        crate::config::parse(&text).is_ok(),
+        "{:?}",
+        crate::config::parse(&text)
+            .err()
+            .map(|e| e.parts().0.message())
     );
 }
 

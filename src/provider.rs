@@ -211,6 +211,12 @@ pub trait DeployLogin {
     /// Extra environment for every call of `program` in this run (a token for the target
     /// CLI, its private configuration directory). Never argv, never a file.
     fn env(&self, program: &str) -> Vec<(&'static str, &str)>;
+    /// The value of deploy-credentials field `field` this sign-in holds, for an operation
+    /// that hands it to another program on stdin (`registry-push`, #289), so the item is
+    /// not read again. `None` when the login keeps no such value. Never argv, env or a file.
+    fn held(&self, _field: &str) -> Option<&SecretValue> {
+        None
+    }
 }
 
 /// The provider whose CLI an environment's `deploy_credentials` sign in (FR-40): the
@@ -467,7 +473,8 @@ pub struct RegistryPush<'a> {
     pub target: &'a str,
     /// The target's bound app, never a caller input.
     pub app: &'a str,
-    /// The target's `deploy_credentials` item, read once by the push.
+    /// The target's `deploy_credentials` item, read once by the strict sign-in; it names
+    /// the push's principal.
     pub item: &'a crate::domain::ItemRef,
     /// `<registry>/<app>:<tag>`, validated (P6) and in the local daemon (P10).
     pub image: &'a str,
@@ -496,8 +503,15 @@ pub trait TargetOperations: fmt::Debug + Sync {
     ) -> Result<(), Error>;
     /// `registry-push`: push `push.image` from the local daemon to the app's repository
     /// under the target's deploy credentials (a write, never retried); the digest the
-    /// registry reported (`sha256:<64 hex>`).
-    fn registry_push(&self, r: &dyn CommandRunner, push: &RegistryPush) -> Result<String, Error>;
+    /// registry reported (`sha256:<64 hex>`). `login` is the strict deploy sign-in `r`
+    /// carries: the push takes its credential from it, so the deploy item is read once
+    /// (#289).
+    fn registry_push(
+        &self,
+        r: &dyn CommandRunner,
+        push: &RegistryPush,
+        login: &dyn DeployLogin,
+    ) -> Result<String, Error>;
 }
 
 pub trait TargetConfig: fmt::Debug + Send + Sync {

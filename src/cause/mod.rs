@@ -728,6 +728,15 @@ pub enum Cause {
         io: IoKind,
         given_by: GivenBy,
     },
+    /// A `.opv` `config = "<path>"` line whose file, once symbolic links are followed,
+    /// resolves outside the repository holding the `.opv` (#288, FR-66): a containment rule,
+    /// never reported as a permission problem.
+    ConfigOutsideRepository {
+        /// The file the line names, as given (joined to the `.opv`'s folder).
+        path: PathBuf,
+        /// The `.opv` file carrying the line.
+        dot_opv: PathBuf,
+    },
     ConfigInvalid {
         source: ConfigSource,
         at: Option<Location>,
@@ -2377,6 +2386,7 @@ impl Cause {
             ConfigNotFound { .. } => "config_not_found",
             ConfigSourceMismatch { .. } => "config_source_mismatch",
             ConfigUnreadable { .. } => "config_unreadable",
+            ConfigOutsideRepository { .. } => "config_outside_repository",
             // sealed target (#271, design `sealed-target` §3.1): the configuration causes
             ConfigInvalid {
                 rule:
@@ -2536,6 +2546,7 @@ impl Cause {
             ConfigNotFound { .. }
             | ConfigSourceMismatch { .. }
             | ConfigUnreadable { .. }
+            | ConfigOutsideRepository { .. }
             | ConfigInvalid { .. }
             | ContractStale { .. }
             | NeedsUndeclared { .. }

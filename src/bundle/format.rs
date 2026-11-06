@@ -75,6 +75,12 @@ pub struct Header {
     /// bundles sealed before 0.18.1, which means `inherit`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_environment: Option<ChildEnvironment>,
+    /// The names whose values `opv sync --supply-stdin` supplied (#287: `source =
+    /// "infrastructure"` keys, never stored in 1Password), sorted, each one of `names`.
+    /// Names only, never a value. Absent when nothing was supplied, and in bundles sealed
+    /// before 0.18.2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supplied: Option<Vec<String>>,
 }
 
 /// What `opv unseal --exec` passes on from the runtime's environment (#137, #279 S5).
@@ -121,6 +127,8 @@ pub enum FormatError {
     NamesNotSorted,
     #[error("the header's recipients are not sorted")]
     RecipientsNotSorted,
+    #[error("the header's supplied names are not sorted names of the bundle")]
+    SuppliedNotNamed,
     #[error("a second header line appears before the age block")]
     SecondHeader,
     #[error("the age block is missing")]
@@ -520,6 +528,14 @@ fn check_header(header: &Header) -> Result<(), FormatError> {
     }
     if header.recipients.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(FormatError::RecipientsNotSorted);
+    }
+    if let Some(supplied) = &header.supplied
+        && (supplied.windows(2).any(|pair| pair[0] >= pair[1])
+            || supplied
+                .iter()
+                .any(|s| !header.names.iter().any(|n| n.name == *s)))
+    {
+        return Err(FormatError::SuppliedNotNamed);
     }
     Ok(())
 }

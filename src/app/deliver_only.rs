@@ -901,6 +901,22 @@ pub fn admit(fleet: &Fleet, scope: &Scope<'_>, raw: RawSupply) -> Result<Supply,
 
 // --- 1Password and the planner (§4.4, §6.1) --------------------------------------------------
 
+/// The refusal of a run on a whole-set store that would rewrite it while `missing`
+/// (`(product, key)`, in plan order) are delivered infrastructure keys this run supplies no
+/// value for (#287): a re-seal without them would drop them from the bundle. The same
+/// `not_supplied` reason an incomplete supply gets, naming the first key; `None` when
+/// nothing is missing.
+pub fn unsupplied_on_whole_set(env: &str, missing: &[(&str, &str)]) -> Option<Error> {
+    let (p, k) = missing.first()?;
+    Some(refused(
+        env,
+        named(p, k),
+        SupplyRefusal::NotSupplied {
+            keys: missing.iter().map(|(p, k)| key_label(p, k)).collect(),
+        },
+    ))
+}
+
 /// Refuse a 1Password field of an infrastructure key in `env`'s read (§4.4), supplied or
 /// not: two sources of truth would let a person edit 1Password and wrongly believe the
 /// target changed. `read` is the environment's item fields (`tidy::read`).

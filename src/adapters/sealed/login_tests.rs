@@ -136,6 +136,7 @@ fn header() -> Header {
         }],
         secrets_dir_env: None,
         child_environment: None,
+        supplied: None,
     }
 }
 

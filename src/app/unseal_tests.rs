@@ -223,6 +223,7 @@ fn crafted(dir: &std::path::Path, var: &str) -> PathBuf {
         ],
         secrets_dir_env: Some("SECRETS_DIR".into()),
         child_environment: None,
+        supplied: None,
     };
     let line = canonical_header(&header).unwrap();
     let entries: [(&str, &[u8]); 2] = [("API_TOKEN", b"marker-a"), ("TLS_KEY", b"marker-b")];
