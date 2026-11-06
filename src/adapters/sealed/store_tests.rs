@@ -40,6 +40,11 @@ fn recipient_line() -> String {
 /// prod's sealed target `box` delivering api (TOKEN, DB_URL, and TLS_KEY as a file) to
 /// `recipients`, signed by the fixture signer.
 fn fleet_with(recipients: &[String]) -> Fleet {
+    fleet_local(recipients, "")
+}
+
+/// [`fleet_with`] with `local` added to `[products.api.local]`.
+fn fleet_local(recipients: &[String], local: &str) -> Fleet {
     let list = recipients
         .iter()
         .map(|r| format!("\"{r}\""))
@@ -60,6 +65,7 @@ sealed.signer = "{}"
 
 [products.api.local]
 secrets_dir_env = "APP_SECRETS_DIR"
+{local}
 
 [products.api.keys.TOKEN]
 kind = "secret"
@@ -78,7 +84,18 @@ file = "tls/key"
 
 /// The target of [`fleet_with`], rooted at `root` as `--sealed-root` roots it.
 fn target_with(root: &Path, recipients: &[String]) -> SealedTarget {
-    let fleet = fleet_with(recipients);
+    sealed_of(root, &fleet_with(recipients))
+}
+
+/// The target of [`fleet_local`] with `environment = "declared_only"` (#279 S5).
+fn target_declared_only(root: &Path) -> SealedTarget {
+    sealed_of(
+        root,
+        &fleet_local(&[recipient_line()], "environment = \"declared_only\""),
+    )
+}
+
+fn sealed_of(root: &Path, fleet: &Fleet) -> SealedTarget {
     let mut t = fleet.environments["prod"].targets["box"].config.clone();
     t.set_out_root(root);
     t.as_any()
@@ -162,6 +179,7 @@ fn plant_foreign(t: &SealedTarget, revision: u64) {
         signer: key.fingerprint(),
         names,
         secrets_dir_env: None,
+        child_environment: None,
     };
     let entries: [(&str, &[u8]); 1] = [("TOKEN", b"test-marker-planted")];
     let bytes = crypto::seal(&header, &entries, &[recipient], &key).unwrap();
@@ -285,6 +303,27 @@ fn an_unchanged_configuration_prints_no_preflight_line() {
 }
 
 #[test]
+fn a_change_to_declared_only_prints_one_preflight_line_with_the_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = FakeRunner::new([]);
+    write(&store(&target(dir.path()), &r), &["DB_URL", "TOKEN"]).unwrap();
+    let lines: Vec<String> = target_declared_only(dir.path())
+        .preflight(&r, PreflightMode::Read)
+        .unwrap()
+        .checks
+        .into_iter()
+        .map(|c| c.outcome.unwrap().line(&c.name))
+        .collect();
+    assert_eq!(
+        lines,
+        vec![
+            "warn  sealed bundle sealed/prod/api.opv-sealed: stale as a whole (environment changed): every name is sealed again"
+                .to_string()
+        ]
+    );
+}
+
+#[test]
 fn listing_makes_no_call() {
     let dir = tempfile::tempdir().unwrap();
     let (t, r) = (target(dir.path()), FakeRunner::new([]));
@@ -356,6 +395,28 @@ fn the_header_names_the_placement_the_plan_and_the_destinations() {
             vec!["file:tls/key".to_string(), "env:TOKEN".to_string()],
             Some("APP_SECRETS_DIR".to_string()),
         )
+    );
+}
+
+#[test]
+fn a_declared_only_product_seals_its_environment_into_the_header() {
+    let dir = tempfile::tempdir().unwrap();
+    let (t, r) = (target_declared_only(dir.path()), FakeRunner::new([]));
+    write(&store(&t, &r), &["TOKEN"]).unwrap();
+    assert_eq!(
+        header(&t).child_environment,
+        Some(crate::bundle::format::ChildEnvironment::DeclaredOnly)
+    );
+}
+
+#[test]
+fn an_inherit_product_seals_inherit_into_the_header() {
+    let dir = tempfile::tempdir().unwrap();
+    let (t, r) = (target(dir.path()), FakeRunner::new([]));
+    write(&store(&t, &r), &["TOKEN"]).unwrap();
+    assert_eq!(
+        header(&t).child_environment,
+        Some(crate::bundle::format::ChildEnvironment::Inherit)
     );
 }
 

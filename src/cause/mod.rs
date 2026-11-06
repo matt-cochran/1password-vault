@@ -527,8 +527,16 @@ pub enum ProduceRule {
 pub enum OpenUrlProblem {
     NotHttps,
     HostNotListed,
-    TooLong { limit: u64 },
+    TooLong {
+        limit: u64,
+    },
     Userinfo,
+    /// The query and fragment together are longer than `limit` bytes (S8).
+    QueryTooLong {
+        limit: u64,
+    },
+    /// The URL holds one of the producer's input values, raw or encoded (S8).
+    CarriesInput,
 }
 
 // --- end provision -------------------------------------------------------------------------

@@ -883,14 +883,17 @@ pub fn record_account(start: &Path, account: &str) -> Result<RecordOutcome, Erro
     let mut text = String::from(
         "# opv: this project's 1Password account (an ID, not a secret). Commit this file.\n",
     );
+    // S10 (security review 0.18.0): every value is written as an escaped TOML string, so a
+    // `config` holding `"` names the same path when read back and adds no key.
+    let quoted = |v: &str| toml::Value::String(v.to_string()).to_string();
     if let Some(p) = existing.as_ref().and_then(|d| d.project.as_deref()) {
-        text.push_str(&format!("project = \"{p}\"\n"));
+        text.push_str(&format!("project = {}\n", quoted(p)));
     }
     // FR-66: the configuration the pointer names stays named.
     if let Some(c) = existing.as_ref().and_then(|d| d.config.as_deref()) {
-        text.push_str(&format!("config = \"{c}\"\n"));
+        text.push_str(&format!("config = {}\n", quoted(c)));
     }
-    text.push_str(&format!("account = \"{account}\"\n"));
+    text.push_str(&format!("account = {}\n", quoted(account)));
     write_no_follow(&path, &text).map_err(|e| refuse(LocalOp::Write, e.kind().into()))?;
     Ok(RecordOutcome {
         path,

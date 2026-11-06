@@ -696,11 +696,13 @@ pub struct Placement {
 }
 
 /// A product a target delivers: each key's rendered env name with its `file` path (`None`
-/// for a key delivered as a variable), and the product's `local.secrets_dir_env`.
+/// for a key delivered as a variable), the product's `local.secrets_dir_env`, and whether
+/// its `local.environment` is `declared_only` (a sealed bundle carries it, #279 S5).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlacedProduct {
     pub names: BTreeMap<String, Option<String>>,
     pub secrets_dir_env: Option<String>,
+    pub declared_only: bool,
 }
 
 /// A passing check: ok, or ok with a warning.
