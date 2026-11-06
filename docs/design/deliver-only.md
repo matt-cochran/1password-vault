@@ -76,6 +76,11 @@ scope; a missing one is `NotSupplied`, naming the keys. Producers that run separ
 runs with `--product`/`--target`, or share one pipe (§8.4). This removes the green job that silently
 held a value Terraform had just rotated.
 
+**Whole-set targets (#287).** A sealed target rewrites its whole bundle on every change, so a run
+that would re-seal it needs every infrastructure key the target delivers supplied: without
+`--supply-stdin` such a run is refused before sealing with the same `NotSupplied`, naming the
+keys. The bundle's signed header lists the supplied names under `supplied`.
+
 ## 3. Intake channel
 
 `opv sync <env> --supply-stdin` is boolean and takes no argument, so no file path can be given.

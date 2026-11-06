@@ -17,7 +17,8 @@
 //!   ([`StagedStore::check_local`]) when it opens the target, before it reads any value from
 //!   1Password, so a tampered bundle costs no values read.
 //! - **Writing.** The header is built here (placement, revision, signer and recipient
-//!   fingerprints, contract digest, opv version, plan id), sealed and signed by the runner's
+//!   fingerprints, contract digest, opv version, plan id, and the names whose values
+//!   `--supply-stdin` supplied, #287), sealed and signed by the runner's
 //!   seal effect, and written atomically under an OS advisory lock on a file beside the bundle (released when its holder dies): a
 //!   temporary file in the same directory, `fsync`, `rename`, `fsync` of the directory (§5.6).
 //!   `revision = max(previous + 1, now)` in Unix seconds, `previous` from a verified header
@@ -328,12 +329,13 @@ impl<'a> SealedStore<'a> {
             .unwrap_or_else(|_| "project".to_string())
     }
 
-    /// Seal `entries` (sorted by name) as `product`'s bundle and write it atomically.
+    /// Seal `entries` (sorted by name) as `product`'s bundle and write it atomically; the
+    /// header names those of `entries` that are in `supplied` as supplied at sync (#287).
     fn seal_one(
         &self,
         product: &str,
         entries: &[(&str, &SecretValue)],
-        plan_id: &str,
+        run: &WriteRun<'_>,
     ) -> Result<(), Error> {
         let path = self.target.written_path(product);
         let dir = path
@@ -363,6 +365,12 @@ impl<'a> SealedStore<'a> {
         let sde = secrets_dir_env(&names, placed);
         let declared = declared_only(placed);
         let recipients = self.target.sorted_recipients();
+        // #287: names only, in the entries' (sorted) order; absent when none was supplied.
+        let supplied: Vec<String> = entries
+            .iter()
+            .filter(|(n, _)| run.supplied.iter().any(|s| s == n))
+            .map(|(n, _)| n.to_string())
+            .collect();
         let header = Header {
             format: FORMAT.to_string(),
             project: self.project(),
@@ -372,7 +380,7 @@ impl<'a> SealedStore<'a> {
             revision,
             created_at: crate::domain::provenance::utc(now),
             opv_version: env!("CARGO_PKG_VERSION").to_string(),
-            plan_id: plan_id.to_string(),
+            plan_id: run.plan_id.to_string(),
             contract_digest: format::contract_digest(
                 &names,
                 sde.as_deref(),
@@ -389,6 +397,7 @@ impl<'a> SealedStore<'a> {
             } else {
                 ChildEnvironment::Inherit
             }),
+            supplied: (!supplied.is_empty()).then_some(supplied),
         };
         let keys = self
             .target
@@ -697,7 +706,7 @@ impl StagedStore for SealedStore<'_> {
                 continue;
             }
             entries.sort_by(|a, b| a.0.cmp(b.0));
-            self.seal_one(product, &entries, run.plan_id)?;
+            self.seal_one(product, &entries, run)?;
         }
         Ok(())
     }

@@ -46,11 +46,7 @@ struct Docker {
 
 impl Docker {
     fn new(store: &'static str) -> Self {
-        let fake = FakeRunner::new([crate::app::testutil::item(&[crate::app::testutil::secret(
-            "",
-            "FLY_API_TOKEN",
-            TOKEN,
-        )])]);
+        let fake = FakeRunner::default();
         Self {
             fake,
             store,
@@ -135,11 +131,13 @@ fn run(d: &Docker) -> (Result<String, Error>, tempfile::TempDir) {
         vault: "vprod".into(),
         item: "ideploy".into(),
     };
+    let token = SecretValue::new(TOKEN.to_string());
     let req = PushRequest {
         env: "prod",
         target: "web",
         app: "shop",
         item: &item,
+        token: &token,
         image: IMAGE,
         endpoint: ENDPOINT,
         runtime: runtime.path(),
@@ -169,6 +167,16 @@ fn docker_calls(d: &Docker) -> Vec<Vec<String>> {
         .collect()
 }
 
+// --- #289: the push reads nothing from 1Password ------------------------------------------
+
+/// The token comes from the strict sign-in that already read the deploy item.
+#[test]
+fn the_push_makes_no_op_call() {
+    let d = ok_world();
+    let _ = run(&d);
+    assert!(d.fake.calls.borrow().iter().all(|c| c.program != "op"));
+}
+
 // --- T6: the token reaches docker on stdin only -------------------------------------------
 
 #[test]
@@ -176,7 +184,7 @@ fn the_login_reads_the_token_on_stdin() {
     let d = ok_world();
     run(&d).0.unwrap();
     assert_eq!(
-        d.fake.calls.borrow()[1].stdin.as_deref(),
+        d.fake.calls.borrow()[0].stdin.as_deref(),
         Some(TOKEN.as_bytes())
     );
 }

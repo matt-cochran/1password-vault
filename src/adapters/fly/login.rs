@@ -178,6 +178,10 @@ impl DeployLogin for FlyLogin {
             _ => Vec::new(),
         }
     }
+
+    fn held(&self, field: &str) -> Option<&SecretValue> {
+        self.token.as_ref().filter(|_| field == TOKEN_FIELD)
+    }
 }
 
 #[cfg(test)]

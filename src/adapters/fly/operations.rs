@@ -26,7 +26,7 @@ use serde::Deserialize;
 use super::{Effect, read_json};
 use crate::cause::{Cause, EnvName, Guard, OperationRefusal, TargetName};
 use crate::error::Error;
-use crate::provider::{ListedMachine, RegistryPush, TargetOperations};
+use crate::provider::{DeployLogin, ListedMachine, RegistryPush, TargetOperations};
 use crate::runner::CommandRunner;
 
 /// `machines` argv: `flyctl machine list --app <app> --json` (§2).
@@ -161,7 +161,15 @@ impl TargetOperations for Operations {
         machine_update(r, env, target, app, machine, image)
     }
 
-    fn registry_push(&self, r: &dyn CommandRunner, push: &RegistryPush) -> Result<String, Error> {
+    fn registry_push(
+        &self,
+        r: &dyn CommandRunner,
+        push: &RegistryPush,
+        login: &dyn DeployLogin,
+    ) -> Result<String, Error> {
+        let token = login.held(super::login::TOKEN_FIELD).ok_or(Cause::Bug {
+            site: "fly: registry-push without the deploy sign-in's token",
+        })?;
         super::registry::registry_push(
             r,
             &super::registry::PushRequest {
@@ -169,6 +177,7 @@ impl TargetOperations for Operations {
                 target: push.target,
                 app: push.app,
                 item: push.item,
+                token,
                 image: push.image,
                 endpoint: push.endpoint,
                 runtime: push.runtime,

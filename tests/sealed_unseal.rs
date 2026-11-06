@@ -71,6 +71,7 @@ fn bundle_with(
             .collect(),
         secrets_dir_env: secrets_dir_env.map(str::to_string),
         child_environment,
+        supplied: None,
     };
     let values: Vec<(&str, &[u8])> = entries
         .iter()

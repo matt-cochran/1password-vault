@@ -372,6 +372,12 @@ impl<'a> EnvRunner<'a> {
         Ok(self)
     }
 
+    /// The deploy sign-in this runner carries, when it signed one in: an operation takes a
+    /// credential the sign-in already read from it (#289).
+    pub fn deploy_login(&self) -> Option<&dyn DeployLogin> {
+        self.login.as_deref()
+    }
+
     /// `principal`: the deploy credentials of a named target, under which the provider's
     /// sign-in calls are observed, so a rejection addresses that credential and never the
     /// person's own vendor login (X22, 06.01).

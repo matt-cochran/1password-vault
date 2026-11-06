@@ -107,9 +107,14 @@ names the field and the rule; a recipient or signer is named by its fingerprint,
   refused on a sealed target: a bundle cannot carry the key that opens it.
 - **The signing key is never sealed.** A key read from the item named by `deploy_credentials`
   is refused.
-- **No infrastructure key (#275).** A key with `source = "infrastructure"` is supplied at sync
-  and never stored in 1Password, so there is nothing to seal: `config_invalid`, naming
-  `<product>/<KEY>` and the target. Deliver it through a target with its own store.
+- **Infrastructure keys are sealed from the value supplied at sync (#287).** A key with
+  `source = "infrastructure"` is never stored in 1Password; `opv sync <env> --supply-stdin`
+  seals the value its `opv.supply/1` document supplies, and the bundle's signed header lists
+  that key under `supplied` (names only). A sync that would re-seal the bundle without a
+  supplied value for every infrastructure key the target delivers refuses before sealing
+  (`supply_refused`, `not_supplied`, naming `<product>/<KEY>`), and nothing is written. A
+  scheduled sync with nothing to change seals nothing and passes. (0.18.0 refused such a key
+  at load, #275.) Bundles sealed without `supplied` open unchanged.
 - A variable whose value holds a NUL byte is shown by `plan` and refused by `sync` before
   anything is written. A file key may hold any bytes.
 - Limits: 256 names per bundle, 1 MiB per value, 8 MiB per bundle.
