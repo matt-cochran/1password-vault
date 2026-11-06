@@ -97,6 +97,16 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "PlanUnknown",
         "only opv apply reaches it, and only at a person's terminal, which the harness never gives",
     ),
+    // provision (#253): `ProducerFailed` and `ProducerChanged` are reached by
+    // scenarios/provision.rs (a person's terminal under a pseudo-terminal). `Unsupported` is
+    // raised only for a producer member on native Windows (D12, src/app/provision.rs
+    // `who_is_running`), which the Unix-only e2e harness never runs on. Reached by
+    // src/app/provision_tests.rs (`a_producer_member_on_native_windows_is_unsupported`).
+    (
+        "Unsupported",
+        "native Windows only (D12); the e2e harness is Unix-only",
+    ),
+    // end provision
 ];
 
 fn snapshots() -> PathBuf {
@@ -177,7 +187,7 @@ impl Scenario {
         }
     }
 
-    fn after_install(mut self, f: fn(&Scenario)) -> Self {
+    pub(crate) fn after_install(mut self, f: fn(&Scenario)) -> Self {
         self.after_install.push(f);
         self
     }
@@ -306,7 +316,7 @@ impl Scenario {
 
     /// The project's git checkout with everything staged committed, so `HEAD` holds it
     /// (the revision CI deploys: what a retirement's needs check scans).
-    fn committed(self) -> Self {
+    pub(crate) fn committed(self) -> Self {
         let ok = Command::new("git")
             .args(["commit", "-qm", "the app"])
             .current_dir(self.path("project"))
@@ -1374,6 +1384,36 @@ mod cases {
         )
         .mcp("opv_propose", value_intent())
     }
+
+    // --- the sealed target (#271, scenarios/sealed.rs) ----------------------------------------
+
+    /// `opv unseal` of a bundle one header byte of which changed after `opv sync` sealed it:
+    /// refused at the signature, before anything is decrypted.
+    pub fn sealed_refused() -> Case {
+        Case {
+            scenario: crate::scenarios::sealed::tampered_runtime(),
+            args: crate::scenarios::sealed::unseal_identity_args(),
+            mcp: None,
+        }
+    }
+
+    /// `opv sync` over that tampered bundle: refused as an input, and the file left alone.
+    pub fn sealed_bundle_tampered() -> Case {
+        Case {
+            scenario: crate::scenarios::sealed::tampered_app(),
+            args: crate::scenarios::sealed::sync_args(),
+            mcp: None,
+        }
+    }
+
+    /// `opv sync` while the bundle's lock file is held: the write is refused, no bundle.
+    pub fn sealed_lock_held() -> Case {
+        Case {
+            scenario: crate::scenarios::sealed::locked_app(),
+            args: crate::scenarios::sealed::sync_args(),
+            mcp: None,
+        }
+    }
 }
 
 /// A Rust file reading one declared name (`API_KEY`) and one the contract does not declare.
@@ -2202,6 +2242,9 @@ scenarios! {
         retire_still_read => RetireStillRead,
         contract_stale => ContractStale,
         value_in_text_field => ValueInTextField,
+        sealed_refused => SealedRefused,
+        sealed_bundle_tampered => InputInvalid,
+        sealed_lock_held => LocalIo,
     ],
     text: [
         config_source_mismatch => ConfigSourceMismatch,
@@ -2360,7 +2403,20 @@ fn core_access_raises_single_writer_for_the_vault_with_one_writer() {
 /// Every `Cause` variant and the fields its document's `subject` holds (`seen` and the
 /// `cause` tag are never shown), read from `src/cause/mod.rs`.
 fn variants() -> &'static BTreeMap<String, BTreeSet<String>> {
-    static V: OnceLock<BTreeMap<String, BTreeSet<String>>> = OnceLock::new();
+    &variant_fields().0
+}
+
+/// Each variant's fields serde leaves out when empty (`skip_serializing_if`): a subject may
+/// show them or not.
+fn optional_fields() -> &'static BTreeMap<String, BTreeSet<String>> {
+    &variant_fields().1
+}
+
+/// Each variant's always-shown fields, and its fields shown only when set.
+type Fields = BTreeMap<String, BTreeSet<String>>;
+
+fn variant_fields() -> &'static (Fields, Fields) {
+    static V: OnceLock<(Fields, Fields)> = OnceLock::new();
     V.get_or_init(|| {
         let src = std::fs::read_to_string(Path::new(ROOT).join("src/cause/mod.rs"))
             .expect("src/cause/mod.rs");
@@ -2368,20 +2424,37 @@ fn variants() -> &'static BTreeMap<String, BTreeSet<String>> {
         let field = re(r"^(?:pub\s+)?([a-z_][a-z0-9_]*)\s*:");
         let variant = re(r"^([A-Z][A-Za-z0-9]*)\s*(\{)?");
         let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut optional: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut current = String::new();
         let mut depth = 0i32;
         let mut skip_field = false;
+        let mut optional_field = false;
         for line in src[start..].lines() {
             let l = line.trim();
             if l.is_empty() || l.starts_with("//") {
                 continue;
             }
             if l.starts_with('#') {
-                // A field serde does not serialize is not part of the subject.
-                if l.starts_with("#[serde(skip") {
+                // A field serde does not serialize is not part of the subject; one it skips
+                // only when empty may be.
+                if l.starts_with("#[serde(skip_serializing_if") {
+                    optional_field = true;
+                } else if l.starts_with("#[serde(skip") {
                     skip_field = true;
                 }
                 continue;
+            }
+            if optional_field {
+                optional_field = false;
+                if depth == 1
+                    && let Some(c) = field.captures(l)
+                {
+                    optional
+                        .entry(current.clone())
+                        .or_default()
+                        .insert(c[1].to_string());
+                    continue;
+                }
             }
             if skip_field {
                 skip_field = false;
@@ -2407,7 +2480,7 @@ fn variants() -> &'static BTreeMap<String, BTreeSet<String>> {
             }
             depth += l.matches('{').count() as i32 - l.matches('}').count() as i32;
         }
-        out
+        (out, optional)
     })
 }
 
@@ -2447,12 +2520,16 @@ fn variant_codes() -> &'static BTreeMap<String, BTreeSet<String>> {
 }
 
 /// The variant an error object (or a `then` inside one) was rendered from: the one whose
-/// fields are exactly the subject's keys, and whose codes include `code` when several match.
+/// fields are the subject's keys (less any it shows only when set), and whose codes include `code` when several match.
 fn identify_with(subject: &Value, code: &str) -> Option<String> {
     let keys: BTreeSet<String> = subject.as_object()?.keys().cloned().collect();
+    let none = BTreeSet::new();
     let by_fields: Vec<&String> = variants()
         .iter()
-        .filter(|(_, f)| **f == keys)
+        .filter(|(v, f)| {
+            let optional = optional_fields().get(*v).unwrap_or(&none);
+            f.is_subset(&keys) && keys.iter().all(|k| f.contains(k) || optional.contains(k))
+        })
         .map(|(v, _)| v)
         .collect();
     match by_fields.as_slice() {
@@ -2617,6 +2694,9 @@ fn every_scenario_snapshot_belongs_to_a_scenario() {
         )
         .chain(crate::scenarios::session_reuse::SNAPSHOTS.iter().copied())
         .chain(crate::scenarios::set_from_file::SNAPSHOTS.iter().copied())
+        .chain(crate::scenarios::provision::SNAPSHOTS.iter().copied())
+        .chain(crate::scenarios::provision_sets::SNAPSHOTS.iter().copied())
+        .chain(crate::scenarios::sealed::SNAPSHOTS.iter().copied())
         .collect();
     let orphans: Vec<String> = std::fs::read_dir(scenario_snapshots())
         .map(|d| {

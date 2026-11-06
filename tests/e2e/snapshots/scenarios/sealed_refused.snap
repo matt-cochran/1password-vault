@@ -1,0 +1,18 @@
+# sealed_refused: opv unseal {root}/project/sealed/prod/web.opv-sealed --env prod --product web --signers {root}/runtime/allowed_signers --identity-file {root}/runtime/identity.txt
+
+## text exit: 6
+## text stdout
+
+## text stderr
+opv: the sealed bundle <SCENARIO>/project/sealed/prod/web.opv-sealed failed its signature check against <SCENARIO>/runtime/allowed_signers: the signature does not verify over the bundle; nothing was decrypted
+Do: give --signers the allowed_signers file whose line for this environment (namespaces="opv-sealed") holds the release's signing key, or seal the bundle again with opv sync
+Next: opv unseal <SCENARIO>/project/sealed/prod/web.opv-sealed --env prod --product web --signers <SCENARIO>/runtime/allowed_signers --identity-file <SCENARIO>/runtime/identity.txt
+
+## json exit: 6
+## json stdout
+{"schema_version":4,"ok":false,"exit_code":6,"next":{"kind":"run","actor":"assistant","command":"opv unseal <SCENARIO>/project/sealed/prod/web.opv-sealed --env prod --product web --signers <SCENARIO>/runtime/allowed_signers --identity-file <SCENARIO>/runtime/identity.txt --json"},"do":"give --signers the allowed_signers file whose line for this environment (namespaces=\"opv-sealed\") holds the release's signing key, or seal the bundle again with opv sync","error":{"code":"sealed_signature_invalid","category":"policy","message":"the sealed bundle <SCENARIO>/project/sealed/prod/web.opv-sealed failed its signature check against <SCENARIO>/runtime/allowed_signers: the signature does not verify over the bundle; nothing was decrypted","subject":{"refusal":{"kind":"signature_invalid","signers":"<SCENARIO>/runtime/allowed_signers","detail":"the signature does not verify over the bundle"},"bundle":"<SCENARIO>/project/sealed/prod/web.opv-sealed"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"give --signers the allowed_signers file whose line for this environment (namespaces=\"opv-sealed\") holds the release's signing key, or seal the bundle again with opv sync","next":{"kind":"run","actor":"assistant","command":"opv unseal <SCENARIO>/project/sealed/prod/web.opv-sealed --env prod --product web --signers <SCENARIO>/runtime/allowed_signers --identity-file <SCENARIO>/runtime/identity.txt --json"}}}
+
+## json stderr
+opv: the sealed bundle <SCENARIO>/project/sealed/prod/web.opv-sealed failed its signature check against <SCENARIO>/runtime/allowed_signers: the signature does not verify over the bundle; nothing was decrypted
+Do: give --signers the allowed_signers file whose line for this environment (namespaces="opv-sealed") holds the release's signing key, or seal the bundle again with opv sync
+Next: opv unseal <SCENARIO>/project/sealed/prod/web.opv-sealed --env prod --product web --signers <SCENARIO>/runtime/allowed_signers --identity-file <SCENARIO>/runtime/identity.txt --json

@@ -78,9 +78,19 @@ exactly the CLI's `--json` error object.
 Every failure has one `error.code` from a closed list (`opv schema` lists them), the same
 in the CLI's `--json` document and in an MCP answer:
 
-- `next` is `{kind, actor, command}`. Run `next.command` yourself only when `next.actor`
-  is `assistant` and `human_required` is false; otherwise hand `do` and the command to the
-  user and wait (a `ci` action is left to CI).
+- `next` is `{kind, actor, command}`, and in schema 4 a step can also carry `argv`, `reach`
+  and `choices`. Run `next.command` yourself only when `next.actor` is `assistant` and
+  `human_required` is false; otherwise hand `do` and the command to the user and wait (a
+  `ci` action is left to CI). `next.kind: choose` is a person's pick: it comes with two or
+  more `choices` (accounts), each with its ordered `steps` as `argv` arrays. Never choose an
+  account for the user and never run a choice's steps; show the choices and wait. `reach`
+  (`app`, `shell`, `none`) says how far this session can reach a 1Password session: with
+  `none` you cannot verify a sign-in yourself, and the person runs `next` in their terminal.
+- You cannot share the person's 1Password session. On WSL with the Linux `op`, and on
+  headless hosts, a sign-in lives only in the shell that made it, so after the person signs
+  in in their terminal you still see value-state only. The shell-function form
+  `eval "$(opv login --shell)"` for the person's own shell is documented only: it is never
+  a typed `next` step, and no opv output steers you into a session.
 - `retry`: `safe` re-run as is; `after_fix` once `do` is done; `check_first` run `next` (a
   read) before acting again, because something may already exist; `never` the command
   must change.
@@ -101,6 +111,18 @@ with `section: plan` and the same targets, product and rotate). CI runs `opv syn
 (exit 10). A person runs the same command in their own terminal, or lets CI do it on change
 and on a schedule. `stale_plan`: the item, target or configuration changed; show the new
 plan and ask again.
+
+## Sealed bundles
+
+A sealed target's bundle (`*.opv-sealed`) is opened at the runtime by `opv unseal`, never by
+you. You may run `opv unseal <bundle> --env <env> --product <p> --signers <file> --verify-only
+--json`, or the same without `--verify-only` and with the runtime's identity file, to check a
+bundle: both print names, destinations and fingerprints, never a value. Never run `unseal
+--exec`, never read or copy an age identity (`AGE-SECRET-KEY-1…`) and never decrypt a bundle
+with `age -d`. A runtime identity is a key with `rules = { age_identity = true }`, made by
+`opv propose generate` and the person's `opv apply`, which prints only its `age1…` recipient.
+Changes to `sealed.recipients`, `sealed.signer` or a runtime's `allowed_signers` decide who
+may open or set an environment's values: propose them and let the user review them like code.
 
 ## Self-made secrets
 
@@ -169,9 +191,10 @@ A `pending_revoke` finding means an old identity still reads the vault: once
   records `deploy_credentials` — the token is never printed. If they decline or the target
   already records one, it is a stop: hand `opv explain` to them and wait.
 - **Account findings** (`no_accounts`, `selected_account_absent`, `account_ambiguous`,
-  `selected_signed_out`): run `opv account list --json`; ask the user which account; record it
-  with `opv account use <ID>`; hand `opv login --add --account <email>` or
-  `opv login --account <ID>` to the user, wait, then re-run `opv ready --json`.
+  `selected_signed_out`, `account_required`): run `opv account list --json`; when its `next`
+  is `kind: choose`, show the user its choices and never pick one yourself. Ask the user
+  which account; record it with `opv account use <ID>`; hand `opv login --add --account
+  <email>` or `opv login --account <ID>` to the user, wait, then re-run `opv ready --json`.
 - **`ids_not_in_account`**: the recorded vault is in another account. Ask the user: select
   that account (`opv account use <ID>`) or rebind (`opv propose structure --rebind <env>`),
   then `opv apply`.
@@ -182,6 +205,13 @@ A `pending_revoke` finding means an old identity still reads the vault: once
   hand it over and never read that file. Values that already exist elsewhere:
   the user runs `opv import <env> --from <file.env>`; `--dry-run` shows what would come in;
   `--replace` is the user's decision.
+- **A set** (`keys_blocking` with `scope.set`; a contract `[sets.<SET>]`, e.g. an OAuth
+  consent's refresh token from a `[producers.<name>]` command, or matched generated keys and
+  their bundle): never run `opv provision` yourself and never set a member with `opv set`. You
+  may run `opv provision <SET> --env <env> --dry-run --json` to show the plan (names, makers,
+  pins; never a value), then hand the finding's `opv provision <SET> --env <env>` to the user
+  verbatim (`--fill-missing` for a partial set, `--replace` only if they decide to re-make it)
+  and wait; they type the environment back and consent in their browser.
 - **Everything saved**: local runs use `opv run <env> --product <p> -- <command>`; deploys go
   `opv plan <env>` then `opv sync <env> --expect-plan <id>` (add `--deploy` only when the user
   wants to deploy). CI secrets in GitHub Actions use a `github` environment and the same sync.

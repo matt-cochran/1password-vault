@@ -14,6 +14,8 @@ pub enum Declared {
     Key,
     Role,
     Store,
+    /// A `[producers.X]` of the contract (#253).
+    Producer,
 }
 
 impl Declared {
@@ -24,6 +26,7 @@ impl Declared {
             Declared::Key => "key",
             Declared::Role => "role",
             Declared::Store => "store",
+            Declared::Producer => "producer",
         }
     }
 }
@@ -177,6 +180,74 @@ pub enum ConfigCheck {
         other_env: String,
         other_owner: String,
     },
+    // provision (#253, `docs/design/owner-value-ingestion.md` §3.2): `[sets]`, `[producers]`
+    /// A set member is not a key wanted in one of the set's environments.
+    SetMemberNotWanted { member: String, env: String },
+    /// A set's members live in more than one 1Password item (access boundary) in `env`:
+    /// 1Password writes one item atomically, never several (D1).
+    SetSpansBoundaries {
+        env: String,
+        boundaries: Vec<String>,
+    },
+    /// A key is a member of more than one set (D13).
+    MemberOfTwoSets { member: String, sets: Vec<String> },
+    /// A set member is not a team value stored in 1Password: `personal`, `from`, or
+    /// `source = "infrastructure"`.
+    SetMemberNotStored { member: String, why: &'static str },
+    /// `generate = "rules"` on a key whose rules give no recipe.
+    GenerateNoRecipe { member: String },
+    /// A `hex_bytes`/`base64_bytes` size outside 16..=1024.
+    GenerateBytes { bytes: u64 },
+    /// `output` is not one of the producer's declared `outputs`.
+    ProducerOutputUndeclared {
+        producer: String,
+        output: String,
+        outputs: Vec<String>,
+    },
+    /// A producer's declared output no member or template uses.
+    ProducerOutputUnused { producer: String, output: String },
+    /// A producer's `command[0]` is `op` or `opv`: a producer never gets `op`'s
+    /// environment (vet F6).
+    ProducerIsOp { program: String },
+    /// A producer's argument at `index` (0-based) looks like a secret value.
+    ProducerArgumentSecret { index: usize },
+    /// A producer's command names project file `file`, and the contract pins no `sha256`.
+    ProducerShaMissing { file: String },
+    /// A producer input names a key outside the set's own boundary or environment.
+    ProducerInputOutside { input: String, key: String },
+    /// A producer `timeout` over the cap (vet F10).
+    ProducerTimeoutCap { max: &'static str },
+    /// An `open_url_hosts` entry is not a host name.
+    OpenUrlHost { host: String },
+    // end provision
+    // sealed target (#271, `docs/design/sealed-target.md` §3.1)
+    /// A sealed target's recipient is also a recipient of a sealed target in another trust
+    /// group (`sealed_recipient_shared`). `recipient` is its fingerprint, never the key.
+    SealedRecipientShared {
+        recipient: String,
+        other_env: String,
+        other_target: String,
+    },
+    /// A sealed target's signer also signs for a sealed target in another trust group
+    /// (`sealed_signer_shared`, T1). `signer` is its fingerprint.
+    SealedSignerShared {
+        signer: String,
+        other_env: String,
+        other_target: String,
+    },
+    /// A key a sealed target delivers holds an age identity (`age_identity = true`, T14).
+    SealedDeliversIdentity { target: String },
+    /// A key a sealed target delivers is read from the item of the target's own
+    /// `deploy_credentials`, its signing key (G4).
+    SealedDeliversSigner { target: String },
+    /// A key a sealed target delivers is `source = "infrastructure"` (#206): supplied at
+    /// sync, never stored in 1Password, so there is no value to seal (#275).
+    SealedDeliversInfrastructure {
+        product: String,
+        key: String,
+        target: String,
+    },
+    // end sealed target
 }
 
 fn list(items: &[String]) -> String {
@@ -353,6 +424,81 @@ impl ConfigCheck {
                 "keeps {label} {name} for {owner} in {store}, where environment {other_env} keeps \
                  it for {other_owner}; each would overwrite and prune the other's value"
             ),
+            // provision (#253)
+            SetMemberNotWanted { member, env } => {
+                format!("names {member}, which is not declared for environment {env}")
+            }
+            SetSpansBoundaries { env, boundaries } => format!(
+                "has members in {} 1Password items in environment {env} ({}); a set fills one item",
+                boundaries.len(),
+                list(boundaries)
+            ),
+            MemberOfTwoSets { member, sets } => {
+                format!(
+                    "makes {member} a member of more than one set ({})",
+                    list(sets)
+                )
+            }
+            SetMemberNotStored { member, why } => format!(
+                "names {member}, which is {why}; a set member is a team value stored in 1Password"
+            ),
+            GenerateNoRecipe { member } => {
+                format!("is \"rules\", but the rules of {member} give no byte recipe")
+            }
+            GenerateBytes { bytes } => format!("asks for {bytes} bytes; it must be 16 to 1024"),
+            ProducerOutputUndeclared {
+                producer, output, ..
+            } => format!("names output {output}, which producer {producer} does not declare"),
+            ProducerOutputUnused { producer, output } => {
+                format!("declares output {output} of producer {producer}, which no member uses")
+            }
+            ProducerIsOp { program } => format!(
+                "starts {program}; a producer is never op or opv, which would get your 1Password session"
+            ),
+            ProducerArgumentSecret { index } => {
+                format!("has argument {index} that looks like a secret value")
+            }
+            ProducerShaMissing { file } => {
+                format!("runs project file {file}, but pins no sha256 of it")
+            }
+            ProducerInputOutside { input, key } => format!(
+                "has input {input} reading {key}, outside the set's own item and environment"
+            ),
+            ProducerTimeoutCap { max } => format!("is longer than {max}"),
+            OpenUrlHost { host } => format!("lists {host}, which is not a host name"),
+            // end provision
+            SealedRecipientShared {
+                recipient,
+                other_env,
+                other_target,
+            } => format!(
+                "lists recipient {recipient}, which target {other_target} of environment \
+                 {other_env} also seals to, in another trust group"
+            ),
+            SealedSignerShared {
+                signer,
+                other_env,
+                other_target,
+            } => format!(
+                "is signer {signer}, which also signs for target {other_target} of environment \
+                 {other_env}, in another trust group"
+            ),
+            SealedDeliversIdentity { target } => format!(
+                "is an age identity (age_identity = true), and sealed target {target} delivers \
+                 it; a bundle cannot carry the key that opens it"
+            ),
+            SealedDeliversSigner { target } => format!(
+                "is read from the item of sealed target {target}'s deploy_credentials, its \
+                 signing key, and a sealed target never delivers its own signing key"
+            ),
+            SealedDeliversInfrastructure {
+                product,
+                key,
+                target,
+            } => format!(
+                "is {product}/{key}, supplied at sync (source = \"infrastructure\") and never \
+                 stored in 1Password, so sealed target {target} has no value to seal"
+            ),
         };
         format!("{field} {p}")
     }
@@ -490,6 +636,58 @@ impl ConfigCheck {
             StoreShared { .. } => {
                 format!("give one of them its own store, or set {field} so the names differ")
             }
+            // provision (#253)
+            SetMemberNotWanted { member, env } => {
+                format!("add \"{env}\" to the environments of {member}, or remove it from {field}")
+            }
+            SetSpansBoundaries { .. } => {
+                "keep a set's members in one product boundary; other products read them with from"
+                    .into()
+            }
+            MemberOfTwoSets { member, .. } => format!("keep {member} in one set only"),
+            SetMemberNotStored { member, .. } => format!("remove {member} from {field}"),
+            GenerateNoRecipe { .. } => {
+                format!("write {leaf} = {{ hex_bytes = 32 }} or {{ base64_bytes = 32 }}")
+            }
+            GenerateBytes { .. } => format!("set {field} to a size from 16 to 1024"),
+            ProducerOutputUndeclared { outputs, .. } => {
+                format!("set {field} to one of {}", list(outputs))
+            }
+            ProducerOutputUnused { output, .. } => {
+                format!("remove {output} from {field}, or make a member of it")
+            }
+            ProducerIsOp { .. } => {
+                format!("make {field} start the producer's own program, such as python3")
+            }
+            ProducerArgumentSecret { index } => format!(
+                "remove argument {index} from {field}; a producer receives its inputs on standard input"
+            ),
+            ProducerShaMissing { file } => {
+                format!("add sha256 = \"<SHA-256 of {file}>\" next to {field}")
+            }
+            ProducerInputOutside { input, .. } => {
+                format!("point input {input} at a key of the set's own item and environment")
+            }
+            ProducerTimeoutCap { max } => format!("set {leaf} to at most {max}"),
+            OpenUrlHost { host } => {
+                format!("write {host} as a host name only, such as accounts.example.com")
+            }
+            SealedRecipientShared { other_target, .. }
+            | SealedSignerShared { other_target, .. } => {
+                format!(
+                    "give this target its own key in {field}, or set the same sealed.trust_group \
+                     on it and on target {other_target}"
+                )
+            }
+            SealedDeliversIdentity { target } | SealedDeliversSigner { target } => format!(
+                "remove the product of {field} from target {target}'s products, or deliver this \
+                 key from another target"
+            ),
+            SealedDeliversInfrastructure { target, .. } => format!(
+                "remove the product of {field} from target {target}'s products and deliver it \
+                 from a target that is not sealed, or store the value in 1Password (drop \
+                 source = \"infrastructure\")"
+            ),
         }
     }
 }

@@ -64,6 +64,9 @@ pub fn set(
     // configuration alone, so nobody is handed a command that cannot succeed.
     if let Ok((product, name)) = resolve(fleet, key, env_name) {
         super::import::refuse_not_stored(fleet, &product, &name, env_name)?;
+        // A set member is written only with its set (#253 §5.6): also from the configuration
+        // alone, before the person is prompted.
+        super::import::refuse_set_member(fleet, &product, &name, env_name)?;
     }
     // An assistant is refused before anything, with the exact command for the person; then
     // a process without a terminal. Neither path calls the prompt (R60).
@@ -129,9 +132,11 @@ pub fn set_from_file(
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     // The same order as `set`: an infrastructure key has no value to store, said from the
-    // configuration; then a person at a terminal, refused before the file is touched.
+    // configuration; then a set member, whose set writes it; then a person at a terminal,
+    // refused before the file is touched.
     if let Ok((product, name)) = resolve(fleet, key, env_name) {
         super::import::refuse_not_stored(fleet, &product, &name, env_name)?;
+        super::import::refuse_set_member(fleet, &product, &name, env_name)?;
     }
     let by = from_file_command(key, env_name);
     refuse_if_agent(env, by.clone())?;

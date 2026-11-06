@@ -353,6 +353,7 @@ pub(crate) fn not_signed_in_to(account: &str, check: &SessionCheck) -> Error {
         system: System::OnePassword,
         account: Some(AccountId::new(account)),
         state,
+        selected_by: None,
     }
     .into()
 }

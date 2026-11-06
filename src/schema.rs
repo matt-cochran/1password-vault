@@ -184,6 +184,24 @@ pub const EFFECTS: &[Effect] = &[
         handles_values: true,
         ask_user_first: true,
     },
+    // #271: without --exec, unseal verifies and inspects a sealed bundle offline and prints
+    // no value; `opv unseal --verify-only --json` is safe for an assistant (design §4.3).
+    Effect {
+        command: "unseal",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    // #271: with --exec, unseal delivers the bundle's values to the command it runs (design
+    // §5.5), like `run`.
+    Effect {
+        command: "unseal --exec",
+        effect: "runs_command",
+        needs_terminal: false,
+        handles_values: true,
+        ask_user_first: true,
+    },
     Effect {
         command: "run --preview",
         effect: "reads",
@@ -426,6 +444,16 @@ pub const EFFECTS: &[Effect] = &[
         handles_values: true,
         ask_user_first: true,
     },
+    // #253: makes a contract set's values (a producer receives its declared inputs on stdin)
+    // and writes them in one checked edit; a person in their own terminal. `--dry-run` is a
+    // read an assistant may run.
+    Effect {
+        command: "provision",
+        effect: "writes_1password",
+        needs_terminal: true,
+        handles_values: true,
+        ask_user_first: true,
+    },
 ];
 
 /// The commands whose item read tidies the 1Password layout when a signed-in person runs
@@ -454,7 +482,7 @@ pub const ALSO_WRITES_1PASSWORD: [&str; 0] = [];
 
 /// What a flag adds to its command's effect: (command, long flag, effect). Every one of
 /// these needs the user's yes for the run.
-pub const FLAG_EFFECTS: [(&str, &str, &str); 16] = [
+pub const FLAG_EFFECTS: [(&str, &str, &str); 17] = [
     ("sync", "deploy", "deploys"),
     ("sync", "prune", "deletes"),
     // #179: with --prune, also unsets the keys marked retiring (targets only).
@@ -476,10 +504,27 @@ pub const FLAG_EFFECTS: [(&str, &str, &str); 16] = [
     // 0.9.0: creates a service account and stores its token as a GitHub secret (the owner,
     // in their own terminal; the token is never shown).
     ("access", "create", "creates_credential"),
+    // #253 D8: re-makes the whole set; the old values are kept in the item.
+    ("provision", "replace", "replaces_value"),
 ];
 
 /// Commands whose only output is JSON, with or without `--json`.
 const JSON_ONLY: [&str; 1] = ["schema"];
+
+/// `opv.supply/1` (#206): the supply `sync --supply-stdin` reads.
+const SUPPLY_SCHEMA: &str = "what opv sync <env> --supply-stdin reads: one or more JSON documents back to back, each {schema: \"opv.supply/1\", env: <the sync's environment>, serial: <a whole number from the producer's own object>, values: {\"<product>/<KEY>\": \"<value>\"}} with no other field; values are non-empty strings of at least 8 bytes for declared infrastructure keys (source = \"infrastructure\"); at most 1 MiB and 256 names in all; every infrastructure key in the run's scope is supplied; never written to 1Password";
+
+/// `opv.produce/1` (#253 §5.2): the protocol between `opv provision` and a producer.
+const PRODUCE_SCHEMA: &str = "between opv provision and a [producers.<name>] command, one JSON object per line: opv writes one request on stdin {schema: \"opv.produce/1\", kind: \"request\", env, set, outputs: [name], nonce, inputs: {name: value}}, then closes it; the producer writes on stdout any notices {schema, kind: \"notice\", open_url: <https URL on a host in open_url_hosts>} or {schema, kind: \"notice\", waiting: true}, then exactly one last line: a result {schema, kind: \"result\", env: <the request's>, nonce: <the request's>, outputs: {name: non-empty string}} with every requested output once, or an error {schema, kind: \"error\", code: <[a-z_]{1,40}>}, and exits 0; unknown fields are refused; at most 1 MiB, 64 KiB per line and per value; stderr is never shown; one attempt, never retried, within the producer's timeout";
+
+/// `opv.provision/1` (#253 §7): the receipt, and with `--dry-run` the plan.
+const PROVISION_SCHEMA: &str = "what opv provision <SET> --env <ENV> --json prints: {schema: \"opv.provision/1\", set, env, mode (absent|partial|inconsistent|complete|replace), result (written|unchanged|declined), concurrent_edit, item {vault_id, item_id, version_before, version_after, verified_at}, members [{key, made_by (producer|generate|template), state}], producers [{name, sha256, exit}], compared_environments, not_compared, next}; with --dry-run: {schema, result: \"dry_run\", plan {set, env, item {boundary, vault_id, item_id, version}, state, replace, members [{key, made_by {maker (producer|generate|template), ...}, state, rule?}], producers [{name, command, sha256, timeout_seconds, inputs, open_url_hosts}], budget {producers_seconds, commit_seconds, left_seconds}, compare}, next}; names, versions and hashes only, never a value, length, digest or prefix";
+
+/// The contract's `[sets]` table (#253 §3.1).
+const SETS_TABLE: &str = "[sets.<name>] environments = [<env>], members = {\"<product>/<KEY>\" = {producer = <name>, output = <output>} | {generate = \"rules\" | {hex_bytes = N} | {base64_bytes = N}}}: values opv provision makes and writes together; every member a declared, stored team key wanted in each listed environment, all in one item there (one boundary), a key in at most one set";
+
+/// The contract's `[producers]` table (#253 §3.1).
+const PRODUCERS_TABLE: &str = "[producers.<name>] command = [argv] (no shell; not op or opv), sha256 = <64 hex of the project file command names> (required when it names one), outputs = [name], inputs = {name = \"<product>/<KEY>\"} (in the set's own boundary and environment), open_url_hosts = [host], timeout = \"<duration>\" (at most 15m): a person-run command that speaks opv.produce/1";
 
 /// The `opv schema` document for the command tree `root` of version `version`.
 pub fn describe(root: &clap::Command, version: &str) -> Value {
@@ -499,7 +544,7 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
         "conventions": {
             "json": "with --json (and always for schema and config export <env>) stdout is one JSON document; human text goes to stderr",
             "ok": "true on success; false on failure, with exit_code and error",
-            "next": "{kind (run|apply|enter_value|authorize|wait_ci|none), actor (assistant|person|ci), command or null}: what runs next; on failure always set",
+            "next": "{kind (run|apply|enter_value|authorize|wait_ci|choose|none), actor (assistant|person|ci), command or null, argv?, reach?, choices?}: what runs next; on failure always set. argv (schema 4): the exact words to exec, present only when built from a typed opv command (ready, account list, and the session and account errors: op_not_signed_in, account_not_registered, account_required, account_ambiguous, own_session_required, credential_rejected); never present for a placeholder (-- <command>), a vendor command or an MCP call, and never parsed from command; a missing argv reads as null. choose: a person picks one of choices [{account {account_id, shorthand, email, address, signed_in}, steps [{kind, actor, effect (writes_config|signs_in|reads), command, argv?, do?}]}], then that choice's steps run in order; command is null, there are always two or more, and opv never picks one. reach (app|shell|none): how far this process reaches a 1Password session; with none the person's own run is the check",
             "do": "what to do before `next`, or null; shown before next. Only a person can do it when human_required is true (fill a value in 1Password, approve, sign in)",
             "retry": "safe: re-run the same command now; after_fix: re-run it once `do` is done; never: run `next` instead",
             "human_required": "true when an agent must hand `do` and `next` to the user instead of acting",
@@ -509,7 +554,7 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
             "plan_id": "plan --json prints plan_id when the plan is clean; it covers exactly the targets planned (every target of the environment, or those --target names); sync --expect-plan <plan_id> applies exactly that plan to the same targets or fails with stale_plan (exit 6) and changes nothing",
             "targets": "status, plan and sync cover every target of the environment in name order, or only those --target names (repeatable); every row and key reference names its target",
             "run": "run always passes op:// references to op run, so op run masks values in the child's output; a value needing a fix a person's tidy would make is warned about on stderr, never injected",
-            "schema_version": "3 since 0.12.0 (next became the typed {kind, actor, command} object); stays 3 while fields are only added; changes when a field changes meaning",
+            "schema_version": "4 since 0.18.0 (next gained argv, reach, choices and the kind choose); 3 from 0.12.0 (next became the typed {kind, actor, command} object); changes when a field changes meaning or a closed set grows",
         },
         "global_flags": global,
         "commands": commands,
@@ -517,9 +562,20 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
         "exit_codes": exit_codes(),
         "error_codes": error_codes(),
         // #206 (docs/design/deliver-only.md): values supplied at sync, never stored.
-        "capabilities": ["supplied_values/1"],
+        // #253 (docs/design/owner-value-ingestion.md): a person's producer hands opv a value.
+        // #271 (docs/design/sealed-target.md): `opv unseal` verifies a sealed bundle offline.
+        "capabilities": ["supplied_values/1", "owner_produce/1", "sealed_bundles/1"],
         "inputs": {
-            "opv.supply/1": "what opv sync <env> --supply-stdin reads: one or more JSON documents back to back, each {schema: \"opv.supply/1\", env: <the sync's environment>, serial: <a whole number from the producer's own object>, values: {\"<product>/<KEY>\": \"<value>\"}} with no other field; values are non-empty strings of at least 8 bytes for declared infrastructure keys (source = \"infrastructure\"); at most 1 MiB and 256 names in all; every infrastructure key in the run's scope is supplied; never written to 1Password",
+            "opv.supply/1": SUPPLY_SCHEMA,
+        },
+        "schemas": {
+            "opv.produce/1": PRODUCE_SCHEMA,
+            "opv.provision/1": PROVISION_SCHEMA,
+            "opv.supply/1": SUPPLY_SCHEMA,
+        },
+        "contract_tables": {
+            "sets": SETS_TABLE,
+            "producers": PRODUCERS_TABLE,
         },
         "states": {
             "row_state": ["saved", "missing", "failing_rule", "skipped", "source_blocked", "supplied_at_sync"],
@@ -679,6 +735,7 @@ fn exit_codes() -> Value {
         "131": {"meaning": "interrupted (SIGQUIT)", "retry": "safe"},
         "143": {"meaning": "interrupted (SIGTERM)", "retry": "safe"},
         "run": "opv run exits with the child's own code",
+        "unseal --exec": "opv unseal --exec exits with the command's own code",
     })
 }
 
@@ -778,17 +835,19 @@ fn documents() -> Value {
         "propose": "{kind, relaxations [{product, key, env?, kind, reason}], diff, questions [{env, ask}], plan_id, written, generated?, generated_by?, fragment? {toml, json, removed?, load_error {code, message}|null}}: the contract diff (names and rules, never a value or an id); generated: true when the configuration is generated, so the change goes into its generator and next is opv propose structure; generated_by names the generator its first line names (null when none) and fragment holds only the declarations the generator must emit, with the error the file would raise once merged; propose setup adds structure_steps and bindings_after; propose structure and generate print {plan_id, steps [{step, ...}], structure, contract_after, bindings_after}",
         "apply": "{plan_id, confirmed, steps_run, created, fields_added, generated [{environment, product, key}], record_written, config_written}: names and public ids only",
         "set": "{key, environment, state}: the key's value state after the entry (a word, never the value)",
+        "provision": "opv.provision/1 (see schemas): the receipt, or with --dry-run the plan; names, versions and hashes only, never a value",
         "import": "{environment, applied, rows [{found, product, key, action, rule}], writes, decisions_needed, next}: per key imported or skipped, names only, never a value",
         "needs": "{rows [{name, state (undeclared|declared_unobserved|ambiguous|declared), files, product, annotation_stale}], coverage}: names and file:line only",
         "contract": "{components [{name, environments [{name, keys [{name, kind, shape, required}]}]}], contract_digest}; --relaxations: {base, relaxations}",
         "ready": "{receipt_id, opv_version, config {source}, account ({account_id, by} or null), matrix [{environment, product, target, keys, saved, findings, delivered}], targets [{environment, name, provider, locator, state (ready|grants_missing), reason?, evidence_write (not_verified: an open state vault does not prove delivery evidence can be written; a sync checked with opv delivery verify does)}], findings [{code (an error code, an account finding, or key_missing|key_empty|key_failed_rule|key_wrong_kind), scope {account?, environment?, product?, key?}, blocking, actor (owner|agent|ci), effect (none|signs_in|writes_1password|writes_target|writes_config), prerequisite, verify}], next ({kind, actor, command} or null)}: names, IDs and codes only. A target whose deploy credentials, state vault or boundaries cannot be opened is `grants_missing` in the matrix, naming what could not be opened",
         "access": "{environments: [{environment, report: {checks: [{grant: {principal: {kind (deploy|ci_reader), environment, target?}, service_account, vault_id, permission (read|read_write)}, state (present|missing|read_only_needed|not_visible)}], extra: [{vault_id, service_account}], checked, unclassified}, commands: [string]}]}: who needs each boundary and target and the owner's exact commands for the missing grants; --target narrows to one target; read-only, never says clean",
-        "account list": "{discovery (ok|unavailable|op_missing|credential: a service account or Connect decides the account), platform, cli_accounts_only, selected ({account_id, by (flag|env|pointer|manifest|only), source} or null), accounts [{account_id, user_id, email, address, shorthand, source, signed_in (true|false|null), selected}], findings [{code (no_accounts|selected_account_absent|account_ambiguous|selected_signed_out|discovery_unavailable|op_missing), human_required, message, next}], next}: account metadata only, never a credential, session or field value",
+        "account list": "{discovery (ok|unavailable|op_missing|credential: a service account or Connect decides the account), platform, cli_accounts_only, selected ({account_id, by (flag|env|pointer|manifest|only), source} or null), accounts [{account_id, user_id, email, address, shorthand, source, signed_in (true|false|null), selected}], findings [{code (no_accounts|selected_account_absent|account_ambiguous|account_required|selected_signed_out|discovery_unavailable|op_missing), human_required, message, next}], next (typed; account_required: kind choose with reach and choices [{account, steps}], never a picked account)}: account metadata only, never a credential, session or field value",
         "account use": "{account_id, path}: the .opv file written",
         "config export": "with <ENV>: the config-kind values, always {product: {KEY: value}}, every product (source-only products and products with no config value left out) or only --product's; with --json and no <ENV>: the configuration itself (IDs, names, kinds, rules); no frame on success",
         "delivery verify": "{environment, placements: [{product, target, revision, state, reason, names: [{name, state, attested?, supplied?}], attested?, supplied?, deployed, receipt_revision?}]}: every placement of the product, each with its target and state; --target narrows to one placement; a receipt kept from sync --receipt must be the current delivery; attested (a name's flag, the placement's list from its receipt) marks a name counted on a person's attestation, not proven (docs/attestation.md); supplied marks a name whose value was supplied at sync: its verified means unchanged on the target since supplied, not current, and it is never source_changed",
         "changed": "{environment, changed, placements: [{product, target, state (unchanged|changed|no_record), items?: [{item_id, recorded, current?}]}], next, do}: each placement's recorded source versions against the item's current version (item IDs and version numbers only, never a value); exit 10 when something changed, with ok true",
         "schema": "this document",
+        "unseal": "{schema: \"opv.unseal/1\", bundle: {format, project, environment, product, target, revision, created_at, opv_version, plan_id, contract_digest, signer, recipient}, names: [{name, destination}], checked: {signature, recipient, payload, runtime_dir (ram_backed|not_needed|not_checked)}, overridden: [name]}: a sealed bundle verified offline; overridden names the bundle variables this environment already sets, which --exec replaces (--json conflicts with --exec) (signer and recipient are fingerprints); never a value, an identity or a recipient string",
         "inventory": [
             "environments: [{env, tier, boundaries: {name: {vault_id, item_id} or null}}]",
             "keys: [{product, key, kind, source, presence, lifecycle, expires, attributes, delivery, location, next}]",
@@ -979,6 +1038,36 @@ mod tests {
         assert!(
             states.iter().any(|v| v.as_str() == Some("unknown")),
             "states.row_target_state does not list unknown: {states:?}"
+        );
+    }
+
+    /// #253 §4.1: `opv schema` lists the `owner_produce/1` capability and, in its schema
+    /// map, the producer protocol and the provision receipt beside the supply.
+    #[test]
+    fn the_schema_lists_owner_produce_and_its_schemas() {
+        let doc = describe(&clap::Command::new("opv"), "test");
+        let schemas: Vec<&str> = doc["schemas"]
+            .as_object()
+            .map(|m| m.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        assert!(
+            doc["capabilities"]
+                .as_array()
+                .is_some_and(|c| c.iter().any(|v| v == "owner_produce/1"))
+                && schemas == ["opv.produce/1", "opv.provision/1", "opv.supply/1"],
+            "{doc}"
+        );
+    }
+
+    /// #253 §3.1: the contract's `[sets]` and `[producers]` tables are described.
+    #[test]
+    fn the_schema_describes_the_sets_and_producers_tables() {
+        let doc = describe(&clap::Command::new("opv"), "test");
+        assert!(
+            doc["contract_tables"]["sets"].is_string()
+                && doc["contract_tables"]["producers"].is_string(),
+            "{}",
+            doc["contract_tables"]
         );
     }
 }

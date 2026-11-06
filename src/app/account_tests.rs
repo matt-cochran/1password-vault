@@ -61,6 +61,7 @@ fn inputs<'a>(
         manifest,
         platform,
         session_vars: Vec::new(),
+        reach: crate::json::Reach::None,
     }
 }
 
@@ -471,7 +472,10 @@ fn the_report_next_is_the_first_findings_next() {
         Platform::Linux,
         &none_signed_in,
     ));
-    assert_eq!(r.next.as_deref(), Some("opv doctor"));
+    assert_eq!(
+        r.next.as_ref().and_then(|n| n["command"].as_str()),
+        Some("opv doctor")
+    );
 }
 
 #[test]
@@ -919,6 +923,7 @@ fn a_selection_matching_several_accounts_is_ambiguous_not_absent() {
         manifest: None,
         platform: Platform::Linux,
         session_vars: Vec::new(),
+        reach: crate::json::Reach::None,
     });
     assert_eq!(r.findings[0].code, "account_ambiguous");
 }
@@ -964,6 +969,7 @@ fn shared(vars: &[&str]) -> Report {
         manifest: None,
         platform: Platform::Wsl,
         session_vars: vars.iter().map(|v| v.to_string()).collect(),
+        reach: crate::json::Reach::None,
     })
 }
 
@@ -1071,6 +1077,7 @@ fn accounts_on_different_addresses_are_not_reported_as_shared() {
         manifest: None,
         platform: Platform::Linux,
         session_vars: Vec::new(),
+        reach: crate::json::Reach::None,
     });
     assert!(!codes(&r).contains(&"shared_sign_in_address"));
 }
@@ -1184,4 +1191,234 @@ fn account_list_without_op_is_a_missing_dependency() {
     r.push_io_error(std::io::ErrorKind::NotFound);
     let code = list(&r, None, true, &mut Vec::new()).map_err(|e| e.code_str());
     assert_eq!(code, Err("dependency_missing"));
+}
+
+// --- #257, FR-65: typed account choices; opv never picks one ---------------------------
+
+/// The #257 machine: two accounts on my.1password.com, both signed out, none selected.
+fn unselected_with(signed_in: &dyn Fn(&str) -> Option<bool>, reach: crate::json::Reach) -> Report {
+    report(&Inputs {
+        discovery: Discovery::Listed(vec![personal(), business()]),
+        signed_in,
+        flag: None,
+        env: None,
+        pointer: None,
+        manifest: None,
+        platform: Platform::Wsl,
+        session_vars: Vec::new(),
+        reach,
+    })
+}
+
+fn unselected() -> Report {
+    unselected_with(&|_| Some(false), crate::json::Reach::None)
+}
+
+/// The framed `opv account list --json` document of `r` (schema 4).
+fn framed(r: &Report) -> serde_json::Value {
+    let body = document(r).unwrap().to_string();
+    serde_json::from_slice(&crate::json::finish(body.as_bytes(), Ok(()), false)).unwrap()
+}
+
+#[test]
+fn several_unselected_is_account_required() {
+    assert!(codes(&unselected()).contains(&"account_required"));
+}
+
+#[test]
+fn several_unselected_account_required_needs_a_person() {
+    let r = unselected();
+    let f = r
+        .findings
+        .iter()
+        .find(|f| f.code == "account_required")
+        .unwrap();
+    assert!(f.human_required);
+}
+
+/// #257: the document's `next` is `choose`, never `none`.
+#[test]
+fn several_unselected_next_is_choose() {
+    assert_eq!(framed(&unselected())["next"]["kind"], "choose");
+}
+
+#[test]
+fn several_unselected_next_lists_each_account() {
+    assert_eq!(
+        framed(&unselected())["next"]["choices"]
+            .as_array()
+            .map(Vec::len),
+        Some(2)
+    );
+}
+
+/// Never a guess: the choose itself names no command to run.
+#[test]
+fn several_unselected_next_has_no_command() {
+    assert!(framed(&unselected())["next"]["command"].is_null());
+}
+
+/// The choice is recorded by account ID, as an exec-ready argv (FR-50, FR-65).
+#[test]
+fn each_choice_records_its_account_by_id() {
+    assert_eq!(
+        framed(&unselected())["next"]["choices"][1]["steps"][0]["argv"],
+        serde_json::json!(["opv", "account", "use", "BUSI0000000000000000000002"])
+    );
+}
+
+/// The shorthand is shown so a person can tell the accounts apart (and use it with op).
+#[test]
+fn each_choice_names_its_shorthand() {
+    assert_eq!(
+        framed(&unselected())["next"]["choices"][0]["account"]["shorthand"],
+        "my"
+    );
+}
+
+#[test]
+fn the_choose_reports_its_reach() {
+    assert_eq!(framed(&unselected())["next"]["reach"], "none");
+}
+
+#[test]
+fn signed_in_choice_has_no_signin_step() {
+    let r = unselected_with(
+        &|id| Some(id == "PERS0000000000000000000001"),
+        crate::json::Reach::None,
+    );
+    let steps = framed(&r)["next"]["choices"][0]["steps"].clone();
+    assert!(
+        !steps
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["effect"] == "signs_in"),
+        "{steps}"
+    );
+}
+
+/// `reach: none`: the person signs in in their own terminal, and that run is the check.
+#[test]
+fn signed_out_choice_signs_in_in_the_persons_terminal() {
+    assert_eq!(
+        framed(&unselected())["next"]["choices"][0]["steps"][1]["command"],
+        "opv login -- opv ready --json"
+    );
+}
+
+/// `reach: app`: unlocking the app reaches this process, so the assistant verifies.
+#[test]
+fn app_reach_choice_ends_with_the_assistants_check() {
+    let r = unselected_with(&|_| Some(false), crate::json::Reach::App);
+    assert_eq!(
+        framed(&r)["next"]["choices"][0]["steps"][2]["argv"],
+        serde_json::json!(["opv", "ready", "--json"])
+    );
+}
+
+#[test]
+fn the_text_next_line_offers_each_account() {
+    assert_eq!(
+        unselected().next_line().as_deref(),
+        Some(
+            "pick one: opv account use PERS0000000000000000000001; \
+             opv account use BUSI0000000000000000000002"
+        )
+    );
+}
+
+/// One account and nothing selected is the only one: there is nothing to choose.
+#[test]
+fn one_unselected_account_is_not_account_required() {
+    let r = report(&inputs(
+        Discovery::Listed(vec![owner()]),
+        None,
+        None,
+        None,
+        None,
+        Platform::Linux,
+        &none_signed_in,
+    ));
+    assert!(!codes(&r).contains(&"account_required"));
+}
+
+#[test]
+fn selected_signed_out_next_names_the_account() {
+    let r = report(&inputs(
+        Discovery::Listed(vec![owner(), other()]),
+        Some("AAAA0000000000000000000001"),
+        None,
+        None,
+        None,
+        Platform::Linux,
+        &|_| Some(false),
+    ));
+    assert_eq!(
+        framed(&r)["next"]["command"],
+        "opv login --account AAAA0000000000000000000001"
+    );
+}
+
+/// The person's own sign-in is an `authorize`, never the assistant's `run`.
+#[test]
+fn selected_signed_out_next_is_authorize() {
+    let r = report(&inputs(
+        Discovery::Listed(vec![owner(), other()]),
+        Some("AAAA0000000000000000000001"),
+        None,
+        None,
+        None,
+        Platform::Linux,
+        &|_| Some(false),
+    ));
+    assert_eq!(framed(&r)["next"]["kind"], "authorize");
+}
+
+#[test]
+fn selected_signed_in_has_no_account_finding() {
+    let r = report(&inputs(
+        Discovery::Listed(vec![owner(), other()]),
+        Some("AAAA0000000000000000000001"),
+        None,
+        None,
+        None,
+        Platform::Linux,
+        &|_| Some(true),
+    ));
+    assert!(
+        !codes(&r)
+            .iter()
+            .any(|c| c.starts_with("account_") || c.starts_with("selected_")),
+        "{:?}",
+        codes(&r)
+    );
+}
+
+/// SR-1: the choices carry IDs, emails, shorthands, addresses and booleans only; a session
+/// variable is known by name and its value never enters the report.
+#[test]
+fn choices_hold_no_session_var_value() {
+    let r = report(&Inputs {
+        discovery: Discovery::Listed(vec![personal(), business()]),
+        signed_in: &|_| Some(false),
+        flag: None,
+        env: None,
+        pointer: None,
+        manifest: None,
+        platform: Platform::Wsl,
+        session_vars: vec!["OP_SESSION_my".into()],
+        reach: crate::json::Reach::Shell,
+    });
+    let doc = framed(&r).to_string();
+    let forbidden = ["\"value\"", "\"token\"", "\"password\"", "\"session\""];
+    assert!(!forbidden.iter().any(|f| doc.contains(f)), "{doc}");
+}
+
+/// FR-65: `ready` gives the same remediation as `account list`: one builder.
+#[test]
+fn the_typed_step_is_the_documents_next() {
+    let r = unselected();
+    let step = r.findings.iter().find_map(|f| f.step.as_ref()).unwrap();
+    assert_eq!(Some(typed_step(step)), r.next);
 }

@@ -329,7 +329,7 @@ fn stopped(tool: &str, writes: bool, verbose: bool) -> Value {
 impl Server {
     #[tool(
         name = "opv_state",
-        description = "Read one section of this project's state, as the same document the CLI command of that name prints with --json: inventory (opv inventory: every declared key's state per environment), needs (opv needs: the names the code reads against the contract), contract (opv contract: the contract as data), ready (opv ready: readiness findings and each one's next step), plan (opv plan <env>: what a sync would change, and its plan_id), changed (opv changed <env>: source items changed since the last sync), access (opv access: who needs which vault for CI and deploys), delivery_preview (opv run <env> --preview: what a local run would deliver), history (opv history <env>: what opv last wrote to the targets) or status (opv status: settings in 1Password and on the targets). env, product and target scope the section as the command's own arguments do; plan, changed, delivery_preview and history need env. Names, states, item ids and versions only, never a value. Changes nothing: a sync, deploy or apply is a person's or CI's.",
+        description = "Read one section of this project's state, as the same document the CLI command of that name prints with --json: inventory (opv inventory: every declared key's state per environment), needs (opv needs: the names the code reads against the contract), contract (opv contract: the contract as data), ready (opv ready: readiness findings and each one's next step), plan (opv plan <env>: what a sync would change, and its plan_id), changed (opv changed <env>: source items changed since the last sync), access (opv access: who needs which vault for CI and deploys), delivery_preview (opv run <env> --preview: what a local run would deliver), history (opv history <env>: what opv last wrote to the targets), accounts (opv account list: this machine's accounts, which is signed in, and the choice to make when none is selected) or status (opv status: settings in 1Password and on the targets). env, product and target scope the section as the command's own arguments do; plan, changed, delivery_preview and history need env. Names, states, item ids and versions only, never a value. Changes nothing: a sync, deploy or apply is a person's or CI's.",
         input_schema = state_schema(),
         annotations(read_only_hint = true, destructive_hint = false)
     )]
@@ -524,26 +524,9 @@ fn config_request(project: &std::path::Path) -> config_store::Request {
     }
 }
 
-/// Credentials that would let this process write 1Password without the person's own
-/// authorization in the 1Password app (#133): an `op` session token, a service account or
-/// Connect. The first one set, by name.
-fn credential_in_environment(vars: impl Iterator<Item = (String, String)>) -> Option<String> {
-    vars.filter(|(_, v)| !v.is_empty())
-        .map(|(k, _)| k)
-        .find(|k| {
-            crate::app::account::is_session_var(k)
-                || [
-                    "OP_SERVICE_ACCOUNT_TOKEN",
-                    "OP_CONNECT_HOST",
-                    "OP_CONNECT_TOKEN",
-                ]
-                .contains(&k.as_str())
-        })
-}
-
 /// The refusal of a 1Password write when this process runs under CI (`CI` or
 /// `GITHUB_ACTIONS`): 1Password is read-only there (`require_person`), so it is refused
-/// before any call, like [`credential_in_environment`].
+/// before any call, like [`crate::host::credential_in_environment`].
 fn ci_refusal() -> Option<Cause> {
     crate::host::Host::detect()
         .ci
@@ -1070,7 +1053,7 @@ fn import_local_doc<R: Accounted>(
     if !one_line(&args.file) {
         return call.refused(usage("file", "the path of a .env file, on one line"));
     }
-    if let Some(var) = credential_in_environment(vars) {
+    if let Some(var) = crate::host::credential_in_environment(vars) {
         return call.refused(own_session("import", var));
     }
     if let Some(refused) = ci_refusal() {
@@ -1224,7 +1207,7 @@ fn next_doc<R: Accounted>(project: &std::path::Path, r: &R, args: &NextScope) ->
 }
 
 /// The sections of `opv_state` (design §25.2), in the golden's order.
-const SECTIONS: [(&str, Section); 10] = [
+const SECTIONS: [(&str, Section); 11] = [
     ("inventory", Section::Inventory),
     ("needs", Section::Needs),
     ("contract", Section::Contract),
@@ -1234,11 +1217,12 @@ const SECTIONS: [(&str, Section); 10] = [
     ("access", Section::Access),
     ("delivery_preview", Section::DeliveryPreview),
     ("history", Section::History),
+    ("accounts", Section::Accounts),
     ("status", Section::Status),
 ];
 
 /// What an unknown section is refused with.
-const SECTION_FORMAT: &str = "one of inventory, needs, contract, ready, plan, changed, access, delivery_preview, history or status";
+const SECTION_FORMAT: &str = "one of inventory, needs, contract, ready, plan, changed, access, delivery_preview, history, accounts or status";
 
 /// One `opv_state` section: the CLI command whose `--json` document it answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1252,6 +1236,7 @@ enum Section {
     Access,
     DeliveryPreview,
     History,
+    Accounts,
     Status,
 }
 
@@ -1287,6 +1272,7 @@ impl Section {
             Self::Access => &["access"],
             Self::DeliveryPreview => &["run"],
             Self::History => &["history"],
+            Self::Accounts => &["account", "list"],
             Self::Status => &["status"],
         }
     }
@@ -1302,6 +1288,7 @@ impl Section {
             Self::Access => [Optional, No, Optional],
             Self::DeliveryPreview => [Required, Optional, No],
             Self::History => [Required, No, Optional],
+            Self::Accounts => [No, No, No],
             Self::Status => [Optional, Optional, Optional],
         }
     }
@@ -1345,6 +1332,7 @@ fn state_words(
         .concat(),
         Section::Inventory => [flag("--env", env), flag("--product", product)].concat(),
         Section::Contract => [flag("--env", env), flag("--component", product)].concat(),
+        Section::Accounts => Vec::new(),
         _ => {
             let preview = (section == Section::DeliveryPreview).then(|| "--preview".to_string());
             let positional: Vec<String> =
@@ -1576,6 +1564,12 @@ fn state_doc<R: Accounted>(
             };
         }
         Section::History => crate::app::history::run(&fleet, required, target, r, true, &mut *out),
+        Section::Accounts => {
+            return match crate::app::account::document(&crate::app::account::gather(r, None)) {
+                Ok(doc) => call.document(doc.to_string().as_bytes(), Ok(())),
+                Err(e) => call.failed(&e),
+            };
+        }
         Section::Status => match env {
             None => crate::app::status::overview(&fleet, product, r, &mut *out, true),
             Some(env) => crate::app::status::run_targeted(
@@ -1702,51 +1696,6 @@ mod tests {
         assert!(scan_inside(&project, "src"));
         assert!(!scan_inside(&project, links.path().to_str().unwrap()));
     }
-    fn vars(pairs: &[(&str, &str)]) -> impl Iterator<Item = (String, String)> {
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect::<Vec<_>>()
-            .into_iter()
-    }
-
-    #[test]
-    fn an_op_session_token_refuses_the_structural_apply() {
-        let found = credential_in_environment(vars(&[("OP_SESSION_my", "x")]));
-        assert_eq!(found.as_deref(), Some("OP_SESSION_my"));
-    }
-
-    #[test]
-    fn a_bare_op_session_refuses_the_structural_apply() {
-        let found = credential_in_environment(vars(&[("OP_SESSION", "x")]));
-        assert_eq!(found.as_deref(), Some("OP_SESSION"));
-    }
-
-    /// FMECA L6: op's delegation setting shares the prefix but holds no session.
-    #[test]
-    fn the_delegation_setting_does_not_refuse_the_structural_apply() {
-        let found = credential_in_environment(vars(&[("OP_SESSION_DELEGATION_ENABLED", "true")]));
-        assert_eq!(found, None);
-    }
-
-    #[test]
-    fn a_service_account_token_refuses_the_structural_apply() {
-        let found = credential_in_environment(vars(&[("OP_SERVICE_ACCOUNT_TOKEN", "ops_x")]));
-        assert_eq!(found.as_deref(), Some("OP_SERVICE_ACCOUNT_TOKEN"));
-    }
-
-    #[test]
-    fn a_connect_credential_refuses_the_structural_apply() {
-        let found = credential_in_environment(vars(&[("OP_CONNECT_TOKEN", "x")]));
-        assert_eq!(found.as_deref(), Some("OP_CONNECT_TOKEN"));
-    }
-
-    #[test]
-    fn an_environment_without_op_credentials_may_apply() {
-        let found = credential_in_environment(vars(&[("OP_ACCOUNT", "A"), ("HOME", "/h")]));
-        assert_eq!(found, None);
-    }
-
     #[test]
     fn every_registered_tool_has_a_cli_parity_entry() {
         let mut registered: Vec<String> = Server::tool_router()
@@ -1892,6 +1841,7 @@ mod tests {
             system: crate::cause::System::Fly,
             account: None,
             state: crate::cause::SessionState::SignedOut,
+            selected_by: None,
         }
         .into()
     }

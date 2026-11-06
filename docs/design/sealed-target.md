@@ -67,6 +67,7 @@ outputs and bundle format" locally first. §5 is this design's proposal for that
 words it as a **signed payload holding the map**; this design encrypts and then signs, with a
 plaintext header. That conflict is not settled here. Lane K0 obtains the downstream's format and
 a fixture bundle before the format lane B1 starts, and the owner decides which side adapts (D9).
+K0's findings are in §5.8.
 
 ## 2. Summary
 
@@ -148,7 +149,11 @@ How this differs from the issue's sketch:
 8. **The identity is never sealed (T14).** A key whose rules say `age_identity = true` is never
    delivered by a sealed target, since a bundle cannot carry the key that opens it. The error
    names the key.
-9. **NUL bytes.** A secret delivered as a variable that contains a NUL byte is a `Store::refusal`:
+9. **No infrastructure key (#275).** A key with `source = "infrastructure"` (deliver-only,
+   `docs/design/deliver-only.md`) is supplied at sync and never stored in 1Password, so a sealed
+   target has no value to seal. A sealed target that would deliver one is refused at load
+   (`config_invalid`), naming the key as `<product>/<KEY>` and the target.
+10. **NUL bytes.** A secret delivered as a variable that contains a NUL byte is a `Store::refusal`:
    `plan` shows it and `sync` refuses before writing. File keys may hold any bytes.
 
 ### 3.2 Channels
@@ -508,6 +513,217 @@ needs a Cargo workspace (`Cargo.toml:1` has a single package). `src/bundle/` is 
 dependency on the rest of opv so it can move into that crate unchanged. Acceptance 4's "and the
 library" stays open until the owner amends it or the crate ships (P3).
 
+### 5.8 K0 findings: the downstream
+
+Lane K0, 2026-11-04. A read-only look at the downstream: the owner's platform host in the infra
+repository (`matt-cochran-products/infra`). Evidence is cited at two commits:
+
+- **`40261a36`**: before sealing (`opv run` at every start).
+- **`50833e19`**: `origin/staging`, with sealing merged (infra #1848, #1850, #1852).
+
+No value was read, and nothing contacted 1Password or a server.
+
+**Short answer.** The downstream already has its own format, live on staging and production
+behind a cutover fallback. It is called `opv-sealed/v1`, and its design matches §5 on the points
+that matter: encrypt then sign, verify before decrypt, a monotonic revision, age plus SSHSIG
+only. It differs in layout and in one security property (signer-to-environment binding). The
+accepted rule in D9 ("defaulting to (b) on any point that weakens a §9.2 property") therefore
+gives: **`opv-sealed/1` stays as designed and the downstream adapts.** Its adaptation is small.
+Three gaps are in opv's **configuration rules**, not in the format, and need owner decisions
+(D11 to D13 below).
+
+#### 5.8.1 What the runtime did, and does now
+
+**Before** (`40261a36`):
+
+- `platformd` (Rust) supervises every product container on one Fly Machine per platform. It started
+  each container as `opv run <env> --product <p> -- platformd env-map K=NAME… -- docker run -e NAME…`
+  (`fly/platform/platformd/src/secrets.rs:1-13`, `:91-98`).
+- Each product scope had its own read-only service-account token,
+  `OP_SERVICE_ACCOUNT_TOKEN__<PRODUCT>` (`secrets.rs:11-13`, `:110-118`).
+- A drift fingerprint re-ran `opv run` per product every `PLATFORM_SECRET_POLL_SECS`, which was
+  300 (`platformd/src/main.rs:131`, `:261-262`; `fly/platform/staging/fly.toml:23`, `:32`).
+- `PLATFORM_SECRETS = "opv:staging-*"`: one opv environment per product scope.
+
+**Now** (`50833e19`; `docs/design/0016-sealed-secret-bundles.md`, `docs/platform/sealed-secrets.md`):
+
+- `PLATFORM_SECRETS = "sealed:<env>-*+opv:<env>-*"`. The `+opv` part is the cutover fallback,
+  removed in a later cleanup step (`fly/platform/staging/fly.toml:30`,
+  `fly/platform/production/fly.toml:34`).
+- The owner seals from an interactive session with `fly/platform/sealed.py`, driven by
+  `60-platform-release.sh <env> seal <p|all>` (a script outside the repository). Each seal is
+  one `opv run` per scope (`sealed.py:201-230`).
+- `platformd` is the only runtime consumer. It verifies, decrypts once per bundle digest with the
+  `age` CLI, keeps the values in `Zeroizing` memory, and starts containers with them
+  (`platformd/src/sealed.rs:87-127`, `:370-389`, `:426-515`; `main.rs:247-268`).
+- `unseal --exec` is not used, by design: "`unseal --exec` (opv #271) is not implemented here,
+  because `platformd` is the runtime consumer" (`docs/platform/sealed-secrets.md:133`).
+
+#### 5.8.2 What the runtime needs from a bundle
+
+| Need | The downstream today | Evidence (`50833e19`) |
+|---|---|---|
+| Where the bundle lives | `sealed/<env>/<product>.age` plus a detached `.age.sig`, committed to the **manifest store**, a separate git repository (`platform-manifests-<staging\|production>`), next to `index.age`. It is not in the image and not in the infra checkout. `platformd` pulls the store | `sealed.rs:74-83`; `sealed.toml:13`; `fly.toml:61` comment |
+| Granularity | one bundle per (opv environment, product). Each product is its own opv environment, `staging-<p>` or `prod-<p>` | `staging/opv/secrets.toml:1-3`, `:9-38` |
+| Products, staging | allumata, endorz, fantasticus, journeeze, licenz, nearvado, preveti, pubops, resoniche, zonetico | `staging/opv/secrets.toml` |
+| Products, production | the same ten. `platform-proof` (the owner's Access proof token) sits in `prod-platform` and is not sealed | `production/opv/secrets.toml:355-361` |
+| Never sealed | the platform scope: the identity, the signing key and the registry tokens. These are Fly secrets of the machine | `sealed.py:44`; `main.rs:108-116` |
+| Recipients | **one** age recipient per platform (the machine), shared by all its product environments, and the same identity that opens `index.age` | `sealed.toml:10-11`; `docs/platform/sealed-secrets.md` "Rotation" |
+| Signers | **one** ed25519 key per platform: the release (manifest) signing key, in namespace `opv-sealed`. The principal is the fixed string `opv-sealed`, not the environment | `sealed.toml:12`; `sealed.rs:262-290` (`:278`) |
+| Identity at runtime | Fly secret `PLATFORM_MANIFEST_AGE_KEY`, environment only. Read once at start, removed from the process environment, held in memory, fed to `age -d -i -` on stdin | `main.rs:108-116`; `sealed.rs:295-402` |
+| Delivery | `docker run -e NAME` from the `docker` CLI's environment. Renames (`FLEET__<P>__<KEY>`) and sidecar-only keys come from the unit manifest | `runtime.rs:345-370`; `secrets.rs:270-300` |
+| File keys | chosen per key in the **unit manifest** (`secrets[].file`), not in the opv contract. `platformd` writes `/run/secrets/<NAME>` (0444) into a per-container tmpfs directory and bind-mounts it read-only. No sealed product declares an opv `file` key | `manifest.rs:82-109`; `runtime.rs:60-62`, `:370`, `:406-419` |
+| Revision floor | the revision the machine already runs, persisted in its state (a supervisor ratchet). A changed bundle with the same revision is refused | `main.rs:247-268`; `sealed.rs:87-127` |
+| Drift | a new bundle digest. There is no polling | `secrets.rs:121-127`; `main.rs:216-224` |
+| Staleness check | `sealed.py seal --check` compares the contract digest and the recipients. No 1Password call | `sealed.py:187-199` |
+| Env-only constraint | Fly delivers platform secrets only as environment variables. That is why the identity is env-only (D4(b) covers it) | `staging/fly.toml:31-36` |
+| Tools in the image | `age`, `ssh-keygen`, `opv` (pinned), `allowed_signers` baked at build | `fly/platform/image/Dockerfile:30-36` |
+| Empty pending keys | a key the catalog marks pending, and that is empty, is left out of the bundle. Any other empty or missing key refuses the seal | `sealed.py:96-140` |
+
+#### 5.8.3 The downstream's format against `opv-sealed/1`
+
+| Point | Downstream `opv-sealed/v1` | `opv-sealed/1` (§5) | Verdict |
+|---|---|---|---|
+| Order | encrypt, then sign the envelope (ciphertext included) | the same | **fits.** The issue's "signed payload" wording is settled: both encrypt then sign |
+| Verify before decrypt | yes | yes | fits |
+| Layout | pretty-printed JSON envelope (`indent=1`) with an armored age string, plus a **detached** `.sig` file | one LF-only file: header line, age armor, SSHSIG armor | opv's is stronger: the parts cannot drift apart, and T8/T9 are closed. **The downstream adapts** |
+| Signer bound to environment | no. Principal `opv-sealed` for every environment. Environments are separated only because each platform has its own key, so any staging-signed bundle opens for any staging product | principal = `environment` (§4.2, T1) | opv's is stronger. **The downstream adapts:** its `derive_signers` (`sealed.rs:278`) writes the platform's environments as principals |
+| Header fields | `schema env product revision created_at contract_digest recipients ciphertext` | adds `project target opv_version plan_id signer names secrets_dir_env`; recipients as fingerprints | fits. `platformd` reads only env, product and revision, and nothing in it uses `contract_digest` |
+| Payload | JSON `{"schema","env","product","revision","values":{K: string}}`, bound to the header by env, product and revision | binary framing, bound by the header digest and the name list | fits. Rust and Python parse either in a few lines. JSON strings cannot carry non-UTF-8 file values; the binary framing can |
+| Revision | `max(now, prev + 1)` | the same rule (§5.4) | fits |
+| Floor | the running revision, kept by the supervisor | `--min-revision`, set by the deploy (D5) | fits. A library or native reader takes the floor as a parameter; `platformd` keeps its own ratchet |
+| Extension | `.age` (the file is JSON, not age) | `.opv-sealed` | the downstream renames |
+| File values | trailing newline stripped (`rstrip('\n')`, `sealed.py:128`) | exact bytes | no impact today, since no sealed product has a file key |
+
+**Conclusion.** The format fits. Moving to `opv-sealed/1` costs the downstream:
+
+- a new reader in `sealed.rs`, about the size of today's `verify` plus `open`, still using its
+  `age` and `ssh-keygen` CLIs (the file splits in memory into message bytes and an SSHSIG block);
+- principal lines per environment;
+- one re-seal of every scope: about 20 reads (ten scopes per platform) in all, the same as any `seal all`.
+
+`sealed.py` is retired, because `opv sync` replaces it.
+
+#### 5.8.4 Gaps in opv's configuration and CLI, not the format
+
+1. **G1. One trust unit spans many environments (blocks adoption).** The downstream has one
+   recipient and one signer per **platform**, shared by its ten `staging-<p>` environments.
+   Under §3 that is ten `[environments.staging-<p>.targets.platform]` sections with the same
+   recipient and signer, and §3.1-2 and §3.1-4 refuse them (`sealed_recipient_shared`,
+   `sealed_signer_shared`). §7.1's default of one identity per environment and product does not
+   fit a supervisor holding one identity for ten products. → **D11.**
+2. **G2. Bundles go to another repository.** `sealed.out` is relative to the configuration file,
+   with no `..` (§3.1-5). The downstream's configuration is `fly/platform/<env>/opv/secrets.toml`
+   in infra, but its bundles belong in the manifest store checkout. So `opv sync` cannot write
+   them there; the caller must copy them, and `status` then reports `absent` (§5.6 pattern 2,
+   U1). → **D12.**
+3. **G3. The signing key is not an SSH Key item.**
+   - Staging signs with `PLATFORM_MANIFEST_SIGNING_KEY`, a **file** field of `staging-platform`
+     (`staging/opv/secrets.toml`, product `platform`).
+   - Production signs with a key file on the owner's machine, read from 1Password only "with
+     `LOAD`" (`docs/platform/sealed-secrets.md:143`). It is not in the production contract.
+   - D3(a) expects the target's `deploy_credentials` to be a 1Password SSH Key item. → **D13.**
+4. **G4. A signing key that is also a declared key could be sealed.** §3.1-8 refuses sealing the
+   identity, but not the target's own signing key when the key is also declared as a product
+   key. The downstream's key is one (`sealed.py:44` blocks both by name). Add it to §3.1-8 in P1:
+   a key whose `op://` reference equals the target's `deploy_credentials` is never delivered by
+   a sealed target.
+5. **G5. Principals as a list or pattern.** A downstream line trusts a whole platform:
+   `staging-allumata,staging-endorz,… namespaces="opv-sealed" ssh-ed25519 …`, or
+   `staging-*`. §4.2 requires the header's `environment` among the principals. **B2** must
+   accept a comma-separated principal list, which OpenSSH allows. It should also decide whether
+   to accept `*` patterns as `ssh-keygen -Y verify` does. Recommended: lists only, which are
+   explicit, and the downstream generates the list from its contract at image build. Each new
+   product then needs an image rebuild, which the downstream already does for `ALLOWED_SIGNERS`.
+6. **G6. Empty pending keys.** The downstream leaves catalog-pending empty keys out of the bundle
+   (`sealed.py:96-140`, infra #1850). opv's whole set (§5.3) holds every desired, delivered row;
+   an empty value follows opv's existing empty-value rules. **P3/C1** must confirm that a
+   declared-but-empty key is reported (`not_delivered`) and does not refuse the whole seal.
+   Otherwise one pending key blocks a product's secret rotation.
+
+#### 5.8.5 What changes for other lanes
+
+- **B1 (format): no change.** Two inputs:
+  - Keep every part splittable with stock tools; the downstream verifies with `ssh-keygen` and
+    decrypts with `age` before any opv code is on the machine.
+  - Real shapes to test against: environment names such as `staging-zonetico`; up to 39 names
+    in one scope (production zonetico); multi-line PEM and JSON values; names up to 35
+    characters (`PORTAL_GATEWAY_ACCESS_CLIENT_SECRET`).
+
+  `tests/fixtures/sealed/downstream/shape.json` lists them.
+- **B2:** principal lists (G5).
+- **P1:** the trust-unit rule (G1, D11); `sealed.out` (G2, D12); G4 in §3.1-8.
+- **P2:** depends on D13.
+- **U1:** `--verify-only` without an identity is what the downstream's unattended path needs
+  ("confirms the bundles exist, 0 calls").
+- **U2:** this downstream does not use `unseal --exec`, and it has no opv file keys. U2's file
+  half (supervised RAM directory) has no consumer, so the §13 option to defer file keys (−2.5 h)
+  applies.
+- **L1 / D7:** `platformd` is a Rust consumer, so it would use the library crate. It is not
+  blocked: a native reader of the documented format is enough. D7 (defer) stands.
+- **Migration** (replaces the generic steps at the end of §13 for this downstream):
+  1. Once opv 0.18.0 is released and D11 to D13 are settled, move the `sealed.toml` target into
+     `secrets.toml` in the D11 form.
+  2. Make the signing key an SSH Key item (D13).
+  3. `platformd` reads both formats, chosen by the first line: `opv-sealed v1` versus `{`.
+     Rebuild with `allowed_signers` principal lines per environment.
+  4. `opv sync <env> --target platform` for every product, written into the store (D12) and
+     pushed.
+  5. Run `opv unseal --verify-only` per bundle (staging first).
+  6. Once every scope reports `sealed:<sha256>` from an `opv-sealed/1` bundle, remove the
+     downstream reader of its own format and `sealed.py`.
+  7. A scheduled `opv changed` replaces `sealed.py seal --check`.
+  8. The infra runbook's existing "Cleanup" step, unchanged: strict `sealed:<env>-*`, then
+     revoke the `OP_SERVICE_ACCOUNT_TOKEN__*` tokens.
+
+#### 5.8.6 Owner decisions raised by K0
+
+> **Owner decisions (2026-11-04, interview):** D9 confirmed as (b): opv keeps `opv-sealed/1`, and the downstream adapts. D11 (a): `sealed.trust_group`. D12 (a): `opv sync --sealed-root <dir>`. D13 (a): both platform signing keys move to 1Password SSH Key items, used as the targets' `deploy_credentials`. Lane P1 carries D11, D12 and G4 (never seal the target's own signing key). Lane B2 carries G5 (principal lists, no patterns). The downstream work (a platformd reader for `opv-sealed/1`, principal lines per environment, SSH Key items, retiring `sealed.py`) is infra work outside opv's plan.
+
+**D9, confirmed or reopened.** The owner accepted D9's recommendation, on the premise that the
+downstream might have no format. It has one. Applying the accepted rule:
+
+- opv keeps `opv-sealed/1`;
+- the downstream adapts (§5.8.3), with a dual-read cutover;
+- nothing in its format is adopted.
+
+The alternative, opv implementing the downstream's JSON envelope as v1, would save the downstream
+its reader change. But it would weaken T1, T8 and T9, and give opv a detached signature.
+**Recommended: confirm (b).**
+
+**D11. One trust unit across several environments (G1).**
+
+- (a) A target field `sealed.trust_group = "<name>"`. Recipients and signers may be shared only
+  among targets with the same group, and §3.1-2 and §3.1-4 become "not shared across groups".
+  The principal stays the environment; a runtime's `allowed_signers` line lists its group's
+  environments (G5).
+- (b) The downstream collapses to one opv environment per platform (`staging`, `prod`), with one
+  boundary per product. That fits §3 as written, but means a contract and vault-binding
+  migration. The per-product environments existed for per-product service-account tokens, which
+  sealing retires.
+- (c) Drop the sharing rules and rely on review.
+
+**Recommended: (a).** It keeps the cross-tier guard (a staging key can never sign for
+production) and fits a supervisor that holds one identity for many products.
+
+**D12. Where `sync` writes a bundle that lives in another repository (G2).**
+
+- (a) `opv sync --sealed-root <dir>`: `sealed.out` resolves under `<dir>`, and `status` and
+  `delivery verify` look there.
+- (b) The caller copies, and `status` reports `absent` there (§5.6 pattern 2 as designed).
+- (c) Allow an absolute `sealed.out`.
+
+**Recommended: (a).** The store checkout is a per-run path, so it belongs in a flag, not in
+committed configuration.
+
+**D13. The downstream's signing key (G3).**
+
+- (a) Move both platform signing keys into 1Password SSH Key items, referenced as each target's
+  `deploy_credentials` (D3 as accepted). Production then signs with 1 read instead of 0.
+- (b) opv also accepts a file field holding an OpenSSH private key.
+
+**Recommended: (a).** S0 checks the SSH Key item's OpenSSH export (T16) either way.
+
 ## 6. Cryptography and dependencies
 
 ### 6.1 Encryption: age, X25519 only
@@ -631,6 +847,92 @@ deny = [
 An advisory ignore is global. The `[bans]` wrapper makes `cargo deny` fail if any other crate
 brings in `p256`, which could make the timing path reachable. Recipients are parsed only with
 `age::x25519::Recipient::from_str`.
+
+### 6.5 S0 findings (spike, 2026-11-04): **GO**
+
+Lane S0 ran on `v0180/st-s0`. All four conditions hold, so the sealed slice stays in 0.18.0.
+
+**1. API fit: holds.** `tests/sealed_kat.rs` (8 tests) runs against stock-tool fixtures in
+`tests/fixtures/sealed/kat/`.
+
+- age:
+  - `Decryptor::new(ArmoredReader::new(..))`, then `decrypt` with one `x25519::Identity`,
+    decrypts a ciphertext made by the `age` 1.1.1 CLI (`age -a -r`).
+  - `is_scrypt()` lets opv refuse a passphrase stanza before decrypting.
+  - `Encryptor::with_recipients` over `ArmoredWriter` (`Format::AsciiArmor`) round-trips, and
+    the armor is LF only.
+  - A different identity is refused.
+- ssh-key:
+  - `PublicKey::verify("opv-sealed", ..)` accepts an `ssh-keygen -Y sign -n opv-sealed`
+    signature, which carries `HashAlg::Sha512`.
+  - It refuses a wrong namespace and a changed message.
+  - `PrivateKey::sign` in process gives an SSHSIG **byte-identical** to `ssh-keygen`'s.
+    Ed25519 is deterministic.
+- `allowed_signers`: the strict-subset line `prod namespaces="opv-sealed" ssh-ed25519 <b64>
+  <comment>` behaves as follows under `ssh-keygen -Y verify`:
+  - accepted with `-I prod`;
+  - refused with `-I staging`;
+  - refused with `-n git`.
+
+  This is the T1/T13 KAT that B2's parser must match.
+- Features used:
+  - `age 0.12.1` with `default-features = false, features = ["armor"]`, so no `ssh`,
+    `plugin`, `async` or `cli-common`;
+  - `ssh-key 0.6.7` with `default-features = false, features = ["ed25519", "alloc", "std"]`,
+    so no ECDSA, RSA or DSA, and no `encryption`, because 1Password returns the key
+    unencrypted.
+
+  `zeroize` was already a dependency.
+
+**2. `cargo deny check`: passes.** The result is `advisories ok, bans ok, licenses ok,
+sources ok`.
+
+- The two ignores in §6.4 are in `deny.toml`. Each has a reason, and each states an expiry of
+  2027-02-01 in its reason and comment.
+- cargo-deny 0.20 has no expiry field, so the date is a review commitment, not enforced.
+- **The fence was checked to bite.** With `ssh-key`'s `p256` feature switched on, `cargo deny
+  check bans` fails with `crate 'p256 = 0.13.2' is explicitly banned` and `direct parent
+  'ssh-key' … was not marked as a wrapper`. The change was then reverted.
+- There are new `multiple-versions` warnings (`digest`, `sha2`, `hybrid-array`, `base64`,
+  `thiserror`, `toml` and others). They are warnings only.
+
+**3. Crate count: about 100, not ~87.** The count is the `cargo tree -e normal,build`
+difference, and covers what the target builds, not the lockfile:
+
+| Target | Before | After | Added |
+|---|---|---|---|
+| `x86_64-unknown-linux-gnu` | 167 | 268 | 101 |
+| `x86_64-pc-windows-msvc` | 162 | 265 | 103 |
+
+- `Cargo.lock` gains 115 packages. It also lists optional dependencies that are not built,
+  such as `rsa`, `p384` and `p521` under `ssh-key`.
+- The added crates are the ones §6.4 lists: the fluent/i18n stack, `scrypt`, `ml-kem`,
+  `kem 0.3.0-pre.0`, `p256` and `hpke`.
+- The release binary-size delta was not re-measured. With the crates unused, the linker drops
+  them, so a measurement now would mean nothing. §6.4's 0.8 MB stands until B2 wires them in.
+
+**4. T16: answered from documentation; one live check is left for P2.**
+
+- **`op` 2.40.0's own help** (`op read --help`) documents
+  `op read "op://<vault>/<item>/private key?ssh-format=openssh"` for the OpenSSH form. Without
+  the parameter, `op` returns PKCS#8 (`-----BEGIN PRIVATE KEY-----`).
+- **`op item get --format json`:** the `private_key` field (type `SSHKEY`) holds PKCS#8 PEM in
+  `value`, and the OpenSSH PEM in `ssh_formats.openssh.value`.
+  - 1Password's published docs do not show this JSON shape. It comes from a third-party
+    consumer of `op` (Ansible `community.general.onepassword_ssh_key`, which reads both).
+  - It was **not** confirmed on a live item, by rule.
+  - P2's sim fixture and first live run must confirm the field path.
+- **Parse paths:**
+  - **Preferred:** take `ssh_formats.openssh.value`, or the field read with
+    `?ssh-format=openssh`, and parse it with `PrivateKey::from_openssh`. Refuse
+    `is_encrypted()`.
+  - **Fallback for PKCS#8:** RFC 8410 ed25519 PKCS#8 is a fixed 48-byte DER, made of the
+    16-byte prefix `302e020100300506032b657004220420` and the 32-byte seed. Then use
+    `Ed25519Keypair::from_seed`.
+    - The KAT proves that this gives the same public key as the OpenSSH form.
+    - It needs no extra crate.
+    - Anything else (another length or prefix, or an RSA key) is
+      `input_invalid { field: "private key" }`.
 
 ## 7. Keys, identity and the permission model
 
@@ -1115,6 +1417,10 @@ bundle before B1 starts. B1 is blocked until this is decided.
 
 **Recommendation: (c), defaulting to (b) on any point that weakens a §9.2 property.** Signing
 the plaintext would force decryption before verification, which acceptance 3 forbids.
+
+**K0 outcome (§5.8).** The downstream has its own format (`opv-sealed/v1`, encrypt then sign,
+verify before decrypt). It is weaker on T1, T8 and T9, so the rule above keeps `opv-sealed/1`
+and the downstream adapts. K0 raises D11 to D13 (configuration, not format).
 
 ### D10. A bundle name already in the inherited environment (new)
 

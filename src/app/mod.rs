@@ -72,11 +72,15 @@ mod placement_tests;
 #[cfg(test)]
 mod plan_tests;
 pub(crate) mod preflight;
+// The runner lane (#253) consumes this; until it does, its surface is unreachable.
+#[allow(dead_code)]
+pub(crate) mod produce_doc;
 #[cfg(test)]
 #[path = "product_flag_tests.rs"]
 mod product_flag_tests;
 pub mod propose;
 pub mod provider_op;
+pub mod provision;
 pub mod ready;
 pub mod receipt_age;
 pub mod remote_delivery;
@@ -108,6 +112,8 @@ pub mod sync;
 pub mod target_cmd;
 pub mod target_credentials;
 pub(crate) mod tidy;
+pub mod unseal;
+pub mod unseal_exec;
 #[cfg(test)]
 mod ux2_tests;
 #[cfg(test)]
@@ -177,48 +183,6 @@ pub(crate) fn read_and_plan(
 /// The item fields, the item's `version` and each boundary item's `version` by id (C2):
 /// [`read_item_fields`]'s result.
 pub(crate) type ItemRead = (Vec<plan::ItemField>, Option<u64>, BTreeMap<String, u64>);
-
-/// A plan, its store listing, the item's `version` and each boundary item's `version` by id
-/// (C2): [`read_and_plan_versioned`]'s result.
-pub(crate) type VersionedPlan = (
-    SyncPlan,
-    Vec<StoreEntry>,
-    Option<u64>,
-    BTreeMap<String, u64>,
-);
-
-/// [`read_and_plan`] that also returns the item's `version` integer and the `version` read
-/// from each boundary item by id (C2), for the plan id (FR-41) and the delivery recording.
-/// Still one item read (FR-13), plus a person's tidy (FR-43): the version is the tidied
-/// item's, so a plan that tidied and the sync after it agree.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn read_and_plan_versioned(
-    fleet: &Fleet,
-    env_name: &str,
-    target: Option<&str>,
-    r: &dyn CommandRunner,
-    ports: Option<&Ports<'_>>,
-    rotate: &BTreeSet<(String, String)>,
-    prune_immutable: &BTreeSet<(String, String)>,
-    retiring_prune: bool,
-) -> Result<VersionedPlan, Error> {
-    let read = tidy::read(fleet, env_name, r)?;
-    let ledgers = placement_ledgers(fleet, env_name, target, ports, r);
-    let (mut plan, listed) = plan_item_with(
-        fleet,
-        env_name,
-        target,
-        read.fields,
-        ports,
-        rotate,
-        prune_immutable,
-        &ledgers,
-        retiring_prune,
-    )?;
-    plan.tidy = read.changes;
-    plan.tidy_error = read.tidy_error;
-    Ok((plan, listed, read.version, read.item_versions))
-}
 
 /// The environment's item fields, `version` integer (FR-41) and per-boundary-item versions
 /// (C2): its one read by IDs (FR-13), tolerant and tidied when a person runs opv (FR-43,
@@ -2294,6 +2258,9 @@ fn provider_named(src: &str) -> Option<String> {
         // The HTTP provider by its module and target type; plain "HTTP" stays allowed
         // (the protocol, documentation links).
         "httpprovider",
+        // The sealed provider by its target type; core may name the `bundle` codec and the
+        // word "sealed" (a bundle, `opv unseal`), never the adapter (design §8.1).
+        "sealedtarget",
         // Store kinds and bindings (FR-39): core sees only `StoreConfig`.
         "azure_key_vault",
         "external-secrets",
@@ -2301,7 +2268,7 @@ fn provider_named(src: &str) -> Option<String> {
         "clustersecretstores?",
     ];
     let re = regex::Regex::new(&format!(
-        r"(?i)\b({})\b|\b(az|gh)\s|\bgithub::|\bhttp::",
+        r"(?i)\b({})\b|\b(az|gh)\s|\bgithub::|\bhttp::|\badapters::sealed\b",
         words.join("|")
     ))
     .unwrap();
@@ -2369,6 +2336,30 @@ fn guard_ignores_a_provider_named_in_a_test_item() {
 fn guard_flags_a_source_naming_the_http_adapter() {
     let src = "fn f() -> &'static dyn Provider { &crate::adapters::http::PROVIDER }\n";
     assert_eq!(provider_named(src).as_deref(), Some("http::"));
+}
+
+/// The guard flags the sealed adapter's module (FR-37, design `sealed-target` §8.1).
+#[cfg(test)]
+#[test]
+fn guard_flags_a_source_naming_the_sealed_adapter() {
+    let src = "fn f() -> &'static dyn Provider { &crate::adapters::sealed::PROVIDER }\n";
+    assert_eq!(provider_named(src).as_deref(), Some("adapters::sealed"));
+}
+
+/// The guard flags the sealed target's type (FR-37).
+#[cfg(test)]
+#[test]
+fn guard_flags_a_source_naming_the_sealed_target_type() {
+    let src = "fn f(t: &dyn Any) -> bool { t.is::<SealedTarget>() }\n";
+    assert_eq!(provider_named(src).as_deref(), Some("SealedTarget"));
+}
+
+/// The bundle codec is not an adapter: core may name it (design `sealed-target` §8.1).
+#[cfg(test)]
+#[test]
+fn guard_allows_a_source_naming_the_bundle_codec() {
+    let src = "use crate::bundle::format::Header;\nfn f() -> &'static str { \"sealed\" }\n";
+    assert_eq!(provider_named(src), None);
 }
 
 #[cfg(test)]

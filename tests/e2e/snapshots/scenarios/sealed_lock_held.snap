@@ -1,0 +1,21 @@
+# sealed_lock_held: opv sync prod --confirm prod --target box
+
+## text exit: 6
+## text stdout
+prod/box: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: another opv run is sealing <SCENARIO>/project/sealed/prod/web.opv-sealed; retry when it finishes
+Do: wait for the other opv run sealing <SCENARIO>/project/sealed/prod/web.opv-sealed to finish
+Next: opv plan prod --target box
+
+## json exit: 6
+## json stdout
+{"schema_version":4,"ok":false,"exit_code":6,"next":{"kind":"run","actor":"assistant","command":"opv plan prod --target box --json"},"do":"wait for the other opv run sealing <SCENARIO>/project/sealed/prod/web.opv-sealed to finish","error":{"code":"local_io_failed","category":"policy","message":"another opv run is sealing <SCENARIO>/project/sealed/prod/web.opv-sealed; retry when it finishes","subject":{"io":"would_block","op":"seal_lock","path":"<SCENARIO>/project/sealed/prod/web.opv-sealed"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"safe","human_required":false,"do":"wait for the other opv run sealing <SCENARIO>/project/sealed/prod/web.opv-sealed to finish","next":{"kind":"run","actor":"assistant","command":"opv plan prod --target box --json"}}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: another opv run is sealing <SCENARIO>/project/sealed/prod/web.opv-sealed; retry when it finishes
+Do: wait for the other opv run sealing <SCENARIO>/project/sealed/prod/web.opv-sealed to finish
+Next: opv plan prod --target box --json

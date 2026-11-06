@@ -216,7 +216,7 @@ fn the_json_reply_matches_the_contract() {
     assert_eq!(
         doc,
         json!({
-            "schema_version": 3,
+            "schema_version": 4,
             "environment": "prod",
             "changed": true,
             "placements": [{

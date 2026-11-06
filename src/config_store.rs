@@ -5,11 +5,16 @@
 //! Discovery ([`locate`]), first match wins:
 //! 1. `--config <file>` (or `OPV_CONFIG`);
 //! 2. `OPV_PROJECT=<name>`: the manifest titled `opv · <name>`;
-//! 3. a `secrets.toml` in the current directory or a parent (unchanged since v0.2);
-//! 4. a one-line `.opv` file (`project = "<name>"`, optionally `account = "…"`) in the
-//!    current directory or a parent;
-//! 5. the git remote `origin`, normalized to `host/owner/repo`, matched against the
+//! 3. a `secrets.toml` in the current directory or a parent, at or below the nearest `.opv`'s
+//!    folder (FR-66; anywhere above when there is no `.opv`);
+//! 4. that `.opv`'s `config = "<path>"` (relative to its folder, inside the repository),
+//!    else its `project = "<name>"` (optionally with `account = "…"`);
+//! 5. a `secrets.toml` above that `.opv`, only when it names neither `config` nor `project`;
+//! 6. the git remote `origin`, normalized to `host/owner/repo`, matched against the
 //!    manifests' repo tags.
+//!
+//! When nothing matches, the bounded search below the repository ([`config::found_below`])
+//! lists the files it saw as a hint; none is used without being named.
 //!
 //! Steps 2, 4 and 5 make one `op item list --tags opv-manifest` call (metadata only);
 //! loading a manifest is one more `op item get` by IDs, before the environment's item read.
@@ -521,11 +526,13 @@ impl ConfigStore for ManifestStore {
     }
 }
 
-/// How `--config` was given.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How the configuration file was named.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Given {
     Flag,
     Env,
+    /// The `config = "<path>"` line of this `.opv` (FR-66).
+    DotOpv(PathBuf),
 }
 
 /// Where the configuration was found.
@@ -561,6 +568,14 @@ impl Found {
                 store,
                 given: Some(Given::Env),
             } => Some(format!("using {} (from OPV_CONFIG)", store.describe())),
+            Found::File {
+                store,
+                given: Some(Given::DotOpv(dot)),
+            } => Some(format!(
+                "using {} (named by {})",
+                store.describe(),
+                dot.display()
+            )),
             Found::File { store, given: None } => Some(format!("using {}", store.describe())),
             Found::Manifest(m)
                 if !verbose && matches!(m.matched, Matched::Repo(_) | Matched::DotFile(_)) =>
@@ -622,6 +637,10 @@ impl Found {
             } => GivenBy::EnvVar {
                 var: VarName::new("OPV_CONFIG"),
             },
+            Found::File {
+                given: Some(Given::DotOpv(path)),
+                ..
+            } => GivenBy::DotOpv { path: path.clone() },
             _ => GivenBy::Discovered,
         }
     }
@@ -702,6 +721,24 @@ pub struct DotOpv {
     pub project: Option<String>,
     #[serde(default)]
     pub account: Option<String>,
+    /// The configuration file, relative to the `.opv`'s folder (FR-66). Only its form is
+    /// checked here; whether it exists and stays inside the repository is checked when
+    /// discovery uses it, so `opv login` works before the file is generated.
+    #[serde(default)]
+    pub config: Option<String>,
+}
+
+/// A `.opv` `config` value's form: a relative path of plain parts (no `..`, no root or
+/// drive, no backslash, no NUL), so it can only name something below the `.opv`'s folder.
+fn is_relative_in_repo(s: &str) -> bool {
+    !s.is_empty()
+        && !s.contains(['\0', '\\', ':'])
+        && Path::new(s).components().all(|c| {
+            matches!(
+                c,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
 }
 
 /// Parse a `.opv` file's text.
@@ -719,7 +756,7 @@ pub fn parse_dot_opv(text: &str, path: &Path) -> Result<DotOpv, Error> {
         .into()
     };
     let d: DotOpv = toml::from_str(text).map_err(|e| {
-        // The pointer holds `project = "<name>"` and/or `account = "<account>"` only.
+        // The pointer holds `project`, `account` and `config` only.
         let at = location(text, e.span());
         if e.message().starts_with("unknown field") {
             invalid(at, "the pointer", FieldRule::Unknown { suggestion: None })
@@ -727,6 +764,26 @@ pub fn parse_dot_opv(text: &str, path: &Path) -> Result<DotOpv, Error> {
             invalid(at, "the pointer", FieldRule::Syntax)
         }
     })?;
+    if let Some(c) = &d.config {
+        if !is_relative_in_repo(c) {
+            return Err(invalid(
+                None,
+                "config",
+                FieldRule::Pattern {
+                    id: PatternId::RelativeInRepo,
+                },
+            ));
+        }
+        if d.project.is_some() {
+            return Err(invalid(
+                None,
+                "config",
+                FieldRule::ConflictsWith {
+                    field: DottedPath(vec!["project".into()]),
+                },
+            ));
+        }
+    }
     if let Some(project) = &d.project
         && !is_project_name(project)
     {
@@ -826,8 +883,12 @@ pub fn record_account(start: &Path, account: &str) -> Result<RecordOutcome, Erro
     let mut text = String::from(
         "# opv: this project's 1Password account (an ID, not a secret). Commit this file.\n",
     );
-    if let Some(p) = existing.and_then(|d| d.project) {
+    if let Some(p) = existing.as_ref().and_then(|d| d.project.as_deref()) {
         text.push_str(&format!("project = \"{p}\"\n"));
+    }
+    // FR-66: the configuration the pointer names stays named.
+    if let Some(c) = existing.as_ref().and_then(|d| d.config.as_deref()) {
+        text.push_str(&format!("config = \"{c}\"\n"));
     }
     text.push_str(&format!("account = \"{account}\"\n"));
     write_no_follow(&path, &text).map_err(|e| refuse(LocalOp::Write, e.kind().into()))?;
@@ -913,43 +974,106 @@ pub fn locate(req: &Request, r: &dyn CommandRunner) -> Result<Found, Error> {
     if let Some((path, given)) = &req.config {
         return Ok(Found::File {
             store: FileStore { path: path.clone() },
-            given: Some(*given),
+            given: Some(given.clone()),
         });
     }
     if let Some(project) = &req.project {
         let account = pick_account_at(r, req.account.clone(), &req.start)?;
         return by_project(r, project, account, Matched::ProjectEnv);
     }
-    if !req.manifest_only
-        && let Some(path) = config::discover(&req.start)
-    {
-        return Ok(Found::File {
-            store: FileStore { path },
-            given: None,
-        });
-    }
-    if let Some(path) = find_dot_opv(&req.start) {
-        let text =
-            fs::read_to_string(&path).map_err(|e| unreadable(&path, &e, GivenBy::Discovered))?;
-        let dot = parse_dot_opv(&text, &path)?;
-        // One order everywhere (0.9.0): OP_ACCOUNT (which `opv login --account` sets for its
-        // command) before the checkout's .opv.
-        let account = pick_account_at(r, req.account.clone().or(dot.account), &req.start)?;
-        if let Some(project) = &dot.project {
-            return by_project(r, project, account, Matched::DotFile(path));
+    let walked = if req.manifest_only {
+        None
+    } else {
+        config::discover(&req.start)
+    };
+    let walked_file = |path: PathBuf| Found::File {
+        store: FileStore { path },
+        given: None,
+    };
+    let Some(path) = find_dot_opv(&req.start) else {
+        if let Some(file) = walked {
+            return Ok(walked_file(file));
         }
         return match git_repo(r) {
-            Some(repo) => by_repo(r, &repo, &req.start, account.as_deref()),
+            Some(repo) => {
+                let account = pick_account_at(r, req.account.clone(), &req.start)?;
+                by_repo(r, &repo, &req.start, account.as_deref())
+            }
             None => Err(not_found(&req.start, None, None)),
         };
+    };
+    // FR-66: a walk-up file wins only at or below the `.opv`'s folder, so a stray
+    // `~/secrets.toml` never beats the configuration the project declares.
+    let dot_dir = path.parent().unwrap_or(Path::new("."));
+    if let Some(file) = &walked
+        && file.parent().is_some_and(|d| within(d, dot_dir))
+    {
+        return Ok(walked_file(file.clone()));
+    }
+    let text = fs::read_to_string(&path).map_err(|e| unreadable(&path, &e, GivenBy::Discovered))?;
+    let dot = parse_dot_opv(&text, &path)?;
+    if let Some(named) = &dot.config
+        && !req.manifest_only
+    {
+        return Ok(Found::File {
+            store: FileStore {
+                path: named_by_dot_opv(&path, named)?,
+            },
+            given: Some(Given::DotOpv(path)),
+        });
+    }
+    if dot.project.is_none()
+        && dot.config.is_none()
+        && let Some(file) = walked
+    {
+        return Ok(walked_file(file));
+    }
+    // One order everywhere (0.9.0): OP_ACCOUNT (which `opv login --account` sets for its
+    // command) before the checkout's .opv.
+    let account = pick_account_at(r, req.account.clone().or(dot.account), &req.start)?;
+    if let Some(project) = &dot.project {
+        return by_project(r, project, account, Matched::DotFile(path));
     }
     match git_repo(r) {
-        Some(repo) => {
-            let account = pick_account_at(r, req.account.clone(), &req.start)?;
-            by_repo(r, &repo, &req.start, account.as_deref())
-        }
+        Some(repo) => by_repo(r, &repo, &req.start, account.as_deref()),
         None => Err(not_found(&req.start, None, None)),
     }
+}
+
+/// Whether `path` is `dir` or inside it, both resolved (symbolic links, `..`): `false` when
+/// either cannot be resolved.
+fn within(path: &Path, dir: &Path) -> bool {
+    match (path.canonicalize(), dir.canonicalize()) {
+        (Ok(p), Ok(d)) => p.starts_with(d),
+        _ => false,
+    }
+}
+
+/// The file a `.opv`'s `config = "<named>"` line names, resolved (FR-66). The file must exist
+/// and, once symbolic links are followed, sit inside the repository holding the `.opv` (the
+/// `.opv`'s folder outside a repository): a cloned repository is untrusted, so a link out of it
+/// is refused by name, as `config_unreadable` naming the `.opv`. The resolved path is what is
+/// read, so the file opened is the file checked.
+fn named_by_dot_opv(dot_opv: &Path, named: &str) -> Result<PathBuf, Error> {
+    let dir = dot_opv.parent().unwrap_or(Path::new("."));
+    let given = dir.join(named);
+    let refuse = |io: IoKind| -> Error {
+        Cause::ConfigUnreadable {
+            path: given.clone(),
+            io,
+            given_by: GivenBy::DotOpv {
+                path: dot_opv.to_path_buf(),
+            },
+        }
+        .into()
+    };
+    let dir = dir.canonicalize().map_err(|e| refuse(e.kind().into()))?;
+    let root = repo_root(&dir).unwrap_or(&dir);
+    let file = given.canonicalize().map_err(|e| refuse(e.kind().into()))?;
+    if !file.starts_with(root) {
+        return Err(refuse(IoKind::PermissionDenied));
+    }
+    Ok(file)
 }
 
 /// The account value that selects this project's 1Password account, in the one order every
@@ -1038,7 +1162,7 @@ fn pick_account_at(
         (given, []) => Ok(given),
         (Some(a), all) => manifest::resolve_from(all, &a, account_source(&a, start)).map(Some),
         (None, [one]) => Ok(Some(one.account_uuid.clone())),
-        (None, all) => Err(manifest::choose_error(all)),
+        (None, all) => Err(manifest::choose_error(all, r)),
     }
 }
 
@@ -1285,8 +1409,17 @@ pub fn project_of(r: &Row) -> Option<&str> {
 }
 
 /// No configuration anywhere, and no manifest for this checkout (the catalog's
-/// `ConfigNotFound`).
+/// `ConfigNotFound`), with the `secrets.toml` files the bounded search below the repository
+/// root (or `start` outside one) saw: a hint naming `--config` and the `.opv` line, never a
+/// file used unnamed (FR-66).
 pub fn not_found(start: &Path, repo: Option<&str>, account: Option<&str>) -> Error {
+    let root = repo_root(start).unwrap_or(start);
+    let (paths, stopped) = config::found_below(root);
+    let found = (!paths.is_empty()).then(|| crate::cause::FoundConfigs {
+        paths,
+        dot_opv: find_dot_opv(start).unwrap_or_else(|| root.join(DOT_FILE)),
+        stopped,
+    });
     // C16: no environment is guessed (`opv init dev` was one); a command naming one gets
     // `opv init <env>` from `main`. 03.20: only the selected account was searched; say so.
     crate::cause::Cause::ConfigNotFound {
@@ -1296,6 +1429,7 @@ pub fn not_found(start: &Path, repo: Option<&str>, account: Option<&str>) -> Err
             repo: repo.map(str::to_string),
             account: account.map(crate::cause::AccountId::new),
         }),
+        found,
     }
     .into()
 }

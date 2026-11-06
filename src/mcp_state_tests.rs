@@ -69,6 +69,27 @@ roles = ["migrate"]
     )
 }
 
+/// The two signed-out accounts `op account list` prints for [`World::two_accounts`], in
+/// the order op lists them.
+fn two_accounts() -> Vec<Value> {
+    vec![
+        json!({
+            "account_uuid": "AAAA0000000000000000000001",
+            "url": "https://my-team.1password.com/",
+            "email": "owner@example.com",
+            "user_uuid": "USER0000000000000000000001",
+            "shorthand": "my-team"
+        }),
+        json!({
+            "account_uuid": "BBBB0000000000000000000002",
+            "url": "https://example.1password.com/",
+            "email": "other@example.com",
+            "user_uuid": "USER0000000000000000000002",
+            "shorthand": "example"
+        }),
+    ]
+}
+
 /// An environment's `app` item, both fields set to marked values.
 fn app_item(env: &str) -> Value {
     json!({
@@ -81,8 +102,20 @@ fn app_item(env: &str) -> Value {
     })
 }
 
-/// `FakeOp` as the tool's runner (its account is the project's).
-pub(super) struct Fake(pub(super) FakeOp);
+/// `FakeOp` as the tool's runner (its account is the project's). The second field
+/// overrides `op account list` when a test needs a machine with more than [`FakeOp`]'s own.
+pub(super) struct Fake(pub(super) FakeOp, Option<Vec<Value>>);
+
+impl Fake {
+    fn new(op: FakeOp) -> Self {
+        Self(op, None)
+    }
+
+    /// The same runner, answering `op account list` with `accounts`.
+    fn listing(op: FakeOp, accounts: Vec<Value>) -> Self {
+        Self(op, Some(accounts))
+    }
+}
 
 impl CommandRunner for Fake {
     fn read(&self, call: &Call, refused: &[i32]) -> io::Result<Outcome> {
@@ -92,6 +125,12 @@ impl CommandRunner for Fake {
         self.0.write(call)
     }
     fn probe(&self, call: &Call, limit: Duration) -> io::Result<Output> {
+        if let Some(accounts) = &self.1
+            && call.program == "op"
+            && call.args.starts_with(&["account", "list"])
+        {
+            return Ok(Output::success(serde_json::to_vec(accounts).unwrap()));
+        }
         self.0.probe(call, limit)
     }
     fn pause(&self, d: Duration, note: &str) {
@@ -128,7 +167,21 @@ impl World {
     }
 
     fn with_contract(contract: &str) -> Self {
+        Self::with_contract_and_accounts(contract, None)
+    }
+
+    /// A world whose `op account list` names two signed-out accounts, none selected for
+    /// the project.
+    pub(super) fn two_accounts() -> Self {
+        Self::with_contract_and_accounts(CONTRACT, Some(two_accounts()))
+    }
+
+    fn with_contract_and_accounts(contract: &str, accounts: Option<Vec<Value>>) -> Self {
         let op = FakeOp::default();
+        // A world with its own listing has no session for either account.
+        if accounts.is_some() {
+            op.signed_in.set(false);
+        }
         let item = op.insert("vdev0000000000000000000001", app_item("dev"));
         let prod = op.insert("vshr0000000000000000000002", app_item("prod"));
         // The directory names the project (a name may not start with a dot).
@@ -145,7 +198,11 @@ impl World {
             format!("account = \"{ACCOUNT}\"\n"),
         )
         .unwrap();
-        Self { dir, r: Fake(op) }
+        let r = match accounts {
+            Some(accounts) => Fake::listing(op, accounts),
+            None => Fake::new(op),
+        };
+        Self { dir, r }
     }
 
     pub(super) fn project(&self) -> &Path {
@@ -335,6 +392,36 @@ fn the_access_section_is_opv_access_json() {
 }
 
 #[test]
+fn the_accounts_section_is_opv_account_list_json() {
+    let w = World::two_accounts();
+    let want = w.cli(&["account", "list"], |_, r, out| {
+        crate::app::account::list(r, None, true, out)
+    });
+    assert_eq!(w.tool(json!({"section": "accounts"})), want);
+}
+
+#[test]
+fn the_accounts_section_offers_a_choice_when_no_account_is_selected() {
+    let w = World::two_accounts();
+    assert_eq!(
+        w.tool(json!({"section": "accounts"}))["next"]["kind"],
+        "choose"
+    );
+}
+
+#[test]
+fn the_accounts_section_offers_each_account_as_a_choice() {
+    let w = World::two_accounts();
+    assert_eq!(
+        w.tool(json!({"section": "accounts"}))["next"]["choices"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
 fn the_delivery_preview_section_is_opv_run_preview_json() {
     let w = World::new();
     let fleet = w.fleet();
@@ -450,7 +537,7 @@ fn an_undeclared_environment_is_the_clis_own_error() {
 #[test]
 fn a_missing_configuration_is_the_clis_own_error() {
     let dir = tempfile::Builder::new().prefix("myapp-").tempdir().unwrap();
-    let r = Fake(FakeOp::default());
+    let r = Fake::new(FakeOp::default());
     let err = load_fleet(dir.path(), &r).unwrap_err();
     let argv = ["opv", "contract", "--json"].map(str::to_string);
     let want: Value = serde_json::from_slice(&crate::json::finish_with(
@@ -481,6 +568,16 @@ fn an_unknown_section_reads_nothing() {
     let w = World::new();
     w.tool(json!({"section": "deployment_plan"}));
     assert!(w.r.0.calls.borrow().is_empty());
+}
+
+#[test]
+fn an_unknown_section_names_accounts_among_the_sections() {
+    let w = World::new();
+    let message = w.tool(json!({"section": "configuration"}))["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(message.contains("accounts"), "{message}");
 }
 
 #[test]
@@ -563,6 +660,7 @@ canary! {
     the_inventory_section_answers_no_value: {"section": "inventory"},
     the_needs_section_answers_no_value: {"section": "needs"},
     the_contract_section_answers_no_value: {"section": "contract"},
+    the_accounts_section_answers_no_value: {"section": "accounts"},
     the_ready_section_answers_no_value: {"section": "ready"},
     the_plan_section_answers_no_value: {"section": "plan", "env": "prod"},
     the_changed_section_answers_no_value: {"section": "changed", "env": "prod"},

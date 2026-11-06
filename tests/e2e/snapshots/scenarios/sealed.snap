@@ -1,0 +1,210 @@
+# sealed: seal with opv sync, verify and run with opv unseal
+
+## first opv sync exit: 0
+## first opv sync stdout
+prod/box: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
+prod/box: delivery: web revision drv-<id>
+prod/box: written: web/API_KEY (API_KEY), web/DATABASE_URL (DATABASE_URL), web/LOG_LEVEL (LOG_LEVEL), web/OTEL_RESOURCE (OTEL_RESOURCE), web/SESSION_SECRET (SESSION_SECRET), web/TLS_CERTIFICATE (TLS_CERTIFICATE), web/TLS_PRIVATE_KEY (TLS_PRIVATE_KEY)
+prod/box: summary: written 7 · unchanged 0 · held 0 · deployed no · pending 0 · pruned 0 · kept 0 · skipped 1
+
+## first opv sync stderr
+using <SCENARIO>/project/secrets.toml
+
+## second opv sync exit: 0
+## second opv sync stdout
+prod/box: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
+prod/box: delivery: web revision drv-<id>
+prod/box: summary: written 0 · unchanged 0 · held 0 · deployed no · pending 0 · pruned 0 · kept 0 · skipped 1
+
+## second opv sync stderr
+using <SCENARIO>/project/secrets.toml
+
+## opv status exit: 0
+## opv status stdout
+prod/box: 10 keys · 9 saved · 1 skipped · 0 findings · 0 not yet on sealed bundle
+TARGET  PRODUCT  KEY              KIND    STATE    ON TARGET
+box     shared   DATABASE_URL     secret  saved    n/a
+box     shared   FEATURE_FLAGS    config  saved    via sealed bundle
+box     web      API_KEY          secret  saved    same
+box     web      DATABASE_URL     secret  saved    same
+    shared from shared/DATABASE_URL
+box     web      LOG_LEVEL        config  saved    same, via sealed bundle
+box     web      MIGRATION_TOKEN  secret  skipped  n/a
+box     web      OTEL_RESOURCE    config  saved    same, via sealed bundle · file (verbatim)
+box     web      SESSION_SECRET   secret  saved    same
+box     web      TLS_CERTIFICATE  secret  saved    same · file (verbatim)
+box     web      TLS_PRIVATE_KEY  secret  saved    same · file (verbatim)
+warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
+
+## opv status stderr
+using <SCENARIO>/project/secrets.toml
+
+## unseal --verify-only exit: 0
+## unseal --verify-only stdout
+verified prod/web revision <revision> (project project, target box)
+  signer      SHA256:WukzcBfSQ/h2lb+LBUQqZV32GZGju50eutYraFc51OY
+  recipient   not checked (no identity given)
+  sealed      <time> by opv <version>, plan <id>
+  contract    sha256:69b533dcf408e59fd084e56588fe1789b9882710c5262f3ae847a09402645840
+  payload     not decrypted (--verify-only)
+  runtime dir RAM-backed, ready for the file keys
+names (7):
+  API_KEY          env:API_KEY
+  DATABASE_URL     env:DATABASE_URL
+  LOG_LEVEL        env:LOG_LEVEL
+  OTEL_RESOURCE    file:otel/resource
+  SESSION_SECRET   env:SESSION_SECRET
+  TLS_CERTIFICATE  file:tls/certificate
+  TLS_PRIVATE_KEY  file:tls/private-key
+
+## unseal --verify-only stderr
+opv unseal: prod/web revision <revision> signer SHA256:WukzcBfSQ/h2lb+LBUQqZV32GZGju50eutYraFc51OY 7 names
+
+## unseal --verify-only --json exit: 0
+## unseal --verify-only --json stdout
+{"schema_version":4,"ok":true,"schema":"opv.unseal/1","bundle":{"format":"opv-sealed/1","project":"project","environment":"prod","product":"web","target":"box","revision":"<revision>","created_at":"<time>","opv_version":"<version>","plan_id":"<id>","contract_digest":"sha256:69b533dcf408e59fd084e56588fe1789b9882710c5262f3ae847a09402645840","signer":"SHA256:WukzcBfSQ/h2lb+LBUQqZV32GZGju50eutYraFc51OY","recipient":null},"names":[{"name":"API_KEY","destination":"env:API_KEY"},{"name":"DATABASE_URL","destination":"env:DATABASE_URL"},{"name":"LOG_LEVEL","destination":"env:LOG_LEVEL"},{"name":"OTEL_RESOURCE","destination":"file:otel/resource"},{"name":"SESSION_SECRET","destination":"env:SESSION_SECRET"},{"name":"TLS_CERTIFICATE","destination":"file:tls/certificate"},{"name":"TLS_PRIVATE_KEY","destination":"file:tls/private-key"}],"checked":{"signature":true,"recipient":false,"payload":false,"runtime_dir":"ram_backed"},"overridden":[],"next":{"kind":"none","actor":"person","command":null},"do":null}
+
+## unseal --verify-only --json stderr
+opv unseal: prod/web revision <revision> signer SHA256:WukzcBfSQ/h2lb+LBUQqZV32GZGju50eutYraFc51OY 7 names
+
+## unseal exit: 0
+## unseal stdout
+verified prod/web revision <revision> (project project, target box)
+  signer      SHA256:WukzcBfSQ/h2lb+LBUQqZV32GZGju50eutYraFc51OY
+  recipient   sha256:40ef75a4870713f1 (this identity)
+  sealed      <time> by opv <version>, plan <id>
+  contract    sha256:69b533dcf408e59fd084e56588fe1789b9882710c5262f3ae847a09402645840
+  payload     decrypted in memory; matches the signed header
+names (7):
+  API_KEY          env:API_KEY
+  DATABASE_URL     env:DATABASE_URL
+  LOG_LEVEL        env:LOG_LEVEL
+  OTEL_RESOURCE    file:otel/resource
+  SESSION_SECRET   env:SESSION_SECRET
+  TLS_CERTIFICATE  file:tls/certificate
+  TLS_PRIVATE_KEY  file:tls/private-key
+
+## unseal stderr
+opv unseal: prod/web revision <revision> signer SHA256:WukzcBfSQ/h2lb+LBUQqZV32GZGju50eutYraFc51OY 7 names
+
+## unseal --exec (names only) exit: 0
+## unseal --exec (names only) stdout
+API_KEY
+DATABASE_URL
+HOME
+LOG_LEVEL
+OPV_NO_SKILL
+OPV_SIM_WORLD
+OPV_TEST_SUID_DUMPABLE
+PATH
+PWD
+SESSION_SECRET
+WEB_SECRETS_DIR
+XDG_RUNTIME_DIR
+./otel/resource
+./tls/certificate
+./tls/private-key
+
+## unseal --exec (names only) stderr
+opv unseal: prod/web revision <revision> signer SHA256:WukzcBfSQ/h2lb+LBUQqZV32GZGju50eutYraFc51OY 7 names
+
+## retired opv sync --prune --retire exit: 0
+## retired opv sync --prune --retire stdout
+retire: prod: web/LOG_LEVEL no longer read at HEAD; released to the prune
+prod/box: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
+prod/box: delivery: web revision drv-<id>
+prod/box: written: web/API_KEY (API_KEY), web/DATABASE_URL (DATABASE_URL), web/OTEL_RESOURCE (OTEL_RESOURCE), web/SESSION_SECRET (SESSION_SECRET), web/TLS_CERTIFICATE (TLS_CERTIFICATE), web/TLS_PRIVATE_KEY (TLS_PRIVATE_KEY)
+prod/box: will prune: web/LOG_LEVEL (LOG_LEVEL)
+prod/box: pruned: web/LOG_LEVEL (LOG_LEVEL)
+prod/box: summary: written 6 · unchanged 0 · held 0 · deployed no · pending 0 · pruned 1 · kept 0 · skipped 2
+
+## retired opv sync --prune --retire stderr
+using <SCENARIO>/project/secrets.toml
+
+## retired unseal --verify-only exit: 0
+## retired unseal --verify-only stdout
+verified prod/web revision <revision> (project project, target box)
+  signer      SHA256:WukzcBfSQ/h2lb+LBUQqZV32GZGju50eutYraFc51OY
+  recipient   not checked (no identity given)
+  sealed      <time> by opv <version>, plan <id>
+  contract    sha256:5ddc7bb1218671cc199854f8ebd4a5b06deb3a6eb0ba0801aab582d435d6ea26
+  payload     not decrypted (--verify-only)
+  runtime dir RAM-backed, ready for the file keys
+names (6):
+  API_KEY          env:API_KEY
+  DATABASE_URL     env:DATABASE_URL
+  OTEL_RESOURCE    file:otel/resource
+  SESSION_SECRET   env:SESSION_SECRET
+  TLS_CERTIFICATE  file:tls/certificate
+  TLS_PRIVATE_KEY  file:tls/private-key
+
+## retired unseal --verify-only stderr
+opv unseal: prod/web revision <revision> signer SHA256:WukzcBfSQ/h2lb+LBUQqZV32GZGju50eutYraFc51OY 6 names
+
+## opv sync --sealed-root exit: 0
+## opv sync --sealed-root stdout
+prod/box: warning: unreferenced shared value shared/FEATURE_FLAGS: no key points at it with from; point a key at it or remove it
+prod/box: delivery: web revision drv-<id>
+prod/box: written: web/API_KEY (API_KEY), web/DATABASE_URL (DATABASE_URL), web/LOG_LEVEL (LOG_LEVEL), web/OTEL_RESOURCE (OTEL_RESOURCE), web/SESSION_SECRET (SESSION_SECRET), web/TLS_CERTIFICATE (TLS_CERTIFICATE), web/TLS_PRIVATE_KEY (TLS_PRIVATE_KEY)
+prod/box: summary: written 7 · unchanged 0 · held 0 · deployed no · pending 0 · pruned 0 · kept 0 · skipped 1
+
+## opv sync --sealed-root stderr
+using <SCENARIO>/project/secrets.toml
+
+## staging signer opv sync --json exit: 2
+## staging signer opv sync --json stdout
+{"schema_version":4,"ok":false,"exit_code":2,"next":{"kind":"run","actor":"assistant","command":"opv plan prod --target box --json"},"do":"in 1Password, open the deploy credentials item and make public key the public key that sealed.signer names","error":{"code":"input_invalid","category":"config","message":"the deploy credentials item: public key must be the public key that sealed.signer names","subject":{"rule":{"rule":"type","expected":"the public key that sealed.signer names"},"path":"","kind":"deploy_credentials","at":null,"field":"public key"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"in 1Password, open the deploy credentials item and make public key the public key that sealed.signer names","next":{"kind":"run","actor":"assistant","command":"opv plan prod --target box --json"}}}
+
+## staging signer opv sync --json stderr
+using <SCENARIO>/project/secrets.toml
+opv: the deploy credentials item: public key must be the public key that sealed.signer names
+Do: in 1Password, open the deploy credentials item and make public key the public key that sealed.signer names
+Next: opv plan prod --target box --json
+
+## signer shared with staging opv sync --json exit: 2
+## signer shared with staging opv sync --json stdout
+{"schema_version":4,"ok":false,"exit_code":2,"next":{"kind":"run","actor":"assistant","command":"opv plan prod --target box --json"},"do":"give this target its own key in environments.staging.targets.box.sealed.signer, or set the same sealed.trust_group on it and on target box in <SCENARIO>/project/secrets.toml at line 166, column 8","error":{"code":"sealed_signer_shared","category":"config","message":"<SCENARIO>/project/secrets.toml at line 166, column 8: environments.staging.targets.box.sealed.signer is signer SHA256:WukzcBfSQ/h2lb+LBUQqZV32GZGju50eutYraFc51OY, which also signs for target box of environment prod, in another trust group","subject":{"rule":{"rule":"check","check":{"check":"sealed_signer_shared","signer":"SHA256:WukzcBfSQ/h2lb+LBUQqZV32GZGju50eutYraFc51OY","other_env":"prod","other_target":"box"}},"source":{"kind":"file","path":"<SCENARIO>/project/secrets.toml","given_by":{"via":"discovered"}},"at":{"line":166,"col":8},"field":["environments","staging","targets","box","sealed","signer"]},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"give this target its own key in environments.staging.targets.box.sealed.signer, or set the same sealed.trust_group on it and on target box in <SCENARIO>/project/secrets.toml at line 166, column 8","next":{"kind":"run","actor":"assistant","command":"opv plan prod --target box --json"}}}
+
+## signer shared with staging opv sync --json stderr
+using <SCENARIO>/project/secrets.toml
+opv: <SCENARIO>/project/secrets.toml at line 166, column 8: environments.staging.targets.box.sealed.signer is signer SHA256:WukzcBfSQ/h2lb+LBUQqZV32GZGju50eutYraFc51OY, which also signs for target box of environment prod, in another trust group
+Do: give this target its own key in environments.staging.targets.box.sealed.signer, or set the same sealed.trust_group on it and on target box in <SCENARIO>/project/secrets.toml at line 166, column 8
+Next: opv plan prod --target box --json
+
+## tampered opv sync --json exit: 2
+## tampered opv sync --json stdout
+{"schema_version":4,"ok":false,"exit_code":2,"next":{"kind":"run","actor":"assistant","command":"opv plan prod --target box --json"},"do":"edit <SCENARIO>/project/sealed/prod/web.opv-sealed: make its content (the signature does not verify over the bundle) an unchanged opv-sealed/1 bundle signed by sealed.signer (mark *.opv-sealed binary in .gitattributes, or delete the file and sync again)","error":{"code":"input_invalid","category":"config","message":"the sealed bundle <SCENARIO>/project/sealed/prod/web.opv-sealed: its content (the signature does not verify over the bundle) must be an unchanged opv-sealed/1 bundle signed by sealed.signer (mark *.opv-sealed binary in .gitattributes, or delete the file and sync again)","subject":{"rule":{"rule":"type","expected":"an unchanged opv-sealed/1 bundle signed by sealed.signer (mark *.opv-sealed binary in .gitattributes, or delete the file and sync again)"},"path":"<SCENARIO>/project/sealed/prod/web.opv-sealed","kind":"sealed_bundle","at":null,"field":"its content (the signature does not verify over the bundle)"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"edit <SCENARIO>/project/sealed/prod/web.opv-sealed: make its content (the signature does not verify over the bundle) an unchanged opv-sealed/1 bundle signed by sealed.signer (mark *.opv-sealed binary in .gitattributes, or delete the file and sync again)","next":{"kind":"run","actor":"assistant","command":"opv plan prod --target box --json"}}}
+
+## tampered opv sync --json stderr
+using <SCENARIO>/project/secrets.toml
+opv: the sealed bundle <SCENARIO>/project/sealed/prod/web.opv-sealed: its content (the signature does not verify over the bundle) must be an unchanged opv-sealed/1 bundle signed by sealed.signer (mark *.opv-sealed binary in .gitattributes, or delete the file and sync again)
+Do: edit <SCENARIO>/project/sealed/prod/web.opv-sealed: make its content (the signature does not verify over the bundle) an unchanged opv-sealed/1 bundle signed by sealed.signer (mark *.opv-sealed binary in .gitattributes, or delete the file and sync again)
+Next: opv plan prod --target box --json
+
+## tampered unseal --json exit: 6
+## tampered unseal --json stdout
+{"schema_version":4,"ok":false,"exit_code":6,"next":{"kind":"run","actor":"assistant","command":"opv unseal <SCENARIO>/project/sealed/prod/web.opv-sealed --env prod --product web --signers <SCENARIO>/runtime/allowed_signers --identity-file <SCENARIO>/runtime/identity.txt --json"},"do":"give --signers the allowed_signers file whose line for this environment (namespaces=\"opv-sealed\") holds the release's signing key, or seal the bundle again with opv sync","error":{"code":"sealed_signature_invalid","category":"policy","message":"the sealed bundle <SCENARIO>/project/sealed/prod/web.opv-sealed failed its signature check against <SCENARIO>/runtime/allowed_signers: the signature does not verify over the bundle; nothing was decrypted","subject":{"refusal":{"kind":"signature_invalid","signers":"<SCENARIO>/runtime/allowed_signers","detail":"the signature does not verify over the bundle"},"bundle":"<SCENARIO>/project/sealed/prod/web.opv-sealed"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"give --signers the allowed_signers file whose line for this environment (namespaces=\"opv-sealed\") holds the release's signing key, or seal the bundle again with opv sync","next":{"kind":"run","actor":"assistant","command":"opv unseal <SCENARIO>/project/sealed/prod/web.opv-sealed --env prod --product web --signers <SCENARIO>/runtime/allowed_signers --identity-file <SCENARIO>/runtime/identity.txt --json"}}}
+
+## tampered unseal --json stderr
+opv: the sealed bundle <SCENARIO>/project/sealed/prod/web.opv-sealed failed its signature check against <SCENARIO>/runtime/allowed_signers: the signature does not verify over the bundle; nothing was decrypted
+Do: give --signers the allowed_signers file whose line for this environment (namespaces="opv-sealed") holds the release's signing key, or seal the bundle again with opv sync
+Next: opv unseal <SCENARIO>/project/sealed/prod/web.opv-sealed --env prod --product web --signers <SCENARIO>/runtime/allowed_signers --identity-file <SCENARIO>/runtime/identity.txt --json
+
+## staging-only signers unseal --json exit: 6
+## staging-only signers unseal --json stdout
+{"schema_version":4,"ok":false,"exit_code":6,"next":{"kind":"run","actor":"assistant","command":"opv unseal <SCENARIO>/project/sealed/prod/web.opv-sealed --env prod --product web --signers <SCENARIO>/runtime/allowed_signers --identity-file <SCENARIO>/runtime/identity.txt --json"},"do":"give --signers the allowed_signers file whose line for this environment (namespaces=\"opv-sealed\") holds the release's signing key, or seal the bundle again with opv sync","error":{"code":"sealed_signature_invalid","category":"policy","message":"the sealed bundle <SCENARIO>/project/sealed/prod/web.opv-sealed failed its signature check against <SCENARIO>/runtime/allowed_signers: the signing key is listed only for other principals; add `prod` to its allowed_signers line (namespaces=\"opv-sealed\"); nothing was decrypted","subject":{"refusal":{"kind":"signature_invalid","signers":"<SCENARIO>/runtime/allowed_signers","detail":"the signing key is listed only for other principals; add `prod` to its allowed_signers line (namespaces=\"opv-sealed\")"},"bundle":"<SCENARIO>/project/sealed/prod/web.opv-sealed"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"give --signers the allowed_signers file whose line for this environment (namespaces=\"opv-sealed\") holds the release's signing key, or seal the bundle again with opv sync","next":{"kind":"run","actor":"assistant","command":"opv unseal <SCENARIO>/project/sealed/prod/web.opv-sealed --env prod --product web --signers <SCENARIO>/runtime/allowed_signers --identity-file <SCENARIO>/runtime/identity.txt --json"}}}
+
+## staging-only signers unseal --json stderr
+opv: the sealed bundle <SCENARIO>/project/sealed/prod/web.opv-sealed failed its signature check against <SCENARIO>/runtime/allowed_signers: the signing key is listed only for other principals; add `prod` to its allowed_signers line (namespaces="opv-sealed"); nothing was decrypted
+Do: give --signers the allowed_signers file whose line for this environment (namespaces="opv-sealed") holds the release's signing key, or seal the bundle again with opv sync
+Next: opv unseal <SCENARIO>/project/sealed/prod/web.opv-sealed --env prod --product web --signers <SCENARIO>/runtime/allowed_signers --identity-file <SCENARIO>/runtime/identity.txt --json
+
+## lock held opv sync --json exit: 6
+## lock held opv sync --json stdout
+{"schema_version":4,"ok":false,"exit_code":6,"next":{"kind":"run","actor":"assistant","command":"opv plan prod --target box --json"},"do":"wait for the other opv run sealing <SCENARIO>/project/sealed/prod/web.opv-sealed to finish","error":{"code":"local_io_failed","category":"policy","message":"another opv run is sealing <SCENARIO>/project/sealed/prod/web.opv-sealed; retry when it finishes","subject":{"io":"would_block","op":"seal_lock","path":"<SCENARIO>/project/sealed/prod/web.opv-sealed"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"safe","human_required":false,"do":"wait for the other opv run sealing <SCENARIO>/project/sealed/prod/web.opv-sealed to finish","next":{"kind":"run","actor":"assistant","command":"opv plan prod --target box --json"}}}
+
+## lock held opv sync --json stderr
+using <SCENARIO>/project/secrets.toml
+opv: another opv run is sealing <SCENARIO>/project/sealed/prod/web.opv-sealed; retry when it finishes
+Do: wait for the other opv run sealing <SCENARIO>/project/sealed/prod/web.opv-sealed to finish
+Next: opv plan prod --target box --json

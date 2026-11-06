@@ -235,7 +235,7 @@ fn the_preview_document_is_the_contract_version() {
         &signed_in(),
     )
     .unwrap();
-    assert_eq!(doc["schema_version"], json!(3));
+    assert_eq!(doc["schema_version"], json!(4));
 }
 
 #[test]

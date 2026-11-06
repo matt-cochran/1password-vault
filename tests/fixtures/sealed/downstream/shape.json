@@ -1,0 +1,1129 @@
+{
+  "source": "matt-cochran-products/infra@50833e19, fly/platform/{staging,production}/opv/secrets.toml",
+  "note": "Names only: environments, products, key names and kinds. No value, recipient or key material. See README.md.",
+  "downstream_format": "opv-sealed/v1 (infra docs/platform/sealed-secrets.md); opv's format is opv-sealed/1 (docs/design/sealed-target.md section 5)",
+  "platforms": {
+    "staging": {
+      "environment_pattern": "staging-*",
+      "recipients": 1,
+      "signers": 1,
+      "identity": "Fly secret PLATFORM_MANIFEST_AGE_KEY (environment only)",
+      "not_sealed": {
+        "environment": "staging-platform",
+        "products": [
+          "platform",
+          "platform-proof"
+        ]
+      },
+      "products": {
+        "allumata": {
+          "environment": "staging-allumata",
+          "bundle": "sealed/staging-allumata/allumata.age",
+          "keys": [
+            {
+              "name": "ANTHROPIC_API_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "DATABASE_URL",
+              "kind": "secret"
+            },
+            {
+              "name": "INTEGRATION_ENC_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "JOURNEEZE_API_HOST",
+              "kind": "config"
+            },
+            {
+              "name": "JOURNEEZE_IDENTITY_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "JOURNEEZE_SITE_KEY",
+              "kind": "config"
+            },
+            {
+              "name": "JOURNEEZE_USER_HASH_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "JWT_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "OPENROUTER_API_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
+              "kind": "secret"
+            },
+            {
+              "name": "OTEL_EXPORTER_OTLP_HEADERS",
+              "kind": "secret"
+            },
+            {
+              "name": "REDIS_URL",
+              "kind": "secret"
+            },
+            {
+              "name": "STRIPE_SECRET_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "STRIPE_WEBHOOK_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "TYPESAFE_JEV_API_KEY",
+              "kind": "secret"
+            }
+          ]
+        },
+        "endorz": {
+          "environment": "staging-endorz",
+          "bundle": "sealed/staging-endorz/endorz.age",
+          "keys": [
+            {
+              "name": "AWS_ACCESS_KEY_ID",
+              "kind": "secret"
+            },
+            {
+              "name": "AWS_ENDPOINT_URL_S3",
+              "kind": "secret"
+            },
+            {
+              "name": "AWS_REGION",
+              "kind": "secret"
+            },
+            {
+              "name": "AWS_SECRET_ACCESS_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "BUCKET_NAME",
+              "kind": "secret"
+            },
+            {
+              "name": "DATABASE_URL",
+              "kind": "secret"
+            },
+            {
+              "name": "JWT_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "OPENROUTER_API_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
+              "kind": "secret"
+            },
+            {
+              "name": "OTEL_EXPORTER_OTLP_HEADERS",
+              "kind": "secret"
+            },
+            {
+              "name": "TYPESAFE_JEV_API_KEY",
+              "kind": "secret"
+            }
+          ]
+        },
+        "fantasticus": {
+          "environment": "staging-fantasticus",
+          "bundle": "sealed/staging-fantasticus/fantasticus.age",
+          "keys": [
+            {
+              "name": "DATABASE_URL",
+              "kind": "secret"
+            },
+            {
+              "name": "JWT_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "OPENROUTER_API_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "STRIPE_SECRET_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "STRIPE_WEBHOOK_SECRET",
+              "kind": "secret"
+            }
+          ]
+        },
+        "journeeze": {
+          "environment": "staging-journeeze",
+          "bundle": "sealed/staging-journeeze/journeeze.age",
+          "keys": [
+            {
+              "name": "BLOB_ACCESS_KEY_ID",
+              "kind": "secret"
+            },
+            {
+              "name": "BLOB_SECRET_ACCESS_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "DATABASE_URL",
+              "kind": "secret"
+            },
+            {
+              "name": "DATABASE_URL_UNPOOLED",
+              "kind": "secret"
+            },
+            {
+              "name": "GITHUB_APP_CLIENT_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "GITHUB_APP_PRIVATE_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "GITHUB_CONNECT_STATE_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "GITHUB_WEBHOOK_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "GOOGLE_OAUTH_CLIENT_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "GUIDE_ASSET_SIGNING_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "JOURNEEZE_APP_PASSWORD",
+              "kind": "secret"
+            },
+            {
+              "name": "JZ_BLOB_BUCKET",
+              "kind": "secret"
+            },
+            {
+              "name": "JZ_BLOB_ENDPOINT",
+              "kind": "secret"
+            },
+            {
+              "name": "JZ_BLOB_REGION",
+              "kind": "secret"
+            },
+            {
+              "name": "JZ_GOOGLE_CLIENT_ID",
+              "kind": "config"
+            },
+            {
+              "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
+              "kind": "secret"
+            },
+            {
+              "name": "OTEL_EXPORTER_OTLP_HEADERS",
+              "kind": "secret"
+            },
+            {
+              "name": "TYPESAFE_JEV_API_KEY",
+              "kind": "secret"
+            }
+          ]
+        },
+        "licenz": {
+          "environment": "staging-licenz",
+          "bundle": "sealed/staging-licenz/licenz.age",
+          "keys": [
+            {
+              "name": "DATABASE_URL",
+              "kind": "secret"
+            },
+            {
+              "name": "JWT_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
+              "kind": "secret"
+            },
+            {
+              "name": "OTEL_EXPORTER_OTLP_HEADERS",
+              "kind": "secret"
+            }
+          ]
+        },
+        "nearvado": {
+          "environment": "staging-nearvado",
+          "bundle": "sealed/staging-nearvado/nearvado.age",
+          "keys": [
+            {
+              "name": "NEARVADO_DATABASE_URL",
+              "kind": "secret"
+            },
+            {
+              "name": "NEARVADO_S3_ACCESS_KEY_ID",
+              "kind": "secret"
+            },
+            {
+              "name": "NEARVADO_S3_BUCKET",
+              "kind": "secret"
+            },
+            {
+              "name": "NEARVADO_S3_ENDPOINT",
+              "kind": "secret"
+            },
+            {
+              "name": "NEARVADO_S3_REGION",
+              "kind": "secret"
+            },
+            {
+              "name": "NEARVADO_S3_SECRET_ACCESS_KEY",
+              "kind": "secret"
+            }
+          ]
+        },
+        "preveti": {
+          "environment": "staging-preveti",
+          "bundle": "sealed/staging-preveti/preveti.age",
+          "keys": [
+            {
+              "name": "DATABASE_URL",
+              "kind": "secret"
+            },
+            {
+              "name": "JWT_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "OPENROUTER_API_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
+              "kind": "secret"
+            },
+            {
+              "name": "OTEL_EXPORTER_OTLP_HEADERS",
+              "kind": "secret"
+            },
+            {
+              "name": "PERPLEXITY_API_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "STRIPE_PUBLISHABLE_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "STRIPE_SECRET_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "STRIPE_WEBHOOK_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "TAVILY_API_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "TYPESAFE_JEV_API_KEY",
+              "kind": "secret"
+            }
+          ]
+        },
+        "pubops": {
+          "environment": "staging-pubops",
+          "bundle": "sealed/staging-pubops/pubops.age",
+          "keys": [
+            {
+              "name": "DATABASE_URL",
+              "kind": "secret"
+            },
+            {
+              "name": "JWT_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "OPENROUTER_API_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "PUBOPS_TOTP_ENCRYPTION_KEY_HEX",
+              "kind": "secret"
+            },
+            {
+              "name": "STRIPE_SECRET_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "STRIPE_WEBHOOK_SECRET",
+              "kind": "secret"
+            }
+          ]
+        },
+        "resoniche": {
+          "environment": "staging-resoniche",
+          "bundle": "sealed/staging-resoniche/resoniche.age",
+          "keys": [
+            {
+              "name": "AWS_ACCESS_KEY_ID",
+              "kind": "secret"
+            },
+            {
+              "name": "AWS_ENDPOINT_URL_S3",
+              "kind": "secret"
+            },
+            {
+              "name": "AWS_REGION",
+              "kind": "secret"
+            },
+            {
+              "name": "AWS_SECRET_ACCESS_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "BUCKET_NAME",
+              "kind": "secret"
+            },
+            {
+              "name": "DATABASE_URL",
+              "kind": "secret"
+            },
+            {
+              "name": "JWT_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "OPENROUTER_API_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "STRIPE_SECRET_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "STRIPE_WEBHOOK_SECRET",
+              "kind": "secret"
+            }
+          ]
+        },
+        "zonetico": {
+          "environment": "staging-zonetico",
+          "bundle": "sealed/staging-zonetico/zonetico.age",
+          "keys": [
+            {
+              "name": "AUTH_ADMIN_TOKEN",
+              "kind": "secret"
+            },
+            {
+              "name": "AWS_ACCESS_KEY_ID",
+              "kind": "secret"
+            },
+            {
+              "name": "AWS_ENDPOINT_URL_S3",
+              "kind": "secret"
+            },
+            {
+              "name": "AWS_REGION",
+              "kind": "secret"
+            },
+            {
+              "name": "AWS_SECRET_ACCESS_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "BILLING_CREDENTIAL_ACTIVE_KEY_ID",
+              "kind": "secret"
+            },
+            {
+              "name": "BILLING_CREDENTIAL_KEYS",
+              "kind": "secret"
+            },
+            {
+              "name": "BUCKET_NAME",
+              "kind": "secret"
+            },
+            {
+              "name": "CF_CUSTOM_HOSTNAMES_TOKEN",
+              "kind": "secret"
+            },
+            {
+              "name": "CF_SAAS_ZONE_ID",
+              "kind": "secret"
+            },
+            {
+              "name": "DATABASE_URL",
+              "kind": "secret"
+            },
+            {
+              "name": "DATABASE_URL_UNPOOLED",
+              "kind": "secret"
+            },
+            {
+              "name": "GOTRUE_DB_DATABASE_URL",
+              "kind": "secret"
+            },
+            {
+              "name": "GOTRUE_EXTERNAL_GOOGLE_CLIENT_ID",
+              "kind": "secret"
+            },
+            {
+              "name": "GOTRUE_EXTERNAL_GOOGLE_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "GOTRUE_JWT_KEYS",
+              "kind": "secret"
+            },
+            {
+              "name": "GOTRUE_JWT_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
+              "kind": "secret"
+            },
+            {
+              "name": "OTEL_EXPORTER_OTLP_HEADERS",
+              "kind": "secret"
+            },
+            {
+              "name": "PLATFORM_CLOUDFLARE_ACCOUNT_ID",
+              "kind": "secret"
+            },
+            {
+              "name": "PLATFORM_CLOUDFLARE_API_TOKEN",
+              "kind": "secret"
+            },
+            {
+              "name": "PLATFORM_ENTITLEMENTS_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "PLATFORM_RELEASE_HMAC_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "PORTAL_CREDENTIAL_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "PORTAL_GATEWAY_ACCESS_CLIENT_ID",
+              "kind": "secret"
+            },
+            {
+              "name": "PORTAL_GATEWAY_ACCESS_CLIENT_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "PORTAL_GATEWAY_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "PORTAL_SESSION_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "PROVIDER_VAULT_ACTIVE_KEY_ID",
+              "kind": "secret"
+            },
+            {
+              "name": "PROVIDER_VAULT_KEYS",
+              "kind": "secret"
+            },
+            {
+              "name": "ZONETICO_APP_PASSWORD",
+              "kind": "secret"
+            }
+          ]
+        }
+      }
+    },
+    "production": {
+      "environment_pattern": "prod-*",
+      "recipients": 1,
+      "signers": 1,
+      "identity": "Fly secret PLATFORM_MANIFEST_AGE_KEY (environment only)",
+      "not_sealed": {
+        "environment": "prod-platform",
+        "products": [
+          "platform",
+          "platform-proof"
+        ]
+      },
+      "products": {
+        "allumata": {
+          "environment": "prod-allumata",
+          "bundle": "sealed/prod-allumata/allumata.age",
+          "keys": [
+            {
+              "name": "ANTHROPIC_API_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "DATABASE_URL",
+              "kind": "secret"
+            },
+            {
+              "name": "INTEGRATION_ENC_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "JWT_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "OPENAI_API_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "OPENROUTER_API_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
+              "kind": "secret"
+            },
+            {
+              "name": "OTEL_EXPORTER_OTLP_HEADERS",
+              "kind": "secret"
+            },
+            {
+              "name": "REDIS_URL",
+              "kind": "secret"
+            },
+            {
+              "name": "SMTP_PASS",
+              "kind": "secret"
+            },
+            {
+              "name": "TYPESAFE_JEV_API_KEY",
+              "kind": "secret"
+            }
+          ]
+        },
+        "endorz": {
+          "environment": "prod-endorz",
+          "bundle": "sealed/prod-endorz/endorz.age",
+          "keys": [
+            {
+              "name": "AWS_ACCESS_KEY_ID",
+              "kind": "secret"
+            },
+            {
+              "name": "AWS_ENDPOINT_URL_S3",
+              "kind": "secret"
+            },
+            {
+              "name": "AWS_REGION",
+              "kind": "secret"
+            },
+            {
+              "name": "AWS_SECRET_ACCESS_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "BUCKET_NAME",
+              "kind": "secret"
+            },
+            {
+              "name": "DATABASE_URL",
+              "kind": "secret"
+            },
+            {
+              "name": "JWT_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "OPENROUTER_API_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
+              "kind": "secret"
+            },
+            {
+              "name": "OTEL_EXPORTER_OTLP_HEADERS",
+              "kind": "secret"
+            },
+            {
+              "name": "SMTP_PASS",
+              "kind": "secret"
+            },
+            {
+              "name": "TYPESAFE_JEV_API_KEY",
+              "kind": "secret"
+            }
+          ]
+        },
+        "fantasticus": {
+          "environment": "prod-fantasticus",
+          "bundle": "sealed/prod-fantasticus/fantasticus.age",
+          "keys": [
+            {
+              "name": "DATABASE_URL",
+              "kind": "secret"
+            },
+            {
+              "name": "JWT_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "OPENROUTER_API_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "RESEND_API_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "STRIPE_SECRET_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "STRIPE_WEBHOOK_SECRET",
+              "kind": "secret"
+            }
+          ]
+        },
+        "journeeze": {
+          "environment": "prod-journeeze",
+          "bundle": "sealed/prod-journeeze/journeeze.age",
+          "keys": [
+            {
+              "name": "BLOB_ACCESS_KEY_ID",
+              "kind": "secret"
+            },
+            {
+              "name": "BLOB_SECRET_ACCESS_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "DATABASE_URL",
+              "kind": "secret"
+            },
+            {
+              "name": "DATABASE_URL_UNPOOLED",
+              "kind": "secret"
+            },
+            {
+              "name": "GITHUB_APP_CLIENT_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "GITHUB_APP_PRIVATE_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "GITHUB_CONNECT_STATE_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "GITHUB_WEBHOOK_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "GOOGLE_OAUTH_CLIENT_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "GUIDE_ASSET_SIGNING_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "JOURNEEZE_APP_PASSWORD",
+              "kind": "secret"
+            },
+            {
+              "name": "JOURNEEZE_SITE_SECRETS",
+              "kind": "secret"
+            },
+            {
+              "name": "JZ_BLOB_BUCKET",
+              "kind": "secret"
+            },
+            {
+              "name": "JZ_BLOB_ENDPOINT",
+              "kind": "secret"
+            },
+            {
+              "name": "JZ_BLOB_REGION",
+              "kind": "secret"
+            },
+            {
+              "name": "JZ_GOOGLE_CLIENT_ID",
+              "kind": "config"
+            },
+            {
+              "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
+              "kind": "secret"
+            },
+            {
+              "name": "OTEL_EXPORTER_OTLP_HEADERS",
+              "kind": "secret"
+            },
+            {
+              "name": "RESEND_API_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "TYPESAFE_JEV_API_KEY",
+              "kind": "secret"
+            }
+          ]
+        },
+        "licenz": {
+          "environment": "prod-licenz",
+          "bundle": "sealed/prod-licenz/licenz.age",
+          "keys": [
+            {
+              "name": "DATABASE_URL",
+              "kind": "secret"
+            },
+            {
+              "name": "JWT_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
+              "kind": "secret"
+            },
+            {
+              "name": "OTEL_EXPORTER_OTLP_HEADERS",
+              "kind": "secret"
+            },
+            {
+              "name": "RESEND_API_KEY",
+              "kind": "secret"
+            }
+          ]
+        },
+        "nearvado": {
+          "environment": "prod-nearvado",
+          "bundle": "sealed/prod-nearvado/nearvado.age",
+          "keys": [
+            {
+              "name": "NEARVADO_DATABASE_URL",
+              "kind": "secret"
+            },
+            {
+              "name": "NEARVADO_S3_ACCESS_KEY_ID",
+              "kind": "secret"
+            },
+            {
+              "name": "NEARVADO_S3_BUCKET",
+              "kind": "secret"
+            },
+            {
+              "name": "NEARVADO_S3_ENDPOINT",
+              "kind": "secret"
+            },
+            {
+              "name": "NEARVADO_S3_REGION",
+              "kind": "secret"
+            },
+            {
+              "name": "NEARVADO_S3_SECRET_ACCESS_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "RESEND_API_KEY",
+              "kind": "secret"
+            }
+          ]
+        },
+        "preveti": {
+          "environment": "prod-preveti",
+          "bundle": "sealed/prod-preveti/preveti.age",
+          "keys": [
+            {
+              "name": "DATABASE_URL",
+              "kind": "secret"
+            },
+            {
+              "name": "JWT_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "OPENROUTER_API_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
+              "kind": "secret"
+            },
+            {
+              "name": "OTEL_EXPORTER_OTLP_HEADERS",
+              "kind": "secret"
+            },
+            {
+              "name": "PERPLEXITY_API_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "RESEND_API_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "STRIPE_PUBLISHABLE_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "STRIPE_SECRET_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "STRIPE_WEBHOOK_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "TAVILY_API_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "TYPESAFE_JEV_API_KEY",
+              "kind": "secret"
+            }
+          ]
+        },
+        "pubops": {
+          "environment": "prod-pubops",
+          "bundle": "sealed/prod-pubops/pubops.age",
+          "keys": [
+            {
+              "name": "DATABASE_URL",
+              "kind": "secret"
+            },
+            {
+              "name": "JWT_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "OPENROUTER_API_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "PUBOPS_TOTP_ENCRYPTION_KEY_HEX",
+              "kind": "secret"
+            },
+            {
+              "name": "RESEND_API_KEY",
+              "kind": "secret"
+            }
+          ]
+        },
+        "resoniche": {
+          "environment": "prod-resoniche",
+          "bundle": "sealed/prod-resoniche/resoniche.age",
+          "keys": [
+            {
+              "name": "AWS_ACCESS_KEY_ID",
+              "kind": "secret"
+            },
+            {
+              "name": "AWS_ENDPOINT_URL_S3",
+              "kind": "secret"
+            },
+            {
+              "name": "AWS_REGION",
+              "kind": "secret"
+            },
+            {
+              "name": "AWS_SECRET_ACCESS_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "BUCKET_NAME",
+              "kind": "secret"
+            },
+            {
+              "name": "DATABASE_URL",
+              "kind": "secret"
+            },
+            {
+              "name": "JWT_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "OPENROUTER_API_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "RESEND_API_KEY",
+              "kind": "secret"
+            }
+          ]
+        },
+        "zonetico": {
+          "environment": "prod-zonetico",
+          "bundle": "sealed/prod-zonetico/zonetico.age",
+          "keys": [
+            {
+              "name": "AUTH_ADMIN_TOKEN",
+              "kind": "secret"
+            },
+            {
+              "name": "AWS_ACCESS_KEY_ID",
+              "kind": "secret"
+            },
+            {
+              "name": "AWS_ENDPOINT_URL_S3",
+              "kind": "secret"
+            },
+            {
+              "name": "AWS_REGION",
+              "kind": "secret"
+            },
+            {
+              "name": "AWS_SECRET_ACCESS_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "BILLING_CREDENTIAL_ACTIVE_KEY_ID",
+              "kind": "secret"
+            },
+            {
+              "name": "BILLING_CREDENTIAL_KEYS",
+              "kind": "secret"
+            },
+            {
+              "name": "BUCKET_NAME",
+              "kind": "secret"
+            },
+            {
+              "name": "CF_CUSTOM_HOSTNAMES_TOKEN",
+              "kind": "secret"
+            },
+            {
+              "name": "CF_SAAS_ZONE_ID",
+              "kind": "secret"
+            },
+            {
+              "name": "DATABASE_URL",
+              "kind": "secret"
+            },
+            {
+              "name": "DATABASE_URL_UNPOOLED",
+              "kind": "secret"
+            },
+            {
+              "name": "GOTRUE_DB_DATABASE_URL",
+              "kind": "secret"
+            },
+            {
+              "name": "GOTRUE_EXTERNAL_GOOGLE_CLIENT_ID",
+              "kind": "secret"
+            },
+            {
+              "name": "GOTRUE_EXTERNAL_GOOGLE_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "GOTRUE_JWT_KEYS",
+              "kind": "secret"
+            },
+            {
+              "name": "GOTRUE_JWT_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "GOTRUE_SMTP_PASS",
+              "kind": "secret"
+            },
+            {
+              "name": "JOURNEEZE_AGENCY_IDENTITY_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "JOURNEEZE_AGENCY_SITE_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "JOURNEEZE_OWNER_IDENTITY_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "JOURNEEZE_OWNER_SITE_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "JOURNEEZE_PLATFORM_IDENTITY_SECRET",
+              "kind": "secret"
+            },
+            {
+              "name": "JOURNEEZE_PLATFORM_SITE_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "JOURNEEZE_SITES_GATEWAY_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "JOURNEEZE_USER_HASH_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
+              "kind": "secret"
+            },
+            {
+              "name": "OTEL_EXPORTER_OTLP_HEADERS",
+              "kind": "secret"
+            },
+            {
+              "name": "PLATFORM_CLOUDFLARE_ACCOUNT_ID",
+              "kind": "secret"
+            },
+            {
+              "name": "PLATFORM_CLOUDFLARE_API_TOKEN",
+              "kind": "secret"
+            },
+            {
+              "name": "PLATFORM_ENTITLEMENTS_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "PLATFORM_RELEASE_HMAC_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "PORTAL_CREDENTIAL_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "PORTAL_GATEWAY_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "PORTAL_SESSION_KEY",
+              "kind": "secret"
+            },
+            {
+              "name": "PROVIDER_VAULT_ACTIVE_KEY_ID",
+              "kind": "secret"
+            },
+            {
+              "name": "PROVIDER_VAULT_KEYS",
+              "kind": "secret"
+            },
+            {
+              "name": "STRIPE_AGENCY_PRICE_ID",
+              "kind": "secret"
+            },
+            {
+              "name": "ZONETICO_APP_PASSWORD",
+              "kind": "secret"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

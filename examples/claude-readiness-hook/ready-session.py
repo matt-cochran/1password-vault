@@ -77,8 +77,9 @@ def main():
         if not isinstance(cwd, str) or not os.path.isabs(cwd) or not os.path.isdir(cwd):
             raise ValueError("invalid cwd")
         doc = json.loads(capture([args.opv, "ready", args.env, "--json"], cwd, args.timeout))
-        # The readiness receipt has the same fields in schema 1 (opv 0.9) and 2 (opv 0.10).
-        if not isinstance(doc, dict) or type(doc.get("schema_version")) is not int or doc["schema_version"] not in (1, 2):
+        # The readiness receipt has the same fields in schema 1 (opv 0.9), 2 (opv 0.10),
+        # 3 (opv 0.12) and 4 (opv 0.18).
+        if not isinstance(doc, dict) or type(doc.get("schema_version")) is not int or doc["schema_version"] not in (1, 2, 3, 4):
             raise ValueError("unsupported receipt")
         findings = doc.get("findings")
         matrix = doc.get("matrix")

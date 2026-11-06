@@ -9,7 +9,9 @@
 use std::io::Write;
 
 use crate::adapters::onepassword_manifest::{Account, Discovery};
-use crate::cause::{AccountId, AccountRef, AccountSource, Cause, Cmd, Invocation, VarName};
+use crate::cause::{
+    AccountChoice, AccountId, AccountRef, AccountSource, Cause, Cmd, Invocation, Next, VarName,
+};
 use crate::error::Error;
 use crate::host::Platform;
 
@@ -116,6 +118,9 @@ pub struct Inputs<'a> {
     /// The names of the `OP_SESSION_*` variables in this environment (names only, never a
     /// value; #142).
     pub session_vars: Vec<String>,
+    /// How far this process reaches a 1Password session ([`super::signin::reach`]): it
+    /// decides the sign-in and verify steps of an `account_required` choice (FR-65).
+    pub reach: crate::json::Reach,
 }
 
 /// The names of the `OP_SESSION_*` variables set in this process's environment (#142),
@@ -197,7 +202,12 @@ pub struct Finding {
     pub code: String,
     pub human_required: bool,
     pub message: String,
+    /// The step as a person reads it; `None` when it is no single command (a `choose`).
     pub next: Option<String>,
+    /// The typed step (FR-65): the report's `next`, and `ready`'s, are built from it, never
+    /// from [`Finding::next`]'s text. `None` for an advisory finding; never serialized.
+    #[serde(skip)]
+    pub step: Option<Next>,
 }
 
 /// The FR-49 document (`opv account list --json`).
@@ -209,10 +219,85 @@ pub struct Report {
     pub selected: Option<Selected>,
     pub accounts: Vec<AccountRow>,
     pub findings: Vec<Finding>,
-    // The frame turns a body's own `next` command into the schema-3 object; read the command
-    // back from either shape (06.04).
-    #[serde(default, deserialize_with = "crate::json::next_command")]
-    pub next: Option<String>,
+    /// The typed `next` of the first finding with a step (schema 4, FR-65): `kind`, `actor`,
+    /// `command` and `argv`, and for `account_required` the `choose` with its `reach` and
+    /// `choices`. The same builder serves `opv ready` ([`typed_step`]).
+    #[serde(default, deserialize_with = "step_or_none")]
+    pub next: Option<serde_json::Value>,
+}
+
+/// A framed `next` read back: `None` for the frame's `kind: none` (a report with no step),
+/// else the typed object as written.
+fn step_or_none<'de, D>(d: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v: serde_json::Value = serde::Deserialize::deserialize(d)?;
+    Ok((!v.is_null() && v["kind"] != "none").then_some(v))
+}
+
+impl Report {
+    /// The `Next:` line of the text output: the first finding's step as a person reads it,
+    /// or each choice's first step for a `choose`.
+    pub fn next_line(&self) -> Option<String> {
+        self.findings
+            .iter()
+            .find(|f| f.step.is_some())
+            .and_then(Finding::step_text)
+    }
+
+    /// The report without the findings whose code is `code`, its `next` taken again from
+    /// what remains (`opv ready` drops `account_required` when every environment names its
+    /// own account, so none is chosen for the project).
+    pub fn without(mut self, code: &str) -> Self {
+        self.findings.retain(|f| f.code != code);
+        self.next = report_next(&self.findings);
+        self
+    }
+}
+
+impl Finding {
+    /// The step as a person reads it: [`Finding::next`], or for a `choose` each choice's
+    /// first step (`pick one: opv account use <ID>; …`). `None` for an advisory finding.
+    pub fn step_text(&self) -> Option<String> {
+        self.next
+            .clone()
+            .or_else(|| self.step.as_ref().and_then(choose_line))
+    }
+}
+
+/// The typed `next` of a finding's step, as `account list` and `ready` render it (schema 4):
+/// against `opv account list`, with `argv` built only from the typed command (FR-65).
+pub fn typed_step(step: &Next) -> serde_json::Value {
+    crate::cause::render::typed_next_value(step, &list_invocation())
+}
+
+/// A `choose` as one line: each choice's first step, for the person to pick from.
+fn choose_line(step: &Next) -> Option<String> {
+    let Next::Choose(c) = step else {
+        return None;
+    };
+    let firsts: Vec<String> = c
+        .choices
+        .iter()
+        .filter_map(|choice| {
+            choice
+                .steps
+                .first()?
+                .run
+                .as_ref()
+                .map(crate::cause::render::cmd_text)
+        })
+        .collect();
+    Some(format!("pick one: {}", firsts.join("; ")))
+}
+
+/// The report's `next`: the typed step of the first finding that has one.
+fn report_next(findings: &[Finding]) -> Option<serde_json::Value> {
+    findings
+        .iter()
+        .find_map(|f| f.step.as_ref())
+        .map(typed_step)
 }
 
 /// What `opv account use` recorded: the account ID and the `.opv` file written.
@@ -306,11 +391,13 @@ fn finding_from(code: &str, cause: &Cause) -> Finding {
         message = format!("{message}; {action}");
     }
     let listing = crate::cause::render::cmd_text(&cmd(&["account", "list"], &[]));
+    let text = crate::cause::render::next_text(&next, &inv).filter(|n| *n != listing);
     Finding {
         code: code.into(),
         human_required: cause.human_required(&inv),
         message,
-        next: crate::cause::render::next_text(&next, &inv).filter(|n| *n != listing),
+        step: text.is_some().then_some(next),
+        next: text,
     }
 }
 
@@ -375,6 +462,7 @@ fn ambiguous_finding(value: &str, source: &str, many: &[&Account]) -> Finding {
             named.join(", ")
         ),
         next: None,
+        step: None,
     }
 }
 
@@ -382,6 +470,8 @@ fn ambiguous_finding(value: &str, source: &str, many: &[&Account]) -> Finding {
 /// never asks the 1Password app, so with the app integration a person who is signed in may
 /// show here until a command is approved (audit 04.08): the message says both.
 fn signed_out_finding(account_id: &str) -> Finding {
+    // The person's own sign-in (`authorize`), named by account ID (FR-50).
+    let login = cmd(&["login"], &["--account", account_id]);
     Finding {
         code: "selected_signed_out".into(),
         human_required: true,
@@ -389,11 +479,49 @@ fn signed_out_finding(account_id: &str) -> Finding {
             "op has no session for the selected 1Password account {account_id} here; if you \
              use the 1Password app, unlock it and approve its prompt, else sign in"
         ),
-        next: Some(crate::cause::render::cmd_text(&cmd(
-            &["login"],
-            &["--account", account_id],
-        ))),
+        next: Some(crate::cause::render::cmd_text(&login)),
+        step: Some(Next::Handoff(login)),
     }
+}
+
+/// #257, FR-65: several listed accounts and none selected for the project. opv never picks
+/// one: the person chooses, and each choice's steps record it (`opv account use <ID>`),
+/// sign in by `reach` unless that account is signed in, and check with `opv ready --json`.
+/// Blocking, and the same `choose` `opv ready` and the catalog's `account_required` give
+/// ([`crate::cause::step::account_choices`]).
+fn required_finding(rows: &[AccountRow], reach: crate::json::Reach) -> Finding {
+    let accounts = choices_of(rows);
+    let cause = Cause::AccountRequired {
+        accounts: accounts.clone(),
+        reach,
+    };
+    let inv = list_invocation();
+    let mut message = cause.message();
+    if let Some(action) = cause.do_text(&inv) {
+        message = format!("{message}; {action}");
+    }
+    let step = crate::cause::step::account_choices(&accounts, reach, &cmd(&["ready"], &["--json"]));
+    Finding {
+        code: "account_required".into(),
+        human_required: true,
+        message,
+        next: None,
+        step: Some(step),
+    }
+}
+
+/// The listed accounts as the choices of a `choose`, in `op account list`'s order (never
+/// ranked): ID, email, sign-in address, shorthand and the session probe's answer.
+fn choices_of(rows: &[AccountRow]) -> Vec<AccountChoice> {
+    rows.iter()
+        .map(|r| AccountChoice {
+            email: r.email.clone(),
+            address: r.address.clone(),
+            id: AccountId::new(r.account_id.clone()),
+            shorthand: (!r.shorthand.is_empty()).then(|| r.shorthand.clone()),
+            signed_in: r.signed_in,
+        })
+        .collect()
 }
 
 /// #142: several accounts on one sign-in address (`my.1password.com` for every individual
@@ -424,6 +552,7 @@ fn shared_address_findings(listed: &[Account]) -> Vec<Finding> {
                 })
                 .collect();
             Finding {
+                step: None,
                 code: "shared_sign_in_address".into(),
                 human_required: false,
                 message: format!(
@@ -467,6 +596,7 @@ fn session_var_findings(
                         a.account_uuid
                     ),
                     next: None,
+                    step: None,
                 }),
                 None => Some(Finding {
                     code: "stale_session_variable".into(),
@@ -476,6 +606,7 @@ fn session_var_findings(
                          eval of op signin?); remove it from this shell (unset {var})"
                     ),
                     next: None,
+                    step: None,
                 }),
             }
         })
@@ -503,12 +634,14 @@ pub fn report_with(inputs: &Inputs<'_>, op_windows_exe: bool) -> Report {
             human_required: false,
             message: "op account list failed or printed something opv does not understand".into(),
             next: Some("opv doctor".into()),
+            step: Some(Next::Check(cmd(&["doctor"], &[]))),
         }),
         Discovery::OpMissing => findings.push(Finding {
             code: "op_missing".into(),
             human_required: true,
             message: "the 1Password CLI (op) is not installed".into(),
             next: Some("opv doctor".into()),
+            step: Some(Next::Check(cmd(&["doctor"], &[]))),
         }),
     }
     // The probe runs once per listed account and only for a listed account.
@@ -559,6 +692,9 @@ pub fn report_with(inputs: &Inputs<'_>, op_windows_exe: bool) -> Report {
                 by: "only".into(),
                 source: "only".into(),
             });
+        } else {
+            // #257: several accounts and nothing names one. Never a guess (X2).
+            findings.push(required_finding(&rows, inputs.reach));
         }
     }
     if let Some(at) = selected_at {
@@ -571,7 +707,7 @@ pub fn report_with(inputs: &Inputs<'_>, op_windows_exe: bool) -> Report {
     let chosen = selected.as_ref().map(|s| s.account_id.as_str());
     findings.extend(session_var_findings(&inputs.session_vars, listed, chosen));
     findings.extend(shared_address_findings(listed));
-    let next = findings.iter().find_map(|f| f.next.clone());
+    let next = report_next(&findings);
     Report {
         discovery: discovery_str(&inputs.discovery).into(),
         platform: platform_str(inputs.platform).into(),
@@ -722,6 +858,16 @@ pub fn use_account(
 /// The FR-49 report for this machine and checkout: one `op account list` probe, one
 /// `op whoami --account <id>` probe per listed account, `.opv` and `OP_ACCOUNT`.
 pub fn gather(r: &dyn crate::runner::CommandRunner, flag: Option<&str>) -> Report {
+    gather_with(r, flag, None)
+}
+
+/// [`gather`] with the account the project's configuration names (`project`: the one every
+/// environment's `account` agrees on), which selects as the manifest does.
+pub fn gather_with(
+    r: &dyn crate::runner::CommandRunner,
+    flag: Option<&str>,
+    project: Option<&str>,
+) -> Report {
     use crate::adapters::onepassword_manifest as manifest;
     let host = crate::host::Host::detect();
     // A service account or Connect decides the account itself: nothing to list or choose.
@@ -735,16 +881,25 @@ pub fn gather(r: &dyn crate::runner::CommandRunner, flag: Option<&str>) -> Repor
         .unwrap_or_else(|| std::path::PathBuf::from(".opv"));
     let env = crate::config_store::account_env();
     let probe = |id: &str| manifest::signed_in(r, id);
+    let discovery = manifest::discover(r);
+    let session_vars = session_var_names();
+    let listed: &[Account] = match &discovery {
+        Discovery::Listed(accounts) => accounts,
+        _ => &[],
+    };
+    // No account is selected when a choice is offered, so only the app can reach one.
+    let reach = super::signin::reach(None, &session_vars, listed, &host);
     report_with(
         &Inputs {
-            discovery: manifest::discover(r),
+            discovery,
             signed_in: &probe,
             flag,
             env: env.as_deref(),
             pointer: pointer.as_deref().map(|a| (a, pointer_path.as_path())),
-            manifest: None,
+            manifest: project,
             platform: host.platform,
-            session_vars: session_var_names(),
+            session_vars,
+            reach,
         },
         host.op_is_windows_exe(),
     )
@@ -783,19 +938,27 @@ pub fn list(
         ));
     }
     if json {
-        let mut v = serde_json::to_value(&doc).map_err(|_| {
-            Error::from(Cause::Bug {
-                site: "account list serialization",
-            })
-        })?;
-        v["schema_version"] = serde_json::json!(crate::json::SCHEMA_VERSION);
+        let v = document(&doc)?;
         return writeln!(out, "{v}").map_err(super::write_err);
     }
     render_text(&doc, out)?;
-    if let Some(next) = &doc.next {
+    if let Some(next) = doc.next_line() {
         writeln!(out, "Next: {next}").map_err(super::write_err)?;
     }
     Ok(())
+}
+
+/// The `opv account list --json` body of `report` (FR-49, schema 4), before the frame: its
+/// `next` is the typed step, a `choose` for `account_required` (FR-65). The one builder
+/// for `account list`, `ready` and MCP's `accounts` section ([`gather`] then this).
+pub fn document(report: &Report) -> Result<serde_json::Value, Error> {
+    let mut v = serde_json::to_value(report).map_err(|_| {
+        Error::from(Cause::Bug {
+            site: "account list serialization",
+        })
+    })?;
+    v["schema_version"] = serde_json::json!(crate::json::SCHEMA_VERSION);
+    Ok(v)
 }
 
 /// `opv account use <who> [--json]` (FR-49): records the account in `.opv`, without a prompt

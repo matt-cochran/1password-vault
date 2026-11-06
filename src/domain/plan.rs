@@ -1849,6 +1849,8 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
             products,
             origin: Origin::File,
             read_from: Default::default(),
+            sets: Default::default(),
+            producers: Default::default(),
         }
     }
 
